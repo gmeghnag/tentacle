@@ -84,8 +84,8 @@ describe("execChannel", () => {
 
     ws.open();
     expect(ws.sent).toHaveLength(2);
-    expect(dec.decode(ws.sent[0]!.subarray(1))).toBe('{"id":1}\n');
-    expect(dec.decode(ws.sent[1]!.subarray(1))).toBe('{"id":2}\n');
+    expect(dec.decode((ws.sent[0] as Uint8Array).subarray(1))).toBe('{"id":1}\n');
+    expect(dec.decode((ws.sent[1] as Uint8Array).subarray(1))).toBe('{"id":2}\n');
   });
 
   test("drops buffered frames if the socket closes before it ever opens", () => {

@@ -64,7 +64,10 @@ export function execChannel(ws: WebSocketLike, options: ExecChannelOptions = {})
 
   const flush = (): void => {
     while (queue.length > 0 && !closed) {
-      ws.send(queue.shift()!);
+      const frame = queue.shift();
+      if (frame !== undefined) {
+        ws.send(frame);
+      }
     }
     if (closed) {
       queue.length = 0; // dropped — the channel is dead
