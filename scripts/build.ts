@@ -57,7 +57,11 @@ const wasmBase64 = readFileSync(wasmPath).toString("base64");
 const yogaInitPath = resolve(dirname(wasmPath), "index.js");
 
 const result = await Bun.build({
-  entrypoints: [resolve(root, "packages/cli/src/main.ts")],
+  // `worker.ts` is a second entrypoint on purpose: in a compiled binary the
+  // daemon worker must be embedded, and `new Worker("./worker.ts")` resolves
+  // against the embedded entrypoints — without it the spawn fails with
+  // "ModuleNotFound resolving /$bunfs/root/worker.ts" (see local-runtime.ts).
+  entrypoints: [resolve(root, "packages/cli/src/main.ts"), resolve(root, "packages/cli/src/worker.ts")],
   // @ts-expect-error - `compile` is supported by the Bun bundler
   compile: { outfile, ...(target ? { target } : {}) },
   minify: true,
