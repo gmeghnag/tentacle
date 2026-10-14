@@ -22,7 +22,7 @@ import {
   tabulateJson,
 } from "@agent-harness/agent";
 import type { HarnessConfig } from "@agent-harness/config";
-import { type JobController, PermissionBroker } from "@agent-harness/core";
+import { type JobController, type ModelProvider, PermissionBroker } from "@agent-harness/core";
 import { BackgroundJobs, HostExecution } from "@agent-harness/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@agent-harness/mcp";
 import { OpenAIProvider } from "@agent-harness/providers";
@@ -59,12 +59,21 @@ export interface WiredAgent {
   readonly tools: ToolRegistry;
 }
 
-export function buildAgent(config: HarnessConfig): WiredAgent {
-  const model = new OpenAIProvider({
-    baseURL: config.baseURL,
-    model: config.model,
-    ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-  });
+export interface BuildAgentOptions {
+  /** Replace the OpenAI provider — e.g. a proxy that tunnels model calls to a
+   *  remote client (the pod reverse-tunnel, F4.d). Used for the main model and
+   *  for sub-agents (per-type model overrides are ignored over the tunnel). */
+  readonly modelOverride?: ModelProvider;
+}
+
+export function buildAgent(config: HarnessConfig, options: BuildAgentOptions = {}): WiredAgent {
+  const model =
+    options.modelOverride ??
+    new OpenAIProvider({
+      baseURL: config.baseURL,
+      model: config.model,
+      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    });
   const env = new HostExecution({ cwd: config.cwd, root: config.cwd });
   const tools = new ToolRegistry().registerAll(builtinTools);
   const permissions = new PermissionBroker();
@@ -95,8 +104,10 @@ export function buildAgent(config: HarnessConfig): WiredAgent {
     const agentTypes = mergeAgentTypes(BUILTIN_AGENT_TYPES, loadUserAgentTypes(config.configDir));
     const { run, types } = createSubagentRunner({
       model,
-      // Per-type model override: same endpoint, a different model id.
+      // Per-type model override: same endpoint, a different model id. Over a
+      // model tunnel the override provider is used for every type.
       modelFor: (modelId) =>
+        options.modelOverride ??
         new OpenAIProvider({
           baseURL: config.baseURL,
           model: modelId,

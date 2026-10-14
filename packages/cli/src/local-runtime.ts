@@ -17,7 +17,13 @@ import {
 } from "@agent-harness/agent";
 import { RemoteClient, type RemoteSession } from "@agent-harness/client";
 import type { HarnessConfig } from "@agent-harness/config";
-import type { ChatMessage, JobController, JobStatus, PermissionBroker } from "@agent-harness/core";
+import type {
+  ChatMessage,
+  JobController,
+  JobStatus,
+  ModelProvider,
+  PermissionBroker,
+} from "@agent-harness/core";
 import {
   type DuplexChannel,
   type MessageEndpoint,
@@ -100,11 +106,13 @@ export interface LocalRuntimeDeps {
   readonly model: string;
   /** A session to resume (its uid + history are reused), or null for a fresh one. */
   readonly resume: SessionRecord | null;
+  /** Local model the daemon can tunnel calls back to (pod reverse-tunnel, F4.d). */
+  readonly modelProvider?: ModelProvider;
 }
 
 /** Handshake the daemon and return a session factory that persists each turn. */
 export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalRuntime> {
-  const client = new RemoteClient(deps.channel, deps.permissions);
+  const client = new RemoteClient(deps.channel, deps.permissions, deps.modelProvider);
   await client.initialize();
 
   let seed = deps.resume;

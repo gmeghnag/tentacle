@@ -5,6 +5,7 @@
  * place keeps client and daemon provably in sync.
  */
 import type { z } from "zod";
+import { ModelStreamParamsSchema, ModelStreamResultSchema } from "./model.ts";
 import { RequestPermissionParamsSchema, RequestPermissionResultSchema } from "./permission.ts";
 import {
   CancelParamsSchema,
@@ -29,6 +30,7 @@ export const Method = {
   Compact: "session/compact",
   Snapshot: "session/snapshot",
   RequestPermission: "session/request_permission",
+  ModelStream: "model/stream",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -55,6 +57,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: RequestPermissionParamsSchema,
     result: RequestPermissionResultSchema,
   },
+  [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
 };
 
 /** params schema for every notification method. */

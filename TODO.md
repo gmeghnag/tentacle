@@ -306,7 +306,12 @@ Daily-driver work (done 2026-10-14):
         **validated LIVE against kind** (opt-in `k8s/test/integration.live.test.ts`:
         REST + exec round-trip over TLS). Note for F4.a.2: Bun honours
         `NODE_EXTRA_CA_CERTS` for fetch AND WebSocket, so CA trust is easy.
-      - [ ] **F4.d — reverse-tunnel model proxy** (`model/stream` + proxy provider).
+      - [x] **F4.d — reverse-tunnel model proxy** (2026-10-14, non-streaming cut):
+        protocol `model/stream` + wire schemas; daemon `ProxyModelProvider` +
+        `Connection.requestModelStream`; `serve --stdio --model-proxy`; client
+        `RemoteClient` serves it with the LOCAL provider; `startPodRuntime` passes
+        it. Endpoint+key stay on the laptop. In-memory round-trip tested.
+        Follow-up (F4.d.2): token streaming over the tunnel + mid-call cancel.
 - [ ] **Skills support** — packaged procedural guidance the model opts into
       (complementary to the result pipeline: skills = *how to do it*, the pipeline
       = *the guarantee the context stays clean*).

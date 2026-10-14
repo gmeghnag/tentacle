@@ -22,6 +22,7 @@ import {
   type WaitForReadyOptions,
   buildPodManifest,
 } from "@agent-harness/k8s";
+import { OpenAIProvider } from "@agent-harness/providers";
 import type { DuplexChannel } from "@agent-harness/transport";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 
@@ -63,9 +64,20 @@ export async function startPodRuntime(
     await deps.kube.waitForReady(name);
     deps.log(`[pod] ${name} ready; starting the agent daemon over exec\n`);
     const channel = deps.kube.openExec(
-      { pod: name, container: AGENT_CONTAINER, command: ["agent-harness", "serve", "--stdio"] },
+      {
+        pod: name,
+        container: AGENT_CONTAINER,
+        command: ["agent-harness", "serve", "--stdio", "--model-proxy"],
+      },
       { onStderr: (text) => deps.log(`[pod ${name}] ${text}`) },
     );
+    // The pod reaches the model through us (reverse-tunnel): serve the local
+    // provider, so the endpoint and API key never leave the laptop.
+    const modelProvider = new OpenAIProvider({
+      baseURL: config.baseURL,
+      model: config.model,
+      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    });
     return await createLocalRuntime({
       channel,
       disposeTransport: () => {
@@ -77,6 +89,7 @@ export async function startPodRuntime(
       cwd: config.cwd,
       model: config.model,
       resume: deps.resume,
+      modelProvider,
     });
   } catch (error) {
     // The pod was created but never became usable — delete it before surfacing.

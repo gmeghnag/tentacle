@@ -125,7 +125,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     // channel here, so every log line must go to stderr.
     if (bools.has("stdio")) {
       try {
-        await startStdioDaemon(config, (line) => process.stderr.write(`[daemon] ${line}\n`));
+        await startStdioDaemon(config, (line) => process.stderr.write(`[daemon] ${line}\n`), {
+          modelProxy: bools.has("model-proxy"),
+        });
         return 0;
       } catch (error) {
         process.stderr.write(

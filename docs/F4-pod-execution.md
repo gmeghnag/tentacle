@@ -242,9 +242,21 @@ sent to the pod (reverse-tunnel, §5).
   `buildPodManifest`. **Cluster auth is a stopgap:** `HARNESS_K8S_SERVER` +
   `HARNESS_K8S_TOKEN` env (kubeconfig auto-resolution is F4.a.2); no `pod` config
   block yet (flags/env only).
-- **F4.d — reverse-tunnel model proxy** (`model/stream` protocol +
-  `ProxyModelProvider` + client relay). The one new protocol slice; test the
-  proxy round-trip in-memory first (no k8s needed).
+- **F4.d — reverse-tunnel model proxy** — ✅ **done (2026-10-14), non-streaming
+  first cut.** Protocol: `model.ts` wire schemas (ChatRequest/StreamEvent) + the
+  `model/stream` request. Daemon: `ProxyModelProvider` (tunnels each model call
+  to the client) + `Connection.requestModelStream`; `serve --stdio --model-proxy`
+  wires it (provider set after the Connection; the agent is built lazily on
+  `session/new`, so the binding is ready). Client: `RemoteClient` serves
+  `model/stream` by running the LOCAL provider and returning the turn's events;
+  `createLocalRuntime` accepts a `modelProvider`, `startPodRuntime` passes the
+  local `OpenAIProvider` and execs `serve --stdio --model-proxy`. So the endpoint
+  + API key never leave the laptop. Round-trip tested in-memory
+  (`cli/test/model-proxy.test.ts`). **Limitations (follow-ups):** the client
+  returns the whole turn in one batch — **no token-by-token streaming over the
+  tunnel** (the laptop TUI sees each model turn arrive at once) — and **no
+  mid-call cancel** of a tunnelled model request (turn-level cancel between calls
+  still works). Both are F4.d.2.
 - **F4.e — exec-plugin auth + hardening** (credential-plugin, CA edge cases,
   timeouts, clear errors) + operator docs.
 

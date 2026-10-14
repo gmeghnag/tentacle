@@ -13,6 +13,7 @@ import {
   type InitializeParams,
   type InitializeResult,
   Method,
+  type ModelStreamResult,
   type NewSessionParams,
   type NewSessionResult,
   Notification,
@@ -23,6 +24,7 @@ import {
   type RequestPermissionResult,
   type SnapshotParams,
   type SnapshotResult,
+  type WireChatRequest,
 } from "@agent-harness/protocol";
 import { DomainErrorCode, type DuplexChannel, RpcError, RpcPeer } from "@agent-harness/transport";
 import type { HostedSession } from "./hosted-session.ts";
@@ -71,6 +73,16 @@ export class Connection {
       session.cancel();
     }
     this.peer.close();
+  }
+
+  /**
+   * Ask the connected client to run a model turn on our behalf (the pod
+   * reverse-tunnel). Outbound daemon→client request, like permission requests.
+   */
+  requestModelStream(request: WireChatRequest): Promise<ModelStreamResult> {
+    return this.peer
+      .request(Method.ModelStream, { request })
+      .then((result) => result as ModelStreamResult);
   }
 
   private async onRequest(method: string, params: unknown): Promise<unknown> {

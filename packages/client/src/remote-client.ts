@@ -4,12 +4,20 @@
  * local `PermissionBroker` (the TUI's prompt), and routes streamed
  * `session/update`s to the right `RemoteSession`.
  */
-import type { ChatMessage, PermissionBroker, PermissionRequest } from "@agent-harness/core";
+import type {
+  ChatMessage,
+  ChatRequest,
+  ModelProvider,
+  PermissionBroker,
+  PermissionRequest,
+} from "@agent-harness/core";
 import {
   type CompactResult,
   type InitializeResult,
   JsonRpcErrorCode,
   Method,
+  type ModelStreamParams,
+  type ModelStreamResult,
   type NewSessionResult,
   Notification,
   PROTOCOL_VERSION,
@@ -20,6 +28,7 @@ import {
   type SessionUpdateParams,
   type SnapshotResult,
   type StopReason,
+  type WireStreamEvent,
   text,
 } from "@agent-harness/protocol";
 import { type DuplexChannel, RpcError, RpcPeer } from "@agent-harness/transport";
@@ -41,8 +50,17 @@ export class RemoteClient {
   /** Session-independent listeners for background-job exits (idle or mid-turn). */
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
 
-  constructor(channel: DuplexChannel, permissions: PermissionBroker) {
+  private readonly modelProvider?: ModelProvider;
+
+  constructor(
+    channel: DuplexChannel,
+    permissions: PermissionBroker,
+    modelProvider?: ModelProvider,
+  ) {
     this.permissions = permissions;
+    if (modelProvider) {
+      this.modelProvider = modelProvider;
+    }
     this.peer = new RpcPeer(channel, {
       onNotification: (method, params) => {
         if (method === Notification.SessionUpdate) {
@@ -63,6 +81,9 @@ export class RemoteClient {
       onRequest: async (method, params) => {
         if (method === Method.RequestPermission) {
           return this.onPermission(params as RequestPermissionParams);
+        }
+        if (method === Method.ModelStream) {
+          return this.onModelStream(params as ModelStreamParams);
         }
         throw new RpcError(JsonRpcErrorCode.MethodNotFound, `unexpected request: ${method}`);
       },
@@ -134,6 +155,22 @@ export class RemoteClient {
 
   close(): void {
     this.peer.close();
+  }
+
+  /**
+   * Serve a `model/stream` request from the daemon (the pod reverse-tunnel):
+   * run the LOCAL model and return the turn's events. First cut collects them
+   * all before replying (no token streaming over the tunnel yet).
+   */
+  private async onModelStream(params: ModelStreamParams): Promise<ModelStreamResult> {
+    if (!this.modelProvider) {
+      throw new RpcError(JsonRpcErrorCode.MethodNotFound, "no local model to serve model/stream");
+    }
+    const events: WireStreamEvent[] = [];
+    for await (const event of this.modelProvider.stream(params.request as unknown as ChatRequest)) {
+      events.push(event as WireStreamEvent);
+    }
+    return { events };
   }
 
   private async onPermission(params: RequestPermissionParams): Promise<RequestPermissionResult> {

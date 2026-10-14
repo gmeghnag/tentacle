@@ -4,7 +4,14 @@
  * Binding is loopback-safe by default (a non-loopback bind requires a token).
  */
 import type { HarnessConfig } from "@agent-harness/config";
-import { Connection, type RunningServer, SessionHost, startWsServer } from "@agent-harness/daemon";
+import {
+  Connection,
+  type ModelStreamSender,
+  ProxyModelProvider,
+  type RunningServer,
+  SessionHost,
+  startWsServer,
+} from "@agent-harness/daemon";
 import {
   type NodeReadableLike,
   type NodeWritableLike,
@@ -50,10 +57,29 @@ export function startDaemon(config: HarnessConfig, options: ServeOptions): Runni
 export function startStdioDaemon(
   config: HarnessConfig,
   log?: (line: string) => void,
+  options: { modelProxy?: boolean } = {},
 ): Promise<void> {
+  // With `--model-proxy`, the agent's model calls are tunnelled back to the
+  // client over this same channel (the pod reverse-tunnel): the provider is set
+  // after the Connection exists, but a session (hence the agent) is only built
+  // on `session/new`, which arrives later, so the binding is always ready.
+  let sendModel: ModelStreamSender | null = null;
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
-    createAgent: (cwd) => buildAgent({ ...config, cwd }),
+    createAgent: (cwd) =>
+      options.modelProxy
+        ? buildAgent(
+            { ...config, cwd },
+            {
+              modelOverride: new ProxyModelProvider((request) => {
+                if (!sendModel) {
+                  throw new Error("model proxy transport not ready");
+                }
+                return sendModel(request);
+              }),
+            },
+          )
+        : buildAgent({ ...config, cwd }),
   });
   const channel = streamChannel(
     process.stdin as unknown as NodeReadableLike,
@@ -64,6 +90,9 @@ export function startStdioDaemon(
     sessionHost,
     log ? (error) => log(`error: ${error.message}`) : undefined,
   );
+  if (options.modelProxy) {
+    sendModel = (request) => connection.requestModelStream(request);
+  }
   return new Promise<void>((resolve) => {
     let done = false;
     const finish = (): void => {
