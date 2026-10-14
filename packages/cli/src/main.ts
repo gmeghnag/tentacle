@@ -21,7 +21,7 @@ import {
   recordFromSnapshot,
 } from "@agent-harness/agent";
 import { type ChatMessage, PermissionBroker } from "@agent-harness/core";
-import { KubeClient } from "@agent-harness/k8s";
+import { KubeClient, type KubeClientOptions, loadKubeClientOptions } from "@agent-harness/k8s";
 import { type SessionController, startTui } from "@agent-harness/tui";
 import { type HarnessConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
@@ -69,10 +69,11 @@ Environment:
   HARNESS_CWD              working directory for tools
   HARNESS_SUBAGENTS        enable/disable sub-agents (on/off, default on)
 
-Pod execution (--pod):
-  HARNESS_K8S_SERVER       Kubernetes API server URL (kubeconfig auto-resolution is forthcoming)
-  HARNESS_K8S_TOKEN        bearer token for the API server
-  HARNESS_POD_NAMESPACE    default namespace (overridden by --namespace)
+Pod execution (--pod): cluster auth resolves from ~/.kube/config (or $KUBECONFIG)
+  by default — current context, with CA trust + bearer/client-cert/exec-plugin.
+  HARNESS_K8S_SERVER       API server URL override (e.g. behind a proxy); skips kubeconfig
+  HARNESS_K8S_TOKEN        bearer token, used with HARNESS_K8S_SERVER
+  HARNESS_POD_NAMESPACE    namespace (overridden by --namespace; else the context's)
   HARNESS_POD_IMAGE        default pod image (overridden by --image); must contain agent-harness
 `;
 
@@ -207,25 +208,38 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
 
     // `--pod`: run the agent daemon inside a Kubernetes pod (the sandbox),
     // driven from this local TUI (F4). Requires an image (with `agent-harness`
-    // on PATH); cluster auth comes from HARNESS_K8S_SERVER/_TOKEN for now
-    // (kubeconfig auto-resolution is F4.a.2). No in-process fallback.
+    // on PATH). Cluster auth resolves from the local kubeconfig (current
+    // context; `--namespace` overrides), or from HARNESS_K8S_SERVER/_TOKEN as an
+    // explicit override (e.g. behind a proxy). No in-process fallback.
     if (wantsPod) {
-      const namespace = topFlags.get("namespace") ?? process.env.HARNESS_POD_NAMESPACE ?? "default";
+      const nsFlag = topFlags.get("namespace") ?? process.env.HARNESS_POD_NAMESPACE;
       const image = topFlags.get("image") ?? process.env.HARNESS_POD_IMAGE;
       if (!image) {
         write("[pod] --image <ref> is required (the pod container image, with agent-harness)\n");
         return 1;
       }
-      const server = process.env.HARNESS_K8S_SERVER;
-      if (!server) {
+      let clientOptions: KubeClientOptions;
+      try {
+        const envServer = process.env.HARNESS_K8S_SERVER;
+        if (envServer) {
+          const token = process.env.HARNESS_K8S_TOKEN;
+          clientOptions = {
+            server: envServer,
+            namespace: nsFlag ?? "default",
+            ...(token ? { token } : {}),
+          };
+        } else {
+          clientOptions = loadKubeClientOptions({ ...(nsFlag ? { namespace: nsFlag } : {}) });
+        }
+      } catch (error) {
         write(
-          "[pod] set HARNESS_K8S_SERVER (and HARNESS_K8S_TOKEN) — kubeconfig auto-resolution is F4.a.2\n",
+          `[pod] cluster auth failed: ${error instanceof Error ? error.message : String(error)}\n`,
         );
         return 1;
       }
-      const token = process.env.HARNESS_K8S_TOKEN;
+      const namespace = clientOptions.namespace;
       const permissions = new PermissionBroker();
-      const kube = new KubeClient({ server, namespace, ...(token ? { token } : {}) });
+      const kube = new KubeClient(clientOptions);
       let runtime: Awaited<ReturnType<typeof startPodRuntime>>;
       try {
         runtime = await startPodRuntime(config, {

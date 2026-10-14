@@ -197,9 +197,20 @@ sent to the pod (reverse-tunnel, §5).
   (polls, rejects on a terminal phase or timeout) + `podIsReady`, bearer-token
   auth, injectable `fetch`. Unit-tested against a mock API server
   (`k8s/test/client.test.ts`), like `cli/test/main.test.ts`.
-  **Still to do in this slice:** kubeconfig parsing (needs a YAML dep) + TLS/CA +
-  client-cert/exec-plugin auth — split out as **F4.a.2** so the REST layer could
-  land dependency-free and green first.
+- **F4.a.2 — kubeconfig + TLS auth** — ✅ **done (2026-10-14).** `kubeconfig.ts`
+  (pure: `parseKubeconfig` via the `yaml` dep + `resolveContext` → server,
+  namespace, CA, and credential — bearer/client-cert/exec-plugin — decoding
+  `-data` fields, leaving file paths for the I/O layer). `kube-auth.ts`
+  (`loadKubeClientOptions`: reads `~/.kube/config` or `$KUBECONFIG`, materialises
+  file/exec-plugin creds, and builds `fetch`/`makeWebSocket` carrying the cluster
+  TLS via Bun's per-call `tls: { ca, cert, key, rejectUnauthorized }`). `main.ts`
+  `--pod` now resolves from the kubeconfig by default (`--namespace` overrides;
+  `HARNESS_K8S_SERVER`/`_TOKEN` is an explicit override). Pure parser unit-tested
+  (`k8s/test/kubeconfig.test.ts`); the full path **validated LIVE from a real kind
+  kubeconfig with client-cert mTLS** — Bun honours `tls.{ca,cert,key}` on both
+  `fetch` AND `WebSocket`, so the earlier `NODE_EXTRA_CA_CERTS` workaround is
+  unnecessary. **Deferred:** `$KUBECONFIG` path-list merging (first entry only),
+  interactive OIDC refresh, `auth-provider` (legacy), impersonation.
 - **F4.b — exec WS channel + `serve --stdio`** — ✅ **done (2026-10-14).**
   `transport/stream-channel.ts` (`streamChannel`: a newline-delimited
   `DuplexChannel` over a byte-stream pair) + `serve --stdio` (`startStdioDaemon`

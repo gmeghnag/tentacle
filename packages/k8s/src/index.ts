@@ -8,3 +8,5 @@ export * from "./client.ts";
 export * from "./exec-frame.ts";
 export * from "./exec-channel.ts";
 export * from "./pod.ts";
+export * from "./kubeconfig.ts";
+export * from "./kube-auth.ts";

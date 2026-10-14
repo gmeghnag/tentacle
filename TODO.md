@@ -285,8 +285,12 @@ Daily-driver work (done 2026-10-14):
       - [x] **F4.a — `KubeClient` REST** (2026-10-14): new `@agent-harness/k8s`
         package — `createPod`/`getPod`/`deletePod`/`waitForReady`/`podIsReady`,
         bearer auth, injectable `fetch`, mock-API tests. Dependency-free.
-      - [ ] **F4.a.2 — kubeconfig + TLS auth**: parse `~/.kube/config` (YAML dep),
-        CA/client-cert/bearer/exec-plugin → a resolved `KubeClientOptions`.
+      - [x] **F4.a.2 — kubeconfig + TLS auth** (2026-10-14): `kubeconfig.ts`
+        (pure parse+resolve, `yaml` dep) + `kube-auth.ts` `loadKubeClientOptions`
+        (CA/client-cert/bearer/exec-plugin → `KubeClientOptions` with TLS-aware
+        fetch/WebSocket via Bun's per-call `tls`). `--pod` resolves from the
+        kubeconfig by default. Validated LIVE from a real kind kubeconfig with
+        client-cert mTLS (Bun honours `tls.{ca,cert,key}` on fetch AND WebSocket).
       - [x] **F4.b — exec WS channel + `serve --stdio`** (2026-10-14):
         `transport` `streamChannel` (newline-delimited byte-stream channel) +
         `startStdioDaemon`; k8s `exec-frame` (`encodeStdin`/`ExecDemux`),
