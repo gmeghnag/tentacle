@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // Root project: type-checks the whole monorepo in one pass (`tsc --noEmit`).
+  // Bun resolves workspace packages at runtime via symlinks; these `paths`
+  // let `tsc` resolve the same `@agent-harness/*` specifiers for type-checking.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "jsx": "react-jsx",
+    "types": ["bun", "react"],
+    "paths": {
+      "@agent-harness/protocol": ["packages/protocol/src/index.ts"],
+      "@agent-harness/config": ["packages/config/src/index.ts"],
+      "@agent-harness/core": ["packages/core/src/index.ts"],
+      "@agent-harness/providers": ["packages/providers/src/index.ts"],
+      "@agent-harness/exec": ["packages/exec/src/index.ts"],
+      "@agent-harness/tools": ["packages/tools/src/index.ts"],
+      "@agent-harness/mcp": ["packages/mcp/src/index.ts"],
+      "@agent-harness/agent": ["packages/agent/src/index.ts"],
+      "@agent-harness/transport": ["packages/transport/src/index.ts"],
+      "@agent-harness/daemon": ["packages/daemon/src/index.ts"],
+      "@agent-harness/client": ["packages/client/src/index.ts"],
+      "@agent-harness/cli": ["packages/cli/src/index.ts"],
+      "@agent-harness/tui": ["packages/tui/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/src/**/*.tsx",
+    "packages/*/test/**/*.ts",
+    "packages/*/test/**/*.tsx"
+  ]
+}

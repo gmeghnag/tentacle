@@ -1,0 +1,13 @@
+{
+  "name": "@agent-harness/mcp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@agent-harness/core": "workspace:*",
+    "zod": "3.23.8"
+  }
+}

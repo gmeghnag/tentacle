@@ -1,0 +1,16 @@
+{
+  "name": "@agent-harness/agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@agent-harness/core": "workspace:*",
+    "@agent-harness/tools": "workspace:*"
+  },
+  "devDependencies": {
+    "zod": "3.23.8"
+  }
+}

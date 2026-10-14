@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@agent-harness/agent": ["../agent/src/index.ts"],
+      "@agent-harness/core": ["../core/src/index.ts"],
+      "@agent-harness/daemon": ["../daemon/src/index.ts"],
+      "@agent-harness/protocol": ["../protocol/src/index.ts"],
+      "@agent-harness/tools": ["../tools/src/index.ts"],
+      "@agent-harness/transport": ["../transport/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

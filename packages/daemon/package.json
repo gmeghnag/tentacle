@@ -1,0 +1,19 @@
+{
+  "name": "@agent-harness/daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@agent-harness/agent": "workspace:*",
+    "@agent-harness/core": "workspace:*",
+    "@agent-harness/protocol": "workspace:*",
+    "@agent-harness/transport": "workspace:*"
+  },
+  "devDependencies": {
+    "@agent-harness/tools": "workspace:*",
+    "zod": "3.23.8"
+  }
+}
