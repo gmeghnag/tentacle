@@ -213,9 +213,19 @@ sent to the pod (reverse-tunnel, §5).
   URL/subprotocol builders, `openExec` wiring. **Not covered:** `serve --stdio`
   end-to-end against a spawned process, and a live apiserver exec socket (the
   building blocks are tested deterministically instead).
-- **F4.c — `startPodRuntime` + `--pod`/`--namespace` wiring + pod lifecycle**
-  (create → ready → connect → delete-on-exit). Real-ish smoke test with a mock
-  API, mirroring `cli/test/worker.test.ts`.
+- **F4.c — `startPodRuntime` + `--pod`/`--namespace`/`--image` + pod lifecycle**
+  — ✅ **done (2026-10-14).** `k8s/pod.ts` `buildPodManifest` (keepalive
+  container on the given image; the daemon is `exec`-ed in). `cli/pod-runtime.ts`
+  `startPodRuntime` (create → waitForReady → `openExec(serve --stdio)` →
+  `createLocalRuntime`; `dispose` closes the channel and deletes the pod; any
+  pre-ready failure deletes the pod and rethrows — no in-process fallback).
+  `main.ts` `--pod` branch: `--namespace` (default `default`), `--image`
+  (required), persistence on the laptop, same TUI/permissions/auto-wake as local.
+  Tested end-to-end over an in-memory channel wired to a real `Connection`
+  (create/ready/exec/turn/persist/dispose/delete) + cleanup-on-failure +
+  `buildPodManifest`. **Cluster auth is a stopgap:** `HARNESS_K8S_SERVER` +
+  `HARNESS_K8S_TOKEN` env (kubeconfig auto-resolution is F4.a.2); no `pod` config
+  block yet (flags/env only).
 - **F4.d — reverse-tunnel model proxy** (`model/stream` protocol +
   `ProxyModelProvider` + client relay). The one new protocol slice; test the
   proxy round-trip in-memory first (no k8s needed).

@@ -21,11 +21,13 @@ import {
   recordFromSnapshot,
 } from "@agent-harness/agent";
 import { type ChatMessage, PermissionBroker } from "@agent-harness/core";
+import { KubeClient } from "@agent-harness/k8s";
 import { type SessionController, startTui } from "@agent-harness/tui";
 import { type HarnessConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { parseFlags, resolveToken } from "./flags.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
+import { startPodRuntime } from "./pod-runtime.ts";
 import { render } from "./render.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { startTerminal } from "./terminal.ts";
@@ -39,6 +41,8 @@ Usage:
   agent-harness --plain         plain line-based REPL (for pipes / no TTY)
   agent-harness --resume [uid]  resume a saved session (latest if no uid) in the TUI
   agent-harness -i --in-process run the agent on the render thread (opt out of the worker)
+  agent-harness --pod --namespace <ns> --image <ref>
+                                run the agent inside a Kubernetes pod (sandbox), local TUI
   agent-harness <prompt...>     run a single task and exit
   agent-harness serve [opts]    host the remote-control daemon
   agent-harness connect <url>   drive a remote daemon with the TUI
@@ -64,6 +68,12 @@ Environment:
   HARNESS_MAX_ITERATIONS   max model/tool iterations per turn
   HARNESS_CWD              working directory for tools
   HARNESS_SUBAGENTS        enable/disable sub-agents (on/off, default on)
+
+Pod execution (--pod):
+  HARNESS_K8S_SERVER       Kubernetes API server URL (kubeconfig auto-resolution is forthcoming)
+  HARNESS_K8S_TOKEN        bearer token for the API server
+  HARNESS_POD_NAMESPACE    default namespace (overridden by --namespace)
+  HARNESS_POD_IMAGE        default pod image (overridden by --image); must contain agent-harness
 `;
 
 export interface CliIO {
@@ -170,10 +180,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // Rich interactive TUI. `--resume [uid]` also enters it (resuming a session).
   const { flags: topFlags, bools: topBools } = parseFlags(args);
   const wantsResume = topBools.has("resume") || topFlags.has("resume");
+  const wantsPod = topBools.has("pod");
   if (
     args[0] === "-i" ||
     args[0] === "--interactive" ||
     wantsResume ||
+    wantsPod ||
     (args.length === 0 && process.stdin.isTTY)
   ) {
     // Sessions persist as JSON under <configDir>/sessions; `--resume` loads one.
@@ -191,6 +203,59 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       } else {
         write(`[resume] ${resumeRecord.id} — ${resumeRecord.title}\n`);
       }
+    }
+
+    // `--pod`: run the agent daemon inside a Kubernetes pod (the sandbox),
+    // driven from this local TUI (F4). Requires an image (with `agent-harness`
+    // on PATH); cluster auth comes from HARNESS_K8S_SERVER/_TOKEN for now
+    // (kubeconfig auto-resolution is F4.a.2). No in-process fallback.
+    if (wantsPod) {
+      const namespace = topFlags.get("namespace") ?? process.env.HARNESS_POD_NAMESPACE ?? "default";
+      const image = topFlags.get("image") ?? process.env.HARNESS_POD_IMAGE;
+      if (!image) {
+        write("[pod] --image <ref> is required (the pod container image, with agent-harness)\n");
+        return 1;
+      }
+      const server = process.env.HARNESS_K8S_SERVER;
+      if (!server) {
+        write(
+          "[pod] set HARNESS_K8S_SERVER (and HARNESS_K8S_TOKEN) — kubeconfig auto-resolution is F4.a.2\n",
+        );
+        return 1;
+      }
+      const token = process.env.HARNESS_K8S_TOKEN;
+      const permissions = new PermissionBroker();
+      const kube = new KubeClient({ server, namespace, ...(token ? { token } : {}) });
+      let runtime: Awaited<ReturnType<typeof startPodRuntime>>;
+      try {
+        runtime = await startPodRuntime(config, {
+          kube,
+          namespace,
+          image,
+          permissions,
+          store,
+          resume: resumeRecord,
+          log: write,
+        });
+      } catch (error) {
+        write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        return 1;
+      }
+      try {
+        await startTui(null, {
+          model: config.model,
+          cwd: config.cwd,
+          contextWindow: config.contextWindow,
+          permissions,
+          jobs: runtime.jobs,
+          autoWakeOnJobExit: config.autoWake,
+          createSession: runtime.createSession,
+          ...(resumeRecord ? { resumeMessages: resumeRecord.messages } : {}),
+        });
+      } finally {
+        runtime.dispose();
+      }
+      return 0;
     }
 
     // By default the agent runs in a worker thread, off the render thread, so

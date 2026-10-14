@@ -7,3 +7,4 @@ export * from "./types.ts";
 export * from "./client.ts";
 export * from "./exec-frame.ts";
 export * from "./exec-channel.ts";
+export * from "./pod.ts";

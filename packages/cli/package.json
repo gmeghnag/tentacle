@@ -16,6 +16,7 @@
     "@agent-harness/core": "workspace:*",
     "@agent-harness/daemon": "workspace:*",
     "@agent-harness/exec": "workspace:*",
+    "@agent-harness/k8s": "workspace:*",
     "@agent-harness/mcp": "workspace:*",
     "@agent-harness/providers": "workspace:*",
     "@agent-harness/tools": "workspace:*",

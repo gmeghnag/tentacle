@@ -38,6 +38,7 @@
         "@agent-harness/core": "workspace:*",
         "@agent-harness/daemon": "workspace:*",
         "@agent-harness/exec": "workspace:*",
+        "@agent-harness/k8s": "workspace:*",
         "@agent-harness/mcp": "workspace:*",
         "@agent-harness/providers": "workspace:*",
         "@agent-harness/tools": "workspace:*",
@@ -95,6 +96,13 @@
       "version": "0.0.0",
       "dependencies": {
         "@agent-harness/core": "workspace:*",
+      },
+    },
+    "packages/k8s": {
+      "name": "@agent-harness/k8s",
+      "version": "0.0.0",
+      "dependencies": {
+        "@agent-harness/transport": "workspace:*",
       },
     },
     "packages/mcp": {
@@ -178,6 +186,8 @@
     "@agent-harness/daemon": ["@agent-harness/daemon@workspace:packages/daemon"],
 
     "@agent-harness/exec": ["@agent-harness/exec@workspace:packages/exec"],
+
+    "@agent-harness/k8s": ["@agent-harness/k8s@workspace:packages/k8s"],
 
     "@agent-harness/mcp": ["@agent-harness/mcp@workspace:packages/mcp"],
 

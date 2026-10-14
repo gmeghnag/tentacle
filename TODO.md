@@ -293,7 +293,12 @@ Daily-driver work (done 2026-10-14):
         `exec-channel` (`execChannel`/`buildExecUrl`/`execSubprotocols`) +
         `KubeClient.openExec`. Deterministic tests (framing, re-chunk, fake-WS,
         real `RpcPeer` handshake over a stream pair).
-      - [ ] **F4.c — `startPodRuntime` + `--pod`/`--namespace` + pod lifecycle.**
+      - [x] **F4.c — `startPodRuntime` + `--pod`/`--namespace`/`--image`**
+        (2026-10-14): `buildPodManifest` (keepalive container; daemon exec'd in)
+        + `startPodRuntime` (create→ready→openExec(serve --stdio)→
+        createLocalRuntime; dispose closes + deletes the pod) + `main.ts --pod`.
+        Auth stopgap: `HARNESS_K8S_SERVER`/`_TOKEN` env (kubeconfig = F4.a.2).
+        End-to-end tested over an in-memory channel to a real Connection.
       - [ ] **F4.d — reverse-tunnel model proxy** (`model/stream` + proxy provider).
 - [ ] **Skills support** — packaged procedural guidance the model opts into
       (complementary to the result pipeline: skills = *how to do it*, the pipeline
