@@ -6,5 +6,6 @@
  */
 export * from "./channel.ts";
 export * from "./port-channel.ts";
+export * from "./stream-channel.ts";
 export * from "./errors.ts";
 export * from "./peer.ts";

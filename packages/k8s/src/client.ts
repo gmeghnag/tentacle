@@ -8,6 +8,15 @@
  * auth are later slices; `fetch` is injectable so this layer is fully testable
  * against a mock API server without any of that.
  */
+import type { DuplexChannel } from "@agent-harness/transport";
+import {
+  type ExecChannelOptions,
+  type ExecTarget,
+  type WebSocketLike,
+  buildExecUrl,
+  execChannel,
+  execSubprotocols,
+} from "./exec-channel.ts";
 import { type Pod, TERMINAL_PHASES, podIsReady } from "./types.ts";
 
 /** Thrown when the API server returns a non-2xx response. */
@@ -30,6 +39,8 @@ export interface KubeClientOptions {
   readonly token?: string;
   /** Injectable fetch, for tests. Defaults to the global `fetch`. */
   readonly fetch?: typeof fetch;
+  /** Injectable WebSocket factory, for tests. Defaults to the global `WebSocket`. */
+  readonly makeWebSocket?: (url: string, protocols: string[]) => WebSocketLike;
 }
 
 export interface WaitForReadyOptions {
@@ -65,6 +76,7 @@ export class KubeClient {
   private readonly namespace: string;
   private readonly token?: string;
   private readonly doFetch: typeof fetch;
+  private readonly makeWebSocket: (url: string, protocols: string[]) => WebSocketLike;
 
   constructor(options: KubeClientOptions) {
     this.server = options.server.replace(/\/+$/, "");
@@ -73,6 +85,9 @@ export class KubeClient {
       this.token = options.token;
     }
     this.doFetch = options.fetch ?? fetch;
+    this.makeWebSocket =
+      options.makeWebSocket ??
+      ((url, protocols) => new WebSocket(url, protocols) as unknown as WebSocketLike);
   }
 
   /** `/api/v1/namespaces/<ns>/pods[/<name>]`. */
@@ -153,6 +168,17 @@ export class KubeClient {
       }
       await delay(intervalMs, options.signal);
     }
+  }
+
+  /**
+   * Open an exec WebSocket to `target` and return it as a `DuplexChannel` an
+   * `RpcPeer` can ride. The command is typically the pod daemon, e.g.
+   * `["agent-harness", "serve", "--stdio"]`.
+   */
+  openExec(target: ExecTarget, options: ExecChannelOptions = {}): DuplexChannel {
+    const url = buildExecUrl(this.server, this.namespace, target);
+    const ws = this.makeWebSocket(url, execSubprotocols(this.token));
+    return execChannel(ws, options);
   }
 }
 

@@ -200,9 +200,19 @@ sent to the pod (reverse-tunnel, §5).
   **Still to do in this slice:** kubeconfig parsing (needs a YAML dep) + TLS/CA +
   client-cert/exec-plugin auth — split out as **F4.a.2** so the REST layer could
   land dependency-free and green first.
-- **F4.b — exec WS channel** (`k8sExecChannel` with channel-byte framing +
-  newline re-chunking) + `serve --stdio` in the daemon. Round-trip tested over a
-  mock WS that echoes the `v4.channel.k8s.io` framing.
+- **F4.b — exec WS channel + `serve --stdio`** — ✅ **done (2026-10-14).**
+  `transport/stream-channel.ts` (`streamChannel`: a newline-delimited
+  `DuplexChannel` over a byte-stream pair) + `serve --stdio` (`startStdioDaemon`
+  binds a `Connection` over `process.stdin`/`stdout`; logs to stderr since stdout
+  is the RPC channel). In `@agent-harness/k8s`: `exec-frame.ts` (pure
+  `encodeStdin` + `ExecDemux` channel-byte routing & newline re-chunk),
+  `exec-channel.ts` (`execChannel` over a `WebSocketLike`, plus pure `buildExecUrl`
+  https→wss and `execSubprotocols` with the bearer-token subprotocol), and
+  `KubeClient.openExec`. Tests: stream-channel round-trip incl. a real `RpcPeer`
+  handshake over newline framing, demux re-chunking, exec channel over a fake WS,
+  URL/subprotocol builders, `openExec` wiring. **Not covered:** `serve --stdio`
+  end-to-end against a spawned process, and a live apiserver exec socket (the
+  building blocks are tested deterministically instead).
 - **F4.c — `startPodRuntime` + `--pod`/`--namespace` wiring + pod lifecycle**
   (create → ready → connect → delete-on-exit). Real-ish smoke test with a mock
   API, mirroring `cli/test/worker.test.ts`.

@@ -27,7 +27,7 @@ import { connectTui } from "./connect.ts";
 import { parseFlags, resolveToken } from "./flags.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
 import { render } from "./render.ts";
-import { startDaemon } from "./serve.ts";
+import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { startTerminal } from "./terminal.ts";
 import { buildAgent, connectConfiguredMcp } from "./wiring.ts";
 
@@ -108,7 +108,21 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
 
   // Host the remote-control daemon and run until interrupted.
   if (args[0] === "serve") {
-    const { flags } = parseFlags(args.slice(1));
+    const { flags, bools } = parseFlags(args.slice(1));
+    // `--stdio`: run the daemon over stdin/stdout instead of a WebSocket (used
+    // inside a pod, driven over the k8s exec channel — F4). stdout IS the RPC
+    // channel here, so every log line must go to stderr.
+    if (bools.has("stdio")) {
+      try {
+        await startStdioDaemon(config, (line) => process.stderr.write(`[daemon] ${line}\n`));
+        return 0;
+      } catch (error) {
+        process.stderr.write(
+          `[daemon] stdio error: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+        return 1;
+      }
+    }
     let token: string | undefined;
     try {
       token = await resolveToken(flags);

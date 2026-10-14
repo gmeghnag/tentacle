@@ -287,7 +287,12 @@ Daily-driver work (done 2026-10-14):
         bearer auth, injectable `fetch`, mock-API tests. Dependency-free.
       - [ ] **F4.a.2 — kubeconfig + TLS auth**: parse `~/.kube/config` (YAML dep),
         CA/client-cert/bearer/exec-plugin → a resolved `KubeClientOptions`.
-      - [ ] **F4.b — exec WS channel** (`v4.channel.k8s.io`) + `serve --stdio`.
+      - [x] **F4.b — exec WS channel + `serve --stdio`** (2026-10-14):
+        `transport` `streamChannel` (newline-delimited byte-stream channel) +
+        `startStdioDaemon`; k8s `exec-frame` (`encodeStdin`/`ExecDemux`),
+        `exec-channel` (`execChannel`/`buildExecUrl`/`execSubprotocols`) +
+        `KubeClient.openExec`. Deterministic tests (framing, re-chunk, fake-WS,
+        real `RpcPeer` handshake over a stream pair).
       - [ ] **F4.c — `startPodRuntime` + `--pod`/`--namespace` + pod lifecycle.**
       - [ ] **F4.d — reverse-tunnel model proxy** (`model/stream` + proxy provider).
 - [ ] **Skills support** — packaged procedural guidance the model opts into
