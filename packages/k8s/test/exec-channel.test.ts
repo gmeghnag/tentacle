@@ -18,16 +18,25 @@ function msg(channel: number, text: string): Uint8Array {
   return out;
 }
 
-/** An in-memory WebSocket for driving the exec channel deterministically. */
+/**
+ * An in-memory WebSocket for driving the exec channel deterministically.
+ * Mimics the real lifecycle: it starts CONNECTING and must be `open()`-ed
+ * before `send` succeeds — like a real `WebSocket`.
+ */
 class FakeWS implements WebSocketLike {
   binaryType = "";
   readonly sent: Uint8Array[] = [];
+  readyState = 0; // CONNECTING
   private readonly listeners = new Map<string, Array<(ev: { data: unknown }) => void>>();
 
   send(data: Uint8Array): void {
+    if (this.readyState !== 1) {
+      throw new DOMException("The object is in an invalid state.", "InvalidStateError");
+    }
     this.sent.push(data);
   }
   close(): void {
+    this.readyState = 3;
     this.emit("close", { data: null });
   }
   addEventListener(type: string, handler: (ev: { data: unknown }) => void): void {
@@ -40,6 +49,14 @@ class FakeWS implements WebSocketLike {
       h(ev);
     }
   }
+  /** Complete the (fake) handshake: CONNECTING → OPEN. */
+  open(): void {
+    if (this.readyState !== 0) {
+      return;
+    }
+    this.readyState = 1;
+    this.emit("open", { data: null });
+  }
   /** Simulate an inbound server message. */
   receive(bytes: Uint8Array): void {
     this.emit("message", { data: bytes });
@@ -47,14 +64,42 @@ class FakeWS implements WebSocketLike {
 }
 
 describe("execChannel", () => {
-  test("sends RPC frames on the stdin channel", () => {
+  test("sends RPC frames on the stdin channel once the socket is open", () => {
     const ws = new FakeWS();
     const channel = execChannel(ws);
+    ws.open();
     channel.send('{"x":1}');
     expect(ws.sent).toHaveLength(1);
     const frame = ws.sent[0] as Uint8Array;
     expect(frame[0]).toBe(0); // stdin channel
     expect(dec.decode(frame.subarray(1))).toBe('{"x":1}\n');
+  });
+
+  test("buffers frames sent while CONNECTING and flushes them in order on open", () => {
+    const ws = new FakeWS();
+    const channel = execChannel(ws);
+    channel.send('{"id":1}');
+    channel.send('{"id":2}');
+    expect(ws.sent).toHaveLength(0); // not sent while CONNECTING (would throw)
+
+    ws.open();
+    expect(ws.sent).toHaveLength(2);
+    expect(dec.decode(ws.sent[0]!.subarray(1))).toBe('{"id":1}\n');
+    expect(dec.decode(ws.sent[1]!.subarray(1))).toBe('{"id":2}\n');
+  });
+
+  test("drops buffered frames if the socket closes before it ever opens", () => {
+    const ws = new FakeWS();
+    const channel = execChannel(ws);
+    let closed = false;
+    channel.setOnClose(() => {
+      closed = true;
+    });
+    channel.send('{"id":1}');
+    ws.close();
+    expect(closed).toBe(true);
+    ws.open(); // an open after a close must not resurrect the queue
+    expect(ws.sent).toHaveLength(0);
   });
 
   test("delivers inbound stdout frames, reassembled across messages", () => {
@@ -143,7 +188,11 @@ describe("KubeClient.openExec", () => {
     expect(seenProtocols[0]).toBe("v4.channel.k8s.io");
     expect(seenProtocols).toHaveLength(2); // includes the bearer subprotocol
 
+    // The channel is usable immediately (the pod runtime issues the first frame
+    // right away); the frame goes out once the (fake) socket opens.
     channel.send('{"ping":1}');
+    expect(ws.sent).toHaveLength(0);
+    ws.open();
     expect((ws.sent[0] as Uint8Array)[0]).toBe(0);
   });
 });

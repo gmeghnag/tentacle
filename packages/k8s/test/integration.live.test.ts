@@ -57,7 +57,8 @@ describe("live k8s integration (opt-in: set HARNESS_K8S_SERVER)", () => {
         const frames: string[] = [];
         channel.setOnMessage((m) => frames.push(m));
 
-        await new Promise((r) => setTimeout(r, 2000)); // let the WS open
+        // No pre-wait: the exec channel buffers outbound frames until the
+        // WebSocket opens (regression guard for the CONNECTING send bug).
         channel.send("hello-exec");
         channel.send("second-line");
         await new Promise((r) => setTimeout(r, 2000));
