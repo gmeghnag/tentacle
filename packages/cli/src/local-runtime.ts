@@ -169,8 +169,24 @@ export async function startWorkerRuntime(
   log: (line: string) => void,
 ): Promise<LocalRuntime | null> {
   let worker: Worker;
+  // A spawn failure (e.g. a worker missing from a compiled binary) would
+  // otherwise surface only as the 8s handshake timeout; capture it so the
+  // fallback message says what actually happened.
+  let workerError: string | null = null;
   try {
+    // `new Worker` specifier resolution differs by form AND environment:
+    //  - this URL form resolves relative to THIS module from source, and — on
+    //    Bun >= 1.4 — against the entrypoints embedded in a compiled binary
+    //    (scripts/build.ts lists worker.ts as a second entrypoint).
+    //  - on Bun 1.3 the URL form fails in a compiled binary ("ModuleNotFound
+    //    resolving /$bunfs/root/worker.ts"); a plain relative string works
+    //    there but resolves against the CWD from source (breaking `bun test`).
+    // The URL form + Bun >= 1.4 is the only combo that works in both — see the
+    // TODO entry "Compiled binary drops the worker daemon".
     worker = new Worker(new URL("./worker.ts", import.meta.url).href, { type: "module" });
+    worker.addEventListener("error", (event) => {
+      workerError = String((event as ErrorEvent).message);
+    });
     worker.postMessage(config); // object bootstrap (structured-cloned)
   } catch (error) {
     log(`[worker] could not start (${String(error)}); using in-process\n`);
@@ -202,7 +218,7 @@ export async function startWorkerRuntime(
       "worker handshake",
     );
   } catch (error) {
-    log(`[worker] handshake failed (${String(error)}); using in-process\n`);
+    log(`[worker] handshake failed (${workerError ?? String(error)}); using in-process\n`);
     worker.terminate();
     return null;
   }

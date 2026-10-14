@@ -253,6 +253,58 @@ Daily-driver work (done 2026-10-14):
       - **Not covered by tests:** a real MCP subprocess in the worker (the
         registration path mirrors the tested in-process `connectConfiguredMcp`;
         spawning a live MCP server in a unit test is out of scope).
+- [x] 🔴 **Compiled binary drops the worker daemon — 8s "handshake timed out",
+      silent in-process fallback.** FOUND 2026-10-14, **FIXED 2026-10-14** (on
+      branch `fix/compiled-worker-spawn`, after upgrading Bun to **1.4.3**).
+      Fix = keep the `new Worker(new URL("./worker.ts", import.meta.url).href)`
+      form + list `worker.ts` as a **second build entrypoint** (`scripts/build.ts`)
+      + **Bun ≥ 1.4.3** (on 1.4 the URL form resolves against embedded
+      entrypoints). `startWorkerRuntime` also gained a worker `error` listener so
+      a spawn failure now logs the real cause instead of the generic 8s timeout.
+      Verified end-to-end: the 1.4.3 binary contains the embedded worker
+      bootstrap, boots with `ready` on line 1 and **0 fallback lines**.
+      Running the **compiled** `dist/agent-harness -i` (vs.
+      `bun packages/cli/src/main.ts`) prints `[worker] handshake failed (Error:
+      worker handshake timed out after 8000ms); using in-process` before the TUI.
+      From **source** the same config boots the worker in ~20ms, so this is
+      specific to the `bun build --compile` executable — and the in-process
+      fallback masks it, so nothing looks broken.
+      - **Root cause (repro'd in an isolated mini-project):** in a compiled
+        binary the worker is not part of the bundle, so
+        `new Worker(new URL("./worker.ts", import.meta.url).href)` fails at
+        spawn with `BuildMessage: ModuleNotFound resolving
+        "/$bunfs/root/worker.ts" (entry point)` (`/$bunfs` = the embedded
+        virtual FS). `startWorkerRuntime` (`cli/src/local-runtime.ts`) never
+        listens for the worker's `error` event, so the failure surfaces only as
+        the 8s handshake timeout, then the in-process fallback.
+      - **What does NOT work (Bun 1.3.14):**
+        - `compile.workers: ["worker.ts"]` — same `ModuleNotFound`.
+        - `worker.ts` as a **second entrypoint** + the **URL form**
+          (`new URL(…)` / `.href`) — same `ModuleNotFound`. (Current Bun docs
+          say the URL form "will work" once the worker is a listed entrypoint —
+          true on a newer Bun, NOT on 1.3.14.)
+      - **What half-works — and is a REGRESSION, do not ship:** `worker.ts` as a
+        second entrypoint + a **plain relative string** `new Worker("./worker.ts")`.
+        In a compiled binary this resolves the embedded entrypoint and the real
+        binary boots clean (verified: no fallback line, `ready` immediate). BUT
+        from **source/tests** the string form resolves relative to the **CWD**
+        (not the module), so `bun test` (CWD = repo root) → `./worker.ts` =
+        `<root>/worker.ts` (missing) → `cli/test/worker.test.ts` times out
+        (passed in 21ms on `main` with the URL form). *Leading hypothesis — to
+        confirm:* the "real worker" vs "trivial worker" delta I first suspected
+        is actually just this CWD-vs-module resolution, not the imports.
+      - **Root cause (confirmed):** it was specifier resolution, NOT the
+        import graph. The string form resolves against the **CWD** from source
+        (breaks `bun test`) but against embedded entrypoints in a compiled
+        binary; the URL form is the reverse. No single specifier works in both
+        environments on Bun 1.3 — but on **Bun 1.4** the URL form works in
+        both (verified: `new URL(…)` + 2nd entrypoint, compiled 1.4.3 mini-repro
+        → worker boots).
+      - **Done (2026-10-14):** Bun upgraded to 1.4.3 and `engines.bun` bumped
+        to `>=1.4.3` (the compiled-binary worker path needs it; source runs
+        fine on 1.3, but keeping the floor simple). Interim behaviour is safe
+        regardless: the TUI still works via the in-process fallback;
+        `--in-process` / `--no-worker` is the explicit escape hatch.
 - [x] **Autonomous wake on job-exit (DONE 2026-10-14, DEFAULT ON).** When a
       background job exits while the agent is idle, the TUI auto-starts a
       continuation turn so the model reacts without a user prompt.
