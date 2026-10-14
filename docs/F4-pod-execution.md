@@ -192,9 +192,14 @@ sent to the pod (reverse-tunnel, §5).
 
 ## 8. Execution plan (slices, each shippable green)
 
-- **F4.a — kubeconfig + `KubeClient` REST** (parse config, auth client-cert +
-  bearer, `createPod`/`getPod`/`deletePod`). Unit-tested against a mock API
-  server (Bun.serve), like `cli/test/main.test.ts`.
+- **F4.a — `KubeClient` REST** — ✅ **done (2026-10-14)**, in `@agent-harness/k8s`
+  (`client.ts` + `types.ts`): `createPod`/`getPod`/`deletePod` + `waitForReady`
+  (polls, rejects on a terminal phase or timeout) + `podIsReady`, bearer-token
+  auth, injectable `fetch`. Unit-tested against a mock API server
+  (`k8s/test/client.test.ts`), like `cli/test/main.test.ts`.
+  **Still to do in this slice:** kubeconfig parsing (needs a YAML dep) + TLS/CA +
+  client-cert/exec-plugin auth — split out as **F4.a.2** so the REST layer could
+  land dependency-free and green first.
 - **F4.b — exec WS channel** (`k8sExecChannel` with channel-byte framing +
   newline re-chunking) + `serve --stdio` in the daemon. Round-trip tested over a
   mock WS that echoes the `v4.channel.k8s.io` framing.

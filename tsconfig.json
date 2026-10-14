@@ -21,7 +21,8 @@
       "@agent-harness/daemon": ["packages/daemon/src/index.ts"],
       "@agent-harness/client": ["packages/client/src/index.ts"],
       "@agent-harness/cli": ["packages/cli/src/index.ts"],
-      "@agent-harness/tui": ["packages/tui/src/index.ts"]
+      "@agent-harness/tui": ["packages/tui/src/index.ts"],
+      "@agent-harness/k8s": ["packages/k8s/src/index.ts"]
     }
   },
   "include": [
