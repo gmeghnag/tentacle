@@ -275,6 +275,13 @@ Daily-driver work (done 2026-10-14):
         idle" + coalescing — a turn that itself spawns a job that exits will wake
         again (usually desired; could runaway on a pathological agent). Consider a
         consecutive-auto-wake cap without intervening user input.
+- [ ] **F4 — Pod execution** (`--pod --namespace <ns>`): run the agent inside a
+      k8s pod (the sandbox), driven from the local TUI. Self-contained (no
+      kubectl/oc — direct API via kubeconfig + the `v4.channel.k8s.io` exec WS)
+      with a **reverse-tunnel for the model over the RPC channel** so the local
+      endpoint/secret never leave the laptop. Reuses the whole client/daemon/RPC
+      stack (new transport + lifecycle only). Full design + slice plan in
+      `docs/F4-pod-execution.md`. MVP = F4.a–F4.d.
 - [ ] **Skills support** — packaged procedural guidance the model opts into
       (complementary to the result pipeline: skills = *how to do it*, the pipeline
       = *the guarantee the context stays clean*).
