@@ -210,9 +210,14 @@ sent to the pod (reverse-tunnel, §5).
   https→wss and `execSubprotocols` with the bearer-token subprotocol), and
   `KubeClient.openExec`. Tests: stream-channel round-trip incl. a real `RpcPeer`
   handshake over newline framing, demux re-chunking, exec channel over a fake WS,
-  URL/subprotocol builders, `openExec` wiring. **Not covered:** `serve --stdio`
-  end-to-end against a spawned process, and a live apiserver exec socket (the
-  building blocks are tested deterministically instead).
+  URL/subprotocol builders, `openExec` wiring. **Validated LIVE** against a real
+  apiserver (kind) by the opt-in `k8s/test/integration.live.test.ts` (skipped
+  unless `HARNESS_K8S_SERVER` is set): REST create/ready/delete over TLS + an
+  exec round-trip through `cat` over `v4.channel.k8s.io` with bearer-token auth.
+  Finding for F4.a.2: **Bun honours `NODE_EXTRA_CA_CERTS` for both `fetch` and
+  `WebSocket`**, so trusting the cluster CA is a matter of pointing it at the
+  parsed CA file (bearer-token auth already works end-to-end). **Still not
+  covered:** `serve --stdio` end-to-end against a spawned process.
 - **F4.c — `startPodRuntime` + `--pod`/`--namespace`/`--image` + pod lifecycle**
   — ✅ **done (2026-10-14).** `k8s/pod.ts` `buildPodManifest` (keepalive
   container on the given image; the daemon is `exec`-ed in). `cli/pod-runtime.ts`

@@ -298,7 +298,10 @@ Daily-driver work (done 2026-10-14):
         + `startPodRuntime` (create→ready→openExec(serve --stdio)→
         createLocalRuntime; dispose closes + deletes the pod) + `main.ts --pod`.
         Auth stopgap: `HARNESS_K8S_SERVER`/`_TOKEN` env (kubeconfig = F4.a.2).
-        End-to-end tested over an in-memory channel to a real Connection.
+        End-to-end tested over an in-memory channel to a real Connection, and
+        **validated LIVE against kind** (opt-in `k8s/test/integration.live.test.ts`:
+        REST + exec round-trip over TLS). Note for F4.a.2: Bun honours
+        `NODE_EXTRA_CA_CERTS` for fetch AND WebSocket, so CA trust is easy.
       - [ ] **F4.d — reverse-tunnel model proxy** (`model/stream` + proxy provider).
 - [ ] **Skills support** — packaged procedural guidance the model opts into
       (complementary to the result pipeline: skills = *how to do it*, the pipeline
