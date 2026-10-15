@@ -103,6 +103,48 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
 
 ### Block 4 — remote (transport `RpcPeer`, daemon ws-server/connection/host)
 
+- [ ] 🟡 **Worker daemon swallows its own errors → TUI shows bare `RpcError:
+      internal error`.** SEEN TWICE on 2026-10-16, both in the local (worker,
+      no pod) TUI, both right after a `Read` tool result rendered in the TUI
+      (second time: after reading `packages/agent/src/agent.ts`, a 434-line
+      file). Chain: the worker's RPC request handler throws a NON-`RpcError`
+      → `transport/peer.ts:209` converts it to the generic
+      `InternalError(-32603, "internal error")` for the client AND calls
+      `reportError` → `onError` — but `cli/src/worker.ts:92` builds its
+      `Connection` with NO `onError`, so the real error is dropped and the TUI
+      (client side) only ever sees the generic message. ROOT CAUSE UNKNOWN
+      (no daemon-side log exists to look at). Suspect: a handler that throws on
+      a large tool result / `session/update` payload (both crashes followed a
+      big `Read`), or the client's inbound result validation
+      (`peer.ts:258`, "invalid result for …") — but neither is confirmed.
+      Next: wire `onError` in `worker.ts` → `postObject` to the main thread
+      (like the mcp-errors path) so the TUI logs the REAL error (the same
+      generic-conversion gap exists on the `ws-server.ts:182` side); then
+      reproduce (long `Read` / large tool result in the TUI) and capture the
+      stack before guessing further.
+- [ ] 🟡 **Mid-turn "Queue a task…" (steering) silently no-ops on the worker
+      and pod paths (pre-existing gap, surfaced 2026-10-16).** The TUI's
+      mid-turn input calls `sessionRef.current?.enqueue(text)` (`tui/App.tsx:451`,
+      OPTIONAL — a no-op when absent), but `enqueue` exists only on the local
+      `Session` (`agent/src/session.ts:83`). The worker and pod runtimes wrap a
+      `RemoteSession` in `persistingController` (`cli/local-runtime.ts`) which
+      exposes no `enqueue`, and the daemon explicitly drops `steer` updates
+      (`daemon/mapping.ts:108`: "Steering is a local-TUI interaction; not yet
+      wired over the wire"). So on the DEFAULT (worker) path and on `run`/
+      `exec`, a task typed mid-turn is silently dropped (the input line
+      empties, nothing is queued). Only `--in-process`/`--no-worker` (and the
+      worker-failure fallback) queue it. Surfaced when a mutation-test
+      leftover in `local-runtime.ts` (`allowAll` unimported → `ReferenceError`
+      on the worker handshake) was forcing the in-process fallback — while that
+      broken state existed, steering "worked" because the fallback had the real
+      `Session`; after the revert, the worker path is active again and the
+      pre-existing gap is visible. NOT caused by the `exec` refactor (the
+      worker/in-process blocks in `main.ts` are untouched). Fix: add a
+      `session/enqueue` RPC (protocol method → `RemoteClient.enqueue` →
+      `HostedSession` → the daemon-side `Session.enqueue`, exposed on
+      `RemoteSession` + `persistingController`); interim: don't silently
+      swallow in `App.tsx` (notice "steering unavailable in this runtime").
+      Parked — to be done after the `exec` feature lands.
 - [x] 🟡 **Loopback daemon accepts cross-origin browser WebSockets (CSRF /
       DNS-rebinding).** FIXED (2026-10-14): extracted `originAllowed(origin,
       allowed)` (pure, exported) and wired it into `authorize` — it now
@@ -396,6 +438,83 @@ Daily-driver work (done 2026-10-14):
         hint). Validated LIVE on an x86_64 OpenShift cluster: UBI9 full
         success (89 MB transfer + daemon), busybox clean failure at the probe.
         Design + as-built log: `docs/pod-binary-injection.md`.
+      - [~] **F4.g — `exec` attach to an existing pod** (branch
+        `feat/pod-exec-attach`, from `c5b7f58`):
+        `agent-harness exec <pod> [--namespace <ns>] [--container <c>|-c <c>]
+        [--resume [uid]]` — the `run` flow minus the lifecycle: `getPod`
+        (404 → actionable error, terminal phase → reject) → bounded 60 s
+        readiness wait → **preflight `agent-harness --version`** that skips the
+        whole injection when the pod already has it (re-attach is sub-second,
+        no 89 MB transfer) → same daemon exec + reverse-tunnel + persisting
+        runtime. The pod is USER-OWNED: `dispose` only closes the exec channel;
+        NO `deletePod`, NO exit safety net (closing the TUI detaches, the pod
+        stays `Running`). New: `startExecRuntime` + `PodExecRuntimeDeps` in
+        `cli/pod-runtime.ts`, `getPod` on `PodCluster`, `-c` short alias in
+        `main.ts`, `containerExecError` (translates "exec channel closed before
+        the command reported a status" → wrong-container hint), shared helpers
+        `loadPodAuth`/`loadPodResume`/`runPodTui` in `main.ts`. Tests:
+        `describe("startExecRuntime")` (9 cases) + `exec` parse case + the
+        single-broker regression test under `describe("startPodRuntime")`.
+        **Permission fix (validated 2026-10-15):** the `run`/`exec` refactor
+        had split the `PermissionBroker` into two instances (runtime's
+        default-`allowAll` auto-approved everything; the TUI prompt was never
+        reached) — restored to ONE shared instance passed to both
+        `startPodRuntime`/`startExecRuntime` and `startTui` (invariant
+        documented on `runPodTui`). Validation at time of writing:
+        typecheck 0, lint 0, 530 pass / 0 fail / 1 skip (531 total; skip =
+        live k8s opt-in).
+        **Pre-commit checklist (all done):**
+        1. ~~**Container default (deviation from approved plan):**~~
+           **FIXED:** `startExecRuntime` no longer forces `AGENT_CONTAINER` —
+           `deps.container` is passed through (undefined → the exec API omits
+           the `container` parameter and picks the only/default container, so
+           single-container pods need no `-c`). `injectAgentBinary`/
+           `probePodArch` gained an optional `container` (the `run` path still
+           passes the concrete name); `containerExecError` renders
+           `container "x" of pod "p"` when named, `pod "p"` when not. Tests:
+           the no-container case now asserts `exec:mypod:-:…`, plus a new
+           explicit-`container: "dns"` case asserting `exec:mypod:dns:…`.
+        2. ~~**Regression test for the single-broker invariant:** prove
+           `startPodRuntime`/`startExecRuntime` route permission requests
+           through `deps.permissions` (spy requester + a turn with an `ask`
+           tool in the daemon → assert the requester was called). The `main.ts`
+           wiring (one instance → runtime + TUI) is the other half;
+           `startTui` is Ink so it is not directly mockable.~~ **DONE:**
+           `SpyFakeCluster` (daemon agent gets `fsWriteTool` — a real `ask`
+           tool — with its gate wired to a SEPARATE daemon-side broker, exactly
+           like production `wiring.ts`; the client-side broker is a
+           `SpyBroker` passed as `deps.permissions`) + `AskModel` (one
+           `tool_call` to `fs_write`, then done). Two tests (one per runtime):
+           the turn's ask crosses the wire and is recorded by the spy
+           (`level:"ask"`, `title:"Write a file"`, `detail:"/tmp/x.txt"`).
+           Identity is the point: a client wired to a DIFFERENT broker would
+           leave the spy empty (turn completes via allowAll, test fails on
+           `toHaveLength(1)`). `FakeCluster.model`/`connection` became
+           `protected` for the subclass. Verified NOT VACUOUS via a
+           mutation-test: temporarily wiring the client to a DIFFERENT
+           `PermissionBroker` (the original bug) makes both tests fail on
+           `expect(spy.requests).toHaveLength(1)` (received 0 — the ask never
+           reached the spied broker) — then reverted (file is byte-identical).
+        3. ~~**Doc staleness:** `docs/pod-exec-attach.md` §10 says "526 pass" —
+           update to 527 pass / 0 fail / 1 skip (528 total) and note the
+           `-c`/`containerExecError` addition.~~ **DONE (with item 1):** §3
+           flow diagram (no more `?? AGENT_CONTAINER`), §10 test list (8
+           cases), `-c`/`containerExecError` noted, validation line now
+           528 pass / 0 fail / 1 skip.
+        4. ~~**Rebuild the 3 binaries**~~ **DONE:** all three rebuilt after the
+           broker + container fixes (linux-x64, linux-arm64, then macOS `dist/
+           agent-harness` last, ad-hoc signed); `dist/` is git-ignored, so
+           nothing ships in the commit.
+        5. ~~**Single commit**~~ **DONE:**
+           `feat(cli): exec subcommand — attach TUI to an existing pod
+           (inject-if-needed, -c container alias, no delete on exit)`.
+        **Accepted debt (do not regress, optional to improve later):**
+        `startExecRuntime` duplicates ~60 lines of `startPodRuntime`'s tail
+        (status scaffold, injection wiring, openExec, modelProvider,
+        createLocalRuntime) — the two tails differ BY DESIGN (delete vs
+        no-delete, `podCreateError` vs `containerExecError`), so a shared-core
+        extraction with lifecycle hooks is the only clean de-duplication;
+        not worth it for this feature.
 - [ ] **Skills support** — packaged procedural guidance the model opts into
       (complementary to the result pipeline: skills = *how to do it*, the pipeline
       = *the guarantee the context stays clean*).

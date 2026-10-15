@@ -32,8 +32,10 @@ import {
   type Pod,
   type RunExecOptions,
   type RunExecResult,
+  TERMINAL_PHASES,
   type WaitForReadyOptions,
   buildPodManifest,
+  podIsReady,
 } from "@agent-harness/k8s";
 import { OpenAIProvider } from "@agent-harness/providers";
 import type { DuplexChannel } from "@agent-harness/transport";
@@ -45,6 +47,8 @@ import { StatusLine } from "./status-line.ts";
 /** The subset of `KubeClient` the pod runtime needs (injectable for tests). */
 export interface PodCluster {
   createPod(pod: Pod, signal?: AbortSignal): Promise<Pod>;
+  /** Fetch a pod's current state (the `exec` attach preflight). */
+  getPod(name: string, signal?: AbortSignal): Promise<Pod>;
   waitForReady(name: string, options?: WaitForReadyOptions): Promise<Pod>;
   deletePod(name: string, signal?: AbortSignal): Promise<void>;
   /** Best-effort, non-blocking delete that survives `process.exit` (Ctrl+C). */
@@ -84,6 +88,30 @@ function podCreateError(error: unknown, namespace: string): Error {
   ) {
     return new Error(
       `namespace "${namespace}" does not exist in this cluster — create it (e.g. kubectl create namespace ${namespace}) or pass --namespace <existing>`,
+    );
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * Translate a one-shot exec that dies with "closed before the command reported
+ * a status" (the apiserver closing the exec WebSocket without a k8s status —
+ * the classic symptom of a WRONG CONTAINER on a multi-container pod) into an
+ * actionable error. Any other failure keeps its own message untouched.
+ */
+function containerExecError(
+  error: unknown,
+  podName: string,
+  container: string | undefined,
+  namespace: string,
+): Error {
+  if (
+    error instanceof Error &&
+    /exec channel closed before the command reported a status/.test(error.message)
+  ) {
+    const where = container ? `container "${container}" of pod "${podName}"` : `pod "${podName}"`;
+    return new Error(
+      `cannot exec into ${where} — the exec closed before the command reported a status. The container may not exist (a multi-container pod): list them (kubectl describe pod ${podName} -n ${namespace}) and pass the right one with --container <c> (alias -c)`,
     );
   }
   return error instanceof Error ? error : new Error(String(error));
@@ -209,5 +237,168 @@ export async function startPodRuntime(
     status?.finish();
     void deps.kube.deletePod(name).catch(() => {});
     throw error;
+  }
+}
+
+export interface PodExecRuntimeDeps {
+  readonly kube: PodCluster;
+  readonly namespace: string;
+  /** The EXISTING pod's name (no create, no delete — see `startExecRuntime`). */
+  readonly podName: string;
+  /** Container to exec into; undefined → the API picks the only/default one. */
+  readonly container?: string;
+  readonly permissions: PermissionBroker;
+  readonly store: JsonSessionStore;
+  readonly resume: SessionRecord | null;
+  readonly log: (line: string) => void;
+}
+
+/**
+ * Attach to an EXISTING pod (the `exec` command): inject the agent binary if
+ * the pod does not already have it, open the daemon exec, and build the same
+ * persisting local runtime as `startPodRuntime` — with one deliberate
+ * difference: the pod is USER-OWNED, so this runtime neither creates nor
+ * deletes it. `dispose` closes the exec channel (the pod-side daemon dies with
+ * it); the pod stays `Running` for reuse (re-attach is a sub-second
+ * version-probe) and for cleanup by the owner (`kubectl delete pod`).
+ *
+ * No `registerPodCleanup` safety net either: the whole point is that a TUI
+ * exit (Ctrl+C → process.exit) must NOT delete the pod.
+ */
+export async function startExecRuntime(
+  config: HarnessConfig,
+  deps: PodExecRuntimeDeps,
+): Promise<LocalRuntime> {
+  const name = deps.podName;
+  // No `?? AGENT_CONTAINER` default: when the caller does not name a container,
+  // the exec API omits the `container` parameter and picks the only/default
+  // one (single-container pods need no `-c`).
+  const container = deps.container;
+  // Same single-line (TTY) / one-line-per-phase (piped) contract as `run`.
+  const status = (process.stdout.isTTY ?? false) ? new StatusLine({ write: deps.log }) : null;
+  const phase = (text: string): void => {
+    if (status) {
+      status.set(text);
+    } else {
+      deps.log(`${text}\n`);
+    }
+  };
+
+  phase(`[pod] attaching to ${name} in namespace ${deps.namespace}…`);
+  let pod: Pod;
+  try {
+    pod = await deps.kube.getPod(name);
+  } catch (error) {
+    status?.finish();
+    // A 404 from `getPod` can only mean the pod does not exist (wrong name or
+    // wrong namespace — the kubeconfig context's namespace is not guaranteed
+    // to be the pod's). 403 keeps its RBAC message; it is the operator's to fix.
+    if (error instanceof KubeApiError && error.status === 404) {
+      throw new Error(
+        `pod "${name}" not found in namespace "${deps.namespace}" — check the name (kubectl get pods -n ${deps.namespace}) or pass --namespace <ns>; use \`run\` to create one`,
+      );
+    }
+    throw error instanceof Error ? error : new Error(String(error));
+  }
+  // A terminated pod can never host the daemon (and `waitForReady` would just
+  // time out) — say so up front.
+  const podPhase = pod.status?.phase;
+  if (podPhase !== undefined && TERMINAL_PHASES.has(podPhase)) {
+    status?.finish();
+    throw new Error(`pod "${name}" is ${podPhase}; cannot attach to a terminated pod`);
+  }
+
+  // The pod may still be pulling (the user ran it seconds ago): a BOUNDED wait
+  // — `exec` is an attach, not a create, so we do not sit for the full
+  // create-flow default.
+  if (!podIsReady(pod)) {
+    phase(`[pod] waiting for ${name} to become ready…`);
+    try {
+      pod = await deps.kube.waitForReady(name, { timeoutMs: 60_000 });
+    } catch (error) {
+      status?.finish();
+      throw error;
+    }
+  }
+
+  try {
+    // Preflight: if the pod ALREADY has a working `agent-harness` (a re-attach
+    // after a previous attach, or an image that ships it), the whole injection
+    // — 89 MB transfer — is skipped. Any failure (not on PATH, wrong arch,
+    // bad libc) falls through to the injection, which re-verifies anyway.
+    // One-shot execs do not go through the status line (same as in `run`):
+    // `injectAgentBinary` owns its phases via `onStatus`.
+    let probe: RunExecResult;
+    try {
+      probe = await deps.kube.runExec(
+        { pod: name, container, command: ["agent-harness", "--version"] },
+        undefined,
+        { timeoutMs: 15_000 },
+      );
+    } catch (error) {
+      status?.finish();
+      // A wrong container surfaces here (the first exec) — translate it.
+      throw containerExecError(error, name, container, deps.namespace);
+    }
+    let version: string;
+    if (probe.exitCode === 0) {
+      version = probe.stdout.trim() || "agent-harness";
+    } else {
+      version = await injectAgentBinary({
+        kube: deps.kube,
+        podName: name,
+        container,
+        podArch: () => probePodArch(deps.kube, name, container),
+        resolveBinary: (target) =>
+          resolvePodBinary(target, {
+            // Same single-line invariant as `run`: interactive mode folds the
+            // resolver's verbose path into the "resolving … binary…" phase.
+            log: status ? () => {} : deps.log,
+          }),
+        log: deps.log,
+        onStatus: status ? (text) => status.set(text) : undefined,
+      });
+    }
+    status?.finish();
+    // Piped only: the TUI opening IS the confirmation in interactive mode.
+    if (!status) {
+      deps.log(
+        `[pod] ${version} attached to ${name}; the agent daemon is starting (closing the TUI detaches — the pod stays up)\n`,
+      );
+    }
+    const channel = deps.kube.openExec(
+      {
+        pod: name,
+        container,
+        command: ["agent-harness", "serve", "--stdio", "--model-proxy"],
+      },
+      { onStderr: (text) => deps.log(`[pod ${name}] ${text}`) },
+    );
+    // The pod reaches the model through us (reverse-tunnel): serve the local
+    // provider, so the endpoint and API key never leave the laptop.
+    const modelProvider = new OpenAIProvider({
+      baseURL: config.baseURL,
+      model: config.model,
+      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    });
+    return await createLocalRuntime({
+      channel,
+      // User-owned pod: closing the exec detaches the daemon but the pod keeps
+      // running (keepalive) — no `deletePod`, by design.
+      disposeTransport: () => {
+        channel.close();
+      },
+      permissions: deps.permissions,
+      store: deps.store,
+      cwd: config.cwd,
+      model: config.model,
+      resume: deps.resume,
+      modelProvider,
+    });
+  } catch (error) {
+    status?.finish();
+    // NO pod delete here: the pod is not ours. The injection's own messages
+    // (e.g. the glibc hint) surface untouched; a wrong container is translated.
+    throw containerExecError(error, name, container, deps.namespace);
   }
 }

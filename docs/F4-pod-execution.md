@@ -1,9 +1,10 @@
 # F4 — Pod Execution: Architecture & Design
 
-Status: **F4.a–F4.e shipped (2026-10-14/15)**, validated live; the original
+Status: **F4.a–F4.g shipped (2026-10-14/15 + branch `feat/pod-exec-attach`)**, validated live; the original
 design is captured here and §8 records what actually shipped. The pod-binary
 injection (F4.e) has its own detailed design + as-built log in
-`docs/pod-binary-injection.md`. It builds on F3
+`docs/pod-binary-injection.md`; the `exec` attach (F4.g) has its plan +
+as-built in `docs/pod-exec-attach.md`. It builds on F3
 (`docs/F3-remote-control.md`) and reuses **the entire client/daemon/RPC stack
 unchanged** — F4 is a new *transport + lifecycle + reverse-tunnel*, not new
 protocol design above the wire vocabulary.
@@ -14,10 +15,12 @@ protocol design above the wire vocabulary.
 
 **Goal:** `agent-harness run --image <ref> [--namespace <ns>] [<name>]` runs
 the agent **inside a Kubernetes pod** (the sandbox), driven from the **local
-TUI on the laptop**.
-The user types locally; the agent loop, tool execution, `/loop`, background
-jobs, MCP servers — everything — run in the pod. Streaming UX, permission
-prompts, and session persistence are identical to the local experience.
+TUI on the laptop**; `agent-harness exec <pod> [--namespace <ns>]` attaches
+the **same** TUI to an **existing** pod (injecting the binary if it lacks one)
+without creating or deleting anything. In both cases the user types locally
+and the agent loop, tool execution, `/loop`, background jobs, MCP servers —
+everything — run in the pod. Streaming UX, permission prompts, and session
+persistence are identical to the local experience.
 
 **Hard constraints (from the request):**
 - **Self-contained.** No shelling out to `kubectl` / `oc`. The tool talks to the
@@ -169,6 +172,17 @@ secret, which stays home behind the tunnel.
    delete to process exit + SIGINT/SIGTERM, reusing the terminal-restore
    signal-safety pattern.
 
+**Attach mode (`exec`, F4.g):** the same flow against a pod that already
+exists — no create, and **no delete at all**. `startExecRuntime` does
+`getPod` (missing → actionable error; terminal phase → reject) → a bounded
+readiness wait → the F4.e injection **only if a preflight `agent-harness
+--version` shows the pod lacks it** (re-attach is a sub-second probe, no
+binary transfer) → the same daemon exec + runtime. Because the pod is
+user-owned, `dispose` only closes the exec channel (the pod daemon dies with
+the exec) and **no exit safety net is registered**: closing the TUI detaches
+and leaves the pod `Running` for reuse; the owner deletes it. See
+`docs/pod-exec-attach.md`.
+
 **Workspace (the decision to make per use-case):** v1 uses `git clone` in an
 init step (or an image that already contains the repo); results leave via git /
 PR, not file-sync. PVC mount and local→pod sync are later options. The pod's
@@ -297,6 +311,21 @@ sent to the pod (reverse-tunnel, §5).
   `docs/pod-binary-injection.md`.
 - **F4.f — exec-plugin auth + hardening** (credential-plugin, CA edge cases,
   timeouts, clear errors) + operator docs.
+- **F4.g — `exec` attach to an existing pod** — ✅ **shipped (branch
+  `feat/pod-exec-attach`)**. `agent-harness exec <pod> [--namespace <ns>]
+  [--container <c>] [--resume [uid]]` attaches the local TUI to a pod that
+  already exists — the `run` flow minus the lifecycle. `startExecRuntime`
+  (`cli/src/pod-runtime.ts`) is `startPodRuntime` with the create/delete
+  removed: `getPod` (404 → actionable "use `run` to create one"; a terminal
+  phase → "cannot attach") → a BOUNDED readiness wait (60 s — an attach, not a
+  create) → a **preflight `agent-harness --version`** that skips the whole
+  injection when the pod already has a working binary (re-attach is
+  sub-second; no 89 MB transfer), else the full F4.e `injectAgentBinary` →
+  the same daemon exec + reverse-tunnel + persisting runtime. The pod is
+  USER-OWNED: `dispose` only closes the exec channel (the pod-side daemon dies
+  with it) and NO exit safety net is registered, so closing the TUI detaches
+  but leaves the pod `Running` for reuse; cleanup is the owner's
+  (`kubectl delete pod`). Plan + as-built: `docs/pod-exec-attach.md`.
 
 MVP = **F4.a–F4.e**. F4.f is hardening.
 

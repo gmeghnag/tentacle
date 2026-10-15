@@ -78,6 +78,15 @@ Install path `/usr/local/bin/agent-harness` (PATH is searched; if the image alre
 ours shadows it — fine, it's our sandbox; note: running as root is assumed, same as today's
 `COPY agent-harness /usr/bin/...` Dockerfile; if non-root, log a clear error from the exit status).
 
+> **Third caller (F4.g, `exec` attach — branch `feat/pod-exec-attach`):**
+> `startExecRuntime` runs the SAME sequence against a pod that already exists,
+> but with a **preflight `agent-harness --version`** in front: if it succeeds
+> the whole injection is skipped (re-attach is a sub-second probe, no 89 MB
+> transfer) and its stdout is the version label; only on failure does the full
+> sequence above run. The pod is user-owned, so no create/delete wraps it and a
+> failed injection leaves the pod untouched (the glibc hint still applies).
+> Plan + as-built: `docs/pod-exec-attach.md`.
+
 ### `uname -m` → target mapping
 - `x86_64` → `bun-linux-x64`
 - `aarch64` → `bun-linux-arm64`

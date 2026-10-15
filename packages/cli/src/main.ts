@@ -6,6 +6,7 @@ import { join } from "node:path";
  *   agent-harness                 → interactive TUI (when stdin is a TTY)
  *   agent-harness <prompt...>     → one-shot run
  *   agent-harness run [opts]      → run the agent inside a Kubernetes pod (F4)
+ *   agent-harness exec <pod>      → attach the TUI to an existing pod (F4)
  *   agent-harness --help          → usage
  *   agent-harness --version       → print the version and exit
  *
@@ -29,7 +30,7 @@ import { type HarnessConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { parseFlags, resolveToken } from "./flags.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
-import { startPodRuntime } from "./pod-runtime.ts";
+import { startExecRuntime, startPodRuntime } from "./pod-runtime.ts";
 import { render } from "./render.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { startTerminal } from "./terminal.ts";
@@ -53,6 +54,12 @@ Usage:
                                 run the agent inside a Kubernetes pod (sandbox), local TUI
                                 (<name> is the pod name; random when omitted; sessions
                                 persist on the laptop, so --resume works)
+  agent-harness exec <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]
+                                attach the TUI to an EXISTING pod (agent-harness is
+                                injected if it is not there yet); --container is the
+                                container to exec into (default: the pod's only one);
+                                the pod is NOT deleted on exit — closing the TUI
+                                detaches, the pod stays up
   agent-harness <prompt...>     run a single task and exit
   agent-harness serve [opts]    host the remote-control daemon
   agent-harness connect <url>   drive a remote daemon with the TUI
@@ -92,6 +99,14 @@ Pod execution (agent-harness run --image <ref> [--namespace <ns>] [<name>]):
   HARNESS_POD_IMAGE        default pod image (overridden by --image)
   HARNESS_POD_BIN          use this prebuilt agent-harness binary for the pod instead of
                            the cached/built one (path to a bun-linux-x64/arm64 binary)
+
+Pod attach (agent-harness exec <pod> [--namespace <ns>] [--container <c>|-c <c>]):
+  <pod> must already exist (kubectl get pods -n <ns>); --namespace defaults like
+  run (context's namespace — pass it if the pod lives elsewhere). Multi-container
+  pods need the target container: --container <c> (alias -c) — without it the
+  pod's only container is used. The agent binary is injected only when the pod
+  does not already have a working one (re-attaching to a used pod skips the
+  transfer). The pod is left RUNNING on exit — delete it yourself when done.
 `;
 
 export interface CliIO {
@@ -198,6 +213,79 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
   }
 
+  // `run` / `exec` shared setup: cluster auth (kubeconfig current context, or
+  // HARNESS_K8S_SERVER/_TOKEN override) and session resume. Sessions persist as
+  // JSON under <configDir>/sessions; the pod is stateless, so resuming seeds
+  // the pod daemon with the saved session (uid + history), same as the TUI.
+  const loadPodAuth = async (namespace: string | undefined, prefix: string) => {
+    try {
+      const envServer = process.env.HARNESS_K8S_SERVER;
+      if (envServer) {
+        const token = process.env.HARNESS_K8S_TOKEN;
+        return {
+          options: {
+            server: envServer,
+            namespace: namespace ?? "default",
+            ...(token ? { token } : {}),
+          } as KubeClientOptions,
+        };
+      }
+      return { options: loadKubeClientOptions({ ...(namespace ? { namespace } : {}) }) };
+    } catch (error) {
+      write(
+        `[${prefix}] cluster auth failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      return { error: true } as const;
+    }
+  };
+  const loadPodResume = async (flags: Map<string, string>, bools: Set<string>) => {
+    const store = new JsonSessionStore(join(config.configDir, "sessions"));
+    const wantsResume = bools.has("resume") || flags.has("resume");
+    let resumeRecord: SessionRecord | null = null;
+    if (wantsResume) {
+      const uid = flags.get("resume");
+      resumeRecord = uid ? await store.load(uid) : await store.latest();
+      if (!resumeRecord) {
+        write(
+          uid
+            ? `[resume] no session "${uid}"; starting fresh\n`
+            : "[resume] no saved sessions yet; starting fresh\n",
+        );
+      } else {
+        write(`[resume] ${resumeRecord.id} — ${resumeRecord.title}\n`);
+      }
+    }
+    return { store, resume: resumeRecord };
+  };
+  // `run` and `exec` both end in the same local TUI over the pod runtime. The
+  // `permissions` broker MUST be the SAME instance handed to the runtime AND the
+  // TUI: the pod daemon routes its `session/request_permission` to the runtime's
+  // `RemoteClient` (which resolves it through that broker), while the TUI's
+  // prompt installs its interactive requester on the broker it is given. Two
+  // brokers would silently decouple the two — the daemon's broker (default
+  // `allowAll`) auto-approves everything and the TUI prompt is never reached.
+  const runPodTui = async (
+    runtime: Awaited<ReturnType<typeof startPodRuntime>>,
+    permissions: PermissionBroker,
+    resumeRecord: SessionRecord | null,
+  ): Promise<number> => {
+    try {
+      await startTui(null, {
+        model: config.model,
+        cwd: config.cwd,
+        contextWindow: config.contextWindow,
+        permissions,
+        jobs: runtime.jobs,
+        autoWakeOnJobExit: config.autoWake,
+        createSession: runtime.createSession,
+        ...(resumeRecord ? { resumeMessages: resumeRecord.messages } : {}),
+      });
+    } finally {
+      runtime.dispose();
+    }
+    return 0;
+  };
+
   // `run`: run the agent daemon inside a Kubernetes pod (the sandbox), driven
   // from this local TUI (F4). The image need NOT contain `agent-harness` — it
   // is injected over the exec channel at startup (F4.e); it must be a Linux
@@ -219,51 +307,19 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return 1;
     }
     const name = runPos[0];
-    // Sessions persist as JSON under <configDir>/sessions; `--resume` loads one.
-    // The pod is stateless — the history lives on the laptop, so resuming seeds
-    // the pod daemon with the saved session (uid + history), same as the TUI.
-    const store = new JsonSessionStore(join(config.configDir, "sessions"));
-    const wantsResume = runBools.has("resume") || runFlags.has("resume");
-    let resumeRecord: SessionRecord | null = null;
-    if (wantsResume) {
-      const uid = runFlags.get("resume");
-      resumeRecord = uid ? await store.load(uid) : await store.latest();
-      if (!resumeRecord) {
-        write(
-          uid
-            ? `[resume] no session "${uid}"; starting fresh\n`
-            : "[resume] no saved sessions yet; starting fresh\n",
-        );
-      } else {
-        write(`[resume] ${resumeRecord.id} — ${resumeRecord.title}\n`);
-      }
-    }
-    let clientOptions: KubeClientOptions;
-    try {
-      const envServer = process.env.HARNESS_K8S_SERVER;
-      if (envServer) {
-        const token = process.env.HARNESS_K8S_TOKEN;
-        clientOptions = {
-          server: envServer,
-          namespace: namespace ?? "default",
-          ...(token ? { token } : {}),
-        };
-      } else {
-        clientOptions = loadKubeClientOptions({ ...(namespace ? { namespace } : {}) });
-      }
-    } catch (error) {
-      write(
-        `[pod] cluster auth failed: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
+    const { store, resume: resumeRecord } = await loadPodResume(runFlags, runBools);
+    const auth = await loadPodAuth(namespace, "pod");
+    if ("error" in auth) {
       return 1;
     }
+    const kube = new KubeClient(auth.options);
+    // ONE broker shared by the pod runtime and the TUI (see `runPodTui`).
     const permissions = new PermissionBroker();
-    const kube = new KubeClient(clientOptions);
     let runtime: Awaited<ReturnType<typeof startPodRuntime>>;
     try {
       runtime = await startPodRuntime(config, {
         kube,
-        namespace: clientOptions.namespace,
+        namespace: auth.options.namespace,
         image,
         ...(name ? { name } : {}),
         permissions,
@@ -275,21 +331,75 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
     }
-    try {
-      await startTui(null, {
-        model: config.model,
-        cwd: config.cwd,
-        contextWindow: config.contextWindow,
-        permissions,
-        jobs: runtime.jobs,
-        autoWakeOnJobExit: config.autoWake,
-        createSession: runtime.createSession,
-        ...(resumeRecord ? { resumeMessages: resumeRecord.messages } : {}),
-      });
-    } finally {
-      runtime.dispose();
+    return await runPodTui(runtime, permissions, resumeRecord);
+  }
+
+  // `exec`: attach the local TUI to an EXISTING pod (F4, the `run` flow minus
+  // the lifecycle): the pod is user-owned, so nothing is created — and
+  // NOTHING is deleted on exit (closing the TUI detaches; the pod stays up for
+  // reuse). The agent binary is injected only when the pod lacks a working
+  // one (a preflight `--version` probe skips the transfer on re-attach); the
+  // same image constraints as `run` apply to the injected binary. See
+  // `startExecRuntime` and `docs/pod-exec-attach.md`.
+  if (args[0] === "exec") {
+    // `-c` is a short alias for `--container` (`parseFlags` only understands
+    // long `--` flags), so extract it first: `-c <name>` and `-c=<name>`.
+    const rest = args.slice(1);
+    let shortContainer: string | undefined;
+    const filtered: string[] = [];
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (arg === undefined) {
+        continue;
+      }
+      if (arg === "-c") {
+        const value = rest[++i];
+        if (value === undefined) {
+          write("\n[error] -c needs a container name (alias for --container <c>)\n");
+          return 1;
+        }
+        shortContainer = value;
+      } else if (arg.startsWith("-c=")) {
+        shortContainer = arg.slice(3);
+      } else {
+        filtered.push(arg);
+      }
     }
-    return 0;
+    const { flags: execFlags, bools: execBools, positional: execPos } = parseFlags(filtered);
+    const podName = execPos[0];
+    if (!podName) {
+      write(
+        "\n[error] usage: agent-harness exec <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]\n",
+      );
+      return 1;
+    }
+    const namespace = execFlags.get("namespace") ?? process.env.HARNESS_POD_NAMESPACE;
+    const container = execFlags.get("container") ?? shortContainer;
+    const { store, resume: resumeRecord } = await loadPodResume(execFlags, execBools);
+    const auth = await loadPodAuth(namespace, "pod");
+    if ("error" in auth) {
+      return 1;
+    }
+    const kube = new KubeClient(auth.options);
+    // ONE broker shared by the pod runtime and the TUI (see `runPodTui`).
+    const permissions = new PermissionBroker();
+    let runtime: Awaited<ReturnType<typeof startExecRuntime>>;
+    try {
+      runtime = await startExecRuntime(config, {
+        kube,
+        namespace: auth.options.namespace,
+        podName,
+        ...(container ? { container } : {}),
+        permissions,
+        store,
+        resume: resumeRecord,
+        log: write,
+      });
+    } catch (error) {
+      write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 1;
+    }
+    return await runPodTui(runtime, permissions, resumeRecord);
   }
 
   // Plain line-based REPL (scripting / no-TTY fallback). No interactive

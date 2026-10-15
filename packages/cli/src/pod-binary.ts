@@ -61,7 +61,7 @@ export function archToTarget(arch: PodArch): PodBinaryTarget {
 export async function probePodArch(
   kube: Pick<PodCluster, "runExec">,
   podName: string,
-  container: string,
+  container?: string,
 ): Promise<PodArch> {
   let raw = "";
   try {
@@ -78,7 +78,8 @@ export async function probePodArch(
 export interface PodBinaryDeps {
   readonly kube: Pick<PodCluster, "runExec">;
   readonly podName: string;
-  readonly container: string;
+  /** Container to inject into; undefined → the API picks the only/default one. */
+  readonly container?: string;
   /** Resolve the pod's arch (the `uname -m` probe with fallback). */
   readonly podArch: () => Promise<PodArch>;
   /** Resolve the binary's bytes for a target (build or cache, on the laptop). */

@@ -104,6 +104,13 @@ describe("cli main (end-to-end)", () => {
     expect(out.join("")).toContain("Usage:");
   });
 
+  test("exec without a pod name prints usage and exits non-zero", async () => {
+    const out: string[] = [];
+    const code = await main(["bun", "cli", "exec"], { write: (t) => out.push(t) });
+    expect(code).toBe(1);
+    expect(out.join("")).toContain("usage: agent-harness exec <pod>");
+  });
+
   test("--version prints the version and exits 0 without touching config", async () => {
     // Point the config dir at a FRESH, non-existent path: if `--version` ever
     // loaded config it would scaffold this directory (first-run side effect).
