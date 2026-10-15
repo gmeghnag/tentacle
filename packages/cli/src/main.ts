@@ -24,7 +24,12 @@ import {
   recordFromSnapshot,
 } from "@agent-harness/agent";
 import { type ChatMessage, PermissionBroker } from "@agent-harness/core";
-import { KubeClient, type KubeClientOptions, loadKubeClientOptions } from "@agent-harness/k8s";
+import {
+  KubeClient,
+  type KubeClientOptions,
+  deletePodFromEnv,
+  loadKubeClientOptions,
+} from "@agent-harness/k8s";
 import { type SessionController, startTui } from "@agent-harness/tui";
 import { type HarnessConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
@@ -117,6 +122,16 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const write = io.write ?? ((text: string) => void process.stdout.write(text));
 
   const args = argv.slice(2);
+
+  // Hidden subcommand: the detached pod-delete child when THIS process is a
+  // compiled binary (so the delete-on-exit safety net needs no external `bun`).
+  // It reads HARNESS_POD_DELETE_* / HARNESS_POD_TLS_* from the env and issues a
+  // single best-effort DELETE, then exits — no config, no TTY, no model setup.
+  if (args[0] === "__delete-pod") {
+    await deletePodFromEnv();
+    return 0;
+  }
+
   if (args[0] === "--help" || args[0] === "-h") {
     write(HELP);
     return 0;

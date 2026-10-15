@@ -3,6 +3,8 @@ import {
   type PodDeleteOptions,
   type PodDeleteSpawnOptions,
   buildPodDeleteScript,
+  deletePodFromEnv,
+  podDeleteCommand,
   spawnPodDelete,
 } from "../src/pod-cleanup.ts";
 
@@ -118,5 +120,109 @@ describe("spawnPodDelete", () => {
     expect(() =>
       spawnPodDelete({ server: "http://x", namespace: "n", podName: "p" }, throwing),
     ).not.toThrow();
+  });
+});
+
+describe("podDeleteCommand", () => {
+  test("from `bun` (source) → `bun -e <script>`", () => {
+    expect(podDeleteCommand("/opt/homebrew/bin/bun")).toEqual([
+      "bun",
+      "-e",
+      buildPodDeleteScript(),
+    ]);
+    // A versioned/debug bun basename still counts as bun.
+    expect(podDeleteCommand("/usr/local/bin/bun-debug")[0]).toBe("bun");
+  });
+
+  test("from a compiled binary → re-exec THE SAME binary with `__delete-pod` (no external bun)", () => {
+    const exe = "/Users/me/agent-harness/dist/agent-harness";
+    expect(podDeleteCommand(exe)).toEqual([exe, "__delete-pod"]);
+    // Crucially the deleter is the binary itself — not a hardcoded `bun`.
+    expect(podDeleteCommand(exe)[0]).not.toBe("bun");
+  });
+});
+
+describe("deletePodFromEnv", () => {
+  const KEYS = [
+    "HARNESS_POD_DELETE_URL",
+    "HARNESS_POD_DELETE_TOKEN",
+    "HARNESS_POD_TLS_CA",
+    "HARNESS_POD_TLS_CERT",
+    "HARNESS_POD_TLS_KEY",
+    "HARNESS_POD_TLS_INSECURE",
+  ];
+  const withEnv = async (
+    env: Record<string, string>,
+    fn: (
+      fetchCalls: Array<{ url: string; init: RequestInit & { tls?: unknown } }>,
+    ) => Promise<void>,
+  ): Promise<void> => {
+    const saved = new Map(KEYS.map((k) => [k, process.env[k]]));
+    for (const k of KEYS) {
+      delete process.env[k];
+    }
+    Object.assign(process.env, env);
+    const fetchCalls: Array<{ url: string; init: RequestInit & { tls?: unknown } }> = [];
+    const fakeFetch = (async (url: unknown, init: unknown) => {
+      fetchCalls.push({ url: String(url), init: (init ?? {}) as RequestInit & { tls?: unknown } });
+      return new Response(null, { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await deletePodFromEnv(fakeFetch);
+      await fn(fetchCalls);
+    } finally {
+      for (const [k, v] of saved) {
+        if (v === undefined) {
+          delete process.env[k];
+        } else {
+          process.env[k] = v;
+        }
+      }
+    }
+  };
+
+  test("issues a DELETE to the URL with bearer + TLS from the env", async () => {
+    await withEnv(
+      {
+        HARNESS_POD_DELETE_URL: "https://api:6443/api/v1/namespaces/dev/pods/p-1",
+        HARNESS_POD_DELETE_TOKEN: "tok",
+        HARNESS_POD_TLS_CA: "CA",
+        HARNESS_POD_TLS_CERT: "CERT",
+        HARNESS_POD_TLS_KEY: "KEY",
+        HARNESS_POD_TLS_INSECURE: "1",
+      },
+      async (calls) => {
+        expect(calls).toHaveLength(1);
+        const { url, init } = calls[0] as (typeof calls)[number];
+        expect(url).toBe("https://api:6443/api/v1/namespaces/dev/pods/p-1");
+        expect(init.method).toBe("DELETE");
+        expect((init.headers as Record<string, string>).authorization).toBe("Bearer tok");
+        expect(init.tls).toEqual({ ca: "CA", cert: "CERT", key: "KEY", rejectUnauthorized: false });
+      },
+    );
+  });
+
+  test("no URL → no fetch at all (nothing to delete)", async () => {
+    await withEnv({}, async (calls) => {
+      expect(calls).toHaveLength(0);
+    });
+  });
+
+  test("a fetch error is swallowed (best-effort, never throws)", async () => {
+    const boom = (async () => {
+      throw new Error("network down");
+    }) as unknown as typeof fetch;
+    const key = "HARNESS_POD_DELETE_URL";
+    const saved = process.env[key];
+    process.env[key] = "https://api/pods/p";
+    try {
+      await expect(deletePodFromEnv(boom)).resolves.toBeUndefined();
+    } finally {
+      if (saved === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = saved;
+      }
+    }
   });
 });

@@ -8,19 +8,22 @@
  * `process.exit` still fires `process` `exit` handlers, on **every** exit path
  * (SIGINT / SIGTERM / normal / crash) — so we register one that deletes the pod.
  *
- * The delete is done by a **detached, fire-and-forget child** (`bun -e`):
+ * The delete is done by a **detached, fire-and-forget child**:
  *   - it is `detached` + `unref`'d, so it never blocks the parent's exit;
  *   - it does a single `DELETE /pods/<name>` with a client-side timeout — the
  *     apiserver answers immediately (kubelet teardown happens *after* the 200),
  *     so a pod stuck in "Terminating" does not keep the child alive;
  *   - it self-terminates on the timeout if the HTTP call hangs.
  *
- * Secrets (token / TLS material) are passed via env vars, not inlined in the
- * `-e` script string (which is otherwise visible in `ps`). The script itself is
- * static. The child must be the real `bun` on PATH — a compiled `agent-harness`
- * binary cannot re-execute itself as a script runtime, and the `run` flow
- * already requires `bun` to be available on the laptop (it is what builds the
- * injected pod binary).
+ * The child command adapts to how the parent is running (`podDeleteCommand`):
+ *   - from a **compiled binary**, it re-executes THE SAME binary with the hidden
+ *     `__delete-pod` subcommand (`deletePodFromEnv`) — no external `bun` needed,
+ *     so a distributed standalone binary cleans up even on a host without Bun;
+ *   - from **source** (`process.execPath` is `bun`), it runs `bun -e <script>`.
+ *
+ * Secrets (token / TLS material) are passed via env vars, never inlined in the
+ * command line (which is visible in `ps`). Both paths read the same
+ * `HARNESS_POD_DELETE_*` / `HARNESS_POD_TLS_*` env.
  */
 
 /** TLS material for the delete call (mirrors Bun's fetch/WebSocket `tls`). */
@@ -87,6 +90,63 @@ export function buildPodDeleteScript(): string {
 }
 
 /**
+ * The runtime counterpart of `buildPodDeleteScript`: issue the single
+ * best-effort `DELETE` from the current process, reading its configuration from
+ * the same `HARNESS_POD_DELETE_*` / `HARNESS_POD_TLS_*` env vars. This is what
+ * the compiled binary's hidden `__delete-pod` subcommand runs, so the deleter
+ * child needs no external `bun`. Never throws; resolves once the call settles.
+ */
+export async function deletePodFromEnv(fetchImpl: typeof fetch = fetch): Promise<void> {
+  const url = process.env.HARNESS_POD_DELETE_URL;
+  if (!url) {
+    return;
+  }
+  const headers: Record<string, string> = {};
+  const token = process.env.HARNESS_POD_DELETE_TOKEN;
+  if (token) {
+    headers.authorization = `Bearer ${token}`;
+  }
+  const tls: Record<string, string | boolean> = {};
+  if (process.env.HARNESS_POD_TLS_CA) {
+    tls.ca = process.env.HARNESS_POD_TLS_CA;
+  }
+  if (process.env.HARNESS_POD_TLS_CERT) {
+    tls.cert = process.env.HARNESS_POD_TLS_CERT;
+  }
+  if (process.env.HARNESS_POD_TLS_KEY) {
+    tls.key = process.env.HARNESS_POD_TLS_KEY;
+  }
+  if (process.env.HARNESS_POD_TLS_INSECURE === "1") {
+    tls.rejectUnauthorized = false;
+  }
+  const init: RequestInit & { tls?: Record<string, string | boolean> } = {
+    method: "DELETE",
+    headers,
+    signal: AbortSignal.timeout(5000),
+  };
+  if (Object.keys(tls).length > 0) {
+    init.tls = tls;
+  }
+  try {
+    await fetchImpl(url, init as RequestInit);
+  } catch {
+    // best-effort — a network error must never surface.
+  }
+}
+
+/**
+ * The command the detached deleter child runs, chosen by how THIS process is
+ * running. From a compiled binary (`execPath` is not `bun`) → re-exec the same
+ * binary with the hidden `__delete-pod` subcommand, so no external `bun` is
+ * required. From source (`execPath` is `bun`) → `bun -e <script>`.
+ */
+export function podDeleteCommand(execPath: string): string[] {
+  const base = execPath.replace(/\\/g, "/").split("/").pop() ?? "";
+  const isBun = base === "bun" || base.startsWith("bun-");
+  return isBun ? ["bun", "-e", buildPodDeleteScript()] : [execPath, "__delete-pod"];
+}
+
+/**
  * Spawn the detached deleter child. Never throws: a failure to spawn (e.g. no
  * `bun` on PATH) is swallowed — the safety net must not break the exit.
  */
@@ -125,7 +185,7 @@ export function spawnPodDelete(
       env.HARNESS_POD_TLS_INSECURE = "1";
     }
 
-    const child = spawn(["bun", "-e", buildPodDeleteScript()], env, {
+    const child = spawn(podDeleteCommand(process.execPath), env, {
       detached: true,
       stdio: ["ignore", "ignore", "ignore"],
     });
