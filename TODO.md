@@ -170,6 +170,18 @@ Findings are in the App glue and terminal lifecycle:
       a subtle `⎿ cancelled` notice so the user sees it was interrupted, not done.
 - [ ] 🔵 (aesthetic) diff bars pad to width by character count, not display
       width, so CJK/emoji lines misalign the full-width background bars.
+- [ ] 🟡 **A dropped connection leaks the raw Bun socket error into the TUI.** A
+      transport close mid-turn (candidate sources: the model-provider
+      `fetch`/SSE stream, an MCP connection, or the local worker channel)
+      surfaces verbatim as
+      `⚠ Error: The socket connection was closed unexpectedly. For more
+      information, pass verbose: true in the second argument to fetch()`
+      because `App.tsx:326` does `failTurn(state, String(error))` with no
+      mapping. Future iteration: catch transport/network close errors at the
+      `session.send()` boundary and surface a clean "connection to the
+      provider/daemon dropped — retry the turn?" notice instead of the raw
+      message; decide on auto-retry / reconnect semantics. (Reported 2026-10-14
+      in a local TUI session — **not** k8s/pod related.)
 
 Daily-driver work (done 2026-10-14):
 - [x] **App.tsx decomposition (partial).** Extracted cohesive, unit-tested units
