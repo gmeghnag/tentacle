@@ -6,6 +6,7 @@ import { join } from "node:path";
  *   agent-harness                 → interactive TUI (when stdin is a TTY)
  *   agent-harness <prompt...>     → one-shot run
  *   agent-harness --help          → usage
+ *   agent-harness --version       → print the version and exit
  *
  * Configuration is layered (env > ~/.config/agent-harness/config.jsonc >
  * defaults); see `@agent-harness/config`. The config dir + PROMPT.md are
@@ -33,6 +34,12 @@ import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { startTerminal } from "./terminal.ts";
 import { buildAgent, connectConfiguredMcp } from "./wiring.ts";
 
+/**
+ * The app version: a literal injected at compile time (`define` in
+ * `scripts/build.ts`), or `"dev"` when running from source.
+ */
+const APP_VERSION = process.env.HARNESS_APP_VERSION ?? "dev";
+
 const HELP = `agent-harness — run an agent task
 
 Usage:
@@ -47,6 +54,7 @@ Usage:
   agent-harness serve [opts]    host the remote-control daemon
   agent-harness connect <url>   drive a remote daemon with the TUI
   agent-harness --help          show this help
+  agent-harness --version       print the version and exit
 
 Remote control:
   agent-harness serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
@@ -87,6 +95,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const args = argv.slice(2);
   if (args[0] === "--help" || args[0] === "-h") {
     write(HELP);
+    return 0;
+  }
+
+  // `--version` exits before config loading, model setup, or TTY handling —
+  // it doubles as the post-injection health probe in a pod.
+  if (args[0] === "--version") {
+    write(`agent-harness ${APP_VERSION}\n`);
     return 0;
   }
 

@@ -56,6 +56,12 @@ const wasmBase64 = readFileSync(wasmPath).toString("base64");
 // absolute path so it needn't resolve the package's restricted `exports` map.
 const yogaInitPath = resolve(dirname(wasmPath), "index.js");
 
+// Inject the CLI package version as a literal (`agent-harness --version` reads
+// `process.env.HARNESS_APP_VERSION`; from source it falls back to "dev").
+const cliVersion = JSON.parse(
+  readFileSync(resolve(root, "packages/cli/package.json"), "utf8"),
+).version as string;
+
 const result = await Bun.build({
   // `worker.ts` is a second entrypoint on purpose: in a compiled binary the
   // daemon worker must be embedded, and `new Worker("./worker.ts")` resolves
@@ -64,6 +70,7 @@ const result = await Bun.build({
   entrypoints: [resolve(root, "packages/cli/src/main.ts"), resolve(root, "packages/cli/src/worker.ts")],
   // @ts-expect-error - `compile` is supported by the Bun bundler
   compile: { outfile, ...(target ? { target } : {}) },
+  define: { "process.env.HARNESS_APP_VERSION": JSON.stringify(cliVersion) },
   minify: true,
   plugins: [
     {

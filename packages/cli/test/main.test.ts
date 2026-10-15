@@ -103,4 +103,28 @@ describe("cli main (end-to-end)", () => {
     expect(code).toBe(1);
     expect(out.join("")).toContain("Usage:");
   });
+
+  test("--version prints the version and exits 0 without touching config", async () => {
+    // Point the config dir at a FRESH, non-existent path: if `--version` ever
+    // loaded config it would scaffold this directory (first-run side effect).
+    const freshConfigDir = join(dir, "config-never-created");
+    const saved = process.env.HARNESS_CONFIG_DIR;
+    process.env.HARNESS_CONFIG_DIR = freshConfigDir;
+    try {
+      const out: string[] = [];
+      const code = await main(["bun", "cli", "--version"], { write: (t) => out.push(t) });
+      expect(code).toBe(0);
+      expect(out.join("")).toMatch(/^agent-harness \S+\n$/);
+      // Config was never loaded: no scaffolding happened.
+      let exists = true;
+      try {
+        await readFile(freshConfigDir, "utf8");
+      } catch {
+        exists = false;
+      }
+      expect(exists).toBe(false);
+    } finally {
+      process.env.HARNESS_CONFIG_DIR = saved;
+    }
+  });
 });
