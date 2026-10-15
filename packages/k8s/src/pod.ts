@@ -1,8 +1,13 @@
 /**
  * Build the Pod manifest for an agent sandbox (F4). The container runs a
  * keepalive (so the pod reaches Ready and stays up) and the agent daemon is
- * `exec`-ed into it on demand (`agent-harness serve --stdio`) — so the image
- * MUST contain the `agent-harness` binary on PATH.
+ * `exec`-ed into it on demand (`agent-harness serve --stdio`).
+ *
+ * The image does NOT need to contain `agent-harness`: the pod runtime injects
+ * the binary over the exec channel before the daemon starts (F4.e,
+ * `cli/src/pod-binary.ts`). It needs only to be a Linux **glibc** image with
+ * `sh` + `head` (Bun's compiled binary is glibc-linked; musl images such as
+ * Alpine/busybox cannot run it).
  */
 import type { Pod } from "./types.ts";
 
@@ -14,7 +19,7 @@ export interface PodManifestOptions {
   readonly name: string;
   /** Namespace (also set on the object; the API also infers it from the URL). */
   readonly namespace?: string;
-  /** Container image — must contain the `agent-harness` binary. */
+  /** Container image — a Linux glibc image with `sh` + `head` (the tool is injected, F4.e). */
   readonly image: string;
   /** Keepalive command for the container. Default `["sleep", "infinity"]`. */
   readonly command?: readonly string[];

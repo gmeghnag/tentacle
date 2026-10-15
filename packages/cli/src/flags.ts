@@ -11,7 +11,10 @@ export interface ParsedFlags {
   readonly bools: Set<string>;
 }
 
-/** `--key value` → flags, `--key` (no value) → bools, everything else positional. */
+/**
+ * `--key value` → flags, `--key=value` → flags, `--key` (no value) → bools,
+ * everything else positional. Both `--namespace dev` and `--namespace=dev` work.
+ */
 export function parseFlags(args: readonly string[]): ParsedFlags {
   const positional: string[] = [];
   const flags = new Map<string, string>();
@@ -22,6 +25,11 @@ export function parseFlags(args: readonly string[]): ParsedFlags {
       continue;
     }
     if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      if (eq > 2) {
+        flags.set(arg.slice(2, eq), arg.slice(eq + 1));
+        continue;
+      }
       const key = arg.slice(2);
       const next = args[i + 1];
       if (next !== undefined && !next.startsWith("--")) {

@@ -1,7 +1,9 @@
 # F4 — Pod Execution: Architecture & Design
 
-Status: **proposed (no code yet)** as of 2026-10-14. This document captures the
-design so a later session can execute it directly. It builds on F3
+Status: **F4.a–F4.e shipped (2026-10-14/15)**, validated live; the original
+design is captured here and §8 records what actually shipped. The pod-binary
+injection (F4.e) has its own detailed design + as-built log in
+`docs/pod-binary-injection.md`. It builds on F3
 (`docs/F3-remote-control.md`) and reuses **the entire client/daemon/RPC stack
 unchanged** — F4 is a new *transport + lifecycle + reverse-tunnel*, not new
 protocol design above the wire vocabulary.
@@ -10,8 +12,9 @@ protocol design above the wire vocabulary.
 
 ## 1. Goal & scope
 
-**Goal:** `agent-harness --pod --namespace <ns>` runs the agent **inside a
-Kubernetes pod** (the sandbox), driven from the **local TUI on the laptop**.
+**Goal:** `agent-harness run --image <ref> [--namespace <ns>] [<name>]` runs
+the agent **inside a Kubernetes pod** (the sandbox), driven from the **local
+TUI on the laptop**.
 The user types locally; the agent loop, tool execution, `/loop`, background
 jobs, MCP servers — everything — run in the pod. Streaming UX, permission
 prompts, and session persistence are identical to the local experience.
@@ -150,11 +153,16 @@ secret, which stays home behind the tunnel.
 
 ## 6. Pod lifecycle & workspace
 
-`--pod` drives an **ephemeral sandbox** by default:
+`run` drives an **ephemeral sandbox** by default:
 
-1. Resolve kubeconfig + namespace; render a Pod from a config template (§7).
+1. Resolve kubeconfig + namespace (`--namespace` defaults to the context's);
+   render a Pod from a config template (§7).
 2. `createPod` → poll `getPod` for `Ready` (spinner; image pull can be slow;
-   bounded timeout → clean error, no silent hang).
+   bounded timeout → clean error, no silent hang). A **missing namespace**
+   fails the pod create with a 404, which `startPodRuntime` translates into an
+   actionable error ("create it … or pass --namespace <existing>") — the
+   namespace is deliberately NOT auto-created (it is admin-ish, often not
+   allowed by RBAC, and a sign the context is stale).
 3. Open the exec WS → handshake the `RemoteClient` → hand the TUI a
    `LocalRuntime`.
 4. On exit (`dispose`): close the WS and **`deletePod`** (ephemeral) — tie the
@@ -204,7 +212,7 @@ sent to the pod (reverse-tunnel, §5).
   (`loadKubeClientOptions`: reads `~/.kube/config` or `$KUBECONFIG`, materialises
   file/exec-plugin creds, and builds `fetch`/`makeWebSocket` carrying the cluster
   TLS via Bun's per-call `tls: { ca, cert, key, rejectUnauthorized }`). `main.ts`
-  `--pod` now resolves from the kubeconfig by default (`--namespace` overrides;
+  `run` now resolves from the kubeconfig by default (`--namespace` overrides;
   `HARNESS_K8S_SERVER`/`_TOKEN` is an explicit override). Pure parser unit-tested
   (`k8s/test/kubeconfig.test.ts`); the full path **validated LIVE from a real kind
   kubeconfig with client-cert mTLS** — Bun honours `tls.{ca,cert,key}` on both
@@ -229,14 +237,15 @@ sent to the pod (reverse-tunnel, §5).
   `WebSocket`**, so trusting the cluster CA is a matter of pointing it at the
   parsed CA file (bearer-token auth already works end-to-end). **Still not
   covered:** `serve --stdio` end-to-end against a spawned process.
-- **F4.c — `startPodRuntime` + `--pod`/`--namespace`/`--image` + pod lifecycle**
-  — ✅ **done (2026-10-14).** `k8s/pod.ts` `buildPodManifest` (keepalive
+- **F4.c — `startPodRuntime` + `run`/`--namespace`/`--image` + pod lifecycle**
+  — ✅ **done (2026-10-14; renamed `--pod` → `run` in 2026-10-15).** `k8s/pod.ts` `buildPodManifest` (keepalive
   container on the given image; the daemon is `exec`-ed in). `cli/pod-runtime.ts`
   `startPodRuntime` (create → waitForReady → `openExec(serve --stdio)` →
   `createLocalRuntime`; `dispose` closes the channel and deletes the pod; any
   pre-ready failure deletes the pod and rethrows — no in-process fallback).
-  `main.ts` `--pod` branch: `--namespace` (default `default`), `--image`
-  (required), persistence on the laptop, same TUI/permissions/auto-wake as local.
+  `main.ts` `run` branch: `--namespace` (default the kubeconfig context's),
+  `--image` (required), an optional positional pod `<name>` (else random),
+  persistence on the laptop, same TUI/permissions/auto-wake as local.
   Tested end-to-end over an in-memory channel wired to a real `Connection`
   (create/ready/exec/turn/persist/dispose/delete) + cleanup-on-failure +
   `buildPodManifest`. **Cluster auth is a stopgap:** `HARNESS_K8S_SERVER` +
@@ -257,10 +266,39 @@ sent to the pod (reverse-tunnel, §5).
   tunnel** (the laptop TUI sees each model turn arrive at once) — and **no
   mid-call cancel** of a tunnelled model request (turn-level cancel between calls
   still works). Both are F4.d.2.
-- **F4.e — exec-plugin auth + hardening** (credential-plugin, CA edge cases,
+- **F4.e — pod binary injection** — ✅ **done (2026-10-15).** The pod image
+  no longer needs to contain `agent-harness`: the runtime injects a Linux
+  binary over the exec WebSocket before the daemon starts. Sequence (in
+  `startPodRuntime`, after the pod is Ready): (1) `uname -m` arch probe —
+  ANY failure/unknown output falls back to `bun-linux-x64` (never aborts);
+  (2) resolve the binary's bytes on the laptop: `HARNESS_POD_BIN` (explicit
+  prebuilt) → the git-ignored `dist/pod-bin/agent-harness-<target>` cache →
+  `Bun.build` cross-compile with the SAME options as `bun run compile`
+  (shared `buildBinary`, so the two never drift); (3) stream the raw bytes
+  to the pod's stdin through a one-shot exec (`k8s/exec-run.ts`, resolves on
+  the k8s status channel when the command EXITS — 256 KB chunks, buffer
+  until the socket opens, size-scaled timeout, progress: a `docker pull`-style
+  bar in the TTY single-line, or a discrete line per ~10% when piped):
+  `sh -c "mkdir -p /usr/local/bin && head -c N > /usr/local/bin/agent-harness
+  && chmod 755 …"` — `head -c N` reads exactly N bytes and exits, so the
+  known byte count IS the EOF (no tar, no terminator); (4) verify with
+  `agent-harness --version` (the new flag, exits before config load), which
+  catches a wrong-arch / bad-libc / broken binary with the pod's stderr
+  instead of an opaque channel close — a musl loader failure gets an
+  appended "use a glibc-based image" hint. Any step throws → the existing
+  `catch` deletes the pod. **Image constraint (decided, not avoidable):**
+  Bun's compiled binary is always dynamically glibc-linked (needs
+  `libc.so.6`, `libdl.so.2`, …; max `GLIBC_2.17`) and Bun has no musl or
+  static target — so the image must be a Linux **glibc** image with
+  `sh` + `head` (UBI9/Debian/RHEL/Amazon Linux OK; Alpine/busybox = musl →
+  NO, and the `--version` probe fails cleanly with the hint). Validated
+  LIVE on an x86_64 cluster: UBI9 full success (89 MB transfer 10%→100% +
+  daemon in pod), busybox clean failure at the probe. Detail + as-built log:
+  `docs/pod-binary-injection.md`.
+- **F4.f — exec-plugin auth + hardening** (credential-plugin, CA edge cases,
   timeouts, clear errors) + operator docs.
 
-MVP = **F4.a–F4.d**. F4.e is hardening.
+MVP = **F4.a–F4.e**. F4.f is hardening.
 
 ## 9. Open risks
 

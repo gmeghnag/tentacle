@@ -6,6 +6,7 @@ import {
   type PodBinaryTarget,
   archToTarget,
   injectAgentBinary,
+  libcMismatchHint,
   mapUnameOutput,
   probePodArch,
 } from "../src/pod-binary.ts";
@@ -77,6 +78,7 @@ function depsFor(
     arch?: "x64" | "arm64";
     resolveBinary?: (target: PodBinaryTarget) => Promise<Uint8Array>;
     log?: (line: string) => void;
+    onStatus?: (text: string) => void;
   } = {},
 ): PodBinaryDeps {
   return {
@@ -88,6 +90,7 @@ function depsFor(
     podArch: async () => opts.arch ?? "x64",
     resolveBinary: opts.resolveBinary ?? (async () => new Uint8Array([1, 2, 3])),
     log: opts.log ?? (() => {}),
+    ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
   };
 }
 
@@ -109,6 +112,31 @@ describe("archToTarget", () => {
   test("maps arch to a Bun Linux target", () => {
     expect(archToTarget("x64")).toBe("bun-linux-x64");
     expect(archToTarget("arm64")).toBe("bun-linux-arm64");
+  });
+});
+
+describe("libcMismatchHint", () => {
+  test("matches the classic musl-image loader failure (the real busybox error)", () => {
+    expect(
+      libcMismatchHint(
+        "agent-harness: error while loading shared libraries: libdl.so.2: cannot open shared object file: No such file or directory",
+      ),
+    ).toBe(
+      " — this image appears to lack glibc (Alpine/busybox use musl); agent-harness is a glibc binary, use a glibc-based image (e.g. UBI9, Debian, RHEL)",
+    );
+  });
+  test("matches each pattern, case-insensitively", () => {
+    expect(libcMismatchHint("ERROR WHILE LOADING SHARED LIBRARIES: libc.so.6")).toBeDefined();
+    expect(
+      libcMismatchHint(
+        "/lib/ld-musl-x86_64.so.1: cannot open shared object file: No such file or directory",
+      ),
+    ).toBeDefined();
+  });
+  test("undefined for any other failure (the raw error stays the primary signal)", () => {
+    expect(libcMismatchHint("agent-harness: Exec format error\n")).toBeUndefined();
+    expect(libcMismatchHint("/bin/sh: agent-harness: not found\n")).toBeUndefined();
+    expect(libcMismatchHint("")).toBeUndefined();
   });
 });
 
@@ -152,25 +180,29 @@ describe("injectAgentBinary", () => {
       log: (l) => logs.push(l),
     });
 
-    await injectAgentBinary(deps);
+    const result = await injectAgentBinary(deps);
 
     expect(kube.calls).toHaveLength(2);
-    // 1) the raw transfer: sh -c head -c N > path && chmod, with the exact bytes
+    // 1) the raw transfer: sh -c mkdir -p dir && head -c N > path && chmod,
+    //    with the exact bytes
     const installCall = callAt(kube.calls, 0);
     expect(installCall.command[0]).toBe("sh");
     expect(installCall.command[1]).toBe("-c");
     const shellCmd = installCall.command[2];
-    expect(shellCmd).toBe(`head -c ${bytes.length} > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`);
+    expect(shellCmd).toBe(
+      `mkdir -p /usr/local/bin && head -c ${bytes.length} > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`,
+    );
     expect(installCall.input).toBeDefined();
     expect(installCall.input).toEqual(bytes);
     // 2) the version probe (no input)
     const versionCall = callAt(kube.calls, 1);
     expect(versionCall.command).toEqual(["agent-harness", "--version"]);
     expect(versionCall.input).toBeUndefined();
-    // logs mention the arch, the transfer, and the resolved version
+    // logs mention the arch and the transfer; the version is returned (the
+    // caller folds it into its final line — it is not logged here anymore).
     expect(logs.some((l) => l.includes("x64"))).toBe(true);
     expect(logs.some((l) => l.includes("injecting agent-harness"))).toBe(true);
-    expect(logs.some((l) => l.includes("agent-harness 1.2.3"))).toBe(true);
+    expect(result).toBe("agent-harness 1.2.3");
   });
 
   test("picks the arm64 target for an arm64 pod", async () => {
@@ -212,6 +244,18 @@ describe("injectAgentBinary", () => {
     expect(callAt(kube.calls, 1).command).toEqual(["agent-harness", "--version"]);
   });
 
+  test("a failed --version probe (musl image) appends the glibc hint to the error", async () => {
+    const kube = new FakeKube([
+      ok(), // install ok
+      fail(
+        "agent-harness: error while loading shared libraries: libdl.so.2: cannot open shared object file: No such file or directory\n",
+      ),
+    ]);
+    await expect(injectAgentBinary(depsFor(kube))).rejects.toThrow(
+      /agent-harness --version failed.*libdl\.so\.2.*appears to lack glibc.*UBI9, Debian, RHEL/,
+    );
+  });
+
   test("the install call passes a size-scaled timeout", async () => {
     const kube = new FakeKube([ok(), ok("v\n")]);
     await injectAgentBinary(
@@ -238,5 +282,36 @@ describe("injectAgentBinary", () => {
     // onProgress fires once per 256 KB chunk: 20%, 50%, 70%, 100%.
     expect(progressLines).toHaveLength(4);
     expect(logs.some((l) => l.includes("100%"))).toBe(true);
+  });
+
+  test("interactive mode: phases drive onStatus (single line) and the version is returned", async () => {
+    const statuses: string[] = [];
+    const logs: string[] = [];
+    const kube = new FakeKube([ok(), ok("agent-harness 1.2.3\n")]);
+    const total = 4 * 256 * 1024;
+    const result = await injectAgentBinary(
+      depsFor(kube, {
+        resolveBinary: async () => new Uint8Array(total),
+        log: (l) => logs.push(l),
+        onStatus: (text) => statuses.push(text),
+      }),
+    );
+    // Every phase update goes to the shared status line — nothing is logged
+    // (the single-line invariant), except the version is returned for the
+    // caller's final line.
+    expect(logs).toHaveLength(0);
+    expect(result).toBe("agent-harness 1.2.3");
+    // The phase sequence: resolve → transfer (with the bar) → verify. The
+    // transfer line is repainted per chunk (25/50/75/100%); the LAST one is 100%.
+    expect(statuses[0]).toContain("resolving bun-linux-x64 binary…");
+    const transfers = statuses.filter((s) => s.includes("injecting agent-harness ▓"));
+    expect(transfers.length).toBeGreaterThan(1);
+    const last = transfers[transfers.length - 1];
+    if (last === undefined) {
+      throw new Error("no transfer status line");
+    }
+    expect(last).toContain("100%");
+    expect(last).toContain(`${(total / 1048576).toFixed(1)} MB`);
+    expect(statuses.at(-1)).toContain("verifying…");
   });
 });

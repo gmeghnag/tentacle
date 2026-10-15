@@ -20,15 +20,34 @@ import { dirname, resolve } from "node:path";
 import type { PodBinaryTarget } from "./pod-binary.ts";
 
 /**
- * The monorepo root, relative to this source file. Only the source CLI runs
- * this (injection happens on the laptop); a compiled binary never reaches
- * `resolvePodBinary`, so a source-relative root is correct.
+ * Resolve the monorepo root so the cache/build paths work in BOTH run modes:
+ * - source: this file lives at `packages/cli/src/`, so root is three up;
+ * - compiled binary: `import.meta.dir` is the virtual `$bunfs` root, but
+ *   `process.execPath` is the real binary path (`<repo>/dist/agent-harness`),
+ *   so walk up to the directory that owns `package.json`.
+ *
+ * The `run` flow runs the compiled binary (`./dist/agent-harness run …`),
+ * so this must NOT assume source mode. Last resort is the current working
+ * directory (the user runs the binary from the repo; `node_modules` discovery
+ * in `findYogaWasm` still works from there).
  */
-const root = resolve(import.meta.dir, "../../..");
-const yogaShim = resolve(root, "scripts/yoga-auto.ts");
+export function repoRoot(): string {
+  if (!import.meta.url.includes("$bunfs")) {
+    return resolve(import.meta.dir, "../../..");
+  }
+  let dir = dirname(process.execPath);
+  for (let i = 0; i < 8 && dir !== dirname(dir); i++) {
+    if (existsSync(resolve(dir, "package.json"))) {
+      return dir;
+    }
+    dir = dirname(dir);
+  }
+  return process.cwd();
+}
 
 /** Locate the real yoga.wasm so we can embed its bytes (shared with the CLI build). */
 export function findYogaWasm(): string {
+  const root = repoRoot();
   const candidates: string[] = [];
   try {
     candidates.push(
@@ -61,7 +80,9 @@ export function findYogaWasm(): string {
  * failure — the caller decides whether to exit.
  */
 export async function buildBinary(outfile: string, target: string | undefined): Promise<boolean> {
+  const root = repoRoot();
   const wasmPath = findYogaWasm();
+  const yogaShim = resolve(root, "scripts/yoga-auto.ts");
   const wasmBase64 = readFileSync(wasmPath).toString("base64");
   // The instantiator lives next to the wasm (dist/index.js); give the bundler
   // its absolute path so it needn't resolve the package's restricted `exports` map.
@@ -116,7 +137,7 @@ export async function buildBinary(outfile: string, target: string | undefined): 
 
 /** The default pod-binary cache directory (git-ignored, next to `dist/`). */
 export function podBinCacheDir(): string {
-  return resolve(root, "dist/pod-bin");
+  return resolve(repoRoot(), "dist/pod-bin");
 }
 
 export interface ResolvePodBinaryOptions {

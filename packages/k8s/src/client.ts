@@ -18,6 +18,7 @@ import {
   execSubprotocols,
 } from "./exec-channel.ts";
 import { type RunExecOptions, type RunExecResult, runExecOverWebSocket } from "./exec-run.ts";
+import { type PodTls, spawnPodDelete } from "./pod-cleanup.ts";
 import { type Pod, TERMINAL_PHASES, podIsReady } from "./types.ts";
 
 /** Thrown when the API server returns a non-2xx response. */
@@ -38,6 +39,13 @@ export interface KubeClientOptions {
   readonly namespace: string;
   /** Bearer token (one supported auth mode in this slice). */
   readonly token?: string;
+  /**
+   * Cluster TLS material (CA trust / client cert / key / insecure flag) carried
+   * from `loadKubeClientOptions`. The async `fetch` already bakes this in, but
+   * the delete-on-exit child process needs it explicitly to issue its own
+   * (out-of-process) `DELETE`. Undefined for a plain non-TLS server.
+   */
+  readonly tls?: PodTls;
   /** Injectable fetch, for tests. Defaults to the global `fetch`. */
   readonly fetch?: typeof fetch;
   /** Injectable WebSocket factory, for tests. Defaults to the global `WebSocket`. */
@@ -76,6 +84,7 @@ export class KubeClient {
   private readonly server: string;
   private readonly namespace: string;
   private readonly token?: string;
+  private readonly tls?: PodTls;
   private readonly doFetch: typeof fetch;
   private readonly makeWebSocket: (url: string, protocols: string[]) => WebSocketLike;
 
@@ -86,6 +95,7 @@ export class KubeClient {
       this.token = options.token;
     }
     this.doFetch = options.fetch ?? fetch;
+    this.tls = options.tls;
     this.makeWebSocket =
       options.makeWebSocket ??
       ((url, protocols) => new WebSocket(url, protocols) as unknown as WebSocketLike);
@@ -142,6 +152,22 @@ export class KubeClient {
     if (!res.ok && res.status !== 404) {
       throw new KubeApiError(res.status, await safeText(res));
     }
+  }
+
+  /**
+   * Best-effort, non-blocking pod delete that survives `process.exit` — the
+   * Ctrl+C / SIGTERM safety net. Spawns a detached `bun -e` child that issues
+   * the `DELETE` and self-terminates on a timeout; it is `unref`'d so it never
+   * delays the parent's exit. Never throws. See `pod-cleanup.ts`.
+   */
+  deletePodBestEffort(name: string): void {
+    spawnPodDelete({
+      server: this.server,
+      namespace: this.namespace,
+      podName: name,
+      ...(this.token ? { token: this.token } : {}),
+      ...(this.tls ? { tls: this.tls } : {}),
+    });
   }
 
   /**

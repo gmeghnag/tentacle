@@ -9,5 +9,6 @@ export * from "./exec-frame.ts";
 export * from "./exec-channel.ts";
 export * from "./exec-run.ts";
 export * from "./pod.ts";
+export * from "./pod-cleanup.ts";
 export * from "./kubeconfig.ts";
 export * from "./kube-auth.ts";

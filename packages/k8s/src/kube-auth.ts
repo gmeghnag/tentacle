@@ -140,6 +140,9 @@ export function loadKubeClientOptions(options: LoadKubeOptions = {}): KubeClient
     server: ctx.server,
     namespace: ctx.namespace,
     ...(token ? { token } : {}),
+    // The delete-on-exit child process needs the TLS material explicitly (the
+    // async `fetch` below already bakes it in, but the child does its own call).
+    ...(hasTls ? { tls } : {}),
     fetch: doFetch,
     makeWebSocket,
   };

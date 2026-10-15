@@ -1,17 +1,21 @@
 # Pod binary injection — architecture & plan
 
-**Status:** steps 1–5 shipped (committed). Live validation (step 6) PROVED on a real
-cluster: UBI9 full success (89 MB transfer + daemon); busybox fails cleanly at the
-`--version` probe (glibc constraint, see §9 CHECKPOINT). Code fixes are in the working
-tree, validated (498 pass) but NOT yet committed. See §9 for the resume checkpoint.
-This document is the single source of truth for the feature.
+**Status:** steps 1–7 shipped; step 6 PROVEN live (UBI9 full success,
+89 MB transfer + daemon; busybox fails cleanly at the `--version` probe — glibc
+constraint). The working tree also carries, in the same commit: the `--pod`
+flag → `run` subcommand (positional pod `<name>`, `--namespace=`, `--resume`),
+the pod **delete-on-exit** safety net (Ctrl+C / SIGTERM), the missing-namespace
+404 → actionable error, and the **single-line startup rendering** (spinner +
+docker-pull bar on TTY, discrete ~10% lines when piped). All validated
+(typecheck + lint clean, 519 pass / 0 fail / 1 skip). See §9 for the resume
+checkpoint. This document is the single source of truth for the feature.
 **Branch:** `feat/pod-binary-injection`, created from `main` @ `583e121`.
 **Predecessor branch (superseded):** `feat/pod-daemon-healthcheck` (never committed; its 3-piece design
 is folded into this plan as steps 1–2).
 
 ## 1. Goal
 
-Let `agent-harness --pod --namespace <ns> --image <ANY_LINUX_IMAGE>` work with an image that does
+Let `agent-harness run --namespace <ns> --image <ANY_LINUX_IMAGE>` work with an image that does
 **not** contain `agent-harness`. The CLI injects a Linux binary it built (or has cached) from the
 laptop into the pod, over the exec channel, before starting the daemon.
 
@@ -174,8 +178,9 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
 ```
 
 `injectAgentBinary` = the sequence in §2: probe → resolve bytes (log size) → `runExec`
-`head -c N > path && chmod` (log progress ~every 10%) → `runExec(["agent-harness","--version"])`
-→ on success log `[pod <name>] agent-harness <version> ready in pod`.
+`head -c N > path && chmod` (progress: TTY single-line bar / piped ~10% lines) →
+`runExec(["agent-harness","--version"])` → return the version label (the caller's
+final line folds it in; no separate "ready in pod" log line).
 
 **`pod-runtime.ts`** `startPodRuntime`: after `waitForReady`, before `openExec`, call
 `await injectAgentBinary(…)`. The existing `catch` already deletes the pod on throw — unchanged.
@@ -214,7 +219,7 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
   done, with the design summary + the `HARNESS_POD_BIN` knob).
 - `docs/F4-pod-execution.md`: one section (or a pointer) — the injection flow + the image no
   longer needs the tool.
-- Update `pod.ts` header comment + `main.ts` `--pod` help text: `--image` now only needs to be
+- Update `pod.ts` header comment + `main.ts` `run` help text: `--image` now only needs to be
   a linux image with `sh` (+ `head`), the tool is injected.
 - `dist/Dockerfile`: mark as optional/legacy (still valid for prebaked images) — comment only.
 
@@ -236,16 +241,18 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
    covered manually/live). — **shipped** (`65497b7`).
 5. [x] **Wire into `startPodRuntime`** + log lines matching the existing `[pod]` style.
    — **shipped** (`280acd6`).
-6. [ ] **Live validation** (the real test, against kind):
+6. [~] **Live validation** — done for UBI9 (full success) + busybox (clean probe
+   failure); the negative Mach-O case is still pending. See §9.
    - build `TARGET=bun-linux-x64` (or via `HARNESS_POD_BIN` pointing at a prebuilt one),
-   - run `./dist/agent-harness --pod --namespace test00 --image <busybox-or-ubi-without-tool>`
+   - run `./dist/agent-harness run --namespace test00 --image <busybox-or-ubi-without-tool>`
      (any linux image that has `sh`; `busybox` has `sh` + `head`),
    - expect: log lines for probe/transfer/progress/version, then the TUI opens and a turn
      works end-to-end (model via reverse tunnel).
    - Also verify the negative path: point `HARNESS_POD_BIN` at the macOS binary → expect a
      clear `[pod …] agent-harness --version failed: … Exec format error`-style message,
      pod deleted, no opaque "connection closed".
-7. [ ] **Docs/TODO** (see 3.4).
+7. [x] **Docs/TODO** (see 3.4) — **done** (working tree; note `dist/Dockerfile`
+   is git-ignored, its marker is local-only).
 
 ## 5. Files to read when resuming (with why)
 
@@ -259,7 +266,7 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
 | `packages/k8s/test/client.test.ts` | mock API server pattern for `KubeClient` tests |
 | `packages/cli/src/pod-runtime.ts` | `startPodRuntime`, `PodCluster` (add `runExec`), log style, catch-deletes-pod |
 | `packages/cli/test/pod-runtime.test.ts` | `FakeCluster` (add `runExec`), `ScriptedProvider`, test style |
-| `packages/cli/src/main.ts` | arg flow: `--help`/`connect` handling (template for `--version`), `--pod` block, HELP text |
+| `packages/cli/src/main.ts` | arg flow: `--help`/`connect` handling (template for `--version`), `run` block, HELP text |
 | `packages/cli/src/serve.ts` | `serve --stdio` (what the daemon command runs; check worker usage) |
 | `scripts/build.ts` | the `Bun.build` options to share (`entrypoints` incl. worker second entrypoint, yoga plugin, `define` for version, `TARGET` env, mac codesign) |
 | `packages/transport/src/channel.ts` | `DuplexChannel` (text-only — why `runExec` needs its own bytes path) |
@@ -366,8 +373,14 @@ is the truth; §2–§4 remain the design rationale.
   `pod-runtime.test.ts`'s `FakeCluster` implements `runExec`.
 - **Deviations (intentional):** progress logged per crossed 10% bucket; `chmod`
   in the same `sh -c`; install path `/usr/local/bin`. (§7.)
+- **Updated in the working tree (this commit):** the progress presentation is now
+  the single-line renderer (see §9 "Also in this working tree" #4) — a spinner
+  line on a TTY (the bar is the transfer phase's text), discrete ~10% lines when
+  piped; the arch probe is folded into the "resolving <target>" phase; and
+  `injectAgentBinary` returns the `--version` label (the caller folds it into its
+  final line) instead of logging a "ready in pod" line.
 - **Not yet wired into `startPodRuntime`** — that is step 5. Until then the
-  injection code is present and unit-tested but not invoked by `--pod`.
+  injection code is present and unit-tested but not invoked by `run`.
 - Suite: 493 pass / 0 fail / 1 skip.
 
 ### Step 4 — `resolvePodBinary` (shipped, `65497b7`)
@@ -423,15 +436,21 @@ is the truth; §2–§4 remain the design rationale.
   validation (step 6) and docs (step 7).
 - Suite: 498 pass / 0 fail / 1 skip.
 
-### Step 6 — live validation (kind)
-- Planned: build a Linux binary (or point `HARNESS_POD_BIN` at one), run
-  `--pod` against an image without the tool, confirm probe/transfer/progress/
-  version logs then a working turn; negative case = a wrong-arch binary must
-  yield a clear `--version` failure, not an opaque close.
+### Step 6 — live validation (done — real OpenShift x86_64 cluster, ns `test00`; details in §9)
+- UBI9 full success (89 MB transfer 10%→100% + daemon in pod); busybox clean
+  failure at the `--version` probe (glibc constraint, clear error + now the
+  hint). **PENDING:** the negative case with `HARNESS_POD_BIN` pointing at the
+  macOS Mach-O binary (expect a clear `--version failed … Exec format error`,
+  pod deleted, no opaque close).
 
-### Step 7 — docs/TODO
-- Planned: `TODO.md` F4.e entry, `docs/F4-pod-execution.md` section, update
-  `pod.ts` header + `--pod` help, mark `dist/Dockerfile` optional.
+### Step 7 — docs/TODO (done, working tree)
+- `TODO.md` F4.e entry (MVP now F4.a–F4.e); `docs/F4-pod-execution.md` F4.e
+  section + the old "F4.e hardening" renumbered F4.f + status header;
+  `packages/k8s/src/pod.ts` header/doc + `main.ts` `run` help and
+  `--image` error text (glibc + `sh`+`head` constraint, tool is injected,
+  `HARNESS_POD_BIN` knob documented); `dist/Dockerfile` marked optional/legacy
+  — note: the file is git-IGNORED (`dist/`), so that marker is local-only and
+  not committable.
 
 ## 9. CHECKPOINT 2026-10-15 — live validation + fixes (resume from here)
 
@@ -452,7 +471,7 @@ is the truth; §2–§4 remain the design rationale.
 - **Real constraint (document in step 7): "Linux glibc image with `sh`+`head`"**
   (UBI9/Debian/RHEL/Amazon Linux OK; Alpine/busybox = musl → NO).
 
-### Fixes in working tree — VALIDATED (typecheck+lint clean, 498 pass/0 fail/1 skip)
+### Fixes in working tree — VALIDATED (typecheck+lint clean; 519 pass/0 fail/1 skip at commit)
 1. `pod-binary-build.ts` — `repoRoot()`: in a compiled binary `import.meta.dir` is
    `/$bunfs/root`, so the cache resolved to `/dist/pod-bin` → `EROFS mkdir /dist`
    (real bug found in the user's live run). Fix: if `import.meta.url` contains
@@ -465,20 +484,69 @@ is the truth; §2–§4 remain the design rationale.
    head -c N > … && chmod 755 …"` (busybox/minimal images lack `/usr/local/bin`).
    Test asserts updated in `pod-binary.test.ts` + `pod-runtime.test.ts`.
 
-### PENDING — NOT YET VALIDATED (in working tree)
+### `libcMismatchHint` — done + validated (2026-10-15)
 - `pod-binary.ts` — `libcMismatchHint(stderr)`: on a `--version` probe failure,
   appends an actionable hint ("appears to lack glibc … use UBI9/Debian/RHEL")
-  when stderr matches `error while loading shared libraries` / `cannot open shared
-  object file`. **TODO: add a unit test for the hint (2 positive + 1 negative),
-  run typecheck+lint+test, then commit.**
+  when stderr matches `error while loading shared libraries` / `cannot open
+  shared object file` (case-insensitive; any other failure gets NO hint, so the
+  raw exec/loader error stays the primary signal). Tests: 3 unit cases (the real
+  busybox error verbatim, each pattern case-insensitively, negatives for
+  Exec-format / not-found / empty) + a sequence test asserting the full message
+  on a musl `--version` failure. Validated: typecheck + lint clean, 502 pass /
+  0 fail / 1 skip.
+
+### Also in this working tree (same commit as the fixes)
+1. **`--pod` flag → `run` subcommand** — `main.ts` + `flags.ts` (the parser now
+   also accepts `--key=value`). `agent-harness run --image <ref>
+   [--namespace <ns>] [--resume [uid]] [<name>]`; `<name>` is an optional
+   positional pod name (else random). The old `--pod` block is a relocated
+   version of this one.
+2. **Pod delete-on-exit safety net** — Ctrl+C / SIGTERM / crash calls
+   `process.exit` *before* `runtime.dispose()`, so the normal async `deletePod`
+   never ran and the pod was orphaned. `k8s/pod-cleanup.ts` (new) spawns a
+   **detached, `unref`'d `bun -e` child** that issues one `DELETE /pods/<name>`
+   (secrets via env, static script, 5 s client timeout) and self-terminates; it
+   never blocks exit and never throws. `KubeClient.deletePodBestEffort` +
+   `PodCluster.deletePodBestEffort` + `registerPodCleanup` (registered right after
+   `createPod`, so pre-ready failures are covered). Design + as-built:
+   `docs/pod-delete-on-exit.md`. Tests: `k8s/test/pod-cleanup.test.ts` + the
+   exit-cleanup test in `cli/test/pod-runtime.test.ts`.
+3. **Missing-namespace 404 → actionable error** — `podCreateError` in
+   `pod-runtime.ts` translates a pod-create 404 (`namespaces "…" not found`,
+   JSON-escaped quotes stripped) into "create it … or pass --namespace <existing>";
+   any other `KubeApiError` keeps its message. The namespace is deliberately NOT
+   auto-created (admin-ish, often not allowed by RBAC). Two tests (404 + 403).
+4. **Single-line startup rendering** — the 7-line startup is now ONE line on a
+   TTY: `cli/src/status-line.ts` (new, braille spinner repainted in place, cursor
+   hidden while active + an `exit` safety net that restores it, `finish()` clears
+   the line) drives every phase — create → ready → the injection's own phases
+   (probe/resolve/transfer/verify, via `injectAgentBinary`'s `onStatus`) — and
+   `cli/src/transfer-progress.ts` (new) renders the `docker pull`-style bar that
+   is the transfer phase's text. When piped (log/CI/test) the same phases log one
+   discrete line each (the bar one per ~10%), so transcripts stay readable and the
+   existing tests hold. The final "ready…starting the daemon" line is logged only
+   when piped (the TUI opening is the confirmation on a TTY). The resolver's
+   verbose cache/build path is dropped on a TTY (the phase line is enough).
+   Phase strings were trimmed (arch probe folded into "resolving <target>",
+   `verifying…`, `injecting agent-harness <bar>`). Tests: `cli/test/status-line.test.ts`
+   (new) + an `onStatus` sequence test in `pod-binary.test.ts`.
 
 ### Git state + next actions
-- Tip: `5f44e52` (docs step 5). Dirty (4 files): `pod-binary-build.ts`,
-  `pod-binary.ts`, `pod-binary.test.ts`, `pod-runtime.test.ts`.
-- 1) finish hint (test + validate), 2) ONE commit: `fix(cli): repo root in compiled
-  binary + mkdir -p install dir + glibc hint on probe failure`,
-  3) step 6 negative case: `HARNESS_POD_BIN=$PWD/dist/agent-harness` (macOS Mach-O)
-  → expect clear `--version failed … Exec format error`, pod deleted,
-  4) step 7: docs/TODO (F4.e, F4 doc, `--pod` help text with the glibc constraint,
-  Dockerfile note), 5) merge to main, delete `feat/pod-daemon-healthcheck`.
+- Tip before this commit: `5357d1e` (this checkpoint doc). The working tree
+  carried 20 changed files (14 modified + 6 new): the 4 fix files
+  (`pod-binary-build.ts`, `pod-binary.ts`, `pod-binary.test.ts`,
+  `pod-runtime.test.ts`), the step 7 docs (`packages/cli/src/main.ts`,
+  `packages/k8s/src/pod.ts`, `TODO.md`, `docs/F4-pod-execution.md`), and — from the
+  items above — `flags.ts`, `pod-runtime.ts`, `k8s/src/client.ts`,
+  `k8s/src/index.ts`, `k8s/src/kube-auth.ts`, plus the new `pod-cleanup.ts`,
+  `pod-cleanup.test.ts`, `status-line.ts`, `transfer-progress.ts`,
+  `status-line.test.ts`, and `docs/pod-delete-on-exit.md`. `dist/` is git-IGNORED
+  (`dist/Dockerfile`'s marker is local-only, not committable). All committed
+  together (single commit — see the commit message).
+- DONE in this commit: 1) the glibc fixes + `libcMismatchHint` (+tests), 2) the
+  `run` subcommand + delete-on-exit + missing-namespace error, 4) docs/TODO,
+  plus the single-line rendering + its tests. Remaining: 3) step 6 negative case
+  (`HARNESS_POD_BIN=$PWD/dist/agent-harness`, the macOS Mach-O binary → expect a
+  clear `--version failed … Exec format error`, pod deleted), and 5) merge to
+  `main`, delete `feat/pod-daemon-healthcheck`.
 

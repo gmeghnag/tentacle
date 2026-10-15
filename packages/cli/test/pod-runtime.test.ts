@@ -12,13 +12,14 @@ import type {
 } from "@agent-harness/core";
 import { PermissionBroker } from "@agent-harness/core";
 import { Connection, SessionHost } from "@agent-harness/daemon";
-import type {
-  ExecChannelOptions,
-  ExecTarget,
-  Pod,
-  RunExecOptions,
-  RunExecResult,
-  WaitForReadyOptions,
+import {
+  type ExecChannelOptions,
+  type ExecTarget,
+  KubeApiError,
+  type Pod,
+  type RunExecOptions,
+  type RunExecResult,
+  type WaitForReadyOptions,
 } from "@agent-harness/k8s";
 import { ToolRegistry } from "@agent-harness/tools";
 import { type DuplexChannel, createChannelPair } from "@agent-harness/transport";
@@ -73,6 +74,9 @@ class FakeCluster implements PodCluster {
     this.calls.push(`delete:${name}`);
     this.connection?.close();
     return Promise.resolve();
+  }
+  deletePodBestEffort(name: string): void {
+    this.calls.push(`besteffort:${name}`);
   }
   openExec(target: ExecTarget, _options?: ExecChannelOptions): DuplexChannel {
     this.calls.push(`exec:${target.pod}:${target.command.join(" ")}`);
@@ -158,7 +162,8 @@ describe("startPodRuntime", () => {
     const unameIdx = kube.calls.findIndex((c) => c === `runexec:${podName}:uname -m`);
     const installIdx = kube.calls.findIndex(
       (c) =>
-        c === `runexec:${podName}:sh -c head -c 8 > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`,
+        c ===
+        `runexec:${podName}:sh -c mkdir -p /usr/local/bin && head -c 8 > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`,
     );
     const versionIdx = kube.calls.findIndex(
       (c) => c === `runexec:${podName}:agent-harness --version`,
@@ -215,11 +220,150 @@ describe("startPodRuntime", () => {
     expect(kube.calls.some((c) => c.includes("serve --stdio"))).toBe(false);
   });
 
+  test("uses an explicit pod name when provided (else generates one)", async () => {
+    const model = new ScriptedProvider([[{ type: "done" }]]);
+    const kube = new FakeCluster(model);
+    const store = new JsonSessionStore(join(dir, "named"));
+
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), {
+      kube,
+      namespace: "dev",
+      image: "img",
+      name: "my-agent",
+      permissions: new PermissionBroker(),
+      store,
+      resume: null,
+      log: () => {},
+    });
+    expect(kube.calls[0]).toBe("create:my-agent");
+    runtime.dispose();
+  });
+
+  test("a 404 from createPod (missing namespace) becomes an actionable error", async () => {
+    const kube: PodCluster = {
+      createPod: () =>
+        Promise.reject(
+          new KubeApiError(404, JSON.stringify({ message: 'namespaces "dev" not found' })),
+        ),
+      waitForReady: () => Promise.resolve({}),
+      deletePod: () => Promise.resolve(),
+      deletePodBestEffort: () => {},
+      openExec: () => {
+        throw new Error("should not be reached");
+      },
+      runExec: () => {
+        throw new Error("should not be reached");
+      },
+    };
+    await expect(
+      startPodRuntime(baseConfig("/pod/work"), {
+        kube,
+        namespace: "dev",
+        image: "img",
+        permissions: new PermissionBroker(),
+        store: new JsonSessionStore(join(dir, "no-ns")),
+        resume: null,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/namespace "dev" does not exist.*create it/);
+  });
+
+  test("a non-404 createPod failure keeps its own message", async () => {
+    const kube: PodCluster = {
+      createPod: () =>
+        Promise.reject(
+          new KubeApiError(
+            403,
+            JSON.stringify({
+              message: 'pods "agent-harness-x" is forbidden: RBAC',
+            }),
+          ),
+        ),
+      waitForReady: () => Promise.resolve({}),
+      deletePod: () => Promise.resolve(),
+      deletePodBestEffort: () => {},
+      openExec: () => {
+        throw new Error("should not be reached");
+      },
+      runExec: () => {
+        throw new Error("should not be reached");
+      },
+    };
+    await expect(
+      startPodRuntime(baseConfig("/pod/work"), {
+        kube,
+        namespace: "dev",
+        image: "img",
+        permissions: new PermissionBroker(),
+        store: new JsonSessionStore(join(dir, "rbac")),
+        resume: null,
+        log: () => {},
+      }),
+    ).rejects.toThrow(/status 403.*RBAC/);
+  });
+
+  test("registers a process-exit cleanup that deletes the pod (Ctrl+C safety net)", async () => {
+    const model = new ScriptedProvider([[{ type: "done" }]]);
+    const kube = new FakeCluster(model);
+    const store = new JsonSessionStore(join(dir, "exit-cleanup"));
+
+    // Capture the `exit` listener `startPodRuntime` registers, then remove it
+    // (so a later test's `process` teardown can't fire a stale delete).
+    const registered: Array<(() => void) | string> = [];
+    let podName: string | undefined;
+    const originalOn = process.on.bind(process);
+    process.on = ((event: string, listener: (...args: unknown[]) => void): unknown => {
+      if (event === "exit") {
+        registered.push(listener);
+        return process;
+      }
+      return originalOn(event, listener);
+    }) as typeof process.on;
+    const originalOnce = process.once.bind(process);
+    process.once = ((event: string, listener: (...args: unknown[]) => void): unknown => {
+      if (event === "exit") {
+        registered.push(listener);
+        return process;
+      }
+      return originalOnce(event, listener);
+    }) as typeof process.once;
+    try {
+      const runtime = await startPodRuntime(baseConfig("/pod/work"), {
+        kube,
+        namespace: "dev",
+        image: "img",
+        permissions: new PermissionBroker(),
+        store,
+        resume: null,
+        log: () => {},
+      });
+      podName = (kube.calls[0] as string).slice("create:".length);
+      runtime.dispose();
+    } finally {
+      process.on = originalOn as typeof process.on;
+      process.once = originalOnce as typeof process.once;
+    }
+
+    expect(registered).toHaveLength(1);
+    const listener = registered[0];
+    if (typeof listener !== "function") {
+      throw new Error(`expected a function exit listener, got ${String(listener)}`);
+    }
+    // Fire the captured listener (as `process.exit` would) and assert the
+    // best-effort delete ran for the created pod.
+    listener();
+    if (podName === undefined) {
+      throw new Error("expected the pod to have been created");
+    }
+    expect(kube.calls).toContain(`besteffort:${podName}`);
+  });
+
   test("deletes the pod and rethrows if it never becomes ready", async () => {
     const kube: PodCluster = {
       createPod: (pod) => Promise.resolve(pod),
       waitForReady: () => Promise.reject(new Error("never ready")),
       deletePod: () => Promise.resolve(),
+      deletePodBestEffort: () => {},
       openExec: () => {
         throw new Error("should not be reached");
       },

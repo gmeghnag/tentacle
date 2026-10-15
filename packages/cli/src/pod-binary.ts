@@ -6,7 +6,9 @@
  *   1. probe the pod's arch with `uname -m` (any failure → x64 fallback, never aborts)
  *   2. resolve the matching Linux binary's bytes (build or cache, on the laptop)
  *   3. stream them to the pod's stdin via a one-shot exec:
- *        `sh -c "head -c <N> > /usr/local/bin/agent-harness && chmod 755 …"`
+ *        `sh -c "mkdir -p /usr/local/bin && head -c <N> > …/agent-harness && chmod 755 …"`
+ *     (`mkdir -p` because minimal images such as busybox have no
+ *     `/usr/local/bin` yet; the install path's directory is created on demand.)
  *     `head -c N` reads exactly N bytes and exits → the command's exit status is
  *     the EOF signal (no terminator, no tar).
  *   4. verify it runs with `agent-harness --version` (catches a wrong-arch /
@@ -15,9 +17,15 @@
  * This module keeps the pod runtime small: the arch probe and the binary
  * resolver are injected seams so the sequence is testable without a cluster or
  * a build. The caller's `catch` deletes the pod on any throw (existing behavior).
+ *
+ * Phase progress is emitted through `deps.onStatus` when provided (the caller's
+ * single TTY status line — one spinner line, repainted per phase, with the
+ * transfer bar as the bar phase's text), else through `deps.log` (one line per
+ * phase + a discrete progress line per ~10%, the piped/log/CI mode).
  */
 import type { ExecTarget } from "@agent-harness/k8s";
 import type { PodCluster } from "./pod-runtime.ts";
+import { TransferProgress, renderBar } from "./transfer-progress.ts";
 
 /** Where the binary is installed in the pod (conventional, first in most PATHs). */
 export const POD_BIN_PATH = "/usr/local/bin/agent-harness";
@@ -76,6 +84,28 @@ export interface PodBinaryDeps {
   /** Resolve the binary's bytes for a target (build or cache, on the laptop). */
   readonly resolveBinary: (target: PodBinaryTarget) => Promise<Uint8Array>;
   readonly log: (line: string) => void;
+  /**
+   * Interactive (TTY) single-line status sink. When provided, every phase
+   * update — including the transfer bar — is emitted as `onStatus(text)` for
+   * the caller's shared spinner line (`status-line.ts`); when absent, each
+   * phase is a normal `log` line (the piped/log/CI mode).
+   */
+  readonly onStatus?: (text: string) => void;
+}
+
+/**
+ * A hint for when the `--version` probe fails because the pod's libc cannot
+ * satisfy the (glibc) binary's shared-library needs — the classic
+ * Alpine/busybox (musl) case. Bun has no static or musl build, so the injected
+ * binary is always glibc-linked; this turns the bare loader error
+ * ("error while loading shared libraries: libdl.so.2 …") into something
+ * actionable. Returns `undefined` for any other failure so the raw exec/loader
+ * error stays the primary signal.
+ */
+export function libcMismatchHint(stderr: string): string | undefined {
+  return /error while loading shared libraries|cannot open shared object file/i.test(stderr)
+    ? " — this image appears to lack glibc (Alpine/busybox use musl); agent-harness is a glibc binary, use a glibc-based image (e.g. UBI9, Debian, RHEL)"
+    : undefined;
 }
 
 /** A generous, size-scaled budget for the one-shot binary transfer. */
@@ -87,39 +117,63 @@ function transferTimeoutMs(bytes: number): number {
 /**
  * Inject the binary into the pod and verify it runs. Throws with the pod's
  * stderr on any failure (the caller's catch deletes the pod). On success the
- * pod has a working `agent-harness` on PATH.
+ * pod has a working `agent-harness` on PATH, and the resolved version label
+ * (from `agent-harness --version`) is returned so the caller can fold it into
+ * its final status line.
  */
-export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void> {
+export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
+  // Interactive (TTY) mode routes every phase through the caller's shared
+  // status line (`onStatus`); piped mode logs one line per phase.
+  const onStatus = deps.onStatus;
+  const emit: (line: string) => void = onStatus ?? ((line) => deps.log(`${line}\n`));
+
+  // The arch probe is invisible: its result is folded into the resolve phase
+  // (the target encodes the arch), so probe + resolve read as one line.
   const arch = await deps.podArch();
   const target = archToTarget(arch);
-  deps.log(`[pod ${deps.podName}] arch ${arch} → resolving ${target} binary\n`);
+  emit(`[${deps.podName}] resolving ${target} binary…`);
   const bytes = await deps.resolveBinary(target);
   const n = bytes.length;
-  deps.log(`[pod ${deps.podName}] injecting agent-harness (${(n / 1048576).toFixed(1)} MB)\n`);
+  if (!onStatus) {
+    deps.log(`[${deps.podName}] injecting agent-harness (${(n / 1048576).toFixed(1)} MB)\n`);
+  }
 
   // 1) Stream the raw binary. `head -c N` reads exactly N bytes and exits, so
   // the command's status is the EOF signal. The shell does the redirection (the
-  // k8s exec `command` is an argv — no shell of its own).
-  let lastBucket = -1;
-  const onProgress = (written: number): void => {
-    const bucket = Math.floor((written / n) * 10); // 0..10 (10 = 100%)
-    if (bucket > lastBucket && bucket >= 1) {
-      lastBucket = bucket;
-      deps.log(
-        `[pod ${deps.podName}] transfer ${Math.min(bucket * 10, 100)}% (${(written / 1048576).toFixed(1)}/${(n / 1048576).toFixed(1)} MB)\n`,
-      );
-    }
-  };
+  // k8s exec `command` is an argv — no shell of its own). Progress: the bar is
+  // the status line's text when interactive, one line per ~10% when piped
+  // (see `transfer-progress.ts`).
+  const pipedProgress = onStatus
+    ? null
+    : new TransferProgress({
+        total: n,
+        write: deps.log,
+        prefix: `[${deps.podName}] transfer `,
+      });
 
+  // `mkdir -p` first: minimal images (busybox, scratch-based) have no
+  // `/usr/local/bin`, and the redirect would fail on the missing directory.
+  const binDir = POD_BIN_PATH.slice(0, POD_BIN_PATH.lastIndexOf("/"));
   const installTarget: ExecTarget = {
     pod: deps.podName,
     container: deps.container,
-    command: ["sh", "-c", `head -c ${n} > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`],
+    command: [
+      "sh",
+      "-c",
+      `mkdir -p ${binDir} && head -c ${n} > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`,
+    ],
   };
   const install = await deps.kube.runExec(installTarget, bytes, {
     timeoutMs: transferTimeoutMs(n),
-    onProgress,
+    onProgress: (written) => {
+      if (onStatus) {
+        emit(`[${deps.podName}] injecting agent-harness ${renderBar(written, n)}`);
+      } else {
+        pipedProgress?.update(written);
+      }
+    },
   });
+  pipedProgress?.finish();
   if (install.exitCode !== 0) {
     throw new Error(
       `[pod ${deps.podName}] failed to inject agent-harness (exit ${install.exitCode}): ${
@@ -129,17 +183,21 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void> {
   }
 
   // 2) Verify it actually runs (wrong arch / bad libc / missing deps surface here).
+  emit(`[${deps.podName}] verifying…`);
   const version = await deps.kube.runExec(
     { pod: deps.podName, container: deps.container, command: ["agent-harness", "--version"] },
     undefined,
     { timeoutMs: 15_000 },
   );
   if (version.exitCode !== 0) {
+    const detail = version.stderr.trim() || version.status || "no output";
     throw new Error(
-      `[pod ${deps.podName}] agent-harness --version failed (exit ${version.exitCode}): ${
-        version.stderr.trim() || version.status || "no output"
+      `[pod ${deps.podName}] agent-harness --version failed (exit ${version.exitCode}): ${detail}${
+        libcMismatchHint(version.stderr) ?? ""
       }`,
     );
   }
-  deps.log(`[pod ${deps.podName}] ${version.stdout.trim() || "agent-harness"} ready in pod\n`);
+  // The version label is returned, not logged: the caller's final line
+  // (piped mode) folds it in, so the pod's `--version` is not printed twice.
+  return version.stdout.trim() || "agent-harness";
 }

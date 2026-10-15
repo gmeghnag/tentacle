@@ -339,20 +339,20 @@ Daily-driver work (done 2026-10-14):
         idle" + coalescing — a turn that itself spawns a job that exits will wake
         again (usually desired; could runaway on a pathological agent). Consider a
         consecutive-auto-wake cap without intervening user input.
-- [~] **F4 — Pod execution** (`--pod --namespace <ns>`): run the agent inside a
+- [~] **F4 — Pod execution** (`run --image <ref> [--namespace <ns>] [<name>]`): run the agent inside a
       k8s pod (the sandbox), driven from the local TUI. Self-contained (no
       kubectl/oc — direct API via kubeconfig + the `v4.channel.k8s.io` exec WS)
       with a **reverse-tunnel for the model over the RPC channel** so the local
       endpoint/secret never leave the laptop. Reuses the whole client/daemon/RPC
       stack (new transport + lifecycle only). Full design + slice plan in
-      `docs/F4-pod-execution.md`. MVP = F4.a–F4.d.
+      `docs/F4-pod-execution.md`. MVP = F4.a–F4.e.
       - [x] **F4.a — `KubeClient` REST** (2026-10-14): new `@agent-harness/k8s`
         package — `createPod`/`getPod`/`deletePod`/`waitForReady`/`podIsReady`,
         bearer auth, injectable `fetch`, mock-API tests. Dependency-free.
       - [x] **F4.a.2 — kubeconfig + TLS auth** (2026-10-14): `kubeconfig.ts`
         (pure parse+resolve, `yaml` dep) + `kube-auth.ts` `loadKubeClientOptions`
         (CA/client-cert/bearer/exec-plugin → `KubeClientOptions` with TLS-aware
-        fetch/WebSocket via Bun's per-call `tls`). `--pod` resolves from the
+        fetch/WebSocket via Bun's per-call `tls`). `run` resolves from the
         kubeconfig by default. Validated LIVE from a real kind kubeconfig with
         client-cert mTLS (Bun honours `tls.{ca,cert,key}` on fetch AND WebSocket).
       - [x] **F4.b — exec WS channel + `serve --stdio`** (2026-10-14):
@@ -361,10 +361,13 @@ Daily-driver work (done 2026-10-14):
         `exec-channel` (`execChannel`/`buildExecUrl`/`execSubprotocols`) +
         `KubeClient.openExec`. Deterministic tests (framing, re-chunk, fake-WS,
         real `RpcPeer` handshake over a stream pair).
-      - [x] **F4.c — `startPodRuntime` + `--pod`/`--namespace`/`--image`**
-        (2026-10-14): `buildPodManifest` (keepalive container; daemon exec'd in)
-        + `startPodRuntime` (create→ready→openExec(serve --stdio)→
-        createLocalRuntime; dispose closes + deletes the pod) + `main.ts --pod`.
+      - [x] **F4.c — `startPodRuntime` + `run`/`--namespace`/`--image`**
+        (2026-10-14; command renamed `--pod` → `run` with an optional
+        positional pod `<name>` in 2026-10-15): `buildPodManifest` (keepalive
+        container; daemon exec'd in) + `startPodRuntime` (create→ready→
+        openExec(serve --stdio)→ createLocalRuntime; dispose closes + deletes
+        the pod) + `main.ts run`. A missing namespace 404s the pod create and
+        is translated into an actionable error (not auto-created).
         Auth stopgap: `HARNESS_K8S_SERVER`/`_TOKEN` env (kubeconfig = F4.a.2).
         End-to-end tested over an in-memory channel to a real Connection, and
         **validated LIVE against kind** (opt-in `k8s/test/integration.live.test.ts`:
@@ -376,6 +379,23 @@ Daily-driver work (done 2026-10-14):
         `RemoteClient` serves it with the LOCAL provider; `startPodRuntime` passes
         it. Endpoint+key stay on the laptop. In-memory round-trip tested.
         Follow-up (F4.d.2): token streaming over the tunnel + mid-call cancel.
+      - [x] **F4.e — pod binary injection** (2026-10-15): `run` now works
+        with an image that does NOT contain `agent-harness` — the binary is
+        injected over the exec WebSocket before the daemon starts: `uname -m`
+        arch probe (ANY failure → `bun-linux-x64`, never aborts) → bytes from
+        `HARNESS_POD_BIN` → `dist/pod-bin/` cache → `Bun.build` cross-compile
+        (shared options with `bun run compile`) → raw stream via one-shot
+        `sh -c "mkdir -p … && head -c N > … && chmod 755 …"` (`head -c` EOF =
+        known size — no tar, no terminator) → verify with `agent-harness
+        --version` (glibc hint on a musl loader failure). New pieces:
+        `k8s/exec-run.ts` (one-shot exec resolving on command exit),
+        `cli/pod-binary.ts`, `cli/pod-binary-build.ts`, `--version` flag.
+        **Constraint:** the image must be a Linux **glibc** image with
+        `sh`+`head` (Bun's compiled binary is always glibc-linked; musl
+        Alpine/busybox cannot run it — the probe fails with a clear error +
+        hint). Validated LIVE on an x86_64 OpenShift cluster: UBI9 full
+        success (89 MB transfer + daemon), busybox clean failure at the probe.
+        Design + as-built log: `docs/pod-binary-injection.md`.
 - [ ] **Skills support** — packaged procedural guidance the model opts into
       (complementary to the result pipeline: skills = *how to do it*, the pipeline
       = *the guarantee the context stays clean*).

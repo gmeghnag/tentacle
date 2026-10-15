@@ -5,6 +5,7 @@ import { join } from "node:path";
  *
  *   agent-harness                 → interactive TUI (when stdin is a TTY)
  *   agent-harness <prompt...>     → one-shot run
+ *   agent-harness run [opts]      → run the agent inside a Kubernetes pod (F4)
  *   agent-harness --help          → usage
  *   agent-harness --version       → print the version and exit
  *
@@ -48,8 +49,10 @@ Usage:
   agent-harness --plain         plain line-based REPL (for pipes / no TTY)
   agent-harness --resume [uid]  resume a saved session (latest if no uid) in the TUI
   agent-harness -i --in-process run the agent on the render thread (opt out of the worker)
-  agent-harness --pod --namespace <ns> --image <ref>
+  agent-harness run --image <ref> [--namespace <ns>] [--resume [uid]] [<name>]
                                 run the agent inside a Kubernetes pod (sandbox), local TUI
+                                (<name> is the pod name; random when omitted; sessions
+                                persist on the laptop, so --resume works)
   agent-harness <prompt...>     run a single task and exit
   agent-harness serve [opts]    host the remote-control daemon
   agent-harness connect <url>   drive a remote daemon with the TUI
@@ -77,12 +80,18 @@ Environment:
   HARNESS_CWD              working directory for tools
   HARNESS_SUBAGENTS        enable/disable sub-agents (on/off, default on)
 
-Pod execution (--pod): cluster auth resolves from ~/.kube/config (or $KUBECONFIG)
+Pod execution (agent-harness run --image <ref> [--namespace <ns>] [<name>]):
+  the image must be a Linux glibc image with sh+head (agent-harness is injected
+  into the pod; musl images cannot run it). --namespace defaults to the
+  kubeconfig context's namespace; a MISSING namespace fails with a clear error
+  (it is not created). Cluster auth resolves from ~/.kube/config (or $KUBECONFIG)
   by default — current context, with CA trust + bearer/client-cert/exec-plugin.
   HARNESS_K8S_SERVER       API server URL override (e.g. behind a proxy); skips kubeconfig
   HARNESS_K8S_TOKEN        bearer token, used with HARNESS_K8S_SERVER
   HARNESS_POD_NAMESPACE    namespace (overridden by --namespace; else the context's)
-  HARNESS_POD_IMAGE        default pod image (overridden by --image); must contain agent-harness
+  HARNESS_POD_IMAGE        default pod image (overridden by --image)
+  HARNESS_POD_BIN          use this prebuilt agent-harness binary for the pod instead of
+                           the cached/built one (path to a bun-linux-x64/arm64 binary)
 `;
 
 export interface CliIO {
@@ -189,6 +198,100 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
   }
 
+  // `run`: run the agent daemon inside a Kubernetes pod (the sandbox), driven
+  // from this local TUI (F4). The image need NOT contain `agent-harness` — it
+  // is injected over the exec channel at startup (F4.e); it must be a Linux
+  // glibc image with `sh` + `head` (musl images cannot run the injected glibc
+  // binary). `--namespace` defaults to the kubeconfig context's namespace; a
+  // missing namespace fails with a clear error (it is NOT created). `--resume`
+  // works because sessions persist on the laptop (the pod is stateless).
+  // Cluster auth resolves from the local kubeconfig (current context), or from
+  // HARNESS_K8S_SERVER/_TOKEN as an explicit override (e.g. behind a proxy).
+  // No in-process fallback.
+  if (args[0] === "run") {
+    const { flags: runFlags, bools: runBools, positional: runPos } = parseFlags(args.slice(1));
+    const namespace = runFlags.get("namespace") ?? process.env.HARNESS_POD_NAMESPACE;
+    const image = runFlags.get("image") ?? process.env.HARNESS_POD_IMAGE;
+    if (!image) {
+      write(
+        "[pod] --image <ref> is required (any Linux glibc image with sh+head; agent-harness is injected)\n",
+      );
+      return 1;
+    }
+    const name = runPos[0];
+    // Sessions persist as JSON under <configDir>/sessions; `--resume` loads one.
+    // The pod is stateless — the history lives on the laptop, so resuming seeds
+    // the pod daemon with the saved session (uid + history), same as the TUI.
+    const store = new JsonSessionStore(join(config.configDir, "sessions"));
+    const wantsResume = runBools.has("resume") || runFlags.has("resume");
+    let resumeRecord: SessionRecord | null = null;
+    if (wantsResume) {
+      const uid = runFlags.get("resume");
+      resumeRecord = uid ? await store.load(uid) : await store.latest();
+      if (!resumeRecord) {
+        write(
+          uid
+            ? `[resume] no session "${uid}"; starting fresh\n`
+            : "[resume] no saved sessions yet; starting fresh\n",
+        );
+      } else {
+        write(`[resume] ${resumeRecord.id} — ${resumeRecord.title}\n`);
+      }
+    }
+    let clientOptions: KubeClientOptions;
+    try {
+      const envServer = process.env.HARNESS_K8S_SERVER;
+      if (envServer) {
+        const token = process.env.HARNESS_K8S_TOKEN;
+        clientOptions = {
+          server: envServer,
+          namespace: namespace ?? "default",
+          ...(token ? { token } : {}),
+        };
+      } else {
+        clientOptions = loadKubeClientOptions({ ...(namespace ? { namespace } : {}) });
+      }
+    } catch (error) {
+      write(
+        `[pod] cluster auth failed: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      return 1;
+    }
+    const permissions = new PermissionBroker();
+    const kube = new KubeClient(clientOptions);
+    let runtime: Awaited<ReturnType<typeof startPodRuntime>>;
+    try {
+      runtime = await startPodRuntime(config, {
+        kube,
+        namespace: clientOptions.namespace,
+        image,
+        ...(name ? { name } : {}),
+        permissions,
+        store,
+        resume: resumeRecord,
+        log: write,
+      });
+    } catch (error) {
+      write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      return 1;
+    }
+    try {
+      await startTui(null, {
+        model: config.model,
+        cwd: config.cwd,
+        contextWindow: config.contextWindow,
+        permissions,
+        jobs: runtime.jobs,
+        autoWakeOnJobExit: config.autoWake,
+        createSession: runtime.createSession,
+        ...(resumeRecord ? { resumeMessages: resumeRecord.messages } : {}),
+      });
+    } finally {
+      runtime.dispose();
+    }
+    return 0;
+  }
+
   // Plain line-based REPL (scripting / no-TTY fallback). No interactive
   // permission prompt here, so the broker stays headless (approves all).
   if (args[0] === "--plain") {
@@ -198,12 +301,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // Rich interactive TUI. `--resume [uid]` also enters it (resuming a session).
   const { flags: topFlags, bools: topBools } = parseFlags(args);
   const wantsResume = topBools.has("resume") || topFlags.has("resume");
-  const wantsPod = topBools.has("pod");
   if (
     args[0] === "-i" ||
     args[0] === "--interactive" ||
     wantsResume ||
-    wantsPod ||
     (args.length === 0 && process.stdin.isTTY)
   ) {
     // Sessions persist as JSON under <configDir>/sessions; `--resume` loads one.
@@ -221,72 +322,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       } else {
         write(`[resume] ${resumeRecord.id} — ${resumeRecord.title}\n`);
       }
-    }
-
-    // `--pod`: run the agent daemon inside a Kubernetes pod (the sandbox),
-    // driven from this local TUI (F4). Requires an image (with `agent-harness`
-    // on PATH). Cluster auth resolves from the local kubeconfig (current
-    // context; `--namespace` overrides), or from HARNESS_K8S_SERVER/_TOKEN as an
-    // explicit override (e.g. behind a proxy). No in-process fallback.
-    if (wantsPod) {
-      const nsFlag = topFlags.get("namespace") ?? process.env.HARNESS_POD_NAMESPACE;
-      const image = topFlags.get("image") ?? process.env.HARNESS_POD_IMAGE;
-      if (!image) {
-        write("[pod] --image <ref> is required (the pod container image, with agent-harness)\n");
-        return 1;
-      }
-      let clientOptions: KubeClientOptions;
-      try {
-        const envServer = process.env.HARNESS_K8S_SERVER;
-        if (envServer) {
-          const token = process.env.HARNESS_K8S_TOKEN;
-          clientOptions = {
-            server: envServer,
-            namespace: nsFlag ?? "default",
-            ...(token ? { token } : {}),
-          };
-        } else {
-          clientOptions = loadKubeClientOptions({ ...(nsFlag ? { namespace: nsFlag } : {}) });
-        }
-      } catch (error) {
-        write(
-          `[pod] cluster auth failed: ${error instanceof Error ? error.message : String(error)}\n`,
-        );
-        return 1;
-      }
-      const namespace = clientOptions.namespace;
-      const permissions = new PermissionBroker();
-      const kube = new KubeClient(clientOptions);
-      let runtime: Awaited<ReturnType<typeof startPodRuntime>>;
-      try {
-        runtime = await startPodRuntime(config, {
-          kube,
-          namespace,
-          image,
-          permissions,
-          store,
-          resume: resumeRecord,
-          log: write,
-        });
-      } catch (error) {
-        write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
-        return 1;
-      }
-      try {
-        await startTui(null, {
-          model: config.model,
-          cwd: config.cwd,
-          contextWindow: config.contextWindow,
-          permissions,
-          jobs: runtime.jobs,
-          autoWakeOnJobExit: config.autoWake,
-          createSession: runtime.createSession,
-          ...(resumeRecord ? { resumeMessages: resumeRecord.messages } : {}),
-        });
-      } finally {
-        runtime.dispose();
-      }
-      return 0;
     }
 
     // By default the agent runs in a worker thread, off the render thread, so
