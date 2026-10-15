@@ -139,12 +139,15 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       broken state existed, steering "worked" because the fallback had the real
       `Session`; after the revert, the worker path is active again and the
       pre-existing gap is visible. NOT caused by the `exec` refactor (the
-      worker/in-process blocks in `main.ts` are untouched). Fix: add a
-      `session/enqueue` RPC (protocol method → `RemoteClient.enqueue` →
-      `HostedSession` → the daemon-side `Session.enqueue`, exposed on
-      `RemoteSession` + `persistingController`); interim: don't silently
-      swallow in `App.tsx` (notice "steering unavailable in this runtime").
-      Parked — to be done after the `exec` feature lands.
+      worker/in-process blocks in `main.ts` are untouched).
+      **Implementation plan: `docs/steering-over-rpc.md`** — add a
+      `session/enqueue` request (client → daemon `Session.enqueue`) and stream
+      the agent's `steer` event back over `session/update` (new `steer`
+      update variant; the TUI already clears the ⏳ line on it). Additive
+      protocol change (version stays 1): a new method is `MethodNotFound`
+      for old clients that never call it, and new update variants are ignored
+      by old clients (union members are non-`.strict()`). 10 files + 5 test
+      files; see the doc for the full per-file spec. Not yet implemented.
 - [x] 🟡 **Loopback daemon accepts cross-origin browser WebSockets (CSRF /
       DNS-rebinding).** FIXED (2026-10-14): extracted `originAllowed(origin,
       allowed)` (pure, exported) and wired it into `authorize` — it now
