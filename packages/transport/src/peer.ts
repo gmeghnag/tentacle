@@ -40,6 +40,14 @@ export interface RpcPeerOptions {
   readonly maxFrameBytes?: number;
   /** Non-fatal errors (bad frames, handler throws) are reported here. */
   readonly onError?: (error: Error) => void;
+  /**
+   * When a request handler throws a NON-`RpcError`, the error response is a
+   * generic "internal error" by default (never leak server internals to an
+   * untrusted/remote peer). Set this true for a LOCAL, trusted peer (the
+   * in-process worker daemon) so the real message + stack cross the wire and the
+   * client (TUI) shows the actual cause instead of an opaque "internal error".
+   */
+  readonly exposeInternalErrors?: boolean;
 }
 
 interface Pending {
@@ -206,8 +214,23 @@ export class RpcPeer {
       if (error instanceof RpcError) {
         this.sendErrorResponse(id, error.code, error.message, error.data);
       } else {
-        this.reportError(error instanceof Error ? error : new Error(String(error)));
-        this.sendErrorResponse(id, JsonRpcErrorCode.InternalError, "internal error");
+        const err = error instanceof Error ? error : new Error(String(error));
+        this.reportError(err);
+        // Default: opaque, so a remote/untrusted peer learns nothing. A trusted
+        // local peer (`exposeInternalErrors`) gets the real message + stack, so
+        // the error is never silently reduced to "internal error" at the client.
+        if (this.opts.exposeInternalErrors) {
+          this.sendErrorResponse(
+            id,
+            JsonRpcErrorCode.InternalError,
+            err.message || "internal error",
+            {
+              stack: err.stack,
+            },
+          );
+        } else {
+          this.sendErrorResponse(id, JsonRpcErrorCode.InternalError, "internal error");
+        }
       }
     }
   }

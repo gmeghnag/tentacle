@@ -21,6 +21,7 @@ import { Connection, SessionHost } from "@agent-harness/daemon";
 import { connectMcpServers } from "@agent-harness/mcp";
 import type { ToolRegistry } from "@agent-harness/tools";
 import { type MessageEndpoint, messagePortChannel } from "@agent-harness/transport";
+import { logDaemonError } from "./daemon-log.ts";
 import { buildAgent } from "./wiring.ts";
 
 // `globalThis` in a worker exposes postMessage/addEventListener at runtime; the
@@ -89,5 +90,16 @@ port.addEventListener("message", (event: { data: unknown }) => {
     },
   });
   // Bind one Connection to this worker's port; the main thread is the client.
-  new Connection(messagePortChannel(port), host);
+  // A handler crash (previously surfaced as a bare "RpcError: internal error"
+  // with the real cause dropped) is now BOTH persisted with its stack to
+  // `<configDir>/logs/daemon-errors.log` AND, because this is a local trusted
+  // peer, sent to the client so the TUI shows the actual message.
+  new Connection(
+    messagePortChannel(port),
+    host,
+    (error) => {
+      logDaemonError(config.configDir, error);
+    },
+    { exposeInternalErrors: true },
+  );
 });

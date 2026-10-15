@@ -38,6 +38,13 @@ export interface ConnectionOptions {
   readonly maxSessions?: number;
   /** Reject an inbound frame larger than this (bytes) before parsing it. */
   readonly maxFrameBytes?: number;
+  /**
+   * Surface the real message + stack of a non-`RpcError` handler throw to the
+   * client instead of an opaque "internal error". Only for a LOCAL, trusted
+   * connection (the in-process worker) — NOT the remote ws-server. See
+   * `RpcPeerOptions.exposeInternalErrors`.
+   */
+  readonly exposeInternalErrors?: boolean;
 }
 
 export class Connection {
@@ -64,6 +71,7 @@ export class Connection {
         ? { requestTimeoutMs: options.permissionTimeoutMs }
         : {}),
       ...(options.maxFrameBytes !== undefined ? { maxFrameBytes: options.maxFrameBytes } : {}),
+      ...(options.exposeInternalErrors ? { exposeInternalErrors: true } : {}),
       ...(onError ? { onError } : {}),
     });
   }

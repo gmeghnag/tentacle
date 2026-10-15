@@ -117,11 +117,24 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       a large tool result / `session/update` payload (both crashes followed a
       big `Read`), or the client's inbound result validation
       (`peer.ts:258`, "invalid result for …") — but neither is confirmed.
-      Next: wire `onError` in `worker.ts` → `postObject` to the main thread
-      (like the mcp-errors path) so the TUI logs the REAL error (the same
-      generic-conversion gap exists on the `ws-server.ts:182` side); then
-      reproduce (long `Read` / large tool result in the TUI) and capture the
-      stack before guessing further.
+      **Observability shipped (2026-10-16) — the error is no longer lost
+      (root cause still OPEN):** the worker's `Connection` now wires `onError`
+      → `logDaemonError` (`cli/daemon-log.ts`), appending the real message +
+      **stack** to `<configDir>/logs/daemon-errors.log` (append-only, ISO
+      timestamped; a FILE, not stdout, so it can't corrupt the TUI mid-session).
+      AND, because the worker is a local/trusted peer, `Connection` is built
+      with `exposeInternalErrors: true` (new `RpcPeerOptions`/`ConnectionOptions`
+      flag): a non-`RpcError` handler throw now sends the REAL message (+ stack
+      in `data`) to the client instead of the opaque "internal error", so the
+      TUI line itself shows the actual cause. Default stays opaque — the remote
+      `ws-server` path does NOT set the flag (no leak to untrusted clients).
+      Tests: `transport/test/peer.test.ts` (expose on → real message+stack; off
+      → generic), `cli/test/daemon-log.test.ts`.
+      **When it recurs:** grab `~/.config/agent-harness/logs/daemon-errors.log`
+      (or the configured `configDir`) — it now has the stack — and/or screenshot
+      the (now real) TUI error line, then diagnose. Still TODO: the same
+      generic-conversion gap on `ws-server.ts:182` is intentionally left (remote
+      = untrusted); a server-side error log there is a possible follow-up.
 - [ ] 🟡 **Mid-turn "Queue a task…" (steering) silently no-ops on the worker
       and pod paths (pre-existing gap, surfaced 2026-10-16).** The TUI's
       mid-turn input calls `sessionRef.current?.enqueue(text)` (`tui/App.tsx:451`,

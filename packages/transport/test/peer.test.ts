@@ -110,6 +110,28 @@ describe("RpcPeer", () => {
     server.close();
   });
 
+  test("exposeInternalErrors surfaces the real message + stack to the client (trusted/local peer)", async () => {
+    const [ca, cb] = createChannelPair();
+    const errors: Error[] = [];
+    const server = new RpcPeer(cb, {
+      onRequest: async () => {
+        throw new Error("the real crash");
+      },
+      onError: (e) => errors.push(e),
+      exposeInternalErrors: true,
+    });
+    const client = new RpcPeer(ca);
+    // No longer reduced to "internal error": the client sees the actual cause,
+    // with the stack along in `data` for reporting.
+    await expect(client.request("initialize", INIT_PARAMS)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message: "the real crash",
+      data: { stack: expect.any(String) },
+    });
+    expect(errors[0]?.message).toBe("the real crash"); // still reported locally too
+    server.close();
+  });
+
   test("an invalid result from the handler rejects the caller", async () => {
     const [ca, cb] = createChannelPair();
     const server = new RpcPeer(cb, { onRequest: async () => ({ wrong: true }) });
