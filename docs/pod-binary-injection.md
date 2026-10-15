@@ -1,9 +1,10 @@
 # Pod binary injection — architecture & plan
 
-**Status:** in progress — §4 steps 1–5 shipped and committed (see §8, the as-built
-log); steps 6–7 remain. The injection is functional end-to-end (unit-tested); live
-validation on kind is the remaining proof. This document is the single source of
-truth for the feature.
+**Status:** steps 1–5 shipped (committed). Live validation (step 6) PROVED on a real
+cluster: UBI9 full success (89 MB transfer + daemon); busybox fails cleanly at the
+`--version` probe (glibc constraint, see §9 CHECKPOINT). Code fixes are in the working
+tree, validated (498 pass) but NOT yet committed. See §9 for the resume checkpoint.
+This document is the single source of truth for the feature.
 **Branch:** `feat/pod-binary-injection`, created from `main` @ `583e121`.
 **Predecessor branch (superseded):** `feat/pod-daemon-healthcheck` (never committed; its 3-piece design
 is folded into this plan as steps 1–2).
@@ -431,4 +432,53 @@ is the truth; §2–§4 remain the design rationale.
 ### Step 7 — docs/TODO
 - Planned: `TODO.md` F4.e entry, `docs/F4-pod-execution.md` section, update
   `pod.ts` header + `--pod` help, mark `dist/Dockerfile` optional.
+
+## 9. CHECKPOINT 2026-10-15 — live validation + fixes (resume from here)
+
+### Live validation (step 6, real OpenShift cluster, ns `test00`, node x86_64)
+- ✅ **UBI9** (`registry.access.redhat.com/ubi9/ubi:latest`): FULL SUCCESS — cache-hit
+  (`dist/pod-bin/agent-harness-bun-linux-x64`, 89 MB), transfer 10%→100% over the WS
+  exec, `agent-harness 0.0.0 ready in pod`, daemon started. The live ~89 MB transfer
+  (the one never proven by unit tests) WORKS.
+- ⚠️ **busybox**: injection succeeded, `--version` probe failed with a CLEAR error
+  (`error while loading shared libraries: libdl.so.2: cannot open shared object file`).
+  The probe did its job (no opaque "connection closed").
+
+### glibc constraint (decided — cannot be removed)
+- `readelf` on the injected x64 binary: NEEDED `libc.so.6`, `ld-linux-x86-64.so.2`,
+  `libpthread.so.0`, `libdl.so.2`, `libm.so.6`; max `GLIBC_2.17`.
+- Bun has **no** static or musl compile target → the binary is ALWAYS glibc-linked.
+  `libdl.so.2` (dlopen) is required by the Bun runtime itself; it cannot be dropped.
+- **Real constraint (document in step 7): "Linux glibc image with `sh`+`head`"**
+  (UBI9/Debian/RHEL/Amazon Linux OK; Alpine/busybox = musl → NO).
+
+### Fixes in working tree — VALIDATED (typecheck+lint clean, 498 pass/0 fail/1 skip)
+1. `pod-binary-build.ts` — `repoRoot()`: in a compiled binary `import.meta.dir` is
+   `/$bunfs/root`, so the cache resolved to `/dist/pod-bin` → `EROFS mkdir /dist`
+   (real bug found in the user's live run). Fix: if `import.meta.url` contains
+   `$bunfs`, walk up from `process.execPath` to the dir owning `package.json`;
+   source path unchanged; fallback `process.cwd()`. Compiled probe confirmed
+   `podBinCacheDir()` = `<repo>/dist/pod-bin` in BOTH modes. Also confirmed
+   `Bun.build` WORKS inside a compiled binary (nested build probe) → cache-miss
+   → build is viable at runtime.
+2. `pod-binary.ts` — install command now `sh -c "mkdir -p /usr/local/bin &&
+   head -c N > … && chmod 755 …"` (busybox/minimal images lack `/usr/local/bin`).
+   Test asserts updated in `pod-binary.test.ts` + `pod-runtime.test.ts`.
+
+### PENDING — NOT YET VALIDATED (in working tree)
+- `pod-binary.ts` — `libcMismatchHint(stderr)`: on a `--version` probe failure,
+  appends an actionable hint ("appears to lack glibc … use UBI9/Debian/RHEL")
+  when stderr matches `error while loading shared libraries` / `cannot open shared
+  object file`. **TODO: add a unit test for the hint (2 positive + 1 negative),
+  run typecheck+lint+test, then commit.**
+
+### Git state + next actions
+- Tip: `5f44e52` (docs step 5). Dirty (4 files): `pod-binary-build.ts`,
+  `pod-binary.ts`, `pod-binary.test.ts`, `pod-runtime.test.ts`.
+- 1) finish hint (test + validate), 2) ONE commit: `fix(cli): repo root in compiled
+  binary + mkdir -p install dir + glibc hint on probe failure`,
+  3) step 6 negative case: `HARNESS_POD_BIN=$PWD/dist/agent-harness` (macOS Mach-O)
+  → expect clear `--version failed … Exec format error`, pod deleted,
+  4) step 7: docs/TODO (F4.e, F4 doc, `--pod` help text with the glibc constraint,
+  Dockerfile note), 5) merge to main, delete `feat/pod-daemon-healthcheck`.
 
