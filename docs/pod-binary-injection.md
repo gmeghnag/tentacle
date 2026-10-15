@@ -1,7 +1,9 @@
 # Pod binary injection — architecture & plan
 
-**Status:** in progress — §4 steps 1–4 shipped and committed (see §8, the as-built log);
-steps 5–7 remain. This document is the single source of truth for the feature.
+**Status:** in progress — §4 steps 1–5 shipped and committed (see §8, the as-built
+log); steps 6–7 remain. The injection is functional end-to-end (unit-tested); live
+validation on kind is the remaining proof. This document is the single source of
+truth for the feature.
 **Branch:** `feat/pod-binary-injection`, created from `main` @ `583e121`.
 **Predecessor branch (superseded):** `feat/pod-daemon-healthcheck` (never committed; its 3-piece design
 is folded into this plan as steps 1–2).
@@ -231,7 +233,8 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
    with shared options from refactored `scripts/build.ts`; test the `HARNESS_POD_BIN` and
    cache-hit paths (skip the real build in unit tests — it's slow; the build path is
    covered manually/live). — **shipped** (`65497b7`).
-5. [ ] **Wire into `startPodRuntime`** + log lines matching the existing `[pod]` style.
+5. [x] **Wire into `startPodRuntime`** + log lines matching the existing `[pod]` style.
+   — **shipped** (`280acd6`).
 6. [ ] **Live validation** (the real test, against kind):
    - build `TARGET=bun-linux-x64` (or via `HARNESS_POD_BIN` pointing at a prebuilt one),
    - run `./dist/agent-harness --pod --namespace test00 --image <busybox-or-ubi-without-tool>`
@@ -394,16 +397,30 @@ is the truth; §2–§4 remain the design rationale.
   `Reflect.deleteProperty(process.env, "X")` (also `noDelete`-clean for biome).
 - Suite: 497 pass / 0 fail / 1 skip.
 
-### Step 5 — wire into `startPodRuntime`
-- Planned (next): call `injectAgentBinary(…)` after `waitForReady`, before `openExec`,
-  wiring the real seams: `podArch: probePodArch(kube, name, AGENT_CONTAINER)`,
-  `resolveBinary: (t) => resolvePodBinary(t, { log })`; existing `catch` already
-  deletes the pod on failure. Log lines in the `[pod …]` style.
-
-### Step 5 — wire into `startPodRuntime`
-- Planned: call `injectAgentBinary(…)` after `waitForReady`, before `openExec`;
-  existing `catch` already deletes the pod on failure. Log lines in the
-  `[pod …]` style.
+### Step 5 — wire into `startPodRuntime` (shipped, `280acd6`)
+- `packages/cli/src/pod-runtime.ts`: `startPodRuntime` now runs
+  `createPod → waitForReady → injectAgentBinary → openExec(serve --stdio)`,
+  wiring the REAL seams (no fakes in production):
+    - `podArch: () => probePodArch(kube, name, AGENT_CONTAINER)` — the
+      `uname -m` probe with x64 fallback (never aborts).
+    - `resolveBinary: (t) => resolvePodBinary(t, { log })` —
+      `HARNESS_POD_BIN` override → `dist/pod-bin/` cache → shared
+      `buildBinary` cross-compile.
+    - `log: deps.log` — injection logs use the existing `[pod …]` style.
+  Any injection failure throws inside the existing `try`, so the pod is
+  deleted before the error surfaces (behavior unchanged). Module flow
+  comment updated.
+- Tests (`pod-runtime.test.ts`): the happy path now asserts the FULL
+  sequence with the real `resolvePodBinary` wired (test sets
+  `HARNESS_POD_BIN` to an 8-byte fake file → no build): create, ready,
+  `uname -m`, the exact install shell command (`head -c 8 >
+  /usr/local/bin/agent-harness && chmod 755 …`), `--version` verify, then
+  the daemon exec — in that order. New negative test: a failing
+  `--version` (e.g. wrong arch) rethrows with the pod stderr, deletes the
+  pod, and never opens the daemon exec.
+- **This makes the injection functional end-to-end.** Remaining: live
+  validation (step 6) and docs (step 7).
+- Suite: 498 pass / 0 fail / 1 skip.
 
 ### Step 6 — live validation (kind)
 - Planned: build a Linux binary (or point `HARNESS_POD_BIN` at one), run
