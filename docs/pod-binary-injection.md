@@ -1,7 +1,7 @@
 # Pod binary injection — architecture & plan
 
-**Status:** in progress — §4 steps 1–3 shipped and committed (see §8, the as-built log);
-steps 4–7 remain. This document is the single source of truth for the feature.
+**Status:** in progress — §4 steps 1–4 shipped and committed (see §8, the as-built log);
+steps 5–7 remain. This document is the single source of truth for the feature.
 **Branch:** `feat/pod-binary-injection`, created from `main` @ `583e121`.
 **Predecessor branch (superseded):** `feat/pod-daemon-healthcheck` (never committed; its 3-piece design
 is folded into this plan as steps 1–2).
@@ -227,10 +227,10 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
    arch mapping, uname-failure fallback to x64, `head` failure → throw with stderr,
    `--version` failure → throw with stderr. Extend the existing `FakeCluster` in
    `pod-runtime.test.ts` with a `runExec`. — **shipped** (`7b650ee`).
-4. [ ] **`resolveBinary`** (`pod-binary-build.ts`): `HARNESS_POD_BIN` path, cache, `Bun.build`
+4. [x] **`resolveBinary`** (`pod-binary-build.ts`): `HARNESS_POD_BIN` path, cache, `Bun.build`
    with shared options from refactored `scripts/build.ts`; test the `HARNESS_POD_BIN` and
    cache-hit paths (skip the real build in unit tests — it's slow; the build path is
-   covered manually/live).
+   covered manually/live). — **shipped** (`65497b7`).
 5. [ ] **Wire into `startPodRuntime`** + log lines matching the existing `[pod]` style.
 6. [ ] **Live validation** (the real test, against kind):
    - build `TARGET=bun-linux-x64` (or via `HARNESS_POD_BIN` pointing at a prebuilt one),
@@ -302,11 +302,17 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
   (`POD_BIN_PATH`); conventional, first in most PATHs, and the old Dockerfile's
   `/usr/bin` layout is superseded. Assumes the pod runs as root (same assumption as
   before); a non-root image surfaces "Permission denied" via the exec status.
-- [ ] **Cache invalidation** — step 4. v1 intent: existence + `HARNESS_POD_BIN` override
-  only (no mtime magic).
-- [ ] **`runExecOverWebSocket` signature** — decided in step 2 (see §8): it takes a built
+- [x] **Cache invalidation** — RESOLVED (step 4, as intended): v1 = existence +
+  `HARNESS_POD_BIN` override only (no mtime magic). Cache key is the full Bun target
+  (`agent-harness-bun-linux-x64` / `-arm64`) so the two arches never collide; a stale
+  binary is handled by deleting the cache file (or using the override).
+- [x] **`runExecOverWebSocket` signature** — decided in step 2 (see §8): it takes a built
   `url` + `subprotocols` rather than an `ExecTarget`, so `KubeClient` stays the single
   place that knows URL/auth.
+- [x] **Where `buildBinary` lives** — RESOLVED (step 4): in
+  `packages/cli/src/pod-binary-build.ts` (not `scripts/build.ts`); the script imports it.
+  Direction matters: `scripts/` is not part of the `tsc` project `include`, so the shared
+  code must live in a package for type-checking, and the script (run by Bun) imports it.
 
 ## 8. Implementation log (as-built) — the source of truth
 
@@ -360,11 +366,39 @@ is the truth; §2–§4 remain the design rationale.
   injection code is present and unit-tested but not invoked by `--pod`.
 - Suite: 493 pass / 0 fail / 1 skip.
 
-### Step 4 — `resolvePodBinary` (in progress)
-- Planned: `packages/cli/src/pod-binary-build.ts` — `HARNESS_POD_BIN` override,
-  `dist/pod-bin/agent-harness-<arch>` cache, `Bun.build` with options shared
-  from a refactored `scripts/build.ts`. Unit tests cover the override + cache;
-  the real build is covered manually/live. *(see §8, next entry once shipped)*
+### Step 4 — `resolvePodBinary` (shipped, `65497b7`)
+- `packages/cli/src/pod-binary-build.ts` (new):
+  - `resolvePodBinary(target, { cacheDir?, build?, log? })` — resolution order:
+    1. `HARNESS_POD_BIN` (explicit prebuilt path; read directly, never cached/built),
+    2. cache `dist/pod-bin/agent-harness-<target>` (git-ignored),
+    3. build into the cache. A failed build throws with a `TARGET=… bun run
+       compile` + `HARNESS_POD_BIN` hint and leaves no partial cache entry.
+  - `buildBinary(outfile, target)` — the `Bun.build` options (main.ts +
+    worker.ts entrypoints, embedded yoga-wasm, version `define`, minify)
+    extracted from `scripts/build.ts` so the CLI binary and the injected pod
+    binary can never drift. `findYogaWasm` moved with it.
+  - `podBinCacheDir()`, `ResolvePodBinaryOptions` (`cacheDir`/`build` are test
+    seams; `log` mirrors the `[pod …]` style as `[pod-binary] …`).
+- `scripts/build.ts` (refactored): now imports `buildBinary` and keeps only the
+  `TARGET` env plumbing + the macOS ad-hoc re-sign. **Deviation (intentional):**
+  the shared code lives in the CLI package, not the script — `scripts/` is not
+  in the `tsc` project, so type-checking requires package-resident code (§7).
+- Tests (`pod-binary-build.test.ts`): override wins (no cache/build),
+  cache-miss builds, cache-hit skips the build, failed-build error + no
+  partial entry. The real cross-compile stays out of unit tests (slow).
+- Verified the refactor end-to-end on macOS: `bun run compile` → Mach-O arm64,
+  `./dist/agent-harness --version` → `agent-harness 0.0.0` (version `define`
+  intact after the move).
+- **Pitfall hit (test-only):** in Bun, `process.env.X = undefined` stringifies
+  to `"undefined"` (it does NOT delete the key) — env cleanup in tests must use
+  `Reflect.deleteProperty(process.env, "X")` (also `noDelete`-clean for biome).
+- Suite: 497 pass / 0 fail / 1 skip.
+
+### Step 5 — wire into `startPodRuntime`
+- Planned (next): call `injectAgentBinary(…)` after `waitForReady`, before `openExec`,
+  wiring the real seams: `podArch: probePodArch(kube, name, AGENT_CONTAINER)`,
+  `resolveBinary: (t) => resolvePodBinary(t, { log })`; existing `catch` already
+  deletes the pod on failure. Log lines in the `[pod …]` style.
 
 ### Step 5 — wire into `startPodRuntime`
 - Planned: call `injectAgentBinary(…)` after `waitForReady`, before `openExec`;
