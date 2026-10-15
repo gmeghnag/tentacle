@@ -78,7 +78,7 @@ style suggestions.
   "no new issues" is true.
 - Every fix ships with a regression test that was **shown failing on the
   buggy code** (red) before the fix (green). A test that passes on both
-  proves nothing.
+  proves nothing. See §9 for how to write one that actually holds.
 
 ## 5. Output discipline
 
@@ -89,15 +89,22 @@ style suggestions.
 
 ## 6. Repo facts (verified)
 
-- Bun workspaces monorepo, 13 packages, TypeScript strict, Biome.
-  - `bun test` — full suite (368 passing as of this writing).
+- Bun workspaces monorepo, **14 packages** (`agent`, `cli`, `client`, `config`,
+  `core`, `daemon`, `exec`, `k8s`, `mcp`, `protocol`, `providers`, `tools`,
+  `transport`, `tui`), TypeScript strict, Biome. **Bun ≥ 1.4.3 required**
+  (`engines.bun`; the compiled-binary worker path needs it — see the TODO entry).
+  - `bun test` — full suite. **Baseline 540 pass / 1 skip on 2026-10-16**
+    (re-check; the single skip is the opt-in live-k8s test — it is NOT a
+    failure). Don't trust a pinned number blindly; run it.
   - `bun run typecheck` — `tsc --noEmit`.
-  - `bun run lint` — `biome check .`
-  - `bun run check` — typecheck + lint + test.
+  - `bun run lint` — `biome check .` (checks TS/JS/JSON; not Markdown).
+  - `bun run check` — typecheck **then** lint **then** test, in order (a
+    typecheck failure short-circuits before tests run). Green before "done".
 - **Lint baseline: clean (0 errors, 0 warnings).** `bun run lint` passes, so
-  `bun run check` is green for lint; any new error/warning is yours. (The
-  earlier baseline of 1 error + 5 warnings in `packages/tui` no longer
-  reproduces — those were resolved since.)
+  `bun run check` is green for lint; any new error/warning is yours. Common
+  auto-fixable trips: `biome check --write <file>` for formatting; hand-fix
+  `noDelete` (use a computed `delete obj[key]`) and `noAssignInExpressions`
+  (make the arrow a block body).
 - TUI stack: Ink 5.0.1, React 18.3.1, ink-testing-library 4.0.0.
 - **Ink gotcha (already bit us once)**: an empty `<Text>` measures as `0×0`,
   so a per-row `<Text>` list collapses blank rows and shifts content up.
@@ -105,14 +112,122 @@ style suggestions.
 - **TUI repro from `/tmp`** (when the repo must stay untouched): bun cannot
   resolve bare/directory imports from `/tmp`, so import via absolute paths
   into the `.bun` store, and use `createElement` instead of JSX (avoids
-  `react/jsx-runtime` resolution):
+  `react/jsx-runtime` resolution). The `+<hash>` store suffixes below drift on
+  any dependency change — glob `node_modules/.bun` for the current directory
+  rather than copying these verbatim:
   ```ts
   import { createElement as h } from "<repo>/node_modules/.bun/react@18.3.1/node_modules/react/index.js";
   import { Box, Text } from "<repo>/node_modules/.bun/ink@5.0.1+d2b1a511eef311f2/node_modules/ink/build/index.js";
   import { render } from "<repo>/node_modules/.bun/ink-testing-library@4.0.0+2b82e8ab9dffa8af/node_modules/ink-testing-library/build/index.js";
   import { App } from "<repo>/packages/tui/src/App.tsx"; // TS/TSX source: absolute paths work
   ```
-- Git: branch `main` has **no commits yet**; everything is untracked. Ask
-  before creating the first commit.
-- Docs: `README.md`, `ARCHITECTURE.md`, `docs/F3-remote-control.md` (proposed
-  design, no code yet).
+- Git: commit **only on the user's explicit OK**; if on `main`, branch first.
+- Docs: `README.md`, `ARCHITECTURE.md`, per-feature design docs under `docs/`.
+
+## 7. Architecture invariants (mandatory — breaking one is a bug)
+
+These are load-bearing. Verify you are not violating one *before* writing code;
+each has bitten us. Cited symbols are the source of truth — read them, don't
+assume.
+
+- **TUI always over RPC — one session path.** Every runtime (in-process worker,
+  pod `run`, pod `exec`, remote `connect`) drives the TUI through the SAME
+  `RemoteClient` ↔ `Connection` stack (`createLocalRuntime`). The agent loop +
+  tool execution run daemon-side, off the render thread. A new execution target
+  adds **only a transport** (a `DuplexChannel`) + lifecycle — never a parallel
+  agent loop or a second session code path. If you're copying the send/stream
+  logic, stop: you're meant to reuse it.
+- **Single-broker invariant.** Exactly ONE `PermissionBroker` instance is shared
+  between the runtime (`RemoteClient`) and `startTui`. Two instances **silently**
+  decouple: the daemon-side default `allowAll` auto-approves everything and the
+  interactive prompt is never reached. See the invariant comment on `runPodTui`
+  (`cli/main.ts`) and its regression test (a *separate* daemon-side broker spy).
+- **Persistence lives on the laptop/main thread.** The daemon owns the live
+  conversation; the main thread owns the on-disk JSON store. Read history back
+  via `snapshot` after each turn/compaction and persist there; the main owns the
+  session uid (passed into `session/new`) so `--resume` keeps the file. Persist
+  only `ChatMessage`s — never rendering-only events (e.g. `steer`).
+- **Model stays on the laptop (pod reverse-tunnel).** A pod reaches the model
+  THROUGH us (`model/stream` over RPC, `ProxyModelProvider`): the daemon is given
+  the LOCAL provider so the endpoint + API key never leave the laptop. Never put
+  provider creds in a pod/image.
+- **Protocol changes are additive; version stays 1.** Schemas in
+  `@agent-harness/protocol` are the shared truth. A new method → an old peer
+  returns `MethodNotFound` (clean, catchable — handle it). A new `session/update`
+  variant → a union member + its reverse mapping in `client/mapping.ts`. Wire
+  BOTH ends (request and, if it streams back, the update). Don't bump the version
+  for additive work. (Caveat: an unknown update *discriminant* is NOT silently
+  ignored by an old client — only relevant for mixed-version `connect`.)
+- **Don't serialize the RPC peer.** `transport/peer.ts` dispatches inbound
+  requests concurrently (`void handleRequest`, no per-connection mutex) on
+  purpose: a long-running `session/prompt` must not block a short
+  `session/enqueue` / `session/request_permission`. Never add an await/lock that
+  serializes `Connection` handlers.
+- **Never write raw to the terminal while Ink owns it.** During a TUI session the
+  alt-screen is Ink's. Startup diagnostics go through the single `StatusLine`,
+  cleared with `finish()` *before* Ink mounts; daemon stderr is buffered
+  (`createStderrSink`) and flushed only after unmount or on the pre-mount failure
+  path; MCP server stderr is piped+routed, never `inherit`. A stray
+  `process.stdout.write` mid-session corrupts the render.
+- **Pod lifecycle.** `run` creates AND deletes its pod; the delete-on-exit net
+  (`deletePodBestEffort`) survives `process.exit`/Ctrl+C via a detached child
+  (`exit` handlers still fire; SIGINT routes through it). `exec` is user-owned:
+  never create or delete, no exit net. Pass secrets to the child via **env, never
+  argv** (argv is visible in `ps`).
+- **Bun TLS + k8s specifics.** Bun honours per-call `tls:{ca,cert,key}` on
+  `fetch` AND `WebSocket` (and `NODE_EXTRA_CA_CERTS`) — that's how cluster auth
+  works with no `kubectl`. Use the `v4.channel.k8s.io` exec subprotocol; stdin
+  EOF is a known byte count + command exit (`head -c N`), because v4 can't
+  half-close stdin (v5 needs k8s ≥1.29 — don't adopt it as a drop-in).
+
+## 8. Planning a change (write the plan, then follow it)
+
+A feature/fix plan (a doc under `docs/`) must be *verified against the code*, not
+narrated from memory. A plan that mis-states the code produces wrong work.
+
+Writing it:
+- **Verify every assumption against the source first**, citing `file:line`. Name
+  the ONE assumption the change stands or falls on (e.g. "requests are dispatched
+  concurrently") and prove it before anything else. If you can't cite it, you
+  don't know it.
+- Prefer the **additive, reuse-existing-seams** shape (§7). List the exact files
+  with the smallest diff, in dependency order (protocol → daemon → client → cli →
+  tui). Identify the shared source of truth and wire both ends.
+- **Enumerate the failure modes**, not just the happy path: error, disconnect,
+  race, empty input, version skew. For each, say how state converges. A silent
+  drop is a bug — design it out or surface it.
+- Sections: *Problem* (with evidence) · *Preconditions* (verified invariants it
+  relies on) · *Design* · *Files to change* (exact) · *Tests* · *Validation* ·
+  *Notes/debt* (what you deliberately left, and why).
+
+Following it:
+- Implement in the plan's order; run the **narrow** test file per slice (§4).
+- If a step contradicts the code, **STOP and fix the plan**, don't force the code
+  to match a wrong plan. Update the doc so it stays the source of truth.
+- `bun run check` green before declaring done (§4), compared to the lint baseline
+  (§6). Report honestly against §5.
+
+## 9. Writing tests (don't fool yourself)
+
+Tests complement §4; these are about *quality*, because a passing test can prove
+nothing.
+
+- **Red before green** (mandatory here): show the test failing on the buggy /
+  unimplemented code first. A test green on both old and new code tests nothing.
+- **Prove the exact property** that the change hinges on (§2), not a weaker
+  correlate. When in doubt, confirm **non-vacuity by mutation**: temporarily break
+  the code (or wire the wrong dependency) and confirm the test fails, then revert.
+  The single-broker test was validated exactly this way.
+- **Test the failure modes, not just the happy path** — error, reject, race,
+  ordering, empty, boundary. A happy-path-only suite is the classic weak suite;
+  the bug lives in the cases you skipped.
+- **Use injectable seams and fakes**, not real I/O: injected `fetch`, fake
+  `WebSocket` (`FakeWS`), fake spawner, `SpyBroker`/`SpyFakeCluster`, the mock API
+  server. Match the existing fakes rather than inventing new ones. Drive async
+  deterministically (`open()`/`receive()`/`tick()`); use small timeouts for
+  timeout paths.
+- Assert the **behavioral contract at the boundary**, not private implementation
+  details (those churn).
+- Repo style: double quotes, trailing commas, **no `!` non-null assertions**
+  (assert conditionally, like the existing tests). Iterate on the single relevant
+  file; full suite only before done.
