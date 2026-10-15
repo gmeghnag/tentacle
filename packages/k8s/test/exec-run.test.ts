@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { WebSocketLike } from "../src/exec-channel.ts";
-import { type RunExecOptions, parseKubeStatus, runExecOverWebSocket } from "../src/exec-run.ts";
+import {
+  type RunExecOptions,
+  SEND_HIGH_WATER_BYTES,
+  parseKubeStatus,
+  runExecOverWebSocket,
+} from "../src/exec-run.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -187,6 +192,62 @@ describe("runExecOverWebSocket — input on the stdin channel", () => {
     expect(ws.sent.length).toBeGreaterThan(1);
     ws.receive(msg(3, '{"status":"Success"}'));
     await promise;
+  });
+});
+
+describe("runExecOverWebSocket — backpressure (bufferedAmount gating)", () => {
+  /** A FakeWS whose send buffer is observable and optionally never drains. */
+  class BufferedWS extends FakeWS {
+    private drains: boolean;
+    constructor(drains: boolean) {
+      super();
+      this.drains = drains;
+    }
+    get bufferedAmount(): number {
+      // A draining socket reports an empty buffer (bytes left for the network);
+      // a stalled one reports everything ever handed to it as still pending.
+      return this.drains ? 0 : this.sent.reduce((n, f) => n + f.length, 0);
+    }
+  }
+
+  test("a stalled socket pauses the stream near the high-water mark (no 100% race)", async () => {
+    const ws = new BufferedWS(false); // never drains
+    const total = 10 * 1024 * 1024; // 10 MB, well above the 4 MB high-water
+    const input = new Uint8Array(total);
+    const progress: number[] = [];
+    const promise = runExecOverWebSocket(() => ws, "wss://api/exec", ["v4.channel.k8s.io"], input, {
+      timeoutMs: 120,
+      onProgress: (n) => progress.push(n),
+    });
+    ws.open();
+    // The transfer stalls: it must NOT have dumped the whole 10 MB into the
+    // socket (the old synchronous flush did exactly that, racing progress to
+    // 100%). It pauses within one chunk of the high-water mark.
+    const maxProgress = Math.max(...progress);
+    expect(maxProgress).toBeLessThan(total);
+    expect(maxProgress).toBeLessThanOrEqual(SEND_HIGH_WATER_BYTES + 256 * 1024);
+    // With the buffer stuck full, it never completes → the overall timeout wins.
+    await expect(promise).rejects.toThrow(/timed out/);
+  });
+
+  test("a draining socket streams the whole input and completes", async () => {
+    const ws = new BufferedWS(true); // always drains → never gated
+    const total = 5 * 1024 * 1024; // 5 MB, above the high-water
+    const input = new Uint8Array(total).fill(0x7);
+    let lastProgress = 0;
+    const promise = runExecOverWebSocket(() => ws, "wss://api/exec", ["v4.channel.k8s.io"], input, {
+      onProgress: (n) => {
+        lastProgress = n;
+      },
+    });
+    ws.open();
+    // All bytes were handed to the socket (reassembled payloads sum to total).
+    const sentBytes = ws.sent.reduce((n, f) => n + (f.length - 1), 0);
+    expect(sentBytes).toBe(total);
+    expect(lastProgress).toBe(total);
+    ws.receive(msg(3, '{"status":"Success"}'));
+    const result = await promise;
+    expect(result.exitCode).toBe(0);
   });
 });
 

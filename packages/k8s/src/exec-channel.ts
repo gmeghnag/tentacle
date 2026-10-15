@@ -20,6 +20,12 @@ export interface WebSocketLike {
   binaryType?: string;
   /** WebSocket ready state; 0=CONNECTING, 1=OPEN. Lets us buffer until open. */
   readyState?: number;
+  /**
+   * Bytes queued in the socket layer but not yet handed to the OS/network.
+   * Optional (not all impls expose it); the one-shot transfer uses it for
+   * backpressure (`exec-run.ts`), treating `undefined` as 0 (no gating).
+   */
+  readonly bufferedAmount?: number;
   send(data: Uint8Array): void;
   close(): void;
   addEventListener(type: "message", handler: (event: { data: unknown }) => void): void;

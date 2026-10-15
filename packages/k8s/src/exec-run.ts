@@ -11,11 +11,13 @@
  * real exit code. No terminator, no tar (the known byte count is the EOF).
  *
  * Like `execChannel`, the socket is CONNECTING when constructed and `send`
- * while CONNECTING throws `InvalidStateError`, so outbound stdin bytes are
- * queued until the socket's `open` event and flushed in order. Backpressure is
- * intentionally none (v1): `ws.send` buffers in the socket layer, which is fine
- * for a one-shot ~60 MB transfer — if it ever stalls, add a `bufferedAmount`
- * check in `flush`.
+ * while CONNECTING throws `InvalidStateError`, so stdin bytes start flowing on
+ * the socket's `open` event. Frames are built on demand (never the whole binary
+ * at once) and gated on `ws.bufferedAmount`: once the socket's send buffer hits
+ * `SEND_HIGH_WATER_BYTES` the pump waits for it to drain before continuing, so a
+ * large (~60 MB) transfer neither doubles memory nor races `onProgress` ahead of
+ * the real network drain. A socket that does not report `bufferedAmount` is
+ * never gated (the original synchronous behavior).
  */
 import type { WebSocketLike } from "./exec-channel.ts";
 import { CHANNEL_ERROR, CHANNEL_STDERR, CHANNEL_STDIN, CHANNEL_STDOUT } from "./exec-frame.ts";
@@ -24,6 +26,18 @@ import { CHANNEL_ERROR, CHANNEL_STDERR, CHANNEL_STDIN, CHANNEL_STDOUT } from "./
 const STDIN_CHUNK_BYTES = 256 * 1024;
 /** A probe must not hang: the default give-up for one-shot execs. */
 const DEFAULT_TIMEOUT_MS = 30_000;
+/**
+ * Backpressure high-water mark: stop feeding the socket once this many bytes
+ * are still buffered in its send queue, and resume when it drains. This caps
+ * the in-flight memory for a large transfer AND makes `onProgress` track the
+ * real network drain instead of racing ahead to 100% as the whole binary is
+ * dumped into the socket buffer in one synchronous burst. Only effective when
+ * the socket reports `bufferedAmount` (a real `WebSocket` does; `undefined` →
+ * no gating, the old synchronous behavior).
+ */
+export const SEND_HIGH_WATER_BYTES = 4 * 1024 * 1024;
+/** How often to re-check a full socket buffer (ms) while draining. */
+const DRAIN_POLL_MS = 15;
 
 export interface RunExecResult {
   /**
@@ -136,15 +150,19 @@ export function runExecOverWebSocket(
     let settled = false;
     let closed = false;
     let bytesWritten = 0;
+    let sendOffset = 0; // bytes of `input` already handed to the socket
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
-
-    const queue: Uint8Array[] = [];
 
     const finish = (): void => {
       if (timer) {
         clearTimeout(timer);
         timer = undefined;
+      }
+      if (drainTimer) {
+        clearTimeout(drainTimer);
+        drainTimer = undefined;
       }
       if (onAbort) {
         opts.signal?.removeEventListener("abort", onAbort);
@@ -180,36 +198,41 @@ export function runExecOverWebSocket(
       }
     };
 
-    // Queue the input as channel-0 (stdin) frames, chunked, until the socket
-    // opens. The single channel byte is the only framing — no newline (raw
+    // Stream `input` as channel-0 (stdin) frames, chunked and framed ON DEMAND
+    // (never the whole binary at once — that would hold a second full copy in
+    // memory). The single channel byte is the only framing — no newline (raw
     // bytes), unlike the text RPC channel.
-    if (input) {
-      for (let offset = 0; offset < input.length; offset += STDIN_CHUNK_BYTES) {
-        const end = Math.min(offset + STDIN_CHUNK_BYTES, input.length);
-        const frame = new Uint8Array(end - offset + 1);
-        frame[0] = CHANNEL_STDIN;
-        frame.set(input.subarray(offset, end), 1);
-        queue.push(frame);
+    //
+    // Backpressure: send while the socket's buffer is below the high-water
+    // mark; once it fills, stop and re-check after a short delay, so a big
+    // transfer neither bloats memory nor races `onProgress` to 100% ahead of
+    // the actual network drain. A socket that does not report `bufferedAmount`
+    // (`?? 0`) is never gated — the original synchronous behavior.
+    const pump = (): void => {
+      drainTimer = undefined;
+      if (!input || closed || settled) {
+        return;
       }
-    }
-
-    const flush = (): void => {
-      while (queue.length > 0 && !closed && !settled) {
-        const frame = queue.shift();
-        if (frame === undefined) {
-          break;
+      while (sendOffset < input.length && !closed && !settled) {
+        if ((ws.bufferedAmount ?? 0) >= SEND_HIGH_WATER_BYTES) {
+          // Socket buffer is full — wait for it to drain, then resume.
+          drainTimer = setTimeout(pump, DRAIN_POLL_MS);
+          drainTimer.unref?.();
+          return;
         }
+        const end = Math.min(sendOffset + STDIN_CHUNK_BYTES, input.length);
+        const frame = new Uint8Array(end - sendOffset + 1);
+        frame[0] = CHANNEL_STDIN;
+        frame.set(input.subarray(sendOffset, end), 1);
         try {
           ws.send(frame);
         } catch (error) {
           fail(error instanceof Error ? error : new Error(String(error)));
           return;
         }
-        bytesWritten += frame.length - 1; // exclude the channel byte
+        bytesWritten += end - sendOffset; // binary bytes (channel byte excluded)
+        sendOffset = end;
         opts.onProgress?.(bytesWritten);
-      }
-      if (closed || settled) {
-        queue.length = 0; // dropped — the socket is dead
       }
     };
 
@@ -250,7 +273,10 @@ export function runExecOverWebSocket(
         return;
       }
       closed = true;
-      queue.length = 0;
+      if (drainTimer) {
+        clearTimeout(drainTimer);
+        drainTimer = undefined;
+      }
       if (!settled) {
         fail(new Error("exec channel closed before the command reported a status"));
       }
@@ -267,7 +293,7 @@ export function runExecOverWebSocket(
         handleIncoming(bytes);
       }
     });
-    ws.addEventListener("open", () => flush());
+    ws.addEventListener("open", () => pump());
     ws.addEventListener("close", onSocketEnd);
     ws.addEventListener("error", onSocketEnd);
 
@@ -284,10 +310,10 @@ export function runExecOverWebSocket(
       fail(new Error(`exec timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
-    // If the socket is already open (unusual for a real WS), flush now; the
+    // If the socket is already open (unusual for a real WS), pump now; the
     // `open` event covers the normal CONNECTING→OPEN path.
     if (ws.readyState === 1) {
-      flush();
+      pump();
     }
   });
 }
