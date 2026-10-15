@@ -17,6 +17,7 @@ import {
   execChannel,
   execSubprotocols,
 } from "./exec-channel.ts";
+import { type RunExecOptions, type RunExecResult, runExecOverWebSocket } from "./exec-run.ts";
 import { type Pod, TERMINAL_PHASES, podIsReady } from "./types.ts";
 
 /** Thrown when the API server returns a non-2xx response. */
@@ -179,6 +180,28 @@ export class KubeClient {
     const url = buildExecUrl(this.server, this.namespace, target);
     const ws = this.makeWebSocket(url, execSubprotocols(this.token));
     return execChannel(ws, options);
+  }
+
+  /**
+   * Run a one-shot command in the pod and resolve when it EXITS (with its exit
+   * code + captured stdout/stderr), or reject on timeout / a close without a
+   * status. `input` streams raw bytes to the command's stdin (the binary
+   * transfer). Unlike `openExec`, this returns a `Promise` that settles on the
+   * command's exit — it is for one-shot commands, not an RPC channel.
+   */
+  runExec(
+    target: ExecTarget,
+    input?: Uint8Array,
+    options?: RunExecOptions,
+  ): Promise<RunExecResult> {
+    const url = buildExecUrl(this.server, this.namespace, target);
+    return runExecOverWebSocket(
+      this.makeWebSocket,
+      url,
+      execSubprotocols(this.token),
+      input,
+      options,
+    );
   }
 }
 

@@ -1,0 +1,293 @@
+/**
+ * A one-shot `exec` over a Kubernetes `exec` WebSocket (`v4.channel.k8s.io`)
+ * that RESOLVES ON COMMAND EXIT — the counterpart of `execChannel`, which is a
+ * text-only duplex channel an RPC peer rides forever. Use it for one-shot
+ * commands: probe the pod's architecture (`uname -m`), verify an injected
+ * binary (`agent-harness --version`), and the raw-binary transfer itself.
+ *
+ * The transfer streams the binary's bytes to the pod's stdin in 256 KB chunks;
+ * the pod runs `head -c <N>`, which reads exactly N bytes and exits — so the
+ * k8s status channel (3) delivers a terminal exit status and we resolve with a
+ * real exit code. No terminator, no tar (the known byte count is the EOF).
+ *
+ * Like `execChannel`, the socket is CONNECTING when constructed and `send`
+ * while CONNECTING throws `InvalidStateError`, so outbound stdin bytes are
+ * queued until the socket's `open` event and flushed in order. Backpressure is
+ * intentionally none (v1): `ws.send` buffers in the socket layer, which is fine
+ * for a one-shot ~60 MB transfer — if it ever stalls, add a `bufferedAmount`
+ * check in `flush`.
+ */
+import type { WebSocketLike } from "./exec-channel.ts";
+import { CHANNEL_ERROR, CHANNEL_STDERR, CHANNEL_STDIN, CHANNEL_STDOUT } from "./exec-frame.ts";
+
+/** stdin is sent in this many bytes per WebSocket frame (no single giant frame). */
+const STDIN_CHUNK_BYTES = 256 * 1024;
+/** A probe must not hang: the default give-up for one-shot execs. */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+export interface RunExecResult {
+  /**
+   * The command's exit code: `0` for a k8s `Success` status, `1` for `Failure`.
+   * (k8s does not return the numeric exit code for a pod exec — only a
+   * `Success`/`Failure` status — so we map accordingly.) Typed `number | null`
+   * so callers can defensively check `!== 0`; a resolved result always carries
+   * a concrete `0` or `1`.
+   */
+  readonly exitCode: number | null;
+  /** Everything the command wrote to stdout (channel 1), decoded as UTF-8. */
+  readonly stdout: string;
+  /** Everything the command wrote to stderr (channel 2), decoded as UTF-8. */
+  readonly stderr: string;
+  /** The raw terminal status (channel 3): a k8s `Status` object as JSON. */
+  readonly status?: string;
+}
+
+export interface RunExecOptions {
+  /** Give up after this long (ms). Default 30000; the binary transfer passes more. */
+  readonly timeoutMs?: number;
+  /** Abort the exec (also closes the socket). */
+  readonly signal?: AbortSignal;
+  /**
+   * Report progress as stdin bytes are written to the socket. `bytesWritten` is
+   * the running count of *binary* bytes sent (channel framing excluded), so the
+   * caller divides by the total to log ~every 10%.
+   */
+  readonly onProgress?: (bytesWritten: number) => void;
+}
+
+/**
+ * Parse a k8s exec `Status` (channel 3) into an exit code + a human message.
+ * Returns `null` when the text is not yet a complete `Status` (a fragment, or
+ * JSON without a `.status` field) so the caller can keep accumulating.
+ */
+export function parseKubeStatus(
+  statusText: string,
+): { readonly exitCode: number; readonly message?: string } | null {
+  let parsed: {
+    status?: string;
+    message?: string;
+    details?: { causes?: Array<{ message?: string }> };
+  };
+  try {
+    parsed = JSON.parse(statusText);
+  } catch {
+    return null;
+  }
+  if (typeof parsed.status !== "string") {
+    return null;
+  }
+  if (parsed.status === "Success") {
+    return { exitCode: 0 };
+  }
+  // Failure: surface the most specific cause message (e.g. "Exec format error"),
+  // falling back to the top-level status message.
+  const cause = parsed.details?.causes?.[0]?.message;
+  return {
+    exitCode: 1,
+    ...(cause ? { message: cause } : parsed.message ? { message: parsed.message } : {}),
+  };
+}
+
+/** Normalise a WebSocket message payload to bytes (we request `arraybuffer`). */
+function toBytes(data: unknown): Uint8Array | null {
+  if (data instanceof ArrayBuffer) {
+    return new Uint8Array(data);
+  }
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  if (typeof data === "string") {
+    return new TextEncoder().encode(data);
+  }
+  return null;
+}
+
+/**
+ * Open an exec at `url` (with `subprotocols`), stream `input` (optional) to the
+ * command's stdin, and RESOLVE when the command EXITS (a terminal status on
+ * channel 3) — or REJECT on timeout, abort, or a socket close without a status.
+ * This is for one-shot commands that finish; an RPC peer uses `openExec`
+ * instead (which never resolves on exit).
+ */
+export function runExecOverWebSocket(
+  makeWebSocket: (url: string, protocols: string[]) => WebSocketLike,
+  url: string,
+  subprotocols: string[],
+  input?: Uint8Array,
+  options?: RunExecOptions,
+): Promise<RunExecResult> {
+  const opts = options ?? {};
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  return new Promise<RunExecResult>((resolve, reject) => {
+    let ws: WebSocketLike;
+    try {
+      ws = makeWebSocket(url, subprotocols);
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+
+    const stdoutDec = new TextDecoder();
+    const stderrDec = new TextDecoder();
+    const statusDec = new TextDecoder();
+    let stdout = "";
+    let stderr = "";
+    let statusText = "";
+    let settled = false;
+    let closed = false;
+    let bytesWritten = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+
+    const queue: Uint8Array[] = [];
+
+    const finish = (): void => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (onAbort) {
+        opts.signal?.removeEventListener("abort", onAbort);
+        onAbort = undefined;
+      }
+    };
+
+    const settle = (result: RunExecResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      finish();
+      resolve(result);
+      try {
+        ws.close();
+      } catch {
+        // already closing / closed
+      }
+    };
+
+    const fail = (error: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      finish();
+      reject(error);
+      try {
+        ws.close();
+      } catch {
+        // already closing / closed
+      }
+    };
+
+    // Queue the input as channel-0 (stdin) frames, chunked, until the socket
+    // opens. The single channel byte is the only framing — no newline (raw
+    // bytes), unlike the text RPC channel.
+    if (input) {
+      for (let offset = 0; offset < input.length; offset += STDIN_CHUNK_BYTES) {
+        const end = Math.min(offset + STDIN_CHUNK_BYTES, input.length);
+        const frame = new Uint8Array(end - offset + 1);
+        frame[0] = CHANNEL_STDIN;
+        frame.set(input.subarray(offset, end), 1);
+        queue.push(frame);
+      }
+    }
+
+    const flush = (): void => {
+      while (queue.length > 0 && !closed && !settled) {
+        const frame = queue.shift();
+        if (frame === undefined) {
+          break;
+        }
+        try {
+          ws.send(frame);
+        } catch (error) {
+          fail(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+        bytesWritten += frame.length - 1; // exclude the channel byte
+        opts.onProgress?.(bytesWritten);
+      }
+      if (closed || settled) {
+        queue.length = 0; // dropped — the socket is dead
+      }
+    };
+
+    const handleIncoming = (bytes: Uint8Array): void => {
+      if (bytes.length === 0) {
+        return;
+      }
+      const channel = bytes[0];
+      const payload = bytes.subarray(1);
+      switch (channel) {
+        case CHANNEL_STDOUT:
+          stdout += stdoutDec.decode(payload, { stream: true });
+          break;
+        case CHANNEL_STDERR:
+          stderr += stderrDec.decode(payload, { stream: true });
+          break;
+        case CHANNEL_ERROR: {
+          statusText += statusDec.decode(payload, { stream: true });
+          const parsed = parseKubeStatus(statusText);
+          if (parsed) {
+            settle({
+              exitCode: parsed.exitCode,
+              stdout,
+              stderr,
+              status: statusText,
+            });
+          }
+          break;
+        }
+        default:
+          // Unknown channel (e.g. 4 = resize): ignored.
+          break;
+      }
+    };
+
+    const onSocketEnd = (): void => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      queue.length = 0;
+      if (!settled) {
+        fail(new Error("exec channel closed before the command reported a status"));
+      }
+    };
+
+    try {
+      ws.binaryType = "arraybuffer";
+    } catch {
+      // read-only post-connect on some impls; the handler copes either way
+    }
+    ws.addEventListener("message", (event) => {
+      const bytes = toBytes(event.data);
+      if (bytes) {
+        handleIncoming(bytes);
+      }
+    });
+    ws.addEventListener("open", () => flush());
+    ws.addEventListener("close", onSocketEnd);
+    ws.addEventListener("error", onSocketEnd);
+
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        fail(new DOMException("aborted", "AbortError"));
+      } else {
+        onAbort = () => fail(new DOMException("aborted", "AbortError"));
+        opts.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
+    timer = setTimeout(() => {
+      fail(new Error(`exec timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    // If the socket is already open (unusual for a real WS), flush now; the
+    // `open` event covers the normal CONNECTING→OPEN path.
+    if (ws.readyState === 1) {
+      flush();
+    }
+  });
+}

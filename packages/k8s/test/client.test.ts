@@ -143,4 +143,69 @@ describe("KubeClient", () => {
     // Deleting again (already gone) does not throw.
     await c.deletePod("p5");
   });
+
+  test("runExec builds the exec URL + subprotocols and resolves on command exit", async () => {
+    // A minimal in-memory exec socket: records the URL/protocols it was built
+    // with, then (after `open`) reports a Success status so `runExec` resolves.
+    let seenUrl = "";
+    let seenProtocols: string[] = [];
+    const listeners = new Map<string, Array<(ev: { data: unknown }) => void>>();
+    const emit = (type: string, ev: { data: unknown }): void => {
+      for (const h of listeners.get(type) ?? []) {
+        h(ev);
+      }
+    };
+    const fakeWs = {
+      binaryType: "",
+      readyState: 0,
+      sent: [] as Uint8Array[],
+      send(data: Uint8Array) {
+        this.sent.push(data);
+      },
+      close() {},
+      addEventListener(type: string, handler: (ev: { data: unknown }) => void) {
+        const arr = listeners.get(type) ?? [];
+        arr.push(handler);
+        listeners.set(type, arr);
+      },
+      open() {
+        this.readyState = 1;
+        emit("open", { data: null });
+      },
+      /** Deliver a channel-framed inbound message. */
+      receive(channel: number, text: string) {
+        const body = new TextEncoder().encode(text);
+        const out = new Uint8Array(body.length + 1);
+        out[0] = channel;
+        out.set(body, 1);
+        emit("message", { data: out });
+      },
+    };
+    const c = new KubeClient({
+      server: `http://localhost:${server.port}`,
+      namespace: NS,
+      token: "secret-token",
+      makeWebSocket: (url, protocols) => {
+        seenUrl = url;
+        seenProtocols = protocols;
+        return fakeWs;
+      },
+    });
+
+    const promise = c.runExec({ pod: "p6", command: ["uname", "-m"] });
+    expect(
+      seenUrl.startsWith(`ws://localhost:${server.port}/api/v1/namespaces/${NS}/pods/p6/exec?`),
+    ).toBe(true);
+    expect(seenUrl).toContain("command=uname");
+    expect(seenUrl).toContain("command=-m");
+    expect(seenProtocols[0]).toBe("v4.channel.k8s.io");
+    expect(seenProtocols[1]).toMatch(/^base64url\.bearer\.authorization\.k8s\.io\./);
+
+    fakeWs.open();
+    fakeWs.receive(1, "x86_64\n");
+    fakeWs.receive(3, '{"status":"Success"}');
+    const result = await promise;
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("x86_64\n");
+  });
 });
