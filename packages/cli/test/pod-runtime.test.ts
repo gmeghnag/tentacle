@@ -27,7 +27,12 @@ import { ToolRegistry, fsWriteTool } from "@agent-harness/tools";
 import { type DuplexChannel, createChannelPair } from "@agent-harness/transport";
 import type { HarnessConfig } from "../src/config.ts";
 import { POD_BIN_PATH } from "../src/pod-binary.ts";
-import { type PodCluster, startExecRuntime, startPodRuntime } from "../src/pod-runtime.ts";
+import {
+  type PodCluster,
+  createStderrSink,
+  startExecRuntime,
+  startPodRuntime,
+} from "../src/pod-runtime.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -756,5 +761,42 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     expect(req.title).toBe("Write a file");
     expect(req.detail).toBe("/tmp/x.txt");
     runtime.dispose();
+  });
+});
+
+describe("createStderrSink", () => {
+  test("buffers daemon stderr instead of writing it live (no TUI corruption)", () => {
+    const lines: string[] = [];
+    const sink = createStderrSink("[pod p-1]", (l) => lines.push(l));
+    sink.onStderr("boom 1\n");
+    sink.onStderr("boom 2\n");
+    // Nothing is written while the TUI owns the screen.
+    expect(lines).toHaveLength(0);
+    // One flush, after teardown, carries everything buffered.
+    sink.flush();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toBe("[pod p-1] daemon stderr:\nboom 1\nboom 2\n");
+    // Idempotent: a second flush writes nothing more.
+    sink.flush();
+    expect(lines).toHaveLength(1);
+  });
+
+  test("an empty sink flushes nothing", () => {
+    const lines: string[] = [];
+    createStderrSink("[pod p]", (l) => lines.push(l)).flush();
+    expect(lines).toHaveLength(0);
+  });
+
+  test("tail-caps a chatty daemon so the buffer can't grow without bound", () => {
+    const lines: string[] = [];
+    const sink = createStderrSink("[pod p]", (l) => lines.push(l));
+    // Far more than the 16 KB cap; the LAST bytes must survive, the first drop.
+    sink.onStderr("A".repeat(20 * 1024));
+    sink.onStderr("TAIL");
+    sink.flush();
+    const body = (lines[0] ?? "").replace("[pod p] daemon stderr:\n", "");
+    expect(body.endsWith("TAIL\n")).toBe(true);
+    expect(body.length).toBeLessThanOrEqual(16 * 1024 + 1); // cap (+ the added "\n")
+    expect(body.includes("A")).toBe(true); // some head retained, not all
   });
 });

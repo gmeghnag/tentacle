@@ -44,6 +44,45 @@ import { resolvePodBinary } from "./pod-binary-build.ts";
 import { injectAgentBinary, probePodArch } from "./pod-binary.ts";
 import { StatusLine } from "./status-line.ts";
 
+/** A bounded stderr collector that flushes once, on teardown. */
+export interface PodStderrSink {
+  /** Accumulate a chunk of the pod daemon's stderr (never written live). */
+  onStderr(text: string): void;
+  /** Write the buffered stderr to the log (idempotent; no-op when empty). */
+  flush(): void;
+}
+
+/**
+ * Collect the pod daemon's stderr instead of writing it straight to stdout.
+ *
+ * During a live session the TUI owns the terminal (Ink's alternate screen), so
+ * forwarding daemon stderr to stdout as it arrives corrupts the render (the
+ * `d19f10d` TODO: a dropped-connection error leaking over the UI). Instead we
+ * buffer it — tail-capped so a chatty daemon can't grow it without bound — and
+ * flush it exactly once: on teardown, after Ink has left the alt-screen, and on
+ * the startup-failure path (before the TUI mounts), so a daemon that never came
+ * up is still diagnosable.
+ */
+export function createStderrSink(prefix: string, log: (line: string) => void): PodStderrSink {
+  const capBytes = 16 * 1024;
+  let buf = "";
+  return {
+    onStderr(text: string): void {
+      buf += text;
+      if (buf.length > capBytes) {
+        buf = buf.slice(buf.length - capBytes);
+      }
+    },
+    flush(): void {
+      if (buf.length === 0) {
+        return;
+      }
+      log(`${prefix} daemon stderr:\n${buf.endsWith("\n") ? buf : `${buf}\n`}`);
+      buf = "";
+    },
+  };
+}
+
 /** The subset of `KubeClient` the pod runtime needs (injectable for tests). */
 export interface PodCluster {
   createPod(pod: Pod, signal?: AbortSignal): Promise<Pod>;
@@ -144,6 +183,9 @@ export async function startPodRuntime(
   deps: PodRuntimeDeps,
 ): Promise<LocalRuntime> {
   const name = deps.name ?? `agent-harness-${crypto.randomUUID().slice(0, 8)}`;
+  // The pod daemon's stderr is buffered (not written live) so it never corrupts
+  // the Ink TUI; flushed once on teardown / startup failure. See `createStderrSink`.
+  const stderr = createStderrSink(`[pod ${name}]`, deps.log);
   // Interactive (TTY) startup is ONE line: a spinner repainted per phase
   // (create → ready → inject, with the transfer bar as the bar phase's text),
   // cleared when the daemon starts. Piped (log/CI) logs one line per phase
@@ -210,7 +252,7 @@ export async function startPodRuntime(
         container: AGENT_CONTAINER,
         command: ["agent-harness", "serve", "--stdio", "--model-proxy"],
       },
-      { onStderr: (text) => deps.log(`[pod ${name}] ${text}`) },
+      { onStderr: stderr.onStderr },
     );
     // The pod reaches the model through us (reverse-tunnel): serve the local
     // provider, so the endpoint and API key never leave the laptop.
@@ -223,6 +265,9 @@ export async function startPodRuntime(
       channel,
       disposeTransport: () => {
         channel.close();
+        // Safe here: `dispose()` runs after the TUI has unmounted (left the
+        // alt-screen), so the buffered daemon stderr can go to stdout.
+        stderr.flush();
         void deps.kube.deletePod(name).catch(() => {});
       },
       permissions: deps.permissions,
@@ -235,6 +280,9 @@ export async function startPodRuntime(
   } catch (error) {
     // The pod was created but never became usable — delete it before surfacing.
     status?.finish();
+    // The TUI never mounted on this path, so flushing any daemon stderr (e.g. a
+    // `serve` that failed to start) to stdout is safe and aids diagnosis.
+    stderr.flush();
     void deps.kube.deletePod(name).catch(() => {});
     throw error;
   }
@@ -270,6 +318,9 @@ export async function startExecRuntime(
   deps: PodExecRuntimeDeps,
 ): Promise<LocalRuntime> {
   const name = deps.podName;
+  // Buffer the pod daemon's stderr so it never corrupts the Ink TUI; flushed
+  // once on teardown / startup failure. See `createStderrSink`.
+  const stderr = createStderrSink(`[pod ${name}]`, deps.log);
   // No `?? AGENT_CONTAINER` default: when the caller does not name a container,
   // the exec API omits the `container` parameter and picks the only/default
   // one (single-container pods need no `-c`).
@@ -372,7 +423,7 @@ export async function startExecRuntime(
         container,
         command: ["agent-harness", "serve", "--stdio", "--model-proxy"],
       },
-      { onStderr: (text) => deps.log(`[pod ${name}] ${text}`) },
+      { onStderr: stderr.onStderr },
     );
     // The pod reaches the model through us (reverse-tunnel): serve the local
     // provider, so the endpoint and API key never leave the laptop.
@@ -387,6 +438,8 @@ export async function startExecRuntime(
       // running (keepalive) — no `deletePod`, by design.
       disposeTransport: () => {
         channel.close();
+        // Safe after the TUI has unmounted (left the alt-screen).
+        stderr.flush();
       },
       permissions: deps.permissions,
       store: deps.store,
@@ -397,6 +450,8 @@ export async function startExecRuntime(
     });
   } catch (error) {
     status?.finish();
+    // The TUI never mounted on this path, so flushing any daemon stderr is safe.
+    stderr.flush();
     // NO pod delete here: the pod is not ours. The injection's own messages
     // (e.g. the glibc hint) surface untouched; a wrong container is translated.
     throw containerExecError(error, name, container, deps.namespace);
