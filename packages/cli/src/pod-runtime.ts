@@ -4,8 +4,12 @@
  * stack as the worker and remote-control paths. The only new parts are the
  * transport (the exec WebSocket, F4.b) and the pod lifecycle here:
  *
- *   createPod → waitForReady → openExec(`agent-harness serve --stdio`) →
+ *   createPod → waitForReady → injectAgentBinary (F4.e: probe arch, stream the
+ *   binary, verify with --version) → openExec(`agent-harness serve --stdio`) →
  *   createLocalRuntime(handshake + persisting sessions) → …use… → deletePod.
+ *
+ * The injection (F4.e) means the image no longer needs to contain the tool —
+ * any Linux image with `sh` + `head` works; see `pod-binary.ts`.
  *
  * Persistence stays on the laptop (the `createLocalRuntime` store), so the pod
  * is a stateless sandbox and `--resume` works locally.
@@ -27,6 +31,8 @@ import {
 import { OpenAIProvider } from "@agent-harness/providers";
 import type { DuplexChannel } from "@agent-harness/transport";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
+import { resolvePodBinary } from "./pod-binary-build.ts";
+import { injectAgentBinary, probePodArch } from "./pod-binary.ts";
 
 /** The subset of `KubeClient` the pod runtime needs (injectable for tests). */
 export interface PodCluster {
@@ -65,6 +71,16 @@ export async function startPodRuntime(
 
   try {
     await deps.kube.waitForReady(name);
+    // Inject the tool into the sandbox (F4.e): the image need not contain
+    // `agent-harness`. Any failure here throws → the pod is deleted below.
+    await injectAgentBinary({
+      kube: deps.kube,
+      podName: name,
+      container: AGENT_CONTAINER,
+      podArch: () => probePodArch(deps.kube, name, AGENT_CONTAINER),
+      resolveBinary: (target) => resolvePodBinary(target, { log: deps.log }),
+      log: deps.log,
+    });
     deps.log(`[pod] ${name} ready; starting the agent daemon over exec\n`);
     const channel = deps.kube.openExec(
       {
