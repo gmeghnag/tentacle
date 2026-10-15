@@ -1,6 +1,8 @@
 # Pod binary injection — architecture & plan
 
-**Status:** planned (branch `feat/pod-binary-injection`, created from `main` @ `583e121`, empty working tree).
+**Status:** in progress — §4 steps 1–3 shipped and committed (see §8, the as-built log);
+steps 4–7 remain. This document is the single source of truth for the feature.
+**Branch:** `feat/pod-binary-injection`, created from `main` @ `583e121`.
 **Predecessor branch (superseded):** `feat/pod-daemon-healthcheck` (never committed; its 3-piece design
 is folded into this plan as steps 1–2).
 
@@ -215,22 +217,22 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
 
 ## 4. Order of implementation (each step committed, tests green)
 
-1. **`--version`** in `main.ts` (+ `define` in `scripts/build.ts`, HELP line, test in
-   `main.test.ts`). Small, independent, unblocks the probe.
-2. **`runExec`** in `@agent-harness/k8s` (`exec-run.ts` + `client.ts` + `index.ts` + tests
+1. [x] **`--version`** in `main.ts` (+ `define` in `scripts/build.ts`, HELP line, test in
+   `main.test.ts`). Small, independent, unblocks the probe. — **shipped** (`70939c5`).
+2. [x] **`runExec`** in `@agent-harness/k8s` (`exec-run.ts` + `client.ts` + `index.ts` + tests
    with `FakeWS`-style fake: status→resolve, stdout/stderr collection, timeout reject,
-   input chunking on channel 0, close-without-status reject).
-3. **`PodCluster.runExec`** + **`injectAgentBinary`** (`pod-binary.ts`) with tests: a fake
+   input chunking on channel 0, close-without-status reject). — **shipped** (`f9939cb`).
+3. [x] **`PodCluster.runExec`** + **`injectAgentBinary`** (`pod-binary.ts`) with tests: a fake
    cluster records calls; assert sequence (uname → head -c N with bytes → --version),
    arch mapping, uname-failure fallback to x64, `head` failure → throw with stderr,
    `--version` failure → throw with stderr. Extend the existing `FakeCluster` in
-   `pod-runtime.test.ts` with a `runExec`.
-4. **`resolveBinary`** (`pod-binary-build.ts`): `HARNESS_POD_BIN` path, cache, `Bun.build`
+   `pod-runtime.test.ts` with a `runExec`. — **shipped** (`7b650ee`).
+4. [ ] **`resolveBinary`** (`pod-binary-build.ts`): `HARNESS_POD_BIN` path, cache, `Bun.build`
    with shared options from refactored `scripts/build.ts`; test the `HARNESS_POD_BIN` and
    cache-hit paths (skip the real build in unit tests — it's slow; the build path is
    covered manually/live).
-5. **Wire into `startPodRuntime`** + log lines matching the existing `[pod]` style.
-6. **Live validation** (the real test, against kind):
+5. [ ] **Wire into `startPodRuntime`** + log lines matching the existing `[pod]` style.
+6. [ ] **Live validation** (the real test, against kind):
    - build `TARGET=bun-linux-x64` (or via `HARNESS_POD_BIN` pointing at a prebuilt one),
    - run `./dist/agent-harness --pod --namespace test00 --image <busybox-or-ubi-without-tool>`
      (any linux image that has `sh`; `busybox` has `sh` + `head`),
@@ -239,7 +241,7 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
    - Also verify the negative path: point `HARNESS_POD_BIN` at the macOS binary → expect a
      clear `[pod …] agent-harness --version failed: … Exec format error`-style message,
      pod deleted, no opaque "connection closed".
-7. **Docs/TODO** (see 3.4).
+7. [ ] **Docs/TODO** (see 3.4).
 
 ## 5. Files to read when resuming (with why)
 
@@ -290,12 +292,92 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
     commit as `main`); its design lives in this doc (steps 1–2 + the `--version` probe).
     Delete it after this lands.
 
-## 7. Open questions (decide while coding, don't block)
+## 7. Open questions & decisions
 
-- Cache invalidation: v1 = existence + `HARNESS_POD_BIN` override only (no mtime magic).
-- `onProgress` log granularity: every ~10% (60 MB → ~7 lines).
-- Should `runExec` also be used to `chmod` in a second exec instead of the `sh -c` one-liner?
-  (One `sh -c` is simpler; keep it unless tests show a problem.)
-- Default install path: `/usr/local/bin` vs `/usr/bin` — `/usr/local/bin` (conventional, and
-  first in most PATHs; if the image has its own `agent-harness` in `/usr/bin`, PATH order
-  decides — acceptable, note it).
+- [x] **`onProgress` log granularity** — RESOLVED (step 3): one line per crossed 10% bucket
+  (first at 10%, capped at 100%). A 60 MB transfer logs ~10 lines, not ~7.
+- [x] **`chmod` in a second exec?** — RESOLVED (step 3): kept in the same `sh -c` one-liner
+  as the `head -c` write (`head -c N > path && chmod 755 path`).
+- [x] **Default install path** — RESOLVED (step 3): `/usr/local/bin/agent-harness`
+  (`POD_BIN_PATH`); conventional, first in most PATHs, and the old Dockerfile's
+  `/usr/bin` layout is superseded. Assumes the pod runs as root (same assumption as
+  before); a non-root image surfaces "Permission denied" via the exec status.
+- [ ] **Cache invalidation** — step 4. v1 intent: existence + `HARNESS_POD_BIN` override
+  only (no mtime magic).
+- [ ] **`runExecOverWebSocket` signature** — decided in step 2 (see §8): it takes a built
+  `url` + `subprotocols` rather than an `ExecTarget`, so `KubeClient` stays the single
+  place that knows URL/auth.
+
+## 8. Implementation log (as-built) — the source of truth
+
+This section records what actually shipped, step by step, including deviations
+from the plan in §2–§4. When this feature is done, this section (plus the code)
+is the truth; §2–§4 remain the design rationale.
+
+### Step 1 — `--version` (shipped, `70939c5`)
+- `packages/cli/src/main.ts`: `--version` handled before config loading (like
+  `--help`), prints `agent-harness <version>`, exits 0. Version from
+  `process.env.HARNESS_APP_VERSION` (compile-time literal) with a `"dev"`
+  fallback for source runs. Added to `HELP`.
+- `scripts/build.ts`: reads the CLI package `version` and injects it via
+  `compile.define`. The worker second entrypoint + yoga plugin are unchanged.
+- Test (`main.test.ts`): exit 0, version line, and a fresh config dir is left
+  unscaffolded (proves config is never loaded).
+- **As planned.** Suite: 466 pass / 0 fail / 1 skip.
+
+### Step 2 — one-shot `runExec` (shipped, `f9939cb`)
+- `packages/k8s/src/exec-run.ts` (new): `runExecOverWebSocket(makeWebSocket,
+  url, subprotocols, input?, options?)` — resolves on the k8s status channel
+  (3), streams raw stdin on channel 0 in 256 KB chunks, buffers until the
+  socket opens, supports timeout + abort, rejects on a close without a status.
+  `parseKubeStatus` maps `Success`→0 / `Failure`→1 and extracts the most
+  specific cause message (e.g. "Exec format error"); returns `null` on
+  fragments so a status split across frames still resolves.
+- `KubeClient.runExec(target, input?, options?)` builds URL + subprotocols and
+  delegates; `index.ts` exports the module.
+- **Deviation (intentional):** the low-level function takes a built `url` +
+  `subprotocols`, not an `ExecTarget` — keeps `KubeClient` the single place
+  that knows URL/auth and makes the WS logic injectable. (§7.)
+- Tests: `FakeWS`-driven (resolve, reassembly, chunking + progress,
+  buffer-until-open, timeout, close-without-status, abort, `parseKubeStatus`) +
+  a `KubeClient.runExec` URL/subprotocol test.
+- Suite: 480 pass / 0 fail / 1 skip.
+
+### Step 3 — `injectAgentBinary` (shipped, `7b650ee`)
+- `packages/cli/src/pod-binary.ts` (new): `mapUnameOutput`, `archToTarget`,
+  `probePodArch` (never throws — any probe failure → x64), `injectAgentBinary`
+  (install via `sh -c "head -c N > /usr/local/bin/agent-harness && chmod 755 …"`
+  with ~10% progress + size-scaled timeout, then an `agent-harness --version`
+  verify), and `POD_BIN_PATH`.
+- `packages/cli/src/pod-runtime.ts`: `PodCluster` gains `runExec`.
+- Tests (`pod-binary.test.ts`): arch mapping, probe fallbacks, the exact exec
+  sequence + bytes, arm64 target selection, install/`--version` failures
+  surfacing pod stderr, the size-scaled timeout, ~10% progress bucketing.
+  `pod-runtime.test.ts`'s `FakeCluster` implements `runExec`.
+- **Deviations (intentional):** progress logged per crossed 10% bucket; `chmod`
+  in the same `sh -c`; install path `/usr/local/bin`. (§7.)
+- **Not yet wired into `startPodRuntime`** — that is step 5. Until then the
+  injection code is present and unit-tested but not invoked by `--pod`.
+- Suite: 493 pass / 0 fail / 1 skip.
+
+### Step 4 — `resolvePodBinary` (in progress)
+- Planned: `packages/cli/src/pod-binary-build.ts` — `HARNESS_POD_BIN` override,
+  `dist/pod-bin/agent-harness-<arch>` cache, `Bun.build` with options shared
+  from a refactored `scripts/build.ts`. Unit tests cover the override + cache;
+  the real build is covered manually/live. *(see §8, next entry once shipped)*
+
+### Step 5 — wire into `startPodRuntime`
+- Planned: call `injectAgentBinary(…)` after `waitForReady`, before `openExec`;
+  existing `catch` already deletes the pod on failure. Log lines in the
+  `[pod …]` style.
+
+### Step 6 — live validation (kind)
+- Planned: build a Linux binary (or point `HARNESS_POD_BIN` at one), run
+  `--pod` against an image without the tool, confirm probe/transfer/progress/
+  version logs then a working turn; negative case = a wrong-arch binary must
+  yield a clear `--version` failure, not an opaque close.
+
+### Step 7 — docs/TODO
+- Planned: `TODO.md` F4.e entry, `docs/F4-pod-execution.md` section, update
+  `pod.ts` header + `--pod` help, mark `dist/Dockerfile` optional.
+
