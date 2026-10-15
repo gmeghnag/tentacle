@@ -11,7 +11,14 @@ import type {
 } from "@agent-harness/core";
 import { PermissionBroker } from "@agent-harness/core";
 import { Connection, SessionHost } from "@agent-harness/daemon";
-import type { ExecChannelOptions, ExecTarget, Pod, WaitForReadyOptions } from "@agent-harness/k8s";
+import type {
+  ExecChannelOptions,
+  ExecTarget,
+  Pod,
+  RunExecOptions,
+  RunExecResult,
+  WaitForReadyOptions,
+} from "@agent-harness/k8s";
 import { ToolRegistry } from "@agent-harness/tools";
 import { type DuplexChannel, createChannelPair } from "@agent-harness/transport";
 import type { HarnessConfig } from "../src/config.ts";
@@ -78,6 +85,22 @@ class FakeCluster implements PodCluster {
     this.connection = new Connection(daemonCh, host);
     return clientCh;
   }
+  // One-shot execs (the binary-injection sequence): record them. `--version`
+  // succeeds; `uname -m` reports x64; the install command is treated as done.
+  runExec(
+    target: ExecTarget,
+    _input?: Uint8Array,
+    _options?: RunExecOptions,
+  ): Promise<RunExecResult> {
+    this.calls.push(`runexec:${target.pod}:${target.command.join(" ")}`);
+    if (target.command[0] === "uname") {
+      return Promise.resolve({ exitCode: 0, stdout: "x86_64\n", stderr: "" });
+    }
+    if (target.command.join(" ").includes("--version")) {
+      return Promise.resolve({ exitCode: 0, stdout: "agent-harness 1.2.3\n", stderr: "" });
+    }
+    return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+  }
 }
 
 function baseConfig(cwd: string): HarnessConfig {
@@ -135,6 +158,9 @@ describe("startPodRuntime", () => {
       waitForReady: () => Promise.reject(new Error("never ready")),
       deletePod: () => Promise.resolve(),
       openExec: () => {
+        throw new Error("should not be reached");
+      },
+      runExec: () => {
         throw new Error("should not be reached");
       },
     };

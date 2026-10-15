@@ -19,6 +19,8 @@ import {
   type ExecChannelOptions,
   type ExecTarget,
   type Pod,
+  type RunExecOptions,
+  type RunExecResult,
   type WaitForReadyOptions,
   buildPodManifest,
 } from "@agent-harness/k8s";
@@ -32,6 +34,7 @@ export interface PodCluster {
   waitForReady(name: string, options?: WaitForReadyOptions): Promise<Pod>;
   deletePod(name: string, signal?: AbortSignal): Promise<void>;
   openExec(target: ExecTarget, options?: ExecChannelOptions): DuplexChannel;
+  runExec(target: ExecTarget, input?: Uint8Array, options?: RunExecOptions): Promise<RunExecResult>;
 }
 
 export interface PodRuntimeDeps {
