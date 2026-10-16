@@ -1,143 +1,138 @@
-# TUI brand/accent colour → cyan
+# feat/tui-brand-color — TUI accent → cyan
 
-## Problem
+> **Status:** implementation (ready to execute)
+> **Branch:** `feat/tui-brand-color`
+> **Size:** M · **Blast:** cross-module · **Suited:** Phase 1 → a weaker model (Qwen3 27B) executes (design + sites + acceptance given; it makes and applies the edits); **Review by a stronger model / fresh context** (executor is weak). Phase 2 (OSC-11) → `load-bearing`, Opus-only, a SEPARATE task.
+
+## Context
+
+*— claude-opus-4-8, 2026-10-16*
 
 For the public MIT release the TUI accent must drop the Anthropic trade-dress
-orange and become a distinctive, on-brand cyan. Today the brand colour is:
+orange `#d77757` and the barely-visible permission blue `#6377ff`, and become one
+distinctive cyan: **`#06b6d4`** (dark terminals; light variant `#0891b2` for
+later). Today the colour is **hard-coded in 6 places** plus two theme tokens, so
+it drifts and a change touches many files. This task centralises it to ONE source
+and swaps to cyan.
 
-- **Orange `#d77757`** (Anthropic "claude" orange) — assistant bullets and most
-  component accents.
-- **Blue `#6377ff`** — the permission-dialog frame (and `theme.accent`), barely
-  visible on a dark terminal.
+Scope split: **Phase 1** (this task now) = centralise + swap to cyan on dark,
+safe and release-ready. **Phase 2** (deferred, separate task, NOT Qwen) = `theme`
+config `auto|dark|light` + an OSC-11 terminal-background probe before Ink mounts
+(that touches terminal ownership, AGENTS §7 → `load-bearing`).
 
-…and it is **hard-coded in 6 places** plus two separate theme tokens, so a colour
-change today means editing many files and the value drifts. Decision (recorded):
-unify to **ONE** accent token, **cyan `#06b6d4`** on dark terminals (contrast
-7.5:1), light-terminal variant **`#0891b2`** (3.3:1 on white).
+## Implementation
 
-## Preconditions (verified against the source)
+*— claude-opus-4-8, 2026-10-16*
 
-- **Two colour-consumption paths**, which is why the value is scattered:
-  1. **chalk stylers** in `theme.ts` (`theme.claude`/`theme.accent`), consumed by
-     `render-lines.ts` (e.g. `theme.claude("⏺")` at `:66`, `theme.accent("◆")` at
-     `:239`, `theme.accent("⏺")` at `:288`) — these build **styled strings**.
-  2. **Ink `<Text color={hex}>` props** with hard-coded hex in components:
-     `components/LineInput.tsx:13` (`CLAUDE = "#d77757"`),
-     `components/Thinking.tsx:11` (`CLAUDE = "#d77757"`),
-     `components/CommandPalette.tsx:11` (`ACCENT = "#d77757"`),
-     `components/StatusBar.tsx:94` (`color="#d77757"` inline),
-     `components/PermissionPrompt.tsx:6` (`ACCENT = "#6377ff"`).
-  > The recorded decision's file list was **incomplete** — it missed
-  > `CommandPalette.tsx` and `StatusBar.tsx`. All six sites are listed here.
-- A chalk styler (`theme.accent`) is a **function**, not a hex string, so it
-  cannot be passed to an Ink `color=` prop. Both paths therefore need a **shared
-  raw hex constant** as the single source of truth.
-- **No dark/light detection exists.** `theme.ts`'s header says it is "tuned for a
-  dark terminal"; there is no terminal-background probe anywhere.
-- **Colour is not frame-observable in tests.** chalk auto-disables when stdout is
-  not a TTY, and the ink-testing-library harness strips SGR — so the TUI tests
-  assert text/structure, never colour. (Same constraint we hit with the cursor
-  inverse.) Correctness is verified by the resolved-token value + a no-stale-hex
-  check + a manual soak, not by frame assertions.
-- The config stack already threads scalar options end-to-end
-  (`contextWindow`: `config/src/schema.ts:28`, `resolve.ts:158`,
-  `load.ts:44,187`) — a new `theme` option follows the same shape.
-- The TUI entry `run.tsx` calls Ink's `render()` (`:56`); anything that must own
-  the raw terminal (an OSC-11 probe) runs **before** that, per AGENTS §7 ("never
-  write raw while Ink owns the screen").
+> **For the executor (Qwen):** this is yours to *do*, not transcribe. The plan
+> gives the design, the sites, and the acceptance criteria; **you** read each
+> site, make the edit that reaches the target state, and verify. Keep edits
+> minimal and faithful to the Design; don't reformat unrelated lines. If a site
+> doesn't look as described, reconcile it with the Design — or STOP and report if
+> it's genuinely ambiguous; never retry with invented text. When done, run the
+> Tests/Verification; `bun run check` must be green. Work only on this branch.
 
-## The one load-bearing assumption
+### Load-bearing assumption
 
-> There must be **one source of truth** for the accent hex that *both* the chalk
-> path and the Ink-`color=` path read. Otherwise the colour re-scatters and the
-> next change reopens this same problem. Everything below funnels both paths
-> through a single exported constant in `theme.ts`.
+There is **one source of truth** for the accent hex that *both* colour paths
+read: a new `accentHex` constant in `theme.ts`. The chalk path uses
+`chalk.hex(accentHex)`; the component path imports `accentHex` for `color=`
+props. If both don't funnel through it, the colour re-scatters. (Everything below
+enforces this.)
 
-## Design (phased — ship the safe part first)
+### Preconditions (verified)
 
-### Phase 1 — centralise + swap to cyan (dark), low risk
+- **Two colour-consumption paths** (why it's scattered):
+  1. chalk stylers in `theme.ts` → used by `render-lines.ts` (`theme.claude("⏺")`
+     at `:66`; `theme.accent` at `:239`,`:288`).
+  2. Ink `<Text color={…}>` in components with hard-coded hex:
+     `components/LineInput.tsx:13` `const CLAUDE = "#d77757"` (used `:37`),
+     `components/Thinking.tsx:11` `const CLAUDE = "#d77757"` (used `:26`),
+     `components/CommandPalette.tsx:11` `const ACCENT = "#d77757"` (used `:30`),
+     `components/PermissionPrompt.tsx:6` `const ACCENT = "#6377ff"` (used `:41`,`:50`),
+     `components/StatusBar.tsx:94` inline `color="#d77757"`.
+- A chalk styler is a function, not a hex → it can't be an Ink `color=` prop;
+  hence the shared raw `accentHex` constant.
+- `chalk.hex(...)` exists (chalk is already imported in `theme.ts:11`).
+- Components live in `packages/tui/src/components/`; `theme.ts` is
+  `packages/tui/src/theme.ts` → import path from a component is `../theme.ts`.
+- Removing the `claude` token is safe: its only use is `render-lines.ts:66`
+  (changed below). If any `theme.claude` reference is missed, **typecheck fails**
+  (the key no longer exists) — a built-in safety net, not a silent bug.
+- Colour is **not frame-observable** in tests (chalk off + SGR stripped) → the
+  regression net is a grep-guard + a tiny unit test on `accentHex`, not frames.
 
-1. In `theme.ts`, define the single source:
-   ```ts
-   export const ACCENT_DARK = "#06b6d4";
-   export const ACCENT_LIGHT = "#0891b2";
-   export const accentHex = ACCENT_DARK; // Phase 1: dark only
-   ```
-2. Collapse the two brand tokens into **one**: `theme.accent = chalk.hex(accentHex)`;
-   **remove `theme.claude`**. In `render-lines.ts` the assistant bullet (`:66`,
-   was `theme.claude`) now uses `theme.accent`, matching the in-progress glyph.
-   *(Consequence: the assistant bullet and the in-progress/sub-agent glyph become
-   the same cyan — a deliberate flattening to one brand colour; confirm it reads
-   well.)*
-3. Point the 6 component sites at the shared constant: replace each hard-coded
-   `"#d77757"`/`"#6377ff"` with `import { accentHex }` and `color={accentHex}`
-   (drop the per-file `CLAUDE`/`ACCENT` consts).
+### Design
 
-That alone delivers the release-ready cyan and the maintainability win (one token,
-zero hard-coded hex), with no new runtime machinery.
+Phase 1: add `accentHex = "#06b6d4"` to `theme.ts`; collapse the two brand tokens
+into one `accent = chalk.hex(accentHex)` (drop `claude`); point `render-lines.ts`
+at `theme.accent`; in each component, import `accentHex` and set its local accent
+const (or the inline prop) to it. Each component keeps its existing usage sites
+unchanged — only the *value* now comes from the single source. (The local const
+names `CLAUDE`/`ACCENT` stay as aliases to `accentHex`; renaming them is cosmetic
+debt, see Review — do NOT rename now, it adds edits and risk.)
 
-### Phase 2 — dark/light selection (OSC-11 + config), higher risk
+### Files — sites & target state
 
-4. Add a `theme` config: `"auto" | "dark" | "light"` (default `"auto"`), threaded
-   through `config` (`schema.ts`/`resolve.ts`/`load.ts`) like `contextWindow`.
-5. `theme.ts` becomes mode-aware: instead of a static `accentHex`, a one-time
-   `initTheme(mode)` (or `createTheme(mode)`) picks `ACCENT_DARK`/`ACCENT_LIGHT`.
-   Everything still reads one resolved value; components read it after init.
-6. `"auto"` resolution: in `run.tsx`, **before** `render()`, probe the terminal
-   background with **OSC 11** (`ESC ] 11 ; ? BEL`), parse the `rgb:…` reply,
-   decide dark/light by luminance, with a **~150 ms timeout → fallback dark** and
-   full restore of stdin state. Explicit `dark`/`light` skips the probe. This is
-   the only piece that touches raw terminal I/O and must obey AGENTS §7 (done and
-   cleared before Ink mounts; no raw writes once Ink owns the screen).
+Seven files; the executor reads each and makes the edit that reaches the target
+(keep usage sites intact where possible — only the *value* moves to one source):
 
-Phase 2 is separable and can land later; Phase 1 is the release blocker.
+- `theme.ts` — add `export const accentHex = "#06b6d4";` (after the `chalk`
+  import); collapse the brand tokens to one — `accent: chalk.hex(accentHex)` —
+  and **remove** `claude` (`:15`).
+- `render-lines.ts:66` — the assistant bullet `theme.claude("⏺")` → `theme.accent`
+  (the only `theme.claude` use; removing the token makes typecheck flag a miss).
+- `components/LineInput.tsx:13` (`CLAUDE`, used `:37`), `Thinking.tsx:11`
+  (`CLAUDE`, `:26`), `CommandPalette.tsx:11` (`ACCENT`, `:30`),
+  `PermissionPrompt.tsx:6` (`ACCENT`, `:41`,`:50`) — in each: import `accentHex`
+  from `../theme.ts` and make the local const resolve to it (keep the const name
+  and its usages).
+- `components/StatusBar.tsx:94` — inline `color="#d77757"`: import `accentHex` and
+  use it there.
 
-## Files to change
+Target invariant: **no literal `#d77757`/`#6377ff` left under `packages/tui/src`**,
+and every accent reads `accentHex`.
 
-Phase 1:
-- `packages/tui/src/theme.ts` — add `ACCENT_DARK`/`ACCENT_LIGHT`/`accentHex`;
-  `accent = chalk.hex(accentHex)`; remove `claude`; refresh the header comment.
-- `packages/tui/src/render-lines.ts` — `theme.claude` → `theme.accent` (`:66`).
-- `packages/tui/src/components/LineInput.tsx`, `Thinking.tsx`,
-  `CommandPalette.tsx`, `StatusBar.tsx`, `PermissionPrompt.tsx` — use `accentHex`,
-  drop the local hex consts.
+### Failure modes
 
-Phase 2 (deferred):
-- `packages/config/src/{schema,resolve,load}.ts` — `theme: auto|dark|light`.
-- `packages/tui/src/theme.ts` — `initTheme(mode)`.
-- `packages/tui/src/run.tsx` + a new `osc11.ts` (pure parse + injectable probe).
-- wiring to pass the resolved mode into `initTheme` before mount.
+- *Executor drift / corrupted edit:* old strings are short and distinctive and
+  live outside repetitive regions → low risk; the "STOP, don't invent" rule and
+  `bun run check` catch the rest.
+- *Missed `theme.claude` site:* typecheck fails (key removed) — caught, not
+  silent.
+- *Import in the wrong place / `chalk.hex` typo:* lint/typecheck fail — caught.
+- *Residual hard-coded hex:* the grep-guard below fails.
 
-## Tests
+### Tests
 
-- **Phase 1:** a `theme.test.ts` asserting `accentHex === "#06b6d4"`, `theme.accent`
-  is defined and `theme.claude` is gone (type/compile guard); a repo check that no
-  `#d77757`/`#6377ff` remains under `packages/tui/src` (grep guard — colour isn't
-  frame-testable, so this is the regression net). Existing TUI tests must stay
-  green (they assert structure, not colour).
-- **Phase 2:** pure unit tests for the OSC-11 reply parser (`rgb:` string →
-  dark/light by luminance; malformed → fallback), the timeout path (injected slow
-  terminal → dark), and config precedence (explicit `light` beats `auto`; `auto`
-  with no reply → dark). The terminal query is injected/faked — no real TTY.
+- **Grep-guard (must return nothing):**
+  `grep -rn "d77757\\|6377ff" packages/tui/src` → zero matches.
+- **New unit test** `packages/tui/test/theme.test.ts`:
+  ```ts
+  import { expect, test } from "bun:test";
+  import { accentHex, theme } from "../src/theme.ts";
 
-## Validation
+  test("brand accent is the release cyan, single-sourced", () => {
+    expect(accentHex).toBe("#06b6d4");
+    expect(typeof theme.accent).toBe("function"); // chalk styler present
+  });
+  ```
+- The existing TUI suite must stay green (it asserts structure, not colour).
 
-`bun run check` green. Manual soak on a **dark** terminal (Phase 1): assistant
-bullets, in-progress glyph, input prompt, command palette, status bar and the
-permission frame are all the new cyan and readable; `grep -rn "d77757\|6377ff"
-packages/tui/src` returns nothing. Phase 2: repeat on a **light** terminal and
-confirm `auto` picks `#0891b2`, and that the OSC-11 probe leaves the terminal
-clean (no stray escape, input not swallowed) because it completes before Ink
-mounts.
+## Execution
 
-## Notes / debt
+*— <executor model-id>, <date>*
 
-- Contrast (recorded): `#06b6d4` 7.5:1 on dark; `#0891b2` 3.3:1 on white. Reason
-  for cyan: distinctive/on-brand (cephalopod/deep-sea), outside the
-  red/green/yellow semantic band, strong on dark (the typical dev/SRE case).
-- Flattening `claude`+`accent` into one token means the assistant bullet is no
-  longer a distinct colour from the in-progress glyph. If we later want two brand
-  shades, reintroduce a second token from the same source constant — don't
-  re-hard-code.
-- Phase 2's OSC-11 auto-detection is the only risky part; shipping Phase 1 alone
-  (dark cyan, centralised) is a complete, safe release step on its own.
+<!-- Qwen fills this: the edits actually applied, in order, the `bun run check`
+result, the grep-guard output, and ANY drift from the Files section (and why).
+If an old-string did not match, record that you stopped and what you found. -->
+
+## Review
+
+*— <reviewer model-id>, <date> (fresh context — executor was a weak model)>*
+
+<!-- Fill after execution: re-run `bun run check` and the grep-guard; confirm the
+single-source invariant (no stray hex, both paths read accentHex); eyeball a dark
+terminal if possible; note how the executor behaved (clean mechanical apply? any
+drift/corruption?). Cosmetic debt to note: the `CLAUDE`/`ACCENT` local consts are
+now aliases to accentHex — a later cleanup may rename them. -->
