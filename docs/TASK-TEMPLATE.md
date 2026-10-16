@@ -3,6 +3,11 @@ Task doc template. Copy to docs/<type>/<slug>.md where <type> is feat | fix |
 eval and <slug> matches the branch name <type>/<slug>. One task, one branch, one
 doc. Each section is signed by the model that wrote it: `*— <model-id>, <date>*`.
 See AGENTS.md §10.
+
+Migrating a legacy §8 plan into this shape: Problem → Context; Preconditions /
+Design / Files / Tests (+ the load-bearing assumption, failure modes) →
+Implementation (sub-sections below); Validation → Execution (the gate result)
+and Review (the judgment); Notes/debt → Review (+ follow-ups).
 -->
 
 # <type>/<slug> — <Title>
@@ -33,10 +38,39 @@ decision it serves. For an `eval`, the exact question being decided.
 
 *— <model-id>, <YYYY-MM-DD>*
 
-The plan (AGENTS §8), verified against the source: cite `file:line`, name the
-one load-bearing assumption and prove it, enumerate failure modes, list the
-exact files in dependency order, and the tests. Approved before Execution
-starts. (For an `eval`, left empty until the eval is promoted.)
+The plan (AGENTS §8), verified against the source — approved before Execution
+starts. (For an `eval`, left empty until the eval is promoted.) Fill the
+sub-sections below; drop one only when it genuinely does not apply.
+
+### Load-bearing assumption
+
+The ONE thing the change stands or falls on. Prove it with `file:line` before
+anything else; if you cannot cite it, you do not know it.
+
+### Preconditions
+
+Verified invariants / facts the change relies on, each cited `file:line`
+(especially any AGENTS §7 invariant it leans on).
+
+### Design
+
+How it works. Prefer the additive, reuse-existing-seams shape (§7); name the
+shared source of truth and wire both ends.
+
+### Files
+
+The exact files to change, smallest diff, in dependency order (protocol →
+daemon → client → cli → tui).
+
+### Failure modes
+
+Not just the happy path: error, disconnect, race, empty input, version skew —
+and, for each, how state converges. A silent drop is a bug; design it out.
+
+### Tests
+
+Red-before-green for a fix (§9); the exact property each test pins, with the
+fakes/seams to use.
 
 ## Execution
 
