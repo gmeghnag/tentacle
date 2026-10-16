@@ -1,6 +1,14 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as markdown from "../src/markdown.ts";
-import { itemLines, transcriptLines, transcriptRows, wrapLines } from "../src/render-lines.ts";
+import {
+  itemLines,
+  layoutTranscript,
+  sliceLaid,
+  transcriptLines,
+  transcriptRows,
+  warmRowsChunk,
+  wrapLines,
+} from "../src/render-lines.ts";
 import type { DisplayItem, ToolItem } from "../src/state.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
@@ -246,6 +254,112 @@ describe("transcriptRows", () => {
       turn = [settled, { kind: "assistant", text: "streaming more" }];
       transcriptRows(turn, o);
       expect(spy.mock.calls.length).toBe(afterFirst + 1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("a Ctrl+O (expandAll) toggle re-lays-out only tool items, not user/assistant", () => {
+    // Only `tool` items collapse, so only their layout depends on expandAll.
+    // Keying expand into every item's cache made a toggle needlessly re-render
+    // the whole transcript; non-tool items must stay cached across the flip.
+    const spy = spyOn(markdown, "renderMarkdown");
+    try {
+      // First paint lays everything out (the assistant item renders markdown).
+      transcriptRows(items, { expandAll: false, width });
+      const afterFirst = spy.mock.calls.length;
+      expect(afterFirst).toBeGreaterThanOrEqual(1);
+
+      // Flip expandAll: the user/assistant items are unaffected by expand, so
+      // they must be served from cache — zero additional markdown renders.
+      transcriptRows(items, { expandAll: true, width });
+      expect(spy.mock.calls.length).toBe(afterFirst);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("windowed layout (layoutTranscript + sliceLaid)", () => {
+  const bigTool: ToolItem = {
+    kind: "tool",
+    id: "w",
+    name: "shell",
+    args: "{}",
+    status: "ok",
+    startedAt: 0,
+    endedAt: 1,
+    resultText: Array.from({ length: 12 }, (_, i) => `out ${i + 1}`).join("\n"),
+  };
+  const items: DisplayItem[] = [
+    { kind: "user", text: "a prompt long enough to wrap at a narrow width right here" },
+    {
+      kind: "assistant",
+      text: "**bold** reply with enough words to wrap across several rows at width 20",
+    },
+    bigTool,
+    { kind: "assistant", text: "short tail" },
+  ];
+  const opts = { expandAll: true, width: 20 };
+
+  test("total equals the full transcriptRows length", () => {
+    expect(layoutTranscript(items, opts).total).toBe(transcriptRows(items, opts).length);
+  });
+
+  test("sliceLaid(s,e) equals transcriptRows(...).slice(s,e) for EVERY window", () => {
+    const full = transcriptRows(items, opts);
+    const { laid, total } = layoutTranscript(items, opts);
+    expect(total).toBe(full.length);
+    expect(total).toBeGreaterThan(4); // the transcript really does span many rows
+    for (let s = 0; s <= total; s++) {
+      for (let e = s; e <= total; e++) {
+        expect(sliceLaid(laid, s, e)).toEqual(full.slice(s, e));
+      }
+    }
+  });
+
+  test("an all-blank transcript yields total 0 and an empty slice", () => {
+    const blank: DisplayItem[] = [{ kind: "assistant", text: "   " }];
+    const { laid, total } = layoutTranscript(blank, opts);
+    expect(total).toBe(0);
+    expect(sliceLaid(laid, 0, 10)).toEqual([]);
+  });
+
+  test("a window clamped past the end returns only the rows that exist", () => {
+    const full = transcriptRows(items, opts);
+    const { laid, total } = layoutTranscript(items, opts);
+    expect(sliceLaid(laid, total - 2, total + 50)).toEqual(full.slice(total - 2));
+  });
+});
+
+describe("warmRowsChunk (non-blocking resize warm)", () => {
+  // Fresh item identities → cache is cold regardless of width.
+  const items: DisplayItem[] = Array.from({ length: 6 }, (_, i) => ({
+    kind: "assistant" as const,
+    text: `reply ${i} with **enough** words to wrap at a narrow width right here`,
+  }));
+
+  test("processes a bounded prefix within the budget and returns a resume index", () => {
+    const next = warmRowsChunk(items, { expandAll: true, width: 24 }, 0, 0);
+    // Budget 0 still makes progress (≥1 item) but does not do the whole lot.
+    expect(next).toBeGreaterThan(0);
+    expect(next).toBeLessThan(items.length);
+  });
+
+  test("iterating to completion warms the transcript so the commit render is a no-op", () => {
+    const o = { expandAll: true, width: 29 };
+    let idx = 0;
+    let guard = 0;
+    while (idx < items.length && guard++ < 1000) {
+      idx = warmRowsChunk(items, o, idx, 0);
+    }
+    expect(idx).toBe(items.length);
+    // After warming, laying out at that width must do zero markdown renders —
+    // i.e. the size-commit render pays ~nothing (no synchronous re-wrap freeze).
+    const spy = spyOn(markdown, "renderMarkdown");
+    try {
+      layoutTranscript(items, o);
+      expect(spy.mock.calls.length).toBe(0);
     } finally {
       spy.mockRestore();
     }

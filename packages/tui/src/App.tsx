@@ -20,7 +20,7 @@ import { useLineEditor, usePaintScheduler } from "./hooks.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
 import { stepPaste, stripPasteMarkers } from "./paste.ts";
 import { usePermissionBroker } from "./permission-ui.ts";
-import { stripAnsi, transcriptRows } from "./render-lines.ts";
+import { layoutTranscript, sliceLaid, stripAnsi, warmRowsChunk } from "./render-lines.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import { type Selection, extractSelection, isNonEmpty, rowSelectionRange } from "./selection.ts";
 import {
@@ -161,6 +161,9 @@ export function App({
   const abortRef = useRef<AbortController | null>(null);
   const lastUserRef = useRef<string | null>(null);
   const prevRowsRef = useRef(0);
+  // Generation token for the background resize re-layout warm: a newer resize
+  // (or unmount) bumps it so the in-flight warm aborts instead of committing.
+  const warmGenRef = useRef(0);
   // Autonomous wake on a background-job exit: a job that finishes while a turn
   // is running sets this, so the wake fires once the current turn settles (the
   // running turn won't see the exit — the agent flushes exits at turn START).
@@ -220,11 +223,42 @@ export function App({
     if (!stdout || typeof stdout.on !== "function") {
       return;
     }
-    const onResize = (): void =>
-      setSize({ columns: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
+    const onResize = (): void => {
+      const next = { columns: stdout.columns ?? 80, rows: stdout.rows ?? 24 };
+      // Height-only change: wrapping is unaffected, so resize the viewport now.
+      if (next.columns === size.columns) {
+        setSize(next);
+        return;
+      }
+      // Width change: re-wrapping the whole transcript is O(transcript) and would
+      // freeze the frame. Warm the row cache at the new width off the render
+      // thread in time-budgeted chunks, then commit — the committing render is
+      // then all cache hits. A newer resize bumps the token and supersedes this
+      // warm, coalescing a drag storm onto the latest width.
+      warmGenRef.current += 1;
+      const gen = warmGenRef.current;
+      const items = stateRef.current.items;
+      const opts = { expandAll, width: next.columns };
+      let idx = 0;
+      const step = (): void => {
+        if (warmGenRef.current !== gen) {
+          return; // superseded by a newer resize, or unmounted
+        }
+        idx = warmRowsChunk(items, opts, idx, 6);
+        if (idx >= items.length) {
+          setSize(next);
+          return;
+        }
+        setTimeout(step, 0);
+      };
+      step();
+    };
     stdout.on("resize", onResize);
-    return () => void stdout.off?.("resize", onResize);
-  }, [stdout]);
+    return () => {
+      stdout.off?.("resize", onResize);
+      warmGenRef.current += 1; // cancel any in-flight warm on unmount/resubscribe
+    };
+  }, [stdout, size.columns, expandAll]);
 
   // Reset the palette selection whenever the typed text changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
@@ -256,10 +290,14 @@ export function App({
       ? 1 + queued.length + inputBoxRows
       : inputBoxRows + paletteCommands.length;
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
-  const allRows = transcriptRows(st.items, { expandAll, width: columns });
-  const total = allRows.length;
+  // Positional layout only (O(items) cache lookups, no full array): take the
+  // row `total` for scroll maths and materialise just the visible window. The
+  // whole transcript is assembled on demand (sliceLaid 0..total) only where a
+  // full buffer is genuinely needed — a text selection on mouse-release.
+  const layout = layoutTranscript(st.items, { expandAll, width: columns });
+  const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
-  const visible = allRows.slice(win.start, win.end);
+  const visible = sliceLaid(layout.laid, win.start, win.end);
   const scrolledUp = isScrolledUp(scrollOffset, total, viewport);
   const hiddenAbove = win.start;
 
@@ -661,7 +699,9 @@ export function App({
       }
       // Left button: release copies the selection, press/drag starts/extends it.
       if (!r.press) {
-        finishSelection(allRows);
+        // Selection can span rows scrolled out of view, so assemble the whole
+        // buffer here — only on release, never on the per-frame render path.
+        finishSelection(sliceLaid(layout.laid, 0, total));
         return;
       }
       const visibleIndex = r.y - 1;
