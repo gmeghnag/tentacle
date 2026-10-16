@@ -137,6 +137,18 @@ assume.
   adds **only a transport** (a `DuplexChannel`) + lifecycle — never a parallel
   agent loop or a second session code path. If you're copying the send/stream
   logic, stop: you're meant to reuse it.
+- **Logic lives in pure modules; components only render.** Any decision with
+  branching or computation — editing, history, selection, view projection, key
+  routing — goes in a pure, React-free, unit-tested module (`editor.ts`,
+  `history.ts`, `input-view.ts` are the pattern), so a behaviour is understood
+  and tested in one place, not chased across components. A `.tsx` component is a
+  dumb renderer: it maps a precomputed view-model to elements and owns only
+  presentation (colours, glyphs, spacing). The split line: *computation/branching
+  you'd want to test → pure module; "what it looks like" → component.* Don't push
+  presentation into the view-model (that's just ceremony), and don't bury logic in
+  a component "because it's small" — the TUI harness strips SGR, so render-time
+  logic left in a component is often untestable, which is reason enough to extract
+  it. (New code follows this; the `App.tsx` key handler is known debt to extract.)
 - **Single-broker invariant.** Exactly ONE `PermissionBroker` instance is shared
   between the runtime (`RemoteClient`) and `startTui`. Two instances **silently**
   decouple: the daemon-side default `allowAll` auto-approves everything and the

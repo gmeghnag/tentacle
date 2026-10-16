@@ -1,6 +1,12 @@
 # TUI input editing: word-jump, shift-selection, prompt history
 
-**Stato:** **non implementato** (piano). Tre feature della riga di input della TUI.
+**Stato:** **in corso** — slice pure (editor/history/hooks/input-span) verdi;
+wiring `App.tsx` + render `LineInput` + test ink non ancora fatti. Resoconto
+as-built: `docs/tui-input-editing-esecution.md`.
+⚠️ La **decisione (C) qui sotto è stata raffinata dall'utente**: Up/Down plain
+navigano la **bozza verticale**, la history si attiva **solo al bordo**
+(prima/ultima riga); Shift+Up/Down **mai** history (estendono la selezione).
+Vedi §0 del log di esecuzione. Tre feature della riga di input della TUI.
 Decisioni utente **confermate** (vedi §3). Basato su `main` @ `7bb38f3`.
 **Nota:** da implementare DOPO che il rename `→ tentacle` è atterrato (tocca gli
 stessi file); ri-verificare i `file:line` citati, che il rename può aver spostato

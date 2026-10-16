@@ -41,6 +41,13 @@ function delay(ms: number): Promise<void> {
 }
 
 const UP = "\u001B[A";
+const DOWN = "\u001B[B";
+const SHIFT_UP = "\u001B[1;2A";
+const SHIFT_DOWN = "\u001B[1;6B";
+const SHIFT_RIGHT = "\u001B[1;1C"; // some terminals; see below for the xterm form
+const XTERM_SHIFT_RIGHT = "\u001B[2C"; // xterm/VT200+ shift+right
+const XTERM_CTRL_RIGHT = "\u001B[5C"; // ctrl+right
+const XTERM_ALT_RIGHT = "\u001B[1;3C"; // alt+right
 const PAGE_UP = "\u001B[5~";
 const WHEEL_UP = "\u001B[<64;10;5M";
 const WHEEL_DOWN = "\u001B[<65;10;5M";
@@ -676,6 +683,173 @@ describe("App robustness", () => {
     stdin.write("x");
     await delay(40);
     expect(lastFrame() ?? "").toContain("hellox");
+    unmount();
+  });
+});
+
+describe("input editing: line start/end", () => {
+  // Ink 5.0.1 does not surface Home/End through useInput (they arrive as
+  // input="" with no flag), so line start/end is bound to Ctrl+A / Ctrl+E —
+  // the readline convention. We observe the cursor position by where the next
+  // inserted character lands (the harness strips SGR, so the block cursor and
+  // any selection highlight are invisible in the frame).
+  const mkApp = () => {
+    const model = new ScriptedProvider([]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv });
+    return render(<App agent={agent} model="qwen3" cwd="/tmp/work" />);
+  };
+  // A pre-existing render quirk (in the unchanged LineInput cursor renderer)
+  // can split a mid-line block cursor onto the separator row (e.g. "Xhell" +
+  // "o"). It is out of scope here and does not affect the buffer, so we assert
+  // on the character order with the rule/newlines removed.
+  const unwrap = (f: string | undefined): string => (f ?? "").replace(/[─\n]/g, "");
+
+  test("Ctrl+A jumps to the start of the line", async () => {
+    const { stdin, lastFrame, unmount } = mkApp();
+    await delay(20);
+    stdin.write("hello");
+    await delay(20);
+    stdin.write("\u0001"); // Ctrl+A
+    stdin.write("X");
+    await delay(20);
+    const frame = unwrap(lastFrame());
+    expect(frame).toContain("Xhello");
+    expect(frame).not.toContain("helloX");
+    unmount();
+  });
+
+  test("Ctrl+E jumps to the end of the line", async () => {
+    const { stdin, lastFrame, unmount } = mkApp();
+    await delay(20);
+    stdin.write("hello");
+    await delay(20);
+    stdin.write("\u0001"); // Ctrl+A → start
+    stdin.write("X"); // "Xhello", cursor after X
+    stdin.write("\u0005"); // Ctrl+E → end
+    stdin.write("Y"); // appended → "XhelloY"
+    await delay(20);
+    expect(unwrap(lastFrame())).toContain("XhelloY");
+    unmount();
+  });
+
+  test("a mid-line cursor reached by editing renders on one clean line", async () => {
+    // Regression: an Ink 5.x reconciliation quirk made the block-cursor row
+    // (a nested `<Text inverse>` inside a `<Text>`) mis-measure when the value
+    // grew by a char with the cursor mid-line, wrapping the last char onto the
+    // box's border row ("❯ Xhell" + "──o──"). Ink ≥6.6 fixes it, but that needs
+    // React 19; LineInput renders the cursor as sibling Texts instead.
+    const { stdin, lastFrame, unmount } = mkApp();
+    await delay(20);
+    stdin.write("hello");
+    await delay(20);
+    stdin.write("\u0001"); // Ctrl+A → start
+    stdin.write("X"); // "Xhello", cursor mid-line (col 1)
+    await delay(20);
+    const frame = lastFrame() ?? "";
+    // The whole value stays on the input line …
+    expect(frame).toContain("❯ Xhello");
+    // … and no character bleeds onto a separator/border row.
+    expect(frame).not.toMatch(/─[0-9A-Za-z]─/);
+    unmount();
+  });
+});
+
+describe("input editing: navigation, history & selection", () => {
+  const mkApp = () => {
+    const model = new ScriptedProvider([]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv });
+    return render(<App agent={agent} model="qwen3" cwd="/tmp/work" />);
+  };
+
+  test("Up on the only line recalls the previous prompt from history", async () => {
+    const { stdin, lastFrame, unmount } = mkApp();
+    await delay(30);
+    stdin.write("first task");
+    await delay(20);
+    stdin.write("\r"); // submit → history gains "first task", the input clears
+    await delay(60);
+    stdin.write(UP);
+    await delay(20);
+    // The live input line (❯, not the transcript's ›) shows the recalled prompt.
+    expect(lastFrame() ?? "").toContain("❯ first task");
+    unmount();
+  });
+
+  test("Up inside a multi-line draft moves the cursor up, it does not recall history", async () => {
+    const { stdin, lastFrame, unmount } = mkApp();
+    await delay(30);
+    stdin.write("earlier");
+    await delay(20);
+    stdin.write("\r"); // history = ["earlier"]
+    await delay(60);
+    // Build a two-line draft: "foo", then `\`+Enter (continuation), then "bar".
+    stdin.write("foo\\"); // "foo" then a trailing backslash
+    await delay(20);
+    stdin.write("\r"); // continuation → newline, not submit
+    await delay(20);
+    stdin.write("bar");
+    await delay(20);
+    stdin.write(UP); // on line 2 → moveVertical up to line 1, no history
+    await delay(20);
+    stdin.write("X"); // inserted on line 1 (at the carried column, end of "foo")
+    await delay(20);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("fooX");
+    expect(frame).toContain("bar");
+    // History was not recalled: "earlier" lives only in the transcript (›).
+    expect(frame).not.toContain("❯ earlier");
+    unmount();
+  });
+
+  test("Down past the newest entry restores the live draft", async () => {
+    const { stdin, lastFrame, unmount } = mkApp();
+    await delay(30);
+    stdin.write("aaa");
+    await delay(20);
+    stdin.write("\r"); // history = ["aaa"]
+    await delay(60);
+    stdin.write("mydraft"); // a live draft, not submitted
+    await delay(20);
+    stdin.write(UP); // recall "aaa" (the draft is saved)
+    await delay(20);
+    expect(lastFrame() ?? "").toContain("❯ aaa");
+    stdin.write(DOWN); // past the newest → restore the saved draft
+    await delay(20);
+    expect(lastFrame() ?? "").toContain("❯ mydraft");
+    unmount();
+  });
+
+  test("Shift+Right selects and Backspace deletes the selected range", async () => {
+    const { stdin, lastFrame, unmount } = mkApp();
+    await delay(30);
+    stdin.write("abcdef");
+    await delay(20);
+    stdin.write("\u0001"); // Ctrl+A → start
+    await delay(20);
+    stdin.write(XTERM_SHIFT_RIGHT);
+    stdin.write(XTERM_SHIFT_RIGHT);
+    stdin.write(XTERM_SHIFT_RIGHT); // selection spans "abc"
+    await delay(20);
+    stdin.write("\u007F"); // Backspace → deletes the selection
+    await delay(20);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("❯ def");
+    expect(frame).not.toContain("abc");
+    unmount();
+  });
+
+  test("Ctrl+Right jumps to the next word boundary", async () => {
+    const { stdin, lastFrame, unmount } = mkApp();
+    await delay(30);
+    stdin.write("one two three");
+    await delay(20);
+    stdin.write("\u0001"); // Ctrl+A → start
+    await delay(20);
+    stdin.write(XTERM_CTRL_RIGHT); // → end of "one"
+    await delay(20);
+    stdin.write("X"); // inserted at the word boundary
+    await delay(20);
+    expect(lastFrame() ?? "").toContain("❯ oneX two three");
     unmount();
   });
 });

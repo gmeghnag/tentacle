@@ -16,9 +16,11 @@ import { LineInput } from "./components/LineInput.tsx";
 import { PermissionPrompt, permissionPromptRows } from "./components/PermissionPrompt.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
+import { pushHistory, recall } from "./history.ts";
 import { useLineEditor, usePaintScheduler } from "./hooks.ts";
+import { resolveLineInput } from "./input-actions.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
-import { stepPaste, stripPasteMarkers } from "./paste.ts";
+import { sanitizePasted, stepPaste } from "./paste.ts";
 import { usePermissionBroker } from "./permission-ui.ts";
 import { layoutTranscript, sliceLaid, stripAnsi, warmRowsChunk } from "./render-lines.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
@@ -91,17 +93,6 @@ const WELCOME = "Tentacle ready. Type a task, or `/help` for commands.";
 
 // Lines scrolled per mouse-wheel notch.
 const WHEEL_LINES = 3;
-// Any control byte — such chars are never inserted into the input buffer by the
-// single-keystroke path.
-// biome-ignore lint/suspicious/noControlCharactersInRegex: detects control bytes
-const CONTROL_RE = /[\x00-\x1f\x7f]/;
-// Pasted text keeps newlines and tabs (the prompt is multi-line); CRLF/CR are
-// normalised to LF and every other control byte is stripped. `\t` (\u0009) and
-// `\n` (\u000a) are intentionally outside this class.
-// biome-ignore lint/suspicious/noControlCharactersInRegex: strips control bytes from pastes
-const PASTE_CONTROL_RE = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
-const sanitizePasted = (text: string): string =>
-  text.replace(/\r\n?/g, "\n").replace(PASTE_CONTROL_RE, "");
 // Clipboard reads are trimmed: copied terminal output often has a trailing
 // newline that would otherwise land as a stray blank line.
 const flattenPasted = (text: string): string => sanitizePasted(text).trim();
@@ -148,6 +139,14 @@ export function App({
   const pasteBufRef = useRef<string | null>(null);
   // Recovery timer: fires if a paste's closing marker never arrives (see below).
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Shell-style prompt history, kept in refs (session-local, in-memory; the
+  // input line is not React state, so no re-render is forced on recall).
+  // `histIndexRef === historyRef.length` means "on the live draft" (see
+  // `history.ts`); `draftRef` is the text saved when history is first entered,
+  // restored once the walk returns to the draft slot.
+  const historyRef = useRef<string[]>([]);
+  const histIndexRef = useRef(0);
+  const draftRef = useRef("");
 
   const stateRef = useRef<DisplayState>({
     ...initialState,
@@ -482,6 +481,13 @@ export function App({
         handleCommand(text);
         return;
       }
+      // Record the prompt in history (dedup is inside `pushHistory`) and return
+      // to the live-draft slot: the next Up starts a fresh walk from the newest
+      // entry. Done before the running branch so a steering prompt is recalled
+      // too.
+      historyRef.current = pushHistory(historyRef.current, text);
+      histIndexRef.current = historyRef.current.length;
+      draftRef.current = "";
       // Mid-turn: queue the task (steering) so it is handed to the agent before
       // its next round, instead of starting a new turn. Call through the session
       // (not a detached reference) so `this` is preserved.
@@ -769,79 +775,82 @@ export function App({
       field.insert(restored);
     }
 
-    // Scrolling works whether or not a turn is running.
-    if (key.upArrow) {
-      setScrollOffset((o) => applyScroll(o, "lineUp", total, viewport));
-      return;
-    }
-    if (key.downArrow) {
-      setScrollOffset((o) => applyScroll(o, "lineDown", total, viewport));
-      return;
-    }
-    if (key.pageUp) {
-      setScrollOffset((o) => applyScroll(o, "pageUp", total, viewport));
-      return;
-    }
-    if (key.pageDown) {
-      setScrollOffset((o) => applyScroll(o, "pageDown", total, viewport));
-      return;
-    }
-
     // Line editing works while idle AND while a turn runs (so a task can be
-    // typed and queued for steering); Enter routes to `submit`, which either
-    // runs or enqueues based on the running state.
-    // Ctrl+V: read the OS clipboard and insert at the cursor. (The terminal's
-    // own paste — Cmd+V on macOS — never reaches us as a key; it arrives as a
-    // text chunk, handled by the insert branch below.)
-    if (key.ctrl && char === "v") {
-      void paste().then(
-        (text) => {
-          const clean = flattenPasted(text);
-          if (clean) {
-            field.insert(clean);
-          }
-        },
-        () => pushNotice("_Clipboard unavailable._"),
+    // typed and queued for steering). The routing decision is pure
+    // (`resolveLineInput`); here we only execute it. History recall is
+    // inherently stateful (session refs + the live draft), so it stays a local
+    // closure the "history" action calls into.
+    const historyStep = (dir: -1 | 1): void => {
+      // On the draft slot the live value IS the draft (saved by the first Up);
+      // inside history the saved draft is what a Down past the newest restores.
+      const onDraftSlot = histIndexRef.current >= historyRef.current.length;
+      const prevIndex = histIndexRef.current;
+      const res = recall(
+        { items: historyRef.current, index: prevIndex },
+        dir,
+        onDraftSlot ? field.value : draftRef.current,
       );
-      return;
-    }
-    if (key.return) {
-      // A `\` immediately before the cursor is a line continuation: replace it
-      // with a newline instead of submitting (terminal-independent multi-line
-      // entry; Shift/Alt+Enter aren't reliably distinguishable in a TTY).
-      if (field.value.slice(0, field.cursor).endsWith("\\")) {
+      histIndexRef.current = res.index;
+      draftRef.current = res.draft;
+      // A no-op recall (e.g. Up with an empty history) must not touch the
+      // field, or a mid-buffer cursor would jump to the end.
+      if (res.value === field.value && res.index === prevIndex) {
+        return;
+      }
+      // Shell convention: the cursor lands at the end of the recalled entry.
+      field.set(res.value);
+    };
+
+    const action = resolveLineInput(char, key, { value: field.value, cursor: field.cursor });
+    switch (action.kind) {
+      case "moveVertical":
+        field.moveVertical(action.dir, action.extend);
+        return;
+      case "history":
+        historyStep(action.dir);
+        return;
+      case "scroll":
+        setScrollOffset((o) => applyScroll(o, action.dir, total, viewport));
+        return;
+      case "pasteClipboard":
+        // Ctrl+V: read the OS clipboard and insert at the cursor. (The terminal's
+        // own paste — Cmd+V on macOS — never reaches us as a key; it arrives as a
+        // text chunk, routed to an "insert" action instead.)
+        void paste().then(
+          (text) => {
+            const clean = flattenPasted(text);
+            if (clean) {
+              field.insert(clean);
+            }
+          },
+          () => pushNotice("_Clipboard unavailable._"),
+        );
+        return;
+      case "newline":
+        // A trailing `\` before the cursor is a line continuation, not a submit.
         field.deleteBack();
         field.insert("\n");
         return;
-      }
-      submit(field.value);
-      return;
-    }
-    if (key.leftArrow) {
-      field.moveCursor(-1);
-      return;
-    }
-    if (key.rightArrow) {
-      field.moveCursor(1);
-      return;
-    }
-    if (key.backspace || key.delete) {
-      field.deleteBack();
-      return;
-    }
-    // Insert only genuine printable text; never a control/modified key. A
-    // multi-char chunk (the terminal's native paste) is flattened so an
-    // embedded newline neither breaks the line nor submits it.
-    if (char && !key.ctrl && !key.meta && !key.escape && !key.tab) {
-      const clean =
-        char.length === 1
-          ? CONTROL_RE.test(char)
-            ? ""
-            : char
-          : sanitizePasted(stripPasteMarkers(char));
-      if (clean) {
-        field.insert(clean);
-      }
+      case "submit":
+        submit(field.value);
+        return;
+      case "moveWord":
+        field.moveWord(action.dir, action.extend);
+        return;
+      case "moveCursor":
+        field.moveCursor(action.delta, action.extend);
+        return;
+      case "moveLine":
+        field.moveLine(action.edge, action.extend);
+        return;
+      case "deleteBack":
+        field.deleteBack();
+        return;
+      case "insert":
+        field.insert(action.text);
+        return;
+      case "none":
+        return;
     }
   });
 
@@ -909,6 +918,7 @@ export function App({
               <LineInput
                 value={field.value}
                 cursor={field.cursor}
+                anchor={field.anchor}
                 placeholder="Queue a task…"
                 maxRows={MAX_INPUT_ROWS}
               />
@@ -929,6 +939,7 @@ export function App({
               <LineInput
                 value={field.value}
                 cursor={field.cursor}
+                anchor={field.anchor}
                 placeholder={INPUT_PLACEHOLDER}
                 maxRows={MAX_INPUT_ROWS}
               />
