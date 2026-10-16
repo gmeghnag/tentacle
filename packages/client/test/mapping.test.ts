@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionUpdate } from "@agent-harness/protocol";
+import type { SessionUpdate } from "@tentacle/protocol";
 import { stopReasonFromProtocol, updateToEvent } from "../src/mapping.ts";
 
 describe("stopReasonFromProtocol", () => {

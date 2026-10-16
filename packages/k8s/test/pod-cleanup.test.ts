@@ -38,9 +38,9 @@ describe("buildPodDeleteScript", () => {
     const script = buildPodDeleteScript();
     expect(script).toContain('method: "DELETE"');
     expect(script).toContain("AbortSignal.timeout(5000)");
-    expect(script).toContain("HARNESS_POD_DELETE_URL");
-    expect(script).toContain("HARNESS_POD_DELETE_TOKEN");
-    expect(script).toContain("HARNESS_POD_TLS_CA");
+    expect(script).toContain("TENTACLE_POD_DELETE_URL");
+    expect(script).toContain("TENTACLE_POD_DELETE_TOKEN");
+    expect(script).toContain("TENTACLE_POD_TLS_CA");
     expect(script).toContain(".catch(() => {})");
     expect(script).toContain("process.exit(0)");
     // No secrets are inlined in the script (they come from env): the only
@@ -69,7 +69,7 @@ describe("spawnPodDelete", () => {
     expect(call.options.detached).toBe(true);
     expect(call.options.stdio).toEqual(["ignore", "ignore", "ignore"]);
     expect(unrefs).toHaveLength(1); // the child is unref'd (never blocks exit)
-    expect(call.env.HARNESS_POD_DELETE_URL).toBe(
+    expect(call.env.TENTACLE_POD_DELETE_URL).toBe(
       "https://api.cluster:6443/api/v1/namespaces/dev/pods/p-1",
     );
   });
@@ -89,14 +89,14 @@ describe("spawnPodDelete", () => {
       throw new Error("no spawn call");
     }
     // Names are URL-encoded; the trailing slash is stripped.
-    expect(call.env.HARNESS_POD_DELETE_URL).toBe(
+    expect(call.env.TENTACLE_POD_DELETE_URL).toBe(
       "https://api.cluster:6443/api/v1/namespaces/ns%2Fx/pods/pod%20y",
     );
-    expect(call.env.HARNESS_POD_DELETE_TOKEN).toBe("secret-token");
-    expect(call.env.HARNESS_POD_TLS_CA).toBe("CA-PEM");
-    expect(call.env.HARNESS_POD_TLS_CERT).toBe("CERT-PEM");
-    expect(call.env.HARNESS_POD_TLS_KEY).toBe("KEY-PEM");
-    expect(call.env.HARNESS_POD_TLS_INSECURE).toBe("1");
+    expect(call.env.TENTACLE_POD_DELETE_TOKEN).toBe("secret-token");
+    expect(call.env.TENTACLE_POD_TLS_CA).toBe("CA-PEM");
+    expect(call.env.TENTACLE_POD_TLS_CERT).toBe("CERT-PEM");
+    expect(call.env.TENTACLE_POD_TLS_KEY).toBe("KEY-PEM");
+    expect(call.env.TENTACLE_POD_TLS_INSECURE).toBe("1");
   });
 
   test("omits token/TLS env when absent", () => {
@@ -106,9 +106,9 @@ describe("spawnPodDelete", () => {
     if (!call) {
       throw new Error("no spawn call");
     }
-    expect(call.env.HARNESS_POD_DELETE_TOKEN).toBeUndefined();
-    expect(call.env.HARNESS_POD_TLS_CA).toBeUndefined();
-    expect(call.env.HARNESS_POD_TLS_INSECURE).toBeUndefined();
+    expect(call.env.TENTACLE_POD_DELETE_TOKEN).toBeUndefined();
+    expect(call.env.TENTACLE_POD_TLS_CA).toBeUndefined();
+    expect(call.env.TENTACLE_POD_TLS_INSECURE).toBeUndefined();
     // The parent's PATH is carried over (the child needs to find `bun`).
     expect(call.env.PATH).toBeDefined();
   });
@@ -135,7 +135,7 @@ describe("podDeleteCommand", () => {
   });
 
   test("from a compiled binary → re-exec THE SAME binary with `__delete-pod` (no external bun)", () => {
-    const exe = "/Users/me/agent-harness/dist/agent-harness";
+    const exe = "/Users/me/tentacle/dist/tentacle";
     expect(podDeleteCommand(exe)).toEqual([exe, "__delete-pod"]);
     // Crucially the deleter is the binary itself — not a hardcoded `bun`.
     expect(podDeleteCommand(exe)[0]).not.toBe("bun");
@@ -144,12 +144,12 @@ describe("podDeleteCommand", () => {
 
 describe("deletePodFromEnv", () => {
   const KEYS = [
-    "HARNESS_POD_DELETE_URL",
-    "HARNESS_POD_DELETE_TOKEN",
-    "HARNESS_POD_TLS_CA",
-    "HARNESS_POD_TLS_CERT",
-    "HARNESS_POD_TLS_KEY",
-    "HARNESS_POD_TLS_INSECURE",
+    "TENTACLE_POD_DELETE_URL",
+    "TENTACLE_POD_DELETE_TOKEN",
+    "TENTACLE_POD_TLS_CA",
+    "TENTACLE_POD_TLS_CERT",
+    "TENTACLE_POD_TLS_KEY",
+    "TENTACLE_POD_TLS_INSECURE",
   ];
   const withEnv = async (
     env: Record<string, string>,
@@ -184,12 +184,12 @@ describe("deletePodFromEnv", () => {
   test("issues a DELETE to the URL with bearer + TLS from the env", async () => {
     await withEnv(
       {
-        HARNESS_POD_DELETE_URL: "https://api:6443/api/v1/namespaces/dev/pods/p-1",
-        HARNESS_POD_DELETE_TOKEN: "tok",
-        HARNESS_POD_TLS_CA: "CA",
-        HARNESS_POD_TLS_CERT: "CERT",
-        HARNESS_POD_TLS_KEY: "KEY",
-        HARNESS_POD_TLS_INSECURE: "1",
+        TENTACLE_POD_DELETE_URL: "https://api:6443/api/v1/namespaces/dev/pods/p-1",
+        TENTACLE_POD_DELETE_TOKEN: "tok",
+        TENTACLE_POD_TLS_CA: "CA",
+        TENTACLE_POD_TLS_CERT: "CERT",
+        TENTACLE_POD_TLS_KEY: "KEY",
+        TENTACLE_POD_TLS_INSECURE: "1",
       },
       async (calls) => {
         expect(calls).toHaveLength(1);
@@ -212,7 +212,7 @@ describe("deletePodFromEnv", () => {
     const boom = (async () => {
       throw new Error("network down");
     }) as unknown as typeof fetch;
-    const key = "HARNESS_POD_DELETE_URL";
+    const key = "TENTACLE_POD_DELETE_URL";
     const saved = process.env[key];
     process.env[key] = "https://api/pods/p";
     try {

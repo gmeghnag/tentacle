@@ -1,5 +1,5 @@
 /**
- * `@agent-harness/exec` — execution environments.
+ * `@tentacle/exec` — execution environments.
  *
  * Ships the host implementation; a container implementation (F2) will live here
  * too, behind the same `ExecutionEnvironment` contract.

@@ -5,8 +5,8 @@ import type {
   ModelProvider,
   StreamEvent,
   Tool,
-} from "@agent-harness/core";
-import { ToolRegistry } from "@agent-harness/tools";
+} from "@tentacle/core";
+import { ToolRegistry } from "@tentacle/tools";
 import { z } from "zod";
 import { Agent, type AgentEvent } from "../src/agent.ts";
 import { spillLargeOutput } from "../src/result-pipeline.ts";
@@ -58,15 +58,15 @@ describe("Agent applies result transforms (spill)", () => {
       events.push(event);
     }
 
-    // The full output was written under .harness/tool-output/.
+    // The full output was written under .tentacle/tool-output/.
     expect(writes).toHaveLength(1);
-    expect(writes[0]?.path).toContain(".harness/tool-output/noisy-c1");
+    expect(writes[0]?.path).toContain(".tentacle/tool-output/noisy-c1");
     expect(writes[0]?.contents).toBe(big);
 
     // The in-context tool result is the spilled preview, not the full output.
     const toolResult = events.find((e) => e.type === "tool_result");
     const content = toolResult?.type === "tool_result" ? toolResult.result.content : "";
-    expect(content).toContain(".harness/tool-output/noisy-c1");
+    expect(content).toContain(".tentacle/tool-output/noisy-c1");
     expect(content.length).toBeLessThan(big.length);
   });
 });

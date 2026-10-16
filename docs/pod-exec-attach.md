@@ -1,4 +1,4 @@
-# `agent-harness exec` — piano: aggancio a un pod esistente
+# `tentacle exec` — piano: aggancio a un pod esistente
 
 **Stato:** **implementato** (branch `feat/pod-exec-attach` da `c5b7f58`).
 Questo doc nasce come piano; §10 è l'as-built. Basato su `c5b7f58` (branch
@@ -9,7 +9,7 @@ Questo doc nasce come piano; §10 è l'as-built. Basato su `c5b7f58` (branch
 
 ## 1. Obiettivo e relazione con `run`
 
-`agent-harness exec <pod>` aggancia la TUI locale a un **pod già esistente**:
+`tentacle exec <pod>` aggancia la TUI locale a un **pod già esistente**:
 inietta l'agent se serve, apre l'exec del daemon (`serve --stdio`) e parte la
 TUI. **Non crea e non cancella nulla**: il pod è del user, il ciclo di vita
 resta suo.
@@ -22,8 +22,8 @@ lifecycle:
 | Input | `--image <ref>` obbligatorio | **nome pod** (posizionale), no `--image` |
 | Pod | `createPod` (manifest `buildPodManifest`) | `getPod` — deve già esistere |
 | Ready | `waitForReady` (default 120 s) | se non ready: **attesa breve** (~60 s, `waitForReady` riusato); terminale/missing → errore |
-| Iniezione binario | sì (F4.e) | sì, **identica** — ma con preflight: se `agent-harness --version` già risponde, **salta l'intera iniezione** (pod riagganciato / image pre-baked) |
-| Daemon exec | `openExec(["agent-harness","serve","--stdio","--model-proxy"])` | **identica** |
+| Iniezione binario | sì (F4.e) | sì, **identica** — ma con preflight: se `tentacle --version` già risponde, **salta l'intera iniezione** (pod riagganciato / image pre-baked) |
+| Daemon exec | `openExec(["tentacle","serve","--stdio","--model-proxy"])` | **identica** |
 | TUI / persist / model-proxy / permissions | `startTui` + `createLocalRuntime` | **identica** (sessioni su laptop, reverse-tunnel invariato) |
 | Delete su exit | **sì**: `dispose` → `deletePod` + safety net `process.once("exit")` → `deletePodBestEffort` | **NO**: al detach il pod resta `Running`. Nessun `deletePod`, **nessun `registerPodCleanup`** |
 | Errori | create 404 ns → `podCreateError` | pod 404 → "usa `kubectl get pods`… o `run` se vuoi crearlo" |
@@ -38,23 +38,23 @@ comando "attach". Se vuoi pulire dopo, `kubectl delete pod <name>`.
 ## 2. Superficie CLI
 
 ```
-agent-harness exec <pod> [--namespace <ns>] [--container <c>] [--resume [uid]]
+tentacle exec <pod> [--namespace <ns>] [--container <c>] [--resume [uid]]
 ```
 
 - `<pod>`: posizione 1, **obbligatoria** (se manca → usage, exit 1).
-- `--namespace`: stessa catena di `run` — flag > `HARNESS_POD_NAMESPACE` >
+- `--namespace`: stessa catena di `run` — flag > `TENTACLE_POD_NAMESPACE` >
   namespace del kubeconfig context. (Attenzione: se il context del cluster è su
   un namespace diverso da quello del pod, serve il flag — stesso caveat di `run`.)
 - `--container`: opzionale; se omesso l'API sceglie l'unico/contenitore default
   (già il comportamento di `ExecTarget.container?`). Per i nostri pod `run` è
   sempre `agent`; il flag serve a pod altrui multi-containere.
 - `--resume [uid]`: **identico** a `run` (le sessioni persistono su
-  `~/.config/agent-harness/sessions`, il pod è stateless).
+  `~/.config/tentacle/sessions`, il pod è stateless).
 
 Aggiunta al `HELP` (`main.ts`), accanto alla voce `run`:
 
 ```
-  agent-harness exec <pod> [--namespace <ns>] [--container <c>] [--resume [uid]]
+  tentacle exec <pod> [--namespace <ns>] [--container <c>] [--resume [uid]]
                                 attach the TUI to an existing pod (inject if needed);
                                 the pod is NOT deleted on exit
 ```
@@ -67,14 +67,14 @@ Aggiunta al `HELP` (`main.ts`), accanto alla voce `run`:
 main: "exec"
  ├─ parseFlags(args.slice(1)) → pod name (pos 1), flags
  ├─ config = loadConfig()                       (stesso di run)
- ├─ auth: HARNESS_K8S_SERVER? : loadKubeClientOptions({ namespace? })   (stesso blocco di run)
+ ├─ auth: TENTACLE_K8S_SERVER? : loadKubeClientOptions({ namespace? })   (stesso blocco di run)
  ├─ store + --resume                            (stesso blocco di run)
  └─ startExecRuntime(config, deps)              ← NUOVA (pod-runtime.ts)
      ├─ 1. kube.getPod(name)
      │     · 404 KubeApiError  → "pod "<n>" not found in namespace "<ns>" (kubectl get pods -n <ns>) — or `run` to create one"
      │     · terminale (Succeeded/Failed) → "pod "<n>" is <phase>; cannot attach"
      ├─ 2. se non podIsReady(pod) → kube.waitForReady(name, { timeoutMs: 60_000 })
-     ├─ 3. preflight: runExec(["agent-harness","--version"]) timeout 15 s
+     ├─ 3. preflight: runExec(["tentacle","--version"]) timeout 15 s
      │     · exit 0 → version = stdout, SALTA iniezione
      │     · altrimenti → injectAgentBinary({ kube, podName: name,
      │                                        container,   // undefined → API sceglie il solo/default
@@ -83,7 +83,7 @@ main: "exec"
      │                                        log, onStatus })   (stesso wiring di run)
      │       · exit code / loader error → throw CON `libcMismatchHint` (stessi messaggi di run)
      ├─ 4. status.finish(); (piped: "[pod] <version> attached to <name>; starting the agent daemon")
-     ├─ 5. kube.openExec({ pod: name, container, command: ["agent-harness","serve","--stdio","--model-proxy"] },
+     ├─ 5. kube.openExec({ pod: name, container, command: ["tentacle","serve","--stdio","--model-proxy"] },
      │                     { onStderr: (t) => log(`[pod ${name}] ${t}`) })
      ├─ 6. modelProvider = new OpenAIProvider(config)  (reverse-tunnel, identico a run)
      └─ 7. createLocalRuntime({ channel,
@@ -100,7 +100,7 @@ testi, le fasi 3-4 **riusano i testi di `run`**:
 [pod] resolving <name> in <ns>…
 [pod] waiting for <name> to become ready…        (solo se non già ready)
 [<name>] resolving bun-linux-x64 binary…         (solo se serve iniettare)
-[<name>] injecting agent-harness ▓▓▓░ 47% 41.9/89.0 MB
+[<name>] injecting tentacle ▓▓▓░ 47% 41.9/89.0 MB
 [<name>] verifying…
 → clear → TUI
 ```
@@ -215,7 +215,7 @@ Note UX:
 `FakeCluster` esteso con `getPod` (scriptato per caso):
 
 1. **happy path**: getPod ready → preflight `--version` exit 0 → **nessuna**
-   install exec → `exec:<pod>:agent-harness serve --stdio --model-proxy` →
+   install exec → `exec:<pod>:tentacle serve --stdio --model-proxy` →
    handshake → TUI-ready. Assert su `calls`: presente `runexec:…--version`,
    **assente** `runexec:…head -c`, **assenti** `delete:*` e `besteffort:*`,
    `dispose` non produce delete.
@@ -242,21 +242,21 @@ Note UX:
 ### 6.2 Validazione live (cluster x86_64, namespace `test00` — fai tu, come al solito)
 
 ```sh
-./dist/agent-harness run --image registry.access.redhat.com/ubi9/ubi:latest --namespace test00 keep1
+./dist/tentacle run --image registry.access.redhat.com/ubi9/ubi:latest --namespace test00 keep1
 # (chiudi la TUI SENZA lasciare che il pod muoia? no: run lo cancella all'exit —
 #  quindi per la prova exec, crea il pod manualmente oppure usa run in un
 #  secondo terminale e aggancia exec MENTRE è aperto; alternativa pulita:)
 kubectl -n test00 run keep1 --image=registry.access.redhat.com/ubi9/ubi --restart=Never -- sleep infinity
 kubectl -n test00 wait --for=condition=Ready pod/keep1
 
-./dist/agent-harness exec keep1 --namespace test00          # 1ª volta: inietta 89 MB
+./dist/tentacle exec keep1 --namespace test00          # 1ª volta: inietta 89 MB
 #  → TUI, un prompt, /clear, esc
 kubectl -n test00 get pod keep1                              # Running (NON cancellato)
-./dist/agent-harness exec keep1 --namespace test00          # 2ª volta: solo --version, aggancio immediato
-kubectl -n test00 exec keep1 -- agent-harness --version     # binario presente, 755
-./dist/agent-harness exec missing-pod --namespace test00    # 404 → messaggio azionabile
+./dist/tentacle exec keep1 --namespace test00          # 2ª volta: solo --version, aggancio immediato
+kubectl -n test00 exec keep1 -- tentacle --version     # binario presente, 755
+./dist/tentacle exec missing-pod --namespace test00    # 404 → messaggio azionabile
 kubectl -n test00 run busybox1 --image=busybox --restart=Never -- sleep infinity   # (o kubectl)
-./dist/agent-harness exec busybox1 --namespace test00       # --version fallisce → hint glibc/musl, pod intatto
+./dist/tentacle exec busybox1 --namespace test00       # --version fallisce → hint glibc/musl, pod intatto
 kubectl -n test00 delete pod keep1 busybox1
 ```
 
@@ -275,7 +275,7 @@ bun test` green.
 3. Test unit (§6.1).
 4. Docs (§4.4).
 5. Build (`TARGET=bun-linux-x64 bun run compile` → cache `dist/pod-bin` PRIMA,
-   poi `bun run compile` per `dist/agent-harness`) + validazione live (§6.2).
+   poi `bun run compile` per `dist/tentacle`) + validazione live (§6.2).
 6. Commit singolo:
    `feat(cli): exec subcommand — attach TUI to an existing pod (inject-if-needed, no delete on exit)`.
 
@@ -283,8 +283,8 @@ bun test` green.
 
 ## 8. Open (fuori scope v1, decisione tua)
 
-- **Cleanup orphans**: `agent-harness pod ls` / `agent-harness pod rm <name>`
-  (filtro label `app.kubernetes.io/managed-by=agent-harness`) per i pod di
+- **Cleanup orphans**: `tentacle pod ls` / `tentacle pod rm <name>`
+  (filtro label `app.kubernetes.io/managed-by=tentacle`) per i pod di
   `run` rimasti orfani. Utile proprio perché `exec` non cancella.
 - **Detach senza chiudere** (`--detach`: TUI in background, ri-aggancio col
   solo `exec <pod>`): oggi `exec` ricrea sempre un nuovo daemon stdio; è
@@ -306,7 +306,7 @@ Implementato fedele al piano, con queste divergenze da nota:
   `PodCluster` (`pod-runtime.ts`) — niente di nuovo in `packages/k8s`.
 - **`startExecRuntime`** (`pod-runtime.ts`): `getPod` → 404 → errore azionabile
   (con suggerimento `run`); fase terminale → `cannot attach`; `podIsReady`
-  falso → `waitForReady({ timeoutMs: 60_000 })`; **preflight `agent-harness
+  falso → `waitForReady({ timeoutMs: 60_000 })`; **preflight `tentacle
   --version`** (timeout 15 s) che salta `injectAgentBinary` se risponde, altr.
   iniezione F4.e identica a `run`; poi `openExec(serve --stdio --model-proxy)` +
   reverse-tunnel + `createLocalRuntime`. `disposeTransport = channel.close()` —
@@ -334,7 +334,7 @@ wait boundato → attach; exec senza status (container sbagliato) → errore
 azionabile; iniezione fallita (musl) → hint glibc e pod **intoccato**.
 
 **Validazione**: `bun run typecheck` 0 · `bun run lint` 244 file 0 · `bun test`
-528 pass / 0 fail / 1 skip (il skip = k8s live opt-in `HARNESS_K8S_SERVER`).
+528 pass / 0 fail / 1 skip (il skip = k8s live opt-in `TENTACLE_K8S_SERVER`).
 
 **Live** (da fare su `test00`, x86_64): UBI9 iniezione + TUI, ri-aggancio
 senza transfer, 404, busybox/musl → hint, pod lasciato `Running` al detach.

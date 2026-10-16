@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, JsonSessionStore } from "@agent-harness/agent";
+import { Agent, JsonSessionStore } from "@tentacle/agent";
 import type {
   BackgroundJob,
   ChatRequest,
@@ -10,11 +10,11 @@ import type {
   JobController,
   ModelProvider,
   StreamEvent,
-} from "@agent-harness/core";
-import { PermissionBroker } from "@agent-harness/core";
-import { Connection, SessionHost } from "@agent-harness/daemon";
-import { ToolRegistry } from "@agent-harness/tools";
-import { createChannelPair } from "@agent-harness/transport";
+} from "@tentacle/core";
+import { PermissionBroker } from "@tentacle/core";
+import { Connection, SessionHost } from "@tentacle/daemon";
+import { ToolRegistry } from "@tentacle/tools";
+import { createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime } from "../src/local-runtime.ts";
 
 class ScriptedProvider implements ModelProvider {

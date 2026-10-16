@@ -1,5 +1,5 @@
 /**
- * `@agent-harness/tui` — the Ink (React) terminal UI.
+ * `@tentacle/tui` — the Ink (React) terminal UI.
  */
 export * from "./state.ts";
 export * from "./diff-format.ts";

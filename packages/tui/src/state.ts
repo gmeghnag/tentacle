@@ -8,8 +8,8 @@
  * item may still be streaming. Keeping the reducer pure makes the whole UI
  * logic testable without React.
  */
-import type { AgentEvent, AgentStopReason } from "@agent-harness/agent";
-import type { ToolResultDetail } from "@agent-harness/core";
+import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
+import type { ToolResultDetail } from "@tentacle/core";
 
 export type ToolStatus = "running" | "ok" | "error";
 

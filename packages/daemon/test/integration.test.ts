@@ -1,17 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@agent-harness/agent";
+import { Agent } from "@tentacle/agent";
 import {
   type ChatRequest,
   type ExecutionEnvironment,
   type ModelProvider,
   PermissionBroker,
   type StreamEvent,
-} from "@agent-harness/core";
-import { JsonRpcErrorCode } from "@agent-harness/protocol";
-import type { SessionUpdateParams } from "@agent-harness/protocol";
-import { ToolRegistry, shellTool } from "@agent-harness/tools";
-import { RpcPeer, createChannelPair } from "@agent-harness/transport";
-import { DomainErrorCode } from "@agent-harness/transport";
+} from "@tentacle/core";
+import { JsonRpcErrorCode } from "@tentacle/protocol";
+import type { SessionUpdateParams } from "@tentacle/protocol";
+import { ToolRegistry, shellTool } from "@tentacle/tools";
+import { RpcPeer, createChannelPair } from "@tentacle/transport";
+import { DomainErrorCode } from "@tentacle/transport";
 import { Connection } from "../src/connection.ts";
 import { SessionHost } from "../src/session-host.ts";
 

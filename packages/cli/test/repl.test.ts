@@ -1,12 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@agent-harness/agent";
-import type {
-  ChatRequest,
-  ExecutionEnvironment,
-  ModelProvider,
-  StreamEvent,
-} from "@agent-harness/core";
-import { ToolRegistry } from "@agent-harness/tools";
+import { Agent } from "@tentacle/agent";
+import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
+import { ToolRegistry } from "@tentacle/tools";
 import { runRepl } from "../src/repl.ts";
 
 class ScriptedProvider implements ModelProvider {

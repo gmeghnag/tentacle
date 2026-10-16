@@ -118,11 +118,11 @@ describe("runExecOverWebSocket — resolve on exit", () => {
     const ws = new FakeWS();
     const promise = runExecOverWebSocket(() => ws, "wss://api/exec", ["v4.channel.k8s.io"]);
     ws.open();
-    ws.receive(msg(2, "/bin/sh: agent-harness: not found\n"));
+    ws.receive(msg(2, "/bin/sh: tentacle: not found\n"));
     ws.receive(msg(3, '{"status":"Failure","message":"exit code 127"}'));
     const result = await promise;
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toBe("/bin/sh: agent-harness: not found\n");
+    expect(result.stderr).toBe("/bin/sh: tentacle: not found\n");
   });
 
   test("reassembles stdout across multiple messages", async () => {

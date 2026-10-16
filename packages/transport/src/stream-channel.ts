@@ -1,7 +1,7 @@
 /**
  * A `DuplexChannel` over a pair of byte streams (a Node `Readable` + `Writable`,
  * e.g. `process.stdin` / `process.stdout`). This is the transport for a daemon
- * driven over stdio — `agent-harness serve --stdio` — which is in turn what the
+ * driven over stdio — `tentacle serve --stdio` — which is in turn what the
  * Kubernetes `exec` channel pipes into inside a pod (F4).
  *
  * Unlike the WebSocket / MessagePort channels, a byte stream has no message

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExecTarget, RunExecOptions, RunExecResult } from "@agent-harness/k8s";
+import type { ExecTarget, RunExecOptions, RunExecResult } from "@tentacle/k8s";
 import {
   POD_BIN_PATH,
   type PodBinaryDeps,
@@ -119,10 +119,10 @@ describe("libcMismatchHint", () => {
   test("matches the classic musl-image loader failure (the real busybox error)", () => {
     expect(
       libcMismatchHint(
-        "agent-harness: error while loading shared libraries: libdl.so.2: cannot open shared object file: No such file or directory",
+        "tentacle: error while loading shared libraries: libdl.so.2: cannot open shared object file: No such file or directory",
       ),
     ).toBe(
-      " — this image appears to lack glibc (Alpine/busybox use musl); agent-harness is a glibc binary, use a glibc-based image (e.g. UBI9, Debian, RHEL)",
+      " — this image appears to lack glibc (Alpine/busybox use musl); tentacle is a glibc binary, use a glibc-based image (e.g. UBI9, Debian, RHEL)",
     );
   });
   test("matches each pattern, case-insensitively", () => {
@@ -134,8 +134,8 @@ describe("libcMismatchHint", () => {
     ).toBeDefined();
   });
   test("undefined for any other failure (the raw error stays the primary signal)", () => {
-    expect(libcMismatchHint("agent-harness: Exec format error\n")).toBeUndefined();
-    expect(libcMismatchHint("/bin/sh: agent-harness: not found\n")).toBeUndefined();
+    expect(libcMismatchHint("tentacle: Exec format error\n")).toBeUndefined();
+    expect(libcMismatchHint("/bin/sh: tentacle: not found\n")).toBeUndefined();
     expect(libcMismatchHint("")).toBeUndefined();
   });
 });
@@ -170,7 +170,7 @@ describe("injectAgentBinary", () => {
     const logs: string[] = [];
     const kube = new FakeKube([
       ok(), // install: head -c N
-      ok("agent-harness 1.2.3\n"), // version probe
+      ok("tentacle 1.2.3\n"), // version probe
     ]);
     const deps = depsFor(kube, {
       resolveBinary: async (target) => {
@@ -196,18 +196,18 @@ describe("injectAgentBinary", () => {
     expect(installCall.input).toEqual(bytes);
     // 2) the version probe (no input)
     const versionCall = callAt(kube.calls, 1);
-    expect(versionCall.command).toEqual(["agent-harness", "--version"]);
+    expect(versionCall.command).toEqual(["tentacle", "--version"]);
     expect(versionCall.input).toBeUndefined();
     // logs mention the arch and the transfer; the version is returned (the
     // caller folds it into its final line — it is not logged here anymore).
     expect(logs.some((l) => l.includes("x64"))).toBe(true);
-    expect(logs.some((l) => l.includes("injecting agent-harness"))).toBe(true);
-    expect(result).toBe("agent-harness 1.2.3");
+    expect(logs.some((l) => l.includes("injecting tentacle"))).toBe(true);
+    expect(result).toBe("tentacle 1.2.3");
   });
 
   test("picks the arm64 target for an arm64 pod", async () => {
     let seenTarget: PodBinaryTarget | undefined;
-    const kube = new FakeKube([ok(), ok("agent-harness dev\n")]);
+    const kube = new FakeKube([ok(), ok("tentacle dev\n")]);
     const deps = depsFor(kube, {
       arch: "arm64",
       resolveBinary: async (t) => {
@@ -221,11 +221,11 @@ describe("injectAgentBinary", () => {
 
   test("a failed install (head / chmod) throws with the pod stderr", async () => {
     const kube = new FakeKube([
-      fail("/bin/sh: can't create /usr/local/bin/agent-harness: Permission denied\n"),
+      fail("/bin/sh: can't create /usr/local/bin/tentacle: Permission denied\n"),
       ok(), // not reached
     ]);
     await expect(injectAgentBinary(depsFor(kube))).rejects.toThrow(
-      /failed to inject agent-harness.*Permission denied/,
+      /failed to inject tentacle.*Permission denied/,
     );
     // It stopped at the install (the --version probe never ran).
     expect(kube.calls).toHaveLength(1);
@@ -234,25 +234,25 @@ describe("injectAgentBinary", () => {
   test("a failed --version probe (wrong arch) throws with the pod stderr", async () => {
     const kube = new FakeKube([
       ok(), // install ok
-      fail("agent-harness: Exec format error\n"),
+      fail("tentacle: Exec format error\n"),
     ]);
     await expect(injectAgentBinary(depsFor(kube))).rejects.toThrow(
-      /agent-harness --version failed.*Exec format error/,
+      /tentacle --version failed.*Exec format error/,
     );
     // The version probe is what failed.
     expect(kube.calls).toHaveLength(2);
-    expect(callAt(kube.calls, 1).command).toEqual(["agent-harness", "--version"]);
+    expect(callAt(kube.calls, 1).command).toEqual(["tentacle", "--version"]);
   });
 
   test("a failed --version probe (musl image) appends the glibc hint to the error", async () => {
     const kube = new FakeKube([
       ok(), // install ok
       fail(
-        "agent-harness: error while loading shared libraries: libdl.so.2: cannot open shared object file: No such file or directory\n",
+        "tentacle: error while loading shared libraries: libdl.so.2: cannot open shared object file: No such file or directory\n",
       ),
     ]);
     await expect(injectAgentBinary(depsFor(kube))).rejects.toThrow(
-      /agent-harness --version failed.*libdl\.so\.2.*appears to lack glibc.*UBI9, Debian, RHEL/,
+      /tentacle --version failed.*libdl\.so\.2.*appears to lack glibc.*UBI9, Debian, RHEL/,
     );
   });
 
@@ -287,7 +287,7 @@ describe("injectAgentBinary", () => {
   test("interactive mode: phases drive onStatus (single line) and the version is returned", async () => {
     const statuses: string[] = [];
     const logs: string[] = [];
-    const kube = new FakeKube([ok(), ok("agent-harness 1.2.3\n")]);
+    const kube = new FakeKube([ok(), ok("tentacle 1.2.3\n")]);
     const total = 4 * 256 * 1024;
     const result = await injectAgentBinary(
       depsFor(kube, {
@@ -300,11 +300,11 @@ describe("injectAgentBinary", () => {
     // (the single-line invariant), except the version is returned for the
     // caller's final line.
     expect(logs).toHaveLength(0);
-    expect(result).toBe("agent-harness 1.2.3");
+    expect(result).toBe("tentacle 1.2.3");
     // The phase sequence: resolve → transfer (with the bar) → verify. The
     // transfer line is repainted per chunk (25/50/75/100%); the LAST one is 100%.
     expect(statuses[0]).toContain("resolving bun-linux-x64 binary…");
-    const transfers = statuses.filter((s) => s.includes("injecting agent-harness ▓"));
+    const transfers = statuses.filter((s) => s.includes("injecting tentacle ▓"));
     expect(transfers.length).toBeGreaterThan(1);
     const last = transfers[transfers.length - 1];
     if (last === undefined) {

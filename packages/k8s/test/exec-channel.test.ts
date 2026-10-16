@@ -136,7 +136,7 @@ describe("buildExecUrl", () => {
     const url = buildExecUrl("https://api.cluster:6443", "dev", {
       pod: "agent-1",
       container: "main",
-      command: ["agent-harness", "serve", "--stdio"],
+      command: ["tentacle", "serve", "--stdio"],
     });
     expect(url.startsWith("wss://api.cluster:6443/api/v1/namespaces/dev/pods/agent-1/exec?")).toBe(
       true,
@@ -145,7 +145,7 @@ describe("buildExecUrl", () => {
     expect(url).toContain("stdin=true");
     expect(url).toContain("stdout=true");
     expect(url).toContain("stderr=true");
-    expect(url).toContain("command=agent-harness");
+    expect(url).toContain("command=tentacle");
     expect(url).toContain("command=serve");
     expect(url).toContain("command=--stdio");
   });
@@ -183,7 +183,7 @@ describe("KubeClient.openExec", () => {
       },
     });
 
-    const channel = client.openExec({ pod: "p1", command: ["agent-harness", "serve", "--stdio"] });
+    const channel = client.openExec({ pod: "p1", command: ["tentacle", "serve", "--stdio"] });
     expect(seenUrl).toContain("wss://api:6443/api/v1/namespaces/dev/pods/p1/exec?");
     expect(seenProtocols[0]).toBe("v4.channel.k8s.io");
     expect(seenProtocols).toHaveLength(2); // includes the bearer subprotocol

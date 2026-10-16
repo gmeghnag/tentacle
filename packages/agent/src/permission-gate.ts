@@ -8,7 +8,7 @@
  * auto-run; for other tools it is the whole tool. The gate checks its rules
  * before prompting, so an approved-prefix command runs without a round-trip.
  */
-import type { PermissionRequest, PermissionRequester, Tool } from "@agent-harness/core";
+import type { PermissionRequest, PermissionRequester, Tool } from "@tentacle/core";
 import { commandCoveredByPrefixes, suggestShellPrefix } from "./shell-prefix.ts";
 
 function asRecord(input: unknown): Record<string, unknown> {

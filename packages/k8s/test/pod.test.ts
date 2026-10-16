@@ -21,7 +21,7 @@ describe("buildPodManifest", () => {
     expect(pod.kind).toBe("Pod");
     expect(pod.metadata?.name).toBe("agent-1");
     expect(pod.metadata?.namespace).toBe("dev");
-    expect(pod.metadata?.labels?.["app.kubernetes.io/managed-by"]).toBe("agent-harness");
+    expect(pod.metadata?.labels?.["app.kubernetes.io/managed-by"]).toBe("tentacle");
     const spec = pod.spec as Spec;
     expect(spec.restartPolicy).toBe("Never");
     expect(spec.containers).toHaveLength(1);
@@ -51,6 +51,6 @@ describe("buildPodManifest", () => {
     expect(spec.serviceAccountName).toBe("agent-sa");
     expect(spec.activeDeadlineSeconds).toBe(3600);
     expect(pod.metadata?.labels?.team).toBe("core");
-    expect(pod.metadata?.labels?.["app.kubernetes.io/managed-by"]).toBe("agent-harness");
+    expect(pod.metadata?.labels?.["app.kubernetes.io/managed-by"]).toBe("tentacle");
   });
 });

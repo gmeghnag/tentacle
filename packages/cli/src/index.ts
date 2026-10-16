@@ -1,5 +1,5 @@
 /**
- * `@agent-harness/cli` — the command-line client (one-shot and interactive).
+ * `@tentacle/cli` — the command-line client (one-shot and interactive).
  */
 export * from "./config.ts";
 export * from "./render.ts";

@@ -147,63 +147,63 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   const { fileConfig, env, defaultCwd, promptFromFile } = ctx;
   const model = fileConfig.model ?? {};
 
-  const baseURL = pick(env.HARNESS_MODEL_BASE_URL, model.baseURL, DEFAULT_BASE_URL);
-  const modelId = pick(env.HARNESS_MODEL, model.model, DEFAULT_MODEL);
-  const cwd = pick(env.HARNESS_CWD, fileConfig.cwd, defaultCwd);
+  const baseURL = pick(env.TENTACLE_MODEL_BASE_URL, model.baseURL, DEFAULT_BASE_URL);
+  const modelId = pick(env.TENTACLE_MODEL, model.model, DEFAULT_MODEL);
+  const cwd = pick(env.TENTACLE_CWD, fileConfig.cwd, defaultCwd);
   const maxIterations = pick(
-    parsePositiveInt(env.HARNESS_MAX_ITERATIONS),
+    parsePositiveInt(env.TENTACLE_MAX_ITERATIONS),
     fileConfig.maxIterations,
     DEFAULT_MAX_ITERATIONS,
   );
   const contextWindow = pick(
-    parsePositiveInt(env.HARNESS_CONTEXT_WINDOW),
+    parsePositiveInt(env.TENTACLE_CONTEXT_WINDOW),
     model.contextWindow,
     DEFAULT_CONTEXT_WINDOW,
   );
-  const systemPrompt = pick(env.HARNESS_SYSTEM_PROMPT, promptFromFile, DEFAULT_SYSTEM_PROMPT);
+  const systemPrompt = pick(env.TENTACLE_SYSTEM_PROMPT, promptFromFile, DEFAULT_SYSTEM_PROMPT);
   const subagentsEnabled = pick(
-    parseBool(env.HARNESS_SUBAGENTS),
+    parseBool(env.TENTACLE_SUBAGENTS),
     fileConfig.subagents?.enabled,
     DEFAULT_SUBAGENTS_ENABLED,
   );
   const subagentMaxIterations = pick(
-    parseIterationLimit(env.HARNESS_SUBAGENT_MAX_ITERATIONS),
+    parseIterationLimit(env.TENTACLE_SUBAGENT_MAX_ITERATIONS),
     fileConfig.subagents?.maxIterations,
     DEFAULT_SUBAGENT_MAX_ITERATIONS,
   );
   const maxInlineOutputChars = pick(
-    parseNonNegativeInt(env.HARNESS_MAX_OUTPUT_CHARS),
+    parseNonNegativeInt(env.TENTACLE_MAX_OUTPUT_CHARS),
     fileConfig.tools?.maxInlineOutputChars,
     DEFAULT_MAX_INLINE_OUTPUT_CHARS,
   );
   const redactSecrets = pick(
-    parseBool(env.HARNESS_REDACT_SECRETS),
+    parseBool(env.TENTACLE_REDACT_SECRETS),
     fileConfig.tools?.redactSecrets,
     DEFAULT_REDACT_SECRETS,
   );
   const summarizeLargeOutput = pick(
-    parseBool(env.HARNESS_SUMMARIZE_OUTPUT),
+    parseBool(env.TENTACLE_SUMMARIZE_OUTPUT),
     fileConfig.tools?.summarizeLargeOutput,
     DEFAULT_SUMMARIZE_LARGE_OUTPUT,
   );
   const dedupOutput = pick(
-    parseBool(env.HARNESS_DEDUP_OUTPUT),
+    parseBool(env.TENTACLE_DEDUP_OUTPUT),
     fileConfig.tools?.dedupOutput,
     DEFAULT_DEDUP_OUTPUT,
   );
   const tabulateJson = pick(
-    parseBool(env.HARNESS_TABULATE_JSON),
+    parseBool(env.TENTACLE_TABULATE_JSON),
     fileConfig.tools?.tabulateJson,
     DEFAULT_TABULATE_JSON,
   );
-  const autoWake = pick(parseBool(env.HARNESS_AUTO_WAKE), fileConfig.autoWake, DEFAULT_AUTO_WAKE);
+  const autoWake = pick(parseBool(env.TENTACLE_AUTO_WAKE), fileConfig.autoWake, DEFAULT_AUTO_WAKE);
 
   // API key precedence: env var > file `apiKey` > file `apiKeyCommand`.
   let apiKey: string | undefined;
   let apiKeyCommand: string | undefined;
   let apiKeySource: ApiKeySource = "none";
-  if (env.HARNESS_MODEL_API_KEY) {
-    apiKey = env.HARNESS_MODEL_API_KEY;
+  if (env.TENTACLE_MODEL_API_KEY) {
+    apiKey = env.TENTACLE_MODEL_API_KEY;
     apiKeySource = "env";
   } else if (model.apiKey) {
     apiKey = model.apiKey;

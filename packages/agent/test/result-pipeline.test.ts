@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ToolResult } from "@agent-harness/core";
+import type { ToolResult } from "@tentacle/core";
 import {
   type ResultTransformContext,
   applyResultTransforms,
@@ -13,7 +13,7 @@ function ctx(overrides: Partial<ResultTransformContext> = {}): ResultTransformCo
   return {
     toolName: "shell",
     toolCallId: "c1",
-    writeSpill: async () => ".harness/tool-output/shell-c1.txt",
+    writeSpill: async () => ".tentacle/tool-output/shell-c1.txt",
     ...overrides,
   };
 }
@@ -33,12 +33,12 @@ describe("spillLargeOutput", () => {
       ctx({
         writeSpill: async (contents) => {
           written = contents;
-          return ".harness/tool-output/shell-c1.txt";
+          return ".tentacle/tool-output/shell-c1.txt";
         },
       }),
     );
     expect(written).toBe(big); // the full output was persisted
-    expect(out.content).toContain(".harness/tool-output/shell-c1.txt");
+    expect(out.content).toContain(".tentacle/tool-output/shell-c1.txt");
     expect(out.content).toContain("read it selectively");
     expect(out.content).toContain("characters omitted");
     expect(out.content.length).toBeLessThan(big.length); // context is protected
@@ -80,13 +80,13 @@ describe("summarizeLargeOutput", () => {
       ctx({
         writeSpill: async (c) => {
           spilled = c;
-          return ".harness/tool-output/shell-c1.txt";
+          return ".tentacle/tool-output/shell-c1.txt";
         },
       }),
     );
     expect(spilled).toHaveLength(5000);
     expect(out.content).toContain("summary of 5000 chars");
-    expect(out.content).toContain(".harness/tool-output/shell-c1.txt");
+    expect(out.content).toContain(".tentacle/tool-output/shell-c1.txt");
     expect(out.content.length).toBeLessThan(5000);
   });
 

@@ -1,13 +1,13 @@
 /**
- * Build + cache resolution for the pod-injected `agent-harness` binary (F4.e,
+ * Build + cache resolution for the pod-injected `tentacle` binary (F4.e,
  * step 4). The pod is always Linux, so we only ever build the two Linux targets
  * (`bun-linux-x64` / `bun-linux-arm64`); the laptop's own platform is irrelevant
  * (cross-compilation via `Bun.build` `compile.target`).
  *
  * Resolution order for a target (see `resolvePodBinary`):
- *   1. `HARNESS_POD_BIN` — an explicit path to a prebuilt binary (the primary
+ *   1. `TENTACLE_POD_BIN` — an explicit path to a prebuilt binary (the primary
  *      "I build it myself" knob); read directly, never cached/built.
- *   2. The cache at `dist/pod-bin/agent-harness-<target>` (git-ignored).
+ *   2. The cache at `dist/pod-bin/tentacle-<target>` (git-ignored).
  *   3. Build into the cache with the SAME options as the CLI build
  *      (`buildBinary`), so the pod binary and the local binary never drift.
  *
@@ -23,10 +23,10 @@ import type { PodBinaryTarget } from "./pod-binary.ts";
  * Resolve the monorepo root so the cache/build paths work in BOTH run modes:
  * - source: this file lives at `packages/cli/src/`, so root is three up;
  * - compiled binary: `import.meta.dir` is the virtual `$bunfs` root, but
- *   `process.execPath` is the real binary path (`<repo>/dist/agent-harness`),
+ *   `process.execPath` is the real binary path (`<repo>/dist/tentacle`),
  *   so walk up to the directory that owns `package.json`.
  *
- * The `run` flow runs the compiled binary (`./dist/agent-harness run …`),
+ * The `run` flow runs the compiled binary (`./dist/tentacle run …`),
  * so this must NOT assume source mode. Last resort is the current working
  * directory (the user runs the binary from the repo; `node_modules` discovery
  * in `findYogaWasm` still works from there).
@@ -74,7 +74,7 @@ export function findYogaWasm(): string {
 }
 
 /**
- * Build the standalone `agent-harness` binary to `outfile` for `target`. Shared
+ * Build the standalone `tentacle` binary to `outfile` for `target`. Shared
  * by `scripts/build.ts` (the `compile` script) and the pod-binary cache so the
  * two never drift. Returns `true` on success, `false` (after logging) on
  * failure — the caller decides whether to exit.
@@ -100,9 +100,9 @@ export async function buildBinary(outfile: string, target: string | undefined): 
     // @ts-expect-error - `compile` is supported by the Bun bundler
     compile: { outfile, ...(target ? { target } : {}) },
     // Inject the CLI package version as a literal (`--version` reads
-    // `process.env.HARNESS_APP_VERSION`; from source it falls back to "dev").
+    // `process.env.TENTACLE_APP_VERSION`; from source it falls back to "dev").
     define: {
-      "process.env.HARNESS_APP_VERSION": JSON.stringify(
+      "process.env.TENTACLE_APP_VERSION": JSON.stringify(
         JSON.parse(readFileSync(resolve(root, "packages/cli/package.json"), "utf8")).version,
       ),
     },
@@ -149,8 +149,8 @@ export interface ResolvePodBinaryOptions {
 }
 
 /**
- * Resolve the bytes of the `agent-harness` binary for `target`, in order:
- * `HARNESS_POD_BIN` (explicit prebuilt) → the cache → build into the cache.
+ * Resolve the bytes of the `tentacle` binary for `target`, in order:
+ * `TENTACLE_POD_BIN` (explicit prebuilt) → the cache → build into the cache.
  * Returns the file bytes ready to stream into the pod.
  */
 export async function resolvePodBinary(
@@ -160,15 +160,15 @@ export async function resolvePodBinary(
   const log = options.log ?? (() => {});
   const build = options.build ?? buildBinary;
   // 1) An explicit prebuilt binary wins — the primary "I build it myself" knob.
-  const override = process.env.HARNESS_POD_BIN;
+  const override = process.env.TENTACLE_POD_BIN;
   if (override) {
-    log(`[pod-binary] using HARNESS_POD_BIN → ${override}\n`);
+    log(`[pod-binary] using TENTACLE_POD_BIN → ${override}\n`);
     return new Uint8Array(readFileSync(override));
   }
   // 2/3) Cache, building on a miss. The cache key is the full Bun target
-  // (e.g. `agent-harness-bun-linux-x64`) so x64/arm64 never collide.
+  // (e.g. `tentacle-bun-linux-x64`) so x64/arm64 never collide.
   const cacheDir = options.cacheDir ?? podBinCacheDir();
-  const outfile = resolve(cacheDir, `agent-harness-${target}`);
+  const outfile = resolve(cacheDir, `tentacle-${target}`);
   if (!existsSync(outfile)) {
     log(`[pod-binary] no cache for ${target}; building → ${outfile}\n`);
     // `dist/pod-bin/` may not exist yet.
@@ -176,7 +176,7 @@ export async function resolvePodBinary(
     const ok = await build(outfile, target);
     if (!ok || !existsSync(outfile)) {
       throw new Error(
-        `failed to build the ${target} agent-harness binary — run \`TARGET=${target} bun run compile\` and point HARNESS_POD_BIN at it`,
+        `failed to build the ${target} tentacle binary — run \`TARGET=${target} bun run compile\` and point TENTACLE_POD_BIN at it`,
       );
     }
     log(`[pod-binary] built ${target} → ${outfile}\n`);

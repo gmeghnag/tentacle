@@ -1,10 +1,10 @@
 # F3 — Remote Control: Architecture & Design
 
 Status: **implemented (core slices)** as of 2026-10-12. Shipped: F3.a transport
-(`@agent-harness/transport` — `RpcPeer` + in-memory channel), F3.b daemon core
-(`@agent-harness/daemon` — `SessionHost`/`HostedSession`/`Connection` + event &
+(`@tentacle/transport` — `RpcPeer` + in-memory channel), F3.b daemon core
+(`@tentacle/daemon` — `SessionHost`/`HostedSession`/`Connection` + event &
 permission mapping), F3.c WebSocket binding (`startWsServer` over `Bun.serve` +
-a real-socket smoke test), F3.d client (`@agent-harness/client` — `RemoteClient`/
+a real-socket smoke test), F3.d client (`@tentacle/client` — `RemoteClient`/
 `RemoteSession`, reused by the Ink `App` behind a `SessionController` interface)
 and the `serve`/`connect` CLI, F3.e security (bearer-token auth, loopback-safe
 bind refusal, Origin allow-list, server-side confinement/permissions), and the
@@ -16,7 +16,7 @@ multi-client observers/fan-out, the `config.jsonc` `remote` block, TLS is coded
 
 This document is the implementation plan for F3. It builds on the locked decisions in `ARCHITECTURE.md` (ADR-002: WebSocket +
 JSON-RPC 2.0 with an ACP-shaped vocabulary) and on the already-shipped
-`@agent-harness/protocol` package, which **already defines the entire wire
+`@tentacle/protocol` package, which **already defines the entire wire
 vocabulary** we need. F3 is therefore mostly *transport + daemon + client +
 hardening*, not new protocol design.
 
@@ -50,8 +50,8 @@ reasoning, tool calls/diffs, token meter, and interactive permission prompts).
 ## 2. Requirements
 
 ### 2.1 Functional
-1. Start a daemon: `agent-harness serve [--host H] [--port P]`.
-2. Connect a client: `agent-harness connect <url> [--token T]` → full TUI.
+1. Start a daemon: `tentacle serve [--host H] [--port P]`.
+2. Connect a client: `tentacle connect <url> [--token T]` → full TUI.
 3. Handshake negotiates `PROTOCOL_VERSION`; incompatible majors are refused.
 4. Create/attach sessions; submit prompts; receive streamed updates; cancel a turn.
 5. Interactive permission prompts round-trip to the connected client.
@@ -106,28 +106,28 @@ defers nothing we'd regret.
 
 ## 4. Component architecture
 
-New packages (all depend on the existing `@agent-harness/protocol`):
+New packages (all depend on the existing `@tentacle/protocol`):
 
 ```
           ┌────────────────────────── host machine ──────────────────────────┐
           │                                                                   │
-client ── WS ──▶  @agent-harness/daemon                                        │
+client ── WS ──▶  @tentacle/daemon                                        │
           │        ├─ WsServer (Bun.serve websocket)                           │
           │        ├─ Connection  (one per socket)                            │
           │        │    └─ RpcPeer (framing/validation/correlation)  ◀── shared│
           │        ├─ Auth (token/TLS/origin)                                  │
           │        └─ SessionHost                                              │
           │             └─ map<sessionId, HostedSession>                       │
-          │                   ├─ Agent + Session   (existing @agent-harness/agent)
+          │                   ├─ Agent + Session   (existing @tentacle/agent)
           │                   ├─ HostExecution(root)  (write-confined)         │
           │                   └─ RemotePermissionRequester → session/request_permission
           └───────────────────────────────────────────────────────────────────┘
 
-@agent-harness/transport   RpcPeer: JSON-RPC 2.0 request/notify/response over a
+@tentacle/transport   RpcPeer: JSON-RPC 2.0 request/notify/response over a
                            duplex message channel; schema-validates with the
                            protocol registries; correlates ids; used by BOTH ends.
 
-@agent-harness/client      Client runtime: connects, handshakes, exposes
+@tentacle/client      Client runtime: connects, handshakes, exposes
                            newSession/prompt/cancel + an async stream of
                            SessionUpdate; answers session/request_permission.
                            The Ink App consumes this exactly like a local Session.
@@ -148,7 +148,7 @@ test the hard part (framing/validation/cancellation) with zero sockets.
 
 ## 5. Wire protocol — reuse what we have
 
-`@agent-harness/protocol` already defines, as Zod schemas with a method registry:
+`@tentacle/protocol` already defines, as Zod schemas with a method registry:
 
 - Framing: `JsonRpcRequest/Notification/Response`, `JsonRpcError`, `JSONRPC_VERSION`.
 - Methods (request→response): `initialize`, `session/new`, `session/prompt`,
@@ -274,7 +274,7 @@ client                                   daemon
 Non-negotiable, because a control channel = remote code execution.
 
 1. **Bind safe by default:** loopback only. Non-loopback bind **requires** a token
-   (`--token`, or `HARNESS_REMOTE_TOKEN`, or config). Refuse to start a
+   (`--token`, or `TENTACLE_REMOTE_TOKEN`, or config). Refuse to start a
    non-loopback listener without one.
 2. **Auth:** bearer token in the `Authorization` header on the WS upgrade (and a
    `?token=` fallback only for clients that can't set headers). Constant-time
@@ -377,9 +377,9 @@ All green via `bun run check` at each sub-slice.
 ## 15. CLI surface
 
 ```
-agent-harness serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
+tentacle serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
                     [--tls-cert FILE --tls-key FILE] [--cwd DIR]
-agent-harness connect ws(s)://host:port [--token T]      # launches the TUI, remote
+tentacle connect ws(s)://host:port [--token T]      # launches the TUI, remote
 ```
 - `serve` reuses `loadConfig()` (model, confined cwd, system prompt) and adds a
   `remote` config block (host/port/token/tls/limits). Refuses unsafe binds (§9.1).
@@ -401,14 +401,14 @@ Config additions (`config.jsonc`, env > file > default):
 
 ## 16. Implementation phasing (each slice ships green)
 
-- **F3.a — transport:** `@agent-harness/transport` `RpcPeer` + in-memory channel
+- **F3.a — transport:** `@tentacle/transport` `RpcPeer` + in-memory channel
   + `MessageChannel` interface. Tests §14.1. *No sockets.*
 - **F3.b — daemon core:** `SessionHost`, `HostedSession`, AgentEvent→update
   mapping, dispatcher over `RpcPeer`. Drive with `ScriptedProvider` over the
   in-memory channel (§14.2–3). Still no sockets.
 - **F3.c — WebSocket binding:** `Bun.serve` websocket adapter → `MessageChannel`;
   loopback `ws://`; one real-socket smoke test (§14.6).
-- **F3.d — client runtime + `connect`:** `@agent-harness/client`, `RemoteSession`,
+- **F3.d — client runtime + `connect`:** `@tentacle/client`, `RemoteSession`,
   wire the Ink TUI to it (local vs remote behind one interface).
 - **F3.e — security:** token auth, Origin/Host, safe-bind refusal, TLS flags,
   limits, audit (§9, §14.4).

@@ -15,8 +15,8 @@ is folded into this plan as steps 1–2).
 
 ## 1. Goal
 
-Let `agent-harness run --namespace <ns> --image <ANY_LINUX_IMAGE>` work with an image that does
-**not** contain `agent-harness`. The CLI injects a Linux binary it built (or has cached) from the
+Let `tentacle run --namespace <ns> --image <ANY_LINUX_IMAGE>` work with an image that does
+**not** contain `tentacle`. The CLI injects a Linux binary it built (or has cached) from the
 laptop into the pod, over the exec channel, before starting the daemon.
 
 Why: today the image is a build burden (must contain the tool, right arch, pushed to a registry —
@@ -28,7 +28,7 @@ Constraints (user decision):
 - **Linux binaries only** for the remote pod (the pod is always linux).
 - Probe arch with `uname -m`; **if `uname` is missing → fall back to a linux binary** (default
   `linux-x64`), don't abort on the probe.
-- Clean code, tests, no new dependencies (self-contained, like the rest of `@agent-harness/k8s`).
+- Clean code, tests, no new dependencies (self-contained, like the rest of `@tentacle/k8s`).
 
 ## 2. Transport design (decided — raw binary, no tar)
 
@@ -47,7 +47,7 @@ strings). Two options:
 Solution that needs **no terminator at all**: the receiver reads exactly the binary's length:
 
 ```
-sh -c "head -c <N> > /usr/local/bin/agent-harness && chmod 755 /usr/local/bin/agent-harness"
+sh -c "head -c <N> > /usr/local/bin/tentacle && chmod 755 /usr/local/bin/tentacle"
 ```
 
 `head -c N` consumes exactly N bytes from stdin and exits → the exec's command exits → the k8s
@@ -63,24 +63,24 @@ wrapped in a shell. `sh` exists in every target image (ubi/debian/alpine).
 ```
 createPod → waitForReady
   → runExec(["sh","-c","uname -m"])          # arch probe; on ANY failure → linux-x64 (user rule)
-  → pick binary: cache dir dist/pod-bin/agent-harness-<os>-<arch>
+  → pick binary: cache dir dist/pod-bin/tentacle-<os>-<arch>
        missing/stale → build with TARGET=bun-linux-<arch> (Bun.build, same options as scripts/build.ts)
        → write to cache
   → read binary bytes + size N
-  → runExecBinary(["sh","-c","head -c N > /usr/local/bin/agent-harness && chmod 755 …"], bytes)
+  → runExecBinary(["sh","-c","head -c N > /usr/local/bin/tentacle && chmod 755 …"], bytes)
        → exitCode != 0 → throw with pod stderr (abort before RPC channel)
-  → runExec(["agent-harness","--version"])   # probe: catches bad arch/libc/broken binary
+  → runExec(["tentacle","--version"])   # probe: catches bad arch/libc/broken binary
        → exitCode != 0 → throw with stderr ("Exec format error" etc.)
-  → openExec(["agent-harness","serve","--stdio","--model-proxy"])   # existing RPC path, unchanged
+  → openExec(["tentacle","serve","--stdio","--model-proxy"])   # existing RPC path, unchanged
 ```
 
-Install path `/usr/local/bin/agent-harness` (PATH is searched; if the image already had the tool,
+Install path `/usr/local/bin/tentacle` (PATH is searched; if the image already had the tool,
 ours shadows it — fine, it's our sandbox; note: running as root is assumed, same as today's
-`COPY agent-harness /usr/bin/...` Dockerfile; if non-root, log a clear error from the exit status).
+`COPY tentacle /usr/bin/...` Dockerfile; if non-root, log a clear error from the exit status).
 
 > **Third caller (F4.g, `exec` attach — branch `feat/pod-exec-attach`):**
 > `startExecRuntime` runs the SAME sequence against a pod that already exists,
-> but with a **preflight `agent-harness --version`** in front: if it succeeds
+> but with a **preflight `tentacle --version`** in front: if it succeeds
 > the whole injection is skipped (re-attach is a sub-second probe, no 89 MB
 > transfer) and its stdout is the version label; only on failure does the full
 > sequence above run. The pod is user-owned, so no create/delete wraps it and a
@@ -180,7 +180,7 @@ export interface PodBinaryDeps {
   readonly resolveBinary: (target: "bun-linux-x64" | "bun-linux-arm64") => Promise<Uint8Array>;
   readonly log: (line: string) => void;
 }
-/** Inject the agent-harness binary into the pod and verify it runs. Throws with the
+/** Inject the tentacle binary into the pod and verify it runs. Throws with the
  *  pod's stderr on any failure (binary already cleaned up conceptually — pod is deleted
  *  by the caller's existing catch). */
 export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
@@ -188,19 +188,19 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<void>;
 
 `injectAgentBinary` = the sequence in §2: probe → resolve bytes (log size) → `runExec`
 `head -c N > path && chmod` (progress: TTY single-line bar / piped ~10% lines) →
-`runExec(["agent-harness","--version"])` → return the version label (the caller's
+`runExec(["tentacle","--version"])` → return the version label (the caller's
 final line folds it in; no separate "ready in pod" log line).
 
 **`pod-runtime.ts`** `startPodRuntime`: after `waitForReady`, before `openExec`, call
 `await injectAgentBinary(…)`. The existing `catch` already deletes the pod on throw — unchanged.
 
 **Binary resolution (`resolveBinary`)** — new module **`pod-binary-build.ts`** in the CLI:
-- Cache dir: `dist/pod-bin/agent-harness-<os>-<arch>` (next to the compiled binary; `dist/`
+- Cache dir: `dist/pod-bin/tentacle-<os>-<arch>` (next to the compiled binary; `dist/`
   is already git-ignored — confirmed in `.gitignore` line 5).
 - Staleness check: compare cache mtime vs the source tree mtime? **v1: cache only by
-  existence + an env override `HARNESS_POD_BIN` (explicit path to a prebuilt binary — the
+  existence + an env override `TENTACLE_POD_BIN` (explicit path to a prebuilt binary — the
   user's real flow is "faccio io", so this is the primary knob).** Rebuild when missing or
-  when `HARNESS_POD_BIN` is set (read that file instead, no build).
+  when `TENTACLE_POD_BIN` is set (read that file instead, no build).
 - Build: `Bun.build` with the SAME options as `scripts/build.ts` (entrypoints main.ts +
   worker.ts as second entrypoint, yoga plugin, minify, `compile: { target }`). **Refactor
   `scripts/build.ts` to export the shared `buildBinary(outfile, target)` options so the pod
@@ -210,22 +210,22 @@ final line folds it in; no separate "ready in pod" log line).
   entrypoint for consistency with the local binary.)
 - Reading the built file: `readFile` → `Uint8Array`.
 
-### 3.3 `agent-harness --version` — `packages/cli/src/main.ts`
+### 3.3 `tentacle --version` — `packages/cli/src/main.ts`
 
 - New flag, handled **before** config loading (like `--help`/`connect`):
   prints the app version and exits 0. This is the probe command and also user-facing.
 - Version source: read `package.json` at build time via `compile.define` in
-  `scripts/build.ts` (`process.env.HARNESS_APP_VERSION` → JSON version), with runtime
+  `scripts/build.ts` (`process.env.TENTACLE_APP_VERSION` → JSON version), with runtime
   fallback `"dev"` when undefined (source runs). Pattern verified working in compiled
   binaries (see §5, note 1).
 - Add `--version` to the `HELP` text.
 - Test: `main(["bun","cli","--version"])` → exit 0, output contains a version string, and
-  **does not require config** (works with `HARNESS_CONFIG_DIR` pointing at an empty dir —
+  **does not require config** (works with `TENTACLE_CONFIG_DIR` pointing at an empty dir —
   important: it must not scaffold or load model config).
 
 ### 3.4 Docs/TODO
 - `TODO.md`: add entry under F4 (after F4.d): `F4.e — pod binary injection` (unchecked until
-  done, with the design summary + the `HARNESS_POD_BIN` knob).
+  done, with the design summary + the `TENTACLE_POD_BIN` knob).
 - `docs/F4-pod-execution.md`: one section (or a pointer) — the injection flow + the image no
   longer needs the tool.
 - Update `pod.ts` header comment + `main.ts` `run` help text: `--image` now only needs to be
@@ -236,7 +236,7 @@ final line folds it in; no separate "ready in pod" log line).
 
 1. [x] **`--version`** in `main.ts` (+ `define` in `scripts/build.ts`, HELP line, test in
    `main.test.ts`). Small, independent, unblocks the probe. — **shipped** (`70939c5`).
-2. [x] **`runExec`** in `@agent-harness/k8s` (`exec-run.ts` + `client.ts` + `index.ts` + tests
+2. [x] **`runExec`** in `@tentacle/k8s` (`exec-run.ts` + `client.ts` + `index.ts` + tests
    with `FakeWS`-style fake: status→resolve, stdout/stderr collection, timeout reject,
    input chunking on channel 0, close-without-status reject). — **shipped** (`f9939cb`).
 3. [x] **`PodCluster.runExec`** + **`injectAgentBinary`** (`pod-binary.ts`) with tests: a fake
@@ -244,21 +244,21 @@ final line folds it in; no separate "ready in pod" log line).
    arch mapping, uname-failure fallback to x64, `head` failure → throw with stderr,
    `--version` failure → throw with stderr. Extend the existing `FakeCluster` in
    `pod-runtime.test.ts` with a `runExec`. — **shipped** (`7b650ee`).
-4. [x] **`resolveBinary`** (`pod-binary-build.ts`): `HARNESS_POD_BIN` path, cache, `Bun.build`
-   with shared options from refactored `scripts/build.ts`; test the `HARNESS_POD_BIN` and
+4. [x] **`resolveBinary`** (`pod-binary-build.ts`): `TENTACLE_POD_BIN` path, cache, `Bun.build`
+   with shared options from refactored `scripts/build.ts`; test the `TENTACLE_POD_BIN` and
    cache-hit paths (skip the real build in unit tests — it's slow; the build path is
    covered manually/live). — **shipped** (`65497b7`).
 5. [x] **Wire into `startPodRuntime`** + log lines matching the existing `[pod]` style.
    — **shipped** (`280acd6`).
 6. [~] **Live validation** — done for UBI9 (full success) + busybox (clean probe
    failure); the negative Mach-O case is still pending. See §9.
-   - build `TARGET=bun-linux-x64` (or via `HARNESS_POD_BIN` pointing at a prebuilt one),
-   - run `./dist/agent-harness run --namespace test00 --image <busybox-or-ubi-without-tool>`
+   - build `TARGET=bun-linux-x64` (or via `TENTACLE_POD_BIN` pointing at a prebuilt one),
+   - run `./dist/tentacle run --namespace test00 --image <busybox-or-ubi-without-tool>`
      (any linux image that has `sh`; `busybox` has `sh` + `head`),
    - expect: log lines for probe/transfer/progress/version, then the TUI opens and a turn
      works end-to-end (model via reverse tunnel).
-   - Also verify the negative path: point `HARNESS_POD_BIN` at the macOS binary → expect a
-     clear `[pod …] agent-harness --version failed: … Exec format error`-style message,
+   - Also verify the negative path: point `TENTACLE_POD_BIN` at the macOS binary → expect a
+     clear `[pod …] tentacle --version failed: … Exec format error`-style message,
      pod deleted, no opaque "connection closed".
 7. [x] **Docs/TODO** (see 3.4) — **done** (working tree; note `dist/Dockerfile`
    is git-ignored, its marker is local-only).
@@ -318,13 +318,13 @@ final line folds it in; no separate "ready in pod" log line).
   (first at 10%, capped at 100%). A 60 MB transfer logs ~10 lines, not ~7.
 - [x] **`chmod` in a second exec?** — RESOLVED (step 3): kept in the same `sh -c` one-liner
   as the `head -c` write (`head -c N > path && chmod 755 path`).
-- [x] **Default install path** — RESOLVED (step 3): `/usr/local/bin/agent-harness`
+- [x] **Default install path** — RESOLVED (step 3): `/usr/local/bin/tentacle`
   (`POD_BIN_PATH`); conventional, first in most PATHs, and the old Dockerfile's
   `/usr/bin` layout is superseded. Assumes the pod runs as root (same assumption as
   before); a non-root image surfaces "Permission denied" via the exec status.
 - [x] **Cache invalidation** — RESOLVED (step 4, as intended): v1 = existence +
-  `HARNESS_POD_BIN` override only (no mtime magic). Cache key is the full Bun target
-  (`agent-harness-bun-linux-x64` / `-arm64`) so the two arches never collide; a stale
+  `TENTACLE_POD_BIN` override only (no mtime magic). Cache key is the full Bun target
+  (`tentacle-bun-linux-x64` / `-arm64`) so the two arches never collide; a stale
   binary is handled by deleting the cache file (or using the override).
 - [x] **`runExecOverWebSocket` signature** — decided in step 2 (see §8): it takes a built
   `url` + `subprotocols` rather than an `ExecTarget`, so `KubeClient` stays the single
@@ -342,8 +342,8 @@ is the truth; §2–§4 remain the design rationale.
 
 ### Step 1 — `--version` (shipped, `70939c5`)
 - `packages/cli/src/main.ts`: `--version` handled before config loading (like
-  `--help`), prints `agent-harness <version>`, exits 0. Version from
-  `process.env.HARNESS_APP_VERSION` (compile-time literal) with a `"dev"`
+  `--help`), prints `tentacle <version>`, exits 0. Version from
+  `process.env.TENTACLE_APP_VERSION` (compile-time literal) with a `"dev"`
   fallback for source runs. Added to `HELP`.
 - `scripts/build.ts`: reads the CLI package `version` and injects it via
   `compile.define`. The worker second entrypoint + yoga plugin are unchanged.
@@ -372,8 +372,8 @@ is the truth; §2–§4 remain the design rationale.
 ### Step 3 — `injectAgentBinary` (shipped, `7b650ee`)
 - `packages/cli/src/pod-binary.ts` (new): `mapUnameOutput`, `archToTarget`,
   `probePodArch` (never throws — any probe failure → x64), `injectAgentBinary`
-  (install via `sh -c "head -c N > /usr/local/bin/agent-harness && chmod 755 …"`
-  with ~10% progress + size-scaled timeout, then an `agent-harness --version`
+  (install via `sh -c "head -c N > /usr/local/bin/tentacle && chmod 755 …"`
+  with ~10% progress + size-scaled timeout, then an `tentacle --version`
   verify), and `POD_BIN_PATH`.
 - `packages/cli/src/pod-runtime.ts`: `PodCluster` gains `runExec`.
 - Tests (`pod-binary.test.ts`): arch mapping, probe fallbacks, the exact exec
@@ -395,10 +395,10 @@ is the truth; §2–§4 remain the design rationale.
 ### Step 4 — `resolvePodBinary` (shipped, `65497b7`)
 - `packages/cli/src/pod-binary-build.ts` (new):
   - `resolvePodBinary(target, { cacheDir?, build?, log? })` — resolution order:
-    1. `HARNESS_POD_BIN` (explicit prebuilt path; read directly, never cached/built),
-    2. cache `dist/pod-bin/agent-harness-<target>` (git-ignored),
+    1. `TENTACLE_POD_BIN` (explicit prebuilt path; read directly, never cached/built),
+    2. cache `dist/pod-bin/tentacle-<target>` (git-ignored),
     3. build into the cache. A failed build throws with a `TARGET=… bun run
-       compile` + `HARNESS_POD_BIN` hint and leaves no partial cache entry.
+       compile` + `TENTACLE_POD_BIN` hint and leaves no partial cache entry.
   - `buildBinary(outfile, target)` — the `Bun.build` options (main.ts +
     worker.ts entrypoints, embedded yoga-wasm, version `define`, minify)
     extracted from `scripts/build.ts` so the CLI binary and the injected pod
@@ -413,7 +413,7 @@ is the truth; §2–§4 remain the design rationale.
   cache-miss builds, cache-hit skips the build, failed-build error + no
   partial entry. The real cross-compile stays out of unit tests (slow).
 - Verified the refactor end-to-end on macOS: `bun run compile` → Mach-O arm64,
-  `./dist/agent-harness --version` → `agent-harness 0.0.0` (version `define`
+  `./dist/tentacle --version` → `tentacle 0.0.0` (version `define`
   intact after the move).
 - **Pitfall hit (test-only):** in Bun, `process.env.X = undefined` stringifies
   to `"undefined"` (it does NOT delete the key) — env cleanup in tests must use
@@ -427,7 +427,7 @@ is the truth; §2–§4 remain the design rationale.
     - `podArch: () => probePodArch(kube, name, AGENT_CONTAINER)` — the
       `uname -m` probe with x64 fallback (never aborts).
     - `resolveBinary: (t) => resolvePodBinary(t, { log })` —
-      `HARNESS_POD_BIN` override → `dist/pod-bin/` cache → shared
+      `TENTACLE_POD_BIN` override → `dist/pod-bin/` cache → shared
       `buildBinary` cross-compile.
     - `log: deps.log` — injection logs use the existing `[pod …]` style.
   Any injection failure throws inside the existing `try`, so the pod is
@@ -435,9 +435,9 @@ is the truth; §2–§4 remain the design rationale.
   comment updated.
 - Tests (`pod-runtime.test.ts`): the happy path now asserts the FULL
   sequence with the real `resolvePodBinary` wired (test sets
-  `HARNESS_POD_BIN` to an 8-byte fake file → no build): create, ready,
+  `TENTACLE_POD_BIN` to an 8-byte fake file → no build): create, ready,
   `uname -m`, the exact install shell command (`head -c 8 >
-  /usr/local/bin/agent-harness && chmod 755 …`), `--version` verify, then
+  /usr/local/bin/tentacle && chmod 755 …`), `--version` verify, then
   the daemon exec — in that order. New negative test: a failing
   `--version` (e.g. wrong arch) rethrows with the pod stderr, deletes the
   pod, and never opens the daemon exec.
@@ -448,7 +448,7 @@ is the truth; §2–§4 remain the design rationale.
 ### Step 6 — live validation (done — real OpenShift x86_64 cluster, ns `test00`; details in §9)
 - UBI9 full success (89 MB transfer 10%→100% + daemon in pod); busybox clean
   failure at the `--version` probe (glibc constraint, clear error + now the
-  hint). **PENDING:** the negative case with `HARNESS_POD_BIN` pointing at the
+  hint). **PENDING:** the negative case with `TENTACLE_POD_BIN` pointing at the
   macOS Mach-O binary (expect a clear `--version failed … Exec format error`,
   pod deleted, no opaque close).
 
@@ -457,7 +457,7 @@ is the truth; §2–§4 remain the design rationale.
   section + the old "F4.e hardening" renumbered F4.f + status header;
   `packages/k8s/src/pod.ts` header/doc + `main.ts` `run` help and
   `--image` error text (glibc + `sh`+`head` constraint, tool is injected,
-  `HARNESS_POD_BIN` knob documented); `dist/Dockerfile` marked optional/legacy
+  `TENTACLE_POD_BIN` knob documented); `dist/Dockerfile` marked optional/legacy
   — note: the file is git-IGNORED (`dist/`), so that marker is local-only and
   not committable.
 
@@ -465,8 +465,8 @@ is the truth; §2–§4 remain the design rationale.
 
 ### Live validation (step 6, real OpenShift cluster, ns `test00`, node x86_64)
 - ✅ **UBI9** (`registry.access.redhat.com/ubi9/ubi:latest`): FULL SUCCESS — cache-hit
-  (`dist/pod-bin/agent-harness-bun-linux-x64`, 89 MB), transfer 10%→100% over the WS
-  exec, `agent-harness 0.0.0 ready in pod`, daemon started. The live ~89 MB transfer
+  (`dist/pod-bin/tentacle-bun-linux-x64`, 89 MB), transfer 10%→100% over the WS
+  exec, `tentacle 0.0.0 ready in pod`, daemon started. The live ~89 MB transfer
   (the one never proven by unit tests) WORKS.
 - ⚠️ **busybox**: injection succeeded, `--version` probe failed with a CLEAR error
   (`error while loading shared libraries: libdl.so.2: cannot open shared object file`).
@@ -506,7 +506,7 @@ is the truth; §2–§4 remain the design rationale.
 
 ### Also in this working tree (same commit as the fixes)
 1. **`--pod` flag → `run` subcommand** — `main.ts` + `flags.ts` (the parser now
-   also accepts `--key=value`). `agent-harness run --image <ref>
+   also accepts `--key=value`). `tentacle run --image <ref>
    [--namespace <ns>] [--resume [uid]] [<name>]`; `<name>` is an optional
    positional pod name (else random). The old `--pod` block is a relocated
    version of this one.
@@ -537,7 +537,7 @@ is the truth; §2–§4 remain the design rationale.
    when piped (the TUI opening is the confirmation on a TTY). The resolver's
    verbose cache/build path is dropped on a TTY (the phase line is enough).
    Phase strings were trimmed (arch probe folded into "resolving <target>",
-   `verifying…`, `injecting agent-harness <bar>`). Tests: `cli/test/status-line.test.ts`
+   `verifying…`, `injecting tentacle <bar>`). Tests: `cli/test/status-line.test.ts`
    (new) + an `onStatus` sequence test in `pod-binary.test.ts`.
 
 ### Git state + next actions
@@ -555,7 +555,7 @@ is the truth; §2–§4 remain the design rationale.
 - DONE in this commit: 1) the glibc fixes + `libcMismatchHint` (+tests), 2) the
   `run` subcommand + delete-on-exit + missing-namespace error, 4) docs/TODO,
   plus the single-line rendering + its tests. Remaining: 3) step 6 negative case
-  (`HARNESS_POD_BIN=$PWD/dist/agent-harness`, the macOS Mach-O binary → expect a
+  (`TENTACLE_POD_BIN=$PWD/dist/tentacle`, the macOS Mach-O binary → expect a
   clear `--version failed … Exec format error`, pod deleted), and 5) merge to
   `main`, delete `feat/pod-daemon-healthcheck`.
 

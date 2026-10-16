@@ -1,5 +1,5 @@
 {
-  "name": "@agent-harness/agent",
+  "name": "@tentacle/agent",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -7,8 +7,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@agent-harness/core": "workspace:*",
-    "@agent-harness/tools": "workspace:*"
+    "@tentacle/core": "workspace:*",
+    "@tentacle/tools": "workspace:*"
   },
   "devDependencies": {
     "zod": "3.23.8"

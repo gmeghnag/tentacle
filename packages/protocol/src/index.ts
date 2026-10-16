@@ -1,5 +1,5 @@
 /**
- * `@agent-harness/protocol` — the shared wire protocol.
+ * `@tentacle/protocol` — the shared wire protocol.
  *
  * JSON-RPC 2.0 framing + ACP-shaped session/tool/permission vocabulary, all as
  * Zod schemas with inferred types. This package is the single source of truth

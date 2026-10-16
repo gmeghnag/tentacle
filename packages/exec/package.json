@@ -1,5 +1,5 @@
 {
-  "name": "@agent-harness/exec",
+  "name": "@tentacle/exec",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -7,6 +7,6 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@agent-harness/core": "workspace:*"
+    "@tentacle/core": "workspace:*"
   }
 }

@@ -1,5 +1,5 @@
 /**
- * `@agent-harness/agent` — the orchestration loop that ties the model provider,
+ * `@tentacle/agent` — the orchestration loop that ties the model provider,
  * tool registry and execution environment together, plus a multi-turn `Session`.
  */
 export * from "./agent.ts";

@@ -1,5 +1,5 @@
-import type { Agent } from "@agent-harness/agent";
-import type { ChatMessage, JobController, PermissionBroker } from "@agent-harness/core";
+import type { Agent } from "@tentacle/agent";
+import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import { render } from "ink";
 import { App, type SessionController } from "./App.tsx";
 import { messagesToItems } from "./resume.ts";

@@ -5,7 +5,7 @@
  * the model sees prior turns (and their tool results). This is what turns the
  * one-shot loop into an interactive assistant.
  */
-import type { ChatMessage } from "@agent-harness/core";
+import type { ChatMessage } from "@tentacle/core";
 import type { Agent, AgentEvent } from "./agent.ts";
 import { type CompactResult, compactedHistory } from "./compact.ts";
 

@@ -1,5 +1,5 @@
 {
-  "name": "@agent-harness/tools",
+  "name": "@tentacle/tools",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@agent-harness/core": "workspace:*",
+    "@tentacle/core": "workspace:*",
     "diff": "5.2.0",
     "zod": "3.23.8",
     "zod-to-json-schema": "3.23.5"

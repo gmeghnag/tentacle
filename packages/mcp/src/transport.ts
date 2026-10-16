@@ -6,7 +6,7 @@
  * `createStdioTransport` is the host-backed implementation; the `McpTransport`
  * contract lets the client run against an in-memory pair in tests.
  */
-import { scrubSensitiveEnv } from "@agent-harness/core";
+import { scrubSensitiveEnv } from "@tentacle/core";
 import type { McpStdioServerSpec, McpTransport } from "./types.ts";
 
 export interface StdioTransportOptions {

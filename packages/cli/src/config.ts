@@ -1,6 +1,6 @@
 /**
- * Configuration lives in `@agent-harness/config` (layered env > file > default,
+ * Configuration lives in `@tentacle/config` (layered env > file > default,
  * with `apiKeyCommand` secret resolution). Re-exported here so the CLI barrel
- * keeps surfacing `loadConfig` / `HarnessConfig`.
+ * keeps surfacing `loadConfig` / `TentacleConfig`.
  */
-export * from "@agent-harness/config";
+export * from "@tentacle/config";

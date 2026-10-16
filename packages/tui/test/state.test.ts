@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentEvent } from "@agent-harness/agent";
+import type { AgentEvent } from "@tentacle/agent";
 import {
   type DisplayState,
   type NoticeItem,

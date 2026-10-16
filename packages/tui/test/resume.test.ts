@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ChatMessage } from "@agent-harness/core";
+import type { ChatMessage } from "@tentacle/core";
 import { messagesToItems } from "../src/resume.ts";
 import type { ToolItem } from "../src/state.ts";
 

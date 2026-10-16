@@ -23,4 +23,6 @@ coverage/
 *.log
 
 # Agent workspace artifacts (tool-output spills, sessions)
+.tentacle/
 .harness/
+

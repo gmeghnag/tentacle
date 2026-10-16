@@ -14,7 +14,7 @@ export const SessionIdSchema = z.string().min(1);
 export type SessionId = z.infer<typeof SessionIdSchema>;
 
 // --- conversation history (for resume seed + snapshot) ------------------
-// Mirrors `@agent-harness/core`'s `ChatMessage`/`ToolCall` on the wire, so a
+// Mirrors `@tentacle/core`'s `ChatMessage`/`ToolCall` on the wire, so a
 // session can be seeded on `session/new` and read back via `session/snapshot`.
 
 export const WireToolCallSchema = z

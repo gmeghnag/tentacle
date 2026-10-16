@@ -11,7 +11,7 @@
  * Transforms are pure except for the injected `writeSpill`, so they test without
  * a real filesystem.
  */
-import type { ToolResult } from "@agent-harness/core";
+import type { ToolResult } from "@tentacle/core";
 
 export interface ResultTransformContext {
   readonly toolName: string;

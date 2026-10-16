@@ -1,6 +1,6 @@
 /**
  * Built-in defaults and the templates written when scaffolding a fresh
- * `~/.config/agent-harness/` directory on first run.
+ * `~/.config/tentacle/` directory on first run.
  */
 export const DEFAULT_BASE_URL = "http://localhost:8080/v1";
 export const DEFAULT_MODEL = "default";
@@ -49,7 +49,7 @@ Operating principles:
  * authoritative until the user opts in.
  */
 export const DEFAULT_CONFIG_JSONC = `{
-  // agent-harness configuration.
+  // tentacle configuration.
   //
   // Precedence (highest wins):  environment variables  >  this file  >  built-in defaults.
   // Uncomment a setting to override the default shown in the comment.
@@ -96,7 +96,7 @@ export const DEFAULT_CONFIG_JSONC = `{
 
   // Tool-output handling.
   //  - maxInlineOutputChars: a result longer than this is spilled to a file under
-  //    .harness/tool-output/ and the model is told to read it selectively (0 = off).
+  //    .tentacle/tool-output/ and the model is told to read it selectively (0 = off).
   //  - redactSecrets: mask keys/tokens/credentials in tool output (on by default).
   //  - summarizeLargeOutput: replace large output with an LLM summary instead of a
   //    preview (full output still spilled to a file). Costs a model call; off by default.

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { PassThrough } from "node:stream";
-import { Method, PROTOCOL_VERSION } from "@agent-harness/protocol";
+import { Method, PROTOCOL_VERSION } from "@tentacle/protocol";
 import { RpcPeer } from "../src/peer.ts";
 import {
   type NodeReadableLike,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExecutionEnvironment, Tool, ToolContext } from "@agent-harness/core";
+import type { ExecutionEnvironment, Tool, ToolContext } from "@tentacle/core";
 import { z } from "zod";
 import { ToolRegistry } from "../src/index.ts";
 

@@ -6,8 +6,8 @@
     "types": ["bun", "react"],
     "baseUrl": ".",
     "paths": {
-      "@agent-harness/agent": ["../agent/src/index.ts"],
-      "@agent-harness/core": ["../core/src/index.ts"]
+      "@tentacle/agent": ["../agent/src/index.ts"],
+      "@tentacle/core": ["../core/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "test/**/*.tsx"]

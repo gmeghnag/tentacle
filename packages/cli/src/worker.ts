@@ -1,7 +1,7 @@
 /**
  * Worker entry point: the local agent daemon, running off the render thread.
  *
- * The main thread posts the resolved `HarnessConfig` as the bootstrap message
+ * The main thread posts the resolved `TentacleConfig` as the bootstrap message
  * (an object — distinct from the string JSON-RPC frames the `Connection` then
  * exchanges over this same port). We build a `SessionHost` from it and bind one
  * `Connection` to the worker port; the main thread drives it with a
@@ -15,12 +15,12 @@
  * used to report MCP connection errors back to the main thread for display;
  * `messagePortChannel` ignores non-string frames, so they don't reach the RPC.
  */
-import type { HarnessConfig } from "@agent-harness/config";
-import type { Tool } from "@agent-harness/core";
-import { Connection, SessionHost } from "@agent-harness/daemon";
-import { connectMcpServers } from "@agent-harness/mcp";
-import type { ToolRegistry } from "@agent-harness/tools";
-import { type MessageEndpoint, messagePortChannel } from "@agent-harness/transport";
+import type { TentacleConfig } from "@tentacle/config";
+import type { Tool } from "@tentacle/core";
+import { Connection, SessionHost } from "@tentacle/daemon";
+import { connectMcpServers } from "@tentacle/mcp";
+import type { ToolRegistry } from "@tentacle/tools";
+import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
 import { buildAgent } from "./wiring.ts";
 
@@ -41,7 +41,7 @@ port.addEventListener("message", (event: { data: unknown }) => {
     return;
   }
   started = true;
-  const config = event.data as HarnessConfig;
+  const config = event.data as TentacleConfig;
 
   // Connect MCP once, in the background. Until it resolves, `mcpTools` is empty
   // and we remember each freshly-built registry so we can register the tools

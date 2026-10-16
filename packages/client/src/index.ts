@@ -1,5 +1,5 @@
 /**
- * `@agent-harness/client` — the client runtime. Connects to a daemon, performs
+ * `@tentacle/client` — the client runtime. Connects to a daemon, performs
  * the handshake, and exposes a `RemoteSession` the Ink TUI consumes exactly like
  * a local `Session`, plus the WebSocket channel adapter and the wire↔local
  * mappings.

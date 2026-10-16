@@ -6,8 +6,8 @@
  * client returns the whole turn's events in one batch (no token streaming over
  * the tunnel yet).
  */
-import type { ChatRequest, ModelProvider, StreamEvent } from "@agent-harness/core";
-import type { ModelStreamResult, WireChatRequest } from "@agent-harness/protocol";
+import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
+import type { ModelStreamResult, WireChatRequest } from "@tentacle/protocol";
 
 /** Sends a `model/stream` request to the client and resolves with its events. */
 export type ModelStreamSender = (request: WireChatRequest) => Promise<ModelStreamResult>;

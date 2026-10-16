@@ -1,11 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type {
-  ChatRequest,
-  ExecutionEnvironment,
-  ModelProvider,
-  StreamEvent,
-} from "@agent-harness/core";
-import { ToolRegistry, fsReadTool, shellTool } from "@agent-harness/tools";
+import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
+import { ToolRegistry, fsReadTool, shellTool } from "@tentacle/tools";
 import { createSubagentRunner } from "../src/subagent.ts";
 
 class ScriptedProvider implements ModelProvider {

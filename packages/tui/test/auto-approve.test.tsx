@@ -1,12 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@agent-harness/agent";
-import {
-  type ExecutionEnvironment,
-  type ModelProvider,
-  PermissionBroker,
-} from "@agent-harness/core";
-import type { ChatRequest } from "@agent-harness/core";
-import { ToolRegistry, shellTool } from "@agent-harness/tools";
+import { Agent } from "@tentacle/agent";
+import { type ExecutionEnvironment, type ModelProvider, PermissionBroker } from "@tentacle/core";
+import type { ChatRequest } from "@tentacle/core";
+import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
 

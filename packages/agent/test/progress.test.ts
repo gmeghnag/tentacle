@@ -5,8 +5,8 @@ import type {
   ModelProvider,
   StreamEvent,
   Tool,
-} from "@agent-harness/core";
-import { ToolRegistry } from "@agent-harness/tools";
+} from "@tentacle/core";
+import { ToolRegistry } from "@tentacle/tools";
 import { z } from "zod";
 import { Agent, type AgentEvent } from "../src/agent.ts";
 

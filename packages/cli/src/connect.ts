@@ -1,11 +1,11 @@
 /**
- * `agent-harness connect <url>` — launch the Ink TUI against a remote daemon.
+ * `tentacle connect <url>` — launch the Ink TUI against a remote daemon.
  * The TUI is unchanged: it consumes a `RemoteSession` exactly like a local one,
  * and the same `PermissionBroker` carries approval prompts back over the wire.
  */
-import { RemoteClient, connectWebSocket } from "@agent-harness/client";
-import { PermissionBroker } from "@agent-harness/core";
-import { startTui } from "@agent-harness/tui";
+import { RemoteClient, connectWebSocket } from "@tentacle/client";
+import { PermissionBroker } from "@tentacle/core";
+import { startTui } from "@tentacle/tui";
 
 export interface ConnectOptions {
   readonly url: string;

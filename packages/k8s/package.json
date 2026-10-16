@@ -1,5 +1,5 @@
 {
-  "name": "@agent-harness/k8s",
+  "name": "@tentacle/k8s",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@agent-harness/transport": "workspace:*",
+    "@tentacle/transport": "workspace:*",
     "yaml": "2.9.1"
   }
 }

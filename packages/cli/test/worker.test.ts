@@ -2,14 +2,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonSessionStore } from "@agent-harness/agent";
-import { PermissionBroker } from "@agent-harness/core";
-import { type HarnessConfig, loadConfig } from "../src/config.ts";
+import { JsonSessionStore } from "@tentacle/agent";
+import { PermissionBroker } from "@tentacle/core";
+import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { startWorkerRuntime } from "../src/local-runtime.ts";
 
 // End-to-end over the REAL worker boundary: spawn the worker daemon, handshake,
 // open a session, and drive one scripted turn through a fake OpenAI-compatible
-// server. This is the path `agent-harness -i` now uses by default, so it must
+// server. This is the path `tentacle -i` now uses by default, so it must
 // actually boot (a silent fallback to in-process would hide a broken worker).
 
 function sse(events: unknown[]): string {
@@ -23,7 +23,7 @@ const TURN = sse([
 
 let server: ReturnType<typeof Bun.serve>;
 let dir: string;
-let config: HarnessConfig;
+let config: TentacleConfig;
 const saved: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
@@ -33,17 +33,17 @@ beforeAll(async () => {
     fetch: () => new Response(TURN, { headers: { "content-type": "text/event-stream" } }),
   });
   for (const key of [
-    "HARNESS_CONFIG_DIR",
-    "HARNESS_MODEL_BASE_URL",
-    "HARNESS_MODEL",
-    "HARNESS_CWD",
+    "TENTACLE_CONFIG_DIR",
+    "TENTACLE_MODEL_BASE_URL",
+    "TENTACLE_MODEL",
+    "TENTACLE_CWD",
   ]) {
     saved[key] = process.env[key];
   }
-  process.env.HARNESS_CONFIG_DIR = join(dir, "config");
-  process.env.HARNESS_MODEL_BASE_URL = `http://localhost:${server.port}/v1`;
-  process.env.HARNESS_MODEL = "test";
-  process.env.HARNESS_CWD = dir;
+  process.env.TENTACLE_CONFIG_DIR = join(dir, "config");
+  process.env.TENTACLE_MODEL_BASE_URL = `http://localhost:${server.port}/v1`;
+  process.env.TENTACLE_MODEL = "test";
+  process.env.TENTACLE_CWD = dir;
   config = await loadConfig({ cwd: dir });
 });
 

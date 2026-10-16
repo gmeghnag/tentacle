@@ -2,27 +2,27 @@
   "$schema": "https://json.schemastore.org/tsconfig",
   // Root project: type-checks the whole monorepo in one pass (`tsc --noEmit`).
   // Bun resolves workspace packages at runtime via symlinks; these `paths`
-  // let `tsc` resolve the same `@agent-harness/*` specifiers for type-checking.
+  // let `tsc` resolve the same `@tentacle/*` specifiers for type-checking.
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "baseUrl": ".",
     "jsx": "react-jsx",
     "types": ["bun", "react"],
     "paths": {
-      "@agent-harness/protocol": ["packages/protocol/src/index.ts"],
-      "@agent-harness/config": ["packages/config/src/index.ts"],
-      "@agent-harness/core": ["packages/core/src/index.ts"],
-      "@agent-harness/providers": ["packages/providers/src/index.ts"],
-      "@agent-harness/exec": ["packages/exec/src/index.ts"],
-      "@agent-harness/tools": ["packages/tools/src/index.ts"],
-      "@agent-harness/mcp": ["packages/mcp/src/index.ts"],
-      "@agent-harness/agent": ["packages/agent/src/index.ts"],
-      "@agent-harness/transport": ["packages/transport/src/index.ts"],
-      "@agent-harness/daemon": ["packages/daemon/src/index.ts"],
-      "@agent-harness/client": ["packages/client/src/index.ts"],
-      "@agent-harness/cli": ["packages/cli/src/index.ts"],
-      "@agent-harness/tui": ["packages/tui/src/index.ts"],
-      "@agent-harness/k8s": ["packages/k8s/src/index.ts"]
+      "@tentacle/protocol": ["packages/protocol/src/index.ts"],
+      "@tentacle/config": ["packages/config/src/index.ts"],
+      "@tentacle/core": ["packages/core/src/index.ts"],
+      "@tentacle/providers": ["packages/providers/src/index.ts"],
+      "@tentacle/exec": ["packages/exec/src/index.ts"],
+      "@tentacle/tools": ["packages/tools/src/index.ts"],
+      "@tentacle/mcp": ["packages/mcp/src/index.ts"],
+      "@tentacle/agent": ["packages/agent/src/index.ts"],
+      "@tentacle/transport": ["packages/transport/src/index.ts"],
+      "@tentacle/daemon": ["packages/daemon/src/index.ts"],
+      "@tentacle/client": ["packages/client/src/index.ts"],
+      "@tentacle/cli": ["packages/cli/src/index.ts"],
+      "@tentacle/tui": ["packages/tui/src/index.ts"],
+      "@tentacle/k8s": ["packages/k8s/src/index.ts"]
     }
   },
   "include": [

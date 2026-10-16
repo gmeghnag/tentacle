@@ -5,8 +5,8 @@
  * server-side concern, so a client-requested `cwd` is NOT honoured in v1 — every
  * session runs against the daemon's own confined `defaultCwd`.
  */
-import { type Agent, Session } from "@agent-harness/agent";
-import type { ChatMessage, JobController, PermissionBroker } from "@agent-harness/core";
+import { type Agent, Session } from "@tentacle/agent";
+import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import { HostedSession, type RemotePermission } from "./hosted-session.ts";
 
 export type AgentFactory = (cwd: string) => {

@@ -7,8 +7,8 @@ import type {
   JobController,
   ModelProvider,
   StreamEvent,
-} from "@agent-harness/core";
-import { ToolRegistry } from "@agent-harness/tools";
+} from "@tentacle/core";
+import { ToolRegistry } from "@tentacle/tools";
 import { Agent } from "../src/agent.ts";
 
 class ScriptedProvider implements ModelProvider {

@@ -3,35 +3,30 @@ import { join } from "node:path";
 /**
  * CLI entry point (F1).
  *
- *   agent-harness                 → interactive TUI (when stdin is a TTY)
- *   agent-harness <prompt...>     → one-shot run
- *   agent-harness run [opts]      → run the agent inside a Kubernetes pod (F4)
- *   agent-harness exec <pod>      → attach the TUI to an existing pod (F4)
- *   agent-harness --help          → usage
- *   agent-harness --version       → print the version and exit
+ *   tentacle                 → interactive TUI (when stdin is a TTY)
+ *   tentacle <prompt...>     → one-shot run
+ *   tentacle run [opts]      → run the agent inside a Kubernetes pod (F4)
+ *   tentacle exec <pod>      → attach the TUI to an existing pod (F4)
+ *   tentacle --help          → usage
+ *   tentacle --version       → print the version and exit
  *
- * Configuration is layered (env > ~/.config/agent-harness/config.jsonc >
- * defaults); see `@agent-harness/config`. The config dir + PROMPT.md are
+ * Configuration is layered (env > ~/.config/tentacle/config.jsonc >
+ * defaults); see `@tentacle/config`. The config dir + PROMPT.md are
  * scaffolded on first run.
  *
  * NOTE: F1 auto-approves tool calls; the interactive permission engine arrives
  * in F4. Until then, point the CLI at a trusted model and workspace.
  */
-import {
-  JsonSessionStore,
-  Session,
-  type SessionRecord,
-  recordFromSnapshot,
-} from "@agent-harness/agent";
-import { type ChatMessage, PermissionBroker } from "@agent-harness/core";
+import { JsonSessionStore, Session, type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
+import { type ChatMessage, PermissionBroker } from "@tentacle/core";
 import {
   KubeClient,
   type KubeClientOptions,
   deletePodFromEnv,
   loadKubeClientOptions,
-} from "@agent-harness/k8s";
-import { type SessionController, startTui } from "@agent-harness/tui";
-import { type HarnessConfig, loadConfig } from "./config.ts";
+} from "@tentacle/k8s";
+import { type SessionController, startTui } from "@tentacle/tui";
+import { type TentacleConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { parseFlags, resolveToken } from "./flags.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
@@ -45,67 +40,67 @@ import { buildAgent, connectConfiguredMcp } from "./wiring.ts";
  * The app version: a literal injected at compile time (`define` in
  * `scripts/build.ts`), or `"dev"` when running from source.
  */
-const APP_VERSION = process.env.HARNESS_APP_VERSION ?? "dev";
+const APP_VERSION = process.env.TENTACLE_APP_VERSION ?? "dev";
 
-const HELP = `agent-harness — run an agent task
+const HELP = `tentacle — run an agent task
 
 Usage:
-  agent-harness                 start the rich interactive TUI (when stdin is a TTY)
-  agent-harness -i              force the interactive TUI
-  agent-harness --plain         plain line-based REPL (for pipes / no TTY)
-  agent-harness --resume [uid]  resume a saved session (latest if no uid) in the TUI
-  agent-harness -i --in-process run the agent on the render thread (opt out of the worker)
-  agent-harness run --image <ref> [--namespace <ns>] [--resume [uid]] [<name>]
+  tentacle                 start the rich interactive TUI (when stdin is a TTY)
+  tentacle -i              force the interactive TUI
+  tentacle --plain         plain line-based REPL (for pipes / no TTY)
+  tentacle --resume [uid]  resume a saved session (latest if no uid) in the TUI
+  tentacle -i --in-process run the agent on the render thread (opt out of the worker)
+  tentacle run --image <ref> [--namespace <ns>] [--resume [uid]] [<name>]
                                 run the agent inside a Kubernetes pod (sandbox), local TUI
                                 (<name> is the pod name; random when omitted; sessions
                                 persist on the laptop, so --resume works)
-  agent-harness exec <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]
-                                attach the TUI to an EXISTING pod (agent-harness is
+  tentacle exec <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]
+                                attach the TUI to an EXISTING pod (tentacle is
                                 injected if it is not there yet); --container is the
                                 container to exec into (default: the pod's only one);
                                 the pod is NOT deleted on exit — closing the TUI
                                 detaches, the pod stays up
-  agent-harness <prompt...>     run a single task and exit
-  agent-harness serve [opts]    host the remote-control daemon
-  agent-harness connect <url>   drive a remote daemon with the TUI
-  agent-harness --help          show this help
-  agent-harness --version       print the version and exit
+  tentacle <prompt...>     run a single task and exit
+  tentacle serve [opts]    host the remote-control daemon
+  tentacle connect <url>   drive a remote daemon with the TUI
+  tentacle --help          show this help
+  tentacle --version       print the version and exit
 
 Remote control:
-  agent-harness serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
+  tentacle serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
                       [--tls-cert FILE --tls-key FILE]
-  agent-harness connect ws(s)://host:port [--token T|--token-command CMD]
+  tentacle connect ws(s)://host:port [--token T|--token-command CMD]
   A non-loopback --host requires a token (remote code execution risk).
-  Token env fallback: HARNESS_REMOTE_TOKEN.
+  Token env fallback: TENTACLE_REMOTE_TOKEN.
 
 Configuration (precedence: env > config file > defaults):
-  ~/.config/agent-harness/config.jsonc   settings (scaffolded on first run)
-  ~/.config/agent-harness/PROMPT.md       default system prompt
+  ~/.config/tentacle/config.jsonc   settings (scaffolded on first run)
+  ~/.config/tentacle/PROMPT.md       default system prompt
 
 Environment:
-  HARNESS_CONFIG_DIR       override the config directory
-  HARNESS_MODEL_BASE_URL   OpenAI-compatible base URL
-  HARNESS_MODEL            model id
-  HARNESS_MODEL_API_KEY    bearer token (overrides config apiKey/apiKeyCommand)
-  HARNESS_SYSTEM_PROMPT    inline system prompt (overrides PROMPT.md)
-  HARNESS_MAX_ITERATIONS   max model/tool iterations per turn
-  HARNESS_CWD              working directory for tools
-  HARNESS_SUBAGENTS        enable/disable sub-agents (on/off, default on)
+  TENTACLE_CONFIG_DIR       override the config directory
+  TENTACLE_MODEL_BASE_URL   OpenAI-compatible base URL
+  TENTACLE_MODEL            model id
+  TENTACLE_MODEL_API_KEY    bearer token (overrides config apiKey/apiKeyCommand)
+  TENTACLE_SYSTEM_PROMPT    inline system prompt (overrides PROMPT.md)
+  TENTACLE_MAX_ITERATIONS   max model/tool iterations per turn
+  TENTACLE_CWD              working directory for tools
+  TENTACLE_SUBAGENTS        enable/disable sub-agents (on/off, default on)
 
-Pod execution (agent-harness run --image <ref> [--namespace <ns>] [<name>]):
-  the image must be a Linux glibc image with sh+head (agent-harness is injected
+Pod execution (tentacle run --image <ref> [--namespace <ns>] [<name>]):
+  the image must be a Linux glibc image with sh+head (tentacle is injected
   into the pod; musl images cannot run it). --namespace defaults to the
   kubeconfig context's namespace; a MISSING namespace fails with a clear error
   (it is not created). Cluster auth resolves from ~/.kube/config (or $KUBECONFIG)
   by default — current context, with CA trust + bearer/client-cert/exec-plugin.
-  HARNESS_K8S_SERVER       API server URL override (e.g. behind a proxy); skips kubeconfig
-  HARNESS_K8S_TOKEN        bearer token, used with HARNESS_K8S_SERVER
-  HARNESS_POD_NAMESPACE    namespace (overridden by --namespace; else the context's)
-  HARNESS_POD_IMAGE        default pod image (overridden by --image)
-  HARNESS_POD_BIN          use this prebuilt agent-harness binary for the pod instead of
+  TENTACLE_K8S_SERVER       API server URL override (e.g. behind a proxy); skips kubeconfig
+  TENTACLE_K8S_TOKEN        bearer token, used with TENTACLE_K8S_SERVER
+  TENTACLE_POD_NAMESPACE    namespace (overridden by --namespace; else the context's)
+  TENTACLE_POD_IMAGE        default pod image (overridden by --image)
+  TENTACLE_POD_BIN          use this prebuilt tentacle binary for the pod instead of
                            the cached/built one (path to a bun-linux-x64/arm64 binary)
 
-Pod attach (agent-harness exec <pod> [--namespace <ns>] [--container <c>|-c <c>]):
+Pod attach (tentacle exec <pod> [--namespace <ns>] [--container <c>|-c <c>]):
   <pod> must already exist (kubectl get pods -n <ns>); --namespace defaults like
   run (context's namespace — pass it if the pod lives elsewhere). Multi-container
   pods need the target container: --container <c> (alias -c) — without it the
@@ -125,7 +120,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
 
   // Hidden subcommand: the detached pod-delete child when THIS process is a
   // compiled binary (so the delete-on-exit safety net needs no external `bun`).
-  // It reads HARNESS_POD_DELETE_* / HARNESS_POD_TLS_* from the env and issues a
+  // It reads TENTACLE_POD_DELETE_* / TENTACLE_POD_TLS_* from the env and issues a
   // single best-effort DELETE, then exits — no config, no TTY, no model setup.
   if (args[0] === "__delete-pod") {
     await deletePodFromEnv();
@@ -140,7 +135,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // `--version` exits before config loading, model setup, or TTY handling —
   // it doubles as the post-injection health probe in a pod.
   if (args[0] === "--version") {
-    write(`agent-harness ${APP_VERSION}\n`);
+    write(`tentacle ${APP_VERSION}\n`);
     return 0;
   }
 
@@ -149,7 +144,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const { positional, flags } = parseFlags(args.slice(1));
     const url = positional[0];
     if (!url) {
-      write("\n[error] usage: agent-harness connect ws(s)://host:port [--token T]\n");
+      write("\n[error] usage: tentacle connect ws(s)://host:port [--token T]\n");
       return 1;
     }
     try {
@@ -163,7 +158,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   }
 
   // Everything below needs configuration; load it once (scaffolds on first run).
-  let config: HarnessConfig;
+  let config: TentacleConfig;
   try {
     config = await loadConfig({ cwd: process.cwd() });
   } catch (error) {
@@ -197,8 +192,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       write(`\n[serve error] ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
     }
-    const host = flags.get("host") ?? process.env.HARNESS_REMOTE_HOST ?? "127.0.0.1";
-    const port = Number(flags.get("port") ?? process.env.HARNESS_REMOTE_PORT ?? "4000");
+    const host = flags.get("host") ?? process.env.TENTACLE_REMOTE_HOST ?? "127.0.0.1";
+    const port = Number(flags.get("port") ?? process.env.TENTACLE_REMOTE_PORT ?? "4000");
     const certPath = flags.get("tls-cert");
     const keyPath = flags.get("tls-key");
     const tls =
@@ -229,14 +224,14 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   }
 
   // `run` / `exec` shared setup: cluster auth (kubeconfig current context, or
-  // HARNESS_K8S_SERVER/_TOKEN override) and session resume. Sessions persist as
+  // TENTACLE_K8S_SERVER/_TOKEN override) and session resume. Sessions persist as
   // JSON under <configDir>/sessions; the pod is stateless, so resuming seeds
   // the pod daemon with the saved session (uid + history), same as the TUI.
   const loadPodAuth = async (namespace: string | undefined, prefix: string) => {
     try {
-      const envServer = process.env.HARNESS_K8S_SERVER;
+      const envServer = process.env.TENTACLE_K8S_SERVER;
       if (envServer) {
-        const token = process.env.HARNESS_K8S_TOKEN;
+        const token = process.env.TENTACLE_K8S_TOKEN;
         return {
           options: {
             server: envServer,
@@ -302,22 +297,22 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   };
 
   // `run`: run the agent daemon inside a Kubernetes pod (the sandbox), driven
-  // from this local TUI (F4). The image need NOT contain `agent-harness` — it
+  // from this local TUI (F4). The image need NOT contain `tentacle` — it
   // is injected over the exec channel at startup (F4.e); it must be a Linux
   // glibc image with `sh` + `head` (musl images cannot run the injected glibc
   // binary). `--namespace` defaults to the kubeconfig context's namespace; a
   // missing namespace fails with a clear error (it is NOT created). `--resume`
   // works because sessions persist on the laptop (the pod is stateless).
   // Cluster auth resolves from the local kubeconfig (current context), or from
-  // HARNESS_K8S_SERVER/_TOKEN as an explicit override (e.g. behind a proxy).
+  // TENTACLE_K8S_SERVER/_TOKEN as an explicit override (e.g. behind a proxy).
   // No in-process fallback.
   if (args[0] === "run") {
     const { flags: runFlags, bools: runBools, positional: runPos } = parseFlags(args.slice(1));
-    const namespace = runFlags.get("namespace") ?? process.env.HARNESS_POD_NAMESPACE;
-    const image = runFlags.get("image") ?? process.env.HARNESS_POD_IMAGE;
+    const namespace = runFlags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE;
+    const image = runFlags.get("image") ?? process.env.TENTACLE_POD_IMAGE;
     if (!image) {
       write(
-        "[pod] --image <ref> is required (any Linux glibc image with sh+head; agent-harness is injected)\n",
+        "[pod] --image <ref> is required (any Linux glibc image with sh+head; tentacle is injected)\n",
       );
       return 1;
     }
@@ -384,11 +379,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const podName = execPos[0];
     if (!podName) {
       write(
-        "\n[error] usage: agent-harness exec <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]\n",
+        "\n[error] usage: tentacle exec <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]\n",
       );
       return 1;
     }
-    const namespace = execFlags.get("namespace") ?? process.env.HARNESS_POD_NAMESPACE;
+    const namespace = execFlags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE;
     const container = execFlags.get("container") ?? shortContainer;
     const { store, resume: resumeRecord } = await loadPodResume(execFlags, execBools);
     const auth = await loadPodAuth(namespace, "pod");

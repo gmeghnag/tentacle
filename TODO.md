@@ -33,9 +33,9 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       still throws). Also cleans up sub-agent cancellation (child abort now ends
       cleanly instead of becoming an `isError` task result). 353 tests green.
 - [ ] 🔵 **Shell inherits the full `process.env`** (`host-execution.ts:80,132`),
-      incl. `HARNESS_MODEL_API_KEY` etc. — a model-run `echo $HARNESS_MODEL_API_KEY`
+      incl. `TENTACLE_MODEL_API_KEY` etc. — a model-run `echo $TENTACLE_MODEL_API_KEY`
       exfiltrates the key (redaction won't match it). Scrub an allowlist of
-      sensitive vars (`*_API_KEY*`, `HARNESS_REMOTE_TOKEN`, …) from the child env.
+      sensitive vars (`*_API_KEY*`, `TENTACLE_REMOTE_TOKEN`, …) from the child env.
 - [ ] 🔵 **`BackgroundJobs.jobs` map is never reaped** (`exec/background.ts:78`):
       every finished job keeps its ≤256KB×2 buffers for the session's life. Reap
       old `exited`/`killed` jobs or cap the count.
@@ -59,7 +59,7 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       the stop instead). Tests in `agent/test/agent.test.ts` +
       `agent/test/subagent.test.ts`.
       Follow-up (2026-10-14): the sub-agent step limit is now its own config
-      knob — `subagents.maxIterations` (env `HARNESS_SUBAGENT_MAX_ITERATIONS`),
+      knob — `subagents.maxIterations` (env `TENTACLE_SUBAGENT_MAX_ITERATIONS`),
       default 50, **`-1` = unlimited** (the agent loop treats a negative limit as
       ∞). Wired in config (schema/resolve/load) + `wiring.ts`; tests in
       `config/test/resolve.test.ts` + `agent/test/agent.test.ts`.
@@ -70,9 +70,10 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       `$&`/`$$`/`` $` ``/`$'` go in literally. Test added in
       `tools/test/builtins.test.ts`. 354 tests green.
 - [ ] 🔵 **`explore` (read-only) sub-agent still writes spill files** to
-      `.harness/tool-output/` via the result pipeline (`subagent.ts` passes
-      `resultTransforms`), contradicting "cannot modify anything". Harness-internal
-      + confined, but either exclude the spill write for read-only types or note it.
+      `.tentacle/tool-output/` via the result pipeline (`subagent.ts` passes
+      `resultTransforms`), contradicting "cannot modify anything".
+      Tentacle-internal + confined, but either exclude the spill write for
+      read-only types or note it.
 - [ ] 🔵 `fs_read` with `offset` past EOF yields a backwards header
       (`lines 500-499 of 10`) + empty body; `shell` labels any `exit=124` as
       "killed/timed out" even when a command legitimately exits 124.
@@ -130,7 +131,7 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       `ws-server` path does NOT set the flag (no leak to untrusted clients).
       Tests: `transport/test/peer.test.ts` (expose on → real message+stack; off
       → generic), `cli/test/daemon-log.test.ts`.
-      **When it recurs:** grab `~/.config/agent-harness/logs/daemon-errors.log`
+      **When it recurs:** grab `~/.config/tentacle/logs/daemon-errors.log`
       (or the configured `configDir`) — it now has the stack — and/or screenshot
       the (now real) TUI error line, then diagnose. Still TODO: the same
       generic-conversion gap on `ws-server.ts:182` is intentionally left (remote
@@ -254,7 +255,7 @@ Daily-driver work (done 2026-10-14):
       `input-view.test.ts`, `app.test.tsx`.
 - [x] **Session persistence + `--resume`.** Sessions save as JSON under
       `<configDir>/sessions/<uid>.json` after every turn/compaction
-      (`JsonSessionStore`, `Session.onPersist`); `agent-harness --resume [uid]`
+      (`JsonSessionStore`, `Session.onPersist`); `tentacle --resume [uid]`
       reopens one (latest if no uid) and restores its transcript
       (`messagesToItems`). Tests in `session-store.test.ts`, `session.test.ts`,
       `resume.test.ts`.
@@ -273,7 +274,7 @@ Daily-driver work (done 2026-10-14):
       `ConnectOptions.onStderr`.
 - [x] 🔵 MCP server subprocess inherits the full `process.env` (API keys). FIXED
       (2026-10-14): spawns now use `scrubSensitiveEnv(process.env)` (new shared
-      `@agent-harness/core` helper, denylist of `*API_KEY*`/`*TOKEN*`/`*SECRET*`
+      `@tentacle/core` helper, denylist of `*API_KEY*`/`*TOKEN*`/`*SECRET*`
       /…); the user's explicit `spec.env` is still honoured. The **shell** env
       leak (Block-1 ②) can now reuse this same helper. Test in `core/test/env.test.ts`.
 - [x] 🔵 `McpClient.handleMessage` silently drops inbound server requests. FIXED
@@ -286,7 +287,7 @@ Daily-driver work (done 2026-10-14):
 - [x] **Local daemon on a worker thread** (the "TUI always over RPC" lever —
       moves model streaming + tool execution off the render thread, so the UI
       never janks and a daemon crash doesn't kill the UI). **DONE and now the
-      DEFAULT (2026-10-14).** `agent-harness -i` runs on the worker; opt out with
+      DEFAULT (2026-10-14).** `tentacle -i` runs on the worker; opt out with
       `--in-process` (alias `--no-worker`); any worker failure still falls back
       to in-process. MCP tools + live background-job exits now work over the RPC
       boundary (the two gaps that had kept it opt-in — see below).
@@ -298,7 +299,7 @@ Daily-driver work (done 2026-10-14):
         **main thread keeps the JSON store** (decision taken) while the daemon
         owns the live conversation. Wired through `Connection`/`HostedSession`/
         `SessionHost` and `RemoteClient`/`RemoteSession`.
-      - `cli/src/worker.ts` (worker entry: builds the agent from `HarnessConfig`,
+      - `cli/src/worker.ts` (worker entry: builds the agent from `TentacleConfig`,
         hosts one `Connection` on the worker port) + `cli/src/local-runtime.ts`
         (`persistingController` snapshots+persists after each turn/compact;
         `createLocalRuntime` + `startWorkerRuntime` with an 8s handshake timeout).
@@ -333,7 +334,7 @@ Daily-driver work (done 2026-10-14):
       a spawn failure now logs the real cause instead of the generic 8s timeout.
       Verified end-to-end: the 1.4.3 binary contains the embedded worker
       bootstrap, boots with `ready` on line 1 and **0 fallback lines**.
-      Running the **compiled** `dist/agent-harness -i` (vs.
+      Running the **compiled** `dist/tentacle -i` (vs.
       `bun packages/cli/src/main.ts`) prints `[worker] handshake failed (Error:
       worker handshake timed out after 8000ms); using in-process` before the TUI.
       From **source** the same config boots the worker in ~20ms, so this is
@@ -389,7 +390,7 @@ Daily-driver work (done 2026-10-14):
         start). Multiple exits coalesce (the agent drains all pending at once).
       - Works in BOTH paths: in-process (real `jobs`) and worker (the daemon
         streams the exit → client jobs view → same wake). Kill-switch: config
-        `autoWake` (env `HARNESS_AUTO_WAKE`), default true.
+        `autoWake` (env `TENTACLE_AUTO_WAKE`), default true.
       - Tests: `agent/test/session.test.ts` (empty send = continuation, no empty
         user msg, reacts to a pending exit); `tui/test/auto-wake.test.tsx` (idle
         exit → turn runs; toggle off → notice only); `config/test/resolve.test.ts`.
@@ -404,7 +405,7 @@ Daily-driver work (done 2026-10-14):
       endpoint/secret never leave the laptop. Reuses the whole client/daemon/RPC
       stack (new transport + lifecycle only). Full design + slice plan in
       `docs/F4-pod-execution.md`. MVP = F4.a–F4.e.
-      - [x] **F4.a — `KubeClient` REST** (2026-10-14): new `@agent-harness/k8s`
+      - [x] **F4.a — `KubeClient` REST** (2026-10-14): new `@tentacle/k8s`
         package — `createPod`/`getPod`/`deletePod`/`waitForReady`/`podIsReady`,
         bearer auth, injectable `fetch`, mock-API tests. Dependency-free.
       - [x] **F4.a.2 — kubeconfig + TLS auth** (2026-10-14): `kubeconfig.ts`
@@ -426,7 +427,7 @@ Daily-driver work (done 2026-10-14):
         openExec(serve --stdio)→ createLocalRuntime; dispose closes + deletes
         the pod) + `main.ts run`. A missing namespace 404s the pod create and
         is translated into an actionable error (not auto-created).
-        Auth stopgap: `HARNESS_K8S_SERVER`/`_TOKEN` env (kubeconfig = F4.a.2).
+        Auth stopgap: `TENTACLE_K8S_SERVER`/`_TOKEN` env (kubeconfig = F4.a.2).
         End-to-end tested over an in-memory channel to a real Connection, and
         **validated LIVE against kind** (opt-in `k8s/test/integration.live.test.ts`:
         REST + exec round-trip over TLS). Note for F4.a.2: Bun honours
@@ -438,13 +439,13 @@ Daily-driver work (done 2026-10-14):
         it. Endpoint+key stay on the laptop. In-memory round-trip tested.
         Follow-up (F4.d.2): token streaming over the tunnel + mid-call cancel.
       - [x] **F4.e — pod binary injection** (2026-10-15): `run` now works
-        with an image that does NOT contain `agent-harness` — the binary is
+        with an image that does NOT contain `tentacle` — the binary is
         injected over the exec WebSocket before the daemon starts: `uname -m`
         arch probe (ANY failure → `bun-linux-x64`, never aborts) → bytes from
-        `HARNESS_POD_BIN` → `dist/pod-bin/` cache → `Bun.build` cross-compile
+        `TENTACLE_POD_BIN` → `dist/pod-bin/` cache → `Bun.build` cross-compile
         (shared options with `bun run compile`) → raw stream via one-shot
         `sh -c "mkdir -p … && head -c N > … && chmod 755 …"` (`head -c` EOF =
-        known size — no tar, no terminator) → verify with `agent-harness
+        known size — no tar, no terminator) → verify with `tentacle
         --version` (glibc hint on a musl loader failure). New pieces:
         `k8s/exec-run.ts` (one-shot exec resolving on command exit),
         `cli/pod-binary.ts`, `cli/pod-binary-build.ts`, `--version` flag.
@@ -456,10 +457,10 @@ Daily-driver work (done 2026-10-14):
         Design + as-built log: `docs/pod-binary-injection.md`.
       - [~] **F4.g — `exec` attach to an existing pod** (branch
         `feat/pod-exec-attach`, from `c5b7f58`):
-        `agent-harness exec <pod> [--namespace <ns>] [--container <c>|-c <c>]
+        `tentacle exec <pod> [--namespace <ns>] [--container <c>|-c <c>]
         [--resume [uid]]` — the `run` flow minus the lifecycle: `getPod`
         (404 → actionable error, terminal phase → reject) → bounded 60 s
-        readiness wait → **preflight `agent-harness --version`** that skips the
+        readiness wait → **preflight `tentacle --version`** that skips the
         whole injection when the pod already has it (re-attach is sub-second,
         no 89 MB transfer) → same daemon exec + reverse-tunnel + persisting
         runtime. The pod is USER-OWNED: `dispose` only closes the exec channel;
@@ -519,7 +520,7 @@ Daily-driver work (done 2026-10-14):
            528 pass / 0 fail / 1 skip.
         4. ~~**Rebuild the 3 binaries**~~ **DONE:** all three rebuilt after the
            broker + container fixes (linux-x64, linux-arm64, then macOS `dist/
-           agent-harness` last, ad-hoc signed); `dist/` is git-ignored, so
+           tentacle` last, ad-hoc signed); `dist/` is git-ignored, so
            nothing ships in the commit.
         5. ~~**Single commit**~~ **DONE:**
            `feat(cli): exec subcommand — attach TUI to an existing pod
@@ -548,7 +549,7 @@ Built on the `ResultTransform[]` pipeline (`packages/agent/src/result-pipeline.t
 wired in order: redact → dedup → tabulate → (summarize | spill).
 
 - [x] **`spillLargeOutput`** — spill a too-large tool result to
-      `.harness/tool-output/<tool>-<id>.txt` and keep only a preview + pointer
+      `.tentacle/tool-output/<tool>-<id>.txt` and keep only a preview + pointer
       in-context. Configurable via `tools.maxInlineOutputChars`.
 - [x] **`redact`** — mask secrets / API keys / tokens in tool output before it
       enters the context (and before it is spilled to disk). On by default
@@ -586,5 +587,5 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
       `ExecutionEnvironment` contract).
 - [ ] **Remote control (F3)**: heartbeat/idle-timeout/reconnect, multi-client
       observers, `config.jsonc` `remote` block, operator docs.
-- [ ] Add `.harness/` to the workspace `.gitignore` guidance (spilled output).
+- [ ] Add `.tentacle/` to the workspace `.gitignore` guidance (spilled output).
 - [ ] Git: the repo still has no commits (commit only on explicit OK).

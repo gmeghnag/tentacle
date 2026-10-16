@@ -7,9 +7,9 @@
  * counts), so those are recomputed here from the patch — keeping the remote
  * diff render identical to a local one. Pure and unit-tested.
  */
-import type { AgentEvent, AgentStopReason } from "@agent-harness/agent";
-import type { ToolResultDetail } from "@agent-harness/core";
-import type { ContentBlock, SessionUpdate, StopReason } from "@agent-harness/protocol";
+import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
+import type { ToolResultDetail } from "@tentacle/core";
+import type { ContentBlock, SessionUpdate, StopReason } from "@tentacle/protocol";
 import { DIFF_SCHEME } from "./constants.ts";
 
 export function stopReasonFromProtocol(reason: StopReason): AgentStopReason {

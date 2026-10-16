@@ -1,5 +1,5 @@
 {
-  "name": "@agent-harness/tui",
+  "name": "@tentacle/tui",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -7,8 +7,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@agent-harness/agent": "workspace:*",
-    "@agent-harness/core": "workspace:*",
+    "@tentacle/agent": "workspace:*",
+    "@tentacle/core": "workspace:*",
     "chalk": "5.6.2",
     "cli-highlight": "2.1.11",
     "ink": "5.0.1",
@@ -19,7 +19,7 @@
     "wrap-ansi": "9.0.2"
   },
   "devDependencies": {
-    "@agent-harness/tools": "workspace:*",
+    "@tentacle/tools": "workspace:*",
     "@types/react": "18.3.12",
     "ink-testing-library": "4.0.0"
   }

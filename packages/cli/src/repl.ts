@@ -6,7 +6,7 @@
  * handled locally. The terminal driver (`startTerminal`) supplies a readline-backed
  * `prompts` iterable and wires Ctrl+C to cancel the running turn.
  */
-import { type Agent, Session } from "@agent-harness/agent";
+import { type Agent, Session } from "@tentacle/agent";
 import { render } from "./render.ts";
 
 export interface ReplIO {
@@ -20,7 +20,7 @@ export interface ReplIO {
 }
 
 const BANNER =
-  "agent-harness — interactive session\n" +
+  "tentacle — interactive session\n" +
   "Type a task and press enter. /help for commands, /exit to quit.\n";
 
 const HELP =

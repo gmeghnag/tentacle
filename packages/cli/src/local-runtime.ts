@@ -10,26 +10,18 @@
  * record here. The main also owns the session uid (passed into `session/new`),
  * so a resumed session keeps its file.
  */
-import {
-  type JsonSessionStore,
-  type SessionRecord,
-  recordFromSnapshot,
-} from "@agent-harness/agent";
-import { RemoteClient, type RemoteSession } from "@agent-harness/client";
-import type { HarnessConfig } from "@agent-harness/config";
+import { type JsonSessionStore, type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
+import { RemoteClient, type RemoteSession } from "@tentacle/client";
+import type { TentacleConfig } from "@tentacle/config";
 import type {
   ChatMessage,
   JobController,
   JobStatus,
   ModelProvider,
   PermissionBroker,
-} from "@agent-harness/core";
-import {
-  type DuplexChannel,
-  type MessageEndpoint,
-  messagePortChannel,
-} from "@agent-harness/transport";
-import type { SessionController } from "@agent-harness/tui";
+} from "@tentacle/core";
+import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
+import type { SessionController } from "@tentacle/tui";
 
 export interface LocalRuntime {
   readonly createSession: () => SessionController;
@@ -164,7 +156,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
  * a worker problem never breaks the TUI.
  */
 export async function startWorkerRuntime(
-  config: HarnessConfig,
+  config: TentacleConfig,
   deps: { permissions: PermissionBroker; store: JsonSessionStore; resume: SessionRecord | null },
   log: (line: string) => void,
 ): Promise<LocalRuntime | null> {

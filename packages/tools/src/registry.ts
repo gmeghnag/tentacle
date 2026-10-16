@@ -6,7 +6,7 @@
  * and validated against the tool's schema *before* its handler runs, so handlers
  * always receive well-typed input and never see malformed model output.
  */
-import type { Tool, ToolContext, ToolDefinition, ToolResult } from "@agent-harness/core";
+import type { Tool, ToolContext, ToolDefinition, ToolResult } from "@tentacle/core";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
 export class ToolRegistry {

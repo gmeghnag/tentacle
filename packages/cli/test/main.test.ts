@@ -55,21 +55,21 @@ beforeAll(async () => {
     },
   });
   for (const key of [
-    "HARNESS_CONFIG_DIR",
-    "HARNESS_MODEL_BASE_URL",
-    "HARNESS_MODEL",
-    "HARNESS_CWD",
-    "HARNESS_MODEL_API_KEY",
+    "TENTACLE_CONFIG_DIR",
+    "TENTACLE_MODEL_BASE_URL",
+    "TENTACLE_MODEL",
+    "TENTACLE_CWD",
+    "TENTACLE_MODEL_API_KEY",
   ]) {
     saved[key] = process.env[key];
   }
   // Point the config dir at the temp dir so first-run scaffolding never
   // touches the real ~/.config.
-  process.env.HARNESS_CONFIG_DIR = join(dir, "config");
-  process.env.HARNESS_MODEL_BASE_URL = `http://localhost:${server.port}/v1`;
-  process.env.HARNESS_MODEL = "test";
-  process.env.HARNESS_CWD = dir;
-  process.env.HARNESS_MODEL_API_KEY = undefined;
+  process.env.TENTACLE_CONFIG_DIR = join(dir, "config");
+  process.env.TENTACLE_MODEL_BASE_URL = `http://localhost:${server.port}/v1`;
+  process.env.TENTACLE_MODEL = "test";
+  process.env.TENTACLE_CWD = dir;
+  process.env.TENTACLE_MODEL_API_KEY = undefined;
 });
 
 afterAll(async () => {
@@ -108,20 +108,20 @@ describe("cli main (end-to-end)", () => {
     const out: string[] = [];
     const code = await main(["bun", "cli", "exec"], { write: (t) => out.push(t) });
     expect(code).toBe(1);
-    expect(out.join("")).toContain("usage: agent-harness exec <pod>");
+    expect(out.join("")).toContain("usage: tentacle exec <pod>");
   });
 
   test("--version prints the version and exits 0 without touching config", async () => {
     // Point the config dir at a FRESH, non-existent path: if `--version` ever
     // loaded config it would scaffold this directory (first-run side effect).
     const freshConfigDir = join(dir, "config-never-created");
-    const saved = process.env.HARNESS_CONFIG_DIR;
-    process.env.HARNESS_CONFIG_DIR = freshConfigDir;
+    const saved = process.env.TENTACLE_CONFIG_DIR;
+    process.env.TENTACLE_CONFIG_DIR = freshConfigDir;
     try {
       const out: string[] = [];
       const code = await main(["bun", "cli", "--version"], { write: (t) => out.push(t) });
       expect(code).toBe(0);
-      expect(out.join("")).toMatch(/^agent-harness \S+\n$/);
+      expect(out.join("")).toMatch(/^tentacle \S+\n$/);
       // Config was never loaded: no scaffolding happened.
       let exists = true;
       try {
@@ -131,7 +131,7 @@ describe("cli main (end-to-end)", () => {
       }
       expect(exists).toBe(false);
     } finally {
-      process.env.HARNESS_CONFIG_DIR = saved;
+      process.env.TENTACLE_CONFIG_DIR = saved;
     }
   });
 });

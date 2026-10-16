@@ -3,14 +3,9 @@
  * `SessionUpdate` vocabulary (and the turn's `StopReason`). Kept pure and
  * table-ish so it can be unit-tested without sockets or an agent.
  */
-import type { AgentEvent, AgentStopReason } from "@agent-harness/agent";
-import type { ToolResult } from "@agent-harness/core";
-import {
-  type ContentBlock,
-  type SessionUpdate,
-  type StopReason,
-  text,
-} from "@agent-harness/protocol";
+import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
+import type { ToolResult } from "@tentacle/core";
+import { type ContentBlock, type SessionUpdate, type StopReason, text } from "@tentacle/protocol";
 
 /** MIME type used for the embedded unified-diff resource block. */
 export const DIFF_MIME = "text/x-diff";

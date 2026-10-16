@@ -29,7 +29,7 @@ export interface McpCallOptions {
   readonly timeoutMs?: number;
 }
 
-const DEFAULT_CLIENT_INFO: McpClientInfo = { name: "agent-harness", version: "0.0.0" };
+const DEFAULT_CLIENT_INFO: McpClientInfo = { name: "tentacle", version: "0.0.0" };
 // A wedged server must not hang the turn forever; the turn's abort signal still
 // cancels sooner. Generous so a legitimately slow tool completes.
 const DEFAULT_CALL_TIMEOUT_MS = 120_000;

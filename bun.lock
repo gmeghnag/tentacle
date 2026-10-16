@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "agent-harness",
+      "name": "tentacle",
       "dependencies": {
         "react-devtools-core": "file:./stubs/react-devtools-core",
       },
@@ -15,54 +15,54 @@
       },
     },
     "packages/agent": {
-      "name": "@agent-harness/agent",
+      "name": "@tentacle/agent",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/core": "workspace:*",
-        "@agent-harness/tools": "workspace:*",
+        "@tentacle/core": "workspace:*",
+        "@tentacle/tools": "workspace:*",
       },
       "devDependencies": {
         "zod": "3.23.8",
       },
     },
     "packages/cli": {
-      "name": "@agent-harness/cli",
+      "name": "@tentacle/cli",
       "version": "0.0.0",
       "bin": {
-        "agent-harness": "./src/main.ts",
+        "tentacle": "./src/main.ts",
       },
       "dependencies": {
-        "@agent-harness/agent": "workspace:*",
-        "@agent-harness/client": "workspace:*",
-        "@agent-harness/config": "workspace:*",
-        "@agent-harness/core": "workspace:*",
-        "@agent-harness/daemon": "workspace:*",
-        "@agent-harness/exec": "workspace:*",
-        "@agent-harness/k8s": "workspace:*",
-        "@agent-harness/mcp": "workspace:*",
-        "@agent-harness/providers": "workspace:*",
-        "@agent-harness/tools": "workspace:*",
-        "@agent-harness/transport": "workspace:*",
-        "@agent-harness/tui": "workspace:*",
+        "@tentacle/agent": "workspace:*",
+        "@tentacle/client": "workspace:*",
+        "@tentacle/config": "workspace:*",
+        "@tentacle/core": "workspace:*",
+        "@tentacle/daemon": "workspace:*",
+        "@tentacle/exec": "workspace:*",
+        "@tentacle/k8s": "workspace:*",
+        "@tentacle/mcp": "workspace:*",
+        "@tentacle/providers": "workspace:*",
+        "@tentacle/tools": "workspace:*",
+        "@tentacle/transport": "workspace:*",
+        "@tentacle/tui": "workspace:*",
       },
     },
     "packages/client": {
-      "name": "@agent-harness/client",
+      "name": "@tentacle/client",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/agent": "workspace:*",
-        "@agent-harness/core": "workspace:*",
-        "@agent-harness/protocol": "workspace:*",
-        "@agent-harness/transport": "workspace:*",
+        "@tentacle/agent": "workspace:*",
+        "@tentacle/core": "workspace:*",
+        "@tentacle/protocol": "workspace:*",
+        "@tentacle/transport": "workspace:*",
       },
       "devDependencies": {
-        "@agent-harness/daemon": "workspace:*",
-        "@agent-harness/tools": "workspace:*",
+        "@tentacle/daemon": "workspace:*",
+        "@tentacle/tools": "workspace:*",
         "zod": "3.23.8",
       },
     },
     "packages/config": {
-      "name": "@agent-harness/config",
+      "name": "@tentacle/config",
       "version": "0.0.0",
       "dependencies": {
         "jsonc-parser": "3.3.1",
@@ -70,69 +70,69 @@
       },
     },
     "packages/core": {
-      "name": "@agent-harness/core",
+      "name": "@tentacle/core",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/protocol": "workspace:*",
+        "@tentacle/protocol": "workspace:*",
         "zod": "3.23.8",
       },
     },
     "packages/daemon": {
-      "name": "@agent-harness/daemon",
+      "name": "@tentacle/daemon",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/agent": "workspace:*",
-        "@agent-harness/core": "workspace:*",
-        "@agent-harness/protocol": "workspace:*",
-        "@agent-harness/transport": "workspace:*",
+        "@tentacle/agent": "workspace:*",
+        "@tentacle/core": "workspace:*",
+        "@tentacle/protocol": "workspace:*",
+        "@tentacle/transport": "workspace:*",
       },
       "devDependencies": {
-        "@agent-harness/tools": "workspace:*",
+        "@tentacle/tools": "workspace:*",
         "zod": "3.23.8",
       },
     },
     "packages/exec": {
-      "name": "@agent-harness/exec",
+      "name": "@tentacle/exec",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/core": "workspace:*",
+        "@tentacle/core": "workspace:*",
       },
     },
     "packages/k8s": {
-      "name": "@agent-harness/k8s",
+      "name": "@tentacle/k8s",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/transport": "workspace:*",
+        "@tentacle/transport": "workspace:*",
         "yaml": "2.9.1",
       },
     },
     "packages/mcp": {
-      "name": "@agent-harness/mcp",
+      "name": "@tentacle/mcp",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/core": "workspace:*",
+        "@tentacle/core": "workspace:*",
         "zod": "3.23.8",
       },
     },
     "packages/protocol": {
-      "name": "@agent-harness/protocol",
+      "name": "@tentacle/protocol",
       "version": "0.0.0",
       "dependencies": {
         "zod": "3.23.8",
       },
     },
     "packages/providers": {
-      "name": "@agent-harness/providers",
+      "name": "@tentacle/providers",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/core": "workspace:*",
+        "@tentacle/core": "workspace:*",
       },
     },
     "packages/tools": {
-      "name": "@agent-harness/tools",
+      "name": "@tentacle/tools",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/core": "workspace:*",
+        "@tentacle/core": "workspace:*",
         "diff": "5.2.0",
         "zod": "3.23.8",
         "zod-to-json-schema": "3.23.5",
@@ -142,21 +142,21 @@
       },
     },
     "packages/transport": {
-      "name": "@agent-harness/transport",
+      "name": "@tentacle/transport",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/protocol": "workspace:*",
+        "@tentacle/protocol": "workspace:*",
       },
       "devDependencies": {
         "zod": "3.23.8",
       },
     },
     "packages/tui": {
-      "name": "@agent-harness/tui",
+      "name": "@tentacle/tui",
       "version": "0.0.0",
       "dependencies": {
-        "@agent-harness/agent": "workspace:*",
-        "@agent-harness/core": "workspace:*",
+        "@tentacle/agent": "workspace:*",
+        "@tentacle/core": "workspace:*",
         "chalk": "5.6.2",
         "cli-highlight": "2.1.11",
         "ink": "5.0.1",
@@ -167,41 +167,13 @@
         "wrap-ansi": "9.0.2",
       },
       "devDependencies": {
-        "@agent-harness/tools": "workspace:*",
+        "@tentacle/tools": "workspace:*",
         "@types/react": "18.3.12",
         "ink-testing-library": "4.0.0",
       },
     },
   },
   "packages": {
-    "@agent-harness/agent": ["@agent-harness/agent@workspace:packages/agent"],
-
-    "@agent-harness/cli": ["@agent-harness/cli@workspace:packages/cli"],
-
-    "@agent-harness/client": ["@agent-harness/client@workspace:packages/client"],
-
-    "@agent-harness/config": ["@agent-harness/config@workspace:packages/config"],
-
-    "@agent-harness/core": ["@agent-harness/core@workspace:packages/core"],
-
-    "@agent-harness/daemon": ["@agent-harness/daemon@workspace:packages/daemon"],
-
-    "@agent-harness/exec": ["@agent-harness/exec@workspace:packages/exec"],
-
-    "@agent-harness/k8s": ["@agent-harness/k8s@workspace:packages/k8s"],
-
-    "@agent-harness/mcp": ["@agent-harness/mcp@workspace:packages/mcp"],
-
-    "@agent-harness/protocol": ["@agent-harness/protocol@workspace:packages/protocol"],
-
-    "@agent-harness/providers": ["@agent-harness/providers@workspace:packages/providers"],
-
-    "@agent-harness/tools": ["@agent-harness/tools@workspace:packages/tools"],
-
-    "@agent-harness/transport": ["@agent-harness/transport@workspace:packages/transport"],
-
-    "@agent-harness/tui": ["@agent-harness/tui@workspace:packages/tui"],
-
     "@alcalzone/ansi-tokenize": ["@alcalzone/ansi-tokenize@0.1.3", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^4.0.0" } }, "sha512-3yWxPTq3UQ/FY9p1ErPxIyfT64elWaMvM9lIHnaqpyft63tkxodF5aUElYHrdisWve5cETkh1+KBw1yJuW0aRw=="],
 
     "@biomejs/biome": ["@biomejs/biome@1.9.4", "", { "optionalDependencies": { "@biomejs/cli-darwin-arm64": "1.9.4", "@biomejs/cli-darwin-x64": "1.9.4", "@biomejs/cli-linux-arm64": "1.9.4", "@biomejs/cli-linux-arm64-musl": "1.9.4", "@biomejs/cli-linux-x64": "1.9.4", "@biomejs/cli-linux-x64-musl": "1.9.4", "@biomejs/cli-win32-arm64": "1.9.4", "@biomejs/cli-win32-x64": "1.9.4" }, "bin": { "biome": "bin/biome" } }, "sha512-1rkd7G70+o9KkTn5KLmDYXihGoTaIGO9PIIN2ZB7UJxFrWw04CZHPYiMRjYsaDvVV7hP1dYNRLxSANLaBFGpog=="],
@@ -225,6 +197,34 @@
     "@colors/colors": ["@colors/colors@1.5.0", "", {}, "sha512-ooWCrlZP11i8GImSjTHYHLkvFDP48nS4+204nGb1RiX/WXYHmJA2III9/e2DWVabCESdW7hBAEzHRqUn9OUVvQ=="],
 
     "@sindresorhus/is": ["@sindresorhus/is@4.6.0", "", {}, "sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw=="],
+
+    "@tentacle/agent": ["@tentacle/agent@workspace:packages/agent"],
+
+    "@tentacle/cli": ["@tentacle/cli@workspace:packages/cli"],
+
+    "@tentacle/client": ["@tentacle/client@workspace:packages/client"],
+
+    "@tentacle/config": ["@tentacle/config@workspace:packages/config"],
+
+    "@tentacle/core": ["@tentacle/core@workspace:packages/core"],
+
+    "@tentacle/daemon": ["@tentacle/daemon@workspace:packages/daemon"],
+
+    "@tentacle/exec": ["@tentacle/exec@workspace:packages/exec"],
+
+    "@tentacle/k8s": ["@tentacle/k8s@workspace:packages/k8s"],
+
+    "@tentacle/mcp": ["@tentacle/mcp@workspace:packages/mcp"],
+
+    "@tentacle/protocol": ["@tentacle/protocol@workspace:packages/protocol"],
+
+    "@tentacle/providers": ["@tentacle/providers@workspace:packages/providers"],
+
+    "@tentacle/tools": ["@tentacle/tools@workspace:packages/tools"],
+
+    "@tentacle/transport": ["@tentacle/transport@workspace:packages/transport"],
+
+    "@tentacle/tui": ["@tentacle/tui@workspace:packages/tui"],
 
     "@types/bun": ["@types/bun@1.1.14", "", { "dependencies": { "bun-types": "1.1.37" } }, "sha512-opVYiFGtO2af0dnWBdZWlioLBoxSdDO5qokaazLhq8XQtGZbY4pY3/JxY8Zdf/hEwGubbp7ErZXoN1+h2yesxA=="],
 
@@ -409,8 +409,6 @@
     "cliui/strip-ansi": ["strip-ansi@6.0.1", "", { "dependencies": { "ansi-regex": "^5.0.1" } }, "sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A=="],
 
     "cliui/wrap-ansi": ["wrap-ansi@7.0.0", "", { "dependencies": { "ansi-styles": "^4.0.0", "string-width": "^4.1.0", "strip-ansi": "^6.0.0" } }, "sha512-YVGIj2kamLSTxw6NsZjoBxfSwsn0ycdesmc4p+Q21c5zPuZ1pl+NfxVdxPtdHvmNVOQ6XSYG4AUtyt/Fi7D16Q=="],
-
-    "ink/react-devtools-core": ["react-devtools-core@file:stubs/react-devtools-core", {}],
 
     "parse5-htmlparser2-tree-adapter/parse5": ["parse5@6.0.1", "", {}, "sha512-Ofn/CTFzRGTTxwpNEs9PP93gXShHcTq255nzRYSKe8AkVpZY7e1fpmTfOyoIvjP5HG7Z2ZM7VS9PPhQGW2pOpw=="],
 

@@ -4,8 +4,8 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "@agent-harness/core": ["../core/src/index.ts"],
-      "@agent-harness/tools": ["../tools/src/index.ts"]
+      "@tentacle/core": ["../core/src/index.ts"],
+      "@tentacle/tools": ["../tools/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]

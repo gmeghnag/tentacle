@@ -6,8 +6,8 @@ import type {
   PermissionRequest,
   PermissionResponse,
   StreamEvent,
-} from "@agent-harness/core";
-import { ToolRegistry, shellTool } from "@agent-harness/tools";
+} from "@tentacle/core";
+import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { Agent, type AgentEvent } from "../src/agent.ts";
 
 function toolCallTurn(command: string): StreamEvent[] {

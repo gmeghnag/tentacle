@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@agent-harness/agent";
+import { Agent } from "@tentacle/agent";
 import {
   type ChatRequest,
   type ExecutionEnvironment,
   type ModelProvider,
   PermissionBroker,
   type StreamEvent,
-} from "@agent-harness/core";
-import { ToolRegistry, shellTool } from "@agent-harness/tools";
+} from "@tentacle/core";
+import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
 
@@ -285,8 +285,8 @@ describe("App", () => {
       />,
     );
     await delay(40);
-    // Row 1 is the welcome line, now "⏺ Agent harness ready. …" — the bullet
-    // occupies columns 1–2, so "Agent" starts at column 3. Select 10 chars.
+    // Row 1 is the welcome line, now "⏺ Tentacle ready. …" — the bullet
+    // occupies columns 1–2, so "Tentacle" starts at column 3. Select 10 chars.
     stdin.write(press(3, 1));
     await delay(15);
     stdin.write(drag(13, 1));
@@ -296,7 +296,7 @@ describe("App", () => {
 
     expect(copied).toHaveLength(1);
     expect(copied[0]).toHaveLength(10);
-    expect(copied[0]?.startsWith("Agent")).toBe(true);
+    expect(copied[0]?.startsWith("Tentacle")).toBe(true);
     unmount();
   });
 
@@ -607,7 +607,7 @@ describe("App robustness", () => {
     const frame = lastFrame() ?? "";
     expect(frame).toContain("prior question");
     expect(frame).toContain("prior answer");
-    expect(frame).not.toContain("Agent harness ready");
+    expect(frame).not.toContain("Tentacle ready");
     unmount();
   });
 

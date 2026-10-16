@@ -6,8 +6,8 @@ import type {
   JobController,
   ModelProvider,
   StreamEvent,
-} from "@agent-harness/core";
-import { ToolRegistry } from "@agent-harness/tools";
+} from "@tentacle/core";
+import { ToolRegistry } from "@tentacle/tools";
 import { Agent, type AgentEvent, Session } from "../src/index.ts";
 
 /** A JobController whose exits are fired manually. */

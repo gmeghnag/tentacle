@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { JsonRpcErrorCode } from "@agent-harness/protocol";
+import { JsonRpcErrorCode } from "@tentacle/protocol";
 import { createChannelPair } from "../src/channel.ts";
 import { DomainErrorCode, RpcError } from "../src/errors.ts";
 import { RpcPeer } from "../src/peer.ts";

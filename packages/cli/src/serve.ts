@@ -1,9 +1,9 @@
 /**
- * `agent-harness serve` — host the daemon. Reuses `loadConfig()` for the model,
+ * `tentacle serve` — host the daemon. Reuses `loadConfig()` for the model,
  * confined cwd and system prompt, and builds a fresh confined agent per session.
  * Binding is loopback-safe by default (a non-loopback bind requires a token).
  */
-import type { HarnessConfig } from "@agent-harness/config";
+import type { TentacleConfig } from "@tentacle/config";
 import {
   Connection,
   type ModelStreamSender,
@@ -11,12 +11,8 @@ import {
   type RunningServer,
   SessionHost,
   startWsServer,
-} from "@agent-harness/daemon";
-import {
-  type NodeReadableLike,
-  type NodeWritableLike,
-  streamChannel,
-} from "@agent-harness/transport";
+} from "@tentacle/daemon";
+import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import { buildAgent } from "./wiring.ts";
 
 export interface ServeOptions {
@@ -28,7 +24,7 @@ export interface ServeOptions {
   readonly onError?: (error: Error) => void;
 }
 
-export function startDaemon(config: HarnessConfig, options: ServeOptions): RunningServer {
+export function startDaemon(config: TentacleConfig, options: ServeOptions): RunningServer {
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
     // Each session gets its own agent, confined to the daemon's cwd.
@@ -55,7 +51,7 @@ export function startDaemon(config: HarnessConfig, options: ServeOptions): Runni
  * Resolves when stdin closes (the client/exec disconnected).
  */
 export function startStdioDaemon(
-  config: HarnessConfig,
+  config: TentacleConfig,
   log?: (line: string) => void,
   options: { modelProxy?: boolean } = {},
 ): Promise<void> {

@@ -7,7 +7,7 @@
 
 ## 1. Problema (con evidenza)
 
-`exec` inietta `agent-harness` in `/usr/local/bin/agent-harness`
+`exec` inietta `tentacle` in `/usr/local/bin/tentacle`
 (`POD_BIN_PATH`, `cli/pod-binary.ts`) quando il preflight `--version` fallisce,
 poi avvia il daemon e al detach fa solo `channel.close()`
 (`pod-runtime.ts:439-443`). Il pod è user-owned e **non** viene cancellato →
@@ -140,7 +140,7 @@ d'uscita pulita, nessun secondo exec, nessuna dipendenza da un `rm` nell'immagin
      il ramo `probe.exitCode === 0` lo lascia `false`).
    - costruire il comando serve col flag SOLO se `(deps.ephemeral ?? true) && didInject`:
      ```ts
-     const serveCommand = ["agent-harness", "serve", "--stdio", "--model-proxy"];
+     const serveCommand = ["tentacle", "serve", "--stdio", "--model-proxy"];
      if ((deps.ephemeral ?? true) && didInject) {
        serveCommand.push(`--self-destruct=${POD_BIN_PATH}`);
      }
@@ -149,7 +149,7 @@ d'uscita pulita, nessun secondo exec, nessuna dipendenza da un `rm` nell'immagin
        { onStderr: stderr.onStderr },
      );
      ```
-     (sostituisce il `command: ["agent-harness","serve","--stdio","--model-proxy"]`
+     (sostituisce il `command: ["tentacle","serve","--stdio","--model-proxy"]`
      literal a `pod-runtime.ts:424`.)
    - (opzionale, piped-mode) nella riga "attached …" (`pod-runtime.ts:416`)
      aggiungere ", il binario si auto-rimuoverà all'uscita" quando il flag è attivo.
@@ -185,12 +185,12 @@ file; suite intera solo prima di "done".
 4. **LIVE (obbligatoria per questa feature — tocca il runtime in-pod):** su kind
    o OpenShift, `exec` su un pod UBI9 senza il tool:
    - default → l'injection parte, il daemon serve, la TUI si apre; `kubectl exec
-     <pod> -- ls -l /usr/local/bin/agent-harness` → **No such file** mentre la
+     <pod> -- ls -l /usr/local/bin/tentacle` → **No such file** mentre la
      TUI è ancora attaccata (self-destruct all'avvio, inode vivo); dopo il detach
      resta No such file. Il modello risponde normalmente (binario in esecuzione).
    - `--ephemeral=false` → il file **c'è** dopo il detach; un secondo `exec` è
      sub-secondo (preflight OK, nessun transfer) e **non** auto-distrugge.
-   - Pod la cui immagine SHIPpa `agent-harness` → nessuna auto-distruzione
+   - Pod la cui immagine SHIPpa `tentacle` → nessuna auto-distruzione
      (preflight OK, `didInject=false`), con o senza `--ephemeral`.
 5. **Non-regress:** `run` invariato (nessun `--self-destruct` nel suo `openExec`);
    `serve` locale (laptop) invariato (mai `--self-destruct`).

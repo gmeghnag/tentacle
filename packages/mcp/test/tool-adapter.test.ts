@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ToolContext } from "@agent-harness/core";
+import type { ToolContext } from "@tentacle/core";
 import type { McpClient } from "../src/client.ts";
 import { flattenMcpResult, mcpToolName, mcpToolToTool } from "../src/tool-adapter.ts";
 import type { McpCallResult } from "../src/types.ts";

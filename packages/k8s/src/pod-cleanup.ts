@@ -23,7 +23,7 @@
  *
  * Secrets (token / TLS material) are passed via env vars, never inlined in the
  * command line (which is visible in `ps`). Both paths read the same
- * `HARNESS_POD_DELETE_*` / `HARNESS_POD_TLS_*` env.
+ * `TENTACLE_POD_DELETE_*` / `TENTACLE_POD_TLS_*` env.
  */
 
 /** TLS material for the delete call (mirrors Bun's fetch/WebSocket `tls`). */
@@ -66,22 +66,22 @@ export type PodDeleteSpawner = (
 
 /**
  * Build the static `bun -e` script the deleter child runs. It reads its
- * configuration from `HARNESS_POD_DELETE_*` / `HARNESS_POD_TLS_*` env vars and
+ * configuration from `TENTACLE_POD_DELETE_*` / `TENTACLE_POD_TLS_*` env vars and
  * performs a single best-effort `DELETE`, swallowing all errors and exiting.
  * No secrets are embedded in the string.
  */
 export function buildPodDeleteScript(): string {
   return `
-    const url = process.env.HARNESS_POD_DELETE_URL;
+    const url = process.env.TENTACLE_POD_DELETE_URL;
     if (!url) process.exit(0);
     const headers = {};
-    const token = process.env.HARNESS_POD_DELETE_TOKEN;
+    const token = process.env.TENTACLE_POD_DELETE_TOKEN;
     if (token) headers.authorization = "Bearer " + token;
     const tls = {};
-    if (process.env.HARNESS_POD_TLS_CA) tls.ca = process.env.HARNESS_POD_TLS_CA;
-    if (process.env.HARNESS_POD_TLS_CERT) tls.cert = process.env.HARNESS_POD_TLS_CERT;
-    if (process.env.HARNESS_POD_TLS_KEY) tls.key = process.env.HARNESS_POD_TLS_KEY;
-    if (process.env.HARNESS_POD_TLS_INSECURE === "1") tls.rejectUnauthorized = false;
+    if (process.env.TENTACLE_POD_TLS_CA) tls.ca = process.env.TENTACLE_POD_TLS_CA;
+    if (process.env.TENTACLE_POD_TLS_CERT) tls.cert = process.env.TENTACLE_POD_TLS_CERT;
+    if (process.env.TENTACLE_POD_TLS_KEY) tls.key = process.env.TENTACLE_POD_TLS_KEY;
+    if (process.env.TENTACLE_POD_TLS_INSECURE === "1") tls.rejectUnauthorized = false;
     const init = { method: "DELETE", headers };
     if (Object.keys(tls).length > 0) init.tls = tls;
     init.signal = AbortSignal.timeout(5000);
@@ -92,31 +92,31 @@ export function buildPodDeleteScript(): string {
 /**
  * The runtime counterpart of `buildPodDeleteScript`: issue the single
  * best-effort `DELETE` from the current process, reading its configuration from
- * the same `HARNESS_POD_DELETE_*` / `HARNESS_POD_TLS_*` env vars. This is what
+ * the same `TENTACLE_POD_DELETE_*` / `TENTACLE_POD_TLS_*` env vars. This is what
  * the compiled binary's hidden `__delete-pod` subcommand runs, so the deleter
  * child needs no external `bun`. Never throws; resolves once the call settles.
  */
 export async function deletePodFromEnv(fetchImpl: typeof fetch = fetch): Promise<void> {
-  const url = process.env.HARNESS_POD_DELETE_URL;
+  const url = process.env.TENTACLE_POD_DELETE_URL;
   if (!url) {
     return;
   }
   const headers: Record<string, string> = {};
-  const token = process.env.HARNESS_POD_DELETE_TOKEN;
+  const token = process.env.TENTACLE_POD_DELETE_TOKEN;
   if (token) {
     headers.authorization = `Bearer ${token}`;
   }
   const tls: Record<string, string | boolean> = {};
-  if (process.env.HARNESS_POD_TLS_CA) {
-    tls.ca = process.env.HARNESS_POD_TLS_CA;
+  if (process.env.TENTACLE_POD_TLS_CA) {
+    tls.ca = process.env.TENTACLE_POD_TLS_CA;
   }
-  if (process.env.HARNESS_POD_TLS_CERT) {
-    tls.cert = process.env.HARNESS_POD_TLS_CERT;
+  if (process.env.TENTACLE_POD_TLS_CERT) {
+    tls.cert = process.env.TENTACLE_POD_TLS_CERT;
   }
-  if (process.env.HARNESS_POD_TLS_KEY) {
-    tls.key = process.env.HARNESS_POD_TLS_KEY;
+  if (process.env.TENTACLE_POD_TLS_KEY) {
+    tls.key = process.env.TENTACLE_POD_TLS_KEY;
   }
-  if (process.env.HARNESS_POD_TLS_INSECURE === "1") {
+  if (process.env.TENTACLE_POD_TLS_INSECURE === "1") {
     tls.rejectUnauthorized = false;
   }
   const init: RequestInit & { tls?: Record<string, string | boolean> } = {
@@ -167,22 +167,22 @@ export function spawnPodDelete(
         env[key] = value;
       }
     }
-    env.HARNESS_POD_DELETE_URL = url;
+    env.TENTACLE_POD_DELETE_URL = url;
     if (options.token) {
-      env.HARNESS_POD_DELETE_TOKEN = options.token;
+      env.TENTACLE_POD_DELETE_TOKEN = options.token;
     }
     const tls = options.tls;
     if (tls?.ca) {
-      env.HARNESS_POD_TLS_CA = tls.ca;
+      env.TENTACLE_POD_TLS_CA = tls.ca;
     }
     if (tls?.cert) {
-      env.HARNESS_POD_TLS_CERT = tls.cert;
+      env.TENTACLE_POD_TLS_CERT = tls.cert;
     }
     if (tls?.key) {
-      env.HARNESS_POD_TLS_KEY = tls.key;
+      env.TENTACLE_POD_TLS_KEY = tls.key;
     }
     if (tls?.rejectUnauthorized === false) {
-      env.HARNESS_POD_TLS_INSECURE = "1";
+      env.TENTACLE_POD_TLS_INSECURE = "1";
     }
 
     const child = spawn(podDeleteCommand(process.execPath), env, {

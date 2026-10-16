@@ -28,8 +28,8 @@ import {
   type ToolResult,
   type Usage,
   allowAll,
-} from "@agent-harness/core";
-import type { ToolRegistry } from "@agent-harness/tools";
+} from "@tentacle/core";
+import type { ToolRegistry } from "@tentacle/tools";
 import { summarizeConversation } from "./compact.ts";
 import { EventQueue } from "./event-queue.ts";
 import { PermissionGate } from "./permission-gate.ts";
@@ -381,7 +381,7 @@ export class Agent {
 
   /**
    * Run a tool result through the configured transforms. Large output is spilled
-   * to `.harness/tool-output/<tool>-<id>.txt` in the workspace (written via the
+   * to `.tentacle/tool-output/<tool>-<id>.txt` in the workspace (written via the
    * confined env, so it is portable to the container environment later) and
    * replaced in-context with a preview + pointer.
    */
@@ -395,7 +395,7 @@ export class Agent {
       return result;
     }
     const safe = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 60);
-    const path = `.harness/tool-output/${safe(call.name)}-${safe(call.id)}.txt`;
+    const path = `.tentacle/tool-output/${safe(call.name)}-${safe(call.id)}.txt`;
     return applyResultTransforms(result, transforms, {
       toolName: call.name,
       toolCallId: call.id,

@@ -3,7 +3,7 @@
  * display transcript, so `--resume` shows the prior turns, not a blank screen.
  * The agent history remains the source of truth; this is a presentation view.
  */
-import type { ChatMessage } from "@agent-harness/core";
+import type { ChatMessage } from "@tentacle/core";
 import type { DisplayItem, ToolItem } from "./state.ts";
 
 export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[] {

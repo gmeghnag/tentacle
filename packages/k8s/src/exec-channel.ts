@@ -12,7 +12,7 @@
  * CONNECTING throws `InvalidStateError` — so outbound frames are buffered until
  * the socket's `open` event and flushed in order.
  */
-import type { DuplexChannel } from "@agent-harness/transport";
+import type { DuplexChannel } from "@tentacle/transport";
 import { ExecDemux, encodeStdin } from "./exec-frame.ts";
 
 /** The slice of a `WebSocket` the exec channel needs (browser/Bun shape). */

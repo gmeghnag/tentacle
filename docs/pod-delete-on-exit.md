@@ -29,7 +29,7 @@ client-side timeout and is `detached`+`unref`'d, so:
    - `export interface PodDeleteOptions { server; namespace; podName; token?;
      tls? }` (`tls` = `{ca?,cert?,key?,rejectUnauthorized?}`).
    - `buildPodDeleteScript(): string` — a STATIC bun script that reads
-     `HARNESS_POD_DELETE_*` env vars (url/token/tls) and does
+     `TENTACLE_POD_DELETE_*` env vars (url/token/tls) and does
      `fetch(url, {method:"DELETE", ...tls, signal: AbortSignal.timeout(5000)})
      .catch(()=>{})`. Secrets stay in env (not in the `-e` string visible in `ps`).
    - `spawnPodDelete(options, spawn = Bun.spawn): void` — sets the env, spawns

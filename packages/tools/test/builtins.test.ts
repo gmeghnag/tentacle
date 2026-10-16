@@ -6,7 +6,7 @@ import type {
   JobController,
   JobOutput,
   ToolContext,
-} from "@agent-harness/core";
+} from "@tentacle/core";
 import {
   fsEditTool,
   fsMultiEditTool,

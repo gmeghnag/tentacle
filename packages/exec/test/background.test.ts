@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { BackgroundHandle, ExecutionEnvironment } from "@agent-harness/core";
+import type { BackgroundHandle, ExecutionEnvironment } from "@tentacle/core";
 import { BackgroundJobs } from "../src/background.ts";
 
 /** A controllable in-memory background handle for tests. */

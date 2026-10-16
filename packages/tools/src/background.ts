@@ -4,7 +4,7 @@
  * `JobController`); when it is not wired they report the capability as
  * unavailable rather than throwing.
  */
-import type { JobStatus, Tool } from "@agent-harness/core";
+import type { JobStatus, Tool } from "@tentacle/core";
 import { z } from "zod";
 
 /** Human-readable status suffix including the exit code once a job has ended. */

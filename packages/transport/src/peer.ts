@@ -18,7 +18,7 @@ import {
   RequestSchemas,
   isMethodName,
   isNotificationName,
-} from "@agent-harness/protocol";
+} from "@tentacle/protocol";
 import type { DuplexChannel } from "./channel.ts";
 import { RpcError } from "./errors.ts";
 

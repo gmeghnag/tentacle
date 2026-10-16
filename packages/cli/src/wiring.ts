@@ -1,5 +1,5 @@
 /**
- * Builds a fully-wired `Agent` from a resolved `HarnessConfig`: OpenAI-compatible
+ * Builds a fully-wired `Agent` from a resolved `TentacleConfig`: OpenAI-compatible
  * model, host execution (writes confined to the workspace), the built-in tool-set,
  * and a `PermissionBroker` whose requester the frontend can attach at runtime.
  * Shared by the one-shot and interactive entry points.
@@ -20,13 +20,13 @@ import {
   summarizeLargeOutput,
   summarizeText,
   tabulateJson,
-} from "@agent-harness/agent";
-import type { HarnessConfig } from "@agent-harness/config";
-import { type JobController, type ModelProvider, PermissionBroker } from "@agent-harness/core";
-import { BackgroundJobs, HostExecution } from "@agent-harness/exec";
-import { type ConnectMcpResult, connectMcpServers } from "@agent-harness/mcp";
-import { OpenAIProvider } from "@agent-harness/providers";
-import { ToolRegistry, builtinTools, createTaskTool } from "@agent-harness/tools";
+} from "@tentacle/agent";
+import type { TentacleConfig } from "@tentacle/config";
+import { type JobController, type ModelProvider, PermissionBroker } from "@tentacle/core";
+import { BackgroundJobs, HostExecution } from "@tentacle/exec";
+import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
+import { OpenAIProvider } from "@tentacle/providers";
+import { ToolRegistry, builtinTools, createTaskTool } from "@tentacle/tools";
 
 /** Load user-defined agent types from `<configDir>/agents/*.md` (missing dir → none). */
 function loadUserAgentTypes(configDir: string): AgentType[] {
@@ -66,7 +66,7 @@ export interface BuildAgentOptions {
   readonly modelOverride?: ModelProvider;
 }
 
-export function buildAgent(config: HarnessConfig, options: BuildAgentOptions = {}): WiredAgent {
+export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
   const model =
     options.modelOverride ??
     new OpenAIProvider({
@@ -143,7 +143,7 @@ export function buildAgent(config: HarnessConfig, options: BuildAgentOptions = {
  * servers are configured.
  */
 export async function connectConfiguredMcp(
-  config: HarnessConfig,
+  config: TentacleConfig,
   tools: ToolRegistry,
 ): Promise<ConnectMcpResult> {
   const result = await connectMcpServers(config.mcpServers);

@@ -4,16 +4,16 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "@agent-harness/agent": ["../agent/src/index.ts"],
-      "@agent-harness/client": ["../client/src/index.ts"],
-      "@agent-harness/config": ["../config/src/index.ts"],
-      "@agent-harness/core": ["../core/src/index.ts"],
-      "@agent-harness/daemon": ["../daemon/src/index.ts"],
-      "@agent-harness/exec": ["../exec/src/index.ts"],
-      "@agent-harness/providers": ["../providers/src/index.ts"],
-      "@agent-harness/tools": ["../tools/src/index.ts"],
-      "@agent-harness/transport": ["../transport/src/index.ts"],
-      "@agent-harness/tui": ["../tui/src/index.ts"]
+      "@tentacle/agent": ["../agent/src/index.ts"],
+      "@tentacle/client": ["../client/src/index.ts"],
+      "@tentacle/config": ["../config/src/index.ts"],
+      "@tentacle/core": ["../core/src/index.ts"],
+      "@tentacle/daemon": ["../daemon/src/index.ts"],
+      "@tentacle/exec": ["../exec/src/index.ts"],
+      "@tentacle/providers": ["../providers/src/index.ts"],
+      "@tentacle/tools": ["../tools/src/index.ts"],
+      "@tentacle/transport": ["../transport/src/index.ts"],
+      "@tentacle/tui": ["../tui/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]

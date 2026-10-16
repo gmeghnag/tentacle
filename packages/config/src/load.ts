@@ -36,7 +36,7 @@ export interface LoadConfigOptions {
   readonly runCommand?: CommandRunner;
 }
 
-export interface HarnessConfig {
+export interface TentacleConfig {
   readonly baseURL: string;
   readonly model: string;
   readonly cwd: string;
@@ -82,13 +82,13 @@ function resolveConfigDir(override: string | undefined, env: Env, home: string):
   if (override) {
     return resolvePath(expandTilde(override, home));
   }
-  if (env.HARNESS_CONFIG_DIR) {
-    return resolvePath(expandTilde(env.HARNESS_CONFIG_DIR, home));
+  if (env.TENTACLE_CONFIG_DIR) {
+    return resolvePath(expandTilde(env.TENTACLE_CONFIG_DIR, home));
   }
   if (env.XDG_CONFIG_HOME) {
-    return resolvePath(expandTilde(env.XDG_CONFIG_HOME, home), "agent-harness");
+    return resolvePath(expandTilde(env.XDG_CONFIG_HOME, home), "tentacle");
   }
-  return join(home, ".config", "agent-harness");
+  return join(home, ".config", "tentacle");
 }
 
 async function defaultRunner(command: string): Promise<string> {
@@ -116,7 +116,7 @@ function parseConfigFile(text: string, path: string): unknown {
   return value ?? {};
 }
 
-export async function loadConfig(options: LoadConfigOptions = {}): Promise<HarnessConfig> {
+export async function loadConfig(options: LoadConfigOptions = {}): Promise<TentacleConfig> {
   const env = options.env ?? process.env;
   const home = env.HOME ?? homedir();
   const launchCwd = options.cwd ?? process.cwd();

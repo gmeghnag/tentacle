@@ -9,7 +9,7 @@
  * "trigger" the agent surfaces back to the model and the frontend.
  *
  * The interface lives in `core` (so tools and the agent depend only on it); the
- * host-backed implementation lives in `@agent-harness/exec`.
+ * host-backed implementation lives in `@tentacle/exec`.
  */
 import type { ExecOptions } from "./execution.ts";
 

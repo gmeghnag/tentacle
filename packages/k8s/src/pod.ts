@@ -1,9 +1,9 @@
 /**
  * Build the Pod manifest for an agent sandbox (F4). The container runs a
  * keepalive (so the pod reaches Ready and stays up) and the agent daemon is
- * `exec`-ed into it on demand (`agent-harness serve --stdio`).
+ * `exec`-ed into it on demand (`tentacle serve --stdio`).
  *
- * The image does NOT need to contain `agent-harness`: the pod runtime injects
+ * The image does NOT need to contain `tentacle`: the pod runtime injects
  * the binary over the exec channel before the daemon starts (F4.e,
  * `cli/src/pod-binary.ts`). It needs only to be a Linux **glibc** image with
  * `sh` + `head` (Bun's compiled binary is glibc-linked; musl images such as
@@ -70,7 +70,7 @@ export function buildPodManifest(options: PodManifestOptions): Pod {
     metadata: {
       name: options.name,
       ...(options.namespace ? { namespace: options.namespace } : {}),
-      labels: { "app.kubernetes.io/managed-by": "agent-harness", ...options.labels },
+      labels: { "app.kubernetes.io/managed-by": "tentacle", ...options.labels },
     },
     spec,
   };

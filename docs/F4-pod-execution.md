@@ -13,9 +13,9 @@ protocol design above the wire vocabulary.
 
 ## 1. Goal & scope
 
-**Goal:** `agent-harness run --image <ref> [--namespace <ns>] [<name>]` runs
+**Goal:** `tentacle run --image <ref> [--namespace <ns>] [<name>]` runs
 the agent **inside a Kubernetes pod** (the sandbox), driven from the **local
-TUI on the laptop**; `agent-harness exec <pod> [--namespace <ns>]` attaches
+TUI on the laptop**; `tentacle exec <pod> [--namespace <ns>]` attaches
 the **same** TUI to an **existing** pod (injecting the binary if it lacks one)
 without creating or deleting anything. In both cases the user types locally
 and the agent loop, tool execution, `/loop`, background jobs, MCP servers —
@@ -70,7 +70,7 @@ SPDY):
 
 ```
 GET wss://<api-server>/api/v1/namespaces/<ns>/pods/<pod>/exec
-    ?container=<c>&stdin=true&stdout=true&stderr=true&command=agent-harness&command=serve&command=--stdio
+    ?container=<c>&stdin=true&stdout=true&stderr=true&command=tentacle&command=serve&command=--stdio
 Sec-WebSocket-Protocol: v4.channel.k8s.io
 Authorization: Bearer <token>   (or client-cert TLS; see §4)
 ```
@@ -80,7 +80,7 @@ Framing: every WS binary message is prefixed by **one channel byte** —
 channel 0 and read them on channel 1; channel 2 (stderr) is surfaced to the
 local log; channel 3 carries the exec's terminal status.
 
-- **Pod side:** a new `agent-harness serve --stdio` mode wraps `process.stdin` /
+- **Pod side:** a new `tentacle serve --stdio` mode wraps `process.stdin` /
   `process.stdout` as a `DuplexChannel` and binds one `Connection` — exactly
   what `cli/src/worker.ts` does with the worker port today. Frames are the same
   newline-delimited JSON used everywhere else.
@@ -148,7 +148,7 @@ the pod reaches the model purely through the tunnel. `AbortSignal` maps onto a
 surface in F4.
 
 **Config bootstrap** mirrors the worker: the laptop sends the **locally-resolved
-`HarnessConfig`** as the first frame, but with the model section replaced by the
+`TentacleConfig`** as the first frame, but with the model section replaced by the
 proxy marker — "in base alle config salvate localmente" is literal, minus the
 secret, which stays home behind the tunnel.
 
@@ -175,7 +175,7 @@ secret, which stays home behind the tunnel.
 **Attach mode (`exec`, F4.g):** the same flow against a pod that already
 exists — no create, and **no delete at all**. `startExecRuntime` does
 `getPod` (missing → actionable error; terminal phase → reject) → a bounded
-readiness wait → the F4.e injection **only if a preflight `agent-harness
+readiness wait → the F4.e injection **only if a preflight `tentacle
 --version` shows the pod lacks it** (re-attach is a sub-second probe, no
 binary transfer) → the same daemon exec + runtime. Because the pod is
 user-owned, `dispose` only closes the exec channel (the pod daemon dies with
@@ -198,23 +198,23 @@ mechanism as the rest):
 ```jsonc
 "pod": {
   "namespace": "dev",            // --namespace overrides
-  "image": "registry/agent-harness:latest",
+  "image": "registry/tentacle:latest",
   "workspace": { "git": "https://…/repo.git", "ref": "main" },
   "resources": { "cpu": "1", "memory": "2Gi" },
   "securityContext": { "runAsNonRoot": true, "readOnlyRootFilesystem": true },
-  "serviceAccount": "agent-harness",
+  "serviceAccount": "tentacle",
   "ttlSeconds": 3600             // safety auto-delete
 }
 ```
 
-Env: `HARNESS_POD_NAMESPACE`, `HARNESS_POD_IMAGE`, … The model section is **not**
+Env: `TENTACLE_POD_NAMESPACE`, `TENTACLE_POD_IMAGE`, … The model section is **not**
 sent to the pod (reverse-tunnel, §5).
 
 ---
 
 ## 8. Execution plan (slices, each shippable green)
 
-- **F4.a — `KubeClient` REST** — ✅ **done (2026-10-14)**, in `@agent-harness/k8s`
+- **F4.a — `KubeClient` REST** — ✅ **done (2026-10-14)**, in `@tentacle/k8s`
   (`client.ts` + `types.ts`): `createPod`/`getPod`/`deletePod` + `waitForReady`
   (polls, rejects on a terminal phase or timeout) + `podIsReady`, bearer-token
   auth, injectable `fetch`. Unit-tested against a mock API server
@@ -227,7 +227,7 @@ sent to the pod (reverse-tunnel, §5).
   file/exec-plugin creds, and builds `fetch`/`makeWebSocket` carrying the cluster
   TLS via Bun's per-call `tls: { ca, cert, key, rejectUnauthorized }`). `main.ts`
   `run` now resolves from the kubeconfig by default (`--namespace` overrides;
-  `HARNESS_K8S_SERVER`/`_TOKEN` is an explicit override). Pure parser unit-tested
+  `TENTACLE_K8S_SERVER`/`_TOKEN` is an explicit override). Pure parser unit-tested
   (`k8s/test/kubeconfig.test.ts`); the full path **validated LIVE from a real kind
   kubeconfig with client-cert mTLS** — Bun honours `tls.{ca,cert,key}` on both
   `fetch` AND `WebSocket`, so the earlier `NODE_EXTRA_CA_CERTS` workaround is
@@ -237,7 +237,7 @@ sent to the pod (reverse-tunnel, §5).
   `transport/stream-channel.ts` (`streamChannel`: a newline-delimited
   `DuplexChannel` over a byte-stream pair) + `serve --stdio` (`startStdioDaemon`
   binds a `Connection` over `process.stdin`/`stdout`; logs to stderr since stdout
-  is the RPC channel). In `@agent-harness/k8s`: `exec-frame.ts` (pure
+  is the RPC channel). In `@tentacle/k8s`: `exec-frame.ts` (pure
   `encodeStdin` + `ExecDemux` channel-byte routing & newline re-chunk),
   `exec-channel.ts` (`execChannel` over a `WebSocketLike`, plus pure `buildExecUrl`
   https→wss and `execSubprotocols` with the bearer-token subprotocol), and
@@ -245,7 +245,7 @@ sent to the pod (reverse-tunnel, §5).
   handshake over newline framing, demux re-chunking, exec channel over a fake WS,
   URL/subprotocol builders, `openExec` wiring. **Validated LIVE** against a real
   apiserver (kind) by the opt-in `k8s/test/integration.live.test.ts` (skipped
-  unless `HARNESS_K8S_SERVER` is set): REST create/ready/delete over TLS + an
+  unless `TENTACLE_K8S_SERVER` is set): REST create/ready/delete over TLS + an
   exec round-trip through `cat` over `v4.channel.k8s.io` with bearer-token auth.
   Finding for F4.a.2: **Bun honours `NODE_EXTRA_CA_CERTS` for both `fetch` and
   `WebSocket`**, so trusting the cluster CA is a matter of pointing it at the
@@ -262,8 +262,8 @@ sent to the pod (reverse-tunnel, §5).
   persistence on the laptop, same TUI/permissions/auto-wake as local.
   Tested end-to-end over an in-memory channel wired to a real `Connection`
   (create/ready/exec/turn/persist/dispose/delete) + cleanup-on-failure +
-  `buildPodManifest`. **Cluster auth is a stopgap:** `HARNESS_K8S_SERVER` +
-  `HARNESS_K8S_TOKEN` env (kubeconfig auto-resolution is F4.a.2); no `pod` config
+  `buildPodManifest`. **Cluster auth is a stopgap:** `TENTACLE_K8S_SERVER` +
+  `TENTACLE_K8S_TOKEN` env (kubeconfig auto-resolution is F4.a.2); no `pod` config
   block yet (flags/env only).
 - **F4.d — reverse-tunnel model proxy** — ✅ **done (2026-10-14), non-streaming
   first cut.** Protocol: `model.ts` wire schemas (ChatRequest/StreamEvent) + the
@@ -281,22 +281,22 @@ sent to the pod (reverse-tunnel, §5).
   mid-call cancel** of a tunnelled model request (turn-level cancel between calls
   still works). Both are F4.d.2.
 - **F4.e — pod binary injection** — ✅ **done (2026-10-15).** The pod image
-  no longer needs to contain `agent-harness`: the runtime injects a Linux
+  no longer needs to contain `tentacle`: the runtime injects a Linux
   binary over the exec WebSocket before the daemon starts. Sequence (in
   `startPodRuntime`, after the pod is Ready): (1) `uname -m` arch probe —
   ANY failure/unknown output falls back to `bun-linux-x64` (never aborts);
-  (2) resolve the binary's bytes on the laptop: `HARNESS_POD_BIN` (explicit
-  prebuilt) → the git-ignored `dist/pod-bin/agent-harness-<target>` cache →
+  (2) resolve the binary's bytes on the laptop: `TENTACLE_POD_BIN` (explicit
+  prebuilt) → the git-ignored `dist/pod-bin/tentacle-<target>` cache →
   `Bun.build` cross-compile with the SAME options as `bun run compile`
   (shared `buildBinary`, so the two never drift); (3) stream the raw bytes
   to the pod's stdin through a one-shot exec (`k8s/exec-run.ts`, resolves on
   the k8s status channel when the command EXITS — 256 KB chunks, buffer
   until the socket opens, size-scaled timeout, progress: a `docker pull`-style
   bar in the TTY single-line, or a discrete line per ~10% when piped):
-  `sh -c "mkdir -p /usr/local/bin && head -c N > /usr/local/bin/agent-harness
+  `sh -c "mkdir -p /usr/local/bin && head -c N > /usr/local/bin/tentacle
   && chmod 755 …"` — `head -c N` reads exactly N bytes and exits, so the
   known byte count IS the EOF (no tar, no terminator); (4) verify with
-  `agent-harness --version` (the new flag, exits before config load), which
+  `tentacle --version` (the new flag, exits before config load), which
   catches a wrong-arch / bad-libc / broken binary with the pod's stderr
   instead of an opaque channel close — a musl loader failure gets an
   appended "use a glibc-based image" hint. Any step throws → the existing
@@ -312,13 +312,13 @@ sent to the pod (reverse-tunnel, §5).
 - **F4.f — exec-plugin auth + hardening** (credential-plugin, CA edge cases,
   timeouts, clear errors) + operator docs.
 - **F4.g — `exec` attach to an existing pod** — ✅ **shipped (branch
-  `feat/pod-exec-attach`)**. `agent-harness exec <pod> [--namespace <ns>]
+  `feat/pod-exec-attach`)**. `tentacle exec <pod> [--namespace <ns>]
   [--container <c>] [--resume [uid]]` attaches the local TUI to a pod that
   already exists — the `run` flow minus the lifecycle. `startExecRuntime`
   (`cli/src/pod-runtime.ts`) is `startPodRuntime` with the create/delete
   removed: `getPod` (404 → actionable "use `run` to create one"; a terminal
   phase → "cannot attach") → a BOUNDED readiness wait (60 s — an attach, not a
-  create) → a **preflight `agent-harness --version`** that skips the whole
+  create) → a **preflight `tentacle --version`** that skips the whole
   injection when the pod already has a working binary (re-attach is
   sub-second; no 89 MB transfer), else the full F4.e `injectAgentBinary` →
   the same daemon exec + reverse-tunnel + persisting runtime. The pod is

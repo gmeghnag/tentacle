@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentEvent } from "@agent-harness/agent";
-import type { ToolResult } from "@agent-harness/core";
+import type { AgentEvent } from "@tentacle/agent";
+import type { ToolResult } from "@tentacle/core";
 import {
   DIFF_MIME,
   contentToText,

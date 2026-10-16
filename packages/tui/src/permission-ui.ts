@@ -7,7 +7,7 @@
  * Tab) is mirrored in a ref so toggling it mid-session takes effect without
  * re-installing the requester.
  */
-import type { PermissionBroker, PermissionRequest, PermissionResponse } from "@agent-harness/core";
+import type { PermissionBroker, PermissionRequest, PermissionResponse } from "@tentacle/core";
 import {
   type Dispatch,
   type SetStateAction,

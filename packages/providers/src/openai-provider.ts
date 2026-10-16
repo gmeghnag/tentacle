@@ -17,7 +17,7 @@ import type {
   ToolCall,
   ToolDefinition,
   Usage,
-} from "@agent-harness/core";
+} from "@tentacle/core";
 import { parseSSE } from "./sse.ts";
 
 export interface OpenAIProviderConfig {

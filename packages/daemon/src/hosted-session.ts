@@ -4,16 +4,16 @@
  * agent's permission requests to the connected client, and keeps a bounded
  * replay buffer of the current turn (seq-numbered) for reconnect.
  */
-import type { Session } from "@agent-harness/agent";
-import type { ChatMessage, JobController, PermissionBroker } from "@agent-harness/core";
+import type { Session } from "@tentacle/agent";
+import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import type {
   PermissionOutcome,
   RequestPermissionParams,
   SessionUpdate,
   SessionUpdateParams,
   StopReason,
-} from "@agent-harness/protocol";
-import { DomainErrorCode, RpcError } from "@agent-harness/transport";
+} from "@tentacle/protocol";
+import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import { contentToText, eventToUpdate, stopReasonToProtocol } from "./mapping.ts";
 import { outcomeToResponse, toRequestPermissionParams } from "./permission-map.ts";
 

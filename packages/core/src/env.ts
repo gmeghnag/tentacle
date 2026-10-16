@@ -1,7 +1,7 @@
 /**
  * Scrub secret-bearing variables from an environment before it is handed to a
  * spawned child (a shell command, an MCP server subprocess). Without this a
- * model-driven `echo $HARNESS_MODEL_API_KEY` — or any child process — can read
+ * model-driven `echo $TENTACLE_MODEL_API_KEY` — or any child process — can read
  * the user's keys straight out of its inherited environment, which redaction of
  * tool *output* never catches.
  *

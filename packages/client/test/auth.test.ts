@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { PermissionBroker } from "@agent-harness/core";
-import { SessionHost, startWsServer } from "@agent-harness/daemon";
+import { PermissionBroker } from "@tentacle/core";
+import { SessionHost, startWsServer } from "@tentacle/daemon";
 import { RemoteClient } from "../src/remote-client.ts";
 import { connectWebSocket } from "../src/ws-channel.ts";
 

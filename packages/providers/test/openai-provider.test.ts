@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { StreamEvent } from "@agent-harness/core";
+import type { StreamEvent } from "@tentacle/core";
 import { ModelRequestError, OpenAIProvider } from "../src/index.ts";
 
 // A fake OpenAI-compatible endpoint that streams a scripted completion:

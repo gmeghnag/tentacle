@@ -4,7 +4,7 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "@agent-harness/protocol": ["../protocol/src/index.ts"]
+      "@tentacle/protocol": ["../protocol/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]

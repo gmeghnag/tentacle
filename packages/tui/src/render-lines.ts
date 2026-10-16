@@ -8,7 +8,7 @@
  *
  * Pure and framework-free: no React, no Ink — just strings in, strings out.
  */
-import type { ToolResultDetail } from "@agent-harness/core";
+import type { ToolResultDetail } from "@tentacle/core";
 import chalk from "chalk";
 import wrapAnsi from "wrap-ansi";
 import { renderMarkdown } from "./markdown.ts";

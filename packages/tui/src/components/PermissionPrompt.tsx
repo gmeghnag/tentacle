@@ -1,4 +1,4 @@
-import type { PermissionRequest } from "@agent-harness/core";
+import type { PermissionRequest } from "@tentacle/core";
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 

@@ -1,5 +1,5 @@
 /**
- * `@agent-harness/tools` — the tool registry and built-in host tools.
+ * `@tentacle/tools` — the tool registry and built-in host tools.
  */
 export * from "./registry.ts";
 export * from "./builtins.ts";

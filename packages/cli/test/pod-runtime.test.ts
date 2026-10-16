@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, JsonSessionStore } from "@agent-harness/agent";
+import { Agent, JsonSessionStore } from "@tentacle/agent";
 import type {
   ChatRequest,
   ExecutionEnvironment,
@@ -11,9 +11,9 @@ import type {
   PermissionRequest,
   PermissionResponse,
   StreamEvent,
-} from "@agent-harness/core";
-import { PermissionBroker } from "@agent-harness/core";
-import { Connection, SessionHost } from "@agent-harness/daemon";
+} from "@tentacle/core";
+import { PermissionBroker } from "@tentacle/core";
+import { Connection, SessionHost } from "@tentacle/daemon";
 import {
   type ExecChannelOptions,
   type ExecTarget,
@@ -22,10 +22,10 @@ import {
   type RunExecOptions,
   type RunExecResult,
   type WaitForReadyOptions,
-} from "@agent-harness/k8s";
-import { ToolRegistry, fsWriteTool } from "@agent-harness/tools";
-import { type DuplexChannel, createChannelPair } from "@agent-harness/transport";
-import type { HarnessConfig } from "../src/config.ts";
+} from "@tentacle/k8s";
+import { ToolRegistry, fsWriteTool } from "@tentacle/tools";
+import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
+import type { TentacleConfig } from "../src/config.ts";
 import { POD_BIN_PATH } from "../src/pod-binary.ts";
 import {
   type PodCluster,
@@ -119,7 +119,7 @@ class FakeCluster implements PodCluster {
       return Promise.resolve({ exitCode: 0, stdout: "x86_64\n", stderr: "" });
     }
     if (target.command.join(" ").includes("--version")) {
-      return Promise.resolve({ exitCode: 0, stdout: "agent-harness 1.2.3\n", stderr: "" });
+      return Promise.resolve({ exitCode: 0, stdout: "tentacle 1.2.3\n", stderr: "" });
     }
     if (target.command.join(" ").includes("fs_write")) {
       return Promise.resolve({ exitCode: 0, stdout: "ok", stderr: "" });
@@ -204,9 +204,9 @@ class SpyFakeCluster extends FakeCluster {
   }
 }
 
-function baseConfig(cwd: string): HarnessConfig {
+function baseConfig(cwd: string): TentacleConfig {
   // Only the fields the pod runtime reads (cwd, model) matter here.
-  return { cwd, model: "qwen3" } as unknown as HarnessConfig;
+  return { cwd, model: "qwen3" } as unknown as TentacleConfig;
 }
 
 let dir: string;
@@ -214,19 +214,19 @@ let savedPodBin: string | undefined;
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "harness-pod-rt-"));
   // startPodRuntime resolves the binary through the REAL `resolvePodBinary`
-  // (the seam is wired, not faked): point HARNESS_POD_BIN at a small fake file
+  // (the seam is wired, not faked): point TENTACLE_POD_BIN at a small fake file
   // so no build happens and the injection streams these exact bytes.
-  savedPodBin = process.env.HARNESS_POD_BIN;
-  process.env.HARNESS_POD_BIN = join(dir, "fake-agent-harness");
-  writeFileSync(process.env.HARNESS_POD_BIN, "01234567"); // 8 bytes
+  savedPodBin = process.env.TENTACLE_POD_BIN;
+  process.env.TENTACLE_POD_BIN = join(dir, "fake-tentacle");
+  writeFileSync(process.env.TENTACLE_POD_BIN, "01234567"); // 8 bytes
 });
 afterAll(async () => {
   // Restoring via Reflect.deleteProperty keeps biome's `noDelete` happy; in
   // Bun, assigning `undefined` would stringify the value (not unset it).
   if (savedPodBin === undefined) {
-    Reflect.deleteProperty(process.env, "HARNESS_POD_BIN");
+    Reflect.deleteProperty(process.env, "TENTACLE_POD_BIN");
   } else {
-    process.env.HARNESS_POD_BIN = savedPodBin;
+    process.env.TENTACLE_POD_BIN = savedPodBin;
   }
   await rm(dir, { recursive: true, force: true });
 });
@@ -251,8 +251,8 @@ describe("startPodRuntime", () => {
 
     // Lifecycle: created, readied, the F4.e injection ran (probe arch → install
     // the exact 8 bytes via head -c → verify), then the daemon was exec'd.
-    expect(kube.calls[0]).toMatch(/^create:agent-harness-/);
-    expect(kube.calls[1]).toMatch(/^ready:agent-harness-/);
+    expect(kube.calls[0]).toMatch(/^create:tentacle-/);
+    expect(kube.calls[1]).toMatch(/^ready:tentacle-/);
     const podName = (kube.calls[0] as string).slice("create:".length);
     const unameIdx = kube.calls.findIndex((c) => c === `runexec:${podName}:uname -m`);
     const installIdx = kube.calls.findIndex(
@@ -260,9 +260,7 @@ describe("startPodRuntime", () => {
         c ===
         `runexec:${podName}:sh -c mkdir -p /usr/local/bin && head -c 8 > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`,
     );
-    const versionIdx = kube.calls.findIndex(
-      (c) => c === `runexec:${podName}:agent-harness --version`,
-    );
+    const versionIdx = kube.calls.findIndex((c) => c === `runexec:${podName}:tentacle --version`);
     const daemonIdx = kube.calls.findIndex((c) => c.includes("serve --stdio"));
     expect(unameIdx).toBe(2);
     expect(installIdx).toBe(3);
@@ -279,7 +277,7 @@ describe("startPodRuntime", () => {
     // Dispose tears the pod down.
     runtime.dispose();
     await new Promise((r) => setTimeout(r, 10));
-    expect(kube.calls.some((c) => c.startsWith("delete:agent-harness-"))).toBe(true);
+    expect(kube.calls.some((c) => c.startsWith("delete:tentacle-"))).toBe(true);
   });
 
   test("an `ask` tool's permission request is routed through the shared broker", async () => {
@@ -325,7 +323,7 @@ describe("startPodRuntime", () => {
         return Promise.resolve({
           exitCode: 1,
           stdout: "",
-          stderr: "agent-harness: Exec format error\n",
+          stderr: "tentacle: Exec format error\n",
         });
       }
       return original(target, input, options);
@@ -341,7 +339,7 @@ describe("startPodRuntime", () => {
         resume: null,
         log: () => {},
       }),
-    ).rejects.toThrow(/agent-harness --version failed.*Exec format error/);
+    ).rejects.toThrow(/tentacle --version failed.*Exec format error/);
     // The pod is cleaned up on injection failure.
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(true);
     // The daemon exec never happened.
@@ -404,7 +402,7 @@ describe("startPodRuntime", () => {
           new KubeApiError(
             403,
             JSON.stringify({
-              message: 'pods "agent-harness-x" is forbidden: RBAC',
+              message: 'pods "tentacle-x" is forbidden: RBAC',
             }),
           ),
         ),
@@ -552,8 +550,8 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     // `container` parameter (recorded as "-") and the API picks the
     // only/default one — a single-container pod needs no `-c`.
     expect(kube.calls[0]).toBe("get:mypod");
-    expect(kube.calls[1]).toBe("runexec:mypod:agent-harness --version");
-    expect(kube.calls[2]).toBe("exec:mypod:-:agent-harness serve --stdio --model-proxy");
+    expect(kube.calls[1]).toBe("runexec:mypod:tentacle --version");
+    expect(kube.calls[2]).toBe("exec:mypod:-:tentacle serve --stdio --model-proxy");
     expect(kube.calls.some((c) => c.includes("uname"))).toBe(false);
     expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
 
@@ -575,7 +573,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
   test("injects the binary when the preflight probe fails, then attaches", async () => {
     const model = new ScriptedProvider([[{ type: "done" }]]);
     const kube = new FakeCluster(model);
-    // The pod has no agent-harness yet: the preflight probe fails (as
+    // The pod has no tentacle yet: the preflight probe fails (as
     // "command not found" would), but the post-injection verify succeeds.
     let versionCalls = 0;
     const original = kube.runExec.bind(kube);
@@ -589,11 +587,11 @@ describe("startExecRuntime (attach to an existing pod)", () => {
           return Promise.resolve({
             exitCode: 1,
             stdout: "",
-            stderr: "sh: agent-harness: command not found\n",
+            stderr: "sh: tentacle: command not found\n",
           });
         }
         // Post-injection verify: succeeds (the injected binary works).
-        return Promise.resolve({ exitCode: 0, stdout: "agent-harness 1.2.3\n", stderr: "" });
+        return Promise.resolve({ exitCode: 0, stdout: "tentacle 1.2.3\n", stderr: "" });
       }
       return original(target, input, options);
     };
@@ -605,7 +603,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
 
     // Preflight probe → the full injection (probe arch → install the 8 bytes
     // via head -c → verify) → the daemon exec.
-    expect(kube.calls[1]).toBe("runexec:mypod:agent-harness --version");
+    expect(kube.calls[1]).toBe("runexec:mypod:tentacle --version");
     expect(kube.calls[2]).toBe("runexec:mypod:uname -m");
     const installIdx = kube.calls.findIndex((c) => c.includes("head -c 8"));
     expect(installIdx).toBe(3);
@@ -675,8 +673,8 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     // The named container rides on the daemon exec; the one-shot preflight
     // records only the command, so the exec target is the assertion point.
     expect(kube.calls[0]).toBe("get:mypod");
-    expect(kube.calls[1]).toBe("runexec:mypod:agent-harness --version");
-    expect(kube.calls[2]).toBe("exec:mypod:dns:agent-harness serve --stdio --model-proxy");
+    expect(kube.calls[1]).toBe("runexec:mypod:tentacle --version");
+    expect(kube.calls[2]).toBe("exec:mypod:dns:tentacle serve --stdio --model-proxy");
     runtime.dispose();
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
   });
@@ -694,7 +692,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     // getPod (Pending) → the bounded wait → the preflight → the daemon exec.
     expect(kube.calls[0]).toBe("get:mypod");
     expect(kube.calls[1]).toBe("ready:mypod");
-    expect(kube.calls[2]).toBe("runexec:mypod:agent-harness --version");
+    expect(kube.calls[2]).toBe("runexec:mypod:tentacle --version");
     expect(kube.calls.some((c) => c.includes("serve --stdio"))).toBe(true);
     runtime.dispose();
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);

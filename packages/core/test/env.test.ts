@@ -4,10 +4,10 @@ import { isSensitiveEnvKey, scrubSensitiveEnv } from "../src/env.ts";
 describe("isSensitiveEnvKey", () => {
   test("flags keys that look like secrets", () => {
     for (const key of [
-      "HARNESS_MODEL_API_KEY",
+      "TENTACLE_MODEL_API_KEY",
       "OPENAI_API_KEY",
       "AWS_SECRET_ACCESS_KEY",
-      "HARNESS_REMOTE_TOKEN",
+      "TENTACLE_REMOTE_TOKEN",
       "GITHUB_TOKEN",
       "DB_PASSWORD",
       "SOME_PRIVATE_KEY",
@@ -29,12 +29,12 @@ describe("scrubSensitiveEnv", () => {
     const scrubbed = scrubSensitiveEnv({
       PATH: "/usr/bin",
       HOME: "/home/u",
-      HARNESS_MODEL_API_KEY: "sk-secret",
+      TENTACLE_MODEL_API_KEY: "sk-secret",
       GITHUB_TOKEN: "ghp_x",
       EMPTY: undefined,
     });
     expect(scrubbed).toEqual({ PATH: "/usr/bin", HOME: "/home/u" });
-    expect(scrubbed).not.toHaveProperty("HARNESS_MODEL_API_KEY");
+    expect(scrubbed).not.toHaveProperty("TENTACLE_MODEL_API_KEY");
     expect(scrubbed).not.toHaveProperty("GITHUB_TOKEN");
   });
 });

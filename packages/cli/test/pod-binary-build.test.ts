@@ -20,12 +20,12 @@ function fakeBuild(marker: (outfile: string) => string) {
 }
 
 describe("resolvePodBinary", () => {
-  test("HARNESS_POD_BIN override is read directly (no cache, no build)", async () => {
+  test("TENTACLE_POD_BIN override is read directly (no cache, no build)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "harness-podbin-"));
     const override = join(dir, "my-prebuilt");
     writeFileSync(override, "PREBUILT-BYTES");
-    const saved = process.env.HARNESS_POD_BIN;
-    process.env.HARNESS_POD_BIN = override;
+    const saved = process.env.TENTACLE_POD_BIN;
+    process.env.TENTACLE_POD_BIN = override;
     const logs: string[] = [];
     try {
       const bytes = await resolvePodBinary("bun-linux-x64", {
@@ -34,7 +34,7 @@ describe("resolvePodBinary", () => {
         log: (l) => logs.push(l),
       });
       expect(Buffer.from(bytes).toString()).toBe("PREBUILT-BYTES");
-      expect(logs.some((l) => l.includes("HARNESS_POD_BIN"))).toBe(true);
+      expect(logs.some((l) => l.includes("TENTACLE_POD_BIN"))).toBe(true);
       // The override wins: nothing is cached or built.
       expect(existsSync(join(dir, "cache"))).toBe(false);
     } finally {
@@ -42,9 +42,9 @@ describe("resolvePodBinary", () => {
       // would stringify to "undefined" in Bun, so delete the key instead —
       // `Reflect.deleteProperty` keeps biome's `noDelete` happy.)
       if (saved === undefined) {
-        Reflect.deleteProperty(process.env, "HARNESS_POD_BIN");
+        Reflect.deleteProperty(process.env, "TENTACLE_POD_BIN");
       } else {
-        process.env.HARNESS_POD_BIN = saved;
+        process.env.TENTACLE_POD_BIN = saved;
       }
       await rm(dir, { recursive: true, force: true });
     }
@@ -58,11 +58,11 @@ describe("resolvePodBinary", () => {
     try {
       const bytes = await resolvePodBinary(target, { cacheDir, build });
       expect(built).toHaveLength(1);
-      expect(built[0]).toBe(join(cacheDir, "agent-harness-bun-linux-arm64"));
+      expect(built[0]).toBe(join(cacheDir, "tentacle-bun-linux-arm64"));
       expect(Buffer.from(bytes).toString()).toBe(
-        `BUILT:${join(cacheDir, "agent-harness-bun-linux-arm64")}`,
+        `BUILT:${join(cacheDir, "tentacle-bun-linux-arm64")}`,
       );
-      expect(existsSync(join(cacheDir, "agent-harness-bun-linux-arm64"))).toBe(true);
+      expect(existsSync(join(cacheDir, "tentacle-bun-linux-arm64"))).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -71,7 +71,7 @@ describe("resolvePodBinary", () => {
   test("a cache hit does not rebuild", async () => {
     const dir = await mkdtemp(join(tmpdir(), "harness-podbin-"));
     const cacheDir = join(dir, "cache");
-    const outfile = join(cacheDir, "agent-harness-bun-linux-x64");
+    const outfile = join(cacheDir, "tentacle-bun-linux-x64");
     // Seed the cache with an existing binary (the cache dir must exist first).
     mkdirSync(cacheDir, { recursive: true });
     writeFileSync(outfile, "CACHED-BYTES");
@@ -103,7 +103,7 @@ describe("resolvePodBinary", () => {
         /TARGET=bun-linux-x64 bun run compile/,
       );
       // A failed build must not leave a partial cache entry.
-      expect(existsSync(join(cacheDir, "agent-harness-bun-linux-x64"))).toBe(false);
+      expect(existsSync(join(cacheDir, "tentacle-bun-linux-x64"))).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

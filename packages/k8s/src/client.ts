@@ -8,7 +8,7 @@
  * auth are later slices; `fetch` is injectable so this layer is fully testable
  * against a mock API server without any of that.
  */
-import type { DuplexChannel } from "@agent-harness/transport";
+import type { DuplexChannel } from "@tentacle/transport";
 import {
   type ExecChannelOptions,
   type ExecTarget,
@@ -200,7 +200,7 @@ export class KubeClient {
   /**
    * Open an exec WebSocket to `target` and return it as a `DuplexChannel` an
    * `RpcPeer` can ride. The command is typically the pod daemon, e.g.
-   * `["agent-harness", "serve", "--stdio"]`.
+   * `["tentacle", "serve", "--stdio"]`.
    */
   openExec(target: ExecTarget, options: ExecChannelOptions = {}): DuplexChannel {
     const url = buildExecUrl(this.server, this.namespace, target);

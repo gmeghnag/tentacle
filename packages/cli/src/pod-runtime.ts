@@ -6,7 +6,7 @@
  * lifecycle here:
  *
  *   createPod → waitForReady → injectAgentBinary (F4.e: probe arch, stream the
- *   binary, verify with --version) → openExec(`agent-harness serve --stdio`) →
+ *   binary, verify with --version) → openExec(`tentacle serve --stdio`) →
  *   createLocalRuntime(handshake + persisting sessions) → …use… → deletePod.
  *
  * The injection (F4.e) means the image no longer needs to contain the tool —
@@ -20,10 +20,10 @@
  * Persistence stays on the laptop (the `createLocalRuntime` store), so the pod
  * is a stateless sandbox and `--resume` works locally.
  */
-import type { SessionRecord } from "@agent-harness/agent";
-import type { JsonSessionStore } from "@agent-harness/agent";
-import type { HarnessConfig } from "@agent-harness/config";
-import type { PermissionBroker } from "@agent-harness/core";
+import type { SessionRecord } from "@tentacle/agent";
+import type { JsonSessionStore } from "@tentacle/agent";
+import type { TentacleConfig } from "@tentacle/config";
+import type { PermissionBroker } from "@tentacle/core";
 import {
   AGENT_CONTAINER,
   type ExecChannelOptions,
@@ -36,9 +36,9 @@ import {
   type WaitForReadyOptions,
   buildPodManifest,
   podIsReady,
-} from "@agent-harness/k8s";
-import { OpenAIProvider } from "@agent-harness/providers";
-import type { DuplexChannel } from "@agent-harness/transport";
+} from "@tentacle/k8s";
+import { OpenAIProvider } from "@tentacle/providers";
+import type { DuplexChannel } from "@tentacle/transport";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { resolvePodBinary } from "./pod-binary-build.ts";
 import { injectAgentBinary, probePodArch } from "./pod-binary.ts";
@@ -179,10 +179,10 @@ function registerPodCleanup(kube: PodCluster, name: string): void {
  * pod) on failure — there is no in-process fallback.
  */
 export async function startPodRuntime(
-  config: HarnessConfig,
+  config: TentacleConfig,
   deps: PodRuntimeDeps,
 ): Promise<LocalRuntime> {
-  const name = deps.name ?? `agent-harness-${crypto.randomUUID().slice(0, 8)}`;
+  const name = deps.name ?? `tentacle-${crypto.randomUUID().slice(0, 8)}`;
   // The pod daemon's stderr is buffered (not written live) so it never corrupts
   // the Ink TUI; flushed once on teardown / startup failure. See `createStderrSink`.
   const stderr = createStderrSink(`[pod ${name}]`, deps.log);
@@ -221,7 +221,7 @@ export async function startPodRuntime(
     phase(`[pod] waiting for ${name} to become ready…`);
     await deps.kube.waitForReady(name);
     // Inject the tool into the sandbox (F4.e): the image need not contain
-    // `agent-harness`. Any failure here throws → the pod is deleted below.
+    // `tentacle`. Any failure here throws → the pod is deleted below.
     // In interactive mode the injection phases (probe → resolve → transfer →
     // verify) drive the SAME status line via `onStatus`.
     const version = await injectAgentBinary({
@@ -250,7 +250,7 @@ export async function startPodRuntime(
       {
         pod: name,
         container: AGENT_CONTAINER,
-        command: ["agent-harness", "serve", "--stdio", "--model-proxy"],
+        command: ["tentacle", "serve", "--stdio", "--model-proxy"],
       },
       { onStderr: stderr.onStderr },
     );
@@ -314,7 +314,7 @@ export interface PodExecRuntimeDeps {
  * exit (Ctrl+C → process.exit) must NOT delete the pod.
  */
 export async function startExecRuntime(
-  config: HarnessConfig,
+  config: TentacleConfig,
   deps: PodExecRuntimeDeps,
 ): Promise<LocalRuntime> {
   const name = deps.podName;
@@ -373,7 +373,7 @@ export async function startExecRuntime(
   }
 
   try {
-    // Preflight: if the pod ALREADY has a working `agent-harness` (a re-attach
+    // Preflight: if the pod ALREADY has a working `tentacle` (a re-attach
     // after a previous attach, or an image that ships it), the whole injection
     // — 89 MB transfer — is skipped. Any failure (not on PATH, wrong arch,
     // bad libc) falls through to the injection, which re-verifies anyway.
@@ -382,7 +382,7 @@ export async function startExecRuntime(
     let probe: RunExecResult;
     try {
       probe = await deps.kube.runExec(
-        { pod: name, container, command: ["agent-harness", "--version"] },
+        { pod: name, container, command: ["tentacle", "--version"] },
         undefined,
         { timeoutMs: 15_000 },
       );
@@ -393,7 +393,7 @@ export async function startExecRuntime(
     }
     let version: string;
     if (probe.exitCode === 0) {
-      version = probe.stdout.trim() || "agent-harness";
+      version = probe.stdout.trim() || "tentacle";
     } else {
       version = await injectAgentBinary({
         kube: deps.kube,
@@ -421,7 +421,7 @@ export async function startExecRuntime(
       {
         pod: name,
         container,
-        command: ["agent-harness", "serve", "--stdio", "--model-proxy"],
+        command: ["tentacle", "serve", "--stdio", "--model-proxy"],
       },
       { onStderr: stderr.onStderr },
     );

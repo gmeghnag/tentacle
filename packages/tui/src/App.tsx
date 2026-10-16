@@ -1,5 +1,5 @@
-import { type Agent, type AgentEvent, Session } from "@agent-harness/agent";
-import type { JobController, PermissionBroker } from "@agent-harness/core";
+import { type Agent, type AgentEvent, Session } from "@tentacle/agent";
+import type { JobController, PermissionBroker } from "@tentacle/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
@@ -87,7 +87,7 @@ const PASTE_TIMEOUT_MS = 250;
 // Max content lines the input box shows before it windows around the cursor.
 const MAX_INPUT_ROWS = 10;
 
-const WELCOME = "Agent harness ready. Type a task, or `/help` for commands.";
+const WELCOME = "Tentacle ready. Type a task, or `/help` for commands.";
 
 // Lines scrolled per mouse-wheel notch.
 const WHEEL_LINES = 3;
@@ -418,7 +418,7 @@ export function App({
           return;
         }
         case "/save": {
-          const path = `${cwd}/harness-transcript-${Date.now()}.md`;
+          const path = `${cwd}/tentacle-transcript-${Date.now()}.md`;
           const md = transcriptToMarkdown(stateRef.current.items);
           void saveFile(path, md).then(
             () => pushNotice(`_Saved transcript to ${path}_`),

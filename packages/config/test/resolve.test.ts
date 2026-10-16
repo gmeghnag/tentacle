@@ -44,12 +44,12 @@ describe("resolveConfig precedence", () => {
   test("autoWake resolves env > file > default", () => {
     expect(resolveConfig(ctx({ fileConfig: { autoWake: false } })).autoWake).toBe(false);
     const envWins = resolveConfig(
-      ctx({ env: { HARNESS_AUTO_WAKE: "off" }, fileConfig: { autoWake: true } }),
+      ctx({ env: { TENTACLE_AUTO_WAKE: "off" }, fileConfig: { autoWake: true } }),
     );
     expect(envWins.autoWake).toBe(false);
     expect(envWins.sources.autoWake).toBe("env");
     // An unrecognised env value falls through to the default.
-    const fell = resolveConfig(ctx({ env: { HARNESS_AUTO_WAKE: "maybe" } }));
+    const fell = resolveConfig(ctx({ env: { TENTACLE_AUTO_WAKE: "maybe" } }));
     expect(fell.autoWake).toBe(true);
     expect(fell.sources.autoWake).toBe("default");
   });
@@ -68,7 +68,7 @@ describe("resolveConfig precedence", () => {
     // ...and from the env, which wins over the file.
     const envWins = resolveConfig(
       ctx({
-        env: { HARNESS_SUBAGENT_MAX_ITERATIONS: "-1" },
+        env: { TENTACLE_SUBAGENT_MAX_ITERATIONS: "-1" },
         fileConfig: { subagents: { maxIterations: 80 } },
       }),
     );
@@ -76,7 +76,7 @@ describe("resolveConfig precedence", () => {
     expect(envWins.sources.subagentMaxIterations).toBe("env");
     // A bad env value (0, non-integer) falls through to the file/default.
     expect(
-      resolveConfig(ctx({ env: { HARNESS_SUBAGENT_MAX_ITERATIONS: "0" } })).subagentMaxIterations,
+      resolveConfig(ctx({ env: { TENTACLE_SUBAGENT_MAX_ITERATIONS: "0" } })).subagentMaxIterations,
     ).toBe(DEFAULT_SUBAGENT_MAX_ITERATIONS);
   });
 
@@ -86,11 +86,11 @@ describe("resolveConfig precedence", () => {
     ).toBe(false);
     expect(
       resolveConfig(
-        ctx({ env: { HARNESS_SUBAGENTS: "off" }, fileConfig: { subagents: { enabled: true } } }),
+        ctx({ env: { TENTACLE_SUBAGENTS: "off" }, fileConfig: { subagents: { enabled: true } } }),
       ).subagentsEnabled,
     ).toBe(false);
-    expect(resolveConfig(ctx({ env: { HARNESS_SUBAGENTS: "1" } })).subagentsEnabled).toBe(true);
-    const fell = resolveConfig(ctx({ env: { HARNESS_SUBAGENTS: "maybe" } }));
+    expect(resolveConfig(ctx({ env: { TENTACLE_SUBAGENTS: "1" } })).subagentsEnabled).toBe(true);
+    const fell = resolveConfig(ctx({ env: { TENTACLE_SUBAGENTS: "maybe" } }));
     expect(fell.subagentsEnabled).toBe(true);
     expect(fell.sources.subagentsEnabled).toBe("default");
   });
@@ -119,11 +119,11 @@ describe("resolveConfig precedence", () => {
       ctx({
         fileConfig: { model: { baseURL: "http://file/v1" }, cwd: "/file-cwd", maxIterations: 4 },
         env: {
-          HARNESS_MODEL_BASE_URL: "http://env/v1",
-          HARNESS_MODEL: "env-model",
-          HARNESS_CWD: "/env-cwd",
-          HARNESS_MAX_ITERATIONS: "9",
-          HARNESS_SYSTEM_PROMPT: "env prompt",
+          TENTACLE_MODEL_BASE_URL: "http://env/v1",
+          TENTACLE_MODEL: "env-model",
+          TENTACLE_CWD: "/env-cwd",
+          TENTACLE_MAX_ITERATIONS: "9",
+          TENTACLE_SYSTEM_PROMPT: "env prompt",
         },
         promptFromFile: "from file",
       }),
@@ -136,11 +136,11 @@ describe("resolveConfig precedence", () => {
     expect(c.sources.baseURL).toBe("env");
   });
 
-  test("ignores a non-positive HARNESS_MAX_ITERATIONS", () => {
-    expect(resolveConfig(ctx({ env: { HARNESS_MAX_ITERATIONS: "0" } })).maxIterations).toBe(
+  test("ignores a non-positive TENTACLE_MAX_ITERATIONS", () => {
+    expect(resolveConfig(ctx({ env: { TENTACLE_MAX_ITERATIONS: "0" } })).maxIterations).toBe(
       DEFAULT_MAX_ITERATIONS,
     );
-    expect(resolveConfig(ctx({ env: { HARNESS_MAX_ITERATIONS: "abc" } })).maxIterations).toBe(
+    expect(resolveConfig(ctx({ env: { TENTACLE_MAX_ITERATIONS: "abc" } })).maxIterations).toBe(
       DEFAULT_MAX_ITERATIONS,
     );
   });
@@ -151,7 +151,7 @@ describe("resolveConfig API key precedence", () => {
     const c = resolveConfig(
       ctx({
         fileConfig: { model: { apiKey: "file-key", apiKeyCommand: "echo cmd" } },
-        env: { HARNESS_MODEL_API_KEY: "env-key" },
+        env: { TENTACLE_MODEL_API_KEY: "env-key" },
       }),
     );
     expect(c.apiKey).toBe("env-key");

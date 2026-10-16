@@ -1,5 +1,5 @@
 /**
- * `@agent-harness/mcp` — connect to MCP (Model Context Protocol) servers and
+ * `@tentacle/mcp` — connect to MCP (Model Context Protocol) servers and
  * surface their tools into the agent's tool registry.
  */
 export * from "./types.ts";

@@ -4,7 +4,7 @@
  * transcript into a dense brief; the caller then rebuilds the history as the
  * system prompt + that brief. Pure w.r.t. the provider (injected).
  */
-import type { ChatMessage, ChatRequest, ModelProvider } from "@agent-harness/core";
+import type { ChatMessage, ChatRequest, ModelProvider } from "@tentacle/core";
 
 const COMPACT_SYSTEM =
   "You compress a coding-assistant conversation into a dense briefing for the " +

@@ -19,7 +19,7 @@ import type {
   ExecOptions,
   ExecResult,
   ExecutionEnvironment,
-} from "@agent-harness/core";
+} from "@tentacle/core";
 
 export interface HostExecutionConfig {
   /** Default working directory for commands and relative file paths. */

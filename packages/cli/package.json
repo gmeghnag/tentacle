@@ -1,26 +1,26 @@
 {
-  "name": "@agent-harness/cli",
+  "name": "@tentacle/cli",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "bin": {
-    "agent-harness": "./src/main.ts"
+    "tentacle": "./src/main.ts"
   },
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@agent-harness/agent": "workspace:*",
-    "@agent-harness/client": "workspace:*",
-    "@agent-harness/config": "workspace:*",
-    "@agent-harness/core": "workspace:*",
-    "@agent-harness/daemon": "workspace:*",
-    "@agent-harness/exec": "workspace:*",
-    "@agent-harness/k8s": "workspace:*",
-    "@agent-harness/mcp": "workspace:*",
-    "@agent-harness/providers": "workspace:*",
-    "@agent-harness/tools": "workspace:*",
-    "@agent-harness/transport": "workspace:*",
-    "@agent-harness/tui": "workspace:*"
+    "@tentacle/agent": "workspace:*",
+    "@tentacle/client": "workspace:*",
+    "@tentacle/config": "workspace:*",
+    "@tentacle/core": "workspace:*",
+    "@tentacle/daemon": "workspace:*",
+    "@tentacle/exec": "workspace:*",
+    "@tentacle/k8s": "workspace:*",
+    "@tentacle/mcp": "workspace:*",
+    "@tentacle/providers": "workspace:*",
+    "@tentacle/tools": "workspace:*",
+    "@tentacle/transport": "workspace:*",
+    "@tentacle/tui": "workspace:*"
   }
 }

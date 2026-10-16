@@ -9,15 +9,15 @@
  * the user). Its tool-set is restricted by the chosen agent *type*, and the
  * spawn tool itself is always removed from the child (depth-1 guard — no runaway
  * recursion). This module builds the child; the `task` tool (in
- * `@agent-harness/tools`) is the model-facing surface that calls it.
+ * `@tentacle/tools`) is the model-facing surface that calls it.
  */
 import type {
   ExecutionEnvironment,
   ModelProvider,
   PermissionRequester,
   ToolProgressEvent,
-} from "@agent-harness/core";
-import { ToolRegistry } from "@agent-harness/tools";
+} from "@tentacle/core";
+import { ToolRegistry } from "@tentacle/tools";
 import { Agent, type AgentStopReason } from "./agent.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
 

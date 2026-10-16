@@ -6,7 +6,7 @@
  * at the prompt it closes the session.
  */
 import * as readline from "node:readline";
-import type { Agent } from "@agent-harness/agent";
+import type { Agent } from "@tentacle/agent";
 import { runRepl } from "./repl.ts";
 
 export async function startTerminal(agent: Agent): Promise<number> {

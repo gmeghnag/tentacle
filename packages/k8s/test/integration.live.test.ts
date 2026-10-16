@@ -4,7 +4,7 @@ import { buildPodManifest } from "../src/pod.ts";
 
 /**
  * Opt-in LIVE integration test against a real Kubernetes apiserver. Skipped
- * unless `HARNESS_K8S_SERVER` is set, so the normal suite never needs a cluster.
+ * unless `TENTACLE_K8S_SERVER` is set, so the normal suite never needs a cluster.
  *
  * It exercises the whole self-contained path end-to-end — REST pod lifecycle +
  * the `v4.channel.k8s.io` exec WebSocket (TLS + bearer-token-via-subprotocol) —
@@ -19,14 +19,14 @@ import { buildPodManifest } from "../src/pod.ts";
  *   kubectl create clusterrolebinding smoke --clusterrole=cluster-admin \
  *     --serviceaccount=default:default
  *   TOKEN=$(kubectl create token default --duration=1h)
- *   NODE_EXTRA_CA_CERTS=/tmp/ca.crt HARNESS_K8S_SERVER=$SERVER HARNESS_K8S_TOKEN=$TOKEN \
+ *   NODE_EXTRA_CA_CERTS=/tmp/ca.crt TENTACLE_K8S_SERVER=$SERVER TENTACLE_K8S_TOKEN=$TOKEN \
  *     bun test packages/k8s/test/integration.live.test.ts
  */
-const SERVER = process.env.HARNESS_K8S_SERVER;
-const TOKEN = process.env.HARNESS_K8S_TOKEN;
-const NAMESPACE = process.env.HARNESS_K8S_NAMESPACE ?? "default";
+const SERVER = process.env.TENTACLE_K8S_SERVER;
+const TOKEN = process.env.TENTACLE_K8S_TOKEN;
+const NAMESPACE = process.env.TENTACLE_K8S_NAMESPACE ?? "default";
 
-describe("live k8s integration (opt-in: set HARNESS_K8S_SERVER)", () => {
+describe("live k8s integration (opt-in: set TENTACLE_K8S_SERVER)", () => {
   test.skipIf(!SERVER)(
     "creates a busybox pod, round-trips exec over v4.channel.k8s.io, deletes it",
     async () => {

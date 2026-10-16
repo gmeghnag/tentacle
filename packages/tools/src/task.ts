@@ -3,10 +3,10 @@
  *
  * It owns no agent logic: a runner (built in the wiring layer, where the model
  * and registry live) is injected, so this package stays free of a dependency on
- * `@agent-harness/agent`. The tool itself needs no permission — spawning is
+ * `@tentacle/agent`. The tool itself needs no permission — spawning is
  * safe; the child's own tools enforce their permissions and confinement.
  */
-import type { Tool, ToolProgressEvent, ToolResult } from "@agent-harness/core";
+import type { Tool, ToolProgressEvent, ToolResult } from "@tentacle/core";
 import { z } from "zod";
 
 export interface TaskRunResult {

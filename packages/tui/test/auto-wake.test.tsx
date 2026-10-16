@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@agent-harness/agent";
+import { Agent } from "@tentacle/agent";
 import type {
   BackgroundJob,
   ChatRequest,
@@ -7,8 +7,8 @@ import type {
   JobController,
   ModelProvider,
   StreamEvent,
-} from "@agent-harness/core";
-import { ToolRegistry } from "@agent-harness/tools";
+} from "@tentacle/core";
+import { ToolRegistry } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
 

@@ -1,17 +1,17 @@
 /**
- * Inject the `agent-harness` binary into a fresh pod so it can run an image that
+ * Inject the `tentacle` binary into a fresh pod so it can run an image that
  * does NOT already contain the tool (the pod-binary-injection flow, F4.e).
  *
  * The sequence (after the pod is Ready, before the long-lived daemon exec):
  *   1. probe the pod's arch with `uname -m` (any failure → x64 fallback, never aborts)
  *   2. resolve the matching Linux binary's bytes (build or cache, on the laptop)
  *   3. stream them to the pod's stdin via a one-shot exec:
- *        `sh -c "mkdir -p /usr/local/bin && head -c <N> > …/agent-harness && chmod 755 …"`
+ *        `sh -c "mkdir -p /usr/local/bin && head -c <N> > …/tentacle && chmod 755 …"`
  *     (`mkdir -p` because minimal images such as busybox have no
  *     `/usr/local/bin` yet; the install path's directory is created on demand.)
  *     `head -c N` reads exactly N bytes and exits → the command's exit status is
  *     the EOF signal (no terminator, no tar).
- *   4. verify it runs with `agent-harness --version` (catches a wrong-arch /
+ *   4. verify it runs with `tentacle --version` (catches a wrong-arch /
  *     bad-libc / broken binary with a clear error, not an opaque close).
  *
  * This module keeps the pod runtime small: the arch probe and the binary
@@ -23,12 +23,12 @@
  * transfer bar as the bar phase's text), else through `deps.log` (one line per
  * phase + a discrete progress line per ~10%, the piped/log/CI mode).
  */
-import type { ExecTarget } from "@agent-harness/k8s";
+import type { ExecTarget } from "@tentacle/k8s";
 import type { PodCluster } from "./pod-runtime.ts";
 import { TransferProgress, renderBar } from "./transfer-progress.ts";
 
 /** Where the binary is installed in the pod (conventional, first in most PATHs). */
-export const POD_BIN_PATH = "/usr/local/bin/agent-harness";
+export const POD_BIN_PATH = "/usr/local/bin/tentacle";
 
 /** The pod's CPU architecture (we only inject Linux binaries). */
 export type PodArch = "x64" | "arm64";
@@ -105,7 +105,7 @@ export interface PodBinaryDeps {
  */
 export function libcMismatchHint(stderr: string): string | undefined {
   return /error while loading shared libraries|cannot open shared object file/i.test(stderr)
-    ? " — this image appears to lack glibc (Alpine/busybox use musl); agent-harness is a glibc binary, use a glibc-based image (e.g. UBI9, Debian, RHEL)"
+    ? " — this image appears to lack glibc (Alpine/busybox use musl); tentacle is a glibc binary, use a glibc-based image (e.g. UBI9, Debian, RHEL)"
     : undefined;
 }
 
@@ -118,8 +118,8 @@ function transferTimeoutMs(bytes: number): number {
 /**
  * Inject the binary into the pod and verify it runs. Throws with the pod's
  * stderr on any failure (the caller's catch deletes the pod). On success the
- * pod has a working `agent-harness` on PATH, and the resolved version label
- * (from `agent-harness --version`) is returned so the caller can fold it into
+ * pod has a working `tentacle` on PATH, and the resolved version label
+ * (from `tentacle --version`) is returned so the caller can fold it into
  * its final status line.
  */
 export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
@@ -136,7 +136,7 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   const bytes = await deps.resolveBinary(target);
   const n = bytes.length;
   if (!onStatus) {
-    deps.log(`[${deps.podName}] injecting agent-harness (${(n / 1048576).toFixed(1)} MB)\n`);
+    deps.log(`[${deps.podName}] injecting tentacle (${(n / 1048576).toFixed(1)} MB)\n`);
   }
 
   // 1) Stream the raw binary. `head -c N` reads exactly N bytes and exits, so
@@ -168,7 +168,7 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
     timeoutMs: transferTimeoutMs(n),
     onProgress: (written) => {
       if (onStatus) {
-        emit(`[${deps.podName}] injecting agent-harness ${renderBar(written, n)}`);
+        emit(`[${deps.podName}] injecting tentacle ${renderBar(written, n)}`);
       } else {
         pipedProgress?.update(written);
       }
@@ -177,7 +177,7 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   pipedProgress?.finish();
   if (install.exitCode !== 0) {
     throw new Error(
-      `[pod ${deps.podName}] failed to inject agent-harness (exit ${install.exitCode}): ${
+      `[pod ${deps.podName}] failed to inject tentacle (exit ${install.exitCode}): ${
         install.stderr.trim() || install.status || "no output"
       }`,
     );
@@ -186,19 +186,19 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   // 2) Verify it actually runs (wrong arch / bad libc / missing deps surface here).
   emit(`[${deps.podName}] verifying…`);
   const version = await deps.kube.runExec(
-    { pod: deps.podName, container: deps.container, command: ["agent-harness", "--version"] },
+    { pod: deps.podName, container: deps.container, command: ["tentacle", "--version"] },
     undefined,
     { timeoutMs: 15_000 },
   );
   if (version.exitCode !== 0) {
     const detail = version.stderr.trim() || version.status || "no output";
     throw new Error(
-      `[pod ${deps.podName}] agent-harness --version failed (exit ${version.exitCode}): ${detail}${
+      `[pod ${deps.podName}] tentacle --version failed (exit ${version.exitCode}): ${detail}${
         libcMismatchHint(version.stderr) ?? ""
       }`,
     );
   }
   // The version label is returned, not logged: the caller's final line
   // (piped mode) folds it in, so the pod's `--version` is not printed twice.
-  return version.stdout.trim() || "agent-harness";
+  return version.stdout.trim() || "tentacle";
 }

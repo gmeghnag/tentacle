@@ -3,8 +3,8 @@
  * TUI prompt) → the wire `PermissionOutcome` the daemon expects. Inverse of the
  * daemon's `outcomeToResponse`.
  */
-import type { PermissionResponse } from "@agent-harness/core";
-import type { PermissionOutcome } from "@agent-harness/protocol";
+import type { PermissionResponse } from "@tentacle/core";
+import type { PermissionOutcome } from "@tentacle/protocol";
 
 export function responseToOutcome(response: PermissionResponse): PermissionOutcome {
   if (!response.allowed) {

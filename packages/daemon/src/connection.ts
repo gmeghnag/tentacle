@@ -25,8 +25,8 @@ import {
   type SnapshotParams,
   type SnapshotResult,
   type WireChatRequest,
-} from "@agent-harness/protocol";
-import { DomainErrorCode, type DuplexChannel, RpcError, RpcPeer } from "@agent-harness/transport";
+} from "@tentacle/protocol";
+import { DomainErrorCode, type DuplexChannel, RpcError, RpcPeer } from "@tentacle/transport";
 import type { HostedSession } from "./hosted-session.ts";
 import type { SessionHost } from "./session-host.ts";
 

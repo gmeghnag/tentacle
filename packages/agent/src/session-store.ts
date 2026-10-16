@@ -7,7 +7,7 @@
  */
 import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { ChatMessage } from "@agent-harness/core";
+import type { ChatMessage } from "@tentacle/core";
 import type { SessionSnapshot } from "./session.ts";
 
 export interface SessionRecord {

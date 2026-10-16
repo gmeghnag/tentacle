@@ -152,7 +152,7 @@ assume.
   the LOCAL provider so the endpoint + API key never leave the laptop. Never put
   provider creds in a pod/image.
 - **Protocol changes are additive; version stays 1.** Schemas in
-  `@agent-harness/protocol` are the shared truth. A new method → an old peer
+  `@tentacle/protocol` are the shared truth. A new method → an old peer
   returns `MethodNotFound` (clean, catchable — handle it). A new `session/update`
   variant → a union member + its reverse mapping in `client/mapping.ts`. Wire
   BOTH ends (request and, if it streams back, the update). Don't bump the version

@@ -15,7 +15,7 @@ import type {
   JobController,
   JobOutput,
   JobStatus,
-} from "@agent-harness/core";
+} from "@tentacle/core";
 
 /** Max characters retained per stream; older output is dropped from the head. */
 const MAX_BUFFER = 256 * 1024;

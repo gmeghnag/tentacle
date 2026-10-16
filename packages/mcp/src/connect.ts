@@ -6,7 +6,7 @@
  * timeout so a hanging server can't block the app. The returned `dispose` kills
  * every spawned subprocess.
  */
-import type { Tool } from "@agent-harness/core";
+import type { Tool } from "@tentacle/core";
 import { McpClient } from "./client.ts";
 import { mcpToolToTool } from "./tool-adapter.ts";
 import { type StdioTransportOptions, createStdioTransport } from "./transport.ts";

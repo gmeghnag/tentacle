@@ -3,7 +3,7 @@
  *
  * A token is resolved from (in order) `--token`, `--token-command` (a shell
  * command whose stdout is the token — so it is never stored in plaintext, like
- * `apiKeyCommand`), then `HARNESS_REMOTE_TOKEN`.
+ * `apiKeyCommand`), then `TENTACLE_REMOTE_TOKEN`.
  */
 export interface ParsedFlags {
   readonly positional: string[];
@@ -65,6 +65,6 @@ export async function resolveToken(flags: Map<string, string>): Promise<string |
   if (command) {
     return runCommand(command);
   }
-  const env = process.env.HARNESS_REMOTE_TOKEN;
+  const env = process.env.TENTACLE_REMOTE_TOKEN;
   return env && env.length > 0 ? env : undefined;
 }

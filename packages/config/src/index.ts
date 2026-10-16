@@ -1,5 +1,5 @@
 /**
- * `@agent-harness/config` — layered configuration for the harness.
+ * `@tentacle/config` — layered configuration for the harness.
  *
  * Precedence: environment variables > `config.jsonc` > built-in defaults.
  * Secrets are resolved via `apiKeyCommand` so no API key need live in the

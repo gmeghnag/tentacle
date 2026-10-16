@@ -1,16 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@agent-harness/agent";
-import { RemoteClient } from "@agent-harness/client";
-import type {
-  ChatRequest,
-  ExecutionEnvironment,
-  ModelProvider,
-  StreamEvent,
-} from "@agent-harness/core";
-import { PermissionBroker } from "@agent-harness/core";
-import { Connection, ProxyModelProvider, SessionHost } from "@agent-harness/daemon";
-import { ToolRegistry } from "@agent-harness/tools";
-import { createChannelPair } from "@agent-harness/transport";
+import { Agent } from "@tentacle/agent";
+import { RemoteClient } from "@tentacle/client";
+import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
+import { PermissionBroker } from "@tentacle/core";
+import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
+import { ToolRegistry } from "@tentacle/tools";
+import { createChannelPair } from "@tentacle/transport";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";

@@ -10,7 +10,7 @@ import type {
   ModelProvider,
   PermissionBroker,
   PermissionRequest,
-} from "@agent-harness/core";
+} from "@tentacle/core";
 import {
   type CompactResult,
   type InitializeResult,
@@ -30,8 +30,8 @@ import {
   type StopReason,
   type WireStreamEvent,
   text,
-} from "@agent-harness/protocol";
-import { type DuplexChannel, RpcError, RpcPeer } from "@agent-harness/transport";
+} from "@tentacle/protocol";
+import { type DuplexChannel, RpcError, RpcPeer } from "@tentacle/transport";
 import { responseToOutcome } from "./permission-map.ts";
 import { RemoteSession } from "./remote-session.ts";
 

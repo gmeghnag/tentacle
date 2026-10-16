@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ToolContext } from "@agent-harness/core";
+import type { ToolContext } from "@tentacle/core";
 import { type TaskRunResult, createTaskTool } from "../src/task.ts";
 
 const ctx = { sessionId: "s", signal: new AbortController().signal } as unknown as ToolContext;

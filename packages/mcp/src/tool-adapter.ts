@@ -8,7 +8,7 @@
  * built-ins. MCP tools default to `permission: "ask"` (they run external code
  * or hit the network).
  */
-import type { Tool } from "@agent-harness/core";
+import type { Tool } from "@tentacle/core";
 import { z } from "zod";
 import type { McpClient } from "./client.ts";
 import type { McpCallResult, McpToolDef } from "./types.ts";

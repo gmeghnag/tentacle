@@ -4,7 +4,7 @@
  * handler throws an `RpcError` to produce a specific error response; any other
  * thrown value becomes a generic `InternalError` (never leaking a stack).
  */
-import { JsonRpcErrorCode } from "@agent-harness/protocol";
+import { JsonRpcErrorCode } from "@tentacle/protocol";
 
 /** Custom, application-level error codes (outside JSON-RPC's reserved range). */
 export const DomainErrorCode = {

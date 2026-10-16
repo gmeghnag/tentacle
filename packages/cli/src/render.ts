@@ -3,7 +3,7 @@
  * Kept side-effect-free so it is trivially testable; the main loop just writes
  * whatever it returns.
  */
-import type { AgentEvent } from "@agent-harness/agent";
+import type { AgentEvent } from "@tentacle/agent";
 
 export function render(event: AgentEvent): string {
   switch (event.type) {

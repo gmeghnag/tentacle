@@ -3,7 +3,7 @@
  * `DuplexChannel`. `connectWebSocket` resolves once the socket is open, so the
  * caller can immediately `initialize`.
  */
-import type { DuplexChannel } from "@agent-harness/transport";
+import type { DuplexChannel } from "@tentacle/transport";
 
 interface WebSocketLike {
   send(data: string): void;

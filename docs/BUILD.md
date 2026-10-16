@@ -1,6 +1,6 @@
 # Building a standalone binary
 
-`agent-harness` compiles to a single self-contained executable with
+`tentacle` compiles to a single self-contained executable with
 [`bun build --compile`](https://bun.sh/docs/bundler/executables) — no Bun or
 `node_modules` needed on the target machine.
 
@@ -8,21 +8,21 @@
 
 ```sh
 bun install          # once
-bun run compile      # → dist/agent-harness
+bun run compile      # → dist/tentacle
 ```
 
 `bun run compile` runs `scripts/build.ts`, which calls `Bun.build({ compile })`
-with a small plugin (see below). The result is `dist/agent-harness` (~60 MB — it
+with a small plugin (see below). The result is `dist/tentacle` (~60 MB — it
 embeds the Bun runtime). Run it like any binary:
 
 ```sh
-./dist/agent-harness --help
-./dist/agent-harness                       # interactive TUI
-./dist/agent-harness "summarise this repo" # one-shot
-./dist/agent-harness serve --token "$(cat ~/.cache/harness-remote-token)"
+./dist/tentacle --help
+./dist/tentacle                       # interactive TUI
+./dist/tentacle "summarise this repo" # one-shot
+./dist/tentacle serve --token "$(cat ~/.cache/harness-remote-token)"
 ```
 
-Configuration still comes from `~/.config/agent-harness/` and the `HARNESS_*`
+Configuration still comes from `~/.config/tentacle/` and the `TENTACLE_*`
 environment variables exactly as when run from source.
 
 ## Cross-compile

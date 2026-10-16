@@ -8,7 +8,7 @@
  * bridges Bun's socket callbacks to the channel interface and enforces exposure.
  */
 import { timingSafeEqual } from "node:crypto";
-import type { DuplexChannel } from "@agent-harness/transport";
+import type { DuplexChannel } from "@tentacle/transport";
 import { Connection } from "./connection.ts";
 import type { SessionHost } from "./session-host.ts";
 

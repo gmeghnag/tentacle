@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent, type AgentEvent } from "@agent-harness/agent";
+import { Agent, type AgentEvent } from "@tentacle/agent";
 import {
   type ChatRequest,
   type ExecutionEnvironment,
@@ -7,10 +7,10 @@ import {
   PermissionBroker,
   type PermissionRequester,
   type StreamEvent,
-} from "@agent-harness/core";
-import { Connection, SessionHost } from "@agent-harness/daemon";
-import { ToolRegistry, shellTool } from "@agent-harness/tools";
-import { createChannelPair } from "@agent-harness/transport";
+} from "@tentacle/core";
+import { Connection, SessionHost } from "@tentacle/daemon";
+import { ToolRegistry, shellTool } from "@tentacle/tools";
+import { createChannelPair } from "@tentacle/transport";
 import { RemoteClient } from "../src/remote-client.ts";
 import { type WebSocketChannel, connectWebSocket } from "../src/ws-channel.ts";
 
@@ -144,7 +144,7 @@ describe("RemoteSession over an in-memory channel", () => {
 
 describe("real WebSocket smoke test", () => {
   test("connect over a loopback Bun.serve socket and stream a reply", async () => {
-    const { startWsServer } = await import("@agent-harness/daemon");
+    const { startWsServer } = await import("@tentacle/daemon");
     const model = new ScriptedProvider([
       [{ type: "text", delta: "socket says hi" }, { type: "done" }],
     ]);

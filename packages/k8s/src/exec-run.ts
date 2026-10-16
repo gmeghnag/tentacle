@@ -3,7 +3,7 @@
  * that RESOLVES ON COMMAND EXIT — the counterpart of `execChannel`, which is a
  * text-only duplex channel an RPC peer rides forever. Use it for one-shot
  * commands: probe the pod's architecture (`uname -m`), verify an injected
- * binary (`agent-harness --version`), and the raw-binary transfer itself.
+ * binary (`tentacle --version`), and the raw-binary transfer itself.
  *
  * The transfer streams the binary's bytes to the pod's stdin in 256 KB chunks;
  * the pod runs `head -c <N>`, which reads exactly N bytes and exits — so the

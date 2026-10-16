@@ -5,7 +5,7 @@
     "baseUrl": ".",
     "types": ["bun"],
     "paths": {
-      "@agent-harness/core": ["../core/src/index.ts"]
+      "@tentacle/core": ["../core/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]

@@ -27,7 +27,7 @@ describe("loadConfig scaffolding", () => {
     const prompt = await readFile(join(configDir, PROMPT_FILENAME), "utf8");
     expect(prompt).toBe(DEFAULT_SYSTEM_PROMPT);
     const raw = await readFile(join(configDir, CONFIG_FILENAME), "utf8");
-    expect(raw).toContain("agent-harness configuration");
+    expect(raw).toContain("tentacle configuration");
     // With everything commented out, resolved values are the defaults.
     expect(cfg.systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
     expect(cfg.cwd).toBe("/launch");
@@ -70,7 +70,7 @@ describe("loadConfig reading", () => {
       "utf8",
     );
     const cfg = await loadConfig({
-      env: { ...baseEnv(), HARNESS_MODEL: "env-model" },
+      env: { ...baseEnv(), TENTACLE_MODEL: "env-model" },
       configDir,
       cwd: "/launch",
     });
@@ -132,7 +132,7 @@ describe("loadConfig API key", () => {
     );
     let ran = false;
     const cfg = await loadConfig({
-      env: { ...baseEnv(), HARNESS_MODEL_API_KEY: "env-key" },
+      env: { ...baseEnv(), TENTACLE_MODEL_API_KEY: "env-key" },
       configDir: cd,
       cwd: "/launch",
       runCommand: async () => {

@@ -4,9 +4,9 @@
  * unchanged, so a connected TUI renders a remote session identically to a local
  * one. The remote session id is created lazily on the first `send`.
  */
-import type { AgentEvent } from "@agent-harness/agent";
-import type { ChatMessage } from "@agent-harness/core";
-import type { SessionUpdate } from "@agent-harness/protocol";
+import type { AgentEvent } from "@tentacle/agent";
+import type { ChatMessage } from "@tentacle/core";
+import type { SessionUpdate } from "@tentacle/protocol";
 import { stopReasonFromProtocol, updateToEvent } from "./mapping.ts";
 import { AsyncQueue } from "./queue.ts";
 import type { RemoteClient } from "./remote-client.ts";
