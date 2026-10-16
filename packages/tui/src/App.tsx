@@ -20,7 +20,7 @@ import { useLineEditor, usePaintScheduler } from "./hooks.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
 import { stepPaste, stripPasteMarkers } from "./paste.ts";
 import { usePermissionBroker } from "./permission-ui.ts";
-import { stripAnsi, transcriptRows } from "./render-lines.ts";
+import { layoutTranscript, sliceLaid, stripAnsi } from "./render-lines.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import { type Selection, extractSelection, isNonEmpty, rowSelectionRange } from "./selection.ts";
 import {
@@ -256,10 +256,14 @@ export function App({
       ? 1 + queued.length + inputBoxRows
       : inputBoxRows + paletteCommands.length;
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
-  const allRows = transcriptRows(st.items, { expandAll, width: columns });
-  const total = allRows.length;
+  // Positional layout only (O(items) cache lookups, no full array): take the
+  // row `total` for scroll maths and materialise just the visible window. The
+  // whole transcript is assembled on demand (sliceLaid 0..total) only where a
+  // full buffer is genuinely needed — a text selection on mouse-release.
+  const layout = layoutTranscript(st.items, { expandAll, width: columns });
+  const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
-  const visible = allRows.slice(win.start, win.end);
+  const visible = sliceLaid(layout.laid, win.start, win.end);
   const scrolledUp = isScrolledUp(scrollOffset, total, viewport);
   const hiddenAbove = win.start;
 
@@ -661,7 +665,9 @@ export function App({
       }
       // Left button: release copies the selection, press/drag starts/extends it.
       if (!r.press) {
-        finishSelection(allRows);
+        // Selection can span rows scrolled out of view, so assemble the whole
+        // buffer here — only on release, never on the per-frame render path.
+        finishSelection(sliceLaid(layout.laid, 0, total));
         return;
       }
       const visibleIndex = r.y - 1;

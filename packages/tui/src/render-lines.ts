@@ -426,12 +426,17 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   const threshold = opts.collapseThreshold ?? DEFAULT_THRESHOLD;
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
   const hit = rowCache.get(item);
+  // Only `tool` items collapse, so only their layout depends on
+  // expand/threshold/preview; every other kind is a function of width alone.
+  // Keying those options for non-tool items too made a Ctrl+O (expandAll) flip
+  // needlessly invalidate the whole transcript — now it re-lays-out just the
+  // tool items that can actually change.
+  const expandMatters = item.kind === "tool";
   if (
     hit &&
     hit.width === width &&
-    hit.expand === expand &&
-    hit.threshold === threshold &&
-    hit.preview === preview
+    (!expandMatters ||
+      (hit.expand === expand && hit.threshold === threshold && hit.preview === preview))
   ) {
     return hit.rows;
   }
@@ -440,23 +445,86 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   return rows;
 }
 
+/** One laid-out item: its final wrapped rows and the global index of its first row. */
+export interface LaidItem {
+  readonly rows: readonly string[];
+  readonly start: number;
+}
+
 /**
- * The whole transcript as final, width-wrapped rows — the layout the viewport
- * windows and the selection reads. Equivalent to
- * `wrapLines(transcriptLines(items, opts), opts.width)` but memoised per item,
- * so a running turn re-lays-out only the one item that changed.
+ * A positional index of the whole transcript: each non-empty item's cached rows
+ * plus its global start offset (with one blank separator row between items), and
+ * the grand `total` row count.
+ *
+ * This is the cheap half of the layout: it walks every item but only does O(1)
+ * cache lookups (`itemRows`) and offset arithmetic — it never materialises the
+ * full row array. Callers take `total` for scroll maths and `sliceLaid` only the
+ * visible window, so per-frame cost is O(items + viewport), not O(transcript).
+ * The whole array is built (via `transcriptRows`) only when something genuinely
+ * needs it — e.g. extracting a text selection on mouse-release.
  */
-export function transcriptRows(items: readonly DisplayItem[], opts: RenderOptions): string[] {
-  const out: string[] = [];
+export interface TranscriptLayout {
+  readonly laid: readonly LaidItem[];
+  readonly total: number;
+}
+
+export function layoutTranscript(
+  items: readonly DisplayItem[],
+  opts: RenderOptions,
+): TranscriptLayout {
+  const laid: LaidItem[] = [];
+  let cursor = 0;
   for (const item of items) {
     const rows = itemRows(item, opts);
     if (rows.length === 0) {
       continue;
     }
-    if (out.length > 0) {
-      out.push(""); // blank separator between items (matches transcriptLines)
+    if (laid.length > 0) {
+      cursor += 1; // blank separator row between items (matches transcriptLines)
     }
-    out.push(...rows);
+    laid.push({ rows, start: cursor });
+    cursor += rows.length;
+  }
+  return { laid, total: cursor };
+}
+
+/**
+ * Materialise rows `[start, end)` of a laid-out transcript, in global order and
+ * including the blank separator rows. Equivalent to
+ * `transcriptRows(items, opts).slice(start, end)` but it copies only the rows
+ * the window actually covers.
+ */
+export function sliceLaid(laid: readonly LaidItem[], start: number, end: number): string[] {
+  const out: string[] = [];
+  let i = 0;
+  for (const { rows, start: s } of laid) {
+    if (i > 0) {
+      const sep = s - 1; // the separator row sits just before this item
+      if (sep >= start && sep < end) {
+        out.push("");
+      }
+    }
+    const from = Math.max(start, s);
+    const to = Math.min(end, s + rows.length);
+    for (let r = from; r < to; r++) {
+      const row = rows[r - s];
+      if (row !== undefined) {
+        out.push(row);
+      }
+    }
+    i += 1;
   }
   return out;
+}
+
+/**
+ * The whole transcript as final, width-wrapped rows — the layout the selection
+ * reads on mouse-release. Equivalent to
+ * `wrapLines(transcriptLines(items, opts), opts.width)` but memoised per item,
+ * so a running turn re-lays-out only the one item that changed. The hot render
+ * path uses `layoutTranscript` + `sliceLaid` instead of building this in full.
+ */
+export function transcriptRows(items: readonly DisplayItem[], opts: RenderOptions): string[] {
+  const { laid, total } = layoutTranscript(items, opts);
+  return sliceLaid(laid, 0, total);
 }

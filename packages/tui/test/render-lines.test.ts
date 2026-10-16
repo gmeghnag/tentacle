@@ -1,6 +1,13 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as markdown from "../src/markdown.ts";
-import { itemLines, transcriptLines, transcriptRows, wrapLines } from "../src/render-lines.ts";
+import {
+  itemLines,
+  layoutTranscript,
+  sliceLaid,
+  transcriptLines,
+  transcriptRows,
+  wrapLines,
+} from "../src/render-lines.ts";
 import type { DisplayItem, ToolItem } from "../src/state.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
@@ -249,5 +256,77 @@ describe("transcriptRows", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  test("a Ctrl+O (expandAll) toggle re-lays-out only tool items, not user/assistant", () => {
+    // Only `tool` items collapse, so only their layout depends on expandAll.
+    // Keying expand into every item's cache made a toggle needlessly re-render
+    // the whole transcript; non-tool items must stay cached across the flip.
+    const spy = spyOn(markdown, "renderMarkdown");
+    try {
+      // First paint lays everything out (the assistant item renders markdown).
+      transcriptRows(items, { expandAll: false, width });
+      const afterFirst = spy.mock.calls.length;
+      expect(afterFirst).toBeGreaterThanOrEqual(1);
+
+      // Flip expandAll: the user/assistant items are unaffected by expand, so
+      // they must be served from cache — zero additional markdown renders.
+      transcriptRows(items, { expandAll: true, width });
+      expect(spy.mock.calls.length).toBe(afterFirst);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("windowed layout (layoutTranscript + sliceLaid)", () => {
+  const bigTool: ToolItem = {
+    kind: "tool",
+    id: "w",
+    name: "shell",
+    args: "{}",
+    status: "ok",
+    startedAt: 0,
+    endedAt: 1,
+    resultText: Array.from({ length: 12 }, (_, i) => `out ${i + 1}`).join("\n"),
+  };
+  const items: DisplayItem[] = [
+    { kind: "user", text: "a prompt long enough to wrap at a narrow width right here" },
+    {
+      kind: "assistant",
+      text: "**bold** reply with enough words to wrap across several rows at width 20",
+    },
+    bigTool,
+    { kind: "assistant", text: "short tail" },
+  ];
+  const opts = { expandAll: true, width: 20 };
+
+  test("total equals the full transcriptRows length", () => {
+    expect(layoutTranscript(items, opts).total).toBe(transcriptRows(items, opts).length);
+  });
+
+  test("sliceLaid(s,e) equals transcriptRows(...).slice(s,e) for EVERY window", () => {
+    const full = transcriptRows(items, opts);
+    const { laid, total } = layoutTranscript(items, opts);
+    expect(total).toBe(full.length);
+    expect(total).toBeGreaterThan(4); // the transcript really does span many rows
+    for (let s = 0; s <= total; s++) {
+      for (let e = s; e <= total; e++) {
+        expect(sliceLaid(laid, s, e)).toEqual(full.slice(s, e));
+      }
+    }
+  });
+
+  test("an all-blank transcript yields total 0 and an empty slice", () => {
+    const blank: DisplayItem[] = [{ kind: "assistant", text: "   " }];
+    const { laid, total } = layoutTranscript(blank, opts);
+    expect(total).toBe(0);
+    expect(sliceLaid(laid, 0, 10)).toEqual([]);
+  });
+
+  test("a window clamped past the end returns only the rows that exist", () => {
+    const full = transcriptRows(items, opts);
+    const { laid, total } = layoutTranscript(items, opts);
+    expect(sliceLaid(laid, total - 2, total + 50)).toEqual(full.slice(total - 2));
   });
 });
