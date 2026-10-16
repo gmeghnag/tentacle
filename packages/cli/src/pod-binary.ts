@@ -84,6 +84,13 @@ export interface PodBinaryDeps {
   readonly podArch: () => Promise<PodArch>;
   /** Resolve the binary's bytes for a target (build or cache, on the laptop). */
   readonly resolveBinary: (target: PodBinaryTarget) => Promise<Uint8Array>;
+  /**
+   * Absolute install path in the pod. Default `POD_BIN_PATH`
+   * (`/usr/local/bin/tentacle`). Override for a pod with a read-only rootfs (a
+   * hardened OCP/k8s pod) by pointing at a writable+exec dir, e.g. `/tmp/tentacle`.
+   * The daemon is then exec'd by THIS absolute path, so the dir need not be on PATH.
+   */
+  readonly binPath?: string;
   readonly log: (line: string) => void;
   /**
    * Interactive (TTY) single-line status sink. When provided, every phase
@@ -154,14 +161,15 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
 
   // `mkdir -p` first: minimal images (busybox, scratch-based) have no
   // `/usr/local/bin`, and the redirect would fail on the missing directory.
-  const binDir = POD_BIN_PATH.slice(0, POD_BIN_PATH.lastIndexOf("/"));
+  const binPath = deps.binPath ?? POD_BIN_PATH;
+  const binDir = binPath.slice(0, binPath.lastIndexOf("/"));
   const installTarget: ExecTarget = {
     pod: deps.podName,
     container: deps.container,
     command: [
       "sh",
       "-c",
-      `mkdir -p ${binDir} && head -c ${n} > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`,
+      `mkdir -p ${binDir} && head -c ${n} > ${binPath} && chmod 755 ${binPath}`,
     ],
   };
   const install = await deps.kube.runExec(installTarget, bytes, {
@@ -186,7 +194,7 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   // 2) Verify it actually runs (wrong arch / bad libc / missing deps surface here).
   emit(`[${deps.podName}] verifying…`);
   const version = await deps.kube.runExec(
-    { pod: deps.podName, container: deps.container, command: ["tentacle", "--version"] },
+    { pod: deps.podName, container: deps.container, command: [binPath, "--version"] },
     undefined,
     { timeoutMs: 15_000 },
   );

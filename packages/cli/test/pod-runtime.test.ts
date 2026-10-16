@@ -232,6 +232,30 @@ afterAll(async () => {
 });
 
 describe("startPodRuntime", () => {
+  test("--bin-dir installs to and execs the daemon from the custom dir (read-only rootfs)", async () => {
+    const model = new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const kube = new FakeCluster(model);
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), {
+      kube,
+      namespace: "dev",
+      image: "repo/img:tag",
+      binDir: "/tmp",
+      permissions: new PermissionBroker(),
+      store: new JsonSessionStore(join(dir, "bindir")),
+      resume: null,
+      log: () => {},
+    });
+    // The install redirects into /tmp (not /usr/local/bin), and the daemon is
+    // exec'd by the absolute path (a non-PATH dir like /tmp still works).
+    expect(
+      kube.calls.some(
+        (c) => c.includes("mkdir -p /tmp && head -c") && c.includes("> /tmp/tentacle && chmod"),
+      ),
+    ).toBe(true);
+    expect(kube.calls.some((c) => c.includes("/tmp/tentacle serve --stdio"))).toBe(true);
+    runtime.dispose();
+  });
+
   test("creates + readies a pod, runs a turn over exec, deletes on dispose", async () => {
     const model = new ScriptedProvider([
       [{ type: "text", delta: "hi from the pod" }, { type: "done" }],
@@ -260,7 +284,9 @@ describe("startPodRuntime", () => {
         c ===
         `runexec:${podName}:sh -c mkdir -p /usr/local/bin && head -c 8 > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`,
     );
-    const versionIdx = kube.calls.findIndex((c) => c === `runexec:${podName}:tentacle --version`);
+    const versionIdx = kube.calls.findIndex(
+      (c) => c === `runexec:${podName}:${POD_BIN_PATH} --version`,
+    );
     const daemonIdx = kube.calls.findIndex((c) => c.includes("serve --stdio"));
     expect(unameIdx).toBe(2);
     expect(installIdx).toBe(3);

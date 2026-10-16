@@ -100,6 +100,11 @@ export interface PodRuntimeDeps {
   readonly kube: PodCluster;
   readonly namespace: string;
   readonly image: string;
+  /**
+   * Install dir for the injected binary in the pod. Default `/usr/local/bin`;
+   * override (`--bin-dir`) for a read-only rootfs, e.g. `/tmp` on a hardened pod.
+   */
+  readonly binDir?: string;
   /** Pod name (optional; a random one is generated when omitted). */
   readonly name?: string;
   readonly permissions: PermissionBroker;
@@ -183,6 +188,9 @@ export async function startPodRuntime(
   deps: PodRuntimeDeps,
 ): Promise<LocalRuntime> {
   const name = deps.name ?? `tentacle-${crypto.randomUUID().slice(0, 8)}`;
+  // Install path in the pod: a read-only rootfs (a hardened pod) needs a writable
+  // dir via --bin-dir (e.g. /tmp); the daemon is then exec'd by this absolute path.
+  const binPath = `${deps.binDir ?? "/usr/local/bin"}/tentacle`;
   // The pod daemon's stderr is buffered (not written live) so it never corrupts
   // the Ink TUI; flushed once on teardown / startup failure. See `createStderrSink`.
   const stderr = createStderrSink(`[pod ${name}]`, deps.log);
@@ -227,6 +235,7 @@ export async function startPodRuntime(
     const version = await injectAgentBinary({
       kube: deps.kube,
       podName: name,
+      binPath,
       container: AGENT_CONTAINER,
       podArch: () => probePodArch(deps.kube, name, AGENT_CONTAINER),
       resolveBinary: (target) =>
@@ -251,7 +260,7 @@ export async function startPodRuntime(
       {
         pod: name,
         container: AGENT_CONTAINER,
-        command: ["tentacle", "serve", "--stdio", "--model-proxy"],
+        command: [binPath, "serve", "--stdio", "--model-proxy"],
       },
       { onStderr: stderr.onStderr },
     );
@@ -296,6 +305,8 @@ export interface PodAttachRuntimeDeps {
   readonly podName: string;
   /** Container to exec into; undefined → the API picks the only/default one. */
   readonly container?: string;
+  /** Install dir for the injected binary (default `/usr/local/bin`; `--bin-dir` for a read-only rootfs). */
+  readonly binDir?: string;
   readonly permissions: PermissionBroker;
   readonly store: JsonSessionStore;
   readonly resume: SessionRecord | null;
@@ -380,6 +391,11 @@ export async function startAttachRuntime(
     // bad libc) falls through to the injection, which re-verifies anyway.
     // One-shot execs do not go through the status line (same as in `run`):
     // `injectAgentBinary` owns its phases via `onStatus`.
+    // Default exec path: the on-PATH `tentacle` when the pod already has it
+    // (preflight passes). When we inject, the daemon is exec'd by the absolute
+    // install path (supports a writable non-PATH dir like /tmp via --bin-dir).
+    const binPath = `${deps.binDir ?? "/usr/local/bin"}/tentacle`;
+    let serveBin = "tentacle";
     let probe: RunExecResult;
     try {
       probe = await deps.kube.runExec(
@@ -396,9 +412,11 @@ export async function startAttachRuntime(
     if (probe.exitCode === 0) {
       version = probe.stdout.trim() || "tentacle";
     } else {
+      serveBin = binPath; // injected to our dir → exec by absolute path
       version = await injectAgentBinary({
         kube: deps.kube,
         podName: name,
+        binPath,
         container,
         podArch: () => probePodArch(deps.kube, name, container),
         resolveBinary: (target) =>
@@ -423,7 +441,7 @@ export async function startAttachRuntime(
       {
         pod: name,
         container,
-        command: ["tentacle", "serve", "--stdio", "--model-proxy"],
+        command: [serveBin, "serve", "--stdio", "--model-proxy"],
       },
       { onStderr: stderr.onStderr },
     );

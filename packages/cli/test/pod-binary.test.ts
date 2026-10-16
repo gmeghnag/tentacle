@@ -79,12 +79,14 @@ function depsFor(
     resolveBinary?: (target: PodBinaryTarget) => Promise<Uint8Array>;
     log?: (line: string) => void;
     onStatus?: (text: string) => void;
+    binPath?: string;
   } = {},
 ): PodBinaryDeps {
   return {
     kube,
     podName: "p1",
     container: "agent",
+    ...(opts.binPath ? { binPath: opts.binPath } : {}),
     // The arch probe is an injected seam: in production it is
     // `probePodArch(kube, …)` (tested directly below); here it is scripted.
     podArch: async () => opts.arch ?? "x64",
@@ -196,13 +198,26 @@ describe("injectAgentBinary", () => {
     expect(installCall.input).toEqual(bytes);
     // 2) the version probe (no input)
     const versionCall = callAt(kube.calls, 1);
-    expect(versionCall.command).toEqual(["tentacle", "--version"]);
+    expect(versionCall.command).toEqual([POD_BIN_PATH, "--version"]);
     expect(versionCall.input).toBeUndefined();
     // logs mention the arch and the transfer; the version is returned (the
     // caller folds it into its final line — it is not logged here anymore).
     expect(logs.some((l) => l.includes("x64"))).toBe(true);
     expect(logs.some((l) => l.includes("injecting tentacle"))).toBe(true);
     expect(result).toBe("tentacle 1.2.3");
+  });
+
+  test("--bin-dir: installs to and verifies the custom absolute path (read-only rootfs)", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+    const kube = new FakeKube([ok(), ok("tentacle dev\n")]);
+    const deps = depsFor(kube, { binPath: "/tmp/tentacle", resolveBinary: async () => bytes });
+    await injectAgentBinary(deps);
+    // Install writes under /tmp (mkdir -p /tmp), not /usr/local/bin.
+    expect(callAt(kube.calls, 0).command[2]).toBe(
+      `mkdir -p /tmp && head -c ${bytes.length} > /tmp/tentacle && chmod 755 /tmp/tentacle`,
+    );
+    // Verify execs the injected binary by its absolute path (the dir may be off PATH).
+    expect(callAt(kube.calls, 1).command).toEqual(["/tmp/tentacle", "--version"]);
   });
 
   test("picks the arm64 target for an arm64 pod", async () => {
@@ -241,7 +256,7 @@ describe("injectAgentBinary", () => {
     );
     // The version probe is what failed.
     expect(kube.calls).toHaveLength(2);
-    expect(callAt(kube.calls, 1).command).toEqual(["tentacle", "--version"]);
+    expect(callAt(kube.calls, 1).command).toEqual([POD_BIN_PATH, "--version"]);
   });
 
   test("a failed --version probe (musl image) appends the glibc hint to the error", async () => {

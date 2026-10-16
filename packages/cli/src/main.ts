@@ -50,11 +50,11 @@ Usage:
   tentacle --plain         plain line-based REPL (for pipes / no TTY)
   tentacle --resume [uid]  resume a saved session (latest if no uid) in the TUI
   tentacle -i --in-process run the agent on the render thread (opt out of the worker)
-  tentacle run --image <ref> [--namespace <ns>] [--resume [uid]] [<name>]
+  tentacle run --image <ref> [--namespace <ns>] [--bin-dir <dir>] [--resume [uid]] [<name>]
                                 run the agent inside a Kubernetes pod (sandbox), local TUI
                                 (<name> is the pod name; random when omitted; sessions
                                 persist on the laptop, so --resume works)
-  tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]
+  tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>] [--bin-dir <dir>] [--resume [uid]]
                                 attach the TUI to an EXISTING pod (tentacle is
                                 injected if it is not there yet); --container is the
                                 container to exec into (default: the pod's only one);
@@ -99,6 +99,9 @@ Pod execution (tentacle run --image <ref> [--namespace <ns>] [<name>]):
   TENTACLE_POD_IMAGE        default pod image (overridden by --image)
   TENTACLE_POD_BIN          use this prebuilt tentacle binary for the pod instead of
                            the cached/built one (path to a bun-linux-x64/arm64 binary)
+  TENTACLE_POD_BIN_DIR      install dir inside the pod (overridden by --bin-dir; default
+                           /usr/local/bin). Use a writable+exec dir (e.g. /tmp) for a
+                           pod with a read-only root filesystem.
 
 Pod attach (tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>]):
   <pod> must already exist (kubectl get pods -n <ns>); --namespace defaults like
@@ -107,6 +110,8 @@ Pod attach (tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>]):
   pod's only container is used. The agent binary is injected only when the pod
   does not already have a working one (re-attaching to a used pod skips the
   transfer). The pod is left RUNNING on exit — delete it yourself when done.
+  Read-only rootfs (a hardened pod)? --bin-dir <dir> installs to a writable+exec
+  dir instead of /usr/local/bin (e.g. --bin-dir /tmp).
 `;
 
 export interface CliIO {
@@ -310,6 +315,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const { flags: runFlags, bools: runBools, positional: runPos } = parseFlags(args.slice(1));
     const namespace = runFlags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE;
     const image = runFlags.get("image") ?? process.env.TENTACLE_POD_IMAGE;
+    const binDir = runFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR;
     if (!image) {
       write(
         "[pod] --image <ref> is required (any Linux glibc image with sh+head; tentacle is injected)\n",
@@ -331,6 +337,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         kube,
         namespace: auth.options.namespace,
         image,
+        ...(binDir ? { binDir } : {}),
         ...(name ? { name } : {}),
         permissions,
         store,
@@ -385,6 +392,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     const namespace = attachFlags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE;
     const container = attachFlags.get("container") ?? shortContainer;
+    const binDir = attachFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR;
     const { store, resume: resumeRecord } = await loadPodResume(attachFlags, attachBools);
     const auth = await loadPodAuth(namespace, "pod");
     if ("error" in auth) {
@@ -400,6 +408,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         namespace: auth.options.namespace,
         podName,
         ...(container ? { container } : {}),
+        ...(binDir ? { binDir } : {}),
         permissions,
         store,
         resume: resumeRecord,
