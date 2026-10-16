@@ -9,6 +9,18 @@ See AGENTS.md §10.
 
 > **Status:** context · implementation · execution · review · done
 > **Branch:** `<type>/<slug>`
+> **Size:** S | M | L · **Blast:** contained | cross-module | load-bearing · **Suited:** <who executes + review level>
+
+<!--
+Size (effort): S one file/module, known approach · M a few files, some design ·
+L many files / a new subsystem. No XL — split it. Blast (reach if it breaks):
+contained (leaf code, no API/protocol/persistence/IO change) · cross-module
+(shared util / several packages) · load-bearing (an AGENTS §7 invariant, the
+agent loop, a widely-depended seam). Suited: `load-bearing` (any size) or `L`
+→ strong model + mandatory fresh-context Review; `contained` S–M → a weaker
+model + standard Review. See AGENTS.md §10.
+-->
+
 
 ## Context
 
