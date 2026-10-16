@@ -46,6 +46,23 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       when `maxInlineChars < previewChars` (misconfig only; defaults are safe).
 - [ ] 🔵 `exec` kills with SIGTERM only (no SIGKILL escalation on timeout); tool
       args are JSON-parsed twice (permission gate + registry). Both harmless.
+- [ ] 🟡 **Oversize / degenerate tool-call guard (anti-runaway).** A real
+      incident (2026-10-16): the local model repetition-looped emitting `"` and
+      produced an `fs_multi_edit` tool-call with **167,794-char arguments** →
+      the upstream (llama.cpp) returned `500 "parse error col 167795"`, and that
+      monster call **poisoned the session file** (had to remove messages 169/170
+      by hand with `jq`). One degenerate model loop broke the whole session.
+      **Guard, at the harness** (NOT the sampler — a DRY repetition penalty was
+      tried and reverted because it breaks `fs_edit`'s verbatim reproduction of
+      existing code): when a tool-call's assembled arguments exceed a sane cap
+      (and/or show degenerate repetition — a short sequence repeated N× ), reject
+      the call *before* executing or persisting it and return an actionable
+      tool-error to the model so it can recover, instead of attempting the call
+      and saving a corrupt turn. Lives in the tool-call parse/validate path
+      (agent loop / provider SSE assembly where `tool_call` args accumulate).
+      Precedent: the daemon already caps inbound RPC frames (`maxFrameBytes`,
+      Block 4) — this is the analogous cap one layer up, on model output.
+      Keeps normal editing untouched. Plan not yet written.
 
 ### Block 2 — tools (fs_*, shell, background, task/subagent)
 
