@@ -42,4 +42,21 @@ describe("logDaemonError", () => {
     expect(() => logDaemonError(bogus, new Error("x"))).not.toThrow();
     expect(logDaemonError(bogus, new Error("x"))).toBe(daemonErrorLogPath(bogus));
   });
+
+  test("logs the FULL upstream body, not just the truncated message", async () => {
+    // ModelRequestError-shaped: its `message` truncates the upstream body to
+    // 200 chars, but the whole body is retained on a `body` field. The full
+    // body is the point of this log (a truncated tool-call, a provider trace),
+    // so it must be written verbatim even though the message is clipped.
+    const fullBody = `{"error":{"code":500,"message":"${"m".repeat(400)}"}}`;
+    class RequestErrorLike extends Error {
+      constructor(readonly body: string) {
+        super(`model request failed with status 500: ${body.slice(0, 200)}`);
+        this.name = "ModelRequestError";
+      }
+    }
+    const path = logDaemonError(dir, new RequestErrorLike(fullBody));
+    const contents = await readFile(path, "utf8");
+    expect(contents).toContain(fullBody);
+  });
 });
