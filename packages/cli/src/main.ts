@@ -163,9 +163,16 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   }
 
   // Everything below needs configuration; load it once (scaffolds on first run).
+  // EXCEPT the pod daemon (`serve --stdio`): it runs in a possibly read-only
+  // container with no writable HOME and needs NOTHING from the config dir (the
+  // model is proxied over the wire, persistence is on the laptop). Scaffolding
+  // there does `mkdir ~/.config` → EROFS → the daemon dies and the client sees
+  // "connection closed". So the stdio daemon never scaffolds; missing config
+  // files fall back to defaults.
+  const isStdioDaemon = args[0] === "serve" && args.includes("--stdio");
   let config: TentacleConfig;
   try {
-    config = await loadConfig({ cwd: process.cwd() });
+    config = await loadConfig({ cwd: process.cwd(), scaffold: !isStdioDaemon });
   } catch (error) {
     write(`\n[config error] ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
