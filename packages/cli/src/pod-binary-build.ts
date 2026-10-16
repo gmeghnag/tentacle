@@ -140,7 +140,24 @@ export function podBinCacheDir(): string {
   return resolve(repoRoot(), "dist/pod-bin");
 }
 
+/**
+ * The stable, cwd-independent home for a prebuilt pod binary:
+ * `<configDir>/bin/tentacle-<target>`. Per-arch (x64/arm64 coexist). `bin/`
+ * (not `pod-bin/`) because a future docker/podman runner reuses the same spot.
+ */
+export function configBinPath(configDir: string, target: PodBinaryTarget): string {
+  return resolve(configDir, "bin", `tentacle-${target}`);
+}
+
 export interface ResolvePodBinaryOptions {
+  /**
+   * The user's config dir. The stable, cwd-independent home for prebuilt pod
+   * binaries is `<configDir>/bin/tentacle-<target>` (`configBinPath`), checked
+   * before the repo cache — so a daily driver run from ANY directory finds the
+   * binary without a source tree (a compiled binary can't cross-compile from an
+   * arbitrary cwd).
+   */
+  readonly configDir?: string;
   /** Override the cache directory (tests). Defaults to `dist/pod-bin`. */
   readonly cacheDir?: string;
   /** Override the build step (tests); defaults to `buildBinary`. */
@@ -150,8 +167,9 @@ export interface ResolvePodBinaryOptions {
 
 /**
  * Resolve the bytes of the `tentacle` binary for `target`, in order:
- * `TENTACLE_POD_BIN` (explicit prebuilt) → the cache → build into the cache.
- * Returns the file bytes ready to stream into the pod.
+ * `TENTACLE_POD_BIN` (explicit prebuilt) → `<configDir>/bin/tentacle-<target>`
+ * (the stable per-arch home, cwd-independent) → the repo cache → build into the
+ * cache (only possible when run from the source tree). Returns the file bytes.
  */
 export async function resolvePodBinary(
   target: PodBinaryTarget,
@@ -165,8 +183,19 @@ export async function resolvePodBinary(
     log(`[pod-binary] using TENTACLE_POD_BIN → ${override}\n`);
     return new Uint8Array(readFileSync(override));
   }
-  // 2/3) Cache, building on a miss. The cache key is the full Bun target
-  // (e.g. `tentacle-bun-linux-x64`) so x64/arm64 never collide.
+  // 2) The stable, cwd-independent home: <configDir>/bin/tentacle-<target>.
+  // This is what makes `run`/`exec` work from an arbitrary working directory:
+  // a compiled binary there has no source tree to build from.
+  if (options.configDir) {
+    const stable = configBinPath(options.configDir, target);
+    if (existsSync(stable)) {
+      log(`[pod-binary] using ${stable}\n`);
+      return new Uint8Array(readFileSync(stable));
+    }
+  }
+  // 3/4) Repo cache, building on a miss. The cache key is the full Bun target
+  // (e.g. `tentacle-bun-linux-x64`) so x64/arm64 never collide. The build only
+  // works when a source tree is reachable (running from the repo).
   const cacheDir = options.cacheDir ?? podBinCacheDir();
   const outfile = resolve(cacheDir, `tentacle-${target}`);
   if (!existsSync(outfile)) {
@@ -176,7 +205,7 @@ export async function resolvePodBinary(
     const ok = await build(outfile, target);
     if (!ok || !existsSync(outfile)) {
       throw new Error(
-        `failed to build the ${target} tentacle binary — run \`TARGET=${target} bun run compile\` and point TENTACLE_POD_BIN at it`,
+        `failed to build the ${target} tentacle binary — run \`TARGET=${target} bun run compile\`, then put it at <configDir>/bin/tentacle-${target} (or point TENTACLE_POD_BIN at it)`,
       );
     }
     log(`[pod-binary] built ${target} → ${outfile}\n`);

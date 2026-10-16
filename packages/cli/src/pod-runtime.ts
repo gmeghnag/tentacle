@@ -231,6 +231,7 @@ export async function startPodRuntime(
       podArch: () => probePodArch(deps.kube, name, AGENT_CONTAINER),
       resolveBinary: (target) =>
         resolvePodBinary(target, {
+          configDir: config.configDir,
           // Keep the single-line invariant + stay concise: in interactive mode
           // the "resolving … binary…" phase line is enough, so the resolver's
           // verbose cache/build path is dropped; in piped mode log it for the
@@ -402,6 +403,7 @@ export async function startExecRuntime(
         podArch: () => probePodArch(deps.kube, name, container),
         resolveBinary: (target) =>
           resolvePodBinary(target, {
+            configDir: config.configDir,
             // Same single-line invariant as `run`: interactive mode folds the
             // resolver's verbose path into the "resolving … binary…" phase.
             log: status ? () => {} : deps.log,

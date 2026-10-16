@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolvePodBinary } from "../src/pod-binary-build.ts";
+import { configBinPath, resolvePodBinary } from "../src/pod-binary-build.ts";
 import type { PodBinaryTarget } from "../src/pod-binary.ts";
 
 /** A fake build that "compiles" by writing a marker file (no real build). */
@@ -86,6 +86,44 @@ describe("resolvePodBinary", () => {
       expect(Buffer.from(bytes).toString()).toBe("CACHED-BYTES");
       expect(built).toHaveLength(0);
       expect(logs.some((l) => l.includes("using cache"))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a prebuilt in <configDir>/bin is used before the repo cache/build (cwd-independent)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "harness-podbin-"));
+    const configDir = join(dir, "config");
+    const stable = configBinPath(configDir, "bun-linux-x64");
+    mkdirSync(join(configDir, "bin"), { recursive: true });
+    writeFileSync(stable, "STABLE-BYTES");
+    const { built, build } = fakeBuild(() => "SHOULD-NOT-BUILD");
+    const logs: string[] = [];
+    try {
+      const bytes = await resolvePodBinary("bun-linux-x64", {
+        configDir,
+        cacheDir: join(dir, "cache"),
+        build,
+        log: (l) => logs.push(l),
+      });
+      expect(Buffer.from(bytes).toString()).toBe("STABLE-BYTES");
+      expect(built).toHaveLength(0); // not built
+      expect(existsSync(join(dir, "cache"))).toBe(false); // repo cache untouched
+      expect(logs.some((l) => l.includes(stable))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("configDir without the prebuilt falls through to the repo cache/build", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "harness-podbin-"));
+    const configDir = join(dir, "config"); // no bin/ seeded
+    const cacheDir = join(dir, "cache");
+    const { built, build } = fakeBuild((o) => `BUILT:${o}`);
+    try {
+      const bytes = await resolvePodBinary("bun-linux-arm64", { configDir, cacheDir, build });
+      expect(built).toHaveLength(1); // fell through to the build
+      expect(Buffer.from(bytes).toString()).toContain("BUILT:");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
