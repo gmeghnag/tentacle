@@ -243,3 +243,46 @@ nothing.
 - Repo style: double quotes, trailing commas, **no `!` non-null assertions**
   (assert conditionally, like the existing tests). Iterate on the single relevant
   file; full suite only before done.
+
+## 10. Task workflow (one task, one branch, one doc)
+
+Every change — feature, fix, or evaluation — is a single task with a single
+branch and a single living doc. This formalises §8 (the plan) and §4/§5/§9
+(verify/report/test) into one lifecycle. It is mandatory.
+
+- **One task at a time.** Finish the current task (through Review) and merge it
+  before starting the next; exactly ONE task branch off `main` at a time. (This
+  is the rule that prevents the parallel-edit / merge-conflict mess.)
+- **Folders** under `docs/`, by type:
+  - `docs/feat/` — a new capability or improvement, including an **approved**
+    refactor or perf change.
+  - `docs/fix/` — a defect in existing behaviour.
+  - `docs/eval/` — under evaluation: a question being decided (a migration, a
+    refactor/perf idea not yet approved). May never be built.
+  A refactor/perf task goes in `feat/` if already approved, `eval/` if still
+  being decided. An `eval` that gets approved is **promoted**: `git mv` its doc
+  into `feat/` (or `fix/`) and rename the branch — the move is the decision.
+- **Branch ↔ doc, 1:1.** Branch `<type>/<slug>`, doc `docs/<type>/<slug>.md`,
+  same slug. Branch off `main`; commit only on explicit OK (§6).
+- **The doc has four sections** (copy `docs/TASK-TEMPLATE.md`), each **signed by
+  the model that wrote it** — `*— <model-id>, <date>*` — so we can see which
+  model did what on a task and how it behaved, and spot drift:
+  1. **Context** — why the task exists: problem + evidence, constraints, the
+     decision it serves. For an `eval`, the exact question being decided.
+  2. **Implementation** — the plan per §8 (source-verified, `file:line`, the one
+     load-bearing assumption, failure modes, exact files, tests). Approved
+     before Execution starts.
+  3. **Execution** — the as-built: what was actually done, in order, and **any
+     drift from Implementation** (and why). Honest facts, not a re-narration.
+  4. **Review** — an **adversarial** pass, never a rubber stamp: re-run the gate
+     (`bun run check`, §4), red-team the Implementation's failure modes, confirm
+     test non-vacuity (§9). Ideally in a **fresh context** (a subagent or
+     `/code-review`) to avoid self-approval. State what holds, what does not, and
+     how the implementing model behaved.
+- **Lifecycle:** Context → Implementation (approved) → Execution → Review →
+  merge. An `eval` often stops at Context + Review (the verdict); its
+  Implementation/Execution stay empty until it is promoted.
+- **Index & registries:** `TODO.md` is the backlog/index — each item links its
+  task doc. `docs/library-bugs.md` is the cross-cutting upstream-bug registry (a
+  reference, not a task). Docs under `docs/` predating this standard are legacy;
+  new work uses this structure.
