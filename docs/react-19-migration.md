@@ -22,6 +22,84 @@ does the coupled **React 18→19 + Ink 5→8** bump, retires the two workarounds
 > it when the benefit (upstream fixes, currency, future Ink features) is worth
 > the verification cost below — not reflexively.
 
+## Is it worth it? Cost/benefit (verified 2026-10, against the release notes)
+
+**Verdict: not worth it for maintainability/features alone right now.** React 19
+gives this project essentially nothing, and Ink 8's gains are nice-to-haves that
+are outweighed by a *confirmed* break of our mouse input (below). Do it only if
+(a) we deliberately want Ink 8's native scroll primitives to replace the custom
+transcript-perf code, or (b) version rot eventually forces it (and forced-under-
+pressure is worse than planned).
+
+### React 19 — ~nothing for us
+
+React 19's headline features are DOM/web-oriented: Actions / `useActionState` /
+form status, `use()`, `ref`-as-prop (removing `forwardRef`), hydration/SSR,
+document metadata, `useOptimistic`. A TUI uses **none** of them. We have no
+`forwardRef` to drop, no `react-dom`, and no deprecated APIs (string refs,
+`propTypes`, legacy context) to clean up — so even the "removal" wins are zero.
+React 19 is purely the **gate** to a newer Ink.
+([upgrade guide](https://react.dev/blog/2024/04/25/react-19-upgrade-guide))
+
+### What Ink 6 / 7 / 8 actually changed (verified)
+
+- **Ink 6.0** ([notes](https://github.com/vadimdemedes/ink/releases/tag/v6.0.0)):
+  requires Node 20 + React 19; fixes stale output when output height changes
+  (our cursor-bleed bug is in this fix family, landing ~6.6).
+- **Ink 7.0/7.1**: requires Node 22 + React 19.2+; uses `useEffectEvent`
+  internally so input handlers no longer re-subscribe on every render;
+  **Backspace now reports `key.backspace`, not `key.delete`** (we already handle
+  both — safe); adds **`useWindowSize()`**; exposes native **`key.home`/`key.end`**
+  (7.1.1, `build/hooks/use-input.js:48-49`).
+- **Ink 8.0** ([notes](https://github.com/vadimdemedes/ink/releases/tag/v8.0.0)):
+  requires **React 19.3+**; `stdout`/`stdin`/`stderr` typed as generic streams so
+  TTY-only props like `stdout.columns` leave the types; **`useInput` no longer
+  receives unrecognized terminal control sequences — mouse reports, focus events
+  and cursor-position replies are dropped, and there is NO native mouse API to
+  replace them** (#1014); adds `contentOffsetX/Y` + `overflow="hidden"` +
+  `incrementalRendering` for scrollable, low-flicker views; adds
+  `clientWidth`/`clientHeight` to `measureElement()`/`useBoxMetrics()`;
+  `minWidth`/`maxWidth` accept numbers only; Escape no longer sets `key.meta`.
+
+### Gains that actually matter to us
+
+- **`useWindowSize()`** — cleaner resize handling, and effectively *required*
+  (Ink 8 removes `stdout.columns` from the types, which we read at
+  `App.tsx:130,233`). Small, real.
+- **`useEffectEvent` internally** — input handlers stop re-subscribing each
+  render. Free perf.
+- **`contentOffsetX/Y` + `overflow="hidden"` + `incrementalRendering`** — native
+  scrollable views and reduced flicker. This is the one genuinely attractive
+  feature: it **overlaps the custom transcript-perf work** (`tentacle-perf`:
+  `layoutTranscript`/`sliceLaid`, warm-cache, flicker). It could let us delete
+  hand-rolled slice-scroll + layout code.
+- Retiring the cursor-bleed workaround (`LineInput` sibling `<Text>`) and the
+  Home/End-via-Ctrl+A/E necessity. Minor (we keep Ctrl+A/E regardless).
+
+### The dominant cost — Ink 8 breaks our mouse
+
+**Confirmed, not hypothetical.** Our entire mouse stack (wheel scroll, drag-
+select, copy-to-clipboard) depends on Ink delivering SGR 1006 reports as `char`
+through `useInput` (`mouse.ts`, `App.tsx` `dispatchMouse`/`splitMouseReports`).
+Ink 8 **drops** those reports and offers **no native mouse hook/events** in
+return. So on Ink 8 our mouse features go dark unless we rework input to read
+`stdin` raw ourselves (bypassing `useInput`) — a non-trivial rewrite that also
+cuts against Ink's direction. This cost dominates the gains above.
+
+### The real decision (not maintainability — architecture)
+
+Ink 8's `contentOffsetX/Y` + `incrementalRendering` solve the *same* problem as
+our custom perf primitives. So the honest framing is a fork:
+
+- **Stay on Ink 5** + keep investing in the custom perf work (`tentacle-perf`),
+  keep mouse-via-`useInput` as-is. Mouse keeps working; perf stays hand-rolled.
+- **Go to Ink 8** + adopt native scrolling (possibly deleting custom layout/
+  scroll code) **but rewrite mouse on raw stdin**.
+
+Weigh this *together with* the perf branch decision, never in isolation. Today the
+scales tip toward staying on Ink 5 until the native-scroll win (or version rot)
+clearly outweighs the mouse rewrite.
+
 ## Preconditions (verified against the source)
 
 - **Only `packages/tui` depends on React/Ink.** `packages/tui/package.json:14`
@@ -101,8 +179,15 @@ cursor fix and Home/End.
   peer as a non-fatal warning otherwise).
 - `bun.lock` — regenerated by `bun install`.
 - `tsconfig*.json` — **no change expected** (`react-jsx` is correct for 19).
-- `packages/tui/src/**` — **no change expected** from React; any edit here is an
-  Ink-delta fix discovered by the suite/soak, made deliberately.
+- `packages/tui/src/**` — **no change expected from React**, but two **known Ink-8
+  required changes** (not optional):
+  - **`App.tsx` dimensions**: `stdout.columns`/`stdout.rows` reads (`:130,:233`)
+    leave the Ink 8 types → migrate to **`useWindowSize()`** (also re-renders on
+    resize, so it may simplify the resize `useEffect`).
+  - **Mouse input rework** (`mouse.ts` + `App.tsx` handler): see the CONFIRMED
+    BREAK in the risk surface — mouse reports no longer arrive via `useInput`.
+  Any other edit here is an Ink-delta fix discovered by the suite/soak, made
+  deliberately.
 
 ## Risk surface — the Ink 5→8 deltas to verify (this is the real work)
 
@@ -113,10 +198,15 @@ TUI tests cover most; the manual soak covers what the SGR-stripped harness can't
   `key` is a superset (adds `home`/`end`); our resolver reads a subset, so it still
   works. Verify `input=""`-blanking of non-alphanumerics is unchanged.
   *Proof:* `test/input-actions.test.ts` + the App integration tests.
-- **Mouse (SGR 1006)**: we rely on Ink stripping the leading ESC and handing
-  reports as `char` (`mouse.ts`, `App.tsx` `dispatchMouse`/`splitMouseReports`).
-  *Proof:* the mouse-wheel/drag/selection tests in `test/app.test.tsx`; plus a
-  manual drag-select-copy soak.
+- **Mouse (SGR 1006) — CONFIRMED BREAK on Ink 8, not just a risk.** We rely on
+  Ink delivering mouse reports as `char` through `useInput` (`mouse.ts`, `App.tsx`
+  `dispatchMouse`/`splitMouseReports`). Ink 8 drops unrecognized control sequences
+  and has no native mouse API, so wheel-scroll, drag-select and copy stop
+  receiving input. **Resolution required before Ink 8 lands:** read `stdin` raw
+  ourselves (outside `useInput`) and feed the existing `splitMouseReports`/
+  `dispatchMouse` pipeline, or drop mouse. This is the migration's biggest work
+  item. *Proof it's handled:* the mouse-wheel/drag/selection tests in
+  `test/app.test.tsx` pass again + a manual drag-select-copy soak.
 - **Text measurement / layout**: the cursor fix *is* a measurement change, and we
   depend on the "empty `<Text>` is 0×0 → render blank rows as `' '`" rule
   (`render-lines.ts`, `LineInput.tsx`; AGENTS.md §6). Re-verify blank rows, the
@@ -148,8 +238,11 @@ TUI tests cover most; the manual soak covers what the SGR-stripped harness can't
 - **Layout/measurement shift** from the new Ink: a test asserting exact rows/frame
   fails → inspect the frame, adjust the component only if the new output is
   genuinely correct; never loosen an assertion to force green.
-- **Mouse/escape handling change**: a leaked escape into the input would fail the
-  "does not leak" tests → re-check `mouse.ts` against Ink 8's stdin handling.
+- **Mouse goes dark** (confirmed): Ink 8 drops the reports — not a leak but a
+  total loss of mouse input. Mitigated only by the raw-stdin rework above; until
+  then the mouse tests fail. Also: Escape no longer sets `key.meta` on Ink 8 —
+  re-check the escape/abort path (`App.tsx` `key.escape`) and the meta-based
+  word-jump fallback (`input-actions.ts` `key.meta && char === "b"/"f"`).
 - **Compile fails**: a new transitive dep breaks `bun build --compile` → check the
   devtools stub resolution and any new native/ESM-only dep.
 
