@@ -1,4 +1,4 @@
-# `tentacle exec` — piano: aggancio a un pod esistente
+# `tentacle attach` — piano: aggancio a un pod esistente
 
 **Stato:** **implementato** (branch `feat/pod-exec-attach` da `c5b7f58`).
 Questo doc nasce come piano; §10 è l'as-built. Basato su `c5b7f58` (branch
@@ -9,7 +9,7 @@ Questo doc nasce come piano; §10 è l'as-built. Basato su `c5b7f58` (branch
 
 ## 1. Obiettivo e relazione con `run`
 
-`tentacle exec <pod>` aggancia la TUI locale a un **pod già esistente**:
+`tentacle attach <pod>` aggancia la TUI locale a un **pod già esistente**:
 inietta l'agent se serve, apre l'exec del daemon (`serve --stdio`) e parte la
 TUI. **Non crea e non cancella nulla**: il pod è del user, il ciclo di vita
 resta suo.
@@ -38,7 +38,7 @@ comando "attach". Se vuoi pulire dopo, `kubectl delete pod <name>`.
 ## 2. Superficie CLI
 
 ```
-tentacle exec <pod> [--namespace <ns>] [--container <c>] [--resume [uid]]
+tentacle attach <pod> [--namespace <ns>] [--container <c>] [--resume [uid]]
 ```
 
 - `<pod>`: posizione 1, **obbligatoria** (se manca → usage, exit 1).
@@ -54,7 +54,7 @@ tentacle exec <pod> [--namespace <ns>] [--container <c>] [--resume [uid]]
 Aggiunta al `HELP` (`main.ts`), accanto alla voce `run`:
 
 ```
-  tentacle exec <pod> [--namespace <ns>] [--container <c>] [--resume [uid]]
+  tentacle attach <pod> [--namespace <ns>] [--container <c>] [--resume [uid]]
                                 attach the TUI to an existing pod (inject if needed);
                                 the pod is NOT deleted on exit
 ```
@@ -249,14 +249,14 @@ Note UX:
 kubectl -n test00 run keep1 --image=registry.access.redhat.com/ubi9/ubi --restart=Never -- sleep infinity
 kubectl -n test00 wait --for=condition=Ready pod/keep1
 
-./dist/tentacle exec keep1 --namespace test00          # 1ª volta: inietta 89 MB
+./dist/tentacle attach keep1 --namespace test00          # 1ª volta: inietta 89 MB
 #  → TUI, un prompt, /clear, esc
 kubectl -n test00 get pod keep1                              # Running (NON cancellato)
-./dist/tentacle exec keep1 --namespace test00          # 2ª volta: solo --version, aggancio immediato
+./dist/tentacle attach keep1 --namespace test00          # 2ª volta: solo --version, aggancio immediato
 kubectl -n test00 exec keep1 -- tentacle --version     # binario presente, 755
-./dist/tentacle exec missing-pod --namespace test00    # 404 → messaggio azionabile
+./dist/tentacle attach missing-pod --namespace test00    # 404 → messaggio azionabile
 kubectl -n test00 run busybox1 --image=busybox --restart=Never -- sleep infinity   # (o kubectl)
-./dist/tentacle exec busybox1 --namespace test00       # --version fallisce → hint glibc/musl, pod intatto
+./dist/tentacle attach busybox1 --namespace test00       # --version fallisce → hint glibc/musl, pod intatto
 kubectl -n test00 delete pod keep1 busybox1
 ```
 
@@ -287,7 +287,7 @@ bun test` green.
   (filtro label `app.kubernetes.io/managed-by=tentacle`) per i pod di
   `run` rimasti orfani. Utile proprio perché `exec` non cancella.
 - **Detach senza chiudere** (`--detach`: TUI in background, ri-aggancio col
-  solo `exec <pod>`): oggi `exec` ricrea sempre un nuovo daemon stdio; è
+  solo `attach <pod>`): oggi `exec` ricrea sempre un nuovo daemon stdio; è
   sufficiente, il detach vero richiede un daemon persistente nel pod
   (out of scope, come da F4 §1).
 - `--namespace` **implicito dal pod**: `getPod` in tutti i namespace
@@ -313,7 +313,7 @@ Implementato fedele al piano, con queste divergenze da nota:
   **niente `deletePod`, niente `registerPodCleanup`**.
 - **`main.ts`**: `run` e `exec` refactorati su helper condivisi
   (`loadPodAuth`, `loadPodResume`, `runPodTui`) — comportamento di `run`
-  invariato; nuovo blocco `exec <pod> [--namespace] [--container <c>|-c <c>]
+  invariato; nuovo blocco `attach <pod> [--namespace] [--container <c>|-c <c>]
   [--resume]` (nome pod posizionale obbligatorio → usage/exit 1); `-c` alias
   corto estratto PRIMA di `parseFlags` (che legge solo `--`); `containerExecError`
   traduce "exec channel closed before the command reported a status" → hint

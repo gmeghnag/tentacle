@@ -15,7 +15,7 @@ protocol design above the wire vocabulary.
 
 **Goal:** `tentacle run --image <ref> [--namespace <ns>] [<name>]` runs
 the agent **inside a Kubernetes pod** (the sandbox), driven from the **local
-TUI on the laptop**; `tentacle exec <pod> [--namespace <ns>]` attaches
+TUI on the laptop**; `tentacle attach <pod> [--namespace <ns>]` attaches
 the **same** TUI to an **existing** pod (injecting the binary if it lacks one)
 without creating or deleting anything. In both cases the user types locally
 and the agent loop, tool execution, `/loop`, background jobs, MCP servers —
@@ -312,7 +312,7 @@ sent to the pod (reverse-tunnel, §5).
 - **F4.f — exec-plugin auth + hardening** (credential-plugin, CA edge cases,
   timeouts, clear errors) + operator docs.
 - **F4.g — `exec` attach to an existing pod** — ✅ **shipped (branch
-  `feat/pod-exec-attach`)**. `tentacle exec <pod> [--namespace <ns>]
+  `feat/pod-exec-attach`)**. `tentacle attach <pod> [--namespace <ns>]
   [--container <c>] [--resume [uid]]` attaches the local TUI to a pod that
   already exists — the `run` flow minus the lifecycle. `startExecRuntime`
   (`cli/src/pod-runtime.ts`) is `startPodRuntime` with the create/delete

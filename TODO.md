@@ -457,7 +457,7 @@ Daily-driver work (done 2026-10-14):
         Design + as-built log: `docs/pod-binary-injection.md`.
       - [~] **F4.g — `exec` attach to an existing pod** (branch
         `feat/pod-exec-attach`, from `c5b7f58`):
-        `tentacle exec <pod> [--namespace <ns>] [--container <c>|-c <c>]
+        `tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>]
         [--resume [uid]]` — the `run` flow minus the lifecycle: `getPod`
         (404 → actionable error, terminal phase → reject) → bounded 60 s
         readiness wait → **preflight `tentacle --version`** that skips the

@@ -6,7 +6,7 @@ import { join } from "node:path";
  *   tentacle                 → interactive TUI (when stdin is a TTY)
  *   tentacle <prompt...>     → one-shot run
  *   tentacle run [opts]      → run the agent inside a Kubernetes pod (F4)
- *   tentacle exec <pod>      → attach the TUI to an existing pod (F4)
+ *   tentacle attach <pod>      → attach the TUI to an existing pod (F4)
  *   tentacle --help          → usage
  *   tentacle --version       → print the version and exit
  *
@@ -30,7 +30,7 @@ import { type TentacleConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { parseFlags, resolveToken } from "./flags.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
-import { startExecRuntime, startPodRuntime } from "./pod-runtime.ts";
+import { startAttachRuntime, startPodRuntime } from "./pod-runtime.ts";
 import { render } from "./render.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { startTerminal } from "./terminal.ts";
@@ -54,7 +54,7 @@ Usage:
                                 run the agent inside a Kubernetes pod (sandbox), local TUI
                                 (<name> is the pod name; random when omitted; sessions
                                 persist on the laptop, so --resume works)
-  tentacle exec <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]
+  tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]
                                 attach the TUI to an EXISTING pod (tentacle is
                                 injected if it is not there yet); --container is the
                                 container to exec into (default: the pod's only one);
@@ -100,7 +100,7 @@ Pod execution (tentacle run --image <ref> [--namespace <ns>] [<name>]):
   TENTACLE_POD_BIN          use this prebuilt tentacle binary for the pod instead of
                            the cached/built one (path to a bun-linux-x64/arm64 binary)
 
-Pod attach (tentacle exec <pod> [--namespace <ns>] [--container <c>|-c <c>]):
+Pod attach (tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>]):
   <pod> must already exist (kubectl get pods -n <ns>); --namespace defaults like
   run (context's namespace — pass it if the pod lives elsewhere). Multi-container
   pods need the target container: --container <c> (alias -c) — without it the
@@ -223,7 +223,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
   }
 
-  // `run` / `exec` shared setup: cluster auth (kubeconfig current context, or
+  // `run` / `attach` shared setup: cluster auth (kubeconfig current context, or
   // TENTACLE_K8S_SERVER/_TOKEN override) and session resume. Sessions persist as
   // JSON under <configDir>/sessions; the pod is stateless, so resuming seeds
   // the pod daemon with the saved session (uid + history), same as the TUI.
@@ -267,7 +267,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     return { store, resume: resumeRecord };
   };
-  // `run` and `exec` both end in the same local TUI over the pod runtime. The
+  // `run` and `attach` both end in the same local TUI over the pod runtime. The
   // `permissions` broker MUST be the SAME instance handed to the runtime AND the
   // TUI: the pod daemon routes its `session/request_permission` to the runtime's
   // `RemoteClient` (which resolves it through that broker), while the TUI's
@@ -344,14 +344,14 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     return await runPodTui(runtime, permissions, resumeRecord);
   }
 
-  // `exec`: attach the local TUI to an EXISTING pod (F4, the `run` flow minus
+  // `attach`: attach the local TUI to an EXISTING pod (F4, the `run` flow minus
   // the lifecycle): the pod is user-owned, so nothing is created — and
   // NOTHING is deleted on exit (closing the TUI detaches; the pod stays up for
   // reuse). The agent binary is injected only when the pod lacks a working
   // one (a preflight `--version` probe skips the transfer on re-attach); the
   // same image constraints as `run` apply to the injected binary. See
-  // `startExecRuntime` and `docs/pod-exec-attach.md`.
-  if (args[0] === "exec") {
+  // `startAttachRuntime` and `docs/pod-exec-attach.md`.
+  if (args[0] === "attach") {
     // `-c` is a short alias for `--container` (`parseFlags` only understands
     // long `--` flags), so extract it first: `-c <name>` and `-c=<name>`.
     const rest = args.slice(1);
@@ -375,17 +375,17 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         filtered.push(arg);
       }
     }
-    const { flags: execFlags, bools: execBools, positional: execPos } = parseFlags(filtered);
-    const podName = execPos[0];
+    const { flags: attachFlags, bools: attachBools, positional: attachPos } = parseFlags(filtered);
+    const podName = attachPos[0];
     if (!podName) {
       write(
-        "\n[error] usage: tentacle exec <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]\n",
+        "\n[error] usage: tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]\n",
       );
       return 1;
     }
-    const namespace = execFlags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE;
-    const container = execFlags.get("container") ?? shortContainer;
-    const { store, resume: resumeRecord } = await loadPodResume(execFlags, execBools);
+    const namespace = attachFlags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE;
+    const container = attachFlags.get("container") ?? shortContainer;
+    const { store, resume: resumeRecord } = await loadPodResume(attachFlags, attachBools);
     const auth = await loadPodAuth(namespace, "pod");
     if ("error" in auth) {
       return 1;
@@ -393,9 +393,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const kube = new KubeClient(auth.options);
     // ONE broker shared by the pod runtime and the TUI (see `runPodTui`).
     const permissions = new PermissionBroker();
-    let runtime: Awaited<ReturnType<typeof startExecRuntime>>;
+    let runtime: Awaited<ReturnType<typeof startAttachRuntime>>;
     try {
-      runtime = await startExecRuntime(config, {
+      runtime = await startAttachRuntime(config, {
         kube,
         namespace: auth.options.namespace,
         podName,

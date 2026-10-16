@@ -289,10 +289,10 @@ export async function startPodRuntime(
   }
 }
 
-export interface PodExecRuntimeDeps {
+export interface PodAttachRuntimeDeps {
   readonly kube: PodCluster;
   readonly namespace: string;
-  /** The EXISTING pod's name (no create, no delete — see `startExecRuntime`). */
+  /** The EXISTING pod's name (no create, no delete — see `startAttachRuntime`). */
   readonly podName: string;
   /** Container to exec into; undefined → the API picks the only/default one. */
   readonly container?: string;
@@ -314,9 +314,9 @@ export interface PodExecRuntimeDeps {
  * No `registerPodCleanup` safety net either: the whole point is that a TUI
  * exit (Ctrl+C → process.exit) must NOT delete the pod.
  */
-export async function startExecRuntime(
+export async function startAttachRuntime(
   config: TentacleConfig,
-  deps: PodExecRuntimeDeps,
+  deps: PodAttachRuntimeDeps,
 ): Promise<LocalRuntime> {
   const name = deps.podName;
   // Buffer the pod daemon's stderr so it never corrupts the Ink TUI; flushed

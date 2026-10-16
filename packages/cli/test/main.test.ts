@@ -104,11 +104,11 @@ describe("cli main (end-to-end)", () => {
     expect(out.join("")).toContain("Usage:");
   });
 
-  test("exec without a pod name prints usage and exits non-zero", async () => {
+  test("attach without a pod name prints usage and exits non-zero", async () => {
     const out: string[] = [];
-    const code = await main(["bun", "cli", "exec"], { write: (t) => out.push(t) });
+    const code = await main(["bun", "cli", "attach"], { write: (t) => out.push(t) });
     expect(code).toBe(1);
-    expect(out.join("")).toContain("usage: tentacle exec <pod>");
+    expect(out.join("")).toContain("usage: tentacle attach <pod>");
   });
 
   test("--version prints the version and exits 0 without touching config", async () => {

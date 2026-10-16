@@ -30,7 +30,7 @@ import { POD_BIN_PATH } from "../src/pod-binary.ts";
 import {
   type PodCluster,
   createStderrSink,
-  startExecRuntime,
+  startAttachRuntime,
   startPodRuntime,
 } from "../src/pod-runtime.ts";
 
@@ -524,7 +524,7 @@ describe("startPodRuntime", () => {
   });
 });
 
-describe("startExecRuntime (attach to an existing pod)", () => {
+describe("startAttachRuntime (attach to an existing pod)", () => {
   const deps = (kube: PodCluster, store: JsonSessionStore) => ({
     kube,
     namespace: "dev",
@@ -542,7 +542,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     const kube = new FakeCluster(model);
     const store = new JsonSessionStore(join(dir, "exec-ok"));
 
-    const runtime = await startExecRuntime(baseConfig("/pod/work"), deps(kube, store));
+    const runtime = await startAttachRuntime(baseConfig("/pod/work"), deps(kube, store));
 
     // The sequence is: getPod → the --version preflight (it succeeds, so the
     // whole injection is skipped — no arch probe, no transfer, no re-verify)
@@ -596,7 +596,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
       return original(target, input, options);
     };
 
-    const runtime = await startExecRuntime(
+    const runtime = await startAttachRuntime(
       baseConfig("/pod/work"),
       deps(kube, new JsonSessionStore(join(dir, "exec-inject"))),
     );
@@ -622,7 +622,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     };
 
     await expect(
-      startExecRuntime(
+      startAttachRuntime(
         baseConfig("/pod/work"),
         deps(kube, new JsonSessionStore(join(dir, "exec-404"))),
       ),
@@ -636,7 +636,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     kube.pod = { metadata: { name: "mypod" }, status: { phase: "Failed" } };
 
     await expect(
-      startExecRuntime(
+      startAttachRuntime(
         baseConfig("/pod/work"),
         deps(kube, new JsonSessionStore(join(dir, "exec-dead"))),
       ),
@@ -650,7 +650,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
       Promise.reject(new Error("exec channel closed before the command reported a status"));
 
     await expect(
-      startExecRuntime(
+      startAttachRuntime(
         baseConfig("/pod/work"),
         deps(kube, new JsonSessionStore(join(dir, "exec-container"))),
       ),
@@ -665,7 +665,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     const kube = new FakeCluster(model);
     const store = new JsonSessionStore(join(dir, "exec-explicit"));
 
-    const runtime = await startExecRuntime(baseConfig("/pod/work"), {
+    const runtime = await startAttachRuntime(baseConfig("/pod/work"), {
       ...deps(kube, store),
       container: "dns",
     });
@@ -684,7 +684,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     const kube = new FakeCluster(model);
     kube.pod = { metadata: { name: "mypod" }, status: { phase: "Pending" } };
 
-    const runtime = await startExecRuntime(
+    const runtime = await startAttachRuntime(
       baseConfig("/pod/work"),
       deps(kube, new JsonSessionStore(join(dir, "exec-pending"))),
     );
@@ -722,7 +722,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     };
 
     await expect(
-      startExecRuntime(
+      startAttachRuntime(
         baseConfig("/pod/work"),
         deps(kube, new JsonSessionStore(join(dir, "exec-musl"))),
       ),
@@ -742,7 +742,7 @@ describe("startExecRuntime (attach to an existing pod)", () => {
     );
     const store = new JsonSessionStore(join(dir, "perm-exec"));
 
-    const runtime = await startExecRuntime(baseConfig("/pod/work"), {
+    const runtime = await startAttachRuntime(baseConfig("/pod/work"), {
       ...deps(kube, store),
       permissions: spy,
     });
