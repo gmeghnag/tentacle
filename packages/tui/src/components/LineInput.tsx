@@ -1,73 +1,48 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
-import { inputView } from "../input-view.ts";
+import { inputRender } from "../input-view.ts";
 
 /**
- * The prompt input renderer: a block cursor over a (possibly multi-line) value,
- * or a dim placeholder when empty. Multi-line buffers (a pasted block, or a
- * `\`-continuation) render as a column, windowed around the cursor to at most
- * `maxRows` lines. All editing lives in `App`'s key handler, so no control key
- * (Ctrl+O, mouse reports, …) can ever be echoed into the buffer.
+ * The prompt input renderer: a dumb view over the rows computed by
+ * `inputRender` (which resolves the block cursor, the selection highlight and
+ * the windowing). This component owns only presentation — the accent colour,
+ * the dim placeholder, and mapping a segment's `inverse` flag to Ink's prop.
+ * All editing lives in `App`'s key handler, so no control key (Ctrl+O, mouse
+ * reports, …) can ever be echoed into the buffer.
  */
 const CLAUDE = "#d77757";
 
 export function LineInput({
   value,
   cursor,
+  anchor = null,
   placeholder,
   maxRows = 10,
 }: {
   value: string;
   cursor: number;
+  /** Selection anchor (`null` = no selection); selected cells render inverse. */
+  anchor?: number | null;
   placeholder: string;
   maxRows?: number;
 }): ReactElement {
-  if (value === "") {
-    return (
-      <Box>
-        <Text color={CLAUDE}>❯ </Text>
-        <Text inverse> </Text>
-        <Text dimColor>{placeholder}</Text>
-      </Box>
-    );
-  }
-
-  const view = inputView(value, cursor, maxRows);
+  const { rows } = inputRender(value, cursor, anchor, maxRows);
+  const empty = value === "";
   return (
     <Box flexDirection="column">
-      {view.lines.map((line, r) => {
-        // "❯" marks the first logical line (not a windowed continuation); more-
-        // above/below are flagged with a dim arrow in the gutter instead.
-        const firstLogicalVisible = !view.moreAbove && r === 0;
-        const lastVisible = r === view.lines.length - 1;
-        const gutter =
-          view.moreAbove && r === 0 ? "↑ " : view.moreBelow && lastVisible ? "↓ " : null;
-        const prefix = gutter ?? (firstLogicalVisible ? "❯ " : "  ");
-        const prefixColor = gutter ? "gray" : CLAUDE;
-        // Ink measures an empty <Text> as 0×0, which would collapse the row and
-        // shift the box; a single space keeps every row one cell tall.
+      {rows.map((row, r) => {
         const key = `${r}`;
-        if (r !== view.cursorRow) {
-          return (
-            <Box key={key}>
-              <Text color={prefixColor} dimColor={gutter !== null}>
-                {prefix}
-              </Text>
-              <Text>{line === "" ? " " : line}</Text>
-            </Box>
-          );
-        }
-        const col = Math.max(0, Math.min(line.length, view.cursorCol));
         return (
           <Box key={key}>
-            <Text color={prefixColor} dimColor={gutter !== null}>
-              {prefix}
+            <Text color={row.gutter ? "gray" : CLAUDE} dimColor={row.gutter}>
+              {row.prefix}
             </Text>
-            <Text>
-              {line.slice(0, col)}
-              <Text inverse>{line[col] ?? " "}</Text>
-              {line.slice(col + 1)}
-            </Text>
+            {row.segments.map((seg, s) => (
+              <Text key={`${r}-${s}`} inverse={seg.inverse}>
+                {seg.text}
+              </Text>
+            ))}
+            {empty && r === 0 ? <Text dimColor>{placeholder}</Text> : null}
           </Box>
         );
       })}

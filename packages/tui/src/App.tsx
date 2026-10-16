@@ -16,6 +16,7 @@ import { LineInput } from "./components/LineInput.tsx";
 import { PermissionPrompt, permissionPromptRows } from "./components/PermissionPrompt.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
+import { pushHistory, recall } from "./history.ts";
 import { useLineEditor, usePaintScheduler } from "./hooks.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
 import { stepPaste, stripPasteMarkers } from "./paste.ts";
@@ -148,6 +149,14 @@ export function App({
   const pasteBufRef = useRef<string | null>(null);
   // Recovery timer: fires if a paste's closing marker never arrives (see below).
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Shell-style prompt history, kept in refs (session-local, in-memory; the
+  // input line is not React state, so no re-render is forced on recall).
+  // `histIndexRef === historyRef.length` means "on the live draft" (see
+  // `history.ts`); `draftRef` is the text saved when history is first entered,
+  // restored once the walk returns to the draft slot.
+  const historyRef = useRef<string[]>([]);
+  const histIndexRef = useRef(0);
+  const draftRef = useRef("");
 
   const stateRef = useRef<DisplayState>({
     ...initialState,
@@ -444,6 +453,13 @@ export function App({
         handleCommand(text);
         return;
       }
+      // Record the prompt in history (dedup is inside `pushHistory`) and return
+      // to the live-draft slot: the next Up starts a fresh walk from the newest
+      // entry. Done before the running branch so a steering prompt is recalled
+      // too.
+      historyRef.current = pushHistory(historyRef.current, text);
+      histIndexRef.current = historyRef.current.length;
+      draftRef.current = "";
       // Mid-turn: queue the task (steering) so it is handed to the agent before
       // its next round, instead of starting a new turn. Call through the session
       // (not a detached reference) so `this` is preserved.
@@ -729,13 +745,53 @@ export function App({
       field.insert(restored);
     }
 
-    // Scrolling works whether or not a turn is running.
+    // Up/Down: move one logical line inside the (possibly multi-line) prompt,
+    // and only at the buffer's edge fall back to history. Shift never touches
+    // history — it extends the selection. PgUp/PgDn still scroll the transcript.
+    const onFirstLine = field.value.lastIndexOf("\n", field.cursor - 1) === -1;
+    const onLastLine = field.value.indexOf("\n", field.cursor) === -1;
+    const historyStep = (dir: -1 | 1): void => {
+      // On the draft slot the live value IS the draft (saved by the first Up);
+      // inside history the saved draft is what a Down past the newest restores.
+      const onDraftSlot = histIndexRef.current >= historyRef.current.length;
+      const prevIndex = histIndexRef.current;
+      const res = recall(
+        { items: historyRef.current, index: prevIndex },
+        dir,
+        onDraftSlot ? field.value : draftRef.current,
+      );
+      histIndexRef.current = res.index;
+      draftRef.current = res.draft;
+      // A no-op recall (e.g. Up with an empty history) must not touch the
+      // field, or a mid-buffer cursor would jump to the end.
+      if (res.value === field.value && res.index === prevIndex) {
+        return;
+      }
+      // Shell convention: the cursor lands at the end of the recalled entry.
+      field.set(res.value);
+    };
     if (key.upArrow) {
-      setScrollOffset((o) => applyScroll(o, "lineUp", total, viewport));
+      if (key.shift) {
+        field.moveVertical(-1, true);
+        return;
+      }
+      if (!onFirstLine) {
+        field.moveVertical(-1);
+        return;
+      }
+      historyStep(-1);
       return;
     }
     if (key.downArrow) {
-      setScrollOffset((o) => applyScroll(o, "lineDown", total, viewport));
+      if (key.shift) {
+        field.moveVertical(1, true);
+        return;
+      }
+      if (!onLastLine) {
+        field.moveVertical(1);
+        return;
+      }
+      historyStep(1);
       return;
     }
     if (key.pageUp) {
@@ -777,12 +833,55 @@ export function App({
       submit(field.value);
       return;
     }
+    // Word jump: Option/Alt + arrows (macOS) or Ctrl + arrows (Linux).
+    if ((key.ctrl || key.meta) && key.leftArrow) {
+      field.moveWord(-1, key.shift);
+      return;
+    }
+    if ((key.ctrl || key.meta) && key.rightArrow) {
+      field.moveWord(1, key.shift);
+      return;
+    }
+    // macOS fallback: Option sometimes sends a meta char (ESC b / ESC f)
+    // instead of a modified arrow.
+    if (key.meta && char === "b") {
+      field.moveWord(-1, key.shift);
+      return;
+    }
+    if (key.meta && char === "f") {
+      field.moveWord(1, key.shift);
+      return;
+    }
+    // Shift + arrows: character selection.
+    if (key.shift && key.leftArrow) {
+      field.moveCursor(-1, true);
+      return;
+    }
+    if (key.shift && key.rightArrow) {
+      field.moveCursor(1, true);
+      return;
+    }
     if (key.leftArrow) {
       field.moveCursor(-1);
       return;
     }
     if (key.rightArrow) {
       field.moveCursor(1);
+      return;
+    }
+    // Line start/end: Ctrl+A / Ctrl+E (the readline convention). Ink 5.0.1 does
+    // not surface Home/End through useInput — parse-keypress maps them into
+    // `nonAlphanumericKeys`, which use-input blanks to input="" with no flag, so
+    // they're indistinguishable there (native Home/End would need Ink 8 + React
+    // 19). Ctrl+A/E is the portable terminal-native binding and needs no
+    // raw-stdin sniffing. `key.shift` extends the selection when the terminal
+    // reports it.
+    if (key.ctrl && char === "a") {
+      field.moveLine("start", key.shift);
+      return;
+    }
+    if (key.ctrl && char === "e") {
+      field.moveLine("end", key.shift);
       return;
     }
     if (key.backspace || key.delete) {
@@ -869,6 +968,7 @@ export function App({
               <LineInput
                 value={field.value}
                 cursor={field.cursor}
+                anchor={field.anchor}
                 placeholder="Queue a task…"
                 maxRows={MAX_INPUT_ROWS}
               />
@@ -889,6 +989,7 @@ export function App({
               <LineInput
                 value={field.value}
                 cursor={field.cursor}
+                anchor={field.anchor}
                 placeholder={INPUT_PLACEHOLDER}
                 maxRows={MAX_INPUT_ROWS}
               />

@@ -5,6 +5,9 @@ import {
   deleteBack as editorDeleteBack,
   insert as editorInsert,
   moveCursor as editorMove,
+  moveLine as editorMoveLine,
+  moveVertical as editorMoveVertical,
+  moveWord as editorMoveWord,
   setValue as editorSet,
 } from "./editor.ts";
 
@@ -60,7 +63,14 @@ export function usePaintScheduler(frameMs: number): PaintScheduler {
 export interface LineEditor extends EditorState {
   insert(text: string): void;
   deleteBack(): void;
-  moveCursor(delta: number): void;
+  /** Move by `delta` chars; `extend` selects (Shift) instead of moving. */
+  moveCursor(delta: number, extend?: boolean): void;
+  /** Jump one word; `extend` selects (Shift+Option/Ctrl). */
+  moveWord(dir: -1 | 1, extend?: boolean): void;
+  /** Home/End within the current logical line; `extend` selects. */
+  moveLine(edge: "start" | "end", extend?: boolean): void;
+  /** One logical line up/down preserving the column; `extend` selects. */
+  moveVertical(dir: -1 | 1, extend?: boolean): void;
   /** Replace the whole value (cursor defaults to the end). */
   set(value: string, cursor?: number): void;
   /** Clear to empty. */
@@ -76,11 +86,26 @@ export function useLineEditor(): LineEditor {
   const [state, setState] = useState<EditorState>(EMPTY_EDITOR);
   const insert = useCallback((text: string) => setState((s) => editorInsert(s, text)), []);
   const deleteBack = useCallback(() => setState((s) => editorDeleteBack(s)), []);
-  const moveCursor = useCallback((delta: number) => setState((s) => editorMove(s, delta)), []);
+  const moveCursor = useCallback(
+    (delta: number, extend = false) => setState((s) => editorMove(s, delta, extend)),
+    [],
+  );
+  const moveWord = useCallback(
+    (dir: -1 | 1, extend = false) => setState((s) => editorMoveWord(s, dir, extend)),
+    [],
+  );
+  const moveLine = useCallback(
+    (edge: "start" | "end", extend = false) => setState((s) => editorMoveLine(s, edge, extend)),
+    [],
+  );
+  const moveVertical = useCallback(
+    (dir: -1 | 1, extend = false) => setState((s) => editorMoveVertical(s, dir, extend)),
+    [],
+  );
   const set = useCallback(
     (value: string, cursor?: number) => setState(editorSet(value, cursor)),
     [],
   );
   const reset = useCallback(() => setState(EMPTY_EDITOR), []);
-  return { ...state, insert, deleteBack, moveCursor, set, reset };
+  return { ...state, insert, deleteBack, moveCursor, moveWord, moveLine, moveVertical, set, reset };
 }
