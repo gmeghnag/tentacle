@@ -279,6 +279,29 @@ branch and a single living doc. This formalises §8 (the plan) and §4/§5/§9
      test non-vacuity (§9). Ideally in a **fresh context** (a subagent or
      `/code-review`) to avoid self-approval. State what holds, what does not, and
      how the implementing model behaved.
+- **Size every task on two independent axes** (they are not the same — a
+  one-line change in a load-bearing path is small but dangerous; a pile of
+  isolated new code is large but safe):
+  - **Size** (effort): `S` (one file/module, known approach, ≲50 lines, own
+    tests) · `M` (a few files / one package, some design) · `L` (many files or a
+    new subsystem/seam, cross-cutting tests). There is **no `XL`** — an XL task
+    must be **split** into S/M/L sub-tasks (it would break "one legible branch").
+  - **Blast radius** (reach if it breaks), by what it touches: `contained`
+    (pure/leaf code in one module; no change to a public API, protocol schema,
+    persisted format, or terminal/IO path; behaviour pinned by its own tests) ·
+    `cross-module` (a shared util / several packages / a widely-used component;
+    still no wire/persistence/invariant change) · `load-bearing` (touches a §7
+    invariant, the agent loop, or a seam many depend on).
+  Record both in a one-line metadata block at the top of the doc and in the
+  `TODO.md` index: `Type: … · Size: … · Blast: … · Suited: …`.
+- **Blast radius gates who executes and how hard Review is** — this repo is
+  driven by a MIX of models (a strong one and a local Qwen3 27B), and the
+  dangerous combination is *high blast × weak model* (the silent-breakage zone:
+  the `fs_edit`-corruption / session-poison class we have hit):
+  - `contained`, S–M → a weaker model may execute; standard in-context Review.
+  - `load-bearing` (any size) **or** `L` → a stronger model executes (or split
+    first), and Review is **mandatory fresh-context** (a sub-agent or
+    `/code-review`) that red-teams the §7 invariant the change touches.
 - **Lifecycle:** Context → Implementation (approved) → Execution → Review →
   merge. An `eval` often stops at Context + Review (the verdict); its
   Implementation/Execution stay empty until it is promoted.
