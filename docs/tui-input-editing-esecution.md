@@ -210,11 +210,24 @@ revert). Escape verificati sulla fonte (`[2C` shift+right, `[5C` ctrl+right).
   solo render".
 - Rimossi i probe throwaway; `bun run check` verde (604 pass / 1 skip / 0 fail).
 
-### 7.6 Debito lasciato (consapevole)
+### 7.6 Key-handler estratto in un modulo puro — FATTO
 
-- **Estrazione dell'handler tasti di `App.tsx`** in una funzione pura
-  `resolveKey(key, char, ctx) → Action` (testabile senza ink): raccomandata,
-  da fare come **refactor dedicato separato** con i test d'integrazione §7.4
-  come rete di caratterizzazione. Non mescolata a questa feature.
+Il routing line-editing di `App.tsx` (~150 righe di if-chain inline) è stato
+estratto in **`input-actions.ts`**: `resolveLineInput(char, key, {value,
+cursor}) → InputAction` **puro** (nessun React/ref/side-effect). `App` chiama il
+resolver e **esegue** l'`InputAction` con uno `switch`; la meccanica stateful
+(recall history sui ref, scroll, clipboard async) resta in `App` perché
+intrinsecamente stateful. Gli helper di sanitizzazione (`sanitizePasted`,
+`sanitizeInsert`) spostati in `paste.ts` (puri).
+
+- **Payoff:** ogni decisione di routing (la sottile Up→moveVertical vs history
+  al bordo; `\`+Enter newline vs submit; insert vs control-char scartato) è ora
+  unit-testabile **senza ink** — `test/input-actions.test.ts`, 22 test in ~5 ms
+  (vs ~900 ms dei test ink). Rete di caratterizzazione: i test d'integrazione
+  §7.4 restano verdi → comportamento preservato.
+- Commit separato dal completamento feature (checkpoint prima del refactor).
+
+### 7.7 Debito lasciato (consapevole)
+
 - Upgrade Ink 5→8 + React 18→19 (darebbe Home/End nativi + fix §7.2): valutato,
   rimandato (migrazione maggiore non giustificata ora).

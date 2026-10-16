@@ -18,8 +18,9 @@ import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
 import { pushHistory, recall } from "./history.ts";
 import { useLineEditor, usePaintScheduler } from "./hooks.ts";
+import { resolveLineInput } from "./input-actions.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
-import { stepPaste, stripPasteMarkers } from "./paste.ts";
+import { sanitizePasted, stepPaste } from "./paste.ts";
 import { usePermissionBroker } from "./permission-ui.ts";
 import { stripAnsi, transcriptRows } from "./render-lines.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
@@ -92,17 +93,6 @@ const WELCOME = "Tentacle ready. Type a task, or `/help` for commands.";
 
 // Lines scrolled per mouse-wheel notch.
 const WHEEL_LINES = 3;
-// Any control byte — such chars are never inserted into the input buffer by the
-// single-keystroke path.
-// biome-ignore lint/suspicious/noControlCharactersInRegex: detects control bytes
-const CONTROL_RE = /[\x00-\x1f\x7f]/;
-// Pasted text keeps newlines and tabs (the prompt is multi-line); CRLF/CR are
-// normalised to LF and every other control byte is stripped. `\t` (\u0009) and
-// `\n` (\u000a) are intentionally outside this class.
-// biome-ignore lint/suspicious/noControlCharactersInRegex: strips control bytes from pastes
-const PASTE_CONTROL_RE = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
-const sanitizePasted = (text: string): string =>
-  text.replace(/\r\n?/g, "\n").replace(PASTE_CONTROL_RE, "");
 // Clipboard reads are trimmed: copied terminal output often has a trailing
 // newline that would otherwise land as a stray blank line.
 const flattenPasted = (text: string): string => sanitizePasted(text).trim();
@@ -745,11 +735,11 @@ export function App({
       field.insert(restored);
     }
 
-    // Up/Down: move one logical line inside the (possibly multi-line) prompt,
-    // and only at the buffer's edge fall back to history. Shift never touches
-    // history — it extends the selection. PgUp/PgDn still scroll the transcript.
-    const onFirstLine = field.value.lastIndexOf("\n", field.cursor - 1) === -1;
-    const onLastLine = field.value.indexOf("\n", field.cursor) === -1;
+    // Line editing works while idle AND while a turn runs (so a task can be
+    // typed and queued for steering). The routing decision is pure
+    // (`resolveLineInput`); here we only execute it. History recall is
+    // inherently stateful (session refs + the live draft), so it stays a local
+    // closure the "history" action calls into.
     const historyStep = (dir: -1 | 1): void => {
       // On the draft slot the live value IS the draft (saved by the first Up);
       // inside history the saved draft is what a Down past the newest restores.
@@ -770,137 +760,57 @@ export function App({
       // Shell convention: the cursor lands at the end of the recalled entry.
       field.set(res.value);
     };
-    if (key.upArrow) {
-      if (key.shift) {
-        field.moveVertical(-1, true);
-        return;
-      }
-      if (!onFirstLine) {
-        field.moveVertical(-1);
-        return;
-      }
-      historyStep(-1);
-      return;
-    }
-    if (key.downArrow) {
-      if (key.shift) {
-        field.moveVertical(1, true);
-        return;
-      }
-      if (!onLastLine) {
-        field.moveVertical(1);
-        return;
-      }
-      historyStep(1);
-      return;
-    }
-    if (key.pageUp) {
-      setScrollOffset((o) => applyScroll(o, "pageUp", total, viewport));
-      return;
-    }
-    if (key.pageDown) {
-      setScrollOffset((o) => applyScroll(o, "pageDown", total, viewport));
-      return;
-    }
 
-    // Line editing works while idle AND while a turn runs (so a task can be
-    // typed and queued for steering); Enter routes to `submit`, which either
-    // runs or enqueues based on the running state.
-    // Ctrl+V: read the OS clipboard and insert at the cursor. (The terminal's
-    // own paste — Cmd+V on macOS — never reaches us as a key; it arrives as a
-    // text chunk, handled by the insert branch below.)
-    if (key.ctrl && char === "v") {
-      void paste().then(
-        (text) => {
-          const clean = flattenPasted(text);
-          if (clean) {
-            field.insert(clean);
-          }
-        },
-        () => pushNotice("_Clipboard unavailable._"),
-      );
-      return;
-    }
-    if (key.return) {
-      // A `\` immediately before the cursor is a line continuation: replace it
-      // with a newline instead of submitting (terminal-independent multi-line
-      // entry; Shift/Alt+Enter aren't reliably distinguishable in a TTY).
-      if (field.value.slice(0, field.cursor).endsWith("\\")) {
+    const action = resolveLineInput(char, key, { value: field.value, cursor: field.cursor });
+    switch (action.kind) {
+      case "moveVertical":
+        field.moveVertical(action.dir, action.extend);
+        return;
+      case "history":
+        historyStep(action.dir);
+        return;
+      case "scroll":
+        setScrollOffset((o) => applyScroll(o, action.dir, total, viewport));
+        return;
+      case "pasteClipboard":
+        // Ctrl+V: read the OS clipboard and insert at the cursor. (The terminal's
+        // own paste — Cmd+V on macOS — never reaches us as a key; it arrives as a
+        // text chunk, routed to an "insert" action instead.)
+        void paste().then(
+          (text) => {
+            const clean = flattenPasted(text);
+            if (clean) {
+              field.insert(clean);
+            }
+          },
+          () => pushNotice("_Clipboard unavailable._"),
+        );
+        return;
+      case "newline":
+        // A trailing `\` before the cursor is a line continuation, not a submit.
         field.deleteBack();
         field.insert("\n");
         return;
-      }
-      submit(field.value);
-      return;
-    }
-    // Word jump: Option/Alt + arrows (macOS) or Ctrl + arrows (Linux).
-    if ((key.ctrl || key.meta) && key.leftArrow) {
-      field.moveWord(-1, key.shift);
-      return;
-    }
-    if ((key.ctrl || key.meta) && key.rightArrow) {
-      field.moveWord(1, key.shift);
-      return;
-    }
-    // macOS fallback: Option sometimes sends a meta char (ESC b / ESC f)
-    // instead of a modified arrow.
-    if (key.meta && char === "b") {
-      field.moveWord(-1, key.shift);
-      return;
-    }
-    if (key.meta && char === "f") {
-      field.moveWord(1, key.shift);
-      return;
-    }
-    // Shift + arrows: character selection.
-    if (key.shift && key.leftArrow) {
-      field.moveCursor(-1, true);
-      return;
-    }
-    if (key.shift && key.rightArrow) {
-      field.moveCursor(1, true);
-      return;
-    }
-    if (key.leftArrow) {
-      field.moveCursor(-1);
-      return;
-    }
-    if (key.rightArrow) {
-      field.moveCursor(1);
-      return;
-    }
-    // Line start/end: Ctrl+A / Ctrl+E (the readline convention). Ink 5.0.1 does
-    // not surface Home/End through useInput — parse-keypress maps them into
-    // `nonAlphanumericKeys`, which use-input blanks to input="" with no flag, so
-    // they're indistinguishable there (native Home/End would need Ink 8 + React
-    // 19). Ctrl+A/E is the portable terminal-native binding and needs no
-    // raw-stdin sniffing. `key.shift` extends the selection when the terminal
-    // reports it.
-    if (key.ctrl && char === "a") {
-      field.moveLine("start", key.shift);
-      return;
-    }
-    if (key.ctrl && char === "e") {
-      field.moveLine("end", key.shift);
-      return;
-    }
-    if (key.backspace || key.delete) {
-      field.deleteBack();
-      return;
-    }
-    // Insert only genuine printable text; never a control/modified key. A
-    // multi-char chunk (the terminal's native paste) is flattened so an
-    // embedded newline neither breaks the line nor submits it.
-    if (char && !key.ctrl && !key.meta && !key.escape && !key.tab) {
-      const clean =
-        char.length === 1
-          ? CONTROL_RE.test(char)
-            ? ""
-            : char
-          : sanitizePasted(stripPasteMarkers(char));
-      if (clean) {
-        field.insert(clean);
-      }
+      case "submit":
+        submit(field.value);
+        return;
+      case "moveWord":
+        field.moveWord(action.dir, action.extend);
+        return;
+      case "moveCursor":
+        field.moveCursor(action.delta, action.extend);
+        return;
+      case "moveLine":
+        field.moveLine(action.edge, action.extend);
+        return;
+      case "deleteBack":
+        field.deleteBack();
+        return;
+      case "insert":
+        field.insert(action.text);
+        return;
+      case "none":
+        return;
     }
   });
 

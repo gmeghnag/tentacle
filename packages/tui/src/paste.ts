@@ -31,6 +31,33 @@ export function stripPasteMarkers(text: string): string {
   return text.split(START).join("").split(END).join("");
 }
 
+// A lone control byte must never be inserted as text.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detects control bytes
+const CONTROL_RE = /[\x00-\x1f\x7f]/;
+// Control bytes to drop from a pasted chunk; `\t` (\u0009) and `\n` (\u000a) are
+// intentionally outside this class (the prompt is multi-line) after CRLF→LF.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: strips control bytes from pastes
+const PASTE_CONTROL_RE = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
+
+/** Normalise a pasted chunk: CRLF→LF, then drop stray control bytes. */
+export function sanitizePasted(text: string): string {
+  return text.replace(/\r\n?/g, "\n").replace(PASTE_CONTROL_RE, "");
+}
+
+/**
+ * Clean a key/paste chunk for insertion into the buffer: a single character is
+ * dropped when it is a control byte; a multi-character chunk (the terminal's
+ * native paste) is unmarked and sanitised so an embedded newline neither breaks
+ * the line nor submits. Returns "" when nothing insertable remains.
+ */
+export function sanitizeInsert(char: string): string {
+  return char.length === 1
+    ? CONTROL_RE.test(char)
+      ? ""
+      : char
+    : sanitizePasted(stripPasteMarkers(char));
+}
+
 /** Feed one input chunk through the bracketed-paste state machine. */
 export function stepPaste(
   buffer: string | null,
