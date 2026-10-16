@@ -269,9 +269,11 @@ branch and a single living doc. This formalises §8 (the plan) and §4/§5/§9
   model did what on a task and how it behaved, and spot drift:
   1. **Context** — why the task exists: problem + evidence, constraints, the
      decision it serves. For an `eval`, the exact question being decided.
-  2. **Implementation** — the plan per §8 (source-verified, `file:line`, the one
-     load-bearing assumption, failure modes, exact files, tests). Approved
-     before Execution starts.
+  2. **Implementation** — the plan per §8, source-verified (`file:line`),
+     structured as §8 sub-sections: **load-bearing assumption · preconditions ·
+     design · files · failure modes · tests**. Approved before Execution starts.
+     (The §8 seven-part plan lives *here*; a legacy plan's Problem → Context,
+     Validation → Execution/Review, Notes/debt → Review.)
   3. **Execution** — the as-built: what was actually done, in order, and **any
      drift from Implementation** (and why). Honest facts, not a re-narration.
   4. **Review** — an **adversarial** pass, never a rubber stamp: re-run the gate
