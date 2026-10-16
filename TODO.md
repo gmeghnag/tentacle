@@ -455,7 +455,21 @@ Daily-driver work (done 2026-10-14):
         hint). Validated LIVE on an x86_64 OpenShift cluster: UBI9 full
         success (89 MB transfer + daemon), busybox clean failure at the probe.
         Design + as-built log: `docs/pod-binary-injection.md`.
-      - [~] **F4.g — `exec` attach to an existing pod** (branch
+      - [~] **F4.e.2 — read-only-rootfs pods** (2026-10-16): a hardened pod
+        (`readOnlyRootFilesystem`, e.g. coredns on OCP 4.22) broke injection
+        twice. FIXED: (a) `--bin-dir <dir>` / `TENTACLE_POD_BIN_DIR` installs to
+        a writable+exec dir (e.g. `/tmp`) instead of `/usr/local/bin`, exec'd by
+        absolute path; (b) the pod daemon (`serve --stdio`) loads config with
+        `scaffold:false` — it no longer `mkdir`s `~/.config` (was `EROFS` →
+        daemon dies → client sees "connection closed").
+        **OPEN 🔵 residual (fully read-only pods):** `spillLargeOutput` writes a
+        large tool result to `<cwd>/.tentacle/tool-output/` (`agent/agent.ts`);
+        on a read-only pod cwd this write fails. Only triggers on big output (not
+        startup), so attach/run work, but a tool with huge output would error.
+        Fix options: make the spill best-effort (skip + keep inline on write
+        failure), or spill to a writable dir (`/tmp`, or the `--bin-dir` dir).
+        Not yet done.
+      - [~] **F4.g — `attach` to an existing pod** (branch
         `feat/pod-exec-attach`, from `c5b7f58`):
         `tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>]
         [--resume [uid]]` — the `run` flow minus the lifecycle: `getPod`
