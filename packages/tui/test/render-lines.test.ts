@@ -6,6 +6,7 @@ import {
   sliceLaid,
   transcriptLines,
   transcriptRows,
+  warmRowsChunk,
   wrapLines,
 } from "../src/render-lines.ts";
 import type { DisplayItem, ToolItem } from "../src/state.ts";
@@ -328,5 +329,39 @@ describe("windowed layout (layoutTranscript + sliceLaid)", () => {
     const full = transcriptRows(items, opts);
     const { laid, total } = layoutTranscript(items, opts);
     expect(sliceLaid(laid, total - 2, total + 50)).toEqual(full.slice(total - 2));
+  });
+});
+
+describe("warmRowsChunk (non-blocking resize warm)", () => {
+  // Fresh item identities → cache is cold regardless of width.
+  const items: DisplayItem[] = Array.from({ length: 6 }, (_, i) => ({
+    kind: "assistant" as const,
+    text: `reply ${i} with **enough** words to wrap at a narrow width right here`,
+  }));
+
+  test("processes a bounded prefix within the budget and returns a resume index", () => {
+    const next = warmRowsChunk(items, { expandAll: true, width: 24 }, 0, 0);
+    // Budget 0 still makes progress (≥1 item) but does not do the whole lot.
+    expect(next).toBeGreaterThan(0);
+    expect(next).toBeLessThan(items.length);
+  });
+
+  test("iterating to completion warms the transcript so the commit render is a no-op", () => {
+    const o = { expandAll: true, width: 29 };
+    let idx = 0;
+    let guard = 0;
+    while (idx < items.length && guard++ < 1000) {
+      idx = warmRowsChunk(items, o, idx, 0);
+    }
+    expect(idx).toBe(items.length);
+    // After warming, laying out at that width must do zero markdown renders —
+    // i.e. the size-commit render pays ~nothing (no synchronous re-wrap freeze).
+    const spy = spyOn(markdown, "renderMarkdown");
+    try {
+      layoutTranscript(items, o);
+      expect(spy.mock.calls.length).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

@@ -518,6 +518,36 @@ export function sliceLaid(laid: readonly LaidItem[], start: number, end: number)
 }
 
 /**
+ * Warm the per-item row cache for items `[from, …)` at `opts`, processing at
+ * least one item and then stopping once ~`budgetMs` has elapsed. Returns the
+ * index to resume from (`=== items.length` when the whole transcript is warm).
+ *
+ * Pure apart from the module cache it populates. The resize path drives this off
+ * the render thread (time-budgeted chunks) so the width change's O(transcript)
+ * re-wrap never blocks a frame; once warm, the committing render is all hits.
+ */
+export function warmRowsChunk(
+  items: readonly DisplayItem[],
+  opts: RenderOptions,
+  from: number,
+  budgetMs: number,
+): number {
+  const start = performance.now();
+  let i = Math.max(0, from);
+  while (i < items.length) {
+    const item = items[i];
+    if (item !== undefined) {
+      itemRows(item, opts);
+    }
+    i += 1;
+    if (performance.now() - start >= budgetMs) {
+      break;
+    }
+  }
+  return i;
+}
+
+/**
  * The whole transcript as final, width-wrapped rows — the layout the selection
  * reads on mouse-release. Equivalent to
  * `wrapLines(transcriptLines(items, opts), opts.width)` but memoised per item,
