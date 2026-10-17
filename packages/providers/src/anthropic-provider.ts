@@ -97,7 +97,8 @@ export class AnthropicProvider implements ModelProvider {
 
     const res = await this.doFetch(`${this.config.baseURL}/messages`, init);
     if (!res.ok || !res.body) {
-      throw new ModelRequestError(res.status, await safeText(res));
+      const body = await safeText(res);
+      throw new ModelRequestError(res.status, body, anthropicErrorHint(res.status, body));
     }
 
     const blocks = new Map<number, OpenBlock>();
@@ -387,6 +388,27 @@ function toWireTool(tool: ToolDefinition): Record<string, unknown> {
     description: tool.description,
     input_schema: tool.parameters,
   };
+}
+
+/**
+ * An actionable hint for the non-2xx errors a misconfiguration produces, so the
+ * TUI says which setting to fix instead of only echoing the API's error body.
+ * Returns undefined when there is nothing specific to suggest.
+ */
+export function anthropicErrorHint(status: number, body: string): string | undefined {
+  let type: unknown;
+  try {
+    type = (JSON.parse(body) as { error?: { type?: unknown } }).error?.type;
+  } catch {
+    return undefined;
+  }
+  if (status === 404 && type === "not_found_error") {
+    return "check the model id: set model.model in config.jsonc or TENTACLE_MODEL (e.g. claude-opus-5-5)";
+  }
+  if ((status === 401 || status === 403) && type === "authentication_error") {
+    return "check the API key: set model.apiKeyCommand / model.apiKey in config.jsonc or TENTACLE_MODEL_API_KEY";
+  }
+  return undefined;
 }
 
 async function safeText(res: Response): Promise<string> {
