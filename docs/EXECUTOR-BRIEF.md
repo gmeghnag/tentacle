@@ -14,7 +14,13 @@ You are executing exactly ONE task in this repository: **`<type>/<slug>`**.
 1. `AGENTS.md` — especially §0 (hard stop / anti-loop rules), §4 (verification),
    §9 (writing tests), §10 (task workflow). You do not already have it in memory.
 2. The task doc `docs/<type>/<slug>.md` — its **Context** and **Implementation**
-   are your source of truth. Open only the files the Implementation names.
+   are the plan, to be verified against the code (not trusted). Open only the
+   files the Implementation names.
+
+**Reproduce first** (before any edit): run the Context's **Repro** (or write the
+smallest one) on current `main` and record its output in Execution. For a feat,
+show the capability is actually missing. If it does not reproduce, **STOP and
+report** — the task may be stale or wrong.
 
 **While working:**
 - Work only on the task's branch. Keep edits minimal and faithful to the
@@ -24,7 +30,8 @@ You are executing exactly ONE task in this repository: **`<type>/<slug>`**.
   found. Never retry with guessed text (that is the `fs_edit`-corruption loop
   §0 forbids).
 - For a fix: write the regression test and show it **RED on the buggy code
-  first** (§9), then make it green. A test green on both proves nothing.
+  first** (§9), then make it green. A test green on both proves nothing; it must
+  be red **on the assertion of the property**, not on an import/compile error.
 - Follow the Implementation's order; run the **narrow** test file per slice (§4),
   not the whole suite.
 
