@@ -7,8 +7,9 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 import type { SlashCommand } from "../commands.ts";
+import { accentHex } from "../theme.ts";
 
-const ACCENT = "#d77757";
+const ACCENT = accentHex;
 
 export function CommandPalette({
   commands,

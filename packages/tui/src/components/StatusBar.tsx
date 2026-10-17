@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 import type { TokenTotals } from "../state.ts";
+import { accentHex } from "../theme.ts";
 
 function shortCwd(cwd: string): string {
   const home = process.env.HOME;
@@ -91,7 +92,7 @@ export function StatusBar({
           line the hint truncates, the model id stays readable. */}
       <Box flexShrink={1} minWidth={0}>
         {autoApprove ? (
-          <Text color="#d77757" wrap="truncate-end">
+          <Text color={accentHex} wrap="truncate-end">
             {" ⏵⏵ auto-accept on "}
           </Text>
         ) : (

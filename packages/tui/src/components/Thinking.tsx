@@ -1,14 +1,15 @@
 import { Box, Text } from "ink";
 import { type ReactElement, useEffect, useState } from "react";
 import { useElapsed } from "../hooks.ts";
+import { accentHex } from "../theme.ts";
 
 // Braille spinner frames: all render at a uniform width-1 cell, so the label
 // next to it never shifts (the sparkle glyphs jitter — their rendered width
 // varies by terminal).
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 const FRAME_MS = 80;
-// Claude brand orange, as a hex Ink understands.
-const CLAUDE = "#d77757";
+// Brand accent (single-sourced in theme.ts), as a hex Ink understands.
+const CLAUDE = accentHex;
 
 export function Thinking({
   since,

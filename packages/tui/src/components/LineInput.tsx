@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 import { inputRender } from "../input-view.ts";
+import { accentHex } from "../theme.ts";
 
 /**
  * The prompt input renderer: a dumb view over the rows computed by
@@ -10,7 +11,7 @@ import { inputRender } from "../input-view.ts";
  * All editing lives in `App`'s key handler, so no control key (Ctrl+O, mouse
  * reports, …) can ever be echoed into the buffer.
  */
-const CLAUDE = "#d77757";
+const CLAUDE = accentHex;
 
 export function LineInput({
   value,
