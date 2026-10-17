@@ -103,7 +103,7 @@ silence for every model round between tool calls.
   of the daemon already streams: each yielded event becomes a `session/update`
   to the TUI, which is why the 6,480 events burst out at once.
 - **Cancel is lost on both sides:**
-  - `ChatRequest.signal` (`core/src/model.ts:34`) is not carried by
+  - `ChatRequest.signal` (`core/src/model.ts:53`) is not carried by
     `toWireRequest` (`proxy-model.ts:15-42`), and `ProxyModelProvider` ignores it;
   - `RemoteClient.onModelStream` calls the local provider with no signal;
   - the peer has no request cancellation at all: `RpcPeer.request(method,
@@ -238,3 +238,85 @@ recommended. The Implementation must still re-verify every cite.
 - "Protocol changes are additive": two new notifications and one new method;
   no existing schema changes.
 - "Model stays on the laptop": unchanged.
+
+### Review #2 — fresh-context, different model
+
+*— claude-fable-5-1, 2026-10-17*
+
+**Verdict: APPROVE-WITH-NITS → PROMOTE to `fix/pod-model-streaming`.** The root
+cause is correct, the two-primitive design is sound, and the four central
+attacks (reordering under concurrent dispatch, fallback against old peers,
+silent-drop, other consumers) all pass. Findings are a wrong line number and two
+implementation cautions the promoted fix must honour — none change the verdict.
+
+**Premise table:**
+
+| Premise | Cite | Verdict |
+|---|---|---|
+| `onModelStream` collects all events, returns `{ events }` | `client/src/remote-client.ts:166-175` | TRUE (method is 165-174) |
+| `ProxyModelProvider.stream` awaits send, then yields | `daemon/src/proxy-model.ts:50-55` | TRUE |
+| `toWireRequest` drops the signal | `daemon/src/proxy-model.ts:15-42` | TRUE (no signal field) |
+| `ChatRequest.signal` exists | `core/src/model.ts:34` | **FALSE line**: signal is `model.ts:53`; `:34` is `ChatMessage.toolCallId`. Minor |
+| `request` takes no signal; no cancel message | `transport/src/peer.ts:79-108` | TRUE |
+| Laptop `RpcPeer` has no `onError` (unknown notif dropped silently) | `client/src/remote-client.ts:64` | TRUE (only `onNotification`+`onRequest` wired) |
+| Unknown method → `MethodNotFound` | `transport/src/peer.ts:196` | TRUE |
+| Unknown notification → `reportError`, non-fatal | `transport/src/peer.ts:239-241` | TRUE |
+| Results validated inbound | `transport/src/peer.ts:276-286` | TRUE |
+| `ModelStreamParamsSchema` is `.strict()` | `protocol/src/model.ts:54` | TRUE; `ModelStreamResultSchema` is also `.strict()` (`:58-60`), so the "a new field on the result breaks an old peer" claim is TRUE too |
+| Responses resolve synchronously; requests/notifs are `void` | `transport/src/peer.ts:184-191` | TRUE |
+| `attach` skips the binary when `--version` preflight passes | `cli/src/pod-runtime.ts:400-417` | TRUE |
+| `serve`/`connect` run the model inside the daemon | `cli/src/serve.ts:27-31` (`startDaemon`, no proxy) | TRUE |
+
+**Attacks tried:**
+1. *Can the final result be processed before the last `$/progress` under the
+   peer's concurrent dispatch, truncating the reply?* — **No.** All frames ride
+   ONE ordered channel; `receive()` classifies them synchronously
+   (`peer.ts:183-191`), so the `$/progress` frames (sent before the result on the
+   laptop, which flushes on stream-end) dispatch before the response resolves.
+   The design's count-based completion ("end only when the result arrived AND all
+   `N` chunks yielded in `seq` order") is a correct belt-and-suspenders even if a
+   handler yielded. PASSES.
+2. *Does `MethodNotFound` fallback actually work against an old daemon / old
+   laptop given strict schemas + inbound result validation?* — **Yes.** A new
+   method `model/streamChunked` is absent from an old laptop's registry, so
+   `isMethodName` is false → `MethodNotFound` (`peer.ts:195-196`); the daemon
+   falls back to today's `model/stream`. Inbound result validation only fires for
+   *known* methods, and no existing strict schema is touched. A new laptop keeps
+   serving `model/stream` for old daemons. PASSES.
+3. *Any silent drop or synthesized/truncated state?* — **No synthesis.** `seq`
+   gap/dup and count mismatch are loud errors (fail-loud, good). The one
+   fail-silent surface: `$/cancelRequest` is received by the laptop peer, which
+   has no `onError`; if the Implementation forgets to wire its handler the cancel
+   silently no-ops. The listed test "cancel reaches the laptop provider's signal"
+   covers it. `$/progress` is consumed daemon-side, where `onError` *is* wired
+   (`connection.ts:75`), so a bad progress frame is logged. PASSES.
+4. *Does anything besides `ProxyModelProvider` consume `model/stream` (e.g.
+   `/compact`)?* — grep: only `connection.requestModelStream` →
+   `ProxyModelProvider`. Compaction (`agent/src/compact.ts:63`) calls
+   `model.stream(...)` through the *same* provider, so the async-queue redesign
+   covers it. One caution (below). PASSES.
+
+**Findings:**
+1. NIT: `ChatRequest.signal` cite `core/src/model.ts:34` is wrong — it is
+   `:53`.
+2. IMPLEMENTATION CAUTION: the summarize/compaction sub-call builds its own
+   `ChatRequest` (`compact.ts`) and flows through the redesigned
+   `ProxyModelProvider`. Confirm it still terminates cleanly through the queue
+   (it has no `signal`, which is fine, but the queue must not block waiting for a
+   cancel path that never arrives).
+3. IMPLEMENTATION CAUTION: coalescing must flush the final events **before** the
+   method's result frame is sent, so the channel's ordering guarantee (progress
+   before result) holds; the count check then verifies completeness. The plan
+   says this ("flush on stream end and on error") — keep it load-bearing.
+
+**Simpler design considered:** reuse `model/stream` + `$/progress` without a new
+method. Rejected for the same reason the author gives: the laptop cannot detect a
+new vs old daemon, so it would either double-send (progress + full batch) or need
+a field on the `.strict()` result. The new-method probe is the correct additive
+choice, and the generic `$/progress`/`$/cancelRequest` primitives are rightly
+reused by pieces 2 and 3.
+
+**Not independently re-run:** `e2e-attach.ts` (47 s claim). The single-slot local
+LLM makes it a ~50 s run, and the symptom is structurally entailed by
+`onModelStream` collecting all events before replying — the code fully supports
+the measured number, so I did not spend the budget on it.

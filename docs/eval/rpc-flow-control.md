@@ -284,3 +284,73 @@ Ping delay behind 5 MB, ranges across all runs:
 - the cost of the ack round trips on a high-latency link, beyond this one;
 - whether W should adapt dynamically. The proposal is fixed W=2 first, and to
   measure before adding any adaptivity.
+
+### Review #2 — fresh-context, different model
+
+*— claude-fable-5-1, 2026-10-17*
+
+**Verdict: APPROVE-WITH-NITS → PROMOTE to `feat/rpc-flow-control` after
+`fix/pod-model-streaming`.** I re-ran `rtt.ts` and `chunked.ts` against the same
+pod; every qualitative conclusion reproduced. The priority-lane design is
+compatible with §7.
+
+**Re-run (2026-10-17, from `.tentacle/tmp/fable-review/`, pod `ubi9-sleep`, ns
+`tentacle`):**
+```
+# rtt.ts
+open + first echo: 264.3ms
+small RTT x100: p50 49.9ms · p95 123.5ms · p99 269.3ms · max 269.3ms
+1 MB frame echo: 2861.5ms (≈5.6 Mbit/s round-trip) · ping queued behind it: 2861.2ms
+5 MB frame echo: 6305.3ms (≈12.7 Mbit/s round-trip) · ping queued behind it: 6301.3ms
+# chunked.ts
+A burst  : ping 1167ms · 5 MB total 3517ms
+B paced W=1: ping 162ms · 5 MB total 2918ms
+B paced W=2: ping 117ms · 5 MB total 2409ms
+B paced W=4: ping 234ms · 5 MB total 4941ms
+```
+The link was ~2× slower than the doc's clean run (5.6/12.7 vs 12/21.5 Mbit/s),
+which matches finding 5 ("throughput varies 2–3×"). The *structural* claims held
+exactly:
+- Head-of-line blocking: the ping waits the **entire** transfer (2861/2861,
+  6301/6301). Confirmed decisively.
+- Chunking alone (A) is insufficient (ping 1167 ms).
+- End-to-end window (B) bounds the control wait; **W=2 is the sweet spot**
+  (117 ms here, lowest of all), W=4 worse for control. Confirmed.
+
+**Condensed premise table:**
+
+| Premise | Cite | Verdict |
+|---|---|---|
+| `request` and `handleRequest` each send one whole frame | `peer.ts:79-108`, result at `:212` | TRUE |
+| binary transfer already gates on `bufferedAmount` | `k8s/src/exec-run.ts:16-35,205-217` | TRUE |
+| `DuplexChannel` has no priority/backpressure | `transport/src/channel.ts:9-18` | TRUE |
+
+**Attacks tried:**
+1. *Are the conclusions an artifact of `cat` echo rather than a real peer?* —
+   `cat` measures the transport round trip (latency + HOL), which is exactly what
+   the flow-control claim is about; direction and payload semantics don't change
+   it. But `cat` does NOT exercise the real peer's `JSON.parse` + schema
+   validation + chunk reassembly on a 5 MB result — so the doc's own "re-run the
+   spike scripts through the real peer" test is necessary, not optional. Nit.
+2. *Does the control-priority lane serialize dispatch (§7)?* — No. It is a
+   send-side (outbound) queue gating only bulk chunks; `session/update`,
+   responses, `$/cancelRequest`, `$/ack`, keepalive bypass it. It adds no
+   await/lock to inbound `handleRequest`/`handleNotification`. The design states
+   this explicitly ("orders outbound bytes, not dispatch"). Compatible.
+3. *Simpler alternative than per-method opt-in chunking?* — A `$/capabilities`
+   probe is strictly more surface; per-method opt-in (only new `tool/call` is
+   ever chunked, old peers never see a chunked result) is simpler and safe. The
+   author chose it. No simpler correct option missed.
+
+**Findings:**
+1. NIT: the "re-run through the real peer" validation step is load-bearing (the
+   `cat` proxy doesn't cover reassembly/validation cost at 5 MB) — keep it in the
+   acceptance list, not optional.
+2. NIT: implementing the outbound queue touches the hot `session/update` send
+   path; the Implementation must prove `session/update` and acks bypass the
+   queue (a test that a stream update is not delayed behind a bulk transfer).
+
+**What holds:** the numbers, the W=2 recommendation, the §7-safe lane framing,
+the fixed-W-before-adaptivity discipline, and the enumerated failure modes
+(lost/dup ack, close mid-transfer, cancel, two-transfer fairness, ack flood,
+MessagePort off).

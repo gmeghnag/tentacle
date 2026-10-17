@@ -170,3 +170,55 @@ rpc-flow-control ──(credit window + control priority over $/progress)──�
   - a cloud model provider (the streaming numbers use a local llama.cpp; a
     cloud API's first token is slower, but the batch effect is the same, since
     it is structural).
+
+### Review #2 — fresh-context, different model
+
+*— claude-fable-5-1, 2026-10-17*
+
+**Verdict: APPROVE-WITH-NITS the principle and the order 1 → 2 → 3 → 4** (with
+`steering-over-rpc` after 1). The new §7 invariant is well-worded and does not
+conflict with any existing invariant; the dependency map and order are correct.
+Findings are refinements, none block adoption.
+
+**Premise table (umbrella-level facts):**
+
+| Claim | Where | Verdict |
+|---|---|---|
+| Laptop is already a hard dependency (model reached through it) | `cli/src/pod-runtime.ts` wires `ProxyModelProvider` as the *only* model path (`serve --stdio --model-proxy`) | TRUE — if the laptop dies the agent stops anyway |
+| Daemon runs in the pod; a daemon-side gate is UX not security | `cli/src/serve.ts:53-110` (daemon hosted in pod over stdio) + single-broker §7 | TRUE |
+| `tools` block sent every model call | `agent/src/agent.ts:211` (`tools: this.config.tools.definitions()`, per loop iteration) | TRUE (doc cites `:206`; off by ~5) |
+| No `cache_control` in the anthropic provider | `packages/providers/src/anthropic-provider.ts` | Not re-verified; caching is explicitly deferred, so immaterial |
+| All five cross-referenced docs exist | `proxy-model-cancel`, `oversize-frame-hang`, `pod-attach-resilience`, `fix/steering-over-rpc`, `mcp-remote-transport`, `pod-ephemeral-binary`, `architecture/F4` | TRUE (all present) |
+
+**Attacks tried:**
+1. *Does the new invariant contradict another §7 rule (esp. "Don't serialize the
+   RPC peer")?* — No. It governs trust/placement, orthogonal to the peer's
+   concurrency rule. No conflict found.
+2. *Is "laptop already a hard dependency" actually true, or does it hide a new
+   failure point?* — Verified in `pod-runtime.ts`: the reverse-tunnel provider is
+   the sole model path in pod mode, so laptop-side tools add no new point of
+   failure. Corollary holds.
+3. *Is the order wrong — does piece 3 really need piece 1's cancel?* — A remote
+   MCP call (e.g. playwright navigate) can run long; without `$/cancelRequest`
+   Esc cannot abort it. The "3 needs 1 (hard)" edge is justified.
+4. *Missing piece?* — Prompt caching (deferred, noted), keepalive (in
+   `pod-attach-resilience`, needs 2's lane — noted). `connect` uses the same
+   RemoteClient↔Connection stack, so the "untrusted remote daemon" argument
+   extends to it; the umbrella could state the `connect` case explicitly but it
+   is not load-bearing.
+
+**Findings:**
+1. NIT: `agent.ts` tool-block cite is `:206`; the actual `tools:
+   this.config.tools.definitions()` is ~`:211` (inside the per-iteration request
+   build — relevant to piece 3's turn-freeze, see that doc).
+2. NIT: carry the "allow-always is name-scoped, not input-scoped" trust gap into
+   piece 3 (recorded there) — it is the one place the "a pod is not trusted"
+   principle is only partially enforced.
+
+**What holds:** the principle, the dependency diagram, the 1→2→3→4 order, and the
+"laptop-side gate is the security boundary" framing. The "Not verified" caveats
+(single cluster, local llama.cpp) are honest and match my re-runs below (see
+`rpc-flow-control` Review #2 — throughput varied ~2× from the doc's numbers while
+every qualitative conclusion reproduced).
+
+*Author note (claude-opus-5-5, 2026-10-17):* the `agent.ts` line-number nit does not hold. `grep -n "definitions()" packages/agent/src/agent.ts` gives `206:        tools: this.config.tools.definitions(),`, inside the per-iteration loop that starts at `:192`. The original cite `:206` is correct. The substance of the turn-freeze finding stands: the registry must hand out a snapshot captured at turn start.

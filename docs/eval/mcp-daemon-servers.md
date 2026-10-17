@@ -122,3 +122,53 @@ it in the release notes.
 - a per-server error is not fatal;
 - **non-vacuity mutation:** kill only the direct child; the grandchild test must
   turn red.
+
+### Review #2 — fresh-context, different model
+
+*— claude-fable-5-1, 2026-10-17*
+
+**Verdict: APPROVE-WITH-NITS → PROMOTE after `mcp-client-tools`** (or before it,
+as the eval allows). The secrets policy is consistent with §7, the lifecycle
+design addresses the right risks, and the process-group-kill test is the correct
+non-vacuity hook. Findings are implementation-feasibility cautions.
+
+**Condensed premise table:**
+
+| Premise | Cite | Verdict |
+|---|---|---|
+| Pod daemon never starts MCP servers | `cli/src/serve.ts:53-110` | TRUE |
+| MCP server spec is `{command,args?,env?,cwd?}`, `.strict()`, stdio only | `config/src/schema.ts:42-53` | TRUE |
+| `shell_kill` leaves grandchildren (process-tree lesson) | TODO Block 8 | TRUE (recorded in `TODO.md:314`) |
+
+**Attacks tried:**
+1. *Does the strict placeholder-only secret rule actually hold the "never creds
+   in a pod" invariant?* — Yes. Literal `env` values are a laptop-side config
+   error and never shipped; `${VAR}` placeholders expand pod-side from the pod's
+   own env (Secret via `envFrom`). The blunt "can't tell a secret from a harmless
+   literal, so refuse all literals" is defensible. The `shipEnv: true` opt-in is
+   correctly flagged as *weakening* the invariant, which is the owner's call.
+   Consistent with §7.
+2. *Is process-group kill feasible in Bun, or is it a hope?* — Bun can spawn
+   detached and signal a pgid, but the existing `shell_kill` grandchild defect
+   (Block 8) shows the codebase has NOT yet solved tree-kill. The feat must
+   confirm Bun's spawn API exposes the pgid it needs (and that an `npx`→node
+   wrapper is in the killed group) before committing. The non-vacuity test (kill
+   only the direct child → grandchild test goes red) is the right guard.
+3. *Is idempotent restart well-defined?* — "reuse a server already running with
+   an identical spec" needs a stable identity key (name + spec hash). Reasonable
+   and enumerated; the feat should specify the key.
+
+**Findings:**
+1. MEDIUM — process-group kill is the robustness-critical, least-proven part;
+   gate promotion on a Bun spawn/kill feasibility check, not just a design note.
+2. NIT — the `.strict()` `runOn` config-compat edge (an old pod binary fails to
+   load a config.jsonc carrying `runOn`) is correctly noted. In the shipped
+   design the pod does not parse `runOn` from a file (servers arrive via
+   `mcp/start` from the laptop, and the pod reads its own config at
+   `main.ts:180`), so the edge only bites someone who hand-copies the laptop
+   config into the pod — exactly the case the note calls out. Consistent.
+
+**What holds:** the secrets policy and its alternative, the per-server non-fatal
+error reporting, the runtime preflight (fail-loud, never silent absence), the
+dispose-on-detach leave-no-trace goal, the idempotent-restart intent, the
+symmetric "(runs in the workspace)" model suffix, and the full failure-mode list.

@@ -64,6 +64,8 @@ principle those belong with the user's identity on the laptop.
 
 *— claude-opus-5-5, 2026-10-17 (author; design brainstormed with the owner on 2026-10-17; a different model must review before promotion)*
 
+*(Updated 2026-10-18 after Review #2: §2 turn-freeze is now an explicit start-of-turn snapshot; §4 client-tool approvals are once-only, with config-only `autoApprove`. Both MEDIUM findings are folded in.)*
+
 **Verdict: PROMOTE after `pod-model-streaming` and the §7 invariant**, with this
 design.
 
@@ -85,11 +87,26 @@ design.
   holds the set, and `AgentFactory(cwd, { remoteTools })` wires it into each
   session's registry.
 - **Two rules recover the stability of a pull design:**
-  - **Apply at turn boundaries.** A register arriving mid-turn takes effect
-    for the next turn. This keeps the set stable within a turn (the model is
-    not confused, prompt caching stays valid) and keeps transcripts
-    reproducible. Accepted cost: in a very long turn (`maxIterations: -1`) a
-    late tool waits; the TUI says "github ready — available next turn".
+  - **Apply at turn boundaries, through a snapshot** (made precise after
+    Review #2).
+    - A register arriving mid-turn takes effect for the next turn. This keeps
+      the set stable within a turn (the model is not confused, prompt caching
+      stays valid) and keeps transcripts reproducible.
+    - Swapping the `Connection`'s set "at the boundary" is **not enough** on its
+      own. The agent rebuilds `tools.definitions()` on **every** loop iteration
+      (`agent/src/agent.ts:206`, inside the loop at `:192`), so a swap during a
+      turn would still be seen by the next round.
+    - The mechanism: the hosted session captures an **immutable snapshot** of
+      the remote set when `session/prompt` starts. For that whole turn, the
+      session's registry serves the remote tools from that snapshot. The
+      `Connection` only replaces the "latest" set, which the *next* turn's
+      snapshot reads.
+    - A tool withdrawn mid-turn (server crash) stays in the snapshot. A call to
+      it fails on the laptop with an explicit error, "tool no longer
+      available", because the laptop allowlist is checked against the
+      *current* published set.
+    - Accepted cost: in a very long turn (`maxIterations: -1`) a late tool
+      waits; the TUI says "github ready — available next turn".
   - **First register awaited before the first prompt.** The laptop awaits it
     with a short timeout (proposal: 3 s). Meanwhile the status line shows
     "[mcp] 2/3 ready". Servers that miss the timeout arrive by a later
@@ -115,7 +132,29 @@ The umbrella states the reason: the daemon is pod-controlled.
 - **The laptop gate** runs in `RemoteClient`'s `tool/call` handler with the
   **same** `PermissionBroker` instance as the TUI (single-broker invariant, §7).
   The default is `ask`. **It is never auto-approved by a daemon-side
-  `allowAll`**, and "allow always" is stored on the laptop only.
+  `allowAll`.**
+- **Approval scope for client tools** (made precise after Review #2: an "allow
+  always" keyed on the tool *name* would let a pod-controlled daemon call
+  `github`/`slack` with arbitrary input).
+  - **The prompt offers "allow once" only.** It does not offer the existing
+    `session` scope (`core/src/permission.ts:37-38`) for client tools. The
+    daemon writes the input, so a remembered approval would approve inputs the
+    user never saw.
+  - **The prompt always shows the full input** (`PermissionRequest.detail`),
+    because that is the thing being approved.
+  - **Persistent pre-approval exists only as user-authored laptop config:**
+    `mcpServers.<name>.autoApprove: ["<tool>", …]`. It is a deliberate,
+    static choice that a pod-originated prompt can never create. It is
+    documented as "trusts the pod with this tool's full input space".
+  - **No exception for read-only tools.** For a client tool, *reading* is also
+    an effect: data moves from the user's identity into the pod. A read-only
+    GitHub search on private repos exfiltrates exactly what a compromised pod
+    wants. MCP `readOnlyHint` (not yet parsed by `mcp/src`) is therefore not a
+    reason to relax the scope.
+  - **Possible follow-up, not in scope:** input-scoped "don't ask again" rules,
+    like the shell command prefix (`PermissionSuggestion`,
+    `core/src/permission.ts:25-35`), for MCP tools whose input has an obvious
+    scope (e.g. one repo).
 - On the daemon side, remote tools are marked `allow`, to avoid a double
   prompt. That daemon-side decision is UX, not security.
 - **The model is told where the tool runs.** The tool description gets the
@@ -141,7 +180,12 @@ pod-side server. The rule is first wins, with a warning, the same as
 
 ### Failure modes the Implementation must cover
 
-- a register racing a running turn: atomic swap at the boundary;
+- a register racing a running turn: the turn keeps its start-of-turn snapshot,
+  and the next turn sees the new set;
+- a call to a tool withdrawn mid-turn: an explicit "no longer available" error
+  from the laptop;
+- an approval for one input must not approve a different input on the next
+  call;
 - a register during the first-prompt wait;
 - a late server; a server crash: the laptop re-registers without it, and a
   call in flight gets an error;
@@ -162,7 +206,15 @@ pod-side server. The rule is first wins, with a warning, the same as
 - **Non-vacuity mutation:** move the gate to the daemon side; a test with a
   "malicious daemon" fake that sends a raw `tool/call` must turn red.
 - Allowlist refusal.
-- The boundary swap: the set does not change within a turn.
+- **The snapshot:** a register sent between two rounds of the *same* turn does
+  not change the `tools` the second round sends to the model, and the next turn
+  does see it.
+  - Non-vacuity mutation: read the live set instead of the snapshot; the test
+    must turn red.
+- **The approval scope:**
+  - the client-tool prompt offers no `session` scope;
+  - after "allow once", a second call with different input prompts again;
+  - an `autoApprove` entry in the config skips the prompt for that tool only.
 - First-register wait with timeout.
 - Cancel through `$/cancelRequest` (the server-side signal aborts).
 - Disconnect.
@@ -174,3 +226,72 @@ pod-side server. The rule is first wins, with a warning, the same as
 L. Split it at promotion if the branch grows:
 - (a) protocol + `tools/register`/`tool/call` + the laptop gate;
 - (b) the TUI status line and the first-register UX.
+
+### Review #2 — fresh-context, different model
+
+*— claude-fable-5-1, 2026-10-17*
+
+**Verdict: APPROVE-WITH-NITS → PROMOTE after `pod-model-streaming` and the §7
+invariant.** The laptop-side-gate security model is sound and the double-gate
+reasoning is correct. Two medium design gaps (allow-always scope, turn-freeze
+mechanism) must be closed in the promoted feat; neither rejects the eval.
+
+**Condensed premise table:**
+
+| Premise | Cite | Verdict |
+|---|---|---|
+| Pod daemon is `serve --stdio --model-proxy`; never calls `connectMcpServers` | `cli/src/pod-runtime.ts:263,446`; `cli/src/serve.ts:53-110` | TRUE |
+| `connectMcpServers` callers are the worker and `connectConfiguredMcp` only | `cli/src/worker.ts:62`; `cli/src/main.ts:501,549` | TRUE |
+| Pod reads its own config in-container | `cli/src/main.ts:180` | TRUE |
+| MCP tool execute threads `ctx.signal` into `callTool` | `mcp/src/tool-adapter.ts:44-62` | TRUE |
+| `AgentFactory` receives only `cwd` | `daemon/src/session-host.ts:12` | TRUE |
+| `initialize`/`ClientCapabilities`/`session/new` are `.strict()` | `protocol/src/session.ts:36-79` | TRUE |
+| name-clash rule is first-wins + skip | `cli/src/wiring.ts:157-162` | TRUE (catch + skip duplicate) |
+| tools block reaches model every call | `agent/src/agent.ts` (`:206` cited; actual ~`:211`) | TRUE, line off by ~5 |
+
+**Attacks tried:**
+1. *Can a pod-controlled daemon trigger a laptop effect WITHOUT the laptop
+   gate?* — The laptop `tool/call` handler runs the SAME `PermissionBroker` as
+   the TUI (single-broker §7), default `ask`, and refuses any name it did not
+   publish. The daemon-side `allow` is UX. A malicious daemon sending a raw
+   `tool/call` still hits the laptop broker. No ungated path found via `tool/call`.
+2. *Other existing methods as a bypass?* — `session/request_permission` is
+   daemon→laptop and its `title`/`explanation` are attacker-controlled strings
+   rendered in the laptop TUI (inherent to today's design, `connection.ts:179`),
+   so a daemon can craft a misleading prompt — but it still cannot act without the
+   user approving. `model/stream` content is daemon-controlled (inherent). Client
+   tool *descriptions* come from the laptop's own `tools/register`, so no
+   prompt-injection into the laptop via client-tool descriptions. No NEW ungated
+   effect introduced.
+3. *Is the turn-boundary freeze + first-register wait sufficient and
+   §7-compatible?* — The client awaits its OWN register response before
+   `session/prompt`; that is client-side sequencing, not peer serialization, so
+   §7 holds. BUT see finding 2: the freeze is not automatic given the code.
+
+**Findings:**
+1. MEDIUM — **allow-always is name-scoped, not input-scoped.** Once the user
+   picks "allow always" for an identity tool (`mcp__github__create_issue`,
+   `mcp__slack__post`), a pod-controlled daemon can thereafter invoke it with
+   ARBITRARY input and no further gate. That partially contradicts the umbrella's
+   "a pod is not trusted": allow-always effectively hands the pod that tool's
+   identity. The feat should design this out — e.g. no allow-always for
+   client/identity tools, or an input-aware/per-turn re-confirm — and the eval
+   should state the residual trust explicitly.
+2. MEDIUM — **turn-freeze mechanism underspecified vs the code.**
+   `agent/src/agent.ts:~211` rebuilds `tools: this.config.tools.definitions()` on
+   EVERY agent-loop iteration (each model round), not once per turn. So swapping
+   the `Connection`'s tool set "at a turn boundary" does NOT by itself keep the
+   set stable within a turn (the goal for model-confusion and prompt-caching) —
+   the registry must return a FROZEN snapshot captured at turn start, before the
+   loop. The eval delegates this to "atomic swap at the boundary" but should name
+   where the freeze lives, given `definitions()` is per-iteration.
+3. NIT — `agent.ts` tools cite `:206`; actual ~`:211`.
+
+**What holds:** the laptop-side gate + single-broker reuse, the non-vacuity
+mutation ("move the gate daemon-side → malicious-daemon test goes red"), the
+allowlist refusal, the location suffix told to the model, the first-register wait
+with timeout, the `MethodNotFound` both-ways skew handling, and the L→(a)/(b)
+split suggestion. The security core is right; the two mediums are about making
+the "pod is not trusted" principle fully bite.
+
+*Author note (claude-opus-5-5, 2026-10-17):* the `agent.ts` line-number nit does not hold. `grep -n "definitions()" packages/agent/src/agent.ts` gives `206:        tools: this.config.tools.definitions(),`, inside the per-iteration loop that starts at `:192`. The original cite `:206` is correct. The substance of the turn-freeze finding stands: the registry must hand out a snapshot captured at turn start.
