@@ -13,7 +13,7 @@ and Review (the judgment); Notes/debt → Review (+ follow-ups).
 # <type>/<slug> — <Title>
 
 > **Status:** context · implementation · execution · review · done
-> **Branch:** `<type>/<slug>`
+> **Branch:** `<type>/<slug>` — `feat`/`fix` only; an `eval` has **no branch** (committed directly to `main`, see AGENTS §10)
 > **Size:** S | M | L · **Blast:** contained | cross-module | load-bearing · **Suited:** <who executes + review level>
 
 <!--

@@ -95,15 +95,58 @@ still applying to evals) — done in Review.
 
 ## Execution
 
-*— <executor model-id>, <date>*
+*— claude-opus-4-8, 2026-10-17*
 
-<!-- The AGENTS.md edits + the TASK-TEMPLATE note, as applied; the §10
-"branch" grep result; gate; any drift. -->
+All seven §10 spots fixed, plus the template:
+
+1. **Header** → "(one task, one living doc)".
+2. **Intro** → states the two shapes: feat/fix = code + branch; eval = decision
+   record, no code, direct to `main`.
+3. **One-at-a-time** → "One **code** task at a time … ONE **code-task** branch";
+   evals explicitly don't count and any number may be open.
+4. **eval folder + promotion** → "carries no code, committed directly to `main`,
+   no branch"; promotion = `git mv` to feat|fix **and open the code branch then**
+   (was "rename the branch", which assumed one existed).
+5. **Branch ↔ doc** → scoped "(`feat`/`fix` only)"; eval has only its doc on
+   `main`.
+6. **Lifecycle** → split: feat/fix Context→…→merge; **eval** = Context + Review
+   verdict, straight to `main`, no merge.
+7. **Carve-out** → inclusion now lists **`eval` docs**; exclusion (a) scoped to
+   **feat/fix** task docs ("an `eval` doc does **not**" ride a branch). Killed the
+   overlap the owner hit.
+- `docs/TASK-TEMPLATE.md` — the `Branch:` line notes it is feat/fix only; an eval
+  has no branch.
+
+**Drift:** none — exactly the Files list.
+
+**Verification:** grep of §10 for `branch` — every remaining use is either
+feat/fix-scoped or an explicit "eval has no branch" (the one "one legible branch"
+in the Size axis is about a too-big code task → split, correct as-is). `bun run
+check` → green, 646 pass / 1 skip / 0 fail (Markdown-only edit).
 
 ## Review
 
-*— <reviewer model-id>, <date>*
+*— claude-opus-4-8, 2026-10-17 (same-model, in-context — contained/S docs)*
 
-<!-- Re-read §10 end to end: is every "branch"/"one at a time" clause now scoped
-to feat/fix? Is the eval→direct-to-main path stated in each relevant place? Does
-the carve-out's exclusion (a) no longer collide with eval docs? Gate green. -->
+**Verdict: APPROVE.**
+
+1. **§10 re-read end to end:** every "branch" / "one at a time" clause is now
+   scoped to `feat`/`fix`, and the eval→direct-to-`main` path is stated at each
+   relevant place (intro, one-at-a-time, folder, branch↔doc, lifecycle,
+   carve-out). No clause still implies a branch for evals.
+2. **Carve-out collision resolved:** the inclusion explicitly lists `eval` docs;
+   exclusion (a) is feat/fix-only and says an eval doc does not ride a branch —
+   the two no longer overlap.
+3. **No over-correction:** the eval path keeps its **Review verdict**; only the
+   branch + merge gate are dropped, not the adversarial judgment or the Context.
+4. **Gate:** green, 646 pass / 1 skip / 0 fail; Markdown-only.
+
+**Self-red-team:** the promotion step now says "open the code branch then" —
+consistent with "feat/fix has a branch". One residual: an eval that was *already*
+direct-on-main, when promoted, needs its doc `git mv`-d onto the new feat/fix
+branch; that is the normal "doc rides the code branch" rule, so no special case
+needed. No fix outstanding.
+
+**Note:** `eval/changelog-discipline` (already on `main`) retroactively conforms
+— it is a direct-to-`main` eval record now; the branch it was created on was
+unnecessary but left no trace beyond an extra merge commit.
