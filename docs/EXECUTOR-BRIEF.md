@@ -18,7 +18,8 @@ You are executing exactly ONE task in this repository: **`<type>/<slug>`**.
    files the Implementation names.
 
 **Reproduce first** (before any edit): run the Context's **Repro** (or write the
-smallest one) on current `main` and record its output in Execution. For a feat,
+smallest one) on current `main`, in `.tentacle/tmp/<slug>/` (AGENTS §6), and
+record its output in Execution. For a feat,
 show the capability is actually missing. If it does not reproduce, **STOP and
 report** — the task may be stale or wrong.
 
