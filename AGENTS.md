@@ -93,9 +93,10 @@ style suggestions.
   `core`, `daemon`, `exec`, `k8s`, `mcp`, `protocol`, `providers`, `tools`,
   `transport`, `tui`), TypeScript strict, Biome. **Bun ≥ 1.4.3 required**
   (`engines.bun`; the compiled-binary worker path needs it — see the TODO entry).
-  - `bun test` — full suite. **Baseline 540 pass / 1 skip on 2026-10-16**
-    (re-check; the single skip is the opt-in live-k8s test — it is NOT a
-    failure). Don't trust a pinned number blindly; run it.
+  - `bun test` — full suite. **Baseline: all pass except the single opt-in
+    live-k8s skip** (that skip is NOT a failure). The total grows with every
+    task, so no exact count is pinned here — it only goes stale; run it, and any
+    *new* fail (or a non-opt-in skip) is yours.
   - `bun run typecheck` — `tsc --noEmit`.
   - `bun run lint` — `biome check .` (checks TS/JS/JSON; not Markdown).
   - `bun run check` — typecheck **then** lint **then** test, in order (a
