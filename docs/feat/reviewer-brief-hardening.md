@@ -1,6 +1,6 @@
 # feat/reviewer-brief-hardening — make the reviewer brief operational, not aspirational
 
-> **Status:** review
+> **Status:** done — merged 2026-10-17
 > **Branch:** `feat/reviewer-brief-hardening`
 > **Size:** S · **Blast:** contained (one Markdown brief, no code; it shapes how every review agent works, which is why it is a `feat` and not a direct edit, AGENTS §10) · **Suited:** any model executes; standard Review
 
