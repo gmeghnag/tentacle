@@ -1,9 +1,10 @@
 import type { PermissionRequest } from "@tentacle/core";
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
+import { accentHex } from "../theme.ts";
 
-// Accent blue (matches the theme's `accent`), used for the frame + selection.
-const ACCENT = "#6377ff";
+// Brand accent (matches the theme's `accent`), used for the frame + selection.
+const ACCENT = accentHex;
 
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;

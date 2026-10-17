@@ -563,6 +563,20 @@ Daily-driver work (done 2026-10-14):
         no-delete, `podCreateError` vs `containerExecError`), so a shared-core
         extraction with lifecycle hooks is the only clean de-duplication;
         not worth it for this feature.
+- [x] **TUI brand accent → cyan, single-sourced** (`docs/feat/tui-brand-color.md`,
+      2026-10-17): for the public MIT release the TUI drops the Anthropic
+      trade-dress orange `#d77757` and the permission blue `#6377ff` for one
+      distinctive cyan `#06b6d4`, and the colour stops drifting — a new
+      `accentHex` constant in `packages/tui/src/theme.ts` is the ONE source both
+      colour paths read (chalk `theme.accent = chalk.hex(accentHex)`, `claude`
+      token removed; the 5 Ink components import `accentHex`). Grep-guard: zero
+      old-hex under `packages/tui/src`; new `theme.test.ts` (red first,
+      mutation-verified); `bun run check` 635 pass / 1 skip / 0 fail; fresh-
+      context review APPROVE.
+      Type: feat · Size: M · Blast: cross-module · Suited: Phase 1 → weaker
+      model; Phase 2 (below) → load-bearing, strong model, SEPARATE task.
+      Follow-up (Phase 2, not done): `theme` config `auto|dark|light` + an
+      OSC-11 terminal-background probe before Ink mounts.
 - [ ] **Skills support** — packaged procedural guidance the model opts into
       (complementary to the result pipeline: skills = *how to do it*, the pipeline
       = *the guarantee the context stays clean*).

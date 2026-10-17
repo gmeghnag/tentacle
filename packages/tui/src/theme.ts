@@ -3,18 +3,23 @@
  *
  * Tuned for a dark terminal (the common case): diff lines use dark background
  * tints with bright, readable foregrounds, and changed words get a brighter
- * tint on top. Values mirror Claude Code's vocabulary (claude orange, a blue
- * accent, a subtle grey) so the harness feels familiar. chalk auto-disables
- * colour when stdout is not a TTY, so the same strings degrade to plain text in
- * tests and pipes.
+ * tint on top. The brand accent is a single distinctive cyan; chalk
+ * auto-disables colour when stdout is not a TTY, so the same strings degrade
+ * to plain text in tests and pipes.
  */
 import chalk from "chalk";
 
+/**
+ * The single source of truth for the brand accent hex. Both colour paths read
+ * it: the chalk path via `chalk.hex(accentHex)` (theme tokens) and the
+ * component path via its `color=` props. Keep it here — a stray hard-coded hex
+ * anywhere re-scatters the colour.
+ */
+export const accentHex = "#06b6d4";
+
 export const theme = {
-  /** Claude brand orange — assistant bullets, highlights. */
-  claude: chalk.rgb(215, 119, 87),
-  /** Accent blue — in-progress / informational. */
-  accent: chalk.rgb(99, 119, 255),
+  /** Brand accent (cyan) — assistant bullets, in-progress, highlights. */
+  accent: chalk.hex(accentHex),
   /** De-emphasised grey for metadata, context, hints. */
   subtle: chalk.rgb(140, 140, 140),
   success: chalk.rgb(78, 201, 116),

@@ -62,8 +62,8 @@ function assistantLines(text: string): string[] {
   }
   const rendered = renderMarkdown(text).replace(/\n+$/, "");
   const [first = "", ...rest] = rendered.split("\n");
-  // A claude-orange bullet marks the reply; continuation lines hang under it.
-  return [`${theme.claude("⏺")} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
+  // A brand-accent bullet marks the reply; continuation lines hang under it.
+  return [`${theme.accent("⏺")} ${first}`, ...rest.map((l) => `${INDENT}${l}`)];
 }
 
 const HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
