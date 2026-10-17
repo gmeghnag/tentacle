@@ -354,6 +354,20 @@ Daily-driver work (done 2026-10-14):
       back.** Quality-only or a hard 400 in tool loops: undetermined, needs a live
       test. **Eval:** `docs/eval/anthropic-thinking-echo.md`. Type: eval · Size: M ·
       Blast: cross-module.
+- [ ] 🟡 **No retry on a transient model-connection drop** (`ECONNRESET` kills
+      the turn and the sub-agent; only manual `/retry`), and the error log says
+      `(no stack)` with no phase. Recommends retry pre-first-byte only + phase
+      diagnostics. **Eval:** `docs/eval/model-connection-resilience.md`.
+      Type: eval → feat · Size: M · Blast: load-bearing.
+- [ ] 🟡 **`shell_kill` leaves grandchildren running** (only `sh` gets the signal;
+      a compound command's child is re-parented to PID 1). Found during the
+      lifecycle eval — see `docs/eval/daemon-session-lifecycle.md`.
+- [ ] 🟡 **OpenAI provider treats an in-band SSE `{"error":…}` chunk as an empty
+      stream** (HTTP 200, no throw), so callers see a silent empty response (e.g.
+      `/compact` wiping history). See `docs/eval/compact-empty-summary-wipe.md`.
+- [ ] 🟡 **A failed session save crashes the TUI** (`void store.save` rejects →
+      unhandled rejection → exit 1 with a raw stack). See
+      `docs/eval/session-store-durability.md`.
 
 ## Roadmap (ordered)
 
