@@ -40,13 +40,16 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       (leak absent + `PATH` present, `exec` and `spawnBackground`; explicit
       overlay honoured). **Fix:** `docs/fix/shell-env-scrub.md`.
 - [ ] 🔵 **Shared env denylist misses this repo's own pod-TLS vars** (follow-up
-      to the shell-env-scrub fix): `TENTACLE_POD_TLS_KEY` / `_CERT` carry
-      **PEM data** when set inline (`k8s/src/pod-cleanup.ts:81-84`) but do not
-      match `SENSITIVE_KEY` (`core/src/env.ts:11-12`), so they still reach the
-      shell child *and* the MCP child. Pre-existing helper property (both paths
-      expose it equally), not the shell fix's fault — the provider key the
-      original defect names is fixed. Extend the denylist (e.g. `TLS[_-]?(KEY|CERT|CA)`),
-      or document the open-ended-denylist gap. Test in `core/test/env.test.ts`.
+      to the shell-env-scrub fix): `TENTACLE_POD_TLS_KEY` / `_CERT` do not match
+      `SENSITIVE_KEY` (`core/src/env.ts:11-12`). Narrower than it first looks:
+      the vars are **not** in the main process's ambient env (the kubeconfig TLS
+      path keeps them in-memory, `k8s/src/kube-auth.ts:116-141` → `client.ts:87`;
+      only the *trusted, model-free* delete child's own env is ever set,
+      `k8s/src/pod-cleanup.ts:165-183`) — so the exposure is an *ambient export*
+      of cluster TLS reaching the shell/MCP child unscrubbed. **Eval:**
+      `docs/eval/pod-tls-env-scrub.md` (recommends a tiny denylist `fix` — extend
+      `SENSITIVE_KEY` with `TLS[_-]?(KEY|CERT|CA)` + one test, or accept as
+      documented residual).
 - [ ] 🔵 **`BackgroundJobs.jobs` map is never reaped** (`exec/background.ts:78`):
       every finished job keeps its ≤256KB×2 buffers for the session's life. Reap
       old `exited`/`killed` jobs or cap the count.
