@@ -1,9 +1,10 @@
 /**
  * Model provider contract.
  *
- * Concrete adapters target the OpenAI-compatible `/v1/chat/completions`
- * endpoint (local llama.cpp / vLLM / cloud) and normalise streaming and
- * tool-calling quirks behind this single interface (see ADR-003).
+ * Concrete adapters each target one wire format and normalise its streaming
+ * and tool-calling quirks behind this single interface: the OpenAI-compatible
+ * `/v1/chat/completions` endpoint (local llama.cpp / vLLM / cloud) and the
+ * native Anthropic Messages API (`/v1/messages`). See ADR-003.
  */
 
 export type Role = "system" | "user" | "assistant" | "tool";

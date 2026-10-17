@@ -1,8 +1,12 @@
 /**
  * `@tentacle/providers` — model provider adapters.
  *
- * F1 ships the OpenAI-compatible provider, the universal client for any
- * `/v1/chat/completions` endpoint (local or cloud).
+ * Ships the OpenAI-compatible provider (any `/v1/chat/completions` endpoint,
+ * local or cloud) and a native Anthropic Messages API provider
+ * (`/v1/messages`), both behind the core `ModelProvider` contract, plus
+ * `createModelProvider` — the single factory that selects between them.
  */
 export * from "./sse.ts";
 export * from "./openai-provider.ts";
+export * from "./anthropic-provider.ts";
+export * from "./select-provider.ts";

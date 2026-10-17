@@ -37,7 +37,7 @@ import {
   buildPodManifest,
   podIsReady,
 } from "@tentacle/k8s";
-import { OpenAIProvider } from "@tentacle/providers";
+import { createModelProvider } from "@tentacle/providers";
 import type { DuplexChannel } from "@tentacle/transport";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { resolvePodBinary } from "./pod-binary-build.ts";
@@ -266,10 +266,12 @@ export async function startPodRuntime(
     );
     // The pod reaches the model through us (reverse-tunnel): serve the local
     // provider, so the endpoint and API key never leave the laptop.
-    const modelProvider = new OpenAIProvider({
+    const modelProvider = createModelProvider({
+      provider: config.provider,
       baseURL: config.baseURL,
       model: config.model,
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
     });
     return await createLocalRuntime({
       channel,
@@ -447,10 +449,12 @@ export async function startAttachRuntime(
     );
     // The pod reaches the model through us (reverse-tunnel): serve the local
     // provider, so the endpoint and API key never leave the laptop.
-    const modelProvider = new OpenAIProvider({
+    const modelProvider = createModelProvider({
+      provider: config.provider,
       baseURL: config.baseURL,
       model: config.model,
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
     });
     return await createLocalRuntime({
       channel,

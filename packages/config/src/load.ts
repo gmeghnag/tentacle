@@ -38,11 +38,13 @@ export interface LoadConfigOptions {
 }
 
 export interface TentacleConfig {
+  readonly provider: ResolvedConfig["provider"];
   readonly baseURL: string;
   readonly model: string;
   readonly cwd: string;
   readonly maxIterations: number;
   readonly contextWindow: number;
+  readonly maxTokens?: number;
   readonly systemPrompt: string;
   readonly subagentsEnabled: boolean;
   readonly subagentMaxIterations: number;
@@ -228,11 +230,13 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
   const cwd = resolvePath(expandTilde(resolved.cwd, home));
 
   return {
+    provider: resolved.provider,
     baseURL: resolved.baseURL,
     model: resolved.model,
     cwd,
     maxIterations: resolved.maxIterations,
     contextWindow: resolved.contextWindow,
+    ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
     systemPrompt: resolved.systemPrompt,
     subagentsEnabled: resolved.subagentsEnabled,
     subagentMaxIterations: resolved.subagentMaxIterations,

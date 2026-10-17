@@ -79,12 +79,16 @@ Configuration (precedence: env > config file > defaults):
 
 Environment:
   TENTACLE_CONFIG_DIR       override the config directory
-  TENTACLE_MODEL_BASE_URL   OpenAI-compatible base URL
+  TENTACLE_PROVIDER         provider kind: openai (default) | anthropic
+  TENTACLE_MODEL_BASE_URL   base URL incl. version (default: localhost:8080/v1,
+                            or https://api.anthropic.com/v1 for anthropic)
   TENTACLE_MODEL            model id
-  TENTACLE_MODEL_API_KEY    bearer token (overrides config apiKey/apiKeyCommand)
+  TENTACLE_MODEL_API_KEY    bearer token / Anthropic x-api-key (overrides
+                            config apiKey/apiKeyCommand)
   TENTACLE_SYSTEM_PROMPT    inline system prompt (overrides PROMPT.md)
   TENTACLE_NO_AGENTS_MD     do not auto-load the repo's AGENTS.md into the prompt
   TENTACLE_MAX_ITERATIONS   max model/tool iterations per turn
+  TENTACLE_MAX_TOKENS       max output tokens per model response
   TENTACLE_CWD              working directory for tools
   TENTACLE_SUBAGENTS        enable/disable sub-agents (on/off, default on)
 

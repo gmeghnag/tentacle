@@ -9,7 +9,12 @@ import { z } from "zod";
 
 export const ModelConfigSchema = z
   .object({
-    /** OpenAI-compatible base URL, e.g. `http://localhost:8080/v1`. */
+    /**
+     * Provider kind. `"openai"` (default) targets `/v1/chat/completions`;
+     * `"anthropic"` targets the native Messages API `/v1/messages`.
+     */
+    provider: z.enum(["openai", "anthropic"]).optional(),
+    /** Base URL including the API version, e.g. `http://localhost:8080/v1`. */
     baseURL: z.string().url().optional(),
     /** Model id passed to the endpoint. */
     model: z.string().min(1).optional(),
@@ -26,6 +31,8 @@ export const ModelConfigSchema = z
     apiKeyCommand: z.string().min(1).optional(),
     /** Context-window size (tokens) for the TUI context-fill meter. */
     contextWindow: z.number().int().positive().optional(),
+    /** Max output tokens per model response (`max_tokens` on the wire). */
+    maxTokens: z.number().int().positive().optional(),
   })
   .strict();
 

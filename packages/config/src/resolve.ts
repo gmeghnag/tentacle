@@ -8,6 +8,7 @@
  * precedence rules exhaustively testable without touching the filesystem.
  */
 import {
+  DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_AUTO_WAKE,
   DEFAULT_BASE_URL,
   DEFAULT_CONTEXT_WINDOW,
@@ -15,6 +16,7 @@ import {
   DEFAULT_MAX_INLINE_OUTPUT_CHARS,
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_MODEL,
+  DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
   DEFAULT_SUBAGENTS_ENABLED,
   DEFAULT_SUBAGENT_MAX_ITERATIONS,
@@ -33,11 +35,14 @@ export type Source = "env" | "file" | "default";
 export type ApiKeySource = "env" | "file" | "command" | "none";
 
 export interface ResolvedConfig {
+  readonly provider: "openai" | "anthropic";
   readonly baseURL: string;
   readonly model: string;
   readonly cwd: string;
   readonly maxIterations: number;
   readonly contextWindow: number;
+  /** Max output tokens per response; unset → the provider's own default. */
+  readonly maxTokens?: number;
   readonly systemPrompt: string;
   /** Whether a per-repo AGENTS.md was folded into `systemPrompt`. */
   readonly agentsMdLoaded: boolean;
@@ -65,11 +70,13 @@ export interface ResolvedConfig {
   readonly apiKeySource: ApiKeySource;
   /** Per-field provenance (never includes secret values). */
   readonly sources: {
+    readonly provider: Source;
     readonly baseURL: Source;
     readonly model: Source;
     readonly cwd: Source;
     readonly maxIterations: Source;
     readonly contextWindow: Source;
+    readonly maxTokens: Source;
     readonly systemPrompt: Source;
     readonly subagentsEnabled: Source;
     readonly subagentMaxIterations: Source;
@@ -135,6 +142,15 @@ function parseIterationLimit(raw: string | undefined): number | undefined {
   return Number.isInteger(n) && (n > 0 || n === -1) ? n : undefined;
 }
 
+/** Parse a provider env var; unset/unrecognised → undefined (fall through). */
+function parseProvider(raw: string | undefined): "openai" | "anthropic" | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const v = raw.trim().toLowerCase();
+  return v === "openai" || v === "anthropic" ? v : undefined;
+}
+
 /** Parse a boolean env var; unset/unrecognised → undefined (fall through). */
 function parseBool(raw: string | undefined): boolean | undefined {
   if (raw === undefined) {
@@ -154,7 +170,18 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   const { fileConfig, env, defaultCwd, promptFromFile, agentsMd } = ctx;
   const model = fileConfig.model ?? {};
 
-  const baseURL = pick(env.TENTACLE_MODEL_BASE_URL, model.baseURL, DEFAULT_BASE_URL);
+  const provider = pick<"openai" | "anthropic" | undefined>(
+    parseProvider(env.TENTACLE_PROVIDER),
+    model.provider,
+    undefined,
+  );
+  const providerValue = provider.value ?? DEFAULT_PROVIDER;
+  // The default endpoint follows the provider; an explicit baseURL always wins.
+  const baseURL = pick(
+    env.TENTACLE_MODEL_BASE_URL,
+    model.baseURL,
+    providerValue === "anthropic" ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_BASE_URL,
+  );
   const modelId = pick(env.TENTACLE_MODEL, model.model, DEFAULT_MODEL);
   const cwd = pick(env.TENTACLE_CWD, fileConfig.cwd, defaultCwd);
   const maxIterations = pick(
@@ -166,6 +193,11 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     parsePositiveInt(env.TENTACLE_CONTEXT_WINDOW),
     model.contextWindow,
     DEFAULT_CONTEXT_WINDOW,
+  );
+  const maxTokens = pick<number | undefined>(
+    parsePositiveInt(env.TENTACLE_MAX_TOKENS),
+    model.maxTokens,
+    undefined,
   );
   // System prompt = identity (env | PROMPT.md | default). AGENTS.md, when
   // auto-loaded, is appended AFTER it as repo rules — additive, never replacing
@@ -233,11 +265,13 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   }
 
   return {
+    provider: providerValue,
     baseURL: baseURL.value,
     model: modelId.value,
     cwd: cwd.value,
     maxIterations: maxIterations.value,
     contextWindow: contextWindow.value,
+    ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     systemPrompt: systemPromptValue,
     agentsMdLoaded,
     subagentsEnabled: subagentsEnabled.value,
@@ -254,11 +288,13 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(apiKeyCommand !== undefined ? { apiKeyCommand } : {}),
     apiKeySource,
     sources: {
+      provider: provider.source,
       baseURL: baseURL.source,
       model: modelId.source,
       cwd: cwd.source,
       maxIterations: maxIterations.source,
       contextWindow: contextWindow.source,
+      maxTokens: maxTokens.source,
       systemPrompt: systemPrompt.source,
       subagentsEnabled: subagentsEnabled.source,
       subagentMaxIterations: subagentMaxIterations.source,

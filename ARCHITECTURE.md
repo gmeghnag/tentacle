@@ -11,7 +11,7 @@ autonomous/semi-autonomous agent. It is a *platform*, not a tool. Target
 subsystems:
 
 1. **Agent loop** — orchestration: prompt → model → parse tool-calls → execute → feedback → repeat.
-2. **Model/provider layer** — provider-agnostic over the **OpenAI-compatible** wire format.
+2. **Model/provider layer** — provider-agnostic: a `ModelProvider` contract with two native wire formats (OpenAI-compatible `/v1/chat/completions`, Anthropic Messages `/v1/messages`).
 3. **Tool system** — extensible registry with schemas, permissions; MCP for third-party tools.
 4. **Context engineering** — token budget, compaction/summarization, caching, file-state tracking.
 5. **Execution environment** — where tools run (host now; container later), behind one interface.
@@ -31,7 +31,7 @@ Client (CLI/TUI, later web)
    │  WS + JSON-RPC 2.0 (ACP-shaped vocabulary)
    ▼
 Agent Daemon (headless)
-   ├─ Model layer      → any OpenAI-compatible endpoint (local llama.cpp / vLLM / cloud)
+   ├─ Model layer      → any OpenAI-compatible endpoint, or the Anthropic Messages API
    ├─ Tool executor    → ExecutionEnvironment (host impl now; container later)
    ├─ Context manager  → token budget, compaction, cache
    ├─ Permission engine
@@ -51,11 +51,16 @@ One language across core, daemon and clients. Monorepo with `packages/*` keeps t
 protocol as a single shared source of truth. `tsc --noEmit` type-checks the whole
 tree; Bun runs the sources directly. Lint+format via **Biome** (single fast tool).
 
-### ADR-003 — Model interface: **OpenAI-compatible API**
-`/v1/chat/completions` is the de-facto universal format (local and cloud). A single
-client with configurable `baseURL`. The `providers/` layer **normalizes tool-calling
-differences and capability-detects** per endpoint (e.g. llama.cpp `reasoning_content`,
-partial tool-call streaming) — fidelity is NOT uniform across servers.
+### ADR-003 — Model interface: **`ModelProvider` contract, multiple native wire formats**
+`/v1/chat/completions` is the de-facto universal format (local and cloud), so the
+first and default provider targets it with a configurable `baseURL`. The contract,
+however, is wire-format-agnostic: `providers/` ships a **second, native Anthropic
+Messages API** provider (`/v1/messages` — top-level `system`, `tool_use`/`tool_result`
+content blocks, `content_block_delta` streaming) selected by `model.provider`.
+Each provider **normalizes tool-calling differences and capability-detects** per
+endpoint (e.g. llama.cpp `reasoning_content`, partial tool-call streaming) — fidelity
+is NOT uniform across servers. A new wire format adds a provider + decoder; the agent
+loop, protocol, and session path never change.
 
 ### ADR-004 — Remote control: **WS + JSON-RPC 2.0, ACP-shaped vocabulary**
 Transport/framing is ours (WebSocket, remote-native, multi-client, mid-run inject) —

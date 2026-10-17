@@ -1,10 +1,10 @@
 # tentacle
 
-A SOTA agent harness — the platform that turns any OpenAI-compatible LLM into an
-autonomous, remotely-controllable coding agent with a rich terminal UI.
+A SOTA agent harness — the platform that turns any LLM into an autonomous,
+remotely-controllable coding agent with a rich terminal UI.
 
 - **Runtime:** Bun · **Language:** TypeScript (strict) · **Repo:** Bun-workspaces monorepo
-- **Models:** any OpenAI-compatible endpoint (local or cloud)
+- **Models:** any OpenAI-compatible endpoint (local or cloud), or the native Anthropic Messages API
 - **Interfaces:** rich Ink TUI · plain REPL · one-shot · remote control (WebSocket + JSON-RPC 2.0)
 - **Safe by default:** tool writes confined to the workspace; shell commands gated by a permission engine
 
@@ -47,11 +47,13 @@ Resolved with precedence **environment variables › `config.jsonc` › built-in
 
 | Config key (`config.jsonc`) | Env override | Meaning |
 | --- | --- | --- |
-| `model.baseURL` | `TENTACLE_MODEL_BASE_URL` | OpenAI-compatible base URL |
+| `model.provider` | `TENTACLE_PROVIDER` | Provider kind: `openai` (default) or `anthropic` |
+| `model.baseURL` | `TENTACLE_MODEL_BASE_URL` | Base URL incl. version. Default: `http://localhost:8080/v1` (openai) or `https://api.anthropic.com/v1` (anthropic) |
 | `model.model` | `TENTACLE_MODEL` | Model id sent to the endpoint |
 | `model.apiKey` | `TENTACLE_MODEL_API_KEY` | API key, **stored in plaintext** (discouraged) |
 | `model.apiKeyCommand` | — | Shell command whose stdout is the key; resolved at startup, never written to disk |
 | `model.contextWindow` | — | Token budget for the TUI context-fill meter |
+| `model.maxTokens` | `TENTACLE_MAX_TOKENS` | Max output tokens per response. Unset: omitted for openai, `64000` for anthropic |
 | `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline) | System prompt file (default `PROMPT.md`) |
 | `cwd` | `TENTACLE_CWD` | Workspace directory for tools (default: launch dir); writes are confined here |
 | `maxIterations` | `TENTACLE_MAX_ITERATIONS` | Max model/tool rounds per turn |
@@ -85,7 +87,7 @@ See [`docs/F3-remote-control.md`](./docs/F3-remote-control.md).
 
 ## Features
 
-- **Agent loop** over any OpenAI-compatible model; multi-turn `Session`; streaming events.
+- **Agent loop** over any OpenAI-compatible model or the native Anthropic Messages API; multi-turn `Session`; streaming events.
 - **Built-in tools:** `fs_read`, `fs_write`, `fs_edit` (with unified diffs), `shell`.
 - **Background jobs:** `shell` with `run_in_background` plus `shell_output` / `shell_kill`; a finished job is surfaced live and fed back to the model (exit trigger).
 - **Workspace confinement:** writes confined to `cwd` via realpath (symlink escapes refused); reads unconfined.
@@ -101,7 +103,7 @@ See [`docs/F3-remote-control.md`](./docs/F3-remote-control.md).
 | `@tentacle/protocol` | Wire protocol: JSON-RPC 2.0 envelopes + ACP-shaped session/tool/permission schemas (Zod). |
 | `@tentacle/core` | Core contracts: `ModelProvider`, `Tool`, `ExecutionEnvironment`, `JobController`, `PermissionBroker`, `TokenCounter`. |
 | `@tentacle/config` | Layered config loader (`config.jsonc` + env + defaults); scaffolding; lazy `apiKeyCommand`. |
-| `@tentacle/providers` | OpenAI-compatible provider (fetch + SSE streaming, tool-call normalisation). |
+| `@tentacle/providers` | Model providers behind one contract: OpenAI-compatible (`/v1/chat/completions`) + native Anthropic (`/v1/messages`), fetch + SSE streaming, tool-call normalisation, and the `createModelProvider` selector. |
 | `@tentacle/exec` | Host execution environment (`Bun.spawn`), workspace write-confinement, background jobs. |
 | `@tentacle/tools` | Tool registry + built-in tools (fs + shell + background + `agent_task`). |
 | `@tentacle/agent` | The agent loop, `Session`, sub-agents, context compaction, permission gate. |
