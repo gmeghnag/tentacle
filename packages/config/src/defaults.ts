@@ -3,7 +3,11 @@
  * `~/.config/tentacle/` directory on first run.
  */
 export const DEFAULT_BASE_URL = "http://localhost:8080/v1";
+/** Base URL used when `provider` is `"anthropic"` and no `baseURL` is set. */
+export const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
 export const DEFAULT_MODEL = "default";
+/** Provider kind: OpenAI-compatible `/v1/chat/completions` by default. */
+export const DEFAULT_PROVIDER = "openai" as const;
 export const DEFAULT_MAX_ITERATIONS = 16;
 /** Sub-agents (the `agent_task` delegation tool) are available by default. */
 export const DEFAULT_SUBAGENTS_ENABLED = true;
@@ -61,7 +65,12 @@ export const DEFAULT_CONFIG_JSONC = `{
   // Uncomment a setting to override the default shown in the comment.
 
   "model": {
-    // OpenAI-compatible base URL.
+    // Provider kind: "openai" (default, any /v1/chat/completions endpoint) or
+    // "anthropic" (native Messages API, /v1/messages).
+    // "provider": "${DEFAULT_PROVIDER}",
+
+    // Base URL including the API version. Default depends on the provider:
+    // ${DEFAULT_BASE_URL} (openai) or ${DEFAULT_ANTHROPIC_BASE_URL} (anthropic).
     // "baseURL": "${DEFAULT_BASE_URL}",
 
     // Model id sent to the endpoint.
@@ -74,7 +83,11 @@ export const DEFAULT_CONFIG_JSONC = `{
     // "apiKeyCommand": "cat ~/.cache/llama-api-key",
 
     // Context-window size (tokens) used for the TUI context-fill meter.
-    // "contextWindow": ${DEFAULT_CONTEXT_WINDOW}
+    // "contextWindow": ${DEFAULT_CONTEXT_WINDOW},
+
+    // Max output tokens per model response. Unset: omitted for openai, 64000
+    // for anthropic (the API requires it). Lower it for a model with a smaller cap.
+    // "maxTokens": 64000
   },
 
   // System prompt file, relative to this directory (or an absolute path).

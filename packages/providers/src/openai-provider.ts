@@ -26,6 +26,8 @@ export interface OpenAIProviderConfig {
   /** Model id passed to the endpoint. */
   readonly model: string;
   readonly apiKey?: string;
+  /** `max_tokens` when the request sets none; unset → omitted (server default). */
+  readonly maxTokens?: number;
   /** Overrides the derived `id`. */
   readonly id?: string;
   /** Injectable fetch, for tests. Defaults to the global `fetch`. */
@@ -116,7 +118,7 @@ export class OpenAIProvider implements ModelProvider {
     const init: RequestInit = {
       method: "POST",
       headers,
-      body: JSON.stringify(buildPayload(this.config.model, request)),
+      body: JSON.stringify(buildPayload(this.config.model, request, this.config.maxTokens)),
     };
     if (request.signal) {
       init.signal = request.signal;
@@ -184,7 +186,11 @@ export class OpenAIProvider implements ModelProvider {
   }
 }
 
-function buildPayload(model: string, req: ChatRequest): Record<string, unknown> {
+function buildPayload(
+  model: string,
+  req: ChatRequest,
+  defaultMaxTokens?: number,
+): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     model,
     messages: req.messages.map(toWireMessage),
@@ -197,8 +203,9 @@ function buildPayload(model: string, req: ChatRequest): Record<string, unknown> 
   if (req.temperature !== undefined) {
     payload.temperature = req.temperature;
   }
-  if (req.maxTokens !== undefined) {
-    payload.max_tokens = req.maxTokens;
+  const maxTokens = req.maxTokens ?? defaultMaxTokens;
+  if (maxTokens !== undefined) {
+    payload.max_tokens = maxTokens;
   }
   return payload;
 }

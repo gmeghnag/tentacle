@@ -1,7 +1,8 @@
 /**
- * Builds a fully-wired `Agent` from a resolved `TentacleConfig`: OpenAI-compatible
- * model, host execution (writes confined to the workspace), the built-in tool-set,
- * and a `PermissionBroker` whose requester the frontend can attach at runtime.
+ * Builds a fully-wired `Agent` from a resolved `TentacleConfig`: the configured
+ * model provider (OpenAI-compatible or native Anthropic), host execution
+ * (writes confined to the workspace), the built-in tool-set, and a
+ * `PermissionBroker` whose requester the frontend can attach at runtime.
  * Shared by the one-shot and interactive entry points.
  */
 import { readFileSync, readdirSync } from "node:fs";
@@ -25,7 +26,7 @@ import type { TentacleConfig } from "@tentacle/config";
 import { type JobController, type ModelProvider, PermissionBroker } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
-import { OpenAIProvider } from "@tentacle/providers";
+import { createModelProvider } from "@tentacle/providers";
 import { ToolRegistry, builtinTools, createTaskTool } from "@tentacle/tools";
 
 /** Load user-defined agent types from `<configDir>/agents/*.md` (missing dir → none). */
@@ -60,19 +61,22 @@ export interface WiredAgent {
 }
 
 export interface BuildAgentOptions {
-  /** Replace the OpenAI provider — e.g. a proxy that tunnels model calls to a
-   *  remote client (the pod reverse-tunnel, F4.d). Used for the main model and
-   *  for sub-agents (per-type model overrides are ignored over the tunnel). */
+  /** Replace the configured provider — e.g. a proxy that tunnels model calls
+   *  to a remote client (the pod reverse-tunnel, F4.d). Used for the main model
+   *  and for sub-agents (per-type model overrides are ignored over the
+   *  tunnel). */
   readonly modelOverride?: ModelProvider;
 }
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
   const model =
     options.modelOverride ??
-    new OpenAIProvider({
+    createModelProvider({
+      provider: config.provider,
       baseURL: config.baseURL,
       model: config.model,
       ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
     });
   const env = new HostExecution({ cwd: config.cwd, root: config.cwd });
   const tools = new ToolRegistry().registerAll(builtinTools);
@@ -108,10 +112,12 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       // model tunnel the override provider is used for every type.
       modelFor: (modelId) =>
         options.modelOverride ??
-        new OpenAIProvider({
+        createModelProvider({
+          provider: config.provider,
           baseURL: config.baseURL,
           model: modelId,
           ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+          ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
         }),
       env,
       tools,

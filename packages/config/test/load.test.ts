@@ -67,6 +67,27 @@ describe("loadConfig reading", () => {
     expect(cfg.systemPrompt).toBe("custom prompt");
   });
 
+  test("carries the model provider kind through (file and env)", async () => {
+    await loadConfig({ env: baseEnv(), configDir, cwd: "/launch" }); // scaffold
+    await writeFile(
+      join(configDir, CONFIG_FILENAME),
+      `{ "model": { "provider": "anthropic", "model": "claude-x" } }`,
+      "utf8",
+    );
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: "/launch" });
+    expect(cfg.provider).toBe("anthropic");
+    expect(cfg.sources.provider).toBe("file");
+
+    // env wins over the file.
+    const envWins = await loadConfig({
+      env: { ...baseEnv(), TENTACLE_PROVIDER: "openai" },
+      configDir,
+      cwd: "/launch",
+    });
+    expect(envWins.provider).toBe("openai");
+    expect(envWins.sources.provider).toBe("env");
+  });
+
   test("env variables override the file", async () => {
     await loadConfig({ env: baseEnv(), configDir, cwd: "/launch" });
     await writeFile(

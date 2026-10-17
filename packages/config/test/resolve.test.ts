@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_ANTHROPIC_BASE_URL,
   DEFAULT_AUTO_WAKE,
   DEFAULT_BASE_URL,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_MODEL,
+  DEFAULT_PROVIDER,
   DEFAULT_SUBAGENT_MAX_ITERATIONS,
   DEFAULT_SYSTEM_PROMPT,
 } from "../src/defaults.ts";
@@ -40,6 +42,10 @@ describe("resolveConfig precedence", () => {
     expect(c.autoWake).toBe(DEFAULT_AUTO_WAKE);
     expect(c.autoWake).toBe(true);
     expect(c.sources.autoWake).toBe("default");
+    // The provider defaults to OpenAI-compatible (existing behaviour).
+    expect(c.provider).toBe(DEFAULT_PROVIDER);
+    expect(c.provider).toBe("openai");
+    expect(c.sources.provider).toBe("default");
   });
 
   test("autoWake resolves env > file > default", () => {
@@ -155,6 +161,73 @@ describe("resolveConfig precedence", () => {
     // The file schema accepts -1 and still rejects 0 (red before the refine).
     expect(FileConfigSchema.safeParse({ maxIterations: -1 }).success).toBe(true);
     expect(FileConfigSchema.safeParse({ maxIterations: 0 }).success).toBe(false);
+  });
+
+  test("baseURL defaults per provider: anthropic → the Anthropic API", () => {
+    const a = resolveConfig(ctx({ fileConfig: { model: { provider: "anthropic" } } }));
+    expect(DEFAULT_ANTHROPIC_BASE_URL).toBe("https://api.anthropic.com/v1");
+    expect(a.baseURL).toBe(DEFAULT_ANTHROPIC_BASE_URL);
+    expect(a.sources.baseURL).toBe("default");
+    // The provider env var drives the default too.
+    expect(resolveConfig(ctx({ env: { TENTACLE_PROVIDER: "anthropic" } })).baseURL).toBe(
+      DEFAULT_ANTHROPIC_BASE_URL,
+    );
+    // An explicit baseURL always wins (a gateway, or a local /v1/messages).
+    const explicit = resolveConfig(
+      ctx({ fileConfig: { model: { provider: "anthropic", baseURL: "http://gw/v1" } } }),
+    );
+    expect(explicit.baseURL).toBe("http://gw/v1");
+    // openai (the default) keeps the local default unchanged.
+    expect(resolveConfig(ctx()).baseURL).toBe(DEFAULT_BASE_URL);
+  });
+
+  test("maxTokens resolves env > file > unset (no default)", () => {
+    const unset = resolveConfig(ctx());
+    expect(unset.maxTokens).toBeUndefined();
+    expect(unset.sources.maxTokens).toBe("default");
+    const file = resolveConfig(ctx({ fileConfig: { model: { maxTokens: 8192 } } }));
+    expect(file.maxTokens).toBe(8192);
+    expect(file.sources.maxTokens).toBe("file");
+    const env = resolveConfig(
+      ctx({ env: { TENTACLE_MAX_TOKENS: "32000" }, fileConfig: { model: { maxTokens: 8192 } } }),
+    );
+    expect(env.maxTokens).toBe(32000);
+    expect(env.sources.maxTokens).toBe("env");
+    // An invalid env value falls through to the file.
+    expect(
+      resolveConfig(
+        ctx({ env: { TENTACLE_MAX_TOKENS: "lots" }, fileConfig: { model: { maxTokens: 8192 } } }),
+      ).maxTokens,
+    ).toBe(8192);
+    expect(FileConfigSchema.safeParse({ model: { maxTokens: 0 } }).success).toBe(false);
+    expect(FileConfigSchema.safeParse({ model: { maxTokens: 1.5 } }).success).toBe(false);
+  });
+
+  test("provider resolves env > file > default (openai)", () => {
+    // File value wins over the default.
+    expect(resolveConfig(ctx({ fileConfig: { model: { provider: "anthropic" } } })).provider).toBe(
+      "anthropic",
+    );
+    expect(
+      resolveConfig(ctx({ fileConfig: { model: { provider: "anthropic" } } })).sources.provider,
+    ).toBe("file");
+    // env wins over the file.
+    const envWins = resolveConfig(
+      ctx({
+        env: { TENTACLE_PROVIDER: "openai" },
+        fileConfig: { model: { provider: "anthropic" } },
+      }),
+    );
+    expect(envWins.provider).toBe("openai");
+    expect(envWins.sources.provider).toBe("env");
+    // An unrecognised env value falls through to the file/default (not a silent
+    // fallback to an arbitrary kind).
+    const fell = resolveConfig(ctx({ env: { TENTACLE_PROVIDER: "gemini" } }));
+    expect(fell.provider).toBe(DEFAULT_PROVIDER);
+    expect(fell.sources.provider).toBe("default");
+    // The schema is the first gate: an unknown provider kind is a loud error.
+    expect(FileConfigSchema.safeParse({ model: { provider: "gemini" } }).success).toBe(false);
+    expect(FileConfigSchema.safeParse({ model: { provider: "anthropic" } }).success).toBe(true);
   });
 });
 
