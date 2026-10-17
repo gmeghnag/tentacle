@@ -1,8 +1,8 @@
 # fix/compact-empty-summary-wipe — `/compact` with an empty summary irreversibly wipes the conversation
 
-> **Status:** review complete — 1st pass (fresh-context): APPROVE-WITH-NITS, nits
-> resolved on branch; 2nd pass (deeper, first-person): APPROVE, holds. **Committed
-> on branch, awaiting merge.**
+> **Status:** done — 1st pass (fresh-context): APPROVE-WITH-NITS, nits resolved
+> on branch; 2nd pass (deeper, first-person): APPROVE, holds. **Merged to `main`
+> (2026-10-17).**
 > **Branch:** `fix/compact-empty-summary-wipe`
 > **Type:** fix · **Size:** S · **Blast:** cross-module · **Suited:** any model may execute the core guard; standard in-context Review, plus red-team of the persistence path (§7 "Persistence lives on the laptop").
 >

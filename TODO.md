@@ -318,11 +318,12 @@ Daily-driver work (done 2026-10-14):
       cancel; the agent loop never re-checks `aborted` between stream end and tool
       execution. CONFIRMED. **Eval:** `docs/eval/proxy-model-cancel.md`.
       Type: eval · Size: M · Blast: load-bearing.
-- [~] 🔴 **`/compact` with an empty summary wipes the history** (reasoning-only
+- [x] 🔴 **`/compact` with an empty summary wipes the history** (reasoning-only
       model, or an in-band SSE `{"error":…}` chunk) and persists it. CONFIRMED.
-      **Fix (committed on branch, awaiting merge):** `docs/fix/compact-empty-summary-wipe.md`,
-      branch `fix/compact-empty-summary-wipe`. Type: fix · Size: S ·
-      Blast: cross-module.
+      **FIXED (merged to main):** `docs/fix/compact-empty-summary-wipe.md` —
+      `summarizeConversation` throws `CompactError` on an empty summary, so
+      `Session.compact` rejects pre-mutation/pre-persist (history intact in
+      memory and on disk, all runtimes). Type: fix · Size: S · Blast: cross-module.
 - [ ] 🟡 **Remote `/compact` failure shows an opaque `internal error`** (worker
       surfaces the real `CompactError` via `exposeInternalErrors`, but a remote
       `connect` omits the flag — `ws-server.ts:182-187` — so the client gets
