@@ -139,6 +139,72 @@ rpc-flow-control ──(credit window + control priority over $/progress)──�
   a control message, so it needs 2's priority lane to stay timely while bulk
   data flows.
 
+### Mixed configuration (pieces 3 + 4 together)
+
+*Added 2026-10-18.* The two MCP evals each describe one side. This is the
+combined target in `run`/`attach`: **one session uses laptop-side and pod-side
+MCP servers at the same time**, chosen per server by `runOn`.
+
+```jsonc
+"mcpServers": {
+  "github":     { "command": "npx", "args": ["@mcp/github"] },                     // runOn: "client" (default) → laptop
+  "playwright": { "command": "npx", "args": ["@playwright/mcp"] },                 // client → laptop
+  "eslint":     { "command": "npx", "args": ["@mcp/eslint"], "runOn": "daemon" },  // → pod, sees the workspace files
+  "pg":         { "command": "pg-mcp", "env": { "PGPASSWORD": "${PGPASSWORD}" }, "runOn": "daemon" } // placeholder, expanded pod-side
+}
+```
+
+| | `runOn: "client"` | `runOn: "daemon"` |
+|---|---|---|
+| Where the process runs | laptop | pod |
+| How the daemon gets the tools | laptop pushes `tools/register` | the laptop sends `mcp/start` with the spec; the daemon starts the server and registers its tools locally |
+| How a call executes | `tool/call`, daemon → laptop | in-process in the daemon, as a normal tool |
+| Permission gate | **laptop-side**: once-only, config-only `autoApprove` (`mcp-client-tools.md` §4) | daemon-side; the prompt still reaches the laptop TUI via `request_permission` |
+| Secrets | stay on the laptop | `${VAR}` placeholders only, expanded from the pod's env (`mcp-daemon-servers.md` §2) |
+| Description suffix the model sees | "(runs on the user's machine, not in the workspace)" | "(runs in the workspace)" |
+| Defined in | [`mcp-client-tools.md`](./mcp-client-tools.md) | [`mcp-daemon-servers.md`](./mcp-daemon-servers.md) |
+
+Rules that hold only when both sides are live:
+- **One registry, two origins.** The session's registry holds both groups.
+  The start-of-turn snapshot (`mcp-client-tools.md` §2) covers only the
+  client group; daemon-side tools are local and change only when `mcp/start`
+  changes them, which also happens only at turn boundaries.
+- **No cross-side name clash is possible:** there is one `mcpServers` map, so
+  a server name exists on exactly one side. A clash with a built-in, or with a
+  pod-local config's server (if that is ever loaded), follows first-wins with
+  a warning.
+- **Partial availability is normal.** An old daemon refuses one or both new
+  methods with `MethodNotFound`, a runtime is missing in the image, or a server
+  is slow. The status line reports each side separately (e.g. "[mcp] client
+  2/2 · daemon 1/2: eslint — `npx` not found in pod"), and the session runs
+  with whatever is available.
+- **In the local TUI, `runOn` is ignored.** Laptop and workspace are the same
+  machine, so everything starts locally, as today.
+- **Delivery staging:**
+  - with only piece 3, every server runs on the client;
+  - with only piece 4, `runOn` must be introduced there, and unmarked servers
+    keep today's pod-mode behaviour (none);
+  - the full mixed mode needs both.
+
+**Planned end-to-end test** (owned by whichever of 3/4 lands second):
+- **Setup:** a pod-mode session over the real `RemoteClient` ↔ `Connection`
+  stack on an in-memory channel. One fake MCP server is `runOn: "client"`, one
+  is `runOn: "daemon"` (the existing fake-spawner pattern). Each server
+  records which process/side served each call.
+- **Expect:**
+  - the model's `tools` block contains both, with the correct location suffix
+    on each;
+  - calling the client tool executes on the laptop side and passes the laptop
+    gate;
+  - calling the daemon tool executes in the daemon and goes through the
+    daemon-side gate;
+  - neither call ever executes on the wrong side.
+- **Non-vacuity mutation:** route the daemon tool through `tool/call` (or the
+  client tool in-process). The "served by" assertion must turn red.
+- **Failure leg:** the daemon side's `mcp/start` returns an error for its
+  server. The session still works with the client tool, and the status line
+  shows the daemon-side error.
+
 ## Implementation
 
 *(none — umbrella; each sub-eval is promoted on its own)*
