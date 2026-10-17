@@ -22,7 +22,8 @@ verify every claim against the code.
 - **Re-run the gate** `bun run check` yourself; record the **exact** test counts.
   Run the task's acceptance checks against the code — not Execution's word.
 - **Premise table:** every `file:line` the Implementation cites as a premise —
-  open it, mark TRUE/FALSE. A false premise is a finding.
+  open it, mark TRUE/FALSE. Its first row is the Context's symptom: re-run the
+  Repro on `main`. A false premise is a finding.
 - **Mutation non-vacuity** (§9): break the property each new test pins, confirm
   the test **FAILS**, revert, confirm the tree is byte-identical.
 - **Attack the plan, not its checklist.** Its "Failure modes" are the floor: ask

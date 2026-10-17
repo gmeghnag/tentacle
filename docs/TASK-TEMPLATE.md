@@ -34,6 +34,10 @@ model + standard Review. See AGENTS.md §10.
 Why this task exists: the problem with evidence, the constraints, and the
 decision it serves. For an `eval`, the exact question being decided.
 
+**Repro:** the command/script that shows the problem (for a feat: that the
+capability is missing) and the output observed, with its date. The executor
+re-runs it on current `main` before any edit (`docs/EXECUTOR-BRIEF.md`).
+
 ## Implementation
 
 *— <model-id>, <YYYY-MM-DD>*
