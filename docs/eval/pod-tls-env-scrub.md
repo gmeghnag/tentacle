@@ -70,13 +70,13 @@ preference:
   child (that path never scrubs), but that child is trusted and model-free, so nothing is
   lost. Cost: `tls.ca` (a CA bundle, lower sensitivity than the key) is also dropped from
   those children — harmless, since no model-driven child consumes cluster TLS.
-- **(c) Leave it, document the caveat.** Accept the narrow residual; the helper's docstring
+- **(b) Leave it, document the caveat.** Accept the narrow residual; the helper's docstring
   already states the denylist is open-ended by construction.
 
 **Decision asked of the owner:** take (a) now as a tiny `fix` (I lean yes — it's cheap,
 closes a genuine ambient-exfil vector, and is the natural completion of the
 `shell-env-scrub` hardening), or batch it into a future denylist review, or accept as
-documented residual (c).
+documented residual (b).
 
 **Promotion trigger (if (a)):** on the owner's OK, `git mv` this doc to
 `docs/fix/pod-tls-env-scrub.md` and open branch `fix/pod-tls-env-scrub`; the fix is one
