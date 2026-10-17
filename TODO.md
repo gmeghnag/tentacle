@@ -671,6 +671,11 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
       **Eval:** `docs/eval/mcp-remote-transport.md` (recommends Streamable HTTP, transport-only first).
 - [ ] **Sub-agents**: background / parallel execution (SA.d).
       **Eval:** `docs/eval/parallel-subagents.md` (open — leans background-first, must split; needs a use-case).
+- [ ] **Native Anthropic Messages API provider** (today: only OpenAI-compat
+      `/v1/chat/completions`). **Eval:** `docs/eval/anthropic-api-support.md`
+      (recommends a native provider behind the `ModelProvider` seam; tool_use ⇄
+      tool_calls mapping is the high-risk part). Type: feat · Size: M · Blast:
+      cross-module.
 - [ ] **F2**: container execution environment (behind the existing
       `ExecutionEnvironment` contract).
 - [ ] **Remote control (F3)**: heartbeat/idle-timeout/reconnect, multi-client
