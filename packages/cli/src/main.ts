@@ -369,7 +369,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // reuse). The agent binary is injected only when the pod lacks a working
   // one (a preflight `--version` probe skips the transfer on re-attach); the
   // same image constraints as `run` apply to the injected binary. See
-  // `startAttachRuntime` and `docs/pod-exec-attach.md`.
+  // `startAttachRuntime` and `docs/feat/pod-exec-attach.md`.
   if (args[0] === "attach") {
     // `-c` is a short alias for `--container` (`parseFlags` only understands
     // long `--` flags), so extract it first: `-c <name>` and `-c=<name>`.

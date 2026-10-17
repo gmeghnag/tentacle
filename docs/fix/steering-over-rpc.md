@@ -1,5 +1,7 @@
 # Steering over RPC — piano: "Queue a task…" (enqueue) su worker/pod/remote
 
+> **Status:** implementation — not started: `daemon/src/mapping.ts:104` still drops `steer`, no `session/enqueue` (verified 2026-10-17); tracked in `TODO.md` Block 4 · legacy doc (pre-AGENTS §10), not retrofitted to the four sections
+
 **Stato:** **non implementato** (piano). Referenziato da `TODO.md` Block 4
 (entry "Mid-turn 'Queue a task…' silently no-ops on the worker and pod paths").
 Basato su `1170d40` (branch `feat/pod-exec-attach`).

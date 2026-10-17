@@ -3,8 +3,8 @@
 Status: **F4.a–F4.g shipped (2026-10-14/15 + branch `feat/pod-exec-attach`)**, validated live; the original
 design is captured here and §8 records what actually shipped. The pod-binary
 injection (F4.e) has its own detailed design + as-built log in
-`docs/pod-binary-injection.md`; the `exec` attach (F4.g) has its plan +
-as-built in `docs/pod-exec-attach.md`. It builds on F3
+`docs/feat/pod-binary-injection.md`; the `exec` attach (F4.g) has its plan +
+as-built in `docs/feat/pod-exec-attach.md`. It builds on F3
 (`docs/F3-remote-control.md`) and reuses **the entire client/daemon/RPC stack
 unchanged** — F4 is a new *transport + lifecycle + reverse-tunnel*, not new
 protocol design above the wire vocabulary.
@@ -181,7 +181,7 @@ binary transfer) → the same daemon exec + runtime. Because the pod is
 user-owned, `dispose` only closes the exec channel (the pod daemon dies with
 the exec) and **no exit safety net is registered**: closing the TUI detaches
 and leaves the pod `Running` for reuse; the owner deletes it. See
-`docs/pod-exec-attach.md`.
+`docs/feat/pod-exec-attach.md`.
 
 **Workspace (the decision to make per use-case):** v1 uses `git clone` in an
 init step (or an image that already contains the repo); results leave via git /
@@ -308,7 +308,7 @@ sent to the pod (reverse-tunnel, §5).
   NO, and the `--version` probe fails cleanly with the hint). Validated
   LIVE on an x86_64 cluster: UBI9 full success (89 MB transfer 10%→100% +
   daemon in pod), busybox clean failure at the probe. Detail + as-built log:
-  `docs/pod-binary-injection.md`.
+  `docs/feat/pod-binary-injection.md`.
 - **F4.f — exec-plugin auth + hardening** (credential-plugin, CA edge cases,
   timeouts, clear errors) + operator docs.
 - **F4.g — `exec` attach to an existing pod** — ✅ **shipped (branch
@@ -325,7 +325,7 @@ sent to the pod (reverse-tunnel, §5).
   USER-OWNED: `dispose` only closes the exec channel (the pod-side daemon dies
   with it) and NO exit safety net is registered, so closing the TUI detaches
   but leaves the pod `Running` for reuse; cleanup is the owner's
-  (`kubectl delete pod`). Plan + as-built: `docs/pod-exec-attach.md`.
+  (`kubectl delete pod`). Plan + as-built: `docs/feat/pod-exec-attach.md`.
 
 MVP = **F4.a–F4.e**. F4.f is hardening.
 

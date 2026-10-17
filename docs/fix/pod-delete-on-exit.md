@@ -1,5 +1,7 @@
 # Pod delete-on-exit — fix plan
 
+> **Status:** done — shipped 2026-10-15 · legacy doc (pre-AGENTS §10), not retrofitted to the four sections
+
 ## Bug
 Closing the TUI with Ctrl+C (SIGINT) orphans the pod. `terminal.ts`'s signal
 handler calls `process.exit(130/143)` **before** `startTui` resolves, so
@@ -77,5 +79,5 @@ client-side timeout and is `detached`+`unref`'d, so:
   so the test asserts `not.toMatch(/Bearer [A-Za-z0-9]/)` (no *literal* token
   inlined) rather than `not.toContain("Bearer ")`.
 - The delete-on-exit child and the single-line startup rendering (§9 of
-  `docs/pod-binary-injection.md`) are independent: the child only needs `bun`
+  `docs/feat/pod-binary-injection.md`) are independent: the child only needs `bun`
   on PATH, and the rendering only affects the laptop-side log.

@@ -1,5 +1,7 @@
 # Resilient pod attach: keepalive + reconnect-and-resume
 
+> **Status:** implementation — not started: no keepalive/reconnect in `k8s`/`transport` (verified 2026-10-17) · legacy doc (pre-AGENTS §10), not retrofitted to the four sections
+
 ## Problem (with evidence)
 
 A `tentacle attach` session left idle (observed: ~30 min, laptop likely asleep
@@ -117,7 +119,7 @@ Keep the reconnect logic in one place (the attach runtime wrapper in
   persisted — AGENTS §7 persists `ChatMessage`s per turn). On resume the user re-
   issues the interrupted request. Documented, not silently half-applied.
 - **Double close / reconnect race:** a generation token (as in the resize warm,
-  `docs/perf-resize-relayout.md`) guarantees only the latest reconnect commits.
+  `docs/feat/perf-resize-relayout.md`) guarantees only the latest reconnect commits.
 - **Keepalive racing a real request:** the peer dispatches requests concurrently
   (AGENTS §7, `transport/peer.ts` — no per-connection mutex), so a `ping` never
   blocks `session/prompt`.

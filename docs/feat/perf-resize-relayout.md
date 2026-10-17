@@ -1,5 +1,7 @@
 # Non-blocking resize re-layout
 
+> **Status:** done — background resize re-layout warm is in `tui/src/App.tsx:163-257` (verified 2026-10-17) · legacy doc (pre-AGENTS §10), not retrofitted to the four sections
+
 ## Problem (measured)
 
 Every item's wrapped rows are cached per `(item identity, width, …)`

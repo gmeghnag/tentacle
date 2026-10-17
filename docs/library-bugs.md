@@ -80,7 +80,7 @@ Siblings in a row measure correctly and render contiguously. Keeps Ink's native
   `nonAlphanumericKeys` which `use-input` blanks). `key.home`/`key.end` land in
   `ink@8` (`use-input.js`), again gated behind React 19. We bind line start/end
   to **Ctrl+A / Ctrl+E** (readline convention) instead — see
-  `docs/tui-input-editing.md`.
+  `docs/feat/tui-input-editing.md`.
 - **Known Ink gotcha (not a bug):** an empty `<Text>` measures `0×0`, so a
   per-row `<Text>` list collapses blank rows. Render blank rows as `" "`. (In
   AGENTS.md §6.)
