@@ -96,14 +96,44 @@ evidence the rule classifies correctly from the first use.
 
 ## Execution
 
-*— <executor model-id>, <date>*
+*— claude-opus-4-8, 2026-10-17*
 
-<!-- The two AGENTS.md edits as applied; gate result; any drift. -->
+Two `AGENTS.md` edits, as designed:
+
+1. §6 Git bullet — appended "(except the docs/index carve-out in §10)" so the
+   branch-first rule and the carve-out cross-reference instead of contradicting.
+2. §10 — new bullet "Docs & index edits are not tasks (carve-out)" inserted
+   after "Index & registries", before "Agent briefs": the direct-to-`main` path
+   for blast-nil docs/index prose, the explicit NOT-carved-out list (a) task
+   docs, (b) prose bundled with code, (c) substantive AGENTS rule changes, the
+   preserved explicit-OK, and the "when unsure, treat as a task" tie-break.
+
+**Drift:** none — exactly the two edits in Files, no other lines touched.
+
+**Verification:** `bun run check` → green (Biome skips Markdown, so the edit
+carries no lint surface; full suite unchanged, 646 pass / 1 skip / 0 fail).
 
 ## Review
 
-*— <reviewer model-id>, <date>*
+*— claude-opus-4-8, 2026-10-17 (same-model, in-context — contained/S docs, §10 permits standard Review)*
 
-<!-- Confirm the carve-out is unambiguous, the NOT-carved-out list closes the
-scope-creep hole, §6↔§10 no longer contradict, and the explicit-OK is preserved.
-Gate green. -->
+**Verdict: APPROVE.**
+
+1. **Gate:** `bun run check` green; 646 pass / 1 skip / 0 fail. Markdown-only.
+2. **No contradiction:** §6's "branch first" now carries the `(except … §10)`
+   pointer; §10 holds the single definition of the exception. One source.
+3. **Scope-creep hole closed:** the (a)(b)(c) NOT-carved-out list plus the
+   "when unsure, treat as a task" tie-break mean the exemption can only apply to
+   prose with no code reach and no rule change. Erring upward (toward the branch)
+   is the designed default.
+4. **Explicit-OK preserved:** the bullet states the carve-out removes the branch,
+   not the §6 OK — verified against the §6 edit (the OK clause is untouched).
+5. **Self-consistent dogfood:** this very task is an AGENTS rule change and was
+   run as a task per its own point (c) — the boundary classified correctly on
+   first use.
+
+**Self-red-team:** the one soft edge is judging "substantive rule change" vs
+"typo/link fix" — a grey zone. Mitigated by the tie-break (unsure → task); the
+cost of over-classifying is a cheap extra branch, the cost of under-classifying
+is a rule change with no trail, so the asymmetry is set the safe way. No fix
+needed.
