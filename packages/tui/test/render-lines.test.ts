@@ -111,7 +111,7 @@ describe("itemLines", () => {
     const tool: ToolItem = {
       kind: "tool",
       id: "t",
-      name: "task",
+      name: "agent_task",
       args: '{"description":"find bug"}',
       status: "ok",
       startedAt: 0,
@@ -126,7 +126,7 @@ describe("itemLines", () => {
       },
     };
     const text = itemLines(tool, { expandAll: true }).map(strip).join("\n");
-    expect(text).toContain("Task find bug"); // header
+    expect(text).toContain("Agent find bug"); // header
     expect(text).toContain("explore · 2 tool uses"); // tree head
     expect(text).toContain("Read auth.ts");
     expect(text).toContain("$ grep -n token");

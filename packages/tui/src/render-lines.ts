@@ -229,7 +229,7 @@ function diffBody(detail: Extract<ToolResultDetail, { kind: "diff" }>, width: nu
   return out;
 }
 
-/** The nested progress tree for a sub-agent (`task`) call. */
+/** The nested progress tree for a sub-agent (`agent_task`) call. */
 function subAgentLines(tool: ToolItem): string[] {
   const sub = tool.sub;
   if (!sub) {
@@ -251,7 +251,7 @@ function toolBody(tool: ToolItem, width: number): string[] {
   if (tool.detail?.kind === "diff") {
     return diffBody(tool.detail, width);
   }
-  // Sub-agent (`task`): show the nested activity tree, then its report (when done).
+  // Sub-agent (`agent_task`): show the nested activity tree, then its report (when done).
   if (tool.sub) {
     const tree = subAgentLines(tool);
     if (tool.status === "running") {
@@ -313,8 +313,8 @@ export function toolTitle(tool: ToolItem): { label: string; subtitle: string } {
       return { label: "Edit", subtitle: str("path") ?? "" };
     case "shell":
       return { label: "Bash", subtitle: str("command") ?? "" };
-    case "task":
-      return { label: "Task", subtitle: str("description") ?? str("subagent_type") ?? "" };
+    case "agent_task":
+      return { label: "Agent", subtitle: str("description") ?? str("subagent_type") ?? "" };
     default:
       return { label: tool.name, subtitle: tool.args };
   }

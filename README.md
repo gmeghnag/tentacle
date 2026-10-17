@@ -55,7 +55,7 @@ Resolved with precedence **environment variables › `config.jsonc` › built-in
 | `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline) | System prompt file (default `PROMPT.md`) |
 | `cwd` | `TENTACLE_CWD` | Workspace directory for tools (default: launch dir); writes are confined here |
 | `maxIterations` | `TENTACLE_MAX_ITERATIONS` | Max model/tool rounds per turn |
-| `subagents.enabled` | `TENTACLE_SUBAGENTS` | Enable the `task` sub-agent tool (default on) |
+| `subagents.enabled` | `TENTACLE_SUBAGENTS` | Enable the `agent_task` sub-agent tool (default on) |
 
 Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyCommand`.
 `TENTACLE_CONFIG_DIR` (or `XDG_CONFIG_HOME`) relocates the config directory.
@@ -90,7 +90,7 @@ See [`docs/F3-remote-control.md`](./docs/F3-remote-control.md).
 - **Background jobs:** `shell` with `run_in_background` plus `shell_output` / `shell_kill`; a finished job is surfaced live and fed back to the model (exit trigger).
 - **Workspace confinement:** writes confined to `cwd` via realpath (symlink escapes refused); reads unconfined.
 - **Permission engine:** shell commands gated with command-prefix-scoped "always" approvals; never auto-approves command substitution.
-- **Sub-agents:** the `task` tool delegates to isolated child agents; built-in + user-defined types (`<configDir>/agents/*.md`); toggleable.
+- **Sub-agents:** the `agent_task` tool delegates to isolated child agents; built-in + user-defined types (`<configDir>/agents/*.md`); toggleable.
 - **Rich TUI:** Claude-Code-style rendering (full-width diff bars, word-level highlighting, `⏺`/`⎿` glyphs), mouse-wheel scroll + text selection, slash-command palette, `/compact` context compaction, `/help` for the rest.
 - **Remote control:** WebSocket + JSON-RPC 2.0 daemon/client, bearer-token auth, loopback-safe bind.
 
@@ -103,7 +103,7 @@ See [`docs/F3-remote-control.md`](./docs/F3-remote-control.md).
 | `@tentacle/config` | Layered config loader (`config.jsonc` + env + defaults); scaffolding; lazy `apiKeyCommand`. |
 | `@tentacle/providers` | OpenAI-compatible provider (fetch + SSE streaming, tool-call normalisation). |
 | `@tentacle/exec` | Host execution environment (`Bun.spawn`), workspace write-confinement, background jobs. |
-| `@tentacle/tools` | Tool registry + built-in tools (fs + shell + background + `task`). |
+| `@tentacle/tools` | Tool registry + built-in tools (fs + shell + background + `agent_task`). |
 | `@tentacle/agent` | The agent loop, `Session`, sub-agents, context compaction, permission gate. |
 | `@tentacle/transport` | Symmetric JSON-RPC `RpcPeer` over a duplex channel (in-memory testable). |
 | `@tentacle/daemon` | Remote-control server: hosts sessions, maps events to the wire, WS adapter + auth. |

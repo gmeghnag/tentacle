@@ -121,26 +121,31 @@ describe("createSubagentRunner", () => {
 
   test("a child never receives the spawn tool (no recursion)", async () => {
     const { env } = recordingEnv();
+    const spawned: string[] = [];
     const parentTools = fullRegistry().register({
-      name: "task",
+      name: "agent_task",
       description: "spawn",
       inputSchema: shellTool.inputSchema,
       permission: "none",
-      async execute() {
+      async execute(input) {
+        // Side effect that only fires if the spawn tool is actually callable
+        // by the child (i.e. the no-recursion filter failed to strip it).
+        spawned.push(JSON.stringify(input));
         return { content: "SPAWNED A CHILD" };
       },
     });
     const { run } = createSubagentRunner({
       model: new ScriptedProvider([
-        [toolCall("task", { command: "x" }), { type: "done" }],
+        [toolCall("agent_task", { command: "x" }), { type: "done" }],
         [{ type: "text", delta: "no task tool" }, { type: "done" }],
       ]),
       env,
       tools: parentTools,
     });
-    const result = await run({ description: "d", prompt: "spawn", type: "general-purpose" });
-    // The nested task never ran; the child saw "unknown tool" instead.
-    expect(result.report).not.toContain("SPAWNED A CHILD");
+    await run({ description: "d", prompt: "spawn", type: "general-purpose" });
+    // The child attempted to call the spawn tool; it must be rejected as
+    // unknown (not in the child's registry) and therefore never executed.
+    expect(spawned).toEqual([]);
   });
 
   test("a type's model override routes to the provider from modelFor", async () => {

@@ -31,7 +31,7 @@ export interface NoticeItem {
   readonly jobId?: string;
 }
 
-/** Live progress of a sub-agent spawned by a `task` tool call. */
+/** Live progress of a sub-agent spawned by an `agent_task` tool call. */
 export interface SubAgentProgress {
   readonly agentType: string;
   readonly description: string;
@@ -51,7 +51,7 @@ export interface ToolItem {
   readonly detail?: ToolResultDetail;
   readonly startedAt: number;
   readonly endedAt?: number;
-  /** Set when this tool call is a sub-agent (`task`) with nested progress. */
+  /** Set when this tool call is a sub-agent (`agent_task`) with nested progress. */
   readonly sub?: SubAgentProgress;
 }
 

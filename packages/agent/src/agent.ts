@@ -58,7 +58,7 @@ export type AgentEvent =
       readonly result: ToolResult;
     }
   | { readonly type: "usage"; readonly usage: Usage }
-  // Nested sub-agent progress (the `task` tool), keyed by the parent tool-call id.
+  // Nested sub-agent progress (the `agent_task` tool), keyed by the parent tool-call id.
   | {
       readonly type: "subagent_start";
       readonly id: string;

@@ -1,5 +1,5 @@
 /**
- * The `task` tool — the model-facing surface for delegating to a sub-agent.
+ * The `agent_task` tool — the model-facing surface for delegating to a sub-agent.
  *
  * It owns no agent logic: a runner (built in the wiring layer, where the model
  * and registry live) is injected, so this package stays free of a dependency on
@@ -30,7 +30,7 @@ export interface TaskAgentType {
   readonly description: string;
 }
 
-/** Build the `task` tool for the given runner and available sub-agent types. */
+/** Build the `agent_task` tool for the given runner and available sub-agent types. */
 export function createTaskTool(run: TaskRunner, types: readonly TaskAgentType[]): Tool {
   const names = types.map((t) => t.name);
   const defaultType = names[0] ?? "general-purpose";
@@ -46,7 +46,7 @@ export function createTaskTool(run: TaskRunner, types: readonly TaskAgentType[])
   });
 
   return {
-    name: "task",
+    name: "agent_task",
     description: `Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so use it to explore or offload work without filling your own context. Prefer it for open-ended search and read-heavy investigation.\n\nAvailable sub-agent types:\n${typeList}`,
     inputSchema,
     permission: "none",

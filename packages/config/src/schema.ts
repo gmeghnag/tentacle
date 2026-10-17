@@ -71,7 +71,7 @@ export const FileConfigSchema = z
       .int()
       .refine((n) => n > 0 || n === -1, "must be a positive integer or -1 (unlimited)")
       .optional(),
-    /** Sub-agents (the `task` delegation tool). */
+    /** Sub-agents (the `agent_task` delegation tool). */
     subagents: z
       .object({
         /** Whether the agent may spawn sub-agents. Default: enabled. */

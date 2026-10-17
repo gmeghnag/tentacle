@@ -8,7 +8,7 @@
  * permission requester (so writes stay confined and approval prompts still reach
  * the user). Its tool-set is restricted by the chosen agent *type*, and the
  * spawn tool itself is always removed from the child (depth-1 guard — no runaway
- * recursion). This module builds the child; the `task` tool (in
+ * recursion). This module builds the child; the `agent_task` tool (in
  * `@tentacle/tools`) is the model-facing surface that calls it.
  */
 import type {
@@ -24,7 +24,7 @@ import type { ResultTransform } from "./result-pipeline.ts";
 /** A kind of sub-agent: its system prompt and the tools it may use. */
 export interface AgentType {
   readonly name: string;
-  /** When to use it — shown to the model in the `task` tool description. */
+  /** When to use it — shown to the model in the `agent_task` tool description. */
   readonly description: string;
   readonly prompt: string;
   /** Tool names the child may use; `"all"` = every parent tool (minus the spawn tool). */
@@ -124,7 +124,7 @@ export interface SubagentDeps {
   readonly requestPermission?: PermissionRequester;
   readonly maxIterations?: number;
   readonly types?: readonly AgentType[];
-  /** The spawn tool's name, always excluded from children (default `task`). */
+  /** The spawn tool's name, always excluded from children (default `agent_task`). */
   readonly spawnToolName?: string;
   /** Result transforms (e.g. spill large output) given to each child agent. */
   readonly resultTransforms?: readonly ResultTransform[];
@@ -136,7 +136,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
   types: readonly AgentType[];
 } {
   const types = deps.types && deps.types.length > 0 ? deps.types : BUILTIN_AGENT_TYPES;
-  const spawnToolName = deps.spawnToolName ?? "task";
+  const spawnToolName = deps.spawnToolName ?? "agent_task";
 
   const run: SubagentRunner = async (opts, controls) => {
     const type = types.find((t) => t.name === opts.type) ?? types[0];
