@@ -183,7 +183,7 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       `Session`; after the revert, the worker path is active again and the
       pre-existing gap is visible. NOT caused by the `exec` refactor (the
       worker/in-process blocks in `main.ts` are untouched).
-      **Implementation plan: `docs/steering-over-rpc.md`** — add a
+      **Implementation plan: `docs/fix/steering-over-rpc.md`** — add a
       `session/enqueue` request (client → daemon `Session.enqueue`) and stream
       the agent's `steer` event back over `session/update` (new `steer`
       update variant; the TUI already clears the ⏳ line on it). Additive
@@ -369,6 +369,18 @@ Daily-driver work (done 2026-10-14):
       unhandled rejection → exit 1 with a raw stack). See
       `docs/eval/session-store-durability.md`.
 
+### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
+
+Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked up).
+
+- [ ] 🟡 **`tentacle attach` dies after idle** (`⚠ RpcError: peer is closed`):
+      the exec channel has no keepalive or reconnect. **Plan:**
+      `docs/feat/pod-attach-resilience.md`. Type: feat.
+- [ ] **Self-deleting injected binary on `attach`** (leave-no-trace on a
+      user-owned pod). **Eval:** `docs/eval/pod-ephemeral-binary.md`. Type: eval.
+- [ ] **React 18 → 19 + Ink 5 → 8** (want-driven, retires two workarounds).
+      **Eval:** `docs/eval/react-19-migration.md`. Type: eval.
+
 ## Roadmap (ordered)
 
 - [x] **Local daemon on a worker thread** (the "TUI always over RPC" lever —
@@ -541,7 +553,7 @@ Daily-driver work (done 2026-10-14):
         Alpine/busybox cannot run it — the probe fails with a clear error +
         hint). Validated LIVE on an x86_64 OpenShift cluster: UBI9 full
         success (89 MB transfer + daemon), busybox clean failure at the probe.
-        Design + as-built log: `docs/pod-binary-injection.md`.
+        Design + as-built log: `docs/feat/pod-binary-injection.md`.
       - [~] **F4.e.2 — read-only-rootfs pods** (2026-10-16): a hardened pod
         (`readOnlyRootFilesystem`, e.g. coredns on OCP 4.22) broke injection
         twice. FIXED: (a) `--bin-dir <dir>` / `TENTACLE_POD_BIN_DIR` installs to
@@ -613,7 +625,7 @@ Daily-driver work (done 2026-10-14):
            `PermissionBroker` (the original bug) makes both tests fail on
            `expect(spy.requests).toHaveLength(1)` (received 0 — the ask never
            reached the spied broker) — then reverted (file is byte-identical).
-        3. ~~**Doc staleness:** `docs/pod-exec-attach.md` §10 says "526 pass" —
+        3. ~~**Doc staleness:** `docs/feat/pod-exec-attach.md` §10 says "526 pass" —
            update to 527 pass / 0 fail / 1 skip (528 total) and note the
            `-c`/`containerExecError` addition.~~ **DONE (with item 1):** §3
            flow diagram (no more `?? AGENT_CONTAINER`), §10 test list (8

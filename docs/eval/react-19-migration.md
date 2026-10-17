@@ -1,5 +1,7 @@
 # Migration: React 18 → 19 (and Ink 5 → 8)
 
+> **Status:** open — still on React 18.3.1 + Ink 5.0.1 (`packages/tui/package.json:14,18`) · legacy doc (pre-AGENTS §10), not retrofitted to the four sections
+
 ## Problem (why)
 
 We are pinned to **React 18.3.1 + Ink 5.0.1** (`packages/tui/package.json:14,18`).

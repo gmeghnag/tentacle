@@ -1,5 +1,7 @@
 # Ephemeral injected binary — self-destruct on `exec` (leave-no-trace)
 
+> **Status:** open — not implemented, no record of approval (no self-unlink in `packages/`, verified 2026-10-17); the `exec` command it names is now `tentacle attach` · legacy doc (pre-AGENTS §10), not retrofitted to the four sections
+
 **Stato:** **non implementato** (piano). Scope: solo il comando `exec`
 (attach a un pod user-owned). Basato su `main` @ `d3dcf94`.
 

@@ -1,5 +1,7 @@
 # Pod binary injection — architecture & plan
 
+> **Status:** done — steps 1–7 shipped (details below) · legacy doc (pre-AGENTS §10), not retrofitted to the four sections
+
 **Status:** steps 1–7 shipped; step 6 PROVEN live (UBI9 full success,
 89 MB transfer + daemon; busybox fails cleanly at the `--version` probe — glibc
 constraint). The working tree also carries, in the same commit: the `--pod`
@@ -85,7 +87,7 @@ ours shadows it — fine, it's our sandbox; note: running as root is assumed, sa
 > transfer) and its stdout is the version label; only on failure does the full
 > sequence above run. The pod is user-owned, so no create/delete wraps it and a
 > failed injection leaves the pod untouched (the glibc hint still applies).
-> Plan + as-built: `docs/pod-exec-attach.md`.
+> Plan + as-built: `docs/feat/pod-exec-attach.md`.
 
 ### `uname -m` → target mapping
 - `x86_64` → `bun-linux-x64`
@@ -518,7 +520,7 @@ is the truth; §2–§4 remain the design rationale.
    never blocks exit and never throws. `KubeClient.deletePodBestEffort` +
    `PodCluster.deletePodBestEffort` + `registerPodCleanup` (registered right after
    `createPod`, so pre-ready failures are covered). Design + as-built:
-   `docs/pod-delete-on-exit.md`. Tests: `k8s/test/pod-cleanup.test.ts` + the
+   `docs/fix/pod-delete-on-exit.md`. Tests: `k8s/test/pod-cleanup.test.ts` + the
    exit-cleanup test in `cli/test/pod-runtime.test.ts`.
 3. **Missing-namespace 404 → actionable error** — `podCreateError` in
    `pod-runtime.ts` translates a pod-create 404 (`namespaces "…" not found`,
@@ -549,7 +551,7 @@ is the truth; §2–§4 remain the design rationale.
   items above — `flags.ts`, `pod-runtime.ts`, `k8s/src/client.ts`,
   `k8s/src/index.ts`, `k8s/src/kube-auth.ts`, plus the new `pod-cleanup.ts`,
   `pod-cleanup.test.ts`, `status-line.ts`, `transfer-progress.ts`,
-  `status-line.test.ts`, and `docs/pod-delete-on-exit.md`. `dist/` is git-IGNORED
+  `status-line.test.ts`, and `docs/fix/pod-delete-on-exit.md`. `dist/` is git-IGNORED
   (`dist/Dockerfile`'s marker is local-only, not committable). All committed
   together (single commit — see the commit message).
 - DONE in this commit: 1) the glibc fixes + `libcMismatchHint` (+tests), 2) the

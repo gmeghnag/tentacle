@@ -137,7 +137,7 @@ each has bitten us. Cited symbols are the source of truth — read them, don't
 assume.
 
 - **TUI always over RPC — one session path.** Every runtime (in-process worker,
-  pod `run`, pod `exec`, remote `connect`) drives the TUI through the SAME
+  pod `run`, pod `attach`, remote `connect`) drives the TUI through the SAME
   `RemoteClient` ↔ `Connection` stack (`createLocalRuntime`). The agent loop +
   tool execution run daemon-side, off the render thread. A new execution target
   adds **only a transport** (a `DuplexChannel`) + lifecycle — never a parallel
@@ -189,7 +189,7 @@ assume.
   `process.stdout.write` mid-session corrupts the render.
 - **Pod lifecycle.** `run` creates AND deletes its pod; the delete-on-exit net
   (`deletePodBestEffort`) survives `process.exit`/Ctrl+C via a detached child
-  (`exit` handlers still fire; SIGINT routes through it). `exec` is user-owned:
+  (`exit` handlers still fire; SIGINT routes through it). `attach` is user-owned:
   never create or delete, no exit net. Pass secrets to the child via **env, never
   argv** (argv is visible in `ps`).
 - **Bun TLS + k8s specifics.** Bun honours per-call `tls:{ca,cert,key}` on

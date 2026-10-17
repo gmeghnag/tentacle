@@ -1,5 +1,7 @@
 # `tentacle attach` — piano: aggancio a un pod esistente
 
+> **Status:** done — shipped as `tentacle attach` (`cli/src/main.ts:373`) · legacy doc (pre-AGENTS §10), not retrofitted to the four sections
+
 **Stato:** **implementato** (branch `feat/pod-exec-attach` da `c5b7f58`).
 Questo doc nasce come piano; §10 è l'as-built. Basato su `c5b7f58` (branch
 `feat/pod-binary-injection`), che ha consegnato `run` + iniezione binario
@@ -174,7 +176,7 @@ Niente di nuovo: `getPod` esiste già. Eventualmente re-export già presente
 - `docs/F4-pod-execution.md`: §1 scope + riga di uso; §6 lifecycle: paragrafo
   "attach mode (`exec`): no create, no delete; preflight version-probe skips
   re-injection".
-- `docs/pod-binary-injection.md`: nota al checkpoint — il preflight
+- `docs/feat/pod-binary-injection.md`: nota al checkpoint — il preflight
   version-probe è una terza modalità d'uso di `injectAgentBinary` (skip se già
   presente).
 - Questo file: sezione "as-built" al fine.
