@@ -503,7 +503,7 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
       with a **reverse-tunnel for the model over the RPC channel** so the local
       endpoint/secret never leave the laptop. Reuses the whole client/daemon/RPC
       stack (new transport + lifecycle only). Full design + slice plan in
-      `docs/F4-pod-execution.md`. MVP = F4.a–F4.e.
+      `docs/architecture/F4-pod-execution.md`. MVP = F4.a–F4.e.
       - [x] **F4.a — `KubeClient` REST** (2026-10-14): new `@tentacle/k8s`
         package — `createPod`/`getPod`/`deletePod`/`waitForReady`/`podIsReady`,
         bearer auth, injectable `fetch`, mock-API tests. Dependency-free.

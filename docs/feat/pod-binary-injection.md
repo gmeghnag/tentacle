@@ -228,7 +228,7 @@ final line folds it in; no separate "ready in pod" log line).
 ### 3.4 Docs/TODO
 - `TODO.md`: add entry under F4 (after F4.d): `F4.e — pod binary injection` (unchecked until
   done, with the design summary + the `TENTACLE_POD_BIN` knob).
-- `docs/F4-pod-execution.md`: one section (or a pointer) — the injection flow + the image no
+- `docs/architecture/F4-pod-execution.md`: one section (or a pointer) — the injection flow + the image no
   longer needs the tool.
 - Update `pod.ts` header comment + `main.ts` `run` help text: `--image` now only needs to be
   a linux image with `sh` (+ `head`), the tool is injected.
@@ -281,7 +281,7 @@ final line folds it in; no separate "ready in pod" log line).
 | `packages/cli/src/serve.ts` | `serve --stdio` (what the daemon command runs; check worker usage) |
 | `scripts/build.ts` | the `Bun.build` options to share (`entrypoints` incl. worker second entrypoint, yoga plugin, `define` for version, `TARGET` env, mac codesign) |
 | `packages/transport/src/channel.ts` | `DuplexChannel` (text-only — why `runExec` needs its own bytes path) |
-| `TODO.md` (F4 section) + `docs/F4-pod-execution.md` | where to record F4.e |
+| `TODO.md` (F4 section) + `docs/architecture/F4-pod-execution.md` | where to record F4.e |
 
 ## 6. Notes & pitfalls (learned so far)
 
@@ -455,7 +455,7 @@ is the truth; §2–§4 remain the design rationale.
   pod deleted, no opaque close).
 
 ### Step 7 — docs/TODO (done, working tree)
-- `TODO.md` F4.e entry (MVP now F4.a–F4.e); `docs/F4-pod-execution.md` F4.e
+- `TODO.md` F4.e entry (MVP now F4.a–F4.e); `docs/architecture/F4-pod-execution.md` F4.e
   section + the old "F4.e hardening" renumbered F4.f + status header;
   `packages/k8s/src/pod.ts` header/doc + `main.ts` `run` help and
   `--image` error text (glibc + `sh`+`head` constraint, tool is injected,
@@ -547,7 +547,7 @@ is the truth; §2–§4 remain the design rationale.
   carried 20 changed files (14 modified + 6 new): the 4 fix files
   (`pod-binary-build.ts`, `pod-binary.ts`, `pod-binary.test.ts`,
   `pod-runtime.test.ts`), the step 7 docs (`packages/cli/src/main.ts`,
-  `packages/k8s/src/pod.ts`, `TODO.md`, `docs/F4-pod-execution.md`), and — from the
+  `packages/k8s/src/pod.ts`, `TODO.md`, `docs/architecture/F4-pod-execution.md`), and — from the
   items above — `flags.ts`, `pod-runtime.ts`, `k8s/src/client.ts`,
   `k8s/src/index.ts`, `k8s/src/kube-auth.ts`, plus the new `pod-cleanup.ts`,
   `pod-cleanup.test.ts`, `status-line.ts`, `transfer-progress.ts`,
