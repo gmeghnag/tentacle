@@ -20,27 +20,33 @@ verify every claim against the code.
 
 **Verify, in order:**
 - **Re-run the gate** `bun run check` yourself; record the **exact** test counts.
-- **Run the task's acceptance checks** (grep-guards, named tests) against the
-  code — confirm, don't take the Execution section's word for it.
-- **Test non-vacuity by mutation** (§9): break the exact property each new test
-  pins, run the test, confirm it **FAILS**, then revert and confirm the working
-  tree is byte-identical. A test green on both old and new code tests nothing.
-- **Attack the plan itself, not only its checklist.** The Implementation's
-  "Failure modes" list is the *floor*, not the ceiling: ask what would make this
-  wrong that the plan did **not** consider — a missed site, an invariant that is
-  not actually sufficient, another code path that reaches the same state, a §7
-  invariant the change brushes against. For a `load-bearing` task, red-team that
-  §7 invariant explicitly.
-- **Scope check:** the diff contains only this task — no unrelated refactors, no
-  deferred-phase work leaking in.
+  Run the task's acceptance checks against the code — not Execution's word.
+- **Premise table:** every `file:line` the Implementation cites as a premise —
+  open it, mark TRUE/FALSE. A false premise is a finding.
+- **Mutation non-vacuity** (§9): break the property each new test pins, confirm
+  the test **FAILS**, revert, confirm the tree is byte-identical.
+- **Attack the plan, not its checklist.** Its "Failure modes" are the floor: ask
+  what it missed (a site, another path to the same state, a §7 invariant — for
+  `load-bearing`, red-team it explicitly) and whether each planned convergence
+  turns a loud failure into a silent wrong state. Fail-loud beats synthesising
+  data from truncated or invalid input.
+- **External contract** (API/protocol/format work): map the spec's terminal
+  states, stop reasons, required fields and limits to harness behaviour.
+  "Ignored" needs a reason.
+- **Prior art:** grep `docs/eval`, `docs/fix`, `TODO.md`, `docs/library-bugs.md`
+  for the touched files/symbols — an open item on the same path is a constraint.
+- **One end-to-end trace** of changed behaviour through the real code path (a
+  scratchpad script), not unit tests alone. **Scope:** the diff is only this task.
+
+**You do not write code.** No fixes during Review (temporary mutations aside): a
+needed fix is a finding → REQUEST-CHANGES; the executor fixes; a new Review runs.
 
 **Write the task doc's Review section:**
-- **Verdict first** — APPROVE / APPROVE-WITH-NITS / REJECT.
-- Numbered findings with `file:line` evidence; the gate counts; the
-  mutation-check outcome; what holds and what does not; and **how the executor
-  behaved** (clean mechanical apply? drift? corruption?).
-- **Sign honestly which model reviewed**, and the date. If you are the **same
-  model** that executed (only a fresh *context*), say so plainly and note that
-  same-model/fresh-context is **weaker** than a different or stronger reviewer —
-  shared blind spots survive both passes, so a load-bearing task wants a
-  different model (AGENTS §10 routing). Be factual: if something fails, say so.
+- **Verdict first** — APPROVE / APPROVE-WITH-NITS / REQUEST-CHANGES / REJECT.
+- Numbered findings with `file:line`; gate counts; mutation outcome; the premise
+  table; **Attacks tried** (≥3, each with its result, incl. those that found
+  nothing); what holds; and **how the executor behaved**.
+- **Sign honestly which model reviewed**, and the date. Same model or same model
+  *family* as the executor (only a fresh *context*) ⇒ say so: shared blind spots
+  survive both passes, so a load-bearing task wants a different model (AGENTS §10
+  routing). Be factual: if something fails, say so.
