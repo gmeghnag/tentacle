@@ -9,7 +9,7 @@
  * so ordinary vars a child needs (PATH, HOME, LANG, …) still pass through.
  */
 const SENSITIVE_KEY =
-  /(API[_-]?KEY|ACCESS[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIALS?|PRIVATE[_-]?KEY|AUTH)/i;
+  /(API[_-]?KEY|ACCESS[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIALS?|PRIVATE[_-]?KEY|AUTH|TLS[_-]?(KEY|CERT|CA))/i;
 
 /** Whether an environment variable name looks like it carries a secret. */
 export function isSensitiveEnvKey(key: string): boolean {
