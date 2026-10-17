@@ -39,8 +39,12 @@ export class ModelRequestError extends Error {
   constructor(
     readonly status: number,
     readonly body: string,
+    /** An actionable next step (e.g. which config key to set), appended to the message. */
+    readonly hint?: string,
   ) {
-    super(`model request failed with status ${status}: ${body.slice(0, 200)}`);
+    super(
+      `model request failed with status ${status}: ${body.slice(0, 200)}${hint ? ` — ${hint}` : ""}`,
+    );
     this.name = "ModelRequestError";
   }
 }

@@ -5,6 +5,7 @@ import {
   ANTHROPIC_DEFAULT_VERSION,
   AnthropicProvider,
   ModelRequestError,
+  anthropicErrorHint,
   buildPayload,
 } from "../src/index.ts";
 
@@ -497,5 +498,44 @@ describe("AnthropicProvider.stream", () => {
     // The provider must hand the caller's signal to fetch (the OpenAI provider's
     // existing abort contract) so the body stream can be torn down.
     expect(fetchSignal).toBe(controller.signal);
+  });
+});
+
+describe("anthropicErrorHint (actionable non-2xx errors)", () => {
+  const body = (type: string, message: string) =>
+    JSON.stringify({ type: "error", error: { type, message } });
+
+  test("an unknown model names the config key to set", () => {
+    const hint = anthropicErrorHint(404, body("not_found_error", "model: default"));
+    expect(hint).toContain("model.model");
+    expect(hint).toContain("TENTACLE_MODEL");
+  });
+
+  test("a missing or bad key names the key settings", () => {
+    const hint = anthropicErrorHint(401, body("authentication_error", "invalid x-api-key"));
+    expect(hint).toContain("model.apiKeyCommand");
+    expect(hint).toContain("TENTACLE_MODEL_API_KEY");
+  });
+
+  test("other errors get no hint; a non-JSON body never throws", () => {
+    expect(anthropicErrorHint(429, body("rate_limit_error", "slow down"))).toBeUndefined();
+    expect(anthropicErrorHint(404, "<html>not found</html>")).toBeUndefined();
+  });
+
+  test("the hint reaches the thrown error message", async () => {
+    const provider = new AnthropicProvider({
+      baseURL: "http://h/v1",
+      model: "default",
+      fetch: (async () =>
+        new Response(body("not_found_error", "model: default"), {
+          status: 404,
+        })) as unknown as typeof fetch,
+    });
+    const run = async () => {
+      for await (const _ of provider.stream({ messages: [{ role: "user", content: "hi" }] })) {
+        // drain
+      }
+    };
+    await expect(run()).rejects.toThrow("TENTACLE_MODEL");
   });
 });
