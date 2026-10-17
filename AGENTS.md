@@ -121,7 +121,8 @@ style suggestions.
   import { render } from "<repo>/node_modules/.bun/ink-testing-library@4.0.0+2b82e8ab9dffa8af/node_modules/ink-testing-library/build/index.js";
   import { App } from "<repo>/packages/tui/src/App.tsx"; // TS/TSX source: absolute paths work
   ```
-- Git: commit **only on the user's explicit OK**; if on `main`, branch first.
+- Git: commit **only on the user's explicit OK**; if on `main`, branch first
+  (except the docs/index carve-out in §10).
 - Docs: `README.md`, `ARCHITECTURE.md`, per-feature design docs under `docs/`.
 
 ## 7. Architecture invariants (mandatory — breaking one is a bug)
@@ -311,6 +312,21 @@ branch and a single living doc. This formalises §8 (the plan) and §4/§5/§9
   task doc. `docs/library-bugs.md` is the cross-cutting upstream-bug registry (a
   reference, not a task). Docs under `docs/` predating this standard are legacy;
   new work uses this structure.
+- **Docs & index edits are not tasks (carve-out).** A standalone edit to a
+  blast-nil Markdown file that carries no code — `TODO.md`, `docs/library-bugs.md`,
+  a folder `README`, or a standalone decision/notes doc under `docs/` — may be
+  committed **directly to `main`**, no branch and no four-section doc. This is the
+  one exception to §6's "if on `main`, branch first": a task branch exists to
+  protect *code* from parallel-edit/merge conflicts, and prose that touches no
+  code, test, or build path has no such blast (Biome does not lint Markdown, §6).
+  **NOT** carved out: (a) a **task's own doc** (`docs/<type>/<slug>.md`) — it *is*
+  the task and rides the task's branch; (b) a Markdown edit **bundled with a code
+  change** — it rides that code's task branch; (c) a **substantive change to this
+  file's rules** — those shape how everyone works, so they stay a task with the
+  reasoning trail and Review (a typo/link/formatting fix to any doc is fine
+  direct). Unchanged: every direct commit still needs the user's explicit OK
+  (§6) — the carve-out removes the branch, not the OK. When unsure "does this
+  touch code / change a rule?", treat it as a task.
 - **Agent briefs:** a fresh agent spawned to execute or review a task is given
   `docs/EXECUTOR-BRIEF.md` / `docs/REVIEWER-BRIEF.md` — the spawn-time
   choreography (read AGENTS.md + the task doc, then do / adversarially attack).
