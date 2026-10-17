@@ -174,3 +174,60 @@ describe("resolveConfig API key precedence", () => {
     expect(c.apiKeySource).toBe("command");
   });
 });
+
+describe("resolveConfig AGENTS.md composition", () => {
+  test("appends AGENTS.md after the identity prompt, under a labelled header", () => {
+    const c = resolveConfig(ctx({ promptFromFile: "IDENTITY", agentsMd: "RULES" }));
+    expect(c.systemPrompt).toBe("IDENTITY\n\n# Project rules (AGENTS.md)\n\nRULES\n");
+    expect(c.agentsMdLoaded).toBe(true);
+    // The identity still leads; AGENTS.md is strictly appended.
+    expect(c.systemPrompt.startsWith("IDENTITY")).toBe(true);
+    // Provenance of the base prompt is unchanged (file here).
+    expect(c.sources.systemPrompt).toBe("file");
+  });
+
+  test("absent AGENTS.md leaves the prompt byte-identical (additive guarantee)", () => {
+    const c = resolveConfig(ctx({ promptFromFile: "IDENTITY" }));
+    expect(c.systemPrompt).toBe("IDENTITY");
+    expect(c.agentsMdLoaded).toBe(false);
+  });
+
+  test("an all-whitespace AGENTS.md is treated as absent", () => {
+    const c = resolveConfig(ctx({ promptFromFile: "IDENTITY", agentsMd: "   \n\n" }));
+    expect(c.systemPrompt).toBe("IDENTITY");
+    expect(c.agentsMdLoaded).toBe(false);
+  });
+
+  test("env TENTACLE_NO_AGENTS_MD disables the append (and wins over the file)", () => {
+    const off = resolveConfig(
+      ctx({ env: { TENTACLE_NO_AGENTS_MD: "1" }, promptFromFile: "IDENTITY", agentsMd: "RULES" }),
+    );
+    expect(off.systemPrompt).toBe("IDENTITY");
+    expect(off.agentsMdLoaded).toBe(false);
+    // env off beats file loadAgentsMd:true
+    const envBeatsFile = resolveConfig(
+      ctx({
+        env: { TENTACLE_NO_AGENTS_MD: "yes" },
+        fileConfig: { loadAgentsMd: true },
+        promptFromFile: "IDENTITY",
+        agentsMd: "RULES",
+      }),
+    );
+    expect(envBeatsFile.agentsMdLoaded).toBe(false);
+  });
+
+  test("file loadAgentsMd:false disables the append", () => {
+    const c = resolveConfig(
+      ctx({ fileConfig: { loadAgentsMd: false }, promptFromFile: "IDENTITY", agentsMd: "RULES" }),
+    );
+    expect(c.systemPrompt).toBe("IDENTITY");
+    expect(c.agentsMdLoaded).toBe(false);
+  });
+
+  test("a full override (TENTACLE_SYSTEM_PROMPT) is still only the identity; AGENTS.md appends", () => {
+    const c = resolveConfig(ctx({ env: { TENTACLE_SYSTEM_PROMPT: "ENV_ID" }, agentsMd: "RULES" }));
+    expect(c.systemPrompt).toBe("ENV_ID\n\n# Project rules (AGENTS.md)\n\nRULES\n");
+    expect(c.sources.systemPrompt).toBe("env");
+    expect(c.agentsMdLoaded).toBe(true);
+  });
+});

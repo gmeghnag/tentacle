@@ -577,6 +577,31 @@ Daily-driver work (done 2026-10-14):
       model; Phase 2 (below) → load-bearing, strong model, SEPARATE task.
       Follow-up (Phase 2, not done): `theme` config `auto|dark|light` + an
       OSC-11 terminal-background probe before Ink mounts.
+- [x] **Auto-load repo AGENTS.md into the system prompt** (`docs/feat/agents-md-autoload.md`,
+      2026-10-17): a fresh session's prompt was only `PROMPT.md` (~90 words); now
+      a per-repo `AGENTS.md`, found by walking up from the launch cwd (stopping at
+      the `.git` repo root, symlink-loop bounded), is appended after the identity
+      under `# Project rules (AGENTS.md)`. Additive (no file → byte-identical) and
+      defeatable (`TENTACLE_NO_AGENTS_MD` / `loadAgentsMd:false`). `bun run check`
+      645→646 pass; fresh-context review APPROVE-WITH-NITS.
+      Type: feat · Size: M · Blast: load-bearing · Suited: strong model + fresh review.
+- [ ] **AGENTS.md auto-load — folder-trust gate** (follow-up to the above): v1
+      loads a discovered repo's `AGENTS.md` into the prompt UNCONDITIONALLY — a
+      prompt-injection surface if tentacle is launched in an untrusted/cloned repo
+      (that file becomes instructions for a shell+`fs_edit` agent). The `.git`
+      boundary stops *parent*-repo inheritance but not a malicious repo-root file.
+      Add a first-run "trust this folder's AGENTS.md?" gate (remembered per path).
+      Deferred by the owner when autoload shipped; fine for today's single-user
+      trusted-repo use. Type: fix · Size: M · Blast: load-bearing · Suited: strong
+      model + mandatory fresh-context review.
+- [ ] **Subagents don't receive AGENTS.md** (follow-up to the above): the autoload
+      primes only the MAIN session; a spawned subagent (the `task` tool) still
+      starts from its agent-definition body (`agent-defs.ts` → `prompt`), not the
+      repo rules. Defensible — subagents are handed the executor/reviewer briefs,
+      which order reading AGENTS.md — but undocumented, and it partly undercuts the
+      weak-model motivation. Decide: inject AGENTS.md into subagent prompts too, or
+      document that the briefs are the channel. Type: eval · Size: S · Blast:
+      cross-module.
 - [ ] **Skills support** — packaged procedural guidance the model opts into
       (complementary to the result pipeline: skills = *how to do it*, the pipeline
       = *the guarantee the context stays clean*).

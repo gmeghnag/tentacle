@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONFIG_FILENAME, DEFAULT_SYSTEM_PROMPT, PROMPT_FILENAME } from "../src/defaults.ts";
+import {
+  AGENTS_FILENAME,
+  CONFIG_FILENAME,
+  DEFAULT_SYSTEM_PROMPT,
+  PROMPT_FILENAME,
+} from "../src/defaults.ts";
 import { ConfigError, loadConfig } from "../src/load.ts";
 
 let dir: string;
@@ -160,5 +165,68 @@ describe("loadConfig API key", () => {
         runCommand: async () => "   \n",
       }),
     ).rejects.toThrow(/empty key/);
+  });
+});
+
+describe("loadConfig AGENTS.md auto-load", () => {
+  // A fake repo under the temp HOME: `.git` at the root bounds the walk, the
+  // workspace is a nested subdir, AGENTS.md (when present) sits at the root.
+  async function makeRepo(opts: { agents?: string }): Promise<string> {
+    const repo = join(dir, "repo");
+    const work = join(repo, "a", "b");
+    await mkdir(work, { recursive: true });
+    await mkdir(join(repo, ".git"), { recursive: true });
+    if (opts.agents !== undefined) {
+      await writeFile(join(repo, AGENTS_FILENAME), opts.agents, "utf8");
+    }
+    return work;
+  }
+
+  test("appends a repo AGENTS.md found by walking up from the workspace", async () => {
+    const work = await makeRepo({ agents: "REPO RULES" });
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: work });
+    expect(cfg.systemPrompt).toBe(
+      `${DEFAULT_SYSTEM_PROMPT.trimEnd()}\n\n# Project rules (AGENTS.md)\n\nREPO RULES\n`,
+    );
+    expect(cfg.agentsPath).toBe(join(dir, "repo", AGENTS_FILENAME));
+  });
+
+  test("no AGENTS.md in the tree → prompt unchanged, no agentsPath", async () => {
+    const work = await makeRepo({});
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: work });
+    expect(cfg.systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect(cfg.agentsPath).toBeUndefined();
+  });
+
+  test("TENTACLE_NO_AGENTS_MD disables the auto-load", async () => {
+    const work = await makeRepo({ agents: "REPO RULES" });
+    const cfg = await loadConfig({
+      env: { ...baseEnv(), TENTACLE_NO_AGENTS_MD: "1" },
+      configDir,
+      cwd: work,
+    });
+    expect(cfg.systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect(cfg.agentsPath).toBeUndefined();
+  });
+
+  test("the walk stops at the repo root (.git) — a parent AGENTS.md is NOT read", async () => {
+    await writeFile(join(dir, AGENTS_FILENAME), "OUTSIDE THE REPO", "utf8");
+    const work = await makeRepo({}); // repo has .git but no AGENTS.md of its own
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: work });
+    expect(cfg.systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect(cfg.agentsPath).toBeUndefined();
+  });
+
+  test("a present-but-unreadable AGENTS.md degrades to the base prompt — never crashes", async () => {
+    const repo = join(dir, "repo");
+    const work = join(repo, "a", "b");
+    await mkdir(work, { recursive: true });
+    await mkdir(join(repo, ".git"), { recursive: true });
+    // AGENTS.md exists (so the walk finds it) but is a directory → readFile
+    // throws EISDIR → the best-effort read must swallow it and fall back.
+    await mkdir(join(repo, AGENTS_FILENAME), { recursive: true });
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: work });
+    expect(cfg.systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect(cfg.agentsPath).toBeUndefined();
   });
 });

@@ -31,6 +31,12 @@ export const DEFAULT_DEDUP_OUTPUT = true;
 export const DEFAULT_TABULATE_JSON = false;
 export const PROMPT_FILENAME = "PROMPT.md";
 export const CONFIG_FILENAME = "config.jsonc";
+/**
+ * Per-repo agent rules file, auto-loaded from the workspace (walking up to the
+ * repo root) and appended to the system prompt after the identity (`PROMPT.md`).
+ * The same file Claude Code reads, so every agent/harness sees identical rules.
+ */
+export const AGENTS_FILENAME = "AGENTS.md";
 
 /** Default system prompt, also written to `PROMPT.md` on first run. */
 export const DEFAULT_SYSTEM_PROMPT = `You are a capable, precise software engineering agent.

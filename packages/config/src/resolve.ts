@@ -39,6 +39,8 @@ export interface ResolvedConfig {
   readonly maxIterations: number;
   readonly contextWindow: number;
   readonly systemPrompt: string;
+  /** Whether a per-repo AGENTS.md was folded into `systemPrompt`. */
+  readonly agentsMdLoaded: boolean;
   readonly subagentsEnabled: boolean;
   /** Sub-agent step limit; a positive integer, or -1 (unlimited). */
   readonly subagentMaxIterations: number;
@@ -87,7 +89,12 @@ export interface ResolveContext {
   readonly defaultCwd: string;
   /** Contents of the system-prompt file, if one was read. */
   readonly promptFromFile?: string | undefined;
+  /** Contents of a per-repo AGENTS.md, if one was found and read (I/O in load.ts). */
+  readonly agentsMd?: string | undefined;
 }
+
+/** Header the auto-loaded AGENTS.md is appended under, after the identity prompt. */
+const AGENTS_PROMPT_HEADER = "# Project rules (AGENTS.md)";
 
 function pick<T>(
   envValue: T | undefined,
@@ -144,7 +151,7 @@ function parseBool(raw: string | undefined): boolean | undefined {
 }
 
 export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
-  const { fileConfig, env, defaultCwd, promptFromFile } = ctx;
+  const { fileConfig, env, defaultCwd, promptFromFile, agentsMd } = ctx;
   const model = fileConfig.model ?? {};
 
   const baseURL = pick(env.TENTACLE_MODEL_BASE_URL, model.baseURL, DEFAULT_BASE_URL);
@@ -160,7 +167,19 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     model.contextWindow,
     DEFAULT_CONTEXT_WINDOW,
   );
+  // System prompt = identity (env | PROMPT.md | default). AGENTS.md, when
+  // auto-loaded, is appended AFTER it as repo rules — additive, never replacing
+  // the identity. Disable via env TENTACLE_NO_AGENTS_MD (truthy, wins) or file
+  // `loadAgentsMd: false`. The `systemPrompt` source tracks the identity's
+  // provenance; whether AGENTS.md was folded in is reported by `agentsMdLoaded`.
   const systemPrompt = pick(env.TENTACLE_SYSTEM_PROMPT, promptFromFile, DEFAULT_SYSTEM_PROMPT);
+  const noAgentsEnv = parseBool(env.TENTACLE_NO_AGENTS_MD);
+  const agentsEnabled =
+    noAgentsEnv !== undefined ? !noAgentsEnv : (fileConfig.loadAgentsMd ?? true);
+  const agentsMdLoaded = agentsEnabled && agentsMd !== undefined && agentsMd.trim() !== "";
+  const systemPromptValue = agentsMdLoaded
+    ? `${systemPrompt.value.trimEnd()}\n\n${AGENTS_PROMPT_HEADER}\n\n${(agentsMd ?? "").trimEnd()}\n`
+    : systemPrompt.value;
   const subagentsEnabled = pick(
     parseBool(env.TENTACLE_SUBAGENTS),
     fileConfig.subagents?.enabled,
@@ -219,7 +238,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     cwd: cwd.value,
     maxIterations: maxIterations.value,
     contextWindow: contextWindow.value,
-    systemPrompt: systemPrompt.value,
+    systemPrompt: systemPromptValue,
+    agentsMdLoaded,
     subagentsEnabled: subagentsEnabled.value,
     subagentMaxIterations: subagentMaxIterations.value,
     maxInlineOutputChars: maxInlineOutputChars.value,

@@ -83,6 +83,7 @@ Environment:
   TENTACLE_MODEL            model id
   TENTACLE_MODEL_API_KEY    bearer token (overrides config apiKey/apiKeyCommand)
   TENTACLE_SYSTEM_PROMPT    inline system prompt (overrides PROMPT.md)
+  TENTACLE_NO_AGENTS_MD     do not auto-load the repo's AGENTS.md into the prompt
   TENTACLE_MAX_ITERATIONS   max model/tool iterations per turn
   TENTACLE_CWD              working directory for tools
   TENTACLE_SUBAGENTS        enable/disable sub-agents (on/off, default on)
