@@ -32,11 +32,21 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       `agent/test/agent.test.ts` (mid-stream abort → cancelled; non-abort error
       still throws). Also cleans up sub-agent cancellation (child abort now ends
       cleanly instead of becoming an `isError` task result). 353 tests green.
-- [ ] 🔵 **Shell inherits the full `process.env`** (`host-execution.ts:80,132`),
-      incl. `TENTACLE_MODEL_API_KEY` etc. — a model-run `echo $TENTACLE_MODEL_API_KEY`
-      exfiltrates the key (redaction won't match it). Scrub with the existing
-      `scrubSensitiveEnv` denylist (`core/src/env.ts`) from the child env.
-      **Eval:** `docs/eval/shell-env-scrub.md` (fix-ready — recommends promote to `fix`).
+- [x] 🔵 **Shell inherits the full `process.env`** — FIXED (2026-10-17):
+      both `Bun.spawn` sites (`host-execution.ts`) now hand the child
+      `childEnv(options)` = `scrubSensitiveEnv(process.env)` with the caller's
+      explicit `options.env` overlaid unscrubbed (opt-in, same policy as the MCP
+      stdio transport). Red-first tests in `exec/test/host-execution.test.ts`
+      (leak absent + `PATH` present, `exec` and `spawnBackground`; explicit
+      overlay honoured). **Fix:** `docs/fix/shell-env-scrub.md`.
+- [ ] 🔵 **Shared env denylist misses this repo's own pod-TLS vars** (follow-up
+      to the shell-env-scrub fix): `TENTACLE_POD_TLS_KEY` / `_CERT` carry
+      **PEM data** when set inline (`k8s/src/pod-cleanup.ts:81-84`) but do not
+      match `SENSITIVE_KEY` (`core/src/env.ts:11-12`), so they still reach the
+      shell child *and* the MCP child. Pre-existing helper property (both paths
+      expose it equally), not the shell fix's fault — the provider key the
+      original defect names is fixed. Extend the denylist (e.g. `TLS[_-]?(KEY|CERT|CA)`),
+      or document the open-ended-denylist gap. Test in `core/test/env.test.ts`.
 - [ ] 🔵 **`BackgroundJobs.jobs` map is never reaped** (`exec/background.ts:78`):
       every finished job keeps its ≤256KB×2 buffers for the session's life. Reap
       old `exited`/`killed` jobs or cap the count.

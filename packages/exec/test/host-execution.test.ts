@@ -53,3 +53,58 @@ describe("HostExecution", () => {
     expect(r.exitCode).not.toBe(0);
   });
 });
+
+describe("child env scrubbing", () => {
+  const SECRET = "leak-me";
+
+  // Set env vars for the duration of `fn`, then restore their exact prior
+  // state (so the suite stays hermetic regardless of the host environment).
+  async function withEnv(vars: Record<string, string>, fn: () => Promise<void>): Promise<void> {
+    const saved: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(vars)) {
+      saved[key] = process.env[key];
+      process.env[key] = value;
+    }
+    try {
+      await fn();
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) {
+          delete process.env[key as string];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+  }
+
+  test("exec does not leak inherited secret-looking vars (PATH still present)", async () => {
+    await withEnv({ TENTACLE_MODEL_API_KEY: SECRET, MY_ACCESS_TOKEN: SECRET }, async () => {
+      const r = await env.exec("printenv");
+      const lines = r.stdout.split("\n");
+      expect(lines).not.toContain(`TENTACLE_MODEL_API_KEY=${SECRET}`);
+      expect(lines).not.toContain(`MY_ACCESS_TOKEN=${SECRET}`);
+      // Ordinary vars the child needs must survive the scrub.
+      expect(lines.some((l) => l.startsWith("PATH="))).toBe(true);
+    });
+  });
+
+  test("spawnBackground does not leak inherited secret-looking vars either", async () => {
+    await withEnv({ TENTACLE_MODEL_API_KEY: SECRET }, async () => {
+      const handle = env.spawnBackground("printenv");
+      const text = await new Response(handle.stdout).text();
+      await handle.exited;
+      expect(text).not.toContain(`TENTACLE_MODEL_API_KEY=${SECRET}`);
+      expect(text.split("\n").some((l) => l.startsWith("PATH="))).toBe(true);
+    });
+  });
+
+  test("an explicit options.env var is still honoured (even if secret-looking)", async () => {
+    // Pins the policy: only the *ambient* env is scrubbed; an explicit
+    // caller value is an opt-in (same as the MCP stdio transport).
+    const r = await env.exec('echo "${MY_CUSTOM_TOKEN:-unset}"', {
+      env: { MY_CUSTOM_TOKEN: "explicit" },
+    });
+    expect(r.stdout.trim()).toBe("explicit");
+  });
+});

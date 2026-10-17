@@ -14,6 +14,7 @@
  */
 import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, resolve, sep } from "node:path";
+import { scrubSensitiveEnv } from "@tentacle/core";
 import type {
   BackgroundHandle,
   ExecOptions,
@@ -77,7 +78,7 @@ export class HostExecution implements ExecutionEnvironment {
   async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
     const proc = Bun.spawn(["/bin/sh", "-c", command], {
       cwd: options?.cwd ?? this.defaultCwd,
-      env: options?.env ? { ...process.env, ...options.env } : process.env,
+      env: this.childEnv(options),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -129,7 +130,7 @@ export class HostExecution implements ExecutionEnvironment {
   spawnBackground(command: string, options?: ExecOptions): BackgroundHandle {
     const proc = Bun.spawn(["/bin/sh", "-c", command], {
       cwd: options?.cwd ?? this.defaultCwd,
-      env: options?.env ? { ...process.env, ...options.env } : process.env,
+      env: this.childEnv(options),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -142,6 +143,18 @@ export class HostExecution implements ExecutionEnvironment {
       exited: proc.exited.then(() => proc.exitCode),
       kill: () => proc.kill(),
     };
+  }
+
+  /**
+   * The env handed to a spawned child: the host env minus secret-looking vars
+   * (a model-run `echo $TENTACLE_MODEL_API_KEY` must not read the user's keys
+   * out of the inherited env), with the caller's explicit `options.env` overlaid
+   * unscrubbed — an explicit value is an opt-in, same policy as the MCP stdio
+   * transport (`mcp/transport.ts`).
+   */
+  private childEnv(options?: ExecOptions): Record<string, string> {
+    const base = scrubSensitiveEnv(process.env);
+    return options?.env ? { ...base, ...options.env } : base;
   }
 
   async readFile(path: string): Promise<string> {
