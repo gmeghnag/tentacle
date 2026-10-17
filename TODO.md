@@ -388,6 +388,29 @@ Daily-driver work (done 2026-10-14):
       **Eval:** `docs/eval/session-store-per-project.md`.
       Type: eval → fix · Size: M · Blast: load-bearing.
 
+### Block 10 — remote execution model (pod mode: what runs where; 2026-10-17, measured on OCP)
+
+Umbrella and order: `docs/eval/remote-execution-model.md` (proposes a new §7
+invariant: "compute next to the code, identity with the user; a pod is not
+trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
+
+- [ ] 🔴 **1. Pod mode shows nothing until the whole model round ends** (47 s of
+      silence measured, then 6,480 events at once; Esc doesn't stop the model).
+      **Eval:** `docs/eval/pod-model-streaming.md`. Type: eval → fix · Size: M ·
+      Blast: load-bearing.
+- [ ] 🟡 **2. A large payload blocks every other message on the channel** (5 MB
+      → ~4 s head-of-line; an end-to-end window W=2×256 KB bounds it to ~0.25 s).
+      **Eval:** `docs/eval/rpc-flow-control.md`. Needs 1. Type: eval → feat ·
+      Size: M–L · Blast: load-bearing.
+- [ ] 🟡 **3. `runOn: "client"` — laptop MCP servers usable by the pod daemon**
+      (push `tools/register`, `tool/call`, laptop-side gate). **Eval:**
+      `docs/eval/mcp-client-tools.md`. Needs 1 (hard), 2 (soft), §7 invariant.
+      Type: eval → feat · Size: L · Blast: load-bearing.
+- [ ] 🟡 **4. `runOn: "daemon"` — workspace MCP servers started in the pod**
+      (placeholder-only secrets, process-group dispose). **Eval:**
+      `docs/eval/mcp-daemon-servers.md`. Type: eval → feat · Size: M · Blast:
+      load-bearing.
+
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
 Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked up).
