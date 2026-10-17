@@ -216,4 +216,17 @@ describe("loadConfig AGENTS.md auto-load", () => {
     expect(cfg.systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
     expect(cfg.agentsPath).toBeUndefined();
   });
+
+  test("a present-but-unreadable AGENTS.md degrades to the base prompt — never crashes", async () => {
+    const repo = join(dir, "repo");
+    const work = join(repo, "a", "b");
+    await mkdir(work, { recursive: true });
+    await mkdir(join(repo, ".git"), { recursive: true });
+    // AGENTS.md exists (so the walk finds it) but is a directory → readFile
+    // throws EISDIR → the best-effort read must swallow it and fall back.
+    await mkdir(join(repo, AGENTS_FILENAME), { recursive: true });
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: work });
+    expect(cfg.systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect(cfg.agentsPath).toBeUndefined();
+  });
 });

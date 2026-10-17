@@ -217,18 +217,135 @@ Implemented in dependency order:
   (`agentsMdLoaded`/`agentsMd` did not exist).
 
 **Deferred (unchanged from Context):** the folder-**trust** gate. v1 loads a
-repo's AGENTS.md unconditionally — a known prompt-injection surface, flagged for
-Review and a follow-up task; NOT built here.
+repo's AGENTS.md unconditionally — a known prompt-injection surface. Filed as a
+`TODO.md` backlog item (folder-trust gate, `fix` · load-bearing); NOT built here.
+
+**Post-review closes (nits from the fresh-context Review):**
+- *Nit (a) — "follow-up filed" was an over-claim.* True at review time; now
+  **made true**: the folder-trust gate is a `TODO.md` entry. Wording above
+  corrected.
+- *Nit (b) — best-effort read untested.* **Closed**: added
+  `load.test.ts` "a present-but-unreadable AGENTS.md degrades to the base prompt
+  — never crashes" (AGENTS.md as a directory → `readFile` EISDIR → swallowed →
+  base prompt, no throw). Gate now 646 pass.
+- *Nit (c) — subagents don't get AGENTS.md.* Acknowledged, **out of scope**;
+  filed as a separate `TODO.md` eval (inject into subagent prompts vs document
+  the briefs as the channel).
 
 ## Review
 
-*— <reviewer model-id>, <date> (fresh context — load-bearing: a different/stronger model)*
+*— claude-opus-4-8, 2026-10-17 (fresh context)*
 
-<!-- MANDATORY fresh-context, load-bearing. Re-run the gate; red-team the
-prompt-assembly seam: additive guarantee holds (absent → byte-identical)? walk
-bounded against symlink loops? unreadable AGENTS.md cannot crash startup?
-override+AGENTS interaction as specified? Confirm test non-vacuity by mutation.
-Explicitly restate that the folder-TRUST mitigation is deferred and that v1 loads
-a repo's AGENTS.md unconditionally — is that acceptable for how this is used
-today, and is the follow-up filed? Sign which model reviewed (different from the
-executor for a load-bearing task). -->
+**Verdict: APPROVE-WITH-NITS.** The implementation is correct, additive, and
+well-tested; the prompt-assembly seam is clean. The two nits below are
+backlog/doc hygiene, not code defects — neither blocks merge.
+
+**Reviewer-independence caveat (load-bearing task).** I am `claude-opus-4-8` —
+the **same model** as the executor, running only in a **fresh context**. Per
+AGENTS §10 routing and the reviewer brief, a load-bearing task wants a
+*different or stronger* reviewer: same-model/fresh-context is **weaker**, because
+shared blind spots survive both passes. Flagging so the owner can decide whether
+a cross-model pass is warranted before relying on this.
+
+### What I verified
+
+1. **Gate (§4), re-run by me:** `bun run check` → typecheck ✓, lint ✓
+   (`biome check .`, 251 files, no fixes), `bun test` → **645 pass / 1 skip /
+   0 fail** (the skip is the opt-in live-k8s test, not a failure). Matches the
+   Execution claim exactly. Narrow `bun test packages/config/test` → 29 pass.
+
+2. **Single compose seam (confirmed).** The I/O walk lives only in
+   `load.ts:90` (`findAgentsFile`) + the best-effort read at `load.ts:202-210`;
+   the compose/enable decision lives only in `resolve.ts:176-182`
+   (`AGENTS_PROMPT_HEADER` at `resolve.ts:97`). `grep` across `packages`
+   finds no second site. The composed string flows through the existing path —
+   `config.systemPrompt` → `wiring.ts:132` → the lone system message at
+   `agent.ts:138`. No scattering; nothing in the agent loop, protocol, or
+   persistence changed.
+
+3. **Mutation non-vacuity (§9), run by me.** Mutated `AGENTS_PROMPT_HEADER`
+   (`resolve.ts:97`) to `"# MUTATED HEADER"` → `bun test packages/config/test`
+   → **3 fail** (`resolve.test.ts:181`, `:229`, `load.test.ts:188` — all pin the
+   exact composed string, not a correlate). Reverted → working tree
+   **byte-identical** (`git diff --quiet` clean) → **29 pass**. The equality
+   tests are non-vacuous.
+
+### Red-team of the plan (not just its checklist)
+
+4. **Additive guarantee — holds.** With no AGENTS.md (or disabled, or blank),
+   `agentsMdLoaded` is false and `systemPromptValue = systemPrompt.value`
+   verbatim (`resolve.ts:180-182`) — the base is never `trimEnd`-ed on this
+   path, so it is truly byte-identical, including its trailing newline. Pinned
+   by `resolve.test.ts:189-193` and `load.test.ts:194-199`.
+
+5. **Parent-walk — bounded and repo-scoped.** `findAgentsFile`
+   (`load.ts:90-108`) checks `AGENTS.md` **before** the `.git` boundary at each
+   level, so a repo-root AGENTS.md IS found, but a parent repo's is never read
+   once `.git` is seen (`load.ts:98-100`); the `for i < 40` bound
+   (`load.ts:92`) caps a symlink loop; `dirname(dir) === dir` stops at fs root
+   (`load.ts:101-104`). `.git` as a *file* (worktrees/submodules) also bounds
+   correctly since `pathExists` uses `stat`. The `.git`-boundary test
+   (`load.test.ts:212-218`) proves the parent-repo case.
+
+6. **Unreadable AGENTS.md — cannot crash startup.** `pathExists` swallows
+   `stat` errors (`load.ts:75-82`); the read is wrapped in try/catch →
+   `undefined` on failure (`load.ts:204-209`); `findAgentsFile` itself only
+   calls pure path ops + `pathExists`, so it never throws. A permissions error
+   degrades to the base prompt, as the plan requires. (Not pinned by a test —
+   see nit (b).)
+
+7. **Override interaction — as specified.** `TENTACLE_SYSTEM_PROMPT` and a
+   custom `systemPromptFile` set only the *base* (`resolve.ts:175`,
+   `load.ts:185-197`); AGENTS.md still appends unless the defeat switch is set.
+   Precedence `TENTACLE_NO_AGENTS_MD` (truthy) > file `loadAgentsMd` > default-on
+   (`resolve.ts:176-178`) is correct and tested (`resolve.test.ts:201-232`).
+
+8. **§7 invariants — untouched.** The change only extends the string handed to
+   the model. No terminal write, no persistence change, no protocol/schema wire
+   change (the new `loadAgentsMd` is config-file-only, not protocol). Pure
+   logic stayed in `resolve.ts`; I/O stayed in `load.ts` — consistent with the
+   §7 "logic in pure modules" split.
+
+9. **Scope — clean.** `git diff main...` touches only the six source/test files
+   + this doc; no unrelated refactor. The `sources`-exhaustive sub-object was
+   deliberately left alone (provenance surfaced as `agentsMdLoaded` /
+   `agentsPath` instead) — a sensible minimization, honestly disclosed as drift.
+
+### Folder-TRUST deferral (restated)
+
+As required: **v1 loads any discovered repo's AGENTS.md unconditionally** —
+a real prompt-injection surface for an agent with shell + `fs_edit` in a cloned
+/ untrusted repo. The deferral is clearly documented (Context lines 35-40,
+Failure modes line 138-140, Execution 219-221). **Acceptable for how tentacle is
+used today** (the owner runs it in their own trusted repos; the `.git`-boundary
+already prevents silently inheriting a *parent* repo's rules). It must not ship
+to any multi-tenant / clone-and-run posture without the trust gate.
+
+### Nits (non-blocking)
+
+- **(a) The trust-gate follow-up is NOT actually filed.** The doc says it is
+  "flagged … for Review and a follow-up task", but `TODO.md` (the backlog index
+  per §10) has no entry, and there is no `docs/eval|fix` doc for it. The
+  deferral is only recorded inside *this* task's doc, which merges and goes
+  quiet. Recommend filing a `docs/eval/` (or `fix/`) item + a `TODO.md` line
+  before this is relied on in any untrusted context.
+- **(b) Best-effort read is unproven by test.** Finding (6) holds by code
+  inspection, but no test exercises the unreadable/permission path (e.g. a
+  `readFile` that throws → base prompt, no crash). Low risk (the catch is
+  trivial), but the plan listed it as a failure mode; a one-line fake-throw test
+  would pin it.
+- **(c) Subagents do not receive AGENTS.md.** `subagent.ts:166` seeds
+  `systemPrompt: type.prompt`, so a delegated child (often the weaker model —
+  exactly the loop/`fs_edit`-corruption class the Context cites) does **not**
+  get the repo rules. This is a defensible boundary (subagents get their own
+  briefs), and out of this task's scope, but it is undocumented here and
+  partially undercuts the stated motivation. Worth a one-line "non-goal" note.
+
+### How the executor behaved
+
+Clean, mechanical, honest. The as-built matches the code; the three disclosed
+drifts (provenance surface, launch-cwd walk origin, tests-written-together vs a
+staged red-run) are all reasonable and clearly labelled. The non-vacuity claim
+(3 tests fail on header mutation) reproduced exactly. No corruption, no scope
+creep, no over-claiming — the one gap is that the "follow-up filed" wording
+overstates what was actually recorded (nit a).
