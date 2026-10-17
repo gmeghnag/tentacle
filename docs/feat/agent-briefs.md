@@ -140,11 +140,38 @@ it. Record that in this task's Review.
 
 ## Execution
 
-*— <executor model-id>, <date>*
+*— claude-opus-4-8, 2026-10-17*
 
-<!-- Author writes the two brief files to the Design spec + the single AGENTS §10
-pointer line; records here what was written and ANY drift from Design (and why).
-Keep each brief ≲ one screen. -->
+Authored by Opus (knowledge-bearing content), in order:
+
+1. `docs/EXECUTOR-BRIEF.md` — new. Shared preamble (read AGENTS §0/§4/§9/§10 +
+   the task doc, open only named files, never invent, STOP-and-report) + the
+   executor specifics: minimal faithful edits on the task branch, red-before-green
+   for fixes, narrow per-slice tests, fill **Execution** honestly, gate green vs
+   the §6 baseline before done, escalate-don't-spin when blocked.
+2. `docs/REVIEWER-BRIEF.md` — new. Same preamble, then the adversarial pass:
+   don't trust the doc, re-run the gate + acceptance checks, mutation
+   non-vacuity, **correction 1** ("attack the plan, not just its checklist — the
+   Failure-modes list is the floor") and **correction 2** ("sign which model
+   reviewed; same-model/fresh-context is weaker than a different model"), verdict
+   first + numbered `file:line` findings + how the executor behaved.
+3. `AGENTS.md` §10 — one new "Agent briefs" bullet after "Index & registries"
+   pointing at both files and stating they operationalise (not restate) §10, and
+   why the brief is the priming channel (a fresh agent has only `PROMPT.md`).
+
+**Drift from Design:** essentially none. Two deliberate refinements, both within
+the Design's intent: (a) each brief opens with an HTML comment ("copy the body,
+fill `<type>/<slug>`, keep ≲ one screen, cross-link the counterpart") so the
+*file* is self-documenting without that text bleeding into the copied prompt;
+(b) the §10 pointer is a **new bullet** rather than an edit to the "Index &
+registries" bullet — cleaner separation, same one-line-pointer spirit. No rule
+from §10 is restated in either brief (verified: each only references sections by
+number). Each brief is ≲ one screen.
+
+**Verification:** `bun run check` → green (typecheck ✓, lint ✓; Biome skips
+Markdown so the two new docs + the AGENTS.md edit carry no lint surface; full
+test suite unchanged). Grep: `EXECUTOR-BRIEF|REVIEWER-BRIEF` resolves to the two
+files + the §10 pointer; no other references dangling.
 
 ## Review
 

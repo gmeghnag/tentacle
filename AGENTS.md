@@ -311,3 +311,8 @@ branch and a single living doc. This formalises §8 (the plan) and §4/§5/§9
   task doc. `docs/library-bugs.md` is the cross-cutting upstream-bug registry (a
   reference, not a task). Docs under `docs/` predating this standard are legacy;
   new work uses this structure.
+- **Agent briefs:** a fresh agent spawned to execute or review a task is given
+  `docs/EXECUTOR-BRIEF.md` / `docs/REVIEWER-BRIEF.md` — the spawn-time
+  choreography (read AGENTS.md + the task doc, then do / adversarially attack).
+  They operationalise this section; they do not restate its rules. A fresh agent
+  starts with only its `PROMPT.md`, so the brief is the channel that primes it.
