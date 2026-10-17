@@ -66,7 +66,11 @@ export const FileConfigSchema = z
     /** Default workspace directory for tool execution. */
     cwd: z.string().min(1).optional(),
     /** Maximum model/tool iterations per turn. */
-    maxIterations: z.number().int().positive().optional(),
+    maxIterations: z
+      .number()
+      .int()
+      .refine((n) => n > 0 || n === -1, "must be a positive integer or -1 (unlimited)")
+      .optional(),
     /** Sub-agents (the `task` delegation tool). */
     subagents: z
       .object({

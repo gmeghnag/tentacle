@@ -84,7 +84,7 @@ export const DEFAULT_CONFIG_JSONC = `{
   // "cwd": "~/code/project",
 
   // Max model/tool iterations per turn.
-  // "maxIterations": ${DEFAULT_MAX_ITERATIONS},
+  // "maxIterations": ${DEFAULT_MAX_ITERATIONS}, // -1 = unlimited
 
   // Sub-agents: the \`task\` tool that delegates work to an isolated child agent.
   // "subagents": { "enabled": ${DEFAULT_SUBAGENTS_ENABLED}, "maxIterations": ${DEFAULT_SUBAGENT_MAX_ITERATIONS} }, // maxIterations: -1 = unlimited
