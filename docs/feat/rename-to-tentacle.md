@@ -252,7 +252,7 @@ Dopo i 4 replace: `git grep -in harness` (esclusi `bun.lock` + piano) →
 - **Sostantivo comune** (non nome prodotto; la prosa resta corretta):
   "A SOTA agent harness" (`README.md:3`, `ARCHITECTURE.md:9`), "the harness
   runs/scaffolds/separates/…" (`ARCHITECTURE.md:69`, `README.md:20`,
-  `TODO.md:4`, `docs/F4-pod-execution.md:41`), commenti di sorgente
+  `TODO.md:4`, `docs/architecture/F4-pod-execution.md:41`), commenti di sorgente
   "the harness's value-add layer / process / touches"
   (`agent/result-pipeline.ts:2,5`, `cli/wiring.ts:83`,
   `config/index.ts:2`, `exec/host-execution.ts:3`, `k8s/types.ts:2`,
@@ -264,7 +264,7 @@ Dopo i 4 replace: `git grep -in harness` (esclusi `bun.lock` + piano) →
   `` `harness-live-…` `` (`k8s/integration.live.test.ts:38`), helper
   `function harness(...)` + 10 call site (`daemon/integration.test.ts`).
 - **Path di esempio** nei doc: `~/.cache/harness-remote-token`
-  (`docs/BUILD.md:22`, `docs/F3-remote-control.md:394`) — non è un path reale
+  (`docs/BUILD.md:22`, `docs/architecture/F3-remote-control.md:394`) — non è un path reale
   (nessun riferimento in `packages/`); lasciato per non toccare esempi
   illustrativi.
 

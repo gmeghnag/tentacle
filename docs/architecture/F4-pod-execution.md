@@ -5,7 +5,7 @@ design is captured here and §8 records what actually shipped. The pod-binary
 injection (F4.e) has its own detailed design + as-built log in
 `docs/feat/pod-binary-injection.md`; the `exec` attach (F4.g) has its plan +
 as-built in `docs/feat/pod-exec-attach.md`. It builds on F3
-(`docs/F3-remote-control.md`) and reuses **the entire client/daemon/RPC stack
+(`docs/architecture/F3-remote-control.md`) and reuses **the entire client/daemon/RPC stack
 unchanged** — F4 is a new *transport + lifecycle + reverse-tunnel*, not new
 protocol design above the wire vocabulary.
 

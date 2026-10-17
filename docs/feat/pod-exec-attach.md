@@ -173,7 +173,7 @@ Niente di nuovo: `getPod` esiste già. Eventualmente re-export già presente
 
 ### 4.4 Documentazione (stesso commit)
 
-- `docs/F4-pod-execution.md`: §1 scope + riga di uso; §6 lifecycle: paragrafo
+- `docs/architecture/F4-pod-execution.md`: §1 scope + riga di uso; §6 lifecycle: paragrafo
   "attach mode (`exec`): no create, no delete; preflight version-probe skips
   re-injection".
 - `docs/feat/pod-binary-injection.md`: nota al checkpoint — il preflight

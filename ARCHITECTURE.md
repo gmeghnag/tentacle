@@ -92,10 +92,10 @@ per-model strategies, with a heuristic fallback and optional delegation to a ser
 
 ## 5. Build phases
 
-- **F0 (current)** — monorepo skeleton, `protocol/` (ACP-shaped schemas), `core/` contracts, tests, ADRs.
+- **F0** — monorepo skeleton, `protocol/` (ACP-shaped schemas), `core/` contracts, tests, ADRs.
 - **F1** — model layer (streaming + tool-calls) + agent loop + host tools (fs, shell) + in-process CLI → end-to-end agent.
 - **F2** — container execution environment.
-- **F3** — daemon + remote control (WS) + remote client.
-- **F4** — context compaction + session persistence/resume + permission engine.
+- **F3** — daemon + remote control (WS) + remote client. Design: `docs/architecture/F3-remote-control.md`.
+- **F4** — pod execution (`run`/`attach` over the k8s exec channel, model reverse-tunnel). Design: `docs/architecture/F4-pod-execution.md`. (The original F4 scope — compaction, session persistence/resume, permission engine — shipped outside this numbering.)
 - **F5** — MCP client + sub-agents + TUI (Ink).
 - **F6** — observability, cost routing, hardening.

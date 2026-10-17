@@ -83,7 +83,7 @@ tentacle connect ws://host:4000 [--token T]
 
 A non-loopback `--host` requires a token (remote code-execution risk); TLS via
 `--tls-cert`/`--tls-key`. Confinement and permissions are enforced server-side.
-See [`docs/F3-remote-control.md`](./docs/F3-remote-control.md).
+See [`docs/architecture/F3-remote-control.md`](./docs/architecture/F3-remote-control.md).
 
 ## Features
 
