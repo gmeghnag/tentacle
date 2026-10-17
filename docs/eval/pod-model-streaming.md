@@ -183,8 +183,8 @@ recommended. The Implementation must still re-verify every cite.
    - **`$/progress { id, seq, value }`** (notification): a responder streams
      partial values tied to the **request id**, so no separate `streamId`
      namespace is needed. `request(…, { onProgress })` receives them.
-2. **A new method, `model/streamChunked`** (placeholder name; the owner
-   decides, and it is permanent once shipped).
+2. **A new method, `model/streamChunked`.** The name was confirmed by the owner
+   on 2026-10-18; it is permanent once shipped.
    - The laptop handler forwards each local provider event as `$/progress`,
      **coalesced every ~30–50 ms**, so ~6,480 events become ~1,000 frames.
    - The final result is `{ chunks: N, usage? }`.

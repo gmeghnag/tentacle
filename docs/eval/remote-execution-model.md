@@ -225,11 +225,20 @@ Rules that hold only when both sides are live:
 - **The §7 invariant** ("compute next to the code, identity with the user; a
   pod is not trusted") changes the rules, so it is a `feat` on AGENTS.md. It
   should land **before** 3, because 3's gate design follows from it.
-- **Decisions still open, owned by the owner:**
-  - the wire names in 1: `model/streamChunked` is a placeholder; once shipped
-    it is permanent;
-  - the secret policy for `runOn: "daemon"` (see sub-eval 4);
-  - whether to approve the §7 invariant as worded.
+- **Owner decisions (2026-10-18):**
+  - **§7 invariant: APPROVED** as worded. It lands as its own small `feat` on
+    AGENTS.md, before piece 3. The owner's understanding, confirmed: the
+    existing permission mechanism (`PermissionBroker` + the TUI prompt) is
+    unchanged. What changes is *where it is enforced* for laptop-side tools.
+    The laptop checks every pod-originated request itself, because the pod's
+    daemon could skip the prompt.
+  - **Method name: `model/streamChunked`, CONFIRMED.** It is permanent once
+    shipped.
+  - **Order: CONFIRMED.** Piece 1 (`pod-model-streaming`) first, then
+    `fix/steering-over-rpc`, then 2 → 3 → 4.
+- **Still open, owned by the owner:** the secret policy for `runOn: "daemon"`
+  (placeholder-only vs an explicit `shipEnv` opt-in; see sub-eval 4). It is
+  decided when piece 4 is promoted.
 - **Not verified:**
   - a second cluster or network path (all numbers come from one OCP cluster
     and one laptop link);
