@@ -318,9 +318,20 @@ Daily-driver work (done 2026-10-14):
       cancel; the agent loop never re-checks `aborted` between stream end and tool
       execution. CONFIRMED. **Eval:** `docs/eval/proxy-model-cancel.md`.
       Type: eval · Size: M · Blast: load-bearing.
-- [ ] 🔴 **`/compact` with an empty summary wipes the history** (reasoning-only
+- [~] 🔴 **`/compact` with an empty summary wipes the history** (reasoning-only
       model, or an in-band SSE `{"error":…}` chunk) and persists it. CONFIRMED.
-      **Eval:** `docs/eval/compact-empty-summary-wipe.md`. Type: eval · Size: S ·
+      **Fix (committed on branch, awaiting merge):** `docs/fix/compact-empty-summary-wipe.md`,
+      branch `fix/compact-empty-summary-wipe`. Type: fix · Size: S ·
+      Blast: cross-module.
+- [ ] 🟡 **Remote `/compact` failure shows an opaque `internal error`** (worker
+      surfaces the real `CompactError` via `exposeInternalErrors`, but a remote
+      `connect` omits the flag — `ws-server.ts:182-187` — so the client gets
+      `RpcError: internal error` and the TUI prints `Compact failed: internal
+      error`). Correct (history is safe) but unhelpful; fix = a dedicated
+      additive `DomainErrorCode` (e.g. `EmptySummary`) mapped to an `RpcError`
+      so the message crosses the wire without leaking internals (protocol
+      version stays 1). Second review pass, Finding 4, of
+      `docs/fix/compact-empty-summary-wipe.md`. Type: feat · Size: S ·
       Blast: cross-module.
 - [ ] 🟡 **`session/compact` races a turn on the daemon** (both directions: compact
       mid-turn → orphan `tool` msg; prompt mid-compact → turn silently lost).
@@ -364,7 +375,9 @@ Daily-driver work (done 2026-10-14):
       lifecycle eval — see `docs/eval/daemon-session-lifecycle.md`.
 - [ ] 🟡 **OpenAI provider treats an in-band SSE `{"error":…}` chunk as an empty
       stream** (HTTP 200, no throw), so callers see a silent empty response (e.g.
-      `/compact` wiping history). See `docs/eval/compact-empty-summary-wipe.md`.
+      `/compact` wiping history). See `docs/fix/compact-empty-summary-wipe.md`
+      (the wipe is guarded there; this provider defect — which also affects
+      normal turns — is the separate follow-up).
 - [ ] 🟡 **A failed session save crashes the TUI** (`void store.save` rejects →
       unhandled rejection → exit 1 with a raw stack). See
       `docs/eval/session-store-durability.md`.

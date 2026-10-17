@@ -107,7 +107,7 @@ H. consumer throws AT the tool_result yield (tool already ran; e.g. sink/emit th
 | 3 | The broken history reaches disk | **CONFIRMED** | `onPersist` snapshot in A/B/C/H. Daemon path: `persistingController` `finally` (code-read) |
 | 4 | Resume does no repair | **CONFIRMED** | F: the resumed session sends `tool_calls:c1` with 0 answering `tool` messages. No validator exists in the repo |
 | 5 | OpenAI-compatible servers reject it on every later request | **PARTIALLY** | The wire payload is malformed (F). OpenAI's API rejects an unanswered `tool_call_id` with a 400. llama.cpp parses the stored `arguments` as JSON when it applies the chat template, which matches the incident's `500 "parse error col 167795"` for invalid args (E). Not run against a live server; tolerance of dangling ids varies by server and template |
-| 6 | Poisoned "until hand-edited with jq" | **PARTIALLY** | G: `/compact` is an unadvertised rescue. `renderMessage` (`packages/agent/src/compact.ts:19-26`) flattens tool calls to `[called: name]` and **drops arguments**, so neither dangling ids nor 167 KB of args reach the summariser. It loses detail, and it depends on a non-empty summary (see `docs/eval/compact-empty-summary-wipe.md`) |
+| 6 | Poisoned "until hand-edited with jq" | **PARTIALLY** | G: `/compact` is an unadvertised rescue. `renderMessage` (`packages/agent/src/compact.ts:19-26`) flattens tool calls to `[called: name]` and **drops arguments**, so neither dangling ids nor 167 KB of args reach the summariser. It loses detail, and it depends on a non-empty summary (see `docs/fix/compact-empty-summary-wipe.md`) |
 | 7 | Invalid-JSON args are persisted as-is | **CONFIRMED** | E: `JSON.parse ok? false` on the stored string. The 2026-10-16 incident's error column is one past the 167,794-char argument, i.e. unterminated JSON |
 | 8 | Oversize args are persisted | **CONFIRMED** (by code; size is irrelevant to the path) | No length check anywhere between the SSE assembly and `agent.ts:244` (TODO "Oversize / degenerate tool-call guard") |
 | 9 | Orphan `tool` messages | **NOT REPRODUCED** | No current producer: `agent.ts:300` only answers ids from the same turn. They are reachable only from a hand-edited or corrupted session file loaded on resume (no validation, row 4) |
@@ -207,7 +207,7 @@ plus a mutation test (disable the repair → the wire payload has an unanswered 
 - **Sibling evals, not duplicated here:**
   - `docs/eval/sse-abort-truncated-toolcall.md`: one *producer* of invalid args.
     Its local fix is still worth doing; this module is the backstop.
-  - `docs/eval/compact-empty-summary-wipe.md`: the `/compact` rescue path in
+  - `docs/fix/compact-empty-summary-wipe.md`: the `/compact` rescue path in
     row 6 depends on it.
   - `docs/eval/daemon-compact-turn-guard.md`: a concurrent compact during a turn
     is another way to mutate history mid-turn. That needs its own guard;
