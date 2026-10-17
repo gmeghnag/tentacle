@@ -34,8 +34,9 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       cleanly instead of becoming an `isError` task result). 353 tests green.
 - [ ] 🔵 **Shell inherits the full `process.env`** (`host-execution.ts:80,132`),
       incl. `TENTACLE_MODEL_API_KEY` etc. — a model-run `echo $TENTACLE_MODEL_API_KEY`
-      exfiltrates the key (redaction won't match it). Scrub an allowlist of
-      sensitive vars (`*_API_KEY*`, `TENTACLE_REMOTE_TOKEN`, …) from the child env.
+      exfiltrates the key (redaction won't match it). Scrub with the existing
+      `scrubSensitiveEnv` denylist (`core/src/env.ts`) from the child env.
+      **Eval:** `docs/eval/shell-env-scrub.md` (fix-ready — recommends promote to `fix`).
 - [ ] 🔵 **`BackgroundJobs.jobs` map is never reaped** (`exec/background.ts:78`):
       every finished job keeps its ≤256KB×2 buffers for the session's life. Reap
       old `exited`/`killed` jobs or cap the count.
@@ -652,7 +653,9 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
 ## Earlier deferrals (from prior slices)
 
 - [ ] **MCP**: SSE/HTTP transport; resources & prompts; MCP in the `serve` daemon.
+      **Eval:** `docs/eval/mcp-remote-transport.md` (recommends Streamable HTTP, transport-only first).
 - [ ] **Sub-agents**: background / parallel execution (SA.d).
+      **Eval:** `docs/eval/parallel-subagents.md` (open — leans background-first, must split; needs a use-case).
 - [ ] **F2**: container execution environment (behind the existing
       `ExecutionEnvironment` contract).
 - [ ] **Remote control (F3)**: heartbeat/idle-timeout/reconnect, multi-client
