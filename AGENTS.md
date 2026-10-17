@@ -169,6 +169,17 @@ assume.
   THROUGH us (`model/stream` over RPC, `ProxyModelProvider`): the daemon is given
   the LOCAL provider so the endpoint + API key never leave the laptop. Never put
   provider creds in a pod/image.
+- **Compute next to the code, identity with the user; a pod is not trusted.**
+  In `run`/`attach` the pod is the *workspace* (code, shell, builds, MCP servers
+  that act on the workspace) and the laptop is the *identity* (model key,
+  account tokens, permission decisions, session history). The two bullets
+  above are special cases. The daemon runs IN the pod, so whoever controls the
+  pod controls the daemon and can write raw RPC frames to the laptop.
+  Therefore every effect on the laptop that the pod requests is gated **on the
+  laptop**: an allowlist of what the laptop itself published, and a prompt
+  through the single broker. A daemon-side check is UX, never security. Never
+  let a pod-originated prompt create a lasting approval for pod-supplied input.
+  Rationale and design: `docs/eval/remote-execution-model.md`.
 - **Protocol changes are additive; version stays 1.** Schemas in
   `@tentacle/protocol` are the shared truth. A new method → an old peer
   returns `MethodNotFound` (clean, catchable — handle it). A new `session/update`
