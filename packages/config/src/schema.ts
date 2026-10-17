@@ -57,6 +57,12 @@ export const FileConfigSchema = z
      * (default `PROMPT.md`) or absolute.
      */
     systemPromptFile: z.string().min(1).optional(),
+    /**
+     * Auto-load a per-repo `AGENTS.md` (found by walking up from the workspace)
+     * and append it to the system prompt after the identity prompt. Default:
+     * enabled. Set `false`, or the env `TENTACLE_NO_AGENTS_MD`, to disable.
+     */
+    loadAgentsMd: z.boolean().optional(),
     /** Default workspace directory for tool execution. */
     cwd: z.string().min(1).optional(),
     /** Maximum model/tool iterations per turn. */

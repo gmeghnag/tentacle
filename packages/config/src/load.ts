@@ -6,9 +6,10 @@
  */
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve as resolvePath } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { type ParseError, parse, printParseErrorCode } from "jsonc-parser";
 import {
+  AGENTS_FILENAME,
   CONFIG_FILENAME,
   DEFAULT_CONFIG_JSONC,
   DEFAULT_SYSTEM_PROMPT,
@@ -56,6 +57,8 @@ export interface TentacleConfig {
   readonly configDir: string;
   readonly configPath: string;
   readonly promptPath: string;
+  /** Resolved path of the auto-loaded AGENTS.md, if one was folded into the prompt. */
+  readonly agentsPath?: string;
   readonly sources: ResolvedConfig["sources"] & { readonly apiKey: ApiKeySource };
 }
 
@@ -76,6 +79,32 @@ async function pathExists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Find the nearest `AGENTS.md` walking up from `startDir`. Stops at the first
+ * hit, at the repo root (a `.git` directory — never escaping the repo), or at
+ * the filesystem root; the step bound guards against a symlink loop. Returns
+ * the absolute path, or undefined when none is found.
+ */
+async function findAgentsFile(startDir: string): Promise<string | undefined> {
+  let dir = resolvePath(startDir);
+  for (let i = 0; i < 40; i++) {
+    const candidate = join(dir, AGENTS_FILENAME);
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+    // Reached the repo root without a hit → stop; don't read a parent repo's rules.
+    if (await pathExists(join(dir, ".git"))) {
+      return undefined;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) {
+      return undefined; // filesystem root
+    }
+    dir = parent;
+  }
+  return undefined;
 }
 
 function resolveConfigDir(override: string | undefined, env: Env, home: string): string {
@@ -167,7 +196,26 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     throw new ConfigError(`systemPromptFile not found: ${promptPath}`);
   }
 
-  const resolved = resolveConfig({ fileConfig, env, defaultCwd: launchCwd, promptFromFile });
+  // Auto-load a per-repo AGENTS.md from the launch workspace (best-effort: an
+  // unreadable file must never crash startup over an optional convenience). The
+  // compose/enable decision is pure and lives in resolveConfig.
+  const agentsFile = await findAgentsFile(launchCwd);
+  let agentsMd: string | undefined;
+  if (agentsFile) {
+    try {
+      agentsMd = await readFile(agentsFile, "utf8");
+    } catch {
+      agentsMd = undefined;
+    }
+  }
+
+  const resolved = resolveConfig({
+    fileConfig,
+    env,
+    defaultCwd: launchCwd,
+    promptFromFile,
+    agentsMd,
+  });
 
   let apiKey = resolved.apiKey;
   if (resolved.apiKeySource === "command" && resolved.apiKeyCommand) {
@@ -199,6 +247,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     configDir,
     configPath,
     promptPath,
+    ...(resolved.agentsMdLoaded && agentsFile ? { agentsPath: agentsFile } : {}),
     sources: { ...resolved.sources, apiKey: resolved.apiKeySource },
   };
 }

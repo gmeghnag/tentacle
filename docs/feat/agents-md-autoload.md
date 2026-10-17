@@ -163,12 +163,62 @@ tempdir in `load.test.ts`, injected values in `resolve.test.ts`).
 
 ## Execution
 
-*— <executor model-id>, <date>*
+*— claude-opus-4-8, 2026-10-17*
 
-<!-- As-built: the walk helper, the composition, the defeat switch, the tests
-(red shown first where claimed), and ANY drift from Design (and why). Record the
-gate result and exact test counts. Confirm the additive guarantee (no AGENTS.md
-→ identical prompt) empirically. -->
+Implemented in dependency order:
+
+1. `defaults.ts` — `AGENTS_FILENAME = "AGENTS.md"` with a doc comment.
+2. `schema.ts` — optional `loadAgentsMd?: boolean` on the top-level file schema.
+3. `resolve.ts` — `ResolveContext.agentsMd?`; `ResolvedConfig.agentsMdLoaded:
+   boolean`; a pure `AGENTS_PROMPT_HEADER` const; the enable logic
+   (`TENTACLE_NO_AGENTS_MD` truthy wins over `loadAgentsMd`, default on) and the
+   compose (`base.trimEnd() + "\n\n# Project rules (AGENTS.md)\n\n" +
+   agentsMd.trimEnd() + "\n"`), only when enabled **and** `agentsMd` is
+   non-blank. `systemPrompt` source still tracks the identity's provenance.
+4. `load.ts` — `findAgentsFile(startDir)`: walk parents from the launch cwd,
+   first-hit wins, stop at a `.git` boundary (never escape the repo) or fs root,
+   ≤40-step bound (symlink-loop guard); best-effort read (unreadable → undefined,
+   never throws); pass `agentsMd` into `resolveConfig`; surface `agentsPath` on
+   `TentacleConfig` only when actually folded in.
+5. `cli/src/main.ts` — one help line for `TENTACLE_NO_AGENTS_MD`.
+6. Tests — `resolve.test.ts` (6: append shape, additive guarantee, blank-as-
+   absent, env disable + env-beats-file, file disable, full-override still only
+   identity) and `load.test.ts` (4: walk-up append, absent → unchanged, env
+   disable, and the **`.git`-boundary red-team** — a parent AGENTS.md must NOT
+   be read).
+
+**Verification:**
+- Gate: `bun run check` → **green**, typecheck ✓, lint ✓ (after a Biome
+  auto-format of two files — whitespace only), **645 pass / 1 skip / 0 fail**
+  (was 636; +10 new tests). Narrow: `bun test packages/config/test` → 29 pass.
+- Non-vacuity (§9): mutated `AGENTS_PROMPT_HEADER` → **3 tests failed**; reverted
+  → 29 pass. The equality tests pin the exact composed string, not a correlate.
+- Additive guarantee: the `resolve`/`load` "absent" tests assert the prompt is
+  byte-identical to today, and the disabled path returns the base verbatim.
+- End-to-end in THIS repo (temp config dir): `agentsPath =
+  /Users/gmeghnag/tentacle/AGENTS.md`, prompt starts with the `PROMPT.md`
+  identity, header present, AGENTS.md body appended (len ~20.4k); with
+  `TENTACLE_NO_AGENTS_MD=1` → no `agentsPath`, base-length prompt.
+
+**Drift from Design (honest):**
+- *Provenance surface:* the Design said "record where AGENTS.md came from (add to
+  sources)". I exposed it as a top-level `ResolvedConfig.agentsMdLoaded` +
+  `TentacleConfig.agentsPath` instead of extending the exhaustive `sources`
+  sub-object — deliberately, to avoid rippling the `sources`-exhaustive tests and
+  keep the load-bearing blast minimal. Same information, smaller reach.
+- *Walk origin:* starts from the **launch cwd** (per the plan's Precondition),
+  not the resolved workspace cwd. Coupling discovery to the launch dir matches
+  how Claude Code finds AGENTS.md and sidesteps a cwd/compose circular dep. A
+  `TENTACLE_CWD` redirect pointing at a different repo's rules is a documented
+  **non-goal** for v1.
+- *Red-first:* tests and code were written together, so a literal red-run was not
+  staged; non-vacuity is instead proven by the mutation above (the stronger §9
+  check). The composition test would fail structurally on pre-change code
+  (`agentsMdLoaded`/`agentsMd` did not exist).
+
+**Deferred (unchanged from Context):** the folder-**trust** gate. v1 loads a
+repo's AGENTS.md unconditionally — a known prompt-injection surface, flagged for
+Review and a follow-up task; NOT built here.
 
 ## Review
 
