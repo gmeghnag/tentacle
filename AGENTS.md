@@ -20,7 +20,7 @@ style suggestions.
   requirement, repeated failures), stop and report in 2–3 sentences: what was
   tried, what is known, the specific decision needed. Then wait.
 - **Clarify constraints early**: if a user constraint is ambiguous ("don't
-  write code" — does a throwaway repro in `/tmp` count?), ask one short
+  write code" — does a throwaway repro in `.tentacle/tmp` count?), ask one short
   question immediately. Do not burn reasoning budget navigating constraints.
 
 ## 1. Bugs: reproduce before diagnosing
@@ -110,17 +110,21 @@ style suggestions.
 - **Ink gotcha (already bit us once)**: an empty `<Text>` measures as `0×0`,
   so a per-row `<Text>` list collapses blank rows and shifts content up.
   Render blank rows as `" "` (the output grid `trimEnd()`s it back to `""`).
-- **TUI repro from `/tmp`** (when the repo must stay untouched): bun cannot
-  resolve bare/directory imports from `/tmp`, so import via absolute paths
-  into the `.bun` store, and use `createElement` instead of JSX (avoids
-  `react/jsx-runtime` resolution). The `+<hash>` store suffixes below drift on
-  any dependency change — glob `node_modules/.bun` for the current directory
-  rather than copying these verbatim:
+- **Repros run in `<repo root>/.tentacle/tmp/<slug>/`** — always, never `/tmp`
+  or elsewhere (one sub-folder per task: evals run in parallel). `.tentacle/`
+  is gitignored, so Biome skips it, and it is outside `tsconfig` `include` and
+  `bun test` discovery: a repro there can't dirty the tree or the gate. Because
+  it is gitignored, the script itself does **not** survive — paste it (and its
+  output) into the task doc's **Repro**. Workspace packages import directly
+  (`from "@tentacle/providers"`).
+- **TUI repro** (from `.tentacle/tmp/<slug>/`): React/Ink live only in
+  `packages/tui/node_modules`, so import them by relative path, and use
+  `createElement` instead of JSX (avoids `react/jsx-runtime` resolution):
   ```ts
-  import { createElement as h } from "<repo>/node_modules/.bun/react@18.3.1/node_modules/react/index.js";
-  import { Box, Text } from "<repo>/node_modules/.bun/ink@5.0.1+d2b1a511eef311f2/node_modules/ink/build/index.js";
-  import { render } from "<repo>/node_modules/.bun/ink-testing-library@4.0.0+2b82e8ab9dffa8af/node_modules/ink-testing-library/build/index.js";
-  import { App } from "<repo>/packages/tui/src/App.tsx"; // TS/TSX source: absolute paths work
+  import { createElement as h } from "../../../packages/tui/node_modules/react/index.js";
+  import { Box, Text } from "../../../packages/tui/node_modules/ink/build/index.js";
+  import { render } from "../../../packages/tui/node_modules/ink-testing-library/build/index.js";
+  import { App } from "../../../packages/tui/src/App.tsx";
   ```
 - Git: commit **only on the user's explicit OK**; if on `main`, branch first
   (except the docs/index carve-out in §10).

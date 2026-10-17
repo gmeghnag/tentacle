@@ -23,7 +23,8 @@ verify every claim against the code.
   Run the task's acceptance checks against the code — not Execution's word.
 - **Premise table:** every `file:line` the Implementation cites as a premise —
   open it, mark TRUE/FALSE. Its first row is the Context's symptom: re-run the
-  Repro on `main`. A false premise is a finding.
+  Repro on `main` (in `.tentacle/tmp/<slug>/`, AGENTS §6). A false premise is
+  a finding.
 - **Mutation non-vacuity** (§9): break the property each new test pins, confirm
   the test **FAILS**, revert, confirm the tree is byte-identical.
 - **Attack the plan, not its checklist.** Its "Failure modes" are the floor: ask
