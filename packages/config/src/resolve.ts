@@ -158,7 +158,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   const modelId = pick(env.TENTACLE_MODEL, model.model, DEFAULT_MODEL);
   const cwd = pick(env.TENTACLE_CWD, fileConfig.cwd, defaultCwd);
   const maxIterations = pick(
-    parsePositiveInt(env.TENTACLE_MAX_ITERATIONS),
+    parseIterationLimit(env.TENTACLE_MAX_ITERATIONS),
     fileConfig.maxIterations,
     DEFAULT_MAX_ITERATIONS,
   );

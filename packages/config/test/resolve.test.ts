@@ -9,6 +9,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
 } from "../src/defaults.ts";
 import { type ResolveContext, resolveConfig } from "../src/resolve.ts";
+import { FileConfigSchema } from "../src/schema.ts";
 
 function ctx(overrides: Partial<ResolveContext> = {}): ResolveContext {
   return {
@@ -136,13 +137,24 @@ describe("resolveConfig precedence", () => {
     expect(c.sources.baseURL).toBe("env");
   });
 
-  test("ignores a non-positive TENTACLE_MAX_ITERATIONS", () => {
+  test("TENTACLE_MAX_ITERATIONS ignores 0/garbage, accepts -1 (unlimited)", () => {
+    // 0 and non-integers fall back to the default...
     expect(resolveConfig(ctx({ env: { TENTACLE_MAX_ITERATIONS: "0" } })).maxIterations).toBe(
       DEFAULT_MAX_ITERATIONS,
     );
     expect(resolveConfig(ctx({ env: { TENTACLE_MAX_ITERATIONS: "abc" } })).maxIterations).toBe(
       DEFAULT_MAX_ITERATIONS,
     );
+    // ...but -1 (unlimited) is accepted (red before the parseIterationLimit swap).
+    expect(resolveConfig(ctx({ env: { TENTACLE_MAX_ITERATIONS: "-1" } })).maxIterations).toBe(-1);
+  });
+
+  test("maxIterations: -1 (unlimited) is accepted from the file and by the schema", () => {
+    // The resolver passes a file value through unclamped (guard — holds on both).
+    expect(resolveConfig(ctx({ fileConfig: { maxIterations: -1 } })).maxIterations).toBe(-1);
+    // The file schema accepts -1 and still rejects 0 (red before the refine).
+    expect(FileConfigSchema.safeParse({ maxIterations: -1 }).success).toBe(true);
+    expect(FileConfigSchema.safeParse({ maxIterations: 0 }).success).toBe(false);
   });
 });
 
