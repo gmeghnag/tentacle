@@ -93,7 +93,7 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
         completionTokens: event.usage.completionTokens,
       };
     // Nested sub-agent progress is a local-TUI nicety; remote clients see the
-    // `task` tool opaquely (its final report rides the tool_call_update).
+    // `agent_task` tool opaquely (its final report rides the tool_call_update).
     // A background-job exit likewise isn't streamed to remote clients yet (the
     // model still gets its injected note server-side, so behaviour is correct).
     case "subagent_start":

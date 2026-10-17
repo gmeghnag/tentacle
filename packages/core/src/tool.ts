@@ -33,7 +33,7 @@ export interface ToolResult {
 }
 
 /**
- * Live progress a long-running tool (e.g. the `task` sub-agent) can emit while
+ * Live progress a long-running tool (e.g. the `agent_task` sub-agent) can emit while
  * it runs, for the frontend to render. Framework-neutral so `core` stays free
  * of an `agent` dependency; the agent loop maps these onto its event stream.
  */

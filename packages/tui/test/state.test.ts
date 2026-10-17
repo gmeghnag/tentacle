@@ -30,7 +30,7 @@ describe("display state reducer", () => {
 
   test("attaches sub-agent progress to the matching task tool item", () => {
     const s = fold(initialState, [
-      { type: "tool_start", id: "t1", name: "task", arguments: '{"description":"d"}' },
+      { type: "tool_start", id: "t1", name: "agent_task", arguments: '{"description":"d"}' },
       { type: "subagent_start", id: "t1", agentType: "explore", description: "find it" },
       { type: "subagent_tool", id: "t1", label: "Read a.ts" },
       { type: "subagent_tool", id: "t1", label: "Read b.ts" },

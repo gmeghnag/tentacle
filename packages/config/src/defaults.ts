@@ -5,7 +5,7 @@
 export const DEFAULT_BASE_URL = "http://localhost:8080/v1";
 export const DEFAULT_MODEL = "default";
 export const DEFAULT_MAX_ITERATIONS = 16;
-/** Sub-agents (the `task` delegation tool) are available by default. */
+/** Sub-agents (the `agent_task` delegation tool) are available by default. */
 export const DEFAULT_SUBAGENTS_ENABLED = true;
 /**
  * Step limit for a sub-agent's own loop — more generous than the parent's, as a
@@ -86,7 +86,7 @@ export const DEFAULT_CONFIG_JSONC = `{
   // Max model/tool iterations per turn.
   // "maxIterations": ${DEFAULT_MAX_ITERATIONS}, // -1 = unlimited
 
-  // Sub-agents: the \`task\` tool that delegates work to an isolated child agent.
+  // Sub-agents: the \`agent_task\` tool that delegates work to an isolated child agent.
   // "subagents": { "enabled": ${DEFAULT_SUBAGENTS_ENABLED}, "maxIterations": ${DEFAULT_SUBAGENT_MAX_ITERATIONS} }, // maxIterations: -1 = unlimited
 
   // Auto-wake: when a background job exits while idle, automatically start a

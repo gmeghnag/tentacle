@@ -97,9 +97,9 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     largeOutput,
   ];
 
-  // Sub-agents: when enabled, register the `task` delegation tool. Children
+  // Sub-agents: when enabled, register the `agent_task` delegation tool. Children
   // inherit the same confined env + permission requester; the runner filters
-  // out `task` itself so a sub-agent cannot spawn further sub-agents.
+  // out `agent_task` itself so a sub-agent cannot spawn further sub-agents.
   if (config.subagentsEnabled) {
     const agentTypes = mergeAgentTypes(BUILTIN_AGENT_TYPES, loadUserAgentTypes(config.configDir));
     const { run, types } = createSubagentRunner({
