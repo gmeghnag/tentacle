@@ -25,6 +25,19 @@ function renderMessage(message: ChatMessage): string {
   return `${role}: ${message.content}${calls}`;
 }
 
+/**
+ * Thrown when compaction cannot produce a usable summary. An empty summary
+ * would irreversibly wipe the conversation (the history is replaced by the
+ * system prompt + summary), so it is a hard failure that leaves the history
+ * untouched instead.
+ */
+export class CompactError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CompactError";
+  }
+}
+
 /** Produce a compact summary of a conversation using the model (no tools). */
 export async function summarizeConversation(
   model: ModelProvider,
@@ -52,7 +65,17 @@ export async function summarizeConversation(
       summary += event.delta;
     }
   }
-  return summary.trim();
+  const trimmed = summary.trim();
+  if (trimmed.length === 0) {
+    // A thinking model may emit only `reasoning` events, or the server may
+    // have errored in-band — either way there is no visible text. An empty
+    // summary would replace the whole history with a blank brief, so fail
+    // loudly before any state is mutated (see `Session.compact`).
+    throw new CompactError(
+      "model returned an empty summary — conversation left intact — retry /compact, or check the model emitted no visible text (a thinking model may have spent its budget on reasoning)",
+    );
+  }
+  return trimmed;
 }
 
 const SUMMARIZE_TEXT_SYSTEM =

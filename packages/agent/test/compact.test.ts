@@ -8,7 +8,7 @@ import type {
 } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
 import { Agent } from "../src/agent.ts";
-import { compactedHistory, summarizeConversation } from "../src/compact.ts";
+import { CompactError, compactedHistory, summarizeConversation } from "../src/compact.ts";
 import { Session } from "../src/session.ts";
 
 class ScriptedProvider implements ModelProvider {
@@ -60,6 +60,48 @@ describe("compactedHistory", () => {
     expect(next[0]).toEqual({ role: "system", content: "sys" });
     expect(next[1]?.role).toBe("user");
     expect(next[1]?.content).toContain("the gist");
+  });
+});
+
+describe("empty-summary guard", () => {
+  test("summarizeConversation rejects with CompactError when the model emits no visible text", async () => {
+    // A thinking model that spends its whole budget in reasoning (or an
+    // in-band error chunk the provider skips) yields only `reasoning` events.
+    const model = new ScriptedProvider([
+      [{ type: "reasoning", delta: "lots of thinking, no visible content" }, { type: "done" }],
+    ]);
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "important task" },
+    ];
+    await expect(summarizeConversation(model, messages)).rejects.toBeInstanceOf(CompactError);
+  });
+
+  test("Session.compact leaves the history untouched and unpersisted when the summary is empty", async () => {
+    const model = new ScriptedProvider([
+      [{ type: "reasoning", delta: "thinking only" }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry(),
+      env: noopEnv,
+      systemPrompt: "SYS",
+    });
+    const persisted: unknown[] = [];
+    const session = new Session(agent, "empty-guard", {
+      onPersist: (snap) => {
+        persisted.push(snap);
+      },
+    });
+    const before = session.messages.map((m) => ({ ...m }));
+
+    await expect(session.compact()).rejects.toBeInstanceOf(CompactError);
+
+    // The exact property that kills the data loss: history byte-identical AND
+    // nothing persisted (so no wiped 2-message state reaches disk).
+    expect(session.messages).toEqual(before);
+    expect(session.snapshot().messages).toEqual(before);
+    expect(persisted).toHaveLength(0);
   });
 });
 
