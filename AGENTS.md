@@ -245,26 +245,35 @@ nothing.
   (assert conditionally, like the existing tests). Iterate on the single relevant
   file; full suite only before done.
 
-## 10. Task workflow (one task, one branch, one doc)
+## 10. Task workflow (one task, one living doc)
 
 Every change — feature, fix, or evaluation — is a single task with a single
-branch and a single living doc. This formalises §8 (the plan) and §4/§5/§9
-(verify/report/test) into one lifecycle. It is mandatory.
+living doc. A **`feat`/`fix` changes code and gets a branch**; an **`eval` is a
+decision record with no code and is committed directly to `main`** (no branch).
+This formalises §8 (the plan) and §4/§5/§9 (verify/report/test) into one
+lifecycle. It is mandatory.
 
-- **One task at a time.** Finish the current task (through Review) and merge it
-  before starting the next; exactly ONE task branch off `main` at a time. (This
-  is the rule that prevents the parallel-edit / merge-conflict mess.)
+- **One code task at a time.** Finish the current `feat`/`fix` (through Review)
+  and merge it before starting the next; exactly ONE code-task branch off `main`
+  at a time. (This is the rule that prevents the parallel-edit / merge-conflict
+  mess.) `eval`s do **not** count — they carry no code, commit directly to
+  `main`, and any number may be open at once.
 - **Folders** under `docs/`, by type:
   - `docs/feat/` — a new capability or improvement, including an **approved**
     refactor or perf change.
   - `docs/fix/` — a defect in existing behaviour.
   - `docs/eval/` — under evaluation: a question being decided (a migration, a
-    refactor/perf idea not yet approved). May never be built.
+    refactor/perf idea not yet approved). May never be built. An `eval` carries
+    **no code** and is committed **directly to `main`** (no branch); any number
+    may be open at once.
   A refactor/perf task goes in `feat/` if already approved, `eval/` if still
   being decided. An `eval` that gets approved is **promoted**: `git mv` its doc
-  into `feat/` (or `fix/`) and rename the branch — the move is the decision.
-- **Branch ↔ doc, 1:1.** Branch `<type>/<slug>`, doc `docs/<type>/<slug>.md`,
-  same slug. Branch off `main`; commit only on explicit OK (§6).
+  into `feat/` (or `fix/`) **and open the code branch then** — the move is the
+  decision.
+- **Branch ↔ doc (`feat`/`fix` only), 1:1.** A `feat`/`fix` has branch
+  `<type>/<slug>` and doc `docs/<type>/<slug>.md`, same slug, branched off
+  `main`. An `eval` has only its doc (`docs/eval/<slug>.md`), committed to `main`
+  with no branch. Either way, commit only on explicit OK (§6).
 - **The doc has four sections** (copy `docs/TASK-TEMPLATE.md`), each **signed by
   the model that wrote it** — `*— <model-id>, <date>*` — so we can see which
   model did what on a task and how it behaved, and spot drift:
@@ -305,28 +314,31 @@ branch and a single living doc. This formalises §8 (the plan) and §4/§5/§9
   - `load-bearing` (any size) **or** `L` → a stronger model executes (or split
     first), and Review is **mandatory fresh-context** (a sub-agent or
     `/code-review`) that red-teams the §7 invariant the change touches.
-- **Lifecycle:** Context → Implementation (approved) → Execution → Review →
-  merge. An `eval` often stops at Context + Review (the verdict); its
-  Implementation/Execution stay empty until it is promoted.
+- **Lifecycle (`feat`/`fix`):** Context → Implementation (approved) → Execution
+  → Review → merge. An **`eval`** is just Context + a Review verdict, committed
+  straight to `main` (no branch, no merge); its Implementation/Execution stay
+  empty until it is promoted (which opens the code branch).
 - **Index & registries:** `TODO.md` is the backlog/index — each item links its
   task doc. `docs/library-bugs.md` is the cross-cutting upstream-bug registry (a
   reference, not a task). Docs under `docs/` predating this standard are legacy;
   new work uses this structure.
-- **Docs & index edits are not tasks (carve-out).** A standalone edit to a
-  blast-nil Markdown file that carries no code — `TODO.md`, `docs/library-bugs.md`,
-  a folder `README`, or a standalone decision/notes doc under `docs/` — may be
-  committed **directly to `main`**, no branch and no four-section doc. This is the
-  one exception to §6's "if on `main`, branch first": a task branch exists to
-  protect *code* from parallel-edit/merge conflicts, and prose that touches no
-  code, test, or build path has no such blast (Biome does not lint Markdown, §6).
-  **NOT** carved out: (a) a **task's own doc** (`docs/<type>/<slug>.md`) — it *is*
-  the task and rides the task's branch; (b) a Markdown edit **bundled with a code
-  change** — it rides that code's task branch; (c) a **substantive change to this
-  file's rules** — those shape how everyone works, so they stay a task with the
-  reasoning trail and Review (a typo/link/formatting fix to any doc is fine
-  direct). Unchanged: every direct commit still needs the user's explicit OK
-  (§6) — the carve-out removes the branch, not the OK. When unsure "does this
-  touch code / change a rule?", treat it as a task.
+- **Docs & index edits are not code tasks (carve-out).** A blast-nil Markdown
+  file that carries no code — `TODO.md`, `docs/library-bugs.md`, a folder
+  `README`, a standalone decision/notes doc, or **an `eval` doc
+  (`docs/eval/<slug>.md`)** — is committed **directly to `main`**, no branch and
+  (for loose notes) no four-section doc. This is the exception to §6's "if on
+  `main`, branch first": a branch exists to protect *code* from parallel-edit /
+  merge conflicts, and prose that touches no code, test, or build path has no
+  such blast (Biome does not lint Markdown, §6). **NOT** carved out: (a) a
+  **`feat`/`fix` task's own doc** (`docs/feat|fix/<slug>.md`) — it rides that
+  code task's branch (an `eval` doc does **not**: it is a direct-to-`main`
+  record); (b) a Markdown edit **bundled with a code change** — it rides that
+  code's branch; (c) a **substantive change to this file's rules** — those shape
+  how everyone works, so they stay a `feat` task with the reasoning trail and
+  Review (a typo/link/formatting fix to any doc is fine direct). Unchanged: every
+  direct commit still needs the user's explicit OK (§6) — the carve-out removes
+  the branch, not the OK. When unsure "does this change code or a rule?", treat
+  it as a code task.
 - **Agent briefs:** a fresh agent spawned to execute or review a task is given
   `docs/EXECUTOR-BRIEF.md` / `docs/REVIEWER-BRIEF.md` — the spawn-time
   choreography (read AGENTS.md + the task doc, then do / adversarially attack).
