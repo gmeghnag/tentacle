@@ -368,6 +368,11 @@ Daily-driver work (done 2026-10-14):
 - [ ] 🟡 **A failed session save crashes the TUI** (`void store.save` rejects →
       unhandled rejection → exit 1 with a raw stack). See
       `docs/eval/session-store-durability.md`.
+- [ ] 🟡 **`--resume` (no uid) resumes another project's session**:
+      `store.latest()` ignores the launch cwd. Move to
+      `~/.config/tentacle/sessions/<cwd-key>/<uid>.json`. CONFIRMED.
+      **Eval:** `docs/eval/session-store-per-project.md`.
+      Type: eval → fix · Size: M · Blast: load-bearing.
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
