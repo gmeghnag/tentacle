@@ -616,7 +616,11 @@ Daily-driver work (done 2026-10-14):
       weak-model motivation. Decide: inject AGENTS.md into subagent prompts too, or
       document that the briefs are the channel. Type: eval · Size: S · Blast:
       cross-module.
-- [ ] **Skills support** — packaged procedural guidance the model opts into
+- [ ] **Relabel "Task" → "Agent" + rename tool `task` → `agent_task`**: the
+      display label and the model-facing tool name both read as "agent".
+      **Eval:** `docs/eval/subagent-label-rename.md` (recommends doing it, but
+      **gates the tool rename on a weak-model invocation check**; fallback =
+      label-only). Type: feat · Size: S · Blast: load-bearing (model-facing name).
       (complementary to the result pipeline: skills = *how to do it*, the pipeline
       = *the guarantee the context stays clean*).
 
