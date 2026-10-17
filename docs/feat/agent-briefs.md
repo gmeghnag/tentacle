@@ -175,9 +175,39 @@ files + the §10 pointer; no other references dangling.
 
 ## Review
 
-*— <reviewer model-id>, <date>*
+*— claude-opus-4-8, 2026-10-17 (SAME model that executed, in-context — see honesty note)*
 
-<!-- Adversarial pass: confirm the briefs operationalise §10 without restating it
-(no drift source), that each is ≲ one screen, that the reviewer brief carries
-corrections 1 & 2, and that the §10 pointer resolves. Gate green. Note whether a
-later task was actually run through these briefs (dogfood evidence). -->
+**Honesty note (applying this task's own correction 2):** this is a same-model,
+in-context self-review, which is the *weak* kind — shared blind spots survive.
+Acceptable here only because the task is `contained`/`S`, docs-only, touching no
+§7 invariant (§10 permits standard Review for this class). The strong dogfood is
+deferred by design: the briefs get their first real, independent exercise when
+`feat/agents-md-autoload` is executed and reviewed *through* them.
+
+**Verdict: APPROVE.**
+
+1. **Gate:** `bun run check` green — 635 pass / 1 skip / 0 fail (the skip is the
+   documented opt-in live-k8s test). Markdown carries no lint surface.
+2. **No second source of truth:** both briefs reference AGENTS sections by
+   number (§0/§4/§5/§6/§7/§9/§10) and restate none of their text — verified by
+   grep. Drift risk (the top failure mode) is designed out.
+3. **Brevity held:** 43 and 46 lines — within the ≲ one-screen cap.
+4. **Corrections present (reviewer brief):** correction 1 ("attack the plan, not
+   just its checklist — the Failure-modes list is the floor") and correction 2
+   ("sign which model reviewed; same-model/fresh-context is weaker") are both
+   explicit.
+5. **Load-bearing assumption honoured:** each brief's step 1 orders reading
+   AGENTS.md + the task doc, since a fresh agent holds only `PROMPT.md`; it
+   degrades to a confirmation once `agents-md-autoload` lands — never wrong.
+6. **Pointer resolves:** AGENTS §10 "Agent briefs" bullet names both files; both
+   exist.
+
+**Self-red-team (what might be wrong that the plan didn't say):** the briefs are
+prompt *templates* with a `<type>/<slug>` placeholder — a spawner that forgets to
+substitute would hand the agent a literal placeholder. Low impact (the agent
+would ask), but a one-line "fill `<type>/<slug>`" lives in each file's top
+comment, which mitigates it. No other gap found.
+
+**Follow-up:** when `agents-md-autoload` runs through these briefs, record the
+dogfood result (did a fresh executor/reviewer actually follow them cleanly?) as
+evidence back here or in that task's Review.
