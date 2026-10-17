@@ -311,6 +311,50 @@ Daily-driver work (done 2026-10-14):
       a JSON-RPC `-32601` reply instead of hanging the server; notifications are
       still ignored. Test in `client.test.ts`.
 
+### Block 8 — cross-cutting audit (2026-10-17, each verified by a fresh-context sub-agent repro)
+
+- [ ] 🔴 **Pod `--model-proxy`: cancel doesn't stop the model, and the requested
+      tool still runs.** `ProxyModelProvider` ignores `signal`; no `model/stream`
+      cancel; the agent loop never re-checks `aborted` between stream end and tool
+      execution. CONFIRMED. **Eval:** `docs/eval/proxy-model-cancel.md`.
+      Type: eval · Size: M · Blast: load-bearing.
+- [ ] 🔴 **`/compact` with an empty summary wipes the history** (reasoning-only
+      model, or an in-band SSE `{"error":…}` chunk) and persists it. CONFIRMED.
+      **Eval:** `docs/eval/compact-empty-summary-wipe.md`. Type: eval · Size: S ·
+      Blast: cross-module.
+- [ ] 🟡 **`session/compact` races a turn on the daemon** (both directions: compact
+      mid-turn → orphan `tool` msg; prompt mid-compact → turn silently lost).
+      CONFIRMED. **Eval:** `docs/eval/daemon-compact-turn-guard.md`. Type: eval ·
+      Size: S · Blast: load-bearing.
+- [ ] 🟡 **No daemon session lifecycle**: background jobs orphaned on `/clear` /
+      disconnect / exit; duplicate `sessionId` clobbers; `shell_kill` misses
+      grandchildren. CONFIRMED. **Eval:** `docs/eval/daemon-session-lifecycle.md`.
+      Type: eval · Size: M · Blast: load-bearing.
+- [ ] 🟡 **No history-validity invariant** (dangling tool_calls / invalid-JSON args
+      persisted and re-sent; resume repairs nothing). CONFIRMED (mostly).
+      Subsumes the Block-3 requester-throw + consecutive-user items.
+      **Eval:** `docs/eval/history-validity-invariant.md`. Type: eval · Size: M ·
+      Blast: load-bearing.
+- [ ] 🟡 **Session store not crash-safe** (in-place write truncates; failed `void
+      save` crashes the TUI; corrupt files vanish from `--resume`; no schema
+      check). CONFIRMED. **Eval:** `docs/eval/session-store-durability.md`.
+      Type: eval · Size: M · Blast: load-bearing.
+- [ ] 🟡 **Worker death after handshake hangs the TUI forever** (Bun fires
+      `close`; nobody listens). CONFIRMED. **Eval:** `docs/eval/worker-crash-hang.md`.
+      Type: eval · Size: S · Blast: contained.
+- [ ] 🟡 **Truncated tool-call persisted when the SSE stream ends before
+      `finish_reason`** (Esc abort is NOT a trigger in practice). PARTIALLY
+      CONFIRMED. **Eval:** `docs/eval/sse-abort-truncated-toolcall.md`.
+      Type: eval · Size: S · Blast: cross-module.
+- [ ] 🔵 **Oversize (8–16 MiB) frame on `connect` hangs the request** (null-id
+      error can't be correlated). PARTIALLY CONFIRMED (the `--resume` trigger was
+      wrong). **Eval:** `docs/eval/oversize-frame-hang.md`. Type: eval · Size: S ·
+      Blast: cross-module.
+- [ ] 🟡 **Anthropic provider drops `thinking` blocks instead of echoing them
+      back.** Quality-only or a hard 400 in tool loops: undetermined, needs a live
+      test. **Eval:** `docs/eval/anthropic-thinking-echo.md`. Type: eval · Size: M ·
+      Blast: cross-module.
+
 ## Roadmap (ordered)
 
 - [x] **Local daemon on a worker thread** (the "TUI always over RPC" lever —
