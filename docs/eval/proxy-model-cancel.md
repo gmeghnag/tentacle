@@ -1,6 +1,6 @@
 # eval/proxy-model-cancel — cancel (Esc) does not interrupt the in-flight model call on the pod path (`--model-proxy`)
 
-> **Status:** eval (Context + Review; Implementation empty until promoted)
+> **Status:** eval (Context + Review; Implementation empty until promoted). **Partly closed (2026-10-18):** the *model* half — Esc does not stop the tunnelled model call — is fixed by [`../fix/pod-model-streaming.md`](../fix/pod-model-streaming.md) (`$/cancelRequest`; the laptop provider receives the abort). Still open: the agent-loop half (no `aborted` re-check between stream end and tool execution).
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10)
 > **Type:** eval · **Size:** M · **Blast:** load-bearing · **Suited:** strong model executes (touches the agent loop + the model reverse-tunnel §7 invariant + a protocol addition); mandatory fresh-context Review. If promoted → `docs/fix/proxy-model-cancel.md`.
 

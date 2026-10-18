@@ -16,12 +16,15 @@ import {
   type InitializeResult,
   JsonRpcErrorCode,
   Method,
+  type ModelStreamChunkedParams,
+  type ModelStreamChunkedResult,
   type ModelStreamParams,
   type ModelStreamResult,
   type NewSessionResult,
   Notification,
   PROTOCOL_VERSION,
   type PromptResult,
+  type RequestId,
   type RequestPermissionParams,
   type RequestPermissionResult,
   type SessionUpdate,
@@ -31,7 +34,7 @@ import {
   type WireStreamEvent,
   text,
 } from "@tentacle/protocol";
-import { type DuplexChannel, RpcError, RpcPeer } from "@tentacle/transport";
+import { type DuplexChannel, type RequestContext, RpcError, RpcPeer } from "@tentacle/transport";
 import { responseToOutcome } from "./permission-map.ts";
 import { RemoteSession } from "./remote-session.ts";
 
@@ -43,6 +46,21 @@ export interface BackgroundExitNotice {
   readonly exitCode: number | null;
 }
 
+/**
+ * `model/streamChunked` coalescing (a leading-edge throttle): after a quiet
+ * period an event goes out AT ONCE (no added first-token latency); events that
+ * arrive within the next window ride one `$/progress` frame as a batch, so a
+ * fast model (or a slow link: k8s exec through the API server, a WAN
+ * `connect`) pays per-frame overhead at most once per window, not per event.
+ */
+export const MODEL_STREAM_COALESCE_MS = 30;
+/**
+ * Upper bound on one batch's serialized size (UTF-16 units). A batch is closed
+ * before it would exceed this, far below a receiver's `maxFrameBytes` (8 MiB on
+ * the ws-server); a single event larger than it travels alone.
+ */
+export const MODEL_STREAM_BATCH_MAX_CHARS = 64 * 1024;
+
 export class RemoteClient {
   private readonly peer: RpcPeer;
   private readonly permissions: PermissionBroker;
@@ -51,15 +69,20 @@ export class RemoteClient {
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
 
   private readonly modelProvider?: ModelProvider;
+  private readonly onError?: (error: Error) => void;
 
   constructor(
     channel: DuplexChannel,
     permissions: PermissionBroker,
     modelProvider?: ModelProvider,
+    options: { readonly onError?: (error: Error) => void } = {},
   ) {
     this.permissions = permissions;
     if (modelProvider) {
       this.modelProvider = modelProvider;
+    }
+    if (options.onError) {
+      this.onError = options.onError;
     }
     this.peer = new RpcPeer(channel, {
       onNotification: (method, params) => {
@@ -78,15 +101,25 @@ export class RemoteClient {
           this.handlers.get(p.sessionId)?.(p.update);
         }
       },
-      onRequest: async (method, params) => {
+      onRequest: async (method, params, context) => {
         if (method === Method.RequestPermission) {
           return this.onPermission(params as RequestPermissionParams);
         }
         if (method === Method.ModelStream) {
           return this.onModelStream(params as ModelStreamParams);
         }
+        if (method === Method.ModelStreamChunked) {
+          return this.onModelStreamChunked(
+            params as ModelStreamChunkedParams,
+            context as RequestContext,
+          );
+        }
         throw new RpcError(JsonRpcErrorCode.MethodNotFound, `unexpected request: ${method}`);
       },
+      // Log non-fatal peer errors (a stray/malformed notification, a bad frame)
+      // instead of dropping them silently. Routed to the caller's sink, NEVER a
+      // raw terminal write (§7): the laptop's stdout is the RPC channel/Ink's.
+      ...(this.onError ? { onError: (error: Error) => this.onError?.(error) } : {}),
     });
   }
 
@@ -158,9 +191,10 @@ export class RemoteClient {
   }
 
   /**
-   * Serve a `model/stream` request from the daemon (the pod reverse-tunnel):
-   * run the LOCAL model and return the turn's events. First cut collects them
-   * all before replying (no token streaming over the tunnel yet).
+   * Serve a `model/stream` request from the daemon (the pod reverse-tunnel),
+   * batch cut: run the LOCAL model and return the whole turn's events in one
+   * response. Kept so an old daemon (which only knows `model/stream`) works
+   * against a new laptop.
    */
   private async onModelStream(params: ModelStreamParams): Promise<ModelStreamResult> {
     if (!this.modelProvider) {
@@ -171,6 +205,106 @@ export class RemoteClient {
       events.push(event as WireStreamEvent);
     }
     return { events };
+  }
+
+  /**
+   * Serve a `model/streamChunked` request (the streaming cut): run the LOCAL
+   * model and forward its events to the daemon as `$/progress` notifications
+   * tied to the request id, coalesced into batches, then reply with only a
+   * frame count. The events cross as `$/progress` (NOT re-sent in the result), so
+   * the daemon can yield them as they are produced.
+   *
+   * Ordering is the load-bearing guarantee: every `$/progress` for this request
+   * is sent **before** the result frame (the coalescer flushes synchronously on
+   * end/error), and the channel is ordered, so the daemon's peer routes all
+   * chunks before it resolves the result. The count check then proves
+   * completeness.
+   */
+  private async onModelStreamChunked(
+    params: ModelStreamChunkedParams,
+    context: RequestContext,
+  ): Promise<ModelStreamChunkedResult> {
+    if (!this.modelProvider) {
+      throw new RpcError(
+        JsonRpcErrorCode.MethodNotFound,
+        "no local model to serve model/streamChunked",
+      );
+    }
+    const signal = context.signal;
+    const id = String(context.id);
+    // Coalesce into batches (see MODEL_STREAM_COALESCE_MS): one frame per
+    // window at most, a quiet stream's next event at once, a size cap per
+    // batch. `seq` counts FRAMES. The final flush is synchronous, before the
+    // result/error frame, so no event is ever delayed past it.
+    let batch: WireStreamEvent[] = [];
+    let batchChars = 2; // "[]"
+    let seq = 0;
+    let window: ReturnType<typeof setTimeout> | undefined;
+    const sendBatch = (): void => {
+      if (batch.length === 0) {
+        return;
+      }
+      this.peer.notify(Notification.Progress, { id, seq, value: batch });
+      seq += 1;
+      batch = [];
+      batchChars = 2;
+    };
+    const onWindowEnd = (): void => {
+      window = undefined;
+      if (batch.length > 0) {
+        sendBatch();
+        window = setTimeout(onWindowEnd, MODEL_STREAM_COALESCE_MS);
+      }
+    };
+    const push = (event: WireStreamEvent): void => {
+      const size = JSON.stringify(event).length + 1; // + the separating comma
+      if (batch.length > 0 && batchChars + size > MODEL_STREAM_BATCH_MAX_CHARS) {
+        sendBatch(); // close the batch before it would exceed the cap
+      }
+      batch.push(event);
+      batchChars += size;
+      if (window === undefined) {
+        // Leading edge: the stream was quiet, so send now and open a window.
+        sendBatch();
+        window = setTimeout(onWindowEnd, MODEL_STREAM_COALESCE_MS);
+      } else if (batchChars >= MODEL_STREAM_BATCH_MAX_CHARS) {
+        sendBatch(); // an oversize event travels alone, without waiting
+      }
+    };
+    const flush = (): void => {
+      if (window) {
+        clearTimeout(window);
+        window = undefined;
+      }
+      sendBatch();
+    };
+    try {
+      for await (const event of this.modelProvider.stream({
+        ...(params.request as unknown as ChatRequest),
+        ...(signal ? { signal } : {}),
+      })) {
+        const wire = event as WireStreamEvent;
+        push(wire);
+      }
+    } catch (error) {
+      // Flush whatever was produced before the failure so the daemon sees the
+      // partial stream, then surface the error (the daemon drains, then throws).
+      flush();
+      if (
+        signal.aborted ||
+        (error && typeof error === "object" && (error as { name?: string }).name === "cancelled")
+      ) {
+        throw new RpcError(JsonRpcErrorCode.InternalError, "model stream cancelled");
+      }
+      // Rethrow as-is (NOT an RpcError): the peer reports it to `onError` on
+      // the laptop and answers the pod with an opaque "internal error", like
+      // `model/stream`. A provider message can carry the endpoint or key
+      // material, and the pod is not trusted (AGENTS §7).
+      throw error;
+    }
+    // Flush the tail synchronously so the last events precede the result frame.
+    flush();
+    return { chunks: seq };
   }
 
   private async onPermission(params: RequestPermissionParams): Promise<RequestPermissionResult> {

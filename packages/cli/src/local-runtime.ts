@@ -100,11 +100,19 @@ export interface LocalRuntimeDeps {
   readonly resume: SessionRecord | null;
   /** Local model the daemon can tunnel calls back to (pod reverse-tunnel, F4.d). */
   readonly modelProvider?: ModelProvider;
+  /**
+   * Non-fatal errors of the laptop-side peer (a stray/malformed daemon frame, a
+   * local model failure the daemon only sees as opaque). Route to a buffered
+   * sink — never a raw terminal write while Ink owns it (AGENTS §7).
+   */
+  readonly onPeerError?: (error: Error) => void;
 }
 
 /** Handshake the daemon and return a session factory that persists each turn. */
 export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalRuntime> {
-  const client = new RemoteClient(deps.channel, deps.permissions, deps.modelProvider);
+  const client = new RemoteClient(deps.channel, deps.permissions, deps.modelProvider, {
+    ...(deps.onPeerError ? { onError: deps.onPeerError } : {}),
+  });
   await client.initialize();
 
   let seed = deps.resume;

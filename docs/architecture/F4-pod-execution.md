@@ -143,9 +143,20 @@ have:
   `OpenAIProvider` (the resolved local `baseURL`/`apiKey`) and relaying events.
 
 Result: the secret `apiKey` and the local endpoint **never leave the laptop**;
-the pod reaches the model purely through the tunnel. `AbortSignal` maps onto a
-`model/cancel` notification. This is the one genuinely new piece of protocol
-surface in F4.
+the pod reaches the model purely through the tunnel. This is the one genuinely
+new piece of protocol surface in F4.
+
+**As built (F4.d + F4.d.2).** Two methods, chosen per connection:
+`model/streamChunked` (streaming: the laptop sends the events as generic
+`$/progress { id, seq, value }` notifications tied to the request id — `value`
+a batch of wire events, coalesced by a leading-edge 30 ms throttle with a
+64 Ki-char cap — and replies `{ chunks }`, the frame count the daemon checks)
+and `model/stream` (the first cut's single batch, kept for old peers; a
+`MethodNotFound` probe latches the fallback). `AbortSignal` maps onto the
+generic `$/cancelRequest { id }`: the daemon's request is cancelled, the
+laptop's per-request signal aborts the local provider. A local provider error
+reaches the pod opaque (`"internal error"`); a disconnect aborts the laptop
+model. Design + evidence: `docs/fix/pod-model-streaming.md`.
 
 **Config bootstrap** mirrors the worker: the laptop sends the **locally-resolved
 `TentacleConfig`** as the first frame, but with the model section replaced by the
@@ -280,6 +291,11 @@ sent to the pod (reverse-tunnel, §5).
   tunnel** (the laptop TUI sees each model turn arrive at once) — and **no
   mid-call cancel** of a tunnelled model request (turn-level cancel between calls
   still works). Both are F4.d.2.
+- **F4.d.2 — streaming + cancellable model tunnel** — ✅ **done (2026-10-18).**
+  `model/streamChunked` + the generic peer primitives `$/progress` /
+  `$/cancelRequest` (see §5 *As built*); `model/stream` kept for version skew.
+  Measured on kind: first token in the TUI 0.22 s (was 47 s), Esc stops the
+  laptop model in the same millisecond. Doc: `docs/fix/pod-model-streaming.md`.
 - **F4.e — pod binary injection** — ✅ **done (2026-10-15).** The pod image
   no longer needs to contain `tentacle`: the runtime injects a Linux
   binary over the exec WebSocket before the daemon starts. Sequence (in

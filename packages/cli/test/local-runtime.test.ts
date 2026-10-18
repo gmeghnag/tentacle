@@ -14,7 +14,7 @@ import type {
 import { PermissionBroker } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
-import { createChannelPair } from "@tentacle/transport";
+import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime } from "../src/local-runtime.ts";
 
 class ScriptedProvider implements ModelProvider {
@@ -100,6 +100,31 @@ afterAll(async () => {
 });
 
 describe("createLocalRuntime (local over RPC)", () => {
+  test("a non-fatal laptop-peer error (stray daemon frame) reaches onPeerError, never vanishes", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    const daemonPeer = new RpcPeer(daemonCh, {
+      onRequest: () => ({
+        protocolVersion: 1,
+        agentCapabilities: { tools: true, permissions: true },
+      }),
+    });
+    const errors: string[] = [];
+    const runtime = await createLocalRuntime({
+      channel: clientCh,
+      disposeTransport: () => daemonPeer.close(),
+      permissions: new PermissionBroker(),
+      store: new JsonSessionStore(join(dir, "peer-error")),
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: null,
+      onPeerError: (error) => errors.push(error.message),
+    });
+    daemonPeer.notify("$/bogus", {}); // unknown to the laptop: reported, not fatal
+    await new Promise((r) => setTimeout(r, 10));
+    expect(errors).toEqual(["unknown notification: $/bogus"]);
+    runtime.dispose();
+  });
+
   test("persists the session after a turn, under a stable uid", async () => {
     const model = new ScriptedProvider([[{ type: "text", delta: "hi back" }, { type: "done" }]]);
     const { channel, dispose } = daemon(model);

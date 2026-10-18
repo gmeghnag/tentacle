@@ -8,10 +8,15 @@ import {
   type PermissionRequester,
   type StreamEvent,
 } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
+import { Method } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
-import { createChannelPair } from "@tentacle/transport";
-import { RemoteClient } from "../src/remote-client.ts";
+import { RpcPeer, createChannelPair } from "@tentacle/transport";
+import {
+  MODEL_STREAM_BATCH_MAX_CHARS,
+  MODEL_STREAM_COALESCE_MS,
+  RemoteClient,
+} from "../src/remote-client.ts";
 import { type WebSocketChannel, connectWebSocket } from "../src/ws-channel.ts";
 
 class ScriptedProvider implements ModelProvider {
@@ -56,6 +61,353 @@ async function collect(iter: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
   }
   return out;
 }
+
+/** Poll `pred` until true or `timeoutMs` elapses; resolves with the result. */
+async function waitFor(pred: () => boolean, timeoutMs = 2000): Promise<boolean> {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) {
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return true;
+}
+
+/** A local (laptop) provider that records the signal it was called with and can
+ *  hold mid-stream on a gate, so a test can drive a real mid-round cancel. */
+class RecordingGatedProvider implements ModelProvider {
+  readonly id = "rec";
+  readonly seenSignals: AbortSignal[] = [];
+  gate: (() => void) | null = null;
+  constructor(private readonly script: readonly StreamEvent[]) {}
+  async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+    const signal = request.signal ?? new AbortController().signal;
+    this.seenSignals.push(signal);
+    // Yield the first event, then hold until the gate opens or the signal aborts
+    // (a real provider would keep streaming; this lets the test cancel mid-round).
+    yield this.script[0] as StreamEvent;
+    await new Promise<void>((resolve) => {
+      const onAbort = (): void => resolve();
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.gate = (): void => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+    });
+    if (signal.aborted) {
+      return; // the local provider stops on a cancel (like a real one would)
+    }
+    for (const event of this.script.slice(1)) {
+      yield event;
+    }
+  }
+}
+
+describe("model reverse-tunnel, chunked (streaming) cut", () => {
+  test("the daemon streams the laptop model's events to the TUI as they are produced", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    // biome-ignore lint/style/useConst: assigned after the closure that references it
+    let connection: Connection;
+    const model = new RecordingGatedProvider([
+      { type: "reasoning", delta: "thinking…" },
+      { type: "text", delta: "hello from the laptop" },
+      { type: "done", usage: { promptTokens: 5, completionTokens: 3 } },
+    ]);
+    const host = new SessionHost({
+      defaultCwd: "/pod/work",
+      createAgent: () => {
+        const agent = new Agent({
+          model: new ProxyModelProvider(
+            (r) => connection.requestModelStream(r),
+            (r, h) => connection.requestModelStreamChunked(r, h),
+          ),
+          tools: new ToolRegistry(),
+          env: noopEnv,
+        });
+        return { agent, permissions: new PermissionBroker() };
+      },
+    });
+    connection = new Connection(daemonCh, host);
+    const client = new RemoteClient(clientCh, new PermissionBroker(), model);
+    await client.initialize();
+
+    const sendPromise = (async () => {
+      const events: AgentEvent[] = [];
+      for await (const e of client.newSession().send("hi")) {
+        events.push(e);
+        if (e.type === "reasoning") {
+          // The turn is now mid-model-round: let the local model finish.
+          model.gate?.();
+        }
+      }
+      return events;
+    })();
+    const events = await sendPromise;
+
+    // The local (laptop) model actually ran over the tunnel.
+    expect(model.seenSignals).toHaveLength(1);
+    const text = events
+      .filter((e): e is Extract<AgentEvent, { type: "text" }> => e.type === "text")
+      .map((e) => e.delta)
+      .join("");
+    expect(text).toBe("hello from the laptop");
+    expect(events.some((e) => e.type === "reasoning")).toBe(true);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    connection.close();
+    client.close();
+  });
+
+  test("Esc (abort) reaches the laptop local provider's signal and ends the turn as a clean cancel", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    // biome-ignore lint/style/useConst: assigned after the closure that references it
+    let connection: Connection;
+    const model = new RecordingGatedProvider([
+      { type: "reasoning", delta: "thinking…" },
+      { type: "text", delta: "never seen" },
+      { type: "done" },
+    ]);
+    const host = new SessionHost({
+      defaultCwd: "/pod/work",
+      createAgent: () => {
+        const agent = new Agent({
+          model: new ProxyModelProvider(
+            (r) => connection.requestModelStream(r),
+            (r, h) => connection.requestModelStreamChunked(r, h),
+          ),
+          tools: new ToolRegistry(),
+          env: noopEnv,
+        });
+        return { agent, permissions: new PermissionBroker() };
+      },
+    });
+    connection = new Connection(daemonCh, host);
+    const client = new RemoteClient(clientCh, new PermissionBroker(), model);
+    await client.initialize();
+
+    const controller = new AbortController();
+    const sendPromise = (async () => {
+      const events: AgentEvent[] = [];
+      for await (const e of client.newSession().send("hi", controller.signal)) {
+        events.push(e);
+      }
+      return events;
+    })();
+    // Wait until the turn has reached the laptop and the local model is streaming.
+    const reached = await waitFor(() => model.seenSignals.length === 1);
+    expect(reached).toBe(true);
+    // Esc: abort the turn while the model round is in flight.
+    controller.abort();
+    const events = await sendPromise;
+    // The cancel propagated all the way to the laptop's local provider.
+    expect(model.seenSignals[0]?.aborted).toBe(true);
+    // …and the turn ended as a clean cancel, not an error.
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    connection.close();
+    client.close();
+  });
+});
+
+const WIRE_REQ = { messages: [{ role: "user" as const, content: "hi" }] };
+
+/** A raw daemon-side peer issuing `model/streamChunked` (no agent in between). */
+function rawDaemon(model: ModelProvider, onError?: (e: Error) => void) {
+  const [daemonCh, clientCh] = createChannelPair();
+  const client = new RemoteClient(clientCh, new PermissionBroker(), model, {
+    ...(onError ? { onError } : {}),
+  });
+  const daemon = new RpcPeer(daemonCh);
+  return { daemon, daemonCh, client };
+}
+
+describe("model/streamChunked — laptop side", () => {
+  test("coalesces for real: a burst becomes few frames (first event alone, at once), seq counts frames, nothing lost, all before the result", async () => {
+    const script: StreamEvent[] = [
+      ...Array.from({ length: 50 }, (_, i): StreamEvent => ({ type: "text", delta: `t${i}` })),
+      { type: "done", usage: { promptTokens: 7, completionTokens: 50 } },
+    ];
+    const { daemon, client } = rawDaemon(new ScriptedProvider([script]));
+    const frames: { seq: number; value: unknown }[] = [];
+    const result = (await daemon.request(
+      Method.ModelStreamChunked,
+      { request: WIRE_REQ },
+      { onProgress: (value, seq) => frames.push({ seq, value }) },
+    )) as { chunks: number };
+    // Leading edge: the first event goes out alone, without waiting a window.
+    expect(frames[0]?.value).toEqual([script[0]]);
+    // The burst is batched: far fewer frames than events.
+    expect(frames.length).toBeLessThanOrEqual(3);
+    expect(frames.map((f) => f.seq)).toEqual(frames.map((_, i) => i));
+    // Nothing lost, order kept, every frame routed BEFORE the result resolved.
+    expect(frames.flatMap((f) => f.value as StreamEvent[])).toEqual(script);
+    // Only the frame count: usage travelled inside the `done` event.
+    expect(result).toEqual({ chunks: frames.length });
+    daemon.close();
+    client.close();
+  });
+
+  test("a batch never exceeds the size cap (big events split across frames; one oversize event travels alone)", async () => {
+    const big = "x".repeat(Math.floor(MODEL_STREAM_BATCH_MAX_CHARS / 3));
+    const huge = "y".repeat(MODEL_STREAM_BATCH_MAX_CHARS * 2);
+    const script: StreamEvent[] = [
+      ...Array.from({ length: 10 }, (): StreamEvent => ({ type: "text", delta: big })),
+      { type: "text", delta: huge },
+      { type: "done" },
+    ];
+    const { daemon, client } = rawDaemon(new ScriptedProvider([script]));
+    const frames: StreamEvent[][] = [];
+    await daemon.request(
+      Method.ModelStreamChunked,
+      { request: WIRE_REQ },
+      { onProgress: (value) => frames.push(value as StreamEvent[]) },
+    );
+    expect(frames.flat()).toEqual(script);
+    for (const frame of frames) {
+      if (frame.length > 1) {
+        expect(JSON.stringify(frame).length).toBeLessThanOrEqual(MODEL_STREAM_BATCH_MAX_CHARS);
+      }
+    }
+    expect(frames.some((f) => f.length === 1 && f[0]?.type === "text" && f[0].delta === huge)).toBe(
+      true,
+    );
+    daemon.close();
+    client.close();
+  });
+
+  test("after a quiet pause the next event goes out at once (leading edge), not after a window", async () => {
+    const yieldedAt: number[] = [];
+    const model: ModelProvider = {
+      id: "paused",
+      async *stream(): AsyncIterable<StreamEvent> {
+        for (const delta of ["a", "b"]) {
+          yieldedAt.push(performance.now());
+          yield { type: "text", delta };
+          await new Promise((r) => setTimeout(r, MODEL_STREAM_COALESCE_MS * 3));
+        }
+        yield { type: "done" };
+      },
+    };
+    const { daemon, client } = rawDaemon(model);
+    const frames: unknown[] = [];
+    const receivedAt: number[] = [];
+    await daemon.request(
+      Method.ModelStreamChunked,
+      { request: WIRE_REQ },
+      {
+        onProgress: (value) => {
+          frames.push(value);
+          receivedAt.push(performance.now());
+        },
+      },
+    );
+    expect(frames).toEqual([
+      [{ type: "text", delta: "a" }],
+      [{ type: "text", delta: "b" }],
+      [{ type: "done" }],
+    ]);
+    // Each post-pause event arrived well inside one window of being produced.
+    for (const [i, t] of yieldedAt.entries()) {
+      expect((receivedAt[i] ?? Number.POSITIVE_INFINITY) - t).toBeLessThan(
+        MODEL_STREAM_COALESCE_MS / 2,
+      );
+    }
+    daemon.close();
+    client.close();
+  });
+
+  test("a local provider error reaches the pod OPAQUE; the real message goes to the laptop's onError only (§7: pod is not trusted)", async () => {
+    const secret = "401 from http://10.0.0.5:8080/v1 key=sk-SECRET";
+    const model: ModelProvider = {
+      id: "boom",
+      // biome-ignore lint/correctness/useYield: throws before yielding, on purpose
+      async *stream(): AsyncIterable<StreamEvent> {
+        throw new Error(secret);
+      },
+    };
+    const logged: string[] = [];
+    const { daemon, client } = rawDaemon(model, (e) => logged.push(e.message));
+    let message = "";
+    try {
+      await daemon.request(
+        Method.ModelStreamChunked,
+        { request: WIRE_REQ },
+        { onProgress: () => {} },
+      );
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toBe("internal error");
+    expect(message).not.toContain("sk-SECRET");
+    expect(logged.some((l) => l.includes(secret))).toBe(true);
+    daemon.close();
+    client.close();
+  });
+
+  test("a disconnect mid-round aborts the laptop's local model (it does not run to completion for nobody)", async () => {
+    const model = new RecordingGatedProvider([{ type: "text", delta: "a" }, { type: "done" }]);
+    const { daemon, daemonCh, client } = rawDaemon(model);
+    daemon
+      .request(Method.ModelStreamChunked, { request: WIRE_REQ }, { onProgress: () => {} })
+      .catch(() => {});
+    expect(await waitFor(() => model.seenSignals.length === 1)).toBe(true);
+    daemonCh.close(); // the pod went away
+    expect(await waitFor(() => model.seenSignals[0]?.aborted === true, 500)).toBe(true);
+    client.close();
+  });
+});
+
+describe("model/streamChunked — daemon ↔ laptop end to end (ProxyModelProvider)", () => {
+  test("the laptop yields two events then throws: the daemon yields exactly those two, then throws", async () => {
+    const model: ModelProvider = {
+      id: "partial",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { type: "reasoning", delta: "r" };
+        yield { type: "text", delta: "t" };
+        throw new Error("model died");
+      },
+    };
+    const { daemon, client } = rawDaemon(model);
+    const provider = new ProxyModelProvider(
+      () => Promise.reject(new Error("batch not expected")),
+      (r, h) => daemon.request(Method.ModelStreamChunked, { request: r }, h) as never,
+    );
+    const seen: StreamEvent[] = [];
+    let error: unknown;
+    try {
+      for await (const e of provider.stream({ messages: [{ role: "user", content: "hi" }] })) {
+        seen.push(e);
+      }
+    } catch (e) {
+      error = e;
+    }
+    expect(seen).toEqual([
+      { type: "reasoning", delta: "r" },
+      { type: "text", delta: "t" },
+    ]);
+    expect(error).toBeInstanceOf(Error);
+    daemon.close();
+    client.close();
+  });
+
+  test("a disconnect mid-stream makes the daemon's stream() throw instead of hanging", async () => {
+    const model = new RecordingGatedProvider([{ type: "text", delta: "a" }, { type: "done" }]);
+    const { daemon, daemonCh, client } = rawDaemon(model);
+    const provider = new ProxyModelProvider(
+      () => Promise.reject(new Error("batch not expected")),
+      (r, h) => daemon.request(Method.ModelStreamChunked, { request: r }, h) as never,
+    );
+    const seen: StreamEvent[] = [];
+    const run = (async () => {
+      for await (const e of provider.stream({ messages: [{ role: "user", content: "hi" }] })) {
+        seen.push(e);
+        daemonCh.close(); // drop the tunnel after the first event
+      }
+    })();
+    await expect(run).rejects.toThrow("connection closed");
+    expect(seen).toEqual([{ type: "text", delta: "a" }]);
+    client.close();
+  });
+});
 
 describe("RemoteSession over an in-memory channel", () => {
   test("streams the reply back as AgentEvents the TUI understands", async () => {

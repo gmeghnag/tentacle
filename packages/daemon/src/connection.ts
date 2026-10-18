@@ -13,6 +13,7 @@ import {
   type InitializeParams,
   type InitializeResult,
   Method,
+  type ModelStreamChunkedResult,
   type ModelStreamResult,
   type NewSessionParams,
   type NewSessionResult,
@@ -85,12 +86,31 @@ export class Connection {
 
   /**
    * Ask the connected client to run a model turn on our behalf (the pod
-   * reverse-tunnel). Outbound daemon→client request, like permission requests.
+   * reverse-tunnel), batch cut: the client returns the whole turn's events in
+   * one response. Outbound daemon→client request, like permission requests.
    */
   requestModelStream(request: WireChatRequest): Promise<ModelStreamResult> {
     return this.peer
       .request(Method.ModelStream, { request })
       .then((result) => result as ModelStreamResult);
+  }
+
+  /**
+   * Ask the connected client to run a model turn on our behalf (the pod
+   * reverse-tunnel), streaming the events as `$/progress` as they are produced
+   * (the chunked cut). `signal` cancels it; `onProgress` receives each event
+   * in `seq` order. Outbound daemon→client request, like permission requests.
+   */
+  requestModelStreamChunked(
+    request: WireChatRequest,
+    handlers: {
+      readonly signal?: AbortSignal;
+      readonly onProgress: (value: unknown, seq: number) => void;
+    },
+  ): Promise<ModelStreamChunkedResult> {
+    return this.peer
+      .request(Method.ModelStreamChunked, { request }, handlers)
+      .then((result) => result as ModelStreamChunkedResult);
   }
 
   private async onRequest(method: string, params: unknown): Promise<unknown> {

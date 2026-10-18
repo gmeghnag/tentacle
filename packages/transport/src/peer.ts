@@ -10,10 +10,13 @@
  * stream) are trusted and not re-validated; see the project's perf plan.
  */
 import {
+  type CancelRequestParams,
   JSONRPC_VERSION,
   JsonRpcErrorCode,
   JsonRpcMessageSchema,
+  Notification,
   NotificationSchemas,
+  type ProgressParams,
   type RequestId,
   RequestSchemas,
   isMethodName,
@@ -22,8 +25,37 @@ import {
 import type { DuplexChannel } from "./channel.ts";
 import { RpcError } from "./errors.ts";
 
-export type RequestHandler = (method: string, params: unknown) => Promise<unknown> | unknown;
+/** Context handed to an inbound request handler (additive: existing
+ *  `(method, params)` handlers are unaffected). */
+export interface RequestContext {
+  /**
+   * The id of this inbound request, so a responder can frame `$/progress`
+   * partials for it (the peer routes them back by this id).
+   */
+  readonly id: RequestId;
+  /** Aborts when the caller sends `$/cancelRequest` for this request. */
+  readonly signal: AbortSignal;
+}
+
+export type RequestHandler = (
+  method: string,
+  params: unknown,
+  context?: RequestContext,
+) => Promise<unknown> | unknown;
 export type NotificationHandler = (method: string, params: unknown) => void | Promise<void>;
+
+/** Partial values a responder streams to an outbound request via `$/progress`. */
+export type ProgressListener = (value: unknown, seq: number) => void;
+
+export interface RequestOptions {
+  /**
+   * When aborted, the caller sends `$/cancelRequest` for this request's id and
+   * the pending promise rejects with a catchable `cancelled` marker.
+   */
+  readonly signal?: AbortSignal;
+  /** Receives `$/progress` partial values for this request, in `seq` order. */
+  readonly onProgress?: ProgressListener;
+}
 
 export interface RpcPeerOptions {
   /** Handles an inbound request; return its result, or throw `RpcError`. */
@@ -55,12 +87,28 @@ interface Pending {
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer?: ReturnType<typeof setTimeout>;
+  /** Detached from the signal when the request settles (see `request`). */
+  onAbort?: () => void;
+  /** `$/progress` receiver for this request (see `RequestOptions`). */
+  onProgress?: ProgressListener;
 }
+
+/** Bound on `cancelledIds` (late answers to our own cancels). */
+const MAX_REMEMBERED_CANCELS = 1024;
 
 export class RpcPeer {
   private readonly channel: DuplexChannel;
   private readonly opts: RpcPeerOptions;
   private readonly pending = new Map<string, Pending>();
+  /** AbortController per INBOUND request id; a `$/cancelRequest` aborts it. */
+  private readonly inboundCancel = new Map<string, AbortController>();
+  /**
+   * Outbound ids WE cancelled whose late response may still arrive: it is
+   * discarded silently instead of reported as an unknown id (it is expected,
+   * not an error). Bounded (oldest dropped first) so a peer that never answers
+   * cannot grow it; cleared on close.
+   */
+  private readonly cancelledIds = new Set<string>();
   private nextId = 1;
   private closed = false;
 
@@ -75,8 +123,14 @@ export class RpcPeer {
     return this.closed;
   }
 
-  /** Issue a request and resolve with its (schema-validated) result. */
-  request(method: string, params?: unknown): Promise<unknown> {
+  /**
+   * Issue a request and resolve with its (schema-validated) result.
+   *
+   * `options.signal` (abort → `$/cancelRequest` + local cancelled rejection)
+   * and `options.onProgress` (receive `$/progress` partials for this request)
+   * are additive; omitting them behaves exactly as before.
+   */
+  request(method: string, params?: unknown, options?: RequestOptions): Promise<unknown> {
     if (this.closed) {
       return Promise.reject(new RpcError(JsonRpcErrorCode.InternalError, "peer is closed"));
     }
@@ -91,12 +145,34 @@ export class RpcPeer {
     }
     const id = String(this.nextId++);
     return new Promise<unknown>((resolve, reject) => {
-      const pending: Pending = { method, resolve, reject };
+      const pending: Pending = { method, resolve, reject, onProgress: options?.onProgress };
+      const settle = (settleFn: () => void): void => this.settlePending(id, pending, settleFn);
       if (this.opts.requestTimeoutMs !== undefined) {
         pending.timer = setTimeout(() => {
-          this.pending.delete(id);
-          reject(new RpcError(JsonRpcErrorCode.InternalError, `request ${method} timed out`));
+          settle(() =>
+            reject(new RpcError(JsonRpcErrorCode.InternalError, `request ${method} timed out`)),
+          );
         }, this.opts.requestTimeoutMs);
+      }
+      if (options?.signal) {
+        const onAbort = (): void => {
+          if (!this.pending.has(id)) {
+            return; // already settled — the abort is a no-op
+          }
+          // Tell the peer to stop working on our request (unknown to it → no-op),
+          // then reject locally so the caller's `.then`/`for await` ends now.
+          this.notify(Notification.CancelRequest, { id } satisfies CancelRequestParams);
+          this.rememberCancelled(id);
+          settle(() => reject(cancelledError(id)));
+        };
+        if (options.signal.aborted) {
+          // Aborted before the frame could go out: reject, send nothing (the
+          // peer never saw this id, so there is nothing to cancel).
+          settle(() => reject(cancelledError(id)));
+          return;
+        }
+        options.signal.addEventListener("abort", onAbort, { once: true });
+        pending.onAbort = (): void => options.signal?.removeEventListener("abort", onAbort);
       }
       this.pending.set(id, pending);
       this.sendFrame({
@@ -106,6 +182,32 @@ export class RpcPeer {
         ...(params !== undefined ? { params } : {}),
       });
     });
+  }
+
+  private rememberCancelled(id: string): void {
+    this.cancelledIds.add(id);
+    if (this.cancelledIds.size > MAX_REMEMBERED_CANCELS) {
+      const oldest = this.cancelledIds.values().next().value;
+      if (oldest !== undefined) {
+        this.cancelledIds.delete(oldest);
+      }
+    }
+  }
+
+  /**
+   * Settle a pending request exactly once: detach its abort listener, clear its
+   * timer, remove it from `pending`, then run `settleFn`. Every completion path
+   * (timeout, abort, response, close) funnels through here so a listener can
+   * never outlive its request.
+   */
+  private settlePending(id: string, pending: Pending, settleFn: () => void): void {
+    pending.onAbort?.();
+    pending.onAbort = undefined;
+    if (pending.timer) {
+      clearTimeout(pending.timer);
+    }
+    this.pending.delete(id);
+    settleFn();
   }
 
   /** Send a fire-and-forget notification (never validated outbound: hot path). */
@@ -134,13 +236,18 @@ export class RpcPeer {
       return;
     }
     this.closed = true;
-    for (const pending of this.pending.values()) {
-      if (pending.timer) {
-        clearTimeout(pending.timer);
-      }
-      pending.reject(new RpcError(JsonRpcErrorCode.InternalError, "connection closed"));
+    for (const [id, pending] of this.pending) {
+      this.settlePending(id, pending, () =>
+        pending.reject(new RpcError(JsonRpcErrorCode.InternalError, "connection closed")),
+      );
     }
-    this.pending.clear();
+    // Nobody can receive an inbound handler's result any more: abort them all
+    // so a long responder (a model round on the laptop) stops its work.
+    for (const controller of this.inboundCancel.values()) {
+      controller.abort();
+    }
+    this.inboundCancel.clear();
+    this.cancelledIds.clear();
   }
 
   private sendFrame(frame: unknown): void {
@@ -207,8 +314,14 @@ export class RpcPeer {
       this.sendErrorResponse(id, JsonRpcErrorCode.InternalError, "no request handler");
       return;
     }
+    // A `$/cancelRequest` for this id aborts the handler's context signal.
+    const controller = new AbortController();
+    this.inboundCancel.set(String(id), controller);
     try {
-      const result = await handler(method, parsedParams.data);
+      const result = await handler(method, parsedParams.data, {
+        id,
+        signal: controller.signal,
+      } satisfies RequestContext);
       this.sendFrame({ jsonrpc: JSONRPC_VERSION, id, result: result ?? null });
     } catch (error) {
       if (error instanceof RpcError) {
@@ -232,6 +345,10 @@ export class RpcPeer {
           this.sendErrorResponse(id, JsonRpcErrorCode.InternalError, "internal error");
         }
       }
+    } finally {
+      // The handler settled (result or error): drop its cancel controller so it
+      // cannot leak and a late `$/cancelRequest` is a clean no-op.
+      this.inboundCancel.delete(String(id));
     }
   }
 
@@ -243,6 +360,22 @@ export class RpcPeer {
     const parsed = NotificationSchemas[method].safeParse(params);
     if (!parsed.success) {
       this.reportError(new Error(`invalid params for notification ${method}`));
+      return;
+    }
+    // Generic peer primitives, handled here so no application code needs to
+    // know about them. Both are synchronous map work (no await, no lock), so
+    // dispatch stays concurrent (§7). An old peer lacks them in its registry,
+    // so the `isNotificationName` check above already no-ops them (non-fatal).
+    if (method === Notification.CancelRequest) {
+      const { id } = parsed.data as CancelRequestParams;
+      this.inboundCancel.get(id)?.abort();
+      return;
+    }
+    if (method === Notification.Progress) {
+      const { id, seq, value } = parsed.data as ProgressParams;
+      // Route to the still-pending outbound request's listener; a progress for
+      // a settled/unknown id is dropped (non-fatal).
+      this.pending.get(id)?.onProgress?.(value, seq);
       return;
     }
     try {
@@ -257,19 +390,21 @@ export class RpcPeer {
       this.reportError(new Error("response with no id cannot be correlated"));
       return;
     }
-    const pending = this.pending.get(String(id));
+    const key = String(id);
+    const pending = this.pending.get(key);
     if (!pending) {
-      this.reportError(new Error(`response for unknown request id: ${String(id)}`));
+      if (this.cancelledIds.delete(key)) {
+        return; // the late answer to a request we cancelled: expected, not an error
+      }
+      this.reportError(new Error(`response for unknown request id: ${key}`));
       return;
-    }
-    this.pending.delete(String(id));
-    if (pending.timer) {
-      clearTimeout(pending.timer);
     }
     if (error !== undefined) {
       const e = error as { code?: number; message?: string; data?: unknown };
-      pending.reject(
-        new RpcError(e.code ?? JsonRpcErrorCode.InternalError, e.message ?? "error", e.data),
+      this.settlePending(key, pending, () =>
+        pending.reject(
+          new RpcError(e.code ?? JsonRpcErrorCode.InternalError, e.message ?? "error", e.data),
+        ),
       );
       return;
     }
@@ -277,15 +412,17 @@ export class RpcPeer {
     if (isMethodName(pending.method)) {
       const parsed = RequestSchemas[pending.method].result.safeParse(result);
       if (!parsed.success) {
-        pending.reject(
-          new RpcError(JsonRpcErrorCode.InternalError, `invalid result for ${pending.method}`),
+        this.settlePending(key, pending, () =>
+          pending.reject(
+            new RpcError(JsonRpcErrorCode.InternalError, `invalid result for ${pending.method}`),
+          ),
         );
         return;
       }
-      pending.resolve(parsed.data);
+      this.settlePending(key, pending, () => pending.resolve(parsed.data));
       return;
     }
-    pending.resolve(result);
+    this.settlePending(key, pending, () => pending.resolve(result));
   }
 
   private sendErrorResponse(
@@ -311,4 +448,19 @@ function extractId(raw: unknown): RequestId | null {
     }
   }
   return null;
+}
+
+/**
+ * The local rejection for a request the CALLER cancelled. `name ===
+ * "cancelled"` is the catchable marker: a caller that aborts its own request
+ * can distinguish "I cancelled it" from a transport error without string
+ * matching. It is NOT an `RpcError` from the peer (the peer was merely told to
+ * stop), so it carries no wire code.
+ */
+export function cancelledError(id?: string): Error {
+  const error = new Error(
+    id === undefined ? "request was cancelled" : `request ${id} was cancelled`,
+  );
+  error.name = "cancelled";
+  return error;
 }

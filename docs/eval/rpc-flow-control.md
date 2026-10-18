@@ -4,7 +4,8 @@
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10). Promote to `feat/rpc-flow-control`.
 > **Type:** eval → feat · **Size:** M–L · **Blast:** load-bearing (`transport/peer.ts` send path, every runtime's channel) · **Suited:** a strong model executes; mandatory fresh-context Review by a different model.
 > **Umbrella:** [`remote-execution-model.md`](./remote-execution-model.md) (piece 2 of 4).
-> **Needs:** [`pod-model-streaming.md`](./pod-model-streaming.md) — this builds on its `$/progress` and `$/cancelRequest` peer primitives.
+> **Needs:** [`pod-model-streaming.md`](../fix/pod-model-streaming.md) — this builds on its `$/progress` and `$/cancelRequest` peer primitives.
+> **As built by piece 1 (2026-10-18):** `$/progress { id, seq, value }` is generic — the peer checks only `id` + `seq` (`value: z.unknown()`), so **each streaming method must validate its own `value`** (`model/streamChunked` uses `ModelStreamProgressValueSchema`, a batch). `seq` counts frames; a frame may carry a batch. `request(method, params, { signal, onProgress })`; the handler gets `{ id, signal }`; a peer close aborts in-flight inbound handlers; a late answer to a request we cancelled is dropped silently. See `docs/fix/pod-model-streaming.md`.
 > **Needed by:** [`mcp-client-tools.md`](./mcp-client-tools.md) for large tool results (soft: a laptop-side cap is a stopgap); [`../feat/pod-attach-resilience.md`](../feat/pod-attach-resilience.md) (a keepalive must not wait behind bulk data).
 
 ## Context
