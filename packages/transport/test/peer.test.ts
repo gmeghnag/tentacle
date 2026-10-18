@@ -184,4 +184,306 @@ describe("RpcPeer", () => {
     expect(err.error.code).toBe(JsonRpcErrorCode.InvalidRequest);
     expect(err.error.message).toBe("frame too large");
   });
+
+  // --- $/cancelRequest + $/progress (generic peer primitives) -------------
+
+  test("request({signal}): abort sends $/cancelRequest with the outbound id and rejects locally with the cancelled marker", async () => {
+    const [ca, cb] = createChannelPair();
+    // $/cancelRequest is handled by the peer INTERNALLY (never reaches an
+    // onNotification), so capture the raw outbound frames on the wire.
+    const out: string[] = [];
+    const realA = ca;
+    const recA: typeof ca = {
+      send: (d) => {
+        out.push(d);
+        realA.send(d);
+      },
+      close: () => realA.close(),
+      setOnMessage: (h) => realA.setOnMessage(h),
+      setOnClose: (h) => realA.setOnClose(h),
+    };
+    const server = new RpcPeer(cb, { onRequest: () => new Promise(() => {}) });
+    const client = new RpcPeer(recA);
+    const controller = new AbortController();
+    const p = client.request(
+      "session/request_permission",
+      {
+        sessionId: "s1",
+        toolCallId: "t1",
+        title: "x",
+        options: [{ optionId: "a", name: "A", kind: "allow_once" }],
+      },
+      { signal: controller.signal },
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    controller.abort();
+    await expect(p).rejects.toMatchObject({ name: "cancelled" });
+    await new Promise((r) => setTimeout(r, 5)); // let the $/cancelRequest frame hit the wire
+    const cancelFrame = out
+      .map((f) => JSON.parse(f) as { method?: string; params?: { id?: string } })
+      .find((f) => f.method === "$/cancelRequest");
+    // A notification: the cancelled request's id is carried in params.
+    expect(cancelFrame).toBeDefined();
+    expect(cancelFrame?.params?.id).toMatch(/^\d+$/);
+    server.close();
+  });
+
+  test("request({signal}): an already-settled request ignores a later abort (no $/cancelRequest, no second rejection)", async () => {
+    const [ca, cb] = createChannelPair();
+    const out: string[] = [];
+    const realA = ca;
+    const recA: typeof ca = {
+      send: (d) => {
+        out.push(d);
+        realA.send(d);
+      },
+      close: () => realA.close(),
+      setOnMessage: (h) => realA.setOnMessage(h),
+      setOnClose: (h) => realA.setOnClose(h),
+    };
+    const server = new RpcPeer(cb, { onRequest: async () => INIT_RESULT });
+    const client = new RpcPeer(recA);
+    const controller = new AbortController();
+    const result = await client.request("initialize", INIT_PARAMS, {
+      signal: controller.signal,
+    });
+    expect(result).toEqual(INIT_RESULT);
+    controller.abort(); // after settlement: must be a no-op
+    await new Promise((r) => setTimeout(r, 5));
+    expect(out.filter((f) => JSON.parse(f).method === "$/cancelRequest")).toHaveLength(0);
+    server.close();
+  });
+
+  test("request({signal}): an already-aborted signal rejects before the frame is sent (nothing on the wire)", async () => {
+    const [ca] = createChannelPair();
+    const out: string[] = [];
+    const recA: typeof ca = {
+      send: (d) => {
+        out.push(d);
+        ca.send(d);
+      },
+      close: () => ca.close(),
+      setOnMessage: (h) => ca.setOnMessage(h),
+      setOnClose: (h) => ca.setOnClose(h),
+    };
+    const client = new RpcPeer(recA);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      client.request("initialize", INIT_PARAMS, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "cancelled" });
+    // Neither the request nor a $/cancelRequest for an id the peer never saw.
+    expect(out).toEqual([]);
+    client.close();
+  });
+
+  test("a late response to a request WE cancelled is discarded silently (no onError noise); a truly unknown id still reports", async () => {
+    const [ca, cb] = createChannelPair();
+    const errors: string[] = [];
+    let answer: ((v: unknown) => void) | undefined;
+    const server = new RpcPeer(cb, {
+      onRequest: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+    const client = new RpcPeer(ca, { onError: (e) => errors.push(e.message) });
+    const controller = new AbortController();
+    const p = client.request("initialize", INIT_PARAMS, { signal: controller.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    controller.abort();
+    await expect(p).rejects.toMatchObject({ name: "cancelled" });
+    answer?.(INIT_RESULT); // the responder finishes anyway, after our cancel
+    await new Promise((r) => setTimeout(r, 10));
+    expect(errors).toEqual([]);
+    cb.send(JSON.stringify({ jsonrpc: "2.0", id: "999", result: null }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(errors).toEqual(["response for unknown request id: 999"]);
+    server.close();
+  });
+
+  test("inbound $/cancelRequest aborts the matching request's context signal; an unknown id is a no-op", async () => {
+    const [ca, cb] = createChannelPair();
+    let signal: AbortSignal | undefined;
+    const server = new RpcPeer(cb, {
+      onRequest: async (_m, _p, ctx) => {
+        signal = ctx?.signal;
+        await new Promise(() => {}); // never settles, so the controller stays live
+      },
+    });
+    const client = new RpcPeer(ca);
+    const p = client.request("session/request_permission", {
+      sessionId: "s1",
+      toolCallId: "t1",
+      title: "x",
+      options: [{ optionId: "a", name: "A", kind: "allow_once" }],
+    });
+    // Let the request reach the server and register its controller.
+    await new Promise((r) => setTimeout(r, 5));
+    expect(signal?.aborted).toBe(false);
+    // Send a cancel for the (unknown) id 999: must be a clean no-op (no throw).
+    client.notify("$/cancelRequest", { id: "999" });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(signal?.aborted).toBe(false); // unknown id did not abort our handler
+    server.close();
+    await p.catch(() => {}); // close rejects it; swallow
+  });
+
+  test("inbound $/cancelRequest aborts the matching request's context signal (real id)", async () => {
+    const [ca, cb] = createChannelPair();
+    const seen: AbortSignal[] = [];
+    // Capture the outbound request's id by intercepting the request frame.
+    const client = new RpcPeer(ca);
+    const server = new RpcPeer(cb, {
+      onRequest: async (_m, _p, ctx) => {
+        seen.push(ctx?.signal as AbortSignal);
+        await new Promise((r) => setTimeout(r, 30));
+        return { ok: true };
+      },
+    });
+    const p = client.request("session/request_permission", {
+      sessionId: "s1",
+      toolCallId: "t1",
+      title: "x",
+      options: [{ optionId: "a", name: "A", kind: "allow_once" }],
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen).toHaveLength(1);
+    // The client's first outbound request id is "1" (ids are stringified ints).
+    client.notify("$/cancelRequest", { id: "1" });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen[0]?.aborted).toBe(true); // the matching handler was aborted
+    server.close();
+    await p.catch(() => {});
+  });
+
+  test("request({onProgress}) receives $/progress for its id in seq order; a progress for an unknown id is dropped", async () => {
+    const [ca, cb] = createChannelPair();
+    const got: { value: unknown; seq: number }[] = [];
+    const server = new RpcPeer(cb, { onRequest: () => new Promise(() => {}) });
+    const client = new RpcPeer(ca);
+    const p = client.request("initialize", INIT_PARAMS, {
+      onProgress: (value, seq) => got.push({ value, seq }),
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    // Drive raw $/progress frames in from the bare `cb` end, out of order on
+    // purpose, plus one for a settled/unknown id.
+    cb.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "$/progress",
+        params: { id: "1", seq: 0, value: { type: "text", delta: "a" } },
+      }),
+    );
+    cb.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "$/progress",
+        params: { id: "1", seq: 1, value: { type: "text", delta: "b" } },
+      }),
+    );
+    cb.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "$/progress",
+        params: { id: "42", seq: 0, value: { type: "text", delta: "x" } },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    expect(got).toEqual([
+      { value: { type: "text", delta: "a" }, seq: 0 },
+      { value: { type: "text", delta: "b" }, seq: 1 },
+    ]); // the unknown-id progress was dropped
+    server.close();
+    await p.catch(() => {});
+  });
+
+  test("$/progress is generic: a non-model value routes unchanged to onProgress", async () => {
+    const [ca, cb] = createChannelPair();
+    const got: unknown[] = [];
+    const server = new RpcPeer(cb, { onRequest: () => new Promise(() => {}) });
+    const client = new RpcPeer(ca);
+    const p = client.request("initialize", INIT_PARAMS, { onProgress: (value) => got.push(value) });
+    await new Promise((r) => setTimeout(r, 5));
+    cb.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "$/progress",
+        params: { id: "1", seq: 0, value: { stdout: "chunk" } },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    expect(got).toEqual([{ stdout: "chunk" }]);
+    server.close();
+    await p.catch(() => {});
+  });
+
+  test("a malformed $/progress is reported (not fatal) and does not route", async () => {
+    const [ca, cb] = createChannelPair();
+    const errors: Error[] = [];
+    const got: unknown[] = [];
+    const server = new RpcPeer(cb, { onRequest: () => new Promise(() => {}) });
+    const client = new RpcPeer(ca, { onError: (e) => errors.push(e) });
+    const p = client.request("initialize", INIT_PARAMS, {
+      onProgress: (value) => got.push(value),
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    // `seq` out of range → fails the strict schema.
+    cb.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "$/progress",
+        params: { id: "1", seq: -1, value: { type: "text", delta: "a" } },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    expect(got).toHaveLength(0); // nothing routed
+    expect(errors.some((e) => e.message.includes("$/progress"))).toBe(true);
+    server.close();
+    await p.catch(() => {});
+  });
+
+  test("dispatch stays concurrent: a $/progress for a long request is not blocked by another in-flight request (§7)", async () => {
+    const [ca, cb] = createChannelPair();
+    const got: number[] = [];
+    // The server has a request handler that never resolves (a long turn).
+    const server = new RpcPeer(cb, { onRequest: () => new Promise(() => {}) });
+    const client = new RpcPeer(ca);
+    const p = client.request("initialize", INIT_PARAMS, {
+      onProgress: (_value, seq) => got.push(seq),
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    // Send a progress for the long request; it must be routed even though the
+    // request is still in flight (the handler has not resolved).
+    cb.send(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "$/progress",
+        params: { id: "1", seq: 0, value: { type: "text", delta: "a" } },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    expect(got).toEqual([0]); // routed while the request was still open
+    server.close();
+    await p.catch(() => {});
+  });
+  test("a connection close aborts every in-flight inbound handler's context signal", async () => {
+    const [ca, cb] = createChannelPair();
+    let seen: AbortSignal | undefined;
+    const server = new RpcPeer(cb, {
+      onRequest: (_method, _params, context) => {
+        seen = context?.signal;
+        return new Promise(() => {}); // a long-running responder (a model round)
+      },
+    });
+    const client = new RpcPeer(ca);
+    client.request("initialize", INIT_PARAMS).catch(() => {});
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen?.aborted).toBe(false);
+    ca.close(); // the caller went away mid-request
+    await new Promise((r) => setTimeout(r, 5));
+    // The responder must stop its work: nobody can receive its result any more.
+    expect(seen?.aborted).toBe(true);
+    server.close();
+  });
 });

@@ -6,6 +6,7 @@
 import type { TentacleConfig } from "@tentacle/config";
 import {
   Connection,
+  type ModelStreamChunkedSender,
   type ModelStreamSender,
   ProxyModelProvider,
   type RunningServer,
@@ -59,7 +60,10 @@ export function startStdioDaemon(
   // client over this same channel (the pod reverse-tunnel): the provider is set
   // after the Connection exists, but a session (hence the agent) is only built
   // on `session/new`, which arrives later, so the binding is always ready.
+  // Both transports are wired: the chunked (streaming) path, and the batch
+  // path the provider falls back to on a `MethodNotFound` from an old laptop.
   let sendModel: ModelStreamSender | null = null;
+  let sendModelChunked: ModelStreamChunkedSender | null = null;
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
     createAgent: (cwd) =>
@@ -67,12 +71,20 @@ export function startStdioDaemon(
         ? buildAgent(
             { ...config, cwd },
             {
-              modelOverride: new ProxyModelProvider((request) => {
-                if (!sendModel) {
-                  throw new Error("model proxy transport not ready");
-                }
-                return sendModel(request);
-              }),
+              modelOverride: new ProxyModelProvider(
+                (request) => {
+                  if (!sendModel) {
+                    throw new Error("model proxy transport not ready");
+                  }
+                  return sendModel(request);
+                },
+                (request, handlers) => {
+                  if (!sendModelChunked) {
+                    throw new Error("model proxy transport not ready");
+                  }
+                  return sendModelChunked(request, handlers);
+                },
+              ),
             },
           )
         : buildAgent({ ...config, cwd }),
@@ -88,6 +100,8 @@ export function startStdioDaemon(
   );
   if (options.modelProxy) {
     sendModel = (request) => connection.requestModelStream(request);
+    sendModelChunked = (request, handlers) =>
+      connection.requestModelStreamChunked(request, handlers);
   }
   return new Promise<void>((resolve) => {
     let done = false;

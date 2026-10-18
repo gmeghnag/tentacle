@@ -4,7 +4,8 @@
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10). Promote to `feat/mcp-client-tools` (L: consider splitting at promotion, see Review).
 > **Type:** eval → feat · **Size:** L · **Blast:** load-bearing (protocol, daemon tool registry, the permission/trust boundary, a new §7 invariant) · **Suited:** a strong model executes; mandatory fresh-context Review by a different model.
 > **Umbrella:** [`remote-execution-model.md`](./remote-execution-model.md) (piece 3 of 4).
-> **Needs (hard):** [`pod-model-streaming.md`](./pod-model-streaming.md) — `$/cancelRequest` (a remote tool call must be cancellable) and `$/progress`.
+> **Needs (hard):** [`pod-model-streaming.md`](../fix/pod-model-streaming.md) — `$/cancelRequest` (a remote tool call must be cancellable) and `$/progress`.
+> **As built by piece 1 (2026-10-18):** `$/progress { id, seq, value }` is generic — the peer checks only `id` + `seq` (`value: z.unknown()`), so **each streaming method must validate its own `value`** (`model/streamChunked` uses `ModelStreamProgressValueSchema`, a batch). `seq` counts frames; a frame may carry a batch. `request(method, params, { signal, onProgress })`; the handler gets `{ id, signal }`; a peer close aborts in-flight inbound handlers; a late answer to a request we cancelled is dropped silently. See `docs/fix/pod-model-streaming.md`.
 > **Needs (soft):** [`rpc-flow-control.md`](./rpc-flow-control.md) — large results. Until it lands, a laptop-side result cap is the stopgap.
 > **Needs (rule):** the §7 invariant proposed in the umbrella ("a pod is not trusted") — this eval's gate design follows from it.
 

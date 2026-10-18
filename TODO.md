@@ -317,7 +317,8 @@ Daily-driver work (done 2026-10-14):
       tool still runs.** `ProxyModelProvider` ignores `signal`; no `model/stream`
       cancel; the agent loop never re-checks `aborted` between stream end and tool
       execution. CONFIRMED. **Eval:** `docs/eval/proxy-model-cancel.md`.
-      Type: eval · Size: M · Blast: load-bearing.
+      Type: eval · Size: M · Blast: load-bearing. **Model half fixed** by
+      `fix/pod-model-streaming` (2026-10-18); the tool-execution half is open.
 - [x] 🔴 **`/compact` with an empty summary wipes the history** (reasoning-only
       model, or an in-band SSE `{"error":…}` chunk) and persists it. CONFIRMED.
       **FIXED (merged to main):** `docs/fix/compact-empty-summary-wipe.md` —
@@ -394,10 +395,12 @@ Umbrella and order: `docs/eval/remote-execution-model.md` (proposes a new §7
 invariant: "compute next to the code, identity with the user; a pod is not
 trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
 
-- [ ] 🔴 **1. Pod mode shows nothing until the whole model round ends** (47 s of
+- [x] 🔴 **1. Pod mode shows nothing until the whole model round ends** (47 s of
       silence measured, then 6,480 events at once; Esc doesn't stop the model).
-      **Eval:** `docs/eval/pod-model-streaming.md`. Type: eval → fix · Size: M ·
-      Blast: load-bearing.
+      **Fix:** `docs/fix/pod-model-streaming.md` — done 2026-10-18: first token
+      0.22 s on kind, Esc stops the laptop model; `model/streamChunked` +
+      generic `$/progress` / `$/cancelRequest`. Type: fix · Size: M · Blast:
+      load-bearing.
 - [ ] 🟡 **2. A large payload blocks every other message on the channel** (5 MB
       → ~4 s head-of-line; an end-to-end window W=2×256 KB bounds it to ~0.25 s).
       **Eval:** `docs/eval/rpc-flow-control.md`. Needs 1. Type: eval → feat ·

@@ -117,7 +117,7 @@ rpc-flow-control ──(credit window + control priority over $/progress)──�
 
 | # | Eval | What | Needs | Size · Blast |
 |---|---|---|---|---|
-| 1 | [`pod-model-streaming.md`](./pod-model-streaming.md) | model tokens stream through the tunnel; Esc cancels the remote model | — | M · load-bearing |
+| 1 | [`pod-model-streaming.md`](../fix/pod-model-streaming.md) | model tokens stream through the tunnel; Esc cancels the remote model — ✅ **done 2026-10-18** | — | M · load-bearing |
 | 2 | [`rpc-flow-control.md`](./rpc-flow-control.md) | large payloads in windowed chunks; control messages never wait behind bulk data | **1** (builds on `$/progress`) | M–L · load-bearing |
 | 3 | [`mcp-client-tools.md`](./mcp-client-tools.md) | `runOn: "client"`: MCP servers on the laptop, exposed to the pod daemon | **1** hard (cancel). **2** soft: a laptop-side result cap is a stopgap until 2 lands | L · load-bearing |
 | 4 | [`mcp-daemon-servers.md`](./mcp-daemon-servers.md) | `runOn: "daemon"`: MCP servers started in the pod, with no secrets shipped | the `runOn` field (from 3, or introduced here if 4 goes first) | M · load-bearing |

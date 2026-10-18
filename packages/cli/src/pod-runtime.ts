@@ -288,6 +288,9 @@ export async function startPodRuntime(
       model: config.model,
       resume: deps.resume,
       modelProvider,
+      // Laptop-side RPC errors (incl. a local model failure, which the pod only
+      // sees opaque) join the buffered daemon stderr: flushed after unmount.
+      onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),
     });
   } catch (error) {
     // The pod was created but never became usable — delete it before surfacing.
@@ -471,6 +474,9 @@ export async function startAttachRuntime(
       model: config.model,
       resume: deps.resume,
       modelProvider,
+      // Laptop-side RPC errors (incl. a local model failure, which the pod only
+      // sees opaque) join the buffered daemon stderr: flushed after unmount.
+      onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),
     });
   } catch (error) {
     status?.finish();

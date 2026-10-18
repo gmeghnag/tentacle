@@ -5,7 +5,14 @@
  * place keeps client and daemon provably in sync.
  */
 import type { z } from "zod";
-import { ModelStreamParamsSchema, ModelStreamResultSchema } from "./model.ts";
+import {
+  CancelRequestParamsSchema,
+  ModelStreamChunkedParamsSchema,
+  ModelStreamChunkedResultSchema,
+  ModelStreamParamsSchema,
+  ModelStreamResultSchema,
+  ProgressParamsSchema,
+} from "./model.ts";
 import { RequestPermissionParamsSchema, RequestPermissionResultSchema } from "./permission.ts";
 import {
   CancelParamsSchema,
@@ -31,6 +38,7 @@ export const Method = {
   Snapshot: "session/snapshot",
   RequestPermission: "session/request_permission",
   ModelStream: "model/stream",
+  ModelStreamChunked: "model/streamChunked",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -38,6 +46,8 @@ export type MethodName = (typeof Method)[keyof typeof Method];
 export const Notification = {
   SessionUpdate: "session/update",
   Cancel: "session/cancel",
+  Progress: "$/progress",
+  CancelRequest: "$/cancelRequest",
 } as const;
 export type NotificationName = (typeof Notification)[keyof typeof Notification];
 
@@ -58,12 +68,18 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     result: RequestPermissionResultSchema,
   },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
+  [Method.ModelStreamChunked]: {
+    params: ModelStreamChunkedParamsSchema,
+    result: ModelStreamChunkedResultSchema,
+  },
 };
 
 /** params schema for every notification method. */
 export const NotificationSchemas: Readonly<Record<NotificationName, z.ZodTypeAny>> = {
   [Notification.SessionUpdate]: SessionUpdateParamsSchema,
   [Notification.Cancel]: CancelParamsSchema,
+  [Notification.Progress]: ProgressParamsSchema,
+  [Notification.CancelRequest]: CancelRequestParamsSchema,
 };
 
 export function isMethodName(value: string): value is MethodName {
