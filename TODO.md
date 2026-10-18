@@ -787,6 +787,12 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
       **Eval:** `docs/eval/mcp-remote-transport.md` (recommends Streamable HTTP, transport-only first).
 - [ ] **Sub-agents**: background / parallel execution (SA.d).
       **Eval:** `docs/eval/parallel-subagents.md` (open — leans background-first, must split; needs a use-case).
+- [ ] **Parallel tool calls within a round** (today strictly sequential,
+      `agent.ts:283`; pi, Claude Code and opencode all run them in parallel).
+      **Eval:** `docs/eval/parallel-tool-calls.md` (open — leans pi shape: parallel
+      by default + per-tool `executionMode: "sequential"`, writes/shell
+      sequential; measure benefit first; after the proxy-cancel 🔴).
+      Type: eval → feat · Size: M · Blast: load-bearing.
 - [x] **Native Anthropic Messages API provider** — DONE (2026-10-17). **Doc:**
       `docs/feat/anthropic-api-support.md` (native provider behind the
       `ModelProvider` seam; `model.provider` selector, per-provider default
