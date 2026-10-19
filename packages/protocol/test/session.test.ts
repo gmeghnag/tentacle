@@ -3,6 +3,7 @@ import {
   InitializeParamsSchema,
   NewSessionParamsSchema,
   PromptParamsSchema,
+  PromptResultSchema,
   StopReasonSchema,
 } from "../src/index.ts";
 
@@ -27,19 +28,36 @@ describe("session lifecycle schemas", () => {
     expect(NewSessionParamsSchema.safeParse({}).success).toBe(true);
   });
 
+  const prompt = { sessionId: "s1", turnId: "t1", content: [{ type: "text", text: "hi" }] };
+
   test("prompt requires at least one content block", () => {
-    expect(
-      PromptParamsSchema.safeParse({ sessionId: "s1", content: [{ type: "text", text: "hi" }] })
-        .success,
-    ).toBe(true);
-    expect(PromptParamsSchema.safeParse({ sessionId: "s1", content: [] }).success).toBe(false);
+    expect(PromptParamsSchema.safeParse(prompt).success).toBe(true);
+    expect(PromptParamsSchema.safeParse({ ...prompt, content: [] }).success).toBe(false);
   });
 
   test("prompt requires a non-empty sessionId", () => {
+    expect(PromptParamsSchema.safeParse({ ...prompt, sessionId: "" }).success).toBe(false);
+  });
+
+  test("prompt requires a client turnId of 1..128 chars", () => {
+    expect(PromptParamsSchema.safeParse({ ...prompt, turnId: undefined }).success).toBe(false);
+    expect(PromptParamsSchema.safeParse({ ...prompt, turnId: "" }).success).toBe(false);
+    expect(PromptParamsSchema.safeParse({ ...prompt, turnId: "x".repeat(128) }).success).toBe(true);
+    expect(PromptParamsSchema.safeParse({ ...prompt, turnId: "x".repeat(129) }).success).toBe(
+      false,
+    );
+  });
+
+  test("the prompt result is an ack: turnId, plus `ended` only for a finished turn", () => {
+    expect(PromptResultSchema.safeParse({ turnId: "t1" }).success).toBe(true);
     expect(
-      PromptParamsSchema.safeParse({ sessionId: "", content: [{ type: "text", text: "hi" }] })
-        .success,
-    ).toBe(false);
+      PromptResultSchema.safeParse({
+        turnId: "t1",
+        ended: { stopReason: "error", error: { code: -32603, message: "internal error" } },
+      }).success,
+    ).toBe(true);
+    // The old shape (the stop reason as the result) is gone.
+    expect(PromptResultSchema.safeParse({ stopReason: "end_turn" }).success).toBe(false);
   });
 
   test("stop reasons", () => {

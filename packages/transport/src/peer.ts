@@ -73,6 +73,19 @@ export interface RpcPeerOptions {
   /** Non-fatal errors (bad frames, handler throws) are reported here. */
   readonly onError?: (error: Error) => void;
   /**
+   * Called once when the peer closes (remote close or local `close()`), after
+   * every pending request was rejected. Lets an application end work that no
+   * pending request tracks (e.g. a turn whose `session/prompt` already acked).
+   */
+  readonly onClose?: () => void;
+  /**
+   * Called (in addition to `onError`) with the raw params of a KNOWN
+   * notification that failed its schema, so the application can fail whatever
+   * that frame belonged to instead of losing it silently. The peer does not
+   * interpret `params`: it is untrusted, unvalidated input.
+   */
+  readonly onInvalidNotification?: (method: string, params: unknown) => void;
+  /**
    * When a request handler throws a NON-`RpcError`, the error response is a
    * generic "internal error" by default (never leak server internals to an
    * untrusted/remote peer). Set this true for a LOCAL, trusted peer (the
@@ -248,6 +261,12 @@ export class RpcPeer {
     }
     this.inboundCancel.clear();
     this.cancelledIds.clear();
+    // An application hook must not break `close()` or the channel's close path.
+    try {
+      this.opts.onClose?.();
+    } catch (error) {
+      this.reportError(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   private sendFrame(frame: unknown): void {
@@ -360,6 +379,11 @@ export class RpcPeer {
     const parsed = NotificationSchemas[method].safeParse(params);
     if (!parsed.success) {
       this.reportError(new Error(`invalid params for notification ${method}`));
+      try {
+        this.opts.onInvalidNotification?.(method, params);
+      } catch (error) {
+        this.reportError(error instanceof Error ? error : new Error(String(error)));
+      }
       return;
     }
     // Generic peer primitives, handled here so no application code needs to

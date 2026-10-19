@@ -68,17 +68,20 @@ describe("method registry", () => {
     expect(entry.params).toBeDefined();
     expect(entry.result).toBeDefined();
     // Validates a real payload.
-    expect(EnqueueParamsSchema.safeParse({ sessionId: "s1", text: "also do X" }).success).toBe(
-      true,
-    );
+    const ok = { sessionId: "s1", id: "e1", turnId: "t1", text: "also do X" };
+    expect(EnqueueParamsSchema.safeParse(ok).success).toBe(true);
     // Rejects a missing or empty `text` (the thing being injected).
-    expect(EnqueueParamsSchema.safeParse({ sessionId: "s1" }).success).toBe(false);
-    expect(EnqueueParamsSchema.safeParse({ sessionId: "s1", text: "" }).success).toBe(false);
+    expect(EnqueueParamsSchema.safeParse({ ...ok, text: undefined }).success).toBe(false);
+    expect(EnqueueParamsSchema.safeParse({ ...ok, text: "" }).success).toBe(false);
+    // The idempotency key and the turn binding are required, 1..128 chars.
+    for (const key of ["id", "turnId"] as const) {
+      expect(EnqueueParamsSchema.safeParse({ ...ok, [key]: undefined }).success).toBe(false);
+      expect(EnqueueParamsSchema.safeParse({ ...ok, [key]: "" }).success).toBe(false);
+      expect(EnqueueParamsSchema.safeParse({ ...ok, [key]: "x".repeat(129) }).success).toBe(false);
+    }
     // Rejects an empty session id and unknown fields (strict, additive).
-    expect(EnqueueParamsSchema.safeParse({ sessionId: "", text: "x" }).success).toBe(false);
-    expect(EnqueueParamsSchema.safeParse({ sessionId: "s1", text: "x", bogus: 1 }).success).toBe(
-      false,
-    );
+    expect(EnqueueParamsSchema.safeParse({ ...ok, sessionId: "" }).success).toBe(false);
+    expect(EnqueueParamsSchema.safeParse({ ...ok, bogus: 1 }).success).toBe(false);
     // The result is an empty object (the daemon accepts; the model sees it later).
     expect(entry.result.safeParse({}).success).toBe(true);
     expect(entry.result.safeParse({ ok: true }).success).toBe(false); // strict, no extra fields

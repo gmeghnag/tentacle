@@ -86,6 +86,13 @@ port.addEventListener("message", (event: { data: unknown }) => {
 
   const host = new SessionHost({
     defaultCwd: config.cwd,
+    // A failed turn now ends in the stream (`turn_end.error`), not as a handler
+    // throw: same policy as below — the real message to this LOCAL client, the
+    // full error (with stack) to the daemon error log.
+    exposeTurnErrors: true,
+    onTurnError: (error) => {
+      logDaemonError(config.configDir, error);
+    },
     createAgent: (cwd) => {
       const wired = buildAgent({ ...config, cwd });
       register(wired.tools);

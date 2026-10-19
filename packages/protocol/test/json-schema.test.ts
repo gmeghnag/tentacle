@@ -81,6 +81,7 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1prompt/params": [
     {
       sessionId: "s",
+      turnId: "t",
       content: [
         { type: "text", text: "hi" },
         { type: "image", mimeType: "image/png", data: "AA==" },
@@ -88,12 +89,16 @@ const FIXTURES: Record<string, Json[]> = {
       ],
     },
   ],
-  "methods/session~1prompt/result": [{ stopReason: "end_turn" }],
+  "methods/session~1prompt/result": [
+    { turnId: "t" },
+    { turnId: "t", ended: { stopReason: "end_turn" } },
+    { turnId: "t", ended: { stopReason: "error", error: { code: -32603, message: "boom" } } },
+  ],
   "methods/session~1compact/params": [{ sessionId: "s" }],
   "methods/session~1compact/result": [{ before: 10, after: 2 }],
   "methods/session~1snapshot/params": [{ sessionId: "s" }],
   "methods/session~1snapshot/result": [{ messages: [{ role: "user", content: "q" }] }],
-  "methods/session~1enqueue/params": [{ sessionId: "s", text: "steer" }],
+  "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
   "methods/session~1enqueue/result": [{}],
   "methods/session~1request_permission/params": [
     {
@@ -152,6 +157,9 @@ const FIXTURES: Record<string, Json[]> = {
     update({ type: "agent_usage", promptTokens: 1, completionTokens: 2 }),
     update({ type: "background_exit", jobId: "j", command: "c", status: "exited", exitCode: null }),
     update({ type: "steer", text: "x" }),
+    update({ type: "turn_start", turnId: "t", prompt: "go" }),
+    update({ type: "turn_end", turnId: "t", stopReason: "cancelled" }),
+    update({ type: "turn_end", turnId: "t", stopReason: "error", error: { message: "boom" } }),
     // The catch-all (decision E): unknown display / mandatory events are valid frames.
     update({ type: "progress", pct: 3 }),
     { sessionId: "s", seq: 2, mandatory: true, update: { type: "permission_request", id: "p" } },

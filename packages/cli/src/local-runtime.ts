@@ -23,6 +23,7 @@ import type {
 import { applyGroupMessage } from "@tentacle/exec";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
+import { logDaemonError } from "./daemon-log.ts";
 
 export interface LocalRuntime {
   readonly createSession: () => SessionController;
@@ -224,6 +225,12 @@ export async function startWorkerRuntime(
         cwd: config.cwd,
         model: config.model,
         resume: deps.resume,
+        // Laptop-side peer errors (a malformed daemon frame with no turn to
+        // fail) go to the same file log as the worker's own errors — never a
+        // raw terminal write while Ink owns it (AGENTS §7).
+        onPeerError: (error) => {
+          logDaemonError(config.configDir, error);
+        },
       }),
       8000,
       "worker handshake",

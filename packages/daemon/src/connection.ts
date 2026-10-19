@@ -151,21 +151,15 @@ export class Connection {
   }
 
   // Synchronous on purpose: it pushes into the steering queue and returns at
-  // once, so a mid-turn `session/enqueue` is served even while a long-running
-  // `session/prompt` is still in flight on this connection (see AGENTS §7 —
-  // requests dispatch concurrently). The model sees the text at the next
-  // model-round boundary, which streams back as a `steer` update.
+  // once (AGENTS §7 — requests dispatch concurrently). The model sees the text
+  // at the next model-round boundary, which streams back as a `steer` update.
+  // Idempotency and the "this turn is running" check live in `HostedSession`.
   private enqueue(params: EnqueueParams): EnqueueResult {
     const hosted = this.sessions.get(params.sessionId);
     if (!hosted) {
       throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${params.sessionId}`);
     }
-    // Accepting it while idle would be a fake success: the next turn starts by
-    // resetting the steering queue, so the text would be dropped silently.
-    if (!hosted.running) {
-      throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
-    }
-    hosted.enqueue(params.text);
+    hosted.enqueue(params.id, params.turnId, params.text);
     return {};
   }
 
@@ -213,13 +207,14 @@ export class Connection {
     return { sessionId: id };
   }
 
-  private async prompt(params: PromptParams): Promise<PromptResult> {
+  // Acks at once: the turn runs daemon-side and ends with `turn_end` in the
+  // stream, so its outcome survives a lost response.
+  private prompt(params: PromptParams): PromptResult {
     const hosted = this.sessions.get(params.sessionId);
     if (!hosted) {
       throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${params.sessionId}`);
     }
-    const stopReason = await hosted.prompt(params.content);
-    return { stopReason };
+    return hosted.prompt(params.turnId, params.content);
   }
 
   private requestPermission(

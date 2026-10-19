@@ -9,10 +9,10 @@ import {
 } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { JsonRpcErrorCode, PROTOCOL_VERSION } from "@tentacle/protocol";
-import type { EnqueueResult, KnownSessionUpdateParams } from "@tentacle/protocol";
+import type { EnqueueResult, KnownSessionUpdateParams, StopReason } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
-import { DomainErrorCode } from "@tentacle/transport";
+import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import { Connection } from "../src/connection.ts";
 import { HostedSession } from "../src/hosted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
@@ -79,6 +79,42 @@ function harness(
   return { client, updates, connection };
 }
 
+type TurnEndUpdate = Extract<KnownSessionUpdateParams["update"], { type: "turn_end" }>;
+
+/** The streamed `turn_end` of `turnId` (a turn's outcome lives in the stream now). */
+async function turnEnd(
+  updates: readonly KnownSessionUpdateParams[],
+  turnId: string,
+  timeoutMs = 3000,
+): Promise<TurnEndUpdate> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = updates
+      .map((u) => u.update)
+      .find((u): u is TurnEndUpdate => u.type === "turn_end" && u.turnId === turnId);
+    if (found) return found;
+    if (Date.now() > deadline) throw new Error(`no turn_end for ${turnId}`);
+    await tick(1);
+  }
+}
+
+/** Start a turn (asserting the ack) and wait for its streamed `turn_end`. */
+async function runTurn(
+  client: RpcPeer,
+  updates: readonly KnownSessionUpdateParams[],
+  sessionId: string,
+  text: string,
+  turnId: string = crypto.randomUUID(),
+): Promise<TurnEndUpdate> {
+  const ack = await client.request("session/prompt", {
+    sessionId,
+    turnId,
+    content: [{ type: "text", text }],
+  });
+  expect(ack).toEqual({ turnId });
+  return turnEnd(updates, turnId);
+}
+
 describe("daemon ↔ client (in-memory)", () => {
   test("handshake → new → prompt streams updates and resolves the stop reason", async () => {
     const model = new ScriptedProvider([
@@ -96,11 +132,8 @@ describe("daemon ↔ client (in-memory)", () => {
     const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
     expect(sessionId).toBeTruthy();
 
-    const result = (await client.request("session/prompt", {
-      sessionId,
-      content: [{ type: "text", text: "hi" }],
-    })) as { stopReason: string };
-    expect(result.stopReason).toBe("end_turn");
+    const end = await runTurn(client, updates, sessionId, "hi", "t1");
+    expect(end.stopReason).toBe("end_turn");
 
     await tick();
     const texts = updates
@@ -114,8 +147,19 @@ describe("daemon ↔ client (in-memory)", () => {
     expect(updates.some((u) => u.update.type === "agent_usage")).toBe(true);
     // Updates are sequence-numbered for replay: every frame, contiguous from 1.
     expect(updates.map((u) => u.seq)).toEqual(updates.map((_, i) => i + 1));
-    // Every type here is `display`: the flag is omitted, never sent as false.
-    expect(updates.some((u) => "mandatory" in u)).toBe(false);
+    // The turn is bracketed: turn_start{prompt} first, turn_end last, once each.
+    expect(updates[0]?.update).toEqual({ type: "turn_start", turnId: "t1", prompt: "hi" });
+    expect(updates.at(-1)?.update).toEqual({
+      type: "turn_end",
+      turnId: "t1",
+      stopReason: "end_turn",
+    });
+    // The class flag: present (true) exactly on the bracket, omitted elsewhere.
+    for (const u of updates) {
+      const bracket = u.update.type === "turn_start" || u.update.type === "turn_end";
+      expect("mandatory" in u).toBe(bracket);
+      if (bracket) expect(u.mandatory).toBe(true);
+    }
   });
 
   test("a non-text prompt block is rejected with InvalidParams; no turn starts", async () => {
@@ -135,6 +179,7 @@ describe("daemon ↔ client (in-memory)", () => {
     await expect(
       client.request("session/prompt", {
         sessionId,
+        turnId: "t-img",
         content: [
           { type: "text", text: "what is in this photo?" },
           { type: "image", mimeType: "image/png", data: "AA==" },
@@ -148,12 +193,9 @@ describe("daemon ↔ client (in-memory)", () => {
     expect(calls).toBe(0);
     expect(updates).toEqual([]);
 
-    // Nothing leaked (no controller left set): a text prompt runs normally.
-    const result = (await client.request("session/prompt", {
-      sessionId,
-      content: [{ type: "text", text: "hi" }],
-    })) as { stopReason: string };
-    expect(result.stopReason).toBe("end_turn");
+    // Nothing leaked (no controller, no turn record): the SAME turnId now runs.
+    const end = await runTurn(client, updates, sessionId, "hi", "t-img");
+    expect(end.stopReason).toBe("end_turn");
     expect(calls).toBe(1);
   });
 
@@ -194,12 +236,9 @@ describe("daemon ↔ client (in-memory)", () => {
 
     await client.request("initialize", INIT);
     const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
-    const result = (await client.request("session/prompt", {
-      sessionId,
-      content: [{ type: "text", text: "run it" }],
-    })) as { stopReason: string };
+    const end = await runTurn(client, updates, sessionId, "run it");
 
-    expect(result.stopReason).toBe("end_turn");
+    expect(end.stopReason).toBe("end_turn");
     expect(execCalls).toEqual(["ls -la"]);
     // The daemon asked for permission, carrying the current tool-call id.
     expect(asked).toHaveLength(1);
@@ -236,15 +275,13 @@ describe("daemon ↔ client (in-memory)", () => {
       ],
       [{ type: "text", delta: "ok" }, { type: "done" }],
     ]);
-    const { client } = harness(model, env, {
+    const { client, updates } = harness(model, env, {
       onRequest: async () => ({ outcome: { outcome: "selected", optionId: "reject_once" } }),
     });
     await client.request("initialize", INIT);
     const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
-    await client.request("session/prompt", {
-      sessionId,
-      content: [{ type: "text", text: "go" }],
-    });
+    const end = await runTurn(client, updates, sessionId, "go");
+    expect(end.stopReason).toBe("end_turn");
     expect(execCalls).toEqual([]); // never ran
   });
 
@@ -272,7 +309,7 @@ describe("daemon ↔ client (in-memory)", () => {
       [{ type: "text", delta: "ok" }, { type: "done" }],
     ]);
     // The client receives the permission request but never answers it.
-    const { client } = harness(
+    const { client, updates } = harness(
       model,
       env,
       { onRequest: () => new Promise(() => {}) },
@@ -280,12 +317,9 @@ describe("daemon ↔ client (in-memory)", () => {
     );
     await client.request("initialize", INIT);
     const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
-    const result = (await client.request("session/prompt", {
-      sessionId,
-      content: [{ type: "text", text: "go" }],
-    })) as { stopReason: string };
+    const end = await runTurn(client, updates, sessionId, "go");
     expect(execCalls).toEqual([]); // auto-denied on timeout → tool never ran
-    expect(result.stopReason).toBe("end_turn"); // and the turn did not hang
+    expect(end.stopReason).toBe("end_turn"); // and the turn did not hang
   });
 
   test("session/new is refused past the per-connection cap", async () => {
@@ -381,35 +415,26 @@ describe("daemon ↔ client (in-memory)", () => {
     await client.request("initialize", INIT);
     const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
 
-    const promptP = client.request("session/prompt", {
+    await client.request("session/prompt", {
       sessionId,
+      turnId: "t1",
       content: [{ type: "text", text: "go" }],
     });
-    let promptSettled = false;
-    promptP.then(
-      () => {
-        promptSettled = true;
-      },
-      () => {
-        promptSettled = true;
-      },
-    );
     // Wait until the daemon has announced round 1's tool call. The tool's exec
-    // is still running (200 ms), so the prompt is genuinely in flight.
+    // is still running (200 ms), so the turn is genuinely in flight.
     while (!updates.some((u) => u.update.type === "tool_call")) {
       await tick(5);
     }
-    expect(promptSettled).toBe(false);
-    // Enqueue WITHOUT awaiting the prompt: if the peer serialized requests per
-    // connection, this would block until the prompt settled. It resolves on its
-    // own — the concurrency the whole mechanism relies on.
+    expect(updates.some((u) => u.update.type === "turn_end")).toBe(false);
     const result = (await client.request("session/enqueue", {
       sessionId,
+      id: "e1",
+      turnId: "t1",
       text: "steer me",
     })) as EnqueueResult;
     expect(result).toEqual({});
-    const stop = (await promptP) as { stopReason: string };
-    expect(stop.stopReason).toBe("end_turn");
+    const end = await turnEnd(updates, "t1");
+    expect(end.stopReason).toBe("end_turn");
 
     // A `steer` update was streamed back with the queued text…
     expect(steerUpdates(updates).map((s) => s.text)).toEqual(["steer me"]);
@@ -439,17 +464,18 @@ describe("daemon ↔ client (in-memory)", () => {
     await client.request("initialize", INIT);
     const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
 
-    const promptP = client.request("session/prompt", {
+    await client.request("session/prompt", {
       sessionId,
+      turnId: "t1",
       content: [{ type: "text", text: "go" }],
     });
     while (!updates.some((u) => u.update.type === "tool_call")) {
       await tick(5);
     }
     // Both enqueues land on the SAME boundary (before round 2 drains).
-    await client.request("session/enqueue", { sessionId, text: "A" });
-    await client.request("session/enqueue", { sessionId, text: "B" });
-    await promptP;
+    await client.request("session/enqueue", { sessionId, id: "a", turnId: "t1", text: "A" });
+    await client.request("session/enqueue", { sessionId, id: "b", turnId: "t1", text: "B" });
+    await turnEnd(updates, "t1");
     // N enqueue ⇒ N echo, in order — the invariant the TUI's FIFO removal relies on.
     expect(steerUpdates(updates).map((s) => s.text)).toEqual(["A", "B"]);
     // The model saw both injected user messages, in order.
@@ -460,7 +486,7 @@ describe("daemon ↔ client (in-memory)", () => {
     const { client } = harness(new ScriptedProvider([]), noopEnv);
     await client.request("initialize", INIT);
     await expect(
-      client.request("session/enqueue", { sessionId: "nope", text: "x" }),
+      client.request("session/enqueue", { sessionId: "nope", id: "e", turnId: "t", text: "x" }),
     ).rejects.toMatchObject({ code: DomainErrorCode.UnknownSession });
   });
 
@@ -492,7 +518,9 @@ describe("daemon ↔ client (in-memory)", () => {
         maxIterations,
       });
       const runMessages = agent.runMessages.bind(agent);
-      const runningAtNextMacrotask: boolean[] = [];
+      // What "the next `session/enqueue`" would observe at each drain.
+      const atNextMacrotask: { running: boolean; ended: boolean }[] = [];
+      const streamed: KnownSessionUpdateParams[] = [];
       const hosted = new HostedSession(
         "s1",
         new Session(agent),
@@ -501,16 +529,26 @@ describe("daemon ↔ client (in-memory)", () => {
           throw new Error("no permission expected");
         },
       );
+      hosted.setSink((p) => streamed.push(p));
+      const ended = () => streamed.some((p) => p.update.type === "turn_end");
       // Patched after construction: `Session.send` calls `agent.runMessages` per turn.
       agent.runMessages = (messages, sessionId, signal, drain) =>
         runMessages(messages, sessionId, signal, () => {
-          setTimeout(() => runningAtNextMacrotask.push(hosted.running), 0);
+          setTimeout(() => atNextMacrotask.push({ running: hosted.running, ended: ended() }), 0);
           return drain?.() ?? [];
         });
 
-      expect(await hosted.prompt([{ type: "text", text: "go" }])).toBe(label);
+      expect(hosted.prompt("t1", [{ type: "text", text: "go" }])).toEqual({ turnId: "t1" });
       await tick(5);
-      expect(runningAtNextMacrotask.at(-1)).toBe(false);
+      // The turn is over (an enqueue is rejected) AND its outcome already
+      // streamed, by the time any transport message could arrive.
+      expect(atNextMacrotask.length).toBeGreaterThan(0);
+      expect(atNextMacrotask.at(-1)).toEqual({ running: false, ended: true });
+      expect(streamed.at(-1)?.update).toEqual({
+        type: "turn_end",
+        turnId: "t1",
+        stopReason: label,
+      });
     });
   }
 
@@ -521,7 +559,7 @@ describe("daemon ↔ client (in-memory)", () => {
     await client.request("initialize", INIT);
     const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
     await expect(
-      client.request("session/enqueue", { sessionId, text: "late" }),
+      client.request("session/enqueue", { sessionId, id: "e", turnId: "t", text: "late" }),
     ).rejects.toMatchObject({ code: DomainErrorCode.NoTurnRunning });
   });
 
@@ -531,6 +569,7 @@ describe("daemon ↔ client (in-memory)", () => {
     await expect(
       client.request("session/prompt", {
         sessionId: "nope",
+        turnId: "t",
         content: [{ type: "text", text: "x" }],
       }),
     ).rejects.toMatchObject({ code: DomainErrorCode.UnknownSession });
@@ -592,5 +631,437 @@ describe("connection close", () => {
     } finally {
       Bun.spawnSync(["pkill", "-9", "-f", `sleep ${m}`]);
     }
+  });
+});
+
+describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
+  /** A model whose calls each wait for `release()`, then reply via `reply(callIndex, messages)`. */
+  class GatedProvider implements ModelProvider {
+    readonly id = "gated";
+    readonly calls: string[][] = [];
+    private gates: (() => void)[] = [];
+    constructor(
+      private readonly reply: (call: number, messages: string[]) => StreamEvent[] = () => [
+        { type: "text", delta: "ok" },
+        { type: "done" },
+      ],
+      private readonly gated: (call: number) => boolean = () => true,
+    ) {}
+    release(): void {
+      for (const open of this.gates.splice(0)) open();
+    }
+    async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+      const call = this.calls.length;
+      const messages = request.messages.map((m) => m.content);
+      this.calls.push(messages);
+      if (this.gated(call)) await new Promise<void>((r) => this.gates.push(r));
+      for (const event of this.reply(call, messages)) yield event;
+    }
+  }
+
+  /** Like `harness`, with the host's turn-error policy and the agent's iteration cap. */
+  function turnHarness(
+    model: ModelProvider,
+    opts: {
+      env?: ExecutionEnvironment;
+      maxIterations?: number;
+      exposeTurnErrors?: boolean;
+      onTurnError?: (e: Error) => void;
+    } = {},
+  ) {
+    const host = new SessionHost({
+      defaultCwd: "/tmp/daemon-work",
+      ...(opts.exposeTurnErrors ? { exposeTurnErrors: true } : {}),
+      ...(opts.onTurnError ? { onTurnError: opts.onTurnError } : {}),
+      createAgent: () => {
+        const permissions = new PermissionBroker();
+        const agent = new Agent({
+          model,
+          tools: new ToolRegistry().register(shellTool),
+          env: opts.env ?? noopEnv,
+          requestPermission: (req) => permissions.request(req),
+          ...(opts.maxIterations !== undefined ? { maxIterations: opts.maxIterations } : {}),
+        });
+        return { agent, permissions };
+      },
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, host);
+    const updates: KnownSessionUpdateParams[] = [];
+    const client = new RpcPeer(clientCh, {
+      onRequest: async () => ({ outcome: { outcome: "selected", optionId: "allow_once" } }),
+      onNotification: (method, params) => {
+        if (method === "session/update") updates.push(params as KnownSessionUpdateParams);
+      },
+    });
+    const open = async (): Promise<string> => {
+      await client.request("initialize", INIT);
+      return ((await client.request("session/new", {})) as { sessionId: string }).sessionId;
+    };
+    return { client, updates, open };
+  }
+
+  const prompt = (client: RpcPeer, sessionId: string, turnId: string, text = "go") =>
+    client.request("session/prompt", { sessionId, turnId, content: [{ type: "text", text }] });
+
+  /** Every update of one turn, from its turn_start to its turn_end. */
+  const turnUpdates = (updates: readonly KnownSessionUpdateParams[], turnId: string) => {
+    const start = updates.findIndex(
+      (u) => u.update.type === "turn_start" && u.update.turnId === turnId,
+    );
+    const end = updates.findIndex(
+      (u) => u.update.type === "turn_end" && u.update.turnId === turnId,
+    );
+    return updates.slice(start, end + 1);
+  };
+
+  test("prompt acks before the model runs; turn_start{prompt} is already streamed", async () => {
+    const model = new GatedProvider();
+    const { client, updates, open } = turnHarness(model);
+    const sessionId = await open();
+    // Resolves while the model is blocked (on main the ack WAS the turn's end).
+    expect(await prompt(client, sessionId, "t1", "hello")).toEqual({ turnId: "t1" });
+    expect(model.calls).toHaveLength(1);
+    expect(updates.map((u) => u.update)).toEqual([
+      { type: "turn_start", turnId: "t1", prompt: "hello" },
+    ]);
+    model.release();
+    expect((await turnEnd(updates, "t1")).stopReason).toBe("end_turn");
+  });
+
+  // Each exit path of the agent: exactly one turn_start first, one turn_end last.
+  const exits: [string, () => ModelProvider, { maxIterations?: number }, StopReason][] = [
+    [
+      "end_turn",
+      () => new ScriptedProvider([[{ type: "text", delta: "hi" }, { type: "done" }]]),
+      {},
+      "end_turn",
+    ],
+    [
+      "max_iterations",
+      () =>
+        new ScriptedProvider([
+          [
+            { type: "tool_call", toolCall: { id: "c1", name: "missing", arguments: "{}" } },
+            { type: "done" },
+          ],
+        ]),
+      { maxIterations: 1 },
+      "max_iterations",
+    ],
+    [
+      "throwing model",
+      () => ({
+        id: "boom",
+        // biome-ignore lint/correctness/useYield: throws before its first event
+        async *stream(): AsyncIterable<StreamEvent> {
+          throw new Error("provider 401: key sk-SECRET at https://endpoint");
+        },
+      }),
+      {},
+      "error",
+    ],
+  ];
+  for (const [label, makeModel, opts, stopReason] of exits) {
+    test(`turn bracket on every exit: ${label}`, async () => {
+      const errors: Error[] = [];
+      const { client, updates, open } = turnHarness(makeModel(), {
+        ...opts,
+        onTurnError: (e) => errors.push(e),
+      });
+      const sessionId = await open();
+      await prompt(client, sessionId, "t1");
+      const end = await turnEnd(updates, "t1");
+      await tick();
+      expect(end.stopReason).toBe(stopReason);
+      const types = updates.map((u) => u.update.type);
+      expect(types[0]).toBe("turn_start");
+      expect(types.at(-1)).toBe("turn_end");
+      expect(types.filter((t) => t === "turn_start")).toHaveLength(1);
+      expect(types.filter((t) => t === "turn_end")).toHaveLength(1);
+      expect(updates.map((u) => u.seq)).toEqual(updates.map((_, i) => i + 1));
+      if (stopReason === "error") {
+        // Redacted on the wire by default; the real error reaches the sink, once.
+        expect(end.error).toEqual({ message: "internal error" });
+        expect(errors.map((e) => e.message)).toEqual([
+          "provider 401: key sk-SECRET at https://endpoint",
+        ]);
+        expect(JSON.stringify(updates)).not.toContain("sk-SECRET");
+      } else {
+        expect(end.error).toBeUndefined();
+        expect(errors).toEqual([]);
+      }
+    });
+  }
+
+  test("turn bracket on cancel mid-model: turn_end cancelled, once", async () => {
+    const model = new GatedProvider();
+    const { client, updates, open } = turnHarness(model);
+    const sessionId = await open();
+    await prompt(client, sessionId, "t1");
+    client.notify("session/cancel", { sessionId });
+    await tick();
+    model.release();
+    const end = await turnEnd(updates, "t1");
+    expect(end.stopReason).toBe("cancelled");
+    expect(updates.filter((u) => u.update.type === "turn_end")).toHaveLength(1);
+  });
+
+  test("a turn error is exposed only with exposeTurnErrors; an RpcError keeps its code", async () => {
+    const exposed = turnHarness(
+      {
+        id: "boom",
+        // biome-ignore lint/correctness/useYield: throws before its first event
+        async *stream(): AsyncIterable<StreamEvent> {
+          throw new Error("real cause");
+        },
+      },
+      { exposeTurnErrors: true },
+    );
+    const s1 = await exposed.open();
+    await prompt(exposed.client, s1, "t1");
+    expect((await turnEnd(exposed.updates, "t1")).error).toEqual({ message: "real cause" });
+
+    const rpc = turnHarness({
+      id: "rpc",
+      // biome-ignore lint/correctness/useYield: throws before its first event
+      async *stream(): AsyncIterable<StreamEvent> {
+        throw new RpcError(DomainErrorCode.TurnInProgress, "domain message");
+      },
+    });
+    const s2 = await rpc.open();
+    await prompt(rpc.client, s2, "t1");
+    expect((await turnEnd(rpc.updates, "t1")).error).toEqual({
+      code: DomainErrorCode.TurnInProgress,
+      message: "domain message",
+    });
+  });
+
+  test("a retried turnId never runs twice: cached ack while running, `ended` after, forever", async () => {
+    const model = new GatedProvider(undefined, (call) => call === 0);
+    const { client, updates, open } = turnHarness(model);
+    const sessionId = await open();
+    expect(await prompt(client, sessionId, "t1")).toEqual({ turnId: "t1" });
+    // Running: the same id is the same ack, not TurnInProgress, and no new model call.
+    expect(await prompt(client, sessionId, "t1", "different text")).toEqual({ turnId: "t1" });
+    expect(model.calls).toHaveLength(1);
+    model.release();
+    const end = await turnEnd(updates, "t1");
+    // Ended: the ack carries the streamed outcome.
+    const { type: _t, turnId: _id, ...outcome } = end;
+    expect(await prompt(client, sessionId, "t1")).toEqual({ turnId: "t1", ended: outcome });
+    // Not count-bounded: still cached after 50 more turns.
+    for (let i = 0; i < 50; i++) {
+      await prompt(client, sessionId, `n${i}`);
+      await turnEnd(updates, `n${i}`);
+    }
+    const callsBefore = model.calls.length;
+    expect(await prompt(client, sessionId, "t1")).toEqual({ turnId: "t1", ended: outcome });
+    expect(model.calls.length).toBe(callsBefore);
+    expect(updates.filter((u) => u.update.type === "turn_start")).toHaveLength(51);
+  });
+
+  test("a prompt rejected TurnInProgress is not recorded: its id later starts a turn", async () => {
+    const model = new GatedProvider();
+    const { client, updates, open } = turnHarness(model);
+    const sessionId = await open();
+    await prompt(client, sessionId, "t1");
+    await expect(prompt(client, sessionId, "t2")).rejects.toMatchObject({
+      code: DomainErrorCode.TurnInProgress,
+    });
+    model.release();
+    await turnEnd(updates, "t1");
+    expect(await prompt(client, sessionId, "t2")).toEqual({ turnId: "t2" });
+    model.release();
+    await tick();
+    model.release();
+    expect((await turnEnd(updates, "t2")).stopReason).toBe("end_turn");
+  });
+
+  // A turn's first round (last message = the prompt "go") calls a tool on a slow
+  // env (a mid-turn window); every other round echoes the last message.
+  const echo = () =>
+    new GatedProvider(
+      (_call, messages) =>
+        messages.at(-1) === "go"
+          ? [
+              {
+                type: "tool_call",
+                toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls" }) },
+              },
+              { type: "done" },
+            ]
+          : [{ type: "text", delta: `echo:${messages.at(-1) ?? ""}` }, { type: "done" }],
+      () => false,
+    );
+  const slow: ExecutionEnvironment = {
+    id: "slow",
+    async exec() {
+      await tick(100);
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    },
+    async readFile() {
+      return "";
+    },
+    async writeFile() {},
+  };
+  const steers = (updates: readonly KnownSessionUpdateParams[]) =>
+    updates.filter((u) => u.update.type === "steer");
+
+  test("enqueue: accepted, ack lost, turn ends, same id retried → {} and the model saw it once", async () => {
+    const model = echo();
+    const { client, updates, open } = turnHarness(model, { env: slow });
+    const sessionId = await open();
+    await prompt(client, sessionId, "t1");
+    while (!updates.some((u) => u.update.type === "tool_call")) await tick(5);
+    // First attempt applied; its ack is "lost" (the result is discarded).
+    void client.request("session/enqueue", { sessionId, id: "e1", turnId: "t1", text: "s" });
+    await turnEnd(updates, "t1");
+    // The retry after the turn ended: a no-op success, not NoTurnRunning.
+    expect(
+      await client.request("session/enqueue", { sessionId, id: "e1", turnId: "t1", text: "s" }),
+    ).toEqual({});
+    expect(steers(updates)).toHaveLength(1);
+    expect(model.calls.flat().filter((m) => m === "s")).toHaveLength(1);
+    // A retry during a LATER turn is still a no-op: never a second injection.
+    await prompt(client, sessionId, "t2");
+    while (updates.filter((u) => u.update.type === "tool_call").length < 2) await tick(5);
+    expect(
+      await client.request("session/enqueue", { sessionId, id: "e1", turnId: "t1", text: "s" }),
+    ).toEqual({});
+    await turnEnd(updates, "t2");
+    expect(steers(updates)).toHaveLength(1);
+  });
+
+  test("enqueue bound to a turn that is no longer running → NoTurnRunning, never steers the next turn", async () => {
+    const model = echo();
+    const { client, updates, open } = turnHarness(model, { env: slow });
+    const sessionId = await open();
+    await prompt(client, sessionId, "t1");
+    await turnEnd(updates, "t1");
+    await prompt(client, sessionId, "t2");
+    while (updates.filter((u) => u.update.type === "tool_call").length < 2) await tick(5);
+    // A fresh id, but typed during t1: it must not land in t2.
+    await expect(
+      client.request("session/enqueue", { sessionId, id: "late", turnId: "t1", text: "stale" }),
+    ).rejects.toMatchObject({ code: DomainErrorCode.NoTurnRunning });
+    await turnEnd(updates, "t2");
+    expect(steers(updates)).toHaveLength(0);
+    expect(model.calls.flat()).not.toContain("stale");
+    // Rejected attempts are not recorded: the same id for the RUNNING turn applies.
+    await prompt(client, sessionId, "t3");
+    while (updates.filter((u) => u.update.type === "tool_call").length < 3) await tick(5);
+    expect(
+      await client.request("session/enqueue", { sessionId, id: "late", turnId: "t3", text: "now" }),
+    ).toEqual({});
+    await turnEnd(updates, "t3");
+    expect(steers(updates).map((u) => u.update)).toEqual([{ type: "steer", text: "now" }]);
+  });
+
+  test("an enqueue sent right after the ack is not lost to the turn-start steering reset", async () => {
+    // Round 1 is gated (so the turn is surely running), then replies with text.
+    const model = new GatedProvider(
+      (call, messages) => [
+        { type: "text", delta: call === 0 ? "first" : `echo:${messages.at(-1) ?? ""}` },
+        { type: "done" },
+      ],
+      (call) => call === 0,
+    );
+    const { client, updates, open } = turnHarness(model);
+    const sessionId = await open();
+    const sent = prompt(client, sessionId, "t1").then(() =>
+      client.request("session/enqueue", { sessionId, id: "e1", turnId: "t1", text: "early" }),
+    );
+    expect(await sent).toEqual({});
+    model.release();
+    await turnEnd(updates, "t1");
+    // The late drain injected it and ran a second round that saw it.
+    expect(steers(updates).map((u) => u.update)).toEqual([{ type: "steer", text: "early" }]);
+    expect(model.calls[1]?.at(-1)).toBe("early");
+  });
+
+  test("a throwing sink never strands the session as running, nor rejects unhandled", async () => {
+    const agent = new Agent({
+      model: new ScriptedProvider([[{ type: "text", delta: "hi" }, { type: "done" }]]),
+      tools: new ToolRegistry(),
+      env: noopEnv,
+    });
+    const errors: string[] = [];
+    const hosted = new HostedSession(
+      "s1",
+      new Session(agent),
+      new PermissionBroker(),
+      async () => ({ outcome: "cancelled" }),
+      undefined,
+      { onTurnError: (e) => errors.push(e.message) },
+    );
+    hosted.setSink(() => {
+      throw new Error("sink down");
+    });
+    expect(hosted.prompt("t1", [{ type: "text", text: "go" }])).toEqual({ turnId: "t1" });
+    await tick();
+    expect(hosted.running).toBe(false);
+    // Reported, never silent (turn_start, the first chunk, the error's turn_end).
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.every((m) => m === "sink down")).toBe(true);
+    // The turn is recorded ended; a retry reports it instead of re-running.
+    const retry = hosted.prompt("t1", [{ type: "text", text: "go" }]);
+    expect(retry.ended?.stopReason).toBe("error");
+  });
+
+  test("the replay buffer of a turn starts at its turn_start", async () => {
+    const { client, updates, open } = turnHarness(
+      new ScriptedProvider([
+        [{ type: "text", delta: "a" }, { type: "done" }],
+        [{ type: "text", delta: "b" }, { type: "done" }],
+      ]),
+    );
+    const sessionId = await open();
+    await prompt(client, sessionId, "t1");
+    await turnEnd(updates, "t1");
+    await prompt(client, sessionId, "t2");
+    await turnEnd(updates, "t2");
+    expect(turnUpdates(updates, "t2")[0]?.update).toEqual({
+      type: "turn_start",
+      turnId: "t2",
+      prompt: "go",
+    });
+  });
+
+  test("a throwing onTurnError (the embedder's log sink) never strands the turn", async () => {
+    const agent = new Agent({
+      model: {
+        id: "boom",
+        // biome-ignore lint/correctness/useYield: throws before its first event
+        async *stream(): AsyncIterable<StreamEvent> {
+          throw new Error("model down");
+        },
+      },
+      tools: new ToolRegistry(),
+      env: noopEnv,
+    });
+    const hosted = new HostedSession(
+      "s1",
+      new Session(agent),
+      new PermissionBroker(),
+      async () => ({ outcome: "cancelled" }),
+      undefined,
+      {
+        onTurnError: () => {
+          throw new Error("log sink down");
+        },
+      },
+    );
+    const streamed: KnownSessionUpdateParams[] = [];
+    hosted.setSink((p) => streamed.push(p));
+    hosted.prompt("t1", [{ type: "text", text: "go" }]);
+    await tick();
+    expect(hosted.running).toBe(false);
+    expect(streamed.at(-1)?.update).toEqual({
+      type: "turn_end",
+      turnId: "t1",
+      stopReason: "error",
+      error: { message: "internal error" },
+    });
   });
 });

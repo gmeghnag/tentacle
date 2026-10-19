@@ -200,15 +200,23 @@
     "EnqueueParams": {
       "additionalProperties": false,
       "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
         },
         "text": {
           "minLength": 1,
           "type": "string"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
         }
       },
-      "required": ["sessionId", "text"],
+      "required": ["id", "sessionId", "text", "turnId"],
       "type": "object"
     },
     "EnqueueResult": {
@@ -596,19 +604,25 @@
         },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
         }
       },
-      "required": ["content", "sessionId"],
+      "required": ["content", "sessionId", "turnId"],
       "type": "object"
     },
     "PromptResult": {
       "additionalProperties": false,
       "properties": {
-        "stopReason": {
-          "$ref": "#/$defs/StopReason"
+        "ended": {
+          "$ref": "#/$defs/TurnEnd"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
         }
       },
-      "required": ["stopReason"],
+      "required": ["turnId"],
       "type": "object"
     },
     "RequestId": {
@@ -694,7 +708,9 @@
           "plan": "#/$defs/Plan",
           "steer": "#/$defs/Steer",
           "tool_call": "#/$defs/ToolCall",
-          "tool_call_update": "#/$defs/ToolCallUpdate"
+          "tool_call_update": "#/$defs/ToolCallUpdate",
+          "turn_end": "#/$defs/TurnEndUpdate",
+          "turn_start": "#/$defs/TurnStart"
         },
         "propertyName": "type"
       },
@@ -722,6 +738,12 @@
         },
         {
           "$ref": "#/$defs/Steer"
+        },
+        {
+          "$ref": "#/$defs/TurnStart"
+        },
+        {
+          "$ref": "#/$defs/TurnEndUpdate"
         }
       ]
     },
@@ -864,6 +886,76 @@
       "required": ["status", "toolCallId", "type"],
       "type": "object",
       "x-event-class": "display"
+    },
+    "TurnEnd": {
+      "additionalProperties": true,
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/TurnError"
+        },
+        "stopReason": {
+          "$ref": "#/$defs/StopReason"
+        }
+      },
+      "required": ["stopReason"],
+      "type": "object"
+    },
+    "TurnEndUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/TurnError"
+        },
+        "stopReason": {
+          "$ref": "#/$defs/StopReason"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "const": "turn_end",
+          "type": "string"
+        }
+      },
+      "required": ["stopReason", "turnId", "type"],
+      "type": "object",
+      "x-event-class": "mandatory"
+    },
+    "TurnError": {
+      "additionalProperties": true,
+      "properties": {
+        "code": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": ["message"],
+      "type": "object"
+    },
+    "TurnId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "TurnStart": {
+      "additionalProperties": true,
+      "properties": {
+        "prompt": {
+          "type": "string"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "const": "turn_start",
+          "type": "string"
+        }
+      },
+      "required": ["prompt", "turnId", "type"],
+      "type": "object",
+      "x-event-class": "mandatory"
     },
     "UnknownSessionUpdate": {
       "additionalProperties": true,
@@ -1166,5 +1258,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 2
+  "x-protocol-version": 3
 }
