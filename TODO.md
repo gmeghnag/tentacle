@@ -843,10 +843,12 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
 - [ ] **Sub-agents**: background / parallel execution (SA.d).
       **Eval:** `docs/eval/parallel-subagents.md` (open — leans background-first, must split; needs a use-case).
 - [ ] **Parallel tool calls within a round** (today strictly sequential,
-      `agent.ts:283`; pi, Claude Code and opencode all run them in parallel).
-      **Eval:** `docs/eval/parallel-tool-calls.md` (open — leans pi shape: parallel
-      by default + per-tool `executionMode: "sequential"`, writes/shell
-      sequential; measure benefit first; after the proxy-cancel 🔴).
+      `agent.ts:304`; pi, Claude Code and opencode all run them in parallel).
+      **Eval:** `docs/eval/parallel-tool-calls.md` (**DEFER**, 2026-10-19: design
+      ready — consecutive `shared` batches, serial prompts then concurrent run —
+      but on 53 Qwen sessions only 4.3% of calls would go parallel, all
+      ms-scale `fs_read`. Promote on: parallel sub-agents approved, a frontier
+      model as regular driver, or network MCP becoming common).
       Type: eval → feat · Size: M · Blast: load-bearing.
 - [x] **Native Anthropic Messages API provider** — DONE (2026-10-17). **Doc:**
       `docs/feat/anthropic-api-support.md` (native provider behind the
