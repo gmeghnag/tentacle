@@ -1,5 +1,5 @@
 <p align="left">
-  <img src="art/tentacle-lockup.svg" alt="tentacle" height="96">
+  <img src="art/tentacle-lockup.svg" alt="tentacle" height="220">
 </p>
 
 A SOTA agent harness — the platform that turns any LLM into an autonomous,
