@@ -15,6 +15,7 @@ export const DomainErrorCode = {
   NotInitialized: -32005,
   TooManySessions: -32006,
   AlreadyInitialized: -32007,
+  NoTurnRunning: -32008,
 } as const;
 
 export const ErrorCode = { ...JsonRpcErrorCode, ...DomainErrorCode } as const;

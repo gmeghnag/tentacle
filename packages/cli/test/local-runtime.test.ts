@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, JsonSessionStore } from "@tentacle/agent";
+import type { RemoteSession } from "@tentacle/client";
 import type {
   BackgroundJob,
   ChatRequest,
@@ -15,7 +16,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
-import { createLocalRuntime } from "../src/local-runtime.ts";
+import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -232,5 +233,34 @@ describe("createLocalRuntime (local over RPC)", () => {
     expect(all).toHaveLength(1);
     expect(all[0]?.id).toBe(record?.id ?? "");
     rt2.dispose();
+  });
+
+  test("persistingController.enqueue propagates the inner Promise (resolves AND rejects)", async () => {
+    // A stub session whose enqueue resolves — the controller must return that
+    // very Promise (not swallow it) so the TUI can await/reconcile it.
+    const seen: string[] = [];
+    const okInner: RemoteSession = {
+      enqueue: (text: string) =>
+        Promise.resolve().then(() => {
+          seen.push(text);
+        }),
+      snapshot: async () => null,
+      compact: async () => ({ before: 0, after: 0 }),
+    } as unknown as RemoteSession;
+
+    const okCtl = persistingController(okInner, () => {});
+    const okEnqueue = okCtl.enqueue;
+    await expect(okEnqueue?.("hello")).resolves.toBeUndefined();
+    expect(seen).toEqual(["hello"]);
+
+    // And a rejecting inner must propagate the rejection (the TUI reconciles).
+    const rejInner: RemoteSession = {
+      enqueue: () => Promise.reject(new Error("method not found")),
+      snapshot: async () => null,
+      compact: async () => ({ before: 0, after: 0 }),
+    } as unknown as RemoteSession;
+    const rejCtl = persistingController(rejInner, () => {});
+    const rejEnqueue = rejCtl.enqueue;
+    await expect(rejEnqueue?.("nope")).rejects.toThrow(/method not found/);
   });
 });

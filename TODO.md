@@ -165,32 +165,28 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       the (now real) TUI error line, then diagnose. Still TODO: the same
       generic-conversion gap on `ws-server.ts:182` is intentionally left (remote
       = untrusted); a server-side error log there is a possible follow-up.
-- [ ] 🟡 **Mid-turn "Queue a task…" (steering) silently no-ops on the worker
-      and pod paths (pre-existing gap, surfaced 2026-10-16).** The TUI's
-      mid-turn input calls `sessionRef.current?.enqueue(text)` (`tui/App.tsx:451`,
-      OPTIONAL — a no-op when absent), but `enqueue` exists only on the local
-      `Session` (`agent/src/session.ts:83`). The worker and pod runtimes wrap a
-      `RemoteSession` in `persistingController` (`cli/local-runtime.ts`) which
-      exposes no `enqueue`, and the daemon explicitly drops `steer` updates
-      (`daemon/mapping.ts:108`: "Steering is a local-TUI interaction; not yet
-      wired over the wire"). So on the DEFAULT (worker) path and on `run`/
-      `exec`, a task typed mid-turn is silently dropped (the input line
-      empties, nothing is queued). Only `--in-process`/`--no-worker` (and the
-      worker-failure fallback) queue it. Surfaced when a mutation-test
-      leftover in `local-runtime.ts` (`allowAll` unimported → `ReferenceError`
-      on the worker handshake) was forcing the in-process fallback — while that
-      broken state existed, steering "worked" because the fallback had the real
-      `Session`; after the revert, the worker path is active again and the
-      pre-existing gap is visible. NOT caused by the `exec` refactor (the
-      worker/in-process blocks in `main.ts` are untouched).
-      **Implementation plan: `docs/fix/steering-over-rpc.md`** — add a
-      `session/enqueue` request (client → daemon `Session.enqueue`) and stream
-      the agent's `steer` event back over `session/update` (new `steer`
-      update variant; the TUI already clears the ⏳ line on it). Additive
-      protocol change (version stays 1): a new method is `MethodNotFound`
-      for old clients that never call it, and new update variants are ignored
-      by old clients (union members are non-`.strict()`). 10 files + 5 test
-      files; see the doc for the full per-file spec. Not yet implemented.
+- [x] 🟡 **Mid-turn "Queue a task…" (steering) silently no-ops on the worker
+      and pod paths (pre-existing gap, surfaced 2026-10-16).** FIXED
+      (2026-10-19, `fix/steering-over-rpc`): added a `session/enqueue` request
+      (client → daemon → `Session.enqueue`) and streamed the agent's `steer`
+      event back over `session/update` (new `steer` update variant), so the
+      optimistic ⏳ row reconciles. The TUI now reconciles the ⏳ row on an
+      enqueue REJECT (MethodNotFound from an older remote daemon / transport
+      drop) instead of masking a send that never happened. Additive protocol
+      (version stays 1). Tests in protocol/daemon/client/cli/tui (steering
+      order, in-flight concurrency, reject propagation, ⏳ reconciliation —
+      each mutation-checked for non-vacuity). **Fix:**
+      `docs/fix/steering-over-rpc.md`.
+- [ ] 🟢 **Steering follow-ups (from `fix/steering-over-rpc` Review 2).**
+      (a) The TUI removes ⏳ rows by COUNT, so a late `NoTurnRunning` reject
+      (one round-trip after `turn_end`) can remove a row belonging to the
+      NEXT turn's message (`tui/App.tsx`, reconciliation `.catch`). Cosmetic.
+      A real fix needs an id per enqueue, which touches the `Agent` core.
+      (b) On a reject the typed text is lost; only the notice remains. It
+      could be restored into the input line. (c) Pre-existing, out of scope:
+      Esc while the first `send` is still opening the session does not cancel
+      the turn (`client/remote-session.ts`, the abort listener is attached
+      after `openSession`).
 - [x] 🟡 **Loopback daemon accepts cross-origin browser WebSockets (CSRF /
       DNS-rebinding).** FIXED (2026-10-14): extracted `originAllowed(origin,
       allowed)` (pure, exported) and wired it into `authorize` — it now

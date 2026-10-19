@@ -92,6 +92,11 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
         promptTokens: event.usage.promptTokens,
         completionTokens: event.usage.completionTokens,
       };
+    // A steering message was injected into the running turn; the client drops
+    // the matching optimistic ⏳ entry FIFO. Covers both injection points in
+    // the agent loop (the per-round drain and the late-steer before turn_end).
+    case "steer":
+      return { type: "steer", text: event.text };
     // Nested sub-agent progress is a local-TUI nicety; remote clients see the
     // `agent_task` tool opaquely (its final report rides the tool_call_update).
     // A background-job exit likewise isn't streamed to remote clients yet (the
@@ -100,8 +105,6 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
     case "subagent_tool":
     case "subagent_end":
     case "background_exit":
-    // Steering is a local-TUI interaction; not yet wired over the wire.
-    case "steer":
     case "turn_end":
       return null;
   }

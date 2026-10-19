@@ -115,6 +115,9 @@ export function updateToEvent(
         status: update.status,
         exitCode: update.exitCode,
       };
+    // A steering message was injected; the TUI drops the matching ⏳ entry FIFO.
+    case "steer":
+      return { type: "steer", text: update.text };
     case "plan":
       return null;
   }

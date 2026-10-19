@@ -76,6 +76,12 @@ export const BackgroundExitSchema = z.object({
   exitCode: z.number().int().nullable(),
 });
 
+/** A user message queued mid-turn (steering) was injected into the running turn. */
+export const SteerSchema = z.object({
+  type: z.literal("steer"),
+  text: z.string(),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -84,6 +90,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   PlanSchema,
   AgentUsageSchema,
   BackgroundExitSchema,
+  SteerSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 

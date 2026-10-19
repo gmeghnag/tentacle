@@ -13,6 +13,8 @@ describe("session/update payloads", () => {
       content: [{ type: "text", text: "done" }],
     },
     { type: "plan", entries: [{ content: "step 1", status: "in_progress" }] },
+    { type: "background_exit", jobId: "j1", command: "ls", status: "exited", exitCode: 0 },
+    { type: "steer", text: "also do X" },
   ];
 
   test("every update variant parses", () => {
@@ -32,6 +34,20 @@ describe("session/update payloads", () => {
     if (parsed.type === "tool_call") {
       expect(parsed.toolCallId).toBe("t9");
     }
+  });
+
+  test("the discriminated union selects the steer member", () => {
+    const parsed = SessionUpdateSchema.parse({ type: "steer", text: "also do X" });
+    expect(parsed.type).toBe("steer");
+    if (parsed.type === "steer") {
+      expect(parsed.text).toBe("also do X");
+    }
+    // The wrapped notification params carry it too.
+    const wrapped = SessionUpdateParamsSchema.safeParse({
+      sessionId: "s1",
+      update: { type: "steer", text: "also do X" },
+    });
+    expect(wrapped.success).toBe(true);
   });
 
   test("rejects an unknown update type", () => {

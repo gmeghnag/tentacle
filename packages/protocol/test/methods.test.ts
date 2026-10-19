@@ -10,7 +10,7 @@ import {
   isMethodName,
   isNotificationName,
 } from "../src/index.ts";
-import { InitializeParamsSchema } from "../src/session.ts";
+import { EnqueueParamsSchema, InitializeParamsSchema } from "../src/session.ts";
 
 describe("method registry", () => {
   test("every request method has params+result schemas", () => {
@@ -59,6 +59,29 @@ describe("method registry", () => {
       result.safeParse({ chunks: 3, usage: { promptTokens: 1, completionTokens: 2 } }).success,
     ).toBe(false);
     expect(result.safeParse({ events: [] }).success).toBe(false); // not the batch result
+  });
+
+  test("session/enqueue is a registered method with strict params and an empty result", () => {
+    expect(isMethodName("session/enqueue")).toBe(true);
+    const entry = RequestSchemas[Method.Enqueue];
+    // Registered with both a params and a result schema (a request, not a notification).
+    expect(entry.params).toBeDefined();
+    expect(entry.result).toBeDefined();
+    // Validates a real payload.
+    expect(EnqueueParamsSchema.safeParse({ sessionId: "s1", text: "also do X" }).success).toBe(
+      true,
+    );
+    // Rejects a missing or empty `text` (the thing being injected).
+    expect(EnqueueParamsSchema.safeParse({ sessionId: "s1" }).success).toBe(false);
+    expect(EnqueueParamsSchema.safeParse({ sessionId: "s1", text: "" }).success).toBe(false);
+    // Rejects an empty session id and unknown fields (strict, additive).
+    expect(EnqueueParamsSchema.safeParse({ sessionId: "", text: "x" }).success).toBe(false);
+    expect(EnqueueParamsSchema.safeParse({ sessionId: "s1", text: "x", bogus: 1 }).success).toBe(
+      false,
+    );
+    // The result is an empty object (the daemon accepts; the model sees it later).
+    expect(entry.result.safeParse({}).success).toBe(true);
+    expect(entry.result.safeParse({ ok: true }).success).toBe(false); // strict, no extra fields
   });
 
   test("$/progress and $/cancelRequest are registered notifications with strict params", () => {

@@ -115,6 +115,11 @@ export class HostedSession {
     }
   }
 
+  /** Queue a user message for injection at the next model-round boundary. */
+  enqueue(text: string): void {
+    this.session.enqueue(text);
+  }
+
   /** Compact the conversation; returns message counts before/after. */
   async compact(): Promise<{ before: number; after: number }> {
     const { before, after } = await this.session.compact();

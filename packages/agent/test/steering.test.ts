@@ -95,4 +95,62 @@ describe("steering (enqueue mid-turn)", () => {
     const everyMessage = model.seen.flat();
     expect(everyMessage.some((m) => m.content === "stale")).toBe(false);
   });
+
+  // A round that only calls a tool; with `maxIterations: 1` the cap is hit right
+  // after it and the agent gives the model ONE final no-tools round.
+  const toolRound: readonly StreamEvent[] = [
+    { type: "tool_call", toolCall: { id: "c1", name: "missing", arguments: "{}" } },
+    { type: "done" },
+  ];
+
+  test("a message queued during the last allowed round reaches the final report (max_iterations)", async () => {
+    const model = new RecordingProvider([
+      toolRound,
+      [{ type: "text", delta: "report" }, { type: "done" }],
+    ]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, maxIterations: 1 });
+    const session = new Session(agent);
+
+    const events = [];
+    for await (const event of session.send("start")) {
+      if (event.type === "tool_start") {
+        session.enqueue("also X"); // queued while the last allowed round runs
+      }
+      events.push(event);
+    }
+
+    expect(events.filter((e) => e.type === "steer")).toEqual([{ type: "steer", text: "also X" }]);
+    // The final (no-tools) round saw it, so the report can address it.
+    const final = model.seen[1] ?? [];
+    expect(final.some((m) => m.role === "user" && m.content === "also X")).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "turn_end", reason: "max_iterations" });
+  });
+
+  test("a message queued during the final report is kept in history, not dropped (max_iterations)", async () => {
+    const model = new RecordingProvider([
+      toolRound,
+      [{ type: "text", delta: "report" }, { type: "done" }],
+      [{ type: "text", delta: "next" }, { type: "done" }],
+    ]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, maxIterations: 1 });
+    const session = new Session(agent);
+
+    const events = [];
+    for await (const event of session.send("start")) {
+      if (event.type === "text" && event.delta === "report") {
+        session.enqueue("also Y"); // no round is left to run it in
+      }
+      events.push(event);
+    }
+
+    // Echoed (the client clears its pending entry) and the turn still ends capped…
+    expect(events.filter((e) => e.type === "steer")).toEqual([{ type: "steer", text: "also Y" }]);
+    expect(events.at(-1)).toMatchObject({ type: "turn_end", reason: "max_iterations" });
+    // …and it is in the history, so the model sees it on the next turn.
+    for await (const _ of session.send("go on")) {
+      // drain
+    }
+    const next = model.seen[2] ?? [];
+    expect(next.some((m) => m.role === "user" && m.content === "also Y")).toBe(true);
+  });
 });

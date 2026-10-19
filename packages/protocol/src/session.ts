@@ -148,3 +148,17 @@ export type SnapshotParams = z.infer<typeof SnapshotParamsSchema>;
 
 export const SnapshotResultSchema = z.object({ messages: z.array(ChatMessageSchema) }).strict();
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
+
+// --- session/enqueue (steering) ------------------------------------------
+// Queue a user message for injection into the turn currently running, at the
+// next model-round boundary. The daemon resolves it as soon as it has pushed
+// the text into the session's steering queue — the model may not have seen it
+// yet (that happens at the boundary, streamed back as a `steer` update).
+
+export const EnqueueParamsSchema = z
+  .object({ sessionId: SessionIdSchema, text: z.string().min(1) })
+  .strict();
+export type EnqueueParams = z.infer<typeof EnqueueParamsSchema>;
+
+export const EnqueueResultSchema = z.object({}).strict();
+export type EnqueueResult = z.infer<typeof EnqueueResultSchema>;
