@@ -464,7 +464,7 @@ Owner decisions:
 5. **D5 — "allow always" grants are lost on restart**: accepted (you get asked again, never less). Persisting them is a later task.
 6. **D6 — detached-session cap reached → refuse the new session** + audit log line; never evict the oldest.
 7. **D7 — schema: `oneOf` + `discriminator`, reference codegen `swift-openapi-generator`** (not quicktype); `DomainErrorCode` moves into `@tentacle/protocol`.
-8. **D8 — new prerequisites:** `docs/eval/daemon-compact-turn-guard.md` before event-stream 3c; `docs/eval/session-store-durability.md` before `daemon-side-persistence`.
+8. **D8 — new prerequisites:** `docs/fix/daemon-compact-turn-guard.md` before event-stream 3c; `docs/eval/session-store-durability.md` before `daemon-side-persistence`.
 9. **D9 — `pod-attach-resilience`:** Layer 2 (reconnect) is absorbed by `client-reattach-frontends`; Layer 1 shrinks to an S WebSocket ping in `exec-channel.ts` (Bun's client has `ping()`).
 10. **D10 — attachments:** adopt the agent's recommendations (text placeholder when bytes are missing, only the last K images in full, images before text); detail numbers are decided when the first sub-task is promoted.
 
@@ -481,7 +481,7 @@ to promotion time (each child gets its mandatory fresh-context Review then).
 |---|---|---|---|
 | 1 | `docs/fix/background-process-groups.md` — group kill + process-exit net + dispose on connection close (promoted, in execution) | S–M · load-bearing | — |
 | 2 | `docs/feat/protocol-schema-export.md` — JSON Schema export (`oneOf` + discriminator), drift gate, `DomainErrorCode` into protocol | S–M · cross-module | — |
-| 2b | `docs/eval/daemon-compact-turn-guard.md` — prerequisite of 3c (D8) | see doc | — |
+| 2b | `docs/fix/daemon-compact-turn-guard.md` — prerequisite of 3c (D8) | see doc | — |
 | 3a | `docs/eval/session-event-stream.md` §3a — event classes per frame, unknown-event tolerance, wire hygiene, non-text reject | S · load-bearing | 2 |
 | 3b | same doc §3b — `turn_start{prompt}`/`turn_end`, prompt ack, idempotency, turn driver | M · load-bearing | 3a |
 | 3c | same doc §3c — ring, `history_commit` cut, `history_replaced` barrier, paged snapshot | M · load-bearing | 3b, 2b |

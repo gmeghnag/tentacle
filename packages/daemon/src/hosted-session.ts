@@ -7,6 +7,10 @@
  * A turn lives in the stream, not in a request: `prompt` acks at once, the turn
  * is bracketed by `turn_start`/`turn_end` updates, and `prompt`/`enqueue` are
  * idempotent by their client-chosen keys (a retry never runs or injects twice).
+ *
+ * A turn and a compaction are mutually exclusive: both hold the one busy slot
+ * (`controller`), and a request that finds it taken is REJECTED — never queued,
+ * never locked (AGENTS §7: the peer dispatches requests concurrently).
  */
 import type { Session } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
@@ -64,7 +68,10 @@ export function redactTurnError(error: unknown, expose: boolean): TurnError {
 export class HostedSession {
   readonly id: string;
   private readonly session: Session;
+  /** The busy slot: the active turn's OR compaction's controller (`cancel` aborts it). */
   private controller: AbortController | null = null;
+  /** Which operation holds the slot: true for a compaction. */
+  private compacting = false;
   private activeTurnId: string | null = null;
   /** Every turn this session accepted, by client `turnId`, for its lifetime (retries). */
   private readonly turns = new Map<string, { end?: TurnEnd }>();
@@ -111,6 +118,7 @@ export class HostedSession {
     });
   }
 
+  /** A turn or a compaction is active. */
   get running(): boolean {
     return this.controller !== null;
   }
@@ -149,9 +157,7 @@ export class HostedSession {
     }
     // Before the busy check: a rejected prompt starts and records nothing.
     assertTextOnly(content);
-    if (this.controller) {
-      throw new RpcError(DomainErrorCode.TurnInProgress, "a turn is already running");
-    }
+    this.assertIdle();
     const controller = new AbortController();
     this.controller = controller;
     this.activeTurnId = turnId;
@@ -167,6 +173,19 @@ export class HostedSession {
     }
     void this.drive(turnId, text, controller);
     return { turnId };
+  }
+
+  /**
+   * Refuse a new operation while the busy slot is held. Every taker of the slot
+   * calls this and takes it in the same synchronous stretch, so two concurrent
+   * requests can never both pass.
+   */
+  private assertIdle(): void {
+    if (this.controller) {
+      throw this.compacting
+        ? new RpcError(DomainErrorCode.CompactInProgress, "a compaction is running")
+        : new RpcError(DomainErrorCode.TurnInProgress, "a turn is already running");
+    }
   }
 
   /**
@@ -263,10 +282,38 @@ export class HostedSession {
     this.session.enqueue(text);
   }
 
-  /** Compact the conversation; returns message counts before/after. */
-  async compact(): Promise<{ before: number; after: number }> {
-    const { before, after } = await this.session.compact();
-    return { before, after };
+  /**
+   * Compact the conversation; returns message counts before/after. Takes the
+   * busy slot before its first `await` (see `assertIdle`), so it is exclusive
+   * with a turn, and `cancel` — or `signal` (the request's own cancel) — aborts
+   * it: it then rejects `Cancelled` and leaves the history untouched.
+   */
+  async compact(signal?: AbortSignal): Promise<{ before: number; after: number }> {
+    this.assertIdle();
+    // Cancelled before it started: no slot, no model call.
+    if (signal?.aborted) {
+      throw new RpcError(DomainErrorCode.Cancelled, "compaction cancelled");
+    }
+    const controller = new AbortController();
+    this.controller = controller;
+    this.compacting = true;
+    const onAbort = (): void => controller.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      const { before, after } = await this.session.compact(controller.signal);
+      return { before, after };
+    } catch (error) {
+      // Providers throw anything on abort; give the client one clean code.
+      if (controller.signal.aborted) {
+        throw new RpcError(DomainErrorCode.Cancelled, "compaction cancelled");
+      }
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+      // Ours for sure: no one takes the slot without `assertIdle`.
+      this.controller = null;
+      this.compacting = false;
+    }
   }
 
   /** The current conversation history (the main thread persists it). */
@@ -274,7 +321,7 @@ export class HostedSession {
     return { messages: this.session.snapshot().messages };
   }
 
-  /** Abort the active turn (if any). */
+  /** Abort the active turn or compaction (if any). */
   cancel(): void {
     this.controller?.abort();
   }

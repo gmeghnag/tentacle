@@ -90,7 +90,7 @@ Verified against `main` @ `4914e9b` (bun 1.4.3). Scripts run in
    Design: `turn_start` carries the prompt text. Not in the Review's scope
    list; owner confirm.
 5. **`compact` is not serialized with turns** (`hosted-session.ts:124-127`, no
-   guard: `docs/eval/daemon-compact-turn-guard.md`, CONFIRMED there, not
+   guard: `docs/fix/daemon-compact-turn-guard.md`, CONFIRMED there, not
    merged). The barrier is only sound if compaction cannot overlap a turn.
    Recommendation: land `fix/daemon-compact-turn-guard` (S) **before 3c**;
    3c lists it as a precondition and does not re-implement it.
@@ -842,7 +842,7 @@ always follows the push in the same tick. If not, the agent must emit a
 Failure modes: ring overflow mid-round (→ resync from the cut; client discards
 its partial round); `prompt` retried with an already-terminal `turnId` (return
 the cached ack, never re-run); `compact` while a turn runs (coordinate with
-`docs/eval/daemon-compact-turn-guard.md` — the barrier assumes compaction is
+`docs/fix/daemon-compact-turn-guard.md` — the barrier assumes compaction is
 serialized with turns); paged snapshot racing new events (the cursor pins the
 cut; later events come via replay).
 

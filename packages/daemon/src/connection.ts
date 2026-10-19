@@ -29,7 +29,13 @@ import {
   type SnapshotResult,
   type WireChatRequest,
 } from "@tentacle/protocol";
-import { DomainErrorCode, type DuplexChannel, RpcError, RpcPeer } from "@tentacle/transport";
+import {
+  DomainErrorCode,
+  type DuplexChannel,
+  type RequestContext,
+  RpcError,
+  RpcPeer,
+} from "@tentacle/transport";
 import type { HostedSession } from "./hosted-session.ts";
 import type { SessionHost } from "./session-host.ts";
 
@@ -66,7 +72,7 @@ export class Connection {
     this.host = host;
     this.maxSessions = options.maxSessions;
     this.peer = new RpcPeer(channel, {
-      onRequest: (method, params) => this.onRequest(method, params),
+      onRequest: (method, params, context) => this.onRequest(method, params, context),
       onNotification: (method, params) => this.onNotification(method, params),
       // The only outbound daemon→client request is `session/request_permission`,
       // so this timeout is effectively the permission-answer deadline.
@@ -118,7 +124,11 @@ export class Connection {
       .then((result) => result as ModelStreamChunkedResult);
   }
 
-  private async onRequest(method: string, params: unknown): Promise<unknown> {
+  private async onRequest(
+    method: string,
+    params: unknown,
+    context?: RequestContext,
+  ): Promise<unknown> {
     if (method === Method.Initialize) {
       return this.initialize(params as InitializeParams);
     }
@@ -131,7 +141,7 @@ export class Connection {
       case Method.Prompt:
         return this.prompt(params as PromptParams);
       case Method.Compact:
-        return this.compact(params as CompactParams);
+        return this.compact(params as CompactParams, context?.signal);
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);
       case Method.Enqueue:
@@ -163,12 +173,14 @@ export class Connection {
     return {};
   }
 
-  private compact(params: CompactParams): Promise<CompactResult> {
+  // `signal` is the request's own: a `$/cancelRequest` for it stops the
+  // compaction, like `session/cancel` does — the client was told "cancelled".
+  private compact(params: CompactParams, signal?: AbortSignal): Promise<CompactResult> {
     const hosted = this.sessions.get(params.sessionId);
     if (!hosted) {
       throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${params.sessionId}`);
     }
-    return hosted.compact();
+    return hosted.compact(signal);
   }
 
   private initialize(params: InitializeParams): InitializeResult {

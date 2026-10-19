@@ -35,6 +35,8 @@ export const DomainErrorCode = {
   TooManySessions: -32006,
   AlreadyInitialized: -32007,
   NoTurnRunning: -32008,
+  CompactInProgress: -32009,
+  Cancelled: -32010,
 } as const;
 
 /**

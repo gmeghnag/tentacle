@@ -128,3 +128,37 @@ describe("Session.compact", () => {
     expect(session.messages[1]?.content).toContain("a dense brief");
   });
 });
+
+describe("Session.compact cancellation", () => {
+  test("a signal aborted while summarizing wins over the late summary: history untouched", async () => {
+    const controller = new AbortController();
+    // Ignores the signal: the summary lands AFTER the abort.
+    const model: ModelProvider = {
+      id: "late",
+      async *stream(): AsyncIterable<StreamEvent> {
+        controller.abort();
+        yield { type: "text", delta: "a late brief" };
+        yield { type: "done" };
+      },
+    };
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry(),
+      env: noopEnv,
+      systemPrompt: "SYS",
+    });
+    const persisted: unknown[] = [];
+    const session = new Session(agent, "abort-guard", {
+      onPersist: (snap) => {
+        persisted.push(snap);
+      },
+    });
+    session.messages.push({ role: "user", content: "do x" });
+    const before = session.messages.map((m) => ({ ...m }));
+
+    await expect(session.compact(controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(session.messages).toEqual(before);
+    expect(persisted).toHaveLength(0);
+  });
+});

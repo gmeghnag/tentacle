@@ -1148,6 +1148,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "errorCodes": {
     "AlreadyInitialized": -32007,
+    "Cancelled": -32010,
+    "CompactInProgress": -32009,
     "InternalError": -32603,
     "InvalidParams": -32602,
     "InvalidRequest": -32600,

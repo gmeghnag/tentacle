@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Agent, Session } from "@tentacle/agent";
 import {
+  type ChatMessage,
   type ChatRequest,
   type ExecutionEnvironment,
   type ModelProvider,
@@ -1063,5 +1064,308 @@ describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
       stopReason: "error",
       error: { message: "internal error" },
     });
+  });
+});
+
+describe("compaction is exclusive with a turn", () => {
+  /**
+   * The rejection of `p`; fails if `p` resolves or is still pending after `ms`.
+   * Not `expect(p).rejects`: on bun 1.4.3 that spins forever on a promise that
+   * never settles, past the test timeout (docs/library-bugs.md) — and a
+   * regression here is exactly a request left parked.
+   */
+  async function rejection(p: Promise<unknown>, ms = 1000): Promise<unknown> {
+    const outcome = await Promise.race([
+      p.then(
+        () => ({ kind: "resolved" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error }),
+      ),
+      tick(ms).then(() => ({ kind: "pending" as const })),
+    ]);
+    if (outcome.kind !== "rejected") throw new Error(`expected a rejection, got: ${outcome.kind}`);
+    return outcome.error;
+  }
+
+  /**
+   * The summarize request (the tool-free one) parks until `releaseSummary()`
+   * and IGNORES the abort signal (the stronger case for cancel). A turn round
+   * whose last message is "go" calls the shell tool; every other round answers.
+   */
+  class CompactProvider implements ModelProvider {
+    readonly id = "compact";
+    summaries = 0;
+    private summaryGates: (() => void)[] = [];
+    constructor(private readonly summary = "SUMMARY") {}
+    releaseSummary(): void {
+      for (const open of this.summaryGates.splice(0)) open();
+    }
+    async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+      if (request.tools?.length === 0) {
+        this.summaries++;
+        await new Promise<void>((r) => this.summaryGates.push(r));
+        if (this.summary) yield { type: "text", delta: this.summary };
+        yield { type: "done" };
+        return;
+      }
+      if (request.messages.at(-1)?.content === "go") {
+        yield {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls" }) },
+        };
+      } else {
+        yield { type: "text", delta: "done" };
+      }
+      yield { type: "done" };
+    }
+  }
+
+  /** A tool env whose `exec` parks until `release()`. */
+  function parkedEnv() {
+    let gate: (() => void) | null = null;
+    const env: ExecutionEnvironment = {
+      id: "parked",
+      async exec() {
+        await new Promise<void>((r) => {
+          gate = r;
+        });
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      },
+      async readFile() {
+        return "";
+      },
+      async writeFile() {},
+    };
+    return {
+      env,
+      parked: () => gate !== null,
+      release: () => gate?.(),
+    };
+  }
+
+  const until = async (cond: () => boolean, timeoutMs = 3000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (!cond()) {
+      if (Date.now() > deadline) throw new Error("condition not reached");
+      await tick(1);
+    }
+  };
+
+  async function setup(model: ModelProvider, env: ExecutionEnvironment = noopEnv) {
+    const h = harness(model, env, {
+      onRequest: async () => ({ outcome: { outcome: "selected", optionId: "allow_once" } }),
+    });
+    await h.client.request("initialize", INIT);
+    const { sessionId } = (await h.client.request("session/new", {})) as { sessionId: string };
+    const history = async () =>
+      ((await h.client.request("session/snapshot", { sessionId })) as { messages: ChatMessage[] })
+        .messages;
+    const compact = () => h.client.request("session/compact", { sessionId });
+    const prompt = (turnId: string, text: string) =>
+      h.client.request("session/prompt", { sessionId, turnId, content: [{ type: "text", text }] });
+    return { ...h, sessionId, history, compact, prompt };
+  }
+
+  test("compact during a turn is rejected TurnInProgress; the turn's history stays whole", async () => {
+    const model = new CompactProvider();
+    const parked = parkedEnv();
+    const s = await setup(model, parked.env);
+    await s.prompt("t1", "go");
+    await until(parked.parked);
+
+    expect(await rejection(s.compact())).toMatchObject({ code: DomainErrorCode.TurnInProgress });
+
+    parked.release();
+    expect((await turnEnd(s.updates, "t1")).stopReason).toBe("end_turn");
+    const history = (await s.history()).filter((m) => m.role !== "system");
+    expect(history.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect(history[1]?.toolCalls?.[0]?.id).toBe("c1");
+    expect(history[2]?.toolCallId).toBe("c1");
+    expect(model.summaries).toBe(0);
+  });
+
+  test("prompt during a compaction is rejected CompactInProgress and not recorded", async () => {
+    const model = new CompactProvider();
+    const s = await setup(model);
+    await runTurn(s.client, s.updates, s.sessionId, "hello", "t0");
+    const before = (await s.history()).length;
+    const compacting = s.compact();
+    await until(() => model.summaries === 1);
+
+    expect(await rejection(s.prompt("t1", "second"))).toMatchObject({
+      code: DomainErrorCode.CompactInProgress,
+    });
+
+    model.releaseSummary();
+    const result = (await compacting) as { before: number; after: number };
+    expect(result.before).toBe(before);
+    // The rejected id was not recorded: it now starts a turn on the compacted history.
+    expect((await runTurn(s.client, s.updates, s.sessionId, "second", "t1")).stopReason).toBe(
+      "end_turn",
+    );
+    const history = (await s.history()).filter((m) => m.role !== "system");
+    expect(history.map((m) => m.role)).toEqual(["user", "user", "assistant"]);
+    expect(history[0]?.content).toContain("SUMMARY");
+    expect(history[1]?.content).toBe("second");
+  });
+
+  test("compact during a compaction is rejected CompactInProgress; the first completes", async () => {
+    const model = new CompactProvider();
+    const s = await setup(model);
+    await runTurn(s.client, s.updates, s.sessionId, "hello", "t0");
+    const first = s.compact();
+    await until(() => model.summaries === 1);
+
+    expect(await rejection(s.compact())).toMatchObject({ code: DomainErrorCode.CompactInProgress });
+
+    model.releaseSummary();
+    expect(await first).toMatchObject({ after: 1 });
+    expect(model.summaries).toBe(1);
+  });
+
+  test("session/cancel stops a compaction: Cancelled, history untouched, session free", async () => {
+    const model = new CompactProvider();
+    const s = await setup(model);
+    await runTurn(s.client, s.updates, s.sessionId, "hello", "t0");
+    const before = await s.history();
+    const compacting = s.compact();
+    await until(() => model.summaries === 1);
+
+    s.client.notify("session/cancel", { sessionId: s.sessionId });
+    await tick();
+    // The provider ignores the signal: its summary still lands, and must not apply.
+    model.releaseSummary();
+
+    expect(await rejection(compacting)).toMatchObject({ code: DomainErrorCode.Cancelled });
+    expect(await s.history()).toEqual(before);
+    expect((await runTurn(s.client, s.updates, s.sessionId, "again", "t1")).stopReason).toBe(
+      "end_turn",
+    );
+  });
+
+  test("a compaction that fails frees the session for the next prompt", async () => {
+    const model = new CompactProvider("");
+    const s = await setup(model);
+    await runTurn(s.client, s.updates, s.sessionId, "hello", "t0");
+    const compacting = s.compact();
+    await until(() => model.summaries === 1);
+    model.releaseSummary();
+    expect(await rejection(compacting)).toBeInstanceOf(RpcError);
+
+    expect((await runTurn(s.client, s.updates, s.sessionId, "again", "t1")).stopReason).toBe(
+      "end_turn",
+    );
+  });
+
+  test("a parked compaction does not serialize the peer: snapshot and enqueue still answer", async () => {
+    const model = new CompactProvider();
+    const s = await setup(model);
+    await runTurn(s.client, s.updates, s.sessionId, "hello", "t0");
+    const compacting = s.compact();
+    await until(() => model.summaries === 1);
+
+    expect((await s.history()).filter((m) => m.role !== "system")).toHaveLength(2);
+    expect(
+      await rejection(
+        s.client.request("session/enqueue", {
+          sessionId: s.sessionId,
+          id: "e1",
+          turnId: "t0",
+          text: "late",
+        }),
+      ),
+    ).toMatchObject({ code: DomainErrorCode.NoTurnRunning });
+
+    model.releaseSummary();
+    await compacting;
+  });
+  // The load-bearing property: check and take of the busy slot in ONE
+  // synchronous stretch. Both frames are sent in the same tick, so an `await`
+  // between the check and the take would let both in.
+  test("compact then prompt in the same tick: the compaction wins, the prompt is rejected", async () => {
+    const model = new CompactProvider();
+    const s = await setup(model);
+    await runTurn(s.client, s.updates, s.sessionId, "hello", "t0");
+    const before = (await s.history()).length;
+    const compacting = s.compact();
+    const prompted = s.prompt("t1", "racing");
+
+    expect(await rejection(prompted)).toMatchObject({ code: DomainErrorCode.CompactInProgress });
+    await until(() => model.summaries === 1);
+    model.releaseSummary();
+    expect(await compacting).toMatchObject({ before, after: 1 });
+    expect(s.updates.some((u) => u.update.type === "turn_start" && u.update.turnId === "t1")).toBe(
+      false,
+    );
+  });
+
+  test("prompt then compact in the same tick: the turn wins, the compact is rejected", async () => {
+    const model = new CompactProvider();
+    const s = await setup(model);
+    const prompted = s.prompt("t1", "racing");
+    const compacting = s.compact();
+
+    expect(await rejection(compacting)).toMatchObject({ code: DomainErrorCode.TurnInProgress });
+    expect(await prompted).toEqual({ turnId: "t1" });
+    expect((await turnEnd(s.updates, "t1")).stopReason).toBe("end_turn");
+    expect(model.summaries).toBe(0);
+  });
+
+  test("$/cancelRequest on session/compact stops it daemon-side: history untouched, slot freed", async () => {
+    const model = new CompactProvider();
+    const s = await setup(model);
+    await runTurn(s.client, s.updates, s.sessionId, "hello", "t0");
+    const before = await s.history();
+    const controller = new AbortController();
+    const compacting = s.client.request(
+      "session/compact",
+      { sessionId: s.sessionId },
+      { signal: controller.signal },
+    );
+    await until(() => model.summaries === 1);
+
+    controller.abort();
+    await rejection(compacting);
+    await tick();
+    // The provider ignores the signal: its summary still lands, and must not apply.
+    model.releaseSummary();
+    await tick();
+
+    expect(await s.history()).toEqual(before);
+    expect((await runTurn(s.client, s.updates, s.sessionId, "again", "t1")).stopReason).toBe(
+      "end_turn",
+    );
+  });
+
+  test("a retried turnId while compacting gets its cached outcome, not CompactInProgress", async () => {
+    const model = new CompactProvider();
+    const s = await setup(model);
+    await runTurn(s.client, s.updates, s.sessionId, "hello", "t0");
+    const compacting = s.compact();
+    await until(() => model.summaries === 1);
+
+    expect(await s.prompt("t0", "hello")).toMatchObject({
+      turnId: "t0",
+      ended: { stopReason: "end_turn" },
+    });
+
+    model.releaseSummary();
+    await compacting;
+  });
+  test("a compact whose signal is already aborted is Cancelled before any model call", async () => {
+    const model = new CompactProvider();
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv });
+    const session = new Session(agent);
+    session.messages.push({ role: "user", content: "hi" });
+    const hosted = new HostedSession("s1", session, new PermissionBroker(), async () => ({
+      outcome: "cancelled",
+    }));
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(await rejection(hosted.compact(controller.signal))).toMatchObject({
+      code: DomainErrorCode.Cancelled,
+    });
+    expect(model.summaries).toBe(0);
+    expect(hosted.running).toBe(false);
   });
 });

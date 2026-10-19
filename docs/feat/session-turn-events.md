@@ -168,7 +168,7 @@ process.exit(0);
 1. **`compacting` is not a thing yet.** The eval's step 1 checks "`controller`
    (or compacting)". `HostedSession` has no compaction flag
    (`hosted-session.ts:134-137`), and the guard is its own task
-   (`docs/eval/daemon-compact-turn-guard.md`, a precondition of 3c, D8). 3b
+   (`docs/fix/daemon-compact-turn-guard.md`, a precondition of 3c, D8). 3b
    checks only `controller`. Compaction racing a turn stays exactly as on
    `main`.
 2. **No contract orders the ack against the turn's stream** (new failure
