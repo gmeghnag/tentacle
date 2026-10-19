@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type {
+  ChatMessage,
   ChatRequest,
   ExecutionEnvironment,
   ModelProvider,
@@ -243,5 +244,275 @@ describe("Agent.run", () => {
     await expect(collect(agent.run("s1", [{ role: "user", content: "hi" }]))).rejects.toThrow(
       "network boom",
     );
+  });
+});
+
+describe("Agent cancel (post-stream / between-tools)", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const abortError = () => new DOMException("The operation was aborted", "AbortError");
+
+  /** A model that takes `delayMs` before yielding, then emits `events`. When
+   * `honoursAbort` it throws AbortError once the signal has aborted (a real
+   * provider); otherwise it completes normally even after the abort (a
+   * misbehaving one — the leak this describe-block pins). */
+  function lateProvider(
+    events: readonly StreamEvent[],
+    delayMs: number,
+    honoursAbort: boolean,
+  ): ModelProvider {
+    return {
+      id: "late",
+      async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+        await sleep(delayMs);
+        for (const event of events) {
+          if (honoursAbort && request.signal?.aborted) {
+            throw abortError();
+          }
+          yield event;
+        }
+      },
+    };
+  }
+
+  /** A tool that ignores ctx.signal, runs after `slowMs`, and records starts. */
+  function slowTool(name: string, slowMs: number, ran: string[]): Tool<{ n: number }> {
+    return {
+      name,
+      description: name,
+      inputSchema: z.object({ n: z.number() }),
+      permission: "none",
+      async execute(input) {
+        ran.push(`${name}#${input.n}`);
+        await sleep(slowMs);
+        return { content: `ok-${input.n}` };
+      },
+    };
+  }
+
+  function registryWith(ran: string[]): ToolRegistry {
+    return new ToolRegistry().register(slowTool("slow", 120, ran));
+  }
+
+  test("a stream that completes after the abort does not run its tools", async () => {
+    const ran: string[] = [];
+    const ac = new AbortController();
+    // The cancel lands mid-stream (50 ms) and the model, which ignores its
+    // signal, still completes with a tool call (~200 ms).
+    const model = lateProvider(
+      [{ type: "tool_call", toolCall: { id: "c1", name: "slow", arguments: '{"n":1}' } }],
+      200,
+      false,
+    );
+    const agent = new Agent({ model, tools: registryWith(ran), env: noopEnv });
+    const messages: ChatMessage[] = [{ role: "user", content: "hi" }];
+    const timer = setTimeout(() => ac.abort(), 50);
+
+    const events = await collect(agent.runMessages(messages, "s1", ac.signal));
+    clearTimeout(timer);
+
+    // No tool may run after the cancel.
+    expect(ran).toEqual([]);
+    expect(events.filter((e) => e.type === "tool_start")).toHaveLength(0);
+    // The late round is discarded wholesale: no assistant reply in history.
+    expect(messages.filter((m) => m.role === "assistant")).toHaveLength(0);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+  });
+
+  test("a stream that completes after the abort does not keep its reply in history", async () => {
+    const ac = new AbortController();
+    const model = lateProvider(
+      [{ type: "text", delta: "late reply" }, { type: "done" }],
+      200,
+      false,
+    );
+    const agent = new Agent({ model, tools: registryWith([]), env: noopEnv });
+    const messages: ChatMessage[] = [{ role: "user", content: "hi" }];
+    const timer = setTimeout(() => ac.abort(), 50);
+
+    const events = await collect(agent.runMessages(messages, "s1", ac.signal));
+    clearTimeout(timer);
+
+    // The late reply must not be persisted, and the turn is cancelled, not end_turn.
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    expect(messages.filter((m) => m.role === "assistant")).toHaveLength(0);
+  });
+
+  test("a cancel during tool #1 stops tool #2 and answers it synthetically", async () => {
+    const ran: string[] = [];
+    const ac = new AbortController();
+    // The model is fast (returns immediately with two calls); the cancel lands
+    // while the slow tool #1 is running.
+    const model: ModelProvider = {
+      id: "two-calls",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { type: "tool_call", toolCall: { id: "c1", name: "slow", arguments: '{"n":1}' } };
+        yield { type: "tool_call", toolCall: { id: "c2", name: "slow", arguments: '{"n":2}' } };
+        yield { type: "done" };
+      },
+    };
+    const agent = new Agent({ model, tools: registryWith(ran), env: noopEnv });
+    const messages: ChatMessage[] = [{ role: "user", content: "go" }];
+    const timer = setTimeout(() => ac.abort(), 30);
+
+    const events = await collect(agent.runMessages(messages, "s1", ac.signal));
+    clearTimeout(timer);
+
+    // Tool #1 already started and ran; tool #2 must not.
+    expect(ran).toEqual(["slow#1"]);
+    expect(events.filter((e) => e.type === "tool_start")).toHaveLength(1);
+    // Tool #2 is answered (history stays valid) even though it never ran.
+    const results = events.filter((e) => e.type === "tool_result");
+    expect(results.map((e) => e.id)).toEqual(["c1", "c2"]);
+    const c2 = results.at(1);
+    if (c2?.type !== "tool_result") throw new Error("expected a c2 tool_result event");
+    expect(c2.result.isError).toBe(true);
+    expect(messages.at(-1)).toEqual({
+      role: "tool",
+      content: c2.result.content,
+      toolCallId: "c2",
+    });
+    // No dangling tool call: every id in the assistant message has a tool answer.
+    const assistant = messages.find((m) => m.role === "assistant");
+    const answered = new Set(messages.filter((m) => m.role === "tool").map((m) => m.toolCallId));
+    for (const call of assistant?.toolCalls ?? []) {
+      expect(answered.has(call.id)).toBe(true);
+    }
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+  });
+
+  test("a cancel during the max-iterations final stream ends cancelled and drops the late summary", async () => {
+    const ac = new AbortController();
+    let calls = 0;
+    const model: ModelProvider = {
+      id: "cap-late",
+      async *stream(): AsyncIterable<StreamEvent> {
+        calls += 1;
+        if (calls === 1) {
+          yield { type: "tool_call", toolCall: { id: "c1", name: "fast", arguments: '{"n":1}' } };
+          yield { type: "done" };
+          return;
+        }
+        // The final (tools-less) turn: the model ignores the signal and
+        // completes after the abort, with a summary that must not be kept.
+        await sleep(200);
+        yield { type: "text", delta: "late summary" };
+        yield { type: "done" };
+      },
+    };
+    const fastTool: Tool<{ n: number }> = {
+      name: "fast",
+      description: "fast",
+      inputSchema: z.object({ n: z.number() }),
+      permission: "none",
+      async execute(input) {
+        return { content: `ok-${input.n}` };
+      },
+    };
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(fastTool),
+      env: noopEnv,
+      maxIterations: 1,
+    });
+    const messages: ChatMessage[] = [{ role: "user", content: "go" }];
+    const timer = setTimeout(() => ac.abort(), 50);
+
+    const events = await collect(agent.runMessages(messages, "s1", ac.signal));
+    clearTimeout(timer);
+
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    // Only the tool-call round is kept; the late final-turn summary is dropped.
+    expect(messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+  });
+
+  test("a cancel during the last tool of a capped turn ends cancelled, not max_iterations", async () => {
+    const ran: string[] = [];
+    const ac = new AbortController();
+    const model: ModelProvider = {
+      id: "cap-last-tool",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { type: "tool_call", toolCall: { id: "c1", name: "slow", arguments: '{"n":1}' } };
+        yield { type: "done" };
+      },
+    };
+    const agent = new Agent({
+      model,
+      tools: registryWith(ran),
+      env: noopEnv,
+      maxIterations: 1,
+    });
+    const messages: ChatMessage[] = [{ role: "user", content: "go" }];
+    // The cancel lands while the (only) tool — the turn's last tool — is running.
+    const timer = setTimeout(() => ac.abort(), 30);
+
+    const events = await collect(agent.runMessages(messages, "s1", ac.signal));
+    clearTimeout(timer);
+
+    // The tool already started and ran; the cap is hit; the user cancelled.
+    // The turn must report `cancelled`, not `max_iterations` (the cancel wins).
+    expect(ran).toEqual(["slow#1"]);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+  });
+
+  test("a tool approved after the cancel does not run", async () => {
+    const ran: string[] = [];
+    const ac = new AbortController();
+    // The model returns one call to an `ask`-level tool immediately.
+    const model: ModelProvider = {
+      id: "ask-tool",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { type: "tool_call", toolCall: { id: "c1", name: "write", arguments: '{"n":1}' } };
+        yield { type: "done" };
+      },
+    };
+    // The `ask` tool: its permission prompt is only answered AFTER the cancel
+    // (a headless or non-TUI requester can approve late; the TUI denies on Esc).
+    const writeTool: Tool<{ n: number }> = {
+      name: "write",
+      description: "write",
+      inputSchema: z.object({ n: z.number() }),
+      permission: "ask",
+      async execute(input) {
+        ran.push(`write#${input.n}`);
+        return { content: `ok-${input.n}` };
+      },
+    };
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(writeTool),
+      env: noopEnv,
+      // Approves ~100 ms in — well after the cancel at 30 ms.
+      requestPermission: async () => {
+        await sleep(100);
+        return { allowed: true, scope: "once" };
+      },
+    });
+    const messages: ChatMessage[] = [{ role: "user", content: "go" }];
+    const timer = setTimeout(() => ac.abort(), 30);
+
+    const events = await collect(agent.runMessages(messages, "s1", ac.signal));
+    clearTimeout(timer);
+
+    // The approval arrives after the cancel, so the tool must NOT run.
+    expect(ran).toEqual([]);
+    // It is answered with the cancel note (isError), not a real result.
+    const result = events.find((e) => e.type === "tool_result");
+    if (result?.type !== "tool_result") throw new Error("expected a tool_result");
+    expect(result.result.isError).toBe(true);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+  });
+
+  test("a provider that honours the signal still takes the clean catch path", async () => {
+    const ac = new AbortController();
+    const model = lateProvider([{ type: "text", delta: "never" }, { type: "done" }], 200, true);
+    const agent = new Agent({ model, tools: registryWith([]), env: noopEnv });
+    const messages: ChatMessage[] = [{ role: "user", content: "hi" }];
+    const timer = setTimeout(() => ac.abort(), 50);
+
+    const events = await collect(agent.runMessages(messages, "s1", ac.signal));
+    clearTimeout(timer);
+
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    expect(messages.filter((m) => m.role === "assistant")).toHaveLength(0);
   });
 });

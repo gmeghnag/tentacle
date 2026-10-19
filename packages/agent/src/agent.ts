@@ -41,6 +41,9 @@ export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations";
 const MAX_EMPTY_CONTINUES = 2;
 /** The internal nudge injected to un-stick a model that returned an empty round. */
 const CONTINUE_NUDGE = "Continue with the task.";
+/** Result recorded for a tool call skipped because the user cancelled mid-round,
+ * so the assistant's `toolCalls` stay answered in the history. */
+const CANCELLED_TOOL_NOTE = "Cancelled by the user before this tool ran.";
 
 export type AgentEvent =
   | { readonly type: "text"; readonly delta: string }
@@ -241,6 +244,15 @@ export class Agent {
         throw error;
       }
 
+      // The provider may complete normally *after* the abort (a batch fallback,
+      // a third-party provider that swallows its signal, or an Esc landing just
+      // after the last event). Don't keep the late reply or run its tools — end
+      // the turn cancelled. (Providers that THROW on abort take the catch above.)
+      if (signal?.aborted) {
+        yield { type: "turn_end", reason: "cancelled" };
+        return;
+      }
+
       messages.push(
         toolCalls.length > 0
           ? { role: "assistant", content: text, toolCalls }
@@ -281,6 +293,25 @@ export class Agent {
       }
 
       for (const call of toolCalls) {
+        if (signal?.aborted) {
+          // The user cancelled while the previous tool ran (or before this one
+          // could start). It must not start — and must not prompt for
+          // permission either (`authorize` lives inside runTool). Answer it
+          // synthetically so the assistant's `toolCalls` stay valid in the
+          // history; the next iteration top ends the turn as cancelled.
+          messages.push({
+            role: "tool",
+            content: CANCELLED_TOOL_NOTE,
+            toolCallId: call.id,
+          });
+          yield {
+            type: "tool_result",
+            id: call.id,
+            name: call.name,
+            result: { content: CANCELLED_TOOL_NOTE, isError: true },
+          };
+          continue;
+        }
         yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
         // Interleave the tool's live progress (e.g. a sub-agent's activity) into
         // our own stream while it runs, then yield the final result.
@@ -299,6 +330,15 @@ export class Agent {
         yield { type: "tool_result", id: call.id, name: call.name, result };
         messages.push({ role: "tool", content: result.content, toolCallId: call.id });
       }
+    }
+
+    // The cap was hit. If the user cancelled while the last tool ran (after the
+    // iteration-top check, before the final stream below could even start), the
+    // cancel wins over the `max_iterations` report. (An abort *during* the final
+    // stream is handled inside it, below.)
+    if (signal?.aborted) {
+      yield { type: "turn_end", reason: "cancelled" };
+      return;
     }
 
     // Out of iterations. Give the model ONE final turn with no tools offered, so
@@ -334,6 +374,13 @@ export class Agent {
             yield { type: "usage", usage: event.usage };
           }
           // tool_call events are ignored: no tools were offered.
+        }
+        // The final stream may complete after an abort (mirrors the post-stream
+        // check above): the cancel wins over the `max_iterations` report, and
+        // the late reply is not kept (providers that THROW take the catch below).
+        if (signal?.aborted) {
+          yield { type: "turn_end", reason: "cancelled" };
+          return;
         }
         // Persist only the summary (not the synthetic nudge), so history stays clean.
         if (finalText.trim() !== "") {
@@ -426,6 +473,13 @@ export class Agent {
           content: `Permission denied by the user: \`${call.name}\` was not run.`,
           isError: true,
         };
+      }
+      // The permission prompt may be answered (allowed) *after* the user
+      // cancelled — the TUI denies on Esc, but a headless / non-TUI requester
+      // can approve late, and a disconnect is only fail-safe at the daemon
+      // edge. Re-check the abort here so the tool never starts after a cancel.
+      if (ctx.signal.aborted) {
+        return { content: CANCELLED_TOOL_NOTE, isError: true };
       }
     }
     return await this.config.tools.execute(call.name, call.arguments, ctx);
