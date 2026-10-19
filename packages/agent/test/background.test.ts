@@ -49,6 +49,7 @@ function controllableJobs(): JobController & { fireExit(job: BackgroundJob): voi
     read: () => undefined,
     kill: () => false,
     list: () => [],
+    dispose: () => {},
     onExit(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);

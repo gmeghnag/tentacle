@@ -46,6 +46,7 @@ class FakeJobs implements JobController {
   list(): readonly BackgroundJob[] {
     return [];
   }
+  dispose(): void {}
   onExit(listener: (job: BackgroundJob) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

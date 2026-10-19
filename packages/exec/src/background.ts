@@ -77,9 +77,13 @@ class Job {
 export class BackgroundJobs implements JobController {
   private readonly jobs = new Map<string, Job>();
   private readonly listeners = new Set<(job: BackgroundJob) => void>();
-  /** Kill callbacks, keyed by job id (cleared on exit). */
-  private readonly handles = new Map<string, () => void>();
+  /**
+   * Kill callbacks, keyed by job id. Kept after the job exits: a child it
+   * backgrounded (`cmd &`) can outlive it, and the handle still reaches it.
+   */
+  private readonly handles = new Map<string, () => boolean>();
   private seq = 0;
+  private disposed = false;
 
   constructor(private readonly env: ExecutionEnvironment) {}
 
@@ -110,8 +114,12 @@ export class BackgroundJobs implements JobController {
 
   kill(id: string): boolean {
     const job = this.jobs.get(id);
-    if (!job || job.status !== "running") {
+    if (!job) {
       return false;
+    }
+    if (job.status !== "running") {
+      // The job itself is done, but children it left running may not be.
+      return this.handles.get(id)?.() ?? false;
     }
     job.killed = true;
     this.handles.get(id)?.();
@@ -120,6 +128,16 @@ export class BackgroundJobs implements JobController {
 
   list(): readonly BackgroundJob[] {
     return [...this.jobs.values()].map((j) => j.snapshot());
+  }
+
+  dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    for (const id of this.jobs.keys()) {
+      this.kill(id);
+    }
   }
 
   onExit(listener: (job: BackgroundJob) => void): () => void {
@@ -156,7 +174,6 @@ export class BackgroundJobs implements JobController {
     }
     job.exitCode = code;
     job.status = job.killed ? "killed" : "exited";
-    this.handles.delete(job.id);
     const snapshot = job.snapshot();
     for (const listener of this.listeners) {
       listener(snapshot);

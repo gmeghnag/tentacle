@@ -4,7 +4,7 @@
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10)
 > **Type:** eval · **Size:** M (if promoted: split into two tasks, see Review) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (touches the protocol, the daemon `Connection`, and the TUI-over-RPC session path, AGENTS §7)
 
-> **Superseded in part (2026-10-19):** task 2 below (`fix/daemon-session-lifecycle`) is absorbed by `docs/eval/session-registry.md` and `docs/eval/session-ttl-limits.md`, a child of the protocol-v2 redesign `docs/eval/session-reattach.md`. Task 1 (`fix/background-process-groups`) now has its own self-contained doc, `docs/eval/background-process-groups.md` (approved, ready to promote), which also pulls in the process-exit net and job disposal on connection close from task 2 — see the caveat at `:172`.
+> **Superseded in part (2026-10-19):** task 2 below (`fix/daemon-session-lifecycle`) is absorbed by `docs/eval/session-registry.md` and `docs/eval/session-ttl-limits.md`, a child of the protocol-v2 redesign `docs/eval/session-reattach.md`. Task 1 (`fix/background-process-groups`) now has its own self-contained doc, `docs/fix/background-process-groups.md` (promoted, in execution), which also pulls in the process-exit net and job disposal on connection close from task 2 — see the caveat at `:172`.
 
 ## Context
 

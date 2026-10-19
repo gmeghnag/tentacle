@@ -93,6 +93,7 @@ function fakeJobs(): JobController & {
     onExit() {
       return () => {};
     },
+    dispose() {},
   };
 }
 

@@ -33,6 +33,7 @@ export class HostedSession {
   private seq = 0;
   private turnBuffer: SessionUpdateParams[] = [];
   private sink: UpdateSink | null = null;
+  private readonly jobs: JobController | undefined;
 
   constructor(
     id: string,
@@ -43,6 +44,7 @@ export class HostedSession {
   ) {
     this.id = id;
     this.session = session;
+    this.jobs = jobs;
     // The agent's permission gate routes here; we forward to the client and map
     // its choice back to a local allow/deny + scope.
     permissions.setRequester(async (req) => {
@@ -134,5 +136,10 @@ export class HostedSession {
   /** Abort the active turn (if any). */
   cancel(): void {
     this.controller?.abort();
+  }
+
+  /** Terminate every background job this session started. */
+  disposeJobs(): void {
+    this.jobs?.dispose();
   }
 }

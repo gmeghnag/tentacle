@@ -380,11 +380,21 @@ Daily-driver work (done 2026-10-14):
       `(no stack)` with no phase. Recommends retry pre-first-byte only + phase
       diagnostics. **Eval:** `docs/eval/model-connection-resilience.md`.
       Type: eval → feat · Size: M · Blast: load-bearing.
-- [ ] 🟡 **`shell_kill` leaves grandchildren running** (only `sh` gets the signal;
-      a compound command's child is re-parented to PID 1). Found during the
-      lifecycle eval — see `docs/eval/daemon-session-lifecycle.md`. Same work
-      as child 1 of the v2 redesign (`docs/eval/background-process-groups.md`, Block 11)
-      — one task, not two.
+- [x] 🟡 **`shell_kill` leaves grandchildren running** (only `sh` gets the signal;
+      a compound command's child is re-parented to PID 1). FIXED (2026-10-19,
+      `fix/background-process-groups`): every shell runs in its own process
+      group (group TERM → KILL), `dispose()` on connection close, and a
+      main-thread exit net (incl. the worker path, `cmd &` children, SIGHUP/
+      SIGTERM; `nohup` preserved). See `docs/fix/background-process-groups.md`.
+- [ ] 🟢 **Graceful shutdown for background jobs** (follow-up of
+      `fix/background-process-groups`). On the worker path, and in practice on
+      stdio/ws `serve`, tentacle's exit kills job groups with SIGKILL only — no
+      TERM grace (dev servers may leave sockets/temp files). Fix: a `shutdown`
+      handshake (worker runs `Connection.close()` → `dispose()`, acks, bounded
+      by a timeout) and an awaited grace before `process.exit`; the exit net
+      stays the fallback. Likely folded into the v2 `session-registry` child.
+      See Notes/debt in `docs/fix/background-process-groups.md`.
+      Type: feat · Size: S–M · Blast: load-bearing.
 - [ ] 🟡 **OpenAI provider treats an in-band SSE `{"error":…}` chunk as an empty
       stream** (HTTP 200, no throw), so callers see a silent empty response (e.g.
       `/compact` wiping history). See `docs/fix/compact-empty-summary-wipe.md`
@@ -446,7 +456,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       Children drafted (Implementation per child) and owner decisions A–G, D1–D10
       recorded in the parent (2026-10-19).
       Type: eval (parent) · Size: L → split · Blast: load-bearing. Children, in order:
-      1. **Eval (approved, ready to promote):** `docs/eval/background-process-groups.md` · S–M · load-bearing
+      1. **Fix (DONE 2026-10-19, `fix/background-process-groups`):** `docs/fix/background-process-groups.md` · S–M · load-bearing
       2. **Eval:** `docs/eval/protocol-schema-export.md` · S–M · cross-module
       2b. prerequisite: `docs/eval/daemon-compact-turn-guard.md` (before 3c)
       3a/3b/3c. **Eval:** `docs/eval/session-event-stream.md` · S / M / M · load-bearing (three branches)

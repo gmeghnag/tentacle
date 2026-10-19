@@ -14,6 +14,7 @@ function fakeHandle(): {
   let errCtl!: ReadableStreamDefaultController<Uint8Array>;
   let resolve!: (code: number | null) => void;
   let wasKilled = false;
+  let done = false;
   const enc = new TextEncoder();
   const stdout = new ReadableStream<Uint8Array>({
     start: (c) => {
@@ -34,8 +35,10 @@ function fakeHandle(): {
       stdout,
       stderr,
       exited,
+      // Like the real handle: true only while there is something to signal.
       kill: () => {
         wasKilled = true;
+        return !done;
       },
     },
     emitOut: (s) => outCtl.enqueue(enc.encode(s)),
@@ -47,6 +50,7 @@ function fakeHandle(): {
       } catch {
         // already closed
       }
+      done = true;
       resolve(code);
     },
     killed: () => wasKilled,

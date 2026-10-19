@@ -20,6 +20,7 @@ import type {
   ModelProvider,
   PermissionBroker,
 } from "@tentacle/core";
+import { applyGroupMessage } from "@tentacle/exec";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
 
@@ -44,6 +45,7 @@ function remoteJobsView(client: RemoteClient): JobController {
     read: () => undefined,
     kill: () => false,
     list: () => [],
+    dispose: () => {},
     onExit: (listener) =>
       client.onBackgroundExit((n) =>
         listener({
@@ -197,9 +199,13 @@ export async function startWorkerRuntime(
     log(`[worker] could not start (${String(error)}); using in-process\n`);
     return null;
   }
-  // The worker reports MCP connection errors as an object message (never a
-  // string RPC frame), so a broken MCP server is surfaced without being fatal.
+  // Object messages (never string RPC frames) from the worker: forwarded job
+  // process groups (the main thread owns the exit net that kills them), and MCP
+  // connection errors, surfaced without being fatal.
   worker.addEventListener("message", (event: { data: unknown }) => {
+    if (applyGroupMessage(event.data)) {
+      return;
+    }
     const data = event.data as { type?: string; errors?: Record<string, string> } | null;
     if (data && typeof data === "object" && data.type === "mcp-errors" && data.errors) {
       for (const [name, message] of Object.entries(data.errors)) {

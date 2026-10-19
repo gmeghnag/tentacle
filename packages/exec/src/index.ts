@@ -6,3 +6,4 @@
  */
 export * from "./host-execution.ts";
 export * from "./background.ts";
+export * from "./process-group.ts";

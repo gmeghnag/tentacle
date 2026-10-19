@@ -87,6 +87,7 @@
         "@tentacle/transport": "workspace:*",
       },
       "devDependencies": {
+        "@tentacle/exec": "workspace:*",
         "@tentacle/tools": "workspace:*",
         "zod": "3.23.8",
       },

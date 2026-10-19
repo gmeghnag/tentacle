@@ -30,7 +30,11 @@ export interface BackgroundHandle {
   readonly stderr: ReadableStream<Uint8Array>;
   /** Resolves with the exit code (or null if the process was killed by signal). */
   readonly exited: Promise<number | null>;
-  kill(): void;
+  /**
+   * Terminate the process and everything it started — including children it
+   * left running after it exited (`cmd &`). True if anything was signalled.
+   */
+  kill(): boolean;
 }
 
 export interface ExecutionEnvironment {

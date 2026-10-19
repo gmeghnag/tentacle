@@ -46,4 +46,9 @@ export interface JobController {
   list(): readonly BackgroundJob[];
   /** Subscribe to job-exit events; returns an unsubscribe function. */
   onExit(listener: (job: BackgroundJob) => void): () => void;
+  /**
+   * Terminate every running job (end of the owning session/connection).
+   * Idempotent.
+   */
+  dispose(): void;
 }
