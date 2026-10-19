@@ -1,6 +1,6 @@
 # Steering over RPC — piano: "Queue a task…" (enqueue) su worker/pod/remote
 
-> **Status:** implemented (2026-10-19, branch `fix/steering-over-rpc`): `daemon/src/mapping.ts` now maps `steer` → `{ type: "steer", text }` and `session/enqueue` is wired end-to-end (protocol → daemon → client → cli → tui), with the TUI reconciling the optimistic ⏳ row on an enqueue reject. See §Execution below. · legacy doc (pre-AGENTS §10); §1–§7 are the approved plan, §Execution is the as-built record
+> **Status:** merged to `main` (2026-10-19, branch `fix/steering-over-rpc`, two adversarial reviews + post-review fixes): `daemon/src/mapping.ts` now maps `steer` → `{ type: "steer", text }` and `session/enqueue` is wired end-to-end (protocol → daemon → client → cli → tui), with the TUI reconciling the optimistic ⏳ row on an enqueue reject. See §Execution below. · legacy doc (pre-AGENTS §10); §1–§7 are the approved plan, §Execution is the as-built record
 
 `Type: fix · Size: M · Blast: load-bearing · Suited: strong model`
 
