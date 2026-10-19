@@ -1,6 +1,6 @@
 # eval/session-event-stream — the stream as single source of truth: consistent cut, turn events, compaction barrier, idempotent commands
 
-> **Status:** implementation drafted — awaiting owner approval (2026-10-19) (child of `docs/eval/session-reattach.md`, step 3)
+> **Status:** split approved (2026-10-19); **3a promoted** → `docs/feat/session-wire-classes.md` (branch `feat/session-wire-classes`); 3b, 3c still planned here (child of `docs/eval/session-reattach.md`, step 3)
 > **Branch:** none until promoted (then, if the split is approved, `feat/session-wire-classes` → `feat/session-turn-events` → `feat/session-history-cut`, one at a time; else `feat/session-event-stream`)
 > **Type:** eval → feat · **Size:** L overall → split into 3a (S) · 3b (M) · 3c (M) on promotion (verified scope spans 7 packages and three risk centres; see Implementation, open question 1) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (protocol + TUI-over-RPC session path, AGENTS §7)
 
@@ -288,6 +288,16 @@ running: boolean; activeTurnId: string | null
 
 #### 3a — classes, unknown-event tolerance, wire hygiene, non-text reject
 
+> **Promoted 2026-10-19 → `docs/feat/session-wire-classes.md`, which supersedes
+> this section.** Verified drift:
+> - Step 2's `z.union([SessionUpdateSchema, UnknownUpdateSchema])` is refused by
+>   the merged exporter, and every flat or `not`-based catch-all breaks Swift
+>   codegen or strict validation. Adopted: a named wrapper
+>   `SessionUpdateOrUnknown = anyOf[SessionUpdate, UnknownSessionUpdate]`.
+> - `seq` becomes required in 3a.
+> - The annotation is `x-event-class`.
+> - The daemon `null`-frame test is dropped (`rawInput` is opaque).
+
 1. `UPDATE_CLASS` in `protocol/src/updates.ts`: all existing types `display`.
    `HostedSession.emit` sets `mandatory: true` from it (omitted otherwise).
 2. Tolerance: `SessionUpdateParamsSchema.update` becomes
@@ -310,6 +320,18 @@ running: boolean; activeTurnId: string | null
    with `"x-tentacle-class"` in the export script from `UPDATE_CLASS`.
 
 #### 3b — turn events, ack-at-once, idempotency, turn driver
+
+> **Constraints from the 3a Review (2026-10-20), both pre-existing on `main`, both
+> must be closed here because 3b adds the first mandatory events:**
+> 1. A frame that fails the *envelope* schema (no `seq`, empty `type`, a
+>    non-object `update`) is dropped at the peer (`transport/src/peer.ts:360-363`)
+>    and never reaches `classifyUpdate`/`fail`: a malformed mandatory frame
+>    (e.g. `turn_end`) mid-turn would hang the turn. Route envelope failures of
+>    `session/update` to the session's handler (`fail`) when `sessionId` is readable.
+> 2. The in-process worker (`cli/src/local-runtime.ts:219`) and `connect`
+>    (`cli/src/connect.ts:21`) build `RemoteClient` without `onError`, so a stream
+>    error with no turn in flight is silent there. Wire a sink (never a raw
+>    terminal write, AGENTS §7).
 
 1. `prompt` is **synchronous** (no `await` before the ack):
    ```

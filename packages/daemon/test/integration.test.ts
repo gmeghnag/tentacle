@@ -8,8 +8,8 @@ import {
   type StreamEvent,
 } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
-import { JsonRpcErrorCode } from "@tentacle/protocol";
-import type { EnqueueResult, SessionUpdateParams } from "@tentacle/protocol";
+import { JsonRpcErrorCode, PROTOCOL_VERSION } from "@tentacle/protocol";
+import type { EnqueueResult, KnownSessionUpdateParams } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { DomainErrorCode } from "@tentacle/transport";
@@ -42,7 +42,7 @@ const noopEnv: ExecutionEnvironment = {
   },
 };
 
-const INIT = { protocolVersion: 1, clientCapabilities: { streaming: true } };
+const INIT = { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { streaming: true } };
 const tick = (ms = 10): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** A daemon-side `SessionHost` plus a connected client `RpcPeer`. */
@@ -67,12 +67,12 @@ function harness(
   });
   const [daemonCh, clientCh] = createChannelPair();
   const connection = new Connection(daemonCh, host, undefined, connOptions);
-  const updates: SessionUpdateParams[] = [];
+  const updates: KnownSessionUpdateParams[] = [];
   const client = new RpcPeer(clientCh, {
     ...clientHandlers,
     onNotification: (method, params) => {
       if (method === "session/update") {
-        updates.push(params as SessionUpdateParams);
+        updates.push(params as KnownSessionUpdateParams);
       }
     },
   });
@@ -91,7 +91,7 @@ describe("daemon ↔ client (in-memory)", () => {
     const { client, updates } = harness(model, noopEnv);
 
     const init = (await client.request("initialize", INIT)) as { protocolVersion: number };
-    expect(init.protocolVersion).toBe(1);
+    expect(init.protocolVersion).toBe(PROTOCOL_VERSION);
 
     const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
     expect(sessionId).toBeTruthy();
@@ -112,8 +112,49 @@ describe("daemon ↔ client (in-memory)", () => {
     expect(texts.join("")).toBe("Hello world");
     // Usage rode along as an agent_usage update.
     expect(updates.some((u) => u.update.type === "agent_usage")).toBe(true);
-    // Updates are sequence-numbered for replay.
-    expect(updates[0]?.seq).toBe(1);
+    // Updates are sequence-numbered for replay: every frame, contiguous from 1.
+    expect(updates.map((u) => u.seq)).toEqual(updates.map((_, i) => i + 1));
+    // Every type here is `display`: the flag is omitted, never sent as false.
+    expect(updates.some((u) => "mandatory" in u)).toBe(false);
+  });
+
+  test("a non-text prompt block is rejected with InvalidParams; no turn starts", async () => {
+    const inner = new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    let calls = 0;
+    const model: ModelProvider = {
+      id: "counting",
+      stream: (request) => {
+        calls++;
+        return inner.stream(request);
+      },
+    };
+    const { client, updates } = harness(model, noopEnv);
+    await client.request("initialize", INIT);
+    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+
+    await expect(
+      client.request("session/prompt", {
+        sessionId,
+        content: [
+          { type: "text", text: "what is in this photo?" },
+          { type: "image", mimeType: "image/png", data: "AA==" },
+        ],
+      }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      message: expect.stringContaining("image"),
+    });
+    await tick();
+    expect(calls).toBe(0);
+    expect(updates).toEqual([]);
+
+    // Nothing leaked (no controller left set): a text prompt runs normally.
+    const result = (await client.request("session/prompt", {
+      sessionId,
+      content: [{ type: "text", text: "hi" }],
+    })) as { stopReason: string };
+    expect(result.stopReason).toBe("end_turn");
+    expect(calls).toBe(1);
   });
 
   test("a shell tool round-trips a permission prompt and runs when approved", async () => {
@@ -321,11 +362,12 @@ describe("daemon ↔ client (in-memory)", () => {
     async writeFile() {},
   };
 
-  const steerUpdates = (updates: SessionUpdateParams[]) =>
+  const steerUpdates = (updates: KnownSessionUpdateParams[]) =>
     updates
       .map((u) => u.update)
       .filter(
-        (u): u is Extract<SessionUpdateParams["update"], { type: "steer" }> => u.type === "steer",
+        (u): u is Extract<KnownSessionUpdateParams["update"], { type: "steer" }> =>
+          u.type === "steer",
       );
 
   test("session/enqueue mid-turn is served while the prompt is in flight and the model sees it", async () => {
@@ -378,7 +420,7 @@ describe("daemon ↔ client (in-memory)", () => {
     const echoed = updates
       .map((u) => u.update)
       .filter(
-        (u): u is Extract<SessionUpdateParams["update"], { type: "agent_message_chunk" }> =>
+        (u): u is Extract<KnownSessionUpdateParams["update"], { type: "agent_message_chunk" }> =>
           u.type === "agent_message_chunk",
       )
       .map((u) => (u.content.type === "text" ? u.content.text : ""))

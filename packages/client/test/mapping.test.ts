@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionUpdate } from "@tentacle/protocol";
-import { stopReasonFromProtocol, updateToEvent } from "../src/mapping.ts";
+import type { SessionUpdate, SessionUpdateParams } from "@tentacle/protocol";
+import { classifyUpdate, stopReasonFromProtocol, updateToEvent } from "../src/mapping.ts";
 
 describe("stopReasonFromProtocol", () => {
   test("keeps cancelled/max_iterations and collapses the rest to end_turn", () => {
@@ -121,5 +121,40 @@ describe("updateToEvent", () => {
       status: "exited",
       exitCode: 0,
     });
+  });
+});
+
+describe("classifyUpdate (event classes: skip unknown display, fail loudly otherwise)", () => {
+  const frame = (update: unknown, mandatory?: true): SessionUpdateParams =>
+    ({
+      sessionId: "s1",
+      seq: 3,
+      ...(mandatory ? { mandatory } : {}),
+      update,
+    }) as SessionUpdateParams;
+
+  test("a valid known update is handled", () => {
+    const update: SessionUpdate = { type: "steer", text: "x" };
+    expect(classifyUpdate(frame(update))).toEqual({ kind: "update", update });
+  });
+
+  test("an unknown display update is ignored", () => {
+    expect(classifyUpdate(frame({ type: "progress", pct: 3 }))).toEqual({ kind: "ignore" });
+  });
+
+  test("an unknown mandatory update is an error that says to update the client", () => {
+    const r = classifyUpdate(frame({ type: "permission_request" }, true));
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.error.message).toMatch(/permission_request.*newer/);
+  });
+
+  test("a known type that fails its member is an error, even without the mandatory flag", () => {
+    const r = classifyUpdate(frame({ type: "agent_message_chunk" }));
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.error.message).toMatch(/malformed agent_message_chunk/);
+  });
+
+  test("an Object.prototype key is unknown, not known (ignored, not 'malformed')", () => {
+    expect(classifyUpdate(frame({ type: "toString" }))).toEqual({ kind: "ignore" });
   });
 });

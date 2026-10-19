@@ -5,7 +5,17 @@
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
 import type { ToolResult } from "@tentacle/core";
-import { type ContentBlock, type SessionUpdate, type StopReason, text } from "@tentacle/protocol";
+import {
+  type ContentBlock,
+  JsonRpcErrorCode,
+  type KnownSessionUpdateParams,
+  type SessionUpdate,
+  type StopReason,
+  UPDATE_CLASS,
+  type UpdateClass,
+  text,
+} from "@tentacle/protocol";
+import { RpcError } from "@tentacle/transport";
 
 /** MIME type used for the embedded unified-diff resource block. */
 export const DIFF_MIME = "text/x-diff";
@@ -16,6 +26,33 @@ export function contentToText(content: readonly ContentBlock[]): string {
     .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
     .map((b) => b.text)
     .join("\n");
+}
+
+/**
+ * Reject a prompt with any non-text block. The agent loop is text-only until
+ * attachments land; dropping the block silently would let the model answer as
+ * if it had seen the image (parent `session-reattach` point 18).
+ */
+export function assertTextOnly(content: readonly ContentBlock[]): void {
+  const other = content.find((b) => b.type !== "text");
+  if (other) {
+    throw new RpcError(
+      JsonRpcErrorCode.InvalidParams,
+      `only text content is supported (got ${other.type}); see docs/eval/attachments.md`,
+    );
+  }
+}
+
+/** One `session/update` frame: `mandatory: true` iff the update's class is mandatory, else omitted. */
+export function toUpdateParams(
+  sessionId: string,
+  seq: number,
+  update: SessionUpdate,
+  classes: Readonly<Record<SessionUpdate["type"], UpdateClass>> = UPDATE_CLASS,
+): KnownSessionUpdateParams {
+  return classes[update.type] === "mandatory"
+    ? { sessionId, seq, mandatory: true, update }
+    : { sessionId, seq, update };
 }
 
 export function stopReasonToProtocol(reason: AgentStopReason): StopReason {

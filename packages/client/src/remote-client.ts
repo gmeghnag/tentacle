@@ -35,8 +35,15 @@ import {
   text,
 } from "@tentacle/protocol";
 import { type DuplexChannel, type RequestContext, RpcError, RpcPeer } from "@tentacle/transport";
+import { classifyUpdate } from "./mapping.ts";
 import { responseToOutcome } from "./permission-map.ts";
 import { RemoteSession } from "./remote-session.ts";
+
+/** A session's in-flight turn: receives its updates, or a stream error that must fail it. */
+export interface SessionStreamHandler {
+  update(update: SessionUpdate): void;
+  fail(error: Error): void;
+}
 
 /** A background-job exit surfaced by the daemon, outside any turn. */
 export interface BackgroundExitNotice {
@@ -64,7 +71,7 @@ export const MODEL_STREAM_BATCH_MAX_CHARS = 64 * 1024;
 export class RemoteClient {
   private readonly peer: RpcPeer;
   private readonly permissions: PermissionBroker;
-  private readonly handlers = new Map<string, (update: SessionUpdate) => void>();
+  private readonly handlers = new Map<string, SessionStreamHandler>();
   /** Session-independent listeners for background-job exits (idle or mid-turn). */
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
 
@@ -88,17 +95,27 @@ export class RemoteClient {
       onNotification: (method, params) => {
         if (method === Notification.SessionUpdate) {
           const p = params as SessionUpdateParams;
+          const classified = classifyUpdate(p);
+          // An unknown display event is skipped by contract (a newer daemon's);
+          // logging it would flood onError with every such frame.
+          if (classified.kind === "ignore") return;
+          if (classified.kind === "error") {
+            this.onError?.(classified.error);
+            this.handlers.get(p.sessionId)?.fail(classified.error);
+            return;
+          }
+          const update = classified.update;
           // A background exit is not turn-scoped: route it to the dedicated
           // listeners (which fire even when no turn is streaming), never to the
           // per-turn update handler.
-          if (p.update.type === "background_exit") {
-            const { jobId, command, status, exitCode } = p.update;
+          if (update.type === "background_exit") {
+            const { jobId, command, status, exitCode } = update;
             for (const listener of this.exitListeners) {
               listener({ jobId, command, status, exitCode });
             }
             return;
           }
-          this.handlers.get(p.sessionId)?.(p.update);
+          this.handlers.get(p.sessionId)?.update(update);
         }
       },
       onRequest: async (method, params, context) => {
@@ -177,7 +194,7 @@ export class RemoteClient {
     this.peer.notify(Notification.Cancel, { sessionId });
   }
 
-  setUpdateHandler(sessionId: string, handler: ((update: SessionUpdate) => void) | null): void {
+  setUpdateHandler(sessionId: string, handler: SessionStreamHandler | null): void {
     if (handler) {
       this.handlers.set(sessionId, handler);
     } else {

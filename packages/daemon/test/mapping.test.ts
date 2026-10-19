@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentEvent } from "@tentacle/agent";
 import type { ToolResult } from "@tentacle/core";
+import { JsonRpcErrorCode, type SessionUpdate, UPDATE_CLASS } from "@tentacle/protocol";
+import { RpcError } from "@tentacle/transport";
 import {
   DIFF_MIME,
+  assertTextOnly,
   contentToText,
   eventToUpdate,
   stopReasonToProtocol,
+  toUpdateParams,
   toolResultContent,
 } from "../src/mapping.ts";
 
@@ -110,4 +114,62 @@ describe("contentToText", () => {
       ]),
     ).toBe("one\ntwo");
   });
+});
+
+describe("toUpdateParams (the session/update frame)", () => {
+  const samples: SessionUpdate[] = [
+    { type: "agent_message_chunk", content: { type: "text", text: "a" } },
+    { type: "agent_thought_chunk", content: { type: "text", text: "t" } },
+    { type: "tool_call", toolCallId: "t", title: "x", status: "pending" },
+    { type: "tool_call_update", toolCallId: "t", status: "completed" },
+    { type: "plan", entries: [] },
+    { type: "agent_usage", promptTokens: 1, completionTokens: 2 },
+    { type: "background_exit", jobId: "j", command: "c", status: "exited", exitCode: null },
+    { type: "steer", text: "s" },
+  ];
+
+  test("covers every known type (keeps the samples honest)", () => {
+    const types: string[] = samples.map((u) => u.type).sort();
+    expect(types).toEqual(Object.keys(UPDATE_CLASS).sort());
+  });
+
+  test("display updates carry no mandatory key at all (omitted, never false)", () => {
+    for (const update of samples) {
+      const params = toUpdateParams("s1", 7, update);
+      expect(params).toEqual({ sessionId: "s1", seq: 7, update });
+      expect("mandatory" in params).toBe(false);
+    }
+  });
+
+  test("mandatory: true iff the class table says mandatory", () => {
+    const classes = { ...UPDATE_CLASS, steer: "mandatory" } as const;
+    for (const update of samples) {
+      const params = toUpdateParams("s1", 1, update, classes);
+      expect("mandatory" in params).toBe(update.type === "steer");
+      if (update.type === "steer") expect(params.mandatory).toBe(true);
+    }
+  });
+});
+
+describe("assertTextOnly (explicit reject until attachments land)", () => {
+  test("text-only content passes", () => {
+    expect(() => assertTextOnly([{ type: "text", text: "a" }])).not.toThrow();
+  });
+
+  for (const block of [
+    { type: "image", mimeType: "image/png", data: "AA==" },
+    { type: "resource", uri: "file:///a", text: "x" },
+  ] as const) {
+    test(`a ${block.type} block is rejected with InvalidParams naming it`, () => {
+      let caught: unknown;
+      try {
+        assertTextOnly([{ type: "text", text: "look" }, block]);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(RpcError);
+      expect(caught).toMatchObject({ code: JsonRpcErrorCode.InvalidParams });
+      expect(String((caught as Error).message)).toContain(block.type);
+    });
+  }
 });

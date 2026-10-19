@@ -9,7 +9,7 @@ import {
   type StreamEvent,
 } from "@tentacle/core";
 import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
-import { JsonRpcErrorCode, Method } from "@tentacle/protocol";
+import { JsonRpcErrorCode, Method, Notification, PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import {
@@ -634,6 +634,136 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
     // No session opened yet → enqueue must not touch the peer (no id).
     await expect(session.enqueue("early")).resolves.toBeUndefined();
     client.close();
+  });
+});
+
+describe("unknown / malformed session/update frames (event classes)", () => {
+  /** A raw fake daemon that streams `frames` during the prompt; the turn ends only if `end`. */
+  function fakeDaemon(frames: readonly unknown[], end: boolean) {
+    const [daemonCh, clientCh] = createChannelPair();
+    const cancels: unknown[] = [];
+    const daemon: RpcPeer = new RpcPeer(daemonCh, {
+      onRequest: async (method) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        if (method === Method.NewSession) return { sessionId: "s1" };
+        if (method === Method.Prompt) {
+          for (const frame of frames) daemon.notify(Notification.SessionUpdate, frame);
+          if (end) return { stopReason: "end_turn" };
+          return new Promise(() => {});
+        }
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, method);
+      },
+      onNotification: (method, params) => {
+        if (method === Notification.Cancel) cancels.push(params);
+      },
+    });
+    return { clientCh, cancels };
+  }
+
+  async function run(frames: readonly unknown[], end: boolean) {
+    const { clientCh, cancels } = fakeDaemon(frames, end);
+    const errors: Error[] = [];
+    const client = new RemoteClient(clientCh, new PermissionBroker(), undefined, {
+      onError: (e) => errors.push(e),
+    });
+    await client.initialize();
+    const events: AgentEvent[] = [];
+    const outcome = await Promise.race([
+      (async () => {
+        for await (const e of client.newSession().send("hi")) events.push(e);
+        return "ended";
+      })().catch((e: unknown) => e as Error),
+      new Promise<string>((r) => setTimeout(() => r("hung"), 500)),
+    ]);
+    await new Promise((r) => setTimeout(r, 10));
+    client.close();
+    return { outcome, events, errors, cancels };
+  }
+
+  const chunk = (seq: number, text: string) => ({
+    sessionId: "s1",
+    seq,
+    update: { type: "agent_message_chunk", content: { type: "text", text } },
+  });
+
+  test("an unknown display event is skipped silently and the turn completes", async () => {
+    const r = await run(
+      [
+        chunk(1, "a"),
+        { sessionId: "s1", seq: 2, update: { type: "progress", pct: 3 } },
+        chunk(3, "b"),
+      ],
+      true,
+    );
+    expect(r.outcome).toBe("ended");
+    expect(r.events).toEqual([
+      { type: "text", delta: "a" },
+      { type: "text", delta: "b" },
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    expect(r.errors).toEqual([]);
+  });
+
+  test("an unknown mandatory event fails the turn loudly and cancels it daemon-side", async () => {
+    const r = await run(
+      [{ sessionId: "s1", seq: 1, mandatory: true, update: { type: "permission_request" } }],
+      false,
+    );
+    expect(r.outcome).toBeInstanceOf(Error);
+    expect(String((r.outcome as Error).message)).toMatch(/newer than this client/);
+    expect(r.errors.map((e) => e.message)).toEqual([(r.outcome as Error).message]);
+    expect(r.cancels).toEqual([{ sessionId: "s1" }]);
+  });
+
+  test("a malformed background_exit mid-turn fails that turn too (loud, documented)", async () => {
+    const r = await run(
+      [{ sessionId: "s1", seq: 1, update: { type: "background_exit", jobId: "j" } }],
+      false,
+    );
+    expect(r.outcome).toBeInstanceOf(Error);
+    expect(String((r.outcome as Error).message)).toMatch(/malformed background_exit/);
+    expect(r.cancels).toEqual([{ sessionId: "s1" }]);
+  });
+
+  test("with no turn in flight a stream error reaches onError only (never silent, nothing cancelled)", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    const daemon = new RpcPeer(daemonCh, {
+      onRequest: async () => ({
+        protocolVersion: PROTOCOL_VERSION,
+        agentCapabilities: { tools: true, permissions: true },
+      }),
+    });
+    const errors: Error[] = [];
+    const client = new RemoteClient(clientCh, new PermissionBroker(), undefined, {
+      onError: (e) => errors.push(e),
+    });
+    await client.initialize();
+    daemon.notify(Notification.SessionUpdate, {
+      sessionId: "s1",
+      seq: 9,
+      mandatory: true,
+      update: { type: "permission_request" },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(errors.map((e) => e.message)).toEqual([
+      expect.stringMatching(/permission_request.*newer than this client/),
+    ]);
+    client.close();
+  });
+
+  test("a malformed known event fails the turn loudly", async () => {
+    const r = await run(
+      [{ sessionId: "s1", seq: 1, update: { type: "agent_message_chunk" } }],
+      false,
+    );
+    expect(r.outcome).toBeInstanceOf(Error);
+    expect(String((r.outcome as Error).message)).toMatch(/malformed agent_message_chunk/);
+    expect(r.cancels).toEqual([{ sessionId: "s1" }]);
   });
 });
 

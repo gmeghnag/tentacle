@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { PermissionBroker } from "@tentacle/core";
 import { SessionHost, startWsServer } from "@tentacle/daemon";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { RemoteClient } from "../src/remote-client.ts";
 import { connectWebSocket } from "../src/ws-channel.ts";
 
@@ -23,7 +24,7 @@ describe("token auth over a real socket", () => {
       const channel = await connectWebSocket(server.url, { token: "good" });
       const client = new RemoteClient(channel, new PermissionBroker());
       const init = await client.initialize();
-      expect(init.protocolVersion).toBe(1);
+      expect(init.protocolVersion).toBe(PROTOCOL_VERSION);
       client.close();
     } finally {
       server.stop();

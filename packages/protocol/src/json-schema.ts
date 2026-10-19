@@ -39,6 +39,8 @@ export interface ProtocolSource {
   notificationSchemas: Readonly<Record<string, ZodTypeAny>>;
   version: number;
   errorCodes: Readonly<Record<string, number>>;
+  /** Class of each `SessionUpdate` tag, emitted as `x-event-class` on its member. */
+  updateClasses: Readonly<Record<string, string>>;
 }
 
 export const defaultSource: ProtocolSource = {
@@ -47,6 +49,7 @@ export const defaultSource: ProtocolSource = {
   notificationSchemas: P.NotificationSchemas,
   version: P.PROTOCOL_VERSION,
   errorCodes: { ...P.JsonRpcErrorCode, ...P.DomainErrorCode },
+  updateClasses: P.UPDATE_CLASS,
 };
 
 /**
@@ -89,6 +92,10 @@ const SUPPORTED_KINDS = new Set([
 export const UNTAGGED_ALLOWED: readonly string[] = [
   "#/$defs/JsonRpcMessage",
   "#/$defs/JsonRpcResponse",
+  // The unknown-event catch-all: anyOf[SessionUpdate (tagged), UnknownSessionUpdate].
+  // The only shape that codegen decodes without throwing AND a strict validator
+  // accepts for every valid frame (docs/feat/session-wire-classes.md).
+  "#/$defs/SessionUpdateOrUnknown",
 ];
 
 /** Members any other plain `z.union` may have (e.g. `RequestIdSchema`: string | int). */
@@ -163,6 +170,13 @@ function collectDefinitions(src: ProtocolSource) {
 }
 
 function generate(defs: Record<string, ZodTypeAny>): Record<string, JsonObject> {
+  // By identity, not by path: an allowed union is also visited where it is used
+  // (e.g. a property), which the library then emits as a `$ref` to its def.
+  const allowedUntagged = new Set(
+    Object.entries(defs)
+      .filter(([name]) => UNTAGGED_ALLOWED.includes(`#/$defs/${name}`))
+      .map(([, schema]) => schema._def),
+  );
   const out = zodToJsonSchema(z.object({}), {
     definitions: defs,
     definitionPath: "$defs",
@@ -178,7 +192,7 @@ function generate(defs: Record<string, ZodTypeAny>): Record<string, JsonObject> 
       const at = refs.currentPath.join("/");
       if (
         kind === "ZodUnion" &&
-        !UNTAGGED_ALLOWED.includes(at) &&
+        !allowedUntagged.has(def) &&
         options.some((o) => !SCALAR_KINDS.has(o._def.typeName))
       ) {
         throw new Error(`untagged union of non-scalars at ${at} — use z.discriminatedUnion`);
@@ -221,6 +235,27 @@ function rewriteUnions(defs: Record<string, JsonObject>, unions: Record<string, 
     }
     const { anyOf: _, ...rest } = def;
     defs[name] = { ...rest, oneOf: members, discriminator: { propertyName, mapping } };
+  }
+}
+
+/** Annotate each `SessionUpdate` member with `x-event-class`; a tag/class mismatch throws. */
+function annotateUpdateClasses(
+  defs: Record<string, JsonObject>,
+  classes: Readonly<Record<string, string>>,
+): void {
+  const union = defs.SessionUpdate;
+  const mapping = isObject(union?.discriminator) ? union.discriminator.mapping : undefined;
+  if (union === undefined && Object.keys(classes).length === 0) return;
+  if (!isObject(mapping)) throw new Error("SessionUpdate: event classes given but no tagged union");
+  for (const tag of Object.keys(classes)) {
+    if (!(tag in mapping)) throw new Error(`event class for unknown tag "${tag}"`);
+  }
+  for (const [tag, ref] of Object.entries(mapping)) {
+    const cls = Object.hasOwn(classes, tag) ? classes[tag] : undefined;
+    if (cls === undefined) throw new Error(`SessionUpdate: no event class for "${tag}"`);
+    const member = typeof ref === "string" ? defs[ref.slice("#/$defs/".length)] : undefined;
+    if (member === undefined) throw new Error(`SessionUpdate: ${String(ref)} is not a $def`);
+    member["x-event-class"] = cls;
   }
 }
 
@@ -280,6 +315,7 @@ export function buildProtocolJsonSchema(src: ProtocolSource = defaultSource): Pr
   const { defs, names, unions } = collectDefinitions(src);
   const generated = generate(defs);
   rewriteUnions(generated, unions);
+  annotateUpdateClasses(generated, src.updateClasses);
   checkHoles(generated);
   const ref = (schema: ZodTypeAny, where: string): JsonObject => {
     const name = names.get(schema);
