@@ -180,13 +180,22 @@ assume.
   through the single broker. A daemon-side check is UX, never security. Never
   let a pod-originated prompt create a lasting approval for pod-supplied input.
   Rationale and design: `docs/eval/remote-execution-model.md`.
-- **Protocol changes are additive; version stays 1.** Schemas in
-  `@tentacle/protocol` are the shared truth. A new method → an old peer
-  returns `MethodNotFound` (clean, catchable — handle it). A new `session/update`
-  variant → a union member + its reverse mapping in `client/mapping.ts`. Wire
-  BOTH ends (request and, if it streams back, the update). Don't bump the version
-  for additive work. (Caveat: an unknown update *discriminant* is NOT silently
-  ignored by an old client — only relevant for mixed-version `connect`.)
+- **Protocol: one shared truth, versioned honestly.** Schemas in
+  `@tentacle/protocol` are the shared truth; wire BOTH ends (request and, if it
+  streams back, the update; a new `session/update` variant → a union member +
+  its reverse mapping in `client/mapping.ts`).
+  - **Pre-public (now): breaking changes are allowed when they improve the
+    design.** There are no external peers to keep working, so do NOT add
+    compat shims, fallbacks or capability negotiation for old peers — pick the
+    cleanest shape. A breaking change MUST bump `PROTOCOL_VERSION`, so a
+    mixed-version pair fails with a clean `VersionMismatch` at `initialize`
+    instead of a confusing mid-session error.
+  - **Additive work keeps the version.** A new method → an old peer returns
+    `MethodNotFound` (clean, catchable — handle it). Caveat: an unknown update
+    *discriminant* is NOT silently ignored by an old client, so a new update
+    variant is breaking for mixed-version `connect` — bump if that matters.
+  - **Once public** (first release, or a mobile client in a store) this flips
+    back to additive-only + versioned negotiation; revisit this rule then.
 - **Don't serialize the RPC peer.** `transport/peer.ts` dispatches inbound
   requests concurrently (`void handleRequest`, no per-connection mutex) on
   purpose: a long-running `session/prompt` must not block a short
@@ -219,7 +228,8 @@ Writing it:
   the ONE assumption the change stands or falls on (e.g. "requests are dispatched
   concurrently") and prove it before anything else. If you can't cite it, you
   don't know it.
-- Prefer the **additive, reuse-existing-seams** shape (§7). List the exact files
+- Prefer the **reuse-existing-seams** shape (§7); additive by default, breaking
+  only when it improves the design (pre-public, §7 protocol rule). List the exact files
   with the smallest diff, in dependency order (protocol → daemon → client → cli →
   tui). Identify the shared source of truth and wire both ends.
 - **Enumerate the failure modes**, not just the happy path: error, disconnect,
