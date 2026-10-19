@@ -830,8 +830,12 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
 
 ## Branding
 
-- [ ] **Mascot "Tentacle"** — mark decided (tonal primary, mono one-colour).
-      Next: the marks in `art/` + README header (`feat/mascot`). Open: startup
-      pixel mascot in the TUI (`feat/tui-mascot`), dark-mode README variant,
-      small-size icon. **Doc:** `docs/feat/mascot.md`.
-      Type: feat · Size: S · Blast: contained.
+- [x] **Mascot "Tentacle"** — DONE (merged to main 2026-10-19): tonal primary
+      and mono one-colour marks in `art/`, tonal mark centred in the README
+      header. **Doc:** `docs/feat/mascot.md`. Type: feat · Size: S · Blast: contained.
+- [ ] **Startup pixel mascot in the TUI** (`feat/tui-mascot`): half-block
+      banner beside the welcome text; design + palette prototyped in
+      `docs/feat/mascot.md` (Context). Type: feat · Size: S · Blast: contained.
+- [ ] **Mascot follow-ups**: dark-mode README variant (`<picture>`), small-size
+      icon (16–32 px). See
+      `docs/feat/mascot.md` (Review).

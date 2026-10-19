@@ -1,6 +1,6 @@
 # feat/mascot — Tentacle, the project mascot and logo
 
-> **Status:** review
+> **Status:** done (merged to main 2026-10-19)
 > **Branch:** `feat/mascot` (promoted from `docs/eval/mascot.md`)
 > **Type:** feat · **Size:** S · **Blast:** contained (static assets + README; no code, test or build path) · **Suited:** any model executes; standard in-context Review.
 
