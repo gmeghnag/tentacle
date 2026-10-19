@@ -479,7 +479,7 @@ to promotion time (each child gets its mandatory fresh-context Review then).
 
 | # | Task | Size · Blast | Depends on |
 |---|---|---|---|
-| 1 | `docs/eval/background-process-groups.md` — group kill + process-exit net + dispose on connection close (approved, ready to promote) | S–M · load-bearing | — |
+| 1 | `docs/fix/background-process-groups.md` — group kill + process-exit net + dispose on connection close (promoted, in execution) | S–M · load-bearing | — |
 | 2 | `docs/eval/protocol-schema-export.md` — JSON Schema export (`oneOf` + discriminator), drift gate, `DomainErrorCode` into protocol | S–M · cross-module | — |
 | 2b | `docs/eval/daemon-compact-turn-guard.md` — prerequisite of 3c (D8) | see doc | — |
 | 3a | `docs/eval/session-event-stream.md` §3a — event classes per frame, unknown-event tolerance, wire hygiene, non-text reject | S · load-bearing | 2 |

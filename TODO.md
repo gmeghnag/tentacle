@@ -383,7 +383,7 @@ Daily-driver work (done 2026-10-14):
 - [ ] 🟡 **`shell_kill` leaves grandchildren running** (only `sh` gets the signal;
       a compound command's child is re-parented to PID 1). Found during the
       lifecycle eval — see `docs/eval/daemon-session-lifecycle.md`. Same work
-      as child 1 of the v2 redesign (`docs/eval/background-process-groups.md`, Block 11)
+      as child 1 of the v2 redesign (`docs/fix/background-process-groups.md`, Block 11)
       — one task, not two.
 - [ ] 🟡 **OpenAI provider treats an in-band SSE `{"error":…}` chunk as an empty
       stream** (HTTP 200, no throw), so callers see a silent empty response (e.g.
@@ -446,7 +446,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       Children drafted (Implementation per child) and owner decisions A–G, D1–D10
       recorded in the parent (2026-10-19).
       Type: eval (parent) · Size: L → split · Blast: load-bearing. Children, in order:
-      1. **Eval (approved, ready to promote):** `docs/eval/background-process-groups.md` · S–M · load-bearing
+      1. **Fix (in execution, plan revised 2026-10-19):** `docs/fix/background-process-groups.md` · S–M · load-bearing
       2. **Eval:** `docs/eval/protocol-schema-export.md` · S–M · cross-module
       2b. prerequisite: `docs/eval/daemon-compact-turn-guard.md` (before 3c)
       3a/3b/3c. **Eval:** `docs/eval/session-event-stream.md` · S / M / M · load-bearing (three branches)
