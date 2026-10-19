@@ -10,6 +10,8 @@ import {
   type CancelParams,
   type CompactParams,
   type CompactResult,
+  type EnqueueParams,
+  type EnqueueResult,
   type InitializeParams,
   type InitializeResult,
   Method,
@@ -129,6 +131,8 @@ export class Connection {
         return this.compact(params as CompactParams);
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);
+      case Method.Enqueue:
+        return this.enqueue(params as EnqueueParams);
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }
@@ -141,6 +145,25 @@ export class Connection {
     }
     // core `ChatMessage` is structurally the wire schema; copy to a mutable array.
     return { messages: [...hosted.snapshot().messages] } as SnapshotResult;
+  }
+
+  // Synchronous on purpose: it pushes into the steering queue and returns at
+  // once, so a mid-turn `session/enqueue` is served even while a long-running
+  // `session/prompt` is still in flight on this connection (see AGENTS §7 —
+  // requests dispatch concurrently). The model sees the text at the next
+  // model-round boundary, which streams back as a `steer` update.
+  private enqueue(params: EnqueueParams): EnqueueResult {
+    const hosted = this.sessions.get(params.sessionId);
+    if (!hosted) {
+      throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${params.sessionId}`);
+    }
+    // Accepting it while idle would be a fake success: the next turn starts by
+    // resetting the steering queue, so the text would be dropped silently.
+    if (!hosted.running) {
+      throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
+    }
+    hosted.enqueue(params.text);
+    return {};
   }
 
   private compact(params: CompactParams): Promise<CompactResult> {

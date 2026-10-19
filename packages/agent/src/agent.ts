@@ -267,6 +267,15 @@ export class Agent {
       if (toolCalls.length === 0) {
         // Before ending, handle anything the user queued during the reply so a
         // last-moment steer is not dropped — inject it and run another round.
+        // INVARIANT: from this drain to the `turn_end` yield (and on through the
+        // daemon's `HostedSession.prompt` clearing its controller) there must be
+        // NO `await` — no end-of-turn hook, no async persist. A transport message
+        // is a macrotask and cannot interleave, so a remote `session/enqueue` is
+        // either drained here or rejected as `NoTurnRunning`. An await here
+        // reopens a window where it is accepted and then silently dropped.
+        // Pinned by the daemon test "no macrotask fits between the last
+        // steering drain and the turn's end"; the `max_iterations` path below
+        // keeps the same invariant.
         const late = drainSteering?.() ?? [];
         if (late.length > 0) {
           for (const text of late) {
@@ -347,6 +356,12 @@ export class Agent {
     // tool calls ends with no visible result at all ("stopped without a report").
     // Best-effort: any failure still ends the turn as `max_iterations`.
     if (!signal?.aborted) {
+      // Anything queued during the last allowed round is injected first, so the
+      // final report can address it (no round is left to run it otherwise).
+      for (const text of drainSteering?.() ?? []) {
+        messages.push({ role: "user", content: text });
+        yield { type: "steer", text };
+      }
       try {
         const finalMessages: ChatMessage[] = [
           ...messages,
@@ -392,6 +407,15 @@ export class Agent {
           return;
         }
         // Otherwise fall through: the turn still ends as max_iterations below.
+      }
+      // Queued DURING the final report: no round is left to answer it, but it
+      // is kept in the history (the model sees it next turn) rather than being
+      // accepted and then dropped by the next send's reset. Same no-await
+      // invariant as the late-steer drain above: nothing awaits from here to
+      // `turn_end`.
+      for (const text of drainSteering?.() ?? []) {
+        messages.push({ role: "user", content: text });
+        yield { type: "steer", text };
       }
     }
 

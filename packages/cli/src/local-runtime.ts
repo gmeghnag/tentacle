@@ -85,6 +85,11 @@ export function persistingController(
       await flush();
       return result;
     },
+    // Propagate the inner Promise (don't swallow it) so the TUI can reconcile
+    // its optimistic entry on a delivery failure.
+    enqueue(text) {
+      return inner.enqueue(text);
+    },
   };
 }
 

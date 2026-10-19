@@ -168,6 +168,11 @@ export class RemoteClient {
       .then((result) => result as CompactResult);
   }
 
+  /** Queue a user message for the running turn (steering, mid-turn only). */
+  enqueue(sessionId: string, text: string): Promise<void> {
+    return this.peer.request(Method.Enqueue, { sessionId, text }).then(() => undefined);
+  }
+
   cancel(sessionId: string): void {
     this.peer.notify(Notification.Cancel, { sessionId });
   }

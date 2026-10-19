@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@tentacle/agent";
+import { Agent, Session } from "@tentacle/agent";
 import {
   type ChatRequest,
   type ExecutionEnvironment,
@@ -8,11 +8,12 @@ import {
   type StreamEvent,
 } from "@tentacle/core";
 import { JsonRpcErrorCode } from "@tentacle/protocol";
-import type { SessionUpdateParams } from "@tentacle/protocol";
+import type { EnqueueResult, SessionUpdateParams } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { DomainErrorCode } from "@tentacle/transport";
 import { Connection } from "../src/connection.ts";
+import { HostedSession } from "../src/hosted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
 
 class ScriptedProvider implements ModelProvider {
@@ -277,6 +278,208 @@ describe("daemon ↔ client (in-memory)", () => {
         clientCapabilities: { streaming: true },
       }),
     ).rejects.toMatchObject({ code: DomainErrorCode.VersionMismatch });
+  });
+
+  // --- session/enqueue (steering) ----------------------------------------
+  // Round 1 calls a tool (the daemon streams a `tool_call` update); round 2
+  // ECHOES the last user message, so we can assert the model actually SAW the
+  // steered text (non-vacuous — not just that a `steer` update was echoed).
+  class EchoSteerProvider implements ModelProvider {
+    readonly id = "echo-steer";
+    readonly calls: { messages: string[] }[] = [];
+    private turn = 0;
+    async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+      this.turn += 1;
+      this.calls.push({ messages: request.messages.map((m) => m.content) });
+      if (this.turn === 1) {
+        yield {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls" }) },
+        };
+        yield { type: "done" };
+      } else {
+        const last = request.messages[request.messages.length - 1]?.content ?? "";
+        yield { type: "text", delta: `echo:${last}` };
+        yield { type: "done" };
+      }
+    }
+  }
+
+  // A tool env whose exec is slow (200 ms): the client sees the `tool_call`
+  // update while the tool is still running, a deterministic mid-turn window to
+  // enqueue before the agent reaches the next model-round boundary.
+  const slowEnv: ExecutionEnvironment = {
+    id: "slow",
+    async exec() {
+      await new Promise((r) => setTimeout(r, 200));
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    },
+    async readFile() {
+      return "";
+    },
+    async writeFile() {},
+  };
+
+  const steerUpdates = (updates: SessionUpdateParams[]) =>
+    updates
+      .map((u) => u.update)
+      .filter(
+        (u): u is Extract<SessionUpdateParams["update"], { type: "steer" }> => u.type === "steer",
+      );
+
+  test("session/enqueue mid-turn is served while the prompt is in flight and the model sees it", async () => {
+    const model = new EchoSteerProvider();
+    const { client, updates } = harness(model, slowEnv, {
+      onRequest: async (method) =>
+        method === "session/request_permission"
+          ? { outcome: { outcome: "selected", optionId: "allow_once" } }
+          : {},
+    });
+    await client.request("initialize", INIT);
+    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+
+    const promptP = client.request("session/prompt", {
+      sessionId,
+      content: [{ type: "text", text: "go" }],
+    });
+    let promptSettled = false;
+    promptP.then(
+      () => {
+        promptSettled = true;
+      },
+      () => {
+        promptSettled = true;
+      },
+    );
+    // Wait until the daemon has announced round 1's tool call. The tool's exec
+    // is still running (200 ms), so the prompt is genuinely in flight.
+    while (!updates.some((u) => u.update.type === "tool_call")) {
+      await tick(5);
+    }
+    expect(promptSettled).toBe(false);
+    // Enqueue WITHOUT awaiting the prompt: if the peer serialized requests per
+    // connection, this would block until the prompt settled. It resolves on its
+    // own — the concurrency the whole mechanism relies on.
+    const result = (await client.request("session/enqueue", {
+      sessionId,
+      text: "steer me",
+    })) as EnqueueResult;
+    expect(result).toEqual({});
+    const stop = (await promptP) as { stopReason: string };
+    expect(stop.stopReason).toBe("end_turn");
+
+    // A `steer` update was streamed back with the queued text…
+    expect(steerUpdates(updates).map((s) => s.text)).toEqual(["steer me"]);
+    // …and the model actually SAW it: round 2 ran as a whole (without the steer
+    // the turn would have ended after round 1's tool result) and echoed it.
+    expect(model.calls).toHaveLength(2);
+    expect(model.calls[1]?.messages.at(-1)).toBe("steer me");
+    const echoed = updates
+      .map((u) => u.update)
+      .filter(
+        (u): u is Extract<SessionUpdateParams["update"], { type: "agent_message_chunk" }> =>
+          u.type === "agent_message_chunk",
+      )
+      .map((u) => (u.content.type === "text" ? u.content.text : ""))
+      .join("");
+    expect(echoed).toContain("echo:steer me");
+  });
+
+  test("two enqueues on the same boundary stream two steer updates in FIFO order", async () => {
+    const model = new EchoSteerProvider();
+    const { client, updates } = harness(model, slowEnv, {
+      onRequest: async (method) =>
+        method === "session/request_permission"
+          ? { outcome: { outcome: "selected", optionId: "allow_once" } }
+          : {},
+    });
+    await client.request("initialize", INIT);
+    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+
+    const promptP = client.request("session/prompt", {
+      sessionId,
+      content: [{ type: "text", text: "go" }],
+    });
+    while (!updates.some((u) => u.update.type === "tool_call")) {
+      await tick(5);
+    }
+    // Both enqueues land on the SAME boundary (before round 2 drains).
+    await client.request("session/enqueue", { sessionId, text: "A" });
+    await client.request("session/enqueue", { sessionId, text: "B" });
+    await promptP;
+    // N enqueue ⇒ N echo, in order — the invariant the TUI's FIFO removal relies on.
+    expect(steerUpdates(updates).map((s) => s.text)).toEqual(["A", "B"]);
+    // The model saw both injected user messages, in order.
+    expect(model.calls[1]?.messages.slice(-2)).toEqual(["A", "B"]);
+  });
+
+  test("session/enqueue on an unknown session rejects with UnknownSession", async () => {
+    const { client } = harness(new ScriptedProvider([]), noopEnv);
+    await client.request("initialize", INIT);
+    await expect(
+      client.request("session/enqueue", { sessionId: "nope", text: "x" }),
+    ).rejects.toMatchObject({ code: DomainErrorCode.UnknownSession });
+  });
+
+  // INVARIANT (agent.ts, at the late-steer drain): from the LAST steering drain
+  // to the daemon marking the turn over there is no await. A transport message
+  // is a macrotask, so a timer armed inside the drain stands in for "the next
+  // `session/enqueue` to arrive": when it fires the turn must already be over
+  // (→ rejected as NoTurnRunning), never running-but-past-the-drain (→ accepted,
+  // then silently dropped by the next send's reset).
+  for (const [label, maxIterations, script] of [
+    ["end_turn", 16, [[{ type: "text", delta: "hi" }, { type: "done" }]]],
+    [
+      "max_iterations",
+      1,
+      [
+        [
+          { type: "tool_call", toolCall: { id: "c1", name: "missing", arguments: "{}" } },
+          { type: "done" },
+        ],
+        [{ type: "text", delta: "report" }, { type: "done" }],
+      ],
+    ],
+  ] as const) {
+    test(`no macrotask fits between the last steering drain and the turn's end (${label})`, async () => {
+      const agent = new Agent({
+        model: new ScriptedProvider(script),
+        tools: new ToolRegistry(),
+        env: noopEnv,
+        maxIterations,
+      });
+      const runMessages = agent.runMessages.bind(agent);
+      const runningAtNextMacrotask: boolean[] = [];
+      const hosted = new HostedSession(
+        "s1",
+        new Session(agent),
+        new PermissionBroker(),
+        async () => {
+          throw new Error("no permission expected");
+        },
+      );
+      // Patched after construction: `Session.send` calls `agent.runMessages` per turn.
+      agent.runMessages = (messages, sessionId, signal, drain) =>
+        runMessages(messages, sessionId, signal, () => {
+          setTimeout(() => runningAtNextMacrotask.push(hosted.running), 0);
+          return drain?.() ?? [];
+        });
+
+      expect(await hosted.prompt([{ type: "text", text: "go" }])).toBe(label);
+      await tick(5);
+      expect(runningAtNextMacrotask.at(-1)).toBe(false);
+    });
+  }
+
+  test("session/enqueue with no turn running rejects with NoTurnRunning", async () => {
+    // Accepting it would be a fake success: the next `send` resets the steering
+    // queue, so the text would be dropped silently.
+    const { client } = harness(new ScriptedProvider([]), noopEnv);
+    await client.request("initialize", INIT);
+    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+    await expect(
+      client.request("session/enqueue", { sessionId, text: "late" }),
+    ).rejects.toMatchObject({ code: DomainErrorCode.NoTurnRunning });
   });
 
   test("prompting an unknown session errors", async () => {

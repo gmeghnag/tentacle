@@ -9,9 +9,9 @@ import {
   type StreamEvent,
 } from "@tentacle/core";
 import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
-import { Method } from "@tentacle/protocol";
+import { JsonRpcErrorCode, Method } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
-import { RpcPeer, createChannelPair } from "@tentacle/transport";
+import { RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import {
   MODEL_STREAM_BATCH_MAX_CHARS,
   MODEL_STREAM_COALESCE_MS,
@@ -490,6 +490,149 @@ describe("RemoteSession over an in-memory channel", () => {
     expect(prompts).toHaveLength(1); // the client was asked to approve
     expect(events.some((e) => e.type === "tool_start")).toBe(true);
     expect(events.some((e) => e.type === "tool_result")).toBe(true);
+    client.close();
+  });
+});
+
+describe("RemoteSession.enqueue (steering over RPC)", () => {
+  // Round 1 calls a tool (slow exec = a mid-turn window); round 2 answers.
+  const steerModel = (script: readonly (readonly StreamEvent[])[]) => new ScriptedProvider(script);
+
+  test("enqueue mid-turn resolves and the steer echo flows back as a `steer` event", async () => {
+    const model = new ScriptedProvider([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls" }) },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    // A slow exec so the turn is in flight when we enqueue.
+    const env: ExecutionEnvironment = {
+      id: "slow",
+      async exec() {
+        await new Promise((r) => setTimeout(r, 150));
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      },
+      readFile: () => Promise.resolve(""),
+      writeFile: () => Promise.resolve(),
+    };
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, makeHost(model, env));
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+
+    const session = client.newSession();
+    const sendP = (async () => {
+      const events: AgentEvent[] = [];
+      for await (const e of session.send("go")) {
+        events.push(e);
+        if (e.type === "tool_start") {
+          await session.enqueue("steer me"); // mid-turn, while the tool runs
+        }
+      }
+      return events;
+    })();
+    const events = await sendP;
+
+    // The injected message came back as a `steer` event the TUI understands.
+    const steers = events.filter(
+      (e): e is Extract<AgentEvent, { type: "steer" }> => e.type === "steer",
+    );
+    expect(steers.map((s) => s.text)).toEqual(["steer me"]);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    client.close();
+  });
+
+  test("enqueue REJECTS (not swallowed) when the daemon doesn't support it", async () => {
+    // An older daemon: it answers the core session methods but not
+    // `session/enqueue` (a real MethodNotFound would come from its peer).
+    const [daemonCh, clientCh] = createChannelPair();
+    let sessionId = "";
+    new RpcPeer(daemonCh, {
+      onRequest: async (method, params) => {
+        if (method === Method.Initialize) {
+          return { protocolVersion: 1, agentCapabilities: { tools: true, permissions: true } };
+        }
+        if (method === Method.NewSession) {
+          sessionId = "s1";
+          return { sessionId };
+        }
+        if (method === Method.Prompt) {
+          return { stopReason: "end_turn" };
+        }
+        // Anything else — notably session/enqueue — is unknown to this daemon.
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, `unknown method: ${method}`);
+      },
+    });
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+
+    const session = client.newSession();
+    const sendP = (async () => {
+      const events: AgentEvent[] = [];
+      for await (const e of session.send("hi")) {
+        events.push(e);
+      }
+      return events;
+    })();
+    // The session id is now set (send opened it). The enqueue must REJECT with
+    // the daemon's MethodNotFound (not be swallowed) — that is what lets the
+    // TUI reconcile its optimistic entry.
+    await new Promise((r) => setTimeout(r, 10));
+    await expect(session.enqueue("nope")).rejects.toMatchObject({
+      code: JsonRpcErrorCode.MethodNotFound,
+    });
+    const events = await sendP;
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    client.close();
+  });
+
+  test("enqueue while the first send is still opening the session is delivered", async () => {
+    // Round 1 is slow, so the turn is still running when the enqueue lands; the
+    // late-steer drain then injects it and round 2 runs.
+    const seen: string[] = [];
+    const model: ModelProvider = {
+      id: "slow",
+      async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+        seen.push(...request.messages.map((m) => m.content));
+        await new Promise((r) => setTimeout(r, 100));
+        yield { type: "text", delta: "ok" };
+        yield { type: "done" };
+      },
+    };
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, makeHost(model, noopEnv));
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+
+    const session = client.newSession();
+    const iter = session.send("go")[Symbol.asyncIterator]();
+    const first = iter.next(); // starts `session/new`; the id is not known yet
+    // The TUI is already "running" here: this enqueue must wait for the session
+    // instead of resolving as a silent no-op.
+    await session.enqueue("early");
+    const events: AgentEvent[] = [];
+    for (let r = await first; !r.done; r = await iter.next()) {
+      events.push(r.value);
+    }
+    expect(events.filter((e) => e.type === "steer")).toEqual([{ type: "steer", text: "early" }]);
+    expect(seen).toContain("early");
+    client.close();
+  });
+
+  test("enqueue before the first send is a no-op (resolves, touches nothing)", async () => {
+    const model = new ScriptedProvider([[{ type: "text", delta: "hi" }, { type: "done" }]]);
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, makeHost(model, noopEnv));
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+
+    const session = client.newSession();
+    // No session opened yet → enqueue must not touch the peer (no id).
+    await expect(session.enqueue("early")).resolves.toBeUndefined();
     client.close();
   });
 });

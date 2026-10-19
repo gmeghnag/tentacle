@@ -59,3 +59,91 @@ describe("mid-turn task queue (steering)", () => {
     unmount();
   });
 });
+
+describe("mid-turn steering reconciliation (RPC delivery failure)", () => {
+  /**
+   * A remote-like session whose `send` keeps the turn running (a tool in
+   * flight) and whose `enqueue` resolves/rejects like a daemon would, so the
+   * App's mid-turn steering branch (optimistic ⏳ + reconciliation) is driven
+   * without a real daemon.
+   */
+  function makeController(enqueueImpl: (text: string) => void | Promise<void>) {
+    return {
+      async *send() {
+        yield { type: "tool_start", id: "c1", name: "shell", arguments: "" } as const;
+        await delay(5000); // hold the turn open so state.running stays true
+        yield { type: "turn_end", reason: "end_turn" } as const;
+      },
+      enqueue: enqueueImpl,
+    };
+  }
+
+  test("an enqueue that REJECTS removes the optimistic ⏳ row and warns", async () => {
+    let enqueued = 0;
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        createSession={() =>
+          makeController((text) => {
+            enqueued += 1;
+            void text;
+            // Reject after a beat so the optimistic ⏳ renders first, then the
+            // reconciliation removes it (the observable we assert).
+            return new Promise<void>((_resolve, reject) => {
+              setTimeout(() => reject(new Error("method not found")), 80);
+            });
+          })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+      />,
+    );
+    await delay(30);
+    stdin.write("go");
+    await delay(20);
+    stdin.write("\r");
+    await delay(80); // turn 1 running (tool in flight)
+    stdin.write("steer me");
+    await delay(20);
+    stdin.write("\r");
+    await delay(20); // optimistic ⏳ is up; the reject (80 ms) has not fired yet
+
+    // Optimistic: the queued task shows while delivery is pending.
+    expect(lastFrame() ?? "").toContain("⏳ steer me");
+    expect(enqueued).toBe(1);
+
+    // Delivery rejects → the optimistic row is reconciled away and a warning
+    // surfaces (otherwise it would mask a send that never happened).
+    await delay(140);
+    const after = lastFrame() ?? "";
+    expect(after).not.toContain("⏳ steer me");
+    expect(after).toContain("not queued");
+    // The notice carries the actual cause, not a guess ("old daemon").
+    expect(after).toContain("method not found");
+    unmount();
+  });
+
+  test("an enqueue that RESOLVES keeps the ⏳ row until a steer echo / turn_end", async () => {
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        createSession={() => makeController(() => Promise.resolve())}
+        model="qwen3"
+        cwd="/tmp/work"
+      />,
+    );
+    await delay(30);
+    stdin.write("go");
+    await delay(20);
+    stdin.write("\r");
+    await delay(80);
+    stdin.write("steer me");
+    await delay(20);
+    stdin.write("\r");
+    await delay(140); // enqueue resolved, but no steer echo and no turn_end yet
+
+    // Resolving does NOT clear the row: it waits for the `steer` echo (or the
+    // turn_end clear) — matching local semantics, so a resolved-but-not-injected
+    // task is still visible, not silently dropped.
+    expect(lastFrame() ?? "").toContain("⏳ steer me");
+    unmount();
+  });
+});

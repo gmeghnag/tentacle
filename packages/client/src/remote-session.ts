@@ -16,6 +16,8 @@ export class RemoteSession {
   private readonly seedMessages?: readonly ChatMessage[];
   private readonly desiredId?: string;
   private id: string | null = null;
+  /** The in-flight `session/new` of the first `send`, until `id` is known. */
+  private opening: Promise<string> | null = null;
 
   constructor(client: RemoteClient, seedMessages?: readonly ChatMessage[], desiredId?: string) {
     this.client = client;
@@ -36,9 +38,32 @@ export class RemoteSession {
     return this.id ? this.client.snapshot(this.id) : null;
   }
 
+  /**
+   * Queue a user message mid-turn (steering). Resolves when the daemon has
+   * accepted it; REJECTS on a delivery failure (e.g. `MethodNotFound` from an
+   * older remote daemon, or a transport drop) so the caller can reconcile its
+   * optimistic pending entry. While the first send is still opening the
+   * session it waits for the id (the turn is already running for the caller);
+   * a no-op (resolved) before any send.
+   */
+  enqueue(text: string): Promise<void> {
+    if (this.id) {
+      return this.client.enqueue(this.id, text);
+    }
+    if (this.opening) {
+      return this.opening.then((id) => this.client.enqueue(id, text));
+    }
+    return Promise.resolve();
+  }
+
   async *send(prompt: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     if (!this.id) {
-      this.id = await this.client.openSession(undefined, this.seedMessages, this.desiredId);
+      this.opening = this.client.openSession(undefined, this.seedMessages, this.desiredId);
+      try {
+        this.id = await this.opening;
+      } finally {
+        this.opening = null;
+      }
     }
     const id = this.id;
     const queue = new AsyncQueue<AgentEvent>();

@@ -46,8 +46,8 @@ export interface SessionController {
   send(prompt: string, signal?: AbortSignal): AsyncIterable<AgentEvent>;
   /** Compact the conversation (summarise + replace history); optional. */
   compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
-  /** Queue a message mid-turn (steering); optional (local sessions only). */
-  enqueue?(text: string): void;
+  /** Queue a message mid-turn (steering); optional. Local is sync, remote a Promise. */
+  enqueue?(text: string): void | Promise<void>;
 }
 
 export interface AppProps {
@@ -492,15 +492,27 @@ export function App({
       // its next round, instead of starting a new turn. Call through the session
       // (not a detached reference) so `this` is preserved.
       if (stateRef.current.running) {
-        if (sessionRef.current?.enqueue) {
-          sessionRef.current.enqueue(text);
-          setQueued((q) => [...q, text]);
+        const ctrl = sessionRef.current;
+        if (ctrl?.enqueue) {
+          setQueued((q) => [...q, text]); // optimistic (responsive UX)
+          // enqueue is sync (local) or a Promise (worker/pod/remote). On a
+          // reject (e.g. MethodNotFound from an older remote daemon, or a
+          // transport drop) the entry will never get a `steer` echo, so drop
+          // it — otherwise it masks a send that never happened. `Promise.resolve`
+          // normalises the sync case (it never rejects → no local behaviour change).
+          // Remove ONE entry (the list is count-based, like the FIFO removal on
+          // `steer`); which label is cosmetic.
+          Promise.resolve(ctrl.enqueue(text)).catch((error: unknown) => {
+            setQueued((q) => (q.length > 0 ? q.slice(0, -1) : q));
+            const reason = error instanceof Error ? error.message : String(error);
+            pushNotice(`_message not queued: ${reason}_`);
+          });
         }
         return;
       }
       void run(text);
     },
-    [handleCommand, run, field.reset],
+    [handleCommand, pushNotice, run, field.reset],
   );
 
   // All line editing lives in `useLineEditor` (pure `editor.ts` ops), so no
