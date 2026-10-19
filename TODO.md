@@ -313,14 +313,22 @@ Daily-driver work (done 2026-10-14):
 
 ### Block 8 — cross-cutting audit (2026-10-17, each verified by a fresh-context sub-agent repro)
 
-- [ ] 🔴 **Pod `--model-proxy`: cancel doesn't stop the model, and the requested
-      tool still runs.** `ProxyModelProvider` ignores `signal`; no `model/stream`
-      cancel; the agent loop never re-checks `aborted` between stream end and tool
-      execution. CONFIRMED. **Eval:** `docs/eval/proxy-model-cancel.md`.
-      Type: eval → fix · Size: S · Blast: load-bearing. **Model half fixed** by
-      `fix/pod-model-streaming` (2026-10-18). Re-verified 2026-10-19: still open
-      in the agent loop (no abort check after the stream ends or between tool
-      calls; tool #2 runs after Esc), provider-independent.
+- [ ] 🔴 **Pod `--model-proxy`: cancel didn't stop the model, and the requested
+      tool could still run.** FIXED (2026-10-19, on branch `fix/proxy-model-cancel`,
+      pending merge — close with `[x]` at merge): the agent loop now re-checks
+      `aborted` at every boundary (after the stream completes, before each tool
+      call, after the last tool on the cap path, and in `runTool` after a
+      permission approval) — no tool starts after a cancel, provider- and
+      runtime-independent. Cross-model review done; gate green.
+      `docs/fix/proxy-model-cancel.md`. Type: fix · Size: S · Blast:
+      load-bearing. **Model half fixed** by `fix/pod-model-streaming`
+      (2026-10-18). Batch-fallback *wait* follow-up split out below.
+- [ ] 🟡 **Pod `--model-proxy` batch fallback waits for the laptop's generation
+      to finish after a cancel.** Split off the item above (which is FIXED on
+      `fix/proxy-model-cancel`): the loop fix stops the *actions*, but a
+      mixed-version (old-laptop, batch-only) pod still waits for the laptop's
+      generation to complete. Low priority — race `send` against the signal in
+      `packages/daemon/src/proxy-model.ts:~183`.
 - [x] 🔴 **`/compact` with an empty summary wipes the history** (reasoning-only
       model, or an in-band SSE `{"error":…}` chunk) and persists it. CONFIRMED.
       **FIXED (merged to main):** `docs/fix/compact-empty-summary-wipe.md` —
