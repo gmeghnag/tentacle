@@ -30,6 +30,47 @@ Related: `docs/feat/pod-attach-resilience.md` (keepalive + reconnect for pod
 > children's Implementation drafts" (A–G, D1–D10). Where a question or
 > design point here disagrees, the parent decision wins.
 
+> **Re-baselined on 3a/3b/3c (2026-10-20, claude-opus-5-5).** `session-event-stream`
+> is fully built (`docs/feat/session-wire-classes.md`,
+> `docs/feat/session-turn-events.md`, `docs/feat/session-history-cut.md`).
+> The text below is aligned to the as-built shapes; this note wins over any
+> older wording (incl. the 2026-10-19 Review and the Experiments, which are
+> dated evidence against `main` @ `4914e9b` and are not re-run):
+> - **Envelope (Q1, 3a):** `{sessionId, seq, mandatory?: true, update}` — the
+>   class is `mandatory: true` (absent = display), not `class: …`; `update` is
+>   `anyOf[SessionUpdate, UnknownSessionUpdate]`; `seq` required.
+>   `classifyUpdate` (`client/src/mapping.ts`) already implements the rule.
+> - **Turn bracket (Q2/Q3b, 3b):** `turn_start{turnId, prompt: string}` (`""`
+>   for a continuation turn), `turn_end{turnId, stopReason, error?}`;
+>   `prompt{turnId}` acks at once; a re-sent `prompt` for an ended turn returns
+>   `{turnId, ended: {stopReason, error?}}` (the field is `ended`, not
+>   `outcome`); `enqueue{id, turnId}` is bound to its turn.
+> - **Cut (Q6, 3c):** `since` is a `HistoryCut = {epoch: string, seq: int}`
+>   (owner D1). Meaning: every update with `seq ≤ since.seq` is reflected in
+>   `messages`; replay `seq > since.seq` of the **same epoch** carries the rest.
+>   `seq` is compared only within one epoch; `epoch` only for equality. The
+>   epoch changes per session incarnation and per compaction.
+> - **Snapshot (Q3a, 3c):** `snapshot{cursor?, limit?}` → `{messages, since?,
+>   turn?: {turnId}, cursor?}`; `since`/`turn` on the first page only; `turn` =
+>   the turn running **at the cut**. There is no `state` yet: `suspended` is
+>   `permission-events`' to add (it owns suspension). A cursor of an older epoch
+>   → `StaleCursor` (-32011). `RemoteClient.snapshot` already pages (200 per
+>   page), restarts on `StaleCursor` (≤ 3) and fails loudly on a cursor that
+>   makes no progress or past 10 000 pages — reuse it in `fetch_snapshot`.
+> - **History ↔ stream (3c):** every message the agent loop pushes has an
+>   update — prompt → `turn_start`, steer → `steer`, assistant text/tools →
+>   chunks / `tool_call` / `tool_call_update`, nudge and background note →
+>   `context_note{text, reason}` (display). Two rules the reducer must keep:
+>   **tool calls are upserted by `toolCallId`** (an assistant message in the
+>   snapshot lists its calls before their `tool_call` updates, so a replay can
+>   re-announce one), and whitespace-only assistant text of an empty round is
+>   live-only (the agent drops that round from history).
+> - **Barrier (3c):** `history_replaced{reason: "compact"}`, mandatory.
+> - **`session-registry`** (re-baselined the same day): `open{sessionId,
+>   since?: HistoryCut, create?, messages?}` → `{sessionId, epoch, created,
+>   resync}`; no separate `incarnation` (the epoch is it).
+> - `PROTOCOL_VERSION` is 4 after 3c (registry → 5, this child bumps again only
+>   if it changes the wire).
 
 *— claude-opus-5-5, 2026-10-19 (draft, awaiting owner approval)*
 
@@ -59,7 +100,7 @@ lands without them, this plan cannot meet the parent property.
   `{sessionId, seq, class: "display"|"mandatory", update}` where the `update`
   schema has a catch-all member (`{type: string}` passthrough) after the known
   ones; `seq` becomes required. The client applies `class` only for unknown
-  types.
+  types. **→ Built in 3a** as `mandatory?: true` (see the re-baseline note).
 - **Q2 — The in-flight turn's user prompt is not in the stream.**
   `Session.send` pushes the user message synchronously
   (`agent/src/session.ts:66-68`) and no update carries it
@@ -70,7 +111,8 @@ lands without them, this plan cannot meet the parent property.
   every drop in a turn's first round. **Recommendation (owner:
   `session-event-stream`):** `turn_start{turnId, prompt?: ContentBlock[]}`
   (absent for a continuation turn). It is also what a second device needs to
-  render a turn it did not start.
+  render a turn it did not start. **→ Built in 3b** as `prompt: string` (`""`
+  for a continuation turn).
 - **Q3 — Turn status at the cut.** On resync, a `turn_end` with `seq ≤ since`
   is not replayed; the client cannot tell whether a turn is still running, or
   how *its own* turn ended. **Recommendation:** (a) the first `snapshot` page
@@ -79,7 +121,9 @@ lands without them, this plan cannot meet the parent property.
   point 4, F8) stores `turnId → {ack, outcome?}`, and a re-sent
   `prompt{turnId}` for an ended turn returns `{turnId, outcome:{stopReason,
   error?}}` — so the client learns its own turn's end after any resync without
-  a new method (owner: `session-event-stream`).
+  a new method (owner: `session-event-stream`). **→ Built:** (b) in 3b as
+  `PromptResult.ended`; (a) in 3c as `turn?: {turnId}` (running at the cut) —
+  `state: "suspended"` is deferred to `permission-events`.
 - **Q4 — What `open` does in resync mode.** `session-registry` says
   "live → attach + `{replay}` or `{resync: true}`" but not whether the sink is
   attached and what is replayed on resync. This plan assumes **Option A**:
@@ -109,7 +153,8 @@ lands without them, this plan cannot meet the parent property.
   spec says `since` is a **seq number with one meaning** — "every event with
   `seq ≤ since` is reflected in `messages`" — clients may compare it with
   event seqs and must derive nothing else (granularity stays the daemon's).
-  Owner: `session-event-stream` (wording only).
+  Owner: `session-event-stream` (wording only). **→ Built in 3c** with the
+  epoch (D1): `since = {epoch, seq}`, `seq` comparable within one epoch.
 - **Q7 — "reconnecting…" cannot go through `StatusLine` (contradicts this
   doc's Review).** `StatusLine` writes raw `\r`/ANSI to the terminal
   (`cli/src/status-line.ts:1-16,49-71`) and AGENTS §7 requires it to be
@@ -252,13 +297,17 @@ Verified on `main` unless marked *(assumed: child N)*.
   (`tui/src/permission-ui.ts` installs the requester). So a replayed
   `permission_request` for a turn the TUI did not start still shows the
   Approve/Deny dialog — the acceptance scenario needs no new TUI surface.
-- *(assumed: 3 `session-event-stream`)* `turn_start{turnId, prompt?}`,
-  `turn_end{turnId, stopReason, error?}`, `history_replaced{reason}`,
-  `prompt{turnId}` acks at once, `enqueue{id}` dedupes (key checked before
-  `running`), paged `snapshot{cursor?, limit?} → {messages, since, cursor?,
-  turn?}`, event class on the envelope, required `seq` (Q1–Q3, Q6).
-- *(assumed: 4 `session-registry`)* `session/open{sessionId, since?,
-  messages?} → {mode: "replay"|"resync"|"created"}` with Option A semantics
+- *(built: 3 `session-event-stream`, see the re-baseline note)*
+  `turn_start{turnId, prompt: string}`, `turn_end{turnId, stopReason, error?}`,
+  `history_replaced{reason}`, `context_note{text, reason}`, `prompt{turnId}`
+  acks at once (`ended` on a retry of a finished turn), `enqueue{id, turnId}`
+  dedupes (key checked before `running`), paged `snapshot{cursor?, limit?} →
+  {messages, since?: HistoryCut, turn?: {turnId}, cursor?}`, `mandatory?: true`
+  on the envelope, required `seq` (Q1–Q3, Q6).
+- *(assumed: 4 `session-registry`)* `session/open{sessionId, since?:
+  HistoryCut, create?, messages?} → {sessionId, epoch, created, resync}` —
+  the reducer's `mode` is derived: `created` → `"created"`, else `resync` →
+  `"resync"`, else `"replay"` — with Option A semantics
   (Q4); `UnknownSession` (-32003, `transport/src/errors.ts:13`) when not live
   and no `messages`; `session/close` idempotent; detach on socket close;
   model-proxy turns cancelled on detach (session survives).
@@ -285,8 +334,8 @@ type Phase = "opening" | "live" | "resyncing" | "down" | "fatal";
 interface SessionView {
   readonly phase: Phase;
   readonly committed: readonly ChatMessage[]; // seed, or the last snapshot
-  readonly cut: number;                       // snapshot.since; committed ⊇ all seq ≤ cut
-  readonly applied: number;                   // last applied seq (contiguity)
+  readonly cut: HistoryCut | null;            // snapshot.since (or {open.epoch, 0} when created); committed ⊇ all seq ≤ cut.seq
+  readonly applied: number;                   // last applied seq of cut.epoch (contiguity)
   readonly tail: readonly SeqUpdate[];        // applied updates with seq > cut, in seq order
   readonly buffer: readonly SeqUpdate[];      // received, not yet applicable (opening/resyncing)
   readonly turn: { turnId: string; state: "running" | "suspended" } | null;
@@ -294,10 +343,10 @@ interface SessionView {
   readonly fatal?: string;
 }
 type Input =
-  | { kind: "open_sent"; since: number | null }
+  | { kind: "open_sent"; since: HistoryCut | null }
   | { kind: "update"; params: SessionUpdateParams }          // validated envelope
-  | { kind: "open_result"; mode: "replay" | "resync" | "created" }
-  | { kind: "snapshot"; messages: readonly ChatMessage[]; since: number; turn: Turn | null } // all pages folded
+  | { kind: "open_result"; mode: "replay" | "resync" | "created"; epoch: string }
+  | { kind: "snapshot"; messages: readonly ChatMessage[]; since: HistoryCut; turn: Turn | null } // all pages folded
   | { kind: "link_down" }
   | { kind: "recreated" };                                   // UnknownSession → open{messages}
 type Output =
@@ -319,14 +368,20 @@ Rules (each one is a row in the vector tables):
   order; first one must be `applied + 1`, else **gap → `reopen{since:null}`**.
 - `open_result{resync}` (also the fresh-client path) → `resyncing` +
   `fetch_snapshot`. `snapshot{messages, since: S, turn}` → **discard the
-  local tail (partial round)**, `committed = messages`, `cut = applied = S`,
-  `turn` from the snapshot, `pending` cleared; emit `reset{messages ⊕ the user
+  local tail (partial round)**, `committed = messages`, `cut = S`, `applied =
+  S.seq`,
+  `turn` from the snapshot (`{turnId}` → `state: "running"`; `suspended` once
+  `permission-events` adds it), `pending` cleared; emit `reset{messages ⊕ the user
   message of a buffered turn_start after S}` (Q2), then apply buffered
   `seq > S` with the contiguity check, then `committed` effect (persist).
 - `live` + `update`: `seq ≤ applied` → drop (dedupe); `seq > applied + 1` →
   gap → `reopen`; else apply:
   - display known → `tail` + `update` output; display unknown → counts as
     applied, no output;
+  - `tool_call` whose `toolCallId` is already in `committed` or `tail` →
+    upsert, never a second entry (3c: the snapshot's assistant message lists
+    its calls before their `tool_call` updates); `context_note` is a
+    user-role history message (frontends may hide it, the transcript keeps it);
   - `turn_start` → `turn = running`; `turn_end` → `turn = null`, clear its
     `pending`, effect `fetch_snapshot` (persistence after `turn_end`, Review);
   - `permission_request` → `pending.set`, `turn.state = suspended`;
@@ -336,12 +391,13 @@ Rules (each one is a row in the vector tables):
   - unknown **mandatory** → `fatal` + `fatal` output ("this client is too old
     for the daemon; update it"); the shell stops reconnecting for the session.
 - a `snapshot` arriving while `live` (the post-`turn_end` one) folds the tail:
-  `committed = messages`, `cut = since`, `tail = tail.filter(seq > since)`; no
+  `committed = messages`, `cut = since`, `tail = tail.filter(seq > since.seq)`; no
   `reset` output (nothing visible changes); `committed` effect.
 - `link_down` → `down` (state kept: the UI keeps showing it, stale).
 - `recreated` → the daemon lost the session: `turn` (if any) is ended locally
   with `turn_lost` ("the daemon restarted; the turn in flight was lost"),
-  tail and pending cleared, `cut = applied = 0` (a new session's seq space),
+  tail and pending cleared, `cut = {epoch: open.epoch, seq: 0}`, `applied = 0`
+  (a new session's epoch and seq space),
   `reset{committed}`.
 - Guard: more than 3 forced `reopen`s in 60 s for one session → `fatal`
   ("daemon stream inconsistent") — a hostile or buggy pod cannot spin us.
@@ -399,7 +455,8 @@ A mobile app consumes `SessionView` + outputs directly; it never sees
   8a is inert until 8b passes factories.
 - Per generation: wrap the channel (`setOnClose` decorator, Experiment 3),
   build a new `RpcPeer` with the same handlers, `initialize`, then for every
-  open session `open{sessionId, since: view.applied}` (registered *before*
+  open session `open{sessionId, since: view.cut ? {epoch: view.cut.epoch, seq:
+  view.applied} : undefined}` (registered *before*
   sending, LBA), then `flush_outbox`. Callbacks capture `gen`; a stale gen is
   ignored.
 - Session ids are **always client-generated** (`crypto.randomUUID()` when the
@@ -408,9 +465,11 @@ A mobile app consumes `SessionView` + outputs directly; it never sees
 - `UnknownSession` on `open{since}` → `open{sessionId, messages:
   view.committed}` → reducer `recreated`. Two devices racing the recreate:
   the registry makes the second an attach.
-- `fetch_snapshot` effect → page `snapshot{cursor}` until no cursor (guard 1000
-  pages), fold, feed one `snapshot` input. A `CursorExpired`/compaction during
-  paging → restart the fetch (counts toward the reopen guard).
+- `fetch_snapshot` effect → page `snapshot{cursor}` until no cursor (reuse
+  `RemoteClient.snapshot`'s paging: 200 per page, no-progress and 10 000-page
+  guards), fold, feed one `snapshot` input with the first page's `since`/`turn`.
+  A `StaleCursor` (-32011, compaction during paging) → restart the fetch
+  (counts toward the reopen guard).
 - `committed` effect → `options.onCommitted?.(sessionId, messages)`. This is
   the single snapshot used both for persistence and for recreate (today
   `persistingController` takes its own snapshot after each `send`,
@@ -507,7 +566,7 @@ are Q1–Q4 on the siblings).
 | Endless flapping | exponential backoff to 30 s; attempt counter resets only after 10 s up |
 | `dispose()` during backoff/dial | timers cleared, late dial result closed and ignored (generation) |
 | Late frame on an old generation | ignored by the generation guard (`peer.ts:260`, `ws-channel.ts:20-23` deliver it) |
-| Snapshot paging races a compaction | cursor rejected → refetch, bounded by the reopen guard |
+| Snapshot paging races a compaction | `StaleCursor` → refetch, bounded by the reopen guard |
 
 ### Tests
 
@@ -592,23 +651,23 @@ one case per file, generated — never hand-edited):
 {
   "format": "tentacle/client-reattach-vector",
   "formatVersion": 1,
-  "protocolVersion": 2,
+  "protocolVersion": 4,
   "name": "s1-k07-fresh",
   "scenario": "s1-text-tool-permission",
   "path": "reattach | fresh | forced_resync",
   "dropAfterFrame": 7,
-  "initial": { "sessionId": "s-1", "committed": [], "cut": 0, "applied": 0 },
+  "initial": { "sessionId": "s-1", "committed": [], "cut": null, "applied": 0 },
   "steps": [
     { "in": { "kind": "open_sent", "since": null } },
-    { "in": { "kind": "update", "params": { "sessionId": "s-1", "seq": 1, "class": "mandatory",
-              "update": { "type": "turn_start", "turnId": "t-1", "prompt": [{ "type": "text", "text": "hi" }] } } } },
-    { "in": { "kind": "open_result", "mode": "resync" },
+    { "in": { "kind": "update", "params": { "sessionId": "s-1", "seq": 1, "mandatory": true,
+              "update": { "type": "turn_start", "turnId": "t-1", "prompt": "hi" } } } },
+    { "in": { "kind": "open_result", "mode": "resync", "epoch": "e-1" },
       "expectEffects": [{ "kind": "fetch_snapshot" }] },
-    { "in": { "kind": "snapshot", "messages": [], "since": 0, "turn": { "turnId": "t-1", "state": "running" } },
+    { "in": { "kind": "snapshot", "messages": [], "since": { "epoch": "e-1", "seq": 0 }, "turn": { "turnId": "t-1" } },
       "expectOut": [{ "kind": "reset", "messages": [{ "role": "user", "content": "hi" }] }, { "kind": "update", "seq": 1 }] }
   ],
   "expect": {
-    "phase": "live", "cut": 0, "applied": 1,
+    "phase": "live", "cut": { "epoch": "e-1", "seq": 0 }, "applied": 1,
     "committed": [], "tail": [{ "seq": 1, "update": { "type": "turn_start", "turnId": "t-1" } }],
     "turn": { "turnId": "t-1", "state": "running" }, "pending": [],
     "transcript": [{ "role": "user", "text": "hi" }]

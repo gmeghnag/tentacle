@@ -132,13 +132,14 @@ describe("session/update frame (event classes, catch-all, required seq)", () => 
     );
   });
 
-  test("the turn bracket is mandatory, everything else display", () => {
-    // A client that cannot act on turn_start/turn_end would hang the turn.
+  test("the turn bracket and the history barrier are mandatory, everything else display", () => {
+    // A client that cannot act on turn_start/turn_end would hang the turn; one
+    // that skips history_replaced would apply updates over a stale history.
     const mandatory = Object.entries(UPDATE_CLASS)
       .filter(([, c]) => c === "mandatory")
       .map(([t]) => t)
       .sort();
-    expect(mandatory).toEqual(["turn_end", "turn_start"]);
+    expect(mandatory).toEqual(["history_replaced", "turn_end", "turn_start"]);
   });
 
   test("turn_end carries a valid stop reason and a turnId", () => {

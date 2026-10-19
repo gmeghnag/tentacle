@@ -156,8 +156,7 @@ export class Connection {
     if (!hosted) {
       throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${params.sessionId}`);
     }
-    // core `ChatMessage` is structurally the wire schema; copy to a mutable array.
-    return { messages: [...hosted.snapshot().messages] } as SnapshotResult;
+    return hosted.snapshotPage(params.cursor, params.limit);
   }
 
   // Synchronous on purpose: it pushes into the steering queue and returns at

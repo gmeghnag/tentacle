@@ -13,6 +13,7 @@ import type {
 } from "@tentacle/core";
 import {
   type CompactResult,
+  DomainErrorCode,
   type InitializeResult,
   JsonRpcErrorCode,
   Method,
@@ -37,6 +38,17 @@ import { type DuplexChannel, type RequestContext, RpcError, RpcPeer } from "@ten
 import { classifyUpdate } from "./mapping.ts";
 import { responseToOutcome } from "./permission-map.ts";
 import { RemoteSession } from "./remote-session.ts";
+
+/** Page size `snapshot` reads the history with (bounded frames for long sessions). */
+const SNAPSHOT_PAGE = 200;
+/** Restarts of a paged `snapshot` after a compaction raced it, before giving up. */
+const SNAPSHOT_ATTEMPTS = 3;
+/**
+ * Pages one `snapshot` may read (10 000 × 200 messages): a daemon — a pod is
+ * not trusted — that never stops returning a cursor fails loudly here instead
+ * of growing the laptop's memory without bound.
+ */
+const SNAPSHOT_MAX_PAGES = 10_000;
 
 /** A session's in-flight turn: receives its updates, or a stream error that must fail it. */
 export interface SessionStreamHandler {
@@ -188,10 +200,45 @@ export class RemoteClient {
     return result.sessionId;
   }
 
-  /** Read the session's current history back (for the main thread to persist). */
+  /**
+   * Read the session's history back at its current cut (for the main thread to
+   * persist), page by page, newest first, joined chronologically. A compaction
+   * landing between two pages makes the cursor stale: start over.
+   */
   async snapshot(sessionId: string): Promise<readonly ChatMessage[]> {
-    const result = (await this.peer.request(Method.Snapshot, { sessionId })) as SnapshotResult;
-    return result.messages as readonly ChatMessage[];
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.readSnapshotPages(sessionId);
+      } catch (error) {
+        const stale = error instanceof RpcError && error.code === DomainErrorCode.StaleCursor;
+        if (!stale || attempt >= SNAPSHOT_ATTEMPTS) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private async readSnapshotPages(sessionId: string): Promise<readonly ChatMessage[]> {
+    const pages: (readonly ChatMessage[])[] = [];
+    let cursor: string | undefined;
+    do {
+      if (pages.length >= SNAPSHOT_MAX_PAGES) {
+        throw new RpcError(JsonRpcErrorCode.InternalError, "snapshot: too many pages");
+      }
+      const previous = cursor;
+      const result = (await this.peer.request(Method.Snapshot, {
+        sessionId,
+        limit: SNAPSHOT_PAGE,
+        ...(cursor !== undefined ? { cursor } : {}),
+      })) as SnapshotResult;
+      cursor = result.cursor;
+      // Every page that points further back must make progress.
+      if (cursor !== undefined && (result.messages.length === 0 || cursor === previous)) {
+        throw new RpcError(JsonRpcErrorCode.InternalError, "snapshot: cursor made no progress");
+      }
+      pages.push(result.messages as readonly ChatMessage[]);
+    } while (cursor !== undefined);
+    return pages.reverse().flat();
   }
 
   /** Start a turn; resolves with the daemon's ack (the turn ends in the stream). */

@@ -35,6 +35,9 @@ export function render(event: AgentEvent): string {
     }
     case "steer":
       return `\n› ${event.text}\n`;
+    case "history_commit":
+    case "context_note":
+      return "";
     case "turn_end":
       return event.reason === "end_turn" ? "\n" : `\n[stopped: ${event.reason}]\n`;
   }

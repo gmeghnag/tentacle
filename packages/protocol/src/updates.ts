@@ -82,6 +82,18 @@ export const SteerSchema = z.object({
   text: z.string(),
 });
 
+/**
+ * The agent loop added a user-role message of its own to the history: the
+ * nudge after an empty round, or the note telling the model a background job
+ * ended. Display-only (frontends usually hide it), but it makes every history
+ * message replayable, so a client that resynced and one that did not agree.
+ */
+export const ContextNoteSchema = z.object({
+  type: z.literal("context_note"),
+  text: z.string(),
+  reason: z.enum(["continue", "background_exit"]),
+});
+
 /** A turn began (first update of every turn); carries the prompt so a replay shows what was asked. */
 export const TurnStartSchema = z.object({
   type: z.literal("turn_start"),
@@ -99,6 +111,16 @@ export const TurnEndUpdateSchema = z.object({
   error: TurnErrorSchema.optional(),
 });
 
+/**
+ * The history was replaced wholesale (a compaction): a barrier. Anything a
+ * client holds from before it is stale — resync (`snapshot`) instead of
+ * applying later updates on top of it. Starts a new epoch.
+ */
+export const HistoryReplacedSchema = z.object({
+  type: z.literal("history_replaced"),
+  reason: z.enum(["compact"]),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -108,8 +130,10 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentUsageSchema,
   BackgroundExitSchema,
   SteerSchema,
+  ContextNoteSchema,
   TurnStartSchema,
   TurnEndUpdateSchema,
+  HistoryReplacedSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -134,8 +158,10 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   agent_usage: "display",
   background_exit: "display",
   steer: "display",
+  context_note: "display",
   turn_start: "mandatory",
   turn_end: "mandatory",
+  history_replaced: "mandatory",
 };
 
 /** Own keys only: a frame with `type: "toString"` is unknown, not known. */

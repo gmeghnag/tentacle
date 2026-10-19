@@ -174,10 +174,58 @@ export type CompactResult = z.infer<typeof CompactResultSchema>;
 // Read the session's current history back (the main thread persists it; the
 // daemon/worker owns the live conversation but not the on-disk store).
 
-export const SnapshotParamsSchema = z.object({ sessionId: SessionIdSchema }).strict();
+//
+// The snapshot is taken at a consistent CUT of the session's update stream:
+// every update with `seq <= since.seq` is reflected in `messages`, and replay
+// of `seq > since.seq` (same epoch) carries the rest — never doubled, never
+// lost. Paged newest-first: the first page (no `cursor`) is the newest slice
+// and carries the cut; `cursor` fetches the slice just before it.
+// One overlap is by design: an assistant message lists its `toolCalls` before
+// their `tool_call` updates are emitted, so a replayed `tool_call` may name a
+// call already in `messages` — the same call: clients key tool calls by
+// `toolCallId` (upsert), never append a duplicate.
+
+/**
+ * A position in a session's update stream (decision D1). `epoch` changes with
+ * every incarnation of the session and every history replacement (compaction):
+ * compare it for equality only. `seq` is comparable with update `seq`s of the
+ * same epoch.
+ */
+export const HistoryCutSchema = z
+  .object({
+    epoch: z.string().min(1).max(128),
+    seq: z.number().int().nonnegative(),
+  })
+  .strict();
+export type HistoryCut = z.infer<typeof HistoryCutSchema>;
+
+export const SnapshotParamsSchema = z
+  .object({
+    sessionId: SessionIdSchema,
+    /** Opaque: a previous page's `cursor` (an older slice). Absent → the newest page. */
+    cursor: z.string().min(1).max(256).optional(),
+    /** Max messages in this page. Absent → everything up to the cut, in one page. */
+    limit: z.number().int().min(1).optional(),
+  })
+  .strict();
 export type SnapshotParams = z.infer<typeof SnapshotParamsSchema>;
 
-export const SnapshotResultSchema = z.object({ messages: z.array(ChatMessageSchema) }).strict();
+/** The turn running at the cut (its `turn_start` is at or before `since`). */
+export const SnapshotTurnSchema = z.object({ turnId: TurnIdSchema }).strict();
+export type SnapshotTurn = z.infer<typeof SnapshotTurnSchema>;
+
+export const SnapshotResultSchema = z
+  .object({
+    /** Chronological slice of the history, ending at the cut (or at the cursor). */
+    messages: z.array(ChatMessageSchema),
+    /** The cut this snapshot is consistent with. First page only. */
+    since: HistoryCutSchema.optional(),
+    /** Present iff a turn was running at the cut. First page only. */
+    turn: SnapshotTurnSchema.optional(),
+    /** Present iff older messages exist: pass it back for the previous page. */
+    cursor: z.string().min(1).optional(),
+  })
+  .strict();
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 
 // --- session/enqueue (steering) ------------------------------------------

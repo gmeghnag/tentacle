@@ -101,7 +101,8 @@ export function toolResultContent(result: ToolResult): ContentBlock[] {
 /**
  * Map one `AgentEvent` to a `SessionUpdate`, or `null` for events that are not
  * streamed as-is. `turn_end` is `null` here: `HostedSession` owns the turn
- * bracket (`turn_start`/`turn_end`, tagged with the client's `turnId`).
+ * bracket (`turn_start`/`turn_end`, tagged with the client's `turnId`), and
+ * consumes `history_commit` itself (the snapshot cut).
  */
 export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
   switch (event.type) {
@@ -135,6 +136,8 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
     // the agent loop (the per-round drain and the late-steer before turn_end).
     case "steer":
       return { type: "steer", text: event.text };
+    case "context_note":
+      return { type: "context_note", text: event.text, reason: event.reason };
     // Nested sub-agent progress is a local-TUI nicety; remote clients see the
     // `agent_task` tool opaquely (its final report rides the tool_call_update).
     // A background-job exit likewise isn't streamed to remote clients yet (the
@@ -143,6 +146,7 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
     case "subagent_tool":
     case "subagent_end":
     case "background_exit":
+    case "history_commit":
     case "turn_end":
       return null;
   }

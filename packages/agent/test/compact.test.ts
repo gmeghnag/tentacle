@@ -162,3 +162,40 @@ describe("Session.compact cancellation", () => {
     expect(persisted).toHaveLength(0);
   });
 });
+
+describe("Session.compact onReplaced (the daemon's stream barrier)", () => {
+  test("runs once, synchronously after the replacement and before persist", async () => {
+    const model = new ScriptedProvider([[{ type: "text", delta: "brief" }, { type: "done" }]]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry(),
+      env: noopEnv,
+      systemPrompt: "SYS",
+    });
+    const order: string[] = [];
+    const session = new Session(agent, "s", { onPersist: () => order.push("persist") });
+    session.messages.push({ role: "user", content: "do x" });
+    let seen: string[] = [];
+    const done = session.compact(undefined, () => {
+      seen = session.messages.map((m) => m.content);
+      order.push("replaced");
+      // Synchronous with the replacement: no microtask has run in between.
+      queueMicrotask(() => order.push("microtask"));
+    });
+    await done;
+    expect(seen).toEqual(["SYS", expect.stringContaining("brief")]);
+    expect(order.slice(0, 2)).toEqual(["replaced", "persist"]);
+  });
+
+  test("is not called when the compaction fails or is aborted", async () => {
+    const model = new ScriptedProvider([[{ type: "text", delta: "late" }, { type: "done" }]]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv });
+    const session = new Session(agent);
+    session.messages.push({ role: "user", content: "x" });
+    const ac = new AbortController();
+    ac.abort();
+    let called = 0;
+    await expect(session.compact(ac.signal, () => called++)).rejects.toBeDefined();
+    expect(called).toBe(0);
+  });
+});

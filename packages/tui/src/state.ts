@@ -301,6 +301,13 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
       // turn at the point it entered the conversation.
       return { ...state, items: append(state.items, { kind: "user", text: event.text }) };
 
+    // A daemon-side bookkeeping marker, and the loop's own notes to the model
+    // (the nudge, a background note — the exit itself renders from
+    // `background_exit`): nothing to render.
+    case "history_commit":
+    case "context_note":
+      return state;
+
     case "turn_end":
       return {
         ...state,
