@@ -7,7 +7,7 @@
  */
 import { type Agent, Session } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
-import { HostedSession, type RemotePermission } from "./hosted-session.ts";
+import { HostedSession, type RemotePermission, type TurnErrorPolicy } from "./hosted-session.ts";
 
 export type AgentFactory = (cwd: string) => {
   agent: Agent;
@@ -16,7 +16,7 @@ export type AgentFactory = (cwd: string) => {
   jobs?: JobController;
 };
 
-export interface SessionHostOptions {
+export interface SessionHostOptions extends TurnErrorPolicy {
   readonly createAgent: AgentFactory;
   /** The confined working directory every hosted session runs against. */
   readonly defaultCwd: string;
@@ -38,6 +38,10 @@ export class SessionHost {
   ): HostedSession {
     const { agent, permissions, jobs } = this.opts.createAgent(this.opts.defaultCwd);
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
-    return new HostedSession(id, session, permissions, requestPermission, jobs);
+    const { exposeTurnErrors, onTurnError } = this.opts;
+    return new HostedSession(id, session, permissions, requestPermission, jobs, {
+      ...(exposeTurnErrors ? { exposeTurnErrors } : {}),
+      ...(onTurnError ? { onTurnError } : {}),
+    });
   }
 }

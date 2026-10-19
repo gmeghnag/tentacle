@@ -126,6 +126,8 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "agent_usage", promptTokens: 1, completionTokens: 2 },
     { type: "background_exit", jobId: "j", command: "c", status: "exited", exitCode: null },
     { type: "steer", text: "s" },
+    { type: "turn_start", turnId: "t", prompt: "p" },
+    { type: "turn_end", turnId: "t", stopReason: "end_turn" },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {
@@ -134,15 +136,26 @@ describe("toUpdateParams (the session/update frame)", () => {
   });
 
   test("display updates carry no mandatory key at all (omitted, never false)", () => {
-    for (const update of samples) {
+    for (const update of samples.filter((u) => UPDATE_CLASS[u.type] === "display")) {
       const params = toUpdateParams("s1", 7, update);
       expect(params).toEqual({ sessionId: "s1", seq: 7, update });
       expect("mandatory" in params).toBe(false);
     }
   });
 
+  test("the real table: the turn bracket carries mandatory: true", () => {
+    for (const update of samples) {
+      const params = toUpdateParams("s1", 1, update);
+      const mandatory = update.type === "turn_start" || update.type === "turn_end";
+      expect(params.mandatory === true).toBe(mandatory);
+    }
+  });
+
   test("mandatory: true iff the class table says mandatory", () => {
-    const classes = { ...UPDATE_CLASS, steer: "mandatory" } as const;
+    // Every type display except `steer`: the flag follows the injected table only.
+    const classes = Object.fromEntries(
+      Object.keys(UPDATE_CLASS).map((t) => [t, t === "steer" ? "mandatory" : "display"]),
+    ) as Record<keyof typeof UPDATE_CLASS, "display" | "mandatory">;
     for (const update of samples) {
       const params = toUpdateParams("s1", 1, update, classes);
       expect("mandatory" in params).toBe(update.type === "steer");

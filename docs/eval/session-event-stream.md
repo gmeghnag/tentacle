@@ -1,6 +1,6 @@
 # eval/session-event-stream — the stream as single source of truth: consistent cut, turn events, compaction barrier, idempotent commands
 
-> **Status:** split approved (2026-10-19); **3a promoted** → `docs/feat/session-wire-classes.md` (branch `feat/session-wire-classes`); 3b, 3c still planned here (child of `docs/eval/session-reattach.md`, step 3)
+> **Status:** split approved (2026-10-19); **3a promoted** → `docs/feat/session-wire-classes.md` (branch `feat/session-wire-classes`, merged); **3b promoted** → `docs/feat/session-turn-events.md` (branch `feat/session-turn-events`, supersedes §3b where they differ); 3c still planned here (child of `docs/eval/session-reattach.md`, step 3)
 > **Branch:** none until promoted (then, if the split is approved, `feat/session-wire-classes` → `feat/session-turn-events` → `feat/session-history-cut`, one at a time; else `feat/session-event-stream`)
 > **Type:** eval → feat · **Size:** L overall → split into 3a (S) · 3b (M) · 3c (M) on promotion (verified scope spans 7 packages and three risk centres; see Implementation, open question 1) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (protocol + TUI-over-RPC session path, AGENTS §7)
 

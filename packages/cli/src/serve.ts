@@ -30,6 +30,8 @@ export function startDaemon(config: TentacleConfig, options: ServeOptions): Runn
     defaultCwd: config.cwd,
     // Each session gets its own agent, confined to the daemon's cwd.
     createAgent: (cwd) => buildAgent({ ...config, cwd }),
+    // A remote client gets an opaque turn error; the real one is logged here.
+    ...(options.onError ? { onTurnError: options.onError } : {}),
   });
   return startWsServer({
     host: options.host,
@@ -66,6 +68,10 @@ export function startStdioDaemon(
   let sendModelChunked: ModelStreamChunkedSender | null = null;
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
+    // The laptop gets an opaque turn error (the pod is not trusted with more
+    // than it needs, and stays symmetric with `serve`); the real one goes to
+    // the daemon's stderr log (piped + routed by the laptop, never inherited).
+    ...(log ? { onTurnError: (error: Error) => log(`error: ${error.message}`) } : {}),
     createAgent: (cwd) =>
       options.modelProxy
         ? buildAgent(

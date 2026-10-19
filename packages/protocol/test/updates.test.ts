@@ -20,6 +20,9 @@ describe("session/update payloads", () => {
     { type: "plan", entries: [{ content: "step 1", status: "in_progress" }] },
     { type: "background_exit", jobId: "j1", command: "ls", status: "exited", exitCode: 0 },
     { type: "steer", text: "also do X" },
+    { type: "turn_start", turnId: "t1", prompt: "go" },
+    { type: "turn_end", turnId: "t1", stopReason: "end_turn" },
+    { type: "turn_end", turnId: "t1", stopReason: "error", error: { message: "boom" } },
   ];
 
   test("every update variant parses", () => {
@@ -127,6 +130,26 @@ describe("session/update frame (event classes, catch-all, required seq)", () => 
     expect(SessionUpdateParamsSchema.safeParse(frame({ update: { type: "" } })).success).toBe(
       false,
     );
+  });
+
+  test("the turn bracket is mandatory, everything else display", () => {
+    // A client that cannot act on turn_start/turn_end would hang the turn.
+    const mandatory = Object.entries(UPDATE_CLASS)
+      .filter(([, c]) => c === "mandatory")
+      .map(([t]) => t)
+      .sort();
+    expect(mandatory).toEqual(["turn_end", "turn_start"]);
+  });
+
+  test("turn_end carries a valid stop reason and a turnId", () => {
+    const bad = [
+      { type: "turn_end", stopReason: "end_turn" },
+      { type: "turn_end", turnId: "", stopReason: "end_turn" },
+      { type: "turn_end", turnId: "t", stopReason: "nope" },
+      { type: "turn_end", turnId: "t", stopReason: "error", error: {} },
+      { type: "turn_start", turnId: "t" },
+    ];
+    for (const u of bad) expect(SessionUpdateSchema.safeParse(u).success).toBe(false);
   });
 
   test("every known type has a class; only own keys count as known", () => {

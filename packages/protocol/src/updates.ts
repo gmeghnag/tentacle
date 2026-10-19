@@ -8,7 +8,7 @@
  */
 import { z } from "zod";
 import { ContentBlockSchema } from "./content.ts";
-import { SessionIdSchema } from "./session.ts";
+import { SessionIdSchema, StopReasonSchema, TurnErrorSchema, TurnIdSchema } from "./session.ts";
 
 export const ToolCallStatusSchema = z.enum(["pending", "in_progress", "completed", "failed"]);
 export type ToolCallStatus = z.infer<typeof ToolCallStatusSchema>;
@@ -82,6 +82,23 @@ export const SteerSchema = z.object({
   text: z.string(),
 });
 
+/** A turn began (first update of every turn); carries the prompt so a replay shows what was asked. */
+export const TurnStartSchema = z.object({
+  type: z.literal("turn_start"),
+  turnId: TurnIdSchema,
+  prompt: z.string(),
+});
+
+/** A turn ended (last update of every turn): the turn's outcome, in the stream. */
+export const TurnEndUpdateSchema = z.object({
+  type: z.literal("turn_end"),
+  turnId: TurnIdSchema,
+  // Spelled out, not `TurnEndSchema.extend`: a shared `.optional()` instance
+  // exports as an anonymous cross-$def ref, which the exporter refuses.
+  stopReason: StopReasonSchema,
+  error: TurnErrorSchema.optional(),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -91,6 +108,8 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentUsageSchema,
   BackgroundExitSchema,
   SteerSchema,
+  TurnStartSchema,
+  TurnEndUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -115,6 +134,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   agent_usage: "display",
   background_exit: "display",
   steer: "display",
+  turn_start: "mandatory",
+  turn_end: "mandatory",
 };
 
 /** Own keys only: a frame with `type: "toString"` is unknown, not known. */

@@ -4,7 +4,8 @@
  * Flow:
  *   1. `initialize`     — client ↔ agent capability/version handshake.
  *   2. `session/new`    — create a conversation; returns a `sessionId`.
- *   3. `session/prompt` — client submits a user turn; resolves when the turn ends.
+ *   3. `session/prompt` — client submits a user turn under a client-chosen
+ *      `turnId`; acks at once. The turn's end is `turn_end` in the stream.
  *   4. `session/cancel` — notification to interrupt the active turn.
  */
 import { z } from "zod";
@@ -88,9 +89,18 @@ export type NewSessionResult = z.infer<typeof NewSessionResultSchema>;
 
 // --- session/prompt -----------------------------------------------------
 
+/**
+ * Client-chosen id of one turn: the idempotency key of `session/prompt` (a
+ * retry with the same id never runs a second turn) and the tag of its
+ * `turn_start`/`turn_end` updates.
+ */
+export const TurnIdSchema = z.string().min(1).max(128);
+export type TurnId = z.infer<typeof TurnIdSchema>;
+
 export const PromptParamsSchema = z
   .object({
     sessionId: SessionIdSchema,
+    turnId: TurnIdSchema,
     content: z.array(ContentBlockSchema).min(1),
   })
   .strict();
@@ -105,9 +115,30 @@ export const StopReasonSchema = z.enum([
 ]);
 export type StopReason = z.infer<typeof StopReasonSchema>;
 
+/** Why a turn failed; redacted to "internal error" on a remote daemon (a provider message can carry secrets). */
+export const TurnErrorSchema = z.object({
+  code: z.number().int().optional(),
+  message: z.string(),
+});
+export type TurnError = z.infer<typeof TurnErrorSchema>;
+
+/** How a turn ended: streamed in `turn_end`, cached for a retried `session/prompt`. */
+export const TurnEndSchema = z.object({
+  stopReason: StopReasonSchema,
+  /** Present on `stopReason: "error"`. */
+  error: TurnErrorSchema.optional(),
+});
+// Not `.strict()`: it also rides `turn_end`, whose members stay open (see updates.ts).
+export type TurnEnd = z.infer<typeof TurnEndSchema>;
+
+/**
+ * The ack: the turn was accepted (or, on a retry, already exists). `ended` is
+ * present only when a retried `turnId` names a turn that already finished.
+ */
 export const PromptResultSchema = z
   .object({
-    stopReason: StopReasonSchema,
+    turnId: TurnIdSchema,
+    ended: TurnEndSchema.optional(),
   })
   .strict();
 export type PromptResult = z.infer<typeof PromptResultSchema>;
@@ -153,10 +184,19 @@ export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 // Queue a user message for injection into the turn currently running, at the
 // next model-round boundary. The daemon resolves it as soon as it has pushed
 // the text into the session's steering queue — the model may not have seen it
-// yet (that happens at the boundary, streamed back as a `steer` update).
+// yet (that happens at the boundary, streamed back as a `steer` update). `id`
+// is the client-chosen idempotency key: a retry of an accepted id is a no-op
+// success, even after its turn ended. `turnId` binds it to the turn it was
+// typed during: a (retried) enqueue never lands in a later turn — it is
+// `NoTurnRunning` unless that exact turn is still running.
 
 export const EnqueueParamsSchema = z
-  .object({ sessionId: SessionIdSchema, text: z.string().min(1) })
+  .object({
+    sessionId: SessionIdSchema,
+    id: z.string().min(1).max(128),
+    turnId: TurnIdSchema,
+    text: z.string().min(1),
+  })
   .strict();
 export type EnqueueParams = z.infer<typeof EnqueueParamsSchema>;
 

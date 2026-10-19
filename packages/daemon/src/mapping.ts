@@ -99,8 +99,9 @@ export function toolResultContent(result: ToolResult): ContentBlock[] {
 }
 
 /**
- * Map one `AgentEvent` to a `SessionUpdate`, or `null` for `turn_end` (whose
- * stop reason resolves the pending `session/prompt` instead of streaming).
+ * Map one `AgentEvent` to a `SessionUpdate`, or `null` for events that are not
+ * streamed as-is. `turn_end` is `null` here: `HostedSession` owns the turn
+ * bracket (`turn_start`/`turn_end`, tagged with the client's `turnId`).
  */
 export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
   switch (event.type) {

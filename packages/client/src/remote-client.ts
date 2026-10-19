@@ -30,7 +30,6 @@ import {
   type SessionUpdate,
   type SessionUpdateParams,
   type SnapshotResult,
-  type StopReason,
   type WireStreamEvent,
   text,
 } from "@tentacle/protocol";
@@ -133,6 +132,28 @@ export class RemoteClient {
         }
         throw new RpcError(JsonRpcErrorCode.MethodNotFound, `unexpected request: ${method}`);
       },
+      // A `session/update` whose ENVELOPE failed the schema (no `seq`, a
+      // non-object update, …) never reaches `classifyUpdate`: fail its session's
+      // turn here, or a broken `turn_end` would hang it. `onError` already got
+      // the error from the peer. An unreadable `sessionId` cannot be routed.
+      onInvalidNotification: (method, params) => {
+        if (method !== Notification.SessionUpdate) return;
+        const sessionId =
+          params && typeof params === "object" ? (params as { sessionId?: unknown }).sessionId : "";
+        if (typeof sessionId === "string") {
+          this.handlers
+            .get(sessionId)
+            ?.fail(new Error("malformed session/update frame from the daemon"));
+        }
+      },
+      // The turn's outcome now arrives in the stream, not as a pending
+      // response, so a dead socket must end every open turn explicitly (same
+      // error a pending request gets).
+      onClose: () => {
+        for (const handler of [...this.handlers.values()]) {
+          handler.fail(new RpcError(JsonRpcErrorCode.InternalError, "connection closed"));
+        }
+      },
       // Log non-fatal peer errors (a stray/malformed notification, a bad frame)
       // instead of dropping them silently. Routed to the caller's sink, NEVER a
       // raw terminal write (§7): the laptop's stdout is the RPC channel/Ink's.
@@ -173,10 +194,11 @@ export class RemoteClient {
     return result.messages as readonly ChatMessage[];
   }
 
-  prompt(sessionId: string, prompt: string): Promise<StopReason> {
+  /** Start a turn; resolves with the daemon's ack (the turn ends in the stream). */
+  prompt(sessionId: string, turnId: string, prompt: string): Promise<PromptResult> {
     return this.peer
-      .request(Method.Prompt, { sessionId, content: [text(prompt)] })
-      .then((result) => (result as PromptResult).stopReason);
+      .request(Method.Prompt, { sessionId, turnId, content: [text(prompt)] })
+      .then((result) => result as PromptResult);
   }
 
   compact(sessionId: string): Promise<{ before: number; after: number }> {
@@ -185,9 +207,12 @@ export class RemoteClient {
       .then((result) => result as CompactResult);
   }
 
-  /** Queue a user message for the running turn (steering, mid-turn only). */
-  enqueue(sessionId: string, text: string): Promise<void> {
-    return this.peer.request(Method.Enqueue, { sessionId, text }).then(() => undefined);
+  /**
+   * Queue a user message for the running turn `turnId` (steering, mid-turn
+   * only). `id` is the idempotency key: resending it is a no-op success.
+   */
+  enqueue(sessionId: string, id: string, turnId: string, text: string): Promise<void> {
+    return this.peer.request(Method.Enqueue, { sessionId, id, turnId, text }).then(() => undefined);
   }
 
   cancel(sessionId: string): void {

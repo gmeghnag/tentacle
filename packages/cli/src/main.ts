@@ -159,7 +159,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     try {
       const token = await resolveToken(flags);
-      await connectTui({ url, ...(token ? { token } : {}) });
+      await connectTui({ url, ...(token ? { token } : {}) }, write);
       return 0;
     } catch (error) {
       write(`\n[connect error] ${error instanceof Error ? error.message : String(error)}\n`);

@@ -486,4 +486,96 @@ describe("RpcPeer", () => {
     expect(seen?.aborted).toBe(true);
     server.close();
   });
+
+  test("onClose fires exactly once: on a remote close, and on a local close()", async () => {
+    // Remote close: the other end closes the channel.
+    const [ca, cb] = createChannelPair();
+    let closes = 0;
+    const local = new RpcPeer(ca, { onClose: () => closes++ });
+    const remote = new RpcPeer(cb);
+    remote.close();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(closes).toBe(1);
+    local.close(); // already closed: no second call
+    expect(closes).toBe(1);
+
+    // Local close: the hook runs too (both paths funnel into handleClose).
+    const [cc, cd] = createChannelPair();
+    let localCloses = 0;
+    const peer = new RpcPeer(cc, { onClose: () => localCloses++ });
+    new RpcPeer(cd);
+    peer.close();
+    peer.close();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(localCloses).toBe(1);
+  });
+
+  test("inside onClose the peer is already closed and its pending requests are rejected", async () => {
+    const [ca, cb] = createChannelPair();
+    const seen: { closed?: boolean; late?: string } = {};
+    let lateRequest: Promise<unknown> = Promise.resolve();
+    const client: RpcPeer = new RpcPeer(ca, {
+      onClose: () => {
+        seen.closed = client.isClosed;
+        lateRequest = client.request("initialize", INIT_PARAMS).catch((e: Error) => {
+          seen.late = e.message;
+        });
+      },
+    });
+    new RpcPeer(cb, { onRequest: () => new Promise(() => {}) });
+    const pending = client.request("initialize", INIT_PARAMS);
+    client.close();
+    await expect(pending).rejects.toThrow("connection closed");
+    await lateRequest;
+    expect(seen).toEqual({ closed: true, late: "peer is closed" });
+  });
+
+  test("onInvalidNotification receives a known notification whose params fail its schema", async () => {
+    const [ca, cb] = createChannelPair();
+    const invalid: [string, unknown][] = [];
+    const errors: string[] = [];
+    new RpcPeer(ca, {
+      onInvalidNotification: (method, params) => invalid.push([method, params]),
+      onError: (e) => errors.push(e.message),
+    });
+    const sender = new RpcPeer(cb);
+    const bad = { sessionId: "s1", mandatory: true, update: { type: "turn_end" } }; // no seq
+    sender.notify("session/update", bad);
+    sender.notify("no/such/notification", { x: 1 }); // unknown method: onError only
+    await new Promise((r) => setTimeout(r, 5));
+    expect(invalid).toEqual([["session/update", bad]]);
+    // Still reported, as before (the hook is in addition, never instead).
+    expect(errors).toEqual([
+      "invalid params for notification session/update",
+      "unknown notification: no/such/notification",
+    ]);
+  });
+
+  test("a throwing onClose is reported, never thrown out of close()", () => {
+    const [ca, cb] = createChannelPair();
+    const errors: string[] = [];
+    const peer = new RpcPeer(ca, {
+      onClose: () => {
+        throw new Error("hook failed");
+      },
+      onError: (e) => errors.push(e.message),
+    });
+    new RpcPeer(cb);
+    expect(() => peer.close()).not.toThrow();
+    expect(errors).toEqual(["hook failed"]);
+  });
+
+  test("a throwing onInvalidNotification is reported, never thrown out of dispatch", async () => {
+    const [ca, cb] = createChannelPair();
+    const errors: string[] = [];
+    new RpcPeer(ca, {
+      onInvalidNotification: () => {
+        throw new Error("hook failed");
+      },
+      onError: (e) => errors.push(e.message),
+    });
+    new RpcPeer(cb).notify("session/update", { sessionId: "s1" });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(errors).toEqual(["invalid params for notification session/update", "hook failed"]);
+  });
 });

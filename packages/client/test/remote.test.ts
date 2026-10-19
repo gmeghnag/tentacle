@@ -11,7 +11,7 @@ import {
 import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
 import { JsonRpcErrorCode, Method, Notification, PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
-import { RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
+import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import {
   MODEL_STREAM_BATCH_MAX_CHARS,
   MODEL_STREAM_COALESCE_MS,
@@ -550,20 +550,29 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
     // An older daemon: it answers the core session methods but not
     // `session/enqueue` (a real MethodNotFound would come from its peer).
     const [daemonCh, clientCh] = createChannelPair();
-    let sessionId = "";
-    new RpcPeer(daemonCh, {
+    let turnId = "";
+    const daemon: RpcPeer = new RpcPeer(daemonCh, {
       onRequest: async (method, params) => {
         if (method === Method.Initialize) {
           return { protocolVersion: 1, agentCapabilities: { tools: true, permissions: true } };
         }
         if (method === Method.NewSession) {
-          sessionId = "s1";
-          return { sessionId };
+          return { sessionId: "s1" };
         }
         if (method === Method.Prompt) {
-          return { stopReason: "end_turn" };
+          turnId = (params as { turnId: string }).turnId;
+          return { turnId }; // the turn stays open until the enqueue was tried
         }
-        // Anything else — notably session/enqueue — is unknown to this daemon.
+        // Anything else — notably session/enqueue — is unknown to this daemon;
+        // the turn then ends.
+        setTimeout(() =>
+          daemon.notify(Notification.SessionUpdate, {
+            sessionId: "s1",
+            seq: 1,
+            mandatory: true,
+            update: { type: "turn_end", turnId, stopReason: "end_turn" },
+          }),
+        );
         throw new RpcError(JsonRpcErrorCode.MethodNotFound, `unknown method: ${method}`);
       },
     });
@@ -643,7 +652,7 @@ describe("unknown / malformed session/update frames (event classes)", () => {
     const [daemonCh, clientCh] = createChannelPair();
     const cancels: unknown[] = [];
     const daemon: RpcPeer = new RpcPeer(daemonCh, {
-      onRequest: async (method) => {
+      onRequest: async (method, params) => {
         if (method === Method.Initialize) {
           return {
             protocolVersion: PROTOCOL_VERSION,
@@ -652,9 +661,18 @@ describe("unknown / malformed session/update frames (event classes)", () => {
         }
         if (method === Method.NewSession) return { sessionId: "s1" };
         if (method === Method.Prompt) {
+          // Ack at once; the turn ends in the stream (only if `end`).
+          const { turnId } = params as { turnId: string };
           for (const frame of frames) daemon.notify(Notification.SessionUpdate, frame);
-          if (end) return { stopReason: "end_turn" };
-          return new Promise(() => {});
+          if (end) {
+            daemon.notify(Notification.SessionUpdate, {
+              sessionId: "s1",
+              seq: 999,
+              mandatory: true,
+              update: { type: "turn_end", turnId, stopReason: "end_turn" },
+            });
+          }
+          return { turnId };
         }
         throw new RpcError(JsonRpcErrorCode.MethodNotFound, method);
       },
@@ -792,5 +810,345 @@ describe("real WebSocket smoke test", () => {
     } finally {
       server.stop();
     }
+  });
+});
+
+describe("RemoteSession ends turns from the stream (turn_start/turn_end)", () => {
+  /** A raw daemon: acks `prompt` with `ack(turnId)`, then runs `after(turnId)` (its stream). */
+  function scriptedDaemon(
+    ack: (turnId: string) => unknown,
+    after: (turnId: string, notify: (update: unknown, mandatory?: boolean) => void) => void,
+  ) {
+    const [daemonCh, clientCh] = createChannelPair();
+    const cancels: unknown[] = [];
+    let seq = 0;
+    const daemon: RpcPeer = new RpcPeer(daemonCh, {
+      onRequest: async (method, params) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        if (method === Method.NewSession) return { sessionId: "s1" };
+        if (method === Method.Prompt) {
+          const { turnId } = params as { turnId: string };
+          setTimeout(() =>
+            after(turnId, (update, mandatory) =>
+              daemon.notify(Notification.SessionUpdate, {
+                sessionId: "s1",
+                seq: ++seq,
+                ...(mandatory ? { mandatory: true } : {}),
+                update,
+              }),
+            ),
+          );
+          return ack(turnId);
+        }
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, method);
+      },
+      onNotification: (method, params) => {
+        if (method === Notification.Cancel) cancels.push(params);
+      },
+    });
+    return { daemon, clientCh, cancels };
+  }
+
+  async function drive(clientCh: ReturnType<typeof createChannelPair>[1], timeoutMs = 500) {
+    const errors: Error[] = [];
+    const client = new RemoteClient(clientCh, new PermissionBroker(), undefined, {
+      onError: (e) => errors.push(e),
+    });
+    await client.initialize();
+    const events: AgentEvent[] = [];
+    const outcome = await Promise.race([
+      (async () => {
+        for await (const e of client.newSession().send("hi")) events.push(e);
+        return "ended";
+      })().catch((e: unknown) => e as Error),
+      new Promise<string>((r) => setTimeout(() => r("hung"), timeoutMs)),
+    ]);
+    return { client, outcome, events, errors };
+  }
+
+  const end = (turnId: string, stopReason = "end_turn", error?: unknown) => ({
+    type: "turn_end",
+    turnId,
+    stopReason,
+    ...(error ? { error } : {}),
+  });
+  const chunk = (text: string) => ({
+    type: "agent_message_chunk",
+    content: { type: "text", text },
+  });
+
+  test("the turn ends on ITS turn_end; another turn's bracket is ignored", async () => {
+    const { clientCh } = scriptedDaemon(
+      (turnId) => ({ turnId }),
+      (turnId, notify) => {
+        notify({ type: "turn_start", turnId, prompt: "hi" }, true);
+        notify(chunk("a"));
+        notify(end("someone-else"), true); // not ours: must not end the turn
+        notify(chunk("b"));
+        notify(end(turnId), true);
+      },
+    );
+    const r = await drive(clientCh);
+    expect(r.outcome).toBe("ended");
+    expect(r.events).toEqual([
+      { type: "text", delta: "a" },
+      { type: "text", delta: "b" },
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    r.client.close();
+  });
+
+  test("turn_end{error} fails the turn with an RpcError carrying the streamed code/message", async () => {
+    const { clientCh } = scriptedDaemon(
+      (turnId) => ({ turnId }),
+      (turnId, notify) => notify(end(turnId, "error", { code: -32004, message: "boom" }), true),
+    );
+    const r = await drive(clientCh);
+    expect(r.outcome).toBeInstanceOf(RpcError);
+    expect(r.outcome).toMatchObject({ code: -32004, message: "boom" });
+    // Without a code: the generic internal error code.
+    const plain = scriptedDaemon(
+      (turnId) => ({ turnId }),
+      (turnId, notify) => notify(end(turnId, "error", { message: "internal error" }), true),
+    );
+    const r2 = await drive(plain.clientCh);
+    expect(r2.outcome).toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message: "internal error",
+    });
+    r.client.close();
+    r2.client.close();
+  });
+
+  test("an ack carrying `ended` ends the turn with no stream (a retried, finished turn)", async () => {
+    const { clientCh } = scriptedDaemon(
+      (turnId) => ({ turnId, ended: { stopReason: "cancelled" } }),
+      () => {},
+    );
+    const r = await drive(clientCh);
+    expect(r.outcome).toBe("ended");
+    expect(r.events).toEqual([{ type: "turn_end", reason: "cancelled" }]);
+    r.client.close();
+  });
+
+  test("the socket closing after the ack fails the turn with `connection closed` (no hang)", async () => {
+    const { daemon, clientCh } = scriptedDaemon(
+      (turnId) => ({ turnId }),
+      (turnId, notify) => {
+        notify({ type: "turn_start", turnId, prompt: "hi" }, true);
+        setTimeout(() => daemon.close(), 5);
+      },
+    );
+    const r = await drive(clientCh);
+    expect(r.outcome).toBeInstanceOf(RpcError);
+    expect((r.outcome as Error).message).toBe("connection closed");
+  });
+
+  test("an envelope-invalid turn_end (no seq) fails the turn loudly and cancels it daemon-side", async () => {
+    const { daemon, clientCh, cancels } = scriptedDaemon(
+      (turnId) => ({ turnId }),
+      (turnId) =>
+        daemon.notify(Notification.SessionUpdate, {
+          sessionId: "s1",
+          mandatory: true,
+          update: end(turnId),
+        }),
+    );
+    const r = await drive(clientCh);
+    expect(r.outcome).toBeInstanceOf(Error);
+    expect((r.outcome as Error).message).toBe("malformed session/update frame from the daemon");
+    expect(r.errors.map((e) => e.message)).toEqual([
+      "invalid params for notification session/update",
+    ]);
+    await new Promise((res) => setTimeout(res, 5));
+    expect(cancels).toEqual([{ sessionId: "s1" }]);
+    r.client.close();
+  });
+
+  test("an envelope-invalid frame with no readable sessionId reaches onError only (no throw)", async () => {
+    const { daemon, clientCh } = scriptedDaemon(
+      (turnId) => ({ turnId }),
+      (turnId, notify) => {
+        daemon.notify(Notification.SessionUpdate, { sessionId: 42, seq: 1, update: chunk("x") });
+        daemon.notify(Notification.SessionUpdate, null);
+        notify(end(turnId), true);
+      },
+    );
+    const r = await drive(clientCh);
+    expect(r.outcome).toBe("ended");
+    expect(r.errors.map((e) => e.message)).toEqual([
+      "invalid params for notification session/update",
+      "invalid params for notification session/update",
+    ]);
+    r.client.close();
+  });
+
+  for (const [label, ended] of [
+    ["a plain ack", false],
+    ["an ack carrying `ended`", true],
+  ] as const) {
+    test(`a turn_end that arrives BEFORE the ack ends the turn once; the late ack is a no-op (${label})`, async () => {
+      // No contract orders the ack against the turn's stream (the handler's
+      // result is sent a few microtasks after it returns, while the turn runs
+      // concurrently). Measured on the in-memory pair the ack comes first, so pin
+      // the other order deterministically: the stream is sent before returning.
+      const [daemonCh, clientCh] = createChannelPair();
+      const daemon: RpcPeer = new RpcPeer(daemonCh, {
+        onRequest: async (method, params) => {
+          if (method === Method.Initialize) {
+            return {
+              protocolVersion: PROTOCOL_VERSION,
+              agentCapabilities: { tools: true, permissions: true },
+            };
+          }
+          if (method === Method.NewSession) return { sessionId: "s1" };
+          const { turnId } = params as { turnId: string };
+          const frame = (seq: number, update: unknown, mandatory = false) =>
+            daemon.notify(Notification.SessionUpdate, {
+              sessionId: "s1",
+              seq,
+              ...(mandatory ? { mandatory: true } : {}),
+              update,
+            });
+          frame(1, { type: "turn_start", turnId, prompt: "hi" }, true);
+          frame(2, chunk("hi"));
+          frame(3, end(turnId), true);
+          // The ack, after the whole turn (with `ended`, as a retry would get it:
+          // the turn must still end exactly once).
+          return ended ? { turnId, ended: { stopReason: "end_turn" } } : { turnId };
+        },
+      });
+      const r = await drive(clientCh);
+      expect(r.outcome).toBe("ended");
+      expect(r.events).toEqual([
+        { type: "text", delta: "hi" },
+        { type: "turn_end", reason: "end_turn" },
+      ]);
+      r.client.close();
+    });
+  }
+
+  test("a real daemon's failing turn reaches the client as a thrown error (redacted remotely)", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    const failing: ModelProvider = {
+      id: "boom",
+      // biome-ignore lint/correctness/useYield: throws before its first event
+      async *stream(): AsyncIterable<StreamEvent> {
+        throw new Error("provider said sk-SECRET");
+      },
+    };
+    new Connection(daemonCh, makeHost(failing, noopEnv));
+    const r = await drive(clientCh);
+    expect(r.outcome).toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message: "internal error",
+    });
+    r.client.close();
+  });
+});
+
+describe("RemoteSession steering bound to its turn (review fixes)", () => {
+  // Round 1 calls a tool on a slow env (a mid-turn window); later rounds echo.
+  const echoModel = (seen: string[][]): ModelProvider => ({
+    id: "echo",
+    async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+      const messages = request.messages.map((m) => m.content);
+      seen.push(messages);
+      if (messages.at(-1) === "go") {
+        yield {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls" }) },
+        };
+      } else {
+        yield { type: "text", delta: `echo:${messages.at(-1) ?? ""}` };
+      }
+      yield { type: "done" };
+    },
+  });
+  const slowEnv: ExecutionEnvironment = {
+    id: "slow",
+    async exec() {
+      await new Promise((r) => setTimeout(r, 100));
+      return { stdout: "ok", stderr: "", exitCode: 0 };
+    },
+    readFile: () => Promise.resolve(""),
+    writeFile: () => Promise.resolve(),
+  };
+
+  test("two steers in one turn are two distinct enqueues: both reach the model", async () => {
+    const seen: string[][] = [];
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, makeHost(echoModel(seen), slowEnv));
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    const events: AgentEvent[] = [];
+    for await (const e of session.send("go")) {
+      events.push(e);
+      if (e.type === "tool_start") {
+        await session.enqueue("A");
+        await session.enqueue("B");
+      }
+    }
+    // A shared key would make "B" a retry of "A": silently dropped.
+    expect(events.filter((e) => e.type === "steer")).toEqual([
+      { type: "steer", text: "A" },
+      { type: "steer", text: "B" },
+    ]);
+    expect(seen[1]?.slice(-2)).toEqual(["A", "B"]);
+    client.close();
+  });
+
+  test("a steer typed after the turn ended REJECTS NoTurnRunning (never a silent no-op)", async () => {
+    const seen: string[][] = [];
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, makeHost(echoModel(seen), slowEnv));
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    for await (const _ of session.send("go")) {
+      // drain the turn
+    }
+    // The TUI can still show the turn running here (post-turn snapshot in
+    // flight): the text must not vanish — the rejection lets it say "not queued".
+    await expect(session.enqueue("late")).rejects.toMatchObject({
+      code: DomainErrorCode.NoTurnRunning,
+    });
+    expect(seen.flat()).not.toContain("late");
+    client.close();
+  });
+
+  test("a prompt the daemon refuses fails the turn (it does not wait for a turn_end)", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    new RpcPeer(daemonCh, {
+      onRequest: async (method) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        if (method === Method.NewSession) return { sessionId: "s1" };
+        throw new RpcError(DomainErrorCode.TurnInProgress, "a turn is already running");
+      },
+    });
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    const outcome = await Promise.race([
+      (async () => {
+        for await (const _ of client.newSession().send("hi")) {
+          // no events expected
+        }
+        return "ended";
+      })().catch((e: unknown) => e),
+      new Promise((r) => setTimeout(() => r("hung"), 500)),
+    ]);
+    expect(outcome).toMatchObject({ code: DomainErrorCode.TurnInProgress });
+    client.close();
   });
 });

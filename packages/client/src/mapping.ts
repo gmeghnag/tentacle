@@ -156,7 +156,11 @@ export function updateToEvent(
     // A steering message was injected; the TUI drops the matching ⏳ entry FIFO.
     case "steer":
       return { type: "steer", text: update.text };
+    // The turn bracket is consumed by `RemoteSession` (it ends the turn by
+    // `turnId`); it is not an `AgentEvent` of its own.
     case "plan":
+    case "turn_start":
+    case "turn_end":
       return null;
   }
 }
