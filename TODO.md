@@ -414,13 +414,17 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       `docs/eval/mcp-daemon-servers.md`. Type: eval → feat · Size: M · Blast:
       load-bearing.
 
-### Block 11 — editor integration (ACP; 2026-10-19)
+### Block 11 — new capabilities under evaluation (2026-10-19)
 
 - [ ] **Tentacle is not usable from ACP editors (Zed)**: our wire is
       ACP-shaped but not ACP-compatible, and there is no `tentacle acp`. Proposal:
       an adapter frontend over `createLocalRuntime` (no wire change).
       **Eval:** `docs/eval/acp-adapter.md`. Type: eval → feat · Size: M (v1) ·
       Blast: load-bearing.
+- [ ] **Sub-agent in an ephemeral Kubernetes pod** (opt-in, e.g. `runOn: "pod"`
+      on `agent_task`). Open decisions D1–D8; D1 (what code the pod works on) is
+      unanswered. **Eval:** `docs/eval/subagent-in-pod.md`. Type: eval → feat ·
+      Size: M–L · Blast: load-bearing.
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
