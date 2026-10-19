@@ -436,6 +436,25 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       unanswered. **Eval:** `docs/eval/subagent-in-pod.md`. Type: eval → feat ·
       Size: M–L · Blast: load-bearing.
 
+- [ ] **Sessions die with their connection; no re-attach** (blocker for the
+      mobile app). Protocol-v2 redesign: daemon-owned sessions, `session/open`,
+      seq'd byte-bounded stream + consistent-cut snapshot, compaction barrier,
+      idempotent commands, permissions as events (no timeout: the turn suspends
+      until a human answers), 24 h idle TTL, multi-attach, thin-client
+      profile, JSON Schema export. CONFIRMED (repro); fresh-context review
+      F1–F8 integrated. **Parent eval:** `docs/eval/session-reattach.md`.
+      Type: eval (parent) · Size: L → split · Blast: load-bearing. Children, in order:
+      1. `fix/background-process-groups` (from `docs/eval/daemon-session-lifecycle.md`) · S–M · cross-module
+      2. **Eval:** `docs/eval/protocol-schema-export.md` · S · cross-module
+      3. **Eval:** `docs/eval/session-event-stream.md` · M · load-bearing
+      4. **Eval:** `docs/eval/session-registry.md` · M · load-bearing
+      5. **Eval:** `docs/eval/session-ttl-limits.md` · S–M · load-bearing
+      6. **Eval:** `docs/eval/daemon-side-persistence.md` (`serve` only) · M · load-bearing
+      7. **Eval:** `docs/eval/permission-events.md` · M · load-bearing
+      8. **Eval:** `docs/eval/client-reattach.md` · M · load-bearing
+      9. **Eval:** `docs/eval/attachments.md` (sister) · L → split · load-bearing
+      10. mobile app (React Native or Swift) — own eval, after 8
+
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
 Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked up).
