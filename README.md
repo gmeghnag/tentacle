@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="art/tentacle-tonal.svg" alt="Tentacle, the tentacle mascot" width="240">
+<p align="left">
+  <img src="art/tentacle-lockup.svg" alt="tentacle" height="96">
 </p>
-
-# tentacle
 
 A SOTA agent harness — the platform that turns any LLM into an autonomous,
 remotely-controllable coding agent with a rich terminal UI.
