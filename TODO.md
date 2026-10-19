@@ -414,6 +414,14 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       `docs/eval/mcp-daemon-servers.md`. Type: eval → feat · Size: M · Blast:
       load-bearing.
 
+### Block 11 — editor integration (ACP; 2026-10-19)
+
+- [ ] **Tentacle is not usable from ACP editors (Zed)**: our wire is
+      ACP-shaped but not ACP-compatible, and there is no `tentacle acp`. Proposal:
+      an adapter frontend over `createLocalRuntime` (no wire change).
+      **Eval:** `docs/eval/acp-adapter.md`. Type: eval → feat · Size: M (v1) ·
+      Blast: load-bearing.
+
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
 Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked up).
