@@ -343,9 +343,9 @@ Daily-driver work (done 2026-10-14):
       version stays 1). Second review pass, Finding 4, of
       `docs/fix/compact-empty-summary-wipe.md`. Type: feat · Size: S ·
       Blast: cross-module.
-- [ ] 🟡 **`session/compact` races a turn on the daemon** (both directions: compact
+- [x] 🟡 **`session/compact` races a turn on the daemon** (both directions: compact
       mid-turn → orphan `tool` msg; prompt mid-compact → turn silently lost).
-      CONFIRMED. **Fix (in review, `fix/daemon-compact-turn-guard`):**
+      CONFIRMED. **Fix (DONE 2026-10-20, `fix/daemon-compact-turn-guard`):**
       `docs/fix/daemon-compact-turn-guard.md`. Type: fix · Size: S ·
       Blast: load-bearing.
 - [ ] 🟡 **No daemon session lifecycle**: background jobs orphaned on `/clear` /
@@ -459,7 +459,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       Type: eval (parent) · Size: L → split · Blast: load-bearing. Children, in order:
       1. **Fix (DONE 2026-10-19, `fix/background-process-groups`):** `docs/fix/background-process-groups.md` · S–M · load-bearing
       2. **Feat (DONE 2026-10-19, `feat/protocol-schema-export`):** `docs/feat/protocol-schema-export.md` · S–M · cross-module
-      2b. prerequisite (in review, `fix/daemon-compact-turn-guard`): `docs/fix/daemon-compact-turn-guard.md` (before 3c)
+      2b. **Fix (DONE 2026-10-20, `fix/daemon-compact-turn-guard`):** `docs/fix/daemon-compact-turn-guard.md` (before 3c)
       3a. **Feat (DONE 2026-10-20, `feat/session-wire-classes`):** `docs/feat/session-wire-classes.md` · M · load-bearing
       3b. **Feat (DONE 2026-10-20, `feat/session-turn-events`):** `docs/feat/session-turn-events.md` · M · load-bearing
       3c. **Eval:** `docs/eval/session-event-stream.md` §3c · M · load-bearing (after 3b and 2b)

@@ -1,6 +1,6 @@
 # fix/daemon-compact-turn-guard — `session/compact` is not mutually exclusive with a running turn on the daemon
 
-> **Status:** review — APPROVE-WITH-NITS, nits addressed (promoted from `eval/` 2026-10-20)
+> **Status:** done — merged to `main` 2026-10-20 (promoted from `eval/` 2026-10-20)
 > **Branch:** `fix/daemon-compact-turn-guard`
 > **Type:** fix · **Size:** S · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review red-teaming "Don't serialize the RPC peer" (§7)
 
