@@ -1,6 +1,6 @@
 # feat/docs-direct-commit-carveout — docs & index edits are not tasks
 
-> **Status:** implementation (ready to execute)
+> **Status:** done — merged to `main` (94a6f48) · status synced by audit 2026-10-19
 > **Branch:** `feat/docs-direct-commit-carveout`
 > **Size:** S · **Blast:** contained · **Suited:** Opus authors (a rules change — wants the reasoning trail); standard in-context Review (docs-only, no §7 code invariant touched).
 

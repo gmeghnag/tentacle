@@ -123,13 +123,15 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       approving `sudo systemctl restart` creates the rule `systemctl restart`
       (and a later non-sudo `systemctl restart` auto-runs, and vice versa).
 - [ ] 🔵 A throw from the permission `requester` (or `gate.authorize`) escapes
-      `runMessages` uncaught, same class as Block-1 ①. The interactive requester
+      `runMessages` uncaught, same class as Block-1 ①. **Subsumed by**
+      `docs/eval/history-validity-invariant.md`. The interactive requester
       resolves `allowed:false` rather than throwing, so low-risk in practice.
 - [ ] 🔵 `agent-defs.ts`: `parseFrontmatter` needs `\n---\n` → a CRLF file loses
       its frontmatter silently; `tools: foo` (bare string, no `[]`) falls through
       to `"all"` instead of a single-tool list — a footgun that over-grants.
 - [ ] 🔵 `compactedHistory` can leave two consecutive `user` messages (summary +
       next send); OpenAI-compatible servers tolerate it, but note for strict ones.
+      **Subsumed by** `docs/eval/history-validity-invariant.md`.
 
 ### Block 4 — remote (transport `RpcPeer`, daemon ws-server/connection/host)
 
@@ -380,7 +382,9 @@ Daily-driver work (done 2026-10-14):
       Type: eval → feat · Size: M · Blast: load-bearing.
 - [ ] 🟡 **`shell_kill` leaves grandchildren running** (only `sh` gets the signal;
       a compound command's child is re-parented to PID 1). Found during the
-      lifecycle eval — see `docs/eval/daemon-session-lifecycle.md`.
+      lifecycle eval — see `docs/eval/daemon-session-lifecycle.md`. Same work
+      as child 1 of the v2 redesign (`fix/background-process-groups`, Block 11)
+      — one task, not two.
 - [ ] 🟡 **OpenAI provider treats an in-band SSE `{"error":…}` chunk as an empty
       stream** (HTTP 200, no throw), so callers see a silent empty response (e.g.
       `/compact` wiping history). See `docs/fix/compact-empty-summary-wipe.md`
@@ -450,6 +454,9 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       8. **Eval:** `docs/eval/client-reattach.md` · M · load-bearing
       9. **Eval:** `docs/eval/attachments.md` (sister) · L → split · load-bearing
       10. mobile app (React Native or Swift) — own eval, after 8
+
+- [ ] **No changelog discipline** (no `CHANGELOG.md`). **Eval:**
+      `docs/eval/changelog-discipline.md`. Type: eval. Open.
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
@@ -649,8 +656,12 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
         startup), so attach/run work, but a tool with huge output would error.
         Fix options: make the spill best-effort (skip + keep inline on write
         failure), or spill to a writable dir (`/tmp`, or the `--bin-dir` dir).
-        Not yet done.
-      - [~] **F4.g — `attach` to an existing pod** (branch
+        Not yet done. **Audit 2026-10-19 — to verify with a repro:** the code
+        already looks best-effort (`agent/src/agent.ts:474-480` catches the write
+        and returns `null`; `result-pipeline.ts:74-77` keeps a preview + "could
+        not be saved"), so the residual may only be "full output lost", not an
+        error.
+      - [x] **F4.g — `attach` to an existing pod** (branch
         `feat/pod-exec-attach`, from `c5b7f58`):
         `tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>]
         [--resume [uid]]` — the `run` flow minus the lifecycle: `getPod`
@@ -759,17 +770,17 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
       trusted-repo use. Type: fix · Size: M · Blast: load-bearing · Suited: strong
       model + mandatory fresh-context review.
 - [ ] **Subagents don't receive AGENTS.md** (follow-up to the above): the autoload
-      primes only the MAIN session; a spawned subagent (the `task` tool) still
+      primes only the MAIN session; a spawned subagent (the `agent_task` tool) still
       starts from its agent-definition body (`agent-defs.ts` → `prompt`), not the
       repo rules. Defensible — subagents are handed the executor/reviewer briefs,
       which order reading AGENTS.md — but undocumented, and it partly undercuts the
       weak-model motivation. Decide: inject AGENTS.md into subagent prompts too, or
       document that the briefs are the channel. Type: eval · Size: S · Blast:
       cross-module.
-- [ ] **Relabel "Task" → "Agent" + rename tool `task` → `agent_task`**: the
+- [x] **Relabel "Task" → "Agent" + rename tool `task` → `agent_task`**: the
       display label and the model-facing tool name both read as "agent".
       **Promoted eval → feat** (2026-10-17, weak-model gate PASSED — no
-      invocation degradation), on branch `feat/subagent-label-rename`.
+      invocation degradation). **Merged to main (7344fbc).**
       **Doc:** `docs/feat/subagent-label-rename.md`. Type: feat · Size: S ·
       Blast: load-bearing (model-facing name). (complementary to the result
       pipeline: skills = *how to do it*, the pipeline = *the guarantee the
@@ -839,9 +850,12 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
 - [ ] **F2**: container execution environment (behind the existing
       `ExecutionEnvironment` contract).
 - [ ] **Remote control (F3)**: heartbeat/idle-timeout/reconnect, multi-client
-      observers, `config.jsonc` `remote` block, operator docs.
+      observers, `config.jsonc` `remote` block, operator docs. **Superseded**
+      (heartbeat, reconnect, multi-client) by the protocol-v2 redesign
+      `docs/eval/session-reattach.md` (children `session-ttl-limits`,
+      `session-registry`, `client-reattach`); the `remote` config block and
+      operator docs remain.
 - [ ] Add `.tentacle/` to the workspace `.gitignore` guidance (spilled output).
-- [ ] Git: the repo still has no commits (commit only on explicit OK).
 
 ## Branding
 

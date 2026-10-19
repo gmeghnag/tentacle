@@ -1,7 +1,7 @@
 # fix/pod-tls-env-scrub — extend the shared env denylist with this repo's pod-TLS vars
 
-> **Status:** review — **APPROVE** (fresh-context reviewer, same model as executor — see honesty note in Review, 2026-10-17); `TODO.md` item marked FIXED
-> **Branch:** `fix/pod-tls-env-scrub`
+> **Status:** done — committed to `main` (874acaf) · status synced by audit 2026-10-19; Review: APPROVE (fresh-context reviewer, same model as executor — see honesty note in Review)
+> **Branch:** none — committed directly to `main` as 874acaf (the branch was never kept)
 > **Size:** S · **Blast:** contained (one regex fragment in `core/src/env.ts` + test cases in `core/test/env.test.ts`; the helper is a leaf, its callers already pinned by tests) · **Suited:** a weaker model may execute, standard Review.
 >
 > Promoted from `docs/eval/pod-tls-env-scrub.md` on the owner's direction (2026-10-17) — option (a), the eval's recommendation.

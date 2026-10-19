@@ -20,6 +20,9 @@ and passes headers as the 2nd `WebSocket` argument — fine on Bun, likely not o
 React Native (unverified; a mobile client brings its own `DuplexChannel`
 adapter, the "a new target adds only a transport" shape of AGENTS §7).
 
+Related: `docs/feat/pod-attach-resilience.md` (keepalive + reconnect for pod
+`attach`, not started) — likely absorbed by this child; decide when promoting.
+
 ## Implementation
 
 *(empty — filled when promoted)*

@@ -124,20 +124,22 @@ rpc-flow-control ──(credit window + control priority over $/progress)──�
 
 **Related, and not in this umbrella:**
 - `docs/fix/steering-over-rpc.md`: mid-turn "Queue a task…" is silently dropped
-  in pod mode.
+  in pod mode. ✅ **done — merged 2026-10-19 (fe39d5b).**
   - **Not** the cause of the silence: the measured first event lands 0.28 s
     after the local stream ends, which is exactly the batch.
   - It compounds it: the user sees nothing for 47 s, types a correction, and
     that is dropped too.
   - **Do it after 1:** `session/enqueue` is a short control request, and
     `steer` is one more update in the mapping that 1 touches.
-- `docs/eval/proxy-model-cancel.md`: 1 closes the model half. The agent-loop
-  half (re-check `aborted` before running tools) stays in that eval.
+- `docs/fix/proxy-model-cancel.md` (promoted from `eval/`): 1 closes the model
+  half; the agent-loop half (re-check `aborted` before running tools) was that
+  fix. ✅ **done — merged 2026-10-19 (c0b8c77).**
 - `docs/eval/oversize-frame-hang.md`: 2 turns its defensive cap into a real
   transport rule.
 - `docs/feat/pod-attach-resilience.md`: keepalive and reconnect. A keepalive is
   a control message, so it needs 2's priority lane to stay timely while bulk
-  data flows.
+  data flows. Overlaps the protocol-v2 re-attach work
+  (`docs/eval/session-reattach.md`, `client-reattach.md`, `session-ttl-limits.md`).
 
 ### Mixed configuration (pieces 3 + 4 together)
 
@@ -226,7 +228,8 @@ Rules that hold only when both sides are live:
   pod is not trusted") changes the rules, so it is a `feat` on AGENTS.md. It
   should land **before** 3, because 3's gate design follows from it.
 - **Owner decisions (2026-10-18):**
-  - **§7 invariant: APPROVED** as worded. It lands as its own small `feat` on
+  - **§7 invariant: APPROVED** as worded (landed: `feat/pod-trust-invariant`,
+    merged e3c6d52). It lands as its own small `feat` on
     AGENTS.md, before piece 3. The owner's understanding, confirmed: the
     existing permission mechanism (`PermissionBroker` + the TUI prompt) is
     unchanged. What changes is *where it is enforced* for laptop-side tools.

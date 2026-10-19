@@ -1,6 +1,6 @@
 # feat/task-sizing — size & blast-radius on every task
 
-> **Status:** review
+> **Status:** done — merged to `main` (58b39f2) · status synced by audit 2026-10-19
 > **Branch:** `feat/task-sizing`
 > **Size:** S · **Blast:** contained · **Suited:** any model + standard review
 

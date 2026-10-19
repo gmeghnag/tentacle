@@ -148,7 +148,7 @@ silence for every model round between tool calls.
 
 ### Prior art
 
-- `docs/eval/proxy-model-cancel.md` (CONFIRMED): cancel does not stop the
+- `docs/fix/proxy-model-cancel.md` (CONFIRMED; promoted from `eval/`, merged c0b8c77): cancel does not stop the
   model, and the requested tool still runs. This eval closes the model half.
   The agent-loop half stays there.
 - `TODO.md` F4.d.2, cited above.

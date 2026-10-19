@@ -1,6 +1,6 @@
 # feat/tui-brand-color — TUI accent → cyan
 
-> **Status:** implementation (ready to execute)
+> **Status:** done — merged to `main` (f1df6bb) · status synced by audit 2026-10-19
 > **Branch:** `feat/tui-brand-color`
 > **Size:** M · **Blast:** cross-module · **Suited:** Phase 1 → a weaker model (Qwen3 27B) executes (design + sites + acceptance given; it makes and applies the edits); **Review by a stronger model / fresh context** (executor is weak). Phase 2 (OSC-11) → `load-bearing`, Opus-only, a SEPARATE task.
 

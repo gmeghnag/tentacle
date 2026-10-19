@@ -1,6 +1,6 @@
 # feat/task-workflow — one task, one branch, one doc
 
-> **Status:** review
+> **Status:** done — merged to `main` (0ccc277) · status synced by audit 2026-10-19
 > **Branch:** `feat/task-workflow`
 
 ## Context

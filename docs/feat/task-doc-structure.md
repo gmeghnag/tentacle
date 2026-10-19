@@ -1,6 +1,6 @@
 # feat/task-doc-structure — nest the §8 plan inside Implementation
 
-> **Status:** review
+> **Status:** done — merged to `main` (cd7b2be) · status synced by audit 2026-10-19
 > **Branch:** `feat/task-doc-structure`
 > **Size:** S · **Blast:** contained · **Suited:** any model + standard review
 

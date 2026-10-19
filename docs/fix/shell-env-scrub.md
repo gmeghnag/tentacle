@@ -1,6 +1,6 @@
 # fix/shell-env-scrub — scrub secret-looking env vars from the shell child
 
-> **Status:** review — **APPROVE-WITH-NITS** (fresh-context reviewer, 2026-10-17); follow-up TODO filed for the denylist gap (finding 1)
+> **Status:** done — merged to `main` (b6d6b85) · status synced by audit 2026-10-19
 > **Branch:** `fix/shell-env-scrub`
 > **Type:** fix · **Size:** S · **Blast:** cross-module (the shell exec path + the shared `scrubSensitiveEnv` seam) · **Suited:** a weaker model may execute, standard Review — the approach is fixed and the helper is pre-tested.
 >

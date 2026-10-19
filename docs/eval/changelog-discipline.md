@@ -1,7 +1,7 @@
 # eval/changelog-discipline — do we adopt a CHANGELOG, and in what form?
 
 > **Status:** eval (Context + Review; Implementation empty until promoted)
-> **Branch:** `eval/changelog-discipline`
+> **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10)
 > **Size:** S · **Blast:** contained · **Suited:** a process decision — Opus drafts the question + recommendation; owner decides. If promoted → a `feat` task edits AGENTS + seeds `CHANGELOG.md`.
 
 ## Context

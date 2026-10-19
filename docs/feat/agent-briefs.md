@@ -1,6 +1,6 @@
 # feat/agent-briefs — standard executor & reviewer briefs
 
-> **Status:** implementation (ready to execute)
+> **Status:** done — merged to `main` (ffb9522) · status synced by audit 2026-10-19
 > **Branch:** `feat/agent-briefs`
 > **Size:** S · **Blast:** contained · **Suited:** Opus authors (the briefs encode non-obvious discipline — the executor stop-rules and the review-independence insight); standard in-context Review (docs-only, no §7 invariant touched).
 

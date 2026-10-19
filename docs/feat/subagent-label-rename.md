@@ -1,6 +1,6 @@
 # feat/subagent-label-rename — relabel "Task" → "Agent" and rename the tool `task` → `agent_task`
 
-> **Status:** promoted eval → `feat` (2026-10-17, branch `feat/subagent-label-rename`). **Gate PASSED** (weak-model check, evidence in Implementation §preconditions): no invocation degradation for `agent_task` → full rename (label + tool name).
+> **Status:** done — merged to `main` (7344fbc) · status synced by audit 2026-10-19. Promoted eval → `feat` 2026-10-17 (branch `feat/subagent-label-rename`); **Gate PASSED** (weak-model check, evidence in Implementation §preconditions): no invocation degradation for `agent_task` → full rename (label + tool name).
 > Type: `feat` · Size: S (mechanical — 3 name literals + 1 label + comments + 2 test fixtures) · Blast: **load-bearing** (it changes the *model-facing* tool name/schema; the `spawnToolName` default is a correctness coupling) · Suited: strong model executes + **mandatory fresh-context Review** per §10.
 
 ## Context

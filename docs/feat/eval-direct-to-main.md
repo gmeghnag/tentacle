@@ -1,6 +1,6 @@
 # feat/eval-direct-to-main — evals are direct-to-main; de-ambiguate §10
 
-> **Status:** implementation (ready to execute)
+> **Status:** done — merged to `main` (d5c3bc3) · status synced by audit 2026-10-19
 > **Branch:** `feat/eval-direct-to-main`
 > **Size:** S · **Blast:** contained · **Suited:** a substantive AGENTS rule change (so it *is* a task, per the §10 carve-out point (c)); Opus authors; standard in-context Review. Docs-only.
 

@@ -1,6 +1,6 @@
 # feat/agents-md-autoload — auto-load AGENTS.md into the system prompt
 
-> **Status:** implementation (ready to execute)
+> **Status:** done — merged to `main` (6545d1c) · status synced by audit 2026-10-19
 > **Branch:** `feat/agents-md-autoload`
 > **Size:** M · **Blast:** load-bearing · **Suited:** Opus executes (it shapes the system prompt of EVERY session — a seam everything depends on, AGENTS §7); **mandatory fresh-context Review** red-teaming the prompt-assembly seam. NOT Qwen.
 

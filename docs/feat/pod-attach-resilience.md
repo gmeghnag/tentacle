@@ -2,6 +2,8 @@
 
 > **Status:** implementation — not started: no keepalive/reconnect in `k8s`/`transport` (verified 2026-10-17) · legacy doc (pre-AGENTS §10), not retrofitted to the four sections
 
+> **Related (2026-10-19):** the protocol-v2 re-attach redesign overlaps this scope — `docs/eval/session-reattach.md`, `docs/eval/client-reattach.md` (reconnect + resume for every transport, incl. `attach`), `docs/eval/session-ttl-limits.md` (server keepalive). Re-evaluate whether this task is absorbed when `client-reattach` is promoted.
+
 ## Problem (with evidence)
 
 A `tentacle attach` session left idle (observed: ~30 min, laptop likely asleep
