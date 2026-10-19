@@ -317,8 +317,10 @@ Daily-driver work (done 2026-10-14):
       tool still runs.** `ProxyModelProvider` ignores `signal`; no `model/stream`
       cancel; the agent loop never re-checks `aborted` between stream end and tool
       execution. CONFIRMED. **Eval:** `docs/eval/proxy-model-cancel.md`.
-      Type: eval · Size: M · Blast: load-bearing. **Model half fixed** by
-      `fix/pod-model-streaming` (2026-10-18); the tool-execution half is open.
+      Type: eval → fix · Size: S · Blast: load-bearing. **Model half fixed** by
+      `fix/pod-model-streaming` (2026-10-18). Re-verified 2026-10-19: still open
+      in the agent loop (no abort check after the stream ends or between tool
+      calls; tool #2 runs after Esc), provider-independent.
 - [x] 🔴 **`/compact` with an empty summary wipes the history** (reasoning-only
       model, or an in-band SSE `{"error":…}` chunk) and persists it. CONFIRMED.
       **FIXED (merged to main):** `docs/fix/compact-empty-summary-wipe.md` —
