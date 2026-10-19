@@ -1,6 +1,6 @@
 # feat/session-history-cut — byte-bounded ring, `history_commit` cut, `history_replaced` barrier, paged snapshot
 
-> **Status:** reviewed (REQUEST-CHANGES) — findings 1–7 addressed in Execution §"Review fixes"; no second Review (owner's instruction); not committed
+> **Status:** done — reviewed (REQUEST-CHANGES, findings fixed; no second Review by owner's choice), merged to `main` (2026-10-20)
 > **Branch:** `feat/session-history-cut`
 > **Type:** feat · **Size:** M · **Blast:** load-bearing (the agent loop, the steering window, protocol version, the persistence read path) · **Suited:** strong model executes; mandatory fresh-context Review (AGENTS §7)
 
