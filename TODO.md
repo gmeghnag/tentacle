@@ -827,3 +827,11 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
       observers, `config.jsonc` `remote` block, operator docs.
 - [ ] Add `.tentacle/` to the workspace `.gitignore` guidance (spilled output).
 - [ ] Git: the repo still has no commits (commit only on explicit OK).
+
+## Branding
+
+- [ ] **Mascot "Tentacle"** — mark decided (tonal primary, mono one-colour).
+      Next: the marks in `art/` + README header (`feat/mascot`). Open: startup
+      pixel mascot in the TUI (`feat/tui-mascot`), dark-mode README variant,
+      small-size icon. **Eval:** `docs/eval/mascot.md`.
+      Type: eval → feat · Size: S · Blast: contained.
