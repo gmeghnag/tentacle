@@ -197,6 +197,25 @@
         }
       ]
     },
+    "ContextNote": {
+      "additionalProperties": true,
+      "properties": {
+        "reason": {
+          "enum": ["continue", "background_exit"],
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "const": "context_note",
+          "type": "string"
+        }
+      },
+      "required": ["reason", "text", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "EnqueueParams": {
       "additionalProperties": false,
       "properties": {
@@ -223,6 +242,38 @@
       "additionalProperties": false,
       "properties": {},
       "type": "object"
+    },
+    "HistoryCut": {
+      "additionalProperties": false,
+      "properties": {
+        "epoch": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["epoch", "seq"],
+      "type": "object"
+    },
+    "HistoryReplaced": {
+      "additionalProperties": true,
+      "properties": {
+        "reason": {
+          "enum": ["compact"],
+          "type": "string"
+        },
+        "type": {
+          "const": "history_replaced",
+          "type": "string"
+        }
+      },
+      "required": ["reason", "type"],
+      "type": "object",
+      "x-event-class": "mandatory"
     },
     "ImageContent": {
       "additionalProperties": true,
@@ -705,6 +756,8 @@
           "agent_thought_chunk": "#/$defs/AgentThoughtChunk",
           "agent_usage": "#/$defs/AgentUsage",
           "background_exit": "#/$defs/BackgroundExit",
+          "context_note": "#/$defs/ContextNote",
+          "history_replaced": "#/$defs/HistoryReplaced",
           "plan": "#/$defs/Plan",
           "steer": "#/$defs/Steer",
           "tool_call": "#/$defs/ToolCall",
@@ -740,10 +793,16 @@
           "$ref": "#/$defs/Steer"
         },
         {
+          "$ref": "#/$defs/ContextNote"
+        },
+        {
           "$ref": "#/$defs/TurnStart"
         },
         {
           "$ref": "#/$defs/TurnEndUpdate"
+        },
+        {
+          "$ref": "#/$defs/HistoryReplaced"
         }
       ]
     },
@@ -782,6 +841,15 @@
     "SnapshotParams": {
       "additionalProperties": false,
       "properties": {
+        "cursor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "limit": {
+          "minimum": 1,
+          "type": "integer"
+        },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
         }
@@ -792,14 +860,34 @@
     "SnapshotResult": {
       "additionalProperties": false,
       "properties": {
+        "cursor": {
+          "minLength": 1,
+          "type": "string"
+        },
         "messages": {
           "items": {
             "$ref": "#/$defs/ChatMessage"
           },
           "type": "array"
+        },
+        "since": {
+          "$ref": "#/$defs/HistoryCut"
+        },
+        "turn": {
+          "$ref": "#/$defs/SnapshotTurn"
         }
       },
       "required": ["messages"],
+      "type": "object"
+    },
+    "SnapshotTurn": {
+      "additionalProperties": false,
+      "properties": {
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["turnId"],
       "type": "object"
     },
     "Steer": {
@@ -1157,6 +1245,7 @@
     "NoTurnRunning": -32008,
     "NotInitialized": -32005,
     "ParseError": -32700,
+    "StaleCursor": -32011,
     "TooManySessions": -32006,
     "TurnInProgress": -32004,
     "Unauthorized": -32001,
@@ -1260,5 +1349,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 3
+  "x-protocol-version": 4
 }

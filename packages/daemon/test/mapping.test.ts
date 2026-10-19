@@ -128,6 +128,8 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "steer", text: "s" },
     { type: "turn_start", turnId: "t", prompt: "p" },
     { type: "turn_end", turnId: "t", stopReason: "end_turn" },
+    { type: "history_replaced", reason: "compact" },
+    { type: "context_note", text: "Continue with the task.", reason: "continue" },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {
@@ -143,10 +145,13 @@ describe("toUpdateParams (the session/update frame)", () => {
     }
   });
 
-  test("the real table: the turn bracket carries mandatory: true", () => {
+  test("the real table: the turn bracket and the history barrier carry mandatory: true", () => {
     for (const update of samples) {
       const params = toUpdateParams("s1", 1, update);
-      const mandatory = update.type === "turn_start" || update.type === "turn_end";
+      const mandatory =
+        update.type === "turn_start" ||
+        update.type === "turn_end" ||
+        update.type === "history_replaced";
       expect(params.mandatory === true).toBe(mandatory);
     }
   });

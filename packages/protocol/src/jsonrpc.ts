@@ -37,6 +37,8 @@ export const DomainErrorCode = {
   NoTurnRunning: -32008,
   CompactInProgress: -32009,
   Cancelled: -32010,
+  /** A `session/snapshot` cursor from an older epoch (the history was replaced): restart paging. */
+  StaleCursor: -32011,
 } as const;
 
 /**

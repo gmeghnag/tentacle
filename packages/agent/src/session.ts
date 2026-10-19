@@ -89,14 +89,19 @@ export class Session {
    * system prompt + that summary. Returns the summary and the message counts.
    * An abort wins over a summary that lands after it (a provider may ignore the
    * signal): the history is then left untouched and the call rejects.
+   *
+   * `onReplaced` runs synchronously right after the replacement — no microtask
+   * where the history is new and an observer's view of it still old (the
+   * daemon's stream barrier). It must not throw.
    */
-  async compact(signal?: AbortSignal): Promise<CompactResult> {
+  async compact(signal?: AbortSignal, onReplaced?: () => void): Promise<CompactResult> {
     const before = this.messages.length;
     const summary = await this.agent.summarize(this.messages, signal);
     signal?.throwIfAborted();
     const next = compactedHistory(this.messages, summary);
     this.messages.length = 0;
     this.messages.push(...next);
+    onReplaced?.();
     this.persist();
     return { summary, before, after: this.messages.length };
   }

@@ -20,6 +20,8 @@ export interface SessionHostOptions extends TurnErrorPolicy {
   readonly createAgent: AgentFactory;
   /** The confined working directory every hosted session runs against. */
   readonly defaultCwd: string;
+  /** Replay budget per session, in bytes (default `DEFAULT_RING_BYTES`). */
+  readonly ringBytes?: number;
 }
 
 export class SessionHost {
@@ -39,9 +41,17 @@ export class SessionHost {
     const { agent, permissions, jobs } = this.opts.createAgent(this.opts.defaultCwd);
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
     const { exposeTurnErrors, onTurnError } = this.opts;
-    return new HostedSession(id, session, permissions, requestPermission, jobs, {
-      ...(exposeTurnErrors ? { exposeTurnErrors } : {}),
-      ...(onTurnError ? { onTurnError } : {}),
-    });
+    return new HostedSession(
+      id,
+      session,
+      permissions,
+      requestPermission,
+      jobs,
+      {
+        ...(exposeTurnErrors ? { exposeTurnErrors } : {}),
+        ...(onTurnError ? { onTurnError } : {}),
+      },
+      this.opts.ringBytes,
+    );
   }
 }

@@ -1152,3 +1152,104 @@ describe("RemoteSession steering bound to its turn (review fixes)", () => {
     client.close();
   });
 });
+
+describe("RemoteClient.snapshot (paged history at the cut)", () => {
+  test("joins the pages chronologically over a real Connection", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, makeHost(new ScriptedProvider([]), noopEnv));
+    const seen: unknown[] = [];
+    // Count the snapshot requests on the wire: a long history takes several pages.
+    const send = clientCh.send.bind(clientCh);
+    clientCh.send = (frame: string) => {
+      const msg = JSON.parse(frame) as { method?: string; params?: unknown };
+      if (msg.method === Method.Snapshot) seen.push(msg.params);
+      send(frame);
+    };
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    const seed = Array.from({ length: 450 }, (_, i) => ({
+      role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      content: `m${i}`,
+    }));
+    const id = await client.openSession(undefined, seed);
+    expect(await client.snapshot(id)).toEqual(seed);
+    expect(seen).toHaveLength(3);
+    expect(seen[0]).toEqual({ sessionId: id, limit: 200 });
+    client.close();
+  });
+
+  /** A fake daemon answering `session/snapshot` from a script of handlers. */
+  function pagedDaemon(answer: (params: { cursor?: string }, n: number) => unknown) {
+    const [daemonCh, clientCh] = createChannelPair();
+    let n = 0;
+    new RpcPeer(daemonCh, {
+      onRequest: async (method, params) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        return answer(params as { cursor?: string }, ++n);
+      },
+    });
+    return new RemoteClient(clientCh, new PermissionBroker());
+  }
+  const msg = (content: string) => ({ role: "user" as const, content });
+  const since = { epoch: "e", seq: 1 };
+
+  test("a compaction between two pages (StaleCursor) restarts from the newest page", async () => {
+    const client = pagedDaemon((params, n) => {
+      if (n === 1) return { messages: [msg("old-b")], since, cursor: "e/1" };
+      if (n === 2) throw new RpcError(DomainErrorCode.StaleCursor, "stale");
+      if (params.cursor === undefined)
+        return { messages: [msg("summary")], since: { epoch: "f", seq: 9 } };
+      throw new Error("unexpected");
+    });
+    await client.initialize();
+    expect(await client.snapshot("s")).toEqual([msg("summary")]);
+    client.close();
+  });
+
+  test("a daemon whose cursor makes no progress fails loudly instead of paging forever", async () => {
+    let calls = 0;
+    const repeating = pagedDaemon(() => {
+      calls++;
+      return { messages: [msg("x")], since, cursor: "e/1" };
+    });
+    await repeating.initialize();
+    await expect(repeating.snapshot("s")).rejects.toThrow(/no progress/);
+    expect(calls).toBe(2);
+    repeating.close();
+
+    const empty = pagedDaemon(() => ({ messages: [], since, cursor: "e/1" }));
+    await empty.initialize();
+    await expect(empty.snapshot("s")).rejects.toThrow(/no progress/);
+    empty.close();
+  });
+
+  test("gives up after 3 stale attempts; any other error is not retried", async () => {
+    let calls = 0;
+    const stale = pagedDaemon((params) => {
+      calls++;
+      if (params.cursor === undefined) return { messages: [msg("x")], since, cursor: "e/1" };
+      throw new RpcError(DomainErrorCode.StaleCursor, "stale");
+    });
+    await stale.initialize();
+    await expect(stale.snapshot("s")).rejects.toMatchObject({ code: DomainErrorCode.StaleCursor });
+    expect(calls).toBe(6);
+    stale.close();
+
+    calls = 0;
+    const broken = pagedDaemon(() => {
+      calls++;
+      throw new RpcError(DomainErrorCode.UnknownSession, "gone");
+    });
+    await broken.initialize();
+    await expect(broken.snapshot("s")).rejects.toMatchObject({
+      code: DomainErrorCode.UnknownSession,
+    });
+    expect(calls).toBe(1);
+    broken.close();
+  });
+});

@@ -85,6 +85,18 @@ export type AgentEvent =
     }
   // A user message queued mid-turn ("steering") was injected into the loop.
   | { readonly type: "steer"; readonly text: string }
+  // The loop itself added a user-role message to the history (the empty-round
+  // nudge, a background-job note): emitted right after the push, so every
+  // history message has an event and a replay can rebuild it.
+  | {
+      readonly type: "context_note";
+      readonly text: string;
+      readonly reason: "continue" | "background_exit";
+    }
+  // The history now reflects every event yielded so far (a consistent cut for a
+  // snapshot + replay). Carries no data; frontends ignore it. Yielded only
+  // where that holds — never between a push and the `pop` that may undo it.
+  | { readonly type: "history_commit" }
   | { readonly type: "turn_end"; readonly reason: AgentStopReason };
 
 /** Map a tool's neutral progress event onto a nested `AgentEvent` for a call. */
@@ -263,6 +275,11 @@ export class Agent {
       if (toolCalls.length > 0 || text.trim() !== "") {
         emptyRounds = 0;
       }
+      // A round with tool calls is kept as is: commit it. (Not without tool
+      // calls: an empty round's message is popped again below.)
+      if (toolCalls.length > 0) {
+        yield { type: "history_commit" };
+      }
 
       if (toolCalls.length === 0) {
         // Before ending, handle anything the user queued during the reply so a
@@ -294,6 +311,7 @@ export class Agent {
           messages.pop(); // drop the empty assistant turn; keep history clean
           if (messages.at(-1)?.content !== CONTINUE_NUDGE) {
             messages.push({ role: "user", content: CONTINUE_NUDGE });
+            yield { type: "context_note", text: CONTINUE_NUDGE, reason: "continue" };
           }
           continue;
         }
@@ -319,6 +337,7 @@ export class Agent {
             name: call.name,
             result: { content: CANCELLED_TOOL_NOTE, isError: true },
           };
+          yield { type: "history_commit" };
           continue;
         }
         yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
@@ -338,6 +357,8 @@ export class Agent {
         const result = await this.transformResult(call, raw, signal);
         yield { type: "tool_result", id: call.id, name: call.name, result };
         messages.push({ role: "tool", content: result.content, toolCallId: call.id });
+        // After the push, not before: the `tool_result` above precedes it.
+        yield { type: "history_commit" };
       }
     }
 
@@ -442,10 +463,9 @@ export class Agent {
         exitCode: job.exitCode,
       });
       const code = job.exitCode !== null ? ` with exit code ${job.exitCode}` : "";
-      messages.push({
-        role: "user",
-        content: `[background] job ${job.id} (\`${job.command}\`) ${job.status}${code}. Read its output with shell_output({ job_id: "${job.id}" }) if relevant.`,
-      });
+      const note = `[background] job ${job.id} (\`${job.command}\`) ${job.status}${code}. Read its output with shell_output({ job_id: "${job.id}" }) if relevant.`;
+      messages.push({ role: "user", content: note });
+      events.push({ type: "context_note", text: note, reason: "background_exit" });
     }
     return events;
   }

@@ -27,6 +27,30 @@ F7: together they were L).
 > children's Implementation drafts" (A–G, D1–D10). Where a question or
 > design point here disagrees, the parent decision wins.
 
+> **Re-baselined on 3c (2026-10-20, claude-opus-5-5).** `session-event-stream`
+> 3c (`docs/feat/session-history-cut.md`, branch `feat/session-history-cut`)
+> fixed the shapes this plan consumes; the text below is aligned to them and
+> this note wins over any older wording (incl. the 2026-10-19 Review):
+> - `since` is a `HistoryCut = {epoch: string, seq: int}` (owner D1), not a
+>   number. `epoch` is a fresh UUID per `HostedSession` **and** per compaction,
+>   so it already is the incarnation: the separate `incarnation` field of open
+>   question 2 is **dropped** — `open{since}` with another epoch is a resync.
+> - `HostedSession.replayFrom(since: HistoryCut) → {replay} | {resync: true}`
+>   (resync: other epoch, seq before the epoch's barrier, future seq, evicted).
+>   The ring pins everything after the cut, so `replayFrom(current cut)` is
+>   never a resync (pinned by a 3c test).
+> - There is no public `committedSeq`: the cut is private state. This child adds
+>   one synchronous accessor `get cut(): HistoryCut` on `HostedSession` (the
+>   same value `snapshotPage()` returns as `since`) for the resync replay and
+>   for `OpenResult.epoch`.
+> - `snapshot` is `snapshotPage(cursor?, limit?)` → `{messages, since?, turn?,
+>   cursor?}`; a cursor of an older epoch is `StaleCursor` (-32011).
+> - Every history message the agent loop pushes now has an update (3c added
+>   `context_note` for the nudge and the background note), and a replayed
+>   `tool_call` may name a call already in the snapshot (clients upsert by id).
+> - `PROTOCOL_VERSION` is 4 after 3c; this child bumps to 5.
+> - The experiment scripts below (E1–E3) are dated evidence against `main` @
+>   `4914e9b` and keep the old numeric `replayFrom(n)`; they are not re-run.
 
 *— claude-opus-5-5, 2026-10-19 (draft, awaiting owner approval)*
 
@@ -52,7 +76,7 @@ recommendations — the owner strikes what they reject.
    (`ws-server.ts:40`). **Recommendation:** the replay travels as ordinary
    `session/update` notifications, sent synchronously inside the `open`
    handler before the attachment joins the fan-out set; the response carries
-   only `{sessionId, incarnation, created, resync}`. The wire order of updates
+   only `{sessionId, epoch, created, resync}`. The wire order of updates
    is then the true order on every transport, and each update is its own frame.
    Client contract (documented in the schema, consumed by `client-reattach`):
    updates for a session may arrive before the `open` response; a client
@@ -71,6 +95,10 @@ recommendations — the owner strikes what they reject.
    *opaque*, while client-reattach's reducer *compares* `seq` against it — the
    two docs should agree; this child only needs "a number the daemon can
    compare with `seq`" plus the incarnation.)
+   **→ Resolved by 3c (2026-10-20):** `since = {epoch, seq}` (D1); the epoch is
+   a fresh UUID per incarnation and per compaction, so a `since` from a previous
+   incarnation never matches → `resync`. No separate `incarnation` field; `seq`
+   is comparable within one epoch (client-reattach Q6).
 3. **Hole: other attached clients never learn of a `close`.** `session/close`
    from the laptop detaches the phone's sink silently; the phone shows a live
    session until its next command fails with `UnknownSession`, and
@@ -258,16 +286,19 @@ relies on, and a mismatch is a STOP-and-fix-the-plan, AGENTS §8):
   - `HostedSession.emit` stays synchronous; assigns a per-session monotonic
     `seq`; appends to a byte-bounded ring never reset at turn boundaries; then
     delivers. This child replaces only the *delivery* (one sink → a set).
-  - `replayFrom(since): SessionUpdateParams[] | null` — `null` when `since` is
-    not covered (older than the ring floor, older than the last
-    `history_replaced` barrier, or in the future).
-  - `committedSeq` (the consistent cut) readable synchronously.
+  - `replayFrom(since: HistoryCut): {replay: KnownSessionUpdateParams[]} |
+    {resync: true}` — `resync` when `since` is not covered (another epoch, a
+    seq before the current epoch's `history_replaced` barrier, in the future,
+    or evicted from the byte ring). *(As built in 3c.)*
+  - The consistent cut is private in 3c; this child adds `get cut():
+    HistoryCut` (synchronous) — see the re-baseline note.
   - `turn_start` / `turn_end{turnId, stopReason, error?}` are stream events;
     `prompt{turnId}` acks at once; `turn_end` is emitted inside the steering
     no-await window (comment at `agent/src/agent.ts:270-278`, pinned by
     `daemon/test/integration.test.ts:444`).
-  - `snapshot` returns `{messages, since: committedSeq}` (paged).
-  - `PROTOCOL_VERSION` already bumped once (this child bumps again).
+  - `snapshot` is paged: `snapshotPage(cursor?, limit?)` → `{messages, since?:
+    HistoryCut, turn?: {turnId}, cursor?}` (`since`/`turn` on the first page).
+  - `PROTOCOL_VERSION` is 4 after 3c (this child bumps to 5).
 - **`protocol-schema-export`** (step 2): a committed JSON Schema regenerated by
   its script and checked by the gate.
 
@@ -309,7 +340,7 @@ class SessionHost {
 ```
 
 `open` (all synchronous):
-- id given and live → `hosted.attach(attachment, since, incarnation)` →
+- id given and live → `hosted.attach(attachment, since)` →
   `{created: false, resync}`. `messages`/`create` are ignored (a live id is
   never overwritten — the clobber is impossible by construction).
 - no id given, or id not live **and** (`create: true` or `messages` given) →
@@ -335,18 +366,20 @@ interface Attachment {
   readonly send: UpdateSink;                 // synchronous; never awaited
   readonly requestPermission: RemotePermission;
 }
-readonly incarnation: string;                // crypto.randomUUID() at construction
+// (no `incarnation`: the cut's epoch is a fresh UUID per HostedSession — 3c)
+get cut(): HistoryCut;                       // added here: the current cut, synchronous
 private readonly attachments = new Set<Attachment>();
 private closed = false;
-attach(a: Attachment, since?: number, incarnation?: string): { resync: boolean };
+attach(a: Attachment, since?: HistoryCut): { resync: boolean; epoch: string };
 detach(a: Attachment): void;
 close(reason: "closed"): void;
 get attachedCount(): number;                 // for session-ttl-limits
 ```
 
-- `attach` (one synchronous segment): `const covered = since !== undefined &&
-  incarnation === this.incarnation ? this.replayFrom(since) : null;` →
-  `resync = covered === null`; `replay = covered ?? this.replayFrom(this.committedSeq) ?? []`
+- `attach` (one synchronous segment): `const r = since !== undefined ?
+  this.replayFrom(since) : { resync: true };` → `resync = "resync" in r`;
+  `replay = "replay" in r ? r.replay : this.replayFrom(this.cut).replay` (never a
+  resync: the ring pins everything after the cut); `epoch = this.cut.epoch`
   (on resync, everything after the cut, so a snapshot taken later at a cut
   `S' ≥ S` plus the buffered updates `> S'` is complete — see "Why"); call
   `a.send(u)` for each replayed update; then `this.attachments.delete(a);
@@ -381,7 +414,7 @@ get attachedCount(): number;                 // for session-ttl-limits
   connection already holds an attachment for the id, `detach` it first (a
   retried `open` from the same connection must not double-deliver); then
   `host.open(params, attachment)` and record it. Returns `{sessionId,
-  incarnation, created, resync}`. The handler is synchronous (like `enqueue`,
+  epoch, created, resync}`. The handler is synchronous (like `enqueue`,
   `connection.ts:150-167`).
 - Lookup for every other command: `const a = this.attachments.get(id); if (!a ||
   this.host.get(id) !== a.hosted) → delete the stale entry, UnknownSession`.
@@ -397,9 +430,12 @@ get attachedCount(): number;                 // for session-ttl-limits
 
 **4. Protocol** (`packages/protocol`).
 
-- `session/open`: `OpenParams = {sessionId?, since?: number, incarnation?:
-  string, create?: boolean, messages?: ChatMessage[], cwd?: string}` (strict);
-  `OpenResult = {sessionId, incarnation, created: boolean, resync: boolean}`.
+- `session/open`: `OpenParams = {sessionId?, since?: HistoryCut, create?:
+  boolean, messages?: ChatMessage[], cwd?: string}` (strict); `OpenResult =
+  {sessionId, epoch: string, created: boolean, resync: boolean}` — `epoch` is
+  the session's current epoch, read in the same synchronous segment as the
+  replay: a client that has not taken a snapshot (it just created the session)
+  forms its next `since` as `{epoch, last applied seq}`.
   `cwd` kept for parity with `session/new` (ignored server-side,
   `session-host.ts:4-6`).
 - `session/close`: `{sessionId}` → `{}`.
@@ -454,7 +490,7 @@ Dependency order; smallest diff.
 4. `packages/protocol/src/version.ts` — bump; regenerate the exported schema
    (`protocol-schema-export`'s command).
 5. `packages/daemon/src/hosted-session.ts` — attachments, fan-out,
-   `incarnation`, `attach`/`detach`/`close`, routed requester, kept `onExit`
+   `cut` accessor, `attach`/`detach`/`close`, routed requester, kept `onExit`
    unsubscribe; remove `setSink`.
 6. `packages/daemon/src/session-host.ts` — registry (`open`/`get`/`close`/
    `size`/`values`).
@@ -480,7 +516,7 @@ Dependency order; smallest diff.
 How state converges in each:
 
 - **Drop mid-turn** → detach only; the turn runs to `turn_end` (in the ring);
-  a new connection's `open{since, incarnation}` replays the gap. If the client
+  a new connection's `open{since}` replays the gap. If the client
   never returns: stays until `session-ttl-limits` (open question 6).
 - **Two `open{create|messages}` for the same absent id, concurrently** (two
   devices, or a retry) → `host.open` is synchronous, so the first registers
@@ -493,14 +529,15 @@ How state converges in each:
   `open` sees either the live session or nothing (→ recreate with
   `create`/`messages`, else `UnknownSession`). The old incarnation's turn may
   still unwind and emit into its own ring; it has no sinks, and the new
-  incarnation has a new `incarnation`, so no cross-talk.
+  incarnation has a new epoch, so no cross-talk.
 - **Stale attachment after close + recreate by another client** → identity
   check in the lookup → `UnknownSession`; the client re-opens.
-- **`since` from an earlier incarnation, from the future, or evicted** →
-  `resync: true` + replay from the cut; never a silent wrong replay.
+- **`since` from another epoch (an earlier incarnation or a compaction), from
+  before the epoch's barrier, from the future, or evicted** → `resync: true` +
+  replay from the cut; never a silent wrong replay.
 - **Daemon restart** → registry empty → `open` without `create`/`messages` →
   `UnknownSession` → client recreates with `messages` → `created: true`, new
-  incarnation (client resets its cursor).
+  epoch (client resets its cut).
 - **A sink throws** → detached, others continue; the agent loop is never
   affected. **A sink is slow** → `send` never blocks (E3); past the
   backpressure limit Bun closes the socket → detach → client resyncs. Worker
@@ -537,8 +574,8 @@ in Execution.
 
 1. **Drop mid-turn, re-attach, nothing lost** (the parent repro inverted): slow
    gated model (20 chunks); A opens and prompts, `Connection.close()` at chunk
-   ~5; the model still produces all 20; B `open{sessionId, since: lastA,
-   incarnation}` → `resync: false`; A's seqs ∪ B's replay ∪ B's live =
+   ~5; the model still produces all 20; B `open{sessionId, since: {epoch,
+   seq: lastA}}` → `resync: false`; A's seqs ∪ B's replay ∪ B's live =
    1..N contiguous, no duplicate, ending with `turn_end{end_turn}`. *Red today*
    (repro: turn dies at 6/20; `session/open` unknown). *Mutation:*
    `Connection.close()` cancels again → turn ends `cancelled`, fails.
@@ -567,15 +604,16 @@ in Execution.
    `FakeJobs.dispose` called once; after close `FakeJobs.fire()` emits nothing
    (unsubscribed); B (attached) receives `session_closed` and its next prompt →
    `UnknownSession`; `open{X}` without `create` → `UnknownSession`; with
-   `messages` → `created: true`, different `incarnation`. *Mutations:* drop the
+   `messages` → `created: true`, different `epoch`. *Mutations:* drop the
    `dispose` call; drop the unsubscribe; drop the `session_closed` emit — each
    fails one assertion.
 8. **Stale attachment:** A attached to X; B closes X and recreates X; A's
    `prompt{X}` → `UnknownSession`. *Mutation:* lookup without the identity
    check → A drives B's session.
-9. **Incarnation guard:** close + recreate X, run the new incarnation past the
-   old `since`; `open{since: old, incarnation: old}` → `resync: true`.
-   *Mutation:* ignore `incarnation` → `resync: false` with a wrong replay.
+9. **Incarnation guard (via the epoch):** close + recreate X, run the new
+   incarnation past the old `since.seq`; `open{since: old}` → `resync: true`.
+   *Mutation:* reuse the old epoch for the recreated session → `resync: false`
+   with a wrong replay. (3c already pins `replayFrom` on another epoch.)
 10. **Model-proxy detach:** connection with `servesModel: true` closes
     mid-turn → turn ends `cancelled`, session still in `host.get`, a new
     connection's `open` replays `turn_end{cancelled}`. *Mutation:* ignore the
@@ -708,10 +746,12 @@ Only decisions not already argued in the Review.
   (sent from `S`) or live — the client keeps it buffered from the moment it
   sent `open`. Without the replay, events between the cut and the attach point
   would be in neither.
-- **Why an `incarnation`.** `seq` restarts with a recreated session; a number
-  alone cannot tell "your since in this session" from "a since in a session
-  that no longer exists". A UUID per incarnation makes the mismatch explicit
-  and costs one field.
+- **Why the epoch, not a separate `incarnation`.** `seq` restarts with a
+  recreated session; a number alone cannot tell "your since in this session"
+  from "a since in a session that no longer exists". 3c's `since = {epoch,
+  seq}` already carries a UUID that changes per incarnation (and per
+  compaction), so one field covers both mismatches; a second id would be two
+  names for one fact.
 - **Why an explicit `create` flag.** Today a TUI opens a *fresh* session with a
   client-chosen uid and no messages (`local-runtime.ts:127-129`). "Not live +
   no messages → `UnknownSession`" alone would break that; "not live → always

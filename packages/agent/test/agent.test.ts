@@ -88,7 +88,14 @@ describe("Agent.run", () => {
 
     const events = await collect(agent.run("s1", [{ role: "user", content: "use echo" }]));
 
-    expect(events.map((e) => e.type)).toEqual(["tool_start", "tool_result", "text", "turn_end"]);
+    expect(events.map((e) => e.type)).toEqual([
+      "history_commit",
+      "tool_start",
+      "tool_result",
+      "history_commit",
+      "text",
+      "turn_end",
+    ]);
     const toolResult = events.find((e) => e.type === "tool_result");
     expect(toolResult).toMatchObject({ name: "echo", result: { content: "hi" } });
 
@@ -514,5 +521,177 @@ describe("Agent cancel (post-stream / between-tools)", () => {
 
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
     expect(messages.filter((m) => m.role === "assistant")).toHaveLength(0);
+  });
+});
+
+describe("history_commit (the snapshot cut)", () => {
+  /**
+   * Drive a turn and check, at every `history_commit`, the exact property the
+   * daemon's cut stands on: the history reflects every event yielded so far —
+   * and, at every later event, the history is append-only past the last cut
+   * (nothing a cut covered is ever removed or replaced).
+   */
+  async function observe(
+    gen: AsyncGenerator<AgentEvent>,
+    messages: ChatMessage[],
+    onEvent: (event: AgentEvent) => void = () => {},
+  ): Promise<{ events: AgentEvent[]; commits: number }> {
+    const events: AgentEvent[] = [];
+    let covered: ChatMessage[] = [];
+    let commits = 0;
+    const appendOnly = (): void => {
+      covered.forEach((m, i) => expect(messages[i]).toBe(m));
+    };
+    for await (const event of gen) {
+      appendOnly();
+      if (event.type === "history_commit") {
+        commits++;
+        for (const e of events) {
+          if (e.type === "tool_result") {
+            expect(messages).toContainEqual({
+              role: "tool",
+              content: e.result.content,
+              toolCallId: e.id,
+            });
+          } else if (e.type === "steer") {
+            expect(messages.some((m) => m.role === "user" && m.content === e.text)).toBe(true);
+          } else if (e.type === "tool_start") {
+            const calls = messages.flatMap((m) => m.toolCalls ?? []);
+            expect(calls.some((c) => c.id === e.id)).toBe(true);
+          }
+        }
+        // All visible assistant text so far is kept (whitespace-only rounds are
+        // dropped by design: the empty-round nudge).
+        const said = events.map((e) => (e.type === "text" ? e.delta : "")).join("");
+        const kept = messages.map((m) => (m.role === "assistant" ? m.content : "")).join("");
+        expect(kept.replace(/\s/g, "")).toBe(said.replace(/\s/g, ""));
+        covered = [...messages];
+      }
+      events.push(event);
+      onEvent(event);
+    }
+    appendOnly();
+    return { events, commits };
+  }
+
+  test("tool rounds commit after the assistant push and after each tool push; the nudge's pop is never covered", async () => {
+    const model = new ScriptedProvider([
+      [
+        { type: "text", delta: "Let me " },
+        { type: "text", delta: "look." },
+        { type: "tool_call", toolCall: { id: "c1", name: "echo", arguments: '{"text":"one"}' } },
+        { type: "tool_call", toolCall: { id: "c2", name: "echo", arguments: '{"text":"two"}' } },
+        { type: "done" },
+      ],
+      // Empty round: pushed, then popped and replaced by the nudge.
+      [{ type: "text", delta: " " }, { type: "done" }],
+      [
+        { type: "tool_call", toolCall: { id: "c3", name: "echo", arguments: '{"text":"three"}' } },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "Done." }, { type: "done" }],
+    ]);
+    const agent = new Agent({ model, tools: registryWithEcho(), env: noopEnv });
+    const messages: ChatMessage[] = [{ role: "user", content: "go" }];
+    const queue: string[] = [];
+    const { events, commits } = await observe(
+      agent.runMessages(messages, "s1", undefined, () => queue.splice(0)),
+      messages,
+      // A steer typed during round 1 lands at the next boundary.
+      (e) => {
+        if (e.type === "tool_result" && e.id === "c1") queue.push("steer-A");
+      },
+    );
+    // Round 1: assistant + two tools; round 3: assistant + one tool.
+    expect(commits).toBe(5);
+    expect(events.map((e) => e.type)).toEqual([
+      "text",
+      "text",
+      "history_commit",
+      "tool_start",
+      "tool_result",
+      "history_commit",
+      "tool_start",
+      "tool_result",
+      "history_commit",
+      "steer",
+      "text",
+      "context_note",
+      "history_commit",
+      "tool_start",
+      "tool_result",
+      "history_commit",
+      "text",
+      "turn_end",
+    ]);
+    expect(messages.map((m) => m.content)).toContain("Continue with the task.");
+  });
+
+  test("a cancelled tool commits after its synthetic answer", async () => {
+    const ac = new AbortController();
+    const model: ModelProvider = {
+      id: "two-calls",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield {
+          type: "tool_call",
+          toolCall: { id: "c1", name: "echo", arguments: '{"text":"a"}' },
+        };
+        yield {
+          type: "tool_call",
+          toolCall: { id: "c2", name: "echo", arguments: '{"text":"b"}' },
+        };
+        yield { type: "done" };
+      },
+    };
+    const agent = new Agent({ model, tools: registryWithEcho(), env: noopEnv });
+    const messages: ChatMessage[] = [{ role: "user", content: "go" }];
+    const { events, commits } = await observe(
+      agent.runMessages(messages, "s1", ac.signal),
+      messages,
+      // Cancel once tool #1 answered: tool #2 gets the synthetic note.
+      (e) => {
+        if (e.type === "tool_result" && e.id === "c1") ac.abort();
+      },
+    );
+    expect(commits).toBe(3);
+    expect(events.map((e) => e.type)).toEqual([
+      "history_commit",
+      "tool_start",
+      "tool_result",
+      "history_commit",
+      "tool_result",
+      "history_commit",
+      "turn_end",
+    ]);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+  });
+
+  test("the step-limit path commits only inside tool rounds, never after the last drain", async () => {
+    const looping: ModelProvider = {
+      id: "looping",
+      async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+        if (request.tools === undefined) {
+          yield { type: "text", delta: "Report." };
+        } else {
+          yield {
+            type: "tool_call",
+            toolCall: { id: crypto.randomUUID(), name: "echo", arguments: '{"text":"x"}' },
+          };
+        }
+        yield { type: "done" };
+      },
+    };
+    const agent = new Agent({
+      model: looping,
+      tools: registryWithEcho(),
+      env: noopEnv,
+      maxIterations: 2,
+    });
+    const messages: ChatMessage[] = [{ role: "user", content: "go" }];
+    const { events, commits } = await observe(agent.runMessages(messages, "s1"), messages);
+    expect(commits).toBe(4);
+    const tail = events.slice(events.findLastIndex((e) => e.type === "history_commit") + 1);
+    expect(tail.map((e) => e.type)).toEqual(["text", "turn_end"]);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "max_iterations" });
   });
 });

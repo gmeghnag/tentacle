@@ -1,8 +1,8 @@
 /**
  * A single hosted conversation on the daemon: wraps the agent `Session`, drives
  * one turn at a time, streams `session/update` params through a sink, routes the
- * agent's permission requests to the connected client, and keeps a bounded
- * replay buffer of the current turn (seq-numbered) for reconnect.
+ * agent's permission requests to the connected client, and keeps every update
+ * in a byte-bounded replay ring (seq-numbered, never reset per turn).
  *
  * A turn lives in the stream, not in a request: `prompt` acks at once, the turn
  * is bracketed by `turn_start`/`turn_end` updates, and `prompt`/`enqueue` are
@@ -11,17 +11,29 @@
  * A turn and a compaction are mutually exclusive: both hold the one busy slot
  * (`controller`), and a request that finds it taken is REJECTED — never queued,
  * never locked (AGENTS §7: the peer dispatches requests concurrently).
+ *
+ * Recovery is snapshot + replay at a consistent CUT `{epoch, seq, length}`:
+ * `history[0, length)` reflects every update with `seq <= cut.seq`, and the
+ * ring replays the rest. The cut moves only where that holds — at the agent's
+ * `history_commit` markers, at turn end, and at a compaction (new epoch) — and
+ * the snapshot is SLICED to `length`, so a cut that lags behind the history is
+ * still exact: what was pushed after it is replayed, never doubled or lost.
+ * Sound because the history is append-only past any cut within an epoch (the
+ * agent's one `pop` is never behind a marker; compaction starts a new epoch).
  */
 import type { Session } from "@tentacle/agent";
-import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
-import type {
-  KnownSessionUpdateParams,
-  PermissionOutcome,
-  PromptResult,
-  RequestPermissionParams,
-  SessionUpdate,
-  TurnEnd,
-  TurnError,
+import type { JobController, PermissionBroker } from "@tentacle/core";
+import {
+  type HistoryCut,
+  JsonRpcErrorCode,
+  type KnownSessionUpdateParams,
+  type PermissionOutcome,
+  type PromptResult,
+  type RequestPermissionParams,
+  type SessionUpdate,
+  type SnapshotResult,
+  type TurnEnd,
+  type TurnError,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import {
@@ -32,14 +44,32 @@ import {
   toUpdateParams,
 } from "./mapping.ts";
 import { outcomeToResponse, toRequestPermissionParams } from "./permission-map.ts";
+import { SessionRing } from "./ring.ts";
 
 /** Receives each streamed `session/update` (one per emitted update). */
 export type UpdateSink = (params: KnownSessionUpdateParams) => void;
 /** Asks the connected client to resolve a permission request. */
 export type RemotePermission = (params: RequestPermissionParams) => Promise<PermissionOutcome>;
 
-/** Max updates retained for turn-scoped replay on reconnect. */
-const MAX_REPLAY = 1024;
+/**
+ * Default replay budget per session: ≈ 5 p99 turns of real sessions
+ * (calibration in docs/eval/session-event-stream.md §3c).
+ */
+export const DEFAULT_RING_BYTES = 4 * 1024 * 1024;
+
+/** The answer to "replay me everything after `since`". */
+export type ReplayResult =
+  | { readonly replay: readonly KnownSessionUpdateParams[] }
+  | { readonly resync: true };
+
+/** A consistent cut of the stream (see the module comment). */
+interface Cut {
+  readonly epoch: string;
+  readonly seq: number;
+  readonly length: number;
+  /** The turn running at the cut, if any (its `turn_start` is at or before `seq`). */
+  readonly turnId: string | null;
+}
 
 /** How a failed turn's error leaves the daemon (see `redactTurnError`). */
 export interface TurnErrorPolicy {
@@ -80,7 +110,10 @@ export class HostedSession {
   private readonly errorPolicy: TurnErrorPolicy;
   private currentToolCallId = "";
   private seq = 0;
-  private turnBuffer: KnownSessionUpdateParams[] = [];
+  private readonly ring: SessionRing<KnownSessionUpdateParams>;
+  /** Seq of the barrier that opened the current epoch (0 for the first). */
+  private epochStart = 0;
+  private cut: Cut;
   private sink: UpdateSink | null = null;
   private readonly jobs: JobController | undefined;
 
@@ -91,11 +124,21 @@ export class HostedSession {
     requestPermission: RemotePermission,
     jobs?: JobController,
     errorPolicy: TurnErrorPolicy = {},
+    ringBytes: number = DEFAULT_RING_BYTES,
   ) {
     this.id = id;
     this.session = session;
     this.jobs = jobs;
     this.errorPolicy = errorPolicy;
+    this.ring = new SessionRing(ringBytes);
+    // A fresh epoch per incarnation (decision D1): a `since` from a previous
+    // session under the same id never matches. The seed (resume) is covered.
+    this.cut = {
+      epoch: crypto.randomUUID(),
+      seq: 0,
+      length: session.messages.length,
+      turnId: null,
+    };
     // The agent's permission gate routes here; we forward to the client and map
     // its choice back to a local allow/deny + scope.
     permissions.setRequester(async (req) => {
@@ -128,17 +171,85 @@ export class HostedSession {
     this.sink = sink;
   }
 
-  /** Buffered updates of the current turn with `seq` strictly greater than `afterSeq`. */
-  replayFrom(afterSeq: number): KnownSessionUpdateParams[] {
-    return this.turnBuffer.filter((p) => p.seq > afterSeq);
+  /**
+   * Every update after `since`, or `resync` when that cannot be exact: another
+   * epoch (a compaction or another incarnation since), a seq before the current
+   * epoch began or in the future (a buggy/hostile client), or evicted from the
+   * ring. Synchronous, so a caller can attach a sink in the same tick.
+   */
+  replayFrom(since: HistoryCut): ReplayResult {
+    if (
+      since.epoch !== this.cut.epoch ||
+      !Number.isSafeInteger(since.seq) ||
+      since.seq < this.epochStart ||
+      since.seq > this.seq
+    ) {
+      return { resync: true };
+    }
+    const replay = this.ring.since(since.seq);
+    return replay ? { replay } : { resync: true };
   }
 
+  /**
+   * One page of the history at the current cut, newest first (see
+   * `SnapshotResult`). Without `cursor`: the slice ending at the cut, plus the
+   * cut itself and the turn running at it. With `cursor` (an earlier page's):
+   * the slice before it — same epoch only, `StaleCursor` otherwise. `limit`
+   * omitted: everything up to the end, in one page.
+   */
+  snapshotPage(cursor?: string, limit?: number): SnapshotResult {
+    const cut = this.cut;
+    let end = cut.length;
+    if (cursor !== undefined) {
+      end = this.parseCursor(cursor, cut);
+    }
+    const start = limit === undefined ? 0 : Math.max(0, end - limit);
+    // core `ChatMessage` is structurally the wire schema; the slice is a copy.
+    const messages = this.session.messages.slice(start, end) as SnapshotResult["messages"];
+    return {
+      messages,
+      ...(cursor === undefined ? { since: { epoch: cut.epoch, seq: cut.seq } } : {}),
+      ...(cursor === undefined && cut.turnId !== null ? { turn: { turnId: cut.turnId } } : {}),
+      ...(start > 0 ? { cursor: `${cut.epoch}/${start}` } : {}),
+    };
+  }
+
+  /** `"<epoch>/<end>"` → `end`, validated against the current cut. */
+  private parseCursor(cursor: string, cut: Cut): number {
+    const slash = cursor.lastIndexOf("/");
+    const epoch = cursor.slice(0, slash);
+    const raw = cursor.slice(slash + 1);
+    const end = /^[0-9]{1,15}$/.test(raw) ? Number(raw) : Number.NaN;
+    if (slash <= 0 || !Number.isSafeInteger(end)) {
+      throw new RpcError(JsonRpcErrorCode.InvalidParams, "invalid snapshot cursor");
+    }
+    if (epoch !== cut.epoch) {
+      throw new RpcError(
+        DomainErrorCode.StaleCursor,
+        "stale snapshot cursor: the history was replaced — restart from the first page",
+      );
+    }
+    if (end <= 0 || end > cut.length) {
+      throw new RpcError(JsonRpcErrorCode.InvalidParams, "invalid snapshot cursor");
+    }
+    return end;
+  }
+
+  /** Move the cut to "now" (the caller guarantees the history reflects every emit). */
+  private recordCut(turnId: string | null): void {
+    this.cut = {
+      epoch: this.cut.epoch,
+      seq: this.seq,
+      length: this.session.messages.length,
+      turnId,
+    };
+    this.ring.evict(this.seq);
+  }
+
+  /** Number, buffer, then deliver one update. The ring holds it even if the sink throws. */
   private emit(update: SessionUpdate): void {
     const params = toUpdateParams(this.id, ++this.seq, update);
-    this.turnBuffer.push(params);
-    if (this.turnBuffer.length > MAX_REPLAY) {
-      this.turnBuffer.shift();
-    }
+    this.ring.push(params, this.cut.seq);
     this.sink?.(params);
   }
 
@@ -162,7 +273,6 @@ export class HostedSession {
     this.controller = controller;
     this.activeTurnId = turnId;
     this.turns.set(turnId, {});
-    this.turnBuffer = [];
     const text = contentToText(content);
     try {
       this.emit({ type: "turn_start", turnId, prompt: text });
@@ -207,6 +317,11 @@ export class HostedSession {
           this.finishTurn(turnId, { stopReason: stopReasonToProtocol(event.reason) });
           return;
         }
+        // The history reflects every update so far: the snapshot cut moves here.
+        if (event.type === "history_commit") {
+          this.recordCut(turnId);
+          continue;
+        }
         if (event.type === "tool_start") {
           this.currentToolCallId = event.id;
         }
@@ -244,9 +359,10 @@ export class HostedSession {
   }
 
   /**
-   * End the turn: record its outcome, clear the controller, stream `turn_end`.
+   * End the turn: record its outcome, clear the controller, stream `turn_end`,
+   * move the cut past it (the history is final here, on every path).
    * Synchronous, and idempotent per turn. State is set BEFORE the emit, so a
-   * throwing sink can never leave the session "running".
+   * throwing sink can never leave the session "running" — nor skip the cut.
    */
   private finishTurn(turnId: string, end: TurnEnd): void {
     const record = this.turns.get(turnId);
@@ -258,7 +374,11 @@ export class HostedSession {
       this.controller = null;
       this.activeTurnId = null;
     }
-    this.emit({ type: "turn_end", turnId, ...end });
+    try {
+      this.emit({ type: "turn_end", turnId, ...end });
+    } finally {
+      this.recordCut(this.activeTurnId);
+    }
   }
 
   /**
@@ -300,7 +420,9 @@ export class HostedSession {
     const onAbort = (): void => controller.abort();
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      const { before, after } = await this.session.compact(controller.signal);
+      const { before, after } = await this.session.compact(controller.signal, () =>
+        this.historyReplaced(),
+      );
       return { before, after };
     } catch (error) {
       // Providers throw anything on abort; give the client one clean code.
@@ -316,9 +438,27 @@ export class HostedSession {
     }
   }
 
-  /** The current conversation history (the main thread persists it). */
-  snapshot(): { messages: readonly ChatMessage[] } {
-    return { messages: this.session.snapshot().messages };
+  /**
+   * The barrier, run synchronously inside `Session.compact` right after the
+   * history was replaced: a new epoch, `history_replaced`, the cut. Must not
+   * throw (the replacement already happened): a sink error is reported.
+   */
+  private historyReplaced(): void {
+    // The cut is final BEFORE the emit — it names the barrier's own seq (the
+    // next one) — so even a sink that reads the snapshot re-entrantly sees a
+    // consistent new epoch, never the new epoch with the old history length.
+    this.epochStart = this.seq + 1;
+    this.cut = {
+      epoch: crypto.randomUUID(),
+      seq: this.epochStart,
+      length: this.session.messages.length,
+      turnId: null,
+    };
+    try {
+      this.emit({ type: "history_replaced", reason: "compact" });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
   }
 
   /** Abort the active turn or compaction (if any). */

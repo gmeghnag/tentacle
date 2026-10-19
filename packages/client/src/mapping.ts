@@ -156,11 +156,16 @@ export function updateToEvent(
     // A steering message was injected; the TUI drops the matching ⏳ entry FIFO.
     case "steer":
       return { type: "steer", text: update.text };
+    case "context_note":
+      return { type: "context_note", text: update.text, reason: update.reason };
     // The turn bracket is consumed by `RemoteSession` (it ends the turn by
-    // `turnId`); it is not an `AgentEvent` of its own.
+    // `turnId`); it is not an `AgentEvent` of its own. `history_replaced`
+    // cannot arrive inside a turn (a compaction is exclusive with one), and the
+    // client that compacted reads the new history back itself.
     case "plan":
     case "turn_start":
     case "turn_end":
+    case "history_replaced":
       return null;
   }
 }
