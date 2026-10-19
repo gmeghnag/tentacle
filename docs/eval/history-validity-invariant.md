@@ -209,7 +209,7 @@ plus a mutation test (disable the repair → the wire payload has an unanswered 
     Its local fix is still worth doing; this module is the backstop.
   - `docs/fix/compact-empty-summary-wipe.md`: the `/compact` rescue path in
     row 6 depends on it.
-  - `docs/eval/daemon-compact-turn-guard.md`: a concurrent compact during a turn
+  - `docs/fix/daemon-compact-turn-guard.md`: a concurrent compact during a turn
     is another way to mutate history mid-turn. That needs its own guard;
     validation does not make a race safe.
 

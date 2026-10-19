@@ -87,10 +87,13 @@ export class Session {
   /**
    * Compact the conversation: summarise it, then replace the history with the
    * system prompt + that summary. Returns the summary and the message counts.
+   * An abort wins over a summary that lands after it (a provider may ignore the
+   * signal): the history is then left untouched and the call rejects.
    */
   async compact(signal?: AbortSignal): Promise<CompactResult> {
     const before = this.messages.length;
     const summary = await this.agent.summarize(this.messages, signal);
+    signal?.throwIfAborted();
     const next = compactedHistory(this.messages, summary);
     this.messages.length = 0;
     this.messages.push(...next);

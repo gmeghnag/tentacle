@@ -588,7 +588,7 @@ E2E (`.tentacle/tmp/steering-review/race.ts`): race1 →
    - Lo stress test (`window.ts`) con la stessa mutazione dà **DROPPED 51–103 su 150** sia su MessagePort sia su WebSocket. Senza la mutazione dà 0.
    - L'invariante quindi regge davvero il carico ed è protetta solo da un commento. Il doc rinuncia al test perché "fragile", ma un test deterministico esiste.
    - Come scriverlo, in `agent` o in `session`: nel callback `drainSteering`, alla chiamata che ritorna `[]`, programmare `setTimeout(() => (fired = true), 0)`, poi verificare che il consumer riceva `turn_end` con `fired === false`. Una `await` su timer o I/O inserita dopo viene programmata più tardi e fa fallire il test. Non dipende dall'ordine dei microtask.
-   - Rischio concreto: `docs/eval/daemon-compact-turn-guard.md` prevede di toccare proprio lo stato busy di `HostedSession.prompt`.
+   - Rischio concreto: `docs/fix/daemon-compact-turn-guard.md` prevede di toccare proprio lo stato busy di `HostedSession.prompt`.
 3. 🟡 **Low: la riconciliazione di un reject in ritardo è a conteggio e non legata al turno.** Riferimento: `tui/src/App.tsx:505-506`.
    - Sequenza: un `NoTurnRunning` della corsa di fine turno arriva dopo che l'utente ha già avviato il turno successivo e accodato un altro messaggio.
    - Effetto: `slice(0, -1)` toglie la riga ⏳ del messaggio **nuovo**, che è stato accettato. La riga sparisce prima del tempo, ma il messaggio viene consegnato e compare come user item allo `steer`.

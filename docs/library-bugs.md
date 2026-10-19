@@ -84,3 +84,52 @@ Siblings in a row measure correctly and render contiguously. Keeps Ink's native
 - **Known Ink gotcha (not a bug):** an empty `<Text>` measures `0×0`, so a
   per-row `<Text>` list collapses blank rows. Render blank rows as `" "`. (In
   AGENTS.md §6.)
+
+---
+
+## Bun test — `expect(p).rejects` spins forever on a promise that never settles
+
+- **Library:** `bun` (test runner, `bun:test`)
+- **Version in use:** `1.4.3` (`c6da4a4d3`), macOS arm64 (tested)
+- **Affected:** `1.4.3` (only version tested)
+- **Fixed in:** unknown
+
+### Symptom
+
+`await expect(p).rejects.toBe(…)` (any matcher) where `p` never settles does
+not time out: the process pins a core (~100% user CPU) and `--timeout` is not
+enforced, so the whole `bun test` run hangs. A plain `await new Promise(() =>
+{})` in a test times out normally. Inside a larger file it can also surface as
+"this test timed out", after which the NEXT test hangs the run.
+
+Hit in `fix/daemon-compact-turn-guard`: on the buggy code a request the test
+expects to be rejected is instead left parked — exactly the regression the test
+exists to catch, which then hung the suite instead of failing it.
+
+### Repro (isolated)
+
+```ts
+import { expect, test } from "bun:test";
+const tick = (ms = 1) => new Promise((r) => setTimeout(r, ms));
+test("parks forever", async () => {
+  await expect(new Promise(() => {})).rejects.toBe(1);
+});
+test("after a timeout, timers still fire", async () => {
+  for (let i = 0; i < 3; i++) await tick();
+  expect(1).toBe(1);
+});
+```
+
+`perl -e 'alarm 8; exec @ARGV' bun test --timeout 500 ./bun-timeout.test.ts`
+→ killed by the alarm (`exit=142`, `real 8.03`, `user 7.96`), no test result
+printed — deterministic over 2 runs (2026-10-20). Replacing the first test body
+with `await new Promise(() => {})` → `(fail) parks forever [500.01ms]`,
+`1 pass, 1 fail`.
+
+### Our workaround (no upgrade)
+
+For a promise that may stay pending on a regression, don't use `.rejects`:
+race it against a short timer and assert on the outcome — the `rejection(p,
+ms)` helper in `packages/daemon/test/integration.test.ts` ("compaction is
+exclusive with a turn"). Existing `.rejects` on promises that always settle
+are unaffected.

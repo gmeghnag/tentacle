@@ -505,7 +505,7 @@ than scope-creeping into them. The one slip is the `history-validity` cross-
 doc link not being repointed after the `git mv`.
 
 **Prior art / open items on the same path:** `TODO.md` "session/compact races
-a turn on the daemon" (`docs/eval/daemon-compact-turn-guard.md`) is a
+a turn on the daemon" (`docs/fix/daemon-compact-turn-guard.md`) is a
 concurrency guard on the *same* `compact` path — separate concern, still open,
 not touched by this fix. The in-band SSE error-chunk provider defect is the
 known separate `TODO.md` Block item (it *feeds* trigger 2; unaffected here).
@@ -565,7 +565,7 @@ pre-existing defect, but **not introduced or worsened by this fix** — in the
 empty-summary case both promises now *reject* before either mutates, so the
 guard strictly *reduces* the dangerous window (before: the first compact could
 wipe+persist; now: neither mutates). It is the same family as the open
-`docs/eval/daemon-compact-turn-guard.md` (compact racing a turn) — whose
+`docs/fix/daemon-compact-turn-guard.md` (compact racing a turn) — whose
 proposed guard already rejects "when a turn **or another compact is active**"
 (`daemon-compact-turn-guard.md:112`) and shows the compact busy in the TUI —
 so it is already scoped to that task, not here. **No test added** (out of
