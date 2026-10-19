@@ -1,6 +1,6 @@
 # feat/protocol-schema-export — export the wire schema as JSON Schema, gated against drift
 
-> **Status:** executed, gate green — awaiting merge OK (2026-10-19). Promoted from `docs/eval/` on owner approval (OQ-1/OQ-3 by parent D7, OQ-2 as recommended, OQ-4 → event-stream per parent E).
+> **Status:** merged to `main` (2026-10-19). Promoted from `docs/eval/` on owner approval (OQ-1/OQ-3 by parent D7, OQ-2 as recommended, OQ-4 → event-stream per parent E).
 > **Branch:** `feat/protocol-schema-export`
 > **Type:** feat (promoted from eval) · **Size:** S–M (was S: verification added a union rewrite, a type guard and a zod⇔JSON-Schema agreement test; still one package + a re-export) · **Blast:** cross-module (no runtime/wire change; touches `protocol`, a `transport` re-export, root scripts, `bun.lock`) · **Suited:** a weaker model may execute; standard Review
 
