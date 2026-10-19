@@ -219,6 +219,10 @@ PROTOCOL_VERSION: bumped by each breaking child
    Live → attach (replay or resync). Not live + `messages` → recreate (today's
    `--resume` path). Otherwise `UnknownSession`. A live id is always an attach,
    never an overwrite — the duplicate-id clobber disappears by construction.
+   **→ Decided A (2026-10-19):** the replay is delivered as ordinary
+   `session/update` notifications sent *inside* the `open` handler, not as a
+   field of the response (ordering + 8 MiB frame cap). The client buffers
+   updates from the moment it sends `open` and orders by `seq` only.
 3. **Commands ack at once; outcomes are stream events.** `prompt` returns
    `{turnId}` immediately; the result is `turn_end{stopReason, error?}`. A
    failing turn says so in the stream (today a model error is a `prompt`
@@ -243,6 +247,10 @@ PROTOCOL_VERSION: bumped by each breaking child
    `since`-token / Kafka-offset shape). The ring is per-session, bounded in
    **bytes**, never reset on turn boundaries. `since` older than the ring, or
    in the future (buggy/hostile client) → `resync: true`.
+   **→ Decided D1 (2026-10-19):** `since = {epoch, seq}`. `epoch` changes on
+   every session incarnation (re-create under the same id, daemon restart);
+   `seq` is comparable only within one `epoch`; a different `epoch` → resync.
+   The cut is emitted by the agent loop through a `history_commit` marker (D2).
 6. **Compaction is a stream barrier** (review F6). `compact` replaces history
    wholesale (`agent/src/session.ts:95-96`) and is today an out-of-band command;
    a client replaying across it would apply new events over stale history. In
@@ -325,6 +333,11 @@ PROTOCOL_VERSION: bumped by each breaking child
     *mandatory* event (one a client must act on: turn/permission/history) always
     bumps the version, because silently ignoring a `permission_request` or a
     `turn_end` would be a hang. The class is part of the schema.
+    **→ Decided E (2026-10-19):** the class travels in *every frame* (a
+    per-frame `mandatory` flag), `seq` is required, and the union has a
+    catch-all unknown member — so an unknown display event is skipped while
+    its `seq` still counts (today the peer drops it and loses the seq → resync
+    loop); a generated Swift decoder must not throw on it.
 15. **Wire hygiene.** Optional fields are omitted, never `null`, except where
     `null` carries meaning (`exitCode`, JSON-RPC error `id`). Removes the
     optional/nullable ambiguity that bites every non-TS decoder.
@@ -395,6 +408,12 @@ the ring reset at turn start, without the `history_replaced` barrier (a drop
 around a `compact`), and with seq dedupe disabled. Comparing only the final
 committed messages is not enough: it passes a run that drops mid-round chunks.
 
+**→ Decided C (2026-10-19):** the comparison is on a **projected transcript**
+(the reducer output minus what history does not keep: thoughts, usage,
+cancelled partial text), because after a resync those are legitimately absent;
+the literal "equals the uninterrupted one" cannot hold. The steering window
+already has a test (`daemon/test/integration.test.ts:424-472`).
+
 ### Adversarial review — `claude-fable-5-1`, fresh context, 2026-10-19
 
 Verdict: *approve with changes*. All `file:line` evidence verified true; repro
@@ -417,21 +436,66 @@ Improvements adopted from the review: opaque `since` cut token (Matrix/Kafka
 shape), compaction as an event, per-request permission nonce, keepalive
 reframed for iOS (point 12).
 
+### Owner decisions after the children's Implementation drafts — 2026-10-19
+
+The eight children got source-verified Implementation drafts (one agent each,
+`claude-opus-5-5`). Where they converge on a correction to this parent, or
+raise an owner question, the decision is recorded here and **wins over any
+child text or point above that disagrees**. Children's "Open questions"
+sections are resolved by this list.
+
+Convergent corrections (two or more children independently):
+
+- **A — replay as notifications inside `open`** (registry, client-reattach). See point 2.
+- **B — `turn_start{turnId, prompt}`** carries the prompt text: today the user prompt never appears in the stream (event-stream, client-reattach).
+- **C — projected-transcript property** (event-stream, client-reattach). See the property section.
+- **D — restart rebuild of a suspended turn is its own task** after `permission-events`: `docs/eval/suspended-turn-resume.md` (persistence Part B + permission slice 7b). Until it lands, a turn suspended across a restart is closed honestly as "not executed", never as a denial nobody gave.
+- **E — per-frame class + required `seq` + catch-all** (event-stream, client-reattach, schema-export). See point 14.
+- **F — `closeOnBackpressureLimit`** in `session-registry` (Bun drops frames silently on a non-reading client and keeps the socket open).
+- **G — limits only refuse new work, never close** an existing session (ttl-limits). Point 10's "ends by … a daemon-wide limit" is superseded.
+- Connection state in the TUI is rendered by Ink in `StatusBar`, **not** `StatusLine` (AGENTS §7: `StatusLine` is finished before Ink mounts).
+
+Owner decisions:
+
+1. **D1 — `since = {epoch, seq}`** (see point 5).
+2. **D2 — `history_commit` marker** emitted by the agent loop; the cut is the last commit, so the ring never has to hold an unbounded turn.
+3. **D3 — `/clear` closes the old session, including its jobs**, on every runtime; the in-process path gets one `BackgroundJobs` per session so both paths behave the same (aligns `session-registry` with `background-process-groups`).
+4. **D4 — sub-agent permission across a restart is not resumable**: accepted exception; the sub-agent gets an explicit "interrupted" result, never a denial.
+5. **D5 — "allow always" grants are lost on restart**: accepted (you get asked again, never less). Persisting them is a later task.
+6. **D6 — detached-session cap reached → refuse the new session** + audit log line; never evict the oldest.
+7. **D7 — schema: `oneOf` + `discriminator`, reference codegen `swift-openapi-generator`** (not quicktype); `DomainErrorCode` moves into `@tentacle/protocol`.
+8. **D8 — new prerequisites:** `docs/eval/daemon-compact-turn-guard.md` before event-stream 3c; `docs/eval/session-store-durability.md` before `daemon-side-persistence`.
+9. **D9 — `pod-attach-resilience`:** Layer 2 (reconnect) is absorbed by `client-reattach-frontends`; Layer 1 shrinks to an S WebSocket ping in `exec-channel.ts` (Bun's client has `ping()`).
+10. **D10 — attachments:** adopt the agent's recommendations (text placeholder when bytes are missing, only the last K images in full, images before text); detail numbers are decided when the first sub-task is promoted.
+
+Splits adopted: event-stream → 3a/3b/3c (one doc, three branches, in order);
+permission-events → 7a here + 7b into `suspended-turn-resume`;
+daemon-side-persistence → Part A here + Part B into `suspended-turn-resume`;
+client-reattach → 8a + `client-reattach-frontends` (8b); attachments → 4
+sub-tasks (one doc, four branches). Per-child adversarial review is deferred
+to promotion time (each child gets its mandatory fresh-context Review then).
+
 ### Children (dependency order; one code task at a time, AGENTS §10)
 
 | # | Task | Size · Blast | Depends on |
 |---|---|---|---|
-| 0 | finish + merge `fix/steering-over-rpc` (in flight) | — | — |
 | 1 | `docs/eval/background-process-groups.md` — group kill + process-exit net + dispose on connection close (approved, ready to promote) | S–M · load-bearing | — |
-| 2 | `docs/eval/protocol-schema-export.md` — JSON Schema export + drift gate (point 17) | S · cross-module | — |
-| 3 | `docs/eval/session-event-stream.md` — byte ring, consistent cut, `turn_start`/`turn_end{error}`, `history_replaced`, `prompt` ack + `turnId`, `enqueue` id, event classes, paged snapshot, wire hygiene, explicit reject of non-text blocks | M · load-bearing | 2 |
-| 4 | `docs/eval/session-registry.md` — registry, `open{since}` replay/resync, `close`, detach-on-close, multi-attach fan-out, model-proxy rule | M · load-bearing | 1, 3 |
-| 5 | `docs/eval/session-ttl-limits.md` — detached-TTL reaper, daemon-wide limits, server keepalive | S–M · load-bearing | 4 |
-| 6 | `docs/eval/daemon-side-persistence.md` — `serve` persists session history daemon-side (pods unchanged) | M · load-bearing | 4 |
-| 7 | `docs/eval/permission-events.md` — permissions as events, nonce, first-wins, no timeout, suspension rebuilt on restart | M · load-bearing | 4, 6 |
-| 8 | `docs/eval/client-reattach.md` — `RemoteClient` reconnect, pure reducer, TUI wiring, the property test | M · load-bearing | 3, 4, 7 |
-| 9 | `docs/eval/attachments.md` (sister) — multimodal history + providers, attachment store + chunked upload | L → split | 3 |
-| 10 | mobile app (React Native or Swift) — own eval, after 8 | — | 8 |
+| 2 | `docs/eval/protocol-schema-export.md` — JSON Schema export (`oneOf` + discriminator), drift gate, `DomainErrorCode` into protocol | S–M · cross-module | — |
+| 2b | `docs/eval/daemon-compact-turn-guard.md` — prerequisite of 3c (D8) | see doc | — |
+| 3a | `docs/eval/session-event-stream.md` §3a — event classes per frame, unknown-event tolerance, wire hygiene, non-text reject | S · load-bearing | 2 |
+| 3b | same doc §3b — `turn_start{prompt}`/`turn_end`, prompt ack, idempotency, turn driver | M · load-bearing | 3a |
+| 3c | same doc §3c — ring, `history_commit` cut, `history_replaced` barrier, paged snapshot | M · load-bearing | 3b, 2b |
+| 4 | `docs/eval/session-registry.md` — registry, `open{since}` (replay as notifications), `close`, detach-on-close, fan-out, backpressure close, model-proxy rule | M (near L) · load-bearing | 1, 3c |
+| 5 | `docs/eval/session-ttl-limits.md` — 24 h reaper, daemon-wide limits (refuse only), server keepalive | M · load-bearing | 4 |
+| 5b | `docs/eval/session-store-durability.md` — prerequisite of 6 (D8) | see doc | — |
+| 6 | `docs/eval/daemon-side-persistence.md` Part A — `serve` persists history; a turn suspended at restart is closed "not executed" | M · load-bearing | 4, 5b |
+| 7a | `docs/eval/permission-events.md` (live slice) — permissions as events, nonce, first-wins, no timeout, cancel settles | L · load-bearing | 4 |
+| 7b | `docs/eval/suspended-turn-resume.md` — rebuild a suspended turn after a `serve` restart | M · load-bearing | 6, 7a |
+| 8a | `docs/eval/client-reattach.md` — `RemoteClient` reconnect, pure reducer, the property test | M · load-bearing | 3c, 4, 7a |
+| 8b | `docs/eval/client-reattach-frontends.md` — connect/attach/run wiring, `StatusBar`, pod-attach Layer 2 | M · load-bearing | 8a |
+| — | `docs/eval/attachments.md` (sister) — 4 sub-tasks; the first is independent | 4 × S–M · load-bearing | 3a (sub-tasks 2–4) |
+| — | `docs/feat/pod-attach-resilience.md` Layer 1 — WS ping (D9) | S · contained | — |
+| — | mobile app (React Native or Swift) — own eval | — | 8b |
 
 Ordering rationale (F5): `turn_end` in the stream (3) lands before
 detach-on-close (4), so `main` is never in a state where a turn survives the

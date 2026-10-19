@@ -1,8 +1,8 @@
 # eval/session-ttl-limits — detached-session TTL, daemon-wide limits, server keepalive
 
-> **Status:** eval (child of `docs/eval/session-reattach.md`, step 5)
+> **Status:** implementation drafted — awaiting owner approval (2026-10-19) (child of `docs/eval/session-reattach.md`, step 5)
 > **Branch:** none until promoted (then `feat/session-ttl-limits`)
-> **Type:** eval → feat · **Size:** S–M · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (resource teardown on a long-lived `serve`, AGENTS §7)
+> **Type:** eval → feat · **Size:** M (was S–M: the plan touches 9 source files across `daemon` + `cli`, see Files) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (resource teardown on a long-lived `serve`, AGENTS §7)
 
 ## Context
 
@@ -19,7 +19,660 @@ for this Bun version).
 
 ## Implementation
 
-*(empty — filled when promoted)*
+> **Owner decisions (2026-10-19):** the open questions below are resolved in
+> the parent, `docs/eval/session-reattach.md` §"Owner decisions after the
+> children's Implementation drafts" (A–G, D1–D10). Where a question or
+> design point here disagrees, the parent decision wins.
+
+
+*— claude-opus-5-5, 2026-10-19 (draft, awaiting owner approval)*
+
+Verified against `main` @ `4914e9b`. Line numbers below are **today's**; the
+three children this task builds on (`background-process-groups`,
+`session-event-stream`, `session-registry`) are not implemented yet, so the
+interfaces they will add are named as **assumed** and must be re-checked by the
+executor before the first edit (§8 "if a step contradicts the code, STOP").
+
+### Open questions / contradictions
+
+Each has a recommendation; the plan below follows the recommendation.
+
+1. **Does a daemon-wide limit ever *end* a session?** Parent point 10 and this
+   doc's Review say a busy session "ends only by an explicit `close`, a
+   daemon-wide limit, or an optional admin cap". Read literally, a limit could
+   *evict* a live session — which is the silent loss point 8 rejects.
+   **Recommendation: limits are admission control only.** They refuse a *new*
+   session (`TooManySessions`, visible error); they never close an existing
+   one. The only things that end a session are `close`, the idle TTL (idle
+   sessions only) and the opt-in admin cap. Fix the parent's wording on
+   approval.
+2. **Detached cap: refuse or evict?** The Review says "a visible error instead
+   of a slow leak". Refusal has a cost: once a flapping client has piled up
+   `maxDetachedSessions` detached sessions, *every* client is refused a new
+   session until the TTL (24 h) or an operator restart clears them — there is
+   no `session/list` to find and close them. Eviction (close the oldest
+   *idle* detached session to make room) avoids that but is a silent close of
+   someone's session before its TTL. **Recommendation: refuse** (as the Review
+   decided), with an audit line naming the cap and the count, and a default
+   generous enough that only a real leak hits it (16, see Design). Owner to
+   confirm; if eviction is preferred, it is a ~10-line change in
+   `SessionHost.admit` restricted to idle (never busy) sessions.
+3. **Order vs `permission-events` (child 7) and `daemon-side-persistence`
+   (child 6).** This task (child 5) lands *before* both, so "suspended turn"
+   does not exist yet as its own state. Today a turn waiting on a permission is
+   simply a running turn (`HostedSession.controller` is set until the turn's
+   `finally`, `hosted-session.ts:68-70,113-115`), so `running` already covers
+   it in-process. The plan therefore defines **one seam**,
+   `HostedSession.busy`, = `running` in this task. Contract handed forward:
+   - `permission-events` MUST make `busy` true for a suspended turn, including
+     one rebuilt after a daemon restart if that rebuild does not hold an
+     `AbortController` (its design is not written yet). Its test list gains
+     "a suspended, detached session is not reaped after TTL + 1 h".
+   - `daemon-side-persistence` MUST (a) start the TTL at reload time — its
+     Review already says "reload sessions as detached; the idle TTL starts"
+     (`daemon-side-persistence.md:77-78`) — and (b) make a **reaped/closed
+     session's record not reload** (delete or tombstone it). Otherwise every
+     restart resurrects reaped sessions with a fresh 24 h, and the reaper
+     never frees anything across restarts. Recommendation: reap goes through
+     the same `SessionHost.close` as `session/close`, so whatever `close` does
+     to the record, reaping does too — one path.
+4. **"A silent peer is detached within the keepalive bound (fake timers)"**
+   (Review, Tests) **cannot use fake timers**: the ping/idle timers live inside
+   Bun's native WebSocket server (uWS), not in JS `setTimeout`. Measured below:
+   the smallest effective bound is ~8 s whatever `idleTimeout` is set to (4 s
+   timer granularity). **Recommendation:** one real-socket test, ~8–10 s wall
+   time, with an explicit per-test timeout of 15 s. If the owner rejects a
+   10 s test in the default suite, gate it like the live-k8s test (opt-in env)
+   and keep the pure option-mapping test always on.
+5. **Keepalive does not bound every dead-peer case — measured.** (a) A peer
+   that keeps *reading* TCP but never answers pings is **never** closed while
+   the server keeps sending to it: server sends reset the idle timer
+   (experiment 2: 24 sends in 25 s, `idleTimeout: 8`, no close). Such a peer is
+   alive at the TCP level, so this is acceptable; the reaper does not depend on
+   it. (b) A peer that stops reading (frozen app once its kernel buffer is
+   full, a truly half-open socket) **is** closed at about `idleTimeout`, but
+   the server buffers everything sent meanwhile — measured 12 MB at
+   64 KiB / 50 ms before the close at 12 s (experiment 3). Bun's
+   `closeOnBackpressureLimit` closes it in 1.5 s, but would also close a
+   healthy client receiving one large `snapshot`. **Recommendation:** this task
+   sets only `idleTimeout`/`sendPings`; per-sink backpressure ("a sink that
+   cannot keep up is dropped and resyncs", `session-registry.md` Review) stays
+   with the registry's fan-out, where it can be decided per sink without
+   killing the socket. Recorded as debt, not silently assumed.
+6. **Default for `maxSessions` changes meaning.** 64 per connection
+   (`ws-server.ts:39`) becomes 64 per daemon. For a personal host that is still
+   far above use; noted so the Review does not read it as an accidental
+   tightening.
+
+### Load-bearing assumption
+
+**Closing a session ends every process it started.** A reaper built on a close
+that leaves `sh`'s children alive frees nothing while looking like it does
+(this doc's Review, last "Why").
+
+Status: **not provable on today's `main` — an explicit dependency.**
+- Today `JobController` has no way to end all jobs: `start/read/kill/list/onExit`
+  only (`packages/core/src/jobs.ts:35-49`), and `kill` signals only `sh`
+  (`background-process-groups.md` Context, repro 4: `sleep 30009` survives with
+  PPID 1).
+- `fix/background-process-groups` adds `JobController.dispose()` (group kill,
+  TERM → KILL escalation; its Design 2–3) and proved the mechanism on Bun 1.4.3
+  (its `pgid.ts`: `detached: true` gives the child its own group; `kill(-pgid)`
+  leaves no `sleep 31001`).
+- `session-registry` adds `HostedSession.close()` that "cancels the turn,
+  detaches every sink, unsubscribes `onExit`, disposes its jobs"
+  (`session-registry.md` Review, scope bullet 1) and moves `disposeJobs()` out
+  of `Connection.close()`.
+
+**Executor's first step (before any edit):** on the branch with both merged,
+re-run the bpg `pgid.ts` script, then write test T1 (below) — a detached
+session whose background job runs `sleep 3<rand>; true` is reaped and
+`pgrep -f "sleep 3<rand>"` finds nothing. If T1 cannot be made green by the
+reaper calling `SessionHost.close`, STOP (§0): the dependency is not delivering
+what this plan stands on.
+
+Second, smaller assumption (race-freedom, proven by construction): **a sweep and
+an `open` cannot interleave.** The RPC peer dispatches each inbound request with
+`void this.handleRequest(...)` (`packages/transport/src/peer.ts:291`), and a
+handler runs synchronously until its first `await`. `session-registry` requires
+attach to be synchronous in one tick (its Review, "Why attach must be
+synchronous"); this plan makes the sweep synchronous too (decide + `close` in
+one loop, no `await`). So in a single-threaded event loop one of them runs
+entirely first; see Failure modes for both outcomes.
+
+### Preconditions
+
+Verified on `main` (cite) or assumed from an approved/earlier child (named).
+
+- **Today's per-connection limit.** `DEFAULT_MAX_SESSIONS = 64`
+  (`daemon/src/ws-server.ts:39`), passed per `Connection`
+  (`ws-server.ts:182-186`), checked against *this connection's* map
+  (`daemon/src/connection.ts:56,195-199`), error `TooManySessions = -32006`
+  (`transport/src/errors.ts:16`). Pinned by
+  `daemon/test/integration.test.ts:249-256`.
+- **No keepalive options today.** `Bun.serve` gets `hostname/port/tls/fetch/
+  websocket{open,message,close}` only (`ws-server.ts:162-199`). Socket close →
+  `WsChannel.fireClose()` + `Connection.close()` (`ws-server.ts:193-196`).
+- **Bun 1.4.3 defaults, measured** (experiment 1 below): `idleTimeout` 120 s,
+  `sendPings` true. The repo's type package is older (`@types/bun` 1.1.14,
+  `package.json:25`; its `bun.d.ts` documents the same defaults: 120 s,
+  `true`) — the types do not prove runtime behaviour, the experiment does.
+- **The CLI WebSocket client answers pings.** `connect` uses the runtime's
+  `WebSocket` (`client/src/ws-channel.ts:77`); experiment 1 shows Bun's client
+  auto-pongs (`server: pong received` every ping). So `sendPings: true` keeps
+  an idle-but-healthy TUI attached indefinitely.
+- **Running turn.** `HostedSession.running` = `controller !== null`
+  (`daemon/src/hosted-session.ts:68-70`); the controller is cleared in the
+  turn's `finally` (`:113-115`). A turn awaiting a permission answer is still
+  running (the requester is awaited inside the turn, `:48-52`).
+- **Steering invariant.** No `await` from the last steering drain through
+  `turn_end` and "on through the daemon's `HostedSession.prompt` clearing its
+  controller" (`agent/src/agent.ts:270-278`). Anything this task adds at turn
+  end must be synchronous.
+- **Where `serve` is configured.** `startDaemon` builds the `SessionHost` and
+  calls `startWsServer` (`cli/src/serve.ts:28-43`); the CLI parses `serve`
+  flags with `parseFlags` (`cli/src/main.ts:187-240`, `cli/src/flags.ts:18-46`)
+  and stops the server on SIGINT (`main.ts:230-235`). The stdio pod daemon
+  closes its single connection on stdin end and then the process returns
+  (`serve.ts:106-120`, `main.ts:192-197`) — no long-lived registry there, so
+  **no reaper and no keepalive on stdio**.
+- **Time in pure code is passed in, not read** — the repo's existing pattern
+  (`tui/src/App.tsx:345-351` passes `Date.now()` into pure reducers). There is
+  no clock abstraction or fake-timer use in the repo today
+  (`rg "useFakeTimers|setSystemTime|interface Clock" packages` → nothing).
+- **Assumed from `session-registry` (not on `main`; re-check):**
+  `SessionHost` holds the registry `Map<string, HostedSession>` and exposes
+  `open(...)` (create-or-attach, synchronous attach) and `close(id): void`
+  (idempotent, synchronous, unknown id = no-op). `HostedSession` holds a set of
+  attached sinks with `attach(sink)` / `detach(sink)` and `close()`.
+  `Connection.close()` detaches instead of cancelling.
+- **Assumed from `background-process-groups`:** `JobController.dispose(): void`,
+  synchronous, idempotent; `HostedSession.close()` calls it.
+
+### Design
+
+**Definitions (the single source of truth, in the pure module).**
+
+- `attached` — number of sinks currently attached to the session (registry).
+- `busy` — `running || suspended`. In this task `busy === running`
+  (Open question 3); `permission-events` extends it.
+- **idle** ⇔ `attached === 0 && !busy`. Background jobs do **not** count:
+  a dev server left running by an abandoned session is exactly what the
+  reaper exists to stop.
+- `quietSince` — the time of the most recent transition **into** idle; `null`
+  while not idle. Set on: last sink detached while not busy; turn ended while
+  no sink attached; session created detached (persistence reload).
+  Cleared on: any attach; turn start.
+- `detachedSince` — the time of the most recent transition to `attached === 0`
+  (regardless of `busy`); `null` while any sink is attached. Used only by the
+  admin cap.
+- **TTL expiry** ⇔ idle ∧ `now − quietSince ≥ idleTtlMs`.
+- **Admin-cap expiry** ⇔ `adminCapMs` set ∧ `attached === 0` ∧
+  `now − detachedSince ≥ adminCapMs` — closes even a busy session; off by
+  default.
+
+The timestamps are recorded **at the transitions** (not discovered by the
+sweep): a sweep-only design would miss an attach/detach that happens between
+two sweeps and reap a session that was used minutes ago — the "re-attach resets
+the TTL" property would be false.
+
+**1. Clock seam.** `SessionHostOptions.now?: () => number` (default
+`Date.now`). `SessionHost` passes it to every `HostedSession` it builds; both
+the stamps and the sweep read the same clock, so a test drives everything with
+`let t = 0; now: () => t`. No fake timers anywhere.
+
+**2. `HostedSession` liveness (≈25 lines).** A private `stamp()` recomputes
+`quietSince`/`detachedSince` from `attached` and `busy` after each transition:
+in `attach`, `detach`, at turn start, and in the turn's `finally` right after
+`controller = null` — synchronous, no `await` (steering invariant). Exposed as
+a read-only `liveness(): SessionLiveness` (`{ id, attached, busy, quietSince,
+detachedSince }`). A session constructed with no sink (persistence reload,
+`open{messages}` before attach completes) starts with both stamps = `now()`.
+
+**3. Pure decision — new `daemon/src/session-reaper.ts`.**
+
+```ts
+export interface ReapPolicy {
+  readonly idleTtlMs: number;          // > 0; default 24 h
+  readonly adminCapMs?: number;        // undefined = off (default)
+}
+export interface SessionLiveness {
+  readonly id: string; readonly attached: number; readonly busy: boolean;
+  readonly quietSince: number | null; readonly detachedSince: number | null;
+}
+export type ReapReason = "idle_ttl" | "admin_cap";
+/** Pure: which sessions expire at `now`. No I/O, no clock read. */
+export function selectExpired(
+  sessions: Iterable<SessionLiveness>, now: number, policy: ReapPolicy,
+): { id: string; reason: ReapReason }[];
+```
+
+Rules exactly as the Definitions; `idle_ttl` wins when both apply. A session
+with `attached > 0` is never selected, whatever the policy.
+
+**4. Sweep — `SessionHost.reapExpired(policy): {id, reason}[]`.** Synchronous:
+collect `liveness()` of every registered session, `selectExpired(…, now(),
+policy)`, then for each result **re-check** that session's liveness (cheap,
+guards a future refactor that adds an `await`) and call the registry's
+`close(id)`. Returns what it closed so the caller can audit. Reaping is
+`close` — no second teardown path (§7 "one session path").
+
+**5. Loop — `startReaper(host, policy, opts)` in `session-reaper.ts`.** A
+`setInterval(sweep, sweepIntervalMs)` (default 60 s; the TTL is honoured to
+within one interval) with the interval `unref()`'d so it never keeps a process
+alive; `opts.setInterval/clearInterval` are injectable (default globals) only
+so a test can assert start/stop wiring; the sweep logic is tested directly
+through `reapExpired`. Returns `stop()`. Each reaped session → `onAudit("session-reaped <id> <reason>")`.
+Started by `startWsServer` (the only long-lived host), stopped by its
+`RunningServer.stop()`.
+
+**6. Daemon-wide limits — admission control in `SessionHost`.**
+`SessionHostOptions.maxSessions?` (live sessions, default 64) and
+`maxDetachedSessions?` (default 16). Checked **only when `open` would create**
+(no live id, or `open{messages}` recreating); attaching to a live session is
+never refused. Refusal: `RpcError(TooManySessions, "too many sessions on this
+daemon (max N)")` or `"… detached sessions on this daemon (max N) — close or
+wait for the idle TTL"`; the error carries `data: { limit: "sessions" |
+"detached", max }` so a client can tell them apart without parsing text (an
+additive field; no new error code). Limits never close an existing session
+(Open question 1). `Connection` loses `maxSessions`
+(`connection.ts:41,57,67,195-199`); `ConnectionOptions` keeps
+`permissionTimeoutMs` (removed later by `permission-events`) and
+`maxFrameBytes`.
+
+Why 16 detached: a phone + a laptop TUI + a few `connect`s leave a handful
+detached in a day; 16 is above honest use and below "a client reconnects every
+few minutes without an id for a day" (which would pile up hundreds).
+
+**7. Keepalive — `ws-server.ts`.** Pass explicitly to `Bun.serve`'s
+`websocket`: `idleTimeout: options.idleTimeoutSec ?? 60` and `sendPings: true`.
+Measured behaviour (experiment 1): the server pings an idle socket before the
+deadline, a healthy client's pong keeps it open, a silent peer is closed at the
+first 4 s tick ≥ `idleTimeout` (8 s for 1–8, 32 s for 30, 120 s for the
+default 120), firing the same `close` handler → `Connection.close()` → detach
+(registry) → the TTL starts. 60 s instead of Bun's 120 s halves the window in
+which fan-out keeps buffering for a dead peer (Open question 5b), at the cost
+of one ping per idle socket per ~minute. `sendPings: false` is never allowed:
+with it a healthy idle client is closed at `idleTimeout` (experiment 1, third
+run). `--stdio` is untouched (no socket).
+
+**8. Configuration on `serve`.** New flags, parsed in `main.ts`'s `serve`
+branch and passed through `startDaemon` (`ServeOptions`) to
+`SessionHostOptions` / `WsServerOptions`:
+`--session-ttl <dur>` (default `24h`), `--session-admin-cap <dur>` (default
+off), `--max-sessions <n>` (64), `--max-detached-sessions <n>` (16),
+`--ws-idle-timeout <dur>` (60s). A pure `parseDuration("24h" | "90m" | "45s"
+| "1500ms") → ms` in `cli/src/flags.ts`; invalid or ≤ 0 → `[serve error]` and
+exit 1 before binding. HELP text (`main.ts:70-71`) gains one line. No config-file
+keys (flags only, like `--host/--port` today) — additive later if wanted.
+
+### Files
+
+Dependency order (protocol → daemon → cli); **no protocol change** (no new
+method, no new update variant, no version bump: `TooManySessions` exists, the
+`data` field is additive).
+
+1. `packages/daemon/src/session-reaper.ts` — **new**: `ReapPolicy`,
+   `SessionLiveness`, `selectExpired` (pure), `startReaper` (loop).
+2. `packages/daemon/src/hosted-session.ts` — `now` param, `quietSince` /
+   `detachedSince` stamps at attach/detach/turn start/turn `finally`, `busy`,
+   `liveness()`.
+3. `packages/daemon/src/session-host.ts` — `now`, `maxSessions`,
+   `maxDetachedSessions` options; admission check in the create branch of
+   `open`; `reapExpired(policy)`.
+4. `packages/daemon/src/connection.ts` — drop per-connection `maxSessions`.
+5. `packages/daemon/src/ws-server.ts` — `idleTimeoutSec`, `sessionTtlMs`,
+   `adminCapMs`, `sweepIntervalMs` options; `idleTimeout`/`sendPings` on
+   `Bun.serve`; start the reaper, stop it in `stop()`; remove
+   `DEFAULT_MAX_SESSIONS` (moves to `session-host.ts`).
+6. `packages/daemon/src/index.ts` — export `ReapPolicy` if `serve.ts` needs the
+   type.
+7. `packages/cli/src/flags.ts` — `parseDuration`.
+8. `packages/cli/src/serve.ts` — `ServeOptions` gains the limits/TTL/keepalive
+   fields; pass to `SessionHost` / `startWsServer`.
+9. `packages/cli/src/main.ts` — parse the five flags, HELP line.
+10. Tests: `daemon/test/session-reaper.test.ts` (new),
+    `daemon/test/integration.test.ts` (rewrite the per-connection cap test at
+    `:249-256`, add T3–T6), `daemon/test/ws-server.test.ts` (T7),
+    `cli/test/…flags…` (T9; executor locates the existing flags test file with
+    `rg parseFlags packages/cli/test`).
+
+### Failure modes
+
+- **TTL fires during a turn** → impossible by construction: `busy` sessions are
+  never idle, so never `idle_ttl`-selected; only the opt-in admin cap closes a
+  busy session, and only when nothing is attached. Pinned by T2/T3.
+- **Suspended turn (after `permission-events`)** → covered only if that child
+  keeps `busy` true (Open question 3). Until it lands, a pending permission is
+  a running turn — also covered.
+- **Re-attach races the reaper.** Both synchronous, so one runs first.
+  (a) `open` first: the session has `attached > 0` → the sweep skips it.
+  (b) sweep first: the session is closed and removed from the registry →
+  `open{id}` without `messages` → `UnknownSession` → the client recreates with
+  `open{id, messages}` (registry's documented recovery). Never a half-closed
+  session receiving an attach. Pinned by T5.
+- **Turn ends while detached** → `quietSince` = turn-end time, so the full TTL
+  runs from the end of the work, not from the disconnect. Pinned by T3.
+- **Clock jumps** (NTP step, suspend/resume of the host): `Date.now()` is wall
+  time; a forward jump can reap up to the jump early, a backward jump delays.
+  Accepted: the TTL is a 24 h housekeeping bound, not a deadline anyone relies
+  on to the second. (`performance.now()` would avoid it but is per-process,
+  meaningless for a persisted `quietSince` after a restart.)
+- **Sweep throws for one session** (a bug in a `close` path) → catch per
+  session, `onError`, continue with the others; never let one bad session stop
+  the reaper for the daemon's lifetime. Pinned by a fake-host test in T8.
+- **`close` of a reaped session cannot kill a process** (group already gone,
+  `setsid`ed child) → owned by `background-process-groups` (`ESRCH`
+  swallowed; `setsid` is a documented limit there).
+- **Limits at the boundary:** the N+1-th create is refused, the N-th
+  succeeds; re-attach at the limit succeeds; after a reap/close a create
+  succeeds again (counts are derived from the registry, never a separately
+  maintained counter that could drift). Pinned by T6.
+- **Detached cap reached by a flapping client** → every new create refused
+  until TTL/restart (Open question 2); the audit line makes it diagnosable.
+- **Keepalive closes a healthy client** → only if it stops answering pings for
+  ~`idleTimeout`; Bun's client and browser/iOS WebSockets auto-pong while the
+  app runs. A *frozen* iOS app will be detached — intended (parent point 12):
+  its session is not affected, only the socket; it re-opens on foreground.
+- **Dead peer during a streaming turn** → buffered until the idle close
+  (Open question 5); bounded by Bun's 16 MiB default backpressure limit
+  (documented default; experiment 3 shows the close happening before it at
+  ~12 MB).
+- **`stop()` while a sweep is due** → `clearInterval` first; sessions are not
+  closed by `stop()` (process exit follows and the bpg exit net kills job
+  groups) — unchanged from today.
+- **Model-proxy sessions** → n/a: only `serve --stdio` uses the proxy and it
+  runs no reaper; the process ends with its connection.
+- **Version skew** → none: no wire change.
+
+### Tests
+
+All new behaviour is red on today's code (the options/methods do not exist →
+typecheck/test red); each test pins the exact property, not a correlate.
+Fakes: the existing `ScriptedProvider` / `harness` pattern in
+`daemon/test/integration.test.ts:19-80`, extended with a `now` option; a
+gated slow model (a scripted provider that awaits a test-controlled promise)
+for "turn still running"; a real `BackgroundJobs` only in T1. Unique
+`sleep 3<rand>` markers + `pkill -f` in `afterEach` (bpg pattern).
+
+- **T1 — load-bearing: reaping ends the session's processes.** Real
+  `BackgroundJobs` via the factory; start `sleep 3<rand>; true`; detach; set
+  `t += 24h`; `reapExpired` → `pgrep -f` finds nothing. Property: *no process
+  of the job's tree alive*, not "close was called". Mutation: make
+  `reapExpired` remove the session from the map without calling its `close` →
+  must fail.
+- **T2 — `selectExpired` table (pure).** idle & `now − quietSince = ttl` →
+  reaped; `ttl − 1` → not; `attached = 1` → never (also with the cap); `busy`
+  → never without the cap, for any elapsed time (e.g. 30 days); cap set,
+  busy, detached ≥ cap → `admin_cap`; cap set, detached < cap → not; both
+  apply → `idle_ttl`. Mutation: drop the `busy` check → the 30-day busy row
+  fails.
+- **T3 — a running turn is never reaped; TTL counts from its end.** Prompt
+  with the gated model; drop the connection (detach); `t += 25h`; sweep →
+  session still registered and the turn still running; release the model;
+  turn ends at `t1`; `t = t1 + 24h − 1` → alive; `+1` → reaped. Mutation:
+  stamp `quietSince` at detach only (not at turn end) → the `−1` assertion
+  fails.
+- **T4 — re-attach resets the TTL.** Create, detach at 0; `t = 23h` attach
+  from a second connection, detach at 23h; `t = 46h` → alive (would be reaped
+  at 24h without the reset); `t = 47h` → reaped. Mutation: don't clear/re-stamp
+  `quietSince` on attach → fails at 46h.
+- **T5 — reaper vs open.** (a) at expiry, `open{id}` then sweep → not reaped,
+  updates flow. (b) sweep then `open{id}` → `UnknownSession`; then
+  `open{id, messages}` → recreated with those messages.
+- **T6 — daemon-wide limits.** `maxSessions: 2`: connection A creates 1,
+  connection B creates 1, B's third create → `TooManySessions` with
+  `data.limit = "sessions"`; B attaching to A's session → allowed. After
+  `close` of one → a create succeeds. `maxDetachedSessions: 1`: create + drop
+  one, then a new create → refused with `data.limit = "detached"`; after
+  the TTL reap → allowed. Mutation: keep the check per `Connection` → the
+  cross-connection assertion fails (today's code is exactly this mutation:
+  red). Replaces `integration.test.ts:249-256`.
+- **T7 — keepalive (real socket, ~8 s, timeout 15 s; Open question 4).**
+  `startWsServer({ idleTimeoutSec: 1, … })`; open a raw TCP client that
+  completes the upgrade and never answers (the `keepalive.ts` client below)
+  and a Bun `WebSocket` client that stays idle. Assert: within 12 s the
+  server's `onAudit` logged `connection-close` exactly once (the silent one)
+  and the Bun client is still `OPEN`. Mutations: `sendPings: false` → the
+  healthy client is closed too → fails; drop `idleTimeout` → the silent peer
+  survives 12 s (default 120 s) → fails. Red today: no `idleTimeoutSec`
+  option.
+- **T8 — loop wiring.** `startReaper` with injected `setInterval`/
+  `clearInterval` spies: one interval at `sweepIntervalMs`, `stop()` clears
+  it; a host whose `close` throws for one id still closes the others and
+  reports the error via `onError`.
+- **T9 — `parseDuration`.** `24h`, `90m`, `45s`, `1500ms` → ms; `0`, `-1h`,
+  `1d`, `abc`, empty → error.
+
+Non-vacuity summary (§9): T1 (skip `close`), T2/T3 (drop `busy`, wrong stamp
+point), T4 (no reset on attach), T6 (per-connection count), T7 (pings off,
+timeout default). Each mutation applied, test seen red, reverted — recorded in
+Execution.
+
+Gate: `bun run check` green; lint baseline clean (AGENTS §6).
+
+### Experiments (2026-10-19, bun 1.4.3, macOS)
+
+Scripts in `.tentacle/tmp/session-ttl-limits-impl/` (gitignored — pasted in
+full).
+
+**1. `keepalive.ts` — defaults and behaviour of `idleTimeout` / `sendPings`.**
+
+```ts
+// keepalive.ts — what do Bun.serve websocket idleTimeout / sendPings actually do on this Bun?
+// Usage: bun keepalive.ts <idleTimeoutSec|default> <sendPings: true|false|default> <client: bun|silent> <observeSec>
+// "silent" = raw TCP client: completes the WS handshake, logs every frame it receives, never answers
+// (models a frozen app / half-open peer at the WS layer). "bun" = Bun's WebSocket client (auto-pong).
+import { connect } from "node:net";
+const [idleArg, pingArg, client, obsArg] = process.argv.slice(2);
+const ws: Record<string, unknown> = {
+  open() { log("server: open"); },
+  message() {},
+  close(_w: unknown, code: number) { log(`server: close handler fired code=${code}`); },
+  ping() { log("server: ping received"); },
+  pong() { log("server: pong received"); },
+};
+if (idleArg !== "default") ws.idleTimeout = Number(idleArg);
+if (pingArg !== "default") ws.sendPings = pingArg === "true";
+const t0 = Date.now();
+const log = (s: string) => console.log(`${((Date.now() - t0) / 1000).toFixed(1).padStart(6)}s ${s}`);
+const server = Bun.serve({ port: 0, fetch(req, srv) { return srv.upgrade(req) ? undefined : new Response("no", { status: 426 }); }, websocket: ws as never });
+log(`bun ${Bun.version}; idleTimeout=${idleArg} sendPings=${pingArg} client=${client}`);
+if (client === "bun") {
+  const c = new WebSocket(`ws://127.0.0.1:${server.port}`);
+  c.onclose = (e) => log(`client: closed code=${e.code}`);
+} else {
+  const s = connect(server.port, "127.0.0.1", () => {
+    s.write(`GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+  });
+  let hs = false;
+  s.on("data", (b: Buffer) => {
+    if (!hs) { hs = true; log("client: handshake response received"); const i = b.indexOf("\r\n\r\n"); b = b.subarray(i + 4); if (!b.length) return; }
+    const op = b[0] & 0x0f;
+    log(`client: frame opcode=0x${op.toString(16)} (${op === 9 ? "PING" : op === 8 ? "CLOSE" : "other"}) — not answering`);
+  });
+  s.on("close", () => log("client: TCP closed"));
+}
+await Bun.sleep(Number(obsArg) * 1000);
+log("observation window over");
+server.stop(true);
+process.exit(0);
+```
+
+```
+$ bun keepalive.ts default default silent 140
+   0.0s bun 1.4.3; idleTimeout=default sendPings=default client=silent
+   0.0s server: open
+   0.0s client: handshake response received
+ 104.0s client: frame opcode=0x9 (PING) — not answering
+ 120.0s server: close handler fired code=1006
+ 120.0s client: TCP closed
+ 140.0s observation window over
+
+$ bun keepalive.ts default default bun 140
+   0.0s server: open
+ 104.0s server: pong received
+ 140.0s observation window over          (healthy client still open at 140 s)
+
+$ bun keepalive.ts 8 default silent 25
+   4.0s client: frame opcode=0x9 (PING) — not answering
+   8.0s server: close handler fired code=1006
+   8.0s client: TCP closed
+
+$ bun keepalive.ts 8 default bun 25
+   4.0s / 8.0s / 12.0s / 16.0s / 20.0s / 24.0s server: pong received
+  25.0s observation window over          (still open)
+
+$ bun keepalive.ts 8 false bun 25        (sendPings: false, healthy client)
+   8.0s server: close handler fired code=1006
+   8.0s client: closed code=1006
+
+$ bun keepalive.ts 1 default silent 10   → PING at 4.0s, close at 8.0s
+$ bun keepalive.ts 5 default silent 15   → PING at 4.0s, close at 8.0s
+$ bun keepalive.ts 30 default silent 40  → PING at 24.0s, close at 32.0s
+$ bun keepalive.ts 1 default bun 10      → pongs at 4.0s, 8.0s; still open
+```
+
+Read: defaults are `idleTimeout` 120 s and `sendPings` on (the Context's
+"unverified" is now verified). Pings keep a healthy client open indefinitely;
+a silent peer is closed at the first 4 s tick ≥ `idleTimeout` (minimum ~8 s);
+with pings off even a healthy idle client is closed.
+
+**2. `keepalive-send.ts` — do server sends reset the idle timer?**
+
+```ts
+// keepalive-send.ts — does the SERVER sending data reset the idle timer? (a dead peer that keeps
+// receiving fan-out updates). Silent raw client; server sends a 100-byte text frame every <periodMs>.
+// Usage: bun keepalive-send.ts <idleTimeoutSec> <periodMs> <observeSec>
+import { connect } from "node:net";
+const [idleArg, periodArg, obsArg] = process.argv.slice(2);
+const t0 = Date.now();
+const log = (s: string) => console.log(`${((Date.now() - t0) / 1000).toFixed(1).padStart(6)}s ${s}`);
+let sent = 0; let timer: Timer | undefined;
+const server = Bun.serve({
+  port: 0,
+  fetch(req, srv) { return srv.upgrade(req) ? undefined : new Response("no", { status: 426 }); },
+  websocket: {
+    idleTimeout: Number(idleArg),
+    open(ws) { log("server: open"); timer = setInterval(() => { const r = ws.send("x".repeat(100)); sent++; if (r <= 0) log(`server: send returned ${r}`); }, Number(periodArg)); },
+    message() {},
+    close(_w, code) { clearInterval(timer); log(`server: close handler fired code=${code} after ${sent} sends`); },
+  },
+});
+log(`bun ${Bun.version}; idleTimeout=${idleArg}s, server sends every ${periodArg}ms, client silent`);
+const s = connect(server.port, "127.0.0.1", () => s.write(`GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`));
+let pings = 0;
+s.on("data", (b: Buffer) => { for (let i = 0; i < b.length; i++) if (b[i] === 0x89) pings++; });
+s.on("close", () => log(`client: TCP closed (pings seen ~${pings})`));
+await Bun.sleep(Number(obsArg) * 1000);
+log(`observation window over (sent=${sent}, pings seen ~${pings})`);
+server.stop(true); process.exit(0);
+```
+
+```
+$ bun keepalive-send.ts 8 1000 25
+   0.0s bun 1.4.3; idleTimeout=8s, server sends every 1000ms, client silent
+   0.0s server: open
+  25.0s observation window over (sent=24, pings seen ~6)
+  25.0s server: close handler fired code=1006 after 24 sends   (← only at server.stop)
+```
+
+Read: a peer that keeps reading but never pongs is not closed while the server
+streams to it (Open question 5a).
+
+**3. `backpressure.ts` — a peer that stops reading.**
+
+```ts
+// backpressure.ts — a peer that stops READING (frozen app: kernel buffers fill). Server sends a
+// 64 KiB frame every 50 ms. Does idleTimeout close it? Does closeOnBackpressureLimit?
+// Usage: bun backpressure.ts <idleTimeoutSec> <backpressureLimitBytes|default> <closeOnBackpressureLimit: true|false> <observeSec>
+import { connect } from "node:net";
+const [idleArg, bpArg, closeArg, obsArg] = process.argv.slice(2);
+const t0 = Date.now();
+const log = (s: string) => console.log(`${((Date.now() - t0) / 1000).toFixed(1).padStart(6)}s ${s}`);
+let sent = 0, dropped = 0, backpressured = 0; let timer: Timer | undefined; let sock: { getBufferedAmount(): number } | undefined;
+const opts: Record<string, unknown> = {
+  idleTimeout: Number(idleArg), closeOnBackpressureLimit: closeArg === "true",
+  open(ws: never) { sock = ws; log("server: open"); timer = setInterval(() => { const r = (ws as { send(s: string): number }).send("x".repeat(65536)); sent++; if (r === 0) dropped++; if (r === -1) backpressured++; }, 50); },
+  message() {},
+  close(_w: unknown, code: number) { clearInterval(timer); log(`server: close handler fired code=${code} sent=${sent} backpressured(-1)=${backpressured} dropped(0)=${dropped}`); sock = undefined; },
+};
+if (bpArg !== "default") opts.backpressureLimit = Number(bpArg);
+const server = Bun.serve({ port: 0, fetch(req, srv) { return srv.upgrade(req) ? undefined : new Response("no", { status: 426 }); }, websocket: opts as never });
+log(`bun ${Bun.version}; idleTimeout=${idleArg}s backpressureLimit=${bpArg} closeOnBackpressureLimit=${closeArg}; client stops reading after handshake`);
+const s = connect(server.port, "127.0.0.1", () => s.write(`GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`));
+s.once("data", () => { s.pause(); log("client: handshake done, paused reading"); });
+const iv = setInterval(() => { if (sock) log(`server: bufferedAmount=${sock.getBufferedAmount()} sent=${sent} (-1)=${backpressured} (0)=${dropped}`); }, 5000);
+await Bun.sleep(Number(obsArg) * 1000);
+clearInterval(iv); log("observation window over");
+server.stop(true); process.exit(0);
+```
+
+```
+$ bun backpressure.ts 8 default false 22
+   0.0s client: handshake done, paused reading
+   5.0s server: bufferedAmount=5621062 sent=98 (-1)=86 (0)=0
+  10.0s server: bufferedAmount=12030044 sent=196 (-1)=184 (0)=0
+  12.0s server: close handler fired code=1006 sent=235 backpressured(-1)=223 dropped(0)=0
+
+$ bun backpressure.ts 8 1048576 true 12
+   1.5s server: close handler fired code=1006 sent=30 backpressured(-1)=17 dropped(0)=1
+```
+
+Read: a non-reading (frozen/half-open) peer **is** closed by `idleTimeout`
+(here at 12 s), after buffering ~12 MB; `closeOnBackpressureLimit` closes it
+much sooner but is a socket-level kill also for a legitimately large send
+(Open question 5b).
+
+### Why, item by item
+
+Decisions not already argued in the Review.
+
+- **Why stamps at transitions, not "last seen idle" in the sweep.** The sweep
+  only samples every 60 s; an attach-use-detach between two samples would be
+  invisible and the session reaped up to 24 h early. Transitions are the only
+  exact record.
+- **Why a pure `selectExpired` plus a thin loop.** AGENTS §7 "logic lives in
+  pure modules": every rule (idle, busy, cap, boundary) is a table test with
+  plain numbers; the loop has nothing left to get wrong but start/stop.
+- **Why an injected `now()` and not Bun fake timers.** The repo has no
+  fake-timer usage; passing time in is its existing pattern
+  (`App.tsx:345-351`). It also makes the 24 h tests instant and deterministic
+  without patching globals that the RPC peer's own timers use.
+- **Why a 60 s sweep, not a timer per session.** One interval for the daemon,
+  nothing to cancel on every attach/detach/turn transition; ≤ 60 s of slack on
+  a 24 h TTL is irrelevant.
+- **Why reaping is `close`.** One teardown path: what `session/close` frees,
+  reaping frees (jobs, sinks, `onExit`, persisted record later). A second path
+  would drift — the lifecycle eval's orphans came from nobody owning the end.
+- **Why background jobs don't keep a session alive.** Otherwise a single
+  forgotten `npm run dev` makes the session immortal — the leak the TTL
+  exists to close. A user who wants a job to outlive the session should not run
+  it through an agent session.
+- **Why limits are checked only on create.** Refusing an *attach* would lock a
+  user out of their own running work because of someone else's sessions; the
+  attach adds nothing to what the daemon holds.
+- **Why counts are derived, not counters.** `registry.size` and "sessions with
+  `attached === 0`" are computed from the source of truth at check time; a
+  separate counter is a second truth that drifts on an exception path.
+- **Why the admin cap measures *detached* time, not session age.** A session
+  in active use (attached) must never be closed under the user; the cap's job
+  is "nobody has looked at this for X, even though it is busy".
+- **Why `idleTimeout` 60 s, not Bun's 120 s or something tight.** The value
+  bounds how long fan-out buffers for a dead peer (experiment 3) and how stale
+  the attached set can be; 60 s halves both for one ping per minute per idle
+  socket. Tighter buys little (mobile is reconnect-on-foreground, parent point
+  12) and risks closing clients on a briefly blocked event loop.
+- **Why set `sendPings: true` explicitly although it is the default.** It is
+  the property that keeps a healthy idle TUI attached (experiment 1, third
+  run); pinning it in code and in T7 protects it from a Bun default change.
+- **Why no reaper/keepalive on `--stdio`.** The stdio daemon has one
+  connection and exits when it ends (`serve.ts:106-120`); there is nothing to
+  outlive and no socket to ping.
+- **Why flags only (no config-file keys).** Matches how `serve` is configured
+  today (`--host/--port/--token`, `main.ts:187-229`); a config key is an
+  additive follow-up if an operator asks.
+
 
 ## Execution
 

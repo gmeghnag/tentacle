@@ -443,17 +443,24 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       until a human answers), 24 h idle TTL, multi-attach, thin-client
       profile, JSON Schema export. CONFIRMED (repro); fresh-context review
       F1–F8 integrated. **Parent eval:** `docs/eval/session-reattach.md`.
+      Children drafted (Implementation per child) and owner decisions A–G, D1–D10
+      recorded in the parent (2026-10-19).
       Type: eval (parent) · Size: L → split · Blast: load-bearing. Children, in order:
       1. **Eval (approved, ready to promote):** `docs/eval/background-process-groups.md` · S–M · load-bearing
-      2. **Eval:** `docs/eval/protocol-schema-export.md` · S · cross-module
-      3. **Eval:** `docs/eval/session-event-stream.md` · M · load-bearing
+      2. **Eval:** `docs/eval/protocol-schema-export.md` · S–M · cross-module
+      2b. prerequisite: `docs/eval/daemon-compact-turn-guard.md` (before 3c)
+      3a/3b/3c. **Eval:** `docs/eval/session-event-stream.md` · S / M / M · load-bearing (three branches)
       4. **Eval:** `docs/eval/session-registry.md` · M · load-bearing
-      5. **Eval:** `docs/eval/session-ttl-limits.md` · S–M · load-bearing
-      6. **Eval:** `docs/eval/daemon-side-persistence.md` (`serve` only) · M · load-bearing
-      7. **Eval:** `docs/eval/permission-events.md` · M · load-bearing
-      8. **Eval:** `docs/eval/client-reattach.md` · M · load-bearing
-      9. **Eval:** `docs/eval/attachments.md` (sister) · L → split · load-bearing
-      10. mobile app (React Native or Swift) — own eval, after 8
+      5. **Eval:** `docs/eval/session-ttl-limits.md` · M · load-bearing
+      5b. prerequisite: `docs/eval/session-store-durability.md` (before 6)
+      6. **Eval:** `docs/eval/daemon-side-persistence.md` (Part A, `serve` only) · M · load-bearing
+      7a. **Eval:** `docs/eval/permission-events.md` · L · load-bearing
+      7b. **Eval:** `docs/eval/suspended-turn-resume.md` · M · load-bearing
+      8a. **Eval:** `docs/eval/client-reattach.md` · M · load-bearing
+      8b. **Eval:** `docs/eval/client-reattach-frontends.md` · M · load-bearing
+      — **Eval:** `docs/eval/attachments.md` (sister) · 4 sub-tasks · load-bearing
+      — `docs/feat/pod-attach-resilience.md` now Layer 1 only (WS ping) · S · contained
+      — mobile app (React Native or Swift) — own eval, after 8b
 
 - [ ] **No changelog discipline** (no `CHANGELOG.md`). **Eval:**
       `docs/eval/changelog-discipline.md`. Type: eval. Open.
