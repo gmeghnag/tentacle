@@ -7,6 +7,7 @@ import {
   PermissionBroker,
   type StreamEvent,
 } from "@tentacle/core";
+import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { JsonRpcErrorCode } from "@tentacle/protocol";
 import type { EnqueueResult, SessionUpdateParams } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
@@ -492,5 +493,62 @@ describe("daemon ↔ client (in-memory)", () => {
       }),
     ).rejects.toMatchObject({ code: DomainErrorCode.UnknownSession });
     expect(JsonRpcErrorCode.InternalError).toBeDefined();
+  });
+});
+
+describe("connection close", () => {
+  test("Connection.close() terminates the background jobs of its sessions", async () => {
+    const m = `3${Math.floor(Math.random() * 900000 + 100000)}`;
+    const alive = (): number =>
+      Bun.spawnSync(["pgrep", "-f", `sleep ${m}`])
+        .stdout.toString()
+        .trim()
+        .split("\n")
+        .filter(Boolean).length;
+    const created: BackgroundJobs[] = [];
+    const host = new SessionHost({
+      defaultCwd: "/tmp/daemon-work",
+      createAgent: () => {
+        const permissions = new PermissionBroker();
+        // Grace ≫ the 2 s wait below: only close()'s group SIGTERM can pass.
+        const jobs = new BackgroundJobs(new HostExecution({ killGraceMs: 10_000 }));
+        created.push(jobs);
+        const agent = new Agent({
+          model: new ScriptedProvider([]),
+          tools: new ToolRegistry(),
+          env: noopEnv,
+          requestPermission: (req) => permissions.request(req),
+        });
+        return { agent, permissions, jobs };
+      },
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    const connection = new Connection(daemonCh, host);
+    const client = new RpcPeer(clientCh, {});
+    try {
+      await client.request("initialize", INIT);
+      await client.request("session/new", {});
+      const jobs = created[0];
+      expect(jobs).toBeDefined();
+      jobs?.start(`sleep ${m}; true`);
+      const deadline = Date.now() + 2000;
+      while (alive() < 2 && Date.now() < deadline) {
+        await tick(20);
+      }
+      expect(alive()).toBe(2); // sh + sleep: the job really runs
+
+      const exited = new Promise<void>((resolve) => jobs?.onExit(() => resolve()));
+      connection.close();
+
+      const until = Date.now() + 2000;
+      while (alive() > 0 && Date.now() < until) {
+        await tick(50);
+      }
+      expect(alive()).toBe(0);
+      await exited;
+      expect(jobs?.list().map((j) => j.status)).toEqual(["killed"]);
+    } finally {
+      Bun.spawnSync(["pkill", "-9", "-f", `sleep ${m}`]);
+    }
   });
 });

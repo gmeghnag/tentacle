@@ -80,8 +80,11 @@ export class Connection {
   }
 
   close(): void {
+    // A session is unreachable once its connection is gone, so the jobs it
+    // started are unmanaged: end them with it.
     for (const session of this.sessions.values()) {
       session.cancel();
+      session.disposeJobs();
     }
     this.peer.close();
   }

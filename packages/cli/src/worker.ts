@@ -18,6 +18,7 @@
 import type { TentacleConfig } from "@tentacle/config";
 import type { Tool } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
+import { setGroupForwarder } from "@tentacle/exec";
 import { connectMcpServers } from "@tentacle/mcp";
 import type { ToolRegistry } from "@tentacle/tools";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
@@ -32,6 +33,12 @@ const port = globalThis as unknown as MessageEndpoint;
 // ignored by `messagePortChannel`, so they never reach the RPC peer.
 const postObject = (message: unknown): void =>
   (port as unknown as { postMessage(m: unknown): void }).postMessage(message);
+
+// The process-exit net that kills background jobs' process groups must run on
+// the MAIN thread (this worker's exit handler never fires while it holds a live
+// child, nor on `terminate()`), so forward every job group there. Set before
+// any session exists, so no job can be spawned unforwarded.
+setGroupForwarder((op, pgid) => postObject({ type: "job-group", op, pgid }));
 
 let started = false;
 port.addEventListener("message", (event: { data: unknown }) => {
