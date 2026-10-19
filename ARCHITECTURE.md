@@ -82,6 +82,32 @@ OpenAPI `discriminator`. For Swift, wrap `$defs` as OpenAPI 3.1
 `swift-openapi-generator` (`generate: [types]`): each discriminated union becomes a
 tagged enum (the JSON-RPC envelopes are untagged by design — decode them by key presence).
 
+**`session/update` frames: event classes and the unknown-event catch-all.** Every
+frame carries a required `seq` and, iff its update's class is `mandatory`,
+`mandatory: true` (omitted for `display`, never `false`). `UPDATE_CLASS` in
+`protocol/src/updates.ts` is the source of truth; the export annotates each
+`SessionUpdate` member with `x-event-class`. `update` is
+`SessionUpdateOrUnknown = anyOf[SessionUpdate, UnknownSessionUpdate]`, so a newer
+daemon's event type never fails the frame (and its `seq` still counts). Every
+client applies the same rule (TS: `classifyUpdate`, `client/src/mapping.ts`):
+- a known valid update → handle it;
+- a known `type` that fails its member → error (malformed);
+- an unknown `type` with `mandatory` → error ("the daemon is newer, update
+  the client");
+- otherwise → skip silently.
+
+In Swift the wrapper decodes to `value1` (the tagged enum) or `value2` (the
+catch-all, `type` preserved). Why `anyOf` and not an exclusive `oneOf`: making the
+catch-all exclusive needs `not`, which `swift-openapi-generator` drops
+(`docs/feat/session-wire-classes.md`). Optional fields are omitted, never `null`.
+The only `null`s are `BackgroundExit.exitCode` and the JSON-RPC error `id`
+(pinned by a test). The tolerance covers the **top-level** update `type` only:
+a new nested variant inside a known event (e.g. a new `ContentBlock` type in an
+`agent_message_chunk`) makes that event "malformed" for an older client, which
+fails the turn, so extending a nested enum is a breaking change (bump the
+version). A malformed known frame fails the in-flight turn even when it is not
+turn-scoped (e.g. `background_exit`): loud by design.
+
 ### ADR-005 — Execution environment: **host now, container later, one interface**
 Tools execute on the OS where the harness runs. `ExecutionEnvironment` abstracts this;
 a `HostExecution` implementation ships first, a container (podman) implementation later,

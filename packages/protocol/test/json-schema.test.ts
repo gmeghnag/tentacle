@@ -23,8 +23,16 @@ function fakeSource(
   exports: Record<string, unknown>,
   requestSchemas: ProtocolSource["requestSchemas"] = {},
   notificationSchemas: ProtocolSource["notificationSchemas"] = {},
+  updateClasses: ProtocolSource["updateClasses"] = {},
 ): ProtocolSource {
-  return { exports, requestSchemas, notificationSchemas, version: 1, errorCodes: {} };
+  return {
+    exports,
+    requestSchemas,
+    notificationSchemas,
+    version: 1,
+    errorCodes: {},
+    updateClasses,
+  };
 }
 
 describe("committed schema (drift gate)", () => {
@@ -143,7 +151,10 @@ const FIXTURES: Record<string, Json[]> = {
     update({ type: "plan", entries: [{ content: "a", status: "in_progress" }] }),
     update({ type: "agent_usage", promptTokens: 1, completionTokens: 2 }),
     update({ type: "background_exit", jobId: "j", command: "c", status: "exited", exitCode: null }),
-    { sessionId: "s", update: { type: "steer", text: "x" } },
+    update({ type: "steer", text: "x" }),
+    // The catch-all (decision E): unknown display / mandatory events are valid frames.
+    update({ type: "progress", pct: 3 }),
+    { sessionId: "s", seq: 2, mandatory: true, update: { type: "permission_request", id: "p" } },
   ],
   "notifications/session~1cancel/params": [{ sessionId: "s" }],
   "notifications/$~1progress/params": [{ id: "r", seq: 0, value: [{ type: "text", delta: "a" }] }],
@@ -191,6 +202,7 @@ function compile(doc: ProtocolJsonSchema) {
   const ajv = new Ajv2020({ strict: true });
   ajv.addVocabulary([
     "discriminator",
+    "x-event-class",
     "x-protocol-version",
     "errorCodes",
     "methods",
@@ -277,6 +289,90 @@ describe("tagged-union shape (what codegen needs)", () => {
     walk(buildProtocolJsonSchema());
     expect(refs.length).toBeGreaterThan(0);
     expect(refs.filter((r) => !/^#\/\$defs\/[A-Za-z0-9]+$/.test(r))).toEqual([]);
+  });
+});
+
+// --- event classes + catch-all (docs/feat/session-wire-classes.md) ------
+
+/** JSON pointers of every `type: "null"` position in a document. */
+function nullSites(doc: unknown): string[] {
+  const out: string[] = [];
+  const walk = (v: unknown, at: string): void => {
+    if (Array.isArray(v)) v.forEach((c, i) => walk(c, `${at}/${i}`));
+    else if (isRecord(v)) {
+      if (v.type === "null" || (Array.isArray(v.type) && v.type.includes("null"))) out.push(at);
+      for (const [k, c] of Object.entries(v)) walk(c, `${at}/${k}`);
+    }
+  };
+  walk(doc, "#");
+  return out.sort();
+}
+
+describe("event classes and the unknown-event catch-all", () => {
+  const doc = buildProtocolJsonSchema();
+  const defs = isRecord(doc.$defs) ? doc.$defs : {};
+
+  test("session/update carries SessionUpdateOrUnknown = anyOf[SessionUpdate, UnknownSessionUpdate]", () => {
+    const params = defs.SessionUpdateParams;
+    const props = isRecord(params) && isRecord(params.properties) ? params.properties : {};
+    expect(props.update).toEqual({ $ref: "#/$defs/SessionUpdateOrUnknown" });
+    expect(isRecord(params) && params.required).toEqual(["seq", "sessionId", "update"]);
+    expect(defs.SessionUpdateOrUnknown).toEqual({
+      anyOf: [{ $ref: "#/$defs/SessionUpdate" }, { $ref: "#/$defs/UnknownSessionUpdate" }],
+      description: expect.any(String),
+    });
+    // The known union stays the tagged enum codegen needs (D7).
+    const known = defs.SessionUpdate;
+    expect(isRecord(known) && Array.isArray(known.oneOf)).toBe(true);
+    expect(isRecord(known) && isRecord(known.discriminator)).toBe(true);
+  });
+
+  test("every SessionUpdate member is annotated with its UPDATE_CLASS", () => {
+    const known = defs.SessionUpdate;
+    const mapping =
+      isRecord(known) && isRecord(known.discriminator) && isRecord(known.discriminator.mapping)
+        ? known.discriminator.mapping
+        : {};
+    const seen: Record<string, unknown> = {};
+    for (const [tag, ref] of Object.entries(mapping)) {
+      const def = defs[String(ref).replace("#/$defs/", "")];
+      seen[tag] = isRecord(def) ? def["x-event-class"] : undefined;
+    }
+    expect(Object.keys(seen).length).toBeGreaterThan(0);
+    // Strict: an absent annotation (undefined) must not compare equal.
+    expect(seen).toStrictEqual({ ...P.UPDATE_CLASS });
+  });
+
+  const twoMembers = () => {
+    const union = z.discriminatedUnion("type", [
+      z.object({ type: z.literal("a") }),
+      z.object({ type: z.literal("b") }),
+    ]);
+    return { SessionUpdateSchema: union };
+  };
+
+  test("a SessionUpdate member without a class is rejected", () => {
+    const src = fakeSource(twoMembers(), {}, {}, { a: "display" });
+    expect(() => buildProtocolJsonSchema(src)).toThrow(/no event class for "b"/);
+  });
+
+  test("a class for a tag that is not a SessionUpdate member is rejected", () => {
+    const src = fakeSource(twoMembers(), {}, {}, { a: "display", b: "display", c: "mandatory" });
+    expect(() => buildProtocolJsonSchema(src)).toThrow(/event class for unknown tag "c"/);
+  });
+});
+
+describe("wire hygiene — optional fields are omitted, never null", () => {
+  test("null appears only where it carries meaning (exitCode, JSON-RPC error id)", () => {
+    expect(nullSites(buildProtocolJsonSchema())).toEqual([
+      "#/$defs/BackgroundExit/properties/exitCode/anyOf/1",
+      "#/$defs/JsonRpcErrorResponse/properties/id/anyOf/1",
+    ]);
+  });
+
+  test("the walk finds a new nullable field (non-vacuous)", () => {
+    const src = fakeSource({ XSchema: z.object({ a: z.string().nullable() }) });
+    expect(nullSites(buildProtocolJsonSchema(src))).toEqual(["#/$defs/X/properties/a"]);
   });
 });
 

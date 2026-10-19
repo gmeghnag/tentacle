@@ -69,11 +69,19 @@ export class RemoteSession {
     const queue = new AsyncQueue<AgentEvent>();
     const toolNames = new Map<string, string>();
 
-    this.client.setUpdateHandler(id, (update: SessionUpdate) => {
-      const event = updateToEvent(update, toolNames);
-      if (event) {
-        queue.push(event);
-      }
+    this.client.setUpdateHandler(id, {
+      update: (update: SessionUpdate) => {
+        const event = updateToEvent(update, toolNames);
+        if (event) {
+          queue.push(event);
+        }
+      },
+      // A frame this client cannot act on (unknown mandatory, malformed): fail
+      // the turn loudly, and cancel it so the daemon does not run it unobserved.
+      fail: (error: Error) => {
+        queue.fail(error);
+        this.client.cancel(id);
+      },
     });
     const onAbort = (): void => this.client.cancel(id);
     signal?.addEventListener("abort", onAbort);

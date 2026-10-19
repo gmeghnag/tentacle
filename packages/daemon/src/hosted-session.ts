@@ -7,18 +7,24 @@
 import type { Session } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import type {
+  KnownSessionUpdateParams,
   PermissionOutcome,
   RequestPermissionParams,
   SessionUpdate,
-  SessionUpdateParams,
   StopReason,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
-import { contentToText, eventToUpdate, stopReasonToProtocol } from "./mapping.ts";
+import {
+  assertTextOnly,
+  contentToText,
+  eventToUpdate,
+  stopReasonToProtocol,
+  toUpdateParams,
+} from "./mapping.ts";
 import { outcomeToResponse, toRequestPermissionParams } from "./permission-map.ts";
 
 /** Receives each streamed `session/update` (one per emitted update). */
-export type UpdateSink = (params: SessionUpdateParams) => void;
+export type UpdateSink = (params: KnownSessionUpdateParams) => void;
 /** Asks the connected client to resolve a permission request. */
 export type RemotePermission = (params: RequestPermissionParams) => Promise<PermissionOutcome>;
 
@@ -31,7 +37,7 @@ export class HostedSession {
   private controller: AbortController | null = null;
   private currentToolCallId = "";
   private seq = 0;
-  private turnBuffer: SessionUpdateParams[] = [];
+  private turnBuffer: KnownSessionUpdateParams[] = [];
   private sink: UpdateSink | null = null;
   private readonly jobs: JobController | undefined;
 
@@ -77,12 +83,12 @@ export class HostedSession {
   }
 
   /** Buffered updates of the current turn with `seq` strictly greater than `afterSeq`. */
-  replayFrom(afterSeq: number): SessionUpdateParams[] {
-    return this.turnBuffer.filter((p) => (p.seq ?? 0) > afterSeq);
+  replayFrom(afterSeq: number): KnownSessionUpdateParams[] {
+    return this.turnBuffer.filter((p) => p.seq > afterSeq);
   }
 
   private emit(update: SessionUpdate): void {
-    const params: SessionUpdateParams = { sessionId: this.id, seq: ++this.seq, update };
+    const params = toUpdateParams(this.id, ++this.seq, update);
     this.turnBuffer.push(params);
     if (this.turnBuffer.length > MAX_REPLAY) {
       this.turnBuffer.shift();
@@ -92,6 +98,8 @@ export class HostedSession {
 
   /** Drive one turn to completion, streaming updates; resolves with the stop reason. */
   async prompt(content: Parameters<typeof contentToText>[0]): Promise<StopReason> {
+    // Before the busy check: a rejected prompt starts and records nothing.
+    assertTextOnly(content);
     if (this.controller) {
       throw new RpcError(DomainErrorCode.TurnInProgress, "a turn is already running");
     }

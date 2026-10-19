@@ -94,16 +94,66 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
+/**
+ * Event class (parent `session-reattach` §14, decision E). A client MUST skip
+ * an unknown `display` event and MUST fail loudly on an unknown `mandatory`
+ * one (a turn/permission/history event it cannot act on would be a hang).
+ */
+export type UpdateClass = "display" | "mandatory";
+
+/**
+ * The class of every known update type — the source of truth for the per-frame
+ * `mandatory` flag and the schema's `x-event-class`. A `Record` makes a new
+ * variant without a class a compile error.
+ */
+export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> = {
+  agent_message_chunk: "display",
+  agent_thought_chunk: "display",
+  tool_call: "display",
+  tool_call_update: "display",
+  plan: "display",
+  agent_usage: "display",
+  background_exit: "display",
+  steer: "display",
+};
+
+/** Own keys only: a frame with `type: "toString"` is unknown, not known. */
+export function isKnownUpdateType(type: string): type is SessionUpdate["type"] {
+  return Object.hasOwn(UPDATE_CLASS, type);
+}
+
+/** Catch-all for an update type this peer does not know (a newer daemon's). */
+export const UnknownSessionUpdateSchema = z
+  .object({ type: z.string().min(1) })
+  .describe(
+    "An update type this client does not know. Client rule: a frame whose `type` is a known " +
+      "SessionUpdate tag but that fails its member is malformed (error); otherwise skip it unless " +
+      "the frame's `mandatory` is true (error: the daemon is newer than this client).",
+  );
+export type UnknownSessionUpdate = z.infer<typeof UnknownSessionUpdateSchema>;
+
+/**
+ * Known updates first (zod returns the first match), then the catch-all. Exported
+ * as `anyOf`, not `oneOf`: a catch-all that excludes the known tags needs `not`,
+ * which Swift codegen drops (docs/feat/session-wire-classes.md, experiment).
+ */
+export const SessionUpdateOrUnknownSchema = z
+  .union([SessionUpdateSchema, UnknownSessionUpdateSchema])
+  .describe("A known SessionUpdate, or an UnknownSessionUpdate (see its client rule).");
+
 /** Params of the `session/update` notification. */
 export const SessionUpdateParamsSchema = z
   .object({
     sessionId: SessionIdSchema,
-    /**
-     * Monotonic per-session sequence number (additive, forward-compatible):
-     * lets a reconnecting client replay the tail of the current turn exactly.
-     */
-    seq: z.number().int().nonnegative().optional(),
-    update: SessionUpdateSchema,
+    /** Monotonic per-session sequence number; counts unknown (skipped) events too. */
+    seq: z.number().int().nonnegative(),
+    /** Present (always `true`) iff the update's class is `mandatory`; never `false`. */
+    mandatory: z.literal(true).optional(),
+    update: SessionUpdateOrUnknownSchema,
   })
   .strict();
 export type SessionUpdateParams = z.infer<typeof SessionUpdateParamsSchema>;
+/** A frame whose update is a known type — what an emitter (the daemon) builds. */
+export type KnownSessionUpdateParams = Omit<SessionUpdateParams, "update"> & {
+  update: SessionUpdate;
+};

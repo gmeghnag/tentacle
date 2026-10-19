@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { SessionUpdateParamsSchema, SessionUpdateSchema } from "../src/index.ts";
+import {
+  SessionUpdateParamsSchema,
+  SessionUpdateSchema,
+  UPDATE_CLASS,
+  isKnownUpdateType,
+} from "../src/index.ts";
 
 describe("session/update payloads", () => {
   const variants = [
@@ -45,6 +50,7 @@ describe("session/update payloads", () => {
     // The wrapped notification params carry it too.
     const wrapped = SessionUpdateParamsSchema.safeParse({
       sessionId: "s1",
+      seq: 1,
       update: { type: "steer", text: "also do X" },
     });
     expect(wrapped.success).toBe(true);
@@ -68,8 +74,65 @@ describe("session/update payloads", () => {
   test("notification params wrap sessionId + update", () => {
     const r = SessionUpdateParamsSchema.safeParse({
       sessionId: "s1",
+      seq: 1,
       update: { type: "agent_message_chunk", content: { type: "text", text: "x" } },
     });
     expect(r.success).toBe(true);
+  });
+});
+
+describe("session/update frame (event classes, catch-all, required seq)", () => {
+  const frame = (extra: Record<string, unknown>) => ({ sessionId: "s1", seq: 4, ...extra });
+
+  test("an unknown display event is accepted (skipped by the client, its seq still counts)", () => {
+    const r = SessionUpdateParamsSchema.safeParse(frame({ update: { type: "progress", pct: 3 } }));
+    expect(r.success).toBe(true);
+    expect(r.success && r.data.seq).toBe(4);
+  });
+
+  test("an unknown mandatory event is accepted with its flag (the client fails loudly)", () => {
+    const r = SessionUpdateParamsSchema.safeParse(
+      frame({ mandatory: true, update: { type: "permission_request", id: "p" } }),
+    );
+    expect(r.success && r.data.mandatory).toBe(true);
+  });
+
+  test("seq is required", () => {
+    const r = SessionUpdateParamsSchema.safeParse({
+      sessionId: "s1",
+      update: { type: "steer", text: "x" },
+    });
+    expect(r.success).toBe(false);
+  });
+
+  test("mandatory has one encoding: true or absent, never false", () => {
+    const r = SessionUpdateParamsSchema.safeParse(
+      frame({ mandatory: false, update: { type: "steer", text: "x" } }),
+    );
+    expect(r.success).toBe(false);
+  });
+
+  test("a valid known event still parses as its member, not as the catch-all", () => {
+    const r = SessionUpdateParamsSchema.safeParse(
+      frame({ update: { type: "agent_message_chunk", content: { type: "text", text: "hi" } } }),
+    );
+    // The catch-all keeps only `type`; the member keeps `content`.
+    expect(r.success && r.data.update).toEqual({
+      type: "agent_message_chunk",
+      content: { type: "text", text: "hi" },
+    });
+  });
+
+  test("an empty type is rejected even by the catch-all", () => {
+    expect(SessionUpdateParamsSchema.safeParse(frame({ update: { type: "" } })).success).toBe(
+      false,
+    );
+  });
+
+  test("every known type has a class; only own keys count as known", () => {
+    for (const type of Object.keys(UPDATE_CLASS)) expect(isKnownUpdateType(type)).toBe(true);
+    for (const v of ["progress", "toString", "__proto__", "constructor", "hasOwnProperty"]) {
+      expect(isKnownUpdateType(v)).toBe(false);
+    }
   });
 });

@@ -459,7 +459,8 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       1. **Fix (DONE 2026-10-19, `fix/background-process-groups`):** `docs/fix/background-process-groups.md` · S–M · load-bearing
       2. **Feat (DONE 2026-10-19, `feat/protocol-schema-export`):** `docs/feat/protocol-schema-export.md` · S–M · cross-module
       2b. prerequisite: `docs/eval/daemon-compact-turn-guard.md` (before 3c)
-      3a/3b/3c. **Eval:** `docs/eval/session-event-stream.md` · S / M / M · load-bearing (three branches)
+      3a. **Feat (DONE 2026-10-20, `feat/session-wire-classes`):** `docs/feat/session-wire-classes.md` · M · load-bearing
+      3b/3c. **Eval:** `docs/eval/session-event-stream.md` · M / M · load-bearing (one branch each, after 3a)
       4. **Eval:** `docs/eval/session-registry.md` · M · load-bearing
       5. **Eval:** `docs/eval/session-ttl-limits.md` · M · load-bearing
       5b. prerequisite: `docs/eval/session-store-durability.md` (before 6)

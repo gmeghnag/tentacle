@@ -27,7 +27,8 @@
         }
       },
       "required": ["content", "type"],
-      "type": "object"
+      "type": "object",
+      "x-event-class": "display"
     },
     "AgentThoughtChunk": {
       "additionalProperties": true,
@@ -41,7 +42,8 @@
         }
       },
       "required": ["content", "type"],
-      "type": "object"
+      "type": "object",
+      "x-event-class": "display"
     },
     "AgentUsage": {
       "additionalProperties": true,
@@ -60,7 +62,8 @@
         }
       },
       "required": ["completionTokens", "promptTokens", "type"],
-      "type": "object"
+      "type": "object",
+      "x-event-class": "display"
     },
     "BackgroundExit": {
       "additionalProperties": true,
@@ -91,7 +94,8 @@
         }
       },
       "required": ["command", "exitCode", "jobId", "status", "type"],
-      "type": "object"
+      "type": "object",
+      "x-event-class": "display"
     },
     "CancelParams": {
       "additionalProperties": false,
@@ -544,7 +548,8 @@
         }
       },
       "required": ["entries", "type"],
-      "type": "object"
+      "type": "object",
+      "x-event-class": "display"
     },
     "PlanEntry": {
       "additionalProperties": true,
@@ -720,9 +725,24 @@
         }
       ]
     },
+    "SessionUpdateOrUnknown": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SessionUpdate"
+        },
+        {
+          "$ref": "#/$defs/UnknownSessionUpdate"
+        }
+      ],
+      "description": "A known SessionUpdate, or an UnknownSessionUpdate (see its client rule)."
+    },
     "SessionUpdateParams": {
       "additionalProperties": false,
       "properties": {
+        "mandatory": {
+          "const": true,
+          "type": "boolean"
+        },
         "seq": {
           "minimum": 0,
           "type": "integer"
@@ -731,10 +751,10 @@
           "$ref": "#/$defs/SessionId"
         },
         "update": {
-          "$ref": "#/$defs/SessionUpdate"
+          "$ref": "#/$defs/SessionUpdateOrUnknown"
         }
       },
-      "required": ["sessionId", "update"],
+      "required": ["seq", "sessionId", "update"],
       "type": "object"
     },
     "SnapshotParams": {
@@ -772,7 +792,8 @@
         }
       },
       "required": ["text", "type"],
-      "type": "object"
+      "type": "object",
+      "x-event-class": "display"
     },
     "StopReason": {
       "enum": ["end_turn", "max_tokens", "max_iterations", "cancelled", "error"],
@@ -812,7 +833,8 @@
         }
       },
       "required": ["status", "title", "toolCallId", "type"],
-      "type": "object"
+      "type": "object",
+      "x-event-class": "display"
     },
     "ToolCallStatus": {
       "enum": ["pending", "in_progress", "completed", "failed"],
@@ -840,6 +862,19 @@
         }
       },
       "required": ["status", "toolCallId", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
+    "UnknownSessionUpdate": {
+      "additionalProperties": true,
+      "description": "An update type this client does not know. Client rule: a frame whose `type` is a known SessionUpdate tag but that fails its member is malformed (error); otherwise skip it unless the frame's `mandatory` is true (error: the daemon is newer than this client).",
+      "properties": {
+        "type": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["type"],
       "type": "object"
     },
     "WireChatMessage": {
@@ -1131,5 +1166,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 1
+  "x-protocol-version": 2
 }

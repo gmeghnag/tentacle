@@ -9,8 +9,46 @@
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
 import type { ToolResultDetail } from "@tentacle/core";
-import type { ContentBlock, SessionUpdate, StopReason } from "@tentacle/protocol";
+import {
+  type ContentBlock,
+  type SessionUpdate,
+  type SessionUpdateParams,
+  SessionUpdateSchema,
+  type StopReason,
+  isKnownUpdateType,
+} from "@tentacle/protocol";
 import { DIFF_SCHEME } from "./constants.ts";
+
+/** What the client does with one `session/update` frame. */
+export type ClassifiedUpdate =
+  | { readonly kind: "update"; readonly update: SessionUpdate }
+  | { readonly kind: "ignore" }
+  | { readonly kind: "error"; readonly error: Error };
+
+/**
+ * Apply the event-class rule (parent `session-reattach` §14, decision E) to a
+ * frame the peer already validated against the catch-all union: a known valid
+ * update is handled; a known type that fails its member is malformed; an
+ * unknown one is skipped unless the frame says it is mandatory. Never silent
+ * on anything a client must act on.
+ */
+export function classifyUpdate(params: SessionUpdateParams): ClassifiedUpdate {
+  const known = SessionUpdateSchema.safeParse(params.update);
+  if (known.success) return { kind: "update", update: known.data };
+  const { type } = params.update;
+  if (isKnownUpdateType(type)) {
+    return { kind: "error", error: new Error(`malformed ${type} update from the daemon`) };
+  }
+  if (params.mandatory) {
+    return {
+      kind: "error",
+      error: new Error(
+        `unknown mandatory update "${type}": the daemon is newer than this client — update tentacle`,
+      ),
+    };
+  }
+  return { kind: "ignore" };
+}
 
 export function stopReasonFromProtocol(reason: StopReason): AgentStopReason {
   switch (reason) {
