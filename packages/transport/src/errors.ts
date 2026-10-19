@@ -4,19 +4,10 @@
  * handler throws an `RpcError` to produce a specific error response; any other
  * thrown value becomes a generic `InternalError` (never leaking a stack).
  */
-import { JsonRpcErrorCode } from "@tentacle/protocol";
+import { DomainErrorCode, JsonRpcErrorCode } from "@tentacle/protocol";
 
-/** Custom, application-level error codes (outside JSON-RPC's reserved range). */
-export const DomainErrorCode = {
-  Unauthorized: -32001,
-  VersionMismatch: -32002,
-  UnknownSession: -32003,
-  TurnInProgress: -32004,
-  NotInitialized: -32005,
-  TooManySessions: -32006,
-  AlreadyInitialized: -32007,
-  NoTurnRunning: -32008,
-} as const;
+/** Custom, application-level error codes — defined in `@tentacle/protocol`. */
+export { DomainErrorCode };
 
 export const ErrorCode = { ...JsonRpcErrorCode, ...DomainErrorCode } as const;
 

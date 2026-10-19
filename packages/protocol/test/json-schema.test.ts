@@ -1,0 +1,349 @@
+import { describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
+import Ajv2020 from "ajv/dist/2020.js";
+import { ZodDiscriminatedUnion, type ZodTypeAny, z } from "zod";
+import * as P from "../src/index.ts";
+import {
+  type ProtocolJsonSchema,
+  type ProtocolSource,
+  SCHEMA_PATH,
+  buildProtocolJsonSchema,
+  serializeProtocolJsonSchema,
+} from "../src/json-schema.ts";
+
+const STALE = "protocol.json is stale — run `bun run schema:export` and commit the diff";
+
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function fakeSource(
+  exports: Record<string, unknown>,
+  requestSchemas: ProtocolSource["requestSchemas"] = {},
+  notificationSchemas: ProtocolSource["notificationSchemas"] = {},
+): ProtocolSource {
+  return { exports, requestSchemas, notificationSchemas, version: 1, errorCodes: {} };
+}
+
+describe("committed schema (drift gate)", () => {
+  test("schema/protocol.json equals the document built from the zod schemas", () => {
+    const committed: unknown = existsSync(SCHEMA_PATH)
+      ? JSON.parse(readFileSync(SCHEMA_PATH, "utf8"))
+      : undefined;
+    if (!Bun.deepEquals(buildProtocolJsonSchema(), committed)) throw new Error(STALE);
+  });
+
+  test("carries the protocol version and the error codes", () => {
+    const doc = buildProtocolJsonSchema();
+    expect(doc["x-protocol-version"]).toBe(P.PROTOCOL_VERSION);
+    const codes = doc.errorCodes;
+    expect(isRecord(codes) && codes.UnknownSession).toBe(-32003);
+    expect(isRecord(codes) && codes.InvalidParams).toBe(-32602);
+  });
+});
+
+// --- zod ⇔ JSON Schema agreement ----------------------------------------
+// The exact property: the exported schema accepts exactly what the peer's zod
+// validation accepts. One or more valid fixtures per wire position, each
+// expanded mechanically into near-miss payloads.
+
+const update = (u: Json): Json => ({ sessionId: "s", seq: 1, update: u });
+const FIXTURES: Record<string, Json[]> = {
+  "methods/initialize/params": [
+    { protocolVersion: 1, clientCapabilities: { streaming: true } },
+    { protocolVersion: 1, clientCapabilities: {} },
+  ],
+  "methods/initialize/result": [
+    { protocolVersion: 1, agentCapabilities: { tools: true, permissions: false } },
+  ],
+  "methods/session~1new/params": [
+    {
+      cwd: "/w",
+      sessionId: "s",
+      messages: [
+        { role: "assistant", content: "", toolCalls: [{ id: "1", name: "n", arguments: "{}" }] },
+        { role: "tool", content: "out", toolCallId: "1" },
+      ],
+    },
+    {},
+  ],
+  "methods/session~1new/result": [{ sessionId: "s" }],
+  "methods/session~1prompt/params": [
+    {
+      sessionId: "s",
+      content: [
+        { type: "text", text: "hi" },
+        { type: "image", mimeType: "image/png", data: "AA==" },
+        { type: "resource", uri: "file:///a", mimeType: "text/plain", text: "x" },
+      ],
+    },
+  ],
+  "methods/session~1prompt/result": [{ stopReason: "end_turn" }],
+  "methods/session~1compact/params": [{ sessionId: "s" }],
+  "methods/session~1compact/result": [{ before: 10, after: 2 }],
+  "methods/session~1snapshot/params": [{ sessionId: "s" }],
+  "methods/session~1snapshot/result": [{ messages: [{ role: "user", content: "q" }] }],
+  "methods/session~1enqueue/params": [{ sessionId: "s", text: "steer" }],
+  "methods/session~1enqueue/result": [{}],
+  "methods/session~1request_permission/params": [
+    {
+      sessionId: "s",
+      toolCallId: "t",
+      title: "run",
+      explanation: "why",
+      options: [{ optionId: "o", name: "Allow", kind: "allow_once" }],
+    },
+  ],
+  "methods/session~1request_permission/result": [
+    { outcome: { outcome: "selected", optionId: "o" } },
+    { outcome: { outcome: "cancelled" } },
+  ],
+  "methods/model~1stream/params": [
+    {
+      request: {
+        messages: [
+          { role: "user", content: "q", toolCalls: [{ id: "1", name: "n", arguments: "{}" }] },
+        ],
+        tools: [{ name: "n", description: "d", parameters: { type: "object" } }],
+        temperature: 0.5,
+        maxTokens: 100,
+      },
+    },
+  ],
+  "methods/model~1stream/result": [
+    {
+      events: [
+        { type: "text", delta: "a" },
+        { type: "reasoning", delta: "r" },
+        { type: "tool_call", toolCall: { id: "1", name: "n", arguments: "{}" } },
+        { type: "done", usage: { promptTokens: 1, completionTokens: 2 } },
+      ],
+    },
+  ],
+  "methods/model~1streamChunked/params": [{ request: { messages: [] } }],
+  "methods/model~1streamChunked/result": [{ chunks: 3 }],
+  "notifications/session~1update/params": [
+    update({ type: "agent_message_chunk", content: { type: "text", text: "a" } }),
+    update({ type: "agent_thought_chunk", content: { type: "text", text: "t" } }),
+    update({
+      type: "tool_call",
+      toolCallId: "t",
+      title: "x",
+      status: "pending",
+      rawInput: { a: 1 },
+    }),
+    update({
+      type: "tool_call_update",
+      toolCallId: "t",
+      status: "completed",
+      content: [{ type: "text", text: "o" }],
+    }),
+    update({ type: "plan", entries: [{ content: "a", status: "in_progress" }] }),
+    update({ type: "agent_usage", promptTokens: 1, completionTokens: 2 }),
+    update({ type: "background_exit", jobId: "j", command: "c", status: "exited", exitCode: null }),
+    { sessionId: "s", update: { type: "steer", text: "x" } },
+  ],
+  "notifications/session~1cancel/params": [{ sessionId: "s" }],
+  "notifications/$~1progress/params": [{ id: "r", seq: 0, value: [{ type: "text", delta: "a" }] }],
+  "notifications/$~1cancelRequest/params": [{ id: "r" }],
+};
+
+const pointerEscape = (method: string) => method.replaceAll("~", "~0").replaceAll("/", "~1");
+
+/**
+ * Near misses of a valid payload: at every object level add a key, drop each
+ * key; wrong-type each leaf; and boundary values (empty string/array, negative,
+ * zero, fractional) so `min`/`int`/`nonnegative`/`positive` are exercised too.
+ */
+function* perturb(value: Json): Generator<Json> {
+  if (Array.isArray(value)) {
+    yield [];
+    for (let i = 0; i < value.length; i++) {
+      for (const p of perturb(value[i] as Json)) yield value.map((v, j) => (j === i ? p : v));
+    }
+    return;
+  }
+  if (isRecord(value)) {
+    yield { ...value, __extra: 1 };
+    for (const key of Object.keys(value)) {
+      const { [key]: _, ...rest } = value;
+      yield rest;
+      for (const p of perturb(value[key] as Json)) yield { ...value, [key]: p };
+    }
+    return;
+  }
+  yield typeof value === "string" ? 7 : "7";
+  if (typeof value === "string") yield "";
+  if (typeof value === "number") yield* [-1, 0, 1.5];
+}
+
+function zodAt(key: string): ZodTypeAny | undefined {
+  const [kind, escaped, part] = key.split("/");
+  const method = (escaped ?? "").replaceAll("~1", "/").replaceAll("~0", "~");
+  if (kind === "notifications") return P.NotificationSchemas[method as P.NotificationName];
+  const entry = P.RequestSchemas[method as P.MethodName];
+  return part === "params" ? entry?.params : part === "result" ? entry?.result : undefined;
+}
+
+function compile(doc: ProtocolJsonSchema) {
+  const ajv = new Ajv2020({ strict: true });
+  ajv.addVocabulary([
+    "discriminator",
+    "x-protocol-version",
+    "errorCodes",
+    "methods",
+    "notifications",
+  ]);
+  ajv.addSchema(doc, "p");
+  return ajv;
+}
+
+describe("zod ⇔ JSON Schema agreement", () => {
+  test("every method params/result and notification params has a fixture", () => {
+    const expected = [
+      ...Object.keys(P.RequestSchemas).flatMap((m) => [
+        `methods/${pointerEscape(m)}/params`,
+        `methods/${pointerEscape(m)}/result`,
+      ]),
+      ...Object.keys(P.NotificationSchemas).map((m) => `notifications/${pointerEscape(m)}/params`),
+    ].sort();
+    expect(Object.keys(FIXTURES).sort()).toEqual(expected);
+  });
+
+  test("Ajv and zod accept/reject the same payloads", () => {
+    const ajv = compile(buildProtocolJsonSchema());
+    const disagreements: string[] = [];
+    let total = 0;
+    for (const [key, fixtures] of Object.entries(FIXTURES)) {
+      const zs = zodAt(key);
+      const validate = ajv.getSchema(`p#/${key}`);
+      if (zs === undefined || validate === undefined) throw new Error(`no schema at ${key}`);
+      for (const fixture of fixtures) {
+        expect({ key, ok: zs.safeParse(fixture).success }).toEqual({ key, ok: true });
+        for (const payload of [fixture, ...perturb(fixture)]) {
+          total++;
+          const byZod = zs.safeParse(payload).success;
+          const byAjv = validate(payload) === true;
+          if (byZod !== byAjv)
+            disagreements.push(`${key} zod=${byZod} ajv=${byAjv}: ${JSON.stringify(payload)}`);
+        }
+      }
+    }
+    expect(total).toBeGreaterThan(300);
+    expect(disagreements).toEqual([]);
+  });
+});
+
+describe("tagged-union shape (what codegen needs)", () => {
+  test("every discriminated union is oneOf + a complete discriminator mapping of named refs", () => {
+    const doc = buildProtocolJsonSchema();
+    const defs = doc.$defs;
+    if (!isRecord(defs)) throw new Error("no $defs");
+    let unions = 0;
+    for (const [key, schema] of Object.entries(P)) {
+      if (!key.endsWith("Schema") || !(schema instanceof ZodDiscriminatedUnion)) continue;
+      unions++;
+      const def = defs[key.slice(0, -"Schema".length)];
+      if (!isRecord(def)) throw new Error(`missing def for ${key}`);
+      expect(def.anyOf).toBeUndefined();
+      const disc = def.discriminator;
+      if (!isRecord(disc) || !isRecord(disc.mapping))
+        throw new Error(`${key}: no discriminator mapping`);
+      expect(disc.propertyName).toBe(schema.discriminator);
+      const tags = (schema.options as z.AnyZodObject[]).map(
+        (o) => (o.shape[schema.discriminator] as z.ZodLiteral<string>).value,
+      );
+      expect(Object.keys(disc.mapping).sort()).toEqual([...tags].sort());
+      const members = Array.isArray(def.oneOf)
+        ? def.oneOf.map((m) => (isRecord(m) ? m.$ref : m))
+        : [];
+      expect([...members].sort()).toEqual(Object.values(disc.mapping).sort());
+      for (const ref of Object.values(disc.mapping)) {
+        expect(typeof ref === "string" && isRecord(defs[ref.replace("#/$defs/", "")])).toBe(true);
+      }
+    }
+    expect(unions).toBe(4);
+  });
+
+  test("every $ref names a $def", () => {
+    const refs: string[] = [];
+    const walk = (v: unknown): void => {
+      if (Array.isArray(v)) v.forEach(walk);
+      else if (isRecord(v))
+        for (const [k, c] of Object.entries(v)) k === "$ref" ? refs.push(String(c)) : walk(c);
+    };
+    walk(buildProtocolJsonSchema());
+    expect(refs.length).toBeGreaterThan(0);
+    expect(refs.filter((r) => !/^#\/\$defs\/[A-Za-z0-9]+$/.test(r))).toEqual([]);
+  });
+});
+
+describe("guards — fail loudly, never a silent hole", () => {
+  const named = z.object({ a: z.string() });
+
+  test("a z.function() field is rejected (the library would drop it)", () => {
+    const src = fakeSource({ BadSchema: z.object({ a: z.string(), f: z.function() }) });
+    expect(() => buildProtocolJsonSchema(src)).toThrow(/unrepresentable zod type ZodFunction/);
+  });
+
+  test("a .transform() is rejected (the library would ignore it)", () => {
+    const src = fakeSource({ BadSchema: z.object({ a: z.string().transform((s) => s.length) }) });
+    expect(() => buildProtocolJsonSchema(src)).toThrow(/unrepresentable zod type ZodEffects/);
+  });
+
+  test("a plain z.union of objects is rejected (codegen would collapse it)", () => {
+    const src = fakeSource({
+      BadSchema: z.object({ u: z.union([z.object({ a: z.string() }), z.string()]) }),
+    });
+    expect(() => buildProtocolJsonSchema(src)).toThrow(/untagged union of non-scalars/);
+  });
+
+  test("an unlisted z.unknown() field is rejected with its pointer", () => {
+    const src = fakeSource({ BadSchema: z.object({ x: z.unknown() }) });
+    expect(() => buildProtocolJsonSchema(src)).toThrow("#/$defs/Bad/properties/x");
+  });
+
+  test("an anonymous schema reused in two places is rejected", () => {
+    const inner = z.object({ a: z.string() });
+    const src = fakeSource({ ASchema: z.object({ x: inner }), BSchema: z.object({ y: inner }) });
+    expect(() => buildProtocolJsonSchema(src)).toThrow(/export it under a name/);
+  });
+
+  test("one schema under two export names is rejected", () => {
+    expect(() => buildProtocolJsonSchema(fakeSource({ ASchema: named, BSchema: named }))).toThrow(
+      /two names/,
+    );
+  });
+
+  test("a synthesized union member name that collides with an export is rejected", () => {
+    const union = z.discriminatedUnion("type", [z.object({ type: z.literal("a") })]);
+    const src = fakeSource({ USchema: union, UASchema: named });
+    expect(() => buildProtocolJsonSchema(src)).toThrow(/collides/);
+  });
+
+  test("a method whose schema is not a named export is rejected", () => {
+    const src = fakeSource(
+      { NamedSchema: named },
+      { m: { params: z.object({ b: z.string() }), result: named } },
+    );
+    expect(() => buildProtocolJsonSchema(src)).toThrow(/m params: schema is not a named export/);
+  });
+});
+
+describe("determinism", () => {
+  test("two builds serialize byte-identically", () => {
+    expect(serializeProtocolJsonSchema(buildProtocolJsonSchema())).toBe(
+      serializeProtocolJsonSchema(buildProtocolJsonSchema()),
+    );
+  });
+
+  test("field declaration order is not a diff", () => {
+    const ab = fakeSource({ XSchema: z.object({ a: z.string(), b: z.number() }) });
+    const ba = fakeSource({ XSchema: z.object({ b: z.number(), a: z.string() }) });
+    expect(serializeProtocolJsonSchema(buildProtocolJsonSchema(ba))).toBe(
+      serializeProtocolJsonSchema(buildProtocolJsonSchema(ab)),
+    );
+  });
+});
