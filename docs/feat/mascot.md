@@ -1,6 +1,6 @@
 # feat/mascot — Tentacle, the project mascot and logo
 
-> **Status:** execution
+> **Status:** review
 > **Branch:** `feat/mascot` (promoted from `docs/eval/mascot.md`)
 > **Type:** feat · **Size:** S · **Blast:** contained (static assets + README; no code, test or build path) · **Suited:** any model executes; standard in-context Review.
 
@@ -158,6 +158,30 @@ The local, unpushed commit was undone: the eval was re-committed alone on
 ## Review
 
 *— claude-opus-5-5, 2026-10-19*
+
+**Feat review (in-context, as allowed for contained S work, AGENTS §10).**
+
+- **Gate.** `bun run check` on `feat/mascot`: typecheck and lint green,
+  `728 pass · 1 skip · 0 fail` (the skip is the opt-in live-k8s one).
+- **Load-bearing assumption holds.** Biome checked the same 256 files before
+  and after, so the SVGs are not in its scope. Nothing in `packages/` or
+  `scripts/` references `art/`.
+- **Assets.** Both SVGs pass `xmllint --noout`. Both are transparent (no
+  background shape). Fills are exactly `#5B2A86` (mono) and
+  `#5B2A86` / `#8E4BC4` / `#B98BE0` (tonal). The head interior is empty, not
+  a white fill, so it takes the page colour.
+- **README path.** `src="art/tentacle-tonal.svg"` resolves from the repo
+  root.
+- **Theme check.** Rendered on GitHub's light (`#ffffff`) and dark
+  (`#0d1117`) backgrounds. Light is clean. On dark the mark is readable, but
+  the dark-violet head has low contrast. This confirms the open dark-mode
+  follow-up below; it does not block the merge.
+- **What does not hold / not verified:** the image has not been seen on
+  GitHub itself (there is no remote). It only rendered locally with `rsvg`.
+- **How the implementing model behaved:** its first attempt put the assets
+  and the README on `main` together with the eval, against §10. The owner
+  caught it. The local, unpushed commit was undone and redone in the right
+  order (eval on `main`, then this branch).
 
 **Decided by the owner (2026-10-19):**
 
