@@ -70,6 +70,18 @@ are modelled 1:1 on ACP, so an ACP adapter (editors) and an AG-UI adapter (web U
 are cheap to add later. One internal event/command model; interop protocols are
 optional projections.
 
+**Exported wire schema.** The zod schemas in `@tentacle/protocol` are exported as
+one JSON Schema (2020-12) document, `packages/protocol/schema/protocol.json`:
+`methods`/`notifications` keyed by wire method, the shared `$defs`, `errorCodes`
+and `x-protocol-version`. It is generated, never hand-edited — `bun run
+schema:export` regenerates it, and a drift test (`protocol/test/json-schema.test.ts`)
+fails the gate when it is stale, so every wire change shows up as a diff in its PR.
+Shapes are the *input* shape a receiver accepts; discriminated unions are `oneOf` +
+OpenAPI `discriminator`. For Swift, wrap `$defs` as OpenAPI 3.1
+`components.schemas` (rewrite `#/$defs/` → `#/components/schemas/`) and run
+`swift-openapi-generator` (`generate: [types]`): each discriminated union becomes a
+tagged enum (the JSON-RPC envelopes are untagged by design — decode them by key presence).
+
 ### ADR-005 — Execution environment: **host now, container later, one interface**
 Tools execute on the OS where the harness runs. `ExecutionEnvironment` abstracts this;
 a `HostExecution` implementation ships first, a container (podman) implementation later,

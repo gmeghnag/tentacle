@@ -893,7 +893,7 @@ recovery.
   terminal writes (AGENTS §7).
 - Test vectors (frame sequence + drop point + expected reducer output) written
   as **JSON fixtures**, validated against the exported schema
-  (`docs/eval/protocol-schema-export.md`), so a Swift/Kotlin client can run the
+  (`docs/feat/protocol-schema-export.md`), so a Swift/Kotlin client can run the
   same cases.
 
 **Why, item by item.**

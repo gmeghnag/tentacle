@@ -22,6 +22,22 @@ export const JsonRpcErrorCode = {
 } as const;
 
 /**
+ * Custom, application-level error codes (outside JSON-RPC's reserved range).
+ * Part of the wire contract (a non-TS client branches on them), so they live
+ * here; `@tentacle/transport` re-exports them.
+ */
+export const DomainErrorCode = {
+  Unauthorized: -32001,
+  VersionMismatch: -32002,
+  UnknownSession: -32003,
+  TurnInProgress: -32004,
+  NotInitialized: -32005,
+  TooManySessions: -32006,
+  AlreadyInitialized: -32007,
+  NoTurnRunning: -32008,
+} as const;
+
+/**
  * Request / response correlation id. We emit string UUIDs by convention, but
  * the spec also permits integers, so both are accepted when parsing.
  */

@@ -15,6 +15,7 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "check": "bun run typecheck && bun run lint && bun run test",
+    "schema:export": "bun packages/protocol/src/json-schema.ts && biome format --write packages/protocol/schema/protocol.json",
     "compile": "bun run scripts/build.ts"
   },
   "dependencies": {

@@ -251,7 +251,7 @@ makes a late or missing marker harmless (see Design 3c).
   compaction (`cli/src/local-runtime.ts:63-90`).
 - Error exposure: worker exposes (`cli/src/worker.ts:97-104`), ws-server and
   stdio do not (`daemon/src/ws-server.ts:182`, `cli/src/serve.ts:96-100`).
-- Depends on `docs/eval/protocol-schema-export.md` (merged first): I assume its
+- Depends on `docs/feat/protocol-schema-export.md` (merged first): I assume its
   interface as written there — `bun run schema:export` regenerates a committed
   `packages/protocol/schema/protocol.json` from `RequestSchemas` /
   `NotificationSchemas`, and a drift test fails the gate. Each sub-task here

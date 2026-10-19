@@ -1,8 +1,8 @@
-# eval/protocol-schema-export — export the wire schema as JSON Schema, gated against drift
+# feat/protocol-schema-export — export the wire schema as JSON Schema, gated against drift
 
-> **Status:** implementation drafted — awaiting owner approval (2026-10-19)
-> **Branch:** none until promoted (then `feat/protocol-schema-export`)
-> **Type:** eval → feat · **Size:** S–M (was S: verification added a union rewrite, a type guard and a zod⇔JSON-Schema agreement test; still one package + a re-export) · **Blast:** cross-module (no runtime/wire change; touches `protocol`, a `transport` re-export, root scripts, `bun.lock`) · **Suited:** a weaker model may execute; standard Review
+> **Status:** executed, gate green — awaiting merge OK (2026-10-19). Promoted from `docs/eval/` on owner approval (OQ-1/OQ-3 by parent D7, OQ-2 as recommended, OQ-4 → event-stream per parent E).
+> **Branch:** `feat/protocol-schema-export`
+> **Type:** feat (promoted from eval) · **Size:** S–M (was S: verification added a union rewrite, a type guard and a zod⇔JSON-Schema agreement test; still one package + a re-export) · **Blast:** cross-module (no runtime/wire change; touches `protocol`, a `transport` re-export, root scripts, `bun.lock`) · **Suited:** a weaker model may execute; standard Review
 
 ## Context
 
@@ -32,7 +32,7 @@ show up as reviewable diffs of the exported schema from the first one.
 > design point here disagrees, the parent decision wins.
 
 
-*— claude-opus-5-5, 2026-10-19 (draft, awaiting owner approval)*
+*— claude-opus-5-5, 2026-10-19 (approved by owner 2026-10-19)*
 
 Verified against `main` @ `4914e9b`, bun 1.4.3, macOS. Experiments ran in
 `.tentacle/tmp/protocol-schema-export-impl/` (gitignored); scripts and output
@@ -533,9 +533,128 @@ the §6 baseline (lint 0/0; all tests pass except the opt-in live-k8s skip).
 
 ## Execution
 
-*(empty — an eval)*
+*— claude-opus-5-5, 2026-10-19*
+
+Built in the plan's order on `feat/protocol-schema-export` (off `main` @ `d49da99`;
+no protocol/transport change since the verified `4914e9b`).
+
+1. `packages/protocol/package.json` — devDependencies `ajv` 8.17.1,
+   `zod-to-json-schema` 3.23.5; `bun install` → `bun.lock` +14 lines.
+2. `DomainErrorCode` moved to `packages/protocol/src/jsonrpc.ts` (after
+   `JsonRpcErrorCode`); `packages/transport/src/errors.ts` imports and re-exports
+   it. No import site changed; typecheck green.
+3. `packages/protocol/src/json-schema.ts` — Design §1–§7. Exports
+   `ProtocolSource`, `defaultSource`, `UNKNOWN_ALLOWED`, `buildProtocolJsonSchema`,
+   `serializeProtocolJsonSchema`, `SCHEMA_PATH`. Not in `index.ts`.
+4. `packages/protocol/schema/protocol.json` — generated (1135 lines after Biome).
+5. `packages/protocol/test/json-schema.test.ts` — T1–T6, 16 tests (after Review).
+6. Root `package.json` — `schema:export`.
+7. `ARCHITECTURE.md` ADR-004 — one paragraph (location, regen, drift gate,
+   Swift recipe).
+
+**Drift from Implementation (small, all deliberate):**
+- The "anything" check counts a schema made only of annotation keywords
+  (`description`, `default`, `title`, `$comment`) as a hole, not only a literal
+  `{}` — otherwise a `.describe()` on a `z.unknown()` would slip past it.
+- The walk is schema-aware (`properties` children, `anyOf/oneOf/allOf`, `items`,
+  `additionalProperties`, `not`), so the `EnqueueResult/properties` container is
+  never visited and is not in `UNKNOWN_ALLOWED` (7 entries, as planned).
+- T1 compares with `Bun.deepEquals` and throws the "run `bun run
+  schema:export`" message (bun's `toEqual` takes no custom message).
+- The synthesized-name collision gets its own T4 case (the plan listed it under
+  failure modes only).
+
+**Red → green.** T1 run before step 4: `error: protocol.json is stale — run
+\`bun run schema:export\` and commit the diff`; green after generating.
+
+**Mutations** (each applied, run, reverted; `bun test packages/protocol/test/json-schema.test.ts`):
+
+```
+M0 SteerSchema.text optional, no regen  -> (fail) drift gate                                  14 pass 1 fail
+M1 removeAdditionalStrategy passthrough -> (fail) drift gate, (fail) Ajv⇔zod agreement        13 pass 2 fail
+M2 skip the oneOf rewrite               -> (fail) drift gate, (fail) tagged-union shape       13 pass 2 fail
+M3 override without the allowlist check -> (fail) z.function() case, (fail) .transform() case 13 pass 2 fail
+M4 skip the hole/ref walk               -> (fail) z.unknown() case, (fail) reused anon case   13 pass 2 fail
+M5 no `required` sort                   -> (fail) drift gate, (fail) field-order determinism  13 pass 2 fail
+M6 strip minLength/minimum/minItems/int -> (fail) drift gate, (fail) Ajv⇔zod agreement        13 pass 2 fail   (added by Review)
+M7 untagged-union guard off             -> (fail) plain z.union of objects case                15 pass 1 fail   (added by Review)
+```
+
+**Swift codegen on the committed file** (exp 8 recipe, `swift-openapi-generator`
+1.9.0 from `.tentacle/tmp/protocol-schema-export-impl/sog`):
+
+```
+551:  @frozen public enum ContentBlock: Codable, Hashable, Sendable {
+1509: @frozen public enum PermissionOutcome: Codable, Hashable, Sendable {
+2115: @frozen public enum SessionUpdate: Codable, Hashable, Sendable {
+2790: @frozen public enum WireStreamEvent: Codable, Hashable, Sendable {
+```
+
+**Gate:** `bun run check` — `tsc --noEmit` clean, `biome check .` clean (0/0),
+`788 pass, 1 skip, 0 fail` (789 tests / 95 files; the skip is the opt-in live-k8s one) — after the Review fixes.
 
 ## Review
+
+### Implementation review (in-context, adversarial — owner asked for a critical pass)
+
+*— claude-opus-5-5, 2026-10-19*
+
+**Findings, fixed on this branch (each proven by mutation first):**
+- **R1 — the agreement test was vacuous for bounds.** Perturbations only
+  changed types and keys. Stripping every `minLength`/`minimum`/
+  `exclusiveMinimum`/`minItems` and turning `integer` into `number` (M6) left T2
+  **green**; only the drift gate went red, and a regenerate would hide that. So
+  T2 did not prove "schema accepts ≡ zod accepts" for `min`/`int`/
+  `nonnegative`/`positive`. Fix: `perturb` also yields `""`, `[]`, `-1`, `0`,
+  `1.5`. The real code still shows 0 disagreements, and M6 now turns T2 red.
+- **R2 — plain `z.union` of objects was an unguarded silent collapse** (it was
+  listed as a residual in the first draft of this review). Fix: `override`
+  throws `untagged union of non-scalars … use z.discriminatedUnion`, plus a T4
+  case. M7 shows the test is not vacuous.
+- **R3 — a Preconditions claim was false.** "Only `ZodUnion` is
+  `RequestIdSchema`" is wrong: `JsonRpcMessageSchema` (`jsonrpc.ts:106`) and
+  `JsonRpcResponseSchema` (`:99`) are untagged unions of objects, as JSON-RPC
+  defines them (frames are told apart by which keys are present). R2's guard
+  found this on its first run. Fix: an explicit `UNTAGGED_ALLOWED` pointer list
+  (the same pattern as `UNKNOWN_ALLOWED`). The generated file is unchanged.
+- **R4 — the `ARCHITECTURE.md` wording overclaimed.** "Each union becomes a
+  tagged enum" is now "each *discriminated* union". The envelopes are decoded by
+  key presence.
+
+**What holds.**
+- Gate green after the fixes (Execution). M0–M7 are each red on the
+  corresponding test.
+- No runtime reach. Nothing in `packages/*/src` imports `json-schema.ts`;
+  `ajv`/`zod-to-json-schema` are protocol devDependencies; `tools` keeps its own
+  runtime copy (`tools/src/registry.ts:10`). No §7 invariant is touched, and the
+  wire format does not change.
+- `DomainErrorCode`: same object, re-exported. Every import site compiles
+  unchanged.
+- Swift codegen on the committed file gives 4 tagged enums (Execution).
+- Links to the old `docs/eval/` path are updated.
+
+**Residuals (not fixed, stated).**
+- `errorCodes` is a spread of two maps, so a name colliding between
+  `JsonRpcErrorCode` and `DomainErrorCode` would be overwritten silently.
+  There is none today; the codes live side by side in `jsonrpc.ts`, so a clash
+  would show in review.
+- The hole walk does not visit `prefixItems`/`patternProperties`. That is
+  unreachable today, because the kind allowlist rejects `ZodTuple`/`ZodRecord`.
+  Extending the allowlist means extending the walk.
+- Not verified: compiling the generated `Types.swift`, and any Kotlin generator.
+- Agreement is shown on a corpus, not proven. The UTF-16 vs code-point caveat
+  (Failure modes) still applies.
+- T1 says "stale" but does not say *where*. `bun run schema:export && git diff`
+  shows it. That was judged good enough.
+
+**How the implementing model behaved.** It followed the plan in order. The first
+in-context review was too soft: it passed R1 and left R2 as a residual. Only
+the explicit critical pass, which tried a mutation against each claim, caught
+them. The lesson: a review has to *try to break* each "proved" claim, not just
+re-read it. There were two minor self-inflicted trips (a T3 ordering assertion,
+a Biome `noShadowRestrictedNames` error), both caught by the gate.
+
+### Eval review
 
 *— claude-opus-5-5, 2026-10-19*
 
