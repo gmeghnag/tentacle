@@ -422,7 +422,7 @@ reframed for iOS (point 12).
 | # | Task | Size · Blast | Depends on |
 |---|---|---|---|
 | 0 | finish + merge `fix/steering-over-rpc` (in flight) | — | — |
-| 1 | `fix/background-process-groups` — task 1 of `docs/eval/daemon-session-lifecycle.md` | S–M · cross-module | — |
+| 1 | `docs/eval/background-process-groups.md` — group kill + process-exit net + dispose on connection close (approved, ready to promote) | S–M · load-bearing | — |
 | 2 | `docs/eval/protocol-schema-export.md` — JSON Schema export + drift gate (point 17) | S · cross-module | — |
 | 3 | `docs/eval/session-event-stream.md` — byte ring, consistent cut, `turn_start`/`turn_end{error}`, `history_replaced`, `prompt` ack + `turnId`, `enqueue` id, event classes, paged snapshot, wire hygiene, explicit reject of non-text blocks | M · load-bearing | 2 |
 | 4 | `docs/eval/session-registry.md` — registry, `open{since}` replay/resync, `close`, detach-on-close, multi-attach fan-out, model-proxy rule | M · load-bearing | 1, 3 |

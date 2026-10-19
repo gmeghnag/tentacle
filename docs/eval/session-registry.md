@@ -47,7 +47,9 @@ Scope:
   absent + `messages` → recreate; else `UnknownSession`. A live id is never
   overwritten.
 - `session/close {sessionId}`: idempotent; unknown id is a no-op.
-- `Connection.close()` **detaches** instead of cancelling. Exception (parent
+- `Connection.close()` **detaches** instead of cancelling — and drops the
+  `disposeJobs()` call that `background-process-groups` adds there today; job
+  disposal moves to session `close` and the TTL reaper. Exception (parent
   point 11): a turn whose model is served through this connection
   (`--model-proxy`) is cancelled; the session survives.
 - Local runtimes (worker, pod `run`) send `session/close` on exit; the
