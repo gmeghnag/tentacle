@@ -1,8 +1,8 @@
-# eval/mascot — Tentacle, the project mascot and logo
+# feat/mascot — Tentacle, the project mascot and logo
 
-> **Status:** eval (Context + Review; Implementation/Execution empty until promoted)
-> **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10)
-> **Type:** eval · **Size:** S (terminal banner, if promoted) · **Blast:** contained (assets + a leaf TUI component) · **Suited:** any model executes; standard in-context Review.
+> **Status:** execution
+> **Branch:** `feat/mascot` (promoted from `docs/eval/mascot.md`)
+> **Type:** feat · **Size:** S · **Blast:** contained (static assets + README; no code, test or build path) · **Suited:** any model executes; standard in-context Review.
 
 ## Context
 
@@ -99,11 +99,61 @@ Today the TUI greets with one text line, `WELCOME` in
 
 ## Implementation
 
-*(empty until promoted — see Review for the shape of the follow-up `feat`)*
+*— claude-opus-5-5, 2026-10-19*
+
+Scope of this `feat`: put the decided marks in the repo and show the primary
+one in the README. The TUI startup mascot is **not** in this branch: it gets
+its own `feat/tui-mascot` (see Review), so this branch stays asset-only.
+
+### Load-bearing assumption
+
+Nothing in the build, lint or test path reads `art/` or SVG files, so adding
+them cannot break the gate. Biome checks TS/JS/JSON only (AGENTS §6), and
+`biome.json:28` ignores nothing that matters here. `bun run lint` after the
+change confirms it.
+
+### Design
+
+- `art/` at the repo root holds the brand assets (tracked).
+- `art/tentacle-tonal.svg`: primary mark (`#5B2A86` / `#8E4BC4` / `#B98BE0`).
+- `art/tentacle-mono.svg`: one-colour mark (`#5B2A86`).
+- Both are drawn with circle arcs and straight segments on a 600×600
+  canvas (transparent, ~2.6 KB each).
+- `README.md`: the tonal mark centred above the `# tentacle` title, 117 px
+  wide, alt text naming the mascot.
+
+### Files
+
+- `art/tentacle-tonal.svg` (new)
+- `art/tentacle-mono.svg` (new)
+- `README.md` (header image)
+- `TODO.md` (index entry points at this doc)
+
+### Failure modes
+
+- **Broken image on GitHub**: a wrong relative path renders as a broken
+  icon. The path is relative to the repo root, where `README.md` lives.
+- **Dark theme**: low contrast of `#5B2A86` on GitHub dark. Known, left as a
+  follow-up (Review).
+
+### Tests
+
+None: no code. Validation is `xmllint --noout` on both SVGs and a green
+`bun run lint`.
 
 ## Execution
 
-*(empty — an eval carries no code)*
+*— claude-opus-5-5, 2026-10-19*
+
+1. Added the two SVGs to `art/`.
+2. Added the centred header image to `README.md`.
+3. `bun run lint`: `Checked 256 files … No fixes applied.` Both SVGs pass
+   `xmllint --noout`.
+
+Drift: the first attempt committed the assets and README straight to `main`
+together with the eval. That broke AGENTS §10 (only the eval goes to `main`).
+The local, unpushed commit was undone: the eval was re-committed alone on
+`main` (`0428f4e`) and promoted here.
 
 ## Review
 

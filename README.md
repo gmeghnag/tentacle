@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="art/tentacle-tonal.svg" alt="Tentacle, the tentacle mascot" width="117">
+</p>
+
 # tentacle
 
 A SOTA agent harness — the platform that turns any LLM into an autonomous,

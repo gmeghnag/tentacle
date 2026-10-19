@@ -833,5 +833,5 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
 - [ ] **Mascot "Tentacle"** — mark decided (tonal primary, mono one-colour).
       Next: the marks in `art/` + README header (`feat/mascot`). Open: startup
       pixel mascot in the TUI (`feat/tui-mascot`), dark-mode README variant,
-      small-size icon. **Eval:** `docs/eval/mascot.md`.
-      Type: eval → feat · Size: S · Blast: contained.
+      small-size icon. **Doc:** `docs/feat/mascot.md`.
+      Type: feat · Size: S · Blast: contained.
