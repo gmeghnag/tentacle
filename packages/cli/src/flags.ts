@@ -11,38 +11,159 @@ export interface ParsedFlags {
   readonly bools: Set<string>;
 }
 
+/** One flag's alias. */
+interface FlagDef {
+  /** A one-letter alias: `-n` for `--namespace`. */
+  readonly short?: string;
+}
+
 /**
- * `--key value` → flags, `--key=value` → flags, `--key` (no value) → bools,
- * everything else positional. Both `--namespace dev` and `--namespace=dev` work.
+ * What a command accepts (docs/fix/cli-strict-args.md). Closed: anything else
+ * is an error, never silently ignored.
  */
-export function parseFlags(args: readonly string[]): ParsedFlags {
+export interface ArgSpec {
+  /** Flags that take a value: `--k v`, `--k=v`, `-s v`, `-s=v`. */
+  readonly values?: Readonly<Record<string, FlagDef>>;
+  /** Flags that take none. */
+  readonly bools?: Readonly<Record<string, FlagDef>>;
+  /**
+   * Flags whose value is optional: the next word is taken only when `accepts`
+   * it (else the flag is a bool); `--k=v` is always explicit.
+   */
+  readonly optional?: Readonly<Record<string, { readonly accepts: (word: string) => boolean }>>;
+  readonly positional: { readonly min: number; readonly max: number };
+}
+
+export type ParsedArgs =
+  | ({ readonly ok: true } & ParsedFlags)
+  | { readonly ok: false; readonly error: string };
+
+/** A session uid (`--resume <uid>`): the store names sessions by UUID. */
+const SESSION_UID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RESUME = { resume: { accepts: (word: string) => SESSION_UID.test(word) } } as const;
+const TOKEN = { token: {}, "token-command": {} } as const;
+
+/** Every command's arguments: the ONE list of what each accepts. */
+export const ARGS = {
+  connect: { values: TOKEN, positional: { min: 1, max: 1 } },
+  serve: {
+    values: {
+      host: {},
+      port: {},
+      "tls-cert": {},
+      "tls-key": {},
+      ...TOKEN,
+      "session-ttl": {},
+      "session-admin-cap": {},
+      "max-sessions": {},
+      "max-detached-sessions": {},
+      "ws-idle-timeout": {},
+    },
+    bools: { stdio: {}, "model-proxy": {} },
+    positional: { min: 0, max: 0 },
+  },
+  run: {
+    values: { namespace: { short: "n" }, image: {}, "bin-dir": {} },
+    optional: RESUME,
+    positional: { min: 0, max: 1 },
+  },
+  attach: {
+    values: { namespace: { short: "n" }, container: { short: "c" }, "bin-dir": {} },
+    optional: RESUME,
+    positional: { min: 1, max: 1 },
+  },
+  tui: {
+    bools: { interactive: { short: "i" }, "in-process": {}, "no-worker": {} },
+    optional: RESUME,
+    positional: { min: 0, max: 0 },
+  },
+  plain: { bools: { plain: {} }, positional: { min: 0, max: 0 } },
+} as const satisfies Record<string, ArgSpec>;
+
+/**
+ * Parse `args` against a closed `spec`: flags anywhere (before or after the
+ * positionals), long or short, `=` or a separate word; `--` ends the options.
+ * An unknown flag, a missing value, a repeat, a value on a bool, or a wrong
+ * number of positionals is an error.
+ */
+export function parseArgs(args: readonly string[], spec: ArgSpec): ParsedArgs {
   const positional: string[] = [];
   const flags = new Map<string, string>();
   const bools = new Set<string>();
+  const kind = (name: string): "value" | "bool" | "optional" | undefined =>
+    spec.values && Object.hasOwn(spec.values, name)
+      ? "value"
+      : spec.bools && Object.hasOwn(spec.bools, name)
+        ? "bool"
+        : spec.optional && Object.hasOwn(spec.optional, name)
+          ? "optional"
+          : undefined;
+  const longOf = (short: string): string | undefined => {
+    for (const group of [spec.values, spec.bools]) {
+      for (const [name, def] of Object.entries(group ?? {})) {
+        if (def.short === short) return name;
+      }
+    }
+    return undefined;
+  };
   for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === undefined) {
+    const arg = args[i] ?? "";
+    if (arg === "--") {
+      positional.push(...args.slice(i + 1));
+      break;
+    }
+    if (!arg.startsWith("-") || arg === "-") {
+      positional.push(arg);
       continue;
     }
-    if (arg.startsWith("--")) {
-      const eq = arg.indexOf("=");
-      if (eq > 2) {
-        flags.set(arg.slice(2, eq), arg.slice(eq + 1));
+    const isLong = arg.startsWith("--");
+    const eq = arg.indexOf("=");
+    const written = eq > 0 ? arg.slice(0, eq) : arg;
+    const name = isLong ? written.slice(2) : longOf(written.slice(1));
+    const type = name !== undefined && name !== "" ? kind(name) : undefined;
+    if (name === undefined || type === undefined) {
+      return { ok: false, error: `unknown option ${written}` };
+    }
+    if (flags.has(name) || bools.has(name)) {
+      return { ok: false, error: `--${name} given more than once` };
+    }
+    if (type === "bool") {
+      if (eq > 0) return { ok: false, error: `${written} takes no value` };
+      bools.add(name);
+      continue;
+    }
+    let value: string | undefined;
+    if (eq > 0) {
+      value = arg.slice(eq + 1);
+    } else {
+      const next = args[i + 1];
+      const takes =
+        next !== undefined &&
+        !next.startsWith("-") &&
+        (type === "value" || spec.optional?.[name]?.accepts(next) === true);
+      if (takes) {
+        value = next;
+        i++;
+      } else if (type === "optional") {
+        bools.add(name);
         continue;
       }
-      const key = arg.slice(2);
-      const next = args[i + 1];
-      if (next !== undefined && !next.startsWith("--")) {
-        flags.set(key, next);
-        i++;
-      } else {
-        bools.add(key);
-      }
-    } else {
-      positional.push(arg);
     }
+    if (value === undefined || value === "") {
+      return { ok: false, error: `${written} needs a value` };
+    }
+    flags.set(name, value);
   }
-  return { positional, flags, bools };
+  if (positional.length > spec.positional.max) {
+    return {
+      ok: false,
+      error: `unexpected argument ${JSON.stringify(positional[spec.positional.max])}`,
+    };
+  }
+  if (positional.length < spec.positional.min) {
+    return { ok: false, error: "missing argument" };
+  }
+  return { ok: true, positional, flags, bools };
 }
 
 const DURATION_UNITS: Readonly<Record<string, number>> = {
@@ -199,7 +320,9 @@ export function extractGlobalOptions(args: readonly string[]): GlobalOptions {
   }
   const rest = args.slice(i);
   const first = rest[0];
-  if (first !== undefined && COMMANDS.has(first) && rest.some(isProfileFlag)) {
+  const isMode =
+    first !== undefined && (COMMANDS.has(first) || (first.startsWith("-") && first !== "--"));
+  if (isMode && rest.some(isProfileFlag)) {
     return { ok: false, error: "--profile must come before the command" };
   }
   if (profile !== undefined && first === "connect") {
@@ -210,3 +333,40 @@ export function extractGlobalOptions(args: readonly string[]): GlobalOptions {
   }
   return profile !== undefined ? { ok: true, profile, rest } : { ok: true, rest };
 }
+
+/** Which path `main` takes, decided from the first argument alone. */
+export type CliMode = "connect" | "serve" | "run" | "attach" | "plain" | "tui" | "prompt" | "empty";
+
+/**
+ * A subcommand → its own arguments; `--plain` → the REPL; any other leading
+ * `-…` → the TUI's options (`-i`, `--resume`, `--in-process`…); `--` or a word
+ * → a one-shot prompt whose words are kept verbatim.
+ */
+export function cliMode(args: readonly string[]): CliMode {
+  const first = args[0];
+  if (first === undefined) {
+    return "empty";
+  }
+  if (first === "connect" || first === "serve" || first === "run" || first === "attach") {
+    return first;
+  }
+  if (first === "--plain") {
+    return "plain";
+  }
+  if (first.startsWith("-") && first !== "-" && first !== "--") {
+    return "tui";
+  }
+  return "prompt";
+}
+
+/** The usage line printed with an argument error. */
+export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string>> = {
+  connect: "tentacle connect ws(s)://host:port [--token T|--token-command CMD]",
+  serve:
+    "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [...] (see tentacle --help)",
+  run: "tentacle run --image <ref> [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]] [<name>]",
+  attach:
+    "tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]]",
+  plain: "tentacle --plain",
+  tui: "tentacle [-i] [--resume [uid]] [--in-process]",
+};
