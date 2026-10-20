@@ -222,6 +222,35 @@ const shape = (messages: readonly ChatMessage[]): string[] =>
         : `${m.role}:${m.content}`,
   );
 
+/**
+ * Run `[c1 look (none), c2 run (ask), c3 run (ask)]` until the turn waits on
+ * c2, enqueue `steer-1`, and return what a restarted daemon would read back.
+ */
+async function suspendedOnC2(
+  runs: string[],
+  tools: (broker: PermissionBroker) => Tool[],
+): Promise<{ record: DaemonSessionRecord; oldId: string }> {
+  const r = rig(
+    [
+      [
+        call("c1", "look"),
+        call("c2", "run", { n: 2 }),
+        call("c3", "run", { n: 3 }),
+        { type: "done" },
+      ],
+    ],
+    tools,
+  );
+  const c = client();
+  const { hosted } = r.host.open({ create: true }, c.attachment);
+  hosted.prompt("T1", go);
+  await until(() => c.asks.length === 1);
+  hosted.enqueue("e1", "T1", "steer-1");
+  await hosted.persisted();
+  expect(runs).toEqual(["look:{}"]);
+  return { record: reread(r.store.durable.get(hosted.id)), oldId: c.asks[0]?.requestId ?? "" };
+}
+
 describe("daemon persistence: what is written, when", () => {
   test("A1 the turn-start record already holds the prompt and the turn key", async () => {
     // Mutation: persist before `void this.drive(...)` → the prompt is missing.
@@ -258,45 +287,277 @@ describe("daemon persistence: what is written, when", () => {
     expect(r2.host.get(hosted.id)).toBe(restored);
   });
 
-  test("A3 a restart mid-suspension answers 'Not run' — nothing is denied, nothing runs", async () => {
-    // Mutation: label every unanswered call INTERRUPTED → the pending call reads "may have run".
+  test("B1 a restart mid-suspension RESUMES the turn: asked again (new id), each call runs once", async () => {
+    // Mutation: no `resume` branch in reconcileOnReload → "Not run", idle, never asked again.
     const runs: string[] = [];
     const tools = () => [tool("look", "none", runs), tool("run", "ask", runs)];
-    const r = rig(
-      [
-        [
-          call("c1", "look"),
-          call("c2", "run", { n: 2 }),
-          call("c3", "run", { n: 3 }),
-          { type: "done" },
-        ],
-      ],
-      tools,
-    );
-    const c = client();
-    const { hosted } = r.host.open({ create: true }, c.attachment);
-    hosted.prompt("T1", go);
-    await until(() => c.asks.length === 1);
-    hosted.enqueue("e1", "T1", "steer-1");
-    await hosted.persisted();
-    const record = reread(r.store.durable.get(hosted.id));
+    const { record, oldId } = await suspendedOnC2(runs, tools);
     expect(record.turn?.pending).toMatchObject({ toolCallId: "c2", tool: "run", resumable: true });
     expect(record.turn?.steering).toEqual(["steer-1"]);
+
+    const r2 = rig([text("all done")], tools);
+    const restored = r2.host.restore(record);
+    expect(restored.running).toBe(true);
+    const page = restored.snapshotPage();
+    expect(page.turn).toEqual({ turnId: "T1" });
+    expect(shape(page.messages)).toEqual(["user:go", "assistant[c1,c2,c3]", "tool(c1):look ok"]);
+    // A retry of the client's prompt joins the running turn (no restart end any more).
+    expect(restored.prompt("T1", go)).toEqual({ turnId: "T1" });
+
+    const c = client();
+    restored.attach(c.attachment);
+    await until(() => c.asks.length === 1);
+    const newId = c.asks[0]?.requestId;
+    expect(newId).not.toBe(oldId);
+    expect(c.updates.some((u) => u.update.type === "turn_start")).toBe(false);
+    // A client attaching later gets the same request from the replay.
+    const late = client();
+    restored.attach(late.attachment);
+    expect(late.asks.map((a) => a.requestId)).toEqual([newId ?? ""]);
+    // The answer to the pre-restart request does not bind to the new one.
+    let code: number | undefined;
+    try {
+      restored.resolvePermission(oldId, "allow_once");
+    } catch (error) {
+      code = (error as { code?: number }).code;
+    }
+    expect(code).toBe(DomainErrorCode.PermissionNotPending);
     expect(runs).toEqual(["look:{}"]);
 
-    const r2 = rig([], tools);
-    const restored = r2.host.restore(record);
+    c.allow(restored); // c2
+    await until(() => runs.length === 2 && c.asks.length === 1);
+    c.allow(restored); // c3, asked in its turn as it would have been
+    await until(() => c.ended("T1"));
+    expect(runs).toEqual(["look:{}", 'run:{"n":2}', 'run:{"n":3}']);
+    expect(r2.model.calls).toHaveLength(1);
     expect(shape(restored.snapshotPage().messages)).toEqual([
       "user:go",
       "assistant[c1,c2,c3]",
       "tool(c1):look ok",
-      `tool(c2):${NOT_RUN_NOTE}`,
-      `tool(c3):${NOT_RUN_NOTE}`,
+      "tool(c2):run ok",
+      "tool(c3):run ok",
       "user:steer-1",
+      "assistant:all done",
     ]);
+    const end = c.updates.find((u) => u.update.type === "turn_end")?.update;
+    expect(end).toMatchObject({ turnId: "T1", stopReason: "end_turn" });
+    expect(restored.prompt("T1", go)).toEqual({ turnId: "T1", ended: { stopReason: "end_turn" } });
+    await restored.persisted();
+    expect(r2.store.durable.get(restored.id)?.turn).toBeUndefined();
+  });
+
+  test("B2 the restored session's FIRST write still says 'suspended on c2' (the restore window)", async () => {
+    // Mutation: seed the resumed turn after the constructor's write → that write has no
+    // `turn` over a history with unanswered calls (a crash then reloads it idle and broken).
+    const runs: string[] = [];
+    const tools = () => [tool("look", "none", runs), tool("run", "ask", runs)];
+    const { record } = await suspendedOnC2(runs, tools);
+    const store = new SpyStore();
+    store.hold = true;
+    rig([], tools, store).host.restore(record);
+    const first = store.saves[0];
+    expect(first?.turn).toEqual({
+      turnId: "T1",
+      steering: ["steer-1"],
+      ...(record.turn?.pending ? { pending: record.turn.pending } : {}),
+    });
+    expect(first?.messages).toEqual(record.messages);
+    // And that write, reloaded, resumes again (a second restart).
+    const again = rig([], tools).host.restore(reread(first));
+    expect(again.running).toBe(true);
+  });
+
+  test("B3 a permission_request is streamed only once its suspension is on disk", async () => {
+    // Mutation: emit the request before `await this.persisted()` → a client sees an ask a crash would lose.
+    const store = new SpyStore();
+    const runs: string[] = [];
+    const durableAtEmit: unknown[] = [];
+    const updates: KnownSessionUpdateParams[] = [];
+    const r2 = rig(
+      [[call("c1", "run"), { type: "done" }], text("ok")],
+      () => [tool("run", "ask", runs)],
+      store,
+    );
+    const { hosted } = r2.host.open(
+      { create: true },
+      {
+        send: (u) => {
+          updates.push(u);
+          if (u.update.type === "permission_request") {
+            durableAtEmit.push(store.durable.get(u.sessionId)?.turn?.pending?.toolCallId);
+          }
+        },
+      },
+    );
+    await hosted.persisted();
+    store.hold = true;
+    hosted.prompt("T1", go);
+    await until(() => store.saves.some((s) => s.turn?.pending !== undefined));
+    await tick(10);
+    expect(updates.some((u) => u.update.type === "permission_request")).toBe(false);
+    store.hold = false;
+    store.release();
+    await until(() => durableAtEmit.length === 1);
+    expect(durableAtEmit).toEqual(["c1"]);
+  });
+
+  test("B3b a cancel while the ask is still being written: the ask was never shown, nothing is resolved", async () => {
+    // Mutation: emit `permission_resolved` for an ask nobody was shown → a resolution
+    // for an id no client ever received.
+    const store = new SpyStore();
+    const runs: string[] = [];
+    const r = rig([[call("c1", "run"), { type: "done" }]], () => [tool("run", "ask", runs)], store);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    await hosted.persisted();
+    store.hold = true;
+    hosted.prompt("T1", go);
+    await until(() => store.saves.some((s) => s.turn?.pending !== undefined));
+    hosted.cancel();
+    store.hold = false;
+    store.release();
+    await until(() => c.ended("T1"));
+    await tick(5);
+    const types = c.updates.map((u) => u.update.type);
+    expect(types).not.toContain("permission_request");
+    expect(types).not.toContain("permission_resolved");
+    expect(c.updates.find((u) => u.update.type === "turn_end")?.update).toMatchObject({
+      stopReason: "cancelled",
+    });
+    expect(runs).toEqual([]);
+  });
+
+  test("B3c a failed write before the ask: logged, and the request is shown anyway (no daemon decision)", async () => {
+    // Mutation: show the request only when its write succeeded → the turn waits on a
+    // request nobody can see, a decision made by a disk.
+    const store = new SpyStore();
+    const runs: string[] = [];
+    const r = rig(
+      [[call("c1", "run"), { type: "done" }], text("ok")],
+      () => [tool("run", "ask", runs)],
+      store,
+    );
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    await hosted.persisted();
+    store.fail = new Error("disk full");
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 1);
+    expect(r.errors.length).toBeGreaterThan(0);
+    store.fail = null;
+    c.allow(hosted);
+    await until(() => c.ended("T1"));
+    expect(runs).toEqual(["run:{}"]);
+  });
+
+  test("B8 a resumed turn whose key is missing still frees the slot when it ends (never held forever)", async () => {
+    // Mutation: drop `this.turns.set(resume.turnId, {})` → finishTurn finds no key and
+    // the session stays busy forever (no prompt, no compact, never reaped).
+    const runs: string[] = [];
+    const tools = () => [tool("look", "none", runs), tool("run", "ask", runs)];
+    const { record } = await suspendedOnC2(runs, tools);
+    const resume = reconcileOnReload(record).resume;
+    if (!resume) throw new Error("expected a resumable record");
+    const registry = new ToolRegistry();
+    for (const t of tools()) registry.register(t);
+    const permissions = new PermissionBroker();
+    const agent = new Agent({
+      model: new Scripted([]),
+      tools: registry,
+      env,
+      requestPermission: (req) => permissions.request(req),
+    });
+    const persister = new SessionPersister({
+      store: new SpyStore(),
+      cwd: CWD,
+      model: "m",
+      onError: () => {},
+    });
+    const hosted = new HostedSession(
+      record.id,
+      new Session(agent, record.id, { messages: record.messages }),
+      permissions,
+      undefined,
+      {},
+      undefined,
+      Date.now,
+      { persister, restored: { createdAt: 1, lastActiveAt: 1, turns: [], enqueueIds: [], resume } },
+    );
+    expect(hosted.running).toBe(true);
+    hosted.cancel();
+    await until(() => !hosted.running);
+    expect(runs).toEqual(["look:{}"]);
+  });
+
+  test("B4 a crash after an approval, mid-tool: reloaded as 'Interrupted' — never asked or run again", async () => {
+    // Mutation: drop the durable clear before the run → the mid-run record still says
+    // pending → the reload asks again and the tool can run twice.
+    const runs: string[] = [];
+    let unpark: () => void = () => {};
+    const parked = new Promise<void>((r) => {
+      unpark = r;
+    });
+    let midRun: DaemonSessionRecord | undefined;
+    const store = new SpyStore();
+    const tools = () => [
+      tool("run", "ask", runs, async () => {
+        midRun = store.durable.get([...store.durable.keys()][0] ?? "");
+        await parked;
+      }),
+    ];
+    const r = rig([[call("c1", "run"), { type: "done" }]], tools, store);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 1);
+    // A slow disk at the approval: the run must still wait for the clear.
+    store.hold = true;
+    c.allow(hosted);
+    await tick(5);
+    store.hold = false;
+    store.release();
+    await until(() => midRun !== undefined);
+    const restored = rig([], tools).host.restore(reread(midRun));
+    const c2 = client();
+    restored.attach(c2.attachment);
+    await tick(5);
+    expect(restored.running).toBe(false);
+    expect(c2.asks).toHaveLength(0);
+    expect(shape(restored.snapshotPage().messages).at(-1)).toBe(`tool(c1):${INTERRUPTED_NOTE}`);
+    expect(runs).toEqual(["run:{}"]);
+    unpark();
+  });
+
+  test("B5 a resumed turn cancelled before its re-ask: no write says 'pending' on an answered call", async () => {
+    // Mutation: drop the `pending` clear at history_commit → the commit after tool(c2) still says pending c2.
+    const runs: string[] = [];
+    const tools = () => [tool("look", "none", runs), tool("run", "ask", runs)];
+    const { record } = await suspendedOnC2(runs, tools);
+    const r2 = rig([], tools);
+    const restored = r2.host.restore(record);
+    const c = client();
+    restored.attach(c.attachment);
+    restored.cancel();
+    await until(() => !restored.running);
+    await restored.persisted();
+    expect(c.updates.some((u) => u.update.type === "permission_request")).toBe(false);
+    expect(c.updates.find((u) => u.update.type === "turn_end")?.update).toMatchObject({
+      turnId: "T1",
+      stopReason: "cancelled",
+    });
+    const answeredC2 = r2.store.saves.filter(
+      (s) => s.turn && s.messages.some((m) => m.role === "tool" && m.toolCallId === "c2"),
+    );
+    expect(answeredC2.length).toBeGreaterThan(0);
+    expect(answeredC2.map((s) => s.turn?.pending)).toEqual(answeredC2.map(() => undefined));
+    expect(shape(restored.snapshotPage().messages).slice(3)).toEqual([
+      "tool(c2):Cancelled by the user before this tool ran.",
+      "tool(c3):Cancelled by the user before this tool ran.",
+    ]);
+    // As in an uninterrupted turn, a steer still queued at a cancel is dropped
+    // (by design: docs/fix/steering-over-rpc.md — the user cancelled).
     expect(runs).toEqual(["look:{}"]);
     expect(r2.model.calls).toHaveLength(0);
-    expect(restored.running).toBe(false);
   });
 
   test("A4 a crash mid-tool (no pending) → 'Interrupted' for it, 'Not run' after; nothing re-runs", async () => {
@@ -469,27 +730,31 @@ describe("daemon persistence: what is written, when", () => {
 });
 
 describe("daemon persistence: after a restart", () => {
-  test("A8 a retried prompt{turnId} gets the cached restart end and never runs again", async () => {
+  test("A8 a retried prompt{turnId} of a turn closed by the restart gets its restart end, never runs again", async () => {
     // Mutation: do not persist `turns` → the retry starts a second turn (model called).
     const runs: string[] = [];
-    const tools = () => [tool("run", "ask", runs)];
-    const r = rig([[call("c1", "run"), { type: "done" }]], tools);
+    let unpark: () => void = () => {};
+    const parked = new Promise<void>((r) => {
+      unpark = r;
+    });
+    // Crashed mid-tool (not resumable): the restart closes the turn.
+    const tools = () => [tool("slow", "none", runs, () => parked)];
+    const r = rig([[call("c1", "slow"), { type: "done" }]], tools);
     const c = client();
     const { hosted } = r.host.open({ create: true }, c.attachment);
     hosted.prompt("T1", go);
-    await until(() => c.asks.length === 1);
+    await until(() => runs.length === 1);
+    hosted.enqueue("e1", "T1", "x");
     await hosted.persisted();
     const r2 = rig([text("should not run")], tools);
     const restored = r2.host.restore(reread(r.store.durable.get(hosted.id)));
+    expect(restored.running).toBe(false);
     expect(restored.prompt("T1", go)).toEqual({ turnId: "T1", ended: RESTART_TURN_END });
     expect(RESTART_TURN_END.error?.code).toBe(DomainErrorCode.DaemonRestarted);
     expect(r2.model.calls).toHaveLength(0);
     // An enqueue id seen before the restart stays a no-op success (never NoTurnRunning).
-    hosted.enqueue("e1", "T1", "x");
-    await hosted.persisted();
-    const r3 = rig([], tools);
-    const again = r3.host.restore(reread(r.store.durable.get(hosted.id)));
-    expect(() => again.enqueue("e1", "T1", "x")).not.toThrow();
+    expect(() => restored.enqueue("e1", "T1", "x")).not.toThrow();
+    unpark();
   });
 
   test("P8 a pre-restart `since` against the restored session → resync (new epoch)", async () => {
@@ -806,6 +1071,63 @@ describe("persisted-session (pure)", () => {
       }),
     );
     expect(shape(r.messages).at(-1)).toBe(`tool(c1):${INTERRUPTED_NOTE}`);
+  });
+
+  test("B6 reconcile resumes only its own call's suspension with an open turn key; else closes it", () => {
+    // Mutation: drop the turn-key check in resumableTurn → a turn with no (or an ended) key
+    // resumes, and its end could never be recorded (the slot held forever).
+    const pending = { toolCallId: "c2", tool: "run", resumable: true, requestedAt: 1 };
+    const messages: ChatMessage[] = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "c1", name: "look", arguments: "{}" },
+          { id: "c2", name: "run", arguments: "{}" },
+        ],
+      },
+      { role: "tool", content: "ok", toolCallId: "c1" },
+    ];
+    const record = (over: Partial<DaemonSessionRecord>) =>
+      base({
+        messages,
+        turns: [{ turnId: "T" }],
+        turn: { turnId: "T", steering: ["s1"], pending },
+        ...over,
+      });
+    const ok = reconcileOnReload(record({}));
+    expect(ok.resume).toEqual({ turnId: "T", toolCallId: "c2", steering: ["s1"], pending });
+    expect(ok.messages).toEqual(messages); // untouched: no notes, no steers appended
+    expect(ok.turns).toEqual([{ turnId: "T" }]);
+
+    const closed = (r: ReturnType<typeof reconcileOnReload>) => ({
+      resume: r.resume,
+      last: shape(r.messages).slice(-2),
+    });
+    const notRun = { resume: undefined, last: [`tool(c2):${NOT_RUN_NOTE}`, "user:s1"] };
+    expect(closed(reconcileOnReload(record({ turns: [] })))).toEqual(notRun);
+    expect(
+      closed(
+        reconcileOnReload(record({ turns: [{ turnId: "T", end: { stopReason: "end_turn" } }] })),
+      ),
+    ).toEqual(notRun);
+    // The asking tool is not the call's (a sub-agent shape recorded as resumable).
+    expect(
+      closed(
+        reconcileOnReload(
+          record({ turn: { turnId: "T", steering: ["s1"], pending: { ...pending, tool: "x" } } }),
+        ),
+      ),
+    ).toEqual(notRun);
+    // Not resumable (a sub-agent's): the D4 note, never resumed.
+    expect(
+      reconcileOnReload(
+        record({
+          turn: { turnId: "T", steering: [], pending: { ...pending, resumable: false } },
+        }),
+      ).resume,
+    ).toBeUndefined();
   });
 
   test("restoredActivity: idle → the recorded clock; mid-turn → now (keep it longer)", () => {

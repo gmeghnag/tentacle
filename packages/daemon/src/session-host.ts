@@ -127,11 +127,13 @@ export class SessionHost {
   }
 
   /**
-   * Reload a persisted session as a live, DETACHED, idle one (a `serve`
-   * restart): its history reconciled (`reconcileOnReload` — a turn cut short is
-   * closed honestly, nothing re-runs), its idempotency keys and TTL clock
-   * restored. Never refused by the limits (they only refuse NEW sessions,
-   * decision G) and never emits: nobody is attached, and the new incarnation's
+   * Reload a persisted session as a live, DETACHED one (a `serve` restart):
+   * its history reconciled (`reconcileOnReload`), its idempotency keys and TTL
+   * clock restored. A turn suspended on its own call's permission is RUNNING
+   * again — asked anew, streamed into the ring for whoever attaches
+   * (docs/feat/suspended-turn-resume.md); any other turn cut short is closed
+   * honestly and the session is idle (nothing re-runs). Never refused by the
+   * limits (they only refuse NEW sessions, decision G); the new incarnation's
    * epoch makes any returning client resync. Synchronous, like `open`.
    */
   restore(record: DaemonSessionRecord): HostedSession {
@@ -145,6 +147,7 @@ export class SessionHost {
       lastActiveAt,
       turns: reconciled.turns,
       enqueueIds: reconciled.enqueueIds,
+      ...(reconciled.resume ? { resume: reconciled.resume } : {}),
     });
     this.sessions.set(record.id, hosted);
     return hosted;

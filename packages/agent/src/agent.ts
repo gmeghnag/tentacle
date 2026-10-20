@@ -34,8 +34,31 @@ import { summarizeConversation } from "./compact.ts";
 import { EventQueue } from "./event-queue.ts";
 import { PermissionGate } from "./permission-gate.ts";
 import { type ResultTransform, applyResultTransforms } from "./result-pipeline.ts";
+import { suspendedCalls } from "./resume.ts";
 
 export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations";
+
+/**
+ * `runMessages` was asked to resume before a tool call the history is not
+ * suspended on (`suspendedCalls`). Thrown before anything is yielded, pushed or
+ * run: resuming a call that may have been RUNNING would repeat its effects.
+ */
+export class ResumeShapeError extends Error {
+  constructor(readonly toolCallId: string) {
+    super(`cannot resume: the history is not suspended before tool call ${toolCallId}`);
+    this.name = "ResumeShapeError";
+  }
+}
+
+export interface RunOptions {
+  /**
+   * Continue a turn suspended before this tool call (a daemon restart): run it
+   * and the rest of its round — each through the permission gate again — then
+   * the loop as usual. Explicit, never inferred from the history: only the
+   * caller's record knows the call never started.
+   */
+  readonly resumeFrom?: string;
+}
 
 /** Max consecutive empty-response auto-nudges before a stall ends the turn. */
 const MAX_EMPTY_CONTINUES = 2;
@@ -176,13 +199,24 @@ export class Agent {
    * `drainSteering`, when given, is polled at each iteration boundary; any
    * strings it returns are injected as user messages before the next model
    * round (interactive "steering" while a turn is already running).
+   *
+   * `opts.resumeFrom` resumes a suspended turn instead of starting with a model
+   * round (see `RunOptions`); a history not suspended there → `ResumeShapeError`.
    */
   async *runMessages(
     messages: ChatMessage[],
     sessionId: string,
     signal?: AbortSignal,
     drainSteering?: () => readonly string[],
+    opts: RunOptions = {},
   ): AsyncGenerator<AgentEvent> {
+    // Checked before anything runs or is yielded: a wrong resume point is a
+    // caller bug, never a reason to re-run a call.
+    const resumed =
+      opts.resumeFrom !== undefined ? suspendedCalls(messages, opts.resumeFrom) : null;
+    if (opts.resumeFrom !== undefined && resumed === null) {
+      throw new ResumeShapeError(opts.resumeFrom);
+    }
     // A negative limit means "unlimited" (the loop only ends on end_turn /
     // cancel / error); otherwise cap the number of model/tool rounds.
     const configured = this.config.maxIterations ?? 16;
@@ -198,8 +232,17 @@ export class Agent {
       ...(this.config.jobs ? { jobs: this.config.jobs } : {}),
     };
 
+    // A resumed turn first finishes its suspended round — exactly the calls an
+    // uninterrupted run would still have run, each asked again — so the round's
+    // results follow its assistant message with nothing in between.
+    if (resumed) {
+      yield* this.runToolCalls(resumed, messages, toolContext, signal);
+    }
+
     // Surface any background jobs that finished since the last turn: emit an
     // event for the frontend and inject a note so the model knows to react.
+    // (After a resumed round, never inside it: a note between an assistant's
+    // tool calls and their results is an invalid history.)
     for (const event of this.flushBackgroundExits(messages)) {
       yield event;
     }
@@ -322,47 +365,7 @@ export class Agent {
         return;
       }
 
-      for (const call of toolCalls) {
-        if (signal?.aborted) {
-          // The user cancelled while the previous tool ran (or before this one
-          // could start). It must not start — and must not prompt for
-          // permission either (`authorize` lives inside runTool). Answer it
-          // synthetically so the assistant's `toolCalls` stay valid in the
-          // history; the next iteration top ends the turn as cancelled.
-          messages.push({
-            role: "tool",
-            content: CANCELLED_TOOL_NOTE,
-            toolCallId: call.id,
-          });
-          yield {
-            type: "tool_result",
-            id: call.id,
-            name: call.name,
-            result: { content: CANCELLED_TOOL_NOTE, isError: true },
-          };
-          yield { type: "history_commit" };
-          continue;
-        }
-        yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
-        // Interleave the tool's live progress (e.g. a sub-agent's activity) into
-        // our own stream while it runs, then yield the final result.
-        const progress = new EventQueue<AgentEvent>();
-        const ctx: ToolContext = {
-          ...toolContext,
-          emitProgress: (event: ToolProgressEvent) =>
-            progress.push(progressToEvent(call.id, event)),
-        };
-        const resultPromise = this.runTool(call, ctx).finally(() => progress.close());
-        for await (const event of progress.drain()) {
-          yield event;
-        }
-        const raw = await resultPromise;
-        const result = await this.transformResult(call, raw, signal);
-        yield { type: "tool_result", id: call.id, name: call.name, result };
-        messages.push({ role: "tool", content: result.content, toolCallId: call.id });
-        // After the push, not before: the `tool_result` above precedes it.
-        yield { type: "history_commit" };
-      }
+      yield* this.runToolCalls(toolCalls, messages, toolContext, signal);
     }
 
     // The cap was hit. If the user cancelled while the last tool ran (after the
@@ -444,6 +447,61 @@ export class Agent {
     }
 
     yield { type: "turn_end", reason: "max_iterations" };
+  }
+
+  /**
+   * Run one round's tool calls in order: each is authorized and run, and its
+   * result pushed and committed before the next one starts — so a history
+   * suspended inside a call is always "earlier calls answered, this one and
+   * the later ones not" (`suspendedCalls`). A call reached after an abort is
+   * answered as cancelled without prompting, keeping the round answered.
+   */
+  private async *runToolCalls(
+    calls: readonly ToolCall[],
+    messages: ChatMessage[],
+    toolContext: ToolContext,
+    signal: AbortSignal | undefined,
+  ): AsyncGenerator<AgentEvent> {
+    for (const call of calls) {
+      if (signal?.aborted) {
+        // The user cancelled while the previous tool ran (or before this one
+        // could start). It must not start — and must not prompt for
+        // permission either (`authorize` lives inside runTool). Answer it
+        // synthetically so the assistant's `toolCalls` stay valid in the
+        // history; the next iteration top ends the turn as cancelled.
+        messages.push({
+          role: "tool",
+          content: CANCELLED_TOOL_NOTE,
+          toolCallId: call.id,
+        });
+        yield {
+          type: "tool_result",
+          id: call.id,
+          name: call.name,
+          result: { content: CANCELLED_TOOL_NOTE, isError: true },
+        };
+        yield { type: "history_commit" };
+        continue;
+      }
+      yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
+      // Interleave the tool's live progress (e.g. a sub-agent's activity) into
+      // our own stream while it runs, then yield the final result.
+      const progress = new EventQueue<AgentEvent>();
+      const ctx: ToolContext = {
+        ...toolContext,
+        emitProgress: (event: ToolProgressEvent) => progress.push(progressToEvent(call.id, event)),
+      };
+      const resultPromise = this.runTool(call, ctx).finally(() => progress.close());
+      for await (const event of progress.drain()) {
+        yield event;
+      }
+      const raw = await resultPromise;
+      const result = await this.transformResult(call, raw, signal);
+      yield { type: "tool_result", id: call.id, name: call.name, result };
+      messages.push({ role: "tool", content: result.content, toolCallId: call.id });
+      // After the push, not before: the `tool_result` above precedes it.
+      yield { type: "history_commit" };
+    }
   }
 
   /**

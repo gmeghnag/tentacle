@@ -449,7 +449,7 @@ Convergent corrections (two or more children independently):
 - **A — replay as notifications inside `open`** (registry, client-reattach). See point 2.
 - **B — `turn_start{turnId, prompt}`** carries the prompt text: today the user prompt never appears in the stream (event-stream, client-reattach).
 - **C — projected-transcript property** (event-stream, client-reattach). See the property section.
-- **D — restart rebuild of a suspended turn is its own task** after `permission-events`: `docs/eval/suspended-turn-resume.md` (persistence Part B + permission slice 7b). Until it lands, a turn suspended across a restart is closed honestly as "not executed", never as a denial nobody gave.
+- **D — restart rebuild of a suspended turn is its own task** after `permission-events`: `docs/feat/suspended-turn-resume.md` (persistence Part B + permission slice 7b). Until it lands, a turn suspended across a restart is closed honestly as "not executed", never as a denial nobody gave.
 - **E — per-frame class + required `seq` + catch-all** (event-stream, client-reattach, schema-export). See point 14.
 - **F — `closeOnBackpressureLimit`** in `session-registry` (Bun drops frames silently on a non-reading client and keeps the socket open).
 - **G — limits only refuse new work, never close** an existing session (ttl-limits). Point 10's "ends by … a daemon-wide limit" is superseded.
@@ -490,7 +490,7 @@ to promotion time (each child gets its mandatory fresh-context Review then).
 | 5b | `docs/fix/session-store-durability.md` — prerequisite of 6 (D8) | see doc | — |
 | 6 | `docs/feat/daemon-side-persistence.md` Part A — `serve` persists history; a turn suspended at restart is closed "not executed" | M · load-bearing | 4, 5b |
 | 7a | `docs/feat/permission-events.md` (live slice) — permissions as events, nonce, first-wins, no timeout, cancel settles | L · load-bearing | 4 |
-| 7b | `docs/eval/suspended-turn-resume.md` — rebuild a suspended turn after a `serve` restart | M · load-bearing | 6, 7a |
+| 7b | `docs/feat/suspended-turn-resume.md` — rebuild a suspended turn after a `serve` restart | M · load-bearing | 6, 7a |
 | 8a | `docs/eval/client-reattach.md` — `RemoteClient` reconnect, pure reducer, the property test | M · load-bearing | 3c, 4, 7a |
 | 8b | `docs/eval/client-reattach-frontends.md` — connect/attach/run wiring, `StatusBar`, pod-attach Layer 2 | M · load-bearing | 8a |
 | — | `docs/eval/attachments.md` (sister) — 4 sub-tasks; the first is independent | 4 × S–M · load-bearing | 3a (sub-tasks 2–4) |

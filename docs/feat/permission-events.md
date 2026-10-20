@@ -1,6 +1,6 @@
 # feat/permission-events — permission requests as session state, answered by any attached client
 
-> **Status:** DONE — merged to `main` 2026-10-20 (one fresh-context Review: REQUEST-CHANGES, findings 1–5 fixed; no second Review by owner's choice). Scope: slice 7a only; 7b lives in `docs/eval/suspended-turn-resume.md` (owner decision D)
+> **Status:** DONE — merged to `main` 2026-10-20 (one fresh-context Review: REQUEST-CHANGES, findings 1–5 fixed; no second Review by owner's choice). Scope: slice 7a only; 7b lives in `docs/feat/suspended-turn-resume.md` (owner decision D)
 > **Branch:** `feat/permission-events`
 > **Type:** feat · **Size:** L (7a: many small edits across 8 packages) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (single-broker + pod-trust invariants, AGENTS §7)
 
@@ -32,7 +32,7 @@ The draft below was written on `4914e9b`, before wire classes, turn events,
 the history cut, the registry, TTL/limits and daemon-side persistence Part A
 landed. This revision re-verifies it against the code as built. **Where it
 disagrees with the draft, this revision wins**; the draft's "Slice 7b"
-sub-sections are the source for `docs/eval/suspended-turn-resume.md` and are
+sub-sections are the source for `docs/feat/suspended-turn-resume.md` and are
 not built here.
 
 #### Load-bearing assumption (re-proved)

@@ -174,8 +174,10 @@ assume.
   copy wins. Pod daemons (`serve --stdio`, `run`/`attach`) and the in-process
   worker never persist — only `startDaemon` gives `SessionHost` a persister. A
   daemon write inside a turn is `SessionPersister.schedule` (synchronous
-  capture, never awaited) — the steering window. Design:
-  `docs/feat/daemon-side-persistence.md`.
+  capture, never awaited) — the steering window. On reload a turn suspended
+  on its own call's permission runs again and is re-asked (pending on disk ⇒
+  never started); any other turn cut short is closed honestly. Design:
+  `docs/feat/daemon-side-persistence.md`, `docs/feat/suspended-turn-resume.md`.
 - **Model stays on the laptop (pod reverse-tunnel).** A pod reaches the model
   THROUGH us (`model/stream` over RPC, `ProxyModelProvider`): the daemon is given
   the LOCAL provider so the endpoint + API key never leave the laptop. Never put

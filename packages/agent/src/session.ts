@@ -76,6 +76,25 @@ export class Session {
   }
 
   /**
+   * Continue the turn the history is suspended in, before tool call
+   * `toolCallId` (a `serve` restart rebuilt it): that call and the rest of its
+   * round go through the permission gate again, then the loop goes on as
+   * usual. Unlike `send`, it appends nothing and KEEPS the steering queue —
+   * the caller seeds it (`enqueue`) with the steers the suspended turn had
+   * accepted. A history not suspended there rejects (`ResumeShapeError`)
+   * before anything runs.
+   */
+  async *resume(toolCallId: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
+    try {
+      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
+        resumeFrom: toolCallId,
+      });
+    } finally {
+      this.persist();
+    }
+  }
+
+  /**
    * Queue a user message to be injected into the turn currently running, at the
    * next model-round boundary ("steering"). A no-op shape when nothing is
    * running — the message simply waits in the queue until the next `send`.

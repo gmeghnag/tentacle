@@ -37,7 +37,7 @@
  * Sound because the history is append-only past any cut within an epoch (the
  * agent's one `pop` is never behind a marker; compaction starts a new epoch).
  */
-import type { Session } from "@tentacle/agent";
+import type { AgentEvent, Session } from "@tentacle/agent";
 import type {
   JobController,
   PermissionBroker,
@@ -68,6 +68,7 @@ import {
   type DaemonSessionState,
   type PendingPermission,
   type PersistedTurnKey,
+  type ResumedTurn,
   classifyPending,
 } from "./persisted-session.ts";
 import { SessionRing } from "./ring.ts";
@@ -85,6 +86,8 @@ export interface Attachment {
 /** A permission request waiting for its first answer (keyed by its nonce). */
 interface PendingAsk {
   readonly offered: ReadonlySet<string>;
+  /** Streamed to the clients yet (only once its record is durable). */
+  shown: boolean;
   /** Resolve the gate's wait with this outcome (detaches the abort listener). */
   readonly settle: (outcome: PermissionOutcome) => void;
 }
@@ -115,6 +118,8 @@ export interface RestoredSessionState {
   readonly lastActiveAt: number;
   readonly turns: readonly PersistedTurnKey[];
   readonly enqueueIds: readonly string[];
+  /** A turn suspended on a permission at the restart: it runs again (re-asked). */
+  readonly resume?: ResumedTurn;
 }
 
 /**
@@ -214,13 +219,17 @@ export class HostedSession {
     this.jobs = jobs;
     this.errorPolicy = errorPolicy;
     this.ring = new SessionRing(ringBytes);
+    const resume = restored?.resume;
     // A fresh epoch per incarnation (decision D1): a `since` from a previous
     // session under the same id never matches. The seed (resume) is covered.
+    // A resumed turn is running AT the cut: its prompt is already in the
+    // history, so it streams no `turn_start` (a replay would show the prompt
+    // twice) — the snapshot's `turn` says it is running.
     this.cut = {
       epoch: crypto.randomUUID(),
       seq: 0,
       length: session.messages.length,
-      turnId: null,
+      turnId: resume?.turnId ?? null,
     };
     // The agent's permission gate asks here (the factory's broker, replaced
     // synchronously before any turn can run): the turn suspends until a client
@@ -239,17 +248,40 @@ export class HostedSession {
         exitCode: job.exitCode,
       });
     });
+    // A turn suspended at the restart is running again (it holds the slot)
+    // BEFORE the first write below, with its steers queued and its old pending
+    // entry kept: that write must still read "suspended on this call" — never
+    // "idle" over a history with unanswered calls, never "in flight".
+    if (resume) {
+      for (const text of resume.steering) {
+        session.enqueue(text);
+      }
+      this.controller = new AbortController();
+      this.activeTurnId = resume.turnId;
+      this.turns.set(resume.turnId, {});
+      this.pending = resume.pending;
+    }
     // On disk from the start: a session seeded by `open{messages}` (or one
     // just reloaded and reconciled) survives a restart before its next turn.
     this.persist();
+    // Last: every field is set. The call is asked again through the normal
+    // requester (a new request id); no state holds the slot without a driver.
+    if (resume && this.controller) {
+      void this.drive(
+        resume.turnId,
+        session.resume(resume.toolCallId, this.controller.signal),
+        this.controller,
+      );
+    }
   }
 
   /**
    * Suspend the asking tool call until the first of: a valid answer
    * (`resolvePermission`) or the turn's abort (`cancelled`). Persisted
-   * (serve): the suspension is captured BEFORE the request is streamed, and
+   * (serve): the suspension is DURABLE before the request is streamed — a
+   * request a person saw survives a restart (the reload asks it again) — and
    * cleared durably once it settles, BEFORE the gate may run the tool — so
-   * "pending" on disk always means "never started" (reload: "Not run").
+   * "pending" on disk always means "never started" (never run twice).
    */
   private awaitDecision(req: PermissionRequest): Promise<PermissionResponse> {
     const signal = this.compacting ? undefined : this.controller?.signal;
@@ -276,6 +308,7 @@ export class HostedSession {
       const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
       this.asks.set(requestId, {
         offered: new Set(update.options.map((o) => o.optionId)),
+        shown: false,
         settle: (outcome) => {
           signal.removeEventListener("abort", onAbort);
           resolve(outcome);
@@ -285,7 +318,21 @@ export class HostedSession {
     });
     this.pending = record;
     this.persist();
-    this.emit(update);
+    // Shown once on disk (`persisted` never rejects: a failed write is logged
+    // and the request is shown anyway — the daemon decides nothing itself). An
+    // ask settled meanwhile (a cancel) was never seen: nothing is streamed.
+    void this.persisted().then(() => {
+      const ask = this.asks.get(requestId);
+      if (!ask) {
+        return;
+      }
+      ask.shown = true;
+      try {
+        this.emit(update);
+      } catch (error) {
+        this.reportTurnError(error);
+      }
+    });
     return decided.then(async (outcome) => {
       if (this.pending === record) {
         this.pending = undefined;
@@ -327,7 +374,10 @@ export class HostedSession {
     }
     this.asks.delete(requestId);
     try {
-      this.emit({ type: "permission_resolved", requestId, outcome });
+      // A request nobody was shown is not resolved in the stream either.
+      if (ask.shown) {
+        this.emit({ type: "permission_resolved", requestId, outcome });
+      }
     } finally {
       ask.settle(outcome);
     }
@@ -342,7 +392,8 @@ export class HostedSession {
 
   /**
    * Resolves once everything this session wrote so far is on disk (or failed,
-   * which the persister reports). Immediate without a persister. Never in a turn.
+   * which the persister reports). Immediate without a persister. Never awaited
+   * in the steering window (only mid-round, inside the gate, and by `enqueue`).
    */
   persisted(): Promise<void> {
     return this.persister ? this.persister.flush(this.id) : Promise.resolve();
@@ -573,7 +624,7 @@ export class HostedSession {
       // as "running" forever — run it anyway; it ends through `finishTurn`.
       this.reportTurnError(error);
     }
-    void this.drive(turnId, text, controller);
+    void this.drive(turnId, this.session.send(text, controller.signal), controller);
     // After `drive` started: the generator has pushed the prompt by now (it
     // runs up to its first await inside the first `next()`), so the turn key
     // and the prompt are on disk together, before the model is called.
@@ -606,15 +657,23 @@ export class HostedSession {
    * drain and the turn's end"; a microtask-only `await` would not be caught by
    * it, so keep this loop free of any.
    */
-  private async drive(turnId: string, text: string, controller: AbortController): Promise<void> {
+  private async drive(
+    turnId: string,
+    events: AsyncGenerator<AgentEvent>,
+    controller: AbortController,
+  ): Promise<void> {
     try {
-      for await (const event of this.session.send(text, controller.signal)) {
+      for await (const event of events) {
         if (event.type === "turn_end") {
           this.finishTurn(turnId, { stopReason: stopReasonToProtocol(event.reason) });
           return;
         }
         // The history reflects every update so far: the snapshot cut moves here.
         if (event.type === "history_commit") {
+          // No ask can be pending at a commit (the agent commits only between
+          // calls): one still set is a resumed turn's, whose call was answered
+          // without being asked again (cancelled) — never write it as pending.
+          this.pending = undefined;
           this.recordCut(turnId);
           this.persist();
           continue;

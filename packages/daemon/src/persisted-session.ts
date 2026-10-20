@@ -6,7 +6,7 @@
  * Only `serve` persists (its host is the user's own machine). A pod daemon
  * never does: a record it wrote would be pod-supplied history (AGENTS §7).
  */
-import type { SessionRecord } from "@tentacle/agent";
+import { type SessionRecord, suspendedCalls } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
 import { DomainErrorCode, type TurnEnd } from "@tentacle/protocol";
 
@@ -184,11 +184,11 @@ export function parseDaemonRecord(
 
 /**
  * Whether a permission request raised while call `currentToolCallId` runs is
- * that call's own (resumable, Part B) rather than a sub-agent's inside it. True
- * iff the tool matches the current call AND the history is exactly "waiting on
- * this call": it is in the last assistant message, every call before it is
- * answered, it is not. A sub-agent's request fails the first check — the
- * parent's current call is `agent_task`, which never asks itself (P7).
+ * that call's own (resumable after a restart) rather than a sub-agent's inside
+ * it. True iff the tool matches the current call AND the history is exactly
+ * suspended before this call (`suspendedCalls` — the same definition the
+ * reload and the agent's resume use). A sub-agent's request fails the first
+ * check — the parent's current call is `agent_task`, which never asks itself (P7).
  */
 export function classifyPending(
   messages: readonly ChatMessage[],
@@ -196,18 +196,7 @@ export function classifyPending(
   currentToolName: string,
   requestTool: string,
 ): boolean {
-  if (requestTool !== currentToolName) {
-    return false;
-  }
-  const trailing = trailingCalls(messages);
-  if (!trailing) {
-    return false;
-  }
-  const index = trailing.calls.findIndex((c) => c.id === currentToolCallId);
-  if (index < 0 || trailing.answered.has(currentToolCallId)) {
-    return false;
-  }
-  return trailing.calls.slice(0, index).every((c) => trailing.answered.has(c.id));
+  return requestTool === currentToolName && suspendedCalls(messages, currentToolCallId) !== null;
 }
 
 /** The last assistant message's tool calls and which of them have an answer after it. */
@@ -246,16 +235,52 @@ export const RESTART_TURN_END: TurnEnd = {
   },
 };
 
+/** A turn the reload continues: suspended on its own call's permission (`reconcileOnReload`). */
+export interface ResumedTurn {
+  readonly turnId: string;
+  /** The call it waits on: asked again, then it and the rest of its round run. */
+  readonly toolCallId: string;
+  /** Accepted, not yet drained — re-queued, drained where they would have been. */
+  readonly steering: readonly string[];
+  /** The record's pending entry, kept until the re-ask replaces it. */
+  readonly pending: PendingPermission;
+}
+
 export interface Reconciled {
   readonly messages: ChatMessage[];
   readonly turns: readonly PersistedTurnKey[];
   readonly enqueueIds: readonly string[];
+  /** Present iff the turn is continued instead of closed (the history is then untouched). */
+  readonly resume?: ResumedTurn;
 }
 
 /**
- * Turn a record into the idle session it reloads as. Without `turn` it is
- * used as is. With one (the daemon died mid-turn), the session is closed
- * honestly — nothing is re-run and nothing is denied on the user's behalf:
+ * The turn of `record` that can be continued, if any: suspended on a
+ * permission of its OWN call (not a sub-agent's, D4), the history exactly
+ * suspended before that call, the call the one that asked, and the turn's key
+ * still open. Anything else is closed honestly instead.
+ */
+function resumableTurn(record: DaemonSessionRecord): ResumedTurn | undefined {
+  const turn = record.turn;
+  const pending = turn?.pending;
+  if (!turn || !pending?.resumable) {
+    return undefined;
+  }
+  const calls = suspendedCalls(record.messages, pending.toolCallId);
+  const key = record.turns.find((k) => k.turnId === turn.turnId);
+  if (!calls || calls[0]?.name !== pending.tool || !key || key.end) {
+    return undefined;
+  }
+  return { turnId: turn.turnId, toolCallId: pending.toolCallId, steering: turn.steering, pending };
+}
+
+/**
+ * Turn a record into the session it reloads as. Without `turn` it is used as
+ * is. A turn suspended on its own call's permission (`resumableTurn`) is
+ * CONTINUED: the history is untouched and the turn is asked again
+ * (docs/feat/suspended-turn-resume.md). Any other turn (the daemon died
+ * mid-turn) is closed honestly — nothing is re-run and nothing is denied on
+ * the user's behalf:
  * every unanswered call of the trailing assistant message gets a synthetic
  * answer (which one: see the notes above; only the FIRST unanswered call can
  * have started — calls run in order), the steering queue is kept as user
@@ -266,6 +291,10 @@ export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
   const turn = record.turn;
   if (!turn) {
     return { messages, turns: record.turns, enqueueIds: record.enqueueIds };
+  }
+  const resume = resumableTurn(record);
+  if (resume) {
+    return { messages, turns: record.turns, enqueueIds: record.enqueueIds, resume };
   }
   const trailing = trailingCalls(messages);
   if (trailing) {

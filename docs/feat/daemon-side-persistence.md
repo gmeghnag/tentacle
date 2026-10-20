@@ -1,6 +1,6 @@
 # feat/daemon-side-persistence — `serve` persists session history on its own host
 
-> **Status:** DONE — merged to `main` 2026-10-20 (one fresh-context review: REQUEST-CHANGES, findings 1–8 addressed, not re-reviewed by owner choice). Part A only; Part B lives in `docs/eval/suspended-turn-resume.md`
+> **Status:** DONE — merged to `main` 2026-10-20 (one fresh-context review: REQUEST-CHANGES, findings 1–8 addressed, not re-reviewed by owner choice). Part A only; Part B lives in `docs/feat/suspended-turn-resume.md`
 > **Branch:** `feat/daemon-side-persistence`
 > **Type:** feat · **Size:** M (Part A) · **Blast:** load-bearing (persistence + pod-trust invariants, steering window, AGENTS §7 rule change) · **Suited:** strong model executes; mandatory fresh-context Review
 
@@ -37,7 +37,7 @@ prerequisites landed (wire classes, turn events, history cut, registry,
 TTL/limits, compact guard, store durability). This revision re-verifies it
 against the code as built. **Where it disagrees with the draft, this revision
 wins.** The [B] items of the draft stay where they are as the source for
-`docs/eval/suspended-turn-resume.md`.
+`docs/feat/suspended-turn-resume.md`.
 
 #### Load-bearing assumption
 
@@ -348,7 +348,7 @@ redesign it.
      Part B.
 
    Part B is fully planned below (marked **[B]**), so the split is only a doc
-   move: an executor creates `docs/eval/suspended-turn-resume.md` from the [B]
+   move: an executor creates `docs/eval/suspended-turn-resume.md` (promoted 2026-10-20: `docs/feat/suspended-turn-resume.md`) from the [B]
    items. *Alternative:* keep one task. It is then **L** (agent + daemon + cli
    + AGENTS.md, two packages of tests) and must move after `permission-events`.
    That works too, but it delays the store, which `permission-events` does not
