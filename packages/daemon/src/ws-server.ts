@@ -27,8 +27,13 @@ export interface WsServerOptions {
   readonly onAudit?: (line: string) => void;
   /** Auto-deny a permission request a client leaves unanswered this long (ms). */
   readonly permissionTimeoutMs?: number;
-  /** Max sessions one connection may have open before `session/open` is refused. */
-  readonly maxSessions?: number;
+  /**
+   * Close a socket silent for this long (seconds, 1–960; default 60). Pings are
+   * always on, so a healthy client's pong keeps it open however idle; a dead or
+   * frozen peer is closed → its `Connection` detaches → the session's idle TTL
+   * starts. Bun checks every 4 s: a silent peer goes at the first tick past it.
+   */
+  readonly idleTimeoutSec?: number;
   /** Max inbound frame size (bytes) accepted before parsing. */
   readonly maxFrameBytes?: number;
   /**
@@ -48,9 +53,34 @@ export interface WsServerOptions {
 // Conservative per-connection defaults; a never-answering or abusive client is
 // bounded without getting in a real client's way. All overridable per server.
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 min to answer a prompt
-const DEFAULT_MAX_SESSIONS = 64;
+export const DEFAULT_WS_IDLE_TIMEOUT_SEC = 60;
 const DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024; // 8 MiB
 const DEFAULT_BACKPRESSURE_LIMIT = 16 * 1024 * 1024; // Bun's own default
+
+/**
+ * The socket-level options handed to `Bun.serve`'s `websocket` — pure, so the
+ * keepalive/backpressure contract is pinned without a real socket.
+ */
+export function socketOptions(
+  options: Pick<WsServerOptions, "backpressureLimit" | "idleTimeoutSec">,
+): {
+  backpressureLimit: number;
+  closeOnBackpressureLimit: true;
+  idleTimeout: number;
+  sendPings: true;
+} {
+  return {
+    // A client that stops reading (a frozen phone) must not get a silent gap
+    // (Bun drops past the limit) nor stall the others (`send` never blocks):
+    // close it → `Connection.close()` detaches → it resyncs when it returns.
+    backpressureLimit: options.backpressureLimit ?? DEFAULT_BACKPRESSURE_LIMIT,
+    closeOnBackpressureLimit: true,
+    // Explicit, not Bun's defaults (120 s, pings on): pings are what keep an
+    // idle healthy client attached — with them off it would be closed too.
+    idleTimeout: options.idleTimeoutSec ?? DEFAULT_WS_IDLE_TIMEOUT_SEC,
+    sendPings: true,
+  };
+}
 
 export interface RunningServer {
   readonly url: string;
@@ -187,11 +217,7 @@ export function startWsServer(options: WsServerOptions): RunningServer {
       return new Response("expected a websocket upgrade", { status: 426 });
     },
     websocket: {
-      // A client that stops reading (a frozen phone) must not get a silent gap
-      // (Bun drops past the limit) nor stall the others (`send` never blocks):
-      // close it → `Connection.close()` detaches → it resyncs when it returns.
-      backpressureLimit: options.backpressureLimit ?? DEFAULT_BACKPRESSURE_LIMIT,
-      closeOnBackpressureLimit: true,
+      ...socketOptions(options),
       open(ws) {
         const channel = new WsChannel(ws);
         ws.data.channel = channel;
@@ -199,7 +225,6 @@ export function startWsServer(options: WsServerOptions): RunningServer {
           ws,
           new Connection(channel, options.sessionHost, options.onError, {
             permissionTimeoutMs: options.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS,
-            maxSessions: options.maxSessions ?? DEFAULT_MAX_SESSIONS,
             maxFrameBytes: options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
           }),
         );

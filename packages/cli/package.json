@@ -22,5 +22,8 @@
     "@tentacle/tools": "workspace:*",
     "@tentacle/transport": "workspace:*",
     "@tentacle/tui": "workspace:*"
+  },
+  "devDependencies": {
+    "@tentacle/protocol": "workspace:*"
   }
 }

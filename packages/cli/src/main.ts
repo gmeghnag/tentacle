@@ -29,7 +29,7 @@ import { connectMcpServers } from "@tentacle/mcp";
 import { type SessionController, startTui } from "@tentacle/tui";
 import { type TentacleConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
-import { parseFlags, resolveToken } from "./flags.ts";
+import { type ServeLimits, parseFlags, parseServeLimits, resolveToken } from "./flags.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
 import { startAttachRuntime, startPodRuntime } from "./pod-runtime.ts";
 import { render } from "./render.ts";
@@ -71,6 +71,8 @@ Usage:
 Remote control:
   tentacle serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
                       [--tls-cert FILE --tls-key FILE]
+                      [--session-ttl 24h] [--session-admin-cap DUR] [--max-sessions 64]
+                      [--max-detached-sessions 16] [--ws-idle-timeout 60s]
   tentacle connect ws(s)://host:port [--token T|--token-command CMD]
   A non-loopback --host requires a token (remote code execution risk).
   Token env fallback: TENTACLE_REMOTE_TOKEN.
@@ -205,7 +207,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       }
     }
     let token: string | undefined;
+    let limits: ServeLimits;
     try {
+      limits = parseServeLimits({ flags, bools });
       token = await resolveToken(flags);
     } catch (error) {
       write(`\n[serve error] ${error instanceof Error ? error.message : String(error)}\n`);
@@ -221,6 +225,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         : undefined;
     try {
       const server = startDaemon(config, {
+        ...limits,
         host,
         port,
         ...(token ? { token } : {}),

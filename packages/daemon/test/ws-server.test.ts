@@ -5,7 +5,13 @@ import { type ChatRequest, PermissionBroker, type StreamEvent } from "@tentacle/
 import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { SessionHost } from "../src/session-host.ts";
-import { isLoopbackHost, originAllowed, startWsServer, tokensMatch } from "../src/ws-server.ts";
+import {
+  isLoopbackHost,
+  originAllowed,
+  socketOptions,
+  startWsServer,
+  tokensMatch,
+} from "../src/ws-server.ts";
 
 const dummyHost = new SessionHost({
   defaultCwd: "/tmp",
@@ -244,4 +250,130 @@ describe("startWsServer backpressure (a client that stops reading)", () => {
       server.stop();
     }
   }, 20_000);
+});
+
+describe("socketOptions (the keepalive/backpressure contract, always on)", () => {
+  test("pings always on, idle timeout 60 s by default, backpressure closes", () => {
+    // Mutation: `sendPings: false` or no `idleTimeout` → red here, without the slow test.
+    expect(socketOptions({})).toEqual({
+      backpressureLimit: 16 * 1024 * 1024,
+      closeOnBackpressureLimit: true,
+      idleTimeout: 60,
+      sendPings: true,
+    });
+    expect(socketOptions({ idleTimeoutSec: 5, backpressureLimit: 1024 })).toMatchObject({
+      idleTimeout: 5,
+      backpressureLimit: 1024,
+    });
+  });
+});
+
+// Opt-in (~12 s): set TENTACLE_SLOW_TESTS=1. It proves what `socketOptions`
+// cannot — that Bun really behaves that way on this version.
+const SLOW = process.env.TENTACLE_SLOW_TESTS === "1";
+
+describe("startWsServer keepalive (opt-in: set TENTACLE_SLOW_TESTS=1)", () => {
+  // Bun's timers are native (uWS, 4 s ticks), so this is a real-socket test:
+  // with `idleTimeoutSec: 1` a silent peer goes at ~8 s. Mutations: `sendPings:
+  // false` → the healthy client is closed too; no `idleTimeout` → Bun's 120 s
+  // default keeps the silent peer past the window.
+  test.skipIf(!SLOW)(
+    "a silent peer is closed and detached (TTL starts); an idle healthy client stays open",
+    async () => {
+      const host = new SessionHost({
+        defaultCwd: "/tmp",
+        createAgent: () => {
+          const agent = new Agent({
+            model: {
+              id: "unused",
+              async *stream(_r: ChatRequest): AsyncIterable<StreamEvent> {
+                yield { type: "done" };
+              },
+            },
+            tools: new ToolRegistry(),
+            env: {
+              id: "noop",
+              exec: () => Promise.reject(new Error("unused")),
+              readFile: () => Promise.reject(new Error("unused")),
+              writeFile: () => Promise.reject(new Error("unused")),
+            },
+          });
+          return { agent, permissions: new PermissionBroker() };
+        },
+      });
+      const audit: string[] = [];
+      const server = startWsServer({
+        host: "127.0.0.1",
+        port: 0,
+        sessionHost: host,
+        idleTimeoutSec: 1,
+        onAudit: (line) => audit.push(line),
+      });
+      const until = (cond: () => boolean, ms: number): Promise<void> =>
+        new Promise((resolve, reject) => {
+          const deadline = Date.now() + ms;
+          const poll = (): void => {
+            if (cond()) resolve();
+            else if (Date.now() > deadline) reject(new Error(`timed out: ${String(cond)}`));
+            else setTimeout(poll, 20);
+          };
+          poll();
+        });
+      const healthy = new WebSocket(server.url);
+      let healthyClosed = false;
+      healthy.onclose = () => {
+        healthyClosed = true;
+      };
+      // Silent: completes the upgrade, opens a session, then never answers a ping.
+      const healthyOpen = new Promise<void>((resolve) => {
+        healthy.onopen = () => resolve();
+      });
+      const sock = connect(server.port, "127.0.0.1");
+      const sockOpen = new Promise<void>((resolve) => sock.once("connect", () => resolve()));
+      sock.on("data", () => {});
+      try {
+        await healthyOpen;
+        await sockOpen;
+        sock.write(
+          "GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        );
+        const init = { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { streaming: true } };
+        sock.write(
+          clientFrame(
+            JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: init }),
+          ),
+        );
+        sock.write(
+          clientFrame(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 2,
+              method: "session/open",
+              params: { sessionId: "S", create: true },
+            }),
+          ),
+        );
+        await until(() => host.get("S")?.attachedCount === 1, 2000);
+        const opened = Date.now();
+
+        await until(() => audit.includes("connection-close"), 12_000);
+        expect(Date.now() - opened).toBeLessThan(12_000);
+        // Detached by the close → idle, so the reaper's clock is running.
+        const liveness = host.get("S")?.liveness();
+        expect(liveness).toMatchObject({ attached: 0, busy: false });
+
+        // The healthy client outlives another full ping cycle.
+        await new Promise((r) => setTimeout(r, 4500));
+        expect(healthyClosed).toBe(false);
+        expect(healthy.readyState).toBe(WebSocket.OPEN);
+        expect(audit.filter((l) => l === "connection-close")).toHaveLength(1);
+      } finally {
+        healthy.close();
+        sock.destroy();
+        server.stop();
+      }
+    },
+    25_000,
+  );
 });

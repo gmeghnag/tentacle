@@ -486,7 +486,7 @@ to promotion time (each child gets its mandatory fresh-context Review then).
 | 3b | same doc §3b — `turn_start{prompt}`/`turn_end`, prompt ack, idempotency, turn driver | M · load-bearing | 3a |
 | 3c | same doc §3c — ring, `history_commit` cut, `history_replaced` barrier, paged snapshot | M · load-bearing | 3b, 2b |
 | 4 | `docs/eval/session-registry.md` — registry, `open{since}` (replay as notifications), `close`, detach-on-close, fan-out, backpressure close, model-proxy rule | M (near L) · load-bearing | 1, 3c |
-| 5 | `docs/eval/session-ttl-limits.md` — 24 h reaper, daemon-wide limits (refuse only), server keepalive | M · load-bearing | 4 |
+| 5 | `docs/feat/session-ttl-limits.md` — 24 h reaper, daemon-wide limits (refuse only), server keepalive | M · load-bearing | 4 |
 | 5b | `docs/eval/session-store-durability.md` — prerequisite of 6 (D8) | see doc | — |
 | 6 | `docs/eval/daemon-side-persistence.md` Part A — `serve` persists history; a turn suspended at restart is closed "not executed" | M · load-bearing | 4, 5b |
 | 7a | `docs/eval/permission-events.md` (live slice) — permissions as events, nonce, first-wins, no timeout, cancel settles | L · load-bearing | 4 |

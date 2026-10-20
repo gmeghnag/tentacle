@@ -50,6 +50,7 @@ import {
 } from "./mapping.ts";
 import { outcomeToResponse, toRequestPermissionParams } from "./permission-map.ts";
 import { SessionRing } from "./ring.ts";
+import type { SessionLiveness } from "./session-reaper.ts";
 
 /** Receives each streamed `session/update` (one per emitted update). Synchronous; never awaited. */
 export type UpdateSink = (params: KnownSessionUpdateParams) => void;
@@ -130,6 +131,10 @@ export class HostedSession {
   private closed = false;
   private readonly jobs: JobController | undefined;
   private readonly unsubscribeExit: (() => void) | undefined;
+  private readonly now: () => number;
+  /** Liveness stamps for the reaper (meaning: `SessionLiveness`). */
+  private lastActiveAt: number;
+  private lastDetachAt: number;
 
   constructor(
     id: string,
@@ -138,8 +143,12 @@ export class HostedSession {
     jobs?: JobController,
     errorPolicy: TurnErrorPolicy = {},
     ringBytes: number = DEFAULT_RING_BYTES,
+    now: () => number = Date.now,
   ) {
     this.id = id;
+    this.now = now;
+    this.lastActiveAt = now();
+    this.lastDetachAt = this.lastActiveAt;
     this.session = session;
     this.jobs = jobs;
     this.errorPolicy = errorPolicy;
@@ -196,6 +205,25 @@ export class HostedSession {
     return this.attachments.size;
   }
 
+  /** What the reaper decides on (rules in `session-reaper.ts`). */
+  liveness(): SessionLiveness {
+    return {
+      id: this.id,
+      attached: this.attachments.size,
+      busy: this.running,
+      lastActiveAt: this.lastActiveAt,
+      lastDetachAt: this.lastDetachAt,
+    };
+  }
+
+  /** An attachment was removed: the session may have just become detached/idle. */
+  private removeAttachment(attachment: Attachment): void {
+    if (this.attachments.delete(attachment)) {
+      this.lastDetachAt = this.now();
+      this.lastActiveAt = this.lastDetachAt;
+    }
+  }
+
   /**
    * Attach a client: replay what it missed, then add it to the fan-out — ONE
    * synchronous segment (no `await` of any kind), so no update can be emitted
@@ -231,7 +259,7 @@ export class HostedSession {
 
   /** Stop delivering to `attachment` (its connection went away). The session lives on. */
   detach(attachment: Attachment): void {
-    this.attachments.delete(attachment);
+    this.removeAttachment(attachment);
   }
 
   /**
@@ -324,7 +352,7 @@ export class HostedSession {
       try {
         attachment.send(params);
       } catch (error) {
-        this.attachments.delete(attachment);
+        this.removeAttachment(attachment);
         this.reportTurnError(error);
       }
     }
@@ -450,6 +478,7 @@ export class HostedSession {
     if (this.activeTurnId === turnId) {
       this.controller = null;
       this.activeTurnId = null;
+      this.lastActiveAt = this.now();
     }
     try {
       this.emit({ type: "turn_end", turnId, ...end });
@@ -512,6 +541,7 @@ export class HostedSession {
       // Ours for sure: no one takes the slot without `assertIdle`.
       this.controller = null;
       this.compacting = false;
+      this.lastActiveAt = this.now();
     }
   }
 

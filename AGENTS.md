@@ -93,8 +93,9 @@ style suggestions.
   `core`, `daemon`, `exec`, `k8s`, `mcp`, `protocol`, `providers`, `tools`,
   `transport`, `tui`), TypeScript strict, Biome. **Bun ≥ 1.4.3 required**
   (`engines.bun`; the compiled-binary worker path needs it — see the TODO entry).
-  - `bun test` — full suite. **Baseline: all pass except the single opt-in
-    live-k8s skip** (that skip is NOT a failure). The total grows with every
+  - `bun test` — full suite. **Baseline: all pass except the two opt-in
+    skips** — live-k8s (`TENTACLE_K8S_SERVER`) and the real-socket keepalive
+    test (`TENTACLE_SLOW_TESTS=1`, ~12 s); those skips are NOT failures. The total grows with every
     task, so no exact count is pinned here — it only goes stale; run it, and any
     *new* fail (or a non-opt-in skip) is yours.
   - `bun run typecheck` — `tsc --noEmit`.

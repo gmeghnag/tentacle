@@ -309,26 +309,6 @@ describe("fan-out", () => {
     });
   });
 
-  test("the per-connection cap counts attachments; re-opening one does not count twice", async () => {
-    const d = daemon(() => slowModel(1));
-    const a = await d.connect({ maxSessions: 1 });
-    await a.open({ sessionId: "X", create: true });
-    await a.open({ sessionId: "X" });
-    await expect(a.open({ sessionId: "Y", create: true })).rejects.toMatchObject({
-      code: DomainErrorCode.TooManySessions,
-    });
-  });
-
-  test("a session closed by another client frees this connection's cap (no stale entry)", async () => {
-    // Mutation: drop `dropStale()` in `Connection.open` → TooManySessions.
-    const d = daemon(() => slowModel(1));
-    const a = await d.connect({ maxSessions: 1 });
-    const b = await d.connect();
-    await a.open({ sessionId: "X", create: true });
-    await b.client.request("session/close", { sessionId: "X" });
-    expect((await a.open({ sessionId: "Y", create: true })).created).toBe(true);
-  });
-
   test("the steering no-await window survives fan-out to a slow and a fast client", async () => {
     // Mutation: make the fan-out await each send → `turn_end` reaches the fast
     // client only after the next macrotask: an enqueue could slip in.

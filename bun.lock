@@ -45,6 +45,9 @@
         "@tentacle/transport": "workspace:*",
         "@tentacle/tui": "workspace:*",
       },
+      "devDependencies": {
+        "@tentacle/protocol": "workspace:*",
+      },
     },
     "packages/client": {
       "name": "@tentacle/client",

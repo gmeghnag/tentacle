@@ -17,7 +17,7 @@ lives on `Connection` (`daemon/src/connection.ts:54`); `close()` cancels every
 turn (`:80`); `ws-server.ts:193-195` calls it on socket close. Absorbs part of
 task 2 of `docs/eval/daemon-session-lifecycle.md` (no `session/close`,
 duplicate id clobbers a live session, jobs never torn down); the TTL reaper,
-limits and keepalive are split into `docs/eval/session-ttl-limits.md` (review
+limits and keepalive are split into `docs/feat/session-ttl-limits.md` (review
 F7: together they were L).
 
 ## Implementation
