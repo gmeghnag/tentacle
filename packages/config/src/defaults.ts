@@ -61,7 +61,7 @@ Operating principles:
 export const DEFAULT_CONFIG_JSONC = `{
   // tentacle configuration.
   //
-  // Precedence (highest wins):  environment variables  >  this file  >  built-in defaults.
+  // Precedence (highest wins):  environment variables  >  the selected profile  >  this file  >  built-in defaults.
   // Uncomment a setting to override the default shown in the comment.
 
   "model": {
@@ -121,6 +121,20 @@ export const DEFAULT_CONFIG_JSONC = `{
   //    preview (full output still spilled to a file). Costs a model call; off by default.
   //  - dedupOutput: collapse runs of identical consecutive lines (log spam). On by default.
   //  - tabulateJson: render a JSON array-of-objects result as a compact table. Off by default.
-  // "tools": { "maxInlineOutputChars": ${DEFAULT_MAX_INLINE_OUTPUT_CHARS}, "redactSecrets": ${DEFAULT_REDACT_SECRETS}, "summarizeLargeOutput": ${DEFAULT_SUMMARIZE_LARGE_OUTPUT}, "dedupOutput": ${DEFAULT_DEDUP_OUTPUT}, "tabulateJson": ${DEFAULT_TABULATE_JSON} }
+  // "tools": { "maxInlineOutputChars": ${DEFAULT_MAX_INLINE_OUTPUT_CHARS}, "redactSecrets": ${DEFAULT_REDACT_SECRETS}, "summarizeLargeOutput": ${DEFAULT_SUMMARIZE_LARGE_OUTPUT}, "dedupOutput": ${DEFAULT_DEDUP_OUTPUT}, "tabulateJson": ${DEFAULT_TABULATE_JSON} },
+
+  // Named profiles, applied with \`tentacle --profile <name>\` (or TENTACLE_PROFILE).
+  // A profile holds the same settings as this file and is merged over them:
+  //  - "model" merges per key, but provider/baseURL/apiKey/apiKeyCommand move as
+  //    one unit: set any of them and the others are NOT inherited (a key is never
+  //    sent to an endpoint it was not configured for);
+  //  - "subagents"/"tools" merge per key; other settings replace;
+  //  - "mcpServers" merge by name: a server is replaced whole, null removes it.
+  // "profiles": {
+  //   "anthropic": {
+  //     "model": { "provider": "anthropic", "model": "claude-opus-5-5", "apiKeyCommand": "cat ~/.cache/anthropic-key" },
+  //     "mcpServers": { "filesystem": null }
+  //   }
+  // }
 }
 `;

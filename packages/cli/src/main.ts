@@ -29,7 +29,13 @@ import { connectMcpServers } from "@tentacle/mcp";
 import { type SessionController, startTui } from "@tentacle/tui";
 import { type TentacleConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
-import { type ServeLimits, parseFlags, parseServeLimits, resolveToken } from "./flags.ts";
+import {
+  type ServeLimits,
+  extractGlobalOptions,
+  parseFlags,
+  parseServeLimits,
+  resolveToken,
+} from "./flags.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
 import { startAttachRuntime, startPodRuntime } from "./pod-runtime.ts";
 import { render } from "./render.ts";
@@ -68,6 +74,9 @@ Usage:
   tentacle connect <url>   drive a remote daemon with the TUI
   tentacle --help          show this help
   tentacle --version       print the version and exit
+  tentacle --profile <name> ...
+                           apply a profile from config.jsonc ("profiles"); a
+                           leading option, before the command or the prompt
 
 Remote control:
   tentacle serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
@@ -78,12 +87,13 @@ Remote control:
   A non-loopback --host requires a token (remote code execution risk).
   Token env fallback: TENTACLE_REMOTE_TOKEN.
 
-Configuration (precedence: env > config file > defaults):
+Configuration (precedence: env > profile > config file > defaults):
   ~/.config/tentacle/config.jsonc   settings (scaffolded on first run)
   ~/.config/tentacle/PROMPT.md       default system prompt
 
 Environment:
   TENTACLE_CONFIG_DIR       override the config directory
+  TENTACLE_PROFILE          profile to apply (overridden by --profile)
   TENTACLE_PROVIDER         provider kind: openai (default) | anthropic
   TENTACLE_MODEL_BASE_URL   base URL incl. version (default: localhost:8080/v1,
                             or https://api.anthropic.com/v1 for anthropic)
@@ -131,7 +141,14 @@ export interface CliIO {
 export async function main(argv: readonly string[], io: CliIO = {}): Promise<number> {
   const write = io.write ?? ((text: string) => void process.stdout.write(text));
 
-  const args = argv.slice(2);
+  // Leading global options (`--profile`) come off argv BEFORE the dispatch on
+  // args[0], so they never reach a one-shot prompt (docs/feat/config-profiles.md).
+  const globals = extractGlobalOptions(argv.slice(2));
+  if (!globals.ok) {
+    write(`\n[error] ${globals.error}\n`);
+    return 1;
+  }
+  const args = globals.rest;
 
   // Hidden subcommand: the detached pod-delete child when THIS process is a
   // compiled binary (so the delete-on-exit safety net needs no external `bun`).
@@ -182,7 +199,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const isStdioDaemon = args[0] === "serve" && args.includes("--stdio");
   let config: TentacleConfig;
   try {
-    config = await loadConfig({ cwd: process.cwd(), scaffold: !isStdioDaemon });
+    config = await loadConfig({
+      cwd: process.cwd(),
+      scaffold: !isStdioDaemon,
+      ...(globals.profile !== undefined ? { profile: globals.profile } : {}),
+    });
   } catch (error) {
     write(`\n[config error] ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;

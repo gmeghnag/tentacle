@@ -15,8 +15,9 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   PROMPT_FILENAME,
 } from "./defaults.ts";
+import { applyProfile } from "./profile.ts";
 import { type ApiKeySource, type Env, type ResolvedConfig, resolveConfig } from "./resolve.ts";
-import { FileConfigSchema } from "./schema.ts";
+import { type FileConfig, FileConfigSchema } from "./schema.ts";
 
 export class ConfigError extends Error {
   override readonly name = "ConfigError";
@@ -35,6 +36,8 @@ export interface LoadConfigOptions {
   readonly scaffold?: boolean;
   /** How to run `apiKeyCommand` (default: `/bin/sh -c` via `Bun.spawn`). */
   readonly runCommand?: CommandRunner;
+  /** The profile to apply (`--profile`); beats `TENTACLE_PROFILE`. */
+  readonly profile?: string;
 }
 
 export interface TentacleConfig {
@@ -61,6 +64,8 @@ export interface TentacleConfig {
   readonly promptPath: string;
   /** Resolved path of the auto-loaded AGENTS.md, if one was folded into the prompt. */
   readonly agentsPath?: string;
+  /** The profile applied from the config file (`--profile` / `TENTACLE_PROFILE`), if any. */
+  readonly profile?: string;
   readonly sources: ResolvedConfig["sources"] & { readonly apiKey: ApiKeySource };
 }
 
@@ -168,7 +173,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     }
   }
 
-  let fileConfig: ReturnType<typeof FileConfigSchema.parse>;
+  let parsedFile: FileConfig;
   if (await pathExists(configPath)) {
     const raw = parseConfigFile(await readFile(configPath, "utf8"), configPath);
     const parsed = FileConfigSchema.safeParse(raw);
@@ -177,10 +182,19 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
         `Invalid ${configPath}: ${parsed.error.issues[0]?.message ?? "unknown"}`,
       );
     }
-    fileConfig = parsed.data;
+    parsedFile = parsed.data;
   } else {
-    fileConfig = {};
+    parsedFile = {};
   }
+
+  // Fold the selected profile over the base BEFORE anything reads the file
+  // config (prompt file, key command, MCP servers downstream).
+  const profile = options.profile ?? (env.TENTACLE_PROFILE || undefined);
+  const applied = applyProfile(parsedFile, profile);
+  if (!applied.ok) {
+    throw new ConfigError(`${configPath}: ${applied.reason}`);
+  }
+  const fileConfig = applied.config;
 
   // Resolve the prompt file: explicit `systemPromptFile` (relative to the
   // config dir) or the default `PROMPT.md`.
@@ -252,6 +266,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     configPath,
     promptPath,
     ...(resolved.agentsMdLoaded && agentsFile ? { agentsPath: agentsFile } : {}),
+    ...(profile !== undefined ? { profile } : {}),
     sources: { ...resolved.sources, apiKey: resolved.apiKeySource },
   };
 }
