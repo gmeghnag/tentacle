@@ -18,10 +18,9 @@ import { Connection } from "../src/connection.ts";
 import { type Attachment, HostedSession, type UpdateSink } from "../src/hosted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
 
-/** A test client attached to a hosted session: receives updates, denies permissions. */
+/** A test client attached to a hosted session: receives updates. */
 const sinkTo = (send: UpdateSink): Attachment => ({
   send,
-  requestPermission: async () => ({ outcome: "cancelled" }),
 });
 
 class ScriptedProvider implements ModelProvider {
@@ -56,7 +55,10 @@ const tick = (ms = 10): Promise<void> => new Promise((r) => setTimeout(r, ms));
 function harness(
   model: ModelProvider,
   env: ExecutionEnvironment,
-  clientHandlers: ConstructorParameters<typeof RpcPeer>[1] = {},
+  clientHandlers: ConstructorParameters<typeof RpcPeer>[1] & {
+    /** Answer every `permission_request` with this option (else leave it pending). */
+    readonly answer?: string;
+  } = {},
   connOptions: ConstructorParameters<typeof Connection>[3] = {},
 ) {
   const host = new SessionHost({
@@ -75,11 +77,20 @@ function harness(
   const [daemonCh, clientCh] = createChannelPair();
   const connection = new Connection(daemonCh, host, undefined, connOptions);
   const updates: KnownSessionUpdateParams[] = [];
-  const client = new RpcPeer(clientCh, {
-    ...clientHandlers,
+  const { answer, ...handlers } = clientHandlers;
+  const client: RpcPeer = new RpcPeer(clientCh, {
+    ...handlers,
     onNotification: (method, params) => {
       if (method === "session/update") {
-        updates.push(params as KnownSessionUpdateParams);
+        const p = params as KnownSessionUpdateParams;
+        updates.push(p);
+        if (answer !== undefined && p.update.type === "permission_request") {
+          void client.request("session/resolve_permission", {
+            sessionId: p.sessionId,
+            requestId: p.update.requestId,
+            optionId: answer,
+          });
+        }
       }
     },
   });
@@ -210,135 +221,6 @@ describe("daemon ↔ client (in-memory)", () => {
     expect(calls).toBe(1);
   });
 
-  test("a shell tool round-trips a permission prompt and runs when approved", async () => {
-    const execCalls: string[] = [];
-    const env: ExecutionEnvironment = {
-      id: "rec",
-      async exec(command) {
-        execCalls.push(command);
-        return { stdout: "ok", stderr: "", exitCode: 0 };
-      },
-      async readFile() {
-        return "";
-      },
-      async writeFile() {},
-    };
-    const model = new ScriptedProvider([
-      [
-        {
-          type: "tool_call",
-          toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls -la" }) },
-        },
-        { type: "done" },
-      ],
-      [{ type: "text", delta: "done" }, { type: "done" }],
-    ]);
-
-    const asked: unknown[] = [];
-    const { client, updates } = harness(model, env, {
-      onRequest: async (method, params) => {
-        if (method === "session/request_permission") {
-          asked.push(params);
-          return { outcome: { outcome: "selected", optionId: "allow_once" } };
-        }
-        throw new Error(`unexpected request ${method}`);
-      },
-    });
-
-    await client.request("initialize", INIT);
-    const { sessionId } = (await client.request("session/open", { create: true })) as {
-      sessionId: string;
-    };
-    const end = await runTurn(client, updates, sessionId, "run it");
-
-    expect(end.stopReason).toBe("end_turn");
-    expect(execCalls).toEqual(["ls -la"]);
-    // The daemon asked for permission, carrying the current tool-call id.
-    expect(asked).toHaveLength(1);
-    expect((asked[0] as { toolCallId: string }).toolCallId).toBe("c1");
-    await tick();
-    const toolUpdates = updates.filter((u) => u.update.type === "tool_call_update");
-    expect(
-      toolUpdates.some(
-        (u) => u.update.type === "tool_call_update" && u.update.status === "completed",
-      ),
-    ).toBe(true);
-  });
-
-  test("a denied permission blocks the tool and the turn still ends", async () => {
-    const execCalls: string[] = [];
-    const env: ExecutionEnvironment = {
-      id: "rec",
-      async exec(command) {
-        execCalls.push(command);
-        return { stdout: "ok", stderr: "", exitCode: 0 };
-      },
-      async readFile() {
-        return "";
-      },
-      async writeFile() {},
-    };
-    const model = new ScriptedProvider([
-      [
-        {
-          type: "tool_call",
-          toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "rm -rf /" }) },
-        },
-        { type: "done" },
-      ],
-      [{ type: "text", delta: "ok" }, { type: "done" }],
-    ]);
-    const { client, updates } = harness(model, env, {
-      onRequest: async () => ({ outcome: { outcome: "selected", optionId: "reject_once" } }),
-    });
-    await client.request("initialize", INIT);
-    const { sessionId } = (await client.request("session/open", { create: true })) as {
-      sessionId: string;
-    };
-    const end = await runTurn(client, updates, sessionId, "go");
-    expect(end.stopReason).toBe("end_turn");
-    expect(execCalls).toEqual([]); // never ran
-  });
-
-  test("an unanswered permission request times out and auto-denies (turn still ends)", async () => {
-    const execCalls: string[] = [];
-    const env: ExecutionEnvironment = {
-      id: "rec",
-      async exec(command) {
-        execCalls.push(command);
-        return { stdout: "ok", stderr: "", exitCode: 0 };
-      },
-      async readFile() {
-        return "";
-      },
-      async writeFile() {},
-    };
-    const model = new ScriptedProvider([
-      [
-        {
-          type: "tool_call",
-          toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls" }) },
-        },
-        { type: "done" },
-      ],
-      [{ type: "text", delta: "ok" }, { type: "done" }],
-    ]);
-    // The client receives the permission request but never answers it.
-    const { client, updates } = harness(
-      model,
-      env,
-      { onRequest: () => new Promise(() => {}) },
-      { permissionTimeoutMs: 30 },
-    );
-    await client.request("initialize", INIT);
-    const { sessionId } = (await client.request("session/open", { create: true })) as {
-      sessionId: string;
-    };
-    const end = await runTurn(client, updates, sessionId, "go");
-    expect(execCalls).toEqual([]); // auto-denied on timeout → tool never ran
-    expect(end.stopReason).toBe("end_turn"); // and the turn did not hang
-  });
-
   test("a second initialize is rejected (handshake is idempotent-guarded)", async () => {
     const { client } = harness(new ScriptedProvider([]), noopEnv);
     await client.request("initialize", INIT);
@@ -415,10 +297,7 @@ describe("daemon ↔ client (in-memory)", () => {
   test("session/enqueue mid-turn is served while the prompt is in flight and the model sees it", async () => {
     const model = new EchoSteerProvider();
     const { client, updates } = harness(model, slowEnv, {
-      onRequest: async (method) =>
-        method === "session/request_permission"
-          ? { outcome: { outcome: "selected", optionId: "allow_once" } }
-          : {},
+      answer: "allow_once",
     });
     await client.request("initialize", INIT);
     const { sessionId } = (await client.request("session/open", { create: true })) as {
@@ -466,10 +345,7 @@ describe("daemon ↔ client (in-memory)", () => {
   test("two enqueues on the same boundary stream two steer updates in FIFO order", async () => {
     const model = new EchoSteerProvider();
     const { client, updates } = harness(model, slowEnv, {
-      onRequest: async (method) =>
-        method === "session/request_permission"
-          ? { outcome: { outcome: "selected", optionId: "allow_once" } }
-          : {},
+      answer: "allow_once",
     });
     await client.request("initialize", INIT);
     const { sessionId } = (await client.request("session/open", { create: true })) as {
@@ -707,10 +583,18 @@ describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
     const [daemonCh, clientCh] = createChannelPair();
     new Connection(daemonCh, host);
     const updates: KnownSessionUpdateParams[] = [];
-    const client = new RpcPeer(clientCh, {
-      onRequest: async () => ({ outcome: { outcome: "selected", optionId: "allow_once" } }),
+    const client: RpcPeer = new RpcPeer(clientCh, {
       onNotification: (method, params) => {
-        if (method === "session/update") updates.push(params as KnownSessionUpdateParams);
+        if (method !== "session/update") return;
+        const p = params as KnownSessionUpdateParams;
+        updates.push(p);
+        if (p.update.type === "permission_request") {
+          void client.request("session/resolve_permission", {
+            sessionId: p.sessionId,
+            requestId: p.update.requestId,
+            optionId: "allow_once",
+          });
+        }
       },
     });
     const open = async (): Promise<string> => {
@@ -1160,9 +1044,7 @@ describe("compaction is exclusive with a turn", () => {
   };
 
   async function setup(model: ModelProvider, env: ExecutionEnvironment = noopEnv) {
-    const h = harness(model, env, {
-      onRequest: async () => ({ outcome: { outcome: "selected", optionId: "allow_once" } }),
-    });
+    const h = harness(model, env, { answer: "allow_once" });
     await h.client.request("initialize", INIT);
     const { sessionId } = (await h.client.request("session/open", { create: true })) as {
       sessionId: string;

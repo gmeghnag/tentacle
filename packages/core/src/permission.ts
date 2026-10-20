@@ -8,7 +8,8 @@
  *
  * `PermissionBroker` lets the requester be swapped at runtime: the agent is wired
  * to the broker up front, and the TUI attaches its interactive requester once it
- * has mounted (restoring the default on unmount).
+ * has mounted (restoring the default on unmount). On the RPC path the broker is
+ * built with `holdUntilSet`, so "no requester yet" queues instead of approving.
  */
 import type { PermissionLevel } from "./tool.ts";
 
@@ -40,9 +41,23 @@ export type PermissionScope = "once" | "session";
 export interface PermissionResponse {
   readonly allowed: boolean;
   readonly scope?: PermissionScope;
+  /**
+   * No human decision was made: the prompt was withdrawn (its signal aborted)
+   * or torn down (the TUI unmounted). A gate treats it as `allowed: false`; an
+   * RPC client sends NOTHING for it — the request stays pending daemon-side.
+   */
+  readonly dismissed?: true;
 }
 
-export type PermissionRequester = (req: PermissionRequest) => Promise<PermissionResponse>;
+export interface PermissionRequestOptions {
+  /** Aborted when the request is withdrawn (answered elsewhere, its turn cancelled). */
+  readonly signal?: AbortSignal;
+}
+
+export type PermissionRequester = (
+  req: PermissionRequest,
+  options?: PermissionRequestOptions,
+) => Promise<PermissionResponse>;
 
 /** Approve everything (headless default: the caller launched the run). */
 export const allowAll: PermissionRequester = async () => ({ allowed: true });
@@ -50,22 +65,74 @@ export const allowAll: PermissionRequester = async () => ({ allowed: true });
 /** Refuse everything that needs approval. */
 export const denyAll: PermissionRequester = async () => ({ allowed: false });
 
-export class PermissionBroker {
-  private requester: PermissionRequester;
+/** What a withdrawn prompt resolves to. */
+export const DISMISSED: PermissionResponse = { allowed: false, dismissed: true };
 
-  constructor(initial: PermissionRequester = allowAll) {
-    this.requester = initial;
+export interface PermissionBrokerOptions {
+  /**
+   * While no requester is set (before the first `setRequester`, or after
+   * `reset()`), QUEUE requests instead of approving them with `allowAll`; the
+   * next `setRequester` receives them in order. For every broker on the RPC
+   * path: a daemon's request can arrive before the TUI has mounted its prompt,
+   * and approving it there would be the silent auto-approve AGENTS §7 warns of.
+   */
+  readonly holdUntilSet?: boolean;
+}
+
+interface Held {
+  readonly req: PermissionRequest;
+  readonly options: PermissionRequestOptions | undefined;
+  readonly resolve: (response: PermissionResponse) => void;
+  readonly reject: (error: unknown) => void;
+  readonly detach: () => void;
+}
+
+export class PermissionBroker {
+  private requester: PermissionRequester | null;
+  private readonly holdUntilSet: boolean;
+  private held: Held[] = [];
+
+  constructor(initial?: PermissionRequester, options: PermissionBrokerOptions = {}) {
+    this.holdUntilSet = options.holdUntilSet === true;
+    this.requester = initial ?? (this.holdUntilSet ? null : allowAll);
   }
 
   setRequester(requester: PermissionRequester): void {
     this.requester = requester;
+    const held = this.held;
+    this.held = [];
+    for (const entry of held) {
+      entry.detach();
+      requester(entry.req, entry.options).then(entry.resolve, entry.reject);
+    }
   }
 
   reset(): void {
-    this.requester = allowAll;
+    this.requester = this.holdUntilSet ? null : allowAll;
   }
 
-  request(req: PermissionRequest): Promise<PermissionResponse> {
-    return this.requester(req);
+  request(req: PermissionRequest, options?: PermissionRequestOptions): Promise<PermissionResponse> {
+    if (this.requester) {
+      return this.requester(req, options);
+    }
+    const signal = options?.signal;
+    if (signal?.aborted) {
+      return Promise.resolve(DISMISSED);
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = (): void => {
+        this.held = this.held.filter((h) => h !== entry);
+        resolve(DISMISSED);
+      };
+      const entry: Held = {
+        req,
+        options,
+        resolve,
+        reject,
+        detach: () => signal?.removeEventListener("abort", onAbort),
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.held.push(entry);
+    });
   }
 }

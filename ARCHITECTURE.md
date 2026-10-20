@@ -65,9 +65,12 @@ loop, protocol, and session path never change.
 ### ADR-004 — Remote control: **WS + JSON-RPC 2.0, ACP-shaped vocabulary**
 Transport/framing is ours (WebSocket, remote-native, multi-client, mid-run inject) —
 ACP's stdio/local, single-client assumptions do not fit a networked daemon. But the
-*semantics* (session lifecycle, turn, `session/update` streaming, `request_permission`)
-are modelled 1:1 on ACP, so an ACP adapter (editors) and an AG-UI adapter (web UI)
-are cheap to add later. One internal event/command model; interop protocols are
+*semantics* (session lifecycle, turn, `session/update` streaming, permission
+options/outcomes) are modelled on ACP, so an ACP adapter (editors) and an AG-UI
+adapter (web UI) are cheap to add later. One deliberate departure: a permission is
+session state — a `permission_request` event any attached client answers with
+`session/resolve_permission` (first answer wins, no timeout) — not ACP's
+agent→client request bound to one connection (`docs/feat/permission-events.md`). One internal event/command model; interop protocols are
 optional projections.
 
 **Exported wire schema.** The zod schemas in `@tentacle/protocol` are exported as

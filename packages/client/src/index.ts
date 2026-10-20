@@ -7,6 +7,7 @@
 export * from "./constants.ts";
 export * from "./mapping.ts";
 export * from "./permission-map.ts";
+export * from "./permission-router.ts";
 export * from "./queue.ts";
 export * from "./ws-channel.ts";
 export * from "./remote-client.ts";

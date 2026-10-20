@@ -143,9 +143,9 @@ describe("classifyUpdate (event classes: skip unknown display, fail loudly other
   });
 
   test("an unknown mandatory update is an error that says to update the client", () => {
-    const r = classifyUpdate(frame({ type: "permission_request" }, true));
+    const r = classifyUpdate(frame({ type: "future_mandatory" }, true));
     expect(r.kind).toBe("error");
-    if (r.kind === "error") expect(r.error.message).toMatch(/permission_request.*newer/);
+    if (r.kind === "error") expect(r.error.message).toMatch(/future_mandatory.*newer/);
   });
 
   test("a known type that fails its member is an error, even without the mandatory flag", () => {

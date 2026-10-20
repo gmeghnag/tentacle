@@ -624,6 +624,74 @@
       "required": ["optionId", "outcome"],
       "type": "object"
     },
+    "PermissionRequestId": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "PermissionRequestUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "explanation": {
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/PermissionOption"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "requestId": {
+          "$ref": "#/$defs/PermissionRequestId"
+        },
+        "suggestion": {
+          "additionalProperties": true,
+          "properties": {
+            "prefix": {
+              "type": "string"
+            }
+          },
+          "required": ["prefix"],
+          "type": "object"
+        },
+        "title": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "toolCallId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": {
+          "const": "permission_request",
+          "type": "string"
+        }
+      },
+      "required": ["options", "requestId", "title", "tool", "toolCallId", "type"],
+      "type": "object",
+      "x-event-class": "mandatory"
+    },
+    "PermissionResolvedUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/PermissionOutcome"
+        },
+        "requestId": {
+          "$ref": "#/$defs/PermissionRequestId"
+        },
+        "type": {
+          "const": "permission_resolved",
+          "type": "string"
+        }
+      },
+      "required": ["outcome", "requestId", "type"],
+      "type": "object",
+      "x-event-class": "mandatory"
+    },
     "Plan": {
       "additionalProperties": true,
       "properties": {
@@ -719,41 +787,26 @@
         }
       ]
     },
-    "RequestPermissionParams": {
+    "ResolvePermissionParams": {
       "additionalProperties": false,
       "properties": {
-        "explanation": {
+        "optionId": {
+          "minLength": 1,
           "type": "string"
         },
-        "options": {
-          "items": {
-            "$ref": "#/$defs/PermissionOption"
-          },
-          "minItems": 1,
-          "type": "array"
+        "requestId": {
+          "$ref": "#/$defs/PermissionRequestId"
         },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
-        },
-        "title": {
-          "type": "string"
-        },
-        "toolCallId": {
-          "minLength": 1,
-          "type": "string"
         }
       },
-      "required": ["options", "sessionId", "title", "toolCallId"],
+      "required": ["optionId", "requestId", "sessionId"],
       "type": "object"
     },
-    "RequestPermissionResult": {
+    "ResolvePermissionResult": {
       "additionalProperties": false,
-      "properties": {
-        "outcome": {
-          "$ref": "#/$defs/PermissionOutcome"
-        }
-      },
-      "required": ["outcome"],
+      "properties": {},
       "type": "object"
     },
     "ResourceContent": {
@@ -806,6 +859,8 @@
           "background_exit": "#/$defs/BackgroundExit",
           "context_note": "#/$defs/ContextNote",
           "history_replaced": "#/$defs/HistoryReplaced",
+          "permission_request": "#/$defs/PermissionRequestUpdate",
+          "permission_resolved": "#/$defs/PermissionResolvedUpdate",
           "plan": "#/$defs/Plan",
           "session_closed": "#/$defs/SessionClosed",
           "steer": "#/$defs/Steer",
@@ -855,6 +910,12 @@
         },
         {
           "$ref": "#/$defs/SessionClosed"
+        },
+        {
+          "$ref": "#/$defs/PermissionRequestUpdate"
+        },
+        {
+          "$ref": "#/$defs/PermissionResolvedUpdate"
         }
       ]
     },
@@ -1298,6 +1359,7 @@
     "NoTurnRunning": -32008,
     "NotInitialized": -32005,
     "ParseError": -32700,
+    "PermissionNotPending": -32013,
     "StaleCursor": -32011,
     "TooManySessions": -32006,
     "TurnInProgress": -32004,
@@ -1370,12 +1432,12 @@
         "$ref": "#/$defs/PromptResult"
       }
     },
-    "session/request_permission": {
+    "session/resolve_permission": {
       "params": {
-        "$ref": "#/$defs/RequestPermissionParams"
+        "$ref": "#/$defs/ResolvePermissionParams"
       },
       "result": {
-        "$ref": "#/$defs/RequestPermissionResult"
+        "$ref": "#/$defs/ResolvePermissionResult"
       }
     },
     "session/snapshot": {
@@ -1410,5 +1472,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 5
+  "x-protocol-version": 6
 }

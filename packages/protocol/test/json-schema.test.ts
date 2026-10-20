@@ -104,19 +104,10 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1snapshot/result": [{ messages: [{ role: "user", content: "q" }] }],
   "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
   "methods/session~1enqueue/result": [{}],
-  "methods/session~1request_permission/params": [
-    {
-      sessionId: "s",
-      toolCallId: "t",
-      title: "run",
-      explanation: "why",
-      options: [{ optionId: "o", name: "Allow", kind: "allow_once" }],
-    },
+  "methods/session~1resolve_permission/params": [
+    { sessionId: "s", requestId: "r", optionId: "allow_once" },
   ],
-  "methods/session~1request_permission/result": [
-    { outcome: { outcome: "selected", optionId: "o" } },
-    { outcome: { outcome: "cancelled" } },
-  ],
+  "methods/session~1resolve_permission/result": [{}],
   "methods/model~1stream/params": [
     {
       request: {
@@ -164,9 +155,20 @@ const FIXTURES: Record<string, Json[]> = {
     update({ type: "turn_start", turnId: "t", prompt: "go" }),
     update({ type: "turn_end", turnId: "t", stopReason: "cancelled" }),
     update({ type: "turn_end", turnId: "t", stopReason: "error", error: { message: "boom" } }),
+    update({
+      type: "permission_request",
+      requestId: "r",
+      toolCallId: "t",
+      tool: "shell",
+      title: "Run",
+      explanation: "ls",
+      suggestion: { prefix: "ls" },
+      options: [{ optionId: "allow_once", name: "Allow once", kind: "allow_once" }],
+    }),
+    update({ type: "permission_resolved", requestId: "r", outcome: { outcome: "cancelled" } }),
     // The catch-all (decision E): unknown display / mandatory events are valid frames.
     update({ type: "progress", pct: 3 }),
-    { sessionId: "s", seq: 2, mandatory: true, update: { type: "permission_request", id: "p" } },
+    { sessionId: "s", seq: 2, mandatory: true, update: { type: "future_mandatory", id: "p" } },
   ],
   "notifications/session~1cancel/params": [{ sessionId: "s" }],
   "notifications/$~1progress/params": [{ id: "r", seq: 0, value: [{ type: "text", delta: "a" }] }],

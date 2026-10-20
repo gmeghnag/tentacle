@@ -1,8 +1,8 @@
-# eval/permission-events — permission requests as session state, answered by any attached client
+# feat/permission-events — permission requests as session state, answered by any attached client
 
-> **Status:** implementation drafted — awaiting owner approval (2026-10-19)
-> **Branch:** none until promoted (then `feat/permission-events`; slice 7b, if the split below is approved, gets its own doc and branch)
-> **Type:** eval → feat · **Size:** L as a whole → proposed split: **7a** live permission events (L: many small edits across 8 packages) + **7b** suspension across a `serve` restart (M) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (single-broker + pod-trust invariants, AGENTS §7)
+> **Status:** executed + reviewed (one fresh-context Review: REQUEST-CHANGES, findings 1–5 fixed; no second Review by owner's choice) — awaiting owner OK to commit/merge (2026-10-20). Scope: slice 7a only; 7b lives in `docs/eval/suspended-turn-resume.md` (owner decision D)
+> **Branch:** `feat/permission-events`
+> **Type:** feat · **Size:** L (7a: many small edits across 8 packages) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (single-broker + pod-trust invariants, AGENTS §7)
 
 ## Context
 
@@ -23,6 +23,148 @@ deadline is a flat 5 min (`ws-server.ts:38`). Session-remembered grants
 only maps the wire outcome to that scope.
 
 ## Implementation
+
+### Revision for 7a, verified on `main` @ `52ca635` (2026-10-20)
+
+*— claude-opus-5-5, 2026-10-20*
+
+The draft below was written on `4914e9b`, before wire classes, turn events,
+the history cut, the registry, TTL/limits and daemon-side persistence Part A
+landed. This revision re-verifies it against the code as built. **Where it
+disagrees with the draft, this revision wins**; the draft's "Slice 7b"
+sub-sections are the source for `docs/eval/suspended-turn-resume.md` and are
+not built here.
+
+#### Load-bearing assumption (re-proved)
+
+> **The daemon makes no novel decision.** For an `ask` tool, the only
+> daemon-side approval without a client answer is a remembered grant the
+> client's broker gave; every other outcome comes from a client, or is
+> `cancelled` caused by a turn's cancel/close — never by a socket or a clock.
+
+Today it is false in **three** places (the draft knew one):
+
+- `HostedSession`'s requester (`hosted-session.ts:213-242`, the registry's
+  interim routing): **nobody attached → `cancelled` at once** (`:214-217`).
+- `Connection.requestPermission` (`connection.ts:290-300`): closed peer /
+  timeout / malformed reply → `cancelled`; the timeout is
+  `permissionTimeoutMs` (`connection.ts:51-52,96-98`), 5 min on `ws-server`
+  (`ws-server.ts:29,227`).
+- `session/cancel` does not settle a pending ask (the requester has no
+  signal): the turn hangs until someone answers.
+
+Experiment (2026-10-20, bun 1.4.3, `main` @ `52ca635`,
+`.tentacle/tmp/permission-events/repro.ts` — real `Agent` + gate +
+`SessionHost` + `Connection` + `shellTool`, scripted model, scripted client
+`RpcPeer`, `DaemonBrokerSpy` logging what the daemon's gate gets back):
+
+```ts
+// (abridged: setup identical to the draft's experiment, ported to session/open + turnId)
+// E2: the only client's socket drops while the ask is pending.
+a.conn.close();          // → gate gets {allowed:false}
+// E2b: the client detaches before the ask is raised (nobody attached).
+// E3: session/cancel while pending; 300 ms later; then a late allow_once.
+```
+
+```
+E2 dead socket: gate got ["rm -rf build -> {\"allowed\":false}"] exec=[] running=false history-tool=["Permission denied by the user: `shell` was not run."]
+E2b nobody attached: gate got ["make deploy -> {\"allowed\":false}"] exec=[] history-tool=["Permission denied by the user: `shell` was not run."]
+E3 cancel while pending: 300ms later running=true gate-calls=0
+E3 late approve: running=false gate got ["make deploy -> {\"allowed\":true,\"scope\":\"once\"}"] exec=[] history-tool=["Cancelled by the user before this tool ran."]
+```
+
+E2/E2b: the model's history claims a user denial nobody gave. E3: the turn
+hangs on cancel. The remembered-grant exit (draft E1) is unchanged
+(`permission-gate.ts:70-72`). So the design must remove both daemon denials
+and make cancel settle the ask — exactly the draft's §2/§3.
+
+#### Corrections to the draft
+
+1. **No `pendingPermissions` in the `open` result (draft Open question 3,
+   dropped).** The ring never evicts past the pin (`ring.ts:67-74`) and the
+   pin is the cut, which moves only at `history_commit`
+   (`hosted-session.ts:542-545`; emitted by the agent at `agent.ts:281,343,364`,
+   all outside a pending `runTool`) and at `finishTurn`. While an ask is
+   pending, the agent is blocked inside `runTool`, so its
+   `permission_request` (seq > cut) is pinned and every `attach` that replays
+   from the cut (fresh open, resync) or from a `since` before it replays it
+   (`hosted-session.ts:348-370`). **Correction (Review finding 2):** a `since`
+   at or past the request's seq replays only what came after — so a client
+   that re-attaches with `since` must keep the requests it already holds. No
+   client re-attaches with `since` today; the obligation is recorded in
+   `docs/eval/client-reattach.md` (8a).
+   A second source of the same fact would only be a place for the two to
+   disagree. Pinned instead by a test (T3 below). Same reasoning for the
+   `state: "suspended"` that `client-reattach` Q3(a) deferred here: a suspended
+   turn is derivable from the replayed `permission_request` without
+   `permission_resolved`; not added.
+2. **`resolve_permission` requires an `open` on this connection.** The draft
+   allowed any connection; the built `Connection.lookup`
+   (`connection.ts:229-239`) is the rule for every session command ("commands
+   need an `open` first", identity-checked against the live session). Follow
+   it: unknown / not-opened / stale → `UnknownSession`.
+3. **The pending persistence of Part A stays and is re-wired, not removed.**
+   `HostedSession` already writes `turn.pending` before the ask goes out and
+   clears it durably before the gate may run the tool
+   (`hosted-session.ts:210-241`; "pending on disk ⇒ never started", relied on
+   by `reconcileOnReload`, `persisted-session.ts:269-306`). In the new
+   requester: register → `persist()` → `emit(permission_request)`; `settle`
+   stays synchronous through `emit(permission_resolved)`, then clears
+   `this.pending`, `persist()`s, and resolves the gate only after
+   `await this.persisted()` — the same order as today.
+4. **Error code lives in `@tentacle/protocol`** (decision D7):
+   `DomainErrorCode.PermissionNotPending = -32013` in `protocol/src/jsonrpc.ts`
+   (next free after `DaemonRestarted: -32012`).
+5. **`PROTOCOL_VERSION` 5 → 6** (`protocol/src/version.ts:7`).
+6. **`Attachment` loses `requestPermission`** (`hosted-session.ts:68-71`):
+   an attachment is only a sink. The interim routing tests
+   (`registry.test.ts:511-552`) are replaced by their event-based inverses.
+7. **The signal for the daemon's abort listener is the turn controller's**
+   (`hosted-session.ts:139`), and only when the slot holds a turn
+   (`!this.compacting`). A sub-agent's ask is covered: its signal derives from
+   the parent's (`subagent.ts:178`), and its ask goes through the same broker.
+8. **The client router has no `reconcile` input** (there is no list to
+   reconcile from, correction 1) and gains `sessionClosed(sessionId)` and
+   `connectionClosed()`: on either, abort the on-screen prompt and drop the
+   session's (all) queued requests — a dead socket cannot answer, and with
+   `client-reattach` the replay re-offers them. Entries are keyed by
+   `sessionId` + `requestId` (a hostile pod picks its own ids).
+9. **A prompt aborted via its signal resolves `dismissed`**, so no broker
+   promise is left dangling; the router ignores an `answered` for an id that is
+   not the current one.
+10. **Obligations handed here by merged tasks**, now in scope: the dialog is
+    withdrawn when its session closes (`session-registry` Review finding 6 —
+    `close` aborts the turn → `permission_resolved{cancelled}`); "a suspended,
+    detached session is not reaped after TTL + 1 h" (`session-ttl-limits`
+    contract, test T18); `PermissionBroker.request(req, {signal})`
+    (`client-reattach` Q5).
+
+#### Files (as revised, dependency order)
+
+1. `protocol`: `permission.ts` (new update/command schemas, remove
+   request params/result), `updates.ts` (two members + `UPDATE_CLASS`
+   mandatory), `methods.ts` (swap), `jsonrpc.ts` (`PermissionNotPending`),
+   `version.ts` (6); `schema/protocol.json` regenerated (`bun run
+   schema:export`); `test/permission.test.ts`, `test/json-schema.test.ts`.
+2. `transport/test/peer.test.ts`: sample method `session/request_permission`
+   → `model/stream` (no behaviour change).
+3. `core/src/permission.ts`: `signal` option, `dismissed`, `holdUntilSet`;
+   new `core/test/permission.test.ts`.
+4. `agent/src/agent.ts`: abort-first in `runTool`; `agent/test/permission.test.ts`.
+5. `daemon`: `permission-map.ts`, `hosted-session.ts`, `connection.ts`,
+   `ws-server.ts`; tests `integration.test.ts`, `registry.test.ts`,
+   `persistence.test.ts`, `history-cut.test.ts`, `session-reaper.test.ts`
+   (`Attachment` shape; routing tests replaced).
+6. `client`: new `permission-router.ts` (pure) + `remote-client.ts` +
+   `mapping.ts` + `index.ts`; tests `permission-router.test.ts` (new),
+   `remote.test.ts`.
+7. `cli`: `main.ts`, `connect.ts` (`holdUntilSet` brokers, comment);
+   `test/pod-runtime.test.ts` (`SpyBroker` options pass-through).
+8. `tui`: `permission-ui.ts`, `App.tsx`; `test/app.test.tsx`.
+9. Docs: `ARCHITECTURE.md`, `AGENTS.md` (the peer example names the method).
+
+The draft's test list stands, with T3 re-aimed (replay, not a list) and T18
+added; numbering below follows the draft.
 
 > **Owner decisions (2026-10-19):** the open questions below are resolved in
 > the parent, `docs/eval/session-reattach.md` §"Owner decisions after the
@@ -842,101 +984,342 @@ clean (AGENTS §6).
 
 ## Execution
 
-*(empty — an eval)*
+*— claude-opus-5-5, 2026-10-20*
+
+Built in the revised plan's order on `feat/permission-events` (off `main` @
+`52ca635`), red first per slice. The revision above was written first; there
+was no further drift from it except where noted.
+
+1. **Protocol** (v5 → **6**). `permission.ts`: `PermissionRequestUpdate`,
+   `PermissionResolvedUpdate`, `session/resolve_permission` params/result
+   (strict), `PermissionRequestIdSchema` (1–128 chars); the request
+   params/result removed. `updates.ts`: two union members, both `mandatory`.
+   `methods.ts`: `RequestPermission` → `ResolvePermission`. `jsonrpc.ts`:
+   `PermissionNotPending = -32013`. `schema/protocol.json` regenerated. Tests:
+   `permission.test.ts` rewritten (red: exports missing); `json-schema.test.ts`
+   fixtures; the "unknown mandatory event" fixtures in `updates.test.ts`,
+   `client/mapping.test.ts`, `client/remote.test.ts` used
+   `permission_request` as the *unknown* type — now a known tag, so renamed to
+   `future_mandatory` (otherwise they would test "malformed known", not
+   "unknown").
+2. **Transport**: `peer.test.ts`'s sample method → `model/stream` (the peer
+   validates params by schema, so the sample had to be a real method).
+3. **Core**: `PermissionRequester(req, {signal}?)`, `PermissionResponse.dismissed`,
+   `DISMISSED`, `PermissionBroker(initial?, {holdUntilSet})`. Held requests
+   drain in order into the next `setRequester`; an aborted held request
+   resolves `DISMISSED` and is never handed over; a requester rejection
+   propagates. New `core/test/permission.test.ts`: 6/7 red before, 7/7 after.
+4. **Agent**: `runTool` checks the abort before `!allowed`
+   (`agent.ts:518-531`). Red: `Received: "Permission denied by the user…"`.
+5. **Daemon**: `HostedSession` — `Attachment = {send}`, a pending-ask table,
+   `awaitDecision` (signal = the turn controller's, never the compaction's),
+   `resolvePermission`, `settle` (sync: delete → `permission_resolved` → wake
+   the gate); Part A's pending record kept in the same order (capture before
+   the emit; durable clear before the gate resumes). `Connection`: the
+   `resolve_permission` handler (sync, via `lookup`), forwarder and
+   `permissionTimeoutMs` removed; `ws-server`: the 5-min default removed.
+   New `daemon/test/permission-events.test.ts` (T1, T1b, T1c, T2, T3, T3b, T4,
+   T4b, T5, T6, T6b, T7, T8, T9, T18): **15/15 red on the old daemon** (no
+   event / a deny at the gate / reaped after the deny), 15/15 green after.
+   Ported: `Attachment` literals in five test files; `integration.test.ts`'s
+   harness auto-answers via `resolve_permission` (`answer: "allow_once"`);
+   its three old permission tests are deleted — superseded by T1, T1c and T2
+   (the timeout test's inverse); `registry.test.ts`'s "interim permission
+   routing" block deleted — superseded by T3, T4, T3b; `persistence.test.ts`'s
+   client answers through `hosted.resolvePermission`; `mapping.test.ts` samples.
+6. **Client**: new pure `permission-router.ts` (+ `toPermissionRequest`);
+   `RemoteClient` routes the two events to it before the turn handler,
+   executes its actions (prompt with an `AbortController`, abort, send;
+   `PermissionNotPending` swallowed, other send errors → `onError`), feeds it
+   `session_closed` and `onClose`; `onPermission` removed; `mapping.ts` maps
+   both events to `null`. New `permission-router.test.ts` (10) and four
+   real-stack tests in `remote.test.ts` (fidelity of the rebuilt request,
+   display-only, dismissed-sends-nothing, `holdUntilSet`, losing answer silent
+   + `session_closed` withdraws).
+7. **CLI**: the three RPC brokers in `main.ts` and the one in `connect.ts` are
+   `holdUntilSet`; `runPodTui` comment rewritten; `SpyBroker` passes options.
+8. **TUI**: the requester honours `signal` (closes the dialog only if it is
+   still that request's, resolves `DISMISSED`); unmount resolves `DISMISSED`;
+   Ctrl+C in the dialog answers `DISMISSED` then aborts. Four tests in
+   `app.test.tsx`: withdraw, unmount, Ctrl+C red before (3/4); **Esc → plain
+   deny is green on both** — it pins unchanged behaviour, not the change.
+9. **Docs**: `ARCHITECTURE.md` ADR-004 (the departure from ACP named),
+   `AGENTS.md` peer example, `TODO.md` (the 5-min-timeout item marked
+   superseded; index 7a), links in `session-reattach.md` and
+   `suspended-turn-resume.md`. The historical `docs/architecture/F3/F4` designs
+   still say `session/request_permission`; left as records of what shipped then.
+
+**Mutation checks (each reverted, tree restored):**
+
+| Mutation | Red |
+|---|---|
+| 5-min `setTimeout` settles `cancelled` in `awaitDecision` | T2 |
+| `settle` looks up without deleting | T4, T4b, T5, T6 |
+| `requestId = currentToolCallId` | T5 |
+| no abort listener | T5, T6, T6b |
+| option not offered → settle `cancelled` | T7 |
+| nobody attached → `{allowed:false}` | T3b |
+| requester installed on a broker of its own | all 15 |
+| gate resumes before the durable clear (`await persisted()` dropped) | persistence A6 |
+| router caches an `allow_always` from `permission_resolved` and answers | client display-only |
+| router drops `tool`/`suggestion` | client fidelity |
+| client broker without `holdUntilSet` | client holdUntilSet |
+| **`RemoteClient` given a second (plain) broker in `createLocalRuntime`** | **both single-broker tests** (`pod-runtime.test.ts`, run + attach: `Expected length: 1, Received length: 0`) |
+
+**Gate:** `bun run check` → tsc clean, `biome check .` clean (293 files),
+`bun test` **1094 pass, 2 skip (opt-in live-k8s + slow keepalive), 0 fail**
+(4295 expects, 112 files).
+
+**Review fixes (2026-10-20, after the one fresh-context Review below — no
+second Review, by the owner's choice):**
+
+1. *Finding 1 (untested guard).* New daemon test **T6c**: a sink cancels the
+   turn when the tool call is announced, before the ask — no
+   `permission_request`, `turn_end{cancelled}`, tool not run. Green with the
+   guard; **red with the `signal.aborted` early return removed** (the turn
+   hangs), restored byte-identical.
+2. *Finding 2 (false "any `since`" premise).* Revision Correction 1 and the
+   `HostedSession` module comment corrected (a `since` at or past the request
+   replays only what came after); the obligation recorded in
+   `docs/eval/client-reattach.md` (8a must keep pending requests across a
+   reconnect, or re-attach without `since`).
+3. *Finding 3 (orphaned request).* Ctrl+C in the dialog dismisses only when
+   there is a turn of ours to cancel (`App.tsx`); otherwise the dialog stays.
+   TUI tests: "no turn → dialog stays, Esc then denies" (**red** with the old
+   unconditional dismiss) and "during a turn → `DISMISSED`, tool not run, no
+   'Permission denied'".
+4. *Finding 4 (silent unsent "No").* The router emits an `unoffered` action;
+   `RemoteClient` reports it to `onError`. Router test updated.
+5. *Finding 5.* `TODO.md` entry: the ring is unbounded during a long suspension.
+
+Gate after the fixes: `bun run check` → tsc clean, biome clean, **1096 pass,
+2 skip (opt-in), 0 fail** (4305 expects, 112 files). One intermittent failure
+seen while looping the gate: the GC-based "a connection forgets a session
+another client closed" (`session-reaper.test.ts`), **pre-existing** — 1/8 full
+runs on `main`, 3/8 on this branch, 0/40 isolated on both. Recorded in `TODO.md`,
+not fixed here.
+
+**Known limits, deliberately left:**
+- At most one ask is pending per session today (tool calls run in order and a
+  sub-agent's ask blocks its parent's call), so the persisted `turn.pending` is
+  one record. The ask table is a map; if parallel tool calls land, the record
+  must become a list (and 7b's rebuild with it).
+- A hostile pod can flood `permission_request`s: each is one dialog, FIFO, and
+  every answer goes to the pod — denial of service on itself only.
+- The ring pins everything past the cut, so a background-job flood during an
+  hours-long suspension grows the ring unboundedly (pre-existing property of
+  the pin, not new here).
+- 7b (rebuild across a `serve` restart) is not built: a restart still closes a
+  suspended turn as "Not run" (Part A).
 
 ## Review
 
-*— claude-opus-5-5, 2026-10-19*
+*— claude-opus-5-5 (fresh-context reviewer), 2026-10-20*
 
-**Recommend promoting after `session-registry` and `daemon-side-persistence`.** Scope:
-- `permission_request{requestId, toolCallId, …}` (mandatory event);
-  `session/resolve_permission{sessionId, requestId, outcome}`;
-  `permission_resolved{requestId, outcome}` fanned out so every client closes
-  its dialog.
-- `requestId` is a fresh nonce per request, never reused across a
-  cancelled/restarted turn.
-- First valid answer wins; a late/unknown `requestId` → explicit
-  `PermissionNotPending` (never silently dropped).
-- **No timeout** (parent point 8, owner decision): a pending request
-  *suspends* the turn until a person answers (approve / deny) or a client
-  cancels the turn — attached or not. Remove the permission deadline
-  (`permission-timeout` option, `ws-server.ts:38`) for this path; a dead socket
-  never produces a deny. The TTL reaper skips suspended turns.
-- **Suspension survives a daemon restart** (`serve`): from the daemon-persisted
-  history, a trailing assistant tool call with no result and a recorded pending
-  request → rebuild the suspended turn and re-emit `permission_request`
-  (new nonce). Coordinate with `docs/eval/history-validity-invariant.md`:
-  "awaiting permission" is a legitimate state, not a dangling call to repair.
-- Bumps `PROTOCOL_VERSION`; removes `session/request_permission`; updates the
-  exported schema.
+> The earlier text in this section (2026-10-19) was the eval's promotion
+> recommendation. It has been replaced by this review; it is still in git history.
 
-**Why, item by item.**
+**Verdict: REQUEST-CHANGES (small).** I found no behavioural defect in the 7a
+code. The daemon makes no decision of its own any more, the single broker
+holds, pod-trust holds, and the gate is green. Two things still block: a
+load-bearing guard has no test (§9), and a premise in the Revision is false
+and contradicts a sibling plan. Both fixes are small (one test, plus doc
+corrections). Everything else is a nit.
 
-- **Why an event instead of a daemon→client request.** A request is bound to the
-  connection that received it: the requester is captured once at session
-  creation (`connection.ts:179`, `hosted-session.ts:48`). After a reconnect
-  nobody can answer it; today it is coerced to `cancelled` (`connection.ts:208`).
-  An event is session state: it is replayed on attach and visible to every
-  client.
-- **Why `resolve_permission` is a command addressed to the session.** The answer
-  must reach the session whatever socket it arrives on; a JSON-RPC response can
-  only answer the request on the connection that issued it.
-- **Why `permission_resolved` is fanned out.** With multi-attach both the phone
-  and the TUI show the dialog. When one answers, the other must close it —
-  otherwise the user answers twice, or believes they denied something the other
-  device approved.
-- **Why a fresh nonce per request.** Scenario: request R1 is pending, the turn is
-  cancelled and restarted, and a new request for the same tool reuses the id. A
-  late "approve" from the phone, meant for R1 — maybe a *different* command —
-  approves R2. A nonce binds every approval to exactly what the user saw.
-- **Why first-wins plus an explicit `PermissionNotPending`.** Two devices answer:
-  the outcome must be deterministic, and the loser must learn its click did not
-  count. A silent drop makes the losing UI lie ("you denied it" while the other
-  device approved).
-- **Why no timeout.** Owner decision (2026-10-19): a dead socket — a phone with
-  a flat battery — must never turn into a denial. It is safe: while suspended,
-  the tool does not run. And it is why the 5 min deadline (`ws-server.ts:38`)
-  existed that makes it obsolete: a request bound to one connection could hang
-  a turn nobody else could unblock; in v2 any attached client can answer or
-  cancel, so a waiting turn is suspended, not hung. A synthetic deny is also
-  harmful: the model continues blind and piles up further requests.
-- **Why the suspension must survive a daemon restart.** A suspension can last
-  hours on a host that restarts (an update, a reboot). In memory only, a reboot
-  would silently erase the pending approval and the work before it — the exact
-  loss the owner rejected.
-- **Why coordinate with `history-validity-invariant`.** That eval treats a tool
-  call with no result as broken history to repair. Here it is the *expected*
-  state of a suspended turn; a repair on resume would delete the call and
-  destroy the suspension.
-- **Why the single-broker assumption is load-bearing.** Two decision points is
-  the bug AGENTS §7 documents: a second broker's default `allowAll` auto-
-  approves everything. `resolve_permission` must carry the client broker's
-  decision, never create a second decider. Remembered grants staying
-  daemon-side is existing behaviour, and it has a good consequence: "allow
-  always" on one device holds on every device attached to the session.
-- **Why fake `permission_resolved` events are display-only.** In pod modes the
-  pod controls the daemon and can write any frame. A client that recorded a
-  local approval because of such an event would let the pod mint approvals for
-  its own input — forbidden by the pod-trust invariant.
+### Findings
 
-Load-bearing assumption to prove first (restated, review F3): **the daemon
-makes no *novel* decision.** Every new approval comes from the client's single
-`PermissionBroker` (AGENTS §7) via `resolve_permission`; the daemon decides on
-its own only for session-remembered grants already given by that broker
-(`permission-gate.ts:70-77`, existing behaviour). There is no fail-safe deny
-any more: the fail-safe is *not running* the tool while suspended.
-Consequence to state in the design: with multi-attach, an "allow always" given
-on one device holds for every device attached to that session.
+1. **Medium: a load-bearing guard is untested.** The guard is the
+   `signal.aborted` early return in `awaitDecision`
+   (`packages/daemon/src/hosted-session.ts:254`). Mutation: `!signal || signal.aborted`
+   → `!signal`. The **whole daemon suite still passes (176 pass, 0 fail)**.
+   The mutation does real harm, as this probe shows
+   (`.tentacle/tmp/permission-events-review/cancel-window.ts`: a sink cancels
+   synchronously on the `tool_call` update, which is the "cancel lands between
+   `tool_start` and the ask" case the plan names):
+   ```
+   real code:  running=false events=["turn_start","tool_call","tool_call_update","turn_end"]
+   mutated:    running=true  events=["turn_start","tool_call","permission_request"]
+   ```
+   Without the guard, the ask registers a listener on a signal that has already
+   aborted, and that listener never fires. The cancel is already spent, so the
+   turn hangs until someone answers a prompt for a turn the user cancelled.
+   Requested: a daemon test built like the probe. It should assert no
+   `permission_request` and `turn_end{cancelled}`, and it should go red under
+   this mutation.
+2. **Medium: false premise and a hand-off conflict.** The claim is "every
+   `attach` replays it — from any `since`" (Revision, Correction 1; module
+   comment `hosted-session.ts:20-24`). That is false for `since ≥` the
+   request's seq. `replayFrom` returns only `seq > since.seq`
+   (`hosted-session.ts:456-466`, `ring.ts` `since`). Today this is harmless,
+   because no client re-attaches with `since` (`remote-client.ts:215`), and a
+   fresh client or a resync replays from the cut, which is before the request
+   (verified below). But `PermissionRouter.connectionClosed()`
+   (`client/src/permission-router.ts:126-133`) **drops** the on-screen and
+   queued requests. `docs/eval/client-reattach.md:476-479` assumes the opposite:
+   "the original broker promise is still pending because the client object
+   survived". If client-reattach re-opens with its last `since`, a pending
+   prompt is lost and the turn stays suspended with no dialog. Requested: fix
+   the claim to read "from any `since` before the request, and from the cut on
+   resync". Then record the obligation in `client-reattach.md`: keep router
+   entries across a reconnect, or re-open from before the oldest pending
+   request.
+3. **Low: a dismissed prompt is not offered again on a live connection.**
+   `answered(…, dismissed)` forgets the entry (`permission-router.ts:100-102`), and
+   only a new connection replays it. The visible case: Ctrl+C in the dialog
+   while `abortRef.current` is null (`tui/src/App.tsx:661-666`) answers
+   `DISMISSED` and cancels nothing. The turn stays suspended with no dialog
+   until the user quits (exit closes the session, which cancels). This is a
+   narrow window; document it, or fall through to the quit path when there is
+   no abort handle.
+4. **Nit: a "No" can be dropped silently.** If a daemon offers fewer options
+   (only a hostile pod would), a "No" with no `reject_once` is not sent
+   (`permission-router.ts:104-109`). The dialog closes and the request stays
+   pending. This only stalls the pod's own turn, which pod-trust accepts, but
+   it is silent: an `onError` line would make it visible.
+5. **Nit: the ring can now grow without limit.** With no timeout, the
+   "ring grows during a long suspension" limit (Execution, Known limits) is no
+   longer capped at 5 minutes. It deserves a `TODO.md` line, not just prose
+   here.
 
-Invariants to red-team: pod-trust — a pod-originated request must not create a
-lasting approval for pod-supplied input ("allow always" stays session-scoped);
-a hostile pod could emit fake `permission_resolved` events — the client treats
-them as display-only (close a dialog), never as a decision.
+### Gate (re-run by me)
 
-Tests: request pending → drop → re-attach → the request is replayed and the
-answer is accepted; two clients answer → first wins, second gets
-`PermissionNotPending`; a request pending for hours (fake timers) is still
-pending and approvable — never auto-denied; daemon restart mid-suspension →
-the request is re-emitted and approving it runs the tool exactly once; a late answer after a restarted turn does not bind to the
-new request; mutation: route the answer through a second broker → the existing
-single-broker spy test fails.
+`bun run check`: tsc clean; `biome check .`: 293 files, no fixes; `bun test`:
+**1094 pass, 2 skip (the opt-in live-k8s and slow keepalive tests), 0 fail**,
+4295 expect() calls, 1096 tests in 112 files. This matches the Execution
+section exactly.
+
+### Mutation outcomes (each reverted; `cmp` byte-identical; tree checked against a pre-run `git status` + `git diff main` snapshot)
+
+I chose these mutations separately from the executor's table.
+
+| Mutation | Result |
+|---|---|
+| A `agent.ts`: abort re-check moved back after `!allowed` | red: agent "a refusal that comes from a cancel is recorded as cancelled" |
+| B `settle` emits no `permission_resolved` for `cancelled` | red: T6, T6b |
+| C no `signal.aborted` early return in `awaitDecision` | **survives (176/176 daemon pass)**, finding 1 |
+| D `setRequester` does not drain held requests | red: 3 holdUntilSet core tests |
+| E `connectionClosed` keeps the on-screen prompt | red: router "session closed / connection closed" |
+| F Ctrl+C in dialog answers a plain deny | red: TUI Ctrl+C test |
+| G `resolve_permission` bypasses `lookup` (no open needed) | red: T7 |
+| H unmount resolves a plain deny | red: TUI unmount test |
+| I `RemoteClient` never feeds `session_closed` to the router | red: remote "session_closed withdraws the dialog" |
+| J gate resumes before the durable clear | red: persistence A6 |
+| K `createLocalRuntime` gives `RemoteClient` a second broker | red: both pod-runtime single-broker tests (timeouts) |
+
+Mutation K shows that `holdUntilSet` changes what a single-broker violation
+looks like: no silent `allowAll` any more, just a request that never shows
+(a hang). That fails safe.
+
+### Premise table
+
+| # | Premise (Revision) | Verdict |
+|---|---|---|
+| 0 | Context symptom on `main` @ 52ca635: dead socket → deny, nobody attached → deny, cancel hangs | **TRUE**. I re-ran `.tentacle/tmp/permission-events/repro.ts` in a `main` worktree and got E2/E2b/E3 exactly as pasted |
+| 1 | `hosted-session.ts:213-242` (main) interim requester; `:214-217` nobody attached → cancelled | TRUE |
+| 2 | `connection.ts:290-300` (main) closed/timeout/malformed → cancelled; `:51-52,96-98` timeout option | TRUE |
+| 3 | `ws-server.ts:29,227` (main) 5-min default | TRUE |
+| 4 | Cut moves only at `history_commit` (`hosted-session.ts:542-545` main; agent `:281,343,364` main) and `finishTurn` | TRUE. The only `recordCut` callers are `drive`/`finishTurn`; `historyReplaced` runs only during compaction, which excludes a turn |
+| 5 | Sub-agent progress cannot move the cut | TRUE. `progressToEvent` (`agent.ts:103-115`) maps only `subagent_start/tool/end` |
+| 6 | Ring never evicts past the pin (`ring.ts:67-74`) | TRUE (`evict` breaks at `seq > pinSeq`) |
+| 7 | "every attach replays it — from any `since`" | **FALSE** for `since ≥` request seq (finding 2). True for fresh attach and resync |
+| 8 | `Connection.lookup` (`connection.ts:229-239` main) gates session commands | TRUE; `resolve_permission` uses it (mutation G) |
+| 9 | Part A order: capture before emit, durable clear before gate resumes (`hosted-session.ts:210-241` main) | TRUE in the new code (`:284-295`); mutation J goes red |
+| 10 | `DaemonRestarted = -32012` → `PermissionNotPending = -32013` | TRUE |
+| 11 | `PROTOCOL_VERSION` 5 (`version.ts:7`) → 6 | TRUE |
+| 12 | `Attachment` had `requestPermission` (`hosted-session.ts:68-71` main) | TRUE |
+| 13 | Controller at `hosted-session.ts:139` (main); sub-agent signal from the parent (`subagent.ts:178`) | TRUE. The child runs with `controls?.signal` |
+| 14 | Remembered grant is the only autonomous approval (`permission-gate.ts:70-72`) | TRUE |
+
+### Attacks tried
+
+1. **End-to-end, real stack** (`.tentacle/tmp/permission-events-review/e2e.ts`:
+   real Agent + gate + SessionHost + two Connections + RemoteClient with one
+   `holdUntilSet` broker driven like a TUI + a raw "phone" peer). Output:
+   ```
+   T1 before mount: prompts=0 exec=[] (held, not auto-approved)
+   T1 after mount: prompts=[{"detail":"make one","result":"on-screen"}]
+   T1 phone sees replayed pending=1
+   T1 phone answers allow_once: ok; again: err -32013
+   T1 laptop prompt: {"detail":"make one","result":"withdrawn"} exec=["make one"] gate=["make one -> {\"allowed\":true,\"scope\":\"once\"}"]
+   T2 after drop: laptop prompt=withdrawn gate-calls=1 running=true
+   T2 phone denies: ok ... history=[…,"Permission denied by the user: `shell` was not run."]
+   T3 cancel while pending: tail=["permission_resolved{\"outcome\":\"cancelled\"}","tool_call_update","turn_end"] late answer=err -32013 history-last="Cancelled by the user before this tool ran."
+   T4 close while pending: tail=["permission_resolved{\"outcome\":\"cancelled\"}","turn_end","session_closed"]
+   ```
+   Hold-before-mount, late-attach replay, first-wins, withdraw on the other
+   device, no deny on socket drop, cancel and close settling: all hold.
+2. **Cancel between `tool_start` and the ask.** The behaviour is correct, but
+   nothing tests it (finding 1).
+3. **Replay/cut.** I looked for any path that moves the cut while an ask is
+   pending: sub-agent progress, background exits, `historyReplaced`, `close`.
+   None exists. `close` aborts first, which emits `permission_resolved` and
+   only then `finishTurn` moves the cut. The hole is only the `since` case in
+   finding 2.
+4. **Hostile pod frames.** A fake `permission_resolved` only closes a dialog.
+   The router has no grant cache, and mutation I plus the display-only test
+   cover it. A fake `permission_request` (even for a session the client never
+   opened) prompts the user, and the answer goes back to the pod, so any
+   approval lives only in the pod's own gate. Options the pod picks are
+   ignored by the TUI, and a missing `reject_once` costs only the pod's own
+   turn (finding 4). A flood means FIFO dialogs, which only hurts the pod. I
+   found no way to mint an approval on the laptop or to send something the
+   user did not choose (auto-accept is the user's own mode).
+5. **No-novel-decision sweep.** `rg setRequester|reset()` in `src`: only
+   `HostedSession` (constructor, synchronous) and `permission-ui.ts`. Other
+   exits from `awaitDecision`: `compacting` (cannot happen: compaction calls
+   no tools) and an aborted turn (finding 1). No timer, socket or attach
+   count is involved. `permissionTimeout`, `request_permission` and
+   `RequestPermission` are gone from all `src`, the schema and the
+   ARCHITECTURE/AGENTS docs.
+6. **Races.** Two answers in the same tick: T4b, synchronous `settle`. Answer
+   after cancel: `-32013` (e2e T3). Cancel during the durable-clear await after
+   an approval: the gate resumes, and the agent's abort-first check records
+   "cancelled" and does not run the tool. Clients will already have seen
+   `permission_resolved{allow_once}`, which is truthful. Model-proxy detach:
+   `Connection.close` → `hosted.cancel()` (`connection.ts:104-112`) → the abort
+   listener fires.
+7. **Invariants not touched.** Steering window: `drive`/`finishTurn` are not
+   in the diff. Peer: `transport/src` is not in the diff, and the handler is
+   synchronous. In-process path: its broker is still the default (no
+   `holdUntilSet`). Ctrl+C and unmount now resolve `DISMISSED`
+   (`allowed:false`), which the gate reads as before. The TUI is mounted once
+   per process (`tui-sessions.ts:64-92`), so `reset()`-then-hold has no
+   remount path today.
+8. **Protocol.** The version is bumped. `protocol.json` is regenerated and
+   gated (`json-schema.test.ts:39`, "stale" message). Both ends are wired
+   (daemon emit + `resolve_permission` handler; client mapping → `null` + the
+   router). The old method is fully removed.
+
+### Prior art
+
+`session-registry` finding 6 (dialog withdrawn on close): met (T6b + client
+`session_closed` test, mutation I). `session-ttl-limits` "busy for a suspended
+turn" contract (`session-ttl-limits.md:130-133`): met (T18; a suspended turn
+keeps its controller). The opt-in admin cap can still close a busy detached
+session, which is an explicit lifecycle action → `cancelled`.
+`client-reattach` Q5 (signal on the broker): met, but see finding 2 for the
+conflict with its §"Permissions" assumption. `daemon-side-persistence` Part A
+ordering: met (mutation J). Part B stays in `suspended-turn-resume`.
+
+### What holds
+
+The daemon makes no decision of its own. One broker is shared by the runtime
+and the TUI, and `holdUntilSet` closes the pre-mount `allowAll` window. Pod
+frames cannot mint laptop approvals. Answers are first-wins with a nonce per
+ask. Cancel and close settle the ask and tell the model the truth
+("cancelled"). Persistence ordering is preserved. The protocol bump is
+honest, and the schema is gated.
+
+### How the executor behaved
+
+The executor worked in plan order, recorded red before green per slice, and
+ran a broad mutation table, including the important single-broker mutation.
+It reported drift honestly (`future_mandatory` fixture renames, the Esc test
+being green on both trees) and listed its known limits. Every gate count it
+reported reproduced exactly. It missed a test for one guard it designed
+itself, and it overstated the replay claim, which carries into a sibling's
+contract.
+
+*Reviewer note: I am the same model as the executor (claude-opus-5-5), in a
+fresh context only. Shared blind spots can survive both passes; per AGENTS
+§10, a load-bearing task would ideally get a different-model review.*

@@ -212,7 +212,7 @@ assume.
 - **Don't serialize the RPC peer.** `transport/peer.ts` dispatches inbound
   requests concurrently (`void handleRequest`, no per-connection mutex) on
   purpose: a long-running `session/prompt` must not block a short
-  `session/enqueue` / `session/request_permission`. Never add an await/lock that
+  `session/enqueue` / `session/resolve_permission`. Never add an await/lock that
   serializes `Connection` handlers.
 - **Never write raw to the terminal while Ink owns it.** During a TUI session the
   alt-screen is Ink's. Startup diagnostics go through the single `StatusLine`,

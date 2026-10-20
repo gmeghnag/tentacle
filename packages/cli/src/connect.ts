@@ -45,7 +45,8 @@ export async function connectTui(
   write: (line: string) => void,
   deps: ConnectDeps = { connect: connectWebSocket, startTui },
 ): Promise<void> {
-  const permissions = new PermissionBroker();
+  // RPC path: hold a daemon's request until the TUI's prompt is mounted.
+  const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
   const channel = await deps.connect(options.url, options.token ? { token: options.token } : {});
   const sink = bufferedErrorSink();
   const client = new RemoteClient(channel, permissions, undefined, { onError: sink.onError });

@@ -8,8 +8,7 @@ import type { PermissionRequest, PermissionResponse } from "@tentacle/core";
 import type {
   PermissionOption,
   PermissionOutcome,
-  RequestPermissionParams,
-  SessionId,
+  PermissionRequestUpdate,
 } from "@tentacle/protocol";
 
 /** The options the daemon offers for an approval; the "always" label reflects
@@ -25,16 +24,20 @@ export function permissionOptions(req: PermissionRequest): PermissionOption[] {
   ];
 }
 
-export function toRequestPermissionParams(
-  sessionId: SessionId,
+/** The stream event for one ask; `requestId` is its nonce (fresh per ask). */
+export function toPermissionRequestUpdate(
+  requestId: string,
   toolCallId: string,
   req: PermissionRequest,
-): RequestPermissionParams {
+): PermissionRequestUpdate {
   return {
-    sessionId,
+    type: "permission_request",
+    requestId,
     toolCallId,
+    tool: req.tool,
     title: req.title,
     ...(req.detail ? { explanation: req.detail } : {}),
+    ...(req.suggestion ? { suggestion: { prefix: req.suggestion.prefix } } : {}),
     options: permissionOptions(req),
   };
 }

@@ -1,10 +1,26 @@
 /**
- * `session/request_permission` (agent → client request).
+ * Permissions as session state (docs/feat/permission-events.md).
  *
- * When a tool call requires approval, the agent asks the connected client to
- * choose one of the offered options. The `*_always` kinds let a client persist
- * the decision so future equivalent calls are auto-approved/denied by the
- * permission engine (F4).
+ * When a tool call requires approval, the daemon SUSPENDS the turn and streams
+ * a `permission_request` update to every attached client (replayed on attach
+ * while it is pending). Any client that opened the session answers with
+ * `session/resolve_permission`; the first valid answer wins and every client
+ * gets `permission_resolved`, which closes its dialog. There is no timeout: a
+ * request ends only by an answer or by its turn being cancelled/closed
+ * (`cancelled`) — never by a socket or a clock.
+ *
+ * - `requestId` is a fresh nonce per ask (never derived from the tool call,
+ *   the turn or a counter): a late answer to an old request can never bind to
+ *   a new one. Clients treat it as opaque.
+ * - `PermissionNotPending`: the session exists but the request is not pending
+ *   (answered elsewhere, cancelled, never issued, or from before a restart).
+ *   No side effect; the winning outcome arrives as `permission_resolved`. An
+ *   option that was not offered is `InvalidParams`, and the request STAYS
+ *   pending — a malformed answer is never a denial.
+ * - `permission_resolved` is display-only for a client: it never answers,
+ *   records or pre-approves anything (a pod daemon is not trusted).
+ *
+ * The `*_always` kinds ask the daemon to remember a session-scoped rule.
  */
 import { z } from "zod";
 import { SessionIdSchema } from "./session.ts";
@@ -24,27 +40,51 @@ export const PermissionOptionSchema = z.object({
 });
 export type PermissionOption = z.infer<typeof PermissionOptionSchema>;
 
-export const RequestPermissionParamsSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-    toolCallId: z.string().min(1),
-    title: z.string(),
-    explanation: z.string().optional(),
-    options: z.array(PermissionOptionSchema).min(1),
-  })
-  .strict();
-export type RequestPermissionParams = z.infer<typeof RequestPermissionParamsSchema>;
+/** A permission request's nonce (see the module comment). */
+export const PermissionRequestIdSchema = z.string().min(1).max(128);
 
-/** The client either selects an option or the request is cancelled (e.g. turn aborted). */
+/** A client selected an option, or the request's turn was cancelled/closed. */
 export const PermissionOutcomeSchema = z.discriminatedUnion("outcome", [
   z.object({ outcome: z.literal("selected"), optionId: z.string().min(1) }),
   z.object({ outcome: z.literal("cancelled") }),
 ]);
 export type PermissionOutcome = z.infer<typeof PermissionOutcomeSchema>;
 
-export const RequestPermissionResultSchema = z
+/** The turn is suspended until this request is answered (or the turn ends). */
+export const PermissionRequestUpdateSchema = z.object({
+  type: z.literal("permission_request"),
+  requestId: PermissionRequestIdSchema,
+  toolCallId: z.string().min(1),
+  /** The tool's name, so a client rebuilds the request the daemon's gate built. */
+  tool: z.string(),
+  title: z.string(),
+  explanation: z.string().optional(),
+  /** The narrower rule an `allow_always` creates (a shell command prefix). */
+  suggestion: z.object({ prefix: z.string() }).optional(),
+  options: z.array(PermissionOptionSchema).min(1),
+});
+export type PermissionRequestUpdate = z.infer<typeof PermissionRequestUpdateSchema>;
+
+/** The request was settled — by the first answer, or by its turn's cancel. */
+export const PermissionResolvedUpdateSchema = z.object({
+  type: z.literal("permission_resolved"),
+  requestId: PermissionRequestIdSchema,
+  outcome: PermissionOutcomeSchema,
+});
+export type PermissionResolvedUpdate = z.infer<typeof PermissionResolvedUpdateSchema>;
+
+// --- session/resolve_permission ------------------------------------------
+// Answer a pending request with one of its offered options. Needs an `open`
+// of the session on this connection, like every session command.
+
+export const ResolvePermissionParamsSchema = z
   .object({
-    outcome: PermissionOutcomeSchema,
+    sessionId: SessionIdSchema,
+    requestId: PermissionRequestIdSchema,
+    optionId: z.string().min(1),
   })
   .strict();
-export type RequestPermissionResult = z.infer<typeof RequestPermissionResultSchema>;
+export type ResolvePermissionParams = z.infer<typeof ResolvePermissionParamsSchema>;
+
+export const ResolvePermissionResultSchema = z.object({}).strict();
+export type ResolvePermissionResult = z.infer<typeof ResolvePermissionResultSchema>;

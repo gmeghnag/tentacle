@@ -48,6 +48,20 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       explicitly, `k8s/src/pod-cleanup.ts:173-186`). Red-first + mutation-checked
       tests in `core/test/env.test.ts`. **Fix:** `docs/fix/pod-tls-env-scrub.md`
       (promoted from the eval on the owner's OK).
+- [ ] 🟡 **Flaky GC test: "a connection forgets a session another client
+      closed"** (`daemon/test/session-reaper.test.ts`, a `WeakRef` that must be
+      collected within 5 `Bun.gc(true)` rounds). Fails only under full-suite
+      load: measured 2026-10-20 at 1/8 full runs on `main` @ `52ca635` and 3/8
+      on `feat/permission-events` (0/40 isolated on both). GC timing, not a
+      leak, as far as measured. Make it deterministic (more rounds with a
+      bound, or assert the registry/connection drop the reference directly).
+- [ ] 🔵 **The replay ring is unbounded during a long permission suspension**
+      (from `feat/permission-events` Review, 2026-10-20): the ring never evicts
+      past the cut (`daemon/src/ring.ts`), and the cut cannot move while a turn
+      waits on a permission — which now has no timeout. Updates emitted meanwhile
+      (background-job exits, a sub-agent's progress before its ask) accumulate
+      for as long as the suspension lasts. Bound them (e.g. coalesce
+      `background_exit` past a budget) without unpinning the pending request.
 - [ ] 🔵 **`BackgroundJobs.jobs` map is never reaped** (`exec/background.ts:78`):
       every finished job keeps its ≤256KB×2 buffers for the session's life. Reap
       old `exited`/`killed` jobs or cap the count.
@@ -206,6 +220,9 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       is the permission ask). `requestPermission` `.catch()`es any failure
       (timeout/closed/malformed) → `{outcome:"cancelled"}` → `allowed:false`, so
       the tool is denied and the turn still ends. Test in `integration.test.ts`.
+      SUPERSEDED (2026-10-20, `feat/permission-events`): permissions are stream
+      events answered by any client with no timeout; the turn suspends (a cancel
+      or close settles it) and a dead socket is never a deny.
 - [x] 🔵 No cap on sessions-per-connection, and `RpcPeer.receive` does
       `JSON.parse` on arbitrary-size frames — auth-gated DoS surface. FIXED
       (2026-10-14): `RpcPeer` gained `maxFrameBytes` (rejects an oversized frame
@@ -469,7 +486,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       5. **Feat (DONE 2026-10-20, `feat/session-ttl-limits`):** `docs/feat/session-ttl-limits.md` · M · load-bearing
       5b. **Fix (DONE 2026-10-20, `fix/session-store-durability`):** `docs/fix/session-store-durability.md` · M · load-bearing (before 6)
       6. **Feat (DONE 2026-10-20, `feat/daemon-side-persistence`):** `docs/feat/daemon-side-persistence.md` (Part A, `serve` only) · M · load-bearing
-      7a. **Eval:** `docs/eval/permission-events.md` · L · load-bearing
+      7a. **Feat (IN PROGRESS 2026-10-20, `feat/permission-events`):** `docs/feat/permission-events.md` · L · load-bearing
       7b. **Eval:** `docs/eval/suspended-turn-resume.md` · M · load-bearing
       8a. **Eval:** `docs/eval/client-reattach.md` · M · load-bearing
       8b. **Eval:** `docs/eval/client-reattach-frontends.md` · M · load-bearing

@@ -1,5 +1,5 @@
 import { type Agent, type AgentEvent, Session } from "@tentacle/agent";
-import type { JobController, PermissionBroker } from "@tentacle/core";
+import { DISMISSED, type JobController, type PermissionBroker } from "@tentacle/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
@@ -659,8 +659,15 @@ export function App({
       const choices = permission.choices;
       const n = choices.length;
       if (key.ctrl && char === "c") {
-        permission.answer({ allowed: false });
-        abortRef.current?.abort();
+        // "Stop everything", not "I refuse this command": no deny goes out
+        // (over RPC it would race the cancel and show a false "denied" on every
+        // device); the turn's cancel settles the request. With no turn of ours
+        // to cancel the dialog stays: dismissing it would orphan the request
+        // (suspended, unseen) until the TUI quits.
+        if (abortRef.current) {
+          permission.answer(DISMISSED);
+          abortRef.current.abort();
+        }
       } else if (key.upArrow) {
         permission.setSelected((s) => (s - 1 + n) % n);
       } else if (key.downArrow) {

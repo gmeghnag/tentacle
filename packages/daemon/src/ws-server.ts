@@ -25,8 +25,6 @@ export interface WsServerOptions {
   readonly onError?: (error: Error) => void;
   /** One line per connection open/close/auth-failure, for the operator. */
   readonly onAudit?: (line: string) => void;
-  /** Auto-deny a permission request a client leaves unanswered this long (ms). */
-  readonly permissionTimeoutMs?: number;
   /**
    * Close a socket silent for this long (seconds, 1–960; default 60). Pings are
    * always on, so a healthy client's pong keeps it open however idle; a dead or
@@ -52,7 +50,6 @@ export interface WsServerOptions {
 
 // Conservative per-connection defaults; a never-answering or abusive client is
 // bounded without getting in a real client's way. All overridable per server.
-const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 min to answer a prompt
 export const DEFAULT_WS_IDLE_TIMEOUT_SEC = 60;
 const DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024; // 8 MiB
 const DEFAULT_BACKPRESSURE_LIMIT = 16 * 1024 * 1024; // Bun's own default
@@ -224,7 +221,6 @@ export function startWsServer(options: WsServerOptions): RunningServer {
         connections.set(
           ws,
           new Connection(channel, options.sessionHost, options.onError, {
-            permissionTimeoutMs: options.permissionTimeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS,
             maxFrameBytes: options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
           }),
         );

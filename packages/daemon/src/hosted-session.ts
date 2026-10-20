@@ -1,8 +1,8 @@
 /**
  * A single hosted conversation on the daemon: wraps the agent `Session`, drives
  * one turn at a time, fans every `session/update` out to the attached clients,
- * routes the agent's permission requests to one of them, and keeps every update
- * in a byte-bounded replay ring (seq-numbered, never reset per turn).
+ * suspends a turn on a permission request until a client answers it, and keeps
+ * every update in a byte-bounded replay ring (seq-numbered, never reset per turn).
  *
  * The session belongs to the daemon (`SessionHost`), not to a connection: a
  * client ATTACHES (replay of what it missed + live, in one synchronous step, so
@@ -17,6 +17,17 @@
  * (`controller`), and a request that finds it taken is REJECTED — never queued,
  * never locked (AGENTS §7: the peer dispatches requests concurrently).
  *
+ * A permission request is session STATE, not a request to one client: the ask
+ * is streamed as `permission_request` (to every attached client; while it is
+ * pending it sits past the cut, which cannot move while the agent is blocked on
+ * it, so the ring never evicts it and every attach that replays from the cut or
+ * from a `since` before it — a fresh open, a resync — gets it again; a `since`
+ * at or past it gets only what came after, by design) and settled by
+ * the FIRST of: a valid `resolvePermission` from any client, or the turn's abort
+ * (cancel, close, model-proxy detach) → `cancelled`. No timer, no socket event,
+ * nobody-attached ever settles it: the daemon makes no decision of its own
+ * (docs/feat/permission-events.md).
+ *
  * Recovery is snapshot + replay at a consistent CUT `{epoch, seq, length}`:
  * `history[0, length)` reflects every update with `seq <= cut.seq`, and the
  * ring replays the rest. The cut moves only where that holds — at the agent's
@@ -27,14 +38,18 @@
  * agent's one `pop` is never behind a marker; compaction starts a new epoch).
  */
 import type { Session } from "@tentacle/agent";
-import type { JobController, PermissionBroker } from "@tentacle/core";
+import type {
+  JobController,
+  PermissionBroker,
+  PermissionRequest,
+  PermissionResponse,
+} from "@tentacle/core";
 import {
   type HistoryCut,
   JsonRpcErrorCode,
   type KnownSessionUpdateParams,
   type PermissionOutcome,
   type PromptResult,
-  type RequestPermissionParams,
   type SessionUpdate,
   type SnapshotResult,
   type TurnEnd,
@@ -48,7 +63,7 @@ import {
   stopReasonToProtocol,
   toUpdateParams,
 } from "./mapping.ts";
-import { outcomeToResponse, toRequestPermissionParams } from "./permission-map.ts";
+import { outcomeToResponse, toPermissionRequestUpdate } from "./permission-map.ts";
 import {
   type DaemonSessionState,
   type PendingPermission,
@@ -61,13 +76,17 @@ import type { SessionLiveness } from "./session-reaper.ts";
 
 /** Receives each streamed `session/update` (one per emitted update). Synchronous; never awaited. */
 export type UpdateSink = (params: KnownSessionUpdateParams) => void;
-/** Asks the connected client to resolve a permission request. */
-export type RemotePermission = (params: RequestPermissionParams) => Promise<PermissionOutcome>;
 
 /** One client attached to a session (one per connection that opened it). */
 export interface Attachment {
   readonly send: UpdateSink;
-  readonly requestPermission: RemotePermission;
+}
+
+/** A permission request waiting for its first answer (keyed by its nonce). */
+interface PendingAsk {
+  readonly offered: ReadonlySet<string>;
+  /** Resolve the gate's wait with this outcome (detaches the abort listener). */
+  readonly settle: (outcome: PermissionOutcome) => void;
 }
 
 /**
@@ -149,6 +168,8 @@ export class HostedSession {
   private currentToolName = "";
   /** The permission request the turn is suspended on (persisted with the turn). */
   private pending: PendingPermission | undefined;
+  /** Every unanswered ask, by `requestId` (one at a time today: calls run in order). */
+  private readonly asks = new Map<string, PendingAsk>();
   private readonly persister: SessionPersister | null;
   private readonly createdAt: number;
   private seq = 0;
@@ -201,45 +222,10 @@ export class HostedSession {
       length: session.messages.length,
       turnId: null,
     };
-    // The agent's permission gate routes here; we forward to a client and map
-    // its choice back to a local allow/deny + scope. Interim routing (until
-    // permissions become stream events): the most recently attached client, the
-    // device the user most likely holds; nobody attached → denied at once
-    // (fail-safe, as a dead connection's request already was).
-    //
-    // Persisted (serve): the suspension is written BEFORE the request goes out,
-    // and cleared durably once it settles, BEFORE the gate may run the tool — so
-    // "pending" on disk always means "never started" (reload: "Not run").
-    permissions.setRequester(async (req) => {
-      const target = [...this.attachments].at(-1);
-      if (!target) {
-        return outcomeToResponse({ outcome: "cancelled" });
-      }
-      const params = toRequestPermissionParams(this.id, this.currentToolCallId || "pending", req);
-      const pending: PendingPermission = {
-        toolCallId: this.currentToolCallId,
-        tool: req.tool,
-        resumable: classifyPending(
-          this.session.messages,
-          this.currentToolCallId,
-          this.currentToolName,
-          req.tool,
-        ),
-        requestedAt: this.now(),
-      };
-      this.pending = pending;
-      this.persist();
-      try {
-        const outcome = await target.requestPermission(params);
-        return outcomeToResponse(outcome);
-      } finally {
-        if (this.pending === pending) {
-          this.pending = undefined;
-          this.persist();
-          await this.persisted();
-        }
-      }
-    });
+    // The agent's permission gate asks here (the factory's broker, replaced
+    // synchronously before any turn can run): the turn suspends until a client
+    // answers or the turn is aborted. See the module comment.
+    permissions.setRequester((req) => this.awaitDecision(req));
     // A background job can exit while the session is idle (between turns), so we
     // stream the exit the moment it happens — not only at the next turn, where
     // the agent injects a note for the model. The client renders it like a local
@@ -256,6 +242,95 @@ export class HostedSession {
     // On disk from the start: a session seeded by `open{messages}` (or one
     // just reloaded and reconciled) survives a restart before its next turn.
     this.persist();
+  }
+
+  /**
+   * Suspend the asking tool call until the first of: a valid answer
+   * (`resolvePermission`) or the turn's abort (`cancelled`). Persisted
+   * (serve): the suspension is captured BEFORE the request is streamed, and
+   * cleared durably once it settles, BEFORE the gate may run the tool — so
+   * "pending" on disk always means "never started" (reload: "Not run").
+   */
+  private awaitDecision(req: PermissionRequest): Promise<PermissionResponse> {
+    const signal = this.compacting ? undefined : this.controller?.signal;
+    if (!signal || signal.aborted) {
+      // No live turn to ask for: a cancel landed between `tool_start` and the
+      // ask. Nobody is prompted and the tool does not run (the agent records
+      // it as cancelled) — not a decision: there is no turn to approve for.
+      return Promise.resolve(outcomeToResponse({ outcome: "cancelled" }));
+    }
+    const requestId = crypto.randomUUID();
+    const update = toPermissionRequestUpdate(requestId, this.currentToolCallId || "pending", req);
+    const record: PendingPermission = {
+      toolCallId: this.currentToolCallId,
+      tool: req.tool,
+      resumable: classifyPending(
+        this.session.messages,
+        this.currentToolCallId,
+        this.currentToolName,
+        req.tool,
+      ),
+      requestedAt: this.now(),
+    };
+    const decided = new Promise<PermissionOutcome>((resolve) => {
+      const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
+      this.asks.set(requestId, {
+        offered: new Set(update.options.map((o) => o.optionId)),
+        settle: (outcome) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(outcome);
+        },
+      });
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    this.pending = record;
+    this.persist();
+    this.emit(update);
+    return decided.then(async (outcome) => {
+      if (this.pending === record) {
+        this.pending = undefined;
+        this.persist();
+        await this.persisted();
+      }
+      return outcomeToResponse(outcome);
+    });
+  }
+
+  /**
+   * Answer a pending request with one of its offered options. Synchronous end
+   * to end (look up → delete → `permission_resolved` → wake the gate), so of
+   * two answers — in any order, in the same tick or not — exactly one wins.
+   * Not pending → `PermissionNotPending` (no effect). An option that was not
+   * offered → `InvalidParams`, and the request STAYS pending: a malformed
+   * answer is never a denial.
+   */
+  resolvePermission(requestId: string, optionId: string): void {
+    const ask = this.asks.get(requestId);
+    if (!ask) {
+      throw new RpcError(DomainErrorCode.PermissionNotPending, "permission request not pending");
+    }
+    if (!ask.offered.has(optionId)) {
+      throw new RpcError(JsonRpcErrorCode.InvalidParams, "option not offered for this request");
+    }
+    this.settle(requestId, { outcome: "selected", optionId });
+  }
+
+  /**
+   * First-wins: the first caller removes the entry; any later one finds none.
+   * `permission_resolved` goes out BEFORE the gate is woken, so its seq
+   * precedes everything the tool's execution streams.
+   */
+  private settle(requestId: string, outcome: PermissionOutcome): void {
+    const ask = this.asks.get(requestId);
+    if (!ask) {
+      return;
+    }
+    this.asks.delete(requestId);
+    try {
+      this.emit({ type: "permission_resolved", requestId, outcome });
+    } finally {
+      ask.settle(outcome);
+    }
   }
 
   /** Hand the persister this session's state as of NOW (a no-op without one, or once closed). */

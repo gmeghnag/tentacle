@@ -5,6 +5,7 @@ import {
   type ExecutionEnvironment,
   type ModelProvider,
   PermissionBroker,
+  type PermissionRequest,
   type PermissionRequester,
   type StreamEvent,
 } from "@tentacle/core";
@@ -492,6 +493,221 @@ describe("RemoteSession over an in-memory channel", () => {
     expect(events.some((e) => e.type === "tool_result")).toBe(true);
     client.close();
   });
+
+  test("the prompt is the request the daemon's gate built, and 'allow always' is remembered daemon-side", async () => {
+    // Before: the client rebuilt `tool: ""` with no suggestion, so the TUI
+    // labelled a prefix-scoped "always" as "this session".
+    const execCalls: string[] = [];
+    const env: ExecutionEnvironment = {
+      id: "rec",
+      async exec(command) {
+        execCalls.push(command);
+        return { stdout: "done", stderr: "", exitCode: 0 };
+      },
+      readFile: () => Promise.resolve(""),
+      writeFile: () => Promise.resolve(),
+    };
+    const call = (id: string, command: string): StreamEvent => ({
+      type: "tool_call",
+      toolCall: { id, name: "shell", arguments: JSON.stringify({ command }) },
+    });
+    const model = new ScriptedProvider([
+      [call("c1", "git status"), { type: "done" }],
+      [call("c2", "git status -s"), { type: "done" }],
+      [{ type: "done" }],
+    ]);
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, makeHost(model, env));
+    const seen: PermissionRequest[] = [];
+    const broker = new PermissionBroker(async (req) => {
+      seen.push(req);
+      return { allowed: true, scope: "session" };
+    });
+    const client = new RemoteClient(clientCh, broker);
+    await client.initialize();
+    await collect(client.newSession().send("go"));
+    expect(seen).toEqual([
+      {
+        tool: "shell",
+        level: "ask",
+        title: "Run a shell command",
+        detail: "git status",
+        input: {},
+        suggestion: { prefix: "git status" },
+      },
+    ]);
+    expect(execCalls).toEqual(["git status", "git status -s"]);
+    client.close();
+  });
+});
+
+describe("permission events at the client (router + broker over a fake daemon)", () => {
+  const OPTIONS = [
+    { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+    { optionId: "allow_always", name: "Allow always", kind: "allow_always" },
+    { optionId: "reject_once", name: "Deny", kind: "reject_once" },
+  ];
+  /** A raw daemon (it could be a hostile pod): it streams whatever the test says. */
+  async function rig(broker: PermissionBroker) {
+    const [daemonCh, clientCh] = createChannelPair();
+    const resolves: unknown[] = [];
+    let seq = 0;
+    const daemon = new RpcPeer(daemonCh, {
+      onRequest: async (method, params) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        if (method === Method.ResolvePermission) {
+          resolves.push(params);
+          return {};
+        }
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, method);
+      },
+    });
+    const errors: Error[] = [];
+    const client = new RemoteClient(clientCh, broker, undefined, {
+      onError: (e) => errors.push(e),
+    });
+    await client.initialize();
+    const send = (update: Record<string, unknown>) =>
+      daemon.notify(Notification.SessionUpdate, {
+        sessionId: "s1",
+        seq: ++seq,
+        mandatory: true,
+        update,
+      });
+    const request = (requestId: string) =>
+      send({
+        type: "permission_request",
+        requestId,
+        toolCallId: "c1",
+        tool: "shell",
+        title: "Run a shell command",
+        explanation: `cmd-${requestId}`,
+        options: OPTIONS,
+      });
+    const resolved = (requestId: string, optionId = "allow_always") =>
+      send({
+        type: "permission_resolved",
+        requestId,
+        outcome: { outcome: "selected", optionId },
+      });
+    return { client, resolves, errors, send, request, resolved };
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 10));
+
+  test("display-only (pod-trust): a permission_resolved never answers and never pre-approves a later request", async () => {
+    // Mutation: let the router cache an `allow_always` outcome and answer the
+    // next request itself → `asked` stays 1 and a resolve is sent → red.
+    const asked: string[] = [];
+    const signals: AbortSignal[] = [];
+    const broker = new PermissionBroker((req, options) => {
+      asked.push(req.detail ?? "");
+      if (options?.signal) signals.push(options.signal);
+      return new Promise(() => {}); // the user has not answered yet
+    });
+    const r = await rig(broker);
+    r.request("r1");
+    await settle();
+    expect(asked).toEqual(["cmd-r1"]);
+    r.resolved("r1"); // "someone approved it — always"
+    r.resolved("unknown");
+    await settle();
+    expect(signals[0]?.aborted).toBe(true); // the dialog was withdrawn
+    expect(r.resolves).toEqual([]);
+    r.request("r2");
+    await settle();
+    expect(asked).toEqual(["cmd-r1", "cmd-r2"]);
+    expect(r.resolves).toEqual([]);
+    r.client.close();
+  });
+
+  test("an answer is sent once, as session/resolve_permission; a dismissed prompt sends nothing", async () => {
+    const answers = [
+      { allowed: true, scope: "once" },
+      { allowed: false, dismissed: true },
+    ] as const;
+    let i = 0;
+    const r = await rig(new PermissionBroker(async () => answers[i++] ?? { allowed: false }));
+    r.request("r1");
+    await settle();
+    r.request("r2");
+    await settle();
+    expect(r.resolves).toEqual([{ sessionId: "s1", requestId: "r1", optionId: "allow_once" }]);
+    r.client.close();
+  });
+
+  test("holdUntilSet: a request that arrives before the TUI's prompt is mounted waits for it — never auto-approved", async () => {
+    // Mutation: build the broker without `holdUntilSet` (default allowAll) →
+    // an `allow_once` is sent before any prompt exists → red.
+    const broker = new PermissionBroker(undefined, { holdUntilSet: true });
+    const r = await rig(broker);
+    r.request("r1");
+    await settle();
+    expect(r.resolves).toEqual([]);
+    const asked: string[] = [];
+    broker.setRequester(async (req) => {
+      asked.push(req.detail ?? "");
+      return { allowed: false };
+    });
+    await settle();
+    expect(asked).toEqual(["cmd-r1"]);
+    expect(r.resolves).toEqual([{ sessionId: "s1", requestId: "r1", optionId: "reject_once" }]);
+    r.client.close();
+  });
+
+  test("a losing answer (PermissionNotPending) is silent; session_closed withdraws the dialog", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    const daemon = new RpcPeer(daemonCh, {
+      onRequest: async (method) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        throw new RpcError(DomainErrorCode.PermissionNotPending, "permission request not pending");
+      },
+    });
+    const errors: Error[] = [];
+    const signals: AbortSignal[] = [];
+    let answer: (r: { allowed: boolean }) => void = () => {};
+    const broker = new PermissionBroker((_req, options) => {
+      if (options?.signal) signals.push(options.signal);
+      return new Promise((resolve) => {
+        answer = resolve;
+      });
+    });
+    const client = new RemoteClient(clientCh, broker, undefined, {
+      onError: (e) => errors.push(e),
+    });
+    await client.initialize();
+    const frame = (seq: number, update: Record<string, unknown>) =>
+      daemon.notify(Notification.SessionUpdate, { sessionId: "s1", seq, mandatory: true, update });
+    const request = (seq: number, requestId: string) =>
+      frame(seq, {
+        type: "permission_request",
+        requestId,
+        toolCallId: "c1",
+        tool: "shell",
+        title: "t",
+        options: OPTIONS,
+      });
+    request(1, "r1");
+    await settle();
+    answer({ allowed: false });
+    await settle();
+    expect(errors).toEqual([]);
+    request(2, "r2");
+    await settle();
+    frame(3, { type: "session_closed", reason: "closed" });
+    await settle();
+    expect(signals[1]?.aborted).toBe(true);
+    client.close();
+  });
 });
 
 describe("RemoteSession.enqueue (steering over RPC)", () => {
@@ -747,7 +963,7 @@ describe("unknown / malformed session/update frames (event classes)", () => {
 
   test("an unknown mandatory event fails the turn loudly and cancels it daemon-side", async () => {
     const r = await run(
-      [{ sessionId: "s1", seq: 1, mandatory: true, update: { type: "permission_request" } }],
+      [{ sessionId: "s1", seq: 1, mandatory: true, update: { type: "future_mandatory" } }],
       false,
     );
     expect(r.outcome).toBeInstanceOf(Error);
@@ -783,11 +999,11 @@ describe("unknown / malformed session/update frames (event classes)", () => {
       sessionId: "s1",
       seq: 9,
       mandatory: true,
-      update: { type: "permission_request" },
+      update: { type: "future_mandatory" },
     });
     await new Promise((r) => setTimeout(r, 10));
     expect(errors.map((e) => e.message)).toEqual([
-      expect.stringMatching(/permission_request.*newer than this client/),
+      expect.stringMatching(/future_mandatory.*newer than this client/),
     ]);
     client.close();
   });

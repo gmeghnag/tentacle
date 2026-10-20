@@ -76,6 +76,37 @@ describe("permission gate in the agent loop", () => {
     expect(execCalls).toEqual([]); // the command was never executed
   });
 
+  test("a refusal that comes from a cancel is recorded as cancelled, not as a user denial", async () => {
+    // The daemon settles a pending ask as `cancelled` when its turn is
+    // cancelled; the history must not claim the user denied it.
+    // Mutation: check `!allowed` before the abort → "Permission denied" → red.
+    const { env, execCalls } = makeEnv();
+    const controller = new AbortController();
+    const agent = new Agent({
+      model: new ScriptedProvider([toolCallTurn("make deploy")]),
+      tools: new ToolRegistry().register(shellTool),
+      env,
+      requestPermission: async () => {
+        controller.abort();
+        return { allowed: false };
+      },
+    });
+    const events: AgentEvent[] = [];
+    for await (const event of agent.run(
+      "s1",
+      [{ role: "user", content: "go" }],
+      controller.signal,
+    )) {
+      events.push(event);
+    }
+    const result = events.find((e) => e.type === "tool_result");
+    expect(result?.type === "tool_result" && result.result.content).toBe(
+      "Cancelled by the user before this tool ran.",
+    );
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    expect(execCalls).toEqual([]);
+  });
+
   test("allows a shell call when the user approves", async () => {
     const { env, execCalls } = makeEnv();
     const agent = new Agent({

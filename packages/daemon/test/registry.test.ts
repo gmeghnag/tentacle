@@ -328,7 +328,6 @@ describe("fan-out", () => {
     const fast: KnownSessionUpdateParams[] = [];
     const attach = (send: UpdateSink): Attachment => ({
       send,
-      requestPermission: async () => ({ outcome: "cancelled" }),
     });
     // A sink that "returns" a promise settled on a macrotask (a slow transport).
     hosted.attach(attach((() => new Promise((r) => setTimeout(r, 0))) as unknown as UpdateSink));
@@ -466,88 +465,5 @@ describe("the model-serving connection (`--model-proxy`)", () => {
     await b.open({ sessionId: "X", since: { epoch, seq: 0 } });
     expect(types(b.updates)).toContain("turn_end");
     expect(b.updates.at(-1)?.update).toMatchObject({ stopReason: "end_turn" });
-  });
-});
-
-describe("interim permission routing (until permission-events)", () => {
-  const shellTurn = (): ModelProvider => {
-    let call = 0;
-    return {
-      id: "shell",
-      async *stream(): AsyncIterable<StreamEvent> {
-        if (call++ === 0) {
-          await tick(20); // time to detach / re-attach before the tool runs
-          yield {
-            type: "tool_call",
-            toolCall: { id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls" }) },
-          };
-        } else {
-          yield { type: "text", delta: "done" };
-        }
-        yield { type: "done" };
-      },
-    };
-  };
-  const execs: string[] = [];
-  const env: ExecutionEnvironment = {
-    id: "rec",
-    async exec(command) {
-      execs.push(command);
-      return { stdout: "ok", stderr: "", exitCode: 0 };
-    },
-    async readFile() {
-      return "";
-    },
-    async writeFile() {},
-  };
-  const allowing = (asked: string[], who: string) => async (method: string) => {
-    if (method !== "session/request_permission") throw new Error(`unexpected ${method}`);
-    asked.push(who);
-    return { outcome: { outcome: "selected", optionId: "allow_once" } };
-  };
-
-  test("the creator detached: the client attached now is asked, and its answer is used", async () => {
-    // Red on main: the requester was bound to the creating connection → cancelled.
-    execs.length = 0;
-    const asked: string[] = [];
-    const d = daemon(shellTurn, env);
-    const a = await d.connect({}, allowing(asked, "A"));
-    await a.open({ sessionId: "X", create: true });
-    await a.prompt("X", "t1");
-    a.connection.close();
-    const b = await d.connect({}, allowing(asked, "B"));
-    await b.open({ sessionId: "X" });
-    await until(() => ended(b.updates));
-    expect(asked).toEqual(["B"]);
-    expect(execs).toEqual(["ls"]);
-  });
-
-  test("two attached: the most recently attached is asked", async () => {
-    execs.length = 0;
-    const asked: string[] = [];
-    const d = daemon(shellTurn, env);
-    const a = await d.connect({}, allowing(asked, "A"));
-    const b = await d.connect({}, allowing(asked, "B"));
-    await b.open({ sessionId: "X", create: true });
-    await a.open({ sessionId: "X" });
-    await b.prompt("X", "t1");
-    await until(() => ended(b.updates));
-    expect(asked).toEqual(["A"]);
-  });
-
-  test("nobody attached: denied at once, nobody asked, the turn still ends", async () => {
-    execs.length = 0;
-    const asked: string[] = [];
-    const d = daemon(shellTurn, env);
-    const a = await d.connect({}, allowing(asked, "A"));
-    const { epoch } = await a.open({ sessionId: "X", create: true });
-    await a.prompt("X", "t1");
-    a.connection.close();
-    await until(() => d.host.get("X")?.running === false);
-    expect(asked).toEqual([]);
-    expect(execs).toEqual([]);
-    const b = await d.connect();
-    await b.open({ sessionId: "X", since: { epoch, seq: 0 } });
-    expect(b.updates.at(-1)?.update).toMatchObject({ type: "turn_end", stopReason: "end_turn" });
   });
 });

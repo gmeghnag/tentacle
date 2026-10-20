@@ -131,6 +131,15 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "history_replaced", reason: "compact" },
     { type: "session_closed", reason: "closed" },
     { type: "context_note", text: "Continue with the task.", reason: "continue" },
+    {
+      type: "permission_request",
+      requestId: "r",
+      toolCallId: "t",
+      tool: "shell",
+      title: "x",
+      options: [{ optionId: "allow_once", name: "Allow once", kind: "allow_once" }],
+    },
+    { type: "permission_resolved", requestId: "r", outcome: { outcome: "cancelled" } },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {
@@ -146,14 +155,16 @@ describe("toUpdateParams (the session/update frame)", () => {
     }
   });
 
-  test("the real table: the turn bracket, the history barrier and the close carry mandatory: true", () => {
+  test("the real table: the turn bracket, the history barrier, the close and the permission events carry mandatory: true", () => {
     for (const update of samples) {
       const params = toUpdateParams("s1", 1, update);
       const mandatory =
         update.type === "turn_start" ||
         update.type === "turn_end" ||
         update.type === "history_replaced" ||
-        update.type === "session_closed";
+        update.type === "session_closed" ||
+        update.type === "permission_request" ||
+        update.type === "permission_resolved";
       expect(params.mandatory === true).toBe(mandatory);
     }
   });
