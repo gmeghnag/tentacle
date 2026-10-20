@@ -1,6 +1,6 @@
 # feat/maxiterations-unlimited — allow `maxIterations: -1` (unlimited) for the main agent loop
 
-> **Status:** context · implementation · execution · review · done
+> **Status:** done — merged to `main` (`a988886`) · status synced by audit 2026-10-20
 > **Branch:** `feat/maxiterations-unlimited`
 > **Size:** S · **Blast:** contained (config surface only — `schema.ts` + `resolve.ts` + tests; the engine is unchanged) · **Suited:** a weaker model may execute; standard in-context Review (no §7 code invariant touched).
 

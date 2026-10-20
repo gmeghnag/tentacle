@@ -1,6 +1,6 @@
 # fix/cancel-hung-disk — a hung disk blocks `cancel` of a turn waiting on a permission
 
-> **Status:** execution done · Review **waived by the owner** (token budget, 2026-10-20) — see Review
+> **Status:** done — merged to `main` 2026-10-20 (`9aed85b`) · Review **waived by the owner** (token budget, 2026-10-20) — see Review · status synced by audit 2026-10-20
 > **Branch:** `fix/cancel-hung-disk`
 > **Type:** fix · **Size:** S · **Blast:** load-bearing (the permission gate + the persistence "pending ⇒ never started" invariant, AGENTS §7) · **Suited:** strong model executes; fresh-context Review mandatory by §10 — waived here by explicit owner decision
 

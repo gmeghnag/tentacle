@@ -1,6 +1,6 @@
 # eval/pod-model-streaming — in pod mode the TUI sees nothing until the whole model round is done
 
-> **Status:** fix (promoted 2026-10-18; Context + Implementation + Execution in; Review #3 + #4 APPROVE-WITH-NITS; acceptance e2e passed on kind; Delta 2 Review #5 APPROVE; merged to main 2026-10-18)
+> **Status:** done — merged to `main` 2026-10-18 (`4022288`) (promoted 2026-10-18; Context + Implementation + Execution in; Review #3 + #4 APPROVE-WITH-NITS; acceptance e2e passed on kind; Delta 2 Review #5 APPROVE; merged to main 2026-10-18)
 > **Branch:** `fix/pod-model-streaming`
 > **Type:** fix · **Size:** M · **Blast:** load-bearing (protocol + the §7 model-tunnel seam + `transport/peer.ts`) · **Suited:** a strong model executes; mandatory fresh-context Review, ideally by a different model family.
 > **Umbrella:** [`remote-execution-model.md`](./remote-execution-model.md) (piece 1 of 4; no prerequisites; 2 and 3 build on it).

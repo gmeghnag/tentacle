@@ -1,6 +1,6 @@
 # feat/config-profiles — named profiles in the user config, picked with `--profile <name>`
 
-> **Status:** review done (in-context) — awaiting the owner's OK to commit/merge
+> **Status:** done — merged to `main` 2026-10-20 (`3dcd5fa`; in-context review) · status synced by audit 2026-10-20
 > **Branch:** `feat/config-profiles`
 > **Size:** S–M · **Blast:** cross-module (the config loader every runtime uses + the CLI's argument dispatch; no protocol, persistence or terminal change) · **Suited:** any model executes; standard in-context Review
 

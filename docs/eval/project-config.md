@@ -1,6 +1,6 @@
 # eval/project-config — a per-project `.tentacle/config.jsonc` that overrides the user config
 
-> **Status:** eval — **REJECTED by the owner (2026-10-20)**; replaced by an explicit `--config <path>` flag (`docs/feat/config-flag.md`)
+> **Status:** eval — **REJECTED by the owner (2026-10-20)**; replaced by named profiles, `tentacle --profile <name>` (`docs/feat/config-profiles.md`, merged `3dcd5fa`). The `--config <path>` flag first planned as `docs/feat/config-flag.md` was never built: the owner chose profiles instead (audit 2026-10-20)
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10)
 > **Size:** n/a (not built) · **Blast:** n/a · **Suited:** decision record only
 
@@ -130,7 +130,7 @@ leaves residual holes: the agent's fs tools can reach the trust store, and the
 gate is a new piece of startup UX to get exactly right. **No config file is
 ever picked up implicitly from the launch folder.** Instead, the user names the
 file explicitly: `tentacle --config <path>`. That is an explicit choice made on
-every launch, so it needs no trust state. Built as `docs/feat/config-flag.md`.
+every launch, so it needs no trust state. *(Audit 2026-10-20: not built as a flag; the need was met by named profiles, `docs/feat/config-profiles.md`.)*
 
 ## Implementation
 
@@ -149,5 +149,5 @@ project config, unless reduced to a safe-key subset (B) or gated by trust (C),
 is launch-time code execution (`apiKeyCommand`, `mcpServers`) and key
 exfiltration (`baseURL`). The owner chose to avoid the class entirely. The
 need (a different config per context) is met by an explicit
-`--config <path>` (`docs/feat/config-flag.md`). If implicit per-repo settings
+choice made on every launch, built as named profiles: `--profile <name>` (`docs/feat/config-profiles.md`; the `--config <path>` flag was never built). If implicit per-repo settings
 come back, restart from option B or the profiles idea above, not from A.

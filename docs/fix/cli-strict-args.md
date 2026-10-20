@@ -1,6 +1,6 @@
 # fix/cli-strict-args — unknown CLI flags are silently ignored or sent to the model; `-n` is not a namespace
 
-> **Status:** review done (in-context) — awaiting the owner's OK to commit/merge
+> **Status:** done — merged to `main` 2026-10-20 (`41c84d9`; in-context review) · status synced by audit 2026-10-20
 > **Branch:** `fix/cli-strict-args`
 > **Size:** S–M · **Blast:** cross-module (the CLI argument dispatch for every command; no protocol, persistence or runtime change) · **Suited:** any model executes; standard in-context Review
 

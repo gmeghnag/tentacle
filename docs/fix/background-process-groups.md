@@ -1,6 +1,6 @@
 # fix/background-process-groups — kill whole process groups, and never let a job outlive tentacle
 
-> **Status:** reviewed (2026-10-19) — Review round 1: REQUEST-CHANGES; findings 1–6 fixed and verified by the executor (see Execution, *Review round 1 — fixes*). The owner waived a round-2 Review. **Merged to `main` 2026-10-19**; gate green on the merge.
+> **Status:** done — merged to `main` 2026-10-19 (`8b71fc0`). Review round 1: REQUEST-CHANGES; findings 1–6 fixed and verified by the executor (see Execution, *Review round 1 — fixes*). The owner waived a round-2 Review. **Merged to `main` 2026-10-19**; gate green on the merge.
 > **Branch:** `fix/background-process-groups`
 > **Type:** eval → fix · **Size:** S–M · **Blast:** load-bearing (touches how the worker, `serve` and the stdio pod daemon terminate) · **Suited:** strong model executes; mandatory fresh-context Review
 

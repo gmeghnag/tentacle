@@ -1,6 +1,6 @@
 # eval/daemon-session-lifecycle — the daemon has no session lifecycle: background processes outlive their session
 
-> **Status:** eval (Context + Review; Implementation empty until promoted)
+> **Status:** closed — fully delivered through other tasks, all merged to `main`: task 1 → `docs/fix/background-process-groups.md` (`8b71fc0`); task 2 → `docs/feat/session-registry.md` (`c4cf369`) + `docs/feat/session-ttl-limits.md` (`a52b9a5`). Verified in code (audit 2026-10-20): a session's jobs are disposed when it closes (`packages/daemon/src/hosted-session.ts:886`), opening a live id re-attaches instead of clobbering (`packages/daemon/src/session-host.ts:98`), every shell runs in its own process group (`packages/exec/src/process-group.ts`). Kept as the decision record.
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10)
 > **Type:** eval · **Size:** M (if promoted: split into two tasks, see Review) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (touches the protocol, the daemon `Connection`, and the TUI-over-RPC session path, AGENTS §7)
 

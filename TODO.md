@@ -374,10 +374,13 @@ Daily-driver work (done 2026-10-14):
       CONFIRMED. **Fix (DONE 2026-10-20, `fix/daemon-compact-turn-guard`):**
       `docs/fix/daemon-compact-turn-guard.md`. Type: fix · Size: S ·
       Blast: load-bearing.
-- [ ] 🟡 **No daemon session lifecycle**: background jobs orphaned on `/clear` /
+- [x] 🟡 **No daemon session lifecycle**: background jobs orphaned on `/clear` /
       disconnect / exit; duplicate `sessionId` clobbers; `shell_kill` misses
       grandchildren. CONFIRMED. **Eval:** `docs/eval/daemon-session-lifecycle.md`.
-      Type: eval · Size: M · Blast: load-bearing.
+      DONE through other tasks (audit 2026-10-20): `fix/background-process-groups`
+      (process groups, dispose on close, exit net) + `feat/session-registry` and
+      `feat/session-ttl-limits` (daemon-owned sessions: a live id re-attaches,
+      jobs disposed on close). Type: eval · Size: M · Blast: load-bearing.
 - [ ] 🟡 **No history-validity invariant** (dangling tool_calls / invalid-JSON args
       persisted and re-sent; resume repairs nothing). CONFIRMED (mostly).
       Subsumes the Block-3 requester-throw + consecutive-user items.
@@ -494,6 +497,8 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       1. **Fix (DONE 2026-10-19, `fix/background-process-groups`):** `docs/fix/background-process-groups.md` · S–M · load-bearing
       2. **Feat (DONE 2026-10-19, `feat/protocol-schema-export`):** `docs/feat/protocol-schema-export.md` · S–M · cross-module
       2b. **Fix (DONE 2026-10-20, `fix/daemon-compact-turn-guard`):** `docs/fix/daemon-compact-turn-guard.md` (before 3c)
+      (Steps 3a–3c are the three parts of `docs/eval/session-event-stream.md`,
+      now closed: all three merged.)
       3a. **Feat (DONE 2026-10-20, `feat/session-wire-classes`):** `docs/feat/session-wire-classes.md` · M · load-bearing
       3b. **Feat (DONE 2026-10-20, `feat/session-turn-events`):** `docs/feat/session-turn-events.md` · M · load-bearing
       3c. **Feat (DONE 2026-10-20, `feat/session-history-cut`):** `docs/feat/session-history-cut.md` · M · load-bearing
@@ -514,6 +519,11 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       — **Feat (DONE 2026-10-20, `feat/pod-attach-resilience`):** `docs/feat/pod-attach-resilience.md` — Layer 1: exec-channel keepalive (WS ping + blank stdin + pong-gated dead-man) · S · contained
       — mobile app (React Native or Swift) — own eval, after 8b; carries the JSON re-attach test vectors deferred by 8a (R-Q3)
       — **Eval (deferred, low):** `docs/eval/reaper-gc-flaky-test.md` — test-only flake, at the end of v2
+
+- [ ] **`connect` cannot trust a self-signed daemon** (`serve --tls-cert/--tls-key`
+      gives `wss://`, but `connect` has no `--ca-cert` / `--insecure-skip-tls-verify`).
+      **Eval:** `docs/eval/client-tls-trust.md` — promotion-ready. Type: eval →
+      feat · Size: S · Blast: contained.
 
 - [ ] **No changelog discipline** (no `CHANGELOG.md`). **Eval:**
       `docs/eval/changelog-discipline.md`. Type: eval. Open.

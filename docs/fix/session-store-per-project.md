@@ -1,6 +1,6 @@
 # fix/session-store-per-project — sessions under `~/.config/tentacle/sessions/<cwd-key>/<uid>.json`
 
-> **Status:** execution done · in-context review — awaiting the owner's OK to commit/merge (promoted from `docs/eval/` by the owner, 2026-10-20)
+> **Status:** done — merged to `main` 2026-10-20 (`2f3fce4`; in-context review, fresh Review waived by the owner; promoted from `docs/eval/` by the owner, 2026-10-20) · status synced by audit 2026-10-20
 > **Branch:** `fix/session-store-per-project`
 > **Type:** fix · **Size:** M · **Blast:** load-bearing (the persisted layout and the §7 "persistence lives on the laptop/main thread" invariant) · **Suited:** strong model executes; fresh-context Review mandatory by §10 — **waived by the owner** for this task (2026-10-20, "attenzione alta senza review")
 
