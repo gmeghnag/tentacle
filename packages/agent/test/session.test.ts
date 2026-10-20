@@ -170,3 +170,23 @@ describe("Session", () => {
     expect(snapshots).toEqual([2, 4]);
   });
 });
+
+describe("Session.pendingSteering", () => {
+  test("the queued messages, in order, as a copy (a persister must not alias the live queue)", () => {
+    // Mutation: return the live array → the caller's mutation empties the queue.
+    const model: ModelProvider = {
+      id: "m",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { type: "done" };
+      },
+    };
+    const env = {} as ExecutionEnvironment;
+    const session = new Session(new Agent({ model, tools: new ToolRegistry(), env }));
+    session.enqueue("a");
+    session.enqueue("b");
+    const copy = session.pendingSteering() as string[];
+    expect(copy).toEqual(["a", "b"]);
+    copy.length = 0;
+    expect(session.pendingSteering()).toEqual(["a", "b"]);
+  });
+});

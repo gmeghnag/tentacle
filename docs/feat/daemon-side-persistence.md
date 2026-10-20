@@ -1,8 +1,8 @@
-# eval/daemon-side-persistence — `serve` persists session history on its own host
+# feat/daemon-side-persistence — `serve` persists session history on its own host
 
-> **Status:** implementation drafted — awaiting owner approval (2026-10-19)
-> **Branch:** none until promoted (then `feat/daemon-side-persistence`; Part B → `feat/suspended-turn-resume` if the split in Open question 1 is approved)
-> **Type:** eval → feat · **Size:** L as one task → proposed split into two M (Part A here, Part B a new doc; Open question 1) · **Blast:** load-bearing (agent loop, persistence + pod-trust invariants, AGENTS §7 rule change) · **Suited:** strong model executes; mandatory fresh-context Review per part
+> **Status:** executed + reviewed 2026-10-20 (one fresh-context review: REQUEST-CHANGES, findings 1–8 addressed, not re-reviewed by owner choice) — awaiting owner OK to commit/merge. Part A only; Part B lives in `docs/eval/suspended-turn-resume.md`
+> **Branch:** `feat/daemon-side-persistence`
+> **Type:** feat · **Size:** M (Part A) · **Blast:** load-bearing (persistence + pod-trust invariants, steering window, AGENTS §7 rule change) · **Suited:** strong model executes; mandatory fresh-context Review
 
 ## Context
 
@@ -27,6 +27,281 @@ laptop must own the record. A `serve` on the user's own machine is a
 different trust situation.
 
 ## Implementation
+
+### Revision for Part A, verified on `main` @ `e3c3293` (2026-10-20)
+
+*— claude-opus-5-5, 2026-10-20*
+
+The draft below (2026-10-19) was written on `4914e9b`, before seven of its
+prerequisites landed (wire classes, turn events, history cut, registry,
+TTL/limits, compact guard, store durability). This revision re-verifies it
+against the code as built. **Where it disagrees with the draft, this revision
+wins.** The [B] items of the draft stay where they are as the source for
+`docs/eval/suspended-turn-resume.md`.
+
+#### Load-bearing assumption
+
+> **Persisting adds no `await` to the steering window.** Every daemon write is
+> captured synchronously, and the turn-end write sits inside code that cannot
+> await.
+
+Verified:
+- `HostedSession.finishTurn` is a plain (non-`async`) method
+  (`hosted-session.ts:472-488`). `drive` calls it synchronously in the loop body
+  on the agent's `turn_end` event, before the `return` that resumes the
+  generator (`:420-423`). A `schedule(...)` call placed inside it cannot
+  introduce an `await`.
+- `schedule`'s own work runs synchronously up to the first `await` of the
+  write. The chain is `JsonSessionStore.save` (sync until it returns its
+  promise, `session-store.ts:251-264`) → `pump` → `writeAtomic` → the first
+  `await mkdir` (`:296`). So the turn-end write costs one shallow copy, not
+  I/O.
+- **Correction to the draft (A2, "Why `schedule` returns `void`"):** `await` on
+  a `void` call is *not* a type or lint error (TS allows `await undefined`, and
+  Biome has no floating-promise rule here). The real guard is the one above:
+  the call site is a synchronous function.
+- Empirical proof: test P4 (below) copies the macrotask probe
+  (`integration.test.ts:525-557`) with a store whose `save` never resolves. It
+  must still see `{running: false, ended: true}` at the next macrotask, and it
+  must fail under the mutation "`drive` awaits `persister.flush` before
+  `finishTurn`".
+
+#### What changed since the draft (verified, `file:line` on `e3c3293`)
+
+1. **Open question 2 (epoch) is already solved.** `HostedSession` mints a fresh
+   epoch per incarnation (`hosted-session.ts:156-163`), and `replayFrom`
+   resyncs on any foreign epoch (`:271-279`). A restored session is a new
+   incarnation, so no token work is needed. Test P8 pins it.
+2. **Idempotency maps exist and are in memory:** `turns: Map<turnId, {end?}>`
+   (`:119`) and `enqueued: Set` (`:121`). Both are persisted (Open question 3).
+   The turn interrupted by a restart gets a cached end, so a retried
+   `prompt{turnId}` answers `{turnId, ended}` and never runs again (`:370-373`).
+3. **`configDir` is global** (`config/src/load.ts:157`, `~/.config/tentacle`).
+   The draft's `<configDir>/daemon/sessions/` would make two `serve`s on two
+   projects fight over one lock. Worse, a `serve` in project B would reload
+   project A's sessions and run them confined to B's cwd (`session-host.ts:179`
+   ignores the record's cwd). **Fix:** one store per project,
+   `<configDir>/daemon/<projectKey(cwd)>/`, with `projectKey` =
+   `<basename>-<sha256(realpath(cwd))[:12]>`. This is the derivation
+   `docs/eval/session-store-per-project.md` §Review 1 recommends for the client
+   store; it lives in `@tentacle/agent` so that fix can reuse it. A record whose
+   `cwd` is not `config.cwd` is skipped anyway (defence in depth).
+4. **The requester routes to the most recent attachment, or denies at once when
+   none is attached** (`hosted-session.ts:169-177`, the interim routing until
+   `permission-events`). So a "suspension" exists only while a request is
+   outstanding to an attached client. The pending record is set only on that
+   path.
+5. **Store durability as built** (`session-store.ts`): `save` is
+   serialized/latest-wins and rejects on failure (`:244-264`). `list()` returns
+   `{records, skipped}` (`:384-408`). Extra top-level fields are kept, but extra
+   *message* keys are rejected (`:138,149-152`). There is **no delete** yet, so
+   `JsonSessionStore.remove(id)` is added (drops a queued write, waits for the
+   running one, then `rm`).
+6. **There is no `onCommitted()`.** The cut moves in `drive` on the agent's
+   `history_commit` (`:426-429`), in `finishTurn` (`:486`) and in the
+   compaction barrier `historyReplaced` (`:553-569`). Those are the committed
+   boundaries. `Session.onPersist` is not wired on the daemon
+   (`session-host.ts:181`), and every daemon path goes through `HostedSession`,
+   so it stays unwired.
+7. **The prompt is in the history synchronously** once `prompt()` has called
+   `void this.drive(...)`: the async generator body runs up to its first
+   `await` within the first `next()` (`session.ts:62-70`). Repro
+   `.tentacle/tmp/daemon-side-persistence/turnstart.ts` prints
+   `raw history after prompt() returned: ["user:PROMPT"]`. So the turn-start
+   write goes right after `void this.drive(...)`, and test A1 pins that it
+   holds the prompt.
+
+#### Design decisions that differ from the draft
+
+- **D-a. The pending record is durably cleared before an approved tool runs,
+  already in Part A** (the draft deferred this to B4). Part A tells the model
+  "Not run" for a pending call, and that claim is only true if a call that was
+  approved and then started can never still read as pending on disk. The
+  requester wrapper therefore, on settle, clears `pending`, calls `schedule`,
+  and `await`s `persister.flush(id)` before returning to the gate. This is
+  mid-round, inside `authorize`, far from the steering window. A flush failure
+  is logged and the tool still runs (the user approved it). The residual case,
+  a crash right after such a failure, is written up under Failure modes.
+- **D-b. Every acked `enqueue` on `serve` is on disk** (the draft only waited
+  when the turn was suspended). The push stays synchronous; only the ack waits,
+  in `Connection` (`connection.ts` enqueue). The cost is one local fsync on a
+  user-typed message. A **write failure does not fail the ack**: the steer *is*
+  queued and is delivered while the daemon lives. The failure goes to the
+  daemon log like every other store failure, so failures are never RPC errors.
+  (The draft's `PersistFailed` error would collide with idempotency: a retry
+  with the same id is a dedupe no-op success.) `flush` never rejects.
+- **D-c. A file that could not be loaded is never overwritten or deleted.**
+  The ids of skipped files (unreadable, wrong `kind`, unknown `schemaVersion`,
+  foreign `cwd`) are *blocked* in the persister. If a client later opens that
+  uid, the session lives in memory only, and one log line says why.
+- **D-d. The interrupted turn's cached end** is
+  `{stopReason: "error", error: {code: DaemonRestarted, message: "interrupted: the daemon restarted during this turn"}}`.
+  This adds one `DomainErrorCode` (`-32012`) to `@tentacle/protocol`, which is
+  additive: an old client sees an unknown number plus the message, so
+  `PROTOCOL_VERSION` stays. `schema/protocol.json` is regenerated
+  (`bun run schema:export`; the drift gate pins it).
+- **D-e. The TTL clock on reload** (pure `restoredActivity`): a record written
+  while idle → its `lastActiveAt` (exact: nothing ended since). A record
+  written mid-turn → *now*: the session was busy until the crash, at an unknown
+  time ≤ now, and erring on "keep it longer" never destroys data. Expired
+  sessions are left to the reaper's first sweep, so there is one teardown path
+  (`session-host.ts:154-171`).
+- **D-f. Shutdown:** `SIGINT` → stop the reaper and the server →
+  `persister.stop()` (stop accepting writes, then drain) → release the lock →
+  exit. A second `SIGINT` exits at once, so a hung disk cannot trap the user
+  (today a handler is installed, so Ctrl+C never kills `serve` by default,
+  `main.ts:239-242` on `e3c3293`). Sessions are **not** closed on shutdown: surviving a
+  restart is the point.
+- **D-g. A session is written once when created** (the constructor), so a
+  session seeded by `open{messages}` survives a restart before its first turn.
+
+#### Preconditions (re-verified)
+
+P1–P3 and P5–P8 of the draft hold on `e3c3293`, with the line numbers moved:
+- **P1** pushes: `agent.ts:215,268-272,300,314,330,360,384,424,439`;
+  `history_commit` after each push that commits (`:281,341,362`).
+- **P2** sequential calls: `agent.ts:323-363`.
+- **P3** steering in `Session` (`session.ts:32,65,83-85`). The running/turn
+  check is in `HostedSession.enqueue` (`hosted-session.ts:496-509`).
+- **P4** the steering invariant: `agent.ts:287-296`, `hosted-session.ts:410-417`,
+  pinned by `integration.test.ts:525-557`.
+- **P5** `serve` alone builds its host in `startDaemon` (`serve.ts:56-98`).
+  `startStdioDaemon` (`:109-183`) and the worker (`worker.ts:87`) build their
+  own hosts, without a persister.
+- **P6** the client store is `<configDir>/sessions` (`main.ts`), separate from
+  `<configDir>/daemon/<key>/`.
+- **P7** `agent_task` never asks for permission (`tools/src/task.ts`).
+- **P8** `ChatMessage` round-trips through JSON.
+- **New P9:** `PermissionRequest.tool` is the tool's name
+  (`core/src/permission.ts:16`), which `classifyPending` compares with the
+  current call's name.
+
+#### Files (dependency order)
+
+1. `packages/protocol/src/jsonrpc.ts`: `DaemonRestarted: -32012`, plus the
+   regenerated `packages/protocol/schema/protocol.json`.
+2. `packages/agent/src/session.ts`: `pendingSteering(): readonly string[]`.
+3. `packages/agent/src/session-store.ts`: `JsonSessionStore.remove(id)` and
+   `projectKey(cwd)`.
+4. `packages/daemon/src/persisted-session.ts` (new, pure):
+   `DaemonSessionState`, `DaemonSessionRecord`, `toDaemonRecord`,
+   `parseDaemonRecord`, `classifyPending`, `reconcileOnReload`,
+   `restoredActivity`, and the note texts.
+5. `packages/daemon/src/session-persister.ts` (new): `SessionPersister`
+   (`schedule` / `flush` / `remove` / `block` / `stop`) over a minimal
+   `RecordStore` interface, plus `acquireStoreLock`.
+6. `packages/daemon/src/hosted-session.ts`: an optional 8th parameter
+   `persistence?: {persister, restored?}`; the write sites; the pending
+   capture; `persisted()`.
+7. `packages/daemon/src/session-host.ts`: a `persister?` option, `restore()`,
+   and `remove` on `close` (which covers the reaper too).
+8. `packages/daemon/src/connection.ts`: `enqueue` acks after `persisted()`.
+9. `packages/daemon/src/index.ts`: the exports.
+10. `packages/cli/src/serve.ts`: an `async startDaemon` that does
+    store dir → lock → list → restore → listen, and returns
+    `{url, port, stop(): Promise<void>}`.
+11. `packages/cli/src/main.ts`: `await startDaemon`, the notices printed before
+    listening, and the two-stage SIGINT.
+12. `AGENTS.md` §7: the amendment (draft A9, adjusted to the per-project
+    directory).
+
+#### Write sites (all synchronous `schedule`; none awaited in a turn)
+
+| Site | Where | Captures |
+|---|---|---|
+| creation / restore | `HostedSession` constructor | the seeded or reconciled history |
+| turn start | `prompt()`, after `void this.drive(...)` | the prompt in the history, `turn.turnId`, the `turns` entry |
+| committed boundary | `drive` on `history_commit`, after `recordCut` | each round's assistant message and each tool result |
+| suspension | requester wrapper, before forwarding | `turn.pending` |
+| permission settled | requester wrapper, then `await flush` (D-a) | `pending` cleared |
+| enqueue | `HostedSession.enqueue` after the push; `Connection` awaits `persisted()` (D-b) | `turn.steering`, `enqueueIds` |
+| turn end | `finishTurn`, in its `finally` after `recordCut` (sync) | no `turn`; `turns[turnId].end` |
+| compaction | `compact()`'s `finally`, once the slot is free (review fix) | the compacted history and its clock |
+| detach | `removeAttachment` (review fix, R1) | the TTL clock (`lastActiveAt`/`lastDetachAt`) |
+| close | `SessionHost.close` → `persister.remove(id)` | file deleted (skipped if blocked) |
+
+After `close()` (the `closed` flag) every `schedule` is a no-op, so a `remove`
+can never be followed by a resurrecting write.
+
+#### Reconciliation on reload (pure, `reconcileOnReload`)
+
+- **No `turn`** → the history is used as is.
+- **`turn` present** → every unanswered call of the trailing assistant
+  message is answered in order, right after the existing answers:
+  - the first unanswered call:
+    - is the `pending` one and the request came from that call → **"Not run"**;
+    - is the `pending` one but the request came from a sub-agent
+      (`resumable: false`, D4) → **sub-agent interrupted**;
+    - there is no `pending`, or `pending` names some other call → **"Interrupted
+      … may or may not have completed"** (the conservative reading);
+  - every later unanswered call → **"Not run"**.
+
+  `turn.steering` entries are then appended as `user` messages, and the turn's
+  `turns` entry gets the D-d end unless it already has one.
+
+#### Failure modes (delta to the draft's table; the rest of it holds)
+
+| Case | Outcome |
+|---|---|
+| Flush fails after an approval, then the daemon crashes while the tool runs | The disk still says pending, so the reload says "Not run" for a call that may have run. This needs two failures (disk + crash) inside one tool run; it is logged at the flush failure. Documented limit. |
+| A client opens a uid whose file was skipped | The session lives in memory only, with one log line (D-c). The file is left byte-identical. |
+| `serve` started in another project | It uses another directory and another lock, so it neither collides nor reloads foreign sessions. |
+| A record with a foreign `cwd` in the directory | Skipped, reported, blocked (D-c). |
+| `close` / reap racing a write | `remove` drops the queued write and waits for the running one before `rm`, and `closed` stops new writes. |
+| Shutdown while a turn runs | Writes stop being accepted, the pending ones drain, and the last record has `turn`, so it is reconciled at the next start. |
+| Store write fails (ENOSPC/EACCES) | `onError` → `[daemon] error: couldn't write …`. The session serves from memory and the next `schedule` retries. Never an unhandled rejection. |
+| Two `serve`s on one project | The second refuses, naming the pid and the lock file. A dead pid's lock is taken over once. **Limit (review nit 7):** two daemons starting in the same instant over one *stale* lock can both take it over (`rm` + exclusive create is not atomic as a pair, and Bun/Node have no `flock`). It needs a crashed holder plus two simultaneous starts; documented, not fixed. |
+
+#### Tests (red first; each names its mutation)
+
+`packages/daemon/test/persistence.test.ts` (a `SpyStore` with `release()` and
+`durable`, a scripted model, the real `Agent`/`Session`/`PermissionGate`), plus
+`packages/agent/test/session-store.test.ts` (the new `remove`/`projectKey`)
+and `packages/cli/test/serve-persistence.test.ts` (a real disk under a temp
+`configDir`):
+
+- **A1** The turn-start record holds the prompt and the `turns` entry.
+  Mutation: write before `drive` starts → prompt missing.
+- **A2** A restart after `turn_end` → the snapshot deep-equals the history from
+  before; the session is detached and idle.
+- **A3** A restart mid-suspension on `c2` of `[c1 none, c2 ask, c3 ask]`, with
+  `steer-1` enqueued → `tool(c1), tool(c2 "Not run"), tool(c3 "Not run"), user
+  steer-1`; no exec. Mutation: every unanswered call labelled "Interrupted" →
+  fail.
+- **A4** A crash mid-tool (no pending) → "Interrupted" + "Not run"; nothing
+  re-runs.
+- **A5** A sub-agent-shaped pending → the sub-agent note (D4).
+- **A6** Pending is durable *before* the tool runs (D-a): the tool's `execute`
+  reads `SpyStore.durable` and must see no `pending`. Mutation: drop the flush
+  → fail.
+- **A7** An enqueue ack waits for the disk (D-b): the ack does not resolve
+  before `release()`, and afterwards `durable.turn.steering` holds the text.
+  Mutation: drop the await → fail.
+- **P4** The steering invariant with a never-resolving store (see the
+  load-bearing assumption).
+- **A8** Idempotency across a restart: `prompt{T}`, then a restart, then
+  `prompt{T}` → `{turnId: T, ended: {error.code: DaemonRestarted}}`, and the
+  model is not called. Mutation: do not persist `turns` → it runs again.
+- **P8** A pre-restart `since` against the restored session → `resync: true`.
+- **A9** `close` removes the file; a write scheduled before the close does not
+  resurrect it. The reaper's close removes it too.
+- **A10** A store failure → `onError`, no `unhandledRejection`, and the turn
+  completes.
+- **A11** Bad records (truncated, wrong `kind`, `schemaVersion: 2`, foreign
+  `cwd`) → skipped, reported, byte-identical. Opening such a uid never writes
+  the file. The valid records still load.
+- **A12** Lock: a second `startDaemon` on the same `configDir`/cwd refuses with
+  the pid. A dead pid is taken over. Another cwd is not affected.
+- **A13** End to end over a real disk: `startDaemon` → a turn → `stop()` → a
+  new `startDaemon` → `session/open{sessionId}` → the snapshot equals the
+  history. A `SessionHost` without a persister writes nothing (pods/worker).
+- **A14** `pendingSteering` returns a copy; `classifyPending` is false when the
+  tool differs (the sub-agent shape), and `agent_task` stays
+  `permission: "none"` (P7).
+
+---
+
+### Original draft (2026-10-19) — superseded above where they differ; [B] items are the source for `suspended-turn-resume`
 
 > **Owner decisions (2026-10-19):** the open questions below are resolved in
 > the parent, `docs/eval/session-reattach.md` §"Owner decisions after the
@@ -834,91 +1109,401 @@ Gate per §4: the narrow files during iteration, then `bun run check`.
 
 ## Execution
 
-*(empty — an eval)*
+*— claude-opus-5-5, 2026-10-20*
+
+Built in the order of the revision's Files list, on branch
+`feat/daemon-side-persistence`. Baseline gate before any change: typecheck and
+lint clean; `bun test` 1020 pass, 2 skip (the opt-in pair), 0 fail.
+
+What was built:
+1. `protocol/src/jsonrpc.ts`: `DaemonRestarted: -32012`. `schema/protocol.json`
+   regenerated (one line).
+2. `agent/src/session.ts`: `pendingSteering()`. `agent/src/session-store.ts`:
+   `projectKey(cwd)` and `JsonSessionStore.remove(id)`. `remove` drops the
+   queued record (its callers resolve), waits for the running write, then runs
+   `rm -f`.
+3. `daemon/src/persisted-session.ts` (new, pure): the record types,
+   `toDaemonRecord`, `parseDaemonRecord` (kind, version, cwd, field shapes),
+   `classifyPending`, `reconcileOnReload`, `restoredActivity`, and the three
+   note texts plus `RESTART_TURN_END`.
+4. `daemon/src/session-persister.ts` (new): `SessionPersister` (`schedule` is
+   void and captures synchronously; `flush` never rejects; `remove`, `block`,
+   `stop`) and `acquireStoreLock`.
+5. `daemon/src/hosted-session.ts`: an optional 8th ctor parameter
+   `persistence?: {persister, restored?}`, which seeds `turns`, `enqueued`,
+   `createdAt` and `lastActiveAt`. The write sites are those in the table:
+   ctor, `prompt` after `drive`, `history_commit`, the requester (set, then
+   clear + `await persisted()`), `enqueue`, the `finishTurn` `finally`, and
+   `historyReplaced`. `persisted()` is public. The current tool name is
+   tracked.
+6. `daemon/src/session-host.ts`: a `persister?` option; `restore(record)`;
+   `close` → `persister.remove(id)`, which the reaper reaches through `close`.
+7. `daemon/src/connection.ts`: `enqueue` is `async` and acks after
+   `hosted.persisted()`. The running check and the push are still synchronous
+   in `HostedSession.enqueue`.
+8. `cli/src/serve.ts`: an `async startDaemon` that runs store dir → lock →
+   `list` → block/notice the skipped records → `restore` → listen. It returns a
+   `ServeHandle` whose `stop(): Promise<void>` is idempotent. Also
+   `daemonStoreDir(config)`. `cli/src/main.ts`: `await startDaemon`, an
+   `onNotice` printed as `[daemon] …` before the listening line, and a
+   two-stage SIGINT.
+9. `AGENTS.md` §7: the amendment, plus the pod-trust cross-reference.
+   `agent.ts`: the INVARIANT comment names the daemon's turn-end write.
+
+Drift from the Implementation, all small:
+- **Existing tests touched:** `cli/test/serve-limits.test.ts` drives
+  `startDaemon`. It now `await`s it and `stop()`. Because `serve` persists now,
+  it also wipes `<configDir>/daemon` after each test; otherwise a test's
+  sessions would be restored into the next one and change its session counts.
+  This is behavioural evidence that the reload works.
+- **A7 moved from the `HostedSession` level to a real `Connection` over a
+  channel pair**, so the mutation "drop the await in `Connection.enqueue`" is
+  caught. At the `HostedSession` level it would not have been.
+- **A11 opens both kinds of skipped uid:** one that `list()` could not read,
+  and one `parseDaemonRecord` refused. The first draft opened only the second,
+  and the mutation "drop the `block` of a `list()`-skipped file" stayed green.
+  Found by the mutation run, then fixed.
+- **A13 expectation:** `session/open{sessionId}` without `since` answers
+  `resync: true`. That is the designed answer (no token), so the test was
+  corrected; the code was not changed.
+- Tests live in `daemon/test/persistence.test.ts` (A1–A10, P4, P8, pure
+  units), `agent/test/session-store.test.ts` (`remove`, `projectKey`),
+  `agent/test/session.test.ts` (`pendingSteering`) and
+  `cli/test/serve-persistence.test.ts` (A11–A13, real disk).
+
+Red/green. Every new test was written after the code. Non-vacuity was shown by
+**mutation** (§9): each mutation applied alone, the suite run, and the file
+restored. Scripts: `.tentacle/tmp/daemon-side-persistence/mutate*.py`.
+
+| Mutation | Turns red |
+|---|---|
+| turn-start `persist` before `drive` / dropped | A1 |
+| no `finishTurn` write | A2, P4 |
+| every unanswered call → INTERRUPTED | A3, A4 |
+| a missing pending → NOT_RUN | A4, reconcile unit |
+| `classifyPending` without the tool-name check | A5, classify unit |
+| requester without `await persisted()` | A6 |
+| `Connection.enqueue` without `await` | A7 |
+| `HostedSession.enqueue` without `persist` | A3, A7, A8 |
+| `drive` awaits `persisted()` before `finishTurn` | P4 |
+| restored `turns` not seeded | A8 |
+| no `persister.remove` on close | A9 |
+| no `.catch` on the save | A10 |
+| `blocked` ignored by `schedule` | blocked-id unit |
+| `remove` doesn't wait for the running write / keeps the queued one | store `remove` |
+| `projectKey` without `realpath` | `projectKey` |
+| `pendingSteering` returns the live array | `pendingSteering` |
+| no `restore` in `startDaemon` | A13 |
+| no `block` (list-skipped / parse-skipped) | A11 (each) |
+| no lock / no release | A12 / A11, A12, A13 |
+
+Not mutation-checked, and why:
+- **P8 (resync after a restart)** follows from the ctor minting the epoch
+  (`hosted-session.ts:156-163`). There is no persisted epoch to "reuse", so no
+  natural mutation exists.
+- **"Pods write nothing"** is structural: only `startDaemon` creates a
+  `SessionPersister`. The test only shows that a host without one stays
+  silent.
+
+Gate after the change: `bun run check` → typecheck clean, lint clean (289
+files), `bun test` **1047 pass, 2 skip (the opt-in pair), 0 fail** across 109
+files.
+
+#### After the Review (REQUEST-CHANGES): findings addressed
+
+*— claude-opus-5-5 (executor), 2026-10-20*
+
+The owner asked for **one** review only, so these fixes were **not
+re-reviewed** by a fresh context. Each one was shown red before green, then
+mutation-checked (`.tentacle/tmp/daemon-side-persistence/mutate4.py`).
+
+1. **(Medium) A detach did not write the TTL clock** (finding 1). Confirmed by
+   reading the code: `removeAttachment` moved `lastActiveAt` and wrote nothing,
+   so a restart saw an older clock than the live reaper did. Fix:
+   `removeAttachment` calls `persist()`. Compaction now writes in `compact()`'s
+   `finally`, after its clock moves. The `historyReplaced` write was dropped:
+   the mutation run showed it is fully covered by the `finally` write, which
+   follows it within the same `compact` call. New tests: **R1** (detach → the
+   restored and live reapers agree) and **R2** (the compacted history plus the
+   clock are on disk).
+2. **(Low) Properties without a test** (finding 2). New tests:
+   - **R3**: `restore` uses `restoredActivity`.
+   - **R4**: nothing is written after `stop()`.
+   - **A12** extended: a listen failure *after* the lock was taken releases
+     it.
+   - The compaction write is covered by R2.
+3. **(Low) The project check compared raw strings** (finding 3).
+   `parseDaemonRecord` now takes a `sameProject(cwd)` predicate, and
+   `startDaemon` compares `projectKey`s. New test **R6**: the same project
+   through a symlink restores its session.
+4. **(Low) `JsonSessionStore.remove` could delete a newer save** (finding 4).
+   A removal is now an operation in the uid's own latest-wins queue (the
+   `REMOVE` marker), so the latest operation wins. A save made after the
+   remove writes the file again. New store test: "a save AFTER a remove wins".
+   The old "in flight + queued never resurrect" test still passes.
+5. **(Nit) A blocked or unsafe id is now reported once** (findings 5, 6).
+   `SessionPersister.schedule` writes one `onError` line per session that
+   cannot be persisted: either its file was skipped, or its id is not a valid
+   file name. New test **R5**. `remove` skips both kinds of id.
+6. **(Nit) Stale-lock takeover race** (finding 7): documented as a limit in
+   Failure modes, not fixed.
+7. **(Nit) Doc drift** (finding 8): fixed the cited lines (`main.ts:239-242`,
+   `worker.ts:87`) and the file count.
+
+Mutations, each turning its test red: R1 drop the detach write; R2 drop the
+compaction write; R3 restore from `record.lastActiveAt`; R4 ignore `stopped`;
+R5 report on every write; R6 raw-string cwd compare; no `lock.release()` in
+the startup catch; `remove` restored to its old implementation.
+
+Gate after the fixes: `bun run check` → typecheck clean, lint clean (289
+files), `bun test` **1054 pass, 2 skip (the opt-in pair), 0 fail** across 109
+files.
 
 ## Review
 
-*— claude-opus-5-5, 2026-10-19*
+*— claude-opus-5-5 (fresh-context subagent), 2026-10-20*
 
-**Recommend promoting after `session-registry`, before `permission-events`.**
-Scope:
-- `serve` only: the daemon writes each session's history (and the pending
-  permission record, if any) to a store on its host after every committed
-  boundary (round end, turn end, compaction — the same cut as
-  `session-event-stream`). On startup it reloads sessions as detached.
-- **Never `await` the store inside the end-of-turn window.** Steering
-  invariant (`agent.ts`, `fix/steering-over-rpc`): no `await` between the final
-  steering drain and the turn being marked ended. The turn-end write starts
-  *after* the turn is marked ended, or is queued without being awaited in that
-  stretch. (The steering task doc says no end-of-turn hook is planned; this
-  child is that hook.)
-- **Persist the pending steering queue** together with the pending permission
-  record, and re-queue it on restart.
-- Pod modes unchanged: the laptop persists from `snapshot`; the pod daemon
-  stores nothing durable.
-- The client still persists its own copy (offline viewing, `--resume` against a
-  daemon that lost the session); on re-attach the daemon's copy wins.
-- Reuse the session-store code and its durability fixes rather than a second
-  store (`docs/fix/session-store-durability.md`: atomic write, schema check).
-- AGENTS §7 "persistence lives on the laptop" must be amended to say *where the
-  daemon is trusted (`serve`), it also persists* — a rule change, so it rides
-  this task's branch with Review (§10).
+> The earlier eval-stage review text (2026-10-19, "Recommend promoting after
+> `session-registry`…") is superseded by this review; it lives in git history.
 
-**Why, item by item.**
+**Verdict: REQUEST-CHANGES.** One medium finding (1). It is small to fix, but
+it makes a restart delete sessions that the live daemon would keep, which is
+what D-e promises cannot happen. Everything else holds or is low/nit. This
+reviewer is **the same model as the executor** (claude-opus-5-5, only a fresh
+context), so blind spots the two share may survive. A load-bearing task would
+benefit from a different-model pass as well (AGENTS §10).
 
-- **Why `serve` only, and not pods.** In pod modes the daemon is not trusted
-  (AGENTS §7): a record it writes is pod-supplied data. If we reloaded it as
-  history we would let whoever controls the pod fabricate a conversation —
-  e.g. inject instructions the model then follows on resume. Pods are also
-  ephemeral (`run` deletes its pod on exit), so a store there protects nothing.
-  On `serve` the host is the user's own machine.
-- **Why write at committed boundaries (the stream's cut).** A restored session
-  must correspond exactly to some `since` token, so a client re-attaching after
-  a restart gets a consistent snapshot + replay. Writing mid-round would store
-  half a message the agent cannot resume from.
-- **Why reload sessions as detached.** After a restart nobody is attached; the
-  idle TTL starts and suspended turns re-emit their `permission_request`, so
-  the first client to re-attach sees the pending approval.
-- **Why the client still keeps its own copy.** Offline viewing (phone in
-  airplane mode), and recovery when the daemon lost the session (pods, disk
-  loss) via `open{messages}`.
-- **Why the daemon's copy wins on re-attach.** The daemon executed the turns;
-  the client's copy can be behind, never ahead — a client never authors history
-  except prompts, which go through the daemon anyway.
-- **Why reuse the session-store code.** One durability implementation.
-  `session-store-durability` found in-place writes that truncate on crash; a
-  second store would re-introduce exactly those bugs.
-- **Why amend AGENTS §7 in this task.** Otherwise the next model reads
-  "persistence lives on the laptop", sees a daemon store, and removes it as an
-  invariant violation.
-- **Why the store must not be awaited at turn end.** This child is precisely
-  the "async persist at end of turn" the steering invariant forbids. With an
-  `await store.save()` between the final drain and "turn ended", a
-  `session/enqueue` arriving during the write is accepted (the turn is still
-  running), never drained (the drain already happened), and lost when the turn
-  ends — silently. Writing after the turn is marked ended costs nothing: the
-  data is the same, and a crash in between loses at most what a crash during
-  the write would.
-- **Why persist the steering queue.** A turn suspended on a permission is
-  running, so `enqueue` is accepted and queued for the round after approval.
-  The queue lives in memory: a restart during an hours-long suspension would
-  drop those messages silently — the bug class steering closed.
-- **Why "resume from a pending tool call" is the load-bearing assumption.** If
-  the loop cannot resume from "assistant tool call awaiting approval" without
-  re-running the model round, a restart re-asks the model: a different tool
-  call comes back, and the approval the user is looking at no longer matches
-  what would run — plus the cost of the extra round.
+### Findings
 
-Load-bearing assumption to prove first: the persisted history plus the pending
-permission record is enough to rebuild a suspended turn — i.e. the agent loop
-can resume from "assistant tool call awaiting approval" without replaying the
-model round. Verify against `agent/src/agent.ts` (where tool authorization sits
-relative to the assistant-message push).
+1. **MEDIUM. Moving the TTL clock is never persisted, so a restart can reap
+   (and delete) a session too early.** `HostedSession.removeAttachment`
+   (`hosted-session.ts:329-334`) moves `lastActiveAt`/`lastDetachAt` to
+   *now* on every detach, but it does not call `persist()`. The compaction's
+   `finally` (`:663-664`) also sets `lastActiveAt` after the
+   `historyReplaced` write. D-e's premise is "written while idle: its
+   `lastActiveAt` is exact (nothing ended since)". That premise is **FALSE**:
+   the reaper's own contract counts the end of an attachment as activity
+   (`session-reaper.ts:28-33,40`). Repro
+   `.tentacle/tmp/daemon-side-persistence-review/ttl.ts`:
 
-Failure modes: crash mid-write (atomic rename); disk full (surface, keep serving
-from memory); two daemons on one store (lock or refuse); a store from an older
-protocol version (version the file; refuse or migrate explicitly).
+   ```
+   live liveness: {"attached":0,"busy":false,"lastActiveAt":5000,"lastDetachAt":5000}
+   on-disk lastActiveAt: 1000
+   live reap at t=6000, ttl=2000: []
+   restored reap at t=6000, ttl=2000: [{"id":"s","reason":"idle_ttl"}] | file still on disk: false
+   ```
 
-Tests: restart mid-suspension → session reloads, `permission_request`
-re-emitted, approving runs the tool once; restart after `turn_end` → history
-intact; a pod-mode daemon writes nothing.
+   A real case: a TUI stays attached and idle for hours after its last turn,
+   detaches, and the daemon restarts soon after. The idle TTL then runs from
+   the last turn instead of the detach. The first sweep can close the session
+   and `persister.remove` deletes its record. **Fix:** call `this.persist()`
+   in `removeAttachment` and after the compaction's `finally` stamp. It is a
+   synchronous capture; `removeAttachment` can run inside `emit` in
+   `finishTurn`, and a capture is allowed there. Add a regression test:
+   detach, restart, and the clock equals the detach time. Also pin that
+   `restore` uses `restoredActivity` (mutation M10 below survives).
+2. **LOW. Surviving mutations, i.e. test gaps on correct code.**
+   - M8: no `lock.release()` on the startup-failure path (`serve.ts` catch).
+     The behaviour is correct (e2e step 3: a TLS listen failure leaves no
+     lock), but no test pins it.
+   - M9: `schedule` ignores `stopped` (`session-persister.ts:64`). No test
+     shows that writes stop at shutdown.
+   - M10: `restore` uses `record.lastActiveAt` instead of `restoredActivity`
+     (`session-host.ts:142`). Only the pure unit is pinned.
+   - M12: the compaction write in `historyReplaced` is dropped. Nothing pins
+     that a compacted history is the one on disk.
+
+   Add one test each.
+3. **LOW. The cwd check compares raw strings, while the store directory uses
+   the realpath.** `parseDaemonRecord` checks `record.cwd !== cwd`
+   (`persisted-session.ts:151`), but `projectKey` resolves symlinks
+   (`session-store.ts` `projectKey`). The same project reached through a
+   symlink spelling (`TENTACLE_CWD`/config `cwd`) shares the directory and
+   the lock. Its own sessions are then skipped as "belongs to another
+   project" and blocked. In e2e step 4 that is `same store dir: true`, then
+   the notice `skipped …/s1.json: belongs to another project (…)`. No data is
+   lost (the file is left as is), but the sessions are not restored and stay
+   memory-only. **Fix:** compare realpaths (or `projectKey`s), or write the
+   realpath as the record's `cwd`.
+4. **LOW. `JsonSessionStore.remove` can delete a record that was saved after
+   the remove started.** `remove` awaits `slot.running` (`session-store.ts:376`).
+   That is the pump promise, and the pump also writes any record queued
+   during the wait. The `rm` then deletes the newer record, although that
+   save resolved as "durable", which breaks `save`'s contract. Repro
+   `remove-race.ts`: save(1) → remove → save(2) → all resolve → `file exists:
+   false`. Through the host this needs `session/close` and then
+   `session/open{sameId}` within one in-flight write. The next write
+   recreates the file, but an `enqueue` ack in that window could claim a
+   durability that is undone. **Fix:** let `remove` wait only for the write
+   in flight at call time and have the pump re-check (a removal generation),
+   or have `SessionHost` defer re-creating an id until its removal settles.
+5. **NIT. D-c promises a log line that does not exist.** D-c says that when
+   a client later opens a blocked uid, "one log line says why". No such line
+   exists: `schedule` returns silently for a blocked id
+   (`session-persister.ts:64-66`). Only the startup notice reports the file.
+   Add the line, or change the doc.
+6. **NIT. A session id the store refuses is never persisted, and this is
+   logged at every boundary.** The protocol allows any non-empty id
+   (`protocol/src/session.ts:17`), while the store accepts only `SAFE_ID`.
+   For such an id every `schedule` rejects inside `writeAtomic` with
+   `invalid session id`, and `onError` logs it at each boundary. This is
+   safe: no path traversal, since `remove` checks the id too. But it is
+   noisy, and the session is silently memory-only. Report it once (or
+   refuse such ids on `serve`).
+7. **NIT. Two concurrent takeovers of a stale lock can both win.** The
+   takeover is `rmSync` and then `take()` (`session-persister.ts:173-174`).
+   Two daemons starting at once on a stale lock can both succeed, because B's
+   `rm` removes A's fresh lock. This is a narrow TOCTOU and is not documented
+   next to the pid-reuse limit. Take over with a rename, or re-read the pid
+   after `take()`.
+8. **NIT. Documentation drift.** Execution says lint covered "287 files";
+   the gate now reports 289. The premise `main.ts:230-235` (SIGINT handler)
+   is at `:239-242` on `e3c3293`. `worker.ts:86` is `:87`. The tests were
+   written after the code: the red-first rule was not followed literally,
+   and non-vacuity was shown by mutation instead. Execution says so honestly.
+
+### Gate (re-run by the reviewer)
+
+`bun run check`: typecheck clean; lint `Checked 289 files … No fixes
+applied` (0 errors, 0 warnings); `bun test` **1047 pass, 2 skip, 0 fail**,
+4135 `expect()` calls, 1049 tests across 109 files. The 2 skips are the
+opt-in pair (AGENTS §6). This matches Execution's counts.
+
+### Mutation outcomes (reviewer-chosen; script `.tentacle/tmp/daemon-side-persistence-review/mutate.py`, each applied alone, original bytes restored)
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | requester never sets `pending` | RED: A3, A5, A6 |
+| M2 | `finishTurn` keeps `pending` | green. Not reachable: `authorize` blocks the generator, so `finishTurn` cannot run while the requester is outstanding (except `close`, which sets `closed`). Defence in depth, acceptable |
+| M3 | reconcile appends the steers before the synthetic tool answers | RED: A3, reconcile unit |
+| M4 | no cwd check | RED: A11, parse unit |
+| M5 | restored `enqueued` ids not seeded | RED: A8 |
+| M6 | `persister.remove` before `hosted.close` | green. Equivalent: `hosted.close` sets `closed` before its `finishTurn` write, so the order does not matter |
+| M7 | `Connection.enqueue` awaits before the push | RED: A7 |
+| M8 | no lock release on a startup failure | **green (gap, finding 2)** |
+| M9 | `schedule` ignores `stopped` | **green (gap, finding 2)** |
+| M10 | `restore` ignores `restoredActivity` | **green (gap, finding 2)** |
+| M11 | no `history_commit` write | RED: A4 |
+| M12 | no compaction write | **green (gap, finding 2)** |
+| M13 | no constructor write | RED: A13, A11 |
+| M14 | only the first unanswered call answered | RED: A3, A4 |
+| M15 | no turn-key `end` validation | RED: parse unit |
+| M16 | restart end not applied | RED: A8, reconcile unit |
+
+The tree was byte-identical afterwards: `git status --short`, `git diff
+--stat` and the sha of `git diff` match the pre-review snapshot, and the 4
+untracked files have the same shasums. The only edit is this section.
+
+### Premise table (cited on `e3c3293` unless noted)
+
+| Premise | Verdict |
+|---|---|
+| `finishTurn` is non-async, `hosted-session.ts:472-488`; `drive` calls it on `turn_end` before returning, `:420-423` | TRUE |
+| `save` is sync to its promise, `session-store.ts:251-264`; first `await mkdir` at `:296` | TRUE (and `JSON.stringify` runs later, at write time; the capture is a shallow copy of immutable messages, so this is fine) |
+| macrotask probe at `integration.test.ts:525-557` | TRUE |
+| epoch per incarnation `:156-163`; `replayFrom` resync `:271-279` | TRUE (e2e: re-open → `resync: true`, new epoch) |
+| `turns` `:119`, `enqueued` `:121`, retried prompt `:370-373` | TRUE |
+| `configDir` global, `load.ts:157` | TRUE |
+| `session-host.ts:179` ignores the record cwd (`createAgent(defaultCwd)`) | TRUE |
+| requester routes to the latest attachment or denies, `:169-177` | TRUE |
+| store serialized/latest-wins `:244-264`; `list` `:384-408`; strict message keys `:138,149-152` | TRUE |
+| cut moves at `:426-429`, `:486`, `:553-569` | TRUE |
+| `Session.onPersist` not wired on the daemon, `session-host.ts:181` | TRUE |
+| the prompt is pushed within the first `next()`, `session.ts:62-70` | TRUE (A1 + e2e) |
+| P1 push/commit lines `agent.ts` | TRUE |
+| P3 `session.ts:32,65,83-85`; enqueue check `hosted-session.ts:496-509` | TRUE |
+| P4 `agent.ts:287-296`, `hosted-session.ts:410-417` | TRUE |
+| P5 only `startDaemon` gets a persister; stdio `serve.ts:109-183`; worker `:86` | TRUE (worker `new SessionHost` at `:87`; on the current tree `persister` appears only in `serve.ts` `startDaemon`/`reloadedHost`) |
+| `main.ts:230-235` SIGINT handler installed | TRUE in substance; lines drift (`:239-242`) |
+| P7 `agent_task` `permission: "none"` (`task.ts:52`) | TRUE |
+| P9 `PermissionRequest.tool`, `core/src/permission.ts:16` | TRUE |
+| `tool_start` precedes `authorize` (needed for `currentToolCallId`) | TRUE (`agent.ts` yields `tool_start` before `runTool`; sub-agent progress maps to `subagent_*` only, never `tool_start`) |
+| **D-e: an idle record's `lastActiveAt` is exact** | **FALSE**: finding 1 |
+
+### Attacks tried
+
+1. **Steering no-await window.** `finishTurn`'s write goes through
+   `persist` → `schedule` → `build` → `toDaemonRecord` → `store.save` →
+   `pump` → `writeAtomic` up to `mkdir`. All of it is synchronous. P4 exists,
+   and Execution's mutation (await before `finishTurn`) turns it red.
+   `Connection.enqueue` keeps the check and the push in one synchronous step.
+   The await only delays the ack (M7 → A7 red). **Holds.**
+2. **"Pending on disk ⇒ never started".** Paths traced: deny; cancel; close
+   during a request (`closed` → no write; the requester's `finally` sees
+   `pending` already cleared); nobody attached (no `pending` set); request
+   rejected (`Connection.requestPermission` → cancelled → `finally` clears
+   and flushes); sub-agent (`currentToolName` = `agent_task` →
+   `resumable: false` → sub-agent note); shutdown during a request. On
+   shutdown, `server.stop(true)` closes the peers, and the deny arrives
+   after `stopped`, so the disk keeps `pending` for a tool that was denied:
+   "Not run" is true. On the approval-then-SIGINT race, the clearing
+   `schedule` runs in the same microtask continuation as the outcome, before
+   any SIGINT macrotask, and `stop` drains it. **Holds**, apart from the
+   documented two-failure limit.
+3. **Pods and the worker.** `startStdioDaemon` and `worker.ts` build
+   `SessionHost` without `persister`, and the stdio branch in `main.ts:197`
+   never reaches `startDaemon`. **Holds** (structural).
+4. **Restore with the reaper/TTL.** Found **finding 1** (detach clock not
+   persisted). Limits never refuse a restore (by design). A restored session
+   keeps `createdAt`.
+5. **Close/remove races and blocked files.** `closed` stops writes before
+   `remove`. Blocked ids are never written or removed (A11 green). **Finding
+   4**: a remove followed by a re-open of the same id.
+6. **Locking.** Same project → refused with the pid (e2e step 3). A listen
+   failure after the lock releases it (e2e step 3, `lock left behind:
+   false`). The second SIGINT exits with the lock left, then a dead-pid
+   takeover. Stale takeover race: **finding 7**.
+7. **Hostile or malformed records.** The id must match the file name, and
+   the messages and toolCalls are strictly validated. `parseDaemonRecord`
+   covers `turns`/`end`/`turn`/`pending`. `restore` throws only on a
+   duplicate id, which file-name uniqueness rules out. Reconcile cannot throw
+   on a validated record. A `turn.turnId` missing from `turns` just gets no
+   cached end. **Startup cannot be crashed by a record** (tried by reading
+   the code; no file fuzzing). An odd but valid history can still make the
+   provider error at the next turn, which matches the client store.
+8. **Protocol.** `DaemonRestarted: -32012` collides with nothing.
+   `TurnErrorSchema.code` is an open `int` (old clients parse it).
+   `schema/protocol.json` is regenerated and the drift gate is green.
+   **Holds.**
+9. **Other history mutators.** The steering drain (in-memory move, covered
+   by every capture), the continue-nudge, the max-iterations report, the
+   turn error (all covered by the `finishTurn` write) and compaction (covered
+   by `historyReplaced`, but untested: M12). Background jobs are not
+   restorable after a restart; the history may name a job the new daemon
+   does not know. Acceptable for Part A, but not written down.
+10. **End-to-end trace** (`.tentacle/tmp/daemon-side-persistence-review/e2e.ts`;
+    real `startDaemon` on a temp `TENTACLE_CONFIG_DIR`, a mock OpenAI SSE
+    server, a raw WS client). A turn suspends on `fs_write` and
+    `enqueue{e1,"steer-1"}` is acked. The disk then has
+    `turn={turnId:T1, steering:[steer-1], pending:{c1, fs_write, resumable:true}}`.
+    `stop()` releases the lock. On restart the notice is "restored 1
+    session". Re-open gives `created:false, resync:true`. The snapshot is
+    `system, user:write it, assistant[c1], tool(c1):Not run…, user:steer-1`.
+    The marker file was **not** created. A retried `prompt{T1}` returns
+    `ended.error.code -32012` with 0 model calls. A retried `enqueue{e1}`
+    succeeds as a dedupe. A new turn T2 ends cleanly and the disk then holds
+    `turns [[T1,error],[T2,end_turn]]` and no `turn`.
+
+### What holds
+
+The load-bearing assumption (no await in the steering window), the D-a
+ordering, D-b acks, D-c blocking, D-d idempotency across a restart, D-f
+shutdown and the two-stage SIGINT, D-g creation writes, reconciliation
+order and labels, per-project directories, pods and the worker never
+persisting, the additive protocol change, and the AGENTS §7 amendment, which
+is accurate and cross-referenced in the pod-trust bullet. The new code is
+cleanly split into a pure module (`persisted-session.ts`) and a thin I/O
+shell (`session-persister.ts`), as AGENTS §7 asks.
+
+### How the executor behaved
+
+The work was disciplined. The executor followed the revised plan in order
+and re-verified the premises on the current `main`. Every drift was
+recorded honestly: A7 moved to a real `Connection`, A11 was found weak by
+its own mutation run and fixed, A13 had its expectation corrected rather
+than the code. The scope stayed on Part A. Two things fell short: the
+red-before-green rule was replaced by after-the-fact mutation (stated
+openly), and the mutation list missed the lock-on-failure, `stopped`, wiring
+of `restoredActivity` and compaction properties. The one design-level miss,
+finding 1, is a premise (D-e) that was stated without being checked against
+the reaper's own contract.

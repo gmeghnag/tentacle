@@ -49,7 +49,14 @@ import {
   toUpdateParams,
 } from "./mapping.ts";
 import { outcomeToResponse, toRequestPermissionParams } from "./permission-map.ts";
+import {
+  type DaemonSessionState,
+  type PendingPermission,
+  type PersistedTurnKey,
+  classifyPending,
+} from "./persisted-session.ts";
 import { SessionRing } from "./ring.ts";
+import type { SessionPersister } from "./session-persister.ts";
 import type { SessionLiveness } from "./session-reaper.ts";
 
 /** Receives each streamed `session/update` (one per emitted update). Synchronous; never awaited. */
@@ -81,6 +88,24 @@ interface Cut {
   readonly length: number;
   /** The turn running at the cut, if any (its `turn_start` is at or before `seq`). */
   readonly turnId: string | null;
+}
+
+/** What a reloaded session brings back besides its history (`SessionHost.restore`). */
+export interface RestoredSessionState {
+  readonly createdAt: number;
+  readonly lastActiveAt: number;
+  readonly turns: readonly PersistedTurnKey[];
+  readonly enqueueIds: readonly string[];
+}
+
+/**
+ * `serve` only: the session writes itself at every committed boundary (see
+ * `SessionPersister`). Absent on a pod daemon and the in-process worker — no
+ * persister, no write, structurally.
+ */
+export interface SessionPersistence {
+  readonly persister: SessionPersister;
+  readonly restored?: RestoredSessionState;
 }
 
 /** How a failed turn's error leaves the daemon (see `redactTurnError`). */
@@ -121,6 +146,11 @@ export class HostedSession {
   private readonly enqueued = new Set<string>();
   private readonly errorPolicy: TurnErrorPolicy;
   private currentToolCallId = "";
+  private currentToolName = "";
+  /** The permission request the turn is suspended on (persisted with the turn). */
+  private pending: PendingPermission | undefined;
+  private readonly persister: SessionPersister | null;
+  private readonly createdAt: number;
   private seq = 0;
   private readonly ring: SessionRing<KnownSessionUpdateParams>;
   /** Seq of the barrier that opened the current epoch (0 for the first). */
@@ -144,11 +174,21 @@ export class HostedSession {
     errorPolicy: TurnErrorPolicy = {},
     ringBytes: number = DEFAULT_RING_BYTES,
     now: () => number = Date.now,
+    persistence?: SessionPersistence,
   ) {
     this.id = id;
     this.now = now;
-    this.lastActiveAt = now();
+    const restored = persistence?.restored;
+    this.persister = persistence?.persister ?? null;
+    this.createdAt = restored?.createdAt ?? now();
+    this.lastActiveAt = restored?.lastActiveAt ?? now();
     this.lastDetachAt = this.lastActiveAt;
+    for (const key of restored?.turns ?? []) {
+      this.turns.set(key.turnId, key.end ? { end: key.end } : {});
+    }
+    for (const enqueueId of restored?.enqueueIds ?? []) {
+      this.enqueued.add(enqueueId);
+    }
     this.session = session;
     this.jobs = jobs;
     this.errorPolicy = errorPolicy;
@@ -166,14 +206,39 @@ export class HostedSession {
     // permissions become stream events): the most recently attached client, the
     // device the user most likely holds; nobody attached → denied at once
     // (fail-safe, as a dead connection's request already was).
+    //
+    // Persisted (serve): the suspension is written BEFORE the request goes out,
+    // and cleared durably once it settles, BEFORE the gate may run the tool — so
+    // "pending" on disk always means "never started" (reload: "Not run").
     permissions.setRequester(async (req) => {
       const target = [...this.attachments].at(-1);
       if (!target) {
         return outcomeToResponse({ outcome: "cancelled" });
       }
       const params = toRequestPermissionParams(this.id, this.currentToolCallId || "pending", req);
-      const outcome = await target.requestPermission(params);
-      return outcomeToResponse(outcome);
+      const pending: PendingPermission = {
+        toolCallId: this.currentToolCallId,
+        tool: req.tool,
+        resumable: classifyPending(
+          this.session.messages,
+          this.currentToolCallId,
+          this.currentToolName,
+          req.tool,
+        ),
+        requestedAt: this.now(),
+      };
+      this.pending = pending;
+      this.persist();
+      try {
+        const outcome = await target.requestPermission(params);
+        return outcomeToResponse(outcome);
+      } finally {
+        if (this.pending === pending) {
+          this.pending = undefined;
+          this.persist();
+          await this.persisted();
+        }
+      }
     });
     // A background job can exit while the session is idle (between turns), so we
     // stream the exit the moment it happens — not only at the next turn, where
@@ -188,6 +253,50 @@ export class HostedSession {
         exitCode: job.exitCode,
       });
     });
+    // On disk from the start: a session seeded by `open{messages}` (or one
+    // just reloaded and reconciled) survives a restart before its next turn.
+    this.persist();
+  }
+
+  /** Hand the persister this session's state as of NOW (a no-op without one, or once closed). */
+  private persist(): void {
+    if (this.persister && !this.closed) {
+      this.persister.schedule(this.id, () => this.persistedState());
+    }
+  }
+
+  /**
+   * Resolves once everything this session wrote so far is on disk (or failed,
+   * which the persister reports). Immediate without a persister. Never in a turn.
+   */
+  persisted(): Promise<void> {
+    return this.persister ? this.persister.flush(this.id) : Promise.resolve();
+  }
+
+  /** The state a record captures, copied now (the arrays are live). */
+  private persistedState(): DaemonSessionState {
+    const turns: PersistedTurnKey[] = [];
+    for (const [turnId, entry] of this.turns) {
+      turns.push(entry.end ? { turnId, end: entry.end } : { turnId });
+    }
+    const turnId = this.compacting ? null : this.activeTurnId;
+    return {
+      id: this.id,
+      createdAt: this.createdAt,
+      lastActiveAt: this.lastActiveAt,
+      messages: [...this.session.messages],
+      turns,
+      enqueueIds: [...this.enqueued],
+      ...(turnId !== null
+        ? {
+            turn: {
+              turnId,
+              steering: this.session.pendingSteering(),
+              ...(this.pending ? { pending: this.pending } : {}),
+            },
+          }
+        : {}),
+    };
   }
 
   /** A turn or a compaction is active. */
@@ -221,6 +330,9 @@ export class HostedSession {
     if (this.attachments.delete(attachment)) {
       this.lastDetachAt = this.now();
       this.lastActiveAt = this.lastDetachAt;
+      // The TTL clock moved: a restart must see it (the reaper counts a detach
+      // as activity). A capture only — safe anywhere, the fan-out included.
+      this.persist();
     }
   }
 
@@ -387,6 +499,10 @@ export class HostedSession {
       this.reportTurnError(error);
     }
     void this.drive(turnId, text, controller);
+    // After `drive` started: the generator has pushed the prompt by now (it
+    // runs up to its first await inside the first `next()`), so the turn key
+    // and the prompt are on disk together, before the model is called.
+    this.persist();
     return { turnId };
   }
 
@@ -425,10 +541,12 @@ export class HostedSession {
         // The history reflects every update so far: the snapshot cut moves here.
         if (event.type === "history_commit") {
           this.recordCut(turnId);
+          this.persist();
           continue;
         }
         if (event.type === "tool_start") {
           this.currentToolCallId = event.id;
+          this.currentToolName = event.name;
         }
         const update = eventToUpdate(event);
         if (update) {
@@ -484,6 +602,10 @@ export class HostedSession {
       this.emit({ type: "turn_end", turnId, ...end });
     } finally {
       this.recordCut(this.activeTurnId);
+      // Inside the steering window, and safe there: this method cannot await,
+      // and `persist` only captures — the I/O starts after the window.
+      this.pending = undefined;
+      this.persist();
     }
   }
 
@@ -506,6 +628,7 @@ export class HostedSession {
     }
     this.enqueued.add(id);
     this.session.enqueue(text);
+    this.persist();
   }
 
   /**
@@ -542,6 +665,9 @@ export class HostedSession {
       this.controller = null;
       this.compacting = false;
       this.lastActiveAt = this.now();
+      // The compaction's write (history replaced, or untouched on a failure)
+      // with its clock: after the slot is free, so the record has no `turn`.
+      this.persist();
     }
   }
 

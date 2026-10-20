@@ -9,6 +9,8 @@ export * from "./permission-map.ts";
 export * from "./hosted-session.ts";
 export * from "./session-host.ts";
 export * from "./session-reaper.ts";
+export * from "./persisted-session.ts";
+export * from "./session-persister.ts";
 export * from "./connection.ts";
 export * from "./proxy-model.ts";
 export * from "./ws-server.ts";

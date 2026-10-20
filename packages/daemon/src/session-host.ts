@@ -7,10 +7,21 @@
  * honoured in v1 — every session runs against the daemon's own `defaultCwd`.
  */
 import { type Agent, Session } from "@tentacle/agent";
-import type { JobController, PermissionBroker } from "@tentacle/core";
+import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import type { OpenParams } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
-import { type Attachment, HostedSession, type TurnErrorPolicy } from "./hosted-session.ts";
+import {
+  type Attachment,
+  HostedSession,
+  type RestoredSessionState,
+  type TurnErrorPolicy,
+} from "./hosted-session.ts";
+import {
+  type DaemonSessionRecord,
+  reconcileOnReload,
+  restoredActivity,
+} from "./persisted-session.ts";
+import type { SessionPersister } from "./session-persister.ts";
 import { type Expired, type ReapPolicy, selectExpired } from "./session-reaper.ts";
 
 /** `serve`'s defaults (the exposure boundary sets the limits; unset = none). */
@@ -38,6 +49,11 @@ export interface SessionHostOptions extends TurnErrorPolicy {
   readonly maxDetachedSessions?: number;
   /** One line per refused create, naming the limit and the count (decision D6). */
   readonly onAudit?: (line: string) => void;
+  /**
+   * `serve` only: every session writes itself here, `close` deletes its file,
+   * and `restore` reloads one. Pod daemons and the worker never pass it.
+   */
+  readonly persister?: SessionPersister;
 }
 
 /** What `open` did: the session, whether it was built now, and the replay verdict. */
@@ -105,7 +121,33 @@ export class SessionHost {
     }
     this.sessions.delete(id);
     hosted.close();
+    // After `close`: the session writes nothing more, so nothing can recreate the file.
+    this.opts.persister?.remove(id);
     return true;
+  }
+
+  /**
+   * Reload a persisted session as a live, DETACHED, idle one (a `serve`
+   * restart): its history reconciled (`reconcileOnReload` — a turn cut short is
+   * closed honestly, nothing re-runs), its idempotency keys and TTL clock
+   * restored. Never refused by the limits (they only refuse NEW sessions,
+   * decision G) and never emits: nobody is attached, and the new incarnation's
+   * epoch makes any returning client resync. Synchronous, like `open`.
+   */
+  restore(record: DaemonSessionRecord): HostedSession {
+    if (this.sessions.has(record.id)) {
+      throw new Error(`session ${record.id} is already live`);
+    }
+    const reconciled = reconcileOnReload(record);
+    const lastActiveAt = restoredActivity(record, this.now());
+    const hosted = this.build(record.id, reconciled.messages, {
+      createdAt: record.createdAt,
+      lastActiveAt,
+      turns: reconciled.turns,
+      enqueueIds: reconciled.enqueueIds,
+    });
+    this.sessions.set(record.id, hosted);
+    return hosted;
   }
 
   /**
@@ -175,7 +217,11 @@ export class SessionHost {
   }
 
   /** A hosted session with a fresh agent, confined to `defaultCwd`. */
-  private build(id: string, messages: OpenParams["messages"]): HostedSession {
+  private build(
+    id: string,
+    messages: readonly ChatMessage[] | undefined,
+    restored?: RestoredSessionState,
+  ): HostedSession {
     const { agent, permissions, jobs } = this.opts.createAgent(this.opts.defaultCwd);
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
@@ -191,6 +237,9 @@ export class SessionHost {
       },
       this.opts.ringBytes,
       () => this.now(),
+      this.opts.persister
+        ? { persister: this.opts.persister, ...(restored ? { restored } : {}) }
+        : undefined,
     );
   }
 }

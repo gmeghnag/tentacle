@@ -225,7 +225,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ? { cert: await Bun.file(certPath).text(), key: await Bun.file(keyPath).text() }
         : undefined;
     try {
-      const server = startDaemon(config, {
+      const server = await startDaemon(config, {
         ...limits,
         host,
         port,
@@ -233,12 +233,19 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ...(tls ? { tls } : {}),
         onAudit: (line) => write(`[daemon] ${line}\n`),
         onError: (error) => write(`[daemon] error: ${error.message}\n`),
+        onNotice: (line) => write(`[daemon] ${line}\n`),
       });
       write(`daemon listening on ${server.url}\n`);
+      // First Ctrl+C: stop, let the session writes land, release the store
+      // lock. A second one exits at once (a hung disk must not trap the user).
       await new Promise<void>((resolve) => {
+        let interrupted = false;
         process.on("SIGINT", () => {
-          server.stop();
-          resolve();
+          if (interrupted) {
+            process.exit(130);
+          }
+          interrupted = true;
+          void server.stop().then(resolve, resolve);
         });
       });
       return 0;

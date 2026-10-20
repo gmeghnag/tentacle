@@ -84,6 +84,11 @@ export class Session {
     this.steering.push(text);
   }
 
+  /** The messages queued and not yet drained, in order (a copy, for persisting). */
+  pendingSteering(): readonly string[] {
+    return [...this.steering];
+  }
+
   /**
    * Compact the conversation: summarise it, then replace the history with the
    * system prompt + that summary. Returns the summary and the message counts.
