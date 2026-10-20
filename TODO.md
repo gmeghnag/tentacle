@@ -48,13 +48,22 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       explicitly, `k8s/src/pod-cleanup.ts:173-186`). Red-first + mutation-checked
       tests in `core/test/env.test.ts`. **Fix:** `docs/fix/pod-tls-env-scrub.md`
       (promoted from the eval on the owner's OK).
-- [ ] 🟡 **Flaky GC test: "a connection forgets a session another client
-      closed"** (`daemon/test/session-reaper.test.ts`, a `WeakRef` that must be
-      collected within 5 `Bun.gc(true)` rounds). Fails only under full-suite
-      load: measured 2026-10-20 at 1/8 full runs on `main` @ `52ca635` and 3/8
-      on `feat/permission-events` (0/40 isolated on both). GC timing, not a
-      leak, as far as measured. Make it deterministic (more rounds with a
-      bound, or assert the registry/connection drop the reference directly).
+- [ ] 🔵 **Flaky GC test (test-only, low priority — after protocol v2):**
+      `daemon/test/session-reaper.test.ts` "a connection forgets a session
+      another client closed" fails ~1 in 8 full-suite runs. Root cause
+      (2026-10-20, heap snapshot): a conservative-GC stack root delays the
+      collection its `WeakRef` + 5 × `Bun.gc(true)` assertion demands; the
+      production code is correct (the session is unreachable). Plan ready:
+      **Eval:** `docs/eval/reaper-gc-flaky-test.md` (getter + deterministic
+      assertion).
+- [ ] 🟡 **Intermittent timeout, not investigated:** `agent/test/session-store.test.ts`
+      "JsonSessionStore durability > drain() resolves only after in-flight and
+      queued writes settle" timed out at 5 s once in 12 full runs (2026-10-20).
+      Unknown whether test-only or a real `drain()` defect — investigate before
+      assuming the former (session persistence path).
+- [ ] 🔵 **Test residue:** a `HostedSession` from `cli/test/pod-runtime.test.ts`
+      stays reachable from a root closure through its `SpyFakeCluster` fake after
+      the file ends (heap snapshot, 2026-10-20). Test-scoped; tidy when touched.
 - [ ] 🔵 **The replay ring is unbounded during a long permission suspension**
       (from `feat/permission-events` Review, 2026-10-20): the ring never evicts
       past the cut (`daemon/src/ring.ts`), and the cut cannot move while a turn
@@ -493,6 +502,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       — **Eval:** `docs/eval/attachments.md` (sister) · 4 sub-tasks · load-bearing
       — `docs/feat/pod-attach-resilience.md` now Layer 1 only (WS ping) · S · contained
       — mobile app (React Native or Swift) — own eval, after 8b
+      — **Eval (deferred, low):** `docs/eval/reaper-gc-flaky-test.md` — test-only flake, at the end of v2
 
 - [ ] **No changelog discipline** (no `CHANGELOG.md`). **Eval:**
       `docs/eval/changelog-discipline.md`. Type: eval. Open.
