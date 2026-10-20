@@ -156,6 +156,24 @@ export function redactTurnError(error: unknown, expose: boolean): TurnError {
   return { message: "internal error" };
 }
 
+/**
+ * Settles at the first of `done` settling or `signal` aborting (at once if it
+ * already has). Never rejects; drops its abort listener when it settles.
+ */
+export function untilAborted(done: Promise<unknown>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    const finish = (): void => {
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    signal.addEventListener("abort", finish, { once: true });
+    done.then(finish, finish);
+  });
+}
+
 export class HostedSession {
   readonly id: string;
   private readonly session: Session;
@@ -337,7 +355,11 @@ export class HostedSession {
       if (this.pending === record) {
         this.pending = undefined;
         this.persist();
-        await this.persisted();
+        // The turn's abort ends this wait: a hung disk must never trap a cancel
+        // (docs/fix/cancel-hung-disk.md). Safe: the agent checks the abort
+        // before the answer (agent.ts `runTool`), so an aborted turn never runs
+        // the tool and "pending on disk ⇒ never started" still holds.
+        await untilAborted(this.persisted(), signal);
       }
       return outcomeToResponse(outcome);
     });

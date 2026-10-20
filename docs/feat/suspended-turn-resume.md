@@ -248,7 +248,7 @@ approval)` — the operator learns a turn is live again.
 | Grants | Lost (D5 parent): the later calls are asked again. |
 | Pods / worker | No persister → never a record → never resumed. |
 | The waiting call's tool is no longer registered after the restart (Review finding 7) | Nothing is asked; the agent records its normal "unknown tool" result and the turn goes on. Nothing executes. |
-| The disk hangs (a write never settles) | The request is never shown and a cancel cannot end the turn (only `close`); pre-existing for the clear-before-run wait — `TODO.md` (Review finding 6). |
+| The disk hangs (a write never settles) | The request is never shown and a cancel cannot end the turn (only `close`); pre-existing for the clear-before-run wait — `TODO.md` (Review finding 6). **Cancel half fixed** by `docs/fix/cancel-hung-disk.md` (the wait ends on the turn's abort). |
 
 ### Tests (red first; each names its mutation)
 

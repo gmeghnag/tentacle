@@ -19,7 +19,7 @@ import { ToolRegistry, createTaskTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { z } from "zod";
 import { Connection } from "../src/connection.ts";
-import { type Attachment, HostedSession } from "../src/hosted-session.ts";
+import { type Attachment, HostedSession, untilAborted } from "../src/hosted-session.ts";
 import {
   type DaemonSessionRecord,
   INTERRUPTED_NOTE,
@@ -424,6 +424,100 @@ describe("daemon persistence: what is written, when", () => {
     expect(c.updates.find((u) => u.update.type === "turn_end")?.update).toMatchObject({
       stopReason: "cancelled",
     });
+    expect(runs).toEqual([]);
+  });
+
+  // A hung disk (a write that never settles) must never trap a cancel
+  // (docs/fix/cancel-hung-disk.md). Each runs to `turn_end{cancelled}` with the
+  // store still held: nothing is released, ever.
+  // Mutation: `await this.persisted()` in the gate without the abort race → no turn_end.
+  async function cancelOnHungDisk(
+    hangAt: "before-ask" | "after-shown" | "after-allow" | "after-deny",
+  ): Promise<{
+    c: ReturnType<typeof client>;
+    runs: string[];
+    store: SpyStore;
+    hosted: HostedSession;
+  }> {
+    const store = new SpyStore();
+    const runs: string[] = [];
+    const r = rig(
+      [[call("c1", "run"), { type: "done" }], text("after")],
+      () => [tool("run", "ask", runs)],
+      store,
+    );
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    await hosted.persisted();
+    if (hangAt === "before-ask") {
+      store.hold = true;
+      hosted.prompt("T1", go);
+      await until(() => store.saves.some((s) => s.turn?.pending !== undefined));
+    } else {
+      hosted.prompt("T1", go);
+      await until(() => c.asks.length === 1);
+      store.hold = true;
+      const ask = c.asks[0];
+      if (hangAt !== "after-shown" && ask) {
+        hosted.resolvePermission(
+          ask.requestId,
+          hangAt === "after-allow" ? "allow_once" : "reject_once",
+        );
+        // The gate is now parked on the clear-before-run write, which never lands.
+        await until(() =>
+          store.saves.some((s) => s.turn !== undefined && s.turn.pending === undefined),
+        );
+        await tick(5);
+        expect(c.ended("T1")).toBe(false);
+      }
+    }
+    hosted.cancel();
+    await until(() => c.ended("T1"));
+    return { c, runs, store, hosted };
+  }
+
+  const endOf = (c: ReturnType<typeof client>) =>
+    c.updates.find((u) => u.update.type === "turn_end")?.update;
+
+  test("H1 a hung disk before the ask is shown: cancel still ends the turn (never shown, never resolved)", async () => {
+    const { c, runs } = await cancelOnHungDisk("before-ask");
+    expect(endOf(c)).toMatchObject({ stopReason: "cancelled" });
+    const types = c.updates.map((u) => u.update.type);
+    expect(types).not.toContain("permission_request");
+    expect(types).not.toContain("permission_resolved");
+    expect(runs).toEqual([]);
+  });
+
+  test("H2 a hung disk while the ask is shown: cancel resolves it as cancelled and ends the turn", async () => {
+    const { c, runs } = await cancelOnHungDisk("after-shown");
+    expect(endOf(c)).toMatchObject({ stopReason: "cancelled" });
+    expect(c.updates.find((u) => u.update.type === "permission_resolved")?.update).toMatchObject({
+      outcome: { outcome: "cancelled" },
+    });
+    expect(runs).toEqual([]);
+  });
+
+  test("H3 approved, the clear never lands, then cancel: the turn ends and the tool NEVER runs", async () => {
+    // Mutations: drop the abort check after `authorize` in agent.ts `runTool` → the tool
+    // runs while the disk still says 'pending' (a reload would run it again); skip the
+    // clear-before-run wait → the turn ends before the cancel (also A6/B4).
+    const { c, runs, store, hosted } = await cancelOnHungDisk("after-allow");
+    expect(endOf(c)).toMatchObject({ stopReason: "cancelled" });
+    expect(runs).toEqual([]);
+    // The disk comes back later: still nothing runs, and the turn does not end twice.
+    store.hold = false;
+    store.release();
+    await hosted.persisted();
+    await tick(5);
+    expect(runs).toEqual([]);
+    expect(c.updates.filter((u) => u.update.type === "turn_end")).toHaveLength(1);
+    const tools = hosted.snapshotPage().messages.filter((m) => m.role === "tool");
+    expect(tools.map((m) => m.content)).toEqual(["Cancelled by the user before this tool ran."]);
+  });
+
+  test("H4 denied, the clear never lands, then cancel: the turn ends cancelled", async () => {
+    const { c, runs } = await cancelOnHungDisk("after-deny");
+    expect(endOf(c)).toMatchObject({ stopReason: "cancelled" });
     expect(runs).toEqual([]);
   });
 
@@ -983,6 +1077,53 @@ describe("daemon persistence: review fixes (the TTL clock, compaction, shutdown)
       expect.stringMatching(/session bad is not persisted: its file could not be loaded/),
       expect.stringMatching(/session "\.\.\/evil" is not persisted: not a valid file name/),
     ]);
+  });
+});
+
+describe("untilAborted (the gate's abortable disk wait)", () => {
+  // Mutation: no `removeEventListener` in `finish` → one listener leaks per approved ask.
+  const spied = (c: AbortController) => {
+    const live = new Set<unknown>();
+    const add = c.signal.addEventListener.bind(c.signal);
+    const remove = c.signal.removeEventListener.bind(c.signal);
+    c.signal.addEventListener = ((t: string, l: EventListener, o?: AddEventListenerOptions) => {
+      live.add(l);
+      add(t, l, o);
+    }) as AbortSignal["addEventListener"];
+    c.signal.removeEventListener = ((t: string, l: EventListener) => {
+      live.delete(l);
+      remove(t, l);
+    }) as AbortSignal["removeEventListener"];
+    return live;
+  };
+
+  test("settles with the write; the abort listener is gone", async () => {
+    const c = new AbortController();
+    const live = spied(c);
+    const write = Promise.withResolvers<void>();
+    let done = false;
+    const wait = untilAborted(write.promise, c.signal).then(() => {
+      done = true;
+    });
+    await tick();
+    expect(done).toBe(false);
+    expect(live.size).toBe(1);
+    write.resolve();
+    await wait;
+    expect(live.size).toBe(0);
+  });
+
+  test("settles on the abort while the write never does; a rejected write never throws", async () => {
+    const c = new AbortController();
+    const live = spied(c);
+    const wait = untilAborted(new Promise<void>(() => {}), c.signal);
+    c.abort();
+    await wait;
+    expect(live.size).toBe(0);
+    await untilAborted(Promise.reject(new Error("disk")), new AbortController().signal);
+    // Already aborted: at once, no listener added.
+    await untilAborted(new Promise<void>(() => {}), c.signal);
+    expect(live.size).toBe(0);
   });
 });
 
