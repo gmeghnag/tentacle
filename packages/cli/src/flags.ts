@@ -5,6 +5,8 @@
  * command whose stdout is the token — so it is never stored in plaintext, like
  * `apiKeyCommand`), then `TENTACLE_REMOTE_TOKEN`.
  */
+import type { TlsOptions } from "@tentacle/client";
+
 export interface ParsedFlags {
   readonly positional: string[];
   readonly flags: Map<string, string>;
@@ -50,7 +52,11 @@ const TOKEN = { token: {}, "token-command": {} } as const;
 
 /** Every command's arguments: the ONE list of what each accepts. */
 export const ARGS = {
-  connect: { values: TOKEN, positional: { min: 1, max: 1 } },
+  connect: {
+    values: { ...TOKEN, "ca-cert": {} },
+    bools: { "insecure-skip-tls-verify": {} },
+    positional: { min: 1, max: 1 },
+  },
   serve: {
     values: {
       host: {},
@@ -261,6 +267,38 @@ export function parseServeLimits(parsed: Pick<ParsedFlags, "flags" | "bools">): 
   ) as ServeLimits;
 }
 
+/**
+ * `connect`'s TLS trust (docs/feat/client-tls-trust.md): `--ca-cert` reads the
+ * PEM of the CA (or self-signed cert) that signed the daemon's cert, and
+ * `--insecure-skip-tls-verify` skips verification (dev-only, warned by the
+ * caller). Neither set → undefined → the system store is used. A
+ * missing/unreadable CA file fails loudly here, before any socket.
+ */
+export async function resolveTls(
+  flags: ReadonlyMap<string, string>,
+  bools: ReadonlySet<string>,
+): Promise<TlsOptions | undefined> {
+  const caPath = flags.get("ca-cert");
+  const insecure = bools.has("insecure-skip-tls-verify");
+  if (caPath === undefined && !insecure) {
+    return undefined;
+  }
+  let ca: string | undefined;
+  if (caPath !== undefined) {
+    try {
+      ca = await Bun.file(caPath).text();
+    } catch (error) {
+      throw new Error(
+        `cannot read --ca-cert ${caPath}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return {
+    ...(ca !== undefined ? { ca } : {}),
+    ...(insecure ? { rejectUnauthorized: false } : {}),
+  };
+}
+
 /** Run a shell command and return its trimmed stdout (the secret). */
 async function runCommand(command: string): Promise<string> {
   const proc = Bun.spawn(["/bin/sh", "-c", command], { stdout: "pipe", stderr: "pipe" });
@@ -378,7 +416,8 @@ export function cliMode(args: readonly string[]): CliMode {
 
 /** The usage line printed with an argument error. */
 export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string>> = {
-  connect: "tentacle connect ws(s)://host:port [--token T|--token-command CMD]",
+  connect:
+    "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify]",
   serve:
     "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [...] (see tentacle --help)",
   run: "tentacle run --image <ref> [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]",

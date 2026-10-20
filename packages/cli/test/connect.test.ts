@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Agent } from "@tentacle/agent";
 import { ChannelError } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
@@ -6,6 +9,54 @@ import { Connection, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import { bufferedErrorSink, connectTui } from "../src/connect.ts";
+import { resolveTls } from "../src/flags.ts";
+
+describe("resolveTls (connect flags, docs/feat/client-tls-trust.md)", () => {
+  const flags = (entries: [string, string][] = []) => new Map(entries);
+  const bools = (names: string[] = []) => new Set(names);
+
+  test("no flags → undefined (the system store is used)", async () => {
+    expect(await resolveTls(flags(), bools())).toBeUndefined();
+  });
+
+  test("--ca-cert reads the PEM contents", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "tls-trust-"));
+    try {
+      const pem = "-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----\n";
+      const path = join(dir, "ca.pem");
+      await writeFile(path, pem);
+      const tls = await resolveTls(flags([["ca-cert", path]]), bools());
+      expect(tls).toEqual({ ca: pem });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("--insecure-skip-tls-verify sets rejectUnauthorized:false", async () => {
+    expect(await resolveTls(flags(), bools(["insecure-skip-tls-verify"]))).toEqual({
+      rejectUnauthorized: false,
+    });
+  });
+
+  test("both flags together set both fields", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "tls-trust-"));
+    try {
+      const path = join(dir, "ca.pem");
+      await writeFile(path, "PEM");
+      expect(
+        await resolveTls(flags([["ca-cert", path]]), bools(["insecure-skip-tls-verify"])),
+      ).toEqual({ ca: "PEM", rejectUnauthorized: false });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a missing/unreadable --ca-cert fails loudly before any socket", async () => {
+    await expect(
+      resolveTls(flags([["ca-cert", "/nonexistent/no-such-ca.pem"]]), bools()),
+    ).rejects.toThrow(/cannot read --ca-cert .*no-such-ca.pem/);
+  });
+});
 
 describe("connect: buffered peer-error sink (never a raw write while Ink owns the terminal)", () => {
   test("collects errors silently, then writes them in order on flush, once", () => {
@@ -176,5 +227,59 @@ describe("connect: the reconnecting client (docs/feat/client-reattach-frontends.
       }),
     ).rejects.toThrow(/401/);
     expect(mounted).toBe(false);
+  });
+});
+
+describe("connect: TLS trust passthrough + insecure warning (docs/feat/client-tls-trust.md)", () => {
+  // A dial that records the options it was given and returns a ready channel
+  // (a real `Connection` on the far end so `initialize` succeeds).
+  function capturingDial() {
+    const seen: Array<{ url: string; options: { token?: string; tls?: unknown } }> = [];
+    return {
+      seen,
+      dial: (url: string, options: { token?: string; tls?: unknown }) => {
+        seen.push({ url, options });
+        return async () => {
+          const [daemonCh, clientCh] = createChannelPair();
+          new Connection(
+            daemonCh,
+            new SessionHost({
+              defaultCwd: "/tmp",
+              createAgent: () => {
+                throw new Error("initialize only: no agent");
+              },
+            }),
+          );
+          return clientCh;
+        };
+      },
+    };
+  }
+
+  test("tls is passed to the dial options; an insecure knob warns via the sink (not a raw write)", async () => {
+    const { seen, dial } = capturingDial();
+    const written: string[] = [];
+    const tls = { rejectUnauthorized: false };
+    await connectTui({ url: "wss://fake", token: "t", tls }, (line) => written.push(line), {
+      dial,
+      startTui: async () => {
+        // The warning must NOT have leaked while Ink owns the terminal.
+        expect(written.filter((l) => l.includes("insecure"))).toEqual([]);
+      },
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.options).toEqual({ token: "t", tls });
+    // The dev-only warning is flushed after the TUI exits (AGENTS §7).
+    expect(written.some((l) => l.includes("--insecure-skip-tls-verify"))).toBe(true);
+  });
+
+  test("no insecure knob → no warning", async () => {
+    const { dial } = capturingDial();
+    const written: string[] = [];
+    await connectTui({ url: "wss://fake", tls: { ca: "PEM" } }, (line) => written.push(line), {
+      dial,
+      startTui: async () => {},
+    });
+    expect(written).toEqual([]);
   });
 });

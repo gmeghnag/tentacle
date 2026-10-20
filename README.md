@@ -84,7 +84,12 @@ tentacle connect ws://host:4000 [--token T]
 ```
 
 A non-loopback `--host` requires a token (remote code-execution risk); TLS via
-`--tls-cert`/`--tls-key`. Confinement and permissions are enforced server-side.
+`--tls-cert`/`--tls-key` on `serve`. To trust a daemon whose certificate is not
+in the system store, `connect` takes `--ca-cert FILE` (the CA or self-signed
+cert that signed the daemon's cert — the trust anchor, distinct from the
+daemon's own `--tls-cert`) or `--insecure-skip-tls-verify` (skips verification,
+dev-only). A private CA can also be trusted globally via `NODE_EXTRA_CA_CERTS`
+(no flag needed). Confinement and permissions are enforced server-side.
 See [`docs/architecture/F3-remote-control.md`](./docs/architecture/F3-remote-control.md).
 
 ## Features

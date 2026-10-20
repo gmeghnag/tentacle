@@ -521,9 +521,14 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       — **Eval (deferred, low):** `docs/eval/reaper-gc-flaky-test.md` — test-only flake, at the end of v2
 
 - [ ] **`connect` cannot trust a self-signed daemon** (`serve --tls-cert/--tls-key`
-      gives `wss://`, but `connect` has no `--ca-cert` / `--insecure-skip-tls-verify`).
-      **Eval:** `docs/eval/client-tls-trust.md` — promotion-ready. Type: eval →
-      feat · Size: S · Blast: contained.
+      gives `wss://`, but `connect` had no `--ca-cert` / `--insecure-skip-tls-verify`).
+      **Promoted eval → feat** (2026-10-20): `--ca-cert FILE` (trust anchor) +
+      `--insecure-skip-tls-verify` (dev-only); one `tls` object flows to the socket
+      `init` (k8s pattern), plus the classifying probe now carries `tls` too (a bad
+      token over a TLS daemon classifies `unauthorized`, not a redial loop). Executed +
+      fresh-context reviewed (APPROVE-WITH-NITS, all nits resolved) on branch
+      `feat/client-tls-trust`; **Doc:** `docs/feat/client-tls-trust.md`. Type: feat ·
+      Size: S · Blast: contained.
 
 - [ ] **No changelog discipline** (no `CHANGELOG.md`). **Eval:**
       `docs/eval/changelog-discipline.md`. Type: eval. Open.

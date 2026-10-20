@@ -38,6 +38,7 @@ import {
   extractGlobalOptions,
   parseArgs,
   parseServeLimits,
+  resolveTls,
   resolveToken,
 } from "./flags.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
@@ -90,8 +91,12 @@ Remote control:
                       [--session-ttl 24h] [--session-admin-cap DUR] [--max-sessions 64]
                       [--max-detached-sessions 16] [--ws-idle-timeout 60s]
   tentacle connect ws(s)://host:port [--token T|--token-command CMD]
+                      [--ca-cert FILE | --insecure-skip-tls-verify]
   A non-loopback --host requires a token (remote code execution risk).
   Token env fallback: TENTACLE_REMOTE_TOKEN.
+  TLS trust: --ca-cert is the CA (or the self-signed cert) that signed the
+  daemon's cert — the trust anchor, not the daemon's own --tls-cert.
+  --insecure-skip-tls-verify skips verification (dev-only).
 
 Options are checked: an unknown flag, a missing value or a stray argument is
 an error. Flags may come before or after a command's arguments
@@ -198,11 +203,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
 
   // `connect` drives a remote daemon; it needs no local model configuration.
   if (mode === "connect") {
-    const { positional, flags } = parsed;
+    const { positional, flags, bools } = parsed;
     const url = positional[0] ?? "";
     try {
       const token = await resolveToken(flags);
-      await connectTui({ url, ...(token ? { token } : {}) }, write);
+      const tls = await resolveTls(flags, bools);
+      await connectTui({ url, ...(token ? { token } : {}), ...(tls ? { tls } : {}) }, write);
       return 0;
     } catch (error) {
       write(`\n[connect error] ${error instanceof Error ? error.message : String(error)}\n`);
