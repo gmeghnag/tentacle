@@ -1,6 +1,6 @@
 # feat/suspended-turn-resume — a turn suspended on a permission survives a `serve` restart
 
-> **Status:** review done (APPROVE-WITH-NITS, findings 1–7 addressed; no second Review by owner choice) — awaiting merge OK
+> **Status:** DONE — merged to `main` 2026-10-20 (one fresh-context Review: APPROVE-WITH-NITS, findings 1–7 addressed; no second Review by owner choice)
 > **Branch:** `feat/suspended-turn-resume`
 > **Type:** feat (promoted from eval 2026-10-20) · **Size:** M · **Blast:** load-bearing (agent loop, steering window, persistence + permission invariants) · **Suited:** strong model executes; mandatory fresh-context Review (one, by owner choice)
 
