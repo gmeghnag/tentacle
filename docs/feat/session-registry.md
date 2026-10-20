@@ -1,6 +1,6 @@
 # feat/session-registry — daemon-owned sessions, `session/open` / `close`, detach, fan-out
 
-> **Status:** reviewed (2026-10-20) — Review round 1: REQUEST-CHANGES; findings 1–5 fixed by the executor (Execution §5); no second Review, by the owner's choice
+> **Status:** done — reviewed (REQUEST-CHANGES, findings 1–5 fixed, 6 deferred to `permission-events`; no second Review by owner's choice), merged to `main` (2026-10-20)
 > **Branch:** `feat/session-registry`
 > **Type:** eval → feat · **Size:** L (resized at promotion from upper M: owner decision D3 adds `/clear` → close on every runtime, incl. one `BackgroundJobs` per in-process session) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (daemon `Connection`, one-session-path invariant, AGENTS §7)
 
