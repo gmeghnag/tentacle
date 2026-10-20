@@ -511,6 +511,20 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
 
 - [ ] **No changelog discipline** (no `CHANGELOG.md`). **Eval:**
       `docs/eval/changelog-discipline.md`. Type: eval. Open.
+
+- [x] **Per-project config** (`.tentacle/config.jsonc` in the launch folder
+      overrides the user config). **Eval:** `docs/eval/project-config.md` —
+      REJECTED by the owner (2026-10-20): an implicit project file is launch-time
+      code execution / key exfiltration. Replaced by the item below.
+- [x] **Named config profiles** (`tentacle --profile <name>` / `TENTACLE_PROFILE`):
+      `profiles` in the user's `config.jsonc`, merged over it (connection group
+      as a unit; MCP servers by name, `null` removes). DONE 2026-10-20,
+      `feat/config-profiles`: `docs/feat/config-profiles.md` · S–M · cross-module.
+- [ ] 🟡 **Unknown CLI flags are never rejected.** `parseFlags` (`cli/flags.ts`)
+      accepts anything: a typo'd flag after `serve`/`run`/`attach` is silently
+      ignored, and an unknown LEADING option falls through to the one-shot path
+      and is sent to the model as prompt text (found by the `config-profiles`
+      repro). Type: fix · Size: S · Blast: cross-module. Open.
 - [ ] **No `tentacle update`** (self-update + cached pod binaries), and `attach`
       reuses a pod binary of any version (silent skew). Open questions 1–8
       pending discussion. **Eval:** `docs/eval/tentacle-update.md`. Type: eval →
