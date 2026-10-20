@@ -432,11 +432,16 @@ Daily-driver work (done 2026-10-14):
 - [x] 🟡 **A failed session save crashes the TUI** (`void store.save` rejects →
       unhandled rejection → exit 1 with a raw stack). See
       `docs/fix/session-store-durability.md` (fixed there: `SessionSaver`).
-- [ ] 🟡 **`--resume` (no uid) resumes another project's session**:
-      `store.latest()` ignores the launch cwd. Move to
-      `~/.config/tentacle/sessions/<cwd-key>/<uid>.json`. CONFIRMED.
-      **Eval:** `docs/eval/session-store-per-project.md`.
-      Type: eval → fix · Size: M · Blast: load-bearing.
+- [x] 🟡 **`--resume` (no uid) resumes another project's session**: FIXED
+      2026-10-20, `fix/session-store-per-project`: sessions now live in
+      `~/.config/tentacle/sessions/<projectKey(cwd)>/<uid>.json` (old flat files
+      ignored, no migration — owner, pre-v0.1.0; another project's uid is refused).
+      `docs/fix/session-store-per-project.md` · M · load-bearing (fresh Review waived by the owner).
+- [ ] **`--resume` picker**: with no uid and more than one session in this
+      folder, let the user choose which one (today: the newest only). Owner
+      request 2026-10-20. Type: feat · Size: M · Blast: cross-module (a pre-mount
+      Ink picker: it must run before the runtime starts, since `run` creates the
+      pod with the chosen session). Open.
 
 ### Block 10 — remote execution model (pod mode: what runs where; 2026-10-17, measured on OCP)
 
