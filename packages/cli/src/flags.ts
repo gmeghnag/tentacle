@@ -31,6 +31,8 @@ export interface ArgSpec {
    * it (else the flag is a bool); `--k=v` is always explicit.
    */
   readonly optional?: Readonly<Record<string, { readonly accepts: (word: string) => boolean }>>;
+  /** Pairs of flags that cannot be given together (either form: bool or with a value). */
+  readonly conflicts?: readonly (readonly [string, string])[];
   readonly positional: { readonly min: number; readonly max: number };
 }
 
@@ -41,6 +43,9 @@ export type ParsedArgs =
 /** A session uid (`--resume <uid>`): the store names sessions by UUID. */
 const SESSION_UID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RESUME = { resume: { accepts: (word: string) => SESSION_UID.test(word) } } as const;
+/** `--continue` resumes the newest session; `--resume` picks one (docs/feat/resume-picker.md). */
+const CONTINUE = { continue: {} } as const;
+const RESUME_CONFLICTS = [["resume", "continue"]] as const;
 const TOKEN = { token: {}, "token-command": {} } as const;
 
 /** Every command's arguments: the ONE list of what each accepts. */
@@ -64,17 +69,22 @@ export const ARGS = {
   },
   run: {
     values: { namespace: { short: "n" }, image: {}, "bin-dir": {} },
+    bools: CONTINUE,
     optional: RESUME,
+    conflicts: RESUME_CONFLICTS,
     positional: { min: 0, max: 1 },
   },
   attach: {
     values: { namespace: { short: "n" }, container: { short: "c" }, "bin-dir": {} },
+    bools: CONTINUE,
     optional: RESUME,
+    conflicts: RESUME_CONFLICTS,
     positional: { min: 1, max: 1 },
   },
   tui: {
-    bools: { interactive: { short: "i" }, "in-process": {}, "no-worker": {} },
+    bools: { interactive: { short: "i" }, "in-process": {}, "no-worker": {}, ...CONTINUE },
     optional: RESUME,
+    conflicts: RESUME_CONFLICTS,
     positional: { min: 0, max: 0 },
   },
   plain: { bools: { plain: {} }, positional: { min: 0, max: 0 } },
@@ -153,6 +163,12 @@ export function parseArgs(args: readonly string[], spec: ArgSpec): ParsedArgs {
       return { ok: false, error: `${written} needs a value` };
     }
     flags.set(name, value);
+  }
+  const given = (name: string): boolean => flags.has(name) || bools.has(name);
+  for (const [a, b] of spec.conflicts ?? []) {
+    if (given(a) && given(b)) {
+      return { ok: false, error: `--${a} and --${b} cannot be used together` };
+    }
   }
   if (positional.length > spec.positional.max) {
     return {
@@ -282,6 +298,7 @@ const COMMANDS = new Set([
   "-i",
   "--interactive",
   "--resume",
+  "--continue",
   "--plain",
 ]);
 
@@ -364,9 +381,9 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   connect: "tentacle connect ws(s)://host:port [--token T|--token-command CMD]",
   serve:
     "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [...] (see tentacle --help)",
-  run: "tentacle run --image <ref> [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]] [<name>]",
+  run: "tentacle run --image <ref> [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]",
   attach:
-    "tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]]",
+    "tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]|--continue]",
   plain: "tentacle --plain",
-  tui: "tentacle [-i] [--resume [uid]] [--in-process]",
+  tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process]",
 };

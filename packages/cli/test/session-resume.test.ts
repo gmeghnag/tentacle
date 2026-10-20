@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JsonSessionStore, type SessionRecord, parseSessionRecord } from "@tentacle/agent";
 import { ChatMessageSchema } from "@tentacle/protocol";
+import type { SessionChoice } from "@tentacle/tui";
 import { resolveResume } from "../src/session-resume.ts";
 
 let dir: string;
@@ -85,6 +86,113 @@ describe("resolveResume", () => {
     expect(result.fatal).toBe(false);
     expect(result.notices).toHaveLength(1);
     expect(result.lines.at(-1)).toBe("[resume] no saved sessions yet; starting fresh\n");
+  });
+});
+
+// `--resume` on a terminal: the user picks (docs/feat/resume-picker.md).
+describe("resolveResume with a picker", () => {
+  /** A picker spy that answers `answer` and records what it was offered. */
+  function spyPick(answer: (ids: string[]) => string | null) {
+    const offered: string[][] = [];
+    const pick = async (choices: readonly SessionChoice[]) => {
+      const ids = choices.map((c) => c.id);
+      offered.push(ids);
+      return answer(ids);
+    };
+    return { pick, offered };
+  }
+
+  async function storeWith(name: string, ...records: SessionRecord[]): Promise<JsonSessionStore> {
+    const store = new JsonSessionStore(join(dir, name));
+    for (const r of records) {
+      await store.save(r);
+    }
+    await store.drain();
+    return store;
+  }
+
+  test("several sessions: offered newest first, the chosen one (not the newest) resumes", async () => {
+    // Mutation: ignore `pick` (always the newest) → "s3" resumes instead of "s1".
+    const store = await storeWith("pick", rec("s1", 1000), rec("s3", 3000), rec("s2", 2000));
+    const { pick, offered } = spyPick(() => "s1");
+    const result = await resolveResume(store, undefined, undefined, pick);
+    expect(offered).toEqual([["s3", "s2", "s1"]]);
+    expect(result.record?.id).toBe("s1");
+    expect(result.lines).toEqual(["[resume] s1 — title s1\n"]);
+    expect(result.fatal).toBe(false);
+    expect(result.cancelled).toBeUndefined();
+  });
+
+  test("the choices carry title, updatedAt and the visible message count", async () => {
+    const withSystem: SessionRecord = {
+      ...rec("s1", 1000),
+      messages: [
+        { role: "system", content: "sys" },
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+      ],
+    };
+    const store = await storeWith("choices", withSystem, rec("s2", 2000));
+    let seen: readonly SessionChoice[] = [];
+    await resolveResume(store, undefined, undefined, async (choices) => {
+      seen = choices;
+      return null;
+    });
+    expect(seen).toEqual([
+      { id: "s2", title: "title s2", updatedAt: 2000, messageCount: 1 },
+      { id: "s1", title: "title s1", updatedAt: 1000, messageCount: 2 },
+    ]);
+  });
+
+  test("cancelled: nothing resumes, not fatal, a line says so", async () => {
+    // Mutation: treat null as "start fresh" → a fresh session starts after Esc.
+    const store = await storeWith("cancel", rec("s1", 1000), rec("s2", 2000));
+    const result = await resolveResume(store, undefined, undefined, spyPick(() => null).pick);
+    expect(result).toEqual({
+      record: null,
+      lines: ["[resume] cancelled\n"],
+      notices: [],
+      fatal: false,
+      cancelled: true,
+    });
+  });
+
+  test("0 or 1 session: nothing to choose, the picker is not shown", async () => {
+    // Mutation: drop the `records.length < 2` guard → the spy is called.
+    const one = await storeWith("one", rec("only", 1000));
+    const spy = spyPick(() => "only");
+    expect((await resolveResume(one, undefined, undefined, spy.pick)).record?.id).toBe("only");
+    const none = await resolveResume(
+      new JsonSessionStore(join(dir, "none")),
+      undefined,
+      undefined,
+      spy.pick,
+    );
+    expect(none.record).toBeNull();
+    expect(spy.offered).toEqual([]);
+  });
+
+  test("an explicit uid never shows the picker", async () => {
+    const store = await storeWith("uid-no-pick", rec("s1", 1000), rec("s2", 2000));
+    const spy = spyPick(() => "s2");
+    expect((await resolveResume(store, "s1", undefined, spy.pick)).record?.id).toBe("s1");
+    expect(spy.offered).toEqual([]);
+  });
+
+  test("an id the picker invents is refused, never resumed", async () => {
+    const store = await storeWith("invented", rec("s1", 1000), rec("s2", 2000));
+    const result = await resolveResume(store, undefined, undefined, spyPick(() => "zzz").pick);
+    expect(result.record).toBeNull();
+    expect(result.fatal).toBe(true);
+  });
+
+  test("skipped files are still reported when the user picks", async () => {
+    const store = await storeWith("pick-skipped", rec("s1", 1000), rec("s2", 2000));
+    await writeFile(join(dir, "pick-skipped", "bad.json"), "{trunc");
+    const result = await resolveResume(store, undefined, undefined, spyPick(() => "s1").pick);
+    expect(result.record?.id).toBe("s1");
+    expect(result.notices).toHaveLength(1);
+    expect(result.notices[0]).toContain("bad.json");
   });
 });
 

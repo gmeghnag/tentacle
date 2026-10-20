@@ -5,6 +5,10 @@
  * asked for THAT session); without one the newest valid session resumes and the
  * skipped files are reported both before mount and inside the TUI (the
  * pre-mount line alone is hidden by the alternate screen until exit).
+ *
+ * With a `pick` (`--resume` on a terminal, docs/feat/resume-picker.md) and two
+ * or more sessions, the user chooses; without one (`--continue`, or no
+ * terminal) the newest resumes.
  */
 import {
   type JsonSessionStore,
@@ -13,6 +17,7 @@ import {
   isValidSessionId,
   projectKey,
 } from "@tentacle/agent";
+import type { SessionChoice, SessionPick } from "@tentacle/tui";
 
 /**
  * The project the store belongs to (docs/fix/session-store-per-project.md):
@@ -35,12 +40,15 @@ export interface ResumeResolution {
   readonly notices: readonly string[];
   /** Don't start: the requested session exists but can't be read. */
   readonly fatal: boolean;
+  /** Don't start: the user cancelled the picker (not an error). */
+  readonly cancelled?: true;
 }
 
 export async function resolveResume(
   store: JsonSessionStore,
   uid: string | undefined,
   scope?: ResumeScope,
+  pick?: SessionPick,
 ): Promise<ResumeResolution> {
   if (uid !== undefined) {
     if (!isValidSessionId(uid)) {
@@ -77,7 +85,7 @@ export async function resolveResume(
         );
     }
   }
-  const { record, skipped } = await store.latest();
+  const { records, skipped } = await store.list();
   const warning =
     skipped.length > 0
       ? [
@@ -86,6 +94,24 @@ export async function resolveResume(
             .join(", ")}`,
         ]
       : [];
+  if (pick && records.length >= 2) {
+    const id = await pick(records.map(toChoice));
+    if (id === null) {
+      return {
+        record: null,
+        lines: ["[resume] cancelled\n"],
+        notices: [],
+        fatal: false,
+        cancelled: true,
+      };
+    }
+    const chosen = records.find((r) => r.id === id);
+    if (!chosen) {
+      return fatal(`[resume] the picker returned an unknown session "${id}"; not starting\n`);
+    }
+    return found(chosen, warning);
+  }
+  const record = records[0];
   if (!record) {
     return {
       record: null,
@@ -100,6 +126,15 @@ export async function resolveResume(
     };
   }
   return found(record, warning);
+}
+
+function toChoice(record: SessionRecord): SessionChoice {
+  return {
+    id: record.id,
+    title: record.title,
+    updatedAt: record.updatedAt,
+    messageCount: record.messages.filter((m) => m.role !== "system").length,
+  };
 }
 
 function fatal(line: string): ResumeResolution {
