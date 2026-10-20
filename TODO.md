@@ -497,12 +497,10 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       6. **Feat (DONE 2026-10-20, `feat/daemon-side-persistence`):** `docs/feat/daemon-side-persistence.md` (Part A, `serve` only) · M · load-bearing
       7a. **Feat (DONE 2026-10-20, `feat/permission-events`):** `docs/feat/permission-events.md` · L · load-bearing
       7b. **Feat (DONE 2026-10-20, `feat/suspended-turn-resume`):** `docs/feat/suspended-turn-resume.md` · M · load-bearing
-      — **Open (pre-existing on `main`, found by the 7b Review, finding 6):** a store
-        write that never settles (hung disk) blocks `cancel` of a turn waiting for
-        approval — the gate waits on the clear-before-run flush
-        (`hosted-session.ts` `awaitDecision`); since 7b a re-asked request is also
-        never shown. Only `close` ends such a turn. Needs a bounded wait or a
-        cancel path that does not wait on the disk. Not yet an eval.
+      — **Fix (DONE 2026-10-20, `fix/cancel-hung-disk`):** `docs/fix/cancel-hung-disk.md` — a
+        hung disk no longer traps `cancel` of a turn waiting on a permission (the
+        gate's clear-before-run wait now ends on the turn's abort) · S · load-bearing
+        (fresh-context Review waived by the owner)
       8a. **Feat (DONE 2026-10-20, `feat/client-reattach`):** `docs/feat/client-reattach.md` · L · load-bearing
       8b. **Feat (DONE 2026-10-20, `feat/client-reattach-frontends`):** `docs/feat/client-reattach-frontends.md` · M · load-bearing
       9. **Eval:** `docs/eval/session-handoff.md` — continue a `serve` session from another device (owner requirement 2026-10-20: mobile → TUI, live) · L → split · load-bearing
