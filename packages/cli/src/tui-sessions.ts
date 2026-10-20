@@ -5,10 +5,12 @@
  * pending saves — even if the teardown throws — printing only once Ink has
  * unmounted (AGENTS §7). One tested copy instead of three in `main.ts`.
  */
-import { JsonSessionStore, type SessionRecord } from "@tentacle/agent";
+import { join } from "node:path";
+import { JsonSessionStore, type SessionRecord, projectKey } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
 import type { NoticeFeed } from "@tentacle/tui";
 import { NoticeHub } from "./notice-hub.ts";
+import { findInOtherProjects } from "./session-projects.ts";
 import { resolveResume } from "./session-resume.ts";
 import { type DrainOptions, SessionSaver } from "./session-saver.ts";
 
@@ -32,17 +34,25 @@ export interface TuiSessionOptions {
  * unreadable or its uid invalid) — the reason has been written.
  */
 export async function openTuiSessions(
-  dir: string,
+  where: { readonly root: string; readonly cwd: string },
   resume: { readonly wanted: boolean; readonly uid?: string | undefined },
   write: (line: string) => void,
 ): Promise<TuiSessions | null> {
-  const store = new JsonSessionStore(dir);
+  // One directory per project (docs/fix/session-store-per-project.md): the
+  // resume AND the saver use it, so this folder's sessions are the only ones
+  // offered. Old flat files at the root are ignored (no migration, pre-v0.1.0).
+  const key = projectKey(where.cwd);
+  const store = new JsonSessionStore(join(where.root, key));
   const notices = new NoticeHub();
   const saver = new SessionSaver(store, (text) => notices.notify(text));
   if (!resume.wanted) {
     return { notices, saver, resume: null };
   }
-  const resolved = await resolveResume(store, resume.uid);
+  const resolved = await resolveResume(store, resume.uid, {
+    cwd: where.cwd,
+    key,
+    elsewhere: (uid) => findInOtherProjects(where.root, key, uid),
+  });
   for (const line of resolved.lines) {
     write(line);
   }

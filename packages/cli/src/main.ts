@@ -61,7 +61,7 @@ Usage:
   tentacle                 start the rich interactive TUI (when stdin is a TTY)
   tentacle -i              force the interactive TUI
   tentacle --plain         plain line-based REPL (for pipes / no TTY)
-  tentacle --resume [uid]  resume a saved session (latest if no uid) in the TUI
+  tentacle --resume [uid]  resume a saved session of this folder (latest if no uid)
   tentacle -i --in-process run the agent on the render thread (opt out of the worker)
   tentacle run --image <ref> [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]] [<name>]
                                 run the agent inside a Kubernetes pod (sandbox), local TUI
@@ -321,11 +321,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return { error: true } as const;
     }
   };
-  // Sessions persist as JSON under <configDir>/sessions (store + saver + notice
-  // hub, `--resume` resolved pre-mount). `null` = don't start (reason written).
+  // Sessions persist as JSON under <configDir>/sessions/<projectKey(cwd)>/ (store
+  // + saver + notice hub, `--resume` resolved pre-mount, only among THIS
+  // folder's sessions). `null` = don't start (reason written).
   const openSessions = (flags: Map<string, string>, bools: Set<string>) =>
     openTuiSessions(
-      join(config.configDir, "sessions"),
+      { root: join(config.configDir, "sessions"), cwd: config.cwd },
       { wanted: bools.has("resume") || flags.has("resume"), uid: flags.get("resume") },
       write,
     );

@@ -6,7 +6,26 @@
  * skipped files are reported both before mount and inside the TUI (the
  * pre-mount line alone is hidden by the alternate screen until exit).
  */
-import { type JsonSessionStore, type SessionRecord, isValidSessionId } from "@tentacle/agent";
+import {
+  type JsonSessionStore,
+  type LoadResult,
+  type SessionRecord,
+  isValidSessionId,
+  projectKey,
+} from "@tentacle/agent";
+
+/**
+ * The project the store belongs to (docs/fix/session-store-per-project.md):
+ * a uid found in ANOTHER project is refused, never resumed here.
+ */
+export interface ResumeScope {
+  /** This project's cwd, named in messages. */
+  readonly cwd: string;
+  /** Its `projectKey`. */
+  readonly key: string;
+  /** Where else the uid may be (the other projects). */
+  readonly elsewhere: (uid: string) => Promise<LoadResult>;
+}
 
 export interface ResumeResolution {
   readonly record: SessionRecord | null;
@@ -21,6 +40,7 @@ export interface ResumeResolution {
 export async function resolveResume(
   store: JsonSessionStore,
   uid: string | undefined,
+  scope?: ResumeScope,
 ): Promise<ResumeResolution> {
   if (uid !== undefined) {
     if (!isValidSessionId(uid)) {
@@ -31,7 +51,16 @@ export async function resolveResume(
         fatal: true,
       };
     }
-    const result = await store.load(uid);
+    let result = await store.load(uid);
+    if (result.status === "absent" && scope) {
+      result = await scope.elsewhere(uid);
+      if (result.status === "ok" && projectKey(result.record.cwd) !== scope.key) {
+        // Resuming another project's conversation here is the defect itself.
+        return fatal(
+          `[resume] session "${uid}" belongs to ${result.record.cwd}; run tentacle there to resume it\n`,
+        );
+      }
+    }
     switch (result.status) {
       case "ok":
         return found(result.record, []);
@@ -43,14 +72,9 @@ export async function resolveResume(
           fatal: false,
         };
       case "unreadable":
-        return {
-          record: null,
-          lines: [
-            `[resume] session "${uid}" is unreadable: ${result.reason} (${result.file}); not starting — fix or remove the file, or run without --resume\n`,
-          ],
-          notices: [],
-          fatal: true,
-        };
+        return fatal(
+          `[resume] session "${uid}" is unreadable: ${result.reason} (${result.file}); not starting — fix or remove the file, or run without --resume\n`,
+        );
     }
   }
   const { record, skipped } = await store.latest();
@@ -67,13 +91,19 @@ export async function resolveResume(
       record: null,
       lines: [
         ...warning.map((w) => `[resume] ${w}\n`),
-        "[resume] no saved sessions yet; starting fresh\n",
+        scope
+          ? `[resume] no saved sessions for ${scope.cwd} yet; starting fresh\n`
+          : "[resume] no saved sessions yet; starting fresh\n",
       ],
       notices: warning,
       fatal: false,
     };
   }
   return found(record, warning);
+}
+
+function fatal(line: string): ResumeResolution {
+  return { record: null, lines: [line], notices: [], fatal: true };
 }
 
 function found(record: SessionRecord, warning: readonly string[]): ResumeResolution {
