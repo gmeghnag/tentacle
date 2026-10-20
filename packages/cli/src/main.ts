@@ -26,7 +26,7 @@ import {
   loadKubeClientOptions,
 } from "@tentacle/k8s";
 import { connectMcpServers } from "@tentacle/mcp";
-import { type SessionController, startTui } from "@tentacle/tui";
+import { type SessionController, pickSession, startTui } from "@tentacle/tui";
 import { type TentacleConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import {
@@ -61,13 +61,14 @@ Usage:
   tentacle                 start the rich interactive TUI (when stdin is a TTY)
   tentacle -i              force the interactive TUI
   tentacle --plain         plain line-based REPL (for pipes / no TTY)
-  tentacle --resume [uid]  resume a saved session of this folder (latest if no uid)
+  tentacle --resume [uid]  resume a saved session of this folder (pick one if no uid)
+  tentacle --continue      resume this folder's most recent session
   tentacle -i --in-process run the agent on the render thread (opt out of the worker)
-  tentacle run --image <ref> [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]] [<name>]
+  tentacle run --image <ref> [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]
                                 run the agent inside a Kubernetes pod (sandbox), local TUI
                                 (<name> is the pod name; random when omitted; sessions
                                 persist on the laptop, so --resume works)
-  tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]]
+  tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]|--continue]
                                 attach the TUI to an EXISTING pod (tentacle is
                                 injected if it is not there yet); --container is the
                                 container to exec into (default: the pod's only one);
@@ -322,13 +323,20 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
   };
   // Sessions persist as JSON under <configDir>/sessions/<projectKey(cwd)>/ (store
-  // + saver + notice hub, `--resume` resolved pre-mount, only among THIS
-  // folder's sessions). `null` = don't start (reason written).
+  // + saver + notice hub, `--resume`/`--continue` resolved pre-mount, only among
+  // THIS folder's sessions). `{ exit }` = don't start (reason written). The
+  // picker (docs/feat/resume-picker.md) runs only on a terminal, before any
+  // runtime or pod starts, so the chosen session seeds it like `--resume <uid>`.
   const openSessions = (flags: Map<string, string>, bools: Set<string>) =>
     openTuiSessions(
       { root: join(config.configDir, "sessions"), cwd: config.cwd },
-      { wanted: bools.has("resume") || flags.has("resume"), uid: flags.get("resume") },
+      {
+        wanted: bools.has("resume") || flags.has("resume") || bools.has("continue"),
+        uid: flags.get("resume"),
+        latest: bools.has("continue"),
+      },
       write,
+      process.stdin.isTTY && process.stdout.isTTY ? (choices) => pickSession(choices) : undefined,
     );
   // `run` and `attach` both end in the same local TUI over the pod runtime. The
   // `permissions` broker MUST be the SAME instance handed to the runtime AND the
@@ -386,8 +394,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     const name = runPos[0];
     const sessions = await openSessions(runFlags, runBools);
-    if (!sessions) {
-      return 1;
+    if ("exit" in sessions) {
+      return sessions.exit;
     }
     const auth = await loadPodAuth(namespace, "pod");
     if ("error" in auth) {
@@ -431,8 +439,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const container = attachFlags.get("container");
     const binDir = attachFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR;
     const sessions = await openSessions(attachFlags, attachBools);
-    if (!sessions) {
-      return 1;
+    if ("exit" in sessions) {
+      return sessions.exit;
     }
     const auth = await loadPodAuth(namespace, "pod");
     if ("error" in auth) {
@@ -472,8 +480,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const { flags: topFlags, bools: topBools } = parsed;
   if (mode === "tui" || (mode === "empty" && process.stdin.isTTY)) {
     const sessions = await openSessions(topFlags, topBools);
-    if (!sessions) {
-      return 1;
+    if ("exit" in sessions) {
+      return sessions.exit;
     }
     const { saver, resume: resumeRecord } = sessions;
 

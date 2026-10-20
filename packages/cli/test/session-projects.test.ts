@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JsonSessionStore, type SessionRecord, projectKey } from "@tentacle/agent";
 import { findInOtherProjects } from "../src/session-projects.ts";
-import { openTuiSessions } from "../src/tui-sessions.ts";
+import { type TuiSessions, openTuiSessions } from "../src/tui-sessions.ts";
+
+/** The resumed record, or `undefined` when `openTuiSessions` said "don't start". */
+const resumeOf = (opened: TuiSessions | { readonly exit: number }) =>
+  "exit" in opened ? undefined : opened.resume;
 
 // Sessions live per project: <root>/<projectKey(cwd)>/<uid>.json
 // (docs/fix/session-store-per-project.md). No migration of the old flat layout
@@ -78,10 +82,12 @@ describe("openTuiSessions per project (end to end at the seam)", () => {
     await saveIn(root, rec("aaaa", projB, 1000));
     await saveIn(root, rec("bbbb", projA, 2000));
     const out: string[] = [];
-    const sessions = await openTuiSessions({ root, cwd: projB }, { wanted: true }, (l) =>
-      out.push(l),
+    const sessions = await openTuiSessions(
+      { root, cwd: projB },
+      { wanted: true, latest: true },
+      (l) => out.push(l),
     );
-    expect(sessions?.resume?.id).toBe("aaaa");
+    expect(resumeOf(sessions)?.id).toBe("aaaa");
     expect(out).toEqual(["[resume] aaaa — title aaaa\n"]);
   });
 
@@ -91,8 +97,12 @@ describe("openTuiSessions per project (end to end at the seam)", () => {
     const link = join(base, `linkA-${n}`);
     await symlink(projA, link);
     for (const cwd of [link, `${projA}/`, join(projA, ".")]) {
-      const sessions = await openTuiSessions({ root, cwd }, { wanted: true }, () => {});
-      expect(sessions?.resume?.id).toBe("viaReal");
+      const sessions = await openTuiSessions(
+        { root, cwd },
+        { wanted: true, latest: true },
+        () => {},
+      );
+      expect(resumeOf(sessions)?.id).toBe("viaReal");
     }
   });
 
@@ -101,17 +111,19 @@ describe("openTuiSessions per project (end to end at the seam)", () => {
     const root = freshRoot();
     await new JsonSessionStore(root).save(rec("flatOld", projA, 1));
     const out: string[] = [];
-    const sessions = await openTuiSessions({ root, cwd: projA }, { wanted: true }, (l) =>
-      out.push(l),
+    const sessions = await openTuiSessions(
+      { root, cwd: projA },
+      { wanted: true, latest: true },
+      (l) => out.push(l),
     );
-    expect(sessions?.resume).toBeNull();
+    expect(resumeOf(sessions)).toBeNull();
     expect(out).toEqual([`[resume] no saved sessions for ${projA} yet; starting fresh\n`]);
     const byUid = await openTuiSessions(
       { root, cwd: projA },
       { wanted: true, uid: "flatOld" },
       () => {},
     );
-    expect(byUid?.resume).toBeNull();
+    expect(resumeOf(byUid)).toBeNull();
     expect(await filesIn(root)).toEqual(["flatOld.json"]);
   });
 
@@ -119,10 +131,12 @@ describe("openTuiSessions per project (end to end at the seam)", () => {
     const root = freshRoot();
     await saveIn(root, rec("onlyA", projA, 1));
     const out: string[] = [];
-    const sessions = await openTuiSessions({ root, cwd: projB }, { wanted: true }, (l) =>
-      out.push(l),
+    const sessions = await openTuiSessions(
+      { root, cwd: projB },
+      { wanted: true, latest: true },
+      (l) => out.push(l),
     );
-    expect(sessions?.resume).toBeNull();
+    expect(resumeOf(sessions)).toBeNull();
     expect(out).toEqual([`[resume] no saved sessions for ${projB} yet; starting fresh\n`]);
   });
 
@@ -136,7 +150,7 @@ describe("openTuiSessions per project (end to end at the seam)", () => {
       { wanted: true, uid: "ofA" },
       (l) => out.push(l),
     );
-    expect(sessions).toBeNull();
+    expect(sessions).toEqual({ exit: 1 });
     expect(out).toEqual([
       `[resume] session "ofA" belongs to ${projA}; run tentacle there to resume it\n`,
     ]);
@@ -151,15 +165,14 @@ describe("openTuiSessions per project (end to end at the seam)", () => {
       { wanted: true, uid: "ofB" },
       () => {},
     );
-    expect(sessions?.resume?.id).toBe("ofB");
+    expect(resumeOf(sessions)?.id).toBe("ofB");
   });
 
   test("the saver writes into the project's dir", async () => {
     // Mutation: build the saver on the root store → new sessions are flat again.
     const root = freshRoot();
     const sessions = await openTuiSessions({ root, cwd: projA }, { wanted: false }, () => {});
-    expect(sessions).not.toBeNull();
-    if (!sessions) return;
+    if ("exit" in sessions) throw new Error("unreachable");
     sessions.saver.save(rec("new", projA, 5));
     await sessions.saver.drain();
     expect(await filesIn(root)).toEqual([projectKey(projA)]);

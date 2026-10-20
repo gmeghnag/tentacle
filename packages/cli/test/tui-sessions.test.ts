@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { JsonSessionStore, type SessionRecord, projectKey } from "@tentacle/agent";
 import { NoticeHub } from "../src/notice-hub.ts";
 import { SessionSaver } from "../src/session-saver.ts";
-import { type TuiSessionOptions, openTuiSessions, runSessionTui } from "../src/tui-sessions.ts";
+import {
+  type TuiSessionOptions,
+  type TuiSessions,
+  openTuiSessions,
+  runSessionTui,
+} from "../src/tui-sessions.ts";
 
 let dir: string;
 beforeAll(async () => {
@@ -25,6 +30,14 @@ const rec = (id: string, updatedAt: number): SessionRecord => ({
   messages: [{ role: "user", content: `hello ${id}` }],
 });
 
+/** The sessions, or a failed test when `openTuiSessions` said "don't start". */
+function opened(result: TuiSessions | { readonly exit: number }): TuiSessions {
+  if ("exit" in result) {
+    throw new Error(`not started: exit ${result.exit}`);
+  }
+  return result;
+}
+
 /** Subscribe like the TUI does, collecting what reaches it. */
 function received(options: TuiSessionOptions): string[] {
   const seen: string[] = [];
@@ -40,7 +53,7 @@ describe("openTuiSessions", () => {
       { wanted: false },
       (l) => out.push(l),
     );
-    expect(sessions?.resume).toBeNull();
+    expect(opened(sessions).resume).toBeNull();
     expect(out).toEqual([]);
   });
 
@@ -50,22 +63,23 @@ describe("openTuiSessions", () => {
     await new JsonSessionStore(join(d, projectKey("/w"))).save(rec("old", 1));
     await writeFile(join(d, projectKey("/w"), "newer.json"), "{trunc");
     const out: string[] = [];
-    const sessions = await openTuiSessions({ root: d, cwd: "/w" }, { wanted: true }, (l) =>
-      out.push(l),
+    const sessions = await openTuiSessions(
+      { root: d, cwd: "/w" },
+      { wanted: true, latest: true },
+      (l) => out.push(l),
     );
-    expect(sessions?.resume?.id).toBe("old");
+    const open = opened(sessions);
+    expect(open.resume?.id).toBe("old");
     expect(out[0]).toContain("Skipped 1 unreadable session file(s)");
     expect(out[1]).toBe("[resume] old — title old\n");
     let seen: string[] = [];
-    if (sessions) {
-      await runSessionTui(sessions, {
-        start: async (options) => {
-          seen = received(options);
-        },
-        teardown: () => {},
-        write: () => {},
-      });
-    }
+    await runSessionTui(open, {
+      start: async (options) => {
+        seen = received(options);
+      },
+      teardown: () => {},
+      write: () => {},
+    });
     expect(seen).toHaveLength(1);
     expect(seen[0]).toContain("newer.json");
   });
@@ -79,8 +93,90 @@ describe("openTuiSessions", () => {
       await openTuiSessions({ root: d, cwd: "/w" }, { wanted: true, uid: "bad" }, (l) =>
         out.push(l),
       ),
-    ).toBeNull();
+    ).toEqual({ exit: 1 });
     expect(out[0]).toContain('session "bad" is unreadable');
+  });
+});
+
+// `--resume` / `--continue` and the picker (docs/feat/resume-picker.md).
+describe("openTuiSessions: choosing the session", () => {
+  async function twoSessions(name: string): Promise<string> {
+    const d = join(dir, name);
+    const store = new JsonSessionStore(join(d, projectKey("/w")));
+    await store.save(rec("older", 1000));
+    await store.save(rec("newer", 2000));
+    await store.drain();
+    return d;
+  }
+
+  test("--resume on a terminal: the picked session resumes", async () => {
+    const d = await twoSessions("picked");
+    const out: string[] = [];
+    const sessions = await openTuiSessions(
+      { root: d, cwd: "/w" },
+      { wanted: true },
+      (l) => out.push(l),
+      async () => "older",
+    );
+    expect(opened(sessions).resume?.id).toBe("older");
+    expect(out).toEqual(["[resume] older — title older\n"]);
+  });
+
+  test("--continue: the newest, silently, even with a picker available", async () => {
+    // Mutation: let `latest` fall through to the picker → "older" resumes.
+    const d = await twoSessions("continue");
+    const out: string[] = [];
+    const sessions = await openTuiSessions(
+      { root: d, cwd: "/w" },
+      { wanted: true, latest: true },
+      (l) => out.push(l),
+      async () => "older",
+    );
+    expect(opened(sessions).resume?.id).toBe("newer");
+    expect(out).toEqual(["[resume] newer — title newer\n"]);
+  });
+
+  test("--resume with no terminal (no picker): the newest, and a line says why", async () => {
+    // Mutation: drop the line → a silent fallback to another session than asked.
+    const d = await twoSessions("no-tty");
+    const out: string[] = [];
+    const sessions = await openTuiSessions({ root: d, cwd: "/w" }, { wanted: true }, (l) =>
+      out.push(l),
+    );
+    expect(opened(sessions).resume?.id).toBe("newer");
+    expect(out).toEqual([
+      "[resume] no terminal for the picker; resuming the newest session\n",
+      "[resume] newer — title newer\n",
+    ]);
+  });
+
+  test("cancelled in the picker: don't start, exit 0, nothing saved", async () => {
+    // Mutation: return the sessions on cancel → the TUI starts fresh after Esc.
+    const d = await twoSessions("cancelled");
+    const out: string[] = [];
+    const sessions = await openTuiSessions(
+      { root: d, cwd: "/w" },
+      { wanted: true },
+      (l) => out.push(l),
+      async () => null,
+    );
+    expect(sessions).toEqual({ exit: 0 });
+    expect(out).toEqual(["[resume] cancelled\n"]);
+  });
+
+  test("a picker that throws: don't start, exit 1, the reason written", async () => {
+    const d = await twoSessions("picker-throws");
+    const out: string[] = [];
+    const sessions = await openTuiSessions(
+      { root: d, cwd: "/w" },
+      { wanted: true },
+      (l) => out.push(l),
+      async () => {
+        throw new Error("no raw mode");
+      },
+    );
+    expect(sessions).toEqual({ exit: 1 });
+    expect(out).toEqual(["[resume] picker failed: no raw mode; not starting\n"]);
   });
 });
 
@@ -94,9 +190,8 @@ describe("runSessionTui", () => {
       { wanted: true, uid: "r" },
       () => {},
     );
-    expect(sessions).not.toBeNull();
-    if (!sessions) {
-      return;
+    if ("exit" in sessions) {
+      throw new Error("unreachable");
     }
     const log: string[] = [];
     await runSessionTui(sessions, {
@@ -124,7 +219,7 @@ describe("runSessionTui", () => {
       { wanted: false },
       () => {},
     );
-    if (!sessions) {
+    if ("exit" in sessions) {
       throw new Error("unreachable");
     }
     const out: string[] = [];
@@ -145,7 +240,7 @@ describe("runSessionTui", () => {
   test("a throwing start (TUI crash) still tears down and drains", async () => {
     const d = join(dir, "start-throws");
     const sessions = await openTuiSessions({ root: d, cwd: "/w" }, { wanted: false }, () => {});
-    if (!sessions) {
+    if ("exit" in sessions) {
       throw new Error("unreachable");
     }
     let tornDown = false;

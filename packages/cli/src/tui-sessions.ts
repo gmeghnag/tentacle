@@ -8,7 +8,7 @@
 import { join } from "node:path";
 import { JsonSessionStore, type SessionRecord, projectKey } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
-import type { NoticeFeed } from "@tentacle/tui";
+import type { NoticeFeed, SessionPick } from "@tentacle/tui";
 import { NoticeHub } from "./notice-hub.ts";
 import { findInOtherProjects } from "./session-projects.ts";
 import { resolveResume } from "./session-resume.ts";
@@ -27,17 +27,29 @@ export interface TuiSessionOptions {
   readonly resumeMessages?: readonly ChatMessage[];
 }
 
+/** What the command line asked: `--resume [uid]`, or `--continue` (`latest`). */
+export interface ResumeRequest {
+  readonly wanted: boolean;
+  readonly uid?: string | undefined;
+  /** `--continue`: the newest session, never the picker. */
+  readonly latest?: boolean;
+}
+
 /**
  * Open the sessions of one TUI run. Resume lines are written now (pre-mount);
  * resume warnings are ALSO queued as in-TUI notices (the alternate screen would
- * hide the lines until exit). `null` = don't start (the requested session is
- * unreadable or its uid invalid) — the reason has been written.
+ * hide the lines until exit). `{ exit }` = don't start, the reason written:
+ * 1 when the requested session is unreadable, its uid invalid or the picker
+ * failed; 0 when the user cancelled the picker. `pick` is given only on a
+ * terminal (docs/feat/resume-picker.md); without it `--resume` takes the newest
+ * session and says why.
  */
 export async function openTuiSessions(
   where: { readonly root: string; readonly cwd: string },
-  resume: { readonly wanted: boolean; readonly uid?: string | undefined },
+  resume: ResumeRequest,
   write: (line: string) => void,
-): Promise<TuiSessions | null> {
+  pick?: SessionPick,
+): Promise<TuiSessions | { readonly exit: number }> {
   // One directory per project (docs/fix/session-store-per-project.md): the
   // resume AND the saver use it, so this folder's sessions are the only ones
   // offered. Old flat files at the root are ignored (no migration, pre-v0.1.0).
@@ -48,16 +60,44 @@ export async function openTuiSessions(
   if (!resume.wanted) {
     return { notices, saver, resume: null };
   }
-  const resolved = await resolveResume(store, resume.uid, {
-    cwd: where.cwd,
-    key,
-    elsewhere: (uid) => findInOtherProjects(where.root, key, uid),
-  });
+  const choosing = resume.uid === undefined && resume.latest !== true;
+  if (choosing && !pick) {
+    write("[resume] no terminal for the picker; resuming the newest session\n");
+  }
+  // Only the picker's own failure is reported as such; a store error propagates.
+  let pickFailed: { readonly error: unknown } | undefined;
+  const guarded: SessionPick | undefined =
+    choosing && pick
+      ? async (choices) => {
+          try {
+            return await pick(choices);
+          } catch (error) {
+            pickFailed = { error };
+            return null;
+          }
+        }
+      : undefined;
+  const resolved = await resolveResume(
+    store,
+    resume.uid,
+    { cwd: where.cwd, key, elsewhere: (uid) => findInOtherProjects(where.root, key, uid) },
+    guarded,
+  );
+  if (pickFailed) {
+    const { error } = pickFailed;
+    write(
+      `[resume] picker failed: ${error instanceof Error ? error.message : String(error)}; not starting\n`,
+    );
+    return { exit: 1 };
+  }
   for (const line of resolved.lines) {
     write(line);
   }
+  if (resolved.cancelled) {
+    return { exit: 0 };
+  }
   if (resolved.fatal) {
-    return null;
+    return { exit: 1 };
   }
   for (const text of resolved.notices) {
     notices.notify(text);

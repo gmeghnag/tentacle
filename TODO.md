@@ -437,11 +437,12 @@ Daily-driver work (done 2026-10-14):
       `~/.config/tentacle/sessions/<projectKey(cwd)>/<uid>.json` (old flat files
       ignored, no migration — owner, pre-v0.1.0; another project's uid is refused).
       `docs/fix/session-store-per-project.md` · M · load-bearing (fresh Review waived by the owner).
-- [ ] **`--resume` picker**: with no uid and more than one session in this
-      folder, let the user choose which one (today: the newest only). Owner
-      request 2026-10-20. Type: feat · Size: M · Blast: cross-module (a pre-mount
-      Ink picker: it must run before the runtime starts, since `run` creates the
-      pod with the chosen session). Open.
+- [x] **`--resume` picker**: DONE 2026-10-20, `feat/resume-picker`.
+      `--resume` (no uid, ≥2 sessions, on a terminal) opens a pre-mount Ink
+      picker (↑↓/jk, Enter, Esc/Ctrl+C → exit 0); `--continue` resumes the
+      newest; no TTY → newest, said explicitly. Covers tui/run/attach through
+      `openTuiSessions`. `docs/feat/resume-picker.md` · M · cross-module (fresh
+      Review skipped by the owner). Follow-up: in-TUI `/resume`.
 
 ### Block 10 — remote execution model (pod mode: what runs where; 2026-10-17, measured on OCP)
 

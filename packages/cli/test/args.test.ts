@@ -122,6 +122,26 @@ describe("parseArgs: --resume [uid]", () => {
   });
 });
 
+describe("parseArgs: --continue (docs/feat/resume-picker.md)", () => {
+  test("a bool on the TUI, run and attach", () => {
+    expect(ok(["--continue"], ARGS.tui).bools).toEqual(["continue"]);
+    expect(ok(["--image", "x", "--continue"], ARGS.run).bools).toEqual(["continue"]);
+    expect(ok(["mypod", "--continue"], ARGS.attach)).toEqual({
+      flags: {},
+      bools: ["continue"],
+      positional: ["mypod"],
+    });
+  });
+
+  test("with --resume (bare or with a uid) it is an error, in either order", () => {
+    // Mutation: drop the conflict → one of the two is silently ignored.
+    const message = "--resume and --continue cannot be used together";
+    expect(error(["--resume", "--continue"], ARGS.tui)).toBe(message);
+    expect(error(["--continue", "--resume", UID], ARGS.tui)).toBe(message);
+    expect(error(["mypod", "--continue", `--resume=${UID}`], ARGS.attach)).toBe(message);
+  });
+});
+
 // End to end through `main`: the same fake k8s API server as the repro logs the
 // first pod request and refuses it, so nothing is created anywhere.
 describe("tentacle run/attach (end to end, fake API server)", () => {
