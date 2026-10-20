@@ -1,6 +1,6 @@
 # feat/permission-events — permission requests as session state, answered by any attached client
 
-> **Status:** executed + reviewed (one fresh-context Review: REQUEST-CHANGES, findings 1–5 fixed; no second Review by owner's choice) — awaiting owner OK to commit/merge (2026-10-20). Scope: slice 7a only; 7b lives in `docs/eval/suspended-turn-resume.md` (owner decision D)
+> **Status:** DONE — merged to `main` 2026-10-20 (one fresh-context Review: REQUEST-CHANGES, findings 1–5 fixed; no second Review by owner's choice). Scope: slice 7a only; 7b lives in `docs/eval/suspended-turn-resume.md` (owner decision D)
 > **Branch:** `feat/permission-events`
 > **Type:** feat · **Size:** L (7a: many small edits across 8 packages) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (single-broker + pod-trust invariants, AGENTS §7)
 
