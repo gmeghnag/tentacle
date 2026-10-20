@@ -1,6 +1,6 @@
 # Build the standalone `tentacle` binaries (`bun run compile`, see docs/BUILD.md).
 #
-# - push to main / PR / manual: build every target and upload them as workflow
+# - push to main (incl. a merged PR) / manual: build every target and upload them as workflow
 #   artifacts (`tentacle-<bun target>`, the same name the pod-binary lookup uses
 #   under `<configDir>/bin/`).
 # - push of a `v*` tag: same build, then publish a GitHub Release with the
@@ -15,7 +15,6 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -23,8 +22,8 @@ permissions:
 
 concurrency:
   group: build-${{ github.ref }}
-  # Supersede stale PR runs; never cancel a main or tag build.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Never cancel a main or tag build: each one produces artifacts.
+  cancel-in-progress: false
 
 env:
   BUN_VERSION: "1.4.3" # keep in sync with package.json `engines.bun`
