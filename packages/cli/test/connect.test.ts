@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { Agent } from "@tentacle/agent";
+import { PermissionBroker } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
+import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import { bufferedErrorSink, connectTui } from "../src/connect.ts";
 
@@ -41,5 +44,48 @@ describe("connect: buffered peer-error sink (never a raw write while Ink owns th
     });
     expect(writtenDuringTui).toBe(0);
     expect(written).toEqual(["[connect] error: invalid params for notification session/update\n"]);
+  });
+});
+
+describe("connect: quitting ends the sessions it opened (they outlive the socket)", () => {
+  test("every session this TUI opened is closed daemon-side before the channel closes", async () => {
+    // Mutation: drop `await client.closeSessions()` in connectTui → the session stays live.
+    const host = new SessionHost({
+      defaultCwd: "/tmp",
+      createAgent: () => ({
+        agent: new Agent({
+          model: {
+            id: "m",
+            async *stream() {
+              yield { type: "text", delta: "hi" };
+              yield { type: "done" };
+            },
+          },
+          tools: new ToolRegistry(),
+          env: {
+            id: "noop",
+            exec: () => Promise.reject(new Error("unused")),
+            readFile: () => Promise.reject(new Error("unused")),
+            writeFile: () => Promise.reject(new Error("unused")),
+          },
+        }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, host);
+    let liveDuringTui = 0;
+    await connectTui({ url: "ws://fake" }, () => {}, {
+      connect: async () => clientCh as never,
+      startTui: async (_agent, options) => {
+        const session = options.createSession?.();
+        for await (const _ of session?.send("hi") ?? []) {
+          // drain the turn
+        }
+        liveDuringTui = host.size;
+      },
+    });
+    expect(liveDuringTui).toBe(1);
+    expect(host.size).toBe(0);
   });
 });

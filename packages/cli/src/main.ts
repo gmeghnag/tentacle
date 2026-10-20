@@ -25,6 +25,7 @@ import {
   deletePodFromEnv,
   loadKubeClientOptions,
 } from "@tentacle/k8s";
+import { connectMcpServers } from "@tentacle/mcp";
 import { type SessionController, startTui } from "@tentacle/tui";
 import { type TentacleConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
@@ -33,8 +34,9 @@ import { startWorkerRuntime } from "./local-runtime.ts";
 import { startAttachRuntime, startPodRuntime } from "./pod-runtime.ts";
 import { render } from "./render.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
+import { inProcessSessions } from "./session-jobs.ts";
 import { startTerminal } from "./terminal.ts";
-import { buildAgent, connectConfiguredMcp } from "./wiring.ts";
+import { buildAgent, connectConfiguredMcp, inProcessAgents } from "./wiring.ts";
 
 /**
  * The app version: a literal injected at compile time (`define` in
@@ -308,7 +310,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ...(resumeRecord ? { resumeMessages: resumeRecord.messages } : {}),
       });
     } finally {
-      runtime.dispose();
+      await runtime.dispose();
     }
     return 0;
   };
@@ -490,41 +492,37 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             ...(resumeRecord ? { resumeMessages: resumeRecord.messages } : {}),
           });
         } finally {
-          runtime.dispose();
+          await runtime.dispose();
         }
         return 0;
       }
       // worker unavailable → fall through to the in-process path below
     }
 
-    const { agent, permissions, jobs, tools } = buildAgent(config);
-    const mcp = await connectConfiguredMcp(config, tools);
+    // One agent per session (one `BackgroundJobs` each, so `/clear` ends the
+    // old session's jobs, as on every RPC runtime — decision D3), all on ONE
+    // broker: the one the TUI installs its prompt on (AGENTS §7).
+    const { permissions, build } = inProcessAgents(config);
+    const mcp = await connectMcpServers(config.mcpServers);
     for (const [name, message] of Object.entries(mcp.errors)) {
       write(`[mcp] server "${name}" failed to connect: ${message}\n`);
     }
-
-    // A session factory that persists after every turn. The first call resumes
-    // (when asked); later ones (e.g. after /clear) start a fresh, new-uid session.
-    let seed = resumeRecord;
-    const createSession = (): SessionController => {
-      const record = seed;
-      seed = null;
-      const createdAt = record?.createdAt;
-      return new Session(agent, record?.id, {
-        ...(record ? { messages: record.messages } : {}),
-        onPersist: (snapshot) =>
-          void store.save(
-            recordFromSnapshot(snapshot, {
-              cwd: config.cwd,
-              model: config.model,
-              ...(createdAt !== undefined ? { createdAt } : {}),
-            }),
-          ),
-      });
-    };
+    const { createSession, jobs } = inProcessSessions({
+      build,
+      mcpTools: mcp.tools,
+      resume: resumeRecord,
+      persist: (snapshot, createdAt) =>
+        void store.save(
+          recordFromSnapshot(snapshot, {
+            cwd: config.cwd,
+            model: config.model,
+            ...(createdAt !== undefined ? { createdAt } : {}),
+          }),
+        ),
+    });
 
     try {
-      await startTui(agent, {
+      await startTui(null, {
         model: config.model,
         cwd: config.cwd,
         contextWindow: config.contextWindow,

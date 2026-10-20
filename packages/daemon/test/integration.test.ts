@@ -15,8 +15,14 @@ import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import { Connection } from "../src/connection.ts";
-import { HostedSession } from "../src/hosted-session.ts";
+import { type Attachment, HostedSession, type UpdateSink } from "../src/hosted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
+
+/** A test client attached to a hosted session: receives updates, denies permissions. */
+const sinkTo = (send: UpdateSink): Attachment => ({
+  send,
+  requestPermission: async () => ({ outcome: "cancelled" }),
+});
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -117,7 +123,7 @@ async function runTurn(
 }
 
 describe("daemon ↔ client (in-memory)", () => {
-  test("handshake → new → prompt streams updates and resolves the stop reason", async () => {
+  test("handshake → open → prompt streams updates and resolves the stop reason", async () => {
     const model = new ScriptedProvider([
       [
         { type: "text", delta: "Hello " },
@@ -130,7 +136,9 @@ describe("daemon ↔ client (in-memory)", () => {
     const init = (await client.request("initialize", INIT)) as { protocolVersion: number };
     expect(init.protocolVersion).toBe(PROTOCOL_VERSION);
 
-    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
     expect(sessionId).toBeTruthy();
 
     const end = await runTurn(client, updates, sessionId, "hi", "t1");
@@ -175,7 +183,9 @@ describe("daemon ↔ client (in-memory)", () => {
     };
     const { client, updates } = harness(model, noopEnv);
     await client.request("initialize", INIT);
-    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
 
     await expect(
       client.request("session/prompt", {
@@ -236,7 +246,9 @@ describe("daemon ↔ client (in-memory)", () => {
     });
 
     await client.request("initialize", INIT);
-    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
     const end = await runTurn(client, updates, sessionId, "run it");
 
     expect(end.stopReason).toBe("end_turn");
@@ -280,7 +292,9 @@ describe("daemon ↔ client (in-memory)", () => {
       onRequest: async () => ({ outcome: { outcome: "selected", optionId: "reject_once" } }),
     });
     await client.request("initialize", INIT);
-    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
     const end = await runTurn(client, updates, sessionId, "go");
     expect(end.stopReason).toBe("end_turn");
     expect(execCalls).toEqual([]); // never ran
@@ -317,17 +331,19 @@ describe("daemon ↔ client (in-memory)", () => {
       { permissionTimeoutMs: 30 },
     );
     await client.request("initialize", INIT);
-    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
     const end = await runTurn(client, updates, sessionId, "go");
     expect(execCalls).toEqual([]); // auto-denied on timeout → tool never ran
     expect(end.stopReason).toBe("end_turn"); // and the turn did not hang
   });
 
-  test("session/new is refused past the per-connection cap", async () => {
+  test("session/open is refused past the per-connection cap", async () => {
     const { client } = harness(new ScriptedProvider([]), noopEnv, {}, { maxSessions: 1 });
     await client.request("initialize", INIT);
-    await client.request("session/new", {}); // the one allowed session
-    await expect(client.request("session/new", {})).rejects.toMatchObject({
+    await client.request("session/open", { create: true }); // the one allowed session
+    await expect(client.request("session/open", { create: true })).rejects.toMatchObject({
       code: DomainErrorCode.TooManySessions,
     });
   });
@@ -342,7 +358,7 @@ describe("daemon ↔ client (in-memory)", () => {
 
   test("methods other than initialize are refused before the handshake", async () => {
     const { client } = harness(new ScriptedProvider([]), noopEnv);
-    await expect(client.request("session/new", {})).rejects.toMatchObject({
+    await expect(client.request("session/open", { create: true })).rejects.toMatchObject({
       code: DomainErrorCode.NotInitialized,
     });
   });
@@ -414,7 +430,9 @@ describe("daemon ↔ client (in-memory)", () => {
           : {},
     });
     await client.request("initialize", INIT);
-    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
 
     await client.request("session/prompt", {
       sessionId,
@@ -463,7 +481,9 @@ describe("daemon ↔ client (in-memory)", () => {
           : {},
     });
     await client.request("initialize", INIT);
-    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
 
     await client.request("session/prompt", {
       sessionId,
@@ -522,15 +542,8 @@ describe("daemon ↔ client (in-memory)", () => {
       // What "the next `session/enqueue`" would observe at each drain.
       const atNextMacrotask: { running: boolean; ended: boolean }[] = [];
       const streamed: KnownSessionUpdateParams[] = [];
-      const hosted = new HostedSession(
-        "s1",
-        new Session(agent),
-        new PermissionBroker(),
-        async () => {
-          throw new Error("no permission expected");
-        },
-      );
-      hosted.setSink((p) => streamed.push(p));
+      const hosted = new HostedSession("s1", new Session(agent), new PermissionBroker());
+      hosted.attach(sinkTo((p) => streamed.push(p)));
       const ended = () => streamed.some((p) => p.update.type === "turn_end");
       // Patched after construction: `Session.send` calls `agent.runMessages` per turn.
       agent.runMessages = (messages, sessionId, signal, drain) =>
@@ -558,7 +571,9 @@ describe("daemon ↔ client (in-memory)", () => {
     // queue, so the text would be dropped silently.
     const { client } = harness(new ScriptedProvider([]), noopEnv);
     await client.request("initialize", INIT);
-    const { sessionId } = (await client.request("session/new", {})) as { sessionId: string };
+    const { sessionId } = (await client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
     await expect(
       client.request("session/enqueue", { sessionId, id: "e", turnId: "t", text: "late" }),
     ).rejects.toMatchObject({ code: DomainErrorCode.NoTurnRunning });
@@ -579,7 +594,7 @@ describe("daemon ↔ client (in-memory)", () => {
 });
 
 describe("connection close", () => {
-  test("Connection.close() terminates the background jobs of its sessions", async () => {
+  test("Connection.close() only detaches: the jobs live on; session/close from another connection kills them", async () => {
     const m = `3${Math.floor(Math.random() * 900000 + 100000)}`;
     const alive = (): number =>
       Bun.spawnSync(["pgrep", "-f", `sleep ${m}`])
@@ -592,7 +607,7 @@ describe("connection close", () => {
       defaultCwd: "/tmp/daemon-work",
       createAgent: () => {
         const permissions = new PermissionBroker();
-        // Grace ≫ the 2 s wait below: only close()'s group SIGTERM can pass.
+        // Grace ≫ the 2 s wait below: only session/close's group SIGTERM can pass.
         const jobs = new BackgroundJobs(new HostExecution({ killGraceMs: 10_000 }));
         created.push(jobs);
         const agent = new Agent({
@@ -609,7 +624,9 @@ describe("connection close", () => {
     const client = new RpcPeer(clientCh, {});
     try {
       await client.request("initialize", INIT);
-      await client.request("session/new", {});
+      const { sessionId } = (await client.request("session/open", { create: true })) as {
+        sessionId: string;
+      };
       const jobs = created[0];
       expect(jobs).toBeDefined();
       jobs?.start(`sleep ${m}; true`);
@@ -621,6 +638,16 @@ describe("connection close", () => {
 
       const exited = new Promise<void>((resolve) => jobs?.onExit(() => resolve()));
       connection.close();
+      await tick(300);
+      expect(alive()).toBe(2); // the session (and its job) outlived the connection
+      expect(host.get(sessionId)).toBeDefined();
+
+      const [d2, c2] = createChannelPair();
+      new Connection(d2, host);
+      const other = new RpcPeer(c2, {});
+      await other.request("initialize", INIT);
+      expect(await other.request("session/close", { sessionId })).toEqual({});
+      expect(host.get(sessionId)).toBeUndefined();
 
       const until = Date.now() + 2000;
       while (alive() > 0 && Date.now() < until) {
@@ -697,7 +724,8 @@ describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
     });
     const open = async (): Promise<string> => {
       await client.request("initialize", INIT);
-      return ((await client.request("session/new", {})) as { sessionId: string }).sessionId;
+      return ((await client.request("session/open", { create: true })) as { sessionId: string })
+        .sessionId;
     };
     return { client, updates, open };
   }
@@ -988,26 +1016,23 @@ describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
       env: noopEnv,
     });
     const errors: string[] = [];
-    const hosted = new HostedSession(
-      "s1",
-      new Session(agent),
-      new PermissionBroker(),
-      async () => ({ outcome: "cancelled" }),
-      undefined,
-      { onTurnError: (e) => errors.push(e.message) },
-    );
-    hosted.setSink(() => {
-      throw new Error("sink down");
+    const hosted = new HostedSession("s1", new Session(agent), new PermissionBroker(), undefined, {
+      onTurnError: (e) => errors.push(e.message),
     });
+    hosted.attach(
+      sinkTo(() => {
+        throw new Error("sink down");
+      }),
+    );
     expect(hosted.prompt("t1", [{ type: "text", text: "go" }])).toEqual({ turnId: "t1" });
     await tick();
     expect(hosted.running).toBe(false);
-    // Reported, never silent (turn_start, the first chunk, the error's turn_end).
-    expect(errors.length).toBeGreaterThan(0);
-    expect(errors.every((m) => m === "sink down")).toBe(true);
-    // The turn is recorded ended; a retry reports it instead of re-running.
+    // Reported once, never silent; the sink is detached at its first throw.
+    expect(errors).toEqual(["sink down"]);
+    expect(hosted.attachedCount).toBe(0);
+    // The turn is unaffected by its client's failure: it ran to its end.
     const retry = hosted.prompt("t1", [{ type: "text", text: "go" }]);
-    expect(retry.ended?.stopReason).toBe("error");
+    expect(retry.ended?.stopReason).toBe("end_turn");
   });
 
   test("the replay buffer of a turn starts at its turn_start", async () => {
@@ -1041,20 +1066,13 @@ describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
       tools: new ToolRegistry(),
       env: noopEnv,
     });
-    const hosted = new HostedSession(
-      "s1",
-      new Session(agent),
-      new PermissionBroker(),
-      async () => ({ outcome: "cancelled" }),
-      undefined,
-      {
-        onTurnError: () => {
-          throw new Error("log sink down");
-        },
+    const hosted = new HostedSession("s1", new Session(agent), new PermissionBroker(), undefined, {
+      onTurnError: () => {
+        throw new Error("log sink down");
       },
-    );
+    });
     const streamed: KnownSessionUpdateParams[] = [];
-    hosted.setSink((p) => streamed.push(p));
+    hosted.attach(sinkTo((p) => streamed.push(p)));
     hosted.prompt("t1", [{ type: "text", text: "go" }]);
     await tick();
     expect(hosted.running).toBe(false);
@@ -1155,7 +1173,9 @@ describe("compaction is exclusive with a turn", () => {
       onRequest: async () => ({ outcome: { outcome: "selected", optionId: "allow_once" } }),
     });
     await h.client.request("initialize", INIT);
-    const { sessionId } = (await h.client.request("session/new", {})) as { sessionId: string };
+    const { sessionId } = (await h.client.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
     const history = async () =>
       ((await h.client.request("session/snapshot", { sessionId })) as { messages: ChatMessage[] })
         .messages;
@@ -1356,9 +1376,7 @@ describe("compaction is exclusive with a turn", () => {
     const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv });
     const session = new Session(agent);
     session.messages.push({ role: "user", content: "hi" });
-    const hosted = new HostedSession("s1", session, new PermissionBroker(), async () => ({
-      outcome: "cancelled",
-    }));
+    const hosted = new HostedSession("s1", session, new PermissionBroker());
     const controller = new AbortController();
     controller.abort();
 

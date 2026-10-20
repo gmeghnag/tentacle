@@ -66,6 +66,12 @@ export interface BuildAgentOptions {
    *  and for sub-agents (per-type model overrides are ignored over the
    *  tunnel). */
   readonly modelOverride?: ModelProvider;
+  /**
+   * Reuse this broker instead of a fresh one: several agents behind ONE
+   * frontend (one in-process agent per session) must share the broker the TUI
+   * installs its prompt on — two brokers silently decouple (AGENTS §7).
+   */
+  readonly permissions?: PermissionBroker;
 }
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
@@ -80,7 +86,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     });
   const env = new HostExecution({ cwd: config.cwd, root: config.cwd });
   const tools = new ToolRegistry().registerAll(builtinTools);
-  const permissions = new PermissionBroker();
+  const permissions = options.permissions ?? new PermissionBroker();
   // Background jobs let the shell tools launch long-running processes (servers,
   // watchers) without blocking the turn; their exits surface on the next turn.
   const jobs = new BackgroundJobs(env);
@@ -140,6 +146,20 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     requestPermission: (req) => permissions.request(req),
   });
   return { agent, permissions, jobs, tools };
+}
+
+/**
+ * The in-process TUI's agents: one per session (so a session's background
+ * jobs end with it, decision D3), all on ONE broker — the one the TUI installs
+ * its prompt on. A per-agent broker would silently auto-approve (AGENTS §7,
+ * single-broker invariant), so the broker and the factory come as a pair.
+ */
+export function inProcessAgents(config: TentacleConfig): {
+  readonly permissions: PermissionBroker;
+  readonly build: () => WiredAgent;
+} {
+  const permissions = new PermissionBroker();
+  return { permissions, build: () => buildAgent(config, { permissions }) };
 }
 
 /**

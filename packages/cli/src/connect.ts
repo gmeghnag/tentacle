@@ -58,6 +58,9 @@ export async function connectTui(
       createSession: () => client.newSession(),
     });
   } finally {
+    // The daemon keeps sessions past a disconnect: quitting ends ours (turn +
+    // background jobs), acknowledged before the socket closes.
+    await client.closeSessions();
     client.close();
     sink.flush(write);
   }

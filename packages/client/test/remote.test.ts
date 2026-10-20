@@ -556,8 +556,8 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
         if (method === Method.Initialize) {
           return { protocolVersion: 1, agentCapabilities: { tools: true, permissions: true } };
         }
-        if (method === Method.NewSession) {
-          return { sessionId: "s1" };
+        if (method === Method.Open) {
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
         }
         if (method === Method.Prompt) {
           turnId = (params as { turnId: string }).turnId;
@@ -619,7 +619,7 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
 
     const session = client.newSession();
     const iter = session.send("go")[Symbol.asyncIterator]();
-    const first = iter.next(); // starts `session/new`; the id is not known yet
+    const first = iter.next(); // starts `session/open`; the id is not known yet
     // The TUI is already "running" here: this enqueue must wait for the session
     // instead of resolving as a silent no-op.
     await session.enqueue("early");
@@ -659,7 +659,8 @@ describe("unknown / malformed session/update frames (event classes)", () => {
             agentCapabilities: { tools: true, permissions: true },
           };
         }
-        if (method === Method.NewSession) return { sessionId: "s1" };
+        if (method === Method.Open)
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
         if (method === Method.Prompt) {
           // Ack at once; the turn ends in the stream (only if `end`).
           const { turnId } = params as { turnId: string };
@@ -707,6 +708,23 @@ describe("unknown / malformed session/update frames (event classes)", () => {
     sessionId: "s1",
     seq,
     update: { type: "agent_message_chunk", content: { type: "text", text } },
+  });
+
+  test("session_closed while a turn is open fails it (UnknownSession), never hangs", async () => {
+    // Mutation: drop RemoteSession's `session_closed` branch → "hung".
+    const r = await run(
+      [
+        chunk(1, "a"),
+        {
+          sessionId: "s1",
+          seq: 2,
+          mandatory: true,
+          update: { type: "session_closed", reason: "closed" },
+        },
+      ],
+      false,
+    );
+    expect(r.outcome).toMatchObject({ code: DomainErrorCode.UnknownSession });
   });
 
   test("an unknown display event is skipped silently and the turn completes", async () => {
@@ -830,7 +848,8 @@ describe("RemoteSession ends turns from the stream (turn_start/turn_end)", () =>
             agentCapabilities: { tools: true, permissions: true },
           };
         }
-        if (method === Method.NewSession) return { sessionId: "s1" };
+        if (method === Method.Open)
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
         if (method === Method.Prompt) {
           const { turnId } = params as { turnId: string };
           setTimeout(() =>
@@ -1006,7 +1025,8 @@ describe("RemoteSession ends turns from the stream (turn_start/turn_end)", () =>
               agentCapabilities: { tools: true, permissions: true },
             };
           }
-          if (method === Method.NewSession) return { sessionId: "s1" };
+          if (method === Method.Open)
+            return { sessionId: "s1", epoch: "e", created: true, resync: false };
           const { turnId } = params as { turnId: string };
           const frame = (seq: number, update: unknown, mandatory = false) =>
             daemon.notify(Notification.SessionUpdate, {
@@ -1133,7 +1153,8 @@ describe("RemoteSession steering bound to its turn (review fixes)", () => {
             agentCapabilities: { tools: true, permissions: true },
           };
         }
-        if (method === Method.NewSession) return { sessionId: "s1" };
+        if (method === Method.Open)
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
         throw new RpcError(DomainErrorCode.TurnInProgress, "a turn is already running");
       },
     });
@@ -1251,5 +1272,154 @@ describe("RemoteClient.snapshot (paged history at the cut)", () => {
     });
     expect(calls).toBe(1);
     broken.close();
+  });
+});
+
+describe("closing sessions (sessions outlive connections)", () => {
+  /** A model that streams `n` chunks, one per macrotask. */
+  const slow = (n: number): ModelProvider => ({
+    id: "slow",
+    async *stream(): AsyncIterable<StreamEvent> {
+      for (let i = 0; i < n; i++) {
+        await new Promise((r) => setTimeout(r, 1));
+        yield { type: "text", delta: `c${i} ` };
+      }
+      yield { type: "done" };
+    },
+  });
+  const connected = async (host: SessionHost): Promise<RemoteClient> => {
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, host);
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    return client;
+  };
+
+  test("closeSessions() closes every session this client opened, daemon-side", async () => {
+    // Mutation: `closeSessions` iterates nothing → both stay live.
+    const host = makeHost(slow(1), noopEnv);
+    const client = await connected(host);
+    const a = await client.openSession(undefined, undefined, "A");
+    const b = await client.openSession(undefined, undefined, "B");
+    expect(host.get(a) && host.get(b)).toBeDefined();
+    await client.closeSessions(); // acknowledged before the peer closes
+    expect(host.size).toBe(0);
+    client.close();
+  });
+
+  test("closeSessions() is bounded: a daemon that never answers does not block the exit", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    new RpcPeer(daemonCh, {
+      onRequest: (method) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        if (method === Method.Open) {
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
+        }
+        return new Promise(() => {}); // session/close: never answered
+      },
+    });
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    await client.openSession();
+    const started = Date.now();
+    await client.closeSessions(50);
+    expect(Date.now() - started).toBeLessThan(1000);
+    client.close();
+  });
+
+  test("closeSessions() on a closed peer never rejects (no unhandled rejection)", async () => {
+    const host = makeHost(slow(1), noopEnv);
+    const client = await connected(host);
+    await client.openSession(undefined, undefined, "A");
+    client.close();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown): void => {
+      unhandled.push(e);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await client.closeSessions(); // resolves (the request failed: moot), never rejects
+      await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
+
+  test("RemoteSession.close() closes once, also while its first send is still opening", async () => {
+    // Mutation: drop the `opening.then(close)` branch → the session stays live.
+    const host = makeHost(slow(30), noopEnv);
+    const client = await connected(host);
+    const session = client.newSession(undefined, "S");
+    const iter = session.send("go")[Symbol.asyncIterator]();
+    const first = iter.next(); // starts `session/open`; the id is not known yet
+    const turn = (async () => {
+      for (let r = await first; !r.done; r = await iter.next()) {
+        // drain
+      }
+    })().catch((e: unknown) => e);
+    session.close(); // the open is in flight: no id yet
+    session.close(); // idempotent
+    // The turn ends (cancelled by the close that followed the open): never hangs.
+    const outcome = await Promise.race([
+      turn.then(() => "settled"),
+      new Promise((r) => setTimeout(() => r("hung"), 1000)),
+    ]);
+    expect(outcome).toBe("settled");
+    // The open did happen, and the close followed it: the daemon forgot S.
+    expect(host.get("S")).toBeUndefined();
+    expect(host.size).toBe(0);
+    await expect(collect(session.send("again"))).rejects.toMatchObject({
+      code: DomainErrorCode.UnknownSession,
+    });
+    client.close();
+  });
+
+  test("a session closed by ANOTHER client ends this client's running turn (cancelled), never hangs", async () => {
+    // Mutation: drop the daemon's synchronous `turn_end` in `HostedSession.close`
+    // AND the client's `session_closed` handling → the turn hangs.
+    const host = makeHost(slow(200), noopEnv);
+    const laptop = await connected(host);
+    const phone = await connected(host);
+    const session = laptop.newSession(undefined, "S");
+    const turn = collect(session.send("go"));
+    expect(await waitFor(() => host.get("S")?.running === true)).toBe(true);
+    await phone.openSession(undefined, undefined, "S"); // attaches (live)
+    await phone.closeSession("S");
+    const events = (await Promise.race([
+      turn,
+      new Promise((r) => setTimeout(() => r("hung"), 1000)),
+    ])) as AgentEvent[] | "hung";
+    expect(events).not.toBe("hung");
+    expect(events === "hung" ? null : events.at(-1)).toEqual({
+      type: "turn_end",
+      reason: "cancelled",
+    });
+    // The laptop's `opened` dropped S on `session_closed`: its exit must not
+    // close the session the phone recreates under the same id.
+    // Mutation: keep the id in `opened` → the laptop's exit kills the phone's session.
+    await phone.openSession(undefined, undefined, "S");
+    await laptop.closeSessions();
+    expect(host.get("S")).toBeDefined();
+    laptop.close();
+    phone.close();
+  });
+
+  test("send after close never opens a session (refused locally)", async () => {
+    // Mutation: drop the `closed` guard in `runTurn` → a fresh session is opened.
+    const host = makeHost(slow(1), noopEnv);
+    const client = await connected(host);
+    const session = client.newSession(undefined, "S");
+    session.close(); // before any send: nothing to close daemon-side
+    await expect(collect(session.send("x"))).rejects.toMatchObject({
+      code: DomainErrorCode.UnknownSession,
+    });
+    expect(host.size).toBe(0);
+    client.close();
   });
 });

@@ -21,8 +21,14 @@ import {
 import { ToolRegistry } from "@tentacle/tools";
 import { RpcError } from "@tentacle/transport";
 import { z } from "zod";
-import { HostedSession } from "../src/hosted-session.ts";
+import { type Attachment, HostedSession, type UpdateSink } from "../src/hosted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
+
+/** A test client attached to a hosted session: receives updates, denies permissions. */
+const sinkTo = (send: UpdateSink): Attachment => ({
+  send,
+  requestPermission: async () => ({ outcome: "cancelled" }),
+});
 
 /** Each event after a timer: one macrotask per event, like network I/O. */
 class TimedProvider implements ModelProvider {
@@ -127,15 +133,7 @@ function makeHosted(ringBytes?: number, seed?: readonly ChatMessage[]): HostedSe
     jobs,
   });
   const session = new Session(agent, "s1", seed ? { messages: seed } : {});
-  const hosted = new HostedSession(
-    "s1",
-    session,
-    new PermissionBroker(),
-    async () => ({ outcome: "cancelled" }),
-    jobs,
-    {},
-    ringBytes,
-  );
+  const hosted = new HostedSession("s1", session, new PermissionBroker(), jobs, {}, ringBytes);
   jobsOf.set(hosted, jobs);
   return hosted;
 }
@@ -152,14 +150,16 @@ async function scenario(
 ): Promise<KnownSessionUpdateParams[]> {
   const all: KnownSessionUpdateParams[] = [];
   let steered = false;
-  hosted.setSink((p) => {
-    all.push(p);
-    if (!steered && p.update.type === "agent_message_chunk") {
-      steered = true;
-      hosted.enqueue("e1", "t1", "steer-A");
-    }
-    onEmit(p);
-  });
+  hosted.attach(
+    sinkTo((p) => {
+      all.push(p);
+      if (!steered && p.update.type === "agent_message_chunk") {
+        steered = true;
+        hosted.enqueue("e1", "t1", "steer-A");
+      }
+      onEmit(p);
+    }),
+  );
   hosted.prompt("t1", [{ type: "text", text: "go" }]);
   await idle(hosted);
   jobsOf.get(hosted)?.exit("j1");
@@ -333,15 +333,17 @@ describe("history cut: snapshot + replay at every drop point (the exact property
       const hosted = makeHosted();
       let n = 0;
       let snap: { messages: ChatMessage[]; since: HistoryCut } | null = null;
-      hosted.setSink((p) => {
-        if (p.update.type === "agent_message_chunk" && n === 1) {
-          hosted.enqueue("e1", "t1", "steer-A");
-        }
-        if (++n === k) {
-          const { messages, first } = readAll(hosted, 1);
-          if (first.since) snap = { messages, since: first.since };
-        }
-      });
+      hosted.attach(
+        sinkTo((p) => {
+          if (p.update.type === "agent_message_chunk" && n === 1) {
+            hosted.enqueue("e1", "t1", "steer-A");
+          }
+          if (++n === k) {
+            const { messages, first } = readAll(hosted, 1);
+            if (first.since) snap = { messages, since: first.since };
+          }
+        }),
+      );
       hosted.prompt("t1", [{ type: "text", text: "go" }]);
       await idle(hosted);
       const taken = snap as { messages: ChatMessage[]; since: HistoryCut } | null;
@@ -372,9 +374,11 @@ describe("history cut: ring pin, barrier, cursors", () => {
   test("the ring is not reset at a turn boundary: turn 1's tail replays after turn 2", async () => {
     const hosted = makeHosted();
     let since: HistoryCut | undefined;
-    hosted.setSink((p) => {
-      if (p.update.type === "tool_call" && !since) since = hosted.snapshotPage().since;
-    });
+    hosted.attach(
+      sinkTo((p) => {
+        if (p.update.type === "tool_call" && !since) since = hosted.snapshotPage().since;
+      }),
+    );
     hosted.prompt("t1", [{ type: "text", text: "go" }]);
     await idle(hosted);
     hosted.prompt("t2", [{ type: "text", text: "again" }]);
@@ -390,7 +394,7 @@ describe("history cut: ring pin, barrier, cursors", () => {
   test("compaction emits history_replaced (mandatory) and starts a new epoch", async () => {
     const hosted = makeHosted();
     const seen: KnownSessionUpdateParams[] = [];
-    hosted.setSink((p) => seen.push(p));
+    hosted.attach(sinkTo((p) => seen.push(p)));
     hosted.prompt("t1", [{ type: "text", text: "go" }]);
     await idle(hosted);
     const before = hosted.snapshotPage();
@@ -425,7 +429,7 @@ describe("history cut: ring pin, barrier, cursors", () => {
 
   test("a cursor of an older epoch is StaleCursor; a malformed one InvalidParams", async () => {
     const hosted = makeHosted();
-    hosted.setSink(() => {});
+    hosted.attach(sinkTo(() => {}));
     hosted.prompt("t1", [{ type: "text", text: "go" }]);
     await idle(hosted);
     const page = hosted.snapshotPage(undefined, 1);
@@ -459,9 +463,11 @@ describe("history cut: ring pin, barrier, cursors", () => {
   test("`turn` names the turn running at the cut, and only then", async () => {
     const hosted = makeHosted();
     const turns: (string | undefined)[] = [];
-    hosted.setSink((p) => {
-      if (p.update.type === "tool_call") turns.push(hosted.snapshotPage().turn?.turnId);
-    });
+    hosted.attach(
+      sinkTo((p) => {
+        if (p.update.type === "tool_call") turns.push(hosted.snapshotPage().turn?.turnId);
+      }),
+    );
     expect(hosted.snapshotPage().turn).toBeUndefined();
     hosted.prompt("t1", [{ type: "text", text: "go" }]);
     await idle(hosted);
@@ -498,9 +504,11 @@ describe("history cut: ring pin, barrier, cursors", () => {
 
   test("a throwing sink at turn end still moves the cut past the turn", async () => {
     const hosted = makeHosted();
-    hosted.setSink((p) => {
-      if (p.update.type === "turn_end") throw new Error("sink down");
-    });
+    hosted.attach(
+      sinkTo((p) => {
+        if (p.update.type === "turn_end") throw new Error("sink down");
+      }),
+    );
     hosted.prompt("t1", [{ type: "text", text: "go" }]);
     await idle(hosted);
     const page = hosted.snapshotPage();
@@ -514,18 +522,20 @@ describe("history cut: ring pin, barrier, cursors", () => {
 describe("history cut: emit order and wiring (review findings)", () => {
   test("the barrier's cut is final before history_replaced reaches the sink", async () => {
     const hosted = makeHosted();
-    hosted.setSink(() => {});
+    hosted.attach(sinkTo(() => {}));
     hosted.prompt("t1", [{ type: "text", text: "go" }]);
     await idle(hosted);
     const before = hosted.snapshotPage().since;
     let inSink: SnapshotResult | undefined;
     let barrierSeq = -1;
-    hosted.setSink((p) => {
-      if (p.update.type === "history_replaced") {
-        barrierSeq = p.seq;
-        inSink = hosted.snapshotPage();
-      }
-    });
+    hosted.attach(
+      sinkTo((p) => {
+        if (p.update.type === "history_replaced") {
+          barrierSeq = p.seq;
+          inSink = hosted.snapshotPage();
+        }
+      }),
+    );
     await hosted.compact();
     if (!inSink?.since || !before) throw new Error("no snapshot in the sink");
     // Re-entrant read: already the new epoch, the barrier's seq, the new history.
@@ -535,28 +545,35 @@ describe("history cut: emit order and wiring (review findings)", () => {
     expect(hosted.replayFrom(inSink.since)).toEqual({ replay: [] });
   });
 
-  test("an update whose delivery throws is still in the ring, and seqs stay contiguous", async () => {
+  test("a throwing sink is detached; the update stays in the ring, the turn and the others go on", async () => {
     const hosted = makeHosted();
     const since = hosted.snapshotPage().since;
-    let thrown = false;
-    hosted.setSink((p) => {
-      if (!thrown && p.update.type === "agent_message_chunk") {
-        thrown = true;
-        throw new Error("sink down");
-      }
-    });
+    let thrown = 0;
+    let afterThrow = 0;
+    const healthy: number[] = [];
+    hosted.attach(
+      sinkTo((p) => {
+        if (thrown > 0) afterThrow++;
+        if (p.update.type === "agent_message_chunk") {
+          thrown++;
+          throw new Error("sink down");
+        }
+      }),
+    );
+    hosted.attach(sinkTo((p) => healthy.push(p.seq)));
     hosted.prompt("t1", [{ type: "text", text: "go" }]);
     await idle(hosted);
     if (!since) throw new Error("no cut");
     const r = hosted.replayFrom(since);
     if (!("replay" in r)) throw new Error("expected a replay");
     r.replay.forEach((p, i) => expect(p.seq).toBe(since.seq + 1 + i));
-    expect(r.replay.map((p) => p.update.type)).toEqual([
-      "turn_start",
-      "agent_message_chunk",
-      "turn_end",
-    ]);
-    expect(r.replay.at(-1)?.update).toMatchObject({ type: "turn_end", stopReason: "error" });
+    // The turn ran to its normal end; the healthy client got every update.
+    expect(r.replay.at(-1)?.update).toMatchObject({ type: "turn_end", stopReason: "end_turn" });
+    expect(healthy).toEqual(r.replay.map((p) => p.seq));
+    // The throwing one was detached at its first throw: never called again.
+    expect(thrown).toBe(1);
+    expect(afterThrow).toBe(0);
+    expect(hosted.attachedCount).toBe(1);
   });
 
   test("SessionHost passes ringBytes to its sessions", async () => {
@@ -572,11 +589,14 @@ describe("history cut: emit order and wiring (review findings)", () => {
           }),
           permissions: new PermissionBroker(),
         }),
-      }).create("s", undefined, async () => ({ outcome: "cancelled" }));
+      }).open(
+        { sessionId: "s", create: true },
+        sinkTo(() => {}),
+      ).hosted;
     const outcome = async (hosted: HostedSession) => {
       const since = hosted.snapshotPage().since;
       if (!since) throw new Error("no cut");
-      hosted.setSink(() => {});
+      hosted.attach(sinkTo(() => {}));
       hosted.prompt("t1", [{ type: "text", text: "go" }]);
       await idle(hosted);
       return "replay" in hosted.replayFrom(since) ? "replay" : "resync";

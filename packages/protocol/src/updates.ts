@@ -121,6 +121,16 @@ export const HistoryReplacedSchema = z.object({
   reason: z.enum(["compact"]),
 });
 
+/**
+ * The session was closed (`session/close`, by any client): the last update an
+ * attached client gets. Drop the session; a command on it now is
+ * `UnknownSession`. A running turn's `turn_end{cancelled}` precedes it.
+ */
+export const SessionClosedSchema = z.object({
+  type: z.literal("session_closed"),
+  reason: z.enum(["closed"]),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -134,6 +144,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   TurnStartSchema,
   TurnEndUpdateSchema,
   HistoryReplacedSchema,
+  SessionClosedSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -162,6 +173,7 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   turn_start: "mandatory",
   turn_end: "mandatory",
   history_replaced: "mandatory",
+  session_closed: "mandatory",
 };
 
 /** Own keys only: a frame with `type: "toString"` is unknown, not known. */

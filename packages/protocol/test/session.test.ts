@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   InitializeParamsSchema,
-  NewSessionParamsSchema,
+  OpenParamsSchema,
+  OpenResultSchema,
   PromptParamsSchema,
   PromptResultSchema,
   StopReasonSchema,
+  isMethodName,
 } from "../src/index.ts";
 
 describe("session lifecycle schemas", () => {
@@ -24,8 +26,33 @@ describe("session lifecycle schemas", () => {
     expect(r.success).toBe(false);
   });
 
-  test("session/new accepts empty params", () => {
-    expect(NewSessionParamsSchema.safeParse({}).success).toBe(true);
+  test("session/open accepts empty params and the full shape, and rejects unknown keys", () => {
+    expect(OpenParamsSchema.safeParse({}).success).toBe(true);
+    const full = {
+      sessionId: "s",
+      since: { epoch: "e", seq: 0 },
+      create: true,
+      messages: [{ role: "user", content: "hi" }],
+      cwd: "/w",
+    };
+    expect(OpenParamsSchema.safeParse(full).success).toBe(true);
+    expect(OpenParamsSchema.safeParse({ ...full, incarnation: "x" }).success).toBe(false);
+    // `since` is a cut, never a bare number (decision D1).
+    expect(OpenParamsSchema.safeParse({ since: 3 }).success).toBe(false);
+  });
+
+  test("session/open result carries the epoch and both flags", () => {
+    expect(
+      OpenResultSchema.safeParse({ sessionId: "s", epoch: "e", created: false, resync: true })
+        .success,
+    ).toBe(true);
+    expect(OpenResultSchema.safeParse({ sessionId: "s", created: false }).success).toBe(false);
+  });
+
+  test("session/new is gone (replaced by session/open)", () => {
+    expect(isMethodName("session/new")).toBe(false);
+    expect(isMethodName("session/open")).toBe(true);
+    expect(isMethodName("session/close")).toBe(true);
   });
 
   const prompt = { sessionId: "s1", turnId: "t1", content: [{ type: "text", text: "hi" }] };

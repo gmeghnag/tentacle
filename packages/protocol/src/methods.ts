@@ -16,14 +16,16 @@ import {
 import { RequestPermissionParamsSchema, RequestPermissionResultSchema } from "./permission.ts";
 import {
   CancelParamsSchema,
+  CloseParamsSchema,
+  CloseResultSchema,
   CompactParamsSchema,
   CompactResultSchema,
   EnqueueParamsSchema,
   EnqueueResultSchema,
   InitializeParamsSchema,
   InitializeResultSchema,
-  NewSessionParamsSchema,
-  NewSessionResultSchema,
+  OpenParamsSchema,
+  OpenResultSchema,
   PromptParamsSchema,
   PromptResultSchema,
   SnapshotParamsSchema,
@@ -34,7 +36,8 @@ import { SessionUpdateParamsSchema } from "./updates.ts";
 /** Request methods (expect a response). */
 export const Method = {
   Initialize: "initialize",
-  NewSession: "session/new",
+  Open: "session/open",
+  Close: "session/close",
   Prompt: "session/prompt",
   Compact: "session/compact",
   Snapshot: "session/snapshot",
@@ -62,7 +65,8 @@ interface RequestSchema {
 /** params/result schema for every request method. */
 export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.Initialize]: { params: InitializeParamsSchema, result: InitializeResultSchema },
-  [Method.NewSession]: { params: NewSessionParamsSchema, result: NewSessionResultSchema },
+  [Method.Open]: { params: OpenParamsSchema, result: OpenResultSchema },
+  [Method.Close]: { params: CloseParamsSchema, result: CloseResultSchema },
   [Method.Prompt]: { params: PromptParamsSchema, result: PromptResultSchema },
   [Method.Compact]: { params: CompactParamsSchema, result: CompactResultSchema },
   [Method.Snapshot]: { params: SnapshotParamsSchema, result: SnapshotResultSchema },

@@ -161,11 +161,13 @@ export function updateToEvent(
     // The turn bracket is consumed by `RemoteSession` (it ends the turn by
     // `turnId`); it is not an `AgentEvent` of its own. `history_replaced`
     // cannot arrive inside a turn (a compaction is exclusive with one), and the
-    // client that compacted reads the new history back itself.
+    // client that compacted reads the new history back itself. `session_closed`
+    // is consumed by `RemoteClient`/`RemoteSession` (it ends the session).
     case "plan":
     case "turn_start":
     case "turn_end":
     case "history_replaced":
+    case "session_closed":
       return null;
   }
 }

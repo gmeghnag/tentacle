@@ -14,10 +14,10 @@ describe("JSON-RPC envelopes", () => {
     const parsed = JsonRpcRequestSchema.parse({
       jsonrpc: "2.0",
       id: "abc",
-      method: "session/new",
+      method: "session/open",
       params: { cwd: "/tmp" },
     });
-    expect(parsed.method).toBe("session/new");
+    expect(parsed.method).toBe("session/open");
   });
 
   test("rejects a request without an id", () => {

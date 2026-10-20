@@ -7,8 +7,12 @@
  *
  * The daemon owns the live conversation but NOT the on-disk store: after each
  * turn/compaction we read the history back via `snapshot` and write the JSON
- * record here. The main also owns the session uid (passed into `session/new`),
+ * record here. The main also owns the session uid (passed into `session/open`),
  * so a resumed session keeps its file.
+ *
+ * Sessions outlive connections daemon-side, so this runtime closes what it
+ * opened: the previous session on `/clear` (`SessionController.close`), every
+ * session still open on `dispose` — the same on every runtime (AGENTS §7).
  */
 import { type JsonSessionStore, type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
 import { RemoteClient, type RemoteSession } from "@tentacle/client";
@@ -34,7 +38,8 @@ export interface LocalRuntime {
    * called by the frontend (jobs are started/read/killed daemon-side).
    */
   readonly jobs: JobController;
-  dispose(): void;
+  /** Close the open sessions daemon-side, then the transport. Await it before exiting. */
+  dispose(): Promise<void>;
 }
 
 /** A client-side `JobController` whose only live capability is `onExit`. */
@@ -93,6 +98,9 @@ export function persistingController(
     enqueue(text) {
       return inner.enqueue(text);
     },
+    close() {
+      inner.close();
+    },
   };
 }
 
@@ -143,7 +151,8 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
   return {
     createSession,
     jobs: remoteJobsView(client),
-    dispose: () => {
+    dispose: async () => {
+      await client.closeSessions();
       client.close();
       deps.disposeTransport();
     },
