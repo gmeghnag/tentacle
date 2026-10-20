@@ -25,6 +25,7 @@ import {
   DEFAULT_TABULATE_JSON,
 } from "./defaults.ts";
 import type { FileConfig, McpServerConfig } from "./schema.ts";
+import { type SkillInfo, renderSkillsCatalog } from "./skills.ts";
 
 export type Env = Record<string, string | undefined>;
 
@@ -46,6 +47,8 @@ export interface ResolvedConfig {
   readonly systemPrompt: string;
   /** Whether a per-repo AGENTS.md was folded into `systemPrompt`. */
   readonly agentsMdLoaded: boolean;
+  /** Discovered skills (empty when disabled); the offered ones are cataloged in `systemPrompt`. */
+  readonly skills: readonly SkillInfo[];
   readonly subagentsEnabled: boolean;
   /** Sub-agent step limit; a positive integer, or -1 (unlimited). */
   readonly subagentMaxIterations: number;
@@ -97,6 +100,8 @@ export interface ResolveContext {
   readonly promptFromFile?: string | undefined;
   /** Contents of a per-repo AGENTS.md, if one was found and read (I/O in load.ts). */
   readonly agentsMd?: string | undefined;
+  /** Discovered skills, after precedence (I/O in load.ts); ignored when disabled. */
+  readonly skills?: readonly SkillInfo[] | undefined;
 }
 
 /** Header the auto-loaded AGENTS.md is appended under, after the identity prompt. */
@@ -165,6 +170,16 @@ function parseBool(raw: string | undefined): boolean | undefined {
   return undefined;
 }
 
+/**
+ * Whether skills are discovered: env `TENTACLE_NO_SKILLS` (truthy disables,
+ * falsy enables; wins) > file `loadSkills` > enabled. Exported because
+ * `load.ts` must know it BEFORE scanning (a disabled scan does no I/O).
+ */
+export function skillsEnabled(fileConfig: FileConfig, env: Env): boolean {
+  const noSkillsEnv = parseBool(env.TENTACLE_NO_SKILLS);
+  return noSkillsEnv !== undefined ? !noSkillsEnv : (fileConfig.loadSkills ?? true);
+}
+
 export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   const { fileConfig, env, defaultCwd, promptFromFile, agentsMd } = ctx;
   const model = fileConfig.model ?? {};
@@ -210,9 +225,14 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   const agentsEnabled =
     noAgentsEnv !== undefined ? !noAgentsEnv : (fileConfig.loadAgentsMd ?? true);
   const agentsMdLoaded = agentsEnabled && agentsMd !== undefined && agentsMd.trim() !== "";
-  const systemPromptValue = agentsMdLoaded
+  const withAgents = agentsMdLoaded
     ? `${systemPrompt.value.trimEnd()}\n\n${AGENTS_PROMPT_HEADER}\n\n${(agentsMd ?? "").trimEnd()}\n`
     : systemPrompt.value;
+  // Skills: the catalog goes LAST (after the identity and AGENTS.md), and only
+  // when one is offered — with none the prompt stays byte-identical.
+  const skills = skillsEnabled(fileConfig, env) ? (ctx.skills ?? []) : [];
+  const catalog = renderSkillsCatalog(skills);
+  const systemPromptValue = catalog === "" ? withAgents : `${withAgents.trimEnd()}\n\n${catalog}\n`;
   const subagentsEnabled = pick(
     parseBool(env.TENTACLE_SUBAGENTS),
     fileConfig.subagents?.enabled,
@@ -275,6 +295,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     systemPrompt: systemPromptValue,
     agentsMdLoaded,
+    skills,
     subagentsEnabled: subagentsEnabled.value,
     subagentMaxIterations: subagentMaxIterations.value,
     maxInlineOutputChars: maxInlineOutputChars.value,

@@ -1,6 +1,6 @@
 # eval/agent-skills — support for Agent Skills (`SKILL.md`, agentskills.io)
 
-> **Status:** context — owner decisions recorded (2026-10-20); promotion-ready (sub-task 1 `feat/skills-core` first)
+> **Status:** promoted (2026-10-20) — sub-task 1 → `docs/feat/skills-core.md` (`feat/skills-core`); sub-tasks 2–4 still to open. This eval stays the umbrella decision record.
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10)
 > **Type:** eval → feat ×4 · **Size:** L → split into 4 sub-tasks (see "Owner decisions") · **Blast:** load-bearing (compaction, protocol, model-facing tool schemas) · **Suited:** strong model executes each sub-task; mandatory fresh-context Review on 2–4
 

@@ -31,6 +31,17 @@ export type ResultTransform = (
   ctx: ResultTransformContext,
 ) => ToolResult | Promise<ToolResult>;
 
+/**
+ * Skip `transform` for the named tools: their result passes through unchanged.
+ * For a tool whose result is curated context the model asked for (a `skill`
+ * body), where spilling, summarising or deduplicating would silently drop
+ * the instructions — the tool bounds its own output instead. Safety layers
+ * (secret redaction) are deliberately NOT wrapped.
+ */
+export function exemptTools(names: readonly string[], transform: ResultTransform): ResultTransform {
+  return (result, ctx) => (names.includes(ctx.toolName) ? result : transform(result, ctx));
+}
+
 /** Run `result` through every transform in order. */
 export async function applyResultTransforms(
   result: ToolResult,

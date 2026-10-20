@@ -5,3 +5,4 @@ export * from "./registry.ts";
 export * from "./builtins.ts";
 export * from "./background.ts";
 export * from "./task.ts";
+export * from "./skill.ts";

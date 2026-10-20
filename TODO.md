@@ -535,6 +535,10 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       Split into 4 feats: skills-core → skills-compaction → skills-slash /
       skills-subagent. **Eval:** `docs/eval/agent-skills.md`. Type: eval →
       feat ×4 · Size: L → split · Blast: load-bearing.
+      - [x] **skills-core** (discovery, catalog, `skill` tool) — DONE
+        2026-10-20, `feat/skills-core`: `docs/feat/skills-core.md`. Type: feat · Size: M ·
+        Blast: cross-module.
+      - [ ] skills-compaction · [ ] skills-slash · [ ] skills-subagent
 
 - [x] **Remove `TENTACLE_CWD` / config `cwd`: the launch folder IS the working
       folder** — DONE 2026-10-20, `feat/remove-tentacle-cwd`: `docs/feat/remove-tentacle-cwd.md`. (owner decision 2026-10-20, as in Claude Code / opencode / pi).

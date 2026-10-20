@@ -68,6 +68,14 @@ const settingsShape = {
    * enabled. Set `false`, or the env `TENTACLE_NO_AGENTS_MD`, to disable.
    */
   loadAgentsMd: z.boolean().optional(),
+  /**
+   * Discover Agent Skills (`SKILL.md`) in `.agents/skills/` (walking up from
+   * the launch folder to the repo root), `<configDir>/skills/` and
+   * `~/.agents/skills/`, list them in the system prompt and offer the `skill`
+   * tool. Default: enabled. Set `false`, or the env `TENTACLE_NO_SKILLS`, to
+   * disable.
+   */
+  loadSkills: z.boolean().optional(),
   /** Maximum model/tool iterations per turn. */
   maxIterations: z
     .number()

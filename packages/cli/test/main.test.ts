@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../src/index.ts";
@@ -138,6 +138,30 @@ describe("cli main (end-to-end)", () => {
       expect(exists).toBe(false);
     } finally {
       process.env.TENTACLE_CONFIG_DIR = saved;
+    }
+  });
+});
+
+describe("cli main: skill diagnostics", () => {
+  test("printed once to stderr where this config builds the agent; not for run/attach", async () => {
+    const badDir = join(dir, "config", "skills", "bad");
+    await mkdir(badDir, { recursive: true });
+    await writeFile(join(badDir, "SKILL.md"), "---\nname: bad\n---\nbody\n");
+    try {
+      const out: string[] = [];
+      const err: string[] = [];
+      const io = { write: (t: string) => out.push(t), writeErr: (t: string) => err.push(t) };
+      expect(await main(["bun", "cli"], io)).toBe(1); // help path: config loaded locally
+      expect(err).toEqual([
+        `[skills] skipped skill at ${join(badDir, "SKILL.md")}: no description\n`,
+      ]);
+      expect(out.join("")).not.toContain("[skills]"); // never on stdout
+
+      err.length = 0;
+      expect(await main(["bun", "cli", "run"], io)).toBe(1); // no --image: fails after config
+      expect(err).toEqual([]); // a pod session uses the pod's skills
+    } finally {
+      await rm(join(dir, "config", "skills"), { recursive: true, force: true });
     }
   });
 });

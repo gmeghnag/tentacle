@@ -230,6 +230,7 @@ export class Agent {
       signal: signal ?? new AbortController().signal,
       env: this.config.env,
       ...(this.config.jobs ? { jobs: this.config.jobs } : {}),
+      history: messages,
     };
 
     // A resumed turn first finishes its suspended round — exactly the calls an
