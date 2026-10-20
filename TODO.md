@@ -477,6 +477,10 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
 
 - [ ] **No changelog discipline** (no `CHANGELOG.md`). **Eval:**
       `docs/eval/changelog-discipline.md`. Type: eval. Open.
+- [ ] **No `tentacle update`** (self-update + cached pod binaries), and `attach`
+      reuses a pod binary of any version (silent skew). Open questions 1–8
+      pending discussion. **Eval:** `docs/eval/tentacle-update.md`. Type: eval →
+      fix + feat ×2 · Size: M overall · Blast: cross-module.
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
