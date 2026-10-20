@@ -525,6 +525,29 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       **Eval:** `docs/eval/client-tls-trust.md` — promotion-ready. Type: eval →
       feat · Size: S · Blast: contained.
 
+- [ ] **Skills support (Agent Skills, `SKILL.md`)** — packaged procedural
+      guidance the model opts into (skills = *how to do it*; the result pipeline
+      = *the guarantee the context stays clean*). Next on the roadmap. Owner
+      decisions recorded 2026-10-20; promotion-ready.
+      Split into 4 feats: skills-core → skills-compaction → skills-slash /
+      skills-subagent. **Eval:** `docs/eval/agent-skills.md`. Type: eval →
+      feat ×4 · Size: L → split · Blast: load-bearing.
+
+- [ ] **Remove `TENTACLE_CWD` / config `cwd`: the launch folder IS the working
+      folder** (owner decision 2026-10-20, as in Claude Code / opencode / pi).
+      Today AGENTS.md is found from the launch cwd (`config/src/load.ts:158,218`)
+      while tools run in `TENTACLE_CWD ?? cwd ?? launch` (`config/src/resolve.ts:186`):
+      rules from one folder, work in another. Scope: `resolve.ts:186`, the
+      `cwd` key in `config/src/schema.ts:72` (top-level + profiles; **not** the
+      MCP server `cwd` at `:51`), the scaffold comment `defaults.ts:97`, help
+      `cli/src/main.ts:122`, `README.md:60`. A config file that still has `cwd`
+      gets a clear error, not silent ignoring (pre-public, no shim). The cli tests
+      that isolate via `TENTACLE_CWD` (`main`, `worker`, `args`, `wiring`,
+      `profile-flag`, `serve-*`, `fixtures/worker-exit-net.ts`) move to
+      `loadConfig({ cwd })` / a spawned child's `cwd`. Prerequisite for
+      `feat/skills-core` (one discovery root). Type: feat · Size: S–M · Blast:
+      cross-module · Suited: weaker model OK + standard review.
+
 - [ ] **No changelog discipline** (no `CHANGELOG.md`). **Eval:**
       `docs/eval/changelog-discipline.md`. Type: eval. Open.
 
@@ -871,9 +894,7 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
       **Promoted eval → feat** (2026-10-17, weak-model gate PASSED — no
       invocation degradation). **Merged to main (7344fbc).**
       **Doc:** `docs/feat/subagent-label-rename.md`. Type: feat · Size: S ·
-      Blast: load-bearing (model-facing name). (complementary to the result
-      pipeline: skills = *how to do it*, the pipeline = *the guarantee the
-      context stays clean*).
+      Blast: load-bearing (model-facing name).
 
 ## File tools
 
