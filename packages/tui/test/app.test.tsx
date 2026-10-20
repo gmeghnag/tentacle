@@ -305,6 +305,40 @@ describe("App", () => {
     unmount();
   });
 
+  test("a remote session's history_reset mid-turn replaces the partial reply: shown once, never doubled", async () => {
+    // A reconnect that had to resync: the snapshot holds "ab", the replay then
+    // carries the rest. Mutation: ignore `history_reset` in the App loop → "abcc".
+    const createSession = () => ({
+      async *send() {
+        yield { type: "text" as const, delta: "abc" };
+        await delay(5);
+        yield {
+          type: "history_reset" as const,
+          messages: [
+            { role: "user" as const, content: "hi" },
+            { role: "assistant" as const, content: "ab" },
+          ],
+        };
+        yield { type: "text" as const, delta: "c" };
+        yield { type: "turn_end" as const, reason: "end_turn" as const };
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("hi");
+    await delay(20);
+    stdin.write("\r");
+    await delay(80);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("abc");
+    expect(frame).toMatch(/⏺ abc\s*$/m); // exactly "abc": not "abcc", not "abc" + "abc"
+    expect(frame.match(/abc/g)?.length).toBe(1);
+    expect(frame.match(/› hi/g)?.length).toBe(1); // the user bubble once
+    unmount();
+  });
+
   test("/compact calls the session's compact and reports the result", async () => {
     let compacted = 0;
     const createSession = () => ({

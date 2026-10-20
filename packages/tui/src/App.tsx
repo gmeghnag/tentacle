@@ -1,4 +1,4 @@
-import { type Agent, type AgentEvent, Session } from "@tentacle/agent";
+import { type Agent, Session } from "@tentacle/agent";
 import { DISMISSED, type JobController, type PermissionBroker } from "@tentacle/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
@@ -29,9 +29,10 @@ import { type Selection, extractSelection, isNonEmpty, rowSelectionRange } from 
 import {
   type DisplayItem,
   type DisplayState,
+  type SessionEvent,
   appendBackgroundExit,
   appendNotice,
-  applyEvent,
+  applySessionEvent,
   backgroundExitNotice,
   failTurn,
   initialState,
@@ -45,7 +46,8 @@ import {
  * session identically.
  */
 export interface SessionController {
-  send(prompt: string, signal?: AbortSignal): AsyncIterable<AgentEvent>;
+  /** A remote session also yields the reconnect events (`history_reset`, `user_message`). */
+  send(prompt: string, signal?: AbortSignal): AsyncIterable<SessionEvent>;
   /** Compact the conversation (summarise + replace history); optional. */
   compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
   /** Queue a message mid-turn (steering); optional. Local is sync, remote a Promise. */
@@ -377,7 +379,7 @@ export function App({
       flushNow();
       try {
         for await (const event of session.send(continuation ? "" : text, controller.signal)) {
-          stateRef.current = applyEvent(stateRef.current, event, Date.now());
+          stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
           // A queued message was just injected — drop it from the pending list.
           if (event.type === "steer") {
             setQueued((q) => q.slice(1));

@@ -20,7 +20,7 @@ session path — and shows connection state in the Ink `StatusBar` (not
 
 ## Implementation
 
-Planned, source-verified, in `docs/eval/client-reattach.md` — every item
+Planned, source-verified, in `docs/feat/client-reattach.md` (its 2026-10-20 Revision moves Q8 — the WebSocket factory + 401 probe — and the ack-deadline liveness here: owner answers R-Q1/R-Q2) — every item
 marked **[8b]** (Open question Q11, Design, Files item 11, Tests, Validation
 "Manual (8b)"), plus Q7 (`StatusBar`), Q8 (401 via a fetch probe) and Q12
 (pod-attach verdict). Depends on: `client-reattach` (8a).

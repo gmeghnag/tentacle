@@ -66,6 +66,12 @@ export class PermissionRouter {
   private queue: Entry[] = [];
   /** Per session: every request the daemon said is settled (replay dedupe). */
   private readonly resolvedIds = new Map<string, Set<string>>();
+  /**
+   * Per session: requests answered here whose `permission_resolved` has not
+   * arrived yet (the answer may still be in flight, or held while the link is
+   * down). A replay that re-offers one is not a second dialog.
+   */
+  private readonly answeredIds = new Map<string, Set<string>>();
 
   /** A `permission_request` arrived (live or replayed). */
   request(sessionId: string, update: PermissionRequestUpdate): RouterAction[] {
@@ -73,7 +79,8 @@ export class PermissionRouter {
     if (
       is(this.current, sessionId, id) ||
       this.queue.some((e) => is(e, sessionId, id)) ||
-      this.resolvedIds.get(sessionId)?.has(id)
+      this.resolvedIds.get(sessionId)?.has(id) ||
+      this.answeredIds.get(sessionId)?.has(id)
     ) {
       return [];
     }
@@ -89,6 +96,7 @@ export class PermissionRouter {
       this.resolvedIds.set(sessionId, ids);
     }
     ids.add(requestId);
+    this.answeredIds.get(sessionId)?.delete(requestId);
     if (is(this.current, sessionId, requestId)) {
       this.current = null;
       return [{ kind: "abort", sessionId, requestId }, ...this.next()];
@@ -117,12 +125,28 @@ export class PermissionRouter {
         ...this.next(),
       ];
     }
+    let answered = this.answeredIds.get(sessionId);
+    if (!answered) {
+      answered = new Set();
+      this.answeredIds.set(sessionId, answered);
+    }
+    answered.add(requestId);
     return [{ kind: "send", sessionId, requestId, optionId: outcome.optionId }, ...this.next()];
+  }
+
+  /**
+   * An answer could not be delivered (not "answered elsewhere": a real
+   * failure): the request may still be pending daemon-side, so a later replay
+   * must offer it again.
+   */
+  answerFailed(sessionId: string, requestId: string): void {
+    this.answeredIds.get(sessionId)?.delete(requestId);
   }
 
   /** The session ended (`session_closed`): its prompts can no longer be answered. */
   sessionClosed(sessionId: string): RouterAction[] {
     this.resolvedIds.delete(sessionId);
+    this.answeredIds.delete(sessionId);
     this.queue = this.queue.filter((e) => e.sessionId !== sessionId);
     const entry = this.current;
     if (entry?.sessionId === sessionId) {
@@ -132,9 +156,33 @@ export class PermissionRouter {
     return [];
   }
 
+  /**
+   * The session was resynced: keep only the requests the replay re-offers
+   * (`ids`), withdraw the rest — answered or cancelled while this client was
+   * away, or minted by a previous incarnation of the session (a `serve`
+   * restart re-asks under a fresh id). The kept ones are deduped when the
+   * replay re-offers them, so their dialog is not shown twice.
+   */
+  retainOnly(sessionId: string, ids: readonly string[]): RouterAction[] {
+    const keep = (e: Entry): boolean =>
+      e.sessionId !== sessionId || ids.includes(e.update.requestId);
+    this.queue = this.queue.filter(keep);
+    const answered = this.answeredIds.get(sessionId);
+    for (const id of answered ?? []) {
+      if (!ids.includes(id)) answered?.delete(id); // gone: nothing left to dedupe
+    }
+    const entry = this.current;
+    if (entry && !keep(entry)) {
+      this.current = null;
+      return [{ kind: "abort", sessionId, requestId: entry.update.requestId }, ...this.next()];
+    }
+    return [];
+  }
+
   /** The connection closed: nothing can be answered on it (a re-attach replays). */
   connectionClosed(): RouterAction[] {
     this.queue = [];
+    this.answeredIds.clear();
     const entry = this.current;
     this.current = null;
     return entry
