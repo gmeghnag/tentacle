@@ -695,3 +695,34 @@ describe("history_commit (the snapshot cut)", () => {
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "max_iterations" });
   });
 });
+
+describe("ToolContext.history", () => {
+  test("a tool sees the live history: the turn so far, incl. earlier results of the same round", async () => {
+    const seen: (readonly ChatMessage[])[] = [];
+    const spy: Tool<{ text: string }> = {
+      name: "spy",
+      description: "records the history it sees",
+      inputSchema: z.object({ text: z.string() }),
+      permission: "none",
+      async execute(input, ctx) {
+        seen.push([...(ctx.history ?? [])]);
+        return { content: `r-${input.text}` };
+      },
+    };
+    const model = new ScriptedProvider([
+      [
+        { type: "tool_call", toolCall: { id: "c1", name: "spy", arguments: '{"text":"1"}' } },
+        { type: "tool_call", toolCall: { id: "c2", name: "spy", arguments: '{"text":"2"}' } },
+        { type: "done" },
+      ],
+      [{ type: "done" }],
+    ]);
+    const agent = new Agent({ model, tools: new ToolRegistry().register(spy), env: noopEnv });
+    await collect(agent.run("s1", [{ role: "user", content: "go" }]));
+
+    expect(seen.length).toBe(2);
+    expect(seen[0]?.map((m) => m.role)).toEqual(["user", "assistant"]);
+    // The second call of the round sees the first call's result.
+    expect(seen[1]?.at(-1)).toEqual({ role: "tool", content: "r-1", toolCallId: "c1" });
+  });
+});

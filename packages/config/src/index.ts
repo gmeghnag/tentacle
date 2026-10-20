@@ -11,3 +11,5 @@ export * from "./defaults.ts";
 export * from "./profile.ts";
 export * from "./resolve.ts";
 export * from "./load.ts";
+export * from "./skills.ts";
+export * from "./skills-scan.ts";

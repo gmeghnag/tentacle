@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -386,5 +386,155 @@ describe("loadConfig profiles (docs/feat/config-profiles.md)", () => {
     });
     expect(cfg.systemPrompt).toBe("work prompt");
     expect(cfg.promptPath).toBe(join(configDir, "WORK.md"));
+  });
+});
+
+describe("loadConfig skills discovery", () => {
+  const writeSkill = async (root: string, dirName: string, frontmatter: string, body = "body") => {
+    await mkdir(join(root, dirName), { recursive: true });
+    await writeFile(join(root, dirName, "SKILL.md"), `---\n${frontmatter}\n---\n${body}\n`);
+  };
+
+  test("project (every level up to the .git root) > config dir > ~/.agents; shadowing reported", async () => {
+    const repo = join(dir, "work", "repo");
+    const sub = join(repo, "pkg");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(sub, { recursive: true });
+    // Above the repo root: must NOT be scanned (the walk stops at .git).
+    await writeSkill(join(dir, "work", ".agents", "skills"), "outside", "description: o");
+    await writeSkill(join(sub, ".agents", "skills"), "dup", "name: dup\ndescription: nearest");
+    await writeSkill(join(repo, ".agents", "skills"), "dup", "name: dup\ndescription: repo root");
+    await writeSkill(
+      join(repo, ".agents", "skills"),
+      "root-only",
+      "name: root-only\ndescription: r",
+    );
+    await writeSkill(join(configDir, "skills"), "cfg", "name: cfg\ndescription: c");
+    await writeSkill(join(dir, ".agents", "skills"), "cfg", "name: cfg\ndescription: home copy");
+    await writeSkill(join(dir, ".agents", "skills"), "home", "name: home\ndescription: h");
+
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: sub });
+    expect(cfg.skills.map((s) => [s.name, s.description, s.scope])).toEqual([
+      ["dup", "nearest", "project"],
+      ["root-only", "r", "project"],
+      ["cfg", "c", "user"],
+      ["home", "h", "user"],
+    ]);
+    expect(cfg.skillDiagnostics).toEqual([
+      `skill "dup" at ${join(repo, ".agents/skills/dup/SKILL.md")} is shadowed by ${join(sub, ".agents/skills/dup/SKILL.md")}`,
+      `skill "cfg" at ${join(dir, ".agents/skills/cfg/SKILL.md")} is shadowed by ${join(configDir, "skills/cfg/SKILL.md")}`,
+    ]);
+    // Catalog after the identity, in precedence order.
+    expect(cfg.systemPrompt.startsWith(DEFAULT_SYSTEM_PROMPT.trimEnd())).toBe(true);
+    expect(cfg.systemPrompt).toContain("<name>dup</name>\n<description>nearest</description>");
+    expect(cfg.systemPrompt).not.toContain("outside");
+  });
+
+  test("no .git: the walk stops BEFORE home, so ~/.agents/skills is user scope, not project", async () => {
+    const work = join(dir, "notes");
+    await mkdir(work, { recursive: true });
+    await writeSkill(join(dir, ".agents", "skills"), "home", "name: home\ndescription: h");
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: work });
+    expect(cfg.skills.map((s) => [s.name, s.scope])).toEqual([["home", "user"]]);
+    expect(cfg.skillDiagnostics).toEqual([]);
+  });
+
+  test("the catalog goes after AGENTS.md", async () => {
+    const repo = join(dir, "repo");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await writeFile(join(repo, AGENTS_FILENAME), "repo rules");
+    await writeSkill(join(repo, ".agents", "skills"), "a", "name: a\ndescription: d");
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: repo });
+    const rules = cfg.systemPrompt.indexOf("repo rules");
+    const skills = cfg.systemPrompt.indexOf("# Skills");
+    expect(rules).toBeGreaterThan(0);
+    expect(skills).toBeGreaterThan(rules);
+  });
+
+  test("no skills → prompt byte-identical to the no-skills prompt", async () => {
+    await writeFile(join(dir, "p.md"), "identity");
+    const env = { ...baseEnv(), TENTACLE_SYSTEM_PROMPT: "identity\n" };
+    const cfg = await loadConfig({ env, configDir, cwd: dir });
+    expect(cfg.systemPrompt).toBe("identity\n");
+    expect(cfg.skills).toEqual([]);
+  });
+
+  test("off switch: file `loadSkills: false`, env TENTACLE_NO_SKILLS (env wins both ways)", async () => {
+    await writeSkill(join(dir, ".agents", "skills"), "home", "name: home\ndescription: h");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, CONFIG_FILENAME), `{ "loadSkills": false }`);
+    const off = await loadConfig({ env: baseEnv(), configDir, cwd: dir });
+    expect(off.skills).toEqual([]);
+    expect(off.systemPrompt).not.toContain("# Skills");
+    const forcedOn = await loadConfig({
+      env: { ...baseEnv(), TENTACLE_NO_SKILLS: "0" },
+      configDir,
+      cwd: dir,
+    });
+    expect(forcedOn.skills.map((s) => s.name)).toEqual(["home"]);
+    await writeFile(join(configDir, CONFIG_FILENAME), "{}");
+    const envOff = await loadConfig({
+      env: { ...baseEnv(), TENTACLE_NO_SKILLS: "1" },
+      configDir,
+      cwd: dir,
+    });
+    expect(envOff.skills).toEqual([]);
+  });
+
+  test("broken skills are skipped with a diagnostic; hidden ones load but are not cataloged", async () => {
+    const root = join(dir, ".agents", "skills");
+    await writeSkill(root, "bad-yaml", "name: [x\ndescription: d");
+    await writeSkill(root, "no-desc", "name: no-desc");
+    await writeSkill(
+      root,
+      "hidden",
+      "name: hidden\ndescription: h\ndisable-model-invocation: true",
+    );
+    await mkdir(join(root, "not-a-skill"), { recursive: true }); // no SKILL.md: silent
+    await writeFile(join(root, "stray.txt"), "x"); // a file, not a dir: silent
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: dir });
+    expect(cfg.skills.map((s) => [s.name, s.modelInvocable])).toEqual([["hidden", false]]);
+    expect(cfg.systemPrompt).not.toContain("# Skills");
+    expect(cfg.skillDiagnostics.length).toBe(2);
+    expect(cfg.skillDiagnostics[0]).toContain("bad-yaml/SKILL.md: unparseable frontmatter");
+    expect(cfg.skillDiagnostics[1]).toContain("no-desc/SKILL.md: no description");
+  });
+
+  test("bundled files: relative, sorted, no dot-entries / node_modules / SKILL.md, bounded", async () => {
+    const root = join(dir, ".agents", "skills");
+    await writeSkill(root, "tool", "name: tool\ndescription: d");
+    const sd = join(root, "tool");
+    await mkdir(join(sd, "scripts"), { recursive: true });
+    await mkdir(join(sd, "node_modules", "x"), { recursive: true });
+    await writeFile(join(sd, "scripts", "run.sh"), "x");
+    await writeFile(join(sd, "references.md"), "x");
+    await writeFile(join(sd, ".manifest.json"), "x");
+    await writeFile(join(sd, "node_modules", "x", "i.js"), "x");
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: dir });
+    expect(cfg.skills[0]?.files).toEqual(["references.md", "scripts/run.sh"]);
+    expect(cfg.skills[0]?.filesTruncated).toBe(false);
+    expect(cfg.skills[0]?.dir).toBe(sd);
+
+    const big = join(root, "big");
+    await writeSkill(root, "big", "name: big\ndescription: d");
+    await mkdir(join(big, "a", "b", "c", "d", "e"), { recursive: true });
+    await writeFile(join(big, "a", "b", "c", "d", "e", "deep.txt"), "x");
+    for (let i = 0; i < 60; i++) {
+      await writeFile(join(big, `f${String(i).padStart(2, "0")}.txt`), "x");
+    }
+    const cfg2 = await loadConfig({ env: baseEnv(), configDir, cwd: dir });
+    const b = cfg2.skills.find((s) => s.name === "big");
+    expect(b?.files.length).toBe(50);
+    expect(b?.filesTruncated).toBe(true);
+    expect(b?.files.some((f) => f.endsWith("deep.txt"))).toBe(false);
+  });
+
+  test("a symlinked skill directory is followed", async () => {
+    const real = join(dir, "elsewhere", "linked");
+    await writeSkill(join(dir, "elsewhere"), "linked", "name: linked\ndescription: d");
+    await mkdir(join(dir, ".agents", "skills"), { recursive: true });
+    await symlink(real, join(dir, ".agents", "skills", "linked"));
+    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: dir });
+    expect(cfg.skills.map((s) => s.name)).toEqual(["linked"]);
   });
 });

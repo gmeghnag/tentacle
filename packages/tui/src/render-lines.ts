@@ -315,6 +315,8 @@ export function toolTitle(tool: ToolItem): { label: string; subtitle: string } {
       return { label: "Bash", subtitle: str("command") ?? "" };
     case "agent_task":
       return { label: "Agent", subtitle: str("description") ?? str("subagent_type") ?? "" };
+    case "skill":
+      return { label: "Skill", subtitle: str("name") ?? "" };
     default:
       return { label: tool.name, subtitle: tool.args };
   }

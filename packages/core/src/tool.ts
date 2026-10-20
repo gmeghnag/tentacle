@@ -8,6 +8,7 @@
 import type { z } from "zod";
 import type { ExecutionEnvironment } from "./execution.ts";
 import type { JobController } from "./jobs.ts";
+import type { ChatMessage } from "./model.ts";
 
 /** Whether a tool call needs user approval before running. */
 export type PermissionLevel = "none" | "ask" | "deny";
@@ -50,6 +51,12 @@ export interface ToolContext {
   readonly emitProgress?: (event: ToolProgressEvent) => void;
   /** Optional background-job registry; the shell tools use it when wired. */
   readonly jobs?: JobController;
+  /**
+   * The conversation so far (read-only view of the live history), for a tool
+   * whose answer depends on what is already in context — e.g. `skill` does
+   * not load a skill twice. Absent outside the agent loop.
+   */
+  readonly history?: readonly ChatMessage[];
 }
 
 export interface Tool<Input = unknown> {

@@ -4,6 +4,7 @@ import {
   type ResultTransformContext,
   applyResultTransforms,
   collapseRepeatedLines,
+  exemptTools,
   spillLargeOutput,
   summarizeLargeOutput,
   tabulateJson,
@@ -162,5 +163,17 @@ describe("applyResultTransforms", () => {
       (r: ToolResult): ToolResult => ({ ...r, content: `${r.content}|${name}` });
     const out = await applyResultTransforms({ content: "x" }, [tag("a"), tag("b")], ctx());
     expect(out.content).toBe("x|a|b");
+  });
+});
+
+describe("exemptTools", () => {
+  test("an exempt tool's long result passes the spill untouched; any other tool's is spilled", async () => {
+    const spill = exemptTools(["skill"], spillLargeOutput({ maxInlineChars: 100 }));
+    const long: ToolResult = { content: "x".repeat(500) };
+    const exempt = await spill(long, ctx({ toolName: "skill" }));
+    expect(exempt).toBe(long);
+    const other = await spill(long, ctx({ toolName: "shell" }));
+    expect(other.content).not.toBe(long.content);
+    expect(other.content).toContain(".tentacle/tool-output/shell-c1.txt");
   });
 });

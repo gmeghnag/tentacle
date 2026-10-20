@@ -59,6 +59,7 @@ Resolved with precedence **environment variables › `config.jsonc` › built-in
 | `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline) | System prompt file (default `PROMPT.md`) |
 | `maxIterations` | `TENTACLE_MAX_ITERATIONS` | Max model/tool rounds per turn |
 | `subagents.enabled` | `TENTACLE_SUBAGENTS` | Enable the `agent_task` sub-agent tool (default on) |
+| `loadSkills` | `TENTACLE_NO_SKILLS` (truthy disables) | Discover Agent Skills (default on) |
 
 Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyCommand`.
 `TENTACLE_CONFIG_DIR` (or `XDG_CONFIG_HOME`) relocates the config directory.
@@ -98,6 +99,7 @@ See [`docs/architecture/F3-remote-control.md`](./docs/architecture/F3-remote-con
 - **Background jobs:** `shell` with `run_in_background` plus `shell_output` / `shell_kill`; a finished job is surfaced live and fed back to the model (exit trigger).
 - **Workspace confinement:** writes confined to the launch directory via realpath (symlink escapes refused); reads unconfined.
 - **Permission engine:** shell commands gated with command-prefix-scoped "always" approvals; never auto-approves command substitution.
+- **Agent Skills** ([`SKILL.md`](https://agentskills.io/specification)): found in `.agents/skills/` (from the launch folder up to the repo root), `<configDir>/skills/` and `~/.agents/skills/`, first hit wins (problems are printed at startup). Name + description go in the system prompt; the model loads a skill's full instructions with the `skill` tool. `allowed-tools` is ignored; `disable-model-invocation: true` hides a skill from the model. Skills are read when the agent starts (a new one needs a restart); in a pod (`run`/`attach`) or over `connect`, the skills are the daemon host's.
 - **Sub-agents:** the `agent_task` tool delegates to isolated child agents; built-in + user-defined types (`<configDir>/agents/*.md`); toggleable.
 - **Rich TUI:** Claude-Code-style rendering (full-width diff bars, word-level highlighting, `⏺`/`⎿` glyphs), mouse-wheel scroll + text selection, slash-command palette, `/compact` context compaction, `/help` for the rest.
 - **Remote control:** WebSocket + JSON-RPC 2.0 daemon/client, bearer-token auth, loopback-safe bind.

@@ -150,10 +150,13 @@ Pod attach (tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>]):
 
 export interface CliIO {
   write?: (text: string) => void;
+  /** Diagnostics (default stderr: never mixed into a one-shot's stdout or `serve --stdio`'s RPC). */
+  writeErr?: (text: string) => void;
 }
 
 export async function main(argv: readonly string[], io: CliIO = {}): Promise<number> {
   const write = io.write ?? ((text: string) => void process.stdout.write(text));
+  const writeErr = io.writeErr ?? ((text: string) => void process.stderr.write(text));
 
   // Leading global options (`--profile`) come off argv BEFORE the dispatch on
   // args[0], so they never reach a one-shot prompt (docs/feat/config-profiles.md).
@@ -233,6 +236,16 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   } catch (error) {
     write(`\n[config error] ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
+  }
+
+  // Skill discovery problems, once, before any Ink mount (AGENTS §7: no raw
+  // write while Ink owns the terminal). Only where THIS config builds the
+  // agent: `run`/`attach` sessions use the pod's own skills, discovered (and
+  // reported) by the pod daemon.
+  if (mode !== "run" && mode !== "attach") {
+    for (const line of config.skillDiagnostics) {
+      writeErr(`[skills] ${line}\n`);
+    }
   }
 
   // Host the remote-control daemon and run until interrupted.

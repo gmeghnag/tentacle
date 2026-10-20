@@ -14,6 +14,7 @@ import {
   type ResultTransform,
   collapseRepeatedLines,
   createSubagentRunner,
+  exemptTools,
   mergeAgentTypes,
   parseAgentDefinition,
   redactSecrets,
@@ -22,12 +23,18 @@ import {
   summarizeText,
   tabulateJson,
 } from "@tentacle/agent";
-import type { TentacleConfig } from "@tentacle/config";
+import { type TentacleConfig, offeredSkills, splitFrontmatter } from "@tentacle/config";
 import { type JobController, type ModelProvider, PermissionBroker } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
 import { createModelProvider } from "@tentacle/providers";
-import { ToolRegistry, builtinTools, createTaskTool } from "@tentacle/tools";
+import {
+  SKILL_TOOL_NAME,
+  ToolRegistry,
+  builtinTools,
+  createSkillTool,
+  createTaskTool,
+} from "@tentacle/tools";
 
 /** Load user-defined agent types from `<configDir>/agents/*.md` (missing dir → none). */
 function loadUserAgentTypes(configDir: string): AgentType[] {
@@ -100,12 +107,26 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         summarize: (text, signal) => summarizeText(model, text, signal),
       })
     : spillLargeOutput({ maxInlineChars: config.maxInlineOutputChars });
+  // A `skill` result is instructions the model asked for: never spilled,
+  // summarised or reshaped (the tool bounds it itself) — but still redacted.
+  const shaping = (t: ResultTransform): ResultTransform => exemptTools([SKILL_TOOL_NAME], t);
   const resultTransforms: ResultTransform[] = [
     ...(config.redactSecrets ? [redactSecrets()] : []),
-    ...(config.dedupOutput ? [collapseRepeatedLines()] : []),
-    ...(config.tabulateJson ? [tabulateJson()] : []),
-    largeOutput,
+    ...(config.dedupOutput ? [shaping(collapseRepeatedLines())] : []),
+    ...(config.tabulateJson ? [shaping(tabulateJson())] : []),
+    shaping(largeOutput),
   ];
+
+  // Skills: the tool offers exactly the cataloged skills (one rule,
+  // `offeredSkills`); none → no tool. The body is read at activation through
+  // the session env (in a pod: the pod's filesystem, where discovery ran).
+  const skillTool = createSkillTool(offeredSkills(config.skills), async (skill, ctx) => {
+    const { body, bodyLine } = splitFrontmatter(await ctx.env.readFile(skill.location));
+    return { body, bodyLine };
+  });
+  if (skillTool) {
+    tools.register(skillTool);
+  }
 
   // Sub-agents: when enabled, register the `agent_task` delegation tool. Children
   // inherit the same confined env + permission requester; the runner filters

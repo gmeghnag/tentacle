@@ -16,8 +16,16 @@ import {
   PROMPT_FILENAME,
 } from "./defaults.ts";
 import { applyProfile } from "./profile.ts";
-import { type ApiKeySource, type Env, type ResolvedConfig, resolveConfig } from "./resolve.ts";
+import {
+  type ApiKeySource,
+  type Env,
+  type ResolvedConfig,
+  resolveConfig,
+  skillsEnabled,
+} from "./resolve.ts";
 import { type FileConfig, FileConfigSchema } from "./schema.ts";
+import { scanSkills, skillRoots } from "./skills-scan.ts";
+import { type SkillInfo, catalogCapDiagnostic, mergeSkills } from "./skills.ts";
 
 export class ConfigError extends Error {
   override readonly name = "ConfigError";
@@ -64,6 +72,14 @@ export interface TentacleConfig {
   readonly promptPath: string;
   /** Resolved path of the auto-loaded AGENTS.md, if one was folded into the prompt. */
   readonly agentsPath?: string;
+  /**
+   * Discovered Agent Skills, after precedence (empty when disabled), including
+   * the ones hidden from the model (`disable-model-invocation`). Built once:
+   * a new skill needs a restart.
+   */
+  readonly skills: readonly SkillInfo[];
+  /** Skill discovery problems (skipped, shadowed, ignored fields) for the user. */
+  readonly skillDiagnostics: readonly string[];
   /** The profile applied from the config file (`--profile` / `TENTACLE_PROFILE`), if any. */
   readonly profile?: string;
   readonly sources: ResolvedConfig["sources"] & { readonly apiKey: ApiKeySource };
@@ -228,12 +244,29 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     }
   }
 
+  // Discover skills from the launch folder (the same root as AGENTS.md) and the
+  // user scopes. Best-effort like AGENTS.md: problems are diagnostics, never
+  // a failed startup. Disabled → no I/O at all.
+  let skills: SkillInfo[] = [];
+  const skillDiagnostics: string[] = [];
+  if (skillsEnabled(fileConfig, env)) {
+    const scan = await scanSkills(await skillRoots(launchCwd, home, configDir));
+    const merged = mergeSkills(scan.candidates);
+    skills = merged.skills;
+    skillDiagnostics.push(...scan.diagnostics, ...merged.diagnostics);
+    const capped = catalogCapDiagnostic(skills);
+    if (capped) {
+      skillDiagnostics.push(capped);
+    }
+  }
+
   const resolved = resolveConfig({
     fileConfig,
     env,
     defaultCwd: launchCwd,
     promptFromFile,
     agentsMd,
+    skills,
   });
 
   let apiKey = resolved.apiKey;
@@ -269,6 +302,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     configPath,
     promptPath,
     ...(resolved.agentsMdLoaded && agentsFile ? { agentsPath: agentsFile } : {}),
+    skills: resolved.skills,
+    skillDiagnostics,
     ...(profile !== undefined ? { profile } : {}),
     sources: { ...resolved.sources, apiKey: resolved.apiKeySource },
   };
