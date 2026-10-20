@@ -114,6 +114,26 @@ describe("loadConfig reading", () => {
     );
   });
 
+  test("rejects the removed `cwd` key with a hint (top level and in a profile)", async () => {
+    for (const body of [`{ "cwd": "/x" }`, `{ "profiles": { "p": { "cwd": "/x" } } }`]) {
+      const cd = await mkdtemp(join(dir, "cwd-"));
+      await loadConfig({ env: baseEnv(), configDir: cd, cwd: "/launch" });
+      await writeFile(join(cd, CONFIG_FILENAME), body, "utf8");
+      await expect(loadConfig({ env: baseEnv(), configDir: cd, cwd: "/launch" })).rejects.toThrow(
+        /`cwd` was removed/,
+      );
+    }
+  });
+
+  test("TENTACLE_CWD is ignored: tools run in the launch directory", async () => {
+    const cfg = await loadConfig({
+      env: { ...baseEnv(), TENTACLE_CWD: join(dir, "elsewhere") },
+      configDir: join(dir, "envcwd"),
+      cwd: "/launch",
+    });
+    expect(cfg.cwd).toBe("/launch");
+  });
+
   test("reports a JSONC parse error", async () => {
     const cd = join(dir, "broken");
     await loadConfig({ env: baseEnv(), configDir: cd, cwd: "/launch" });

@@ -68,8 +68,6 @@ const settingsShape = {
    * enabled. Set `false`, or the env `TENTACLE_NO_AGENTS_MD`, to disable.
    */
   loadAgentsMd: z.boolean().optional(),
-  /** Default workspace directory for tool execution. */
-  cwd: z.string().min(1).optional(),
   /** Maximum model/tool iterations per turn. */
   maxIterations: z
     .number()

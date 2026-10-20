@@ -93,9 +93,6 @@ export const DEFAULT_CONFIG_JSONC = `{
   // System prompt file, relative to this directory (or an absolute path).
   // "systemPromptFile": "${PROMPT_FILENAME}",
 
-  // Default workspace directory for tools (defaults to the launch directory).
-  // "cwd": "~/code/project",
-
   // Max model/tool iterations per turn.
   // "maxIterations": ${DEFAULT_MAX_ITERATIONS}, // -1 = unlimited
 

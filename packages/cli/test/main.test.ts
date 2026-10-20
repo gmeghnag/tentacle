@@ -58,7 +58,6 @@ beforeAll(async () => {
     "TENTACLE_CONFIG_DIR",
     "TENTACLE_MODEL_BASE_URL",
     "TENTACLE_MODEL",
-    "TENTACLE_CWD",
     "TENTACLE_MODEL_API_KEY",
   ]) {
     saved[key] = process.env[key];
@@ -68,7 +67,6 @@ beforeAll(async () => {
   process.env.TENTACLE_CONFIG_DIR = join(dir, "config");
   process.env.TENTACLE_MODEL_BASE_URL = `http://localhost:${server.port}/v1`;
   process.env.TENTACLE_MODEL = "test";
-  process.env.TENTACLE_CWD = dir;
   process.env.TENTACLE_MODEL_API_KEY = undefined;
 });
 
@@ -87,7 +85,15 @@ afterAll(async () => {
 describe("cli main (end-to-end)", () => {
   test("runs a tool call and writes the file, then prints the reply", async () => {
     const out: string[] = [];
-    const code = await main(["bun", "cli", "create out.txt"], { write: (t) => out.push(t) });
+    // The workspace is the launch directory (no TENTACLE_CWD): launch from `dir`.
+    const launch = process.cwd();
+    process.chdir(dir);
+    let code: number;
+    try {
+      code = await main(["bun", "cli", "create out.txt"], { write: (t) => out.push(t) });
+    } finally {
+      process.chdir(launch);
+    }
     const text = out.join("");
 
     expect(code).toBe(0);

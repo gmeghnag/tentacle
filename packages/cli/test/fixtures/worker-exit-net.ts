@@ -72,7 +72,6 @@ const server = Bun.serve({
 process.env.TENTACLE_CONFIG_DIR = join(dir, "config");
 process.env.TENTACLE_MODEL_BASE_URL = `http://localhost:${server.port}/v1`;
 process.env.TENTACLE_MODEL = "test";
-process.env.TENTACLE_CWD = dir;
 const config = await loadConfig({ cwd: dir });
 
 const runtime = await startWorkerRuntime(

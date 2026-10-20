@@ -57,7 +57,6 @@ Resolved with precedence **environment variables › `config.jsonc` › built-in
 | `model.contextWindow` | — | Token budget for the TUI context-fill meter |
 | `model.maxTokens` | `TENTACLE_MAX_TOKENS` | Max output tokens per response. Unset: omitted for openai, `64000` for anthropic |
 | `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline) | System prompt file (default `PROMPT.md`) |
-| `cwd` | `TENTACLE_CWD` | Workspace directory for tools (default: launch dir); writes are confined here |
 | `maxIterations` | `TENTACLE_MAX_ITERATIONS` | Max model/tool rounds per turn |
 | `subagents.enabled` | `TENTACLE_SUBAGENTS` | Enable the `agent_task` sub-agent tool (default on) |
 
@@ -97,7 +96,7 @@ See [`docs/architecture/F3-remote-control.md`](./docs/architecture/F3-remote-con
 - **Agent loop** over any OpenAI-compatible model or the native Anthropic Messages API; multi-turn `Session`; streaming events.
 - **Built-in tools:** `fs_read`, `fs_write`, `fs_edit` (with unified diffs), `shell`.
 - **Background jobs:** `shell` with `run_in_background` plus `shell_output` / `shell_kill`; a finished job is surfaced live and fed back to the model (exit trigger).
-- **Workspace confinement:** writes confined to `cwd` via realpath (symlink escapes refused); reads unconfined.
+- **Workspace confinement:** writes confined to the launch directory via realpath (symlink escapes refused); reads unconfined.
 - **Permission engine:** shell commands gated with command-prefix-scoped "always" approvals; never auto-approves command substitution.
 - **Sub-agents:** the `agent_task` tool delegates to isolated child agents; built-in + user-defined types (`<configDir>/agents/*.md`); toggleable.
 - **Rich TUI:** Claude-Code-style rendering (full-width diff bars, word-level highlighting, `⏺`/`⎿` glyphs), mouse-wheel scroll + text selection, slash-command palette, `/compact` context compaction, `/help` for the rest.
