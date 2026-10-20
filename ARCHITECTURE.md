@@ -69,8 +69,9 @@ ACP's stdio/local, single-client assumptions do not fit a networked daemon. But 
 options/outcomes) are modelled on ACP, so an ACP adapter (editors) and an AG-UI
 adapter (web UI) are cheap to add later. One deliberate departure: a permission is
 session state — a `permission_request` event any attached client answers with
-`session/resolve_permission` (first answer wins, no timeout) — not ACP's
-agent→client request bound to one connection (`docs/feat/permission-events.md`). One internal event/command model; interop protocols are
+`session/resolve_permission` (first answer wins, no timeout; on `serve` it
+survives a daemon restart and is asked again, `docs/feat/suspended-turn-resume.md`)
+— not ACP's agent→client request bound to one connection (`docs/feat/permission-events.md`). One internal event/command model; interop protocols are
 optional projections.
 
 **Exported wire schema.** The zod schemas in `@tentacle/protocol` are exported as

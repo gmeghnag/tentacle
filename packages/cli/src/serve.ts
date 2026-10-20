@@ -130,6 +130,7 @@ async function reloadedHost(
     notice(`skipped ${bad.file}: ${bad.reason} (left as is)`);
   }
   let restored = 0;
+  let resumed = 0;
   // By project key, not by string: the same project through a symlink (or a
   // trailing slash) shares this directory and must restore its sessions.
   const key = projectKey(config.cwd);
@@ -142,12 +143,19 @@ async function reloadedHost(
       );
       continue;
     }
-    sessionHost.restore(parsed.record);
+    // Running right after a restore = a turn suspended on a permission, asked again.
+    if (sessionHost.restore(parsed.record).running) {
+      resumed++;
+    }
     restored++;
   }
   if (restored > 0) {
+    const waiting =
+      resumed > 0
+        ? ` (${resumed} resumed a turn waiting for approval — answer it from any client)`
+        : "";
     notice(
-      `restored ${restored} session${restored === 1 ? "" : "s"} from ${daemonStoreDir(config)}`,
+      `restored ${restored} session${restored === 1 ? "" : "s"} from ${daemonStoreDir(config)}${waiting}`,
     );
   }
   return sessionHost;

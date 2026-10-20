@@ -47,9 +47,12 @@ describe("serve persistence (end to end, real disk)", () => {
   async function client(url: string) {
     const ws = new WebSocket(url);
     const replies = new Map<number, { result?: unknown; error?: { code: number } }>();
+    /** Every `session/update` notification's `update`, in arrival order. */
+    const updates: Array<{ type: string } & Record<string, unknown>> = [];
     ws.onmessage = (event) => {
       const msg = JSON.parse(String(event.data));
       if (typeof msg.id === "number") replies.set(msg.id, msg);
+      else if (msg.method === "session/update") updates.push(msg.params.update);
     };
     await new Promise<void>((resolve) => {
       ws.onopen = () => resolve();
@@ -65,7 +68,7 @@ describe("serve persistence (end to end, real disk)", () => {
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: { streaming: true },
     });
-    return { ws, request };
+    return { ws, request, updates };
   }
 
   const seed = [
@@ -89,6 +92,8 @@ describe("serve persistence (end to end, real disk)", () => {
     const second = await serve(config, notices);
     try {
       expect(notices.some((l) => l.startsWith("restored 1 session from"))).toBe(true);
+      // Idle on reload: the operator is not told to answer a request that does not exist.
+      expect(notices.some((l) => l.includes("resumed"))).toBe(false);
       const b = await client(second.url);
       const reopened = await b.request("session/open", { sessionId: "s-e2e" });
       expect(reopened?.result).toMatchObject({ created: false, resync: true });
@@ -103,6 +108,79 @@ describe("serve persistence (end to end, real disk)", () => {
       await second.stop();
     }
     expect(await readdir(daemonStoreDir(config))).not.toContain("s-e2e.json");
+  });
+
+  test("B7 a turn suspended at a restart is asked again over the wire; cancel converges on disk", async () => {
+    // Mutation: drop `resume` from SessionHost.restore → no notice, no request, the turn is closed.
+    // The record a serve leaves when it stops while `shell` waits for approval.
+    const record = {
+      id: "s-resume",
+      cwd: config.cwd,
+      model: config.model,
+      createdAt: 1,
+      updatedAt: 2,
+      title: "t",
+      kind: "tentacle.daemon-session",
+      schemaVersion: 1,
+      lastActiveAt: 2,
+      enqueueIds: [],
+      turns: [{ turnId: "T1" }],
+      messages: [
+        { role: "user", content: "say hi" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "c1", name: "shell", arguments: '{"command":"echo hi"}' }],
+        },
+      ],
+      turn: {
+        turnId: "T1",
+        steering: [],
+        pending: { toolCallId: "c1", tool: "shell", resumable: true, requestedAt: 2 },
+      },
+    };
+    await mkdir(daemonStoreDir(config), { recursive: true });
+    const file = join(daemonStoreDir(config), "s-resume.json");
+    await writeFile(file, JSON.stringify(record));
+    const notices: string[] = [];
+    const daemon = await serve(config, notices);
+    try {
+      expect(notices.some((l) => /restored 1 session .*1 resumed a turn waiting/.test(l))).toBe(
+        true,
+      );
+      const c = await client(daemon.url);
+      const opened = await c.request("session/open", { sessionId: "s-resume" });
+      expect(opened?.result).toMatchObject({ created: false, resync: true });
+      await until(() => c.updates.some((u) => u.type === "permission_request"));
+      const ask = c.updates.find((u) => u.type === "permission_request");
+      expect(ask).toMatchObject({ toolCallId: "c1", tool: "shell" });
+      expect(c.updates.some((u) => u.type === "turn_start")).toBe(false);
+      const snap = (await c.request("session/snapshot", { sessionId: "s-resume" }))?.result as {
+        turn?: unknown;
+      };
+      expect(snap.turn).toEqual({ turnId: "T1" });
+      // Cancel (no model call, nothing runs): the turn ends and the disk forgets it.
+      // `session/cancel` is a notification.
+      c.ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "session/cancel",
+          params: { sessionId: "s-resume" },
+        }),
+      );
+      await until(() => c.updates.some((u) => u.type === "turn_end"));
+      expect(c.updates.find((u) => u.type === "turn_end")).toMatchObject({
+        turnId: "T1",
+        stopReason: "cancelled",
+      });
+      c.ws.close();
+    } finally {
+      await daemon.stop();
+    }
+    const after = JSON.parse(await readFile(file, "utf8"));
+    expect(after.turn).toBeUndefined();
+    expect(after.messages.at(-1)).toMatchObject({ role: "tool", toolCallId: "c1" });
+    expect(after.turns).toEqual([{ turnId: "T1", end: { stopReason: "cancelled" } }]);
   });
 
   test("A11 unusable records are reported, left byte-identical, and never overwritten", async () => {

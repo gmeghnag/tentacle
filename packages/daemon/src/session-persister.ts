@@ -7,9 +7,10 @@
  * history there, not at the later I/O) and handed to the store, whose own
  * serialized latest-wins queue does the writing. A turn never waits on the
  * disk — that is what keeps the turn-end write out of the steering window
- * (agent.ts, the late-steer INVARIANT). Only two acks wait, via `flush`, and
- * both are outside that window: an approved tool about to run, and an
- * `enqueue`.
+ * (agent.ts, the late-steer INVARIANT). Only three things wait, via `flush`,
+ * all outside that window: a permission request before it is shown, an
+ * approved tool about to run (both inside the gate, mid-round), and an
+ * `enqueue` ack.
  *
  * A failed write is reported to `onError` and never thrown: the session keeps
  * serving from memory and the next `schedule` writes fresher data.

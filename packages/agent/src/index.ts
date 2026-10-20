@@ -4,6 +4,7 @@
  */
 export * from "./agent.ts";
 export * from "./session.ts";
+export * from "./resume.ts";
 export * from "./session-store.ts";
 export * from "./compact.ts";
 export * from "./result-pipeline.ts";

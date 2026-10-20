@@ -496,7 +496,13 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       5b. **Fix (DONE 2026-10-20, `fix/session-store-durability`):** `docs/fix/session-store-durability.md` · M · load-bearing (before 6)
       6. **Feat (DONE 2026-10-20, `feat/daemon-side-persistence`):** `docs/feat/daemon-side-persistence.md` (Part A, `serve` only) · M · load-bearing
       7a. **Feat (DONE 2026-10-20, `feat/permission-events`):** `docs/feat/permission-events.md` · L · load-bearing
-      7b. **Eval:** `docs/eval/suspended-turn-resume.md` · M · load-bearing
+      7b. **Feat (in review, `feat/suspended-turn-resume`):** `docs/feat/suspended-turn-resume.md` · M · load-bearing
+      — **Open (pre-existing on `main`, found by the 7b Review, finding 6):** a store
+        write that never settles (hung disk) blocks `cancel` of a turn waiting for
+        approval — the gate waits on the clear-before-run flush
+        (`hosted-session.ts` `awaitDecision`); since 7b a re-asked request is also
+        never shown. Only `close` ends such a turn. Needs a bounded wait or a
+        cancel path that does not wait on the disk. Not yet an eval.
       8a. **Eval:** `docs/eval/client-reattach.md` · M · load-bearing
       8b. **Eval:** `docs/eval/client-reattach-frontends.md` · M · load-bearing
       — **Eval:** `docs/eval/attachments.md` (sister) · 4 sub-tasks · load-bearing
