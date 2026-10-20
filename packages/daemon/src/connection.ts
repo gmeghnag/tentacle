@@ -43,12 +43,13 @@ import {
 import type { Attachment, HostedSession } from "./hosted-session.ts";
 import type { SessionHost } from "./session-host.ts";
 
-/** Per-connection resource limits (the daemon's exposure boundary sets these). */
+/**
+ * Per-connection resource limits (the daemon's exposure boundary sets these).
+ * Session counts are daemon-wide, on `SessionHost`: sessions outlive connections.
+ */
 export interface ConnectionOptions {
   /** Auto-deny a `session/request_permission` the client leaves unanswered this long. */
   readonly permissionTimeoutMs?: number;
-  /** Reject a `session/open` past this many sessions attached to one connection. */
-  readonly maxSessions?: number;
   /** Reject an inbound frame larger than this (bytes) before parsing it. */
   readonly maxFrameBytes?: number;
   /**
@@ -76,7 +77,6 @@ export class Connection {
   private readonly peer: RpcPeer;
   private readonly host: SessionHost;
   private readonly attached = new Map<string, Attached>();
-  private readonly maxSessions?: number;
   private readonly servesModel: boolean;
   private initialized = false;
 
@@ -87,7 +87,6 @@ export class Connection {
     options: ConnectionOptions = {},
   ) {
     this.host = host;
-    this.maxSessions = options.maxSessions;
     this.servesModel = options.servesModel === true;
     this.peer = new RpcPeer(channel, {
       onRequest: (method, params, context) => this.onRequest(method, params, context),
@@ -240,17 +239,10 @@ export class Connection {
   // id never build two agents. The replay goes out as notifications BEFORE the
   // response.
   private open(params: OpenParams): OpenResult {
-    // A session closed by another client must not count against this
-    // connection's cap, nor stay referenced here.
+    // A session closed by another client must not stay referenced here.
     this.dropStale();
     const previous =
       params.sessionId !== undefined ? this.attached.get(params.sessionId) : undefined;
-    if (!previous && this.maxSessions !== undefined && this.attached.size >= this.maxSessions) {
-      throw new RpcError(
-        DomainErrorCode.TooManySessions,
-        `too many sessions on this connection (max ${this.maxSessions})`,
-      );
-    }
     // A retried open from this connection: drop the old attachment first, or
     // every update would arrive twice.
     if (previous && params.sessionId !== undefined) {

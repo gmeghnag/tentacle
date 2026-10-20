@@ -464,7 +464,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       3b. **Feat (DONE 2026-10-20, `feat/session-turn-events`):** `docs/feat/session-turn-events.md` · M · load-bearing
       3c. **Feat (DONE 2026-10-20, `feat/session-history-cut`):** `docs/feat/session-history-cut.md` · M · load-bearing
       4. **Feat (DONE 2026-10-20, `feat/session-registry`):** `docs/feat/session-registry.md` · L · load-bearing
-      5. **Eval:** `docs/eval/session-ttl-limits.md` · M · load-bearing
+      5. **Feat (in review, `feat/session-ttl-limits`):** `docs/feat/session-ttl-limits.md` · M · load-bearing
       5b. prerequisite: `docs/eval/session-store-durability.md` (before 6)
       6. **Eval:** `docs/eval/daemon-side-persistence.md` (Part A, `serve` only) · M · load-bearing
       7a. **Eval:** `docs/eval/permission-events.md` · L · load-bearing

@@ -339,15 +339,6 @@ describe("daemon ↔ client (in-memory)", () => {
     expect(end.stopReason).toBe("end_turn"); // and the turn did not hang
   });
 
-  test("session/open is refused past the per-connection cap", async () => {
-    const { client } = harness(new ScriptedProvider([]), noopEnv, {}, { maxSessions: 1 });
-    await client.request("initialize", INIT);
-    await client.request("session/open", { create: true }); // the one allowed session
-    await expect(client.request("session/open", { create: true })).rejects.toMatchObject({
-      code: DomainErrorCode.TooManySessions,
-    });
-  });
-
   test("a second initialize is rejected (handshake is idempotent-guarded)", async () => {
     const { client } = harness(new ScriptedProvider([]), noopEnv);
     await client.request("initialize", INIT);
