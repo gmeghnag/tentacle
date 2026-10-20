@@ -1,6 +1,6 @@
 # feat/client-reattach — `RemoteClient` reconnects and resumes transparently
 
-> **Status:** promoted 2026-10-20 — Revision approved (owner answers R-Q1…R-Q4, 2026-10-20) · Execution done · Review round 1 REQUEST-CHANGES, findings 1–8 addressed (Execution → "Fixes after Review round 1"); no second Review by owner choice · feat (child 8a of `docs/eval/session-reattach.md`)
+> **Status:** DONE — merged to `main` 2026-10-20 (one fresh-context Review: REQUEST-CHANGES, findings 1–8 addressed with red→green tests; no second Review by owner choice)
 > **Branch:** `feat/client-reattach`
 > **Type:** feat · **Size:** L (re-estimated in the Revision; was "M") · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (TUI-over-RPC one-session-path + single-broker invariants, AGENTS §7)
 
