@@ -89,7 +89,7 @@ console.log("/tmp realpath →", realpathSync("/tmp"));
 
 ### Prior art (constraints)
 
-- `docs/eval/session-store-durability.md`: same file. `save` is not atomic,
+- `docs/fix/session-store-durability.md`: same file. `save` is not atomic,
   `load` swallows parse errors as "absent", and saves are fire-and-forget. A
   migration that moves files must not make this worse. Ideally it lands after,
   or together with, the atomic-save fix.

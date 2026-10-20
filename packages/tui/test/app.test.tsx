@@ -166,6 +166,116 @@ describe("App", () => {
     unmount();
   });
 
+  test("a host notice is shown live while idle, and the feed is unsubscribed on unmount", async () => {
+    // Mutation: drop the `notices` subscription effect → the text never renders.
+    const listeners = new Set<(text: string) => void>();
+    const notices = {
+      onNotice(listener: (text: string) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    const agent = new Agent({
+      model: new ScriptedProvider([]),
+      tools: new ToolRegistry(),
+      env: noopEnv,
+    });
+    const { lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" notices={notices} />,
+    );
+    await delay(30);
+    expect(listeners.size).toBe(1);
+    for (const listener of listeners) {
+      listener("⚠ Couldn't save session abcd1234: EACCES");
+    }
+    await delay(30);
+    expect(lastFrame()).toContain("Couldn't save session abcd1234: EACCES");
+    unmount();
+    await delay(10); // passive-effect cleanup runs after the unmount commit
+    expect(listeners.size).toBe(0);
+  });
+
+  /** A session whose turn streams once, then runs until aborted (or forever, if `deaf`). */
+  function slowTurnSession(log: string[], deaf = false) {
+    return () => ({
+      async *send(_prompt: string, signal?: AbortSignal) {
+        try {
+          yield { type: "text" as const, delta: "working…" };
+          await new Promise<void>((resolve) => {
+            if (!deaf) {
+              signal?.addEventListener("abort", () => resolve());
+            }
+          });
+        } finally {
+          // Where a real session persists the turn (Session.persist / flush).
+          log.push(signal?.aborted ? "turn settled (aborted)" : "turn settled");
+        }
+      },
+    });
+  }
+  /** A NoticeFeed whose unsubscribe marks the App's unmount. */
+  function unmountSpy(log: string[]) {
+    return {
+      onNotice: () => () => {
+        log.push("unmounted");
+      },
+    };
+  }
+
+  test("/exit mid-turn stops the turn and exits only after it settled (so it is saved)", async () => {
+    // Mutation: make /exit call `exit()` unconditionally → "unmounted" with no settle.
+    const log: string[] = [];
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        createSession={slowTurnSession(log)}
+        notices={unmountSpy(log)}
+        model="qwen3"
+        cwd="/tmp/work"
+      />,
+    );
+    await delay(30);
+    stdin.write("hi");
+    await delay(20);
+    stdin.write("\r");
+    await delay(50);
+    expect(lastFrame()).toContain("working…");
+    stdin.write("/exit");
+    await delay(20);
+    stdin.write("\r");
+    await delay(80);
+    expect(log).toEqual(["turn settled (aborted)", "unmounted"]);
+    unmount();
+  });
+
+  test("a second /exit while the turn won't stop quits at once", async () => {
+    const log: string[] = [];
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        createSession={slowTurnSession(log, true)}
+        notices={unmountSpy(log)}
+        model="qwen3"
+        cwd="/tmp/work"
+      />,
+    );
+    await delay(30);
+    stdin.write("hi");
+    await delay(20);
+    stdin.write("\r");
+    await delay(50);
+    stdin.write("/exit");
+    await delay(20);
+    stdin.write("\r");
+    await delay(50);
+    expect(log).toEqual([]); // still waiting for the (deaf) turn
+    expect(lastFrame()).toContain("again to quit now");
+    stdin.write("/exit");
+    await delay(20);
+    stdin.write("\r");
+    await delay(50);
+    expect(log).toEqual(["unmounted"]);
+    unmount();
+  });
+
   test("/clear closes the previous session BEFORE building the next one (decision D3)", async () => {
     // Mutation: drop the `close?.()` in the /clear handler → nothing closed.
     const log: string[] = [];

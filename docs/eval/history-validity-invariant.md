@@ -50,6 +50,12 @@ messages are allowed, but strict servers may reject them.
   (`packages/daemon/src/session-host.ts:40`) → `[...options.messages]`
   (`session.ts:38-41`). `grep -rni "validateHistory\|repairHistory\|repair" packages/*/src` finds no
   history validator anywhere.
+  > **Update 2026-10-20 (`fix/session-store-durability`):** `load` is no longer a
+  > cast: `parseSessionRecord` checks the record and each message's *shape*
+  > (strict wire keys, role, string content, 3-key tool calls) and reports a bad
+  > file. It does **not** check history *validity* (call/result pairing,
+  > argument JSON) — that remains this eval's question, and a repair on resume
+  > would sit after `parseSessionRecord`.
 - **Producers that are already guarded (these weaken the "realistic trigger" side).**
   - The RPC permission path turns every reject into `cancelled` → `allowed:false`
     (`packages/daemon/src/connection.ts:179-189`).

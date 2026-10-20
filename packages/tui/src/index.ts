@@ -7,5 +7,5 @@ export * from "./markdown.ts";
 export * from "./render-lines.ts";
 export * from "./scroll.ts";
 export * from "./commands.ts";
-export { App, type AppProps, type SessionController } from "./App.tsx";
+export { App, type AppProps, type NoticeFeed, type SessionController } from "./App.tsx";
 export { startTui, type TuiOptions } from "./run.tsx";
