@@ -520,11 +520,11 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       `profiles` in the user's `config.jsonc`, merged over it (connection group
       as a unit; MCP servers by name, `null` removes). DONE 2026-10-20,
       `feat/config-profiles`: `docs/feat/config-profiles.md` · S–M · cross-module.
-- [ ] 🟡 **Unknown CLI flags are never rejected.** `parseFlags` (`cli/flags.ts`)
-      accepts anything: a typo'd flag after `serve`/`run`/`attach` is silently
-      ignored, and an unknown LEADING option falls through to the one-shot path
-      and is sent to the model as prompt text (found by the `config-profiles`
-      repro). Type: fix · Size: S · Blast: cross-module. Open.
+- [x] 🟡 **Unknown CLI flags are never rejected; `-n` is not a namespace.** FIXED
+      2026-10-20, `fix/cli-strict-args`: `docs/fix/cli-strict-args.md` — one closed
+      spec per command; flags anywhere (`attach mypod -n dev`); typos, missing
+      values, repeats and stray words are errors before any cluster/model call.
+      Type: fix · Size: S–M · Blast: cross-module.
 - [ ] **No `tentacle update`** (self-update + cached pod binaries), and `attach`
       reuses a pod binary of any version (silent skew). Open questions 1–8
       pending discussion. **Eval:** `docs/eval/tentacle-update.md`. Type: eval →

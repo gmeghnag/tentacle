@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { DomainErrorCode } from "@tentacle/transport";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
-import { parseDuration, parseFlags, parseServeLimits } from "../src/flags.ts";
+import { ARGS, parseArgs, parseDuration, parseServeLimits } from "../src/flags.ts";
 import { startDaemon, sweepIntervalFor } from "../src/serve.ts";
 
 describe("parseDuration", () => {
@@ -35,7 +35,11 @@ describe("sweepIntervalFor (the reaper's period)", () => {
 });
 
 describe("parseServeLimits (serve flags)", () => {
-  const limits = (args: string[]) => parseServeLimits(parseFlags(args));
+  const limits = (args: string[]) => {
+    const parsed = parseArgs(args, ARGS.serve);
+    if (!parsed.ok) throw new Error(parsed.error);
+    return parseServeLimits(parsed);
+  };
 
   test("nothing given → nothing set (startDaemon applies the defaults)", () => {
     expect(limits([])).toEqual({});
@@ -69,7 +73,7 @@ describe("parseServeLimits (serve flags)", () => {
     expect(() => limits(["--max-detached-sessions", "2.5"])).toThrow(/--max-detached-sessions/);
     expect(() => limits(["--ws-idle-timeout", "1500ms"])).toThrow(/whole seconds/);
     expect(() => limits(["--ws-idle-timeout", "961s"])).toThrow(/at most 960s/);
-    // A flag with no value lands in `bools`: an error, never a silent default.
+    // A flag with no value: an error (from the strict parser), never a silent default.
     expect(() => limits(["--session-ttl"])).toThrow(/needs a value/);
     expect(() => limits(["--max-sessions", "--port", "1"])).toThrow(/needs a value/);
   });

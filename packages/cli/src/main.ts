@@ -30,9 +30,13 @@ import { type SessionController, startTui } from "@tentacle/tui";
 import { type TentacleConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import {
+  ARGS,
+  type ParsedFlags,
   type ServeLimits,
+  USAGE,
+  cliMode,
   extractGlobalOptions,
-  parseFlags,
+  parseArgs,
   parseServeLimits,
   resolveToken,
 } from "./flags.ts";
@@ -59,17 +63,18 @@ Usage:
   tentacle --plain         plain line-based REPL (for pipes / no TTY)
   tentacle --resume [uid]  resume a saved session (latest if no uid) in the TUI
   tentacle -i --in-process run the agent on the render thread (opt out of the worker)
-  tentacle run --image <ref> [--namespace <ns>] [--bin-dir <dir>] [--resume [uid]] [<name>]
+  tentacle run --image <ref> [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]] [<name>]
                                 run the agent inside a Kubernetes pod (sandbox), local TUI
                                 (<name> is the pod name; random when omitted; sessions
                                 persist on the laptop, so --resume works)
-  tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>] [--bin-dir <dir>] [--resume [uid]]
+  tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]]
                                 attach the TUI to an EXISTING pod (tentacle is
                                 injected if it is not there yet); --container is the
                                 container to exec into (default: the pod's only one);
                                 the pod is NOT deleted on exit — closing the TUI
                                 detaches, the pod stays up
   tentacle <prompt...>     run a single task and exit
+  tentacle -- <prompt...>  the same, for a prompt that starts with '-'
   tentacle serve [opts]    host the remote-control daemon
   tentacle connect <url>   drive a remote daemon with the TUI
   tentacle --help          show this help
@@ -86,6 +91,10 @@ Remote control:
   tentacle connect ws(s)://host:port [--token T|--token-command CMD]
   A non-loopback --host requires a token (remote code execution risk).
   Token env fallback: TENTACLE_REMOTE_TOKEN.
+
+Options are checked: an unknown flag, a missing value or a stray argument is
+an error. Flags may come before or after a command's arguments
+(tentacle attach mypod -n dev = tentacle attach -n dev mypod).
 
 Configuration (precedence: env > profile > config file > defaults):
   ~/.config/tentacle/config.jsonc   settings (scaffolded on first run)
@@ -107,7 +116,7 @@ Environment:
   TENTACLE_CWD              working directory for tools
   TENTACLE_SUBAGENTS        enable/disable sub-agents (on/off, default on)
 
-Pod execution (tentacle run --image <ref> [--namespace <ns>] [<name>]):
+Pod execution (tentacle run --image <ref> [-n|--namespace <ns>] [<name>]):
   the image must be a Linux glibc image with sh+head (tentacle is injected
   into the pod; musl images cannot run it). --namespace defaults to the
   kubeconfig context's namespace; a MISSING namespace fails with a clear error
@@ -123,7 +132,7 @@ Pod execution (tentacle run --image <ref> [--namespace <ns>] [<name>]):
                            /usr/local/bin). Use a writable+exec dir (e.g. /tmp) for a
                            pod with a read-only root filesystem.
 
-Pod attach (tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>]):
+Pod attach (tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>]):
   <pod> must already exist (kubectl get pods -n <ns>); --namespace defaults like
   run (context's namespace — pass it if the pod lives elsewhere). Multi-container
   pods need the target container: --container <c> (alias -c) — without it the
@@ -171,14 +180,25 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     return 0;
   }
 
-  // `connect` drives a remote daemon; it needs no local model configuration.
-  if (args[0] === "connect") {
-    const { positional, flags } = parseFlags(args.slice(1));
-    const url = positional[0];
-    if (!url) {
-      write("\n[error] usage: tentacle connect ws(s)://host:port [--token T]\n");
+  // Every command's arguments are validated HERE, before config, cluster or
+  // model: an unknown flag, a missing value or a stray word is an error, never
+  // ignored or sent as a prompt (docs/fix/cli-strict-args.md).
+  const mode = cliMode(args);
+  let parsed: ParsedFlags = { positional: [], flags: new Map(), bools: new Set() };
+  if (mode !== "prompt" && mode !== "empty") {
+    const own = mode === "tui" || mode === "plain" ? args : args.slice(1);
+    const result = parseArgs(own, ARGS[mode]);
+    if (!result.ok) {
+      write(`\n[error] ${result.error}\nusage: ${USAGE[mode]}\n`);
       return 1;
     }
+    parsed = result;
+  }
+
+  // `connect` drives a remote daemon; it needs no local model configuration.
+  if (mode === "connect") {
+    const { positional, flags } = parsed;
+    const url = positional[0] ?? "";
     try {
       const token = await resolveToken(flags);
       await connectTui({ url, ...(token ? { token } : {}) }, write);
@@ -196,7 +216,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // there does `mkdir ~/.config` → EROFS → the daemon dies and the client sees
   // "connection closed". So the stdio daemon never scaffolds; missing config
   // files fall back to defaults.
-  const isStdioDaemon = args[0] === "serve" && args.includes("--stdio");
+  const isStdioDaemon = mode === "serve" && parsed.bools.has("stdio");
   let config: TentacleConfig;
   try {
     config = await loadConfig({
@@ -210,8 +230,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   }
 
   // Host the remote-control daemon and run until interrupted.
-  if (args[0] === "serve") {
-    const { flags, bools } = parseFlags(args.slice(1));
+  if (mode === "serve") {
+    const { flags, bools } = parsed;
     // `--stdio`: run the daemon over stdin/stdout instead of a WebSocket (used
     // inside a pod, driven over the k8s exec channel — F4). stdout IS the RPC
     // channel here, so every log line must go to stderr.
@@ -352,8 +372,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // Cluster auth resolves from the local kubeconfig (current context), or from
   // TENTACLE_K8S_SERVER/_TOKEN as an explicit override (e.g. behind a proxy).
   // No in-process fallback.
-  if (args[0] === "run") {
-    const { flags: runFlags, bools: runBools, positional: runPos } = parseFlags(args.slice(1));
+  if (mode === "run") {
+    const { flags: runFlags, bools: runBools, positional: runPos } = parsed;
     const namespace = runFlags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE;
     const image = runFlags.get("image") ?? process.env.TENTACLE_POD_IMAGE;
     const binDir = runFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR;
@@ -403,40 +423,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // one (a preflight `--version` probe skips the transfer on re-attach); the
   // same image constraints as `run` apply to the injected binary. See
   // `startAttachRuntime` and `docs/feat/pod-exec-attach.md`.
-  if (args[0] === "attach") {
-    // `-c` is a short alias for `--container` (`parseFlags` only understands
-    // long `--` flags), so extract it first: `-c <name>` and `-c=<name>`.
-    const rest = args.slice(1);
-    let shortContainer: string | undefined;
-    const filtered: string[] = [];
-    for (let i = 0; i < rest.length; i++) {
-      const arg = rest[i];
-      if (arg === undefined) {
-        continue;
-      }
-      if (arg === "-c") {
-        const value = rest[++i];
-        if (value === undefined) {
-          write("\n[error] -c needs a container name (alias for --container <c>)\n");
-          return 1;
-        }
-        shortContainer = value;
-      } else if (arg.startsWith("-c=")) {
-        shortContainer = arg.slice(3);
-      } else {
-        filtered.push(arg);
-      }
-    }
-    const { flags: attachFlags, bools: attachBools, positional: attachPos } = parseFlags(filtered);
-    const podName = attachPos[0];
-    if (!podName) {
-      write(
-        "\n[error] usage: tentacle attach <pod> [--namespace <ns>] [--container <c>|-c <c>] [--resume [uid]]\n",
-      );
-      return 1;
-    }
+  if (mode === "attach") {
+    const { flags: attachFlags, bools: attachBools, positional: attachPos } = parsed;
+    const podName = attachPos[0] ?? "";
     const namespace = attachFlags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE;
-    const container = attachFlags.get("container") ?? shortContainer;
+    const container = attachFlags.get("container");
     const binDir = attachFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR;
     const sessions = await openSessions(attachFlags, attachBools);
     if (!sessions) {
@@ -472,19 +463,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
 
   // Plain line-based REPL (scripting / no-TTY fallback). No interactive
   // permission prompt here, so the broker stays headless (approves all).
-  if (args[0] === "--plain") {
+  if (mode === "plain") {
     return await startTerminal(buildAgent(config).agent);
   }
 
   // Rich interactive TUI. `--resume [uid]` also enters it (resuming a session).
-  const { flags: topFlags, bools: topBools } = parseFlags(args);
-  const wantsResume = topBools.has("resume") || topFlags.has("resume");
-  if (
-    args[0] === "-i" ||
-    args[0] === "--interactive" ||
-    wantsResume ||
-    (args.length === 0 && process.stdin.isTTY)
-  ) {
+  const { flags: topFlags, bools: topBools } = parsed;
+  if (mode === "tui" || (mode === "empty" && process.stdin.isTTY)) {
     const sessions = await openSessions(topFlags, topBools);
     if (!sessions) {
       return 1;
@@ -566,7 +551,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     return 0;
   }
 
-  if (args.length === 0) {
+  // A one-shot prompt: its words verbatim (`--` lets one start with '-').
+  const prompt = args[0] === "--" ? args.slice(1) : args;
+  if (prompt.length === 0) {
     write(HELP);
     return 1;
   }
@@ -580,7 +567,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const onSignal = (): void => controller.abort();
   process.on("SIGINT", onSignal);
 
-  const userMessage: ChatMessage = { role: "user", content: args.join(" ") };
+  const userMessage: ChatMessage = { role: "user", content: prompt.join(" ") };
   try {
     for await (const event of agent.run(crypto.randomUUID(), [userMessage], controller.signal)) {
       write(render(event));
