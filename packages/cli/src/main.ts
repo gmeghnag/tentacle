@@ -119,7 +119,6 @@ Environment:
   TENTACLE_NO_AGENTS_MD     do not auto-load the repo's AGENTS.md into the prompt
   TENTACLE_MAX_ITERATIONS   max model/tool iterations per turn
   TENTACLE_MAX_TOKENS       max output tokens per model response
-  TENTACLE_CWD              working directory for tools
   TENTACLE_SUBAGENTS        enable/disable sub-agents (on/off, default on)
 
 Pod execution (tentacle run --image <ref> [-n|--namespace <ns>] [<name>]):

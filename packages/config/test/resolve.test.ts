@@ -124,7 +124,7 @@ describe("resolveConfig precedence", () => {
   test("env overrides both file and defaults", () => {
     const c = resolveConfig(
       ctx({
-        fileConfig: { model: { baseURL: "http://file/v1" }, cwd: "/file-cwd", maxIterations: 4 },
+        fileConfig: { model: { baseURL: "http://file/v1" }, maxIterations: 4 },
         env: {
           TENTACLE_MODEL_BASE_URL: "http://env/v1",
           TENTACLE_MODEL: "env-model",
@@ -137,7 +137,8 @@ describe("resolveConfig precedence", () => {
     );
     expect(c.baseURL).toBe("http://env/v1");
     expect(c.model).toBe("env-model");
-    expect(c.cwd).toBe("/env-cwd");
+    // TENTACLE_CWD is no longer read: the workspace is always the launch dir.
+    expect(c.cwd).toBe("/launch");
     expect(c.maxIterations).toBe(9);
     expect(c.systemPrompt).toBe("env prompt");
     expect(c.sources.baseURL).toBe("env");

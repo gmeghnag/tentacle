@@ -11,9 +11,8 @@ const saved: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "harness-wiring-"));
-  for (const key of ["TENTACLE_CONFIG_DIR", "TENTACLE_CWD"]) saved[key] = process.env[key];
+  for (const key of ["TENTACLE_CONFIG_DIR"]) saved[key] = process.env[key];
   process.env.TENTACLE_CONFIG_DIR = join(dir, "config"); // never the user's config
-  process.env.TENTACLE_CWD = dir;
   config = await loadConfig({ cwd: dir });
 });
 

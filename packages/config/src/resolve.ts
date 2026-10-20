@@ -73,7 +73,6 @@ export interface ResolvedConfig {
     readonly provider: Source;
     readonly baseURL: Source;
     readonly model: Source;
-    readonly cwd: Source;
     readonly maxIterations: Source;
     readonly contextWindow: Source;
     readonly maxTokens: Source;
@@ -92,7 +91,7 @@ export interface ResolvedConfig {
 export interface ResolveContext {
   readonly fileConfig: FileConfig;
   readonly env: Env;
-  /** Fallback workspace when neither env nor file sets `cwd`. */
+  /** The workspace: always the launch directory (no env/file override). */
   readonly defaultCwd: string;
   /** Contents of the system-prompt file, if one was read. */
   readonly promptFromFile?: string | undefined;
@@ -183,7 +182,9 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     providerValue === "anthropic" ? DEFAULT_ANTHROPIC_BASE_URL : DEFAULT_BASE_URL,
   );
   const modelId = pick(env.TENTACLE_MODEL, model.model, DEFAULT_MODEL);
-  const cwd = pick(env.TENTACLE_CWD, fileConfig.cwd, defaultCwd);
+  // The workspace is the launch directory, as in Claude Code / opencode / pi:
+  // rules (AGENTS.md), skills and tools all start from the same folder.
+  const cwd = defaultCwd;
   const maxIterations = pick(
     parseIterationLimit(env.TENTACLE_MAX_ITERATIONS),
     fileConfig.maxIterations,
@@ -268,7 +269,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     provider: providerValue,
     baseURL: baseURL.value,
     model: modelId.value,
-    cwd: cwd.value,
+    cwd,
     maxIterations: maxIterations.value,
     contextWindow: contextWindow.value,
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
@@ -291,7 +292,6 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       provider: provider.source,
       baseURL: baseURL.source,
       model: modelId.source,
-      cwd: cwd.source,
       maxIterations: maxIterations.source,
       contextWindow: contextWindow.source,
       maxTokens: maxTokens.source,

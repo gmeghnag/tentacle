@@ -178,9 +178,12 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     const raw = parseConfigFile(await readFile(configPath, "utf8"), configPath);
     const parsed = FileConfigSchema.safeParse(raw);
     if (!parsed.success) {
-      throw new ConfigError(
-        `Invalid ${configPath}: ${parsed.error.issues[0]?.message ?? "unknown"}`,
-      );
+      const issue = parsed.error.issues[0];
+      const removedCwd =
+        issue?.code === "unrecognized_keys" && issue.keys.includes("cwd")
+          ? " — `cwd` was removed: tentacle works in the folder it is launched from"
+          : "";
+      throw new ConfigError(`Invalid ${configPath}: ${issue?.message ?? "unknown"}${removedCwd}`);
     }
     parsedFile = parsed.data;
   } else {

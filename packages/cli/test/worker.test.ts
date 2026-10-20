@@ -33,18 +33,12 @@ beforeAll(async () => {
     port: 0,
     fetch: () => new Response(TURN, { headers: { "content-type": "text/event-stream" } }),
   });
-  for (const key of [
-    "TENTACLE_CONFIG_DIR",
-    "TENTACLE_MODEL_BASE_URL",
-    "TENTACLE_MODEL",
-    "TENTACLE_CWD",
-  ]) {
+  for (const key of ["TENTACLE_CONFIG_DIR", "TENTACLE_MODEL_BASE_URL", "TENTACLE_MODEL"]) {
     saved[key] = process.env[key];
   }
   process.env.TENTACLE_CONFIG_DIR = join(dir, "config");
   process.env.TENTACLE_MODEL_BASE_URL = `http://localhost:${server.port}/v1`;
   process.env.TENTACLE_MODEL = "test";
-  process.env.TENTACLE_CWD = dir;
   config = await loadConfig({ cwd: dir });
 });
 

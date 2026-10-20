@@ -536,8 +536,8 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       skills-subagent. **Eval:** `docs/eval/agent-skills.md`. Type: eval →
       feat ×4 · Size: L → split · Blast: load-bearing.
 
-- [ ] **Remove `TENTACLE_CWD` / config `cwd`: the launch folder IS the working
-      folder** (owner decision 2026-10-20, as in Claude Code / opencode / pi).
+- [x] **Remove `TENTACLE_CWD` / config `cwd`: the launch folder IS the working
+      folder** — DONE 2026-10-20, `feat/remove-tentacle-cwd`: `docs/feat/remove-tentacle-cwd.md`. (owner decision 2026-10-20, as in Claude Code / opencode / pi).
       Today AGENTS.md is found from the launch cwd (`config/src/load.ts:158,218`)
       while tools run in `TENTACLE_CWD ?? cwd ?? launch` (`config/src/resolve.ts:186`):
       rules from one folder, work in another. Scope: `resolve.ts:186`, the

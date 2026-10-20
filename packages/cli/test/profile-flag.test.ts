@@ -18,7 +18,6 @@ const KEYS = [
   "TENTACLE_CONFIG_DIR",
   "TENTACLE_MODEL_BASE_URL",
   "TENTACLE_MODEL",
-  "TENTACLE_CWD",
   "TENTACLE_MODEL_API_KEY",
   "TENTACLE_PROFILE",
   "TENTACLE_NO_AGENTS_MD",
@@ -48,7 +47,6 @@ beforeAll(async () => {
     "utf8",
   );
   process.env.TENTACLE_CONFIG_DIR = configDir;
-  process.env.TENTACLE_CWD = dir;
   process.env.TENTACLE_NO_AGENTS_MD = "1";
 });
 

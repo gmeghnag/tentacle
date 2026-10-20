@@ -191,7 +191,6 @@ describe("tentacle run/attach (end to end, fake API server)", () => {
     "TENTACLE_POD_BIN",
     "TENTACLE_POD_NAMESPACE",
     "TENTACLE_MODEL_BASE_URL",
-    "TENTACLE_CWD",
     "TENTACLE_NO_AGENTS_MD",
   ];
   const saved: Record<string, string | undefined> = {};
@@ -223,7 +222,6 @@ describe("tentacle run/attach (end to end, fake API server)", () => {
     const podNamespace = "TENTACLE_POD_NAMESPACE";
     delete process.env[podNamespace];
     process.env.TENTACLE_MODEL_BASE_URL = `http://127.0.0.1:${model.port}/v1`;
-    process.env.TENTACLE_CWD = dir;
     process.env.TENTACLE_NO_AGENTS_MD = "1";
   });
 
