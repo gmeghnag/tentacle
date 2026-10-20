@@ -1,6 +1,6 @@
 # feat/session-ttl-limits — detached-session TTL, daemon-wide limits, server keepalive
 
-> **Status:** review — APPROVE (fresh-context re-review); awaiting owner OK to commit/merge (promoted 2026-10-20) (child of `docs/eval/session-reattach.md`, step 5)
+> **Status:** done — merged to `main` 2026-10-20 (fresh-context re-review: APPROVE; promoted 2026-10-20) (child of `docs/eval/session-reattach.md`, step 5)
 > **Branch:** `feat/session-ttl-limits`
 > **Type:** feat · **Size:** M (was S–M: the plan touches 9 source files across `daemon` + `cli`, see Files) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (resource teardown on a long-lived `serve`, AGENTS §7)
 
