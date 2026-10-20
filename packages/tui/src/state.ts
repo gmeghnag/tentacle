@@ -9,7 +9,8 @@
  * logic testable without React.
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
-import type { ToolResultDetail } from "@tentacle/core";
+import type { ChatMessage, ToolResultDetail } from "@tentacle/core";
+import { messagesToItems } from "./resume.ts";
 
 export type ToolStatus = "running" | "ok" | "error";
 
@@ -322,4 +323,45 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
         lastStopReason: event.reason,
       };
   }
+}
+
+/**
+ * What a session yields to the App: the agent's events, plus two that only a
+ * remote session produces after a reconnect that had to resync — replace the
+ * transcript with the daemon's history, and the turn's own prompt re-delivered
+ * after that reset (docs/feat/client-reattach.md). Same shape as
+ * `@tentacle/client`'s `SessionEvent`.
+ */
+export type SessionEvent =
+  | AgentEvent
+  | { readonly type: "history_reset"; readonly messages: readonly ChatMessage[] }
+  | { readonly type: "user_message"; readonly text: string };
+
+/**
+ * Replace the transcript with `messages` (a resync), keeping the turn's state.
+ * A call with no result in a turn that is still running is running (or waiting
+ * for approval), not done — `messagesToItems` marks every historical call `ok`.
+ */
+export function resetHistory(state: DisplayState, messages: readonly ChatMessage[]): DisplayState {
+  const items = messagesToItems(messages).map((item) =>
+    state.running && item.kind === "tool" && item.resultText === undefined
+      ? { ...item, status: "running" as const }
+      : item,
+  );
+  return { ...state, items };
+}
+
+/** Fold one session event: the two reconnect events here, everything else in `applyEvent`. */
+export function applySessionEvent(
+  state: DisplayState,
+  event: SessionEvent,
+  now: number,
+): DisplayState {
+  if (event.type === "history_reset") {
+    return resetHistory(state, event.messages);
+  }
+  if (event.type === "user_message") {
+    return { ...state, items: append(state.items, { kind: "user", text: event.text }) };
+  }
+  return applyEvent(state, event, now);
 }

@@ -8,7 +8,7 @@
  * diff render identical to a local one. Pure and unit-tested.
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
-import type { ToolResultDetail } from "@tentacle/core";
+import type { ChatMessage, ToolResultDetail } from "@tentacle/core";
 import {
   type ContentBlock,
   type SessionUpdate,
@@ -18,6 +18,18 @@ import {
   isKnownUpdateType,
 } from "@tentacle/protocol";
 import { DIFF_SCHEME } from "./constants.ts";
+
+/**
+ * What a frontend folds from a remote turn: the agent's events, plus two that
+ * only a reconnect produces — replace everything shown with `messages` (a
+ * resync), and the turn's own prompt re-delivered after such a reset.
+ * Structurally identical to the TUI's `SessionEvent` (the TUI does not depend
+ * on this package).
+ */
+export type SessionEvent =
+  | AgentEvent
+  | { readonly type: "history_reset"; readonly messages: readonly ChatMessage[] }
+  | { readonly type: "user_message"; readonly text: string };
 
 /** What the client does with one `session/update` frame. */
 export type ClassifiedUpdate =

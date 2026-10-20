@@ -5,8 +5,10 @@ import {
   type NoticeItem,
   appendBackgroundExit,
   applyEvent,
+  applySessionEvent,
   backgroundExitNotice,
   initialState,
+  resetHistory,
   startTurn,
 } from "../src/state.ts";
 
@@ -164,5 +166,40 @@ describe("display state reducer", () => {
     );
     expect(s.items.filter((i) => i.kind === "notice")).toHaveLength(2);
     expect((s.items.at(-1) as NoticeItem).text).toContain("killed");
+  });
+});
+
+describe("reconnect events (docs/feat/client-reattach.md)", () => {
+  const history = [
+    { role: "user" as const, content: "hi" },
+    {
+      role: "assistant" as const,
+      content: "let me look",
+      toolCalls: [{ id: "c1", name: "shell", arguments: "{}" }],
+    },
+  ];
+
+  test("history_reset replaces the transcript and keeps the turn running; an unanswered call of a running turn is running", () => {
+    // Mutation: drop the running-call mapping → the call awaiting approval shows "ok".
+    const before = fold(startTurn(initialState, "hi", 1), [{ type: "text", delta: "let me l" }]);
+    const s = applySessionEvent(before, { type: "history_reset", messages: history }, 2);
+    expect(s.running).toBe(true);
+    expect(s.items).toEqual([
+      { kind: "user", text: "hi" },
+      { kind: "assistant", text: "let me look" },
+      { kind: "tool", id: "c1", name: "shell", args: "{}", status: "running", startedAt: 0 },
+    ]);
+    // Idle (no turn running): historical calls stay as `messagesToItems` shows them.
+    expect(resetHistory(initialState, history).items.at(-1)).toMatchObject({ status: "ok" });
+  });
+
+  test("user_message appends the replayed prompt; other events still go through applyEvent", () => {
+    let s = applySessionEvent(initialState, { type: "history_reset", messages: [] }, 1);
+    s = applySessionEvent(s, { type: "user_message", text: "go" }, 2);
+    s = applySessionEvent(s, { type: "text", delta: "ok" }, 3);
+    expect(s.items).toEqual([
+      { kind: "user", text: "go" },
+      { kind: "assistant", text: "ok" },
+    ]);
   });
 });

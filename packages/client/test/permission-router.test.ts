@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { DISMISSED } from "@tentacle/core";
 import type { PermissionRequestUpdate } from "@tentacle/protocol";
 import { PermissionRouter, type RouterAction } from "../src/permission-router.ts";
 
@@ -132,5 +133,50 @@ describe("PermissionRouter (pure)", () => {
       "send S/x reject_once",
       "prompt T/x",
     ]);
+  });
+  test("retainOnly (resync): keeps what the replay re-offers, withdraws the rest; kept ids are not prompted twice", () => {
+    const r = new PermissionRouter();
+    r.request("S", req("r1")); // on screen
+    r.request("S", req("r2")); // queued
+    r.request("T", req("t1")); // another session: untouched
+    // The resync replay re-offers only r2 (r1 was answered while away).
+    expect(show(r.retainOnly("S", ["r2"]))).toEqual(["abort S/r1", "prompt S/r2"]);
+    // The replay then re-offers r2: deduped (it is on screen), never a second dialog.
+    expect(show(r.request("S", req("r2")))).toEqual([]);
+    // T's queued request is still there, after S/r2.
+    expect(show(r.answered("S", "r2", { allowed: false }))).toEqual([
+      "send S/r2 reject_once",
+      "prompt T/t1",
+    ]);
+  });
+
+  test("retainOnly keeps the dialog when the replay re-offers it (a drop with no change)", () => {
+    const r = new PermissionRouter();
+    r.request("S", req("r1"));
+    expect(show(r.retainOnly("S", ["r1"]))).toEqual([]);
+    expect(show(r.request("S", req("r1")))).toEqual([]);
+    // Withdrawing everything (a serve restart re-asks under a fresh id).
+    expect(show(r.retainOnly("S", []))).toEqual(["abort S/r1"]);
+    expect(show(r.request("S", req("r1b")))).toEqual(["prompt S/r1b"]);
+  });
+  test("an answered request re-offered by a replay before its permission_resolved is not prompted again", () => {
+    // The answer is in flight (or held while the link is down); a resync replay
+    // re-offers the request. Mutation: drop the `answeredIds` check → a second dialog.
+    const r = new PermissionRouter();
+    r.request("S", req("r1"));
+    expect(show(r.answered("S", "r1", { allowed: true, scope: "once" }))).toEqual([
+      "send S/r1 allow_once",
+    ]);
+    expect(show(r.retainOnly("S", ["r1"]))).toEqual([]);
+    expect(show(r.request("S", req("r1")))).toEqual([]);
+    expect(show(r.resolved("S", "r1"))).toEqual([]);
+    // An answer that failed to deliver is offered again by a later replay.
+    r.request("S", req("r2"));
+    r.answered("S", "r2", { allowed: false });
+    r.answerFailed("S", "r2");
+    expect(show(r.request("S", req("r2")))).toEqual(["prompt S/r2"]);
+    // A dismissed prompt (no decision) was never "answered": re-offered → prompted.
+    r.answered("S", "r2", DISMISSED);
+    expect(show(r.request("S", req("r2")))).toEqual(["prompt S/r2"]);
   });
 });

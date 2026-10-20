@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent, type AgentEvent } from "@tentacle/agent";
+import { Agent } from "@tentacle/agent";
 import {
   type ChatRequest,
   type ExecutionEnvironment,
@@ -13,6 +13,7 @@ import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
 import { JsonRpcErrorCode, Method, Notification, PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
+import type { SessionEvent } from "../src/mapping.ts";
 import {
   MODEL_STREAM_BATCH_MAX_CHARS,
   MODEL_STREAM_COALESCE_MS,
@@ -55,8 +56,8 @@ function makeHost(model: ModelProvider, env: ExecutionEnvironment): SessionHost 
   });
 }
 
-async function collect(iter: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
-  const out: AgentEvent[] = [];
+async function collect(iter: AsyncIterable<SessionEvent>): Promise<SessionEvent[]> {
+  const out: SessionEvent[] = [];
   for await (const ev of iter) {
     out.push(ev);
   }
@@ -134,7 +135,7 @@ describe("model reverse-tunnel, chunked (streaming) cut", () => {
     await client.initialize();
 
     const sendPromise = (async () => {
-      const events: AgentEvent[] = [];
+      const events: SessionEvent[] = [];
       for await (const e of client.newSession().send("hi")) {
         events.push(e);
         if (e.type === "reasoning") {
@@ -149,7 +150,7 @@ describe("model reverse-tunnel, chunked (streaming) cut", () => {
     // The local (laptop) model actually ran over the tunnel.
     expect(model.seenSignals).toHaveLength(1);
     const text = events
-      .filter((e): e is Extract<AgentEvent, { type: "text" }> => e.type === "text")
+      .filter((e): e is Extract<SessionEvent, { type: "text" }> => e.type === "text")
       .map((e) => e.delta)
       .join("");
     expect(text).toBe("hello from the laptop");
@@ -188,7 +189,7 @@ describe("model reverse-tunnel, chunked (streaming) cut", () => {
 
     const controller = new AbortController();
     const sendPromise = (async () => {
-      const events: AgentEvent[] = [];
+      const events: SessionEvent[] = [];
       for await (const e of client.newSession().send("hi", controller.signal)) {
         events.push(e);
       }
@@ -426,7 +427,7 @@ describe("RemoteSession over an in-memory channel", () => {
 
     const events = await collect(client.newSession().send("hi"));
     const text = events
-      .filter((e): e is Extract<AgentEvent, { type: "text" }> => e.type === "text")
+      .filter((e): e is Extract<SessionEvent, { type: "text" }> => e.type === "text")
       .map((e) => e.delta)
       .join("");
     expect(text).toBe("Hello world");
@@ -564,6 +565,9 @@ describe("permission events at the client (router + broker over a fake daemon)",
           resolves.push(params);
           return {};
         }
+        if (method === Method.Open) {
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
+        }
         throw new RpcError(JsonRpcErrorCode.MethodNotFound, method);
       },
     });
@@ -572,6 +576,8 @@ describe("permission events at the client (router + broker over a fake daemon)",
       onError: (e) => errors.push(e),
     });
     await client.initialize();
+    // A client routes only the sessions it opened (the stream is in seq order per session).
+    await client.openSession(undefined, undefined, "s1");
     const send = (update: Record<string, unknown>) =>
       daemon.notify(Notification.SessionUpdate, {
         sessionId: "s1",
@@ -669,6 +675,9 @@ describe("permission events at the client (router + broker over a fake daemon)",
             agentCapabilities: { tools: true, permissions: true },
           };
         }
+        if (method === Method.Open) {
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
+        }
         throw new RpcError(DomainErrorCode.PermissionNotPending, "permission request not pending");
       },
     });
@@ -685,6 +694,7 @@ describe("permission events at the client (router + broker over a fake daemon)",
       onError: (e) => errors.push(e),
     });
     await client.initialize();
+    await client.openSession(undefined, undefined, "s1");
     const frame = (seq: number, update: Record<string, unknown>) =>
       daemon.notify(Notification.SessionUpdate, { sessionId: "s1", seq, mandatory: true, update });
     const request = (seq: number, requestId: string) =>
@@ -742,7 +752,7 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
 
     const session = client.newSession();
     const sendP = (async () => {
-      const events: AgentEvent[] = [];
+      const events: SessionEvent[] = [];
       for await (const e of session.send("go")) {
         events.push(e);
         if (e.type === "tool_start") {
@@ -755,7 +765,7 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
 
     // The injected message came back as a `steer` event the TUI understands.
     const steers = events.filter(
-      (e): e is Extract<AgentEvent, { type: "steer" }> => e.type === "steer",
+      (e): e is Extract<SessionEvent, { type: "steer" }> => e.type === "steer",
     );
     expect(steers.map((s) => s.text)).toEqual(["steer me"]);
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
@@ -797,7 +807,7 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
 
     const session = client.newSession();
     const sendP = (async () => {
-      const events: AgentEvent[] = [];
+      const events: SessionEvent[] = [];
       for await (const e of session.send("hi")) {
         events.push(e);
       }
@@ -839,7 +849,7 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
     // The TUI is already "running" here: this enqueue must wait for the session
     // instead of resolving as a silent no-op.
     await session.enqueue("early");
-    const events: AgentEvent[] = [];
+    const events: SessionEvent[] = [];
     for (let r = await first; !r.done; r = await iter.next()) {
       events.push(r.value);
     }
@@ -884,7 +894,8 @@ describe("unknown / malformed session/update frames (event classes)", () => {
           if (end) {
             daemon.notify(Notification.SessionUpdate, {
               sessionId: "s1",
-              seq: 999,
+              // The next seq: contiguity is checked (a jump would force a resync).
+              seq: frames.length + 1,
               mandatory: true,
               update: { type: "turn_end", turnId, stopReason: "end_turn" },
             });
@@ -907,7 +918,7 @@ describe("unknown / malformed session/update frames (event classes)", () => {
       onError: (e) => errors.push(e),
     });
     await client.initialize();
-    const events: AgentEvent[] = [];
+    const events: SessionEvent[] = [];
     const outcome = await Promise.race([
       (async () => {
         for await (const e of client.newSession().send("hi")) events.push(e);
@@ -985,19 +996,23 @@ describe("unknown / malformed session/update frames (event classes)", () => {
   test("with no turn in flight a stream error reaches onError only (never silent, nothing cancelled)", async () => {
     const [daemonCh, clientCh] = createChannelPair();
     const daemon = new RpcPeer(daemonCh, {
-      onRequest: async () => ({
-        protocolVersion: PROTOCOL_VERSION,
-        agentCapabilities: { tools: true, permissions: true },
-      }),
+      onRequest: async (method) =>
+        method === Method.Open
+          ? { sessionId: "s1", epoch: "e", created: true, resync: false }
+          : {
+              protocolVersion: PROTOCOL_VERSION,
+              agentCapabilities: { tools: true, permissions: true },
+            },
     });
     const errors: Error[] = [];
     const client = new RemoteClient(clientCh, new PermissionBroker(), undefined, {
       onError: (e) => errors.push(e),
     });
     await client.initialize();
+    await client.openSession(undefined, undefined, "s1"); // opened, idle: no turn in flight
     daemon.notify(Notification.SessionUpdate, {
       sessionId: "s1",
-      seq: 9,
+      seq: 1,
       mandatory: true,
       update: { type: "future_mandatory" },
     });
@@ -1036,7 +1051,7 @@ describe("real WebSocket smoke test", () => {
       await client.initialize();
       const events = await collect(client.newSession().send("hi"));
       const text = events
-        .filter((e): e is Extract<AgentEvent, { type: "text" }> => e.type === "text")
+        .filter((e): e is Extract<SessionEvent, { type: "text" }> => e.type === "text")
         .map((e) => e.delta)
         .join("");
       expect(text).toBe("socket says hi");
@@ -1095,7 +1110,7 @@ describe("RemoteSession ends turns from the stream (turn_start/turn_end)", () =>
       onError: (e) => errors.push(e),
     });
     await client.initialize();
-    const events: AgentEvent[] = [];
+    const events: SessionEvent[] = [];
     const outcome = await Promise.race([
       (async () => {
         for await (const e of client.newSession().send("hi")) events.push(e);
@@ -1323,7 +1338,7 @@ describe("RemoteSession steering bound to its turn (review fixes)", () => {
     const client = new RemoteClient(clientCh, new PermissionBroker());
     await client.initialize();
     const session = client.newSession();
-    const events: AgentEvent[] = [];
+    const events: SessionEvent[] = [];
     for await (const e of session.send("go")) {
       events.push(e);
       if (e.type === "tool_start") {
@@ -1610,7 +1625,7 @@ describe("closing sessions (sessions outlive connections)", () => {
     const events = (await Promise.race([
       turn,
       new Promise((r) => setTimeout(() => r("hung"), 1000)),
-    ])) as AgentEvent[] | "hung";
+    ])) as SessionEvent[] | "hung";
     expect(events).not.toBe("hung");
     expect(events === "hung" ? null : events.at(-1)).toEqual({
       type: "turn_end",

@@ -1,0 +1,843 @@
+/**
+ * `RemoteClient` re-attach, case by case, over real daemon objects
+ * (docs/feat/client-reattach.md): the link lifecycle, the obligations handed
+ * over by `permission-events` and `suspended-turn-resume`, recreate, and the
+ * keyed / unkeyed command rules. The every-drop-point property is
+ * `reattach.e2e.test.ts`.
+ */
+import { describe, expect, test } from "bun:test";
+import { Agent } from "@tentacle/agent";
+import { type ModelProvider, PermissionBroker } from "@tentacle/core";
+import {
+  Connection,
+  type DaemonSessionRecord,
+  type RecordStore,
+  SessionHost,
+  SessionPersister,
+  parseDaemonRecord,
+} from "@tentacle/daemon";
+import { ToolRegistry, shellTool } from "@tentacle/tools";
+import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
+import { ChannelError, type LinkStatus } from "../src/link-machine.ts";
+import type { SessionEvent } from "../src/mapping.ts";
+import { type Clock, RemoteClient } from "../src/remote-client.ts";
+import type { StreamOutput } from "../src/session-reducer.ts";
+import { GatedModel, type Step, approver, done, t, tick, until } from "./support/fakes.ts";
+import { cutLink } from "./support/link-cutter.ts";
+
+const CWD = "/tmp/reattach-cases";
+const shell = (id: string): Step => ({
+  kind: "event",
+  event: { type: "tool_call", toolCall: { id, name: "shell", arguments: '{"command":"ls"}' } },
+});
+
+function makeHost(
+  model: ModelProvider,
+  runs: { n: number },
+  persister?: SessionPersister,
+): SessionHost {
+  return new SessionHost({
+    defaultCwd: CWD,
+    ...(persister ? { persister } : {}),
+    createAgent: () => {
+      const permissions = new PermissionBroker();
+      const agent = new Agent({
+        model,
+        tools: new ToolRegistry().register(shellTool),
+        env: {
+          id: "e",
+          exec: async () => {
+            runs.n += 1;
+            return { stdout: "ok", stderr: "", exitCode: 0 };
+          },
+          readFile: async () => "",
+          writeFile: async () => {},
+        },
+        requestPermission: (req, options) => permissions.request(req, options),
+      });
+      return { agent, permissions };
+    },
+  });
+}
+
+/** Where a dial lands (swappable: a restarted daemon), and outbound frames per channel. */
+class Target {
+  host: SessionHost;
+  /** Outbound client frames of every channel this target handed out, by generation. */
+  readonly frames: { method?: string; params?: Record<string, unknown> }[][] = [];
+  last: DuplexChannel | null = null;
+  /** Called after each outbound client frame is forwarded (to race a call against it). */
+  onFrame: ((frame: { method?: string; params?: Record<string, unknown> }) => void) | null = null;
+  constructor(host: SessionHost) {
+    this.host = host;
+  }
+  connect(): DuplexChannel {
+    const [d, c] = createChannelPair();
+    new Connection(d, this.host);
+    const log: { method?: string; params?: Record<string, unknown> }[] = [];
+    this.frames.push(log);
+    const tapped: DuplexChannel = {
+      send: (data) => {
+        const frame = JSON.parse(data);
+        log.push(frame);
+        c.send(data);
+        this.onFrame?.(frame);
+      },
+      close: () => c.close(),
+      setOnMessage: (h) => c.setOnMessage(h),
+      setOnClose: (h) => c.setOnClose(h),
+    };
+    this.last = tapped;
+    return tapped;
+  }
+}
+
+/** A channel factory the test can hold (the link stays down) and count. */
+function dialer(target: Target) {
+  let gate: Promise<void> | null = null;
+  let open: () => void = () => {};
+  let calls = 0;
+  return {
+    calls: () => calls,
+    hold: () => {
+      gate = new Promise((r) => {
+        open = r;
+      });
+    },
+    release: () => {
+      gate = null;
+      open();
+    },
+    factory: async (): Promise<DuplexChannel> => {
+      calls += 1;
+      if (gate) await gate;
+      return target.connect();
+    },
+  };
+}
+
+async function drain(iter: AsyncIterable<SessionEvent>): Promise<SessionEvent[]> {
+  const out: SessionEvent[] = [];
+  for await (const e of iter) out.push(e);
+  return out;
+}
+
+const methods = (log: readonly { method?: string }[]): string[] =>
+  log.flatMap((f) => (f.method ? [f.method] : []));
+
+describe("re-attach: link lifecycle", () => {
+  test("without a factory a drop stays terminal (the inert default): turn fails, status stopped", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), { kind: "gate" }, t("b"), done]]);
+    const target = new Target(makeHost(model, runs));
+    const client = new RemoteClient(target.connect(), new PermissionBroker());
+    const statuses: LinkStatus[] = [];
+    client.onLinkStatus((s) => statuses.push(s));
+    await client.initialize();
+    const turn = drain(client.newSession(undefined, "S").send("go")).catch((e: Error) => e);
+    await until(() => model.waiting);
+    target.last?.close();
+    expect(String(await turn)).toMatch(/connection closed/);
+    expect(statuses).toEqual([{ state: "stopped", reason: "disconnected" }]);
+    client.close();
+  });
+
+  test("E1/E2: a drop after the permission request is applied keeps the dialog; re-attach with since; Approve runs once", async () => {
+    // Obligation (permission-events finding 2): `since` is past the request, so
+    // the daemon does not replay it — the client must keep it.
+    // Mutation: call `router.connectionClosed()` on a reconnectable drop → the
+    // dialog is withdrawn and never re-offered → the turn never ends.
+    const runs = { n: 0 };
+    const model = new GatedModel([
+      [t("a"), shell("c1"), done],
+      [t("b"), done],
+    ]);
+    const target = new Target(makeHost(model, runs));
+    const ap = approver();
+    const dial = dialer(target);
+    const client = new RemoteClient(target.connect(), ap.broker, undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+    });
+    const statuses: LinkStatus[] = [];
+    client.onLinkStatus((s) => statuses.push(s));
+    await client.initialize();
+    const turn = drain(client.newSession(undefined, "S").send("go"));
+    expect(await until(() => ap.pending() === 1)).toBe(true);
+    target.last?.close();
+    expect(await until(() => statuses.at(-1)?.state === "up")).toBe(true);
+    await tick();
+    expect(ap.aborts()).toBe(0); // the dialog survived the drop
+    // Re-attached by replay from its own position: `since`, and no snapshot.
+    const gen1 = target.frames[1] ?? [];
+    expect(gen1.find((f) => f.method === "session/open")?.params?.since).toBeDefined();
+    expect(methods(gen1)).not.toContain("session/snapshot");
+    ap.approve();
+    const events = await turn;
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(runs.n).toBe(1);
+    expect(ap.prompts()).toBe(1); // one broker, one prompt, across the drop
+    expect(statuses).toEqual([
+      { state: "reconnecting", attempt: 1, nextAtMs: expect.any(Number) },
+      { state: "up" },
+    ]);
+    client.close();
+    expect(statuses.at(-1)).toEqual({ state: "stopped", reason: "closed" });
+  });
+
+  test("E3: answered on another client while this one was away — the dialog is withdrawn on recovery, its turn completes", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([
+      [t("a"), shell("c1"), done],
+      [t("b"), done],
+    ]);
+    const target = new Target(makeHost(model, runs));
+    const apA = approver();
+    const dial = dialer(target);
+    const aLink = target.connect();
+    const a = new RemoteClient(aLink, apA.broker, undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+    });
+    await a.initialize();
+    const turn = drain(a.newSession(undefined, "S").send("go"));
+    await until(() => apA.pending() === 1);
+    const apB = approver();
+    const b = new RemoteClient(target.connect(), apB.broker);
+    await b.initialize();
+    await b.openSession(undefined, undefined, "S"); // attaches: the replay offers the request
+    await until(() => apB.pending() === 1);
+    dial.hold();
+    aLink.close(); // the laptop goes offline (and stays: the dial is held)
+    await tick();
+    apB.approve(); // the phone answers while the laptop is offline
+    await until(() => target.host.get("S")?.running === false);
+    dial.release();
+    const events = await turn;
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(apA.aborts()).toBe(1); // withdrawn, never answered here
+    expect(runs.n).toBe(1);
+    a.close();
+    b.close();
+  });
+
+  test("a factory rejecting with `unauthorized` stops for good: status stopped, the turn fails, no retry storm", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), { kind: "gate" }, done]]);
+    const target = new Target(makeHost(model, runs));
+    let calls = 0;
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        calls += 1;
+        throw new ChannelError("unauthorized", "401");
+      },
+      random: () => 0,
+    });
+    const statuses: LinkStatus[] = [];
+    client.onLinkStatus((s) => statuses.push(s));
+    await client.initialize();
+    const turn = drain(client.newSession(undefined, "S").send("go")).catch((e: Error) => e);
+    await until(() => model.waiting);
+    target.last?.close();
+    expect(String(await turn)).toMatch(/rejected the credentials: 401/);
+    await tick();
+    expect(calls).toBe(1);
+    expect(statuses.at(-1)).toEqual({
+      state: "stopped",
+      reason: "the daemon rejected the credentials: 401",
+    });
+    client.close();
+  });
+
+  test("close() during the backoff: the scheduled dial never runs", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), { kind: "gate" }, done]]);
+    const target = new Target(makeHost(model, runs));
+    const timers: (() => void)[] = [];
+    const clock: Clock = {
+      now: () => 0,
+      setTimeout: (fn) => timers.push(fn),
+      clearTimeout: () => {
+        timers.length = 0;
+      },
+    };
+    let calls = 0;
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        calls += 1;
+        return target.connect();
+      },
+      clock,
+      random: () => 0.5,
+    });
+    await client.initialize();
+    const turn = drain(client.newSession(undefined, "S").send("go")).catch((e: Error) => e);
+    await until(() => model.waiting);
+    target.last?.close();
+    await tick();
+    expect(timers.length).toBe(1);
+    client.close();
+    for (const fire of timers.splice(0)) fire();
+    await tick();
+    expect(calls).toBe(0);
+    expect(String(await turn)).toMatch(/connection closed/);
+  });
+
+  test("generation guard: a late frame on a dead channel is ignored", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), { kind: "gate" }, t("b"), done]]);
+    const target = new Target(makeHost(model, runs));
+    // Gen 0 keeps a handle on the client's inbound handler, to deliver after the drop.
+    let late: ((data: string) => void) | null = null;
+    const [d, c] = createChannelPair();
+    new Connection(d, target.host);
+    const gen0: DuplexChannel = {
+      send: (data) => c.send(data),
+      close: () => c.close(),
+      setOnMessage: (h) => {
+        late = h;
+        c.setOnMessage(h);
+      },
+      setOnClose: (h) => c.setOnClose(h),
+    };
+    const statuses: LinkStatus[] = [];
+    const client = new RemoteClient(gen0, new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    client.onLinkStatus((s) => statuses.push(s));
+    await client.initialize();
+    const turn = drain(client.newSession(undefined, "S").send("go"));
+    await until(() => model.waiting);
+    c.close();
+    await until(() => statuses.at(-1)?.state === "up");
+    // A frame the dead generation delivers late: a seq far ahead (a gap if applied).
+    (late as ((data: string) => void) | null)?.(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "S",
+          seq: 999,
+          update: { type: "agent_message_chunk", content: { type: "text", text: "GHOST" } },
+        },
+      }),
+    );
+    await tick();
+    model.open();
+    const events = await turn;
+    expect(JSON.stringify(events)).not.toContain("GHOST");
+    // Not applied: no gap, so no forced reopen on the live channel.
+    expect(methods(target.frames[0] ?? []).filter((m) => m === "session/open")).toHaveLength(1);
+    client.close();
+  });
+});
+
+describe("re-attach: commands across a drop", () => {
+  test("a drop before the first open answered: the session is opened again (create), the turn runs once", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), done]]);
+    const target = new Target(makeHost(model, runs));
+    const link = cutLink(1); // the open request is delivered, its answer is lost
+    new Connection(link.daemon, target.host);
+    const client = new RemoteClient(link.client, new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    link.arm();
+    const events = await drain(client.newSession(undefined, "S").send("go"));
+    expect(link.cut()).toBe(true);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(model.calls).toBe(1);
+    client.close();
+  });
+
+  test("a drop before the first open left the client: the next link CREATES the session, the turn runs (never 'lost')", async () => {
+    // Mutation: recover a never-live session like a live one (no `create`) →
+    // UnknownSession → recreate → `turn_lost` for a prompt that was never sent.
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), done]]);
+    const target = new Target(makeHost(model, runs));
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    target.last?.close(); // gone before the first `session/open` could leave
+    // A raw stream consumer (a mobile view) opens it: no spurious turn_lost / reset.
+    const outs: StreamOutput[] = [];
+    await client.openSession(undefined, undefined, "S", {
+      output: (out) => outs.push(out),
+      recovered: () => {},
+      linkClosed: () => {},
+    });
+    expect(outs.map((o) => o.kind)).toEqual([]);
+    const events = await drain(client.newSession(undefined, "S").send("go"));
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(model.calls).toBe(1);
+    client.close();
+  });
+
+  test("enqueue whose ack is lost is re-sent with its key: the steer lands once", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([
+      [t("a"), { kind: "gate" }, t("b"), done],
+      [t("c"), done],
+    ]);
+    const target = new Target(makeHost(model, runs));
+    const link = cutLink(1); // the enqueue request is delivered, its ack is lost
+    new Connection(link.daemon, target.host);
+    const client = new RemoteClient(link.client, new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const turn = drain(session.send("go"));
+    await until(() => model.waiting);
+    link.arm();
+    await session.enqueue("steer-1"); // resolves after the re-send
+    expect(link.cut()).toBe(true);
+    model.open();
+    await turn;
+    const history = await client.snapshot("S");
+    expect(history.filter((m) => m.role === "user" && m.content === "steer-1")).toHaveLength(1);
+    client.close();
+  });
+
+  test("compact is not re-sent after a drop (no key): it rejects; the session stays usable", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([
+      [t("a"), done],
+      [t("summary"), done],
+      [t("z"), done],
+    ]);
+    const target = new Target(makeHost(model, runs));
+    const link = cutLink(1);
+    new Connection(link.daemon, target.host);
+    const client = new RemoteClient(link.client, new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    await drain(session.send("first"));
+    link.arm();
+    await expect(session.compact()).rejects.toThrow(/not retried/);
+    // It still runs daemon-side (a drop does not cancel it): wait it out.
+    await until(() => model.calls === 2);
+    await until(() => target.host.get("S")?.running === false);
+    const events = await drain(session.send("second"));
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(model.calls).toBe(3); // the compaction ran once daemon-side
+    client.close();
+  });
+
+  test("the daemon lost the session (UnknownSession): recreated from the client's history; the turn is lost, never re-run", async () => {
+    const runs = { n: 0 };
+    const modelA = new GatedModel([
+      [t("one"), done],
+      [t("a"), { kind: "gate" }, done],
+    ]);
+    const target = new Target(makeHost(modelA, runs));
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    await drain(session.send("first"));
+    const history = await session.snapshot(); // what the persisting wrapper reads after a turn
+    const turn = drain(session.send("second")).catch((e: Error) => e);
+    await until(() => modelA.waiting);
+    // A new daemon that never heard of S (a new stdio daemon in a pod).
+    const modelB = new GatedModel([]);
+    target.host = makeHost(modelB, runs);
+    target.last?.close();
+    expect(String(await turn)).toMatch(/lost the session; the turn in flight was not re-run/);
+    expect(modelB.calls).toBe(0); // not re-run
+    expect((await client.snapshot("S")).map((m) => m.content)).toEqual(
+      (history ?? []).map((m) => m.content),
+    );
+    client.close();
+  });
+});
+
+/** An in-memory record store (what a `serve` restart reads back). */
+class MemStore implements RecordStore {
+  readonly durable = new Map<string, DaemonSessionRecord>();
+  async save(record: Parameters<RecordStore["save"]>[0]): Promise<void> {
+    this.durable.set(record.id, JSON.parse(JSON.stringify(record)) as DaemonSessionRecord);
+  }
+  async remove(id: string): Promise<void> {
+    this.durable.delete(id);
+  }
+  async drain(): Promise<void> {}
+}
+
+const persisterFor = (store: MemStore): SessionPersister =>
+  new SessionPersister({ store, cwd: CWD, model: "m", onError: () => {} });
+
+describe("re-attach: a `serve` restart with a turn suspended on approval (suspended-turn-resume obligation)", () => {
+  test("E4: no turn_start after the restart; the old dialog is withdrawn, the re-ask prompts once; Approve runs once; the turn ends", async () => {
+    // Mutation: skip `retainOnly` on a resync → the pre-restart dialog stays
+    // on screen (its id answers PermissionNotPending), aborts stays 0.
+    const runs = { n: 0 };
+    const store = new MemStore();
+    const model1 = new GatedModel([[t("a"), shell("c1"), done]]);
+    const target = new Target(makeHost(model1, runs, persisterFor(store)));
+    const ap = approver();
+    const client = new RemoteClient(target.connect(), ap.broker, undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const log: StreamOutput[] = [];
+    const output = session.output.bind(session);
+    session.output = (out: StreamOutput): void => {
+      log.push(out);
+      output(out);
+    };
+    const turn = drain(session.send("go"));
+    await until(() => ap.pending() === 1);
+    await target.host.get("S")?.persisted();
+    const durable = store.durable.get("S");
+    if (!durable) throw new Error("nothing durable");
+    const parsed = parseDaemonRecord(JSON.parse(JSON.stringify(durable)), (c) => c === CWD);
+    if (!parsed.ok) throw new Error(parsed.reason);
+    // The restart: a new daemon restores the record; the old one is gone.
+    const model2 = new GatedModel([[t("b"), done]]);
+    const host2 = makeHost(model2, runs, persisterFor(new MemStore()));
+    host2.restore(parsed.record);
+    target.host = host2;
+    target.last?.close();
+    // The resumed turn asks again under a fresh id: one new dialog.
+    expect(await until(() => ap.prompts() === 2 && ap.pending() === 1)).toBe(true);
+    expect(ap.aborts()).toBe(1); // the pre-restart dialog, withdrawn
+    ap.approve();
+    const events = await turn;
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(ap.prompts()).toBe(2); // never a third
+    expect(runs.n).toBe(1);
+    const afterReset = log.slice(log.findIndex((o) => o.kind === "reset"));
+    expect(afterReset.some((o) => o.kind === "update" && o.update.type === "turn_start")).toBe(
+      false,
+    );
+    client.close();
+  });
+});
+
+/** Loses the first delivery of every 3rd update while `loss.on`: more gaps than the guard allows. */
+function lossy(inner: DuplexChannel, loss: { on: boolean }): DuplexChannel {
+  const seen = new Set<number>();
+  return {
+    send: (data) => inner.send(data),
+    close: () => inner.close(),
+    setOnMessage: (h) =>
+      inner.setOnMessage((data: string) => {
+        const f = JSON.parse(data);
+        const seq = f.params?.seq;
+        if (loss.on && f.method === "session/update" && seq % 3 === 0 && !seen.has(seq)) {
+          seen.add(seq);
+          return;
+        }
+        h(data);
+      }),
+    setOnClose: (h) => inner.setOnClose(h),
+  };
+}
+
+/** How a call settles within `ms`: "completed", its error message, or "hung". */
+const outcome = (p: Promise<unknown>, ms = 500): Promise<string> =>
+  Promise.race([
+    p.then(
+      () => "completed",
+      (e: Error) => e.message,
+    ),
+    new Promise<string>((r) => setTimeout(() => r("hung"), ms)),
+  ]);
+
+/** A long reply: the turn spans many macrotasks, so a cancel can still land mid-turn. */
+const long = (n: number): Step[] => [...Array.from({ length: n }, (_, i) => t(`${i} `)), done];
+
+describe("re-attach: review findings (docs/feat/client-reattach.md, Review)", () => {
+  test("finding 1: Esc while down, for a prompt that never reached the daemon, cancels the turn", async () => {
+    // Mutation: drop the cancel on the prompt's ack → the cancel sent from
+    // `recovered()` beats the prompt (a no-op) and the turn runs to end_turn.
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("w"), done], long(40)]);
+    const target = new Target(makeHost(model, runs));
+    const dial = dialer(target);
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    await drain(session.send("warm up"));
+    dial.hold();
+    target.last?.close();
+    await tick();
+    const controller = new AbortController();
+    const turn = drain(session.send("second", controller.signal));
+    await tick();
+    controller.abort(); // still down: the prompt is waiting for the link
+    dial.release();
+    const events = await turn;
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    client.close();
+  });
+
+  test("the cancel of an acked turn, lost while down, is re-sent after the reconnect", async () => {
+    // Mutation: never re-send the cancel from `recovered()` → the turn completes.
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), { kind: "gate" }, ...long(40)]]);
+    const target = new Target(makeHost(model, runs));
+    const dial = dialer(target);
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+    });
+    await client.initialize();
+    const controller = new AbortController();
+    const turn = drain(client.newSession(undefined, "S").send("go", controller.signal));
+    await until(() => model.waiting);
+    dial.hold();
+    target.last?.close();
+    await tick();
+    controller.abort(); // the notification is lost: the link is down
+    dial.release();
+    await until(() => (target.frames[1] ?? []).some((f) => f.method === "session/cancel"));
+    model.open();
+    const events = await turn;
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    client.close();
+  });
+
+  test("finding 2: no factory — a command on a session the reducer gave up on rejects at once", async () => {
+    // Mutation: send it to the peer anyway → acked, its turn_end never applied:
+    // the turn hangs silently.
+    const runs = { n: 0 };
+    const model = new GatedModel([long(15), [t("x"), done]]);
+    const host = makeHost(model, runs);
+    const [d, c] = createChannelPair();
+    new Connection(d, host);
+    const loss = { on: true };
+    const client = new RemoteClient(lossy(c, loss), new PermissionBroker(), undefined, {
+      onError: () => {},
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    expect(String(await drain(session.send("one")).catch((e: Error) => e))).toMatch(
+      /giving up on this session/,
+    );
+    loss.on = false;
+    await until(() => host.get("S")?.running === false);
+    expect(await outcome(drain(session.send("two")))).toMatch(/could not be resumed/);
+    expect(model.calls).toBe(1); // never sent to the daemon
+    client.close();
+  });
+
+  test("with a factory: a command waiting out a drop rejects when the recovery fails (whenLive)", async () => {
+    // Mutation: drop the `failed` check in `whenLive` → the command waits forever.
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("w"), done]]);
+    const target = new Target(makeHost(model, runs));
+    const dial = dialer(target);
+    let refuseOpen = false;
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        const inner = await dial.factory();
+        if (!refuseOpen) return inner;
+        // The recovery's `open` fails with the daemon's own error: not retried.
+        let inbound: ((data: string) => void) | null = null;
+        return {
+          send: (data) => {
+            const f = JSON.parse(data);
+            if (f.method !== "session/open") return inner.send(data);
+            const error = { code: -32603, message: "open refused" };
+            queueMicrotask(() => inbound?.(JSON.stringify({ jsonrpc: "2.0", id: f.id, error })));
+          },
+          close: () => inner.close(),
+          setOnMessage: (h) => {
+            inbound = h;
+            inner.setOnMessage(h);
+          },
+          setOnClose: (h) => inner.setOnClose(h),
+        };
+      },
+      random: () => 0,
+      onError: () => {},
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    await drain(session.send("warm up"));
+    dial.hold();
+    refuseOpen = true;
+    target.last?.close();
+    await tick();
+    // A raw command (no turn listener to fail it): only `whenLive` can settle it.
+    const next = outcome(client.prompt("S", "t2", "two"), 1000); // waits for the link
+    dial.release();
+    expect(await next).toMatch(/could not be resumed/);
+    expect(model.calls).toBe(1);
+    client.close();
+  });
+
+  test("finding 4: closeSession during a recovery that hits UnknownSession never recreates it", async () => {
+    // Mutation: drop the `closing` check on the recreate path → the closed
+    // session is created again on the new daemon (an orphan).
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("w"), done]]);
+    const target = new Target(makeHost(model, runs));
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    await drain(session.send("warm up"));
+    await client.snapshot("S");
+    // The daemon restarts: a new host that never heard of S.
+    target.host = makeHost(new GatedModel([]), runs);
+    let closed: Promise<void> | null = null;
+    target.onFrame = (f) => {
+      if (f.method === "session/open" && !closed) {
+        queueMicrotask(() => {
+          closed = client.closeSession("S");
+        });
+      }
+    };
+    target.last?.close();
+    await until(() => closed !== null);
+    await closed;
+    await tick();
+    await tick();
+    expect(target.host.get("S")).toBeUndefined();
+    client.close();
+  });
+
+  test("an update for a session this client never opened is dropped (no prompt from a pod)", async () => {
+    // Mutation: route an unknown session's update to the permission router →
+    // a pod-originated prompt for a session the user never opened.
+    const runs = { n: 0 };
+    const model = new GatedModel([]);
+    const target = new Target(makeHost(model, runs));
+    let inbound: ((data: string) => void) | null = null;
+    const [d, c] = createChannelPair();
+    new Connection(d, target.host);
+    const channel: DuplexChannel = {
+      send: (data) => c.send(data),
+      close: () => c.close(),
+      setOnMessage: (h) => {
+        inbound = h;
+        c.setOnMessage(h);
+      },
+      setOnClose: (h) => c.setOnClose(h),
+    };
+    const ap = approver();
+    const client = new RemoteClient(channel, ap.broker, undefined, { onError: () => {} });
+    await client.initialize();
+    (inbound as ((data: string) => void) | null)?.(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "NOT-OPENED",
+          seq: 1,
+          mandatory: true,
+          update: {
+            type: "permission_request",
+            requestId: "r1",
+            toolCallId: "c1",
+            tool: "shell",
+            title: "rm -rf ~",
+            options: [{ optionId: "allow_once", name: "Allow", kind: "allow_once" }],
+          },
+        },
+      }),
+    );
+    await tick();
+    expect(ap.prompts()).toBe(0);
+    client.close();
+  });
+
+  test("snapshot() waits out a drop and retries (read-only: safe to repeat)", async () => {
+    // Mutation: no retry loop (one attempt) → the read rejects with the drop.
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("w"), done]]);
+    const target = new Target(makeHost(model, runs));
+    const link = cutLink(1); // the snapshot request is delivered, its answer is lost
+    new Connection(link.daemon, target.host);
+    const client = new RemoteClient(link.client, new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    await drain(client.newSession(undefined, "S").send("warm up"));
+    link.arm();
+    const history = await client.snapshot("S");
+    expect(link.cut()).toBe(true);
+    expect(history.map((m) => m.content)).toContain("warm up");
+    client.close();
+  });
+
+  test("an answer the daemon refused is offered again when the request comes back (answerFailed)", async () => {
+    // Mutation: skip `router.answerFailed` → the id stays "answered" and the
+    // re-delivered request is swallowed: no dialog, the turn never ends.
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), shell("c1"), done]]);
+    const host = makeHost(model, runs);
+    const [d, c] = createChannelPair();
+    new Connection(d, host);
+    let inbound: ((data: string) => void) | null = null;
+    let seq = 0;
+    let request: unknown = null;
+    let refused = false;
+    const channel: DuplexChannel = {
+      send: (data) => {
+        const f = JSON.parse(data);
+        if (f.method === "session/resolve_permission" && !refused) {
+          refused = true; // the daemon "fails" it (not PermissionNotPending)
+          const error = { code: -32603, message: "refused once" };
+          queueMicrotask(() => inbound?.(JSON.stringify({ jsonrpc: "2.0", id: f.id, error })));
+          return;
+        }
+        c.send(data);
+      },
+      close: () => c.close(),
+      setOnMessage: (h) => {
+        inbound = h;
+        c.setOnMessage((data: string) => {
+          const f = JSON.parse(data);
+          if (f.method === "session/update") {
+            seq = Math.max(seq, f.params.seq);
+            if (f.params.update.type === "permission_request") request = f.params.update;
+          }
+          h(data);
+        });
+      },
+      setOnClose: (h) => c.setOnClose(h),
+    };
+    const ap = approver();
+    const client = new RemoteClient(channel, ap.broker, undefined, { onError: () => {} });
+    await client.initialize();
+    void drain(client.newSession(undefined, "S").send("go")).catch(() => {});
+    expect(await until(() => ap.pending() === 1)).toBe(true);
+    ap.approve();
+    expect(await until(() => refused)).toBe(true);
+    await tick();
+    // The same request comes back (as a later replay would offer it).
+    (inbound as ((data: string) => void) | null)?.(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: { sessionId: "S", seq: seq + 1, mandatory: true, update: request },
+      }),
+    );
+    expect(await until(() => ap.prompts() === 2)).toBe(true);
+    client.close();
+  });
+});

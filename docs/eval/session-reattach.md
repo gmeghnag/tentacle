@@ -491,7 +491,7 @@ to promotion time (each child gets its mandatory fresh-context Review then).
 | 6 | `docs/feat/daemon-side-persistence.md` Part A — `serve` persists history; a turn suspended at restart is closed "not executed" | M · load-bearing | 4, 5b |
 | 7a | `docs/feat/permission-events.md` (live slice) — permissions as events, nonce, first-wins, no timeout, cancel settles | L · load-bearing | 4 |
 | 7b | `docs/feat/suspended-turn-resume.md` — rebuild a suspended turn after a `serve` restart | M · load-bearing | 6, 7a |
-| 8a | `docs/eval/client-reattach.md` — `RemoteClient` reconnect, pure reducer, the property test | M · load-bearing | 3c, 4, 7a |
+| 8a | `docs/feat/client-reattach.md` — `RemoteClient` reconnect, pure reducer, the property test | L · load-bearing | 3c, 4, 7a |
 | 8b | `docs/eval/client-reattach-frontends.md` — connect/attach/run wiring, `StatusBar`, pod-attach Layer 2 | M · load-bearing | 8a |
 | — | `docs/eval/attachments.md` (sister) — 4 sub-tasks; the first is independent | 4 × S–M · load-bearing | 3a (sub-tasks 2–4) |
 | — | `docs/feat/pod-attach-resilience.md` Layer 1 — WS ping (D9) | S · contained | — |
