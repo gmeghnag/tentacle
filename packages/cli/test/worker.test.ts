@@ -6,6 +6,7 @@ import { JsonSessionStore } from "@tentacle/agent";
 import { PermissionBroker } from "@tentacle/core";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { startWorkerRuntime } from "../src/local-runtime.ts";
+import { SessionSaver } from "../src/session-saver.ts";
 
 // End-to-end over the REAL worker boundary: spawn the worker daemon, handshake,
 // open a session, and drive one scripted turn through a fake OpenAI-compatible
@@ -65,7 +66,7 @@ describe("startWorkerRuntime (real worker spawn)", () => {
       config,
       {
         permissions: new PermissionBroker(),
-        store: new JsonSessionStore(join(dir, "sessions")),
+        saver: new SessionSaver(new JsonSessionStore(join(dir, "sessions")), () => {}),
         resume: null,
       },
       () => {},

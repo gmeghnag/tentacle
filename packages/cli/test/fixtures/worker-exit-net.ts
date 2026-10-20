@@ -17,6 +17,7 @@ import { PermissionBroker } from "@tentacle/core";
 import { trackedGroups } from "@tentacle/exec";
 import { loadConfig } from "../../src/config.ts";
 import { startWorkerRuntime } from "../../src/local-runtime.ts";
+import { SessionSaver } from "../../src/session-saver.ts";
 
 const [marker, dir, form] = process.argv.slice(2) as [string, string, string?];
 const command =
@@ -78,7 +79,7 @@ const runtime = await startWorkerRuntime(
   config,
   {
     permissions: new PermissionBroker(),
-    store: new JsonSessionStore(join(dir, "sessions")),
+    saver: new SessionSaver(new JsonSessionStore(join(dir, "sessions")), () => {}),
     resume: null,
   },
   (line) => process.stderr.write(line),

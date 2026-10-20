@@ -17,11 +17,10 @@
  * clear 404 that we translate into an actionable error (`podCreateError`) —
  * no side-effectful namespace creation by a "run" command.
  *
- * Persistence stays on the laptop (the `createLocalRuntime` store), so the pod
+ * Persistence stays on the laptop (the `createLocalRuntime` saver), so the pod
  * is a stateless sandbox and `--resume` works locally.
  */
 import type { SessionRecord } from "@tentacle/agent";
-import type { JsonSessionStore } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import type { PermissionBroker } from "@tentacle/core";
 import {
@@ -42,6 +41,7 @@ import type { DuplexChannel } from "@tentacle/transport";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { resolvePodBinary } from "./pod-binary-build.ts";
 import { injectAgentBinary, probePodArch } from "./pod-binary.ts";
+import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
 
 /** A bounded stderr collector that flushes once, on teardown. */
@@ -108,7 +108,7 @@ export interface PodRuntimeDeps {
   /** Pod name (optional; a random one is generated when omitted). */
   readonly name?: string;
   readonly permissions: PermissionBroker;
-  readonly store: JsonSessionStore;
+  readonly saver: SessionSaver;
   readonly resume: SessionRecord | null;
   readonly log: (line: string) => void;
 }
@@ -283,7 +283,7 @@ export async function startPodRuntime(
         void deps.kube.deletePod(name).catch(() => {});
       },
       permissions: deps.permissions,
-      store: deps.store,
+      saver: deps.saver,
       cwd: config.cwd,
       model: config.model,
       resume: deps.resume,
@@ -313,7 +313,7 @@ export interface PodAttachRuntimeDeps {
   /** Install dir for the injected binary (default `/usr/local/bin`; `--bin-dir` for a read-only rootfs). */
   readonly binDir?: string;
   readonly permissions: PermissionBroker;
-  readonly store: JsonSessionStore;
+  readonly saver: SessionSaver;
   readonly resume: SessionRecord | null;
   readonly log: (line: string) => void;
 }
@@ -469,7 +469,7 @@ export async function startAttachRuntime(
         stderr.flush();
       },
       permissions: deps.permissions,
-      store: deps.store,
+      saver: deps.saver,
       cwd: config.cwd,
       model: config.model,
       resume: deps.resume,

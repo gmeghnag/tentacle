@@ -17,7 +17,7 @@ import { join } from "node:path";
  * NOTE: F1 auto-approves tool calls; the interactive permission engine arrives
  * in F4. Until then, point the CLI at a trusted model and workspace.
  */
-import { JsonSessionStore, Session, type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
+import { Session, recordFromSnapshot } from "@tentacle/agent";
 import { type ChatMessage, PermissionBroker } from "@tentacle/core";
 import {
   KubeClient,
@@ -36,6 +36,7 @@ import { render } from "./render.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { startTerminal } from "./terminal.ts";
+import { type TuiSessions, openTuiSessions, runSessionTui } from "./tui-sessions.ts";
 import { buildAgent, connectConfiguredMcp, inProcessAgents } from "./wiring.ts";
 
 /**
@@ -272,25 +273,14 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return { error: true } as const;
     }
   };
-  const loadPodResume = async (flags: Map<string, string>, bools: Set<string>) => {
-    const store = new JsonSessionStore(join(config.configDir, "sessions"));
-    const wantsResume = bools.has("resume") || flags.has("resume");
-    let resumeRecord: SessionRecord | null = null;
-    if (wantsResume) {
-      const uid = flags.get("resume");
-      resumeRecord = uid ? await store.load(uid) : await store.latest();
-      if (!resumeRecord) {
-        write(
-          uid
-            ? `[resume] no session "${uid}"; starting fresh\n`
-            : "[resume] no saved sessions yet; starting fresh\n",
-        );
-      } else {
-        write(`[resume] ${resumeRecord.id} — ${resumeRecord.title}\n`);
-      }
-    }
-    return { store, resume: resumeRecord };
-  };
+  // Sessions persist as JSON under <configDir>/sessions (store + saver + notice
+  // hub, `--resume` resolved pre-mount). `null` = don't start (reason written).
+  const openSessions = (flags: Map<string, string>, bools: Set<string>) =>
+    openTuiSessions(
+      join(config.configDir, "sessions"),
+      { wanted: bools.has("resume") || flags.has("resume"), uid: flags.get("resume") },
+      write,
+    );
   // `run` and `attach` both end in the same local TUI over the pod runtime. The
   // `permissions` broker MUST be the SAME instance handed to the runtime AND the
   // TUI: the pod daemon routes its `session/request_permission` to the runtime's
@@ -301,22 +291,23 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const runPodTui = async (
     runtime: Awaited<ReturnType<typeof startPodRuntime>>,
     permissions: PermissionBroker,
-    resumeRecord: SessionRecord | null,
+    sessions: TuiSessions,
   ): Promise<number> => {
-    try {
-      await startTui(null, {
-        model: config.model,
-        cwd: config.cwd,
-        contextWindow: config.contextWindow,
-        permissions,
-        jobs: runtime.jobs,
-        autoWakeOnJobExit: config.autoWake,
-        createSession: runtime.createSession,
-        ...(resumeRecord ? { resumeMessages: resumeRecord.messages } : {}),
-      });
-    } finally {
-      await runtime.dispose();
-    }
+    await runSessionTui(sessions, {
+      start: (sessionOptions) =>
+        startTui(null, {
+          model: config.model,
+          cwd: config.cwd,
+          contextWindow: config.contextWindow,
+          permissions,
+          jobs: runtime.jobs,
+          autoWakeOnJobExit: config.autoWake,
+          createSession: runtime.createSession,
+          ...sessionOptions,
+        }),
+      teardown: () => runtime.dispose(),
+      write,
+    });
     return 0;
   };
 
@@ -342,7 +333,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return 1;
     }
     const name = runPos[0];
-    const { store, resume: resumeRecord } = await loadPodResume(runFlags, runBools);
+    const sessions = await openSessions(runFlags, runBools);
+    if (!sessions) {
+      return 1;
+    }
     const auth = await loadPodAuth(namespace, "pod");
     if ("error" in auth) {
       return 1;
@@ -359,15 +353,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ...(binDir ? { binDir } : {}),
         ...(name ? { name } : {}),
         permissions,
-        store,
-        resume: resumeRecord,
+        saver: sessions.saver,
+        resume: sessions.resume,
         log: write,
       });
     } catch (error) {
       write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
     }
-    return await runPodTui(runtime, permissions, resumeRecord);
+    return await runPodTui(runtime, permissions, sessions);
   }
 
   // `attach`: attach the local TUI to an EXISTING pod (F4, the `run` flow minus
@@ -412,7 +406,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const namespace = attachFlags.get("namespace") ?? process.env.TENTACLE_POD_NAMESPACE;
     const container = attachFlags.get("container") ?? shortContainer;
     const binDir = attachFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR;
-    const { store, resume: resumeRecord } = await loadPodResume(attachFlags, attachBools);
+    const sessions = await openSessions(attachFlags, attachBools);
+    if (!sessions) {
+      return 1;
+    }
     const auth = await loadPodAuth(namespace, "pod");
     if ("error" in auth) {
       return 1;
@@ -429,15 +426,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ...(container ? { container } : {}),
         ...(binDir ? { binDir } : {}),
         permissions,
-        store,
-        resume: resumeRecord,
+        saver: sessions.saver,
+        resume: sessions.resume,
         log: write,
       });
     } catch (error) {
       write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
     }
-    return await runPodTui(runtime, permissions, resumeRecord);
+    return await runPodTui(runtime, permissions, sessions);
   }
 
   // Plain line-based REPL (scripting / no-TTY fallback). No interactive
@@ -455,22 +452,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     wantsResume ||
     (args.length === 0 && process.stdin.isTTY)
   ) {
-    // Sessions persist as JSON under <configDir>/sessions; `--resume` loads one.
-    const store = new JsonSessionStore(join(config.configDir, "sessions"));
-    let resumeRecord: SessionRecord | null = null;
-    if (wantsResume) {
-      const uid = topFlags.get("resume");
-      resumeRecord = uid ? await store.load(uid) : await store.latest();
-      if (!resumeRecord) {
-        write(
-          uid
-            ? `[resume] no session "${uid}"; starting fresh\n`
-            : "[resume] no saved sessions yet; starting fresh\n",
-        );
-      } else {
-        write(`[resume] ${resumeRecord.id} — ${resumeRecord.title}\n`);
-      }
+    const sessions = await openSessions(topFlags, topBools);
+    if (!sessions) {
+      return 1;
     }
+    const { saver, resume: resumeRecord } = sessions;
 
     // By default the agent runs in a worker thread, off the render thread, so
     // tool execution never janks the UI (MCP tools and live background-job exits
@@ -481,24 +467,25 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       const permissions = new PermissionBroker();
       const runtime = await startWorkerRuntime(
         config,
-        { permissions, store, resume: resumeRecord },
+        { permissions, saver, resume: resumeRecord },
         write,
       );
       if (runtime) {
-        try {
-          await startTui(null, {
-            model: config.model,
-            cwd: config.cwd,
-            contextWindow: config.contextWindow,
-            permissions,
-            jobs: runtime.jobs,
-            autoWakeOnJobExit: config.autoWake,
-            createSession: runtime.createSession,
-            ...(resumeRecord ? { resumeMessages: resumeRecord.messages } : {}),
-          });
-        } finally {
-          await runtime.dispose();
-        }
+        await runSessionTui(sessions, {
+          start: (sessionOptions) =>
+            startTui(null, {
+              model: config.model,
+              cwd: config.cwd,
+              contextWindow: config.contextWindow,
+              permissions,
+              jobs: runtime.jobs,
+              autoWakeOnJobExit: config.autoWake,
+              createSession: runtime.createSession,
+              ...sessionOptions,
+            }),
+          teardown: () => runtime.dispose(),
+          write,
+        });
         return 0;
       }
       // worker unavailable → fall through to the in-process path below
@@ -517,7 +504,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       mcpTools: mcp.tools,
       resume: resumeRecord,
       persist: (snapshot, createdAt) =>
-        void store.save(
+        saver.save(
           recordFromSnapshot(snapshot, {
             cwd: config.cwd,
             model: config.model,
@@ -526,20 +513,21 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ),
     });
 
-    try {
-      await startTui(null, {
-        model: config.model,
-        cwd: config.cwd,
-        contextWindow: config.contextWindow,
-        permissions,
-        jobs,
-        autoWakeOnJobExit: config.autoWake,
-        createSession,
-        ...(resumeRecord ? { resumeMessages: resumeRecord.messages } : {}),
-      });
-    } finally {
-      mcp.dispose();
-    }
+    await runSessionTui(sessions, {
+      start: (sessionOptions) =>
+        startTui(null, {
+          model: config.model,
+          cwd: config.cwd,
+          contextWindow: config.contextWindow,
+          permissions,
+          jobs,
+          autoWakeOnJobExit: config.autoWake,
+          createSession,
+          ...sessionOptions,
+        }),
+      teardown: () => mcp.dispose(),
+      write,
+    });
     return 0;
   }
 

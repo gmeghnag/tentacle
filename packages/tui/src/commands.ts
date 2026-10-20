@@ -35,6 +35,24 @@ export function isSessionMutating(command: string): boolean {
 }
 
 /**
+ * What a quit request (`/exit`, `/quit`, Ctrl+C) does. Quitting mid-turn first
+ * stops the turn and waits for it to settle — that is where the session is
+ * saved — then exits; a second request while that stop is pending quits at once
+ * (a turn that won't stop must not trap the user). Ctrl+C mid-turn only stops
+ * the turn (it never quits on the first press).
+ */
+export function quitAction(
+  source: "command" | "ctrl-c",
+  running: boolean,
+  exitPending: boolean,
+): "exit" | "stop-then-exit" | "stop" {
+  if (!running || exitPending) {
+    return "exit";
+  }
+  return source === "command" ? "stop-then-exit" : "stop";
+}
+
+/**
  * Commands matching what the user is typing, for the autocomplete palette.
  * Active only while typing the command name itself: the input must start with
  * "/" and contain no space yet (once there's a space the name is complete and

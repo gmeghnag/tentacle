@@ -9,6 +9,7 @@ import {
   lastAssistantText,
   lastUserText,
   matchCommands,
+  quitAction,
   transcriptToMarkdown,
 } from "./commands.ts";
 import { CommandPalette } from "./components/CommandPalette.tsx";
@@ -29,6 +30,7 @@ import {
   type DisplayItem,
   type DisplayState,
   appendBackgroundExit,
+  appendNotice,
   applyEvent,
   backgroundExitNotice,
   failTurn,
@@ -52,6 +54,14 @@ export interface SessionController {
   close?(): void;
 }
 
+/**
+ * Out-of-band notices from the host (e.g. "couldn't save the session"), shown
+ * as a system line even while idle. Returns the unsubscribe function.
+ */
+export interface NoticeFeed {
+  onNotice(listener: (text: string) => void): () => void;
+}
+
 export interface AppProps {
   /** A local agent; used to build sessions unless `createSession` is given. */
   readonly agent?: Agent;
@@ -69,6 +79,8 @@ export interface AppProps {
    * so the agent reacts to it without a user prompt. Default: true.
    */
   readonly autoWakeOnJobExit?: boolean;
+  /** Host notices to surface live (never a raw terminal write while Ink owns it). */
+  readonly notices?: NoticeFeed;
   /** Injectable for tests (defaults to the OS clipboard + Bun.write). */
   readonly clipboard?: (text: string) => Promise<void>;
   /** Injectable for tests (defaults to the OS clipboard read). */
@@ -110,6 +122,7 @@ export function App({
   permissions,
   jobs,
   autoWakeOnJobExit = true,
+  notices,
   clipboard = copyToClipboard,
   paste = readClipboard,
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
@@ -160,6 +173,8 @@ export function App({
   });
   const sessionRef = useRef<SessionController | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // A quit asked for mid-turn: exit as soon as the turn settles (it is saved then).
+  const exitPendingRef = useRef(false);
   const lastUserRef = useRef<string | null>(null);
   const prevRowsRef = useRef(0);
   // Generation token for the background resize re-layout warm: a newer resize
@@ -218,6 +233,18 @@ export function App({
       }
     });
   }, [jobs, flushNow, autoWakeOnJobExit]);
+
+  // --- host notices ----------------------------------------------------------
+  useEffect(() => {
+    if (!notices) {
+      return;
+    }
+    return notices.onNotice((text) => {
+      stateRef.current = appendNotice(stateRef.current, text);
+      setScrollOffset(0);
+      flushNow();
+    });
+  }, [notices, flushNow]);
 
   // --- terminal resize -----------------------------------------------------
   useEffect(() => {
@@ -367,10 +394,14 @@ export function App({
         abortRef.current = null;
         setQueued([]); // the turn is over; nothing stays queued
         flushNow();
-        // A background job that exited mid-turn could not be seen by the turn
-        // that was running (the agent flushes exits at turn start). Now idle,
-        // fire a continuation so the agent reacts to it.
-        if (wakePendingRef.current) {
+        // A quit asked for mid-turn: the turn has settled (and was saved by the
+        // session's own `finally`), so exit now — and wake nothing.
+        if (exitPendingRef.current) {
+          exit();
+        } else if (wakePendingRef.current) {
+          // A background job that exited mid-turn could not be seen by the turn
+          // that was running (the agent flushes exits at turn start). Now idle,
+          // fire a continuation so the agent reacts to it.
           wakePendingRef.current = false;
           setTimeout(() => {
             if (!stateRef.current.running) {
@@ -380,7 +411,7 @@ export function App({
         }
       }
     },
-    [flushNow, scheduleFlush],
+    [flushNow, scheduleFlush, exit],
   );
   runRef.current = run;
 
@@ -396,7 +427,15 @@ export function App({
       switch (cmd) {
         case "/exit":
         case "/quit":
-          exit();
+          if (quitAction("command", stateRef.current.running, exitPendingRef.current) === "exit") {
+            exit();
+            return;
+          }
+          exitPendingRef.current = true;
+          pushNotice(
+            "_Stopping the turn so it is saved before exiting — /exit or Ctrl+C again to quit now._",
+          );
+          abortRef.current?.abort();
           return;
         case "/help":
           pushNotice(helpText());
@@ -638,10 +677,14 @@ export function App({
       return;
     }
     if (key.ctrl && char === "c") {
-      if (stateRef.current.running && abortRef.current) {
-        abortRef.current.abort();
-      } else {
+      // No abort handle (the turn is already settling) → nothing to stop: quit.
+      if (
+        quitAction("ctrl-c", stateRef.current.running, exitPendingRef.current) === "exit" ||
+        !abortRef.current
+      ) {
         exit();
+      } else {
+        abortRef.current.abort();
       }
       return;
     }

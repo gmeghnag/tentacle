@@ -14,7 +14,7 @@
  * opened: the previous session on `/clear` (`SessionController.close`), every
  * session still open on `dispose` — the same on every runtime (AGENTS §7).
  */
-import { type JsonSessionStore, type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
+import { type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
 import { RemoteClient, type RemoteSession } from "@tentacle/client";
 import type { TentacleConfig } from "@tentacle/config";
 import type {
@@ -28,6 +28,7 @@ import { applyGroupMessage } from "@tentacle/exec";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
 import { logDaemonError } from "./daemon-log.ts";
+import type { SessionSaver } from "./session-saver.ts";
 
 export interface LocalRuntime {
   readonly createSession: () => SessionController;
@@ -109,7 +110,8 @@ export interface LocalRuntimeDeps {
   /** Called to tear down the daemon side (terminate the worker / close the pipe). */
   readonly disposeTransport: () => void;
   readonly permissions: PermissionBroker;
-  readonly store: JsonSessionStore;
+  /** Where each turn's history goes; its failures are reported, never thrown. */
+  readonly saver: SessionSaver;
   readonly cwd: string;
   readonly model: string;
   /** A session to resume (its uid + history are reused), or null for a fresh one. */
@@ -139,7 +141,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     const createdAt = record?.createdAt;
     const session = client.newSession(record?.messages, uid);
     return persistingController(session, (messages) => {
-      void deps.store.save(
+      deps.saver.save(
         recordFromSnapshot(
           { id: uid, messages },
           { cwd: deps.cwd, model: deps.model, ...(createdAt !== undefined ? { createdAt } : {}) },
@@ -182,7 +184,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
  */
 export async function startWorkerRuntime(
   config: TentacleConfig,
-  deps: { permissions: PermissionBroker; store: JsonSessionStore; resume: SessionRecord | null },
+  deps: { permissions: PermissionBroker; saver: SessionSaver; resume: SessionRecord | null },
   log: (line: string) => void,
 ): Promise<LocalRuntime | null> {
   let worker: Worker;
@@ -230,7 +232,7 @@ export async function startWorkerRuntime(
         channel,
         disposeTransport: () => worker.terminate(),
         permissions: deps.permissions,
-        store: deps.store,
+        saver: deps.saver,
         cwd: config.cwd,
         model: config.model,
         resume: deps.resume,

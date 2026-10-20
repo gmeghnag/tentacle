@@ -33,6 +33,7 @@ import {
   startAttachRuntime,
   startPodRuntime,
 } from "../src/pod-runtime.ts";
+import { SessionSaver } from "../src/session-saver.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -241,7 +242,7 @@ describe("startPodRuntime", () => {
       image: "repo/img:tag",
       binDir: "/tmp",
       permissions: new PermissionBroker(),
-      store: new JsonSessionStore(join(dir, "bindir")),
+      saver: new SessionSaver(new JsonSessionStore(join(dir, "bindir")), () => {}),
       resume: null,
       log: () => {},
     });
@@ -268,7 +269,7 @@ describe("startPodRuntime", () => {
       namespace: "dev",
       image: "repo/img:tag",
       permissions: new PermissionBroker(),
-      store,
+      saver: new SessionSaver(store, () => {}),
       resume: null,
       log: () => {},
     });
@@ -296,7 +297,7 @@ describe("startPodRuntime", () => {
     // A turn runs over the exec channel and persists on the laptop side.
     await drain(runtime.createSession().send("hello"));
     await new Promise((r) => setTimeout(r, 20));
-    const saved = await store.list();
+    const saved = (await store.list()).records;
     expect(saved).toHaveLength(1);
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "hi from the pod"]);
 
@@ -320,7 +321,7 @@ describe("startPodRuntime", () => {
       namespace: "dev",
       image: "repo/img:tag",
       permissions: spy,
-      store,
+      saver: new SessionSaver(store, () => {}),
       resume: null,
       log: () => {},
     });
@@ -361,7 +362,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         permissions: new PermissionBroker(),
-        store: new JsonSessionStore(join(dir, "injection-fail")),
+        saver: new SessionSaver(new JsonSessionStore(join(dir, "injection-fail")), () => {}),
         resume: null,
         log: () => {},
       }),
@@ -383,7 +384,7 @@ describe("startPodRuntime", () => {
       image: "img",
       name: "my-agent",
       permissions: new PermissionBroker(),
-      store,
+      saver: new SessionSaver(store, () => {}),
       resume: null,
       log: () => {},
     });
@@ -414,7 +415,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         permissions: new PermissionBroker(),
-        store: new JsonSessionStore(join(dir, "no-ns")),
+        saver: new SessionSaver(new JsonSessionStore(join(dir, "no-ns")), () => {}),
         resume: null,
         log: () => {},
       }),
@@ -449,7 +450,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         permissions: new PermissionBroker(),
-        store: new JsonSessionStore(join(dir, "rbac")),
+        saver: new SessionSaver(new JsonSessionStore(join(dir, "rbac")), () => {}),
         resume: null,
         log: () => {},
       }),
@@ -487,7 +488,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         permissions: new PermissionBroker(),
-        store,
+        saver: new SessionSaver(store, () => {}),
         resume: null,
         log: () => {},
       });
@@ -541,7 +542,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         permissions: new PermissionBroker(),
-        store: new JsonSessionStore(join(dir, "fail")),
+        saver: new SessionSaver(new JsonSessionStore(join(dir, "fail")), () => {}),
         resume: null,
         log: () => {},
       }),
@@ -556,7 +557,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     namespace: "dev",
     podName: "mypod",
     permissions: new PermissionBroker(),
-    store,
+    saver: new SessionSaver(store, () => {}),
     resume: null,
     log: () => {},
   });
@@ -584,7 +585,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     // A turn runs over the exec channel and persists on the laptop side.
     await drain(runtime.createSession().send("hello"));
     await new Promise((r) => setTimeout(r, 20));
-    const saved = await store.list();
+    const saved = (await store.list()).records;
     expect(saved).toHaveLength(1);
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "hi from the existing pod"]);
 

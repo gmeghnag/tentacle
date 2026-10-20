@@ -145,6 +145,15 @@ verifying bytes at resolve time is affordable.
   references. `session-store-durability.md` §4 (validated load) can add
   `attachments` to the shape it checks when it lands; neither task blocks the
   other.
+  > **Update 2026-10-20 (`fix/session-store-durability`):** `load` now validates
+  > (`parseSessionRecord`, `agent/src/session-store.ts`), and its message check
+  > mirrors the strict wire schema **key for key** (`MESSAGE_KEYS`). Old files
+  > still load unchanged, but this task MUST add `attachments` to
+  > `MESSAGE_KEYS` in the same change that adds it to `ChatMessageSchema` —
+  > otherwise every file written with an attachment is reported unreadable
+  > (fatal on `--resume <uid>`). The tripwire test
+  > `packages/cli/test/session-resume.test.ts` ("the set of allowed message
+  > keys is the schema's") fails until both are updated.
 - **Where capability comes from: the model config, not the model id.** Today
   the config has no vision field (`config/src/schema.ts:33` is the model block;
   `rg -i "vision|image" packages/config/src` → nothing), and an
@@ -586,7 +595,7 @@ hide the button); client-side downscale/convert (HEIC → JPEG/PNG, long side
 ≈1500 px) as a protocol recommendation; upload confinement (`uploads/` under the
 workspace, names = hash, original name as metadata only, size caps per file and
 per session); attachment lifetime (tied to the session, GC on close); persisted
-history format change and its migration (`docs/eval/session-store-durability.md`).
+history format change and its migration (`docs/fix/session-store-durability.md`).
 
 **Why, item by item (for the decisions above and those still open).**
 

@@ -1,7 +1,7 @@
 import type { Agent } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import { render } from "ink";
-import { App, type SessionController } from "./App.tsx";
+import { App, type NoticeFeed, type SessionController } from "./App.tsx";
 import { messagesToItems } from "./resume.ts";
 import {
   ENTER_FULLSCREEN,
@@ -23,6 +23,8 @@ export interface TuiOptions {
   readonly createSession?: () => SessionController;
   /** Prior conversation to show on start (a resumed session's history). */
   readonly resumeMessages?: readonly ChatMessage[];
+  /** Host notices shown live in the transcript (e.g. a failed session save). */
+  readonly notices?: NoticeFeed;
 }
 
 /**
@@ -66,6 +68,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         ? { autoWakeOnJobExit: options.autoWakeOnJobExit }
         : {})}
       {...(initialItems ? { initialItems } : {})}
+      {...(options.notices ? { notices: options.notices } : {})}
     />,
     { exitOnCtrlC: false },
   );

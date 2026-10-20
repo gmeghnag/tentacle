@@ -17,6 +17,7 @@ import { Connection, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
+import { SessionSaver } from "../src/session-saver.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -116,7 +117,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       channel: clientCh,
       disposeTransport: () => daemonPeer.close(),
       permissions: new PermissionBroker(),
-      store: new JsonSessionStore(join(dir, "peer-error")),
+      saver: new SessionSaver(new JsonSessionStore(join(dir, "peer-error")), () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: null,
@@ -143,7 +144,7 @@ describe("createLocalRuntime (local over RPC)", () => {
         dispose();
       },
       permissions: new PermissionBroker(),
-      store: new JsonSessionStore(join(dir, "close")),
+      saver: new SessionSaver(new JsonSessionStore(join(dir, "close")), () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: null,
@@ -169,7 +170,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       channel,
       disposeTransport: dispose,
       permissions: new PermissionBroker(),
-      store,
+      saver: new SessionSaver(store, () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: null,
@@ -179,11 +180,33 @@ describe("createLocalRuntime (local over RPC)", () => {
     // Give the post-turn snapshot/persist a tick to land.
     await new Promise((r) => setTimeout(r, 20));
 
-    const saved = await store.list();
+    const saved = (await store.list()).records;
     expect(saved).toHaveLength(1);
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "hi back"]);
     expect(saved[0]?.title).toBe("hello");
     runtime.dispose();
+  });
+
+  test("the turn's save is on disk once the saver drains — no sleep, no lost write at exit", async () => {
+    // Mutation: drop `deps.saver.save(...)` from the persist callback → no file.
+    const model = new ScriptedProvider([[{ type: "text", delta: "bye" }, { type: "done" }]]);
+    const { channel, dispose } = daemon(model);
+    const store = new JsonSessionStore(join(dir, "drain"));
+    const saver = new SessionSaver(store, () => {});
+    const runtime = await createLocalRuntime({
+      channel,
+      disposeTransport: dispose,
+      permissions: new PermissionBroker(),
+      saver,
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: null,
+    });
+    await drain(runtime.createSession().send("last words"));
+    await runtime.dispose();
+    expect(await saver.drain()).toEqual([]);
+    const saved = (await store.list()).records;
+    expect(saved.map((r) => r.messages.map((m) => m.content))).toEqual([["last words", "bye"]]);
   });
 
   test("streams a daemon background-job exit to the client's jobs view while idle", async () => {
@@ -195,7 +218,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       channel,
       disposeTransport: dispose,
       permissions: new PermissionBroker(),
-      store,
+      saver: new SessionSaver(store, () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: null,
@@ -231,14 +254,14 @@ describe("createLocalRuntime (local over RPC)", () => {
       channel: d1.channel,
       disposeTransport: d1.dispose,
       permissions: new PermissionBroker(),
-      store,
+      saver: new SessionSaver(store, () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: null,
     });
     await drain(rt1.createSession().send("first question"));
     await new Promise((r) => setTimeout(r, 20));
-    const record = await store.latest();
+    const record = (await store.latest()).record;
     expect(record).not.toBeNull();
     rt1.dispose();
 
@@ -249,7 +272,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       channel: d2.channel,
       disposeTransport: d2.dispose,
       permissions: new PermissionBroker(),
-      store,
+      saver: new SessionSaver(store, () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: record,
@@ -264,7 +287,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       "second question",
     ]);
     // And it was saved back under the SAME uid (one file, not two).
-    const all = await store.list();
+    const all = (await store.list()).records;
     expect(all).toHaveLength(1);
     expect(all[0]?.id).toBe(record?.id ?? "");
     rt2.dispose();

@@ -396,6 +396,13 @@ What it shows:
   bad files. Extra fields on a record are preserved verbatim, which this plan
   relies on to store `DaemonSessionRecord extends SessionRecord` in the same
   class.
+  > **As built (2026-10-20, `docs/fix/session-store-durability.md`):** all of
+  > the above holds (`save` rejects with `couldn't write <uid>.json: …`;
+  > `load` → `ok | absent | unreadable`; `list` → `{records, skipped}`;
+  > `drain()`). Two constraints for this plan: extra *record* fields are
+  > preserved but extra *message* fields are rejected (the check mirrors the
+  > strict wire `ChatMessageSchema`); and the daemon must handle every `save`
+  > rejection itself (the laptop's `SessionSaver` is cli-side).
 - **`session-event-stream`:** `HostedSession` has **one synchronous place**
   where it advances the consistent cut (`committedSeq`) after a history push
   (round end, each tool result, turn end, compaction via `history_replaced`).
@@ -852,7 +859,7 @@ Scope:
 - The client still persists its own copy (offline viewing, `--resume` against a
   daemon that lost the session); on re-attach the daemon's copy wins.
 - Reuse the session-store code and its durability fixes rather than a second
-  store (`docs/eval/session-store-durability.md`: atomic write, schema check).
+  store (`docs/fix/session-store-durability.md`: atomic write, schema check).
 - AGENTS §7 "persistence lives on the laptop" must be amended to say *where the
   daemon is trusted (`serve`), it also persists* — a rule change, so it rides
   this task's branch with Review (§10).

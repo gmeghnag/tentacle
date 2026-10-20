@@ -100,6 +100,11 @@ export function backgroundExitNotice(
   return { kind: "notice", jobId, text: `background job ${jobId} ${status}${code}: ${command}` };
 }
 
+/** Append a standalone system notice (e.g. a failed session save). */
+export function appendNotice(state: DisplayState, text: string): DisplayState {
+  return { ...state, items: append(state.items, { kind: "notice", text }) };
+}
+
 /**
  * Append a background-job notice, unless one for the same job is already shown
  * — the live `JobController` subscription and the agent's `background_exit`

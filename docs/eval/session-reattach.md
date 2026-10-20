@@ -464,7 +464,7 @@ Owner decisions:
 5. **D5 — "allow always" grants are lost on restart**: accepted (you get asked again, never less). Persisting them is a later task.
 6. **D6 — detached-session cap reached → refuse the new session** + audit log line; never evict the oldest.
 7. **D7 — schema: `oneOf` + `discriminator`, reference codegen `swift-openapi-generator`** (not quicktype); `DomainErrorCode` moves into `@tentacle/protocol`.
-8. **D8 — new prerequisites:** `docs/fix/daemon-compact-turn-guard.md` before event-stream 3c; `docs/eval/session-store-durability.md` before `daemon-side-persistence`.
+8. **D8 — new prerequisites:** `docs/fix/daemon-compact-turn-guard.md` before event-stream 3c; `docs/fix/session-store-durability.md` before `daemon-side-persistence`.
 9. **D9 — `pod-attach-resilience`:** Layer 2 (reconnect) is absorbed by `client-reattach-frontends`; Layer 1 shrinks to an S WebSocket ping in `exec-channel.ts` (Bun's client has `ping()`).
 10. **D10 — attachments:** adopt the agent's recommendations (text placeholder when bytes are missing, only the last K images in full, images before text); detail numbers are decided when the first sub-task is promoted.
 
@@ -487,7 +487,7 @@ to promotion time (each child gets its mandatory fresh-context Review then).
 | 3c | same doc §3c — ring, `history_commit` cut, `history_replaced` barrier, paged snapshot | M · load-bearing | 3b, 2b |
 | 4 | `docs/eval/session-registry.md` — registry, `open{since}` (replay as notifications), `close`, detach-on-close, fan-out, backpressure close, model-proxy rule | M (near L) · load-bearing | 1, 3c |
 | 5 | `docs/feat/session-ttl-limits.md` — 24 h reaper, daemon-wide limits (refuse only), server keepalive | M · load-bearing | 4 |
-| 5b | `docs/eval/session-store-durability.md` — prerequisite of 6 (D8) | see doc | — |
+| 5b | `docs/fix/session-store-durability.md` — prerequisite of 6 (D8) | see doc | — |
 | 6 | `docs/eval/daemon-side-persistence.md` Part A — `serve` persists history; a turn suspended at restart is closed "not executed" | M · load-bearing | 4, 5b |
 | 7a | `docs/eval/permission-events.md` (live slice) — permissions as events, nonce, first-wins, no timeout, cancel settles | L · load-bearing | 4 |
 | 7b | `docs/eval/suspended-turn-resume.md` — rebuild a suspended turn after a `serve` restart | M · load-bearing | 6, 7a |

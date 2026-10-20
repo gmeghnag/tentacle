@@ -6,6 +6,7 @@ import {
   lastAssistantText,
   lastUserText,
   matchCommands,
+  quitAction,
   transcriptToMarkdown,
 } from "../src/commands.ts";
 import type { DisplayItem } from "../src/state.ts";
@@ -97,5 +98,16 @@ describe("isSessionMutating", () => {
     for (const cmd of ["/help", "/model", "/tokens", "/copy", "/save", "/compact", "/exit"]) {
       expect(isSessionMutating(cmd)).toBe(false);
     }
+  });
+});
+
+describe("quitAction", () => {
+  test("idle quits; mid-turn /exit stops first; a second request quits; Ctrl+C mid-turn only stops", () => {
+    expect(quitAction("command", false, false)).toBe("exit");
+    expect(quitAction("ctrl-c", false, false)).toBe("exit");
+    expect(quitAction("command", true, false)).toBe("stop-then-exit");
+    expect(quitAction("ctrl-c", true, false)).toBe("stop");
+    expect(quitAction("command", true, true)).toBe("exit");
+    expect(quitAction("ctrl-c", true, true)).toBe("exit");
   });
 });
