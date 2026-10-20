@@ -54,74 +54,96 @@ export const McpServerSchema = z
 
 export type McpServerConfig = z.infer<typeof McpServerSchema>;
 
+/** The settings a config file — and each of its profiles — can hold. */
+const settingsShape = {
+  model: ModelConfigSchema.optional(),
+  /**
+   * Path to a file holding the system prompt, relative to the config dir
+   * (default `PROMPT.md`) or absolute.
+   */
+  systemPromptFile: z.string().min(1).optional(),
+  /**
+   * Auto-load a per-repo `AGENTS.md` (found by walking up from the workspace)
+   * and append it to the system prompt after the identity prompt. Default:
+   * enabled. Set `false`, or the env `TENTACLE_NO_AGENTS_MD`, to disable.
+   */
+  loadAgentsMd: z.boolean().optional(),
+  /** Default workspace directory for tool execution. */
+  cwd: z.string().min(1).optional(),
+  /** Maximum model/tool iterations per turn. */
+  maxIterations: z
+    .number()
+    .int()
+    .refine((n) => n > 0 || n === -1, "must be a positive integer or -1 (unlimited)")
+    .optional(),
+  /** Sub-agents (the `agent_task` delegation tool). */
+  subagents: z
+    .object({
+      /** Whether the agent may spawn sub-agents. Default: enabled. */
+      enabled: z.boolean().optional(),
+      /** Step limit for a sub-agent's loop; a positive integer, or -1 (unlimited). */
+      maxIterations: z
+        .number()
+        .int()
+        .refine((n) => n > 0 || n === -1, "must be a positive integer or -1 (unlimited)")
+        .optional(),
+    })
+    .strict()
+    .optional(),
+  /**
+   * Auto-wake: when a background job exits while the agent is idle, start a
+   * continuation turn so it reacts without a user prompt. Default: enabled.
+   */
+  autoWake: z.boolean().optional(),
+  /** MCP servers to connect to, keyed by name; their tools are added to the agent. */
+  mcpServers: z.record(McpServerSchema).optional(),
+  /** Tool-output handling. */
+  tools: z
+    .object({
+      /**
+       * Max characters of a tool result kept inline; larger output is spilled
+       * to a file the model reads selectively. 0 disables spilling.
+       */
+      maxInlineOutputChars: z.number().int().nonnegative().optional(),
+      /** Mask secrets (keys, tokens, …) in tool output. Default: enabled. */
+      redactSecrets: z.boolean().optional(),
+      /** Collapse runs of identical consecutive output lines. Default: enabled. */
+      dedupOutput: z.boolean().optional(),
+      /** Render a JSON array-of-objects result as a compact table. Default: disabled. */
+      tabulateJson: z.boolean().optional(),
+      /**
+       * Replace large output with an LLM summary (full output still spilled to
+       * a file) instead of a head/tail preview. Costs a model call per large
+       * result. Default: disabled.
+       */
+      summarizeLargeOutput: z.boolean().optional(),
+    })
+    .strict()
+    .optional(),
+};
+
+/**
+ * A named profile (docs/feat/config-profiles.md): the same settings as the
+ * file, merged over it when selected with `--profile <name>` /
+ * `TENTACLE_PROFILE`. No nested `profiles`; an MCP server set to `null` is
+ * removed from the base for this profile.
+ */
+export const ProfileSchema = z
+  .object({
+    ...settingsShape,
+    mcpServers: z.record(McpServerSchema.nullable()).optional(),
+  })
+  .strict();
+
+export type ProfileConfig = z.infer<typeof ProfileSchema>;
+
 export const FileConfigSchema = z
   .object({
     /** JSON-schema pointer; accepted and ignored so editors can offer hints. */
     $schema: z.string().optional(),
-    model: ModelConfigSchema.optional(),
-    /**
-     * Path to a file holding the system prompt, relative to the config dir
-     * (default `PROMPT.md`) or absolute.
-     */
-    systemPromptFile: z.string().min(1).optional(),
-    /**
-     * Auto-load a per-repo `AGENTS.md` (found by walking up from the workspace)
-     * and append it to the system prompt after the identity prompt. Default:
-     * enabled. Set `false`, or the env `TENTACLE_NO_AGENTS_MD`, to disable.
-     */
-    loadAgentsMd: z.boolean().optional(),
-    /** Default workspace directory for tool execution. */
-    cwd: z.string().min(1).optional(),
-    /** Maximum model/tool iterations per turn. */
-    maxIterations: z
-      .number()
-      .int()
-      .refine((n) => n > 0 || n === -1, "must be a positive integer or -1 (unlimited)")
-      .optional(),
-    /** Sub-agents (the `agent_task` delegation tool). */
-    subagents: z
-      .object({
-        /** Whether the agent may spawn sub-agents. Default: enabled. */
-        enabled: z.boolean().optional(),
-        /** Step limit for a sub-agent's loop; a positive integer, or -1 (unlimited). */
-        maxIterations: z
-          .number()
-          .int()
-          .refine((n) => n > 0 || n === -1, "must be a positive integer or -1 (unlimited)")
-          .optional(),
-      })
-      .strict()
-      .optional(),
-    /**
-     * Auto-wake: when a background job exits while the agent is idle, start a
-     * continuation turn so it reacts without a user prompt. Default: enabled.
-     */
-    autoWake: z.boolean().optional(),
-    /** MCP servers to connect to, keyed by name; their tools are added to the agent. */
-    mcpServers: z.record(McpServerSchema).optional(),
-    /** Tool-output handling. */
-    tools: z
-      .object({
-        /**
-         * Max characters of a tool result kept inline; larger output is spilled
-         * to a file the model reads selectively. 0 disables spilling.
-         */
-        maxInlineOutputChars: z.number().int().nonnegative().optional(),
-        /** Mask secrets (keys, tokens, …) in tool output. Default: enabled. */
-        redactSecrets: z.boolean().optional(),
-        /** Collapse runs of identical consecutive output lines. Default: enabled. */
-        dedupOutput: z.boolean().optional(),
-        /** Render a JSON array-of-objects result as a compact table. Default: disabled. */
-        tabulateJson: z.boolean().optional(),
-        /**
-         * Replace large output with an LLM summary (full output still spilled to
-         * a file) instead of a head/tail preview. Costs a model call per large
-         * result. Default: disabled.
-         */
-        summarizeLargeOutput: z.boolean().optional(),
-      })
-      .strict()
-      .optional(),
+    ...settingsShape,
+    /** Named profiles, keyed by name; at most one is applied per launch. */
+    profiles: z.record(ProfileSchema).optional(),
   })
   .strict();
 

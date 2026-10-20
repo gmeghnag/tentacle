@@ -147,3 +147,66 @@ export async function resolveToken(flags: Map<string, string>): Promise<string |
   const env = process.env.TENTACLE_REMOTE_TOKEN;
   return env && env.length > 0 ? env : undefined;
 }
+
+export type GlobalOptions =
+  | { readonly ok: true; readonly profile?: string; readonly rest: string[] }
+  | { readonly ok: false; readonly error: string };
+
+/** The first arguments that select a command or a mode; anything else starts a one-shot prompt. */
+const COMMANDS = new Set([
+  "serve",
+  "run",
+  "attach",
+  "connect",
+  "-i",
+  "--interactive",
+  "--resume",
+  "--plain",
+]);
+
+const isProfileFlag = (arg: string): boolean => arg === "--profile" || arg.startsWith("--profile=");
+
+/**
+ * Take the LEADING global options off argv, before `main` dispatches on
+ * `args[0]` (docs/feat/config-profiles.md). Today: `--profile <name>` /
+ * `--profile=<name>`. Never silently dropped: a missing value, a repeat, a
+ * `--profile` after a command or mode, or one with `connect` is an error. In
+ * one-shot mode everything after the leading options is prompt text, kept as is.
+ */
+export function extractGlobalOptions(args: readonly string[]): GlobalOptions {
+  let profile: string | undefined;
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i] ?? "";
+    if (!isProfileFlag(arg)) {
+      break;
+    }
+    let value: string | undefined;
+    if (arg === "--profile") {
+      value = args[i + 1];
+      i += 2;
+    } else {
+      value = arg.slice("--profile=".length);
+      i += 1;
+    }
+    if (value === undefined || value === "" || value.startsWith("-")) {
+      return { ok: false, error: "--profile needs a profile name" };
+    }
+    if (profile !== undefined) {
+      return { ok: false, error: "--profile given more than once" };
+    }
+    profile = value;
+  }
+  const rest = args.slice(i);
+  const first = rest[0];
+  if (first !== undefined && COMMANDS.has(first) && rest.some(isProfileFlag)) {
+    return { ok: false, error: "--profile must come before the command" };
+  }
+  if (profile !== undefined && first === "connect") {
+    return {
+      ok: false,
+      error: "--profile has no effect with connect: the remote daemon uses its own config",
+    };
+  }
+  return profile !== undefined ? { ok: true, profile, rest } : { ok: true, rest };
+}

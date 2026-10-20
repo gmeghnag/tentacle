@@ -251,3 +251,120 @@ describe("loadConfig AGENTS.md auto-load", () => {
     expect(cfg.agentsPath).toBeUndefined();
   });
 });
+
+describe("loadConfig profiles (docs/feat/config-profiles.md)", () => {
+  const writeProfiles = async (): Promise<void> => {
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, CONFIG_FILENAME),
+      `{
+        // the base
+        "model": { "baseURL": "http://localhost:8080/v1", "model": "base-model", "apiKeyCommand": "base-cmd" },
+        "profiles": {
+          "work": { "model": { "provider": "anthropic", "model": "work-model", "apiKeyCommand": "work-cmd" } },
+          "fast": { "model": { "model": "fast-model" } }
+        }
+      }`,
+      "utf8",
+    );
+  };
+
+  test("--profile (option) applies the profile; only the profile's key command runs", async () => {
+    // Mutation: ignore `options.profile` → base-model, base-cmd.
+    await writeProfiles();
+    const ran: string[] = [];
+    const cfg = await loadConfig({
+      env: baseEnv(),
+      configDir,
+      cwd: dir,
+      profile: "work",
+      runCommand: async (command) => {
+        ran.push(command);
+        return "k";
+      },
+    });
+    expect(cfg.model).toBe("work-model");
+    expect(cfg.provider).toBe("anthropic");
+    expect(cfg.baseURL).toBe("https://api.anthropic.com/v1");
+    expect(cfg.profile).toBe("work");
+    expect(ran).toEqual(["work-cmd"]);
+  });
+
+  test("TENTACLE_PROFILE selects it; the option beats the env; an empty env is unset", async () => {
+    await writeProfiles();
+    const run = async (): Promise<string> => "k";
+    const viaEnv = await loadConfig({
+      env: { ...baseEnv(), TENTACLE_PROFILE: "fast" },
+      configDir,
+      cwd: dir,
+      runCommand: run,
+    });
+    expect(viaEnv.model).toBe("fast-model");
+    expect(viaEnv.profile).toBe("fast");
+    const both = await loadConfig({
+      env: { ...baseEnv(), TENTACLE_PROFILE: "fast" },
+      configDir,
+      cwd: dir,
+      profile: "work",
+      runCommand: run,
+    });
+    expect(both.model).toBe("work-model");
+    const empty = await loadConfig({
+      env: { ...baseEnv(), TENTACLE_PROFILE: "" },
+      configDir,
+      cwd: dir,
+      runCommand: run,
+    });
+    expect(empty.model).toBe("base-model");
+    expect(empty.profile).toBeUndefined();
+  });
+
+  test("env still beats the profile", async () => {
+    await writeProfiles();
+    const cfg = await loadConfig({
+      env: { ...baseEnv(), TENTACLE_MODEL: "env-model" },
+      configDir,
+      cwd: dir,
+      profile: "fast",
+      runCommand: async () => "k",
+    });
+    expect(cfg.model).toBe("env-model");
+  });
+
+  test("an unknown profile is a ConfigError naming the file and the defined profiles; nothing runs", async () => {
+    await writeProfiles();
+    const ran: string[] = [];
+    const attempt = loadConfig({
+      env: baseEnv(),
+      configDir,
+      cwd: dir,
+      profile: "nope",
+      runCommand: async (command) => {
+        ran.push(command);
+        return "k";
+      },
+    });
+    await expect(attempt).rejects.toBeInstanceOf(ConfigError);
+    await expect(attempt).rejects.toThrow('unknown profile "nope" (defined: work, fast)');
+    await expect(attempt).rejects.toThrow(join(configDir, CONFIG_FILENAME));
+    expect(ran).toEqual([]);
+  });
+
+  test("a profile's systemPromptFile resolves against the config dir", async () => {
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, "WORK.md"), "work prompt", "utf8");
+    await writeFile(
+      join(configDir, CONFIG_FILENAME),
+      `{ "profiles": { "w": { "systemPromptFile": "WORK.md" } } }`,
+      "utf8",
+    );
+    const cfg = await loadConfig({
+      env: { ...baseEnv(), TENTACLE_NO_AGENTS_MD: "1" },
+      configDir,
+      cwd: dir,
+      profile: "w",
+    });
+    expect(cfg.systemPrompt).toBe("work prompt");
+    expect(cfg.promptPath).toBe(join(configDir, "WORK.md"));
+  });
+});
