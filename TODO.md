@@ -507,7 +507,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       8b. **Feat (DONE 2026-10-20, `feat/client-reattach-frontends`):** `docs/feat/client-reattach-frontends.md` · M · load-bearing
       9. **Eval:** `docs/eval/session-handoff.md` — continue a `serve` session from another device (owner requirement 2026-10-20: mobile → TUI, live) · L → split · load-bearing
       — **Eval:** `docs/eval/attachments.md` (sister) · 4 sub-tasks · load-bearing
-      — `docs/feat/pod-attach-resilience.md` now Layer 1 only (WS ping) · S · contained
+      — **Feat (DONE 2026-10-20, `feat/pod-attach-resilience`):** `docs/feat/pod-attach-resilience.md` — Layer 1: exec-channel keepalive (WS ping + blank stdin + pong-gated dead-man) · S · contained
       — mobile app (React Native or Swift) — own eval, after 8b; carries the JSON re-attach test vectors deferred by 8a (R-Q3)
       — **Eval (deferred, low):** `docs/eval/reaper-gc-flaky-test.md` — test-only flake, at the end of v2
 
@@ -522,9 +522,10 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
 
 Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked up).
 
-- [ ] 🟡 **`tentacle attach` dies after idle** (`⚠ RpcError: peer is closed`):
-      the exec channel has no keepalive or reconnect. **Plan:**
-      `docs/feat/pod-attach-resilience.md`. Type: feat.
+- [x] **`tentacle attach` dies after idle** (`⚠ RpcError: peer is closed`):
+      reconnect done (8b); keepalive (Layer 1) DONE 2026-10-20
+      (`feat/pod-attach-resilience`). **Doc:** `docs/feat/pod-attach-resilience.md`.
+      Type: feat · Size: S · Blast: contained.
 - [ ] **Self-deleting injected binary on `attach`** (leave-no-trace on a
       user-owned pod). **Eval:** `docs/eval/pod-ephemeral-binary.md`. Type: eval.
 - [ ] **React 18 → 19 + Ink 5 → 8** (want-driven, retires two workarounds).

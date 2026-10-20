@@ -11,6 +11,15 @@
  * runtime handshakes synchronously right after `openExec`), and sending while
  * CONNECTING throws `InvalidStateError` — so outbound frames are buffered until
  * the socket's `open` event and flushed in order.
+ *
+ * Once open, a heartbeat keeps the idle exec alive and notices when it is dead
+ * (`docs/feat/pod-attach-resilience.md`): each tick sends a WebSocket ping
+ * (answered by the apiserver/kubelet stream) and a blank stdin line (data on
+ * every hop up to the container; the daemon's `streamChannel` drops blank
+ * lines). After a first pong proves the far end answers pings, `maxMissed`
+ * ticks with no inbound byte close the channel — the client's drop path then
+ * reconnects. Without a pong it never closes: an idle daemon sends nothing, so
+ * silence alone proves nothing.
  */
 import type { DuplexChannel } from "@tentacle/transport";
 import { ExecDemux, encodeStdin } from "./exec-frame.ts";
@@ -27,9 +36,12 @@ export interface WebSocketLike {
    */
   readonly bufferedAmount?: number;
   send(data: Uint8Array): void;
+  /** WebSocket ping (Bun's client has it; optional so other impls still fit). */
+  ping?(): void;
   close(): void;
   addEventListener(type: "message", handler: (event: { data: unknown }) => void): void;
   addEventListener(type: "open", handler: () => void): void;
+  addEventListener(type: "pong", handler: () => void): void;
   addEventListener(type: "close", handler: () => void): void;
   addEventListener(type: "error", handler: (event: unknown) => void): void;
 }
@@ -39,7 +51,38 @@ export interface ExecChannelOptions {
   readonly onStderr?: (text: string) => void;
   /** The exec error/status channel (3), a terminal status at the end. */
   readonly onStatus?: (text: string) => void;
+  /** Heartbeat tuning (defaults below); `timers` is a test seam. */
+  readonly keepalive?: KeepaliveOptions;
 }
+
+export interface KeepaliveOptions {
+  /** Tick period. Well under common idle timeouts (an LB's is often 60 s). */
+  readonly intervalMs?: number;
+  /** Consecutive silent ticks, after a first pong, that mean the link is dead. */
+  readonly maxMissed?: number;
+  readonly timers?: IntervalTimers;
+}
+
+export interface IntervalTimers {
+  setInterval(fn: () => void, ms: number): unknown;
+  clearInterval(handle: unknown): void;
+}
+
+export const KEEPALIVE_INTERVAL_MS = 15_000;
+export const KEEPALIVE_MAX_MISSED = 2;
+
+const systemTimers: IntervalTimers = {
+  setInterval: (fn, ms) => {
+    const handle = setInterval(fn, ms);
+    // The socket owns the process lifetime; the heartbeat must not extend it.
+    (handle as { unref?: () => void }).unref?.();
+    return handle;
+  },
+  clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+};
+
+/** A blank stdin line: keepalive data the daemon's line reader discards. */
+const BLANK_STDIN = encodeStdin("");
 
 /** Normalise a WebSocket message payload to bytes (we request `arraybuffer`). */
 function toBytes(data: unknown): Uint8Array | null {
@@ -68,6 +111,14 @@ export function execChannel(ws: WebSocketLike, options: ExecChannelOptions = {})
   const queue: Uint8Array[] = [];
   let opened = ws.readyState === 1;
 
+  const timers = options.keepalive?.timers ?? systemTimers;
+  const intervalMs = options.keepalive?.intervalMs ?? KEEPALIVE_INTERVAL_MS;
+  const maxMissed = options.keepalive?.maxMissed ?? KEEPALIVE_MAX_MISSED;
+  let heartbeat: unknown = null;
+  let pongSeen = false;
+  let inbound = false; // any byte since the previous tick
+  let missed = 0;
+
   const flush = (): void => {
     while (queue.length > 0 && !closed) {
       const frame = queue.shift();
@@ -86,7 +137,45 @@ export function execChannel(ws: WebSocketLike, options: ExecChannelOptions = {})
     }
     closed = true;
     queue.length = 0;
+    if (heartbeat !== null) {
+      timers.clearInterval(heartbeat);
+      heartbeat = null;
+    }
     onClose?.();
+  };
+
+  const tick = (): void => {
+    if (closed) {
+      return;
+    }
+    // Judge the previous tick's probe, then send the next one. Counting ticks
+    // (not wall time) means a laptop waking from sleep judges the pre-sleep
+    // ping, normally answered, instead of the sleep itself.
+    missed = inbound || !pongSeen ? 0 : missed + 1;
+    inbound = false;
+    if (missed >= maxMissed) {
+      try {
+        ws.close();
+      } catch {
+        // already closing / closed
+      }
+      fireClose();
+      return;
+    }
+    // Separately guarded: a throwing ping must not cost the blank line. A throw
+    // means the socket is going away; its own close/error event follows.
+    try {
+      ws.ping?.();
+    } catch {}
+    try {
+      ws.send(BLANK_STDIN);
+    } catch {}
+  };
+
+  const startHeartbeat = (): void => {
+    if (heartbeat === null && !closed) {
+      heartbeat = timers.setInterval(tick, intervalMs);
+    }
   };
 
   const demux = new ExecDemux({
@@ -102,6 +191,7 @@ export function execChannel(ws: WebSocketLike, options: ExecChannelOptions = {})
     // with either an ArrayBuffer or a view regardless.
   }
   ws.addEventListener("message", (event) => {
+    inbound = true;
     const bytes = toBytes(event.data);
     if (bytes) {
       demux.push(bytes);
@@ -110,9 +200,17 @@ export function execChannel(ws: WebSocketLike, options: ExecChannelOptions = {})
   ws.addEventListener("open", () => {
     opened = true;
     flush();
+    startHeartbeat();
+  });
+  ws.addEventListener("pong", () => {
+    pongSeen = true;
+    inbound = true;
   });
   ws.addEventListener("close", fireClose);
   ws.addEventListener("error", fireClose);
+  if (opened) {
+    startHeartbeat(); // already OPEN: no `open` event will come
+  }
 
   return {
     send(data: string): void {
