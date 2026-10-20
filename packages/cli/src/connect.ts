@@ -8,7 +8,12 @@
  * is ours (so even a drop during its first `open` is recovered), and the link
  * state shows in the StatusBar.
  */
-import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
+import {
+  type ConnectOptions as ClientConnectOptions,
+  RemoteClient,
+  type TlsOptions,
+  webSocketChannelFactory,
+} from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
 import type { DuplexChannel } from "@tentacle/transport";
 import { startTui } from "@tentacle/tui";
@@ -16,25 +21,31 @@ import { startTui } from "@tentacle/tui";
 export interface ConnectOptions {
   readonly url: string;
   readonly token?: string;
+  /** Trust a daemon whose cert is not in the system store (see `TlsOptions`). */
+  readonly tls?: TlsOptions;
 }
 
 /**
- * Collects the client's non-fatal peer errors while Ink owns the terminal
- * (a raw write mid-session corrupts the render, AGENTS §7) and writes them,
- * in order, once the TUI has exited.
+ * Collects the client's non-fatal peer errors (and startup warnings) while
+ * Ink owns the terminal (a raw write mid-session corrupts the render,
+ * AGENTS §7) and writes them, in order, once the TUI has exited.
  */
 export function bufferedErrorSink(): {
   readonly onError: (error: Error) => void;
+  readonly warning: (line: string) => void;
   readonly flush: (write: (line: string) => void) => void;
 } {
-  const errors: string[] = [];
+  const lines: string[] = [];
   return {
     onError: (error) => {
-      errors.push(error.message);
+      lines.push(`[connect] error: ${error.message}`);
+    },
+    warning: (line) => {
+      lines.push(line);
     },
     flush: (write) => {
-      for (const message of errors.splice(0)) {
-        write(`[connect] error: ${message}\n`);
+      for (const message of lines.splice(0)) {
+        write(`${message}\n`);
       }
     },
   };
@@ -43,7 +54,7 @@ export function bufferedErrorSink(): {
 /** Injectable for tests; production uses the real socket and TUI. */
 export interface ConnectDeps {
   /** A channel factory for the daemon at `url` (rejects with a `ChannelError`). */
-  readonly dial: (url: string, options: { token?: string }) => () => Promise<DuplexChannel>;
+  readonly dial: (url: string, options: ClientConnectOptions) => () => Promise<DuplexChannel>;
   readonly startTui: typeof startTui;
 }
 
@@ -54,11 +65,21 @@ export async function connectTui(
 ): Promise<void> {
   // RPC path: hold a daemon's request until the TUI's prompt is mounted.
   const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
-  const dial = deps.dial(options.url, options.token ? { token: options.token } : {});
+  const dial = deps.dial(options.url, {
+    ...(options.token ? { token: options.token } : {}),
+    ...(options.tls ? { tls: options.tls } : {}),
+  });
   // Before Ink mounts: a failure here (a bad token, nothing listening) is the
   // plain error the caller prints.
   const channel = await dial();
   const sink = bufferedErrorSink();
+  if (options.tls?.rejectUnauthorized === false) {
+    // Dev-only, so it is surfaced — never silent (AGENTS §7: via the sink, not
+    // a raw write while Ink owns the terminal).
+    sink.warning(
+      "[connect] warning: --insecure-skip-tls-verify skips TLS certificate verification (dev-only); the daemon's identity is not verified",
+    );
+  }
   const client = new RemoteClient(channel, permissions, undefined, {
     onError: sink.onError,
     channelFactory: dial,

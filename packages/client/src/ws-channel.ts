@@ -52,9 +52,27 @@ export class WebSocketChannel implements DuplexChannel {
   }
 }
 
+/**
+ * Server-TLS trust for a `wss://` daemon (docs/feat/client-tls-trust.md).
+ * Bun's WebSocket client verifies against the system CAs only, so a
+ * self-signed / private-CA daemon needs one of these, per connection:
+ * `ca` — the PEM of the CA (or the self-signed cert) that signed the daemon's
+ * server cert; verification stays fully on. `rejectUnauthorized: false` —
+ * skip verification; a dev-only escape hatch. This is the same per-call `tls`
+ * object the k8s pod path composes (`k8s/kube-auth.ts`); the `init` of a Bun
+ * `new WebSocket(url, init)` honours it. NOTE: `disableTlsCerts` does NOT
+ * work on the WS client — it is a fetch-only knob.
+ */
+export interface TlsOptions {
+  readonly ca?: string;
+  readonly rejectUnauthorized?: boolean;
+}
+
 export interface ConnectOptions {
   /** Bearer token; sent as an `Authorization` header (Bun) and `?token=` fallback. */
   readonly token?: string;
+  /** Trust a daemon whose cert is not in the system store (see `TlsOptions`). */
+  readonly tls?: TlsOptions;
 }
 
 type OpenableSocket = WebSocketLike & {
@@ -66,22 +84,38 @@ type OpenableSocket = WebSocketLike & {
 export type WebSocketCtor = new (url: string, init?: unknown) => unknown;
 
 /**
- * The upgrade URL and init for a token: an `Authorization` header (Bun supports
- * a headers option) and, for clients that cannot set headers, `?token=`.
+ * The upgrade URL and init for a token and a TLS trust: an `Authorization`
+ * header (Bun supports a headers option), `?token=` for clients that cannot
+ * set headers, and the `tls` object, coexisting in the same init.
  */
-function socketTarget(url: string, token: string | undefined): { target: string; init?: unknown } {
-  if (!token) {
-    return { target: url };
+function socketTarget(
+  url: string,
+  token: string | undefined,
+  tls?: TlsOptions,
+): { target: string; init?: unknown } {
+  let target = url;
+  const init: { headers?: Record<string, string>; tls?: TlsOptions } = {};
+  if (token) {
+    const u = new URL(url);
+    if (!u.searchParams.has("token")) {
+      u.searchParams.set("token", token);
+    }
+    target = u.toString();
+    init.headers = { Authorization: `Bearer ${token}` };
   }
-  const u = new URL(url);
-  if (!u.searchParams.has("token")) {
-    u.searchParams.set("token", token);
+  if (tls) {
+    init.tls = tls;
   }
-  return { target: u.toString(), init: { headers: { Authorization: `Bearer ${token}` } } };
+  return init.headers === undefined && init.tls === undefined ? { target } : { target, init };
 }
 
-function openSocket(url: string, token: string | undefined, Ctor: WebSocketCtor): OpenableSocket {
-  const { target, init } = socketTarget(url, token);
+function openSocket(
+  url: string,
+  token: string | undefined,
+  tls: TlsOptions | undefined,
+  Ctor: WebSocketCtor,
+): OpenableSocket {
+  const { target, init } = socketTarget(url, token, tls);
   return (init === undefined ? new Ctor(target) : new Ctor(target, init)) as OpenableSocket;
 }
 
@@ -90,7 +124,7 @@ export function connectWebSocket(
   url: string,
   options: ConnectOptions = {},
 ): Promise<WebSocketChannel> {
-  const ws = openSocket(url, options.token, WebSocket as unknown as WebSocketCtor);
+  const ws = openSocket(url, options.token, options.tls, WebSocket as unknown as WebSocketCtor);
   return new Promise((resolve, reject) => {
     ws.addEventListener("open", () => resolve(new WebSocketChannel(ws)));
     ws.addEventListener("error", () => reject(new Error(`failed to connect to ${url}`)));
@@ -125,9 +159,15 @@ export function classifyUpgradeFailure(
 
 export interface ChannelFactoryDeps {
   readonly WebSocket?: WebSocketCtor;
+  /**
+   * The classifying GET (see `webSocketChannelFactory`): `init` carries the
+   * token header AND the TLS trust, because the probe must complete the
+   * handshake to read the daemon's 401 (a `wss://` GET fails its own handshake
+   * without `tls`, which would misclassify a bad token as `rejected`).
+   */
   readonly fetch?: (
     url: string,
-    init: { headers: Record<string, string> },
+    init: { headers: Record<string, string>; tls?: TlsOptions },
   ) => Promise<{
     readonly status: number;
   }>;
@@ -148,8 +188,12 @@ export function webSocketChannelFactory(
     const { target } = socketTarget(url, options.token);
     const doFetch = deps.fetch ?? fetch;
     try {
+      // The probe must complete the TLS handshake to read the daemon's 401, so
+      // it carries the same `tls` trust as the socket (without it a `wss://`
+      // GET fails its own handshake → a bad token would be misclassified).
       const res = await doFetch(target.replace(/^ws/, "http"), {
         headers: options.token ? { Authorization: `Bearer ${options.token}` } : {},
+        ...(options.tls ? { tls: options.tls } : {}),
       });
       return res.status;
     } catch {
@@ -159,7 +203,7 @@ export function webSocketChannelFactory(
   return () =>
     new Promise((resolve, reject) => {
       let opened = false;
-      const ws = openSocket(url, options.token, Ctor);
+      const ws = openSocket(url, options.token, options.tls, Ctor);
       ws.addEventListener("open", () => {
         opened = true;
         resolve(new WebSocketChannel(ws));

@@ -88,6 +88,41 @@ describe("parseArgs: nothing is silently ignored", () => {
     expect(error(["--stdio=yes"], ARGS.serve)).toBe("--stdio takes no value");
   });
 
+  describe("connect TLS trust (docs/feat/client-tls-trust.md)", () => {
+    test("--ca-cert takes a value; --insecure-skip-tls-verify is a bool; both are legal together", () => {
+      expect(ok(["wss://h:443", "--ca-cert", "ca.pem"], ARGS.connect)).toEqual({
+        flags: { "ca-cert": "ca.pem" },
+        bools: [],
+        positional: ["wss://h:443"],
+      });
+      // Mutation: `ca-cert` in bools (not values) → unknown option / takes no value.
+      expect(
+        ok(["wss://h:443", "--ca-cert=ca.pem", "--insecure-skip-tls-verify"], ARGS.connect),
+      ).toEqual({
+        flags: { "ca-cert": "ca.pem" },
+        bools: ["insecure-skip-tls-verify"],
+        positional: ["wss://h:443"],
+      });
+      expect(
+        ok(
+          ["wss://h:443", "--token", "t", "--ca-cert", "c.pem", "--insecure-skip-tls-verify"],
+          ARGS.connect,
+        ),
+      ).toEqual({
+        flags: { token: "t", "ca-cert": "c.pem" },
+        bools: ["insecure-skip-tls-verify"],
+        positional: ["wss://h:443"],
+      });
+    });
+
+    test("--insecure-skip-tls-verify takes no value; --ca-cert needs one", () => {
+      expect(error(["wss://h:443", "--insecure-skip-tls-verify=true"], ARGS.connect)).toBe(
+        "--insecure-skip-tls-verify takes no value",
+      );
+      expect(error(["wss://h:443", "--ca-cert"], ARGS.connect)).toBe("--ca-cert needs a value");
+    });
+  });
+
   test("positional counts are enforced", () => {
     expect(error([], ARGS.attach)).toBe("missing argument");
     expect(error(["a", "b"], ARGS.attach)).toBe('unexpected argument "b"');
