@@ -61,7 +61,7 @@ export function startStdioDaemon(
   // With `--model-proxy`, the agent's model calls are tunnelled back to the
   // client over this same channel (the pod reverse-tunnel): the provider is set
   // after the Connection exists, but a session (hence the agent) is only built
-  // on `session/new`, which arrives later, so the binding is always ready.
+  // on `session/open`, which arrives later, so the binding is always ready.
   // Both transports are wired: the chunked (streaming) path, and the batch
   // path the provider falls back to on a `MethodNotFound` from an old laptop.
   let sendModel: ModelStreamSender | null = null;
@@ -103,6 +103,9 @@ export function startStdioDaemon(
     channel,
     sessionHost,
     log ? (error) => log(`error: ${error.message}`) : undefined,
+    // Its turns cannot reach the model once this connection is gone: cancel
+    // them cleanly on detach instead of failing mid-round (sessions stay).
+    { servesModel: options.modelProxy === true },
   );
   if (options.modelProxy) {
     sendModel = (request) => connection.requestModelStream(request);

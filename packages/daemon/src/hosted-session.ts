@@ -1,8 +1,13 @@
 /**
  * A single hosted conversation on the daemon: wraps the agent `Session`, drives
- * one turn at a time, streams `session/update` params through a sink, routes the
- * agent's permission requests to the connected client, and keeps every update
+ * one turn at a time, fans every `session/update` out to the attached clients,
+ * routes the agent's permission requests to one of them, and keeps every update
  * in a byte-bounded replay ring (seq-numbered, never reset per turn).
+ *
+ * The session belongs to the daemon (`SessionHost`), not to a connection: a
+ * client ATTACHES (replay of what it missed + live, in one synchronous step, so
+ * nothing falls between them) and DETACHES when its connection drops; the turn
+ * keeps running. Only `close` ends the session.
  *
  * A turn lives in the stream, not in a request: `prompt` acks at once, the turn
  * is bracketed by `turn_start`/`turn_end` updates, and `prompt`/`enqueue` are
@@ -46,10 +51,16 @@ import {
 import { outcomeToResponse, toRequestPermissionParams } from "./permission-map.ts";
 import { SessionRing } from "./ring.ts";
 
-/** Receives each streamed `session/update` (one per emitted update). */
+/** Receives each streamed `session/update` (one per emitted update). Synchronous; never awaited. */
 export type UpdateSink = (params: KnownSessionUpdateParams) => void;
 /** Asks the connected client to resolve a permission request. */
 export type RemotePermission = (params: RequestPermissionParams) => Promise<PermissionOutcome>;
+
+/** One client attached to a session (one per connection that opened it). */
+export interface Attachment {
+  readonly send: UpdateSink;
+  readonly requestPermission: RemotePermission;
+}
 
 /**
  * Default replay budget per session: ≈ 5 p99 turns of real sessions
@@ -114,14 +125,16 @@ export class HostedSession {
   /** Seq of the barrier that opened the current epoch (0 for the first). */
   private epochStart = 0;
   private cut: Cut;
-  private sink: UpdateSink | null = null;
+  /** Insertion-ordered: the last one is the most recently attached. */
+  private readonly attachments = new Set<Attachment>();
+  private closed = false;
   private readonly jobs: JobController | undefined;
+  private readonly unsubscribeExit: (() => void) | undefined;
 
   constructor(
     id: string,
     session: Session,
     permissions: PermissionBroker,
-    requestPermission: RemotePermission,
     jobs?: JobController,
     errorPolicy: TurnErrorPolicy = {},
     ringBytes: number = DEFAULT_RING_BYTES,
@@ -139,18 +152,25 @@ export class HostedSession {
       length: session.messages.length,
       turnId: null,
     };
-    // The agent's permission gate routes here; we forward to the client and map
-    // its choice back to a local allow/deny + scope.
+    // The agent's permission gate routes here; we forward to a client and map
+    // its choice back to a local allow/deny + scope. Interim routing (until
+    // permissions become stream events): the most recently attached client, the
+    // device the user most likely holds; nobody attached → denied at once
+    // (fail-safe, as a dead connection's request already was).
     permissions.setRequester(async (req) => {
+      const target = [...this.attachments].at(-1);
+      if (!target) {
+        return outcomeToResponse({ outcome: "cancelled" });
+      }
       const params = toRequestPermissionParams(this.id, this.currentToolCallId || "pending", req);
-      const outcome = await requestPermission(params);
+      const outcome = await target.requestPermission(params);
       return outcomeToResponse(outcome);
     });
     // A background job can exit while the session is idle (between turns), so we
     // stream the exit the moment it happens — not only at the next turn, where
     // the agent injects a note for the model. The client renders it like a local
     // job-exit notice; the TUI dedupes by job id against that next-turn event.
-    jobs?.onExit((job) => {
+    this.unsubscribeExit = jobs?.onExit((job) => {
       this.emit({
         type: "background_exit",
         jobId: job.id,
@@ -166,9 +186,52 @@ export class HostedSession {
     return this.controller !== null;
   }
 
-  /** Attach (or detach with `null`) the sink that receives streamed updates. */
-  setSink(sink: UpdateSink | null): void {
-    this.sink = sink;
+  /** The current cut (what a first snapshot page returns as `since`). */
+  get historyCut(): HistoryCut {
+    return { epoch: this.cut.epoch, seq: this.cut.seq };
+  }
+
+  /** Number of attached clients. */
+  get attachedCount(): number {
+    return this.attachments.size;
+  }
+
+  /**
+   * Attach a client: replay what it missed, then add it to the fan-out — ONE
+   * synchronous segment (no `await` of any kind), so no update can be emitted
+   * between the replay and the live stream (a gap nothing could repair).
+   * `since` covered → the updates after it, `resync: false`. Otherwise →
+   * `resync: true` and the updates after the current cut: a snapshot taken
+   * later is at a cut at or past it, so snapshot + buffered updates past its
+   * `since` is complete. Re-attaching moves the client to "most recent".
+   */
+  attach(attachment: Attachment, since?: HistoryCut): { resync: boolean; epoch: string } {
+    if (this.closed) {
+      throw new Error(`session ${this.id} is closed`);
+    }
+    const covered = since !== undefined ? this.replayFrom(since) : undefined;
+    let replay: readonly KnownSessionUpdateParams[];
+    if (covered !== undefined && "replay" in covered) {
+      replay = covered.replay;
+    } else {
+      const fromCut = this.replayFrom(this.historyCut);
+      // Never: the ring pins everything after the cut.
+      if (!("replay" in fromCut)) {
+        throw new Error(`session ${this.id}: replay ring lost its cut`);
+      }
+      replay = fromCut.replay;
+    }
+    for (const update of replay) {
+      attachment.send(update);
+    }
+    this.attachments.delete(attachment);
+    this.attachments.add(attachment);
+    return { resync: covered === undefined || !("replay" in covered), epoch: this.cut.epoch };
+  }
+
+  /** Stop delivering to `attachment` (its connection went away). The session lives on. */
+  detach(attachment: Attachment): void {
+    this.attachments.delete(attachment);
   }
 
   /**
@@ -246,11 +309,25 @@ export class HostedSession {
     this.ring.evict(this.seq);
   }
 
-  /** Number, buffer, then deliver one update. The ring holds it even if the sink throws. */
+  /**
+   * Number, buffer, then fan out one update. Synchronous and never awaited: a
+   * slow client cannot stall the agent loop (its transport buffers or drops
+   * it), and `turn_end` stays inside the steering no-await window. A sink that
+   * throws (a programming error — closed peers no-op) is detached and reported;
+   * the others still get the update. Iterates a copy: a detach mid-fan-out
+   * never skips a sibling.
+   */
   private emit(update: SessionUpdate): void {
     const params = toUpdateParams(this.id, ++this.seq, update);
     this.ring.push(params, this.cut.seq);
-    this.sink?.(params);
+    for (const attachment of [...this.attachments]) {
+      try {
+        attachment.send(params);
+      } catch (error) {
+        this.attachments.delete(attachment);
+        this.reportTurnError(error);
+      }
+    }
   }
 
   /**
@@ -466,8 +543,34 @@ export class HostedSession {
     this.controller?.abort();
   }
 
-  /** Terminate every background job this session started. */
-  disposeJobs(): void {
+  /**
+   * End the session for every client. Synchronous and idempotent. A running
+   * turn ends HERE, in the stream (`turn_end{cancelled}`, then the unwinding
+   * `drive` is a no-op): its asynchronous end would come after the clients are
+   * detached, and an attached client would wait for it forever. Then
+   * `session_closed` (the last update anyone gets), detach all, stop
+   * listening to job exits, and kill the jobs (no exit notice for the kills).
+   */
+  close(): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    this.controller?.abort();
+    if (this.activeTurnId !== null) {
+      try {
+        this.finishTurn(this.activeTurnId, { stopReason: "cancelled" });
+      } catch (error) {
+        this.reportTurnError(error);
+      }
+    }
+    try {
+      this.emit({ type: "session_closed", reason: "closed" });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    this.attachments.clear();
+    this.unsubscribeExit?.();
     this.jobs?.dispose();
   }
 }

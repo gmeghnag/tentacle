@@ -48,6 +48,8 @@ export interface SessionController {
   compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
   /** Queue a message mid-turn (steering); optional. Local is sync, remote a Promise. */
   enqueue?(text: string): void | Promise<void>;
+  /** End the session (its background jobs included) — `/clear` replaces it; optional. */
+  close?(): void;
 }
 
 export interface AppProps {
@@ -400,6 +402,9 @@ export function App({
           pushNotice(helpText());
           return;
         case "/clear":
+          // The old session ends (with its jobs) on every runtime, before the
+          // fresh one starts (decision D3).
+          sessionRef.current?.close?.();
           sessionRef.current = makeSession();
           stateRef.current = initialState;
           setExpandAll(false);

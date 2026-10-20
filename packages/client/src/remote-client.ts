@@ -1,8 +1,8 @@
 /**
  * The client runtime: an `RpcPeer` over the control channel that performs the
- * handshake, opens sessions, forwards the agent's permission requests to the
- * local `PermissionBroker` (the TUI's prompt), and routes streamed
- * `session/update`s to the right `RemoteSession`.
+ * handshake, opens (and, when done with them, closes) sessions, forwards the
+ * agent's permission requests to the local `PermissionBroker` (the TUI's
+ * prompt), and routes streamed `session/update`s to the right `RemoteSession`.
  */
 import type {
   ChatMessage,
@@ -21,8 +21,8 @@ import {
   type ModelStreamChunkedResult,
   type ModelStreamParams,
   type ModelStreamResult,
-  type NewSessionResult,
   Notification,
+  type OpenResult,
   PROTOCOL_VERSION,
   type PromptResult,
   type RequestId,
@@ -39,6 +39,8 @@ import { classifyUpdate } from "./mapping.ts";
 import { responseToOutcome } from "./permission-map.ts";
 import { RemoteSession } from "./remote-session.ts";
 
+/** How long the exit path waits for the daemon to acknowledge `session/close`s. */
+export const CLOSE_SESSIONS_TIMEOUT_MS = 1000;
 /** Page size `snapshot` reads the history with (bounded frames for long sessions). */
 const SNAPSHOT_PAGE = 200;
 /** Restarts of a paged `snapshot` after a compaction raced it, before giving up. */
@@ -83,6 +85,8 @@ export class RemoteClient {
   private readonly peer: RpcPeer;
   private readonly permissions: PermissionBroker;
   private readonly handlers = new Map<string, SessionStreamHandler>();
+  /** Sessions this client opened and has not closed: `closeSessions` ends them. */
+  private readonly opened = new Set<string>();
   /** Session-independent listeners for background-job exits (idle or mid-turn). */
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
 
@@ -116,6 +120,10 @@ export class RemoteClient {
             return;
           }
           const update = classified.update;
+          // Closed daemon-side (by any client): nothing left to close at exit.
+          if (update.type === "session_closed") {
+            this.opened.delete(p.sessionId);
+          }
           // A background exit is not turn-scoped: route it to the dedicated
           // listeners (which fire even when no turn is streaming), never to the
           // per-turn update handler.
@@ -186,18 +194,61 @@ export class RemoteClient {
     return new RemoteSession(this, seedMessages, sessionId);
   }
 
-  /** Create the remote session and return its id (used lazily by `RemoteSession`). */
+  /**
+   * Open (create) the remote session and return its id (used lazily by
+   * `RemoteSession`). `create: true`: this client starts the session — a
+   * daemon that already has a live one under `sessionId` attaches instead.
+   * (Re-attaching with `since`/resync is `client-reattach`'s.)
+   */
   async openSession(
     cwd?: string,
     messages?: readonly ChatMessage[],
     sessionId?: string,
   ): Promise<string> {
-    const result = (await this.peer.request(Method.NewSession, {
+    const result = (await this.peer.request(Method.Open, {
+      create: true,
       ...(cwd ? { cwd } : {}),
       ...(messages && messages.length > 0 ? { messages } : {}),
       ...(sessionId ? { sessionId } : {}),
-    })) as NewSessionResult;
+    })) as OpenResult;
+    this.opened.add(result.sessionId);
     return result.sessionId;
+  }
+
+  /**
+   * End a session daemon-side (its turn, its background jobs) — sessions
+   * outlive connections, so a client that is done with one says so. Resolves
+   * when the daemon answered — or the request failed (peer closed: moot);
+   * never rejects.
+   */
+  closeSession(sessionId: string): Promise<void> {
+    this.opened.delete(sessionId);
+    return this.peer.request(Method.Close, { sessionId }).then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+
+  /**
+   * Close every session this client opened and has not closed yet — the exit
+   * path. AWAIT it before `close()`: a frame written just before closing is not
+   * guaranteed to be delivered on every transport (the in-memory pair drops
+   * it). Bounded by `timeoutMs` so a hung daemon never blocks the exit; never
+   * rejects.
+   */
+  async closeSessions(timeoutMs: number = CLOSE_SESSIONS_TIMEOUT_MS): Promise<void> {
+    const pending = [...this.opened].map((sessionId) => this.closeSession(sessionId));
+    if (pending.length === 0) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all(pending),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+    clearTimeout(timer);
   }
 
   /**

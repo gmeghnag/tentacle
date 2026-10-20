@@ -73,6 +73,7 @@ function daemon(
 ): {
   channel: ReturnType<typeof createChannelPair>[1];
   dispose: () => void;
+  host: SessionHost;
 } {
   const host = new SessionHost({
     defaultCwd: "/tmp/work",
@@ -84,7 +85,7 @@ function daemon(
   });
   const [daemonCh, clientCh] = createChannelPair();
   const connection = new Connection(daemonCh, host);
-  return { channel: clientCh, dispose: () => connection.close() };
+  return { channel: clientCh, dispose: () => connection.close(), host };
 }
 
 const drain = async (gen: AsyncIterable<unknown>): Promise<void> => {
@@ -125,6 +126,39 @@ describe("createLocalRuntime (local over RPC)", () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(errors).toEqual(["unknown notification: $/bogus"]);
     runtime.dispose();
+  });
+
+  test("sessions outlive the connection, so the runtime closes them: /clear closes the old one, dispose the rest", async () => {
+    // Mutations: drop `closeSessions` from `dispose`; drop the controller's `close` forward.
+    const model = new ScriptedProvider([
+      [{ type: "text", delta: "a" }, { type: "done" }],
+      [{ type: "text", delta: "b" }, { type: "done" }],
+    ]);
+    const { channel, dispose, host } = daemon(model);
+    let transportClosed = false;
+    const runtime = await createLocalRuntime({
+      channel,
+      disposeTransport: () => {
+        transportClosed = true;
+        dispose();
+      },
+      permissions: new PermissionBroker(),
+      store: new JsonSessionStore(join(dir, "close")),
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: null,
+    });
+    const first = runtime.createSession();
+    await drain(first.send("one"));
+    expect(host.size).toBe(1);
+    first.close?.(); // the TUI's /clear
+    const second = runtime.createSession();
+    await drain(second.send("two"));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(host.size).toBe(1); // only the second one is live
+    await runtime.dispose();
+    expect(host.size).toBe(0);
+    expect(transportClosed).toBe(true);
   });
 
   test("persists the session after a turn, under a stable uid", async () => {

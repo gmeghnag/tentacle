@@ -129,6 +129,7 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "turn_start", turnId: "t", prompt: "p" },
     { type: "turn_end", turnId: "t", stopReason: "end_turn" },
     { type: "history_replaced", reason: "compact" },
+    { type: "session_closed", reason: "closed" },
     { type: "context_note", text: "Continue with the task.", reason: "continue" },
   ];
 
@@ -145,13 +146,14 @@ describe("toUpdateParams (the session/update frame)", () => {
     }
   });
 
-  test("the real table: the turn bracket and the history barrier carry mandatory: true", () => {
+  test("the real table: the turn bracket, the history barrier and the close carry mandatory: true", () => {
     for (const update of samples) {
       const params = toUpdateParams("s1", 1, update);
       const mandatory =
         update.type === "turn_start" ||
         update.type === "turn_end" ||
-        update.type === "history_replaced";
+        update.type === "history_replaced" ||
+        update.type === "session_closed";
       expect(params.mandatory === true).toBe(mandatory);
     }
   });

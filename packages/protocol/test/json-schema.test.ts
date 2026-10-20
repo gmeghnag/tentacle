@@ -66,10 +66,12 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/initialize/result": [
     { protocolVersion: 1, agentCapabilities: { tools: true, permissions: false } },
   ],
-  "methods/session~1new/params": [
+  "methods/session~1open/params": [
     {
       cwd: "/w",
       sessionId: "s",
+      since: { epoch: "e", seq: 3 },
+      create: true,
       messages: [
         { role: "assistant", content: "", toolCalls: [{ id: "1", name: "n", arguments: "{}" }] },
         { role: "tool", content: "out", toolCallId: "1" },
@@ -77,7 +79,9 @@ const FIXTURES: Record<string, Json[]> = {
     },
     {},
   ],
-  "methods/session~1new/result": [{ sessionId: "s" }],
+  "methods/session~1open/result": [{ sessionId: "s", epoch: "e", created: true, resync: false }],
+  "methods/session~1close/params": [{ sessionId: "s" }],
+  "methods/session~1close/result": [{}],
   "methods/session~1prompt/params": [
     {
       sessionId: "s",

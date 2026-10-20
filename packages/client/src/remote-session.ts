@@ -2,11 +2,17 @@
  * A remote conversation that presents the *same* interface as the local agent
  * `Session`: `send(text, signal)` yields `AgentEvent`s. The Ink App consumes it
  * unchanged, so a connected TUI renders a remote session identically to a local
- * one. The remote session id is created lazily on the first `send`.
+ * one. The remote session id is created lazily on the first `send`; `close`
+ * ends it daemon-side (a session outlives the connection that opened it).
  */
 import type { AgentEvent } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
-import { JsonRpcErrorCode, type SessionUpdate, type TurnEnd } from "@tentacle/protocol";
+import {
+  DomainErrorCode,
+  JsonRpcErrorCode,
+  type SessionUpdate,
+  type TurnEnd,
+} from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import { stopReasonFromProtocol, updateToEvent } from "./mapping.ts";
 import { AsyncQueue } from "./queue.ts";
@@ -17,8 +23,9 @@ export class RemoteSession {
   private readonly seedMessages?: readonly ChatMessage[];
   private readonly desiredId?: string;
   private id: string | null = null;
-  /** The in-flight `session/new` of the first `send`, until `id` is known. */
+  /** The in-flight `session/open` of the first `send`, until `id` is known. */
   private opening: Promise<string> | null = null;
+  private closed = false;
   /**
    * The client-chosen id of the latest turn (steering binds to it), or null
    * before the first send. Kept after the turn ends ON PURPOSE: a steer typed
@@ -32,6 +39,26 @@ export class RemoteSession {
     this.client = client;
     this.seedMessages = seedMessages;
     this.desiredId = desiredId;
+  }
+
+  /**
+   * End the remote session daemon-side (its turn, its background jobs): the
+   * TUI's `/clear`. Idempotent; fire-and-forget. While the first `send` is
+   * still opening it, the close follows the open. A no-op before any send.
+   */
+  close(): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    if (this.id) {
+      void this.client.closeSession(this.id);
+    } else if (this.opening) {
+      this.opening.then(
+        (id) => this.client.closeSession(id),
+        () => {},
+      );
+    }
   }
 
   /** Compact the remote conversation (no-op if no session was opened yet). */
@@ -83,6 +110,9 @@ export class RemoteSession {
     prompt: string,
     signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
+    if (this.closed) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
+    }
     if (!this.id) {
       this.opening = this.client.openSession(undefined, this.seedMessages, this.desiredId);
       try {
@@ -114,6 +144,12 @@ export class RemoteSession {
     };
     this.client.setUpdateHandler(id, {
       update: (update: SessionUpdate) => {
+        // Closed (by another client): ours already got `turn_end{cancelled}`
+        // before it; fail loudly anyway rather than ever wait on a dead session.
+        if (update.type === "session_closed") {
+          queue.fail(new RpcError(DomainErrorCode.UnknownSession, "the session was closed"));
+          return;
+        }
         if (update.type === "turn_start" || update.type === "turn_end") {
           // Another turn's bracket (not ours) is ignored.
           if (update.type === "turn_end" && update.turnId === turnId) {

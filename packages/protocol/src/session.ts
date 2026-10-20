@@ -3,10 +3,13 @@
  *
  * Flow:
  *   1. `initialize`     — client ↔ agent capability/version handshake.
- *   2. `session/new`    — create a conversation; returns a `sessionId`.
+ *   2. `session/open`   — attach to a live session (replaying what the client
+ *      missed) or create one; returns its `sessionId`. Sessions belong to the
+ *      daemon, not to a connection: a dropped connection only detaches.
  *   3. `session/prompt` — client submits a user turn under a client-chosen
  *      `turnId`; acks at once. The turn's end is `turn_end` in the stream.
  *   4. `session/cancel` — notification to interrupt the active turn.
+ *   5. `session/close`  — end the session for every client (idempotent).
  */
 import { z } from "zod";
 import { ContentBlockSchema } from "./content.ts";
@@ -16,7 +19,7 @@ export type SessionId = z.infer<typeof SessionIdSchema>;
 
 // --- conversation history (for resume seed + snapshot) ------------------
 // Mirrors `@tentacle/core`'s `ChatMessage`/`ToolCall` on the wire, so a
-// session can be seeded on `session/new` and read back via `session/snapshot`.
+// session can be seeded on `session/open` and read back via `session/snapshot`.
 
 export const WireToolCallSchema = z
   .object({ id: z.string(), name: z.string(), arguments: z.string() })
@@ -65,27 +68,6 @@ export const InitializeResultSchema = z
   })
   .strict();
 export type InitializeResult = z.infer<typeof InitializeResultSchema>;
-
-// --- session/new --------------------------------------------------------
-
-export const NewSessionParamsSchema = z
-  .object({
-    /** Working directory the session's tools operate against. */
-    cwd: z.string().optional(),
-    /** Seed history for a resumed session (verbatim, replaces a fresh start). */
-    messages: z.array(ChatMessageSchema).optional(),
-    /** Client-chosen session id (so the client owns the persistence uid). */
-    sessionId: SessionIdSchema.optional(),
-  })
-  .strict();
-export type NewSessionParams = z.infer<typeof NewSessionParamsSchema>;
-
-export const NewSessionResultSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-  })
-  .strict();
-export type NewSessionResult = z.infer<typeof NewSessionResultSchema>;
 
 // --- session/prompt -----------------------------------------------------
 
@@ -227,6 +209,72 @@ export const SnapshotResultSchema = z
   })
   .strict();
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
+
+// --- session/open -------------------------------------------------------
+// Attach to a session, or create it. Synchronous on the daemon (look up or
+// create, replay, attach — one step), so two concurrent opens of one id never
+// build two agents, and no update falls between the replay and the live stream.
+//
+//   - `sessionId` live → attach. `create`/`messages` are ignored: a live id is
+//     never overwritten. `since` covered (same epoch, still in the replay
+//     ring) → the updates after it are replayed, `resync: false`. Otherwise
+//     (absent, another epoch, evicted, …) → `resync: true` and the updates
+//     after the session's current cut are replayed: take a `session/snapshot`
+//     and apply the buffered updates past its `since` on top of it.
+//   - not live (or no `sessionId`) and `create: true` or `messages` → a new
+//     session (seeded with `messages`), `created: true`. No `sessionId` → the
+//     daemon picks one.
+//   - not live, neither → `UnknownSession`: the daemon lost it (a restart, a
+//     close); the client decides whether to recreate it from its own history.
+//
+// ORDERING: replayed updates are ordinary `session/update` notifications, sent
+// before any live one and possibly BEFORE this response: a client routes (or
+// buffers) a session's updates from the moment it sends `open`.
+// Any authenticated client may open any session (one token = one principal).
+
+export const OpenParamsSchema = z
+  .object({
+    /** Client-chosen id (so the client owns the persistence uid); absent → daemon-chosen. */
+    sessionId: SessionIdSchema.optional(),
+    /** The last cut this client applied: a snapshot's `since`, advanced by each applied update. */
+    since: HistoryCutSchema.optional(),
+    /** Create the session if it is not live (a fresh, empty one unless `messages`). */
+    create: z.boolean().optional(),
+    /** Seed history: recreate a session that is not live from the client's copy. */
+    messages: z.array(ChatMessageSchema).optional(),
+    /** Working directory the session's tools operate against (not honoured: the daemon confines it). */
+    cwd: z.string().optional(),
+  })
+  .strict();
+export type OpenParams = z.infer<typeof OpenParamsSchema>;
+
+export const OpenResultSchema = z
+  .object({
+    sessionId: SessionIdSchema,
+    /** The session's current epoch: with the last applied `seq`, the client's next `since`. */
+    epoch: z.string().min(1).max(128),
+    /** A new session was built (vs attached to a live one). */
+    created: z.boolean(),
+    /** `since` could not be honoured: snapshot, then apply the buffered updates past its cut. */
+    resync: z.boolean(),
+  })
+  .strict();
+export type OpenResult = z.infer<typeof OpenResultSchema>;
+
+// --- session/close ------------------------------------------------------
+// End the session for everyone: abort its turn, stop its background jobs, tell
+// every attached client (`session_closed`), forget it. Idempotent: an unknown
+// or already-closed id is a no-op success. Needs no prior `open`.
+
+export const CloseParamsSchema = z
+  .object({
+    sessionId: SessionIdSchema,
+  })
+  .strict();
+export type CloseParams = z.infer<typeof CloseParamsSchema>;
+
+export const CloseResultSchema = z.object({}).strict();
+export type CloseResult = z.infer<typeof CloseResultSchema>;
 
 // --- session/enqueue (steering) ------------------------------------------
 // Queue a user message for injection into the turn currently running, at the

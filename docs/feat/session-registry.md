@@ -1,8 +1,8 @@
-# eval/session-registry — daemon-owned sessions, `session/open` / `close`, detach, fan-out
+# feat/session-registry — daemon-owned sessions, `session/open` / `close`, detach, fan-out
 
-> **Status:** implementation drafted — awaiting owner approval (2026-10-19)
-> **Branch:** none until promoted (then `feat/session-registry`)
-> **Type:** eval → feat · **Size:** M (upper bound, near L: four packages + protocol bump + new daemon test file; a clean M if open questions 3 and 8 are rejected) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (daemon `Connection`, one-session-path invariant, AGENTS §7)
+> **Status:** reviewed (2026-10-20) — Review round 1: REQUEST-CHANGES; findings 1–5 fixed by the executor (Execution §5); no second Review, by the owner's choice
+> **Branch:** `feat/session-registry`
+> **Type:** eval → feat · **Size:** L (resized at promotion from upper M: owner decision D3 adds `/clear` → close on every runtime, incl. one `BackgroundJobs` per in-process session) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (daemon `Connection`, one-session-path invariant, AGENTS §7)
 
 ## Context
 
@@ -26,6 +26,39 @@ F7: together they were L).
 > the parent, `docs/eval/session-reattach.md` §"Owner decisions after the
 > children's Implementation drafts" (A–G, D1–D10). Where a question or
 > design point here disagrees, the parent decision wins.
+
+> **Promotion amendments (2026-10-20, claude-opus-5-5) — win over the text below.**
+> Re-verified against `main` @ `46efdf0`; repro re-run (Execution §0).
+> - **D3 overrides open question 4.** `/clear` closes the previous session,
+>   jobs included, on every runtime: `SessionController` gains an optional
+>   `close(): void`; the TUI calls it on `/clear` before building the next
+>   session; `RemoteSession.close()` sends `session/close` (fire-and-forget,
+>   also after an in-flight open); `persistingController` forwards it. The
+>   in-process path gets one agent (hence one `BackgroundJobs`) per session —
+>   built per `createSession` with the already-connected MCP tools registered
+>   into each registry, as the worker does — and a pure, unit-tested
+>   `SessionJobsView` (`cli/src/session-jobs.ts`) so the TUI's single `jobs`
+>   subscription follows the current session; closing a session detaches its
+>   jobs from the view **before** disposing them (as `HostedSession.close`
+>   unsubscribes `onExit` before `dispose`), so killed-job notices never leak
+>   into the fresh transcript. `closeSessions()` at exit stays (it covers the
+>   session still open when the TUI quits).
+> - **`close` with a turn in flight ends the turn in the stream.** `abort()`
+>   alone would emit the turn's `turn_end` asynchronously, *after* the
+>   attachments were cleared — an attached client would hang on a turn whose
+>   end never reaches it. `HostedSession.close` therefore runs
+>   `finishTurn(activeTurnId, {stopReason: "cancelled"})` synchronously (state +
+>   `turn_end` + cut; the unwinding `drive` then hits the idempotent no-op),
+>   then emits `session_closed`, then detaches. A compaction in flight is just
+>   aborted (its requester gets `Cancelled`). Client side, `RemoteSession`
+>   also fails an open turn on `session_closed` (belt and braces).
+> - **Naming.** `HostedSession` already has a private field `cut: Cut`; the
+>   public accessor is `get historyCut(): HistoryCut`. The constructor loses its
+>   positional `requestPermission` (routing is per attachment now).
+> - **`/clear` close and in-process parity are new tests** (TUI: the old
+>   controller's `close` runs on `/clear`; in-process: `SessionJobsView`
+>   switch + close-before-dispose; remote: `RemoteSession.close` sends one
+>   `session/close`, also when called while the open is in flight).
 
 > **Re-baselined on 3c (2026-10-20, claude-opus-5-5).** `session-event-stream`
 > 3c (`docs/feat/session-history-cut.md`, branch `feat/session-history-cut`)
@@ -777,9 +810,380 @@ Only decisions not already argued in the Review.
 
 ## Execution
 
-*(empty — an eval)*
+*— claude-opus-5-5, 2026-10-20*
+
+### §0 Repro on `main` @ `46efdf0` (before any edit)
+
+`.tentacle/tmp/session-registry/repro.ts` — real `SessionHost` + `Connection`s
+over the in-memory pair; a 20-chunk model (2 ms/chunk); A opens `X` with
+`session/new`, prompts, `Connection.close()` at chunk 5; B tries
+`session/open`; C and D both `session/new {sessionId: "Y"}`.
+
+```
+    turn_end in the ring: {"type":"turn_end","turnId":"t1","stopReason":"cancelled"}
+(1) drop mid-turn: model produced 20/20 chunks; A saw 6 updates, last=agent_message_chunk
+(2) session/open: unknown method: session/open
+(3) two session/new for id Y: agents built so far=3 (X:1 + Y:2)
+```
+
+(1) the drop cancels the turn (the fake model ignores the signal, hence 20/20
+produced, but the turn ends `cancelled`); (2) there is no way to re-attach;
+(3) a duplicate id builds a second agent and clobbers the first.
+### §1 As built, in plan order
+
+1. **Protocol** (`packages/protocol`): `session/open` (`OpenParams{sessionId?,
+   since?: HistoryCut, create?, messages?, cwd?}` strict → `OpenResult{sessionId,
+   epoch, created, resync}`) and `session/close` (`{sessionId}` → `{}`) in
+   `session.ts` (schema comment carries the open rules, the ordering contract
+   — replay as notifications, possibly before the response — and "any
+   authenticated client may open any session"); `session/new` removed from
+   `session.ts`/`methods.ts`; `session_closed{reason: "closed"}` added to the
+   union as **mandatory** (`updates.ts`); `PROTOCOL_VERSION` 4 → 5;
+   `schema/protocol.json` regenerated (`bun run schema:export`).
+2. **`HostedSession`** (`daemon/src/hosted-session.ts`): `Attachment{send,
+   requestPermission}`; insertion-ordered `attachments` set; `attach(a, since?)`
+   — replay (covered `since`) or replay-from-cut (resync), sent through
+   `a.send`, then added, in one synchronous method; `detach`; fan-out in `emit`
+   over a copy, a throwing sink detached + reported (`onTurnError`); permission
+   requester routed at request time to the most recent attachment, none →
+   `cancelled` at once; `get historyCut()`, `get attachedCount()`; `close()`
+   (abort → synchronous `finishTurn(cancelled)` → `session_closed` → clear →
+   `onExit` unsubscribe → `jobs.dispose()`), idempotent. `setSink`,
+   `disposeJobs` and the constructor's positional requester removed.
+3. **`SessionHost`** (`session-host.ts`): the registry — `get`/`size`/`values`,
+   synchronous `open(params, attachment)` (live → attach; else create when
+   `create`/non-empty `messages`/no id, registered before attaching; else
+   `UnknownSession`), idempotent `close(id)`.
+4. **`Connection`** (`connection.ts`): `attached` map; `open` (cap counts
+   attachments, a re-open is pre-detached and not counted), `closeSession`
+   (no attach needed), `lookup` with the identity check (stale entry detached
+   and dropped); `close()` only detaches (cancels first with `servesModel`).
+5. **ws-server**: `backpressureLimit` option (default 16 MiB) +
+   `closeOnBackpressureLimit: true`.
+6. **agent.ts**: steering-invariant comment names the fan-out.
+7. **Client**: `openSession` → `session/open{create: true}` and records the id;
+   `closeSession(id): Promise<void>` (never rejects) and `closeSessions(timeoutMs
+   = 1000): Promise<void>`; `session_closed` drops the id; `RemoteSession.close()`
+   (idempotent, follows an in-flight open; a later `send` → `UnknownSession`)
+   and a `session_closed` branch that fails an open turn; mapping returns
+   `null` for it.
+8. **CLI**: `serve.ts` passes `servesModel: modelProxy`; `LocalRuntime.dispose()`
+   is now `async` (awaits `closeSessions()`, then closes) and `main.ts` awaits
+   it (worker and pod sites); `persistingController` forwards `close`;
+   `connect.ts` awaits `closeSessions()` before `client.close()`. In-process
+   (D3): `cli/src/session-jobs.ts` — `SessionJobsView` + `inProcessSessions`
+   (one `buildAgent` per session, MCP connected once and registered into each
+   registry, `close` = release from the view, then dispose); `buildAgent` gains
+   `options.permissions` so every per-session agent shares the TUI's ONE broker.
+9. **TUI**: `SessionController.close?()`; `/clear` calls it on the old session
+   before `makeSession()`.
+10. `AGENTS.md` §7: `session/new` → `session/open` (a rename, no rule change).
+
+### §2 Drift from the Implementation (and why)
+
+- **D3 included** (owner decision; promotion amendment) — Size L.
+- **`closeSessions()` is awaited, not fire-and-forget.** The plan claimed a
+  frame written before `close()` is delivered "in the in-memory pair (FIFO)".
+  False: `createChannelPair().close()` marks the other end closed synchronously
+  and the queued delivery checks `!other.closed` (`transport/src/channel.ts`),
+  so the frame is dropped — the first `closeSessions` test was red for that
+  reason. Fix: `closeSessions()` returns a Promise that resolves when every
+  close is answered or failed, bounded by `CLOSE_SESSIONS_TIMEOUT_MS` (1 s), and
+  every exit path awaits it; `LocalRuntime.dispose()` became `async` for it.
+- **A throwing sink no longer kills the turn.** Two pre-existing tests pinned
+  "sink throws → turn ends `error`" (history-cut, integration). With fan-out the
+  plan says the sink is detached and the turn goes on; both tests now pin that
+  (the turn ends `end_turn`, error reported once, sink detached).
+- **`Connection.close()` test inverted**: it pinned the
+  `background-process-groups` behaviour this child removes on purpose; it now
+  pins "jobs outlive the connection; `session/close` from another connection
+  kills them" (real processes, as before).
+- **ws backpressure test finding**: a SYNCHRONOUS burst larger than the limit
+  closes a healthy, reading client too (same event loop, no chance to drain).
+  Very likely benign at the defaults (limit 16 MiB vs a 4 MiB replay ring) —
+  a heuristic margin, NOT a bound (Review finding 4: the ring never evicts
+  past the cut, sizes are JSON string lengths, frames add an envelope);
+  documented on the option, with the reconnect-loop risk flagged for
+  `client-reattach`. The test model yields one chunk per macrotask.
+- Architecture docs `docs/architecture/F3-*.md`/`F4-*.md` still say
+  `session/new`: historical design records (they also still say
+  `PROTOCOL_VERSION = 1`), left as is.
+- Not done: open question 2's `incarnation` (dropped by 3c, as planned).
+
+### §3 Tests and non-vacuity
+
+New: `daemon/test/registry.test.ts` (19), `cli/test/session-jobs.test.ts` (6),
+plus tests in `ws-server.test.ts` (backpressure), `client/test/remote.test.ts`
+(5: closeSessions ×3, RemoteSession.close, closed-by-another-client, and a
+`session_closed` frame), `cli/test/local-runtime.test.ts` (1), `tui/test/
+app.test.tsx` (1), protocol schema tests. Each mutation applied once by a
+script (`.tentacle/tmp/session-registry/mutate*.py`), the named test run, the
+source restored:
+
+| Mutation | Test | Result |
+|---|---|---|
+| `Connection.close()` cancels | drop mid-turn → replay | RED |
+| attachment added on a microtask after the replay | atomicity sweep k=0..59 | RED |
+| no live check in `SessionHost.open` | two concurrent opens → one agent | RED |
+| single-sink (`clear()` before add) | fan-out identical stream | RED |
+| no pre-detach on re-open | same connection never doubles | RED |
+| lookup through the host only | command needs an open on this connection | RED |
+| no identity check | stale attachment | RED |
+| awaited fan-out | no-await window, slow + fast client | RED |
+| no `dispose` / no unsubscribe / no `session_closed` | `session/close` test | RED ×3 (the unsubscribe one was GREEN first — invisible to clients; the test now asserts the listener count) |
+| no synchronous `finishTurn` in `close` | close during a turn | RED |
+| fixed epoch | previous-incarnation `since` | RED |
+| ignore `servesModel` | model-proxy detach | RED |
+| route to the oldest attachment | most recent is asked | RED |
+| `closeOnBackpressureLimit: false` | ws backpressure | RED |
+| `closeSessions` closes nothing / no timeout | client tests | RED ×2 |
+| `RemoteSession.close` ignores an in-flight open | close while opening | RED (GREEN twice first: the iteration had not started, then `waitFor(size === 0)` was true before the open arrived — both fixed) |
+| no client `session_closed` branch | `session_closed` frame | RED |
+| `use` keeps the old subscription / no dispose / no release | session-jobs | RED ×3 |
+| `dispose` skips `closeSessions` / controller drops `close` | local-runtime | RED ×2 |
+| `/clear` skips `close?.()` | app.test | RED |
+
+### §4 Gate
+
+`bun run check` (2026-10-20): `tsc` clean; `biome check .` 273 files, no
+issues; `bun test` **935 pass, 1 skip (the opt-in live-k8s), 0 fail**.
+Unverified: no manual run of the real TUI / `connect` against `serve` (the
+paths are covered by the in-memory and ws tests); verify with `tentacle serve`
++ `tentacle connect`, quit mid-turn, check the daemon's session is gone.
+
+
+### §5 Review round 1 — fixes (2026-10-20)
+
+Each fix has a test shown RED under the named mutation
+(`.tentacle/tmp/session-registry/mutate-review.py`), then green.
+
+1. **Single-broker on the in-process path (finding 1).** `cli/src/wiring.ts`
+   `inProcessAgents(config) → {permissions, build}`: the broker and the
+   per-session factory come as one pair, and `main.ts` uses both (startTui
+   gets that `permissions`). New `cli/test/wiring.test.ts`: two agents (before
+   and after `/clear`) share the broker and their requests reach the TUI's
+   requester. Mutation `build: () => buildAgent(config)` → RED.
+2. **Stale attachments (finding 2).** `Connection.dropStale()` forgets every
+   entry whose session is no longer the live one under its id, run before the
+   cap check in `open` and on a failed `lookup`. Test "a session closed by
+   another client frees this connection's cap". Mutation: no `dropStale()` in
+   `open` → RED.
+3. **`connect` exit path (finding 3).** `cli/test/connect.test.ts`: a session
+   opened during the TUI is gone daemon-side after `connectTui` returns.
+   Mutation: drop `await client.closeSessions()` → RED.
+4. **Backpressure margin wording (finding 4).** The `ws-server.ts` option doc
+   and Execution §2 now call it a heuristic margin and flag the reconnect-loop
+   risk for `client-reattach`. No code change.
+5. **Mutations that slipped (finding 5).** `opened.delete` on
+   `session_closed`: the closed-by-another-client test now has the phone
+   recreate `S` and checks the laptop's exit leaves it alive (mutation → RED).
+   The `send`-after-`close` guard: a new test checks a closed `RemoteSession`
+   never opens a session (mutation → RED). The `lookup` stale detach now goes
+   through `dropStale()`, which the cap test pins through `open`. The call in
+   `lookup` itself only frees memory early and is not pinned separately.
+   The `attach` closed guard is unreachable through the host, so it stays
+   untested (as the Review accepted).
+6. **Finding 6** (a pending permission prompt is not withdrawn when its session
+   closes) predates this task and belongs to `permission-events`. Not done here.
+
+Gate after the fixes: `tsc` clean, `biome check .` clean, `bun test`
+**939 pass, 1 skip (opt-in live-k8s), 0 fail** (3682 expects, 101 files).
 
 ## Review
+
+### Review (promotion): REQUEST-CHANGES (small: findings 1–2; the rest are nits)
+
+*— claude-opus-5-5 (fresh-context subagent), 2026-10-20.* This is the **same
+model as the executor**, only in a fresh context. Blind spots the two passes
+share can survive both, so this load-bearing task would benefit from a second
+review by a different model (AGENTS §10).
+
+The design holds and the gate is green. The main invariants survive attack:
+attach atomicity, one session path, the steering window, and the protocol bump.
+Two items need a change before merge. One is a §7 invariant (single broker)
+that the new in-process path relies on but no test pins. The other is a small
+bookkeeping bug in `Connection`.
+
+**Findings**
+
+1. **MEDIUM: the single-broker invariant on the new in-process path has no
+   test.** The wiring is at `packages/cli/src/main.ts:511`:
+   `build: () => buildAgent(config, { permissions })`. I mutated it to
+   `buildAgent(config)`, which gives each per-session agent a fresh broker
+   whose default is `allowAll` (`core/src/permission.ts:56`), so the TUI prompt
+   would never be reached. `bun test packages/cli packages/tui` stayed
+   **GREEN**. This is exactly the silent-decoupling class that AGENTS §7 says
+   has bitten the repo before. The session-jobs tests inject `build`, so the
+   wiring itself is never exercised. *Fix:* move the in-process wiring behind a
+   seam that a test can reach, for example a `buildInProcessSessions(config,
+   permissions, mcp)` in `session-jobs.ts`/`wiring.ts`. Then assert that an
+   agent built for session 1 and one built after `/clear` both route
+   `permissions.request` to the broker the TUI was given (a spy requester).
+   Confirm the test goes red under the mutation above.
+2. **LOW-MEDIUM: stale `Connection.attached` entries count toward the cap and
+   keep closed sessions alive.** Suppose another client closes session X.
+   Connection A's entry for X is pruned only when A next touches X: through
+   `lookup` (`connection.ts:226`), its own `closeSession` (`:271`), or a
+   re-open. Until then it counts against `maxSessions` (`:248`) and holds the
+   closed `HostedSession` (agent + history) for the life of the connection.
+   Repro (`.tentacle/tmp/session-registry-review/stale-cap.ts`, real
+   `Connection`s, `maxSessions: 1`):
+   ```
+   host.size after B closes X: 0
+   A opens Y: too many sessions on this connection (max 1)
+   ```
+   *Fix:* prune entries whose `host.get(id) !== hosted` before the cap check
+   in `open`, or have the `session_closed` fan-out drop the entry: the
+   attachment's `send` sees it, or add an `onClosed` hook on `Attachment`. Add
+   a test for the repro.
+3. **LOW: `connect`'s exit `closeSessions()` has no test.** At
+   `packages/cli/src/connect.ts:63`, removing `await client.closeSessions()`
+   left `bun test packages/cli` **GREEN**. This is the only path where
+   forgetting the close leaks a live session (turn + jobs) on a long-lived
+   `serve`. *Fix:* in `connect.test.ts`, have the fake daemon record a
+   `session/close` for the opened session before the channel closes.
+4. **LOW (accuracy): "an attach burst is at most the 4 MiB ring" is not a
+   bound.** The comment at `ws-server.ts:38` and Execution §2 both make that
+   claim. In fact the ring never evicts past the pin (`ring.ts:71`), so a
+   resync replay "from the cut" can exceed `ringBytes`. Sizes are also counted
+   in UTF-16 units (`ring.ts:22`), not wire bytes (non-ASCII text grows up to
+   2–3× in UTF-8), and the JSON-RPC envelope adds bytes to every frame on top
+   of that. At 16 MiB the margin is very likely enough, but it is not
+   guaranteed. Once `client-reattach` reconnects automatically, an oversize
+   burst would close a healthy client on every attempt. *Fix:* reword the
+   comment as a heuristic margin and record the risk for `client-reattach`, or
+   derive the limit from the burst size.
+5. **NIT: weak tests (each mutation stayed GREEN):**
+   - Dropping `opened.delete` on `session_closed` (`remote-client.ts:125`).
+   - Removing `send`'s closed guard (`remote-session.ts:113`); the documented
+     "a later `send` → `UnknownSession`" is not pinned.
+   - Removing the stale-entry detach in `lookup` (`connection.ts:226-242`).
+   - Removing `attach`'s closed guard. This one is unreachable through the
+     host, so it is acceptable.
+6. **NIT (pre-existing, out of scope):** suppose the session is closed (or
+   cancelled) while a permission prompt is pending on a client. The daemon's
+   outstanding `session/request_permission` is never withdrawn, so that
+   client's dialog stays until it is answered or the 5-minute timeout fires.
+   The answer then lands in an aborted turn (the tool cannot start:
+   `agent.ts:526`). This belongs to `permission-events`.
+
+**Gate** (`bun run check`, run by me): `tsc` clean; `biome check .` checked
+273 files with no issues; `bun test` **935 pass, 1 skip (opt-in live-k8s),
+0 fail**, 3670 `expect()` calls, 936 tests across 100 files. This matches
+Execution §4.
+
+**Mutations** (temporary; the tree was verified byte-identical afterwards:
+`git diff | md5` and the untracked files' md5 are unchanged).
+- I re-ran the executor's `mutate.py`, M1–M14 including M6b: **all RED**, as
+  the Execution table states.
+- My own `.tentacle/tmp/session-registry-review/mut.py` and `mut2.py`:
+
+| Mutation | Result |
+|---|---|
+| `Connection.close()` keeps the attachment (no detach) | RED (ws backpressure) |
+| `opened` not pruned on `session_closed` | **GREEN** (finding 5) |
+| In-process agents get their own broker | **GREEN** (finding 1) |
+| Stale `lookup` entry not detached | **GREEN** (finding 5) |
+| `create` flag ignored (seed-only create) | RED (34 tests) |
+| `attach` always `resync: false` | RED (3) |
+| Cap counts a re-open | RED |
+| A throwing sink is kept attached | RED (2) |
+| `connect` skips `closeSessions` | **GREEN** (finding 3) |
+| A closed session stays attachable | GREEN (unreachable via host) |
+| `session_closed` emitted after `attachments.clear()` | RED (2) |
+| In-process `close`: dispose before release | RED |
+| MCP tools not registered per session | RED |
+| `RemoteSession.send` ignores `closed` | **GREEN** (finding 5) |
+| `dispose`: transport closed before `closeSessions` | RED |
+
+**Premise table**
+
+| Premise | Verdict |
+|---|---|
+| Context symptom: a drop cancels the turn, there is no re-attach, and a duplicate id builds a second agent | **TRUE**. I re-ran `.tentacle/tmp/session-registry/repro.ts` on a `git archive main` copy: turn `cancelled` 6/20, `unknown method: session/open`, agents built = 3. |
+| Inbound requests dispatch concurrently (`peer.ts`, `void this.handleRequest`) | TRUE (now at `:310`; the doc cites `:291`, an older line) |
+| `handleRequest` responds after the handler, so replay notifications precede the response | TRUE. In my e2e, 6 replayed updates arrived before the `open` response. |
+| `emit`/`attach` are synchronous and fan-out is never awaited | TRUE (`hosted-session.ts` `emit`, `attach`) |
+| `SessionHost.open`/`build` are synchronous (no await between lookup and register) | TRUE |
+| A closed peer rejects pending requests, so a pending permission becomes `cancelled` | TRUE (`peer.ts:247-255`, `connection.ts:290-293`) |
+| In-memory pair `close()` drops queued frames (Execution §2 drift claim) | TRUE (`transport/src/channel.ts` send/close) |
+| ws `close` → `Connection.close()` | TRUE (`ws-server.ts:207-209`) |
+| Daemon runtimes use one broker per session (so `setRequester` per `HostedSession` does not clobber) | TRUE (`serve.ts:32,75`, `worker.ts:96` → `buildAgent` without `permissions`) |
+| `/clear` is still refused while a turn runs | TRUE (`tui/src/commands.ts:30`, `App.tsx:392`) |
+| "Largest synchronous burst = 4 MiB ring" | **FALSE as a bound** (finding 4) |
+
+**Attacks tried**
+
+1. **E2E through real code** (`.tentacle/tmp/session-registry-review/e2e.ts`):
+   real `startWsServer` with real `connectWebSocket` clients.
+   - A opens X and prompts. Its socket is dropped at seq 6, and the turn keeps
+     running daemon-side (`attached=0 running=true`).
+   - B runs `open{since:{epoch,6}}` and gets `resync:false`, with 6 replayed
+     updates before the response. A∪B covers seqs 1..32, **contiguous, 0
+     duplicates**, ending in `turn_end{end_turn}`, with 1 agent built.
+   - A stale-epoch `open` gets `resync:true`. B's `close` gives `host.size=0`,
+     and B's last update is `session_closed`.
+   - The `connect` shape (`RemoteClient` + `RemoteSession`), quit mid-turn then
+     `closeSessions()`: `host.size` went 1 → 0, and the whole run took 21 ms.
+   **Holds.**
+2. **Close with a turn in flight / compaction in flight.** `close()` runs
+   `finishTurn(cancelled)` synchronously, then `session_closed`, then clear.
+   The unwinding `drive` then hits the idempotent `finishTurn` no-op, and its
+   later emits land in a sink-less ring. `controller` is null, but the closed
+   session is unreachable: it is out of the registry, and the identity check
+   rejects stale entries. The agent re-checks abort before any tool starts
+   (`agent.ts:526`), so no job can be started after `jobs.dispose()`. A
+   compaction is aborted and its own `finally` frees the slot. **Holds**
+   (mutations M11 and R11 are red).
+3. **Open-while-closing, duplicate open, same-connection re-open.** All of
+   these are synchronous segments, so they **hold** (M3/M5 red). There is one
+   exception: a **stale entry from a close by another connection** counts
+   toward the cap. **Found finding 2.**
+4. **Single-broker invariant across all runtimes.** The daemon side is
+   correct (a broker per session). The in-process D3 side is correct today but
+   unpinned. **Found finding 1.**
+5. **Exit paths.** All three `dispose` callers await
+   (`main.ts:313,495`, `connect.ts:63`). Pod `run` keeps its delete-on-exit
+   net (`pod-runtime.ts:222`), and `deletePod` runs in `disposeTransport`
+   after `closeSessions`. The added exit latency is one RTT, capped at 1 s, and
+   a closed peer rejects at once. SIGINT goes through the exit net, unaffected.
+   Ink owns the terminal until unmount, and nothing writes raw output before
+   it. **Holds.** `connect`'s close is untested (finding 3).
+6. **Protocol.** v4 → 5. `session/new` is removed from `Method`,
+   `RequestSchemas` and the schema. `session_closed` is in the union, in
+   `UPDATE_CLASS` as mandatory, and maps to `null` in the client. The schema
+   drift test is in the gate. **Holds.**
+7. **Backpressure vs replay.** **Found finding 4**, by reading `ring.ts`; I
+   ran no experiment for it.
+
+**What holds:**
+- Attach atomicity: replay as notifications before the response, nothing
+  awaited between the replay and `attachments.add`, a pre-detach on re-open.
+- Detach-on-drop, plus the `servesModel` cancel.
+- Fan-out with a throwing sink detached and reported, never awaited, so the
+  steering window stays intact (M7 red).
+- Most-recent permission routing, with `cancelled` when nobody is attached.
+- `close` is idempotent and orders `turn_end` → `session_closed` → unsubscribe
+  → dispose.
+- The `/clear` → `close?.()` change on every runtime.
+- `persistingController` forwards `close`, and `LocalRuntime.dispose` is
+  async and awaited everywhere.
+- One session path: no second agent loop. The in-process path keeps its own
+  `Session` as before, now one agent per session.
+
+**How the executor behaved:**
+- The executor followed the plan and documented its drifts honestly. These
+  include a false plan premise it caught itself (fire-and-forget close over
+  the in-memory pair) and two tests that were GREEN on its first mutation and
+  that it then fixed.
+- Its mutation table is accurate: every row I re-ran reproduces.
+- Weaknesses:
+  - It pinned the in-process D3 behaviour (jobs) but not the §7 invariant that
+    the same wiring change touches (broker).
+  - It left the `connect` exit path untested.
+  - It overstated the backpressure margin in a code comment.
+
+*(Below: the 2026-10-19 eval-era review, kept for the record.)*
 
 *— claude-opus-5-5, 2026-10-19*
 

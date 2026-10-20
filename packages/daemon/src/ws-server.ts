@@ -27,10 +27,22 @@ export interface WsServerOptions {
   readonly onAudit?: (line: string) => void;
   /** Auto-deny a permission request a client leaves unanswered this long (ms). */
   readonly permissionTimeoutMs?: number;
-  /** Max live sessions per connection before `session/new` is refused. */
+  /** Max sessions one connection may have open before `session/open` is refused. */
   readonly maxSessions?: number;
   /** Max inbound frame size (bytes) accepted before parsing. */
   readonly maxFrameBytes?: number;
+  /**
+   * Bytes queued for one socket before the server CLOSES it (default 16 MiB).
+   * Bun would otherwise drop frames silently and keep a frozen client's socket
+   * open — a gap in its stream; closed, it detaches and resyncs on re-attach.
+   * Keep it well above a session's replay ring (`ringBytes`, 4 MiB): an attach
+   * sends the replay in one synchronous burst. A heuristic margin, not a
+   * bound — the ring never evicts past the snapshot cut, sizes are JSON string
+   * lengths (not wire bytes), and each frame adds an envelope — so a burst over
+   * the limit closes even a healthy client, and one that reconnects
+   * automatically would loop (to revisit with `client-reattach`).
+   */
+  readonly backpressureLimit?: number;
 }
 
 // Conservative per-connection defaults; a never-answering or abusive client is
@@ -38,6 +50,7 @@ export interface WsServerOptions {
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 min to answer a prompt
 const DEFAULT_MAX_SESSIONS = 64;
 const DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024; // 8 MiB
+const DEFAULT_BACKPRESSURE_LIMIT = 16 * 1024 * 1024; // Bun's own default
 
 export interface RunningServer {
   readonly url: string;
@@ -174,6 +187,11 @@ export function startWsServer(options: WsServerOptions): RunningServer {
       return new Response("expected a websocket upgrade", { status: 426 });
     },
     websocket: {
+      // A client that stops reading (a frozen phone) must not get a silent gap
+      // (Bun drops past the limit) nor stall the others (`send` never blocks):
+      // close it → `Connection.close()` detaches → it resyncs when it returns.
+      backpressureLimit: options.backpressureLimit ?? DEFAULT_BACKPRESSURE_LIMIT,
+      closeOnBackpressureLimit: true,
       open(ws) {
         const channel = new WsChannel(ws);
         ws.data.channel = channel;

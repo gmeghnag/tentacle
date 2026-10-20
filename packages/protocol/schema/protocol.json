@@ -151,6 +151,21 @@
       },
       "type": "object"
     },
+    "CloseParams": {
+      "additionalProperties": false,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["sessionId"],
+      "type": "object"
+    },
+    "CloseResult": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
     "CompactParams": {
       "additionalProperties": false,
       "properties": {
@@ -500,9 +515,12 @@
       "required": ["arguments", "id", "name"],
       "type": "object"
     },
-    "NewSessionParams": {
+    "OpenParams": {
       "additionalProperties": false,
       "properties": {
+        "create": {
+          "type": "boolean"
+        },
         "cwd": {
           "type": "string"
         },
@@ -514,18 +532,32 @@
         },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
+        },
+        "since": {
+          "$ref": "#/$defs/HistoryCut"
         }
       },
       "type": "object"
     },
-    "NewSessionResult": {
+    "OpenResult": {
       "additionalProperties": false,
       "properties": {
+        "created": {
+          "type": "boolean"
+        },
+        "epoch": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "resync": {
+          "type": "boolean"
+        },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
         }
       },
-      "required": ["sessionId"],
+      "required": ["created", "epoch", "resync", "sessionId"],
       "type": "object"
     },
     "PermissionOption": {
@@ -745,6 +777,22 @@
       "required": ["type", "uri"],
       "type": "object"
     },
+    "SessionClosed": {
+      "additionalProperties": true,
+      "properties": {
+        "reason": {
+          "enum": ["closed"],
+          "type": "string"
+        },
+        "type": {
+          "const": "session_closed",
+          "type": "string"
+        }
+      },
+      "required": ["reason", "type"],
+      "type": "object",
+      "x-event-class": "mandatory"
+    },
     "SessionId": {
       "minLength": 1,
       "type": "string"
@@ -759,6 +807,7 @@
           "context_note": "#/$defs/ContextNote",
           "history_replaced": "#/$defs/HistoryReplaced",
           "plan": "#/$defs/Plan",
+          "session_closed": "#/$defs/SessionClosed",
           "steer": "#/$defs/Steer",
           "tool_call": "#/$defs/ToolCall",
           "tool_call_update": "#/$defs/ToolCallUpdate",
@@ -803,6 +852,9 @@
         },
         {
           "$ref": "#/$defs/HistoryReplaced"
+        },
+        {
+          "$ref": "#/$defs/SessionClosed"
         }
       ]
     },
@@ -1277,6 +1329,14 @@
         "$ref": "#/$defs/ModelStreamChunkedResult"
       }
     },
+    "session/close": {
+      "params": {
+        "$ref": "#/$defs/CloseParams"
+      },
+      "result": {
+        "$ref": "#/$defs/CloseResult"
+      }
+    },
     "session/compact": {
       "params": {
         "$ref": "#/$defs/CompactParams"
@@ -1293,12 +1353,12 @@
         "$ref": "#/$defs/EnqueueResult"
       }
     },
-    "session/new": {
+    "session/open": {
       "params": {
-        "$ref": "#/$defs/NewSessionParams"
+        "$ref": "#/$defs/OpenParams"
       },
       "result": {
-        "$ref": "#/$defs/NewSessionResult"
+        "$ref": "#/$defs/OpenResult"
       }
     },
     "session/prompt": {
@@ -1349,5 +1409,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 4
+  "x-protocol-version": 5
 }

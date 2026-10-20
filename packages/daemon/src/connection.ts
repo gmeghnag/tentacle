@@ -1,13 +1,17 @@
 /**
  * One client connection: an `RpcPeer` bound to a `SessionHost`. Handles the
- * handshake and the `session/*` methods, streams `session/update` notifications
- * for each turn, and routes the agent's permission requests back to this client.
+ * handshake and the `session/*` methods, holds this client's ATTACHMENTS to the
+ * host's sessions (each streams `session/update` notifications here and can
+ * receive permission requests), and detaches them — never ends a session — when
+ * the connection goes away.
  *
  * Methods other than `initialize` are refused until the handshake completes, and
  * an incompatible protocol major is rejected — security/versioning live here.
  */
 import {
   type CancelParams,
+  type CloseParams,
+  type CloseResult,
   type CompactParams,
   type CompactResult,
   type EnqueueParams,
@@ -17,9 +21,9 @@ import {
   Method,
   type ModelStreamChunkedResult,
   type ModelStreamResult,
-  type NewSessionParams,
-  type NewSessionResult,
   Notification,
+  type OpenParams,
+  type OpenResult,
   PROTOCOL_VERSION,
   type PromptParams,
   type PromptResult,
@@ -36,14 +40,14 @@ import {
   RpcError,
   RpcPeer,
 } from "@tentacle/transport";
-import type { HostedSession } from "./hosted-session.ts";
+import type { Attachment, HostedSession } from "./hosted-session.ts";
 import type { SessionHost } from "./session-host.ts";
 
 /** Per-connection resource limits (the daemon's exposure boundary sets these). */
 export interface ConnectionOptions {
   /** Auto-deny a `session/request_permission` the client leaves unanswered this long. */
   readonly permissionTimeoutMs?: number;
-  /** Reject a `session/new` past this many live sessions on one connection. */
+  /** Reject a `session/open` past this many sessions attached to one connection. */
   readonly maxSessions?: number;
   /** Reject an inbound frame larger than this (bytes) before parsing it. */
   readonly maxFrameBytes?: number;
@@ -54,13 +58,26 @@ export interface ConnectionOptions {
    * `RpcPeerOptions.exposeInternalErrors`.
    */
   readonly exposeInternalErrors?: boolean;
+  /**
+   * This connection serves the model (`--model-proxy`): when it goes away, the
+   * turns of the sessions it is attached to are cancelled (their next model
+   * call would fail obscurely) — the sessions themselves stay for re-attach.
+   */
+  readonly servesModel?: boolean;
+}
+
+/** One session this connection opened. */
+interface Attached {
+  readonly hosted: HostedSession;
+  readonly attachment: Attachment;
 }
 
 export class Connection {
   private readonly peer: RpcPeer;
   private readonly host: SessionHost;
-  private readonly sessions = new Map<string, HostedSession>();
+  private readonly attached = new Map<string, Attached>();
   private readonly maxSessions?: number;
+  private readonly servesModel: boolean;
   private initialized = false;
 
   constructor(
@@ -71,6 +88,7 @@ export class Connection {
   ) {
     this.host = host;
     this.maxSessions = options.maxSessions;
+    this.servesModel = options.servesModel === true;
     this.peer = new RpcPeer(channel, {
       onRequest: (method, params, context) => this.onRequest(method, params, context),
       onNotification: (method, params) => this.onNotification(method, params),
@@ -85,13 +103,20 @@ export class Connection {
     });
   }
 
+  /**
+   * The connection went away: DETACH from every session — they keep running
+   * (and keep their jobs) for a client to re-attach; only `session/close` (or
+   * the process ending) stops them. Exception: a model-serving connection
+   * cancels its sessions' turns, which cannot reach the model without it.
+   */
   close(): void {
-    // A session is unreachable once its connection is gone, so the jobs it
-    // started are unmanaged: end them with it.
-    for (const session of this.sessions.values()) {
-      session.cancel();
-      session.disposeJobs();
+    for (const { hosted, attachment } of this.attached.values()) {
+      if (this.servesModel) {
+        hosted.cancel();
+      }
+      hosted.detach(attachment);
     }
+    this.attached.clear();
     this.peer.close();
   }
 
@@ -136,8 +161,10 @@ export class Connection {
       throw new RpcError(DomainErrorCode.NotInitialized, "initialize before any other method");
     }
     switch (method) {
-      case Method.NewSession:
-        return this.newSession(params as NewSessionParams);
+      case Method.Open:
+        return this.open(params as OpenParams);
+      case Method.Close:
+        return this.closeSession(params as CloseParams);
       case Method.Prompt:
         return this.prompt(params as PromptParams);
       case Method.Compact:
@@ -152,10 +179,7 @@ export class Connection {
   }
 
   private snapshot(params: SnapshotParams): SnapshotResult {
-    const hosted = this.sessions.get(params.sessionId);
-    if (!hosted) {
-      throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${params.sessionId}`);
-    }
+    const hosted = this.lookup(params.sessionId);
     return hosted.snapshotPage(params.cursor, params.limit);
   }
 
@@ -164,10 +188,7 @@ export class Connection {
   // at the next model-round boundary, which streams back as a `steer` update.
   // Idempotency and the "this turn is running" check live in `HostedSession`.
   private enqueue(params: EnqueueParams): EnqueueResult {
-    const hosted = this.sessions.get(params.sessionId);
-    if (!hosted) {
-      throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${params.sessionId}`);
-    }
+    const hosted = this.lookup(params.sessionId);
     hosted.enqueue(params.id, params.turnId, params.text);
     return {};
   }
@@ -175,10 +196,7 @@ export class Connection {
   // `signal` is the request's own: a `$/cancelRequest` for it stops the
   // compaction, like `session/cancel` does — the client was told "cancelled".
   private compact(params: CompactParams, signal?: AbortSignal): Promise<CompactResult> {
-    const hosted = this.sessions.get(params.sessionId);
-    if (!hosted) {
-      throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${params.sessionId}`);
-    }
+    const hosted = this.lookup(params.sessionId);
     return hosted.compact(signal);
   }
 
@@ -199,32 +217,77 @@ export class Connection {
     };
   }
 
-  private newSession(params: NewSessionParams): NewSessionResult {
-    if (this.maxSessions !== undefined && this.sessions.size >= this.maxSessions) {
+  /**
+   * A session this connection opened, still the live one under that id. The
+   * identity check catches "closed (by anyone) and recreated under the same id":
+   * this connection must not silently drive the new session, whose stream it
+   * does not receive. Commands need an `open` first, for the same reason.
+   */
+  private lookup(sessionId: string): HostedSession {
+    const entry = this.attached.get(sessionId);
+    if (entry && this.host.get(sessionId) === entry.hosted) {
+      return entry.hosted;
+    }
+    this.dropStale();
+    throw new RpcError(
+      DomainErrorCode.UnknownSession,
+      `unknown session: ${sessionId} (not open on this connection)`,
+    );
+  }
+
+  // Synchronous on purpose, like the host's `open` it wraps (see there): no
+  // update falls between the replay and the live stream, and two opens of one
+  // id never build two agents. The replay goes out as notifications BEFORE the
+  // response.
+  private open(params: OpenParams): OpenResult {
+    // A session closed by another client must not count against this
+    // connection's cap, nor stay referenced here.
+    this.dropStale();
+    const previous =
+      params.sessionId !== undefined ? this.attached.get(params.sessionId) : undefined;
+    if (!previous && this.maxSessions !== undefined && this.attached.size >= this.maxSessions) {
       throw new RpcError(
         DomainErrorCode.TooManySessions,
         `too many sessions on this connection (max ${this.maxSessions})`,
       );
     }
-    const id = params.sessionId ?? crypto.randomUUID();
-    const hosted = this.host.create(
-      id,
-      params.cwd,
-      (pp) => this.requestPermission(pp),
-      params.messages,
-    );
-    hosted.setSink((update) => this.peer.notify(Notification.SessionUpdate, update));
-    this.sessions.set(id, hosted);
-    return { sessionId: id };
+    // A retried open from this connection: drop the old attachment first, or
+    // every update would arrive twice.
+    if (previous && params.sessionId !== undefined) {
+      previous.hosted.detach(previous.attachment);
+      this.attached.delete(params.sessionId);
+    }
+    const attachment: Attachment = {
+      send: (update) => this.peer.notify(Notification.SessionUpdate, update),
+      requestPermission: (pp) => this.requestPermission(pp),
+    };
+    const { hosted, created, resync, epoch } = this.host.open(params, attachment);
+    this.attached.set(hosted.id, { hosted, attachment });
+    return { sessionId: hosted.id, epoch, created, resync };
+  }
+
+  /** Forget every attachment whose session is no longer the live one under its id. */
+  private dropStale(): void {
+    for (const [id, entry] of this.attached) {
+      if (this.host.get(id) !== entry.hosted) {
+        entry.hosted.detach(entry.attachment);
+        this.attached.delete(id);
+      }
+    }
+  }
+
+  // Needs no `open` (an exit path closes what it may never have re-opened);
+  // an unknown id is a no-op success.
+  private closeSession(params: CloseParams): CloseResult {
+    this.attached.delete(params.sessionId);
+    this.host.close(params.sessionId);
+    return {};
   }
 
   // Acks at once: the turn runs daemon-side and ends with `turn_end` in the
   // stream, so its outcome survives a lost response.
   private prompt(params: PromptParams): PromptResult {
-    const hosted = this.sessions.get(params.sessionId);
-    if (!hosted) {
-      throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${params.sessionId}`);
-    }
+    const hosted = this.lookup(params.sessionId);
     return hosted.prompt(params.turnId, params.content);
   }
 
@@ -243,7 +306,10 @@ export class Connection {
   private onNotification(method: string, params: unknown): void {
     if (method === Notification.Cancel) {
       const { sessionId } = params as CancelParams;
-      this.sessions.get(sessionId)?.cancel();
+      const entry = this.attached.get(sessionId);
+      if (entry && this.host.get(sessionId) === entry.hosted) {
+        entry.hosted.cancel();
+      }
     }
   }
 }

@@ -163,7 +163,7 @@ assume.
 - **Persistence lives on the laptop/main thread.** The daemon owns the live
   conversation; the main thread owns the on-disk JSON store. Read history back
   via `snapshot` after each turn/compaction and persist there; the main owns the
-  session uid (passed into `session/new`) so `--resume` keeps the file. Persist
+  session uid (passed into `session/open`) so `--resume` keeps the file. Persist
   only `ChatMessage`s — never rendering-only events (e.g. `steer`).
 - **Model stays on the laptop (pod reverse-tunnel).** A pod reaches the model
   THROUGH us (`model/stream` over RPC, `ProxyModelProvider`): the daemon is given

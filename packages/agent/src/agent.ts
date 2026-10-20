@@ -285,7 +285,8 @@ export class Agent {
         // Before ending, handle anything the user queued during the reply so a
         // last-moment steer is not dropped — inject it and run another round.
         // INVARIANT: from this drain to the `turn_end` yield (and on through the
-        // daemon's `HostedSession.finishTurn` clearing its controller) there must be
+        // daemon's `HostedSession.finishTurn` clearing its controller and fanning
+        // `turn_end` out to every attached client, never awaited) there must be
         // NO `await` — no end-of-turn hook, no async persist. A transport message
         // is a macrotask and cannot interleave, so a remote `session/enqueue` is
         // either drained here or rejected as `NoTurnRunning`. An await here

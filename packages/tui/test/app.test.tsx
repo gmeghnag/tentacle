@@ -166,6 +166,34 @@ describe("App", () => {
     unmount();
   });
 
+  test("/clear closes the previous session BEFORE building the next one (decision D3)", async () => {
+    // Mutation: drop the `close?.()` in the /clear handler → nothing closed.
+    const log: string[] = [];
+    let n = 0;
+    const createSession = () => {
+      const id = ++n;
+      log.push(`create ${id}`);
+      return {
+        async *send() {
+          // no model turn needed for this test
+        },
+        close() {
+          log.push(`close ${id}`);
+        },
+      };
+    };
+    const { stdin, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/clear");
+    await delay(30);
+    stdin.write("\r");
+    await delay(50);
+    expect(log).toEqual(["create 1", "close 1", "create 2"]);
+    unmount();
+  });
+
   test("/compact calls the session's compact and reports the result", async () => {
     let compacted = 0;
     const createSession = () => ({
