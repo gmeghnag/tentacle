@@ -357,9 +357,9 @@ Daily-driver work (done 2026-10-14):
       Subsumes the Block-3 requester-throw + consecutive-user items.
       **Eval:** `docs/eval/history-validity-invariant.md`. Type: eval · Size: M ·
       Blast: load-bearing.
-- [ ] 🟡 **Session store not crash-safe** (in-place write truncates; failed `void
+- [x] 🟡 **Session store not crash-safe** (in-place write truncates; failed `void
       save` crashes the TUI; corrupt files vanish from `--resume`; no schema
-      check). CONFIRMED. **Fix (done on `fix/session-store-durability`, awaiting merge):**
+      check). FIXED (2026-10-20, `fix/session-store-durability`):
       `docs/fix/session-store-durability.md` — atomic temp+fsync+rename, per-uid
       latest-wins queue, validated loud `load`/`list`, save failures → TUI notice.
       Type: fix · Size: M · Blast: load-bearing.
@@ -403,7 +403,7 @@ Daily-driver work (done 2026-10-14):
       `/compact` wiping history). See `docs/fix/compact-empty-summary-wipe.md`
       (the wipe is guarded there; this provider defect — which also affects
       normal turns — is the separate follow-up).
-- [ ] 🟡 **A failed session save crashes the TUI** (`void store.save` rejects →
+- [x] 🟡 **A failed session save crashes the TUI** (`void store.save` rejects →
       unhandled rejection → exit 1 with a raw stack). See
       `docs/fix/session-store-durability.md` (fixed there: `SessionSaver`).
 - [ ] 🟡 **`--resume` (no uid) resumes another project's session**:
@@ -467,7 +467,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       3c. **Feat (DONE 2026-10-20, `feat/session-history-cut`):** `docs/feat/session-history-cut.md` · M · load-bearing
       4. **Feat (DONE 2026-10-20, `feat/session-registry`):** `docs/feat/session-registry.md` · L · load-bearing
       5. **Feat (DONE 2026-10-20, `feat/session-ttl-limits`):** `docs/feat/session-ttl-limits.md` · M · load-bearing
-      5b. **Fix (done on `fix/session-store-durability`, awaiting merge):** `docs/fix/session-store-durability.md` · M · load-bearing (before 6)
+      5b. **Fix (DONE 2026-10-20, `fix/session-store-durability`):** `docs/fix/session-store-durability.md` · M · load-bearing (before 6)
       6. **Eval:** `docs/eval/daemon-side-persistence.md` (Part A, `serve` only) · M · load-bearing
       7a. **Eval:** `docs/eval/permission-events.md` · L · load-bearing
       7b. **Eval:** `docs/eval/suspended-turn-resume.md` · M · load-bearing

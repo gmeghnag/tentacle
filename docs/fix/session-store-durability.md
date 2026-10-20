@@ -1,6 +1,6 @@
 # fix/session-store-durability — make session persistence crash-safe and its failures visible
 
-> **Status:** review done — post-review fixes applied, re-review waived by the owner (promoted from `eval/` 2026-10-20)
+> **Status:** done — merged to `main` 2026-10-20 (promoted from `eval/` 2026-10-20; post-review fixes applied, re-review waived by the owner)
 > **Branch:** `fix/session-store-durability`
 > **Type:** fix · **Size:** M · **Blast:** load-bearing · **Suited:** strong model executes (touches the §7 "persistence lives on the laptop/main thread" invariant and the persisted format's read path); mandatory fresh-context Review.
 
