@@ -1,6 +1,6 @@
 # feat/daemon-side-persistence — `serve` persists session history on its own host
 
-> **Status:** executed + reviewed 2026-10-20 (one fresh-context review: REQUEST-CHANGES, findings 1–8 addressed, not re-reviewed by owner choice) — awaiting owner OK to commit/merge. Part A only; Part B lives in `docs/eval/suspended-turn-resume.md`
+> **Status:** DONE — merged to `main` 2026-10-20 (one fresh-context review: REQUEST-CHANGES, findings 1–8 addressed, not re-reviewed by owner choice). Part A only; Part B lives in `docs/eval/suspended-turn-resume.md`
 > **Branch:** `feat/daemon-side-persistence`
 > **Type:** feat · **Size:** M (Part A) · **Blast:** load-bearing (persistence + pod-trust invariants, steering window, AGENTS §7 rule change) · **Suited:** strong model executes; mandatory fresh-context Review
 
