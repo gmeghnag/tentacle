@@ -46,6 +46,8 @@ import {
 } from "@tentacle/protocol";
 import { type DuplexChannel, type RequestContext, RpcError, RpcPeer } from "@tentacle/transport";
 import {
+  ChannelError,
+  LIVENESS_MS,
   type LinkState,
   type LinkStatus,
   type LinkStep,
@@ -53,6 +55,7 @@ import {
   initialLink,
   linkDropped,
   linkUp,
+  liveness,
   stopped,
 } from "./link-machine.ts";
 import { PermissionRouter, type RouterAction } from "./permission-router.ts";
@@ -145,6 +148,20 @@ interface SessionEntry {
   owesNotice: boolean;
   /** `closeSession` was called: no recovery, no new commands; forgotten once the daemon answers. */
   closing: boolean;
+  /** `turn_end`s applied from the stream. */
+  turnEndsApplied: number;
+  /** `turn_end`s already applied when `history` was read: fewer than applied ⇒ `history` lags. */
+  turnEndsInHistory: number;
+}
+
+/**
+ * The daemon lost a session (a pod's new exec) and the history this client
+ * could recreate it from lagged its stream: `turns` finished turns are gone —
+ * from the daemon's history, so from the model's context and from the next save.
+ */
+export interface HistoryLostNotice {
+  readonly sessionId: string;
+  readonly turns: number;
 }
 
 /** A command that must not cross a session recreate (its turn/request is gone). */
@@ -182,6 +199,13 @@ export class RemoteClient {
   private link: LinkState;
   private dialTimer: unknown = null;
   private disposed = false;
+  /** When the current generation last received a frame (liveness; factory only). */
+  private lastInboundAt: number;
+  /** Outstanding watched requests (issue time), see `call`. */
+  private readonly watched = new Map<object, number>();
+  private livenessTimer: unknown = null;
+  /** The bound on the factory call in flight (`dialChannel`). */
+  private dialDeadline: unknown = null;
   /** Set when the link is gone for good: every wait rejects with it. */
   private stopError: Error | null = null;
 
@@ -190,6 +214,7 @@ export class RemoteClient {
   /** Session-independent listeners for background-job exits (idle or mid-turn). */
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
   private readonly statusListeners = new Set<(status: LinkStatus) => void>();
+  private readonly historyLostListeners = new Set<(notice: HistoryLostNotice) => void>();
   /** Conditions re-checked after every state change (session live, link stopped, …). */
   private readonly waiters = new Set<() => boolean>();
   /** Which permission request is prompted / answered (pure; see its module). */
@@ -222,6 +247,7 @@ export class RemoteClient {
     this.clock = options.clock ?? systemClock;
     this.random = options.random ?? Math.random;
     this.link = { ...initialLink, upSince: this.clock.now() };
+    this.lastInboundAt = this.clock.now();
     this.peer = this.makePeer(channel, 0);
   }
 
@@ -233,6 +259,16 @@ export class RemoteClient {
   /** A controller the Ink App drives exactly like a local `Session`. */
   newSession(seedMessages?: readonly ChatMessage[], sessionId?: string): RemoteSession {
     return new RemoteSession(this, seedMessages, sessionId);
+  }
+
+  /**
+   * Subscribe to "a recreate could not restore the latest turns" (see
+   * `HistoryLostNotice`); returns an unsubscribe. Never silent: a frontend
+   * shows it.
+   */
+  onHistoryLost(listener: (notice: HistoryLostNotice) => void): () => void {
+    this.historyLostListeners.add(listener);
+    return () => this.historyLostListeners.delete(listener);
   }
 
   /** Subscribe to the link's status (for a frontend's "reconnecting…"); returns an unsubscribe. */
@@ -264,7 +300,7 @@ export class RemoteClient {
     };
     if (sessionId === undefined) {
       const gen = this.gen;
-      const result = (await this.peer.request(Method.Open, params)) as OpenResult;
+      const result = (await this.call(this.peer, Method.Open, params)) as OpenResult;
       const entry = this.register(result.sessionId, seed, listener);
       this.step(entry, { kind: "open_sent" });
       this.applyOpenResult(entry, gen, result);
@@ -309,7 +345,7 @@ export class RemoteClient {
       forget();
       return Promise.resolve();
     }
-    return this.peer.request(Method.Close, { sessionId }).then(forget, forget);
+    return this.call(this.peer, Method.Close, { sessionId }).then(forget, forget);
   }
 
   /**
@@ -345,15 +381,17 @@ export class RemoteClient {
   async snapshot(sessionId: string): Promise<readonly ChatMessage[]> {
     const entry = this.sessions.get(sessionId);
     if (!this.channelFactory || !entry) {
+      const mark = entry?.turnEndsApplied ?? 0;
       const { messages } = await this.readSnapshot(sessionId, this.peer);
-      if (entry) entry.history = messages;
+      if (entry) this.historyRead(entry, messages, mark);
       return messages;
     }
     for (;;) {
       const gen = await this.whenLive(entry);
+      const mark = entry.turnEndsApplied;
       try {
         const { messages } = await this.readSnapshot(sessionId, this.peer);
-        entry.history = messages;
+        this.historyRead(entry, messages, mark);
         return messages;
       } catch (error) {
         if (gen === this.gen && this.up) throw error;
@@ -361,13 +399,23 @@ export class RemoteClient {
     }
   }
 
-  /** Start a turn; resolves with the daemon's ack (the turn ends in the stream). Re-sent after a drop. */
-  prompt(sessionId: string, turnId: string, prompt: string): Promise<PromptResult> {
+  /**
+   * Start a turn; resolves with the daemon's ack (the turn ends in the stream).
+   * Re-sent after a drop. `onSent` fires when the frame is first written to a
+   * channel: until then no daemon can have run it.
+   */
+  prompt(
+    sessionId: string,
+    turnId: string,
+    prompt: string,
+    onSent?: () => void,
+  ): Promise<PromptResult> {
     return this.sessionCall(
       sessionId,
       Method.Prompt,
       { sessionId, turnId, content: [text(prompt)] },
       "keyed",
+      onSent,
     ).then((result) => result as PromptResult);
   }
 
@@ -419,6 +467,11 @@ export class RemoteClient {
       this.clock.clearTimeout(this.dialTimer);
       this.dialTimer = null;
     }
+    this.armLiveness(); // disposed: clears it
+    if (this.dialDeadline !== null) {
+      this.clock.clearTimeout(this.dialDeadline);
+      this.dialDeadline = null;
+    }
     // Stop first: the peer's close callback then finds the link already down.
     this.stop(new RpcError(JsonRpcErrorCode.InternalError, "connection closed"), "closed");
     this.peer.close();
@@ -426,8 +479,21 @@ export class RemoteClient {
 
   // --- generations -------------------------------------------------------
 
-  private makePeer(channel: DuplexChannel, gen: number): RpcPeer {
+  private makePeer(raw: DuplexChannel, gen: number): RpcPeer {
     const current = (): boolean => gen === this.gen;
+    // With a factory, every inbound frame is a sign of life (see `call`).
+    const channel: DuplexChannel = this.channelFactory
+      ? {
+          send: (data) => raw.send(data),
+          close: () => raw.close(),
+          setOnClose: (handler) => raw.setOnClose(handler),
+          setOnMessage: (handler) =>
+            raw.setOnMessage((data) => {
+              if (current()) this.lastInboundAt = this.clock.now();
+              handler(data);
+            }),
+        }
+      : raw;
     const peer: RpcPeer = new RpcPeer(channel, {
       onNotification: (method, params) => {
         if (current() && method === Notification.SessionUpdate) {
@@ -478,12 +544,104 @@ export class RemoteClient {
   }
 
   private handshake(peer: RpcPeer): Promise<InitializeResult> {
-    return peer
-      .request(Method.Initialize, {
-        protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: { streaming: true },
-      })
-      .then((result) => result as InitializeResult);
+    return this.call(peer, Method.Initialize, {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true },
+    }).then((result) => result as InitializeResult);
+  }
+
+  /**
+   * Every request this client sends. With a factory it is WATCHED (except
+   * `compact`, which runs a model call before it answers): a link with a
+   * watched request outstanding and no inbound frame for `LIVENESS_MS` is
+   * presumed dead (a half-open socket) and closed, so the normal drop path
+   * reconnects and re-sends keyed commands. Without a factory: unchanged.
+   */
+  private call(peer: RpcPeer, method: string, params: unknown): Promise<unknown> {
+    const sent = peer.request(method, params);
+    if (!this.channelFactory || method === Method.Compact) {
+      return sent;
+    }
+    const token = {};
+    this.watched.set(token, this.clock.now());
+    this.armLiveness();
+    const settled = (): void => {
+      this.watched.delete(token);
+      this.armLiveness();
+    };
+    sent.then(settled, settled);
+    return sent;
+  }
+
+  /** Re-evaluate liveness and (re)arm its single timer. */
+  private armLiveness(): void {
+    if (this.livenessTimer !== null) {
+      this.clock.clearTimeout(this.livenessTimer);
+      this.livenessTimer = null;
+    }
+    if (this.disposed || this.stopError) {
+      return;
+    }
+    let watchedSince: number | null = null;
+    for (const at of this.watched.values()) {
+      watchedSince = watchedSince === null ? at : Math.min(watchedSince, at);
+    }
+    const verdict = liveness({
+      now: this.clock.now(),
+      lastInboundAt: this.lastInboundAt,
+      watchedSince,
+    });
+    if (verdict.kind === "alive") {
+      this.livenessTimer = this.clock.setTimeout(() => {
+        this.livenessTimer = null;
+        this.armLiveness();
+      }, verdict.checkInMs);
+    } else if (verdict.kind === "dead") {
+      this.onError?.(
+        new Error(`no frame from the daemon for ${LIVENESS_MS / 1000}s: the link is presumed dead`),
+      );
+      // Its pending requests reject (→ settled); its close runs the drop path
+      // (or, mid-handshake, the dial's own retry).
+      this.peer.close();
+    }
+  }
+
+  /**
+   * The factory, bounded by `LIVENESS_MS`: a dial that never settles (a
+   * black-holed SYN) counts as a failed one; its channel, if it ever arrives,
+   * is closed (no orphan generation).
+   */
+  private dialChannel(factory: () => Promise<DuplexChannel>): Promise<DuplexChannel> {
+    return new Promise((resolve, reject) => {
+      let late = false;
+      const timer = this.clock.setTimeout(() => {
+        late = true;
+        this.dialDeadline = null;
+        reject(new ChannelError("unreachable", `no connection after ${LIVENESS_MS / 1000}s`));
+      }, LIVENESS_MS);
+      this.dialDeadline = timer;
+      const settled = (): void => {
+        this.clock.clearTimeout(timer);
+        if (this.dialDeadline === timer) this.dialDeadline = null;
+      };
+      factory().then(
+        (channel) => {
+          // Too late, or `close()` cleared the deadline meanwhile: `dial`
+          // closes a channel that arrives after `close()`.
+          if (late) {
+            channel.close();
+            return;
+          }
+          settled();
+          resolve(channel);
+        },
+        (error: unknown) => {
+          if (late) return;
+          settled();
+          reject(error);
+        },
+      );
+    });
   }
 
   /** The current generation's channel closed. */
@@ -547,7 +705,7 @@ export class RemoteClient {
     this.link = { ...this.link, kind: "dialing" };
     let channel: DuplexChannel;
     try {
-      channel = await this.channelFactory();
+      channel = await this.dialChannel(this.channelFactory);
     } catch (error) {
       this.redial(error);
       return;
@@ -557,6 +715,7 @@ export class RemoteClient {
       return;
     }
     const gen = ++this.gen;
+    this.lastInboundAt = this.clock.now();
     const peer = this.makePeer(channel, gen);
     this.peer = peer;
     try {
@@ -614,6 +773,8 @@ export class RemoteClient {
       liveGen: -1,
       owesNotice: false,
       closing: false,
+      turnEndsApplied: 0,
+      turnEndsInHistory: 0,
     };
     this.sessions.set(id, entry);
     return entry;
@@ -660,7 +821,7 @@ export class RemoteClient {
     const peer = this.peer;
     let result: OpenResult;
     try {
-      result = (await peer.request(Method.Open, params)) as OpenResult;
+      result = (await this.call(peer, Method.Open, params)) as OpenResult;
     } catch (error) {
       if (gen !== this.gen || !this.up) {
         return; // a drop: the next generation opens it again
@@ -699,7 +860,8 @@ export class RemoteClient {
       return; // closed meanwhile: recreating it would leave an orphan daemon-side
     }
     const messages = entry.history;
-    const result = (await this.peer.request(Method.Open, {
+    const lostTurns = entry.turnEndsApplied - entry.turnEndsInHistory;
+    const result = (await this.call(this.peer, Method.Open, {
       sessionId: entry.id,
       ...(messages.length > 0 ? { messages } : { create: true }),
     })) as OpenResult;
@@ -707,7 +869,15 @@ export class RemoteClient {
       return;
     }
     entry.recreates += 1;
+    entry.turnEndsInHistory = entry.turnEndsApplied;
     if (result.created) {
+      // Seeded from OUR history: what it lagged is gone (a racing device that
+      // recreated it first seeded its own — not ours to report).
+      if (lostTurns > 0) {
+        for (const listener of this.historyLostListeners) {
+          listener({ sessionId: entry.id, turns: lostTurns });
+        }
+      }
       this.step(entry, { kind: "recreated", epoch: result.epoch, messages, now: this.clock.now() });
       return;
     }
@@ -718,6 +888,7 @@ export class RemoteClient {
   /** Page a snapshot and fold it in (a resync, or the barrier after a compaction). */
   private async resync(entry: SessionEntry, gen: number): Promise<void> {
     let snap: { messages: readonly ChatMessage[]; since?: HistoryCut; turn?: string };
+    const mark = entry.turnEndsApplied;
     try {
       snap = await this.readSnapshot(entry.id, this.peer);
     } catch (error) {
@@ -731,7 +902,7 @@ export class RemoteClient {
       this.failSession(entry, gen, new Error("the daemon's snapshot carries no cut"));
       return;
     }
-    entry.history = snap.messages;
+    this.historyRead(entry, snap.messages, mark);
     this.step(entry, {
       kind: "snapshot",
       messages: snap.messages,
@@ -739,6 +910,12 @@ export class RemoteClient {
       turn: snap.turn ?? null,
       now: this.clock.now(),
     });
+  }
+
+  /** `messages` is the daemon's history as of a read issued when `mark` turn ends were applied. */
+  private historyRead(entry: SessionEntry, messages: readonly ChatMessage[], mark: number): void {
+    entry.history = messages;
+    entry.turnEndsInHistory = Math.max(entry.turnEndsInHistory, mark);
   }
 
   private failSession(entry: SessionEntry, gen: number, error: unknown): void {
@@ -814,6 +991,9 @@ export class RemoteClient {
         continue;
       }
       const update = out.update;
+      if (update.type === "turn_end") {
+        entry.turnEndsApplied += 1;
+      }
       // Permission events are session state, not turn-scoped (a re-attach
       // replays a pending one): the router decides, never the turn handler.
       if (update.type === "permission_request") {
@@ -885,14 +1065,17 @@ export class RemoteClient {
    * A session command. Without a factory: straight to the peer (a drop
    * rejects, as before). With one: wait until the session is live on the
    * current link; on a drop, `keyed` commands are re-sent (the daemon dedupes
-   * by key) unless the session was recreated meanwhile, `once` commands
-   * reject.
+   * by key) unless the session was recreated since they were first SENT (the
+   * dead daemon may have acted on them), `once` commands reject. A command
+   * never written to a channel before a recreate goes to the new session: no
+   * daemon has seen it.
    */
   private async sessionCall(
     sessionId: string,
     method: string,
     params: unknown,
     policy: "keyed" | "once",
+    onSent?: () => void,
   ): Promise<unknown> {
     const entry = this.sessions.get(sessionId);
     if (entry?.state.phase === "failed") {
@@ -900,16 +1083,22 @@ export class RemoteClient {
       throw new Error(`session ${entry.id} could not be resumed`);
     }
     if (!this.channelFactory || !entry) {
-      return this.peer.request(method, params);
+      onSent?.();
+      return this.call(this.peer, method, params);
     }
-    const recreates = entry.recreates;
+    /** `entry.recreates` when the command was first written (null: not yet). */
+    let sentIn: number | null = null;
     for (;;) {
       const gen = await this.whenLive(entry);
-      if (entry.recreates !== recreates) {
+      if (sentIn !== null && entry.recreates !== sentIn) {
         throw new SessionLostError();
       }
+      if (sentIn === null) {
+        sentIn = entry.recreates;
+        onSent?.();
+      }
       try {
-        return await this.peer.request(method, params);
+        return await this.call(this.peer, method, params);
       } catch (error) {
         if (gen === this.gen && this.up) {
           throw error; // the daemon's own answer
@@ -952,7 +1141,7 @@ export class RemoteClient {
         throw new RpcError(JsonRpcErrorCode.InternalError, "snapshot: too many pages");
       }
       const previous = cursor;
-      const result = (await peer.request(Method.Snapshot, {
+      const result = (await this.call(peer, Method.Snapshot, {
         sessionId,
         limit: SNAPSHOT_PAGE,
         ...(cursor !== undefined ? { cursor } : {}),

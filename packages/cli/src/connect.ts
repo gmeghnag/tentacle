@@ -2,9 +2,15 @@
  * `tentacle connect <url>` — launch the Ink TUI against a remote daemon.
  * The TUI is unchanged: it consumes a `RemoteSession` exactly like a local one,
  * and the same `PermissionBroker` carries approval prompts back over the wire.
+ *
+ * The link survives drops (docs/feat/client-reattach-frontends.md): the same
+ * WebSocket factory opens the first channel and every redial, the session id
+ * is ours (so even a drop during its first `open` is recovered), and the link
+ * state shows in the StatusBar.
  */
-import { RemoteClient, connectWebSocket } from "@tentacle/client";
+import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
+import type { DuplexChannel } from "@tentacle/transport";
 import { startTui } from "@tentacle/tui";
 
 export interface ConnectOptions {
@@ -36,27 +42,35 @@ export function bufferedErrorSink(): {
 
 /** Injectable for tests; production uses the real socket and TUI. */
 export interface ConnectDeps {
-  readonly connect: typeof connectWebSocket;
+  /** A channel factory for the daemon at `url` (rejects with a `ChannelError`). */
+  readonly dial: (url: string, options: { token?: string }) => () => Promise<DuplexChannel>;
   readonly startTui: typeof startTui;
 }
 
 export async function connectTui(
   options: ConnectOptions,
   write: (line: string) => void,
-  deps: ConnectDeps = { connect: connectWebSocket, startTui },
+  deps: ConnectDeps = { dial: webSocketChannelFactory, startTui },
 ): Promise<void> {
   // RPC path: hold a daemon's request until the TUI's prompt is mounted.
   const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
-  const channel = await deps.connect(options.url, options.token ? { token: options.token } : {});
+  const dial = deps.dial(options.url, options.token ? { token: options.token } : {});
+  // Before Ink mounts: a failure here (a bad token, nothing listening) is the
+  // plain error the caller prints.
+  const channel = await dial();
   const sink = bufferedErrorSink();
-  const client = new RemoteClient(channel, permissions, undefined, { onError: sink.onError });
+  const client = new RemoteClient(channel, permissions, undefined, {
+    onError: sink.onError,
+    channelFactory: dial,
+  });
   try {
     await client.initialize();
     await deps.startTui(null, {
       model: "remote",
       cwd: options.url,
       permissions,
-      createSession: () => client.newSession(),
+      createSession: () => client.newSession(undefined, crypto.randomUUID()),
+      link: client,
     });
   } finally {
     // The daemon keeps sessions past a disconnect: quitting ends ours (turn +

@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, JsonSessionStore } from "@tentacle/agent";
+import type { LinkStatus } from "@tentacle/client";
 import type {
   ChatRequest,
   ExecutionEnvironment,
@@ -31,6 +32,7 @@ import { POD_BIN_PATH } from "../src/pod-binary.ts";
 import {
   type PodCluster,
   createStderrSink,
+  podDialError,
   startAttachRuntime,
   startPodRuntime,
 } from "../src/pod-runtime.ts";
@@ -827,5 +829,290 @@ describe("createStderrSink", () => {
     expect(body.endsWith("TAIL\n")).toBe(true);
     expect(body.length).toBeLessThanOrEqual(16 * 1024 + 1); // cap (+ the added "\n")
     expect(body.includes("A")).toBe(true); // some head retained, not all
+  });
+});
+
+/** A cluster whose current exec can be dropped (the network, a laptop sleep). */
+class DroppingCluster extends FakeCluster {
+  /** What `getPod` does on the NEXT preflights (default: the running pod). */
+  getPodResult: (() => Promise<Pod>) | null = null;
+  drop(): void {
+    this.connection?.close();
+  }
+  override getPod(name: string): Promise<Pod> {
+    if (this.getPodResult) {
+      this.calls.push(`get:${name}`);
+      return this.getPodResult();
+    }
+    return super.getPod(name);
+  }
+  execs(): string[] {
+    return this.calls.filter((c) => c.startsWith("exec:"));
+  }
+}
+
+class DroppingSpyCluster extends SpyFakeCluster {
+  drop(): void {
+    this.connection?.close();
+  }
+}
+
+/** First turn: text, then waits for `open()`; later turns answer at once. */
+class GateProvider implements ModelProvider {
+  readonly id = "gate";
+  calls = 0;
+  waiting = false;
+  private release: (() => void) | null = null;
+  open(): void {
+    this.release?.();
+  }
+  async *stream(_request: ChatRequest): AsyncIterable<StreamEvent> {
+    const call = this.calls++;
+    yield { type: "text", delta: `t${call}` };
+    if (call === 0) {
+      this.waiting = true;
+      await new Promise<void>((r) => {
+        this.release = r;
+      });
+      this.waiting = false;
+    }
+    yield { type: "done" };
+  }
+}
+
+/** Asks for `fs_write` on every turn (each new pod daemon asks again). */
+class AskEveryTurn implements ModelProvider {
+  readonly id = "ask-every";
+  private call = 0;
+  async *stream(_request: ChatRequest): AsyncIterable<StreamEvent> {
+    if (this.call++ % 2 === 0) {
+      yield {
+        type: "tool_call",
+        toolCall: {
+          id: `tc${this.call}`,
+          name: "fs_write",
+          arguments: '{"path":"/tmp/x","content":"y"}',
+        },
+      };
+    } else {
+      yield { type: "text", delta: "written" };
+    }
+    yield { type: "done" };
+  }
+}
+
+async function until(pred: () => boolean, ms = 3000): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > end) return false;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return true;
+}
+
+describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
+  const runDeps = (
+    kube: PodCluster,
+    store: JsonSessionStore | SessionSaver,
+    permissions = new PermissionBroker(),
+  ) => ({
+    kube,
+    namespace: "dev",
+    image: "repo/img:tag",
+    permissions,
+    saver: store instanceof SessionSaver ? store : new SessionSaver(store, () => {}),
+    resume: null,
+    log: () => {},
+  });
+
+  test("podDialError: gone / unauthorized are terminal kinds, the rest transient, a running pod dials", () => {
+    const running: Pod = { metadata: { name: "p" }, status: { phase: "Running" } };
+    expect(podDialError("p", { pod: running })).toBeNull();
+    expect(podDialError("p", { pod: { ...running, status: { phase: "Failed" } } })?.kind).toBe(
+      "gone",
+    );
+    expect(podDialError("p", { pod: { ...running, status: { phase: "Succeeded" } } })?.kind).toBe(
+      "gone",
+    );
+    expect(podDialError("p", { pod: { ...running, status: { phase: "Pending" } } })?.kind).toBe(
+      "unreachable",
+    );
+    expect(podDialError("p", { error: new KubeApiError(404, "not found") })?.kind).toBe("gone");
+    expect(podDialError("p", { error: new KubeApiError(401, "") })?.kind).toBe("unauthorized");
+    expect(podDialError("p", { error: new KubeApiError(403, "") })?.kind).toBe("unauthorized");
+    expect(podDialError("p", { error: new KubeApiError(503, "") })?.kind).toBe("unreachable");
+    expect(podDialError("p", { error: new TypeError("fetch failed") })?.kind).toBe("unreachable");
+  });
+
+  test("run: the exec drops while idle — the next turn runs on a new exec, seeded with the laptop's history", async () => {
+    const model = new ScriptedProvider([
+      [{ type: "text", delta: "one" }, { type: "done" }],
+      [{ type: "text", delta: "two" }, { type: "done" }],
+    ]);
+    const kube = new DroppingCluster(model);
+    const store = new JsonSessionStore(join(dir, "reconnect-idle"));
+    const notices: string[] = [];
+    const saver = new SessionSaver(store, () => {});
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), {
+      ...runDeps(kube, saver),
+      notify: (text: string) => notices.push(text),
+    });
+    const statuses: LinkStatus[] = [];
+    runtime.link.onLinkStatus((s) => statuses.push(s));
+    const session = runtime.createSession();
+    await drain(session.send("hello"));
+    // Let the turn's save read the history back (what a recreate seeds from).
+    await new Promise((r) => setTimeout(r, 20));
+    kube.drop();
+    expect(await until(() => statuses.at(-1)?.state === "up")).toBe(true);
+    await drain(session.send("again"));
+    await runtime.dispose();
+    expect(await saver.drain()).toEqual([]);
+    const execs = kube.execs();
+    expect(execs).toHaveLength(2);
+    expect(new Set(execs).size).toBe(1); // the same command, re-run
+    const saved = (await store.list()).records;
+    expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "one", "again", "two"]);
+    expect(notices).toEqual([]);
+  });
+
+  test("run: a drop before the last turn was read back is never silent — the user is told it is gone", async () => {
+    // The pod daemon died before this client read the finished turn back, so
+    // the recreated session (and the next save) cannot contain it. Mutation:
+    // drop the `onHistoryLost` notify → no notice.
+    const model = new ScriptedProvider([
+      [{ type: "text", delta: "one" }, { type: "done" }],
+      [{ type: "text", delta: "two" }, { type: "done" }],
+    ]);
+    const kube = new DroppingCluster(model);
+    const notices: string[] = [];
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), {
+      ...runDeps(kube, new JsonSessionStore(join(dir, "reconnect-window"))),
+      notify: (text: string) => notices.push(text),
+    });
+    const session = runtime.createSession();
+    await drain(session.send("hello"));
+    kube.drop(); // synchronously after turn_end: the save's read has not been answered
+    expect(await until(() => notices.length > 0)).toBe(true);
+    await drain(session.send("again")); // the session itself works again
+    expect(notices).toEqual([
+      "⚠ The daemon lost the session while the link was down; it was restored without your last turn (no longer in the model's context, and not saved).",
+    ]);
+    await runtime.dispose();
+  });
+
+  test("run: the exec drops mid-turn — the turn is reported lost (never re-run), the next one works, the pod stays", async () => {
+    const model = new GateProvider();
+    const kube = new DroppingCluster(model);
+    const store = new JsonSessionStore(join(dir, "reconnect-midturn"));
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), runDeps(kube, store));
+    const session = runtime.createSession();
+    const turn = drain(session.send("first")).then(
+      () => null,
+      (error: Error) => error,
+    );
+    expect(await until(() => model.waiting)).toBe(true);
+    kube.drop();
+    const lost = await turn;
+    expect(lost?.message ?? "").toMatch(/not re-run/);
+    expect(model.calls).toBe(1);
+    await drain(session.send("second"));
+    expect(model.calls).toBe(2);
+    expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
+    model.open();
+    await runtime.dispose();
+  });
+
+  test("run: the pod is gone on reconnect — the link stops (no exec storm), the next turn fails clearly", async () => {
+    const model = new ScriptedProvider([[{ type: "text", delta: "one" }, { type: "done" }]]);
+    const kube = new DroppingCluster(model);
+    const store = new JsonSessionStore(join(dir, "reconnect-gone"));
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), runDeps(kube, store));
+    const statuses: LinkStatus[] = [];
+    runtime.link.onLinkStatus((s) => statuses.push(s));
+    const session = runtime.createSession();
+    await drain(session.send("hello"));
+    kube.getPodResult = () => Promise.reject(new KubeApiError(404, "pods not found"));
+    kube.drop();
+    expect(await until(() => statuses.at(-1)?.state === "stopped")).toBe(true);
+    expect(statuses.at(-1)).toEqual({
+      state: "stopped",
+      reason: `the connection target is gone: pod "${kube.execs()[0]?.split(":")[1] ?? ""}" no longer exists`,
+    });
+    expect(kube.execs()).toHaveLength(1);
+    await expect(drain(session.send("again"))).rejects.toThrow(/gone/);
+    await runtime.dispose();
+  });
+
+  test("attach: a drop re-execs the same daemon command and never deletes the user's pod", async () => {
+    const model = new ScriptedProvider([
+      [{ type: "text", delta: "one" }, { type: "done" }],
+      [{ type: "text", delta: "two" }, { type: "done" }],
+    ]);
+    const kube = new DroppingCluster(model);
+    const store = new JsonSessionStore(join(dir, "reconnect-attach"));
+    const runtime = await startAttachRuntime(baseConfig("/pod/work"), {
+      kube,
+      namespace: "dev",
+      podName: "mypod",
+      permissions: new PermissionBroker(),
+      saver: new SessionSaver(store, () => {}),
+      resume: null,
+      log: () => {},
+    });
+    const statuses: LinkStatus[] = [];
+    runtime.link.onLinkStatus((s) => statuses.push(s));
+    const session = runtime.createSession();
+    await drain(session.send("hello"));
+    kube.drop();
+    expect(await until(() => statuses.at(-1)?.state === "up")).toBe(true);
+    await drain(session.send("again"));
+    await runtime.dispose();
+    expect(kube.execs()).toEqual([
+      "exec:mypod:-:tentacle serve --stdio --model-proxy",
+      "exec:mypod:-:tentacle serve --stdio --model-proxy",
+    ]);
+    // The reconnect checked the pod first (preflight), and nothing deleted it.
+    expect(kube.calls.filter((c) => c === "get:mypod").length).toBeGreaterThanOrEqual(2);
+    expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
+  });
+
+  test("single broker across a reconnect: the new exec's daemon asks on the SAME broker", async () => {
+    const spy = new SpyBroker();
+    const kube = new DroppingSpyCluster(new AskEveryTurn());
+    const store = new JsonSessionStore(join(dir, "reconnect-broker"));
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), runDeps(kube, store, spy));
+    const statuses: LinkStatus[] = [];
+    runtime.link.onLinkStatus((s) => statuses.push(s));
+    const session = runtime.createSession();
+    await drain(session.send("write"));
+    expect(spy.requests).toHaveLength(1);
+    kube.drop();
+    expect(await until(() => statuses.at(-1)?.state === "up")).toBe(true);
+    await drain(session.send("write again"));
+    expect(spy.requests).toHaveLength(2);
+    await runtime.dispose();
+  });
+
+  test("a prompt typed while the link is down was never sent: it runs on the recreated session, not 'lost'", async () => {
+    const model = new ScriptedProvider([
+      [{ type: "text", delta: "one" }, { type: "done" }],
+      [{ type: "text", delta: "two" }, { type: "done" }],
+    ]);
+    const kube = new DroppingCluster(model);
+    const store = new JsonSessionStore(join(dir, "reconnect-typed-while-down"));
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), runDeps(kube, store));
+    const session = runtime.createSession();
+    await drain(session.send("hello"));
+    let typed: Promise<unknown> | null = null;
+    runtime.link.onLinkStatus((s) => {
+      // The link is down right now: the prompt waits, unsent.
+      if (s.state === "reconnecting" && !typed) typed = drain(session.send("typed while down"));
+    });
+    kube.drop();
+    expect(await until(() => typed !== null)).toBe(true);
+    await typed;
+    expect(kube.execs()).toHaveLength(2);
+    await runtime.dispose();
   });
 });

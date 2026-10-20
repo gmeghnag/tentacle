@@ -164,4 +164,22 @@ describe("SessionSaver", () => {
     saver.save(rec("b", 1));
     expect(await saver.drain()).toHaveLength(1);
   });
+
+  test("failed(): a save that never reached the store is reported like a failed write (notice + drain)", async () => {
+    const notices: string[] = [];
+    const saver = new SessionSaver(new JsonSessionStore(join(dir, "failed")), (t) =>
+      notices.push(t),
+    );
+    saver.failed("abcdef0123", "could not read the history back: connection closed");
+    saver.failed("abcdef0123", "again"); // still failing: no second notice
+    expect(notices).toEqual([
+      "⚠ Session abcdef01 not saved — could not read the history back: connection closed. The conversation continues; tentacle retries after the next turn.",
+    ]);
+    expect(await saver.drain()).toEqual([
+      "[session] not saved: abcdef0123 — again (any file on disk is from an earlier save)\n",
+    ]);
+    saver.save(rec("abcdef0123", 2));
+    expect(await saver.drain()).toEqual([]);
+    expect(notices.at(-1)).toBe("Session abcdef01 saved again.");
+  });
 });

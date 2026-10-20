@@ -18,7 +18,7 @@ import {
 } from "@tentacle/daemon";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
-import { ChannelError, type LinkStatus } from "../src/link-machine.ts";
+import { ChannelError, LIVENESS_MS, type LinkStatus } from "../src/link-machine.ts";
 import type { SessionEvent } from "../src/mapping.ts";
 import { type Clock, RemoteClient } from "../src/remote-client.ts";
 import type { StreamOutput } from "../src/session-reducer.ts";
@@ -839,5 +839,281 @@ describe("re-attach: review findings (docs/feat/client-reattach.md, Review)", ()
     );
     expect(await until(() => ap.prompts() === 2)).toBe(true);
     client.close();
+  });
+});
+
+/** A client clock the test advances by hand (timers fire in due order, new ones included). */
+function manualClock() {
+  let now = 0;
+  let next = 0;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  const clock: Clock = {
+    now: () => now,
+    setTimeout: (fn, ms) => {
+      next += 1;
+      timers.set(next, { at: now + ms, fn });
+      return next;
+    },
+    clearTimeout: (handle) => {
+      timers.delete(handle as number);
+    },
+  };
+  return {
+    clock,
+    pending: () => timers.size,
+    advance(ms: number): void {
+      now += ms;
+      for (;;) {
+        const due = [...timers.entries()]
+          .filter(([, timer]) => timer.at <= now)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) return;
+        timers.delete(due[0]);
+        due[1].fn();
+      }
+    },
+  };
+}
+
+/** A channel that can go half-open: outbound frames vanish ("out"), or both directions ("both"). */
+function halfOpen(inner: DuplexChannel) {
+  let mode: "ok" | "out" | "both" = "ok";
+  const channel: DuplexChannel = {
+    send: (data) => {
+      if (mode === "ok") inner.send(data);
+    },
+    close: () => inner.close(),
+    setOnClose: (handler) => inner.setOnClose(handler),
+    setOnMessage: (handler) =>
+      inner.setOnMessage((data) => {
+        if (mode !== "both") handler(data);
+      }),
+  };
+  return {
+    channel,
+    set: (next: "ok" | "out" | "both") => {
+      mode = next;
+    },
+  };
+}
+
+describe("re-attach: liveness (docs/feat/client-reattach-frontends.md §4)", () => {
+  test("half-open with a command outstanding: after 15 s of silence the link is redialled and the keyed command lands once", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([
+      [t("a"), { kind: "gate" }, t("b"), done],
+      [t("c"), done],
+    ]);
+    const target = new Target(makeHost(model, runs));
+    const time = manualClock();
+    const first = halfOpen(target.connect());
+    let dials = 0;
+    const client = new RemoteClient(first.channel, new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        dials += 1;
+        return target.connect();
+      },
+      clock: time.clock,
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const turn = drain(session.send("go"));
+    await until(() => model.waiting);
+    first.set("both"); // the laptop slept: nothing in, nothing out
+    const steer = session.enqueue("steer-1");
+    await tick();
+    time.advance(LIVENESS_MS - 1);
+    await tick();
+    expect(dials).toBe(0); // not yet
+    time.advance(1);
+    expect(await until(() => dials === 1)).toBe(true);
+    for (let i = 0; i < 20; i++) {
+      time.advance(0);
+      await tick();
+    }
+    await steer; // re-sent with its key on the new link
+    model.open();
+    await turn;
+    const history = await client.snapshot("S");
+    expect(history.filter((m) => m.role === "user" && m.content === "steer-1")).toHaveLength(1);
+    client.close();
+  });
+
+  test("a slow but alive link is not declared dead: inbound frames restart the window", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([
+      [t("a"), { kind: "gate" }, t("b"), { kind: "gate" }, t("c"), { kind: "gate" }, done],
+    ]);
+    const target = new Target(makeHost(model, runs));
+    const time = manualClock();
+    const first = halfOpen(target.connect());
+    let dials = 0;
+    const client = new RemoteClient(first.channel, new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        dials += 1;
+        return target.connect();
+      },
+      clock: time.clock,
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const events: SessionEvent[] = [];
+    void (async () => {
+      for await (const e of session.send("go")) events.push(e);
+    })().catch(() => {});
+    await until(() => model.waiting);
+    first.set("out"); // the enqueue never reaches the daemon, but frames still arrive
+    void session.enqueue("never-acked").catch(() => {});
+    await tick();
+    time.advance(10_000);
+    model.open(); // an inbound text frame
+    expect(await until(() => events.some((e) => e.type === "text" && e.delta === "b"))).toBe(true);
+    time.advance(10_000); // 20 s since the request, 10 s since the last frame
+    await tick();
+    expect(dials).toBe(0);
+    time.advance(5_000); // 15 s of silence now
+    expect(await until(() => dials === 1)).toBe(true);
+    client.close();
+  });
+
+  test("inert without a factory: no liveness timer, a silent command just waits", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), { kind: "gate" }, done]]);
+    const target = new Target(makeHost(model, runs));
+    const time = manualClock();
+    const first = halfOpen(target.connect());
+    const client = new RemoteClient(first.channel, new PermissionBroker(), undefined, {
+      clock: time.clock,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    void drain(session.send("go")).catch(() => {});
+    await until(() => model.waiting);
+    first.set("both");
+    let settled = false;
+    void session.enqueue("x").then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    time.advance(60_000);
+    await tick();
+    expect(time.pending()).toBe(0);
+    expect(settled).toBe(false);
+    client.close();
+  });
+
+  test("compact is not watched (it answers after a model call)", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), done]]);
+    const target = new Target(makeHost(model, runs));
+    const time = manualClock();
+    const first = halfOpen(target.connect());
+    let dials = 0;
+    const client = new RemoteClient(first.channel, new PermissionBroker(), undefined, {
+      channelFactory: async () => {
+        dials += 1;
+        return target.connect();
+      },
+      clock: time.clock,
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    await drain(session.send("first"));
+    first.set("both");
+    void session.compact().catch(() => {});
+    await tick();
+    time.advance(60_000);
+    await tick();
+    expect(dials).toBe(0);
+    client.close();
+  });
+
+  test("a dial that never settles is bounded: the next dial runs, the late channel is closed", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), { kind: "gate" }, t("b"), done]]);
+    const target = new Target(makeHost(model, runs));
+    const time = manualClock();
+    let release: (channel: DuplexChannel) => void = () => {};
+    let lateClosed = false;
+    let dials = 0;
+    const statuses: LinkStatus[] = [];
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: () => {
+        dials += 1;
+        if (dials === 1) {
+          return new Promise<DuplexChannel>((resolve) => {
+            release = resolve;
+          });
+        }
+        return Promise.resolve(target.connect());
+      },
+      clock: time.clock,
+      random: () => 0,
+    });
+    client.onLinkStatus((s) => statuses.push(s));
+    await client.initialize();
+    const turn = drain(client.newSession(undefined, "S").send("go"));
+    await until(() => model.waiting);
+    target.last?.close();
+    await tick();
+    time.advance(0); // backoff 0 → dial 1, which hangs
+    await tick();
+    expect(dials).toBe(1);
+    time.advance(LIVENESS_MS);
+    await tick();
+    time.advance(0);
+    expect(await until(() => dials === 2)).toBe(true);
+    expect(
+      statuses.some((s) => s.state === "reconnecting" && /no connection after/.test(s.error ?? "")),
+    ).toBe(true);
+    expect(await until(() => statuses.at(-1)?.state === "up")).toBe(true);
+    const [, late] = createChannelPair();
+    release({
+      ...late,
+      close: () => {
+        lateClosed = true;
+        late.close();
+      },
+    } as DuplexChannel);
+    await tick();
+    expect(lateClosed).toBe(true);
+    model.open();
+    const events = await turn;
+    expect(events.at(-1)?.type).toBe("turn_end");
+    client.close();
+  });
+
+  test("close() during a dial that hangs leaves no timer armed (review nit 1)", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([[t("a"), { kind: "gate" }, done]]);
+    const target = new Target(makeHost(model, runs));
+    const time = manualClock();
+    let dials = 0;
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: () => {
+        dials += 1;
+        return new Promise<DuplexChannel>(() => {}); // a black-holed host
+      },
+      clock: time.clock,
+      random: () => 0,
+    });
+    await client.initialize();
+    const turn = drain(client.newSession(undefined, "S").send("go")).catch((e: Error) => e);
+    await until(() => model.waiting);
+    target.last?.close();
+    await tick();
+    time.advance(0); // dial starts and hangs
+    await tick();
+    expect(dials).toBe(1);
+    client.close();
+    expect(time.pending()).toBe(0);
+    expect(String(await turn)).toMatch(/connection closed/);
   });
 });

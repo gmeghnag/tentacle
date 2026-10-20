@@ -504,7 +504,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         never shown. Only `close` ends such a turn. Needs a bounded wait or a
         cancel path that does not wait on the disk. Not yet an eval.
       8a. **Feat (DONE 2026-10-20, `feat/client-reattach`):** `docs/feat/client-reattach.md` · L · load-bearing
-      8b. **Eval:** `docs/eval/client-reattach-frontends.md` · M · load-bearing
+      8b. **Feat (DONE 2026-10-20, `feat/client-reattach-frontends`):** `docs/feat/client-reattach-frontends.md` · M · load-bearing
       — **Eval:** `docs/eval/attachments.md` (sister) · 4 sub-tasks · load-bearing
       — `docs/feat/pod-attach-resilience.md` now Layer 1 only (WS ping) · S · contained
       — mobile app (React Native or Swift) — own eval, after 8b; carries the JSON re-attach test vectors deferred by 8a (R-Q3)

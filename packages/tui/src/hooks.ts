@@ -10,6 +10,13 @@ import {
   moveWord as editorMoveWord,
   setValue as editorSet,
 } from "./editor.ts";
+import {
+  type LinkFeed,
+  type LinkIndicator,
+  type LinkStatusView,
+  linkIndicator,
+  nextTickMs,
+} from "./link-status.ts";
 
 /**
  * Seconds elapsed since `since`, re-rendering twice a second so a live timer
@@ -22,6 +29,26 @@ export function useElapsed(since: number): number {
     return () => clearInterval(id);
   }, []);
   return Math.max(0, Math.floor((Date.now() - since) / 1000));
+}
+
+/**
+ * The StatusBar's link indicator: subscribes to `link` and re-renders only
+ * when the countdown text changes (no timer while the link is up).
+ */
+export function useLinkIndicator(link?: LinkFeed): LinkIndicator | null {
+  const [status, setStatus] = useState<LinkStatusView | null>(null);
+  const [tick, setTick] = useState(0);
+  useEffect(() => link?.onLinkStatus(setStatus), [link]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `tick` re-arms the countdown
+  useEffect(() => {
+    const ms = nextTickMs(status, Date.now());
+    if (ms === null) {
+      return;
+    }
+    const id = setTimeout(() => setTick((t) => t + 1), ms);
+    return () => clearTimeout(id);
+  }, [status, tick]);
+  return linkIndicator(status, Date.now());
 }
 
 export interface PaintScheduler {

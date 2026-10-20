@@ -4,7 +4,9 @@
 
 > **Related (2026-10-19):** the protocol-v2 re-attach redesign overlaps this scope — `docs/eval/session-reattach.md`, `docs/eval/client-reattach.md` (reconnect + resume for every transport, incl. `attach`), `docs/feat/session-ttl-limits.md` (server keepalive). Re-evaluate whether this task is absorbed when `client-reattach` is promoted.
 
-> **Scope cut (owner decision D9, 2026-10-19):** Layer 2 (reconnect-and-resume) is absorbed by `docs/eval/client-reattach-frontends.md`. This task is now **Layer 1 only**: a WebSocket ping in `exec-channel.ts` (Bun's client has `ping()`) · Size S · Blast contained.
+> **Layer 2 built (2026-10-20, `feat/client-reattach-frontends`):** `execChannelFactory` (`cli/src/pod-runtime.ts`) re-execs the daemon after a drop (pod preflight: deleted/terminated → stop), the session is recreated from the laptop's history, a turn in flight is reported lost; a half-open link is caught by the client's liveness watchdog only while a request is outstanding — idle keepalive is still this task's Layer 1.
+
+> **Scope cut (owner decision D9, 2026-10-19):** Layer 2 (reconnect-and-resume) is absorbed by `docs/feat/client-reattach-frontends.md`. This task is now **Layer 1 only**: a WebSocket ping in `exec-channel.ts` (Bun's client has `ping()`) · Size S · Blast contained.
 
 ## Problem (with evidence)
 

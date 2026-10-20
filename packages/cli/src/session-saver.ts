@@ -79,6 +79,15 @@ export class SessionSaver {
     void settled.finally(() => this.pending.delete(settled));
   }
 
+  /**
+   * A save that never reached the store (its history could not be read back):
+   * reported exactly like a failed write — one notice on the transition, and
+   * `drain` lists it until a later save of the uid succeeds.
+   */
+  failed(id: string, error: string): void {
+    this.settle(id, { ok: false, error });
+  }
+
   private settle(
     id: string,
     outcome: { readonly ok: true } | { readonly ok: false; readonly error: string },

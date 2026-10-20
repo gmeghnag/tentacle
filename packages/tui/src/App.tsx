@@ -18,8 +18,9 @@ import { PermissionPrompt, permissionPromptRows } from "./components/PermissionP
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
 import { pushHistory, recall } from "./history.ts";
-import { useLineEditor, usePaintScheduler } from "./hooks.ts";
+import { useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import { resolveLineInput } from "./input-actions.ts";
+import type { LinkFeed } from "./link-status.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
 import { sanitizePasted, stepPaste } from "./paste.ts";
 import { usePermissionBroker } from "./permission-ui.ts";
@@ -83,6 +84,8 @@ export interface AppProps {
   readonly autoWakeOnJobExit?: boolean;
   /** Host notices to surface live (never a raw terminal write while Ink owns it). */
   readonly notices?: NoticeFeed;
+  /** The runtime's link status, shown in the StatusBar while it is not up. */
+  readonly link?: LinkFeed;
   /** Injectable for tests (defaults to the OS clipboard + Bun.write). */
   readonly clipboard?: (text: string) => Promise<void>;
   /** Injectable for tests (defaults to the OS clipboard read). */
@@ -125,6 +128,7 @@ export function App({
   jobs,
   autoWakeOnJobExit = true,
   notices,
+  link,
   clipboard = copyToClipboard,
   paste = readClipboard,
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
@@ -205,6 +209,7 @@ export function App({
 
   // --- throttled rendering -------------------------------------------------
   const { scheduleFlush, flushNow } = usePaintScheduler(FRAME_MS);
+  const linkView = useLinkIndicator(link);
 
   // --- live background-job exits -------------------------------------------
   // Surface a finished background job the instant it exits, even while idle.
@@ -1028,6 +1033,7 @@ export function App({
         hiddenAbove={hiddenAbove}
         expandAll={expandAll}
         autoApprove={permission.autoApprove}
+        link={linkView}
       />
     </Box>
   );

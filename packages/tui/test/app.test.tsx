@@ -11,6 +11,7 @@ import {
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
+import type { LinkStatusView } from "../src/link-status.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -193,6 +194,43 @@ describe("App", () => {
     expect(lastFrame()).toContain("Couldn't save session abcd1234: EACCES");
     unmount();
     await delay(10); // passive-effect cleanup runs after the unmount commit
+    expect(listeners.size).toBe(0);
+  });
+
+  test("the link status shows in the StatusBar while not up, and clears when it is back", async () => {
+    // Mutation: drop `link={linkView}` from the StatusBar → "reconnecting" never renders.
+    const listeners = new Set<(status: LinkStatusView) => void>();
+    const link = {
+      onLinkStatus(listener: (status: LinkStatusView) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    const emit = (status: LinkStatusView): void => {
+      for (const listener of listeners) listener(status);
+    };
+    const agent = new Agent({
+      model: new ScriptedProvider([]),
+      tools: new ToolRegistry(),
+      env: noopEnv,
+    });
+    const { lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" link={link} />,
+    );
+    await delay(30);
+    expect(lastFrame()).not.toContain("reconnecting");
+    emit({ state: "reconnecting", attempt: 3, nextAtMs: Date.now() + 4_500 });
+    await delay(30);
+    const bar = (lastFrame() ?? "").split("\n").at(-1) ?? "";
+    expect(bar).toMatch(/^reconnecting… \(attempt 3, retry in [45]s\)/);
+    emit({ state: "up" });
+    await delay(30);
+    expect(lastFrame()).not.toContain("reconnecting");
+    emit({ state: "stopped", reason: "the daemon rejected the credentials: 401" });
+    await delay(30);
+    expect(lastFrame()).toContain("disconnected: the daemon rejected the credentials: 401");
+    unmount();
+    await delay(10);
     expect(listeners.size).toBe(0);
   });
 

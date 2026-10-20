@@ -17,10 +17,19 @@ export const BACKOFF_CAP_MS = 30_000;
 export const STABLE_UP_MS = 10_000;
 
 /**
- * Why a channel factory could not open a channel. `unauthorized` is terminal
- * (retrying a rejected token only hides the problem); the others are transient.
+ * A link with a request outstanding and no inbound frame for this long is
+ * dead (a half-open socket: the laptop slept, a NAT forgot the flow). Any
+ * frame counts — a replay burst, an update, a model request — so a slow but
+ * alive daemon is never mistaken for a dead one.
  */
-export type ChannelErrorKind = "unauthorized" | "unreachable" | "rejected";
+export const LIVENESS_MS = 15_000;
+
+/**
+ * Why a channel factory could not open a channel. `unauthorized` (retrying a
+ * rejected credential only hides the problem) and `gone` (the target no longer
+ * exists: a deleted or terminated pod) are terminal; the others are transient.
+ */
+export type ChannelErrorKind = "unauthorized" | "gone" | "unreachable" | "rejected";
 
 export class ChannelError extends Error {
   readonly kind: ChannelErrorKind;
@@ -34,7 +43,13 @@ export class ChannelError extends Error {
 /** What a frontend shows about the link (presentation is the frontend's). */
 export type LinkStatus =
   | { readonly state: "up" }
-  | { readonly state: "reconnecting"; readonly attempt: number; readonly nextAtMs: number }
+  | {
+      readonly state: "reconnecting";
+      readonly attempt: number;
+      readonly nextAtMs: number;
+      /** Why the last dial failed (absent after a plain drop). */
+      readonly error?: string;
+    }
   | { readonly state: "stopped"; readonly reason: string };
 
 export interface LinkState {
@@ -66,6 +81,9 @@ export function terminalReason(error: unknown): string | null {
   if (error instanceof ChannelError && error.kind === "unauthorized") {
     return `the daemon rejected the credentials: ${error.message}`;
   }
+  if (error instanceof ChannelError && error.kind === "gone") {
+    return `the connection target is gone: ${error.message}`;
+  }
   const code = (error as { code?: unknown } | null)?.code;
   if (code === DomainErrorCode.VersionMismatch) {
     return `incompatible daemon: ${(error as Error).message}`;
@@ -73,12 +91,23 @@ export function terminalReason(error: unknown): string | null {
   return null;
 }
 
-function scheduled(state: LinkState, attempt: number, now: number, random: () => number): LinkStep {
+function scheduled(
+  state: LinkState,
+  attempt: number,
+  now: number,
+  random: () => number,
+  error?: string,
+): LinkStep {
   const delay = backoffMs(attempt, random);
   return {
     state: { ...state, kind: "backoff", attempt: attempt + 1 },
     dialInMs: delay,
-    status: { state: "reconnecting", attempt: attempt + 1, nextAtMs: now + delay },
+    status: {
+      state: "reconnecting",
+      attempt: attempt + 1,
+      nextAtMs: now + delay,
+      ...(error !== undefined ? { error } : {}),
+    },
   };
 }
 
@@ -102,7 +131,13 @@ export function dialFailed(
   if (reason !== null) {
     return stopped(state, reason);
   }
-  return scheduled(state, state.attempt, now, random);
+  return scheduled(
+    state,
+    state.attempt,
+    now,
+    random,
+    error instanceof Error ? error.message : String(error),
+  );
 }
 
 /** A new link is up (handshake done). The attempt counter survives until it proves stable. */
@@ -136,4 +171,29 @@ export function turnRecovery(turn: {
   readonly acked: boolean;
 }): TurnRecovery {
   return { resendPrompt: turn.acked && !turn.recreated && !turn.ended };
+}
+
+/** Whether the current link still shows signs of life (see `LIVENESS_MS`). */
+export type Liveness =
+  | { readonly kind: "idle" }
+  | { readonly kind: "alive"; readonly checkInMs: number }
+  | { readonly kind: "dead" };
+
+/**
+ * `watchedSince`: when the oldest still-outstanding watched request was issued
+ * (null: none). The silence is counted from the later of that and the last
+ * inbound frame, so a request after a long idle gets the full window.
+ */
+export function liveness(input: {
+  readonly now: number;
+  readonly lastInboundAt: number;
+  readonly watchedSince: number | null;
+}): Liveness {
+  if (input.watchedSince === null) {
+    return { kind: "idle" };
+  }
+  const quiet = input.now - Math.max(input.lastInboundAt, input.watchedSince);
+  return quiet >= LIVENESS_MS
+    ? { kind: "dead" }
+    : { kind: "alive", checkInMs: LIVENESS_MS - quiet };
 }
