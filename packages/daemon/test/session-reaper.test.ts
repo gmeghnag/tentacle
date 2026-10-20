@@ -320,7 +320,6 @@ describe("SessionHost.reapExpired (the sweep)", () => {
         send: () => {
           throw new Error("broken sink");
         },
-        requestPermission: async () => ({ outcome: "cancelled" }),
       },
     );
     d.clock.t = 10 * H;
@@ -355,7 +354,6 @@ describe("SessionHost.reapExpired (the sweep)", () => {
     const d = daemon();
     const sink: Attachment = {
       send: () => {},
-      requestPermission: async () => ({ outcome: "cancelled" }),
     };
     d.host.open({ sessionId: "a", create: true }, sink);
     d.host.open({ sessionId: "b", create: true }, sink);

@@ -32,7 +32,7 @@ their single execution unit:
 1. `docs/feat/daemon-side-persistence.md` — every item marked **[B]**
    ("Part B — `suspended-turn-resume`" in Design, Files, Tests; the
    `resumeFrom` prototype in Load-bearing assumption).
-2. `docs/eval/permission-events.md` — "Slice 7b — suspension survives a
+2. `docs/feat/permission-events.md` — "Slice 7b — suspension survives a
    `serve` restart" and its Files/Tests entries.
 
 Where they overlap, reconcile in favour of the persistence doc's resume

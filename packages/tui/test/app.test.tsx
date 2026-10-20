@@ -5,6 +5,7 @@ import {
   type ExecutionEnvironment,
   type ModelProvider,
   PermissionBroker,
+  type PermissionRequest,
   type StreamEvent,
 } from "@tentacle/core";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
@@ -409,6 +410,96 @@ describe("App", () => {
 
     expect(execCalls).toEqual([]);
     expect(lastFrame() ?? "").toContain("Permission denied");
+    unmount();
+  });
+
+  describe("the permission dialog's lifecycle (a request withdrawn, the TUI gone, a person's no)", () => {
+    const ask: PermissionRequest = {
+      tool: "shell",
+      level: "ask",
+      title: "Run a shell command",
+      detail: "make deploy",
+      input: {},
+    };
+    async function mounted() {
+      const broker = new PermissionBroker();
+      const agent = new Agent({
+        model: new ScriptedProvider([]),
+        tools: new ToolRegistry(),
+        env: noopEnv,
+      });
+      const app = render(<App agent={agent} model="qwen3" cwd="/tmp/work" permissions={broker} />);
+      await delay(40);
+      const controller = new AbortController();
+      const answer = broker.request(ask, { signal: controller.signal });
+      await delay(40);
+      expect(app.lastFrame() ?? "").toContain("make deploy");
+      return { app, controller, answer };
+    }
+
+    test("a request withdrawn by its signal (answered elsewhere) closes the dialog and resolves dismissed", async () => {
+      // Mutation: ignore `options.signal` in the TUI requester → the dialog stays → red.
+      const { app, controller, answer } = await mounted();
+      controller.abort();
+      expect(await answer).toEqual({ allowed: false, dismissed: true });
+      await delay(40);
+      expect(app.lastFrame() ?? "").not.toContain("make deploy");
+      app.unmount();
+    });
+
+    test("unmounting with the dialog open is not a decision: dismissed, not a deny", async () => {
+      const { app, answer } = await mounted();
+      app.unmount();
+      expect(await answer).toEqual({ allowed: false, dismissed: true });
+    });
+
+    test("Esc is a person's deny (a plain refusal, sent as such)", async () => {
+      const { app, answer } = await mounted();
+      app.stdin.write("\u001B");
+      expect(await answer).toEqual({ allowed: false });
+      app.unmount();
+    });
+
+    test("Ctrl+C in the dialog with no turn of ours to cancel keeps the dialog (no orphaned request)", async () => {
+      // Review finding 3: dismissing here left the request suspended and unseen.
+      const { app, answer } = await mounted();
+      let settled = false;
+      void answer.then(() => {
+        settled = true;
+      });
+      app.stdin.write("\u0003");
+      await delay(40);
+      expect(settled).toBe(false);
+      expect(app.lastFrame() ?? "").toContain("make deploy");
+      app.stdin.write("\u001B");
+      expect(await answer).toEqual({ allowed: false });
+      app.unmount();
+    });
+  });
+
+  test("Ctrl+C in the dialog during a turn stops everything: no deny is recorded, the tool is cancelled", async () => {
+    const { agent, broker, execCalls } = shellSetup();
+    const answers: unknown[] = [];
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" permissions={broker} />,
+    );
+    await delay(40);
+    const request = broker.request.bind(broker);
+    broker.request = async (req, options) => {
+      const r = await request(req, options);
+      answers.push(r);
+      return r;
+    };
+    stdin.write("run it");
+    await delay(30);
+    stdin.write("\r");
+    await delay(150);
+    expect(lastFrame() ?? "").toContain("ls -la");
+    stdin.write("\u0003");
+    await delay(150);
+    expect(answers).toEqual([{ allowed: false, dismissed: true }]);
+    expect(execCalls).toEqual([]);
+    expect(lastFrame() ?? "").not.toContain("Permission denied");
     unmount();
   });
 

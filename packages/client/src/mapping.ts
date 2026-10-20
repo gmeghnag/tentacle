@@ -162,12 +162,15 @@ export function updateToEvent(
     // `turnId`); it is not an `AgentEvent` of its own. `history_replaced`
     // cannot arrive inside a turn (a compaction is exclusive with one), and the
     // client that compacted reads the new history back itself. `session_closed`
-    // is consumed by `RemoteClient`/`RemoteSession` (it ends the session).
+    // is consumed by `RemoteClient`/`RemoteSession` (it ends the session). The
+    // permission events are consumed by `RemoteClient`'s `PermissionRouter`.
     case "plan":
     case "turn_start":
     case "turn_end":
     case "history_replaced":
     case "session_closed":
+    case "permission_request":
+    case "permission_resolved":
       return null;
   }
 }

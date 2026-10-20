@@ -515,18 +515,19 @@ export class Agent {
       } catch {
         input = {};
       }
-      if (!(await this.gate.authorize(tool, input))) {
+      const allowed = await this.gate.authorize(tool, input);
+      // The abort first, whatever the answer: a request settled by a cancel
+      // comes back as a refusal (the daemon's `cancelled`) and must read as
+      // cancelled, never as a denial the user did not give; and an approval
+      // that lands after a cancel must not start the tool.
+      if (ctx.signal.aborted) {
+        return { content: CANCELLED_TOOL_NOTE, isError: true };
+      }
+      if (!allowed) {
         return {
           content: `Permission denied by the user: \`${call.name}\` was not run.`,
           isError: true,
         };
-      }
-      // The permission prompt may be answered (allowed) *after* the user
-      // cancelled — the TUI denies on Esc, but a headless / non-TUI requester
-      // can approve late, and a disconnect is only fail-safe at the daemon
-      // edge. Re-check the abort here so the tool never starts after a cancel.
-      if (ctx.signal.aborted) {
-        return { content: CANCELLED_TOOL_NOTE, isError: true };
       }
     }
     return await this.config.tools.execute(call.name, call.arguments, ctx);

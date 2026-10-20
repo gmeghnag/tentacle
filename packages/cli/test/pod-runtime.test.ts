@@ -9,6 +9,7 @@ import type {
   ExecutionEnvironment,
   ModelProvider,
   PermissionRequest,
+  PermissionRequestOptions,
   PermissionResponse,
   StreamEvent,
 } from "@tentacle/core";
@@ -157,14 +158,17 @@ class AskModel implements ModelProvider {
  * delegates to the base requester). The single-broker invariant is about
  * object IDENTITY: the runtime hands `deps.permissions` to the client
  * (`RemoteClient`), and the client is what `request()`s when the daemon
- * forwards a tool's ask. Spying on the exact instance passed to the runtime
+ * streams a tool's ask (`permission_request`). Spying on the exact instance passed to the runtime
  * therefore proves the ask travelled through it.
  */
 class SpyBroker extends PermissionBroker {
   readonly requests: PermissionRequest[] = [];
-  override async request(req: PermissionRequest): Promise<PermissionResponse> {
+  override async request(
+    req: PermissionRequest,
+    options?: PermissionRequestOptions,
+  ): Promise<PermissionResponse> {
     this.requests.push(req);
-    return super.request(req);
+    return super.request(req, options);
   }
 }
 
@@ -172,12 +176,12 @@ class SpyBroker extends PermissionBroker {
  * A `FakeCluster` whose daemon-side agent wires an `ask` tool (`fs_write`) and
  * routes its permission gate through the daemon's OWN broker — mirroring the
  * production wiring (`wiring.ts`: `requestPermission: (req) =>
- * permissions.request(req)`, with `HostedSession` forwarding that broker's
+ * permissions.request(req)`, with `HostedSession` streaming that broker's
  * asks over the wire). The daemon broker is deliberately a DIFFERENT object
  * from the client's `deps.permissions`: in production the pod/worker owns the
  * agent's broker while the laptop owns the one the TUI prompts on, and the two
  * meet only across the exec channel. Reusing one object here would make the
- * `HostedSession` forwarder re-enter the client and recurse — so the ask only
+ * `HostedSession` requester re-enter the client and recurse — so the ask only
  * reaches the (client-side) `SpyBroker` if the runtime actually wired
  * `deps.permissions` into the `RemoteClient`.
  */

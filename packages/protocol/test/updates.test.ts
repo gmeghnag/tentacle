@@ -95,7 +95,7 @@ describe("session/update frame (event classes, catch-all, required seq)", () => 
 
   test("an unknown mandatory event is accepted with its flag (the client fails loudly)", () => {
     const r = SessionUpdateParamsSchema.safeParse(
-      frame({ mandatory: true, update: { type: "permission_request", id: "p" } }),
+      frame({ mandatory: true, update: { type: "future_mandatory", id: "p" } }),
     );
     expect(r.success && r.data.mandatory).toBe(true);
   });
@@ -135,12 +135,20 @@ describe("session/update frame (event classes, catch-all, required seq)", () => 
   test("the turn bracket, the history barrier and the close are mandatory, everything else display", () => {
     // A client that cannot act on turn_start/turn_end would hang the turn; one
     // that skips history_replaced would apply updates over a stale history; one
-    // that skips session_closed would show a dead session as live.
+    // that skips session_closed would show a dead session as live; one that skips a
+    // permission event would leave a suspended turn unanswerable (or a stale dialog).
     const mandatory = Object.entries(UPDATE_CLASS)
       .filter(([, c]) => c === "mandatory")
       .map(([t]) => t)
       .sort();
-    expect(mandatory).toEqual(["history_replaced", "session_closed", "turn_end", "turn_start"]);
+    expect(mandatory).toEqual([
+      "history_replaced",
+      "permission_request",
+      "permission_resolved",
+      "session_closed",
+      "turn_end",
+      "turn_start",
+    ]);
   });
 
   test("turn_end carries a valid stop reason and a turnId", () => {

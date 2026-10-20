@@ -1,15 +1,17 @@
 /**
  * The client runtime: an `RpcPeer` over the control channel that performs the
- * handshake, opens (and, when done with them, closes) sessions, forwards the
- * agent's permission requests to the local `PermissionBroker` (the TUI's
- * prompt), and routes streamed `session/update`s to the right `RemoteSession`.
+ * handshake, opens (and, when done with them, closes) sessions, turns the
+ * streamed permission requests into prompts on the local `PermissionBroker` (the
+ * TUI's dialog) and the user's answers into `session/resolve_permission` — via
+ * the pure `PermissionRouter` — and routes the other `session/update`s to the
+ * right `RemoteSession`.
  */
-import type {
-  ChatMessage,
-  ChatRequest,
-  ModelProvider,
-  PermissionBroker,
-  PermissionRequest,
+import {
+  type ChatMessage,
+  type ChatRequest,
+  DISMISSED,
+  type ModelProvider,
+  type PermissionBroker,
 } from "@tentacle/core";
 import {
   type CompactResult,
@@ -26,8 +28,6 @@ import {
   PROTOCOL_VERSION,
   type PromptResult,
   type RequestId,
-  type RequestPermissionParams,
-  type RequestPermissionResult,
   type SessionUpdate,
   type SessionUpdateParams,
   type SnapshotResult,
@@ -36,7 +36,7 @@ import {
 } from "@tentacle/protocol";
 import { type DuplexChannel, type RequestContext, RpcError, RpcPeer } from "@tentacle/transport";
 import { classifyUpdate } from "./mapping.ts";
-import { responseToOutcome } from "./permission-map.ts";
+import { PermissionRouter, type RouterAction } from "./permission-router.ts";
 import { RemoteSession } from "./remote-session.ts";
 
 /** How long the exit path waits for the daemon to acknowledge `session/close`s. */
@@ -89,6 +89,10 @@ export class RemoteClient {
   private readonly opened = new Set<string>();
   /** Session-independent listeners for background-job exits (idle or mid-turn). */
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
+  /** Which permission request is prompted / answered (pure; see its module). */
+  private readonly router = new PermissionRouter();
+  /** The on-screen prompt's abort handle, by `sessionId` + `requestId`. */
+  private readonly prompts = new Map<string, AbortController>();
 
   private readonly modelProvider?: ModelProvider;
   private readonly onError?: (error: Error) => void;
@@ -120,9 +124,21 @@ export class RemoteClient {
             return;
           }
           const update = classified.update;
-          // Closed daemon-side (by any client): nothing left to close at exit.
+          // Closed daemon-side (by any client): nothing left to close at exit,
+          // nothing left to answer.
           if (update.type === "session_closed") {
             this.opened.delete(p.sessionId);
+            this.runPermissionActions(this.router.sessionClosed(p.sessionId));
+          }
+          // Permission events are session state, not turn-scoped (a re-attach
+          // replays a pending one): the router decides, never the turn handler.
+          if (update.type === "permission_request") {
+            this.runPermissionActions(this.router.request(p.sessionId, update));
+            return;
+          }
+          if (update.type === "permission_resolved") {
+            this.runPermissionActions(this.router.resolved(p.sessionId, update.requestId));
+            return;
           }
           // A background exit is not turn-scoped: route it to the dedicated
           // listeners (which fire even when no turn is streaming), never to the
@@ -138,9 +154,6 @@ export class RemoteClient {
         }
       },
       onRequest: async (method, params, context) => {
-        if (method === Method.RequestPermission) {
-          return this.onPermission(params as RequestPermissionParams);
-        }
         if (method === Method.ModelStream) {
           return this.onModelStream(params as ModelStreamParams);
         }
@@ -170,6 +183,7 @@ export class RemoteClient {
       // response, so a dead socket must end every open turn explicitly (same
       // error a pending request gets).
       onClose: () => {
+        this.runPermissionActions(this.router.connectionClosed());
         for (const handler of [...this.handlers.values()]) {
           handler.fail(new RpcError(JsonRpcErrorCode.InternalError, "connection closed"));
         }
@@ -452,15 +466,50 @@ export class RemoteClient {
     return { chunks: seq };
   }
 
-  private async onPermission(params: RequestPermissionParams): Promise<RequestPermissionResult> {
-    const req: PermissionRequest = {
-      tool: "",
-      level: "ask",
-      title: params.title,
-      ...(params.explanation ? { detail: params.explanation } : {}),
-      input: {},
-    };
-    const response = await this.permissions.request(req);
-    return { outcome: responseToOutcome(response) };
+  /**
+   * Execute the router's decisions: a prompt goes to the broker with an abort
+   * handle (its answer comes back to the router), an abort withdraws it, a
+   * send answers the daemon. A losing answer (`PermissionNotPending`) is
+   * expected and silent — the winner arrives as `permission_resolved`.
+   */
+  private runPermissionActions(actions: readonly RouterAction[]): void {
+    for (const action of actions) {
+      const { sessionId, requestId } = action;
+      const key = `${sessionId}\u0000${requestId}`;
+      if (action.kind === "prompt") {
+        const controller = new AbortController();
+        this.prompts.set(key, controller);
+        const answered = (response: Parameters<PermissionRouter["answered"]>[2]): void => {
+          if (this.prompts.get(key) === controller) {
+            this.prompts.delete(key);
+          }
+          this.runPermissionActions(this.router.answered(sessionId, requestId, response));
+        };
+        this.permissions
+          .request(action.request, { signal: controller.signal })
+          .then(answered, (error: unknown) => {
+            this.onError?.(error instanceof Error ? error : new Error(String(error)));
+            answered(DISMISSED);
+          });
+      } else if (action.kind === "unoffered") {
+        this.onError?.(
+          new Error(
+            `permission answer "${action.optionId}" was not offered by the daemon for request ${requestId}: not sent`,
+          ),
+        );
+      } else if (action.kind === "abort") {
+        this.prompts.get(key)?.abort();
+        this.prompts.delete(key);
+      } else {
+        this.peer
+          .request(Method.ResolvePermission, { sessionId, requestId, optionId: action.optionId })
+          .catch((error: unknown) => {
+            if (error instanceof RpcError && error.code === DomainErrorCode.PermissionNotPending) {
+              return;
+            }
+            this.onError?.(error instanceof Error ? error : new Error(String(error)));
+          });
+      }
+    }
   }
 }

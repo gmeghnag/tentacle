@@ -24,22 +24,19 @@ describe("RpcPeer", () => {
 
   test("is bidirectional: the server can request the client mid-flight", async () => {
     const [ca, cb] = createChannelPair();
-    // Client answers an inbound permission request.
+    // Client answers an inbound model request (the pod reverse-tunnel).
     const client = new RpcPeer(ca, {
       onRequest: async (method, params) => {
-        expect(method).toBe("session/request_permission");
-        expect((params as { sessionId: string }).sessionId).toBe("s1");
-        return { outcome: { outcome: "selected", optionId: "allow_once" } };
+        expect(method).toBe("model/stream");
+        expect((params as { request: { messages: unknown[] } }).request.messages).toHaveLength(1);
+        return { events: [{ type: "text", delta: "hi" }, { type: "done" }] };
       },
     });
     const server = new RpcPeer(cb);
-    const res = (await server.request("session/request_permission", {
-      sessionId: "s1",
-      toolCallId: "t1",
-      title: "Run a shell command",
-      options: [{ optionId: "allow_once", name: "Allow once", kind: "allow_once" }],
-    })) as { outcome: { outcome: string } };
-    expect(res.outcome.outcome).toBe("selected");
+    const res = (await server.request("model/stream", {
+      request: { messages: [{ role: "user", content: "q" }] },
+    })) as { events: { type: string }[] };
+    expect(res.events.map((e) => e.type)).toEqual(["text", "done"]);
     client.close();
   });
 
@@ -206,13 +203,8 @@ describe("RpcPeer", () => {
     const client = new RpcPeer(recA);
     const controller = new AbortController();
     const p = client.request(
-      "session/request_permission",
-      {
-        sessionId: "s1",
-        toolCallId: "t1",
-        title: "x",
-        options: [{ optionId: "a", name: "A", kind: "allow_once" }],
-      },
+      "model/stream",
+      { request: { messages: [{ role: "user", content: "q" }] } },
       { signal: controller.signal },
     );
     await new Promise((r) => setTimeout(r, 5));
@@ -312,11 +304,8 @@ describe("RpcPeer", () => {
       },
     });
     const client = new RpcPeer(ca);
-    const p = client.request("session/request_permission", {
-      sessionId: "s1",
-      toolCallId: "t1",
-      title: "x",
-      options: [{ optionId: "a", name: "A", kind: "allow_once" }],
+    const p = client.request("model/stream", {
+      request: { messages: [{ role: "user", content: "q" }] },
     });
     // Let the request reach the server and register its controller.
     await new Promise((r) => setTimeout(r, 5));
@@ -341,11 +330,8 @@ describe("RpcPeer", () => {
         return { ok: true };
       },
     });
-    const p = client.request("session/request_permission", {
-      sessionId: "s1",
-      toolCallId: "t1",
-      title: "x",
-      options: [{ optionId: "a", name: "A", kind: "allow_once" }],
+    const p = client.request("model/stream", {
+      request: { messages: [{ role: "user", content: "q" }] },
     });
     await new Promise((r) => setTimeout(r, 5));
     expect(seen).toHaveLength(1);

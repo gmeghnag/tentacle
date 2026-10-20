@@ -8,6 +8,7 @@
  */
 import { z } from "zod";
 import { ContentBlockSchema } from "./content.ts";
+import { PermissionRequestUpdateSchema, PermissionResolvedUpdateSchema } from "./permission.ts";
 import { SessionIdSchema, StopReasonSchema, TurnErrorSchema, TurnIdSchema } from "./session.ts";
 
 export const ToolCallStatusSchema = z.enum(["pending", "in_progress", "completed", "failed"]);
@@ -145,6 +146,8 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   TurnEndUpdateSchema,
   HistoryReplacedSchema,
   SessionClosedSchema,
+  PermissionRequestUpdateSchema,
+  PermissionResolvedUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -174,6 +177,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   turn_end: "mandatory",
   history_replaced: "mandatory",
   session_closed: "mandatory",
+  permission_request: "mandatory",
+  permission_resolved: "mandatory",
 };
 
 /** Own keys only: a frame with `type: "toString"` is unknown, not known. */

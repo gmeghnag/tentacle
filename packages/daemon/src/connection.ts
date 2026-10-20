@@ -1,9 +1,9 @@
 /**
  * One client connection: an `RpcPeer` bound to a `SessionHost`. Handles the
  * handshake and the `session/*` methods, holds this client's ATTACHMENTS to the
- * host's sessions (each streams `session/update` notifications here and can
- * receive permission requests), and detaches them — never ends a session — when
- * the connection goes away.
+ * host's sessions (each streams `session/update` notifications here — permission
+ * requests included, answered with `session/resolve_permission`), and detaches
+ * them — never ends a session — when the connection goes away.
  *
  * Methods other than `initialize` are refused until the handshake completes, and
  * an incompatible protocol major is rejected — security/versioning live here.
@@ -27,8 +27,8 @@ import {
   PROTOCOL_VERSION,
   type PromptParams,
   type PromptResult,
-  type RequestPermissionParams,
-  type RequestPermissionResult,
+  type ResolvePermissionParams,
+  type ResolvePermissionResult,
   type SnapshotParams,
   type SnapshotResult,
   type WireChatRequest,
@@ -48,8 +48,6 @@ import type { SessionHost } from "./session-host.ts";
  * Session counts are daemon-wide, on `SessionHost`: sessions outlive connections.
  */
 export interface ConnectionOptions {
-  /** Auto-deny a `session/request_permission` the client leaves unanswered this long. */
-  readonly permissionTimeoutMs?: number;
   /** Reject an inbound frame larger than this (bytes) before parsing it. */
   readonly maxFrameBytes?: number;
   /**
@@ -91,11 +89,6 @@ export class Connection {
     this.peer = new RpcPeer(channel, {
       onRequest: (method, params, context) => this.onRequest(method, params, context),
       onNotification: (method, params) => this.onNotification(method, params),
-      // The only outbound daemon→client request is `session/request_permission`,
-      // so this timeout is effectively the permission-answer deadline.
-      ...(options.permissionTimeoutMs !== undefined
-        ? { requestTimeoutMs: options.permissionTimeoutMs }
-        : {}),
       ...(options.maxFrameBytes !== undefined ? { maxFrameBytes: options.maxFrameBytes } : {}),
       ...(options.exposeInternalErrors ? { exposeInternalErrors: true } : {}),
       ...(onError ? { onError } : {}),
@@ -122,7 +115,7 @@ export class Connection {
   /**
    * Ask the connected client to run a model turn on our behalf (the pod
    * reverse-tunnel), batch cut: the client returns the whole turn's events in
-   * one response. Outbound daemon→client request, like permission requests.
+   * one response. Outbound daemon→client request (the only kind, with the chunked cut).
    */
   requestModelStream(request: WireChatRequest): Promise<ModelStreamResult> {
     return this.peer
@@ -134,7 +127,7 @@ export class Connection {
    * Ask the connected client to run a model turn on our behalf (the pod
    * reverse-tunnel), streaming the events as `$/progress` as they are produced
    * (the chunked cut). `signal` cancels it; `onProgress` receives each event
-   * in `seq` order. Outbound daemon→client request, like permission requests.
+   * in `seq` order. Outbound daemon→client request.
    */
   requestModelStreamChunked(
     request: WireChatRequest,
@@ -172,6 +165,8 @@ export class Connection {
         return this.snapshot(params as SnapshotParams);
       case Method.Enqueue:
         return this.enqueue(params as EnqueueParams);
+      case Method.ResolvePermission:
+        return this.resolvePermission(params as ResolvePermissionParams);
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }
@@ -201,6 +196,15 @@ export class Connection {
   private compact(params: CompactParams, signal?: AbortSignal): Promise<CompactResult> {
     const hosted = this.lookup(params.sessionId);
     return hosted.compact(signal);
+  }
+
+  // Synchronous, like `enqueue`'s push: the first valid answer settles the
+  // request in this step (first-wins lives in `HostedSession`); a loser gets
+  // `PermissionNotPending` and learns the outcome from `permission_resolved`.
+  private resolvePermission(params: ResolvePermissionParams): ResolvePermissionResult {
+    const hosted = this.lookup(params.sessionId);
+    hosted.resolvePermission(params.requestId, params.optionId);
+    return {};
   }
 
   private initialize(params: InitializeParams): InitializeResult {
@@ -255,7 +259,6 @@ export class Connection {
     }
     const attachment: Attachment = {
       send: (update) => this.peer.notify(Notification.SessionUpdate, update),
-      requestPermission: (pp) => this.requestPermission(pp),
     };
     const { hosted, created, resync, epoch } = this.host.open(params, attachment);
     this.attached.set(hosted.id, { hosted, attachment });
@@ -285,18 +288,6 @@ export class Connection {
   private prompt(params: PromptParams): PromptResult {
     const hosted = this.lookup(params.sessionId);
     return hosted.prompt(params.turnId, params.content);
-  }
-
-  private requestPermission(
-    params: RequestPermissionParams,
-  ): Promise<RequestPermissionResult["outcome"]> {
-    // A timed-out, closed, or malformed permission reply must fail safe: treat
-    // it as a cancellation (→ `allowed: false`), never leave the turn hung or
-    // let the tool run unapproved.
-    return this.peer
-      .request(Method.RequestPermission, params)
-      .then((result) => (result as RequestPermissionResult).outcome)
-      .catch((): RequestPermissionResult["outcome"] => ({ outcome: "cancelled" }));
   }
 
   private onNotification(method: string, params: unknown): void {

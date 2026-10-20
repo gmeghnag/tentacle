@@ -13,7 +13,7 @@ import {
   DomainErrorCode,
   type KnownSessionUpdateParams,
   PROTOCOL_VERSION,
-  type PermissionOutcome,
+  type PermissionRequestUpdate,
 } from "@tentacle/protocol";
 import { ToolRegistry, createTaskTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
@@ -168,18 +168,31 @@ function rig(
 /** A client that collects updates and answers permissions on demand. */
 function client() {
   const updates: KnownSessionUpdateParams[] = [];
-  const asks: Array<{ tool: string; answer: (o: PermissionOutcome) => void }> = [];
-  const attachment: Attachment = {
-    send: (u) => updates.push(u),
-    requestPermission: (params) =>
-      new Promise((resolve) => {
-        asks.push({ tool: params.title, answer: resolve });
-      }),
+  const attachment: Attachment = { send: (u) => updates.push(u) };
+  /** The streamed requests nobody has resolved yet, oldest first. */
+  const pending = (): PermissionRequestUpdate[] => {
+    const resolved = new Set(
+      updates.flatMap((u) => (u.update.type === "permission_resolved" ? [u.update.requestId] : [])),
+    );
+    return updates.flatMap((u) =>
+      u.update.type === "permission_request" && !resolved.has(u.update.requestId) ? [u.update] : [],
+    );
   };
-  const allow = (): void => asks.shift()?.answer({ outcome: "selected", optionId: "allow_once" });
+  const allow = (hosted: HostedSession): void => {
+    const first = pending()[0];
+    if (first) hosted.resolvePermission(first.requestId, "allow_once");
+  };
   const ended = (turnId: string) =>
     updates.some((u) => u.update.type === "turn_end" && u.update.turnId === turnId);
-  return { attachment, updates, asks, allow, ended };
+  return {
+    attachment,
+    updates,
+    get asks() {
+      return pending();
+    },
+    allow,
+    ended,
+  };
 }
 
 async function until(cond: () => boolean, ms = 2000): Promise<void> {
@@ -367,7 +380,7 @@ describe("daemon persistence: what is written, when", () => {
     expect(store.durable.get(hosted.id)?.turn?.pending?.toolCallId).toBe("c1");
     // The disk is slow from here: the approval must wait for it.
     store.hold = true;
-    c.allow();
+    c.allow(hosted);
     await tick(5);
     expect(runs).toEqual([]);
     store.hold = false;
@@ -385,10 +398,10 @@ describe("daemon persistence: what is written, when", () => {
     const [daemonCh, clientCh] = createChannelPair();
     new Connection(daemonCh, r.host);
     let asked = 0;
+    // Nobody answers the `permission_request`: the turn stays suspended.
     const peer = new RpcPeer(clientCh, {
-      onRequest: async () => {
-        asked++;
-        return new Promise(() => {}); // the permission stays pending: the turn is suspended
+      onNotification: (_method, params) => {
+        if ((params as KnownSessionUpdateParams).update.type === "permission_request") asked++;
       },
     });
     await peer.request("initialize", {
@@ -438,7 +451,6 @@ describe("daemon persistence: what is written, when", () => {
     );
     hosted.attach({
       send: (p) => streamed.push(p),
-      requestPermission: async () => ({ outcome: "cancelled" }),
     });
     const ended = () => streamed.some((p) => p.update.type === "turn_end");
     agent.runMessages = (messages, sessionId, signal, drain) =>

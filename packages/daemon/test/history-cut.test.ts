@@ -24,10 +24,9 @@ import { z } from "zod";
 import { type Attachment, HostedSession, type UpdateSink } from "../src/hosted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
 
-/** A test client attached to a hosted session: receives updates, denies permissions. */
+/** A test client attached to a hosted session: receives updates. */
 const sinkTo = (send: UpdateSink): Attachment => ({
   send,
-  requestPermission: async () => ({ outcome: "cancelled" }),
 });
 
 /** Each event after a timer: one macrotask per event, like network I/O. */

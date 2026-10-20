@@ -290,11 +290,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     );
   // `run` and `attach` both end in the same local TUI over the pod runtime. The
   // `permissions` broker MUST be the SAME instance handed to the runtime AND the
-  // TUI: the pod daemon routes its `session/request_permission` to the runtime's
-  // `RemoteClient` (which resolves it through that broker), while the TUI's
-  // prompt installs its interactive requester on the broker it is given. Two
-  // brokers would silently decouple the two — the daemon's broker (default
-  // `allowAll`) auto-approves everything and the TUI prompt is never reached.
+  // TUI: the pod daemon streams its `permission_request` to the runtime's
+  // `RemoteClient` (which prompts through that broker and answers with
+  // `session/resolve_permission`), while the TUI's prompt installs its
+  // interactive requester on the broker it is given. Two brokers would silently
+  // decouple the two — a second broker's default `allowAll` approves everything
+  // and the TUI prompt is never reached. Built with `holdUntilSet`, so a request
+  // that arrives before the TUI mounts waits for its prompt instead.
   const runPodTui = async (
     runtime: Awaited<ReturnType<typeof startPodRuntime>>,
     permissions: PermissionBroker,
@@ -350,7 +352,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     const kube = new KubeClient(auth.options);
     // ONE broker shared by the pod runtime and the TUI (see `runPodTui`).
-    const permissions = new PermissionBroker();
+    const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
     let runtime: Awaited<ReturnType<typeof startPodRuntime>>;
     try {
       runtime = await startPodRuntime(config, {
@@ -423,7 +425,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     const kube = new KubeClient(auth.options);
     // ONE broker shared by the pod runtime and the TUI (see `runPodTui`).
-    const permissions = new PermissionBroker();
+    const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
     let runtime: Awaited<ReturnType<typeof startAttachRuntime>>;
     try {
       runtime = await startAttachRuntime(config, {
@@ -471,7 +473,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     // `--no-worker`); any worker failure also falls back to in-process.
     const useWorker = !topBools.has("in-process") && !topBools.has("no-worker");
     if (useWorker) {
-      const permissions = new PermissionBroker();
+      // RPC path: hold a daemon's request until the TUI's prompt is mounted.
+      const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
       const runtime = await startWorkerRuntime(
         config,
         { permissions, saver, resume: resumeRecord },

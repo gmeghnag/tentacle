@@ -13,7 +13,7 @@ import {
   ModelStreamResultSchema,
   ProgressParamsSchema,
 } from "./model.ts";
-import { RequestPermissionParamsSchema, RequestPermissionResultSchema } from "./permission.ts";
+import { ResolvePermissionParamsSchema, ResolvePermissionResultSchema } from "./permission.ts";
 import {
   CancelParamsSchema,
   CloseParamsSchema,
@@ -42,7 +42,7 @@ export const Method = {
   Compact: "session/compact",
   Snapshot: "session/snapshot",
   Enqueue: "session/enqueue",
-  RequestPermission: "session/request_permission",
+  ResolvePermission: "session/resolve_permission",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
 } as const;
@@ -71,9 +71,9 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.Compact]: { params: CompactParamsSchema, result: CompactResultSchema },
   [Method.Snapshot]: { params: SnapshotParamsSchema, result: SnapshotResultSchema },
   [Method.Enqueue]: { params: EnqueueParamsSchema, result: EnqueueResultSchema },
-  [Method.RequestPermission]: {
-    params: RequestPermissionParamsSchema,
-    result: RequestPermissionResultSchema,
+  [Method.ResolvePermission]: {
+    params: ResolvePermissionParamsSchema,
+    result: ResolvePermissionResultSchema,
   },
   [Method.ModelStream]: { params: ModelStreamParamsSchema, result: ModelStreamResultSchema },
   [Method.ModelStreamChunked]: {

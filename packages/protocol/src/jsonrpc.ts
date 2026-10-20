@@ -41,6 +41,8 @@ export const DomainErrorCode = {
   StaleCursor: -32011,
   /** A turn that a `serve` restart interrupted (the cached end of a retried `session/prompt`). */
   DaemonRestarted: -32012,
+  /** A `session/resolve_permission` for a request that is not pending (answered, cancelled, unknown). */
+  PermissionNotPending: -32013,
 } as const;
 
 /**

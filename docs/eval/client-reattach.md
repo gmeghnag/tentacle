@@ -475,6 +475,14 @@ A mobile app consumes `SessionView` + outputs directly; it never sees
   `persistingController` takes its own snapshot after each `send`,
   `local-runtime.ts:65-94`; **[8b]** switches it to `onCommitted`, so disk is
   aligned after every `turn_end` *and* every resync).
+- **Obligation from `permission-events` (its Review finding 2, 2026-10-20):**
+  the daemon replays a pending `permission_request` only when the attach
+  replays from the cut or from a `since` *before* it; a `since` at or past it
+  does not re-send it. The built `PermissionRouter.connectionClosed()`
+  (`client/src/permission-router.ts`) DROPS the current and queued requests, so
+  8a must either keep them across a reconnect (re-prompt them once the new
+  connection is up) or re-attach without `since` (resync) — never both drop
+  and re-attach with `since`, or a pending request goes unseen.
 - Permissions: a `permission_request` output calls
   `permissions.request({…, signal})` once per `requestId` (a replay of a known
   id does not re-prompt — the original broker promise is still pending because

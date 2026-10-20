@@ -1,40 +1,102 @@
 import { describe, expect, test } from "bun:test";
-import { RequestPermissionParamsSchema, RequestPermissionResultSchema } from "../src/index.ts";
+import {
+  DomainErrorCode,
+  Method,
+  PermissionOutcomeSchema,
+  PermissionRequestUpdateSchema,
+  PermissionResolvedUpdateSchema,
+  RequestSchemas,
+  ResolvePermissionParamsSchema,
+  ResolvePermissionResultSchema,
+  SessionUpdateSchema,
+  UPDATE_CLASS,
+} from "../src/index.ts";
 
-describe("permission request", () => {
-  test("accepts a request with at least one option", () => {
-    const r = RequestPermissionParamsSchema.safeParse({
-      sessionId: "s1",
-      toolCallId: "t1",
-      title: "Run shell command",
-      options: [{ optionId: "a", name: "Allow", kind: "allow_once" }],
-    });
-    expect(r.success).toBe(true);
-  });
+const request = {
+  type: "permission_request",
+  requestId: "r1",
+  toolCallId: "t1",
+  tool: "shell",
+  title: "Run shell command",
+  options: [{ optionId: "a", name: "Allow", kind: "allow_once" }],
+};
 
-  test("rejects a request with no options", () => {
-    const r = RequestPermissionParamsSchema.safeParse({
-      sessionId: "s1",
-      toolCallId: "t1",
-      title: "x",
-      options: [],
-    });
-    expect(r.success).toBe(false);
-  });
-
-  test("outcome: selected needs an optionId", () => {
+describe("permission_request update", () => {
+  test("accepts a request with at least one option, optional fields omitted", () => {
+    expect(PermissionRequestUpdateSchema.safeParse(request).success).toBe(true);
     expect(
-      RequestPermissionResultSchema.safeParse({ outcome: { outcome: "selected", optionId: "a" } })
+      PermissionRequestUpdateSchema.safeParse({
+        ...request,
+        explanation: "rm -rf build",
+        suggestion: { prefix: "rm" },
+      }).success,
+    ).toBe(true);
+  });
+
+  test("rejects no options, an empty requestId, an empty toolCallId", () => {
+    expect(PermissionRequestUpdateSchema.safeParse({ ...request, options: [] }).success).toBe(
+      false,
+    );
+    expect(PermissionRequestUpdateSchema.safeParse({ ...request, requestId: "" }).success).toBe(
+      false,
+    );
+    expect(PermissionRequestUpdateSchema.safeParse({ ...request, toolCallId: "" }).success).toBe(
+      false,
+    );
+  });
+
+  test("is a member of the update union, class mandatory", () => {
+    expect(SessionUpdateSchema.safeParse(request).success).toBe(true);
+    expect(UPDATE_CLASS.permission_request).toBe("mandatory");
+  });
+});
+
+describe("permission_resolved update", () => {
+  test("carries a selected option or cancelled", () => {
+    const base = { type: "permission_resolved", requestId: "r1" };
+    expect(
+      PermissionResolvedUpdateSchema.safeParse({
+        ...base,
+        outcome: { outcome: "selected", optionId: "a" },
+      }).success,
+    ).toBe(true);
+    expect(
+      PermissionResolvedUpdateSchema.safeParse({ ...base, outcome: { outcome: "cancelled" } })
         .success,
     ).toBe(true);
     expect(
-      RequestPermissionResultSchema.safeParse({ outcome: { outcome: "selected" } }).success,
-    ).toBe(false);
+      SessionUpdateSchema.safeParse({ ...base, outcome: { outcome: "cancelled" } }).success,
+    ).toBe(true);
+    expect(UPDATE_CLASS.permission_resolved).toBe("mandatory");
   });
 
-  test("outcome: cancelled", () => {
+  test("outcome: selected needs an optionId", () => {
+    expect(PermissionOutcomeSchema.safeParse({ outcome: "selected" }).success).toBe(false);
+  });
+});
+
+describe("session/resolve_permission", () => {
+  test("params: sessionId, requestId, optionId — strict", () => {
+    const params = { sessionId: "s", requestId: "r1", optionId: "allow_once" };
+    expect(ResolvePermissionParamsSchema.safeParse(params).success).toBe(true);
+    expect(ResolvePermissionParamsSchema.safeParse({ ...params, optionId: "" }).success).toBe(
+      false,
+    );
+    // An answer is an option; cancelling is the turn's own command.
     expect(
-      RequestPermissionResultSchema.safeParse({ outcome: { outcome: "cancelled" } }).success,
-    ).toBe(true);
+      ResolvePermissionParamsSchema.safeParse({ ...params, outcome: { outcome: "cancelled" } })
+        .success,
+    ).toBe(false);
+    expect(ResolvePermissionResultSchema.safeParse({}).success).toBe(true);
+  });
+
+  test("is registered; the old daemon→client request is gone", () => {
+    expect(Method.ResolvePermission).toBe("session/resolve_permission");
+    expect(RequestSchemas[Method.ResolvePermission].params).toBe(ResolvePermissionParamsSchema);
+    expect(Object.values(Method)).not.toContain("session/request_permission");
+  });
+
+  test("PermissionNotPending is its own domain code", () => {
+    expect(DomainErrorCode.PermissionNotPending).toBe(-32013);
   });
 });
