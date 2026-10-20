@@ -520,15 +520,13 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       — mobile app (React Native or Swift) — own eval, after 8b; carries the JSON re-attach test vectors deferred by 8a (R-Q3)
       — **Eval (deferred, low):** `docs/eval/reaper-gc-flaky-test.md` — test-only flake, at the end of v2
 
-- [ ] **`connect` cannot trust a self-signed daemon** (`serve --tls-cert/--tls-key`
+- [x] **`connect` cannot trust a self-signed daemon** (`serve --tls-cert/--tls-key`
       gives `wss://`, but `connect` had no `--ca-cert` / `--insecure-skip-tls-verify`).
-      **Promoted eval → feat** (2026-10-20): `--ca-cert FILE` (trust anchor) +
+      DONE (2026-10-20, on `main`): `--ca-cert FILE` (trust anchor, PEM-validated) +
       `--insecure-skip-tls-verify` (dev-only); one `tls` object flows to the socket
-      `init` (k8s pattern), plus the classifying probe now carries `tls` too (a bad
-      token over a TLS daemon classifies `unauthorized`, not a redial loop). Executed +
-      fresh-context reviewed (APPROVE-WITH-NITS, all nits resolved) on branch
-      `feat/client-tls-trust`; **Doc:** `docs/feat/client-tls-trust.md`. Type: feat ·
-      Size: S · Blast: contained.
+      `init` and the classifying probe; a failed TLS handshake (close 1015) is named and
+      the CLI points at the flag; TLS flags on `ws://` are an error.
+      **Doc:** `docs/feat/client-tls-trust.md`. Type: feat · Size: S · Blast: contained.
 
 - [ ] **Skills support (Agent Skills, `SKILL.md`)** — packaged procedural
       guidance the model opts into (skills = *how to do it*; the result pipeline

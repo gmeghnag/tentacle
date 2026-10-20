@@ -33,10 +33,15 @@ export type ChannelErrorKind = "unauthorized" | "gone" | "unreachable" | "reject
 
 export class ChannelError extends Error {
   readonly kind: ChannelErrorKind;
-  constructor(kind: ChannelErrorKind, message: string) {
+  /** The WebSocket close code that ended the upgrade, when there was one. */
+  readonly closeCode?: number;
+  constructor(kind: ChannelErrorKind, message: string, closeCode?: number) {
     super(message);
     this.name = "ChannelError";
     this.kind = kind;
+    if (closeCode !== undefined) {
+      this.closeCode = closeCode;
+    }
   }
 }
 

@@ -207,7 +207,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const url = positional[0] ?? "";
     try {
       const token = await resolveToken(flags);
-      const tls = await resolveTls(flags, bools);
+      const tls = await resolveTls(url, flags, bools);
       await connectTui({ url, ...(token ? { token } : {}), ...(tls ? { tls } : {}) }, write);
       return 0;
     } catch (error) {

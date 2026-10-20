@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,53 +9,138 @@ import { PermissionBroker } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
-import { bufferedErrorSink, connectTui } from "../src/connect.ts";
+import { bufferedErrorSink, connectTui, tlsTrustHint } from "../src/connect.ts";
 import { resolveTls } from "../src/flags.ts";
 
 describe("resolveTls (connect flags, docs/feat/client-tls-trust.md)", () => {
   const flags = (entries: [string, string][] = []) => new Map(entries);
   const bools = (names: string[] = []) => new Set(names);
+  const WSS = "wss://127.0.0.1:4000";
+  // A real self-signed cert (the client package's test fixture): `--ca-cert`
+  // content is parsed, so a fake PEM no longer passes.
+  const PEM = readFileSync(
+    new URL("../../client/test/fixtures/server.pem", import.meta.url),
+    "utf8",
+  );
 
-  test("no flags → undefined (the system store is used)", async () => {
-    expect(await resolveTls(flags(), bools())).toBeUndefined();
-  });
-
-  test("--ca-cert reads the PEM contents", async () => {
+  async function withCaFile<T>(content: string, run: (path: string) => Promise<T>): Promise<T> {
     const dir = await mkdtemp(join(tmpdir(), "tls-trust-"));
     try {
-      const pem = "-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----\n";
       const path = join(dir, "ca.pem");
-      await writeFile(path, pem);
-      const tls = await resolveTls(flags([["ca-cert", path]]), bools());
-      expect(tls).toEqual({ ca: pem });
+      await writeFile(path, content);
+      return await run(path);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  }
+
+  test("no flags → undefined (the system store is used), whatever the scheme", async () => {
+    expect(await resolveTls(WSS, flags(), bools())).toBeUndefined();
+    expect(await resolveTls("ws://127.0.0.1:4000", flags(), bools())).toBeUndefined();
+  });
+
+  test("--ca-cert reads the PEM contents", async () => {
+    await withCaFile(PEM, async (path) => {
+      expect(await resolveTls(WSS, flags([["ca-cert", path]]), bools())).toEqual({ ca: PEM });
+    });
   });
 
   test("--insecure-skip-tls-verify sets rejectUnauthorized:false", async () => {
-    expect(await resolveTls(flags(), bools(["insecure-skip-tls-verify"]))).toEqual({
+    expect(await resolveTls(WSS, flags(), bools(["insecure-skip-tls-verify"]))).toEqual({
       rejectUnauthorized: false,
     });
   });
 
   test("both flags together set both fields", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "tls-trust-"));
-    try {
-      const path = join(dir, "ca.pem");
-      await writeFile(path, "PEM");
+    await withCaFile(PEM, async (path) => {
       expect(
-        await resolveTls(flags([["ca-cert", path]]), bools(["insecure-skip-tls-verify"])),
-      ).toEqual({ ca: "PEM", rejectUnauthorized: false });
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+        await resolveTls(WSS, flags([["ca-cert", path]]), bools(["insecure-skip-tls-verify"])),
+      ).toEqual({ ca: PEM, rejectUnauthorized: false });
+    });
   });
 
   test("a missing/unreadable --ca-cert fails loudly before any socket", async () => {
     await expect(
-      resolveTls(flags([["ca-cert", "/nonexistent/no-such-ca.pem"]]), bools()),
+      resolveTls(WSS, flags([["ca-cert", "/nonexistent/no-such-ca.pem"]]), bools()),
     ).rejects.toThrow(/cannot read --ca-cert .*no-such-ca.pem/);
+  });
+
+  test("a readable but empty / non-PEM / corrupt --ca-cert fails loudly (not a later 'cannot reach')", async () => {
+    for (const content of [
+      "",
+      "not a certificate\n",
+      "-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----\n",
+    ]) {
+      await withCaFile(content, async (path) => {
+        await expect(resolveTls(WSS, flags([["ca-cert", path]]), bools())).rejects.toThrow(
+          /--ca-cert .*ca\.pem.* (contains no|has an invalid) PEM certificate/,
+        );
+      });
+    }
+    // A bundle is checked block by block: a valid first cert does not excuse a bad one.
+    await withCaFile(
+      `${PEM}-----BEGIN CERTIFICATE-----\nABC\n-----END CERTIFICATE-----\n`,
+      async (path) => {
+        await expect(resolveTls(WSS, flags([["ca-cert", path]]), bools())).rejects.toThrow(
+          /has an invalid PEM certificate/,
+        );
+      },
+    );
+  });
+
+  test("TLS flags on a non-wss:// URL are an error, not silently ignored", async () => {
+    await withCaFile(PEM, async (path) => {
+      await expect(
+        resolveTls("ws://127.0.0.1:4000", flags([["ca-cert", path]]), bools()),
+      ).rejects.toThrow("--ca-cert needs a wss:// URL");
+    });
+    await expect(
+      resolveTls("ws://127.0.0.1:4000", flags(), bools(["insecure-skip-tls-verify"])),
+    ).rejects.toThrow("--insecure-skip-tls-verify needs a wss:// URL");
+    // The scheme is case-insensitive.
+    expect(
+      await resolveTls("WSS://127.0.0.1:4000", flags(), bools(["insecure-skip-tls-verify"])),
+    ).toEqual({ rejectUnauthorized: false });
+  });
+});
+
+describe("tlsTrustHint (a TLS handshake failure points at the right flag)", () => {
+  const tlsFailure = new ChannelError("unreachable", "TLS handshake failed (close 1015): …", 1015);
+
+  test("no trust configured → points at --ca-cert", () => {
+    expect(tlsTrustHint(tlsFailure, undefined)).toContain("--ca-cert FILE");
+  });
+
+  test("a --ca-cert was given → asks to check it is the daemon's signer", () => {
+    expect(tlsTrustHint(tlsFailure, { ca: "PEM" })).toContain(
+      "check that --ca-cert is the CA that signed",
+    );
+  });
+
+  test("verification skipped, or not a TLS failure → no hint", () => {
+    expect(tlsTrustHint(tlsFailure, { rejectUnauthorized: false })).toBeUndefined();
+    expect(
+      tlsTrustHint(new ChannelError("unreachable", "cannot reach", 1006), undefined),
+    ).toBeUndefined();
+    expect(tlsTrustHint(new Error("boom"), undefined)).toBeUndefined();
+  });
+
+  test("connectTui rethrows the dial's TLS failure with the hint, same kind, before any mount", async () => {
+    let mounted = false;
+    const failure = connectTui({ url: "wss://fake" }, () => {}, {
+      dial: () => async () => {
+        throw tlsFailure;
+      },
+      startTui: async () => {
+        mounted = true;
+      },
+    });
+    await expect(failure).rejects.toThrow(/TLS handshake failed .*--ca-cert FILE/);
+    await failure.catch((error: unknown) => {
+      expect(error).toBeInstanceOf(ChannelError);
+      expect((error as ChannelError).kind).toBe("unreachable");
+    });
+    expect(mounted).toBe(false);
   });
 });
 

@@ -200,8 +200,9 @@ describe("the real daemon handshake over TLS (the exact factory `connect` uses)"
       tls: { cert: SERVER_CA, key: SERVER_KEY },
     });
     try {
-      // Without a trust anchor the upgrade dies in the TLS layer (close 1006)
-      // → the factory classifies it `unreachable`, never a silent success.
+      // Without a trust anchor the upgrade dies in the TLS layer (close 1015)
+      // → the factory classifies it `unreachable` and names the TLS handshake,
+      // never a silent success nor a bare "cannot reach".
       let dialError: unknown;
       try {
         await webSocketChannelFactory(server.url)();
@@ -210,6 +211,8 @@ describe("the real daemon handshake over TLS (the exact factory `connect` uses)"
       }
       expect(dialError).toBeInstanceOf(ChannelError);
       expect((dialError as ChannelError).kind).toBe("unreachable");
+      expect((dialError as ChannelError).message).toContain("TLS handshake failed");
+      expect((dialError as ChannelError).closeCode).toBe(1015);
 
       for (const tls of [
         { ca: SERVER_CA },

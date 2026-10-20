@@ -9,6 +9,7 @@
  * state shows in the StatusBar.
  */
 import {
+  ChannelError,
   type ConnectOptions as ClientConnectOptions,
   RemoteClient,
   type TlsOptions,
@@ -51,6 +52,25 @@ export function bufferedErrorSink(): {
   };
 }
 
+/**
+ * The CLI's hint for a failed TLS handshake (close 1015,
+ * docs/feat/client-tls-trust.md): the client names the failure, the CLI names
+ * the flag. `undefined` when it is not a TLS failure or verification was
+ * skipped (then the daemon most likely does not serve TLS — the message
+ * already says so).
+ */
+export function tlsTrustHint(error: unknown, tls: TlsOptions | undefined): string | undefined {
+  if (!(error instanceof ChannelError) || error.closeCode !== 1015) {
+    return undefined;
+  }
+  if (tls?.rejectUnauthorized === false) {
+    return undefined;
+  }
+  return tls?.ca !== undefined
+    ? "check that --ca-cert is the CA that signed the daemon's certificate"
+    : "to trust a self-signed or private-CA daemon, pass --ca-cert FILE (or --insecure-skip-tls-verify, dev-only)";
+}
+
 /** Injectable for tests; production uses the real socket and TUI. */
 export interface ConnectDeps {
   /** A channel factory for the daemon at `url` (rejects with a `ChannelError`). */
@@ -71,7 +91,16 @@ export async function connectTui(
   });
   // Before Ink mounts: a failure here (a bad token, nothing listening) is the
   // plain error the caller prints.
-  const channel = await dial();
+  let channel: DuplexChannel;
+  try {
+    channel = await dial();
+  } catch (error) {
+    const hint = tlsTrustHint(error, options.tls);
+    if (hint !== undefined && error instanceof ChannelError) {
+      throw new ChannelError(error.kind, `${error.message} — ${hint}`, error.closeCode);
+    }
+    throw error;
+  }
   const sink = bufferedErrorSink();
   if (options.tls?.rejectUnauthorized === false) {
     // Dev-only, so it is surfaced — never silent (AGENTS §7: via the sink, not

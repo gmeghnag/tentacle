@@ -5,6 +5,7 @@
  * command whose stdout is the token — so it is never stored in plaintext, like
  * `apiKeyCommand`), then `TENTACLE_REMOTE_TOKEN`.
  */
+import { X509Certificate } from "node:crypto";
 import type { TlsOptions } from "@tentacle/client";
 
 export interface ParsedFlags {
@@ -267,14 +268,40 @@ export function parseServeLimits(parsed: Pick<ParsedFlags, "flags" | "bools">): 
   ) as ServeLimits;
 }
 
+/** One PEM certificate block (a `--ca-cert` file may be a bundle of several). */
+const PEM_CERTIFICATE = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
+
+/**
+ * Parse every certificate in a `--ca-cert` file, so a readable but empty /
+ * non-PEM / corrupt file fails here, by name — not later as a TLS error that
+ * reads like "cannot reach the daemon".
+ */
+function assertPemCertificates(text: string, path: string): void {
+  const blocks = text.match(PEM_CERTIFICATE) ?? [];
+  if (blocks.length === 0) {
+    throw new Error(`--ca-cert ${path} contains no PEM certificate`);
+  }
+  for (const block of blocks) {
+    try {
+      new X509Certificate(block);
+    } catch (error) {
+      throw new Error(
+        `--ca-cert ${path} has an invalid PEM certificate: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}
+
 /**
  * `connect`'s TLS trust (docs/feat/client-tls-trust.md): `--ca-cert` reads the
  * PEM of the CA (or self-signed cert) that signed the daemon's cert, and
  * `--insecure-skip-tls-verify` skips verification (dev-only, warned by the
- * caller). Neither set → undefined → the system store is used. A
- * missing/unreadable CA file fails loudly here, before any socket.
+ * caller). Neither set → undefined → the system store is used. Every misuse
+ * fails loudly here, before any socket: a TLS flag on a non-`wss://` URL
+ * (it would be silently ignored), and a missing, unreadable or non-PEM CA file.
  */
 export async function resolveTls(
+  url: string,
   flags: ReadonlyMap<string, string>,
   bools: ReadonlySet<string>,
 ): Promise<TlsOptions | undefined> {
@@ -282,6 +309,10 @@ export async function resolveTls(
   const insecure = bools.has("insecure-skip-tls-verify");
   if (caPath === undefined && !insecure) {
     return undefined;
+  }
+  if (!/^wss:\/\//i.test(url)) {
+    const flag = caPath !== undefined ? "--ca-cert" : "--insecure-skip-tls-verify";
+    throw new Error(`${flag} needs a wss:// URL (got ${url || "none"})`);
   }
   let ca: string | undefined;
   if (caPath !== undefined) {
@@ -292,6 +323,7 @@ export async function resolveTls(
         `cannot read --ca-cert ${caPath}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    assertPemCertificates(ca, caPath);
   }
   return {
     ...(ca !== undefined ? { ca } : {}),

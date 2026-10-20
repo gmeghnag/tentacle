@@ -1,7 +1,7 @@
 # feat/client-tls-trust — `connect` trusts a self-signed daemon: `--ca-cert` and `--insecure-skip-tls-verify`
 
-> **Status:** Review 2 (claude-opus-5-5): REQUEST-CHANGES (small) — findings 1–5 open; gate green
-> **Branch:** `feat/client-tls-trust`
+> **Status:** done — Review 2 findings 1–5 fixed on `main` (owner: no further review); gate green
+> **Branch:** `feat/client-tls-trust` (merged `31b1b26`); Review 2 fixes committed directly on `main` by owner decision (2026-10-20)
 > **Type:** eval → feat · **Size:** S · **Blast:** contained · **Suited:** weaker model executes; standard in-context Review
 
 ## Context
@@ -169,15 +169,22 @@ created):
 - **`--ca-cert` points at a missing/unreadable file** → throw at flag resolution, before
   `connectTui`; the user gets `[connect error] cannot read --ca-cert …` and no socket is
   opened. Converges to a clean startup failure.
-- **Self-signed daemon, no `--ca-cert`** → the socket errors in the TLS layer;
-  `connectWebSocket` rejects with the existing `failed to connect to <url>`, and the
-  factory (the `connect` path) classifies it `unreachable`. The user is pointed at
-  `--ca-cert` by the README. No silent success.
-- **Wrong CA (file exists, didn't sign the server)** → TLS handshake fails → the same
-  `failed to connect` rejection. The test suite pins this (non-vacuity check).
-- **`wss://` URL but the daemon is not actually serving TLS** → the socket errors at
-  connect time (TLS expected, plain returned) → `failed to connect`. Converges to a
-  clean failure, not a hang.
+- **`--ca-cert` is readable but empty / non-PEM / corrupt** (Review 2, Finding 2) →
+  `resolveTls` parses every certificate block (`X509Certificate`) and throws
+  `--ca-cert FILE contains no PEM certificate` / `has an invalid PEM certificate`
+  before any socket. Without that check, Bun closes 1006 and the user sees "cannot reach".
+- **A TLS flag on a non-`wss://` URL** (Review 2, Finding 3) → `resolveTls` throws
+  `--ca-cert needs a wss:// URL`. Without that check, the flag is silently ignored.
+- **Self-signed daemon, no `--ca-cert`** → Bun closes the upgrade with **1015** (TLS
+  handshake failure); `classifyUpgradeFailure` returns `unreachable`, "TLS handshake
+  failed (close 1015): the daemon's certificate is not trusted, or it does not serve
+  TLS", carrying `closeCode`. The CLI's pure `tlsTrustHint` appends "pass --ca-cert
+  FILE (or --insecure-skip-tls-verify, dev-only)" (Review 2, Finding 1). No silent
+  success. (`connectWebSocket`, the direct open, still rejects `failed to connect`.)
+- **Wrong CA (file exists, didn't sign the server)** → the same 1015; the hint asks to
+  check that `--ca-cert` is the daemon's signer.
+- **`wss://` URL but the daemon is not actually serving TLS** → also 1015 (measured),
+  hence the message names both causes. Converges to a clean failure, not a hang.
 - **Insecure mode + a MITM** → the user *chose* it and got a warning (flushed after the
   TUI exits, §7-compliant); the risk is documented as dev-only. Not a silent drop — it
   is surfaced.
@@ -634,3 +641,40 @@ test. Its gaps were in the same area Review 1 also missed: what the user *sees* 
 trust fails. Both same-model passes tested the classification *kind* but not the
 *message*, and neither fed `resolveTls` a readable but invalid file. That shared blind
 spot is why a different-model pass was worth running.
+
+#### Resolution of Review 2 (claude-opus-5-5, 2026-10-20)
+
+The owner directed: fix on `main`, no further review. Each fix was red-first.
+
+1. **Finding 1** — `ChannelError` gains an optional `closeCode`
+   (`client/src/link-machine.ts`). `classifyUpgradeFailure` maps **1015** to
+   `unreachable` with "TLS handshake failed (close 1015): the daemon's certificate is
+   not trusted, or it does not serve TLS". It stays transient, because a redial may meet
+   a rotated cert. The client stays CLI-agnostic: the pure `tlsTrustHint`
+   (`cli/src/connect.ts`) adds the flag hint, and `connectTui` rethrows the dial error
+   with that hint, keeping the same kind and close code. With no trust configured the
+   hint says "pass --ca-cert FILE"; with a `--ca-cert` it says to check that this is the
+   daemon's signer; with `--insecure-skip-tls-verify` there is no hint. The test
+   comment "close 1006" is corrected to 1015.
+2. **Finding 2** — `resolveTls` parses every PEM block with `node:crypto`
+   `X509Certificate`, so an empty, non-PEM or corrupt file (including a bundle with one
+   bad block) throws by name before any socket.
+3. **Finding 3** — `resolveTls(url, flags, bools)` rejects a TLS flag on a non-`wss://`
+   URL (case-insensitive check).
+4. **Finding 4** — the unused `fixtures/other-ca-key.pem` was deleted.
+5. **Finding 5** — resolved by the owner's own commit and merge of the branch
+   (`a593bb1`, merged `31b1b26`). These Review 2 fixes land directly on `main` on top of
+   that merge. The key from Finding 4 had slipped into that commit, so the owner
+   rewrote the unpushed commit and its merge (`filter-branch`, range `8ea7c77..`) to
+   remove it. No ref contains it anymore.
+6. **Finding 6** (insecure warning only after exit) — left as is, as Review 2 marked it
+   optional.
+
+**Red → green:** `classifyUpgradeFailure` 1015 and the real-daemon "TLS handshake
+failed" assertion → 2 fail, then green. `resolveTls` with the new signature but no
+checks → exactly the empty/non-PEM and `ws://` tests fail, then green. A mutation that
+disables the `connectTui` rethrow → 1 fail ("rethrows … with the hint"), reverted
+byte-identical. The E2E through `main()` (9 cases) now prints the actionable message in
+every case.
+
+*— claude-opus-5-5, 2026-10-20*

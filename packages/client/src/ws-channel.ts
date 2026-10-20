@@ -137,7 +137,7 @@ export function connectWebSocket(
  * (docs/feat/client-reattach-frontends.md, Experiment Q8), so a 1002 is told
  * apart by `probeStatus`: the HTTP status of a plain GET to the same URL (the
  * daemon answers 401 to a bad token, 426 to a good one), `null` when the probe
- * failed — never terminal on a guess.
+ * failed — never terminal on a guess. A 1015 is a failed TLS handshake.
  */
 export function classifyUpgradeFailure(
   closeCode: number,
@@ -145,16 +145,28 @@ export function classifyUpgradeFailure(
 ): ChannelError {
   if (closeCode === 1002) {
     if (probeStatus === 401) {
-      return new ChannelError("unauthorized", "the daemon answered 401 to the token");
+      return new ChannelError("unauthorized", "the daemon answered 401 to the token", closeCode);
     }
     return new ChannelError(
       "rejected",
       probeStatus === null
         ? "the daemon refused the upgrade"
         : `the daemon refused the upgrade (HTTP ${probeStatus})`,
+      closeCode,
     );
   }
-  return new ChannelError("unreachable", `cannot reach the daemon (close ${closeCode})`);
+  if (closeCode === 1015) {
+    // Bun closes a `wss://` upgrade whose TLS handshake failed with 1015: an
+    // untrusted cert (self-signed / private CA / wrong CA), or a daemon that
+    // does not serve TLS at all (docs/feat/client-tls-trust.md). Still
+    // transient: a redial may meet a rotated cert.
+    return new ChannelError(
+      "unreachable",
+      "TLS handshake failed (close 1015): the daemon's certificate is not trusted, or it does not serve TLS",
+      closeCode,
+    );
+  }
+  return new ChannelError("unreachable", `cannot reach the daemon (close ${closeCode})`, closeCode);
 }
 
 export interface ChannelFactoryDeps {

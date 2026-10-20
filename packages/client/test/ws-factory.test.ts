@@ -35,6 +35,14 @@ describe("classifyUpgradeFailure (pure)", () => {
     expect(classifyUpgradeFailure(1006, null).kind).toBe("unreachable");
     expect(classifyUpgradeFailure(1001, null).kind).toBe("unreachable");
   });
+
+  test("1015 names the TLS handshake (untrusted cert, or no TLS served) and keeps the close code", () => {
+    const error = classifyUpgradeFailure(1015, null);
+    expect(error.kind).toBe("unreachable");
+    expect(error.message).toContain("TLS handshake failed");
+    expect(error.closeCode).toBe(1015);
+    expect(classifyUpgradeFailure(1006, null).closeCode).toBe(1006);
+  });
 });
 
 describe("webSocketChannelFactory over a real socket", () => {
