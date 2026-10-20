@@ -29,7 +29,7 @@ D1 — the restarted daemon is a new `epoch`, so clients resync.
 Planned, source-verified, in the two source docs — read both; this doc is
 their single execution unit:
 
-1. `docs/eval/daemon-side-persistence.md` — every item marked **[B]**
+1. `docs/feat/daemon-side-persistence.md` — every item marked **[B]**
    ("Part B — `suspended-turn-resume`" in Design, Files, Tests; the
    `resumeFrom` prototype in Load-bearing assumption).
 2. `docs/eval/permission-events.md` — "Slice 7b — suspension survives a

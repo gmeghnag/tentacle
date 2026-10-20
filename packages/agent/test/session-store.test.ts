@@ -7,6 +7,7 @@ import {
   JsonSessionStore,
   type SessionRecord,
   parseSessionRecord,
+  projectKey,
   recordFromSnapshot,
   sessionTitle,
 } from "../src/index.ts";
@@ -338,5 +339,65 @@ describe("parseSessionRecord", () => {
         expect(result.reason.length).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe("JsonSessionStore.remove", () => {
+  test("deletes the file; a write in flight and one queued never resurrect it", async () => {
+    // Mutation: skip waiting for the running write → it renames over the deleted file.
+    // Mutation: keep the queued record → the pump writes it after the rm.
+    const d = join(dir, "remove");
+    const gated = gatedIo();
+    const store = new JsonSessionStore(d, gated.io);
+    const first = store.save(rec("r", 1));
+    const queued = store.save(rec("r", 2));
+    while (gated.pending() === 0) await new Promise((r) => setTimeout(r, 1));
+    const removing = store.remove("r");
+    gated.release();
+    await Promise.all([first, queued, removing]);
+    await store.drain();
+    expect(gated.written).toEqual([1]);
+    expect(await readdir(d)).toEqual([]);
+    expect((await store.load("r")).status).toBe("absent");
+  });
+
+  test("a save AFTER a remove wins: the newer record is not deleted", async () => {
+    // Mutation: remove = drop queue + wait for the pump + rm → the later save(2) is deleted.
+    const d = join(dir, "remove-then-save");
+    const gated = gatedIo();
+    const store = new JsonSessionStore(d, gated.io);
+    const first = store.save(rec("r", 1));
+    while (gated.pending() === 0) await new Promise((r) => setTimeout(r, 1));
+    const removing = store.remove("r");
+    const second = store.save(rec("r", 2));
+    gated.release();
+    while (gated.pending() === 0) await new Promise((r) => setTimeout(r, 1));
+    gated.release();
+    await Promise.all([first, removing, second]);
+    await store.drain();
+    const loaded = await store.load("r");
+    expect(loaded.status === "ok" ? loaded.record.updatedAt : loaded.status).toBe(2);
+  });
+
+  test("an absent file is a success; an unsafe id is refused", async () => {
+    const store = new JsonSessionStore(join(dir, "remove-absent"));
+    await expect(store.remove("nope")).resolves.toBeUndefined();
+    await expect(store.remove("../x")).rejects.toThrow(/invalid session id/);
+  });
+});
+
+describe("projectKey", () => {
+  test("<basename>-<12 hex>, stable, distinct for distinct paths, symlinks resolved", async () => {
+    // Mutation: hash the unresolved path → the symlink gets another key.
+    const { mkdir, symlink } = await import("node:fs/promises");
+    const a = join(dir, "proj-a");
+    await mkdir(a, { recursive: true });
+    const link = join(dir, "proj-link");
+    await symlink(a, link);
+    expect(projectKey(a)).toMatch(/^proj-a-[0-9a-f]{12}$/);
+    expect(projectKey(a)).toBe(projectKey(`${a}/`));
+    expect(projectKey(link)).toBe(projectKey(a));
+    expect(projectKey(join(dir, "proj-b"))).not.toBe(projectKey(a)); // absent: still keyed
+    expect(projectKey("/")).toMatch(/^root-[0-9a-f]{12}$/);
   });
 });

@@ -161,11 +161,21 @@ assume.
   decouple: the daemon-side default `allowAll` auto-approves everything and the
   interactive prompt is never reached. See the invariant comment on `runPodTui`
   (`cli/main.ts`) and its regression test (a *separate* daemon-side broker spy).
-- **Persistence lives on the laptop/main thread.** The daemon owns the live
-  conversation; the main thread owns the on-disk JSON store. Read history back
-  via `snapshot` after each turn/compaction and persist there; the main owns the
-  session uid (passed into `session/open`) so `--resume` keeps the file. Persist
-  only `ChatMessage`s — never rendering-only events (e.g. `steer`).
+- **Persistence lives on the laptop/main thread — and, where the daemon is
+  trusted (`serve` on the user's own host), the daemon also persists.** The
+  daemon owns the live conversation; the main thread owns its on-disk JSON
+  store and always persists its own copy from `snapshot` after each
+  turn/compaction (offline viewing, `open{messages}` recovery). The main owns
+  the session uid (passed into `session/open`) so `--resume` keeps the file.
+  Persist only `ChatMessage`s — never rendering-only events (e.g. `steer`). A
+  `serve` daemon additionally writes each live session to
+  `<configDir>/daemon/<projectKey(cwd)>/` at every committed boundary and
+  reloads it on start (one daemon per store: a lock); on re-attach the daemon's
+  copy wins. Pod daemons (`serve --stdio`, `run`/`attach`) and the in-process
+  worker never persist — only `startDaemon` gives `SessionHost` a persister. A
+  daemon write inside a turn is `SessionPersister.schedule` (synchronous
+  capture, never awaited) — the steering window. Design:
+  `docs/feat/daemon-side-persistence.md`.
 - **Model stays on the laptop (pod reverse-tunnel).** A pod reaches the model
   THROUGH us (`model/stream` over RPC, `ProxyModelProvider`): the daemon is given
   the LOCAL provider so the endpoint + API key never leave the laptop. Never put
@@ -180,6 +190,8 @@ assume.
   laptop**: an allowlist of what the laptop itself published, and a prompt
   through the single broker. A daemon-side check is UX, never security. Never
   let a pod-originated prompt create a lasting approval for pod-supplied input.
+  This is also why pod daemons store nothing durable: a record a pod wrote is
+  pod-supplied history.
   Rationale and design: `docs/eval/remote-execution-model.md`.
 - **Protocol: one shared truth, versioned honestly.** Schemas in
   `@tentacle/protocol` are the shared truth; wire BOTH ends (request and, if it

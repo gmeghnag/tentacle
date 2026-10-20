@@ -287,7 +287,9 @@ export class Agent {
         // INVARIANT: from this drain to the `turn_end` yield (and on through the
         // daemon's `HostedSession.finishTurn` clearing its controller and fanning
         // `turn_end` out to every attached client, never awaited) there must be
-        // NO `await` — no end-of-turn hook, no async persist. A transport message
+        // NO `await` — no end-of-turn hook, no async persist. (`serve`'s
+        // turn-end write is `persister.schedule` inside the synchronous
+        // `finishTurn`: a capture, never awaited — never `await` a flush there.) A transport message
         // is a macrotask and cannot interleave, so a remote `session/enqueue` is
         // either drained here or rejected as `NoTurnRunning`. An await here
         // reopens a window where it is accepted and then silently dropped.

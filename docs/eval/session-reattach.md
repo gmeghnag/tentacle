@@ -286,7 +286,7 @@ PROTOCOL_VERSION: bumped by each breaking child
      history holds the assistant message with the not-yet-executed tool call;
      on restart the daemon rebuilds "turn suspended on permission X" and
      re-emits `permission_request`. Requires daemon-side persistence for
-     `serve` (now a v2 child, `docs/eval/daemon-side-persistence.md`), and
+     `serve` (now a v2 child, `docs/feat/daemon-side-persistence.md`), and
      makes "tool call awaiting permission" a **legitimate** history state —
      `docs/eval/history-validity-invariant.md` must not "repair" it.
    - Background jobs keep running while suspended; only a session close stops
@@ -488,7 +488,7 @@ to promotion time (each child gets its mandatory fresh-context Review then).
 | 4 | `docs/eval/session-registry.md` — registry, `open{since}` (replay as notifications), `close`, detach-on-close, fan-out, backpressure close, model-proxy rule | M (near L) · load-bearing | 1, 3c |
 | 5 | `docs/feat/session-ttl-limits.md` — 24 h reaper, daemon-wide limits (refuse only), server keepalive | M · load-bearing | 4 |
 | 5b | `docs/fix/session-store-durability.md` — prerequisite of 6 (D8) | see doc | — |
-| 6 | `docs/eval/daemon-side-persistence.md` Part A — `serve` persists history; a turn suspended at restart is closed "not executed" | M · load-bearing | 4, 5b |
+| 6 | `docs/feat/daemon-side-persistence.md` Part A — `serve` persists history; a turn suspended at restart is closed "not executed" | M · load-bearing | 4, 5b |
 | 7a | `docs/eval/permission-events.md` (live slice) — permissions as events, nonce, first-wins, no timeout, cancel settles | L · load-bearing | 4 |
 | 7b | `docs/eval/suspended-turn-resume.md` — rebuild a suspended turn after a `serve` restart | M · load-bearing | 6, 7a |
 | 8a | `docs/eval/client-reattach.md` — `RemoteClient` reconnect, pure reducer, the property test | M · load-bearing | 3c, 4, 7a |

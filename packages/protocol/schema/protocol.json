@@ -1290,6 +1290,7 @@
     "AlreadyInitialized": -32007,
     "Cancelled": -32010,
     "CompactInProgress": -32009,
+    "DaemonRestarted": -32012,
     "InternalError": -32603,
     "InvalidParams": -32602,
     "InvalidRequest": -32600,

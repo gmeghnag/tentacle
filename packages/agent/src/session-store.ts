@@ -11,8 +11,10 @@
  * wins). Reads validate the shape and report a bad file instead of treating
  * it as absent.
  */
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdir, open, readdir, rename, rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { ChatMessage } from "@tentacle/core";
 import type { SessionSnapshot } from "./session.ts";
 
@@ -101,6 +103,26 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 export function isValidSessionId(id: string): boolean {
   return SAFE_ID.test(id);
 }
+/**
+ * A directory name for the project at `cwd`: `<basename>-<sha256(realpath)[:12]>`.
+ * The basename keeps it readable, the hash keeps distinct paths apart (and the
+ * name short). A cwd that no longer exists falls back to its resolved path.
+ */
+export function projectKey(cwd: string): string {
+  const absolute = resolve(cwd);
+  let real = absolute;
+  try {
+    real = realpathSync(absolute);
+  } catch {
+    // Deleted (or unreadable) cwd: the resolved path still names it.
+  }
+  const hash = createHash("sha256").update(real).digest("hex").slice(0, 12);
+  const base = basename(real)
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .replace(/^\.+/, "");
+  return `${base || "root"}-${hash}`;
+}
+
 /** A temp this old is a leftover even if its pid is alive again (pid reuse). */
 const STALE_TEMP_MS = 60 * 60 * 1000;
 /** `.<uid>.json.tmp-<pid>-<rand>`: the writer's pid tells a leftover from a write in flight. */
@@ -218,9 +240,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** One uid's write queue: at most one write running, at most one record waiting. */
+/** A queued deletion: in the same per-uid queue as saves, so the latest operation wins. */
+const REMOVE = Symbol("remove");
+
+/** One uid's write queue: at most one write running, at most one operation waiting. */
 interface WriteSlot {
-  queued: SessionRecord | null;
+  queued: SessionRecord | typeof REMOVE | null;
   /** Settles the callers of the queued record (shared by every save it superseded). */
   waiters: Array<{ resolve: () => void; reject: (error: unknown) => void }>;
   running: Promise<void> | null;
@@ -249,29 +274,34 @@ export class JsonSessionStore {
    * must handle the rejection (an unhandled one terminates the process).
    */
   save(record: SessionRecord): Promise<void> {
-    let slot = this.slots.get(record.id);
+    return this.enqueue(record.id, record);
+  }
+
+  /** Queue `op` for `id` (replacing a queued one) and start the pump if idle. */
+  private enqueue(id: string, op: SessionRecord | typeof REMOVE): Promise<void> {
+    let slot = this.slots.get(id);
     if (!slot) {
       slot = { queued: null, waiters: [], running: null };
-      this.slots.set(record.id, slot);
+      this.slots.set(id, slot);
     }
     const { promise, resolve, reject } = Promise.withResolvers<void>();
-    slot.queued = record;
+    slot.queued = op;
     slot.waiters.push({ resolve, reject });
     if (!slot.running) {
-      slot.running = this.pump(record.id, slot);
+      slot.running = this.pump(id, slot);
     }
     return promise;
   }
 
-  /** Write queued records until the slot is empty; never rejects. */
+  /** Run queued operations until the slot is empty; never rejects. */
   private async pump(id: string, slot: WriteSlot): Promise<void> {
     while (slot.queued) {
-      const record = slot.queued;
+      const op = slot.queued;
       const waiters = slot.waiters;
       slot.queued = null;
       slot.waiters = [];
       try {
-        await this.writeAtomic(record);
+        await (op === REMOVE ? this.removeFile(id) : this.writeAtomic(op));
         for (const waiter of waiters) {
           waiter.resolve();
         }
@@ -332,6 +362,29 @@ export class JsonSessionStore {
       } catch {
         // A temp that vanished or can't be removed is not worth failing over.
       }
+    }
+  }
+
+  /**
+   * Delete a session file, in the uid's queue like a save, so the LATEST
+   * operation wins: a save queued before it is superseded (its callers resolve
+   * with the removal), a save already running finishes first and is then
+   * deleted, and a save made after it writes the file again. An absent file is
+   * a success; any other failure rejects.
+   */
+  async remove(id: string): Promise<void> {
+    if (!SAFE_ID.test(id)) {
+      throw new Error(`invalid session id ${JSON.stringify(id)}`);
+    }
+    return this.enqueue(id, REMOVE);
+  }
+
+  private async removeFile(id: string): Promise<void> {
+    const target = this.file(id);
+    try {
+      await rm(target, { force: true });
+    } catch (error) {
+      throw new Error(`couldn't remove ${target}: ${describeFsError(error)}`, { cause: error });
     }
   }
 

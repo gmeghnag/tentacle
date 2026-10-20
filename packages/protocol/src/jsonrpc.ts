@@ -39,6 +39,8 @@ export const DomainErrorCode = {
   Cancelled: -32010,
   /** A `session/snapshot` cursor from an older epoch (the history was replaced): restart paging. */
   StaleCursor: -32011,
+  /** A turn that a `serve` restart interrupted (the cached end of a retried `session/prompt`). */
+  DaemonRestarted: -32012,
 } as const;
 
 /**

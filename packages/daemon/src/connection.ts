@@ -182,13 +182,17 @@ export class Connection {
     return hosted.snapshotPage(params.cursor, params.limit);
   }
 
-  // Synchronous on purpose: it pushes into the steering queue and returns at
-  // once (AGENTS §7 — requests dispatch concurrently). The model sees the text
-  // at the next model-round boundary, which streams back as a `steer` update.
-  // Idempotency and the "this turn is running" check live in `HostedSession`.
-  private enqueue(params: EnqueueParams): EnqueueResult {
+  // The push into the steering queue is synchronous (AGENTS §7 — requests
+  // dispatch concurrently; the running check and the push are one step). The
+  // model sees the text at the next model-round boundary, which streams back as
+  // a `steer` update. Idempotency and the "this turn is running" check live in
+  // `HostedSession`. Only the ACK waits: on `serve`, until the steer is on disk
+  // (an acked steer survives a restart); elsewhere it is immediate. A failed
+  // write does not fail the ack — the steer is queued; the daemon log has it.
+  private async enqueue(params: EnqueueParams): Promise<EnqueueResult> {
     const hosted = this.lookup(params.sessionId);
     hosted.enqueue(params.id, params.turnId, params.text);
+    await hosted.persisted();
     return {};
   }
 

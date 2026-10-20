@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -88,6 +88,11 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
     config = await loadConfig({ cwd: dir });
   });
 
+  // `serve` persists its sessions now: each test starts from an empty store.
+  afterEach(async () => {
+    await rm(join(dir, "config", "daemon"), { recursive: true, force: true });
+  });
+
   afterAll(async () => {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -135,7 +140,7 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
     // Mutation: drop `startReaper` from `startDaemon` → never audited.
     // Mutation: sweep at the 60 s default regardless of the TTL → not within 3 s.
     const audit: string[] = [];
-    const server = startDaemon(config, {
+    const server = await startDaemon(config, {
       host: "127.0.0.1",
       port: 0,
       sessionTtlMs: 200, // no sweepIntervalMs: derived from the TTL
@@ -155,14 +160,14 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
       expect(reopen?.error?.code).toBe(DomainErrorCode.UnknownSession);
       b.ws.close();
     } finally {
-      server.stop();
+      await server.stop();
     }
   });
 
   test("the sweep follows a short admin cap (derived period), closing a busy-or-not detached session", async () => {
     // Mutation: leave `adminCapMs` out of the derived sweep → 60 s period → not within 3 s.
     const audit: string[] = [];
-    const server = startDaemon(config, {
+    const server = await startDaemon(config, {
       host: "127.0.0.1",
       port: 0,
       adminCapMs: 200, // TTL stays 24 h: only the cap can close it
@@ -176,14 +181,14 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
       a.ws.close();
       await until(() => audit.includes(`session-reaped ${opened.sessionId} admin_cap`));
     } finally {
-      server.stop();
+      await server.stop();
     }
   });
 
   test("stop() stops the reaper too", async () => {
     // Mutation: `stop` only stops the server → the detached session is reaped later.
     const audit: string[] = [];
-    const server = startDaemon(config, {
+    const server = await startDaemon(config, {
       host: "127.0.0.1",
       port: 0,
       sessionTtlMs: 100,
@@ -192,14 +197,14 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
     });
     const a = await client(server.url);
     await a.request("session/open", { create: true });
-    server.stop();
+    await server.stop();
     await new Promise((r) => setTimeout(r, 400));
     expect(audit.filter((l) => l.startsWith("session-reaped"))).toEqual([]);
   });
 
   test("defaults applied: the 65th live session is refused (max 64)", async () => {
     // Mutation: drop the `?? DEFAULT_MAX_SESSIONS` → the 65th is created.
-    const server = startDaemon(config, { host: "127.0.0.1", port: 0 });
+    const server = await startDaemon(config, { host: "127.0.0.1", port: 0 });
     try {
       const a = await client(server.url); // attached: the detached cap never applies
       for (let i = 0; i < 64; i++) {
@@ -211,13 +216,13 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
       });
       a.ws.close();
     } finally {
-      server.stop();
+      await server.stop();
     }
   });
 
   test("defaults applied: the 17th session is refused while 16 are detached", async () => {
     // Mutation: drop the `?? DEFAULT_MAX_DETACHED_SESSIONS` → the 17th is created.
-    const server = startDaemon(config, { host: "127.0.0.1", port: 0 });
+    const server = await startDaemon(config, { host: "127.0.0.1", port: 0 });
     try {
       const a = await client(server.url);
       for (let i = 0; i < 16; i++) {
@@ -244,7 +249,7 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
       });
       b.ws.close();
     } finally {
-      server.stop();
+      await server.stop();
     }
   });
 });
