@@ -69,6 +69,13 @@ Siblings in a row measure correctly and render contiguously. Keeps Ink's native
 `inverse` (works even when colour is disabled, unlike a `chalk.inverse` string).
 
 - **Code:** `packages/tui/src/components/LineInput.tsx` (cursor row).
+- **Second hit (2026-10-20, `feat/client-reattach-frontends`):** a coloured
+  `<Text>` added inside the StatusBar's truncated left `<Text>` on a later
+  render kept the first render's width (46 cols), so
+  `disconnected: the daemon rejected the credent…` truncated with half the
+  line empty. Same workaround: a sibling `<Box>` (`StatusBar.tsx`, link
+  indicator); pinned by `app.test.tsx` "the link status shows in the
+  StatusBar…".
 - **Regression test:** `packages/tui/test/app.test.tsx` →
   "a mid-line cursor reached by editing renders on one clean line" (asserts no
   char bleeds onto the border row).

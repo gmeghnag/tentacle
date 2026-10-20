@@ -37,6 +37,8 @@ interface ActiveTurn {
   ended: boolean;
   /** The daemon acknowledged `prompt{turnId}`. */
   acked: boolean;
+  /** `prompt{turnId}` was written to a channel: a daemon may have run it. */
+  sent: boolean;
   /** The user cancelled; re-sent on the prompt's ack (a cancel can beat the prompt, or be lost). */
   abortWanted: boolean;
 }
@@ -157,6 +159,7 @@ export class RemoteSession implements SessionStreamListener {
       reset: false,
       ended: false,
       acked: false,
+      sent: false,
       abortWanted: false,
     };
     this.active = turn;
@@ -178,7 +181,10 @@ export class RemoteSession implements SessionStreamListener {
 
   /** `prompt{turnId}` (re-sent with the same key after a drop: the daemon runs it once). */
   private sendPrompt(id: string, turn: ActiveTurn): void {
-    this.client.prompt(id, turn.turnId, turn.prompt).then(
+    const sent = (): void => {
+      turn.sent = true;
+    };
+    this.client.prompt(id, turn.turnId, turn.prompt, sent).then(
       // A plain ack: the stream ends the turn. `ended` (a retried turn that
       // already finished — also while this client was away) ends it from the
       // ack; a no-op if the stream did.
@@ -229,6 +235,11 @@ export class RemoteSession implements SessionStreamListener {
         if (this.id) this.client.cancel(this.id);
         return;
       case "turn_lost":
+        if (!turn.sent) {
+          // Typed while the link was down: no daemon ever had it, so it is
+          // not lost — it goes to the recreated session (`sessionCall`).
+          return;
+        }
         this.fail(
           turn,
           new RpcError(

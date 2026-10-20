@@ -2,6 +2,7 @@ import type { Agent } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import { render } from "ink";
 import { App, type NoticeFeed, type SessionController } from "./App.tsx";
+import type { LinkFeed } from "./link-status.ts";
 import { messagesToItems } from "./resume.ts";
 import {
   ENTER_FULLSCREEN,
@@ -25,6 +26,8 @@ export interface TuiOptions {
   readonly resumeMessages?: readonly ChatMessage[];
   /** Host notices shown live in the transcript (e.g. a failed session save). */
   readonly notices?: NoticeFeed;
+  /** The runtime's link status, shown in the StatusBar while it is not up. */
+  readonly link?: LinkFeed;
 }
 
 /**
@@ -69,6 +72,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         : {})}
       {...(initialItems ? { initialItems } : {})}
       {...(options.notices ? { notices: options.notices } : {})}
+      {...(options.link ? { link: options.link } : {})}
     />,
     { exitOnCtrlC: false },
   );

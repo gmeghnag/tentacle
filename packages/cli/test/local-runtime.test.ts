@@ -321,4 +321,185 @@ describe("createLocalRuntime (local over RPC)", () => {
     const rejEnqueue = rejCtl.enqueue;
     await expect(rejEnqueue?.("nope")).rejects.toThrow(/method not found/);
   });
+
+  // docs/feat/client-reattach-frontends.md §6: the post-turn save is detached
+  // (a drop before its snapshot must not hold the turn open), serialized and
+  // coalesced, and its failure is reported, never thrown.
+  function heldInner() {
+    const log: string[] = [];
+    const held: {
+      resolve: (m: { role: "user"; content: string }[]) => void;
+      reject: (e: Error) => void;
+    }[] = [];
+    const inner = {
+      async *send(prompt: string) {
+        log.push(`send:${prompt}`);
+        yield { type: "text", delta: prompt };
+      },
+      snapshot: () =>
+        new Promise((resolve, reject) => {
+          log.push("snapshot");
+          held.push({ resolve, reject });
+        }),
+      compact: async () => ({ before: 2, after: 1 }),
+      enqueue: async () => {},
+      close: () => {
+        log.push("close");
+      },
+    } as unknown as RemoteSession;
+    return { inner, log, held };
+  }
+
+  test("detached save: send ends while the post-turn snapshot is still pending", async () => {
+    const { inner, held } = heldInner();
+    const saved: string[][] = [];
+    const ctl = persistingController(inner, (m) => saved.push(m.map((x) => String(x.content))));
+    await drain(ctl.send("one"));
+    expect(held).toHaveLength(1); // the turn is over; its save still waits
+    held[0]?.resolve([{ role: "user", content: "one" }]);
+    await ctl.flushed();
+    expect(saved).toEqual([["one"]]);
+  });
+
+  test("detached save: serialized and coalesced — one read at a time, at most one more, newest wins", async () => {
+    const { inner, held } = heldInner();
+    const saved: string[][] = [];
+    const ctl = persistingController(inner, (m) => saved.push(m.map((x) => String(x.content))));
+    await drain(ctl.send("one"));
+    await drain(ctl.send("two"));
+    await drain(ctl.send("three"));
+    expect(held).toHaveLength(1); // the 2nd and 3rd wait behind the 1st, as ONE read
+    held[0]?.resolve([{ role: "user", content: "one" }]);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(held).toHaveLength(2);
+    held[1]?.resolve([
+      { role: "user", content: "one" },
+      { role: "user", content: "three" },
+    ]);
+    await ctl.flushed();
+    expect(held).toHaveLength(2);
+    expect(saved).toEqual([["one"], ["one", "three"]]);
+  });
+
+  test("detached save: a failed read is reported once per flush, never thrown", async () => {
+    const { inner, held } = heldInner();
+    const errors: string[] = [];
+    const ctl = persistingController(
+      inner,
+      () => {},
+      (e) => errors.push(e.message),
+    );
+    await drain(ctl.send("one")); // does not throw
+    held[0]?.reject(new Error("connection closed"));
+    await ctl.flushed();
+    expect(errors).toEqual(["connection closed"]);
+  });
+
+  test("detached save: /clear closes the session only after its pending save", async () => {
+    const { inner, log, held } = heldInner();
+    const ctl = persistingController(inner, () => {
+      log.push("persist");
+    });
+    await drain(ctl.send("one"));
+    ctl.close?.();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(log).toEqual(["send:one", "snapshot"]); // not closed under its own save
+    held[0]?.resolve([{ role: "user", content: "one" }]);
+    await ctl.flushed();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(log).toEqual(["send:one", "snapshot", "persist", "close"]);
+  });
+
+  test("a save whose read fails reaches the saver as 'not saved' (notice + exit report)", async () => {
+    const model = new ScriptedProvider([[{ type: "text", delta: "x" }, { type: "done" }]]);
+    const { channel, dispose } = daemon(model);
+    const notices: string[] = [];
+    const saver = new SessionSaver(new JsonSessionStore(join(dir, "flush-fail")), (t) =>
+      notices.push(t),
+    );
+    const runtime = await createLocalRuntime({
+      channel,
+      disposeTransport: dispose,
+      permissions: new PermissionBroker(),
+      saver,
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: null,
+    });
+    const session = runtime.createSession();
+    const turn = session.send("hello");
+    // Consume the turn, then kill the daemon side before the save's read answers.
+    for await (const _ of turn) {
+      // consume
+    }
+    dispose();
+    await runtime.dispose();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatch(/not saved — could not read the history back: .*closed/);
+    const report = await saver.drain();
+    expect(report).toHaveLength(1);
+    expect(report[0]).toMatch(/^\[session\] not saved: /);
+  });
+
+  test("dispose right after a turn waits for its save, even a paged one (no close between two pages)", async () => {
+    // 300 resumed messages → the snapshot takes two pages; a session/close sent
+    // right after the turn would land between them (→ UnknownSession, not saved).
+    const model = new ScriptedProvider([[{ type: "text", delta: "tail" }, { type: "done" }]]);
+    const { channel, dispose } = daemon(model);
+    const store = new JsonSessionStore(join(dir, "paged"));
+    const saver = new SessionSaver(store, () => {});
+    const history = Array.from({ length: 300 }, (_, i) => ({
+      role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      content: `m${i}`,
+    }));
+    const runtime = await createLocalRuntime({
+      channel,
+      disposeTransport: dispose,
+      permissions: new PermissionBroker(),
+      saver,
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: {
+        id: "paged-uid",
+        cwd: "/tmp/work",
+        model: "qwen3",
+        createdAt: 1,
+        updatedAt: 1,
+        title: "m0",
+        messages: history,
+      },
+    });
+    await drain(runtime.createSession().send("last"));
+    await runtime.dispose();
+    expect(await saver.drain()).toEqual([]);
+    const saved = (await store.list()).records;
+    expect(saved[0]?.messages).toHaveLength(302);
+  });
+
+  test("detached save: a turn that failed before producing anything saves nothing (no false 'not saved')", async () => {
+    // Real cluster, pod deleted: the next send fails at once with "the
+    // connection target is gone"; reading the history back would fail too and
+    // report a save failure although the disk is complete.
+    const reads: string[] = [];
+    const errors: string[] = [];
+    const inner = {
+      // biome-ignore lint/correctness/useYield: fails before its first event
+      async *send() {
+        throw new Error("the connection target is gone");
+      },
+      snapshot: async () => {
+        reads.push("snapshot");
+        throw new Error("gone");
+      },
+    } as unknown as RemoteSession;
+    const ctl = persistingController(
+      inner,
+      () => {},
+      (e) => errors.push(e.message),
+    );
+    await expect(drain(ctl.send("are you there?"))).rejects.toThrow(/gone/);
+    await ctl.flushed();
+    expect(reads).toEqual([]);
+    expect(errors).toEqual([]);
+  });
 });

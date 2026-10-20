@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
+import type { LinkIndicator } from "../link-status.ts";
 import type { TokenTotals } from "../state.ts";
 import { accentHex } from "../theme.ts";
 
@@ -58,6 +59,7 @@ export function StatusBar({
   hiddenAbove = 0,
   expandAll = false,
   autoApprove = false,
+  link = null,
 }: {
   model: string;
   cwd: string;
@@ -69,12 +71,27 @@ export function StatusBar({
   hiddenAbove?: number;
   expandAll?: boolean;
   autoApprove?: boolean;
+  /** The link's state when it is not up ("reconnecting…", "disconnected: …"). */
+  link?: LinkIndicator | null;
 }): ReactElement {
   // One line: workspace + tokens + context meter on the left (truncated, never
   // wrapped); the auto-accept mode indicator (always shown, so the keybind is
   // discoverable) and the model name pinned right.
   return (
     <Box width={Math.max(10, columns)}>
+      {/* The link state first, as a SIBLING box: nested in the truncated Text
+          below it kept the first render's width (docs/library-bugs.md, Ink
+          nested-Text mis-measure). Capped so the line keeps some context. */}
+      {link ? (
+        <Box
+          flexShrink={0}
+          width={Math.min(link.text.length + 3, Math.max(10, Math.floor(columns * 0.7)))}
+        >
+          <Text color={link.tone === "error" ? "red" : "yellow"} wrap="truncate-end">
+            {`${link.text} · `}
+          </Text>
+        </Box>
+      ) : null}
       <Box flexGrow={1} flexShrink={1} minWidth={0}>
         <Text wrap="truncate-end">
           <Text dimColor>

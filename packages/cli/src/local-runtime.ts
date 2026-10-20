@@ -15,7 +15,7 @@
  * session still open on `dispose` — the same on every runtime (AGENTS §7).
  */
 import { type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
-import { RemoteClient, type RemoteSession } from "@tentacle/client";
+import { type LinkStatus, RemoteClient, type RemoteSession } from "@tentacle/client";
 import type { TentacleConfig } from "@tentacle/config";
 import type {
   ChatMessage,
@@ -39,7 +39,12 @@ export interface LocalRuntime {
    * called by the frontend (jobs are started/read/killed daemon-side).
    */
   readonly jobs: JobController;
-  /** Close the open sessions daemon-side, then the transport. Await it before exiting. */
+  /** The link's status, for the TUI's StatusBar ("reconnecting…", "disconnected: …"). */
+  readonly link: { onLinkStatus(listener: (status: LinkStatus) => void): () => void };
+  /**
+   * Wait (bounded) for the pending post-turn saves, close the open sessions
+   * daemon-side, then the transport. Await it before exiting.
+   */
   dispose(): Promise<void>;
 }
 
@@ -66,32 +71,79 @@ function remoteJobsView(client: RemoteClient): JobController {
   };
 }
 
+/** How long `dispose` waits for the pending post-turn saves before closing the sessions. */
+export const FLUSH_ON_EXIT_TIMEOUT_MS = 3000;
+
+/** A `SessionController` whose post-turn saves can be awaited. */
+export interface PersistingController extends SessionController {
+  /** Resolves once no save is pending (never rejects). */
+  flushed(): Promise<void>;
+}
+
 /**
  * Wrap a remote session so its history is persisted after each turn/compaction.
  * Reads the authoritative history back from the daemon (`snapshot`) rather than
  * reconstructing it from the update stream.
+ *
+ * The save is DETACHED from the turn (docs/feat/client-reattach-frontends.md
+ * §6): with a reconnecting client the read waits out a dropped link, and the
+ * turn must not look busy for the whole outage. Saves are serialized (one read
+ * at a time, so disk order is history order) and coalesced (at most one more
+ * waits; it reads the newest history when it runs). A failed read goes to
+ * `onFlushError`, never thrown. `close` follows the pending save, so a `/clear`
+ * right after a turn does not close the session under its own save.
  */
 export function persistingController(
   inner: RemoteSession,
   persist: (messages: readonly ChatMessage[]) => void,
-): SessionController {
-  const flush = async (): Promise<void> => {
-    const messages = await inner.snapshot();
-    if (messages && messages.length > 0) {
-      persist(messages);
-    }
+  onFlushError: (error: Error) => void = () => {},
+): PersistingController {
+  let running: Promise<void> | null = null;
+  let again = false;
+  const run = async (): Promise<void> => {
+    do {
+      again = false;
+      try {
+        const messages = await inner.snapshot();
+        if (messages && messages.length > 0) {
+          persist(messages);
+        }
+      } catch (error) {
+        onFlushError(error instanceof Error ? error : new Error(String(error)));
+      }
+    } while (again);
   };
+  const flush = (): void => {
+    if (running) {
+      again = true;
+      return;
+    }
+    running = run().finally(() => {
+      running = null;
+    });
+  };
+  const flushed = (): Promise<void> => running ?? Promise.resolve();
   return {
     async *send(prompt, signal) {
+      // A turn that failed before its first event (the link is gone for good,
+      // the session closed) changed nothing: reading the history back would
+      // only fail and report a save failure for a complete file.
+      let changed = false;
       try {
-        yield* inner.send(prompt, signal);
+        for await (const event of inner.send(prompt, signal)) {
+          changed = true;
+          yield event;
+        }
+        changed = true;
       } finally {
-        await flush();
+        if (changed) {
+          flush();
+        }
       }
     },
     async compact() {
       const result = await inner.compact();
-      await flush();
+      flush();
       return result;
     },
     // Propagate the inner Promise (don't swallow it) so the TUI can reconcile
@@ -100,16 +152,28 @@ export function persistingController(
       return inner.enqueue(text);
     },
     close() {
-      inner.close();
+      void flushed().then(() => inner.close());
     },
+    flushed,
   };
 }
 
 export interface LocalRuntimeDeps {
   readonly channel: DuplexChannel;
+  /**
+   * Opens a fresh channel to the same daemon after a drop (a pod's new exec, a
+   * WebSocket redial): present → the client reconnects and resumes; absent
+   * (the worker) → a drop is terminal.
+   */
+  readonly channelFactory?: () => Promise<DuplexChannel>;
   /** Called to tear down the daemon side (terminate the worker / close the pipe). */
   readonly disposeTransport: () => void;
   readonly permissions: PermissionBroker;
+  /**
+   * An in-TUI notice (the session's `NoticeHub`): e.g. a reconnect that could
+   * not restore the latest turn. Absent → dropped (tests, no TUI).
+   */
+  readonly notify?: (text: string) => void;
   /** Where each turn's history goes; its failures are reported, never thrown. */
   readonly saver: SessionSaver;
   readonly cwd: string;
@@ -130,8 +194,16 @@ export interface LocalRuntimeDeps {
 export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalRuntime> {
   const client = new RemoteClient(deps.channel, deps.permissions, deps.modelProvider, {
     ...(deps.onPeerError ? { onError: deps.onPeerError } : {}),
+    ...(deps.channelFactory ? { channelFactory: deps.channelFactory } : {}),
   });
   await client.initialize();
+  client.onHistoryLost(({ turns }) => {
+    deps.notify?.(
+      `⚠ The daemon lost the session while the link was down; it was restored without your last ${
+        turns === 1 ? "turn" : `${turns} turns`
+      } (no longer in the model's context, and not saved).`,
+    );
+  });
 
   let seed = deps.resume;
   const createSession = (): SessionController => {
@@ -140,25 +212,51 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     const uid = record?.id ?? crypto.randomUUID();
     const createdAt = record?.createdAt;
     const session = client.newSession(record?.messages, uid);
-    return persistingController(session, (messages) => {
-      deps.saver.save(
-        recordFromSnapshot(
-          { id: uid, messages },
-          { cwd: deps.cwd, model: deps.model, ...(createdAt !== undefined ? { createdAt } : {}) },
-        ),
-      );
-    });
+    const controller = persistingController(
+      session,
+      (messages) => {
+        deps.saver.save(
+          recordFromSnapshot(
+            { id: uid, messages },
+            { cwd: deps.cwd, model: deps.model, ...(createdAt !== undefined ? { createdAt } : {}) },
+          ),
+        );
+      },
+      (error) => deps.saver.failed(uid, `could not read the history back: ${error.message}`),
+    );
+    controllers.add(controller);
+    return controller;
   };
+  const controllers = new Set<PersistingController>();
+  const allFlushed = (): Promise<void> =>
+    bounded(
+      Promise.all([...controllers].map((c) => c.flushed())).then(() => undefined),
+      FLUSH_ON_EXIT_TIMEOUT_MS,
+    );
 
   return {
     createSession,
     jobs: remoteJobsView(client),
+    link: { onLinkStatus: (listener) => client.onLinkStatus(listener) },
     dispose: async () => {
+      // A quit right after a turn must not close the session under its save.
+      await allFlushed();
       await client.closeSessions();
       client.close();
       deps.disposeTransport();
     },
   };
+}
+
+/** Resolve when `promise` settles or after `ms`, whichever is first; never rejects. */
+function bounded(promise: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise.catch(() => {}),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {

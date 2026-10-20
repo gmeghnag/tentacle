@@ -21,6 +21,7 @@
  * is a stateless sandbox and `--resume` works locally.
  */
 import type { SessionRecord } from "@tentacle/agent";
+import { ChannelError } from "@tentacle/client";
 import type { TentacleConfig } from "@tentacle/config";
 import type { PermissionBroker } from "@tentacle/core";
 import {
@@ -111,6 +112,8 @@ export interface PodRuntimeDeps {
   readonly saver: SessionSaver;
   readonly resume: SessionRecord | null;
   readonly log: (line: string) => void;
+  /** In-TUI notices (the session's `NoticeHub`), e.g. a reconnect that lost the last turn. */
+  readonly notify?: (text: string) => void;
 }
 
 /**
@@ -159,6 +162,69 @@ function containerExecError(
     );
   }
   return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
+ * Can this pod (still) host the daemon? The reconnect preflight's verdict
+ * (pure): a deleted or terminated pod is `gone` and bad cluster credentials
+ * are `unauthorized` — both stop the reconnect for good; anything else (the
+ * apiserver unreachable, a 5xx, a pod not yet running) is transient. `null`:
+ * a running pod, dial it.
+ */
+export function podDialError(
+  name: string,
+  outcome: { readonly pod: Pod } | { readonly error: unknown },
+): ChannelError | null {
+  if ("pod" in outcome) {
+    const phase = outcome.pod.status?.phase;
+    if (phase !== undefined && TERMINAL_PHASES.has(phase)) {
+      return new ChannelError("gone", `pod "${name}" is ${phase}`);
+    }
+    if (phase !== undefined && phase !== "Running") {
+      return new ChannelError("unreachable", `pod "${name}" is ${phase}`);
+    }
+    return null;
+  }
+  const { error } = outcome;
+  if (error instanceof KubeApiError && error.status === 404) {
+    return new ChannelError("gone", `pod "${name}" no longer exists`);
+  }
+  if (error instanceof KubeApiError && (error.status === 401 || error.status === 403)) {
+    return new ChannelError(
+      "unauthorized",
+      `the cluster refused the credentials (${error.status})`,
+    );
+  }
+  return new ChannelError(
+    "unreachable",
+    `cannot reach the cluster: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
+
+/**
+ * The reconnect channel factory for a pod daemon (pod-attach Layer 2,
+ * docs/feat/client-reattach-frontends.md §2): check the pod, then open the SAME
+ * exec again. A new exec is a new `serve --stdio` (the old one ended with its
+ * stdin), so the client finds its session unknown and recreates it from the
+ * laptop's history; a turn in flight is reported lost, never re-run.
+ */
+export function execChannelFactory(
+  kube: PodCluster,
+  target: ExecTarget,
+  options: ExecChannelOptions,
+): () => Promise<DuplexChannel> {
+  return async () => {
+    let verdict: ChannelError | null;
+    try {
+      verdict = podDialError(target.pod, { pod: await kube.getPod(target.pod) });
+    } catch (error) {
+      verdict = podDialError(target.pod, { error });
+    }
+    if (verdict) {
+      throw verdict;
+    }
+    return kube.openExec(target, options);
+  };
 }
 
 /**
@@ -256,14 +322,15 @@ export async function startPodRuntime(
     if (!status) {
       deps.log(`[pod] ${version} ready in ${name}; starting the agent daemon\n`);
     }
-    const channel = deps.kube.openExec(
-      {
-        pod: name,
-        container: AGENT_CONTAINER,
-        command: [binPath, "serve", "--stdio", "--model-proxy"],
-      },
-      { onStderr: stderr.onStderr },
-    );
+    const target: ExecTarget = {
+      pod: name,
+      container: AGENT_CONTAINER,
+      command: [binPath, "serve", "--stdio", "--model-proxy"],
+    };
+    const execOptions: ExecChannelOptions = { onStderr: stderr.onStderr };
+    // The current exec; a reconnect replaces it (and teardown closes that one).
+    let channel = deps.kube.openExec(target, execOptions);
+    const redial = execChannelFactory(deps.kube, target, execOptions);
     // The pod reaches the model through us (reverse-tunnel): serve the local
     // provider, so the endpoint and API key never leave the laptop.
     const modelProvider = createModelProvider({
@@ -275,6 +342,10 @@ export async function startPodRuntime(
     });
     return await createLocalRuntime({
       channel,
+      channelFactory: async () => {
+        channel = await redial();
+        return channel;
+      },
       disposeTransport: () => {
         channel.close();
         // Safe here: `dispose()` runs after the TUI has unmounted (left the
@@ -291,6 +362,7 @@ export async function startPodRuntime(
       // Laptop-side RPC errors (incl. a local model failure, which the pod only
       // sees opaque) join the buffered daemon stderr: flushed after unmount.
       onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),
+      ...(deps.notify ? { notify: deps.notify } : {}),
     });
   } catch (error) {
     // The pod was created but never became usable — delete it before surfacing.
@@ -316,6 +388,8 @@ export interface PodAttachRuntimeDeps {
   readonly saver: SessionSaver;
   readonly resume: SessionRecord | null;
   readonly log: (line: string) => void;
+  /** In-TUI notices (the session's `NoticeHub`), e.g. a reconnect that lost the last turn. */
+  readonly notify?: (text: string) => void;
 }
 
 /**
@@ -442,14 +516,15 @@ export async function startAttachRuntime(
         `[pod] ${version} attached to ${name}; the agent daemon is starting (closing the TUI detaches — the pod stays up)\n`,
       );
     }
-    const channel = deps.kube.openExec(
-      {
-        pod: name,
-        container,
-        command: [serveBin, "serve", "--stdio", "--model-proxy"],
-      },
-      { onStderr: stderr.onStderr },
-    );
+    const target: ExecTarget = {
+      pod: name,
+      container,
+      command: [serveBin, "serve", "--stdio", "--model-proxy"],
+    };
+    const execOptions: ExecChannelOptions = { onStderr: stderr.onStderr };
+    // The current exec; a reconnect replaces it (and teardown closes that one).
+    let channel = deps.kube.openExec(target, execOptions);
+    const redial = execChannelFactory(deps.kube, target, execOptions);
     // The pod reaches the model through us (reverse-tunnel): serve the local
     // provider, so the endpoint and API key never leave the laptop.
     const modelProvider = createModelProvider({
@@ -461,6 +536,10 @@ export async function startAttachRuntime(
     });
     return await createLocalRuntime({
       channel,
+      channelFactory: async () => {
+        channel = await redial();
+        return channel;
+      },
       // User-owned pod: closing the exec detaches the daemon but the pod keeps
       // running (keepalive) — no `deletePod`, by design.
       disposeTransport: () => {
@@ -477,6 +556,7 @@ export async function startAttachRuntime(
       // Laptop-side RPC errors (incl. a local model failure, which the pod only
       // sees opaque) join the buffered daemon stderr: flushed after unmount.
       onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),
+      ...(deps.notify ? { notify: deps.notify } : {}),
     });
   } catch (error) {
     status?.finish();

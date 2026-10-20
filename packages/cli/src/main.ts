@@ -312,6 +312,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           jobs: runtime.jobs,
           autoWakeOnJobExit: config.autoWake,
           createSession: runtime.createSession,
+          link: runtime.link,
           ...sessionOptions,
         }),
       teardown: () => runtime.dispose(),
@@ -365,6 +366,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         saver: sessions.saver,
         resume: sessions.resume,
         log: write,
+        notify: (text) => sessions.notices.notify(text),
       });
     } catch (error) {
       write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -438,6 +440,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         saver: sessions.saver,
         resume: sessions.resume,
         log: write,
+        notify: (text) => sessions.notices.notify(text),
       });
     } catch (error) {
       write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -491,6 +494,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               jobs: runtime.jobs,
               autoWakeOnJobExit: config.autoWake,
               createSession: runtime.createSession,
+              link: runtime.link,
               ...sessionOptions,
             }),
           teardown: () => runtime.dispose(),

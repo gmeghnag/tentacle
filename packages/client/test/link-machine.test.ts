@@ -4,12 +4,14 @@ import { RpcError } from "@tentacle/transport";
 import {
   BACKOFF_CAP_MS,
   ChannelError,
+  LIVENESS_MS,
   STABLE_UP_MS,
   backoffMs,
   dialFailed,
   initialLink,
   linkDropped,
   linkUp,
+  liveness,
   turnRecovery,
 } from "../src/link-machine.ts";
 
@@ -73,5 +75,54 @@ describe("link machine (pure)", () => {
     expect(turnRecovery({ ...base, acked: false })).toEqual({ resendPrompt: false });
     expect(turnRecovery({ ...base, recreated: true })).toEqual({ resendPrompt: false });
     expect(turnRecovery({ ...base, ended: true })).toEqual({ resendPrompt: false });
+  });
+
+  test("a gone target (deleted pod) is terminal, like unauthorized", () => {
+    const gone = dialFailed(initialLink, new ChannelError("gone", 'pod "p" not found'), 0, max);
+    expect(gone.state.kind).toBe("stopped");
+    expect(gone.dialInMs).toBeUndefined();
+    expect(gone.status).toEqual({
+      state: "stopped",
+      reason: 'the connection target is gone: pod "p" not found',
+    });
+  });
+
+  test("a failed dial says why on the reconnecting status; a plain drop does not", () => {
+    const failed = dialFailed(initialLink, new ChannelError("rejected", "HTTP 502"), 0, max);
+    expect(failed.status).toEqual({
+      state: "reconnecting",
+      attempt: 1,
+      nextAtMs: 500,
+      error: "HTTP 502",
+    });
+    expect(linkDropped(initialLink, 0, max).status).toEqual({
+      state: "reconnecting",
+      attempt: 1,
+      nextAtMs: 500,
+    });
+  });
+
+  test("liveness: dead only after LIVENESS_MS of inbound silence while a request is outstanding", () => {
+    // Nothing outstanding: never dead, however quiet.
+    expect(liveness({ now: 1_000_000, lastInboundAt: 0, watchedSince: null })).toEqual({
+      kind: "idle",
+    });
+    // A request issued after a long idle: the clock starts at the request, not at the last frame.
+    expect(liveness({ now: 100_000, lastInboundAt: 0, watchedSince: 100_000 })).toEqual({
+      kind: "alive",
+      checkInMs: LIVENESS_MS,
+    });
+    // Any inbound frame restarts it.
+    expect(liveness({ now: 120_000, lastInboundAt: 110_000, watchedSince: 100_000 })).toEqual({
+      kind: "alive",
+      checkInMs: LIVENESS_MS - 10_000,
+    });
+    // Boundary: exactly LIVENESS_MS of silence is dead; one ms less is not.
+    expect(
+      liveness({ now: 100_000 + LIVENESS_MS - 1, lastInboundAt: 0, watchedSince: 100_000 }),
+    ).toEqual({ kind: "alive", checkInMs: 1 });
+    expect(
+      liveness({ now: 100_000 + LIVENESS_MS, lastInboundAt: 0, watchedSince: 100_000 }),
+    ).toEqual({ kind: "dead" });
   });
 });
