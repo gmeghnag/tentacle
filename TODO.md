@@ -634,7 +634,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         `docs/feat/tool-naming.md`. Type: feat · Size: S · Blast: contained.
       - [ ] **hooks-core** (config `hooks`, `stdin` in core, `HookRunner`,
         `tool_call` → `PermissionGate`, `tool_result` → pipeline; TUI line
-        `⎿ hook <name> blocked <Tool>`) — H1–H4 decided: `docs/eval/hooks-core.md`. Type: eval → feat ·
+        `⎿ hook <name> blocked <Tool>`) — in progress (`feat/hooks-core`): `docs/feat/hooks-core.md`. Type: feat ·
         Size: M · Blast: load-bearing.
       - [ ] **hooks-turn** (`turn_start`, `turn_end` + continue ≤3,
         `model_request` notify; protocol 7 → 8) — R1–R4 decided:
