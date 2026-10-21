@@ -170,6 +170,8 @@ export class Connection {
         return this.resolvePermission(params as ResolvePermissionParams);
       case Method.McpStatus:
         return this.mcpStatus();
+      case Method.SkillsList:
+        return this.host.skillList;
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }

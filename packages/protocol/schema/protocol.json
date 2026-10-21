@@ -1023,6 +1023,41 @@
       "required": ["seq", "sessionId", "update"],
       "type": "object"
     },
+    "SkillListEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "location": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "model": {
+          "type": "boolean"
+        },
+        "name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "scope": {
+          "enum": ["project", "user"],
+          "type": "string"
+        },
+        "user": {
+          "type": "boolean"
+        }
+      },
+      "required": ["description", "location", "model", "name", "scope", "user"],
+      "type": "object"
+    },
     "SkillName": {
       "maxLength": 64,
       "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
@@ -1042,6 +1077,39 @@
         }
       },
       "required": ["description", "name"],
+      "type": "object"
+    },
+    "SkillsListParams": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "SkillsListResult": {
+      "additionalProperties": false,
+      "properties": {
+        "moreProblems": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "problems": {
+          "items": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/SkillListEntry"
+          },
+          "maxItems": 512,
+          "type": "array"
+        }
+      },
+      "required": ["moreProblems", "problems", "skills"],
       "type": "object"
     },
     "SnapshotParams": {
@@ -1547,6 +1615,14 @@
       },
       "result": {
         "$ref": "#/$defs/SnapshotResult"
+      }
+    },
+    "skills/list": {
+      "params": {
+        "$ref": "#/$defs/SkillsListParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SkillsListResult"
       }
     }
   },

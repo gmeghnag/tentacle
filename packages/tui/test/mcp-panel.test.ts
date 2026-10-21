@@ -1,17 +1,33 @@
 import { describe, expect, test } from "bun:test";
+import type { McpServerView } from "../src/mcp-panel.ts";
 import {
-  type McpPanel,
-  type McpServerView,
-  applyPanel,
-  loadPanel,
-  openPanel,
-  panelClick,
-  panelHeight,
-  panelKey,
-  panelMaxBody,
-  panelRows,
+  type OpenPanel,
+  applyPanel as apply,
+  panelClick as click,
+  mcpPanel,
   panelView,
-} from "../src/mcp-panel.ts";
+} from "../src/panel.ts";
+import {
+  type TreeAction,
+  panelHeight,
+  treeKey as panelKey,
+  panelMaxBody,
+} from "../src/tree-panel.ts";
+
+// The `/mcp` panel through the shared panel API (docs/feat/skills-panel.md
+// generalised it; the rendered rows are unchanged).
+const W = 80;
+type McpPanel = OpenPanel;
+const openPanel = (): OpenPanel => mcpPanel();
+const loadPanel = (servers: readonly McpServerView[]): OpenPanel => mcpPanel(servers);
+const applyPanel = (p: OpenPanel, action: TreeAction): OpenPanel => apply(p, action, W);
+const panelClick = (p: OpenPanel, view: ReturnType<typeof panelView>, i: number): OpenPanel =>
+  click(p, view, i, W);
+const at = (servers: readonly McpServerView[], expanded: number[], cursor: number): OpenPanel => ({
+  kind: "mcp",
+  data: servers,
+  tree: { expanded, cursor },
+});
 
 const github: McpServerView = {
   name: "github",
@@ -79,7 +95,7 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     expect(texts(p)[2]).toBe("❯       list_prs");
     for (const action of ["toggle", "collapse"] as const) {
       const back = applyPanel(p, action);
-      expect(back.expanded).toEqual([]);
+      expect(back.tree.expanded).toEqual([]);
       expect(texts(back)[0]?.startsWith("❯ ▸ github")).toBe(true);
     }
   });
@@ -89,13 +105,13 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     const open = applyPanel(p, "expand");
     expect(applyPanel(open, "expand")).toEqual(open);
     expect(applyPanel(p, "collapse")).toEqual(p);
-    expect(applyPanel(open, "collapse").expanded).toEqual([]);
+    expect(applyPanel(open, "collapse").tree.expanded).toEqual([]);
   });
 
   test("up/down wrap around", () => {
     const p = loadPanel([github, db, fs]);
-    expect(applyPanel(p, "up").cursor).toBe(2);
-    expect(applyPanel(applyPanel(p, "up"), "down").cursor).toBe(0);
+    expect(applyPanel(p, "up").tree.cursor).toBe(2);
+    expect(applyPanel(applyPanel(p, "up"), "down").tree.cursor).toBe(0);
   });
 
   test("a failed server expands to its error; a truncated list shows how many more", () => {
@@ -103,15 +119,13 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     let p = applyPanel(loadPanel([db, big]), "toggle");
     p = applyPanel(applyPanel(p, "down"), "down");
     p = applyPanel(p, "toggle");
-    expect(panelRows(p)).toEqual([
-      { kind: "server", server: 0 },
-      { kind: "info", server: 0, text: "spawn ENOENT" },
-      { kind: "server", server: 1 },
-      { kind: "tool", server: 1, name: "a" },
-      { kind: "more", server: 1, count: 300 },
+    expect(texts(p)).toEqual([
+      "  ▾ db   ✗ failed",
+      "        spawn ENOENT",
+      "❯ ▾ big  ● connected · 301 tools · 41 ms",
+      "        a",
+      "        … 300 more",
     ]);
-    expect(texts(p)).toContain("        … 300 more");
-    expect(texts(p)[2]).toBe("❯ ▾ big  ● connected · 301 tools · 41 ms");
   });
 
   test("unresponsive/closed show the error then their tools; connected with none says so; connecting says so", () => {
@@ -130,12 +144,15 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
       latencyMs: 1,
     };
     const wait: McpServerView = { name: "w", state: "connecting", tools: [], moreTools: 0 };
-    const p: McpPanel = { servers: [stuck, empty, wait], expanded: [0, 1, 2], cursor: 0 };
-    expect(panelRows(p).filter((r) => r.kind !== "server")).toEqual([
-      { kind: "info", server: 0, text: "timed out" },
-      { kind: "tool", server: 0, name: "t" },
-      { kind: "info", server: 1, text: "no tools" },
-      { kind: "info", server: 2, text: "still connecting" },
+    const p = at([stuck, empty, wait], [0, 1, 2], 0);
+    expect(texts(p)).toEqual([
+      "❯ ▾ s  ! unresponsive · 1 tool",
+      "        timed out",
+      "        t",
+      "  ▾ e  ● connected · 0 tools · 1 ms",
+      "        no tools",
+      "  ▾ w  … connecting",
+      "        still connecting",
     ]);
   });
 
@@ -147,7 +164,7 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
       moreTools: 0,
       error: "e‮r",
     };
-    const all = texts({ servers: [evil], expanded: [0], cursor: 0 }).join("\n");
+    const all = texts(at([evil], [0], 0)).join("\n");
     expect(all).toContain("ab");
     expect(all).toContain("xy");
     expect(all).toContain("er");
@@ -156,7 +173,7 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
 
   test("every row fits the width (one terminal row each)", () => {
     const long: McpServerView = { ...github, tools: ["t".repeat(200)] };
-    const rows = texts({ servers: [long], expanded: [0], cursor: 0 }, 30);
+    const rows = texts(at([long], [0], 0), 30);
     for (const r of rows) {
       expect(r.length).toBeLessThanOrEqual(30);
     }
@@ -165,12 +182,12 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
 
   test("a long list is windowed on the cursor, and the hint says where", () => {
     const many: McpServerView = { ...github, tools: Array.from({ length: 40 }, (_, i) => `t${i}`) };
-    let p: McpPanel = { servers: [many], expanded: [0], cursor: 0 };
+    let p = at([many], [0], 0);
     let view = panelView(p, 80, 5);
     expect(view.rows.length).toBe(5);
     expect(view.start).toBe(0);
     expect(view.hint).toContain("1–5 of 41");
-    p = { ...p, cursor: 30 };
+    p = at([many], [0], 30);
     view = panelView(p, 80, 5);
     expect(view.rows.length).toBe(5);
     expect(view.rows.find((r) => r.selected)?.text).toBe("❯       t29");
@@ -186,24 +203,24 @@ describe("mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     const p = loadPanel([github, fs]);
     const view = panelView(p, 80, 10);
     const clicked = panelClick(p, view, 1);
-    expect(clicked.cursor).toBe(1);
-    expect(clicked.expanded).toEqual([1]);
+    expect(clicked.tree.cursor).toBe(1);
+    expect(clicked.tree.expanded).toEqual([1]);
     expect(panelClick(p, view, -1)).toBe(p);
     expect(panelClick(p, view, 2)).toBe(p);
     // A tool row: selected, nothing toggles.
     const open = applyPanel(p, "toggle");
     const tool = panelClick(open, panelView(open, 80, 10), 2);
-    expect(tool.cursor).toBe(2);
-    expect(tool.expanded).toEqual([0]);
+    expect(tool.tree.cursor).toBe(2);
+    expect(tool.tree.expanded).toEqual([0]);
   });
 
   test("a click maps through the window (body row 0 is the window's first row)", () => {
     const many: McpServerView = { ...github, tools: Array.from({ length: 40 }, (_, i) => `t${i}`) };
-    const p: McpPanel = { servers: [many, fs], expanded: [0], cursor: 41 };
+    const p = at([many, fs], [0], 41);
     const view = panelView(p, 80, 5);
     const last = panelClick(p, view, 4); // the fs row, at the window's bottom
-    expect(last.cursor).toBe(41);
-    expect(last.expanded).toEqual([0, 1]);
+    expect(last.tree.cursor).toBe(41);
+    expect(last.tree.expanded).toEqual([0, 1]);
   });
 
   test("clicks and keys on the probing placeholder do nothing", () => {

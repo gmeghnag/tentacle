@@ -19,6 +19,7 @@ import { join } from "node:path";
  */
 import { Session, recordFromSnapshot } from "@tentacle/agent";
 import { type ChatMessage, PermissionBroker } from "@tentacle/core";
+import { toSkillList } from "@tentacle/daemon";
 import {
   KubeClient,
   type KubeClientOptions,
@@ -48,7 +49,13 @@ import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { startTerminal } from "./terminal.ts";
 import { type TuiSessions, openTuiSessions, runSessionTui } from "./tui-sessions.ts";
-import { buildAgent, connectConfiguredMcp, inProcessAgents, skillCatalog } from "./wiring.ts";
+import {
+  buildAgent,
+  connectConfiguredMcp,
+  inProcessAgents,
+  skillCatalog,
+  skillListing,
+} from "./wiring.ts";
 
 /**
  * The app version: a literal injected at compile time (`define` in
@@ -383,6 +390,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           link: runtime.link,
           skills: runtime.skills,
           mcpStatus: runtime.mcpStatus,
+          skillsList: runtime.skillsList,
           ...sessionOptions,
         }),
       teardown: () => runtime.dispose(),
@@ -532,6 +540,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               link: runtime.link,
               skills: runtime.skills,
               mcpStatus: runtime.mcpStatus,
+              skillsList: runtime.skillsList,
               ...sessionOptions,
             }),
           teardown: () => runtime.dispose(),
@@ -567,6 +576,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     });
 
     const catalog = skillCatalog(config);
+    // No daemon here: the same wire-safe listing a `SessionHost` would serve.
+    const listing = toSkillList(skillListing(config));
     await runSessionTui(sessions, {
       start: (sessionOptions) =>
         startTui(null, {
@@ -579,6 +590,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           createSession,
           skills: () => catalog,
           mcpStatus: () => mcpTracker.probe(),
+          skillsList: () => Promise.resolve(listing),
           ...sessionOptions,
         }),
       teardown: () => mcp.dispose(),

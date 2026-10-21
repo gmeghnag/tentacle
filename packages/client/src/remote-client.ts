@@ -43,6 +43,7 @@ import {
   type PromptResult,
   type SessionUpdateParams,
   type SkillSummary,
+  type SkillsListResult,
   type SnapshotResult,
   type WireStreamEvent,
   text,
@@ -282,6 +283,19 @@ export class RemoteClient {
     return this.call(this.peer, Method.McpStatus, {}).then(
       (result) => (result as McpStatusResult).servers,
     );
+  }
+
+  /**
+   * Every skill the daemon discovered and its discovery problems (`/skills`).
+   * Static on the daemon, but asked each time (cheap; never stale after a
+   * redial to a restarted daemon). An older daemon rejects with
+   * `MethodNotFound`. Schema-validated by the peer.
+   */
+  skillsList(): Promise<SkillsListResult> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.SkillsList, {}).then((result) => result as SkillsListResult);
   }
 
   /** A controller the Ink App drives exactly like a local `Session`. */

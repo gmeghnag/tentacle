@@ -8,7 +8,13 @@
  */
 import { type Agent, Session } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
-import type { McpServerStatus, OpenParams, SkillSummary } from "@tentacle/protocol";
+import type {
+  McpServerStatus,
+  OpenParams,
+  SkillListEntry,
+  SkillSummary,
+  SkillsListResult,
+} from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import {
   type Attachment,
@@ -16,7 +22,7 @@ import {
   type RestoredSessionState,
   type TurnErrorPolicy,
 } from "./hosted-session.ts";
-import { toSkillCatalog } from "./mapping.ts";
+import { toSkillCatalog, toSkillList } from "./mapping.ts";
 import {
   type DaemonSessionRecord,
   reconcileOnReload,
@@ -65,6 +71,14 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * Absent → none (`serve` and pod daemons start no MCP servers today).
    */
   readonly mcpStatus?: () => Promise<readonly McpServerStatus[]>;
+  /**
+   * Every skill this daemon discovered and its discovery problems
+   * (`skills/list`, the TUI's `/skills`), as discovery produced them. Absent → none.
+   */
+  readonly skillList?: {
+    readonly skills: readonly SkillListEntry[];
+    readonly problems: readonly string[];
+  };
 }
 
 /** What `open` did: the session, whether it was built now, and the replay verdict. */
@@ -81,10 +95,13 @@ export class SessionHost {
 
   /** The `initialize` skill catalog (built once: skills are fixed at daemon start). */
   readonly skillCatalog: readonly SkillSummary[];
+  /** The `skills/list` result, wire-safe (built once, like the catalog). */
+  readonly skillList: SkillsListResult;
 
   constructor(opts: SessionHostOptions) {
     this.opts = opts;
     this.skillCatalog = toSkillCatalog(opts.skills ?? []);
+    this.skillList = toSkillList(opts.skillList ?? { skills: [], problems: [] });
   }
 
   /** This daemon's MCP servers and their live state; empty when it runs none. */

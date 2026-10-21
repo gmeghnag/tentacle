@@ -24,7 +24,7 @@ import {
 } from "@tentacle/daemon";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import type { ServeLimits } from "./flags.ts";
-import { buildAgent, skillCatalog } from "./wiring.ts";
+import { buildAgent, skillCatalog, skillListing } from "./wiring.ts";
 
 /** Floor for the derived sweep period. */
 const MIN_SWEEP_INTERVAL_MS = 1000;
@@ -120,6 +120,7 @@ async function reloadedHost(
     // Each session gets its own agent, confined to the daemon's cwd.
     createAgent: (cwd) => buildAgent({ ...config, cwd }),
     skills: skillCatalog(config),
+    skillList: skillListing(config),
     // A remote client gets an opaque turn error; the real one is logged here.
     ...(options.onError ? { onTurnError: options.onError } : {}),
     persister,
@@ -232,6 +233,7 @@ export function startStdioDaemon(
     defaultCwd: config.cwd,
     // The pod's own skills (Q4): its config, its filesystem.
     skills: skillCatalog(config),
+    skillList: skillListing(config),
     // The laptop gets an opaque turn error (the pod is not trusted with more
     // than it needs, and stays symmetric with `serve`); the real one goes to
     // the daemon's stderr log (piped + routed by the laptop, never inherited).

@@ -15,11 +15,12 @@ import {
   quitAction,
   resolveSlash,
   retryPlan,
+  skillsListError,
   transcriptToMarkdown,
 } from "./commands.ts";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { LineInput } from "./components/LineInput.tsx";
-import { McpPanel } from "./components/McpPanel.tsx";
+import { ListPanel } from "./components/ListPanel.tsx";
 import { PermissionPrompt, permissionPromptRows } from "./components/PermissionPrompt.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
@@ -27,24 +28,22 @@ import { pushHistory, recall } from "./history.ts";
 import { useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import type { LinkFeed } from "./link-status.ts";
-import {
-  type McpPanel as McpPanelState,
-  type McpServerView,
-  applyPanel,
-  loadPanel,
-  openPanel,
-  panelClick,
-  panelHeight,
-  panelKey,
-  panelMaxBody,
-  panelView,
-} from "./mcp-panel.ts";
+import type { McpServerView } from "./mcp-panel.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
+import {
+  type OpenPanel,
+  applyPanel,
+  mcpPanel,
+  panelClick,
+  panelView,
+  skillsPanel,
+} from "./panel.ts";
 import { sanitizePasted, stepPaste } from "./paste.ts";
 import { usePermissionBroker } from "./permission-ui.ts";
 import { layoutTranscript, sliceLaid, stripAnsi, warmRowsChunk } from "./render-lines.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import { type Selection, extractSelection, isNonEmpty, rowSelectionRange } from "./selection.ts";
+import type { SkillsListView } from "./skills-panel.ts";
 import {
   type DisplayItem,
   type DisplayState,
@@ -59,6 +58,7 @@ import {
   startContinuation,
   startTurn,
 } from "./state.ts";
+import { panelHeight, panelMaxBody, treeKey } from "./tree-panel.ts";
 
 /**
  * The conversation the App drives. Both the local agent `Session` and the
@@ -120,6 +120,8 @@ export interface AppProps {
   readonly skills?: () => readonly SlashSkill[];
   /** The daemon's MCP servers, probed live (`/mcp`). Absent → `/mcp` says it's unavailable. */
   readonly mcpStatus?: () => Promise<readonly McpServerView[]>;
+  /** Every skill the daemon discovered and its problems (`/skills`). Absent → unavailable. */
+  readonly skillsList?: () => Promise<SkillsListView>;
   /** Injectable for tests (defaults to the OS clipboard + Bun.write). */
   readonly clipboard?: (text: string) => Promise<void>;
   /** Injectable for tests (defaults to the OS clipboard read). */
@@ -165,6 +167,7 @@ export function App({
   link,
   skills = () => [],
   mcpStatus,
+  skillsList,
   clipboard = copyToClipboard,
   paste = readClipboard,
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
@@ -186,11 +189,16 @@ export function App({
   const [queued, setQueued] = useState<readonly string[]>([]);
   // Interactive tool-approval dialog + auto-accept (Shift+Tab), all self-contained.
   const permission = usePermissionBroker(permissions);
-  // The `/mcp` panel (docs/feat/mcp-tools-panel.md), open or null. Each open
-  // and close bumps the generation, so a probe answering after its panel
-  // closed (or was reopened) is dropped instead of landing on the screen.
-  const [mcpPanel, setMcpPanel] = useState<McpPanelState | null>(null);
-  const mcpGenRef = useRef(0);
+  // The open list panel (`/mcp`, `/skills`; docs/feat/skills-panel.md) or null.
+  // Each open and close bumps the generation, so a request answering after its
+  // panel closed (or another opened) is dropped instead of landing on screen.
+  const [panel, setPanel] = useState<OpenPanel | null>(null);
+  const panelGenRef = useRef(0);
+  // The panel as of the last render, for text inserted outside the key path
+  // (a paste, a timer-flushed paste or held "["): behind a panel the hidden
+  // input takes none of it.
+  const panelRef = useRef(panel);
+  panelRef.current = panel;
   const [selection, setSelectionState] = useState<Selection | null>(null);
   const selectionRef = useRef<Selection | null>(null);
   // Partial SGR mouse report held across data chunks (see the mouse handling
@@ -346,7 +354,7 @@ export function App({
   const termRows = Math.max(8, size.rows);
   // Slash-command autocomplete: open only while idle and typing a `/command`.
   const paletteCommands =
-    !permission.pending && !st.running && !mcpPanel ? matchCommands(field.value, skills()) : [];
+    !permission.pending && !st.running && !panel ? matchCommands(field.value, skills()) : [];
   const paletteOpen = paletteCommands.length > 0;
   const commandSel = paletteOpen
     ? Math.min(Math.max(0, commandIndex), paletteCommands.length - 1)
@@ -361,20 +369,20 @@ export function App({
     MAX_INPUT_ROWS,
   );
   const inputBoxRows = inputContentLines + 2;
-  const mcpView = mcpPanel ? panelView(mcpPanel, columns, panelMaxBody(termRows)) : null;
+  const listView = panel ? panelView(panel, columns, panelMaxBody(termRows)) : null;
   // Rows above the input/panel while a turn runs: the thinking line + the
   // queued-message lines (each one row: `wrap="truncate-end"`).
   const runningRows = st.running ? 1 + queued.length : 0;
   // Rows the bottom area occupies: the permission dialog; or the running rows,
-  // then the `/mcp` panel or the input box (plus any open palette rows, which
+  // then the list panel or the input box (plus any open palette rows, which
   // only open while idle).
   const activeRows = permission.pending
     ? permissionPromptRows(permission.choices.length)
-    : runningRows + (mcpView ? panelHeight(mcpView) : inputBoxRows + paletteRows.length);
+    : runningRows + (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length);
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
   // Terminal row (1-based) of the panel's first body row: the transcript
   // viewport, the bottom area's marginTop row, the running rows, the title rule.
-  const mcpBodyTop = viewport + 1 + runningRows + 2;
+  const panelBodyTop = viewport + 1 + runningRows + 2;
   // Positional layout only (O(items) cache lookups, no full array): take the
   // row `total` for scroll maths and materialise just the visible window. The
   // whole transcript is assembled on demand (sliceLaid 0..total) only where a
@@ -409,10 +417,37 @@ export function App({
     [flushNow],
   );
 
-  const closeMcpPanel = useCallback(() => {
-    mcpGenRef.current += 1;
-    setMcpPanel(null);
+  const closePanel = useCallback(() => {
+    panelGenRef.current += 1;
+    setPanel(null);
   }, []);
+
+  /**
+   * Open `initial` (its loading state) at once, then whatever `load` resolves
+   * to — only if this panel is still the open one; a failure closes it and
+   * says why.
+   */
+  const openPanel = useCallback(
+    (initial: OpenPanel, load: () => Promise<OpenPanel>, describe: (e: unknown) => string) => {
+      panelGenRef.current += 1;
+      const gen = panelGenRef.current;
+      setPanel(initial);
+      void load().then(
+        (loaded) => {
+          if (panelGenRef.current === gen) {
+            setPanel(loaded);
+          }
+        },
+        (e) => {
+          if (panelGenRef.current === gen) {
+            closePanel();
+            pushNotice(describe(e));
+          }
+        },
+      );
+    },
+    [closePanel, pushNotice],
+  );
 
   const run = useCallback(
     async (text: string, opts?: { continuation?: boolean; skill?: string }) => {
@@ -555,21 +590,22 @@ export function App({
             pushNotice("_MCP status isn't available on this runtime._");
             return;
           }
-          mcpGenRef.current += 1;
-          const gen = mcpGenRef.current;
-          setMcpPanel(openPanel());
-          void mcpStatus().then(
-            (servers) => {
-              if (mcpGenRef.current === gen) {
-                setMcpPanel(loadPanel(servers));
-              }
-            },
-            (e) => {
-              if (mcpGenRef.current === gen) {
-                closeMcpPanel();
-                pushNotice(mcpStatusError(e));
-              }
-            },
+          openPanel(
+            mcpPanel(),
+            () => mcpStatus().then((servers) => mcpPanel(servers)),
+            mcpStatusError,
+          );
+          return;
+        }
+        case "/skills": {
+          if (!skillsList) {
+            pushNotice("_The skill list isn't available on this runtime._");
+            return;
+          }
+          openPanel(
+            skillsPanel(),
+            () => skillsList().then((list) => skillsPanel(list)),
+            skillsListError,
           );
           return;
         }
@@ -624,11 +660,12 @@ export function App({
     [
       makeSession,
       clipboard,
-      closeMcpPanel,
+      openPanel,
       cwd,
       exit,
       flushNow,
       mcpStatus,
+      skillsList,
       model,
       pushNotice,
       run,
@@ -732,7 +769,7 @@ export function App({
         pendingMouseTimerRef.current = null;
         const p = pendingMouseRef.current;
         pendingMouseRef.current = "";
-        if (p === "[") {
+        if (p === "[" && !panelRef.current) {
           field.insert(p); // it was a typed bracket after all
         }
         // A longer p was a truncated report: drop it.
@@ -759,7 +796,7 @@ export function App({
       pasteBufRef.current = null;
       if (buf) {
         const clean = sanitizePasted(buf);
-        if (clean) {
+        if (clean && !panelRef.current) {
           field.insert(clean);
         }
       }
@@ -832,23 +869,23 @@ export function App({
       }
       if (pasteStep.text !== undefined) {
         const clean = sanitizePasted(pasteStep.text);
-        if (clean) {
+        if (clean && !panel) {
           field.insert(clean);
         }
       }
       return;
     }
-    // The `/mcp` panel: its keys first (so Esc closes it rather than stopping
+    // The list panel: its keys first (so Esc closes it rather than stopping
     // a running turn). Mouse reports fall through to the dispatch below; any
     // other key is swallowed there — no line editing behind the panel.
-    if (mcpPanel) {
-      const action = panelKey(char, key);
+    if (panel) {
+      const action = treeKey(char, key);
       if (action === "close") {
-        closeMcpPanel();
+        closePanel();
         return;
       }
       if (action !== "none") {
-        setMcpPanel((p) => (p ? applyPanel(p, action) : p));
+        setPanel((p) => (p ? applyPanel(p, action, columns) : p));
         return;
       }
     }
@@ -907,12 +944,12 @@ export function App({
         setScrollOffset((o) => clampOffset(o + dir, total, viewport));
         return;
       }
-      // A left press on a `/mcp` panel body row selects it (a server row also
+      // A left press on a list panel body row selects it (a head row also
       // expands/collapses). Drags and releases there do nothing.
-      if (mcpView && r.y >= mcpBodyTop && r.y < mcpBodyTop + mcpView.rows.length) {
+      if (listView && r.y >= panelBodyTop && r.y < panelBodyTop + listView.rows.length) {
         if (r.press && r.btn === 0) {
-          const bodyIndex = r.y - mcpBodyTop;
-          setMcpPanel((p) => (p ? panelClick(p, mcpView, bodyIndex) : p));
+          const bodyIndex = r.y - panelBodyTop;
+          setPanel((p) => (p ? panelClick(p, listView, bodyIndex, columns) : p));
         }
         return;
       }
@@ -974,8 +1011,8 @@ export function App({
       holdMouse(data);
       return;
     }
-    // Behind the `/mcp` panel nothing edits the (hidden) input.
-    if (mcpPanel) {
+    // Behind a list panel nothing edits the (hidden) input.
+    if (panel) {
       return;
     }
     // Not a report or a continuable prefix: a held bare "[" was a typed bracket,
@@ -1036,7 +1073,7 @@ export function App({
         void paste().then(
           (text) => {
             const clean = flattenPasted(text);
-            if (clean) {
+            if (clean && !panelRef.current) {
               field.insert(clean);
             }
           },
@@ -1129,8 +1166,8 @@ export function App({
                   </Text>
                 ))
               : null}
-            {mcpView ? (
-              <McpPanel view={mcpView} columns={columns} />
+            {listView ? (
+              <ListPanel view={listView} columns={columns} />
             ) : (
               <>
                 {paletteOpen ? (

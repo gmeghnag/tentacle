@@ -13,4 +13,5 @@ export * from "./updates.ts";
 export * from "./permission.ts";
 export * from "./model.ts";
 export * from "./mcp.ts";
+export * from "./skills.ts";
 export * from "./methods.ts";

@@ -32,6 +32,7 @@ import {
 import { type JobController, type ModelProvider, PermissionBroker } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
+import type { SkillListEntry } from "@tentacle/protocol";
 import {
   SKILL_TOOL_NAME,
   type SkillBodyReader,
@@ -53,6 +54,32 @@ export function skillCatalog(
   config: Pick<TentacleConfig, "skills">,
 ): { name: string; description: string }[] {
   return slashSkills(config.skills).map(({ name, description }) => ({ name, description }));
+}
+
+/**
+ * Every discovered skill and who may invoke it, plus the discovery problems
+ * (`skills/list`, the TUI's `/skills`; docs/feat/skills-panel.md). `user` and
+ * `model` are the same rules the agent applies (`slashSkills`,
+ * `offeredSkills`), so the panel can't disagree with what actually happens.
+ * Raw: the daemon (`toSkillList`) makes it wire-safe.
+ */
+export function skillListing(config: Pick<TentacleConfig, "skills" | "skillDiagnostics">): {
+  skills: SkillListEntry[];
+  problems: string[];
+} {
+  const user = new Set(slashSkills(config.skills).map((s) => s.name));
+  const model = new Set(offeredSkills(config.skills).map((s) => s.name));
+  return {
+    skills: config.skills.map((s) => ({
+      name: s.name,
+      description: s.description,
+      scope: s.scope,
+      user: user.has(s.name),
+      model: model.has(s.name),
+      location: s.location,
+    })),
+    problems: [...config.skillDiagnostics],
+  };
 }
 
 /** Load user-defined agent types from `<configDir>/agents/*.md` (missing dir → none). */
