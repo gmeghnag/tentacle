@@ -108,9 +108,10 @@ export const DEFAULT_CONFIG_JSONC = `{
   // (contract: docs/feat/hooks-core.md). "tool_call" can allow / ask / deny /
   // rewrite a call (exit 2 = deny, stderr = reason); "tool_result" can replace
   // a result. "matcher" is a tool name ("shell"), "a|b" names, or a regex
-  // ("mcp__.*"). "onFailure": "ignore" (default) | "block". turn_start /
-  // turn_end / model_request are accepted but not run yet. A profile's "hooks"
-  // replaces this list.
+  // ("mcp__.*"). "onFailure": "ignore" (default) | "block". "turn_start" can
+  // add context or stop the turn; "turn_end" can continue it (max 3 times);
+  // "model_request" is a notification (docs/feat/hooks-turn.md). A profile's
+  // "hooks" replaces this list.
   // "hooks": [
   //   { "event": "tool_call", "matcher": "shell", "command": "~/.config/tentacle/hooks/no-rm.sh" }
   // ],

@@ -337,4 +337,26 @@ describe("hooks wiring (docs/feat/hooks-core.md)", () => {
     expect(input.tool_result.content).toContain("[REDACTED]");
     expect(input.tool_result.content).not.toContain(SECRET);
   });
+
+  test("turn_start runs as a real process; model_request does not run over a model tunnel (D2)", async () => {
+    const mr = join(dir, "model-request-ran");
+    const model = new ScriptedModel([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const { agent } = buildAgent(
+      {
+        ...config,
+        hooks: [
+          { event: "turn_start", command: `printf '{"context":"from hook"}'` },
+          { event: "model_request", command: `touch '${mr}'` },
+        ],
+      },
+      { modelOverride: model },
+    );
+    const notes: string[] = [];
+    for await (const event of agent.run("s", [{ role: "user", content: "go" }])) {
+      if (event.type === "context_note") notes.push(event.text);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(notes).toEqual(["[hook turn_start] from hook"]);
+    expect(await Bun.file(mr).exists()).toBe(false);
+  });
 });

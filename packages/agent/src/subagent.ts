@@ -172,7 +172,12 @@ export function createSubagentRunner(deps: SubagentDeps): {
       ...(deps.requestPermission ? { requestPermission: deps.requestPermission } : {}),
       ...(deps.resultTransforms ? { resultTransforms: deps.resultTransforms } : {}),
       ...(deps.hooks
-        ? { hooks: deps.hooks.forAgent({ type: type.name, description: opts.description }) }
+        ? {
+            hooks: deps.hooks.forAgent(
+              { type: type.name, description: opts.description },
+              type.model,
+            ),
+          }
         : {}),
     });
 

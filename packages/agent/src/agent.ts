@@ -38,7 +38,7 @@ import {
 } from "@tentacle/tools";
 import { type CarriedSkill, summarizeConversation } from "./compact.ts";
 import { EventQueue } from "./event-queue.ts";
-import type { HookRunner } from "./hooks.ts";
+import { type HookRunner, hookNote } from "./hooks.ts";
 import { PermissionGate } from "./permission-gate.ts";
 import { type ResultTransform, applyResultTransforms } from "./result-pipeline.ts";
 import { suspendedCalls } from "./resume.ts";
@@ -89,11 +89,24 @@ export interface RunOptions {
 
 /** Max consecutive empty-response auto-nudges before a stall ends the turn. */
 const MAX_EMPTY_CONTINUES = 2;
+/** Max `turn_end` hook continues per turn (R2, docs/feat/hooks-turn.md). */
+const MAX_HOOK_CONTINUES = 3;
 /** The internal nudge injected to un-stick a model that returned an empty round. */
 const CONTINUE_NUDGE = "Continue with the task.";
 /** Result recorded for a tool call skipped because the user cancelled mid-round,
  * so the assistant's `toolCalls` stay answered in the history. */
 const CANCELLED_TOOL_NOTE = "Cancelled by the user before this tool ran.";
+
+/** The last user message's text, for `turn_start` hooks ("" if none). */
+function lastUserText(messages: readonly ChatMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role === "user") {
+      return m.content;
+    }
+  }
+  return "";
+}
 
 export type AgentEvent =
   | { readonly type: "text"; readonly delta: string }
@@ -136,12 +149,12 @@ export type AgentEvent =
   // A user message queued mid-turn ("steering") was injected into the loop.
   | { readonly type: "steer"; readonly text: string }
   // The loop itself added a user-role message to the history (the empty-round
-  // nudge, a background-job note): emitted right after the push, so every
-  // history message has an event and a replay can rebuild it.
+  // nudge, a background-job note, a hook's note): emitted right after the
+  // push, so every history message has an event and a replay can rebuild it.
   | {
       readonly type: "context_note";
       readonly text: string;
-      readonly reason: "continue" | "background_exit";
+      readonly reason: "continue" | "background_exit" | "hook";
     }
   // The history now reflects every event yielded so far (a consistent cut for a
   // snapshot + replay). Carries no data; frontends ignore it. Yielded only
@@ -351,6 +364,8 @@ export class Agent {
     // no text, no tool calls) to continue before giving up, so a stall after a
     // tool result doesn't silently end the turn (the user had to type "go on").
     let emptyRounds = 0;
+    // `turn_end` hook continues so far this turn (capped at MAX_HOOK_CONTINUES).
+    let hookContinues = 0;
     const toolContext: ToolContext = {
       sessionId,
       signal: signal ?? new AbortController().signal,
@@ -358,6 +373,9 @@ export class Agent {
       ...(this.config.jobs ? { jobs: this.config.jobs } : {}),
       history: messages,
     };
+
+    // The user's prompt for `turn_start` hooks, read before any note lands.
+    const prompt = lastUserText(messages);
 
     // A resumed turn first finishes its suspended round — exactly the calls an
     // uninterrupted run would still have run, each asked again — so the round's
@@ -380,8 +398,40 @@ export class Agent {
       yield event;
     }
 
+    // `turn_start` hooks: not on a resumed turn, which already started (R4).
+    // A cancel during them is handled by the loop's first check.
+    const hooks = this.config.hooks;
+    if (opts.resumeFrom === undefined && hooks?.hasAny("turn_start")) {
+      const start = await hooks.turnStart({
+        sessionId,
+        prompt,
+        ...(signal ? { signal } : {}),
+      });
+      for (const note of start.notes) {
+        messages.push({ role: "user", content: note });
+        yield { type: "context_note", text: note, reason: "hook" };
+      }
+      if (start.stop) {
+        const text = hookNote("turn_start", `turn stopped: ${start.reason}`);
+        messages.push({ role: "user", content: text });
+        yield { type: "context_note", text, reason: "hook" };
+        // A steer accepted while the hook ran is kept and echoed, never
+        // accepted and then dropped — but gets NO model round: the stop holds,
+        // and the steer must not reach the model without passing `turn_start`
+        // (the user's next message starts a turn that runs it). Same no-await
+        // invariant as the late-steer drain: nothing awaits from here to `turn_end`.
+        for (const steer of drainSteering?.() ?? []) {
+          messages.push({ role: "user", content: steer });
+          yield { type: "steer", text: steer };
+        }
+        yield { type: "turn_end", reason: "end_turn" };
+        return;
+      }
+    }
+
     for (let iteration = 0; iteration < maxIterations; iteration++) {
       if (signal?.aborted) {
+        this.notifyTurnEnd(sessionId, "cancelled");
         yield { type: "turn_end", reason: "cancelled" };
         return;
       }
@@ -401,6 +451,7 @@ export class Agent {
 
       let text = "";
       const toolCalls: ToolCall[] = [];
+      this.notifyModelRequest(sessionId, iteration, request);
       try {
         for await (const event of this.config.model.stream(request)) {
           switch (event.type) {
@@ -426,6 +477,7 @@ export class Agent {
         // AbortError. Turn it into the clean cancellation path (not an error the
         // frontend renders as a failed turn); any other error propagates.
         if (signal?.aborted) {
+          this.notifyTurnEnd(sessionId, "cancelled");
           yield { type: "turn_end", reason: "cancelled" };
           return;
         }
@@ -437,6 +489,7 @@ export class Agent {
       // after the last event). Don't keep the late reply or run its tools — end
       // the turn cancelled. (Providers that THROW on abort take the catch above.)
       if (signal?.aborted) {
+        this.notifyTurnEnd(sessionId, "cancelled");
         yield { type: "turn_end", reason: "cancelled" };
         return;
       }
@@ -458,6 +511,32 @@ export class Agent {
       }
 
       if (toolCalls.length === 0) {
+        // `turn_end` hooks may ask for another round (R2: at most 3 per turn).
+        // Awaited HERE, before the late-steer drain: anything queued while a
+        // hook runs is drained below, so the no-await invariant holds. Not on
+        // a stalled (empty) round — the nudge handles that.
+        const stalled = text.trim() === "" && emptyRounds < MAX_EMPTY_CONTINUES;
+        if (!stalled && hooks?.hasAny("turn_end") && hookContinues < MAX_HOOK_CONTINUES) {
+          const end = await hooks.turnEnd({
+            sessionId,
+            reason: "end_turn",
+            lastAssistantMessage: text,
+            continued: hookContinues,
+            ...(signal ? { signal } : {}),
+          });
+          if (signal?.aborted) {
+            this.notifyTurnEnd(sessionId, "cancelled");
+            yield { type: "turn_end", reason: "cancelled" };
+            return;
+          }
+          if (end.continue) {
+            hookContinues++;
+            const note = hookNote("turn_end", end.reason);
+            messages.push({ role: "user", content: note });
+            yield { type: "context_note", text: note, reason: "hook" };
+            continue;
+          }
+        }
         // Before ending, handle anything the user queued during the reply so a
         // last-moment steer is not dropped — inject it and run another round.
         // INVARIANT: from this drain to the `turn_end` yield (and on through the
@@ -506,6 +585,7 @@ export class Agent {
     // cancel wins over the `max_iterations` report. (An abort *during* the final
     // stream is handled inside it, below.)
     if (signal?.aborted) {
+      this.notifyTurnEnd(sessionId, "cancelled");
       yield { type: "turn_end", reason: "cancelled" };
       return;
     }
@@ -533,13 +613,15 @@ export class Agent {
           },
         ];
         let finalText = "";
-        for await (const event of this.config.model.stream({
+        const finalRequest: ChatRequest = {
           messages: finalMessages,
           ...(this.config.temperature !== undefined
             ? { temperature: this.config.temperature }
             : {}),
           ...(signal ? { signal } : {}),
-        })) {
+        };
+        this.notifyModelRequest(sessionId, "final", finalRequest);
+        for await (const event of this.config.model.stream(finalRequest)) {
           if (event.type === "text") {
             finalText += event.delta;
             yield { type: "text", delta: event.delta };
@@ -554,6 +636,7 @@ export class Agent {
         // check above): the cancel wins over the `max_iterations` report, and
         // the late reply is not kept (providers that THROW take the catch below).
         if (signal?.aborted) {
+          this.notifyTurnEnd(sessionId, "cancelled");
           yield { type: "turn_end", reason: "cancelled" };
           return;
         }
@@ -563,6 +646,7 @@ export class Agent {
         }
       } catch (error) {
         if (signal?.aborted) {
+          this.notifyTurnEnd(sessionId, "cancelled");
           yield { type: "turn_end", reason: "cancelled" };
           return;
         }
@@ -579,7 +663,29 @@ export class Agent {
       }
     }
 
+    this.notifyTurnEnd(sessionId, "max_iterations");
     yield { type: "turn_end", reason: "max_iterations" };
+  }
+
+  /** `turn_end` notification hooks (cancelled / max_iterations): synchronous, never awaited. */
+  private notifyTurnEnd(sessionId: string, reason: "cancelled" | "max_iterations"): void {
+    if (this.config.hooks?.hasAny("turn_end")) {
+      void this.config.hooks.turnEndNotify({ sessionId, reason });
+    }
+  }
+
+  /** `model_request` notification hooks: synchronous, never awaited (D2). */
+  private notifyModelRequest(
+    sessionId: string,
+    iteration: number | "final",
+    request: ChatRequest,
+  ): void {
+    this.config.hooks?.notifyModelRequest({
+      sessionId,
+      iteration,
+      messages: request.messages,
+      toolNames: (request.tools ?? []).map((t) => t.name),
+    });
   }
 
   /**

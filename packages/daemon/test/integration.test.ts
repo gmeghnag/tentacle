@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent, Session } from "@tentacle/agent";
+import { Agent, HookRunner, Session } from "@tentacle/agent";
 import {
   type ChatMessage,
   type ChatRequest,
@@ -432,6 +432,122 @@ describe("daemon ↔ client (in-memory)", () => {
       });
     });
   }
+
+  // The same invariant with an AWAITED `turn_end` hook (docs/feat/hooks-turn.md):
+  // the hook runs BEFORE the last drain, so a `session/enqueue` arriving while
+  // it runs is drained into the turn (another round), never accepted and
+  // dropped; and still no macrotask fits between the last drain and the end.
+  test("a slow turn_end hook: an enqueue during it is drained, and no macrotask fits after the last drain", async () => {
+    const model = new ScriptedProvider([
+      [{ type: "text", delta: "first" }, { type: "done" }],
+      [{ type: "text", delta: "second" }, { type: "done" }],
+    ]);
+    let hookRuns = 0;
+    const env: ExecutionEnvironment = {
+      ...noopEnv,
+      async exec() {
+        hookRuns++;
+        if (hookRuns === 1) {
+          // A transport message arriving while the hook runs.
+          setTimeout(() => hosted.enqueue("e1", "t1", "late steer"), 10);
+        }
+        await tick(50);
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+    const hooks = new HookRunner({
+      specs: [{ event: "turn_end", command: "slow" }],
+      env,
+      cwd: "/",
+    });
+    const agent = new Agent({ model, tools: new ToolRegistry(), env, hooks });
+    const runMessages = agent.runMessages.bind(agent);
+    const atNextMacrotask: { running: boolean; ended: boolean }[] = [];
+    const streamed: KnownSessionUpdateParams[] = [];
+    const hosted = new HostedSession("s1", new Session(agent), new PermissionBroker());
+    const h = hosted;
+    h.attach(sinkTo((p) => streamed.push(p)));
+    const ended = () => streamed.some((p) => p.update.type === "turn_end");
+    agent.runMessages = (messages, sessionId, signal, drain) =>
+      runMessages(messages, sessionId, signal, () => {
+        setTimeout(() => atNextMacrotask.push({ running: h.running, ended: ended() }), 0);
+        return drain?.() ?? [];
+      });
+
+    expect(h.prompt("t1", [{ type: "text", text: "go" }])).toEqual({ turnId: "t1" });
+    while (!ended()) {
+      await tick(10);
+    }
+    await tick(5);
+    // Drained into the turn: a steer echo and a second model round.
+    expect(steerUpdates(streamed).map((s) => s.text)).toEqual(["late steer"]);
+    expect(hookRuns).toBe(2);
+    expect(atNextMacrotask.at(-1)).toEqual({ running: false, ended: true });
+    expect(streamed.at(-1)?.update).toEqual({
+      type: "turn_end",
+      turnId: "t1",
+      stopReason: "end_turn",
+    });
+  });
+
+  // A `turn_start` hook that stops the turn: a steer accepted while it ran is
+  // drained before the end (kept + echoed, never dropped) but gets no model
+  // round — the stop holds, and the steer never bypasses `turn_start`.
+  test("a slow turn_start hook that stops the turn: an enqueue during it is kept and echoed, but gets no model round", async () => {
+    let modelCalls = 0;
+    const model: ModelProvider = {
+      id: "counting",
+      async *stream() {
+        modelCalls++;
+        yield { type: "text", delta: "answered" };
+        yield { type: "done" };
+      },
+    };
+    const env: ExecutionEnvironment = {
+      ...noopEnv,
+      async exec() {
+        setTimeout(() => hosted.enqueue("e1", "t1", "late steer"), 10);
+        await tick(50);
+        return { stdout: "", stderr: "frozen", exitCode: 2 };
+      },
+    };
+    const hooks = new HookRunner({
+      specs: [{ event: "turn_start", command: "slow" }],
+      env,
+      cwd: "/",
+    });
+    const agent = new Agent({ model, tools: new ToolRegistry(), env, hooks });
+    const runMessages = agent.runMessages.bind(agent);
+    const atNextMacrotask: { running: boolean; ended: boolean }[] = [];
+    const streamed: KnownSessionUpdateParams[] = [];
+    const session = new Session(agent);
+    const hosted = new HostedSession("s1", session, new PermissionBroker());
+    hosted.attach(sinkTo((p) => streamed.push(p)));
+    const ended = () => streamed.some((p) => p.update.type === "turn_end");
+    agent.runMessages = (messages, sessionId, signal, drain) =>
+      runMessages(messages, sessionId, signal, () => {
+        setTimeout(() => atNextMacrotask.push({ running: hosted.running, ended: ended() }), 0);
+        return drain?.() ?? [];
+      });
+
+    expect(hosted.prompt("t1", [{ type: "text", text: "go" }])).toEqual({ turnId: "t1" });
+    while (!ended()) {
+      await tick(10);
+    }
+    await tick(5);
+    // Echoed and kept in the history, but the stop holds: the steer never
+    // reached the model without passing through `turn_start`.
+    expect(steerUpdates(streamed).map((s) => s.text)).toEqual(["late steer"]);
+    expect(modelCalls).toBe(0);
+    expect(session.pendingSteering()).toEqual([]);
+    expect(session.messages.at(-1)).toEqual({ role: "user", content: "late steer" });
+    expect(atNextMacrotask.at(-1)).toEqual({ running: false, ended: true });
+    expect(streamed.at(-1)?.update).toEqual({
+      type: "turn_end",
+      turnId: "t1",
+      stopReason: "end_turn",
+    });
+  });
 
   test("session/enqueue with no turn running rejects with NoTurnRunning", async () => {
     // Accepting it would be a fake success: the next `send` resets the steering

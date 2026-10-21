@@ -44,8 +44,10 @@ export function render(event: AgentEvent): string {
     case "steer":
       return `\n› ${event.text}\n`;
     case "history_commit":
-    case "context_note":
       return "";
+    case "context_note":
+      // A user hook's note is shown (R1); the loop's own notes are not.
+      return event.reason === "hook" ? `\n${event.text}\n` : "";
     case "turn_end":
       return event.reason === "end_turn" ? "\n" : `\n[stopped: ${event.reason}]\n`;
   }

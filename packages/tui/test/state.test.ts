@@ -149,6 +149,17 @@ describe("display state reducer", () => {
     expect(s.reasoningStartedAt).toBe(500);
   });
 
+  test("a hook's context_note is a visible notice; the loop's own notes stay hidden (R1)", () => {
+    const text = "[hook turn_end] tests still fail";
+    const s = applyEvent(initialState, { type: "context_note", text, reason: "hook" }, 0);
+    expect(s.items.at(-1)).toEqual({ kind: "notice", text });
+    for (const reason of ["continue", "background_exit"] as const) {
+      expect(applyEvent(initialState, { type: "context_note", text: "x", reason }, 0)).toBe(
+        initialState,
+      );
+    }
+  });
+
   test("background_exit appends one notice and does not duplicate by jobId", () => {
     // The live JobController subscription surfaced it first…
     let s = appendBackgroundExit(

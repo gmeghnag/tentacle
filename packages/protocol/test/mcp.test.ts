@@ -5,7 +5,7 @@ const ok = { name: "github", state: "connected", tools: ["a", "b"], moreTools: 0
 
 describe("McpServerStatusSchema (docs/feat/mcp-tools-panel.md)", () => {
   test("the version is bumped for the breaking change (a count became names)", () => {
-    expect(PROTOCOL_VERSION).toBe(8);
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(8);
   });
 
   test("accepts a server with its tool names", () => {

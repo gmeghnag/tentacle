@@ -9,6 +9,7 @@
  * run as the `runResultHooks` pipeline stage.
  */
 import type {
+  ChatMessage,
   ExecResult,
   ExecutionEnvironment,
   HookEvent,
@@ -20,8 +21,11 @@ import type { ResultTransform } from "./result-pipeline.ts";
 /** Hook stdout above this is a failure (a flooding hook must not fill memory/context). */
 export const MAX_HOOK_STDOUT = 1024 * 1024;
 const MAX_REASON = 2000;
+/** A `turn_start` hook's `context` above this is clipped (it lands in every later request). */
+export const MAX_HOOK_CONTEXT = 10_000;
 const DEFAULT_TIMEOUT_S = 600;
 const DEFAULT_REASON = "blocked by hook";
+const DEFAULT_STOP_REASON = "stopped by hook";
 
 type OnFailure = HookSpec["onFailure"];
 /** What one hook process produced; `"timeout"`/`"error"` when it did not finish normally. */
@@ -188,6 +192,84 @@ export function parseToolResultOutcome(r: HookProcessOutcome, onFailure: OnFailu
     : { kind: "replace", content, isError: is_error };
 }
 
+export type TurnStartVote =
+  | { readonly kind: "none"; readonly failure?: string }
+  | { readonly kind: "context"; readonly text: string }
+  | { readonly kind: "stop"; readonly reason: string };
+
+export type TurnEndVote =
+  | { readonly kind: "stop"; readonly failure?: string }
+  | { readonly kind: "continue"; readonly reason: string };
+
+/** Turn one `turn_start` hook's process outcome into a vote. */
+export function parseTurnStartOutcome(r: HookProcessOutcome, onFailure: OnFailure): TurnStartVote {
+  const fail = (why: string): TurnStartVote =>
+    onFailure === "block"
+      ? { kind: "stop", reason: `hook failed: ${why}` }
+      : { kind: "none", failure: why };
+  const c = classify(r);
+  if ("failure" in c) {
+    return fail(c.failure);
+  }
+  if ("exit2" in c) {
+    return { kind: "stop", reason: c.exit2 || DEFAULT_STOP_REASON };
+  }
+  if (c.ok === null || c.ok.context === undefined) {
+    return { kind: "none" };
+  }
+  if (typeof c.ok.context !== "string") {
+    return fail("`context` is not a string");
+  }
+  return c.ok.context.trim() === ""
+    ? { kind: "none" }
+    : { kind: "context", text: clip(c.ok.context, MAX_HOOK_CONTEXT) };
+}
+
+/** Turn one `turn_end` (end_turn) hook's process outcome into a vote. */
+export function parseTurnEndOutcome(r: HookProcessOutcome, onFailure: OnFailure): TurnEndVote {
+  const fail = (why: string): TurnEndVote =>
+    onFailure === "block"
+      ? { kind: "continue", reason: `hook failed: ${why}` }
+      : { kind: "stop", failure: why };
+  const c = classify(r);
+  if ("failure" in c) {
+    return fail(c.failure);
+  }
+  if ("exit2" in c) {
+    return { kind: "continue", reason: c.exit2 };
+  }
+  if (c.ok === null || c.ok.continue === undefined) {
+    return { kind: "stop" };
+  }
+  if (typeof c.ok.continue !== "boolean") {
+    return fail("`continue` is not a boolean");
+  }
+  if (!c.ok.continue) {
+    return { kind: "stop" };
+  }
+  const reason = typeof c.ok.reason === "string" ? clip(c.ok.reason.trim(), MAX_REASON) : "";
+  return { kind: "continue", reason };
+}
+
+/**
+ * The messages a `model_request` hook has not seen yet: those after the
+ * previous call's count — or all of them when there was none or the history
+ * shrank since (a compaction).
+ */
+export function modelRequestDelta(
+  messages: readonly ChatMessage[],
+  lastCount: number | undefined,
+): readonly ChatMessage[] {
+  return lastCount === undefined || lastCount > messages.length
+    ? messages
+    : messages.slice(lastCount);
+}
+
+/** The user-role note a hook injects into the history. */
+export function hookNote(event: HookEvent, text: string): string {
+  return `[hook ${event}] ${text}`;
+}
+
 export interface NamedVote {
   readonly hook: string;
   readonly vote: ToolCallVote;
@@ -243,6 +325,13 @@ export interface HookRunnerOptions {
   readonly log?: (line: string) => void;
   /** Set for a sub-agent's runner (H2). */
   readonly agent?: HookAgentInfo;
+  /** The configured model id, reported to `model_request` hooks. */
+  readonly modelId?: string;
+  /**
+   * Run `model_request` hooks — only when this process calls the provider
+   * itself. In a pod the request is built in the untrusted pod (D2): false.
+   */
+  readonly modelRequestHooks?: boolean;
 }
 
 interface ToolEventInput {
@@ -254,13 +343,24 @@ interface ToolEventInput {
 }
 
 export class HookRunner {
+  /** Per session: the history length at the last `model_request` sent. */
+  private readonly modelRequestCounts = new Map<string, number>();
+  /** Sessions with a `model_request` notification still running (R3). */
+  private readonly modelRequestBusy = new Set<string>();
+  /** Sessions whose current drop burst was already logged (R3). */
+  private readonly modelRequestDropLogged = new Set<string>();
+
   constructor(private readonly opts: HookRunnerOptions) {}
 
-  /** A runner for a sub-agent: same specs/env, `agent` set (H2). */
-  forAgent(agent: HookAgentInfo): HookRunner {
+  /**
+   * A runner for a sub-agent: same specs/env, `agent` set (H2); `modelId`
+   * when its type overrides the model (reported to `model_request` hooks).
+   */
+  forAgent(agent: HookAgentInfo, modelId?: string): HookRunner {
     return new HookRunner({
       ...this.opts,
       agent: { type: agent.type, description: agent.description },
+      ...(modelId !== undefined ? { modelId } : {}),
     });
   }
 
@@ -324,6 +424,145 @@ export class HookRunner {
     return result;
   }
 
+  /**
+   * `turn_start`: each matching hook's `context` is one note (already
+   * `[hook turn_start] …`), in config order; the first stop ends the run. A
+   * hook killed by the user's cancel is no vote.
+   */
+  async turnStart(i: {
+    readonly sessionId: string;
+    readonly prompt: string;
+    readonly signal?: AbortSignal;
+  }): Promise<{ notes: string[]; stop: boolean; reason: string }> {
+    const notes: string[] = [];
+    for (const spec of this.byEvent("turn_start")) {
+      if (i.signal?.aborted) {
+        break;
+      }
+      const r = await this.run(
+        spec,
+        { ...this.base("turn_start", i.sessionId), prompt: i.prompt },
+        i.signal,
+      );
+      if (i.signal?.aborted) {
+        break;
+      }
+      const vote = parseTurnStartOutcome(r, spec.onFailure);
+      if (vote.kind === "none") {
+        this.logFailure(hookName(spec), "turn_start", vote.failure);
+      } else if (vote.kind === "context") {
+        notes.push(hookNote("turn_start", vote.text));
+      } else {
+        return { notes, stop: true, reason: vote.reason };
+      }
+    }
+    return { notes, stop: false, reason: "" };
+  }
+
+  /**
+   * `turn_end` with `end_turn`: continue if ANY matching hook says so; the
+   * reasons are joined (none → "continue"). A cancel is no vote.
+   */
+  async turnEnd(i: {
+    readonly sessionId: string;
+    readonly reason: "end_turn";
+    readonly lastAssistantMessage: string;
+    readonly continued: number;
+    readonly signal?: AbortSignal;
+  }): Promise<{ continue: boolean; reason: string }> {
+    let cont = false;
+    const reasons: string[] = [];
+    for (const spec of this.byEvent("turn_end")) {
+      if (i.signal?.aborted) {
+        break;
+      }
+      const payload = {
+        ...this.base("turn_end", i.sessionId),
+        reason: i.reason,
+        last_assistant_message: i.lastAssistantMessage,
+        continued: i.continued,
+      };
+      const r = await this.run(spec, payload, i.signal);
+      if (i.signal?.aborted) {
+        return { continue: false, reason: "" };
+      }
+      const vote = parseTurnEndOutcome(r, spec.onFailure);
+      if (vote.kind === "stop") {
+        this.logFailure(hookName(spec), "turn_end", vote.failure);
+      } else {
+        cont = true;
+        if (vote.reason !== "") {
+          reasons.push(vote.reason);
+        }
+      }
+    }
+    return { continue: cont, reason: reasons.length > 0 ? reasons.join("\n") : "continue" };
+  }
+
+  /** `turn_end` for a turn that stopped otherwise: a notification. Never throws. */
+  async turnEndNotify(i: {
+    readonly sessionId: string;
+    readonly reason: "cancelled" | "max_iterations";
+  }): Promise<void> {
+    for (const spec of this.byEvent("turn_end")) {
+      const r = await this.run(spec, { ...this.base("turn_end", i.sessionId), reason: i.reason });
+      this.logFailure(hookName(spec), "turn_end", notifyFailure(r));
+    }
+  }
+
+  /**
+   * `model_request`: a read-only notification before a model call, never
+   * awaited. At most one in flight per session: a call arriving meanwhile is
+   * dropped, logged once per burst (R3). Never throws.
+   */
+  notifyModelRequest(i: {
+    readonly sessionId: string;
+    readonly iteration: number | "final";
+    readonly messages: readonly ChatMessage[];
+    readonly toolNames: readonly string[];
+  }): void {
+    if (this.opts.modelRequestHooks !== true || !this.hasAny("model_request")) {
+      return;
+    }
+    if (this.modelRequestBusy.has(i.sessionId)) {
+      if (!this.modelRequestDropLogged.has(i.sessionId)) {
+        this.modelRequestDropLogged.add(i.sessionId);
+        this.opts.log?.("hook model_request: previous notification still running, dropped");
+      }
+      return;
+    }
+    this.modelRequestDropLogged.delete(i.sessionId);
+    const delta = modelRequestDelta(i.messages, this.modelRequestCounts.get(i.sessionId));
+    this.modelRequestCounts.set(i.sessionId, i.messages.length);
+    const payload = {
+      ...this.base("model_request", i.sessionId),
+      iteration: i.iteration,
+      model: this.opts.modelId ?? null,
+      message_count: i.messages.length,
+      tool_names: i.toolNames,
+      new_messages: delta.map((m) => ({ role: m.role, content: m.content })),
+    };
+    this.modelRequestBusy.add(i.sessionId);
+    void (async () => {
+      try {
+        for (const spec of this.byEvent("model_request")) {
+          const r = await this.run(spec, payload);
+          this.logFailure(hookName(spec), "model_request", notifyFailure(r));
+        }
+      } finally {
+        this.modelRequestBusy.delete(i.sessionId);
+      }
+    })();
+  }
+
+  private byEvent(event: HookEvent): HookSpec[] {
+    return this.opts.specs.filter((s) => s.event === event);
+  }
+
+  private base(event: HookEvent, sessionId: string): Record<string, unknown> {
+    return { event, session_id: sessionId, cwd: this.opts.cwd, agent: this.opts.agent ?? null };
+  }
+
   private matching(event: HookEvent, toolName: string): HookSpec[] {
     return this.opts.specs.filter((s) => s.event === event && hookMatches(s, toolName));
   }
@@ -370,6 +609,12 @@ export class HookRunner {
       this.opts.log?.(`hook ${hook} (${event}) failed, ignored: ${failure}`);
     }
   }
+}
+
+/** A notification hook's failure, if any (its output is ignored). */
+function notifyFailure(r: HookProcessOutcome): string | undefined {
+  const c = classify(r);
+  return "failure" in c ? c.failure : undefined;
 }
 
 /**
