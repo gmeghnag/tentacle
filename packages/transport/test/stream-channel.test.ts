@@ -77,6 +77,7 @@ describe("streamChannel", () => {
           ? {
               protocolVersion: PROTOCOL_VERSION,
               agentCapabilities: { tools: true, permissions: true },
+              skills: [],
             }
           : null,
     });

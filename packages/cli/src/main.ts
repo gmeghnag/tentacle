@@ -48,7 +48,7 @@ import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { startTerminal } from "./terminal.ts";
 import { type TuiSessions, openTuiSessions, runSessionTui } from "./tui-sessions.ts";
-import { buildAgent, connectConfiguredMcp, inProcessAgents } from "./wiring.ts";
+import { buildAgent, connectConfiguredMcp, inProcessAgents, skillCatalog } from "./wiring.ts";
 
 /**
  * The app version: a literal injected at compile time (`define` in
@@ -381,6 +381,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           autoWakeOnJobExit: config.autoWake,
           createSession: runtime.createSession,
           link: runtime.link,
+          skills: runtime.skills,
           ...sessionOptions,
         }),
       teardown: () => runtime.dispose(),
@@ -528,6 +529,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               autoWakeOnJobExit: config.autoWake,
               createSession: runtime.createSession,
               link: runtime.link,
+              skills: runtime.skills,
               ...sessionOptions,
             }),
           teardown: () => runtime.dispose(),
@@ -560,6 +562,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ),
     });
 
+    const catalog = skillCatalog(config);
     await runSessionTui(sessions, {
       start: (sessionOptions) =>
         startTui(null, {
@@ -570,6 +573,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           jobs,
           autoWakeOnJobExit: config.autoWake,
           createSession,
+          skills: () => catalog,
           ...sessionOptions,
         }),
       teardown: () => mcp.dispose(),

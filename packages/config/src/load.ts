@@ -25,7 +25,7 @@ import {
 } from "./resolve.ts";
 import { type FileConfig, FileConfigSchema } from "./schema.ts";
 import { scanSkills, skillRoots } from "./skills-scan.ts";
-import { type SkillInfo, catalogCapDiagnostic, mergeSkills } from "./skills.ts";
+import { type SkillInfo, catalogCapDiagnostic, mergeSkills, slashCapDiagnostic } from "./skills.ts";
 
 export class ConfigError extends Error {
   override readonly name = "ConfigError";
@@ -254,9 +254,10 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     const merged = mergeSkills(scan.candidates);
     skills = merged.skills;
     skillDiagnostics.push(...scan.diagnostics, ...merged.diagnostics);
-    const capped = catalogCapDiagnostic(skills);
-    if (capped) {
-      skillDiagnostics.push(capped);
+    for (const capped of [catalogCapDiagnostic(skills), slashCapDiagnostic(skills)]) {
+      if (capped) {
+        skillDiagnostics.push(capped);
+      }
     }
   }
 

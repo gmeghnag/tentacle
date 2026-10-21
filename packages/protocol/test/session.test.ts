@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   InitializeParamsSchema,
+  InitializeResultSchema,
+  MAX_SKILL_CATALOG,
   OpenParamsSchema,
   OpenResultSchema,
+  PROTOCOL_VERSION,
   PromptParamsSchema,
   PromptResultSchema,
   StopReasonSchema,
@@ -90,5 +93,57 @@ describe("session lifecycle schemas", () => {
   test("stop reasons", () => {
     expect(StopReasonSchema.options).toContain("end_turn");
     expect(StopReasonSchema.safeParse("nope").success).toBe(false);
+  });
+});
+
+describe("skills on the wire (docs/feat/skills-slash.md)", () => {
+  const result = (skills: unknown) => ({
+    protocolVersion: PROTOCOL_VERSION,
+    agentCapabilities: { tools: true, permissions: true },
+    skills,
+  });
+
+  test("the version is bumped for the breaking change", () => {
+    expect(PROTOCOL_VERSION).toBe(7);
+  });
+
+  test("initialize result requires the catalog (empty is fine)", () => {
+    expect(InitializeResultSchema.safeParse(result([])).success).toBe(true);
+    const { skills: _omit, ...without } = result([]);
+    expect(InitializeResultSchema.safeParse(without).success).toBe(false);
+    expect(
+      InitializeResultSchema.safeParse(result([{ name: "deploy-app", description: "Deploy." }]))
+        .success,
+    ).toBe(true);
+  });
+
+  test("a hostile catalog is rejected: bad names, control characters, too many", () => {
+    for (const name of ["Deploy", "a b", "/tmp/x", "-a", "a--b", "x".repeat(65), ""]) {
+      expect(InitializeResultSchema.safeParse(result([{ name, description: "d" }])).success).toBe(
+        false,
+      );
+    }
+    for (const description of ["\u001b[2Jwipe", "two\nlines", "bell\u0007", "c1\u009b31m", ""]) {
+      expect(InitializeResultSchema.safeParse(result([{ name: "a", description }])).success).toBe(
+        false,
+      );
+    }
+    const many = Array.from({ length: MAX_SKILL_CATALOG + 1 }, (_, i) => ({
+      name: `s${i}`,
+      description: "d",
+    }));
+    expect(InitializeResultSchema.safeParse(result(many)).success).toBe(false);
+    expect(InitializeResultSchema.safeParse(result(many.slice(1))).success).toBe(true);
+    expect(
+      InitializeResultSchema.safeParse(result([{ name: "a", description: "d", extra: 1 }])).success,
+    ).toBe(false);
+  });
+
+  test("session/prompt carries an optional, spec-named skill", () => {
+    const base = { sessionId: "s", turnId: "t", content: [{ type: "text", text: "/a go" }] };
+    expect(PromptParamsSchema.safeParse(base).success).toBe(true);
+    expect(PromptParamsSchema.safeParse({ ...base, skill: "deploy-app" }).success).toBe(true);
+    expect(PromptParamsSchema.safeParse({ ...base, skill: "/deploy-app" }).success).toBe(false);
+    expect(PromptParamsSchema.safeParse({ ...base, skill: "" }).success).toBe(false);
   });
 });

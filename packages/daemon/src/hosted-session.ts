@@ -624,8 +624,15 @@ export class HostedSession {
    * arriving together must see the first one's controller (an `await` before it
    * would admit both). A retried `turnId` returns the cached ack — with the
    * outcome if that turn already ended — and never runs a second turn.
+   *
+   * `skill` (the user's `/name`) is checked here, before anything is recorded:
+   * one this session cannot activate for the user → `InvalidParams`.
    */
-  prompt(turnId: string, content: Parameters<typeof contentToText>[0]): PromptResult {
+  prompt(
+    turnId: string,
+    content: Parameters<typeof contentToText>[0],
+    skill?: string,
+  ): PromptResult {
     // The key first: a retry is answered even while a turn runs, or after it ended.
     const known = this.turns.get(turnId);
     if (known) {
@@ -633,12 +640,18 @@ export class HostedSession {
     }
     // Before the busy check: a rejected prompt starts and records nothing.
     assertTextOnly(content);
+    const text = contentToText(content);
+    if (skill !== undefined && (text === "" || !this.session.canActivateSkill(skill))) {
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidParams,
+        `unknown skill "${skill}": not invocable on this daemon`,
+      );
+    }
     this.assertIdle();
     const controller = new AbortController();
     this.controller = controller;
     this.activeTurnId = turnId;
     this.turns.set(turnId, {});
-    const text = contentToText(content);
     try {
       this.emit({ type: "turn_start", turnId, prompt: text });
     } catch (error) {
@@ -646,7 +659,11 @@ export class HostedSession {
       // as "running" forever — run it anyway; it ends through `finishTurn`.
       this.reportTurnError(error);
     }
-    void this.drive(turnId, this.session.send(text, controller.signal), controller);
+    void this.drive(
+      turnId,
+      this.session.send(text, controller.signal, skill !== undefined ? { skill } : {}),
+      controller,
+    );
     // After `drive` started: the generator has pushed the prompt by now (it
     // runs up to its first await inside the first `next()`), so the turn key
     // and the prompt are on disk together, before the model is called.

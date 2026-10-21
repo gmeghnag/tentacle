@@ -27,6 +27,8 @@ import type { StreamOutput } from "./session-reducer.ts";
 interface ActiveTurn {
   readonly turnId: string;
   readonly prompt: string;
+  /** The user's `/name` activation, re-sent with the prompt. */
+  readonly skill?: string;
   readonly queue: AsyncQueue<SessionEvent>;
   /** Tool names by call id (a `tool_call_update` omits it). */
   readonly toolNames: Map<string, string>;
@@ -124,18 +126,24 @@ export class RemoteSession implements SessionStreamListener {
     return Promise.resolve();
   }
 
-  async *send(prompt: string, signal?: AbortSignal): AsyncGenerator<SessionEvent> {
+  /** `opts.skill`: the user activates that skill (`/name`) with this prompt. */
+  async *send(
+    prompt: string,
+    signal?: AbortSignal,
+    opts: { readonly skill?: string } = {},
+  ): AsyncGenerator<SessionEvent> {
     // Known before the first `await`, so a steer typed while the session is
     // still opening is already bound to this turn.
     const turnId = crypto.randomUUID();
     this.turnId = turnId;
-    yield* this.runTurn(turnId, prompt, signal);
+    yield* this.runTurn(turnId, prompt, signal, opts.skill);
   }
 
   private async *runTurn(
     turnId: string,
     prompt: string,
     signal?: AbortSignal,
+    skill?: string,
   ): AsyncGenerator<SessionEvent> {
     if (this.closed) {
       throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
@@ -153,6 +161,7 @@ export class RemoteSession implements SessionStreamListener {
     const turn: ActiveTurn = {
       turnId,
       prompt,
+      ...(skill !== undefined ? { skill } : {}),
       queue: new AsyncQueue<SessionEvent>(),
       toolNames: new Map(),
       shownTools: new Set(),
@@ -184,7 +193,7 @@ export class RemoteSession implements SessionStreamListener {
     const sent = (): void => {
       turn.sent = true;
     };
-    this.client.prompt(id, turn.turnId, turn.prompt, sent).then(
+    this.client.prompt(id, turn.turnId, turn.prompt, sent, turn.skill).then(
       // A plain ack: the stream ends the turn. `ended` (a retried turn that
       // already finished — also while this client was away) ends it from the
       // ack; a no-op if the stream did.

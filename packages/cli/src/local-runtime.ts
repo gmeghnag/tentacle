@@ -41,6 +41,8 @@ export interface LocalRuntime {
   readonly jobs: JobController;
   /** The link's status, for the TUI's StatusBar ("reconnecting…", "disconnected: …"). */
   readonly link: { onLinkStatus(listener: (status: LinkStatus) => void): () => void };
+  /** The daemon's `/name` skills as of the latest handshake (the TUI's palette). */
+  readonly skills: () => readonly { readonly name: string; readonly description: string }[];
   /**
    * Wait (bounded) for the pending post-turn saves, close the open sessions
    * daemon-side, then the transport. Await it before exiting.
@@ -124,13 +126,13 @@ export function persistingController(
   };
   const flushed = (): Promise<void> => running ?? Promise.resolve();
   return {
-    async *send(prompt, signal) {
+    async *send(prompt, signal, opts) {
       // A turn that failed before its first event (the link is gone for good,
       // the session closed) changed nothing: reading the history back would
       // only fail and report a save failure for a complete file.
       let changed = false;
       try {
-        for await (const event of inner.send(prompt, signal)) {
+        for await (const event of inner.send(prompt, signal, opts)) {
           changed = true;
           yield event;
         }
@@ -238,6 +240,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     createSession,
     jobs: remoteJobsView(client),
     link: { onLinkStatus: (listener) => client.onLinkStatus(listener) },
+    skills: () => client.skills(),
     dispose: async () => {
       // A quit right after a turn must not close the session under its save.
       await allFlushed();

@@ -11,6 +11,7 @@ import {
   SKILL_TOOL_NAME,
   ToolRegistry,
   activeSkillNames,
+  createSkillActivator,
   createSkillTool,
 } from "@tentacle/tools";
 import { Agent } from "../src/agent.ts";
@@ -242,26 +243,30 @@ function skillAgent(
   names: readonly string[] = ["deploy-app"],
   resultTransforms: readonly ResultTransform[] = [],
 ): { agent: Agent; model: ScriptedProvider } {
-  const tool = createSkillTool(
-    names.map((name) => ({
-      name,
-      location: `/s/${name}/SKILL.md`,
-      dir: `/s/${name}`,
-      files: [],
-      filesTruncated: false,
-    })),
-    async (s) => ({ body: await read(s.name), bodyLine: 5 }),
-  );
+  const entries = names.map((name) => ({
+    name,
+    location: `/s/${name}/SKILL.md`,
+    dir: `/s/${name}`,
+    files: [],
+    filesTruncated: false,
+  }));
+  const reader = async (s: { name: string }) => ({ body: await read(s.name), bodyLine: 5 });
+  const tool = createSkillTool(entries, reader);
   if (!tool) {
     throw new Error("expected a skill tool");
   }
   const model = new ScriptedProvider(script);
+  // As the wiring does: the tool for the model, the activator for the rest.
   const agent = new Agent({
     model,
     tools: new ToolRegistry().register(tool),
     env: noopEnv,
     systemPrompt: "SYS",
     resultTransforms,
+    skills: createSkillActivator(
+      entries.map((e) => ({ ...e, userInvocable: true })),
+      reader,
+    ),
   });
   return { agent, model };
 }

@@ -14,6 +14,12 @@ export const SKILLS_PROMPT_HEADER = "# Skills";
 /** At most this many skills are listed in the catalog (the rest are reported). */
 export const MAX_CATALOG_SKILLS = 100;
 
+/**
+ * At most this many skills are offered as `/name` commands (the rest are
+ * reported). Must not exceed the protocol's `MAX_SKILL_CATALOG`.
+ */
+export const MAX_SLASH_SKILLS = 200;
+
 /** Spec limits (a breach warns; the skill still loads). */
 const MAX_NAME_CHARS = 64;
 const MAX_DESCRIPTION_CHARS = 1024;
@@ -36,6 +42,8 @@ export interface SkillInfo {
   readonly filesTruncated: boolean;
   /** False for `disable-model-invocation: true`: hidden from the model. */
   readonly modelInvocable: boolean;
+  /** False for `user-invocable: false`: not offered as a `/name` command. */
+  readonly userInvocable: boolean;
 }
 
 /** The frontmatter block and the Markdown body after it. */
@@ -75,6 +83,7 @@ export type ParsedManifest =
       readonly name: string;
       readonly description: string;
       readonly modelInvocable: boolean;
+      readonly userInvocable: boolean;
       readonly warnings: readonly string[];
     }
   | { readonly ok: false; readonly reason: string };
@@ -98,6 +107,10 @@ function nameProblem(name: string): string | undefined {
 
 function isTrue(v: unknown): boolean {
   return v === true || (typeof v === "string" && v.trim().toLowerCase() === "true");
+}
+
+function isFalse(v: unknown): boolean {
+  return v === false || (typeof v === "string" && v.trim().toLowerCase() === "false");
 }
 
 /**
@@ -147,11 +160,19 @@ export function parseSkillManifest(text: string, dirName: string): ParsedManifes
   if (meta["allowed-tools"] !== undefined) {
     warnings.push("`allowed-tools` is ignored (tools keep their normal permission prompts)");
   }
+  const modelInvocable = !isTrue(meta["disable-model-invocation"]);
+  const userInvocable = !isFalse(meta["user-invocable"]);
+  if (!modelInvocable && !userInvocable) {
+    warnings.push(
+      "`disable-model-invocation: true` and `user-invocable: false`: reachable by neither the model nor the user",
+    );
+  }
   return {
     ok: true,
     name,
     description: description.slice(0, MAX_DESCRIPTION_CHARS),
-    modelInvocable: !isTrue(meta["disable-model-invocation"]),
+    modelInvocable,
+    userInvocable,
     warnings,
   };
 }
@@ -223,10 +244,35 @@ export function renderSkillsCatalog(skills: readonly SkillInfo[]): string {
   ].join("\n");
 }
 
+/** Whether `name` follows the spec (and so can be typed as one `/name` token). */
+export function isSpecSkillName(name: string): boolean {
+  return nameProblem(name) === undefined;
+}
+
+/**
+ * The skills the user can activate as `/name` — the daemon's wire catalog AND
+ * what `session/prompt{skill}` accepts (one rule, so the two never disagree):
+ * user-invocable (hidden-from-the-model ones included, eval decision 5), with
+ * a spec-valid name, at most `MAX_SLASH_SKILLS`, in precedence order.
+ */
+export function slashSkills(skills: readonly SkillInfo[]): SkillInfo[] {
+  return skills
+    .filter((s) => s.userInvocable && isSpecSkillName(s.name))
+    .slice(0, MAX_SLASH_SKILLS);
+}
+
 /** Diagnostic when more skills exist than the catalog lists, else undefined. */
 export function catalogCapDiagnostic(skills: readonly SkillInfo[]): string | undefined {
   const visible = skills.filter((s) => s.modelInvocable).length;
   return visible > MAX_CATALOG_SKILLS
     ? `${visible} skills found; only the first ${MAX_CATALOG_SKILLS} are offered to the model`
+    : undefined;
+}
+
+/** Diagnostic when more skills could be `/name` commands than are offered, else undefined. */
+export function slashCapDiagnostic(skills: readonly SkillInfo[]): string | undefined {
+  const typeable = skills.filter((s) => s.userInvocable && isSpecSkillName(s.name)).length;
+  return typeable > MAX_SLASH_SKILLS
+    ? `${typeable} skills found; only the first ${MAX_SLASH_SKILLS} are offered as /commands`
     : undefined;
 }

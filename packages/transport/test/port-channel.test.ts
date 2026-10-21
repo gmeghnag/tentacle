@@ -3,7 +3,11 @@ import { RpcPeer } from "../src/peer.ts";
 import { type MessageEndpoint, messagePortChannel } from "../src/port-channel.ts";
 
 const INIT_PARAMS = { protocolVersion: 1, clientCapabilities: { streaming: true } };
-const INIT_RESULT = { protocolVersion: 1, agentCapabilities: { tools: true, permissions: true } };
+const INIT_RESULT = {
+  protocolVersion: 1,
+  agentCapabilities: { tools: true, permissions: true },
+  skills: [],
+};
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
 // A runtime MessagePort satisfies MessageEndpoint (addEventListener/start/close);
 // Bun's MessagePort *type* omits addEventListener, so cast at the boundary.

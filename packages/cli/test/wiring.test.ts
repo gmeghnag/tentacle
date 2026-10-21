@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Session } from "@tentacle/agent";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
-import { buildAgent, inProcessAgents } from "../src/wiring.ts";
+import { buildAgent, inProcessAgents, skillCatalog } from "../src/wiring.ts";
 
 let dir: string;
 let config: TentacleConfig;
@@ -193,5 +193,55 @@ describe("buildAgent skills (docs/feat/skills-core.md)", () => {
     expect(
       names({ ...cfg, skills: cfg.skills.map((s) => ({ ...s, modelInvocable: false })) }),
     ).not.toContain("skill");
+  });
+
+  test("/name: the daemon catalog and what the agent activates for the user are one rule", async () => {
+    const cfg = await skillConfig();
+    const base = cfg.skills[0];
+    if (!base) {
+      throw new Error("expected a skill");
+    }
+    const skills = [
+      base,
+      { ...base, name: "hidden", modelInvocable: false },
+      { ...base, name: "model-only", userInvocable: false },
+      { ...base, name: "Bad Name" },
+    ];
+    const c = { ...cfg, skills };
+    const catalog = skillCatalog(c);
+    expect(catalog.map((s) => s.name)).toEqual(["big", "hidden"]);
+    const { agent, tools } = buildAgent(c);
+    for (const name of ["big", "hidden", "model-only", "Bad Name", "nope"]) {
+      expect({ name, user: agent.canActivateForUser(name) }).toEqual({
+        name,
+        user: catalog.some((s) => s.name === name),
+      });
+    }
+    // The model's enum stays the offered list: the hidden skill is not in it.
+    const skillDef = tools.definitions().find((d) => d.name === "skill");
+    expect(JSON.stringify(skillDef)).not.toContain('"hidden"');
+  });
+
+  test("/name end-to-end: a user-activated hidden skill's body reaches the model's first round", async () => {
+    const cfg = await skillConfig();
+    const base = cfg.skills[0];
+    if (!base) {
+      throw new Error("expected a skill");
+    }
+    const model = new ScriptedModel([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const { agent } = buildAgent(
+      { ...cfg, cwd: dir, skills: [{ ...base, modelInvocable: false }] },
+      { modelOverride: model },
+    );
+    const session = new Session(agent, "s");
+    for await (const _ of session.send("/big now", undefined, { skill: "big" })) {
+      // drain
+    }
+    // One model round, and the round's result precedes the reply (the request
+    // holds the live history, so look at the order, not the tail).
+    expect(model.requests).toHaveLength(1);
+    const roles = session.messages.map((m) => m.role);
+    expect(roles.slice(1)).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect(session.messages[3]?.content).toStartWith('<skill_content name="big">\n# Big skill\n');
   });
 });

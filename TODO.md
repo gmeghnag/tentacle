@@ -541,7 +541,10 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       - [x] **skills-compaction** (active skills survive `/compact`, `SKILL.md`
         re-read) — DONE 2026-10-21, `feat/skills-compaction`: `docs/feat/skills-compaction.md`.
         Type: feat · Size: M · Blast: load-bearing.
-      - [ ] skills-slash · [ ] skills-subagent
+      - [x] **skills-slash** (`/skill-name`: catalog on the wire, structured
+        activation, protocol v7) — DONE 2026-10-21, `feat/skills-slash`:
+        `docs/feat/skills-slash.md`. Type: feat · Size: M · Blast: load-bearing.
+      - [ ] skills-subagent
 
 - [x] **Remove `TENTACLE_CWD` / config `cwd`: the launch folder IS the working
       folder** — DONE 2026-10-20, `feat/remove-tentacle-cwd`: `docs/feat/remove-tentacle-cwd.md`. (owner decision 2026-10-20, as in Claude Code / opencode / pi).

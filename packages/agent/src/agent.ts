@@ -30,10 +30,11 @@ import {
   allowAll,
 } from "@tentacle/core";
 import {
-  SKILL_TOOL_NAME,
+  type SkillActivator,
   type ToolRegistry,
   skillActivations,
   skillContentName,
+  userSkillCall,
 } from "@tentacle/tools";
 import { type CarriedSkill, summarizeConversation } from "./compact.ts";
 import { EventQueue } from "./event-queue.ts";
@@ -55,6 +56,18 @@ export class ResumeShapeError extends Error {
   }
 }
 
+/**
+ * The user asked for a skill this agent cannot activate for them (unknown, not
+ * user-invocable, skills disabled), or for one with nothing to say. Thrown
+ * before anything is pushed or yielded.
+ */
+export class UnknownSkillError extends Error {
+  constructor(readonly skill: string) {
+    super(`unknown skill "${skill}": not invocable here`);
+    this.name = "UnknownSkillError";
+  }
+}
+
 export interface RunOptions {
   /**
    * Continue a turn suspended before this tool call (a daemon restart): run it
@@ -63,6 +76,14 @@ export interface RunOptions {
    * caller's record knows the call never started.
    */
   readonly resumeFrom?: string;
+  /**
+   * The user activates this skill (`/name`): before the model's first round,
+   * the loop writes a `skill` round — the call, then its result — exactly as
+   * if the model had called the tool, so dedup, compaction and replay treat
+   * both alike (docs/feat/skills-slash.md). The caller checked
+   * `canActivateForUser`; not combinable with `resumeFrom`.
+   */
+  readonly skill?: string;
 }
 
 /** Max consecutive empty-response auto-nudges before a stall ends the turn. */
@@ -160,6 +181,12 @@ export interface AgentConfig {
   /** Transforms applied to every tool result before it enters the conversation
    * (e.g. spilling large output to a file). Applied in order. */
   readonly resultTransforms?: readonly ResultTransform[];
+  /**
+   * Activates skills: the user's `/name` round and the `/compact` re-read.
+   * (The model's `skill` tool, registered in `tools`, is a façade over the
+   * same path with the narrower, model-offered enum.) Absent → no skills.
+   */
+  readonly skills?: SkillActivator;
 }
 
 /**
@@ -167,15 +194,6 @@ export interface AgentConfig {
  * at once (the work is left to finish unobserved — only for work that is safe
  * to abandon, like a read).
  */
-/** A call's arguments as JSON (`{}` when empty or not JSON — as `runTool` reads them). */
-function parseArguments(call: ToolCall): unknown {
-  try {
-    return call.arguments.trim() === "" ? {} : JSON.parse(call.arguments);
-  } catch {
-    return {};
-  }
-}
-
 function unlessAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) {
     return work;
@@ -213,6 +231,11 @@ export class Agent {
     config.jobs?.onExit((job) => this.pendingExits.push(job));
   }
 
+  /** Whether the user may activate `name` (`/name`) in this agent. */
+  canActivateForUser(name: string): boolean {
+    return this.config.skills?.userInvocable(name) ?? false;
+  }
+
   /** Seed message list for a new conversation (the system prompt, if configured). */
   startConversation(): ChatMessage[] {
     return this.config.systemPrompt ? [{ role: "system", content: this.config.systemPrompt }] : [];
@@ -233,12 +256,12 @@ export class Agent {
 
   /**
    * The skills active in `messages`, each with its content read again (for
-   * `/compact`): the original activation call is run again through the same
-   * path as in a turn (gate, tool, result transforms), with an empty history
-   * so it is not deduplicated. When the skill is no longer offered
-   * (`unavailable`: not run at all) or the run does not yield it
-   * (`unreadable`), the content from the history is used instead. Emits no
-   * events: not a turn.
+   * `/compact`) through the activator — the path every activation takes, the
+   * user's included, so a skill hidden from the model is re-read too — then
+   * the result transforms, with an empty history so it is not deduplicated.
+   * When the activator no longer knows it (`unavailable`: removed, skills
+   * disabled) or the read does not yield it (`unreadable`), the content from
+   * the history is used instead. Emits no events: not a turn.
    */
   async reloadSkills(
     sessionId: string,
@@ -252,18 +275,18 @@ export class Agent {
       history: [],
     };
     const skills: CarriedSkill[] = [];
-    const tool = this.config.tools.get(SKILL_TOOL_NAME);
+    const activator = this.config.skills;
     for (const { name, call, content, resultIndex } of skillActivations(messages)) {
       const stored = { name, call, content, resultIndex };
-      // No longer offered (removed, hidden, skills disabled): nothing to read.
-      if (!tool || !tool.inputSchema.safeParse(parseArguments(call)).success) {
+      // No longer activatable (removed, skills disabled): nothing to read.
+      if (!activator?.has(name)) {
         skills.push({ ...stored, source: "unavailable" });
         continue;
       }
       // A read can hang (a pod's exec, a stuck mount) and `readFile` takes no
       // signal: a cancel must still end the compaction and free the busy slot.
       const result = await unlessAborted(
-        (async () => this.transformResult(call, await this.runTool(call, ctx), signal))(),
+        (async () => this.transformResult(call, await activator.activate(name, ctx), signal))(),
         signal,
       );
       // Only the skill's own content is fresh: an error, or a result a
@@ -313,6 +336,9 @@ export class Agent {
     if (opts.resumeFrom !== undefined && resumed === null) {
       throw new ResumeShapeError(opts.resumeFrom);
     }
+    if (opts.skill !== undefined && opts.resumeFrom !== undefined) {
+      throw new Error("a user skill cannot be activated while resuming a suspended turn");
+    }
     // A negative limit means "unlimited" (the loop only ends on end_turn /
     // cancel / error); otherwise cap the number of model/tool rounds.
     const configured = this.config.maxIterations ?? 16;
@@ -334,6 +360,12 @@ export class Agent {
     // results follow its assistant message with nothing in between.
     if (resumed) {
       yield* this.runToolCalls(resumed, messages, toolContext, signal);
+    }
+
+    // The user's `/name`: its `skill` round goes right after their message and
+    // before anything else is injected, so the model's first round sees it.
+    if (opts.skill !== undefined) {
+      yield* this.runUserSkill(opts.skill, messages, toolContext, signal);
     }
 
     // Surface any background jobs that finished since the last turn: emit an
@@ -599,6 +631,55 @@ export class Agent {
       // After the push, not before: the `tool_result` above precedes it.
       yield { type: "history_commit" };
     }
+  }
+
+  /**
+   * Write the user's skill activation as a `skill` round, the same events and
+   * history a model call of the tool produces: the assistant's call
+   * (committed), `tool_start`, the activator's result (transformed like any
+   * tool result), `tool_result`, the `tool` message (committed). Already
+   * active → the activator's "already loaded" note: the round still runs, so
+   * neither the user nor the model is left guessing. A cancel during the read
+   * answers the call as cancelled (the round stays valid); the loop's top then
+   * ends the turn.
+   */
+  private async *runUserSkill(
+    name: string,
+    messages: ChatMessage[],
+    toolContext: ToolContext,
+    signal: AbortSignal | undefined,
+  ): AsyncGenerator<AgentEvent> {
+    const call = userSkillCall(name);
+    messages.push({ role: "assistant", content: "", toolCalls: [call] });
+    yield { type: "history_commit" };
+    yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
+    const cancelled: ToolResult = { content: CANCELLED_TOOL_NOTE, isError: true };
+    let result: ToolResult;
+    const activator = this.config.skills;
+    if (signal?.aborted) {
+      result = cancelled;
+    } else if (!activator) {
+      result = { content: `Unknown skill "${name}".`, isError: true };
+    } else {
+      // Like the compaction re-read: a read can hang and takes no signal, so
+      // a cancel must not wait for it.
+      result = await unlessAborted(
+        (async () =>
+          this.transformResult(call, await activator.activate(name, toolContext), signal))(),
+        signal,
+      ).catch(
+        (error: unknown): ToolResult =>
+          signal?.aborted
+            ? cancelled
+            : {
+                content: `Could not load skill "${name}": ${error instanceof Error ? error.message : String(error)}`,
+                isError: true,
+              },
+      );
+    }
+    yield { type: "tool_result", id: call.id, name: call.name, result };
+    messages.push({ role: "tool", content: result.content, toolCallId: call.id });
+    yield { type: "history_commit" };
   }
 
   /**

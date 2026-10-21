@@ -118,7 +118,7 @@ export function inProcessSessions(deps: InProcessDeps): {
     });
     let closed = false;
     return {
-      send: (prompt, signal) => session.send(prompt, signal),
+      send: (prompt, signal, opts) => session.send(prompt, signal, opts),
       compact: (signal) => session.compact(signal),
       enqueue: (text) => session.enqueue(text),
       close: () => {

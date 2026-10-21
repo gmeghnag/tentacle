@@ -6,13 +6,19 @@
  * one-shot loop into an interactive assistant.
  */
 import type { ChatMessage } from "@tentacle/core";
-import type { Agent, AgentEvent } from "./agent.ts";
+import { type Agent, type AgentEvent, UnknownSkillError } from "./agent.ts";
 import { type CompactResult, carryOverSkills, compactedHistory } from "./compact.ts";
 
 /** A serialisable view of a session's durable state (for persistence/resume). */
 export interface SessionSnapshot {
   readonly id: string;
   readonly messages: readonly ChatMessage[];
+}
+
+/** Per-turn options of `send`. */
+export interface SendOptions {
+  /** The user activates this skill (`/name`) with this turn (see `RunOptions.skill`). */
+  readonly skill?: string;
 }
 
 export interface SessionOptions {
@@ -58,8 +64,19 @@ export class Session {
    * runs over the existing history, reacting to whatever was injected at turn
    * start (e.g. a background-job exit note). This is how an autonomous wake
    * resumes the conversation without a synthetic user prompt.
+   *
+   * `opts.skill` activates a skill for the user (`/name`) right after `text`;
+   * one the agent cannot activate for the user, or with an empty `text`,
+   * rejects (`UnknownSkillError`) before anything is pushed.
    */
-  async *send(text: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
+  async *send(
+    text: string,
+    signal?: AbortSignal,
+    opts: SendOptions = {},
+  ): AsyncGenerator<AgentEvent> {
+    if (opts.skill !== undefined && (text === "" || !this.canActivateSkill(opts.skill))) {
+      throw new UnknownSkillError(opts.skill);
+    }
     // A fresh turn starts with an empty steering queue (abort may have left
     // undrained items from a previous turn).
     this.steering = [];
@@ -67,12 +84,23 @@ export class Session {
       this.messages.push({ role: "user", content: text });
     }
     try {
-      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0));
+      yield* this.agent.runMessages(
+        this.messages,
+        this.id,
+        signal,
+        () => this.steering.splice(0),
+        opts.skill !== undefined ? { skill: opts.skill } : {},
+      );
     } finally {
       // Persist once the turn settles (normal end, error, or abort), so a
       // crash/exit mid-session still leaves the latest history on disk.
       this.persist();
     }
+  }
+
+  /** Whether the user may activate `name` (`/name`) in this session — synchronous, for a pre-ack check. */
+  canActivateSkill(name: string): boolean {
+    return this.agent.canActivateForUser(name);
   }
 
   /**
