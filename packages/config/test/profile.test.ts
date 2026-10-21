@@ -91,8 +91,8 @@ describe("applyProfile", () => {
     // Mutation: field-merge a replaced server → `GH_TOKEN` leaks onto `mcp-ghe`.
     const config = apply("work");
     expect(config.mcpServers).toEqual({
-      github: { command: "mcp-ghe" },
-      jira: { command: "mcp-jira" },
+      github: { type: "stdio", command: "mcp-ghe" },
+      jira: { type: "stdio", command: "mcp-jira" },
     });
   });
 

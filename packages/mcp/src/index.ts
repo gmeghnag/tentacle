@@ -4,6 +4,7 @@
  */
 export * from "./types.ts";
 export * from "./transport.ts";
+export * from "./http-transport.ts";
 export * from "./client.ts";
 export * from "./tool-adapter.ts";
 export * from "./connect.ts";

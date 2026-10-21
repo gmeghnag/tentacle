@@ -88,8 +88,8 @@ describe("startWorkerRuntime (real worker spawn)", () => {
       {
         ...config,
         mcpServers: {
-          echo: { command: process.execPath, args: [server] },
-          missing: { command: join(dir, "no-such-mcp-server") },
+          echo: { type: "stdio", command: process.execPath, args: [server] },
+          missing: { type: "stdio", command: join(dir, "no-such-mcp-server") },
         },
       },
       {

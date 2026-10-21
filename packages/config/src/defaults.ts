@@ -104,10 +104,13 @@ export const DEFAULT_CONFIG_JSONC = `{
   // set false to require a manual prompt instead.
   // "autoWake": ${DEFAULT_AUTO_WAKE},
 
-  // MCP servers to connect to (keyed by name). Each is spawned over stdio and
-  // its tools become available to the agent as \`mcp__<name>__<tool>\`.
+  // MCP servers to connect to (keyed by name). A "command" server is spawned
+  // over stdio; a "type": "http" server is reached over Streamable HTTP at its
+  // "url" ("headers" are sent only to that url — e.g. a bearer token). Their
+  // tools become available to the agent as \`mcp__<name>__<tool>\`.
   // "mcpServers": {
-  //   "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] }
+  //   "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+  //   "remote": { "type": "http", "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer <token>" } }
   // },
 
   // Tool-output handling.
