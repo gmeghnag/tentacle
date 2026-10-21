@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ContextNoteSchema,
+  PROTOCOL_VERSION,
   SessionUpdateParamsSchema,
   SessionUpdateSchema,
   UPDATE_CLASS,
@@ -167,5 +169,15 @@ describe("session/update frame (event classes, catch-all, required seq)", () => 
     for (const v of ["progress", "toString", "__proto__", "constructor", "hasOwnProperty"]) {
       expect(isKnownUpdateType(v)).toBe(false);
     }
+  });
+});
+
+describe("context_note reason 'hook' (docs/feat/hooks-turn.md)", () => {
+  test("is accepted, and the version is bumped (an old client's enum rejects it)", () => {
+    const note = { type: "context_note", text: "[hook turn_end] again", reason: "hook" };
+    expect(ContextNoteSchema.safeParse(note).success).toBe(true);
+    expect(SessionUpdateSchema.safeParse(note).success).toBe(true);
+    expect(ContextNoteSchema.safeParse({ ...note, reason: "other" }).success).toBe(false);
+    expect(PROTOCOL_VERSION).toBe(9);
   });
 });

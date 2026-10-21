@@ -165,6 +165,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
           env,
           cwd: config.cwd,
           ...(options.log ? { log: options.log } : {}),
+          modelId: config.model,
+          // Only when this process calls the provider itself: over the pod
+          // model tunnel the request is built in the untrusted pod (D2).
+          modelRequestHooks: options.modelOverride === undefined,
         })
       : undefined;
   const resultTransforms: ResultTransform[] = [

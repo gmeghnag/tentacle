@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
 import { ToolRegistry, fsReadTool, shellTool } from "@tentacle/tools";
 import { HookRunner } from "../src/hooks.ts";
-import { childToolLabel, createSubagentRunner } from "../src/subagent.ts";
+import { BUILTIN_AGENT_TYPES, childToolLabel, createSubagentRunner } from "../src/subagent.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -69,6 +69,46 @@ describe("createSubagentRunner", () => {
     expect(stdins).toMatchObject([
       { agent: { type: "general-purpose", description: "scan repo" }, tool_name: "shell" },
     ]);
+  });
+
+  test("a child with a model override reports ITS model id to model_request hooks", async () => {
+    const models: unknown[] = [];
+    const env: ExecutionEnvironment = {
+      id: "hk",
+      async exec(_command, options) {
+        models.push((JSON.parse(options?.stdin ?? "null") as { model: unknown }).model);
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+      async readFile() {
+        return "";
+      },
+      async writeFile() {},
+    };
+    const first = BUILTIN_AGENT_TYPES[0];
+    if (!first) throw new Error("no builtin type");
+    const { model: _model, ...base } = first;
+    const say = () => new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const { run } = createSubagentRunner({
+      model: say(),
+      modelFor: () => say(),
+      env,
+      tools: fullRegistry(),
+      types: [
+        { ...base, name: "fast", model: "child-m" },
+        { ...base, name: "plain" },
+      ],
+      hooks: new HookRunner({
+        specs: [{ event: "model_request", command: "mr" }],
+        env,
+        cwd: "/w",
+        modelId: "parent-m",
+        modelRequestHooks: true,
+      }),
+    });
+    await run({ description: "d", prompt: "p", type: "fast" });
+    await run({ description: "d", prompt: "p", type: "plain" });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(models).toEqual(["child-m", "parent-m"]);
   });
 
   test("returns the child's final text as the report (isolated run)", async () => {

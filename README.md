@@ -137,8 +137,8 @@ Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyComma
 
 ### Hooks
 
-`hooks` in `config.jsonc` runs your shell commands on tool events (user scope;
-a profile's `hooks` replaces the base list):
+`hooks` in `config.jsonc` runs your shell commands on tool and turn events
+(user scope; a profile's `hooks` replaces the base list):
 
 ```jsonc
 "hooks": [
@@ -147,8 +147,8 @@ a profile's `hooks` replaces the base list):
 ]
 ```
 
-- **Fields:** `event` (`tool_call`, `tool_result`; `turn_start`, `turn_end`,
-  `model_request` are accepted but not run yet), `command` (run with
+- **Fields:** `event` (`tool_call`, `tool_result`, `turn_start`, `turn_end`,
+  `model_request`), `command` (run with
   `/bin/sh -c` in the working folder), optional `name` (shown in the TUI;
   default: the basename of the command's first word), `matcher` (tool events
   only), `timeout` (seconds, default 600), `onFailure` (`ignore` default, or
@@ -174,10 +174,28 @@ a profile's `hooks` replaces the base list):
   with stderr. When a `tool_call` hook rewrote the input, the result it sees
   starts with the `[hook] input modified by hook <name>; ran with: …` line
   the model also gets.
+- **`turn_start`** (once per turn, before the first model call; not on a
+  resumed turn): input adds `prompt`. `{"context": "…"}` injects a note; exit 2
+  stops the turn (stderr is the reason); a message you queued while it ran is
+  kept in the history but not sent to the model (that turn does not run). `context` is clipped at 10,000 characters. Several
+  hooks run in config order.
+- **`turn_end`** when the model answered: input adds `reason: "end_turn"`,
+  `last_assistant_message`, `continued` (0–2). `{"continue": true, "reason":
+  "…"}` or exit 2 (stderr) injects the reason and runs another round — at most
+  3 times per turn (a turn resumed after a restart starts a fresh count of 3). When the turn stops otherwise (`cancelled`,
+  `max_iterations`) it is a notification: the output is ignored and the turn
+  does not wait for it.
+- **`model_request`** (a read-only notification before every model call,
+  never awaited): input adds `iteration` (or `"final"`), `model`,
+  `message_count`, `tool_names`, `new_messages` (`{role, content}` since the
+  previous call). A call that arrives while the previous one still runs is
+  dropped. Not run in a pod (the request is built there).
+- **Notes:** every hook-injected message is a user-role note `[hook <event>]
+  …`, kept in the history and shown dimmed in the TUI.
 - **Failures** (other exit codes, timeout, invalid JSON, > 1 MiB stdout):
   ignored and logged by default (the daemon log, or stderr in `--plain` /
   one-shot mode); `onFailure: "block"` denies the call / turns the result into
-  an error. A hook killed by your cancel is not a failure.
+  an error / stops the turn (`turn_start`) / continues it (`turn_end`). A hook killed by your cancel is not a failure.
 - **Pods (`run` / `attach`):** hooks come from the **pod's** own config, loaded
   by the pod daemon. Your laptop's hooks do not run there, and a pod hook
   `allow` can skip the pod-side prompt. The pod-side gate is UX, never a

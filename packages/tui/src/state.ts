@@ -322,11 +322,15 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
       // turn at the point it entered the conversation.
       return { ...state, items: append(state.items, { kind: "user", text: event.text }) };
 
-    // A daemon-side bookkeeping marker, and the loop's own notes to the model
-    // (the nudge, a background note — the exit itself renders from
-    // `background_exit`): nothing to render.
-    case "history_commit":
+    // A user hook's note is shown, dimmed (R1, docs/feat/hooks-turn.md): a
+    // user must see what their hooks injected. The loop's own notes (the
+    // nudge, a background note — the exit itself renders from
+    // `background_exit`) stay hidden.
     case "context_note":
+      return event.reason === "hook" ? appendNotice(state, event.text) : state;
+
+    // A daemon-side bookkeeping marker: nothing to render.
+    case "history_commit":
       return state;
 
     case "turn_end":

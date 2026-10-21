@@ -216,7 +216,7 @@
       "additionalProperties": true,
       "properties": {
         "reason": {
-          "enum": ["continue", "background_exit"],
+          "enum": ["continue", "background_exit", "hook"],
           "type": "string"
         },
         "text": {
@@ -1649,5 +1649,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 8
+  "x-protocol-version": 9
 }

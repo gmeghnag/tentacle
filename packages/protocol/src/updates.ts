@@ -85,14 +85,16 @@ export const SteerSchema = z.object({
 
 /**
  * The agent loop added a user-role message of its own to the history: the
- * nudge after an empty round, or the note telling the model a background job
- * ended. Display-only (frontends usually hide it), but it makes every history
- * message replayable, so a client that resynced and one that did not agree.
+ * nudge after an empty round, the note telling the model a background job
+ * ended, or a user hook's note (`hook`: shown dimmed, docs/feat/hooks-turn.md).
+ * Display-only (frontends usually hide the loop's own notes), but it makes
+ * every history message replayable, so a client that resynced and one that
+ * did not agree.
  */
 export const ContextNoteSchema = z.object({
   type: z.literal("context_note"),
   text: z.string(),
-  reason: z.enum(["continue", "background_exit"]),
+  reason: z.enum(["continue", "background_exit", "hook"]),
 });
 
 /** A turn began (first update of every turn); carries the prompt so a replay shows what was asked. */
