@@ -102,7 +102,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A semver pre-release tag (v0.1.0-beta.1) is published as a GitHub
+          # pre-release, so it never becomes the "Latest" release.
+          prerelease=""
+          case "${GITHUB_REF_NAME}" in *-*) prerelease="--prerelease" ;; esac
           gh release create "${GITHUB_REF_NAME}" release/* \
             --verify-tag \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+            --generate-notes \
+            ${prerelease}

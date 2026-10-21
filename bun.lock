@@ -16,7 +16,7 @@
     },
     "packages/agent": {
       "name": "@tentacle/agent",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/core": "workspace:*",
         "@tentacle/tools": "workspace:*",
@@ -27,7 +27,7 @@
     },
     "packages/cli": {
       "name": "@tentacle/cli",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "bin": {
         "tentacle": "./src/main.ts",
       },
@@ -51,7 +51,7 @@
     },
     "packages/client": {
       "name": "@tentacle/client",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/agent": "workspace:*",
         "@tentacle/core": "workspace:*",
@@ -66,7 +66,7 @@
     },
     "packages/config": {
       "name": "@tentacle/config",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "jsonc-parser": "3.3.1",
         "zod": "3.23.8",
@@ -74,7 +74,7 @@
     },
     "packages/core": {
       "name": "@tentacle/core",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/protocol": "workspace:*",
         "zod": "3.23.8",
@@ -82,7 +82,7 @@
     },
     "packages/daemon": {
       "name": "@tentacle/daemon",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/agent": "workspace:*",
         "@tentacle/core": "workspace:*",
@@ -97,14 +97,14 @@
     },
     "packages/exec": {
       "name": "@tentacle/exec",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/core": "workspace:*",
       },
     },
     "packages/k8s": {
       "name": "@tentacle/k8s",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/transport": "workspace:*",
         "yaml": "2.9.1",
@@ -112,7 +112,7 @@
     },
     "packages/mcp": {
       "name": "@tentacle/mcp",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/core": "workspace:*",
         "zod": "3.23.8",
@@ -120,7 +120,7 @@
     },
     "packages/protocol": {
       "name": "@tentacle/protocol",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "zod": "3.23.8",
       },
@@ -131,14 +131,14 @@
     },
     "packages/providers": {
       "name": "@tentacle/providers",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/core": "workspace:*",
       },
     },
     "packages/tools": {
       "name": "@tentacle/tools",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/core": "workspace:*",
         "diff": "5.2.0",
@@ -151,7 +151,7 @@
     },
     "packages/transport": {
       "name": "@tentacle/transport",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/protocol": "workspace:*",
       },
@@ -161,7 +161,7 @@
     },
     "packages/tui": {
       "name": "@tentacle/tui",
-      "version": "0.0.0",
+      "version": "0.1.0-beta.1",
       "dependencies": {
         "@tentacle/agent": "workspace:*",
         "@tentacle/core": "workspace:*",
