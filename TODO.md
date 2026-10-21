@@ -585,6 +585,33 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       reuses a pod binary of any version (silent skew). Open questions 1–8
       pending discussion. **Eval:** `docs/eval/tentacle-update.md`. Type: eval →
       fix + feat ×2 · Size: M overall · Blast: cross-module.
+- [ ] **Extensibility: users extend tentacle themselves (hooks + packages)** —
+      out-of-process hooks (`tool_call` → `PermissionGate`, `tool_result` →
+      result pipeline, `turn_start`, `turn_end`, `model_request`) + declarative
+      packages; no in-process API, no pi/Claude Code compatibility. Eval written
+      2026-10-21, owner decisions D1–D12 and all child sub-decisions recorded;
+      5 children, each with a drafted Implementation, promoted in order
+      (tool-naming first). **Eval:**
+      `docs/eval/extensibility.md`. Type: eval → feat ×5 · Size: L → split ·
+      Blast: load-bearing.
+      - [ ] **tool-naming** (CamelCase display labels only, names in code
+        unchanged; shared `toolLabel` in core; first, hooks-core's H1 line needs
+        it) — promotion-ready:
+        `docs/eval/tool-naming.md`. Type: eval → feat · Size: S · Blast: contained.
+      - [ ] **hooks-core** (config `hooks`, `stdin` in core, `HookRunner`,
+        `tool_call` → `PermissionGate`, `tool_result` → pipeline; TUI line
+        `⎿ hook <name> blocked <Tool>`) — H1–H4 decided: `docs/eval/hooks-core.md`. Type: eval → feat ·
+        Size: M · Blast: load-bearing.
+      - [ ] **hooks-turn** (`turn_start`, `turn_end` + continue ≤3,
+        `model_request` notify; protocol 7 → 8) — R1–R4 decided:
+        `docs/eval/hooks-turn.md`. Type: eval → feat · Size: M · Blast: load-bearing.
+      - [ ] **hooks-project-trust** (`.agents/hooks.json`, `hooks/trust`
+        daemon→client, laptop store for the local worker only, auto-approve
+        excluded) — P1–P3 decided: `docs/eval/hooks-project-trust.md`.
+        Type: eval → feat · Size: M · Blast: load-bearing (§7).
+      - [ ] **packages** (own format; path + git; `tentacle packages …`; not in
+        pod v1) — K1–K3 decided: `docs/eval/packages.md`. Type: eval →
+        feat · Size: M · Blast: cross-module.
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
