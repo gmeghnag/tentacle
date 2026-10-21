@@ -1,9 +1,9 @@
-# eval/hooks-project-trust — project hooks in `.agents/hooks.json`, one-time trust (local), per-session (pod)
+# feat/hooks-project-trust — project hooks in `.agents/hooks.json`, one-time trust (local), per-session (pod)
 
-> **Status:** eval. Owner decisions D3–D6 in the umbrella; **P1–P3 decided 2026-10-21**. Implementation drafted below, approved at promotion.
-> **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10). Promote to `feat/hooks-project-trust`.
-> **Type:** eval → feat · **Size:** M · **Blast:** load-bearing (§7 trust model, the single broker, laptop-side persistence, a new daemon→client method) · **Suited:** §10: a **strong model executes**; mandatory fresh-context Review that red-teams §7
-> **Umbrella:** [`extensibility.md`](./extensibility.md) (child 4 of 5) · **Needs:** `hooks-core` and `hooks-turn` merged
+> **Status:** feat — promoted 2026-10-22. Owner decisions D3–D6 in the umbrella; P1–P3 decided 2026-10-21. Implementation approved.
+> **Branch:** `feat/hooks-project-trust`
+> **Type:** eval → feat · **Size:** M · **Blast:** load-bearing (§7 trust model, the single broker, laptop-side persistence, a new daemon→client method) · **Review:** mandatory fresh-context, red-teams §7
+> **Umbrella:** [`extensibility.md`](../eval/extensibility.md) (child 4 of 5) · **Needs:** `hooks-core` and `hooks-turn` merged ✓
 
 ## Context
 

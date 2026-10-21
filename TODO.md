@@ -641,8 +641,8 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         `docs/feat/hooks-turn.md`. Type: feat · Size: M · Blast: load-bearing.
       - [ ] **hooks-project-trust** (`.agents/hooks.json`, `hooks/trust`
         daemon→client, laptop store for the local worker only, auto-approve
-        excluded) — P1–P3 decided: `docs/eval/hooks-project-trust.md`.
-        Type: eval → feat · Size: M · Blast: load-bearing (§7).
+        excluded) — in progress (`feat/hooks-project-trust`): `docs/feat/hooks-project-trust.md`.
+        Type: feat · Size: M · Blast: load-bearing (§7).
       - [ ] **packages** (own format; path + git; `tentacle packages …`; not in
         pod v1) — K1–K3 decided: `docs/eval/packages.md`. Type: eval →
         feat · Size: M · Blast: cross-module.
