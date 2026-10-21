@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
 import { ToolRegistry, fsReadTool, shellTool } from "@tentacle/tools";
+import { HookRunner } from "../src/hooks.ts";
 import { childToolLabel, createSubagentRunner } from "../src/subagent.ts";
 
 class ScriptedProvider implements ModelProvider {
@@ -43,6 +44,33 @@ function fullRegistry(): ToolRegistry {
 }
 
 describe("createSubagentRunner", () => {
+  test("a child's hooks run with its identity in the input (H2)", async () => {
+    const stdins: unknown[] = [];
+    const env: ExecutionEnvironment = {
+      id: "hk",
+      async exec(command, options) {
+        if (command === "audit") {
+          stdins.push(JSON.parse(options?.stdin ?? "null"));
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+      async readFile() {
+        return "";
+      },
+      async writeFile() {},
+    };
+    const { run } = createSubagentRunner({
+      model: new ScriptedProvider([[toolCall("shell", { command: "ls" }), { type: "done" }]]),
+      env,
+      tools: fullRegistry(),
+      hooks: new HookRunner({ specs: [{ event: "tool_call", command: "audit" }], env, cwd: "/w" }),
+    });
+    await run({ description: "scan repo", prompt: "look", type: "general-purpose" });
+    expect(stdins).toMatchObject([
+      { agent: { type: "general-purpose", description: "scan repo" }, tool_name: "shell" },
+    ]);
+  });
+
   test("returns the child's final text as the report (isolated run)", async () => {
     const { env } = recordingEnv();
     const { run } = createSubagentRunner({

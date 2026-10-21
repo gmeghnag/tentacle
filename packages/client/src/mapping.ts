@@ -8,7 +8,7 @@
  * diff render identical to a local one. Pure and unit-tested.
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
-import type { ChatMessage, ToolResultDetail } from "@tentacle/core";
+import type { ChatMessage, ToolResult, ToolResultDetail } from "@tentacle/core";
 import {
   type ContentBlock,
   type SessionUpdate,
@@ -17,7 +17,7 @@ import {
   type StopReason,
   isKnownUpdateType,
 } from "@tentacle/protocol";
-import { DIFF_SCHEME } from "./constants.ts";
+import { DIFF_SCHEME, HOOK_SCHEME } from "./constants.ts";
 
 /**
  * What a frontend folds from a remote turn: the agent's events, plus two that
@@ -96,9 +96,10 @@ function countDiff(patch: string): { added: number; removed: number } {
 function toolResultFromContent(
   content: readonly ContentBlock[] | undefined,
   isError: boolean,
-): { content: string; isError?: boolean; details?: ToolResultDetail } {
+): ToolResult {
   const texts: string[] = [];
   let details: ToolResultDetail | undefined;
+  let hook: ToolResult["hook"];
   for (const block of content ?? []) {
     if (block.type === "text") {
       texts.push(block.text);
@@ -111,13 +112,27 @@ function toolResultFromContent(
         added,
         removed,
       };
+    } else if (block.type === "resource" && block.uri.startsWith(HOOK_SCHEME)) {
+      hook = parseHookResource(block.uri.slice(HOOK_SCHEME.length), block.text) ?? hook;
     }
   }
   return {
     content: texts.join("\n"),
     ...(isError ? { isError: true } : {}),
     ...(details ? { details } : {}),
+    ...(hook ? { hook } : {}),
   };
+}
+
+/** `<action>/<name>` (the name may contain `/`: split on the first one only). */
+function parseHookResource(rest: string, reason: string | undefined): ToolResult["hook"] {
+  const slash = rest.indexOf("/");
+  const action = slash < 0 ? rest : rest.slice(0, slash);
+  const name = slash < 0 ? "" : rest.slice(slash + 1);
+  if ((action !== "blocked" && action !== "modified") || name === "") {
+    return undefined;
+  }
+  return { action, name, ...(reason !== undefined && reason !== "" ? { reason } : {}) };
 }
 
 /**

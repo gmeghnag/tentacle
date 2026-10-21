@@ -12,12 +12,19 @@
  * a real filesystem.
  */
 import type { ToolResult } from "@tentacle/core";
+import type { HookRunner } from "./hooks.ts";
 
 export interface ResultTransformContext {
   readonly toolName: string;
   readonly toolCallId: string;
   /** The turn's abort signal, for transforms that do async work (e.g. summarise). */
   readonly signal?: AbortSignal;
+  /** The session the call belongs to (for `tool_result` hooks). */
+  readonly sessionId?: string;
+  /** The input the tool actually ran with (after any `tool_call` hook rewrite). */
+  readonly input?: unknown;
+  /** This agent's hook runner, if hooks are configured (`runResultHooks`). */
+  readonly hooks?: HookRunner;
   /**
    * Persist full output out of band and return a path the model can read, or
    * null if it could not be written (the transform then falls back to a plain

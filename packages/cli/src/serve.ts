@@ -118,7 +118,12 @@ async function reloadedHost(
     maxDetachedSessions: options.maxDetachedSessions ?? DEFAULT_MAX_DETACHED_SESSIONS,
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     // Each session gets its own agent, confined to the daemon's cwd.
-    createAgent: (cwd) => buildAgent({ ...config, cwd }),
+    createAgent: (cwd) =>
+      buildAgent(
+        { ...config, cwd },
+        // Hook failures: the daemon's error sink, like a turn error.
+        options.onError ? { log: (line) => options.onError?.(new Error(line)) } : {},
+      ),
     skills: skillCatalog(config),
     skillList: skillListing(config),
     // A remote client gets an opaque turn error; the real one is logged here.
@@ -243,6 +248,7 @@ export function startStdioDaemon(
         ? buildAgent(
             { ...config, cwd },
             {
+              ...(log ? { log } : {}),
               modelOverride: new ProxyModelProvider(
                 (request) => {
                   if (!sendModel) {
@@ -259,7 +265,7 @@ export function startStdioDaemon(
               ),
             },
           )
-        : buildAgent({ ...config, cwd }),
+        : buildAgent({ ...config, cwd }, log ? { log } : {}),
   });
   const channel = streamChannel(
     process.stdin as unknown as NodeReadableLike,

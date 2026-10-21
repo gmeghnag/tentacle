@@ -13,3 +13,4 @@ export * from "./permission-gate.ts";
 export * from "./shell-prefix.ts";
 export * from "./subagent.ts";
 export * from "./agent-defs.ts";
+export * from "./hooks.ts";

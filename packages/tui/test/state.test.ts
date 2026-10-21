@@ -87,6 +87,21 @@ describe("display state reducer", () => {
     }
   });
 
+  test("a tool result's hook annotation is copied onto the tool item (H1)", () => {
+    let s = startTurn(initialState, "go", 1);
+    const hook = { action: "blocked", name: "no-rm", reason: "no" } as const;
+    s = fold(s, [
+      { type: "tool_start", id: "t1", name: "shell", arguments: '{"command":"rm"}' },
+      {
+        type: "tool_result",
+        id: "t1",
+        name: "shell",
+        result: { content: "x", isError: true, hook },
+      },
+    ]);
+    expect(s.items.at(-1)).toMatchObject({ kind: "tool", hook });
+  });
+
   test("tool_result updates the matching running tool in place", () => {
     let s = startTurn(initialState, "go", 1);
     s = fold(s, [

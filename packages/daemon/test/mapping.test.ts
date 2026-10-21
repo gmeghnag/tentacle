@@ -5,6 +5,7 @@ import { JsonRpcErrorCode, type SessionUpdate, UPDATE_CLASS } from "@tentacle/pr
 import { RpcError } from "@tentacle/transport";
 import {
   DIFF_MIME,
+  HOOK_MIME,
   assertTextOnly,
   contentToText,
   eventToUpdate,
@@ -101,6 +102,23 @@ describe("toolResultContent", () => {
 
   test("omits empty content", () => {
     expect(toolResultContent({ content: "   " })).toEqual([]);
+  });
+
+  test("a hook intervention rides as a hook:// resource block (reason in text, H1)", () => {
+    expect(
+      toolResultContent({
+        content: "Blocked by a hook: `shell` was not run. Reason: no",
+        isError: true,
+        hook: { action: "blocked", name: "no-rm", reason: "no" },
+      })[1],
+    ).toEqual({ type: "resource", uri: "hook://blocked/no-rm", mimeType: HOOK_MIME, text: "no" });
+    expect(
+      toolResultContent({ content: "x", hook: { action: "modified", name: "a/b" } })[1],
+    ).toEqual({
+      type: "resource",
+      uri: "hook://modified/a/b",
+      mimeType: HOOK_MIME,
+    });
   });
 });
 

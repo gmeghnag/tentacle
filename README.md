@@ -135,6 +135,54 @@ Precedence: **environment variables › `config.jsonc` › built-in defaults**.
 Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyCommand`.
 `TENTACLE_CONFIG_DIR` (or `XDG_CONFIG_HOME`) moves the config directory.
 
+### Hooks
+
+`hooks` in `config.jsonc` runs your shell commands on tool events (user scope;
+a profile's `hooks` replaces the base list):
+
+```jsonc
+"hooks": [
+  { "event": "tool_call", "matcher": "shell", "command": "~/.config/tentacle/hooks/no-rm.sh" },
+  { "event": "tool_result", "matcher": "mcp__.*", "command": "python3 ~/hooks/redact.py", "timeout": 30, "onFailure": "block" }
+]
+```
+
+- **Fields:** `event` (`tool_call`, `tool_result`; `turn_start`, `turn_end`,
+  `model_request` are accepted but not run yet), `command` (run with
+  `/bin/sh -c` in the working folder), optional `name` (shown in the TUI;
+  default: the basename of the command's first word), `matcher` (tool events
+  only), `timeout` (seconds, default 600), `onFailure` (`ignore` default, or
+  `block`).
+- **Matcher:** a tool *name* (not its display label), `a|b` names, or a regex
+  (`mcp__.*`); absent or `*` = every tool. Names ↔ labels: `shell` Bash,
+  `shell_output` BashOutput, `shell_kill` BashKill, `fs_read` Read, `fs_write`
+  Write, `fs_edit` Edit, `fs_multi_edit` MultiEdit, `agent_task` Agent, `skill`
+  Skill; MCP tools are `mcp__<server>__<tool>`.
+- **Input (stdin, JSON):** `event`, `session_id`, `cwd`, `agent` (`null`, or
+  `{type, description}` in a sub-agent), `tool_name`, `tool_call_id`,
+  `tool_input`; `tool_result` adds `tool_result: {content, is_error}`. Env:
+  `TENTACLE_HOOK_EVENT`, `TENTACLE_PROJECT_DIR`. Secret-looking env vars are
+  scrubbed: a hook reads its own secrets. `tool_input` is the model's own
+  arguments, **unredacted** (secret redaction applies to tool results only).
+- **`tool_call` output:** exit 0 with empty stdout = no opinion; a JSON object
+  with `decision` (`allow` skips the prompt for this call only, `ask` forces
+  it, `deny` + `reason` refuses) and/or `input` (rewrites the call; the model
+  is told). Exit 2 = deny, stderr is the reason. A `"deny"`-level tool stays
+  refused whatever a hook says.
+- **`tool_result` output:** `{"content": "…", "is_error": bool}` replaces the
+  result (it already went through secret redaction); exit 2 = an error result
+  with stderr. When a `tool_call` hook rewrote the input, the result it sees
+  starts with the `[hook] input modified by hook <name>; ran with: …` line
+  the model also gets.
+- **Failures** (other exit codes, timeout, invalid JSON, > 1 MiB stdout):
+  ignored and logged by default (the daemon log, or stderr in `--plain` /
+  one-shot mode); `onFailure: "block"` denies the call / turns the result into
+  an error. A hook killed by your cancel is not a failure.
+- **Pods (`run` / `attach`):** hooks come from the **pod's** own config, loaded
+  by the pod daemon. Your laptop's hooks do not run there, and a pod hook
+  `allow` can skip the pod-side prompt. The pod-side gate is UX, never a
+  security boundary (the pod is not trusted).
+
 ## Features
 
 - **Tools:** `fs_read`, `fs_write`, `fs_edit` (with diffs), `shell`, background jobs.

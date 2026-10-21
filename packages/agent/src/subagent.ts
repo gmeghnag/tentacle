@@ -20,6 +20,7 @@ import {
 } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
 import { Agent, type AgentStopReason } from "./agent.ts";
+import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
 
 /** A kind of sub-agent: its system prompt and the tools it may use. */
@@ -129,6 +130,8 @@ export interface SubagentDeps {
   readonly spawnToolName?: string;
   /** Result transforms (e.g. spill large output) given to each child agent. */
   readonly resultTransforms?: readonly ResultTransform[];
+  /** The parent's hook runner; each child gets one tagged with its identity (H2). */
+  readonly hooks?: HookRunner;
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
@@ -168,6 +171,9 @@ export function createSubagentRunner(deps: SubagentDeps): {
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
       ...(deps.requestPermission ? { requestPermission: deps.requestPermission } : {}),
       ...(deps.resultTransforms ? { resultTransforms: deps.resultTransforms } : {}),
+      ...(deps.hooks
+        ? { hooks: deps.hooks.forAgent({ type: type.name, description: opts.description }) }
+        : {}),
     });
 
     let report = "";

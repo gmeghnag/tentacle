@@ -9,7 +9,7 @@
  * logic testable without React.
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
-import type { ChatMessage, ToolResultDetail } from "@tentacle/core";
+import type { ChatMessage, ToolResult, ToolResultDetail } from "@tentacle/core";
 import { messagesToItems } from "./resume.ts";
 
 export type ToolStatus = "running" | "ok" | "error";
@@ -57,6 +57,8 @@ export interface ToolItem {
   readonly status: ToolStatus;
   readonly resultText?: string;
   readonly detail?: ToolResultDetail;
+  /** A user hook blocked this call or rewrote its input (H1, docs/feat/hooks-core.md). */
+  readonly hook?: ToolResult["hook"];
   readonly startedAt: number;
   readonly endedAt?: number;
   /** Set when this tool call is a sub-agent (`agent_task`) with nested progress. */
@@ -252,6 +254,7 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
         resultText: event.result.content,
         endedAt: now,
         ...(event.result.details ? { detail: event.result.details } : {}),
+        ...(event.result.hook ? { hook: event.result.hook } : {}),
       };
       const items = state.items.slice();
       if (idx >= 0) {

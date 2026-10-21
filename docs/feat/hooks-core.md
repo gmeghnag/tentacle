@@ -525,18 +525,198 @@ Gate: `bun run check` green; lint baseline clean.
 
 ## Execution
 
-*(empty until promoted)*
+*— claude-opus-5-5, 2026-10-22*
+
+**Verified first:** `git grep -n "authorize(\|transformResult(" packages/agent/src`
+→ exactly `agent.ts:289,628,668` (transformResult) and `:754` (authorize), as
+the load-bearing assumption states.
+
+**Repro (feat/hooks-core @ 8f3b7eb, before any edit)**, `.tentacle/tmp/hooks-core/repro.ts`:
+
+```ts
+import { HostExecution } from "@tentacle/exec";
+import { FileConfigSchema } from "../../../packages/config/src/schema.ts";
+const r = await new HostExecution().exec("cat", { stdin: "hello" } as never);
+console.log("exec cat stdin:", JSON.stringify(r.stdout));
+const p = FileConfigSchema.safeParse({ hooks: [{ event: "tool_call", command: "x" }] });
+console.log("hooks key parses:", p.success, p.success ? "" : p.error.issues[0]?.message);
+```
+```
+exec cat stdin: ""
+hooks key parses: false Unrecognized key(s) in object: 'hooks'
+```
+
+**As built, in the plan's order:**
+1. core: `hooks.ts` (`HookEvent`, `HookSpec`), `ExecOptions.stdin`, `ToolResult.hook`, export.
+2. exec: `spawnShell` writes `stdin` and closes it; `spawnBackground` strips it. Red first: `exec("cat", { stdin: "hello" })` → `Received: ""`.
+3. config: `HookSpecSchema` in `settingsShape`, threaded `resolve` → `load` → template. Tests red on the old `src` (3 fails), green after.
+4. agent: `hooks.ts` (pure `hookName` / `hookMatches` / `parse*Outcome` / `combineToolCallVotes`, `HookRunner`, `runResultHooks`); `PermissionGate.authorize` → `GateOutcome` in the plan's order; `runTool` returns `{ result, input }`; `transformResult` takes `{ sessionId, input? }` at all three callers; `AgentConfig.hooks`; `SubagentDeps.hooks` → `forAgent`.
+5. daemon/client: the `hook://<action>/<name>` resource block (`HOOK_MIME`), parsed back on the first `/`. Client tests red on the old `src` (2 fails).
+6. cli: `buildAgent` builds the runner and inserts `runResultHooks` right after `redactSecrets`; `BuildAgentOptions.log` comes from the worker (`logDaemonError`), from `startDaemon` (`options.onError`) and from the pod `serve --stdio` (`log`); `render.ts` prints the H1 lines.
+7. tui: `state.ts` copies `hook`; `render-lines.ts` `hookLines` + `toolBody`. Render tests red on the old `src` (3 fails).
+8. README "Hooks" section: the contract and the name ↔ label table.
+
+**Non-vacuity by mutation** (each one reverted afterwards):
+- prompt built from the original input → the modify test fails;
+- `force: "allow"` ignored → the allow test fails;
+- `ask` not overriding a remembered rule → the ask test fails;
+- no abort check after the hooks → the cancel test fails;
+- the child not given `forAgent` → the H2 sub-agent test fails;
+- `runResultHooks` placed before `redactSecrets` → the wiring test fails.
+
+The pure `hooks.test.ts` was written after `agent/src/hooks.ts`, so it was
+never red on its assertions. The gate and loop properties are pinned by the
+mutations above.
+
+**Drift from Implementation:**
+- `stdin` is a `Uint8Array` (`TextEncoder`), not a `Blob`. Bun's `Writable` typing rejects the DOM `Blob` type. Return type: `Subprocess<"ignore" | Uint8Array, "pipe", "pipe">`.
+- `combineToolCallVotes(input, votes: NamedVote[])`: it takes the model's input and `{ hook, vote }` pairs, so the verdict can name the deciding or last-modifying hook. The runner still runs the hooks sequentially and stops at the first deny.
+- The `none` / `pass` votes carry an optional `failure` string, so the runner can log an ignored failure while the parse functions stay pure.
+- `hookLines(tool)` returns a plain view-model, `{ name, rest, reason[], replacesBody } | null`, not `string[]`. The SGR stays in `toolBody` (§7 split).
+- Added, not in the plan: after the hooks, `authorize` returns a refusal when the signal is aborted, so the user is never prompted after a cancel. `runTool`'s abort check then reports it as cancelled.
+- A `deny`-level tool returns before the hooks, so its hooks never run (test asserts no hook stdin).
+- `tool_result` replace keeps `details` and `hook`. `is_error` falls back to the original result's value when the hook omits it.
+- The invalid-regex check is a zod `superRefine`, so it surfaces as `ConfigError("Invalid <path>: hook \"<name>\": invalid matcher regex …")`. The plain-name pattern is duplicated in `config` and `agent`, because `config` does not depend on `core`.
+- No `log` in the headless/plain `main.ts` paths (`buildAgent(config)`). There, an ignored hook failure is silent.
+
+**Observation:** a `tool_result` hook's `tool_input` is the model's own
+arguments, which are not redacted. Only the result is. The wiring test shows
+the secret the model typed in `tool_input`.
+
+**Gate:** `bun run check`: typecheck clean, lint clean (0/0), `1683 pass / 2 skip / 0 fail` (the two opt-in skips).
+
+**Post-review fixes** (*— claude-opus-5-5, 2026-10-22*). Each new test was shown RED under the stated mutation, then the mutation was reverted:
+- The gate matches remembered rules against the **rewritten** input. New test: a remembered `git status` rewritten by a hook to `rm -rf x` prompts with `rm -rf x`. Mutation: `isRemembered(tool, input)`.
+- A hook `ask` prompts on a `"none"`-level tool. Mutation: drop `&& force !== "ask"`.
+- `HookRunner`: a hook killed by the user's cancel now casts no vote and logs nothing, on both `tool_call` and `tool_result`. Before, it read as "exited 124", and with `onFailure: "block"` it denied the call or turned the result into an error. Tests for both events; mutation: drop the post-`run` abort check.
+- New tests: timeout classification (mutation: drop `"timeout"`), an exec that throws → "could not be started" (mutation: drop the `catch`), and a non-boolean `is_error` (mutation: drop the type check).
+- `cli/src/main.ts` plain REPL and one-shot paths: `buildAgent(config, { log })` writes `[hook] …` to stderr (no Ink mounted there).
+- README: added the pod-scope bullet (the pod's own config, `main.ts` loads it before `startStdioDaemon`; a pod-side gate is UX only, §7), the unredacted `tool_input` note, and the note that `tool_result` hooks see the `[hook] input modified…` prefix.
 
 ## Review
 
-*— claude-opus-5-5, 2026-10-21*
+*— claude-opus-5-5, 2026-10-22. Fresh-context adversarial review. The executor is the **same model** (claude-opus-5-5) in a different context, so blind spots they share can survive both passes. A load-bearing task should ideally get a second review from a different model (AGENTS §10).*
 
-Self-review. Both seams are single call sites, so the change adds one step to
-each existing path and no parallel path (§7 "one session path"). The risky
-part is the gate's ordering: `modify` before the prompt, `allow` never
-remembered, `deny` level before hooks. Each has a dedicated red-first test
-and one mutation check.
+**Verdict: REQUEST-CHANGES.** The design is sound and the code does what the plan says. Every gate-ordering property I traced end to end holds. Two properties the plan relies on for security have **no test that kills their mutation**, and one documented behaviour (failures "logged") is false on two entry points. All fixes are small.
 
-Open for the fresh-context Review: whether `authorize`'s new return type
-leaks into anything beyond `runTool` (today it does not:
-`git grep "\.authorize("` → one hit).
+### Must-fix
+
+1. **The "a hook cannot smuggle a command past an approval" property is unpinned.** `agent/src/permission-gate.ts:149` matches the remembered rule against `effective`. That is correct, but if I mutate it to `isRemembered(tool, input)` (the model's original input), all 41 tests in hooks/permission/subagent still pass. The plan's failure-mode row "`modify` on a pre-approved prefix" depends on this. **Required:** add a loop test in `permission.test.ts`. First approve the prefix `git status` for the session. Then a hook rewrites `git status` → `rm -rf x`. Assert that the requester **is** prompted with `rm -rf x`. Show the test red under the mutation.
+2. **A hook `ask` on a `"none"`-level tool is unpinned.** If I mutate `permission-gate.ts:146` to drop `&& force !== "ask"`, all tests pass. **Required:** add a test where `fs_read` (or a `none` fake tool) gets a hook `{"decision":"ask"}` and the requester is called.
+3. **Executor risk (a): the README says ignored failures are "logged", but the headless paths log nothing.** `cli/src/main.ts:504` (`plain`) and `:609` (one-shot) call `buildAgent(config)` with no `log`. Ink is not mounted on either path, so stderr is safe. **Required:** pass `{ log: (l) => process.stderr.write(`[hook] ${l}\n`) }` (or the path's `write`) at both sites.
+4. **Pod trust: in `run`/`attach`, the laptop's hooks do not run. This is undocumented.** `serve --stdio` loads the **pod's** config (`cli/src/main.ts:266` → `startStdioDaemon(config, …)`). So a laptop `no-rm` deny hook gives no protection in a pod, and nothing tells the user. A pod-side config can also `allow` calls without a prompt. This is acceptable under §7: pod tool calls run in the pod, and the gate there is already daemon-side UX. It must still be stated. **Required:** add one bullet to README `### Hooks` (`README.md:138-176`). It should say that in `run`/`attach`, the hooks come from the pod's own config and run in the pod; that laptop hooks do not apply; and that they are UX, not a security boundary.
+
+### Nits (non-blocking)
+
+5. `agent/src/hooks.ts:183`: dropping the `is_error` type check survives the tests (M6). Add one case.
+6. `agent/src/hooks.ts:353` / `:355`: dropping timeout classification (M14) or the `exec`-throws → `"error"` catch (M15) survives the tests. Add a fake-env case for each. There is also a related bug. A hook killed by a **cancel** is reported as `exited 124`, so it is logged as "failed, ignored". With `onFailure: "block"` on `tool_result`, it turns the result into `hook failed: exited 124`. Return early when `signal.aborted`, without voting.
+7. Executor risk (b): `tool_input` in a `tool_result` hook is the model's unredacted arguments, and so is a `tool_call` hook's input. The model wrote them and the hook is the user's own command, so this is not a leak. The README should still say it ("`tool_input` is not redacted").
+8. The H4 `[hook] input modified…` prefix is part of the content that `tool_result` hooks see. This is harmless, but it is not stated in the README.
+
+### Rulings on executor drift and risks
+
+- **`Uint8Array` stdin instead of `Blob`:** OK. Proven by the exec test and by e2e (3 MB payload to a hook that never reads stdin: no hang, 252 ms).
+- **`combineToolCallVotes(input, NamedVote[])`:** OK. It is the cleaner shape.
+- **`hookLines` returns a view-model:** OK. It follows §7 better than `string[]`.
+- **`authorize` refuses after a cancel during a hook:** OK and correct. The e2e cancel (a 5 s hook, aborted at 300 ms with `onFailure: "block"`) gives no prompt and `Cancelled by the user before this tool ran.` in 303 ms.
+- **Hooks of a deny-level tool never run:** OK. This is H3.
+- **(a)** Must-fix 3.
+- **(b)** Nit 7.
+- **(c) Stdin is untested on a pod daemon:** low risk. The pod daemon runs the same `HostExecution` under the same compiled Bun, and `HostExecution` is the only `ExecutionEnvironment` (`grep implements ExecutionEnvironment`). It is still unverified. To verify, do a `run` smoke with a `cat >/tmp/x` hook in the pod config.
+- **(d)** I mutation-checked `hooks.test.ts` (below). It kills 11 of 12 pure mutations.
+
+### Gate
+
+`bun run check`: typecheck clean, lint clean ("Checked 362 files", no fixes), **1683 pass / 2 skip / 0 fail** (1685 tests, 148 files). The two skips are the opt-in ones. This matches Execution.
+
+### Premise table (Implementation citations, on `main`)
+
+| Premise | Result |
+|---|---|
+| Repro: no hooks seam; `stdin: "ignore"` (`exec/src/host-execution.ts:158`) | TRUE (`git show main:…` line 158) |
+| `authorize` has one call site (`agent.ts:754`); `transformResult` callers are `:289,:628,:668` | TRUE (`git grep` on main) |
+| A profile's `hooks` replaces the base list (`config/src/profile.ts:61`, `{...base, ...scalars}`) | TRUE |
+| The registry turns a schema failure into an error result (`tools/src/registry.ts:68-74`) | TRUE |
+| MCP names are `mcp__<server>__<tool>` (`mcp/src/tool-adapter.ts:40-42`) | TRUE |
+| The resource block already allows `uri`/`mimeType`/`text`, so there is no protocol bump (`protocol/src/content.ts:20-26`) | TRUE |
+| The peer dispatches concurrently, so a hook awaited in a turn does not block `cancel`/`resolve_permission` | TRUE. No change to `transport/`. The e2e cancel during a hook ends in 303 ms |
+| Pod: "hooks come from the pod's own config" | TRUE (`main.ts:266`), but missing from the user docs (must-fix 4) |
+
+### Mutation results (each reverted; tree byte-identical, checked with `git status`/`git diff`/`shasum` against a pre-review snapshot)
+
+- **`hooks.test.ts` alone, killed:**
+  - modify-without-decision counted as allow
+  - exit 2 not special
+  - no 1 MiB cap
+  - plain matcher treated as a regex
+  - no basename in `hookName`
+  - deny does not short-circuit
+  - the `tool_result` chain reads the original result
+  - an ignored failure is not logged
+  - a deny loses its reason
+  - non-object `input` accepted
+  - unknown `decision` accepted
+- **`hooks.test.ts` alone, survived:** `is_error` type unchecked (nit 5).
+- **hooks + permission + subagent suites, killed:**
+  - `content` type unchecked
+  - the deny-level check moved after the hooks (H3)
+  - a hook `allow` gets remembered
+  - no H4 note
+  - the tool runs the raw arguments after a modify
+  - `transformResult` gets the model's input instead of the effective one
+- **hooks + permission + subagent suites, survived:**
+  - remembered rule matched on the original input (**must-fix 1**)
+  - `ask` does not override the `none` level (**must-fix 2**)
+  - no timeout classification (nit 6)
+  - an `exec` throw not caught (nit 6)
+
+### Attacks tried
+
+1. **A modify rewrites what the user approves.** E2E (`.tentacle/tmp/hooks-core/e2e.ts`): real `HostExecution`, `Agent`, `HookRunner` and `redactSecrets` + `runResultHooks`. The hook rewrites `rm -rf build` → `echo safe` with `ask`. **Holds:** the prompt input is `{"command":"echo safe"}`, the tool ran `echo safe`, the result has the H4 line and `hook:{action:"modified",name:"fix"}`, and the hook's stdin carried `event, session_id, cwd, agent:null, tool_name, tool_call_id, tool_input` (the original input).
+2. **Exit-2 deny through a real script.** **Holds:** no prompt, `Blocked by a hook… Reason: rm not allowed`, `hook.name = "no-rm.sh"` (basename default).
+3. **A 3 MB result piped to a hook that ignores stdin.** **Holds:** no hang and no EPIPE crash (252 ms).
+4. **Hook timeout** (`sleep 5`, `timeout: 1`). **Holds:** it stops at about 1 s, logs `failed, ignored: timed out`, and the gate continues to the prompt.
+5. **Cancel during a `block` hook.** **Holds** (see the rulings). The variant where a cancel happens during a `tool_result` hook mislabels the outcome (nit 6).
+6. **Single broker:** `buildAgent` still threads one `permissions.request` into `Agent`, and sub-agents still get `deps.requestPermission`. The hook runner adds no requester. **Holds.**
+7. **No raw terminal writes:** the worker logs to the file `daemon-errors.log` (`logDaemonError`). The pod `--stdio` logs to stderr, which the laptop buffers. `serve` uses `onError`. **Holds.** The headless gap is must-fix 3.
+8. **Pod trust:** see must-fix 4. No laptop-side effect is added: hooks run where the daemon runs. Nothing new crosses the tunnel except an additive `hook://` resource block, which only renders text.
+
+### What holds
+
+- One seam each for `tool_call` (the gate) and `tool_result` (the pipeline). There is no parallel path.
+- H3 runs the deny level before the hooks.
+- A hook `allow` is never remembered.
+- A modify is applied before the prompt.
+- The abort is re-checked after the hooks.
+- With no hooks configured, behaviour is byte-identical: raw arguments, and `hooks` is undefined.
+- The protocol change is additive. Old clients skip unknown resource URIs.
+
+### How the executor behaved
+
+The executor followed the plan's order and reported drift honestly, including the risks it was unsure of. It proved stdin red-first and recorded its mutations. It overstated coverage in two places:
+- It claimed the gate properties were "pinned by the mutations above", but two plan-listed gate properties were never mutated, and both survive.
+- The README promises logging that the headless paths do not do.
+
+### Re-review
+
+*— claude-opus-5-5, 2026-10-22. Same model as the executor, in a fresh context.*
+
+**Verdict: APPROVE.** All 8 findings are fixed.
+
+**Mutations.** Each was rerun by the reviewer and reverted afterwards; the tree was then checked against a snapshot and is byte-identical. All are now killed:
+- Must-fix 1 (remembered rule matched on the original input): 1 fail.
+- Must-fix 2 (`ask` does not override the `none` level): 1 fail.
+- Nit 5 (`is_error` type unchecked): 1 fail.
+- Nit 6:
+  - no timeout classification: 1 fail;
+  - an `exec` throw not caught: 1 fail;
+  - the cancel check removed in `toolCall`: 1 fail;
+  - the cancel check removed in `toolResult`: 1 fail.
+
+**The cancel fix is not over-broad.** Both new checks are gated only on `signal.aborted` (`agent/src/hooks.ts:281` and `:310`). I made each check always break, so votes are dropped even without a cancel. That fails 8 tests (`toolCall`) and 5 tests (`toolResult`). The e2e trace still shows a real 1 s timeout voting and logging (`failed, ignored: timed out`). A cancel during a hook ends in 307 ms with no prompt and no log line.
+
+**Other fixes, checked by reading:**
+- The `main.ts` plain and one-shot paths log to stderr. Ink is not mounted on either path, so this is safe. As the executor noted, it has no test.
+- README (`:166`, `:174-184`) now covers pod scope, unredacted `tool_input`, the H4 prefix, and where failures are logged.
+
+**Gate:** `bun run check` passes. Typecheck clean, lint clean (362 files), **1690 pass / 2 skip / 0 fail** (1692 tests, 148 files).

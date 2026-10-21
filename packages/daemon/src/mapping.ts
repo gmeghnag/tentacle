@@ -27,6 +27,8 @@ import { RpcError } from "@tentacle/transport";
 
 /** MIME type used for the embedded unified-diff resource block. */
 export const DIFF_MIME = "text/x-diff";
+/** A user hook's intervention on a call (H1, docs/feat/hooks-core.md): `hook://<action>/<name>`, reason in `text`. */
+export const HOOK_MIME = "application/x-tentacle-hook";
 
 /** Control characters (C0, DEL, C1): never in a wire skill description. */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
@@ -163,6 +165,14 @@ export function toolResultContent(result: ToolResult): ContentBlock[] {
       uri: `diff://${result.details.path}`,
       mimeType: DIFF_MIME,
       text: result.details.patch,
+    });
+  }
+  if (result.hook) {
+    blocks.push({
+      type: "resource",
+      uri: `hook://${result.hook.action}/${result.hook.name}`,
+      mimeType: HOOK_MIME,
+      ...(result.hook.reason !== undefined ? { text: result.hook.reason } : {}),
     });
   }
   return blocks;

@@ -106,6 +106,17 @@ describe("applyProfile", () => {
     expect(none).toEqual({ ok: false, reason: 'unknown profile "x" (no profiles defined)' });
   });
 
+  test("a profile's hooks replace the base list (top-level setting, no merge)", () => {
+    const base = FileConfigSchema.parse({
+      hooks: [{ event: "tool_call", command: "a" }],
+      profiles: { p: { hooks: [{ event: "tool_result", command: "b" }] } },
+    });
+    const r = applyProfile(base, "p");
+    expect(r.ok && r.config.hooks).toEqual([{ event: "tool_result", command: "b" }]);
+    const none = applyProfile(base, undefined);
+    expect(none.ok && none.config.hooks).toEqual([{ event: "tool_call", command: "a" }]);
+  });
+
   test("the base is never mutated", () => {
     const before = JSON.stringify(base);
     apply("work");

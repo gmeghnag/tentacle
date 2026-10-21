@@ -247,7 +247,38 @@ function subAgentLines(tool: ToolItem): string[] {
   return [head, ...rows];
 }
 
+/**
+ * The hook annotation under a tool call (H1), as plain text: `name` and the
+ * rest of the `hook <name> blocked <Tool>` line, the reason lines (blocked
+ * only), and whether it replaces the body (a block: the model-facing
+ * "Blocked by a hook…" text would repeat the line). Null without a hook.
+ */
+export function hookLines(
+  tool: ToolItem,
+): { name: string; rest: string; reason: string[]; replacesBody: boolean } | null {
+  const hook = tool.hook;
+  if (!hook) {
+    return null;
+  }
+  const label = toolLabel(tool.name);
+  if (hook.action === "modified") {
+    return { name: hook.name, rest: ` modified ${label} input`, reason: [], replacesBody: false };
+  }
+  const reason = hook.reason ? hook.reason.replace(/\n+$/, "").split("\n") : [];
+  return { name: hook.name, rest: ` blocked ${label}`, reason, replacesBody: true };
+}
+
 function toolBody(tool: ToolItem, width: number): string[] {
+  const hook = hookLines(tool);
+  if (!hook) {
+    return plainToolBody(tool, width);
+  }
+  const line = theme.subtle("hook ") + theme.accent(hook.name) + theme.subtle(hook.rest);
+  const reason = hook.reason.map((l) => theme.subtle(l));
+  return [line, ...reason, ...(hook.replacesBody ? [] : plainToolBody(tool, width))];
+}
+
+function plainToolBody(tool: ToolItem, width: number): string[] {
   if (tool.detail?.kind === "diff") {
     return diffBody(tool.detail, width);
   }

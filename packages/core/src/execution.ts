@@ -17,6 +17,8 @@ export interface ExecOptions {
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /** Written to the child's stdin, then closed. Absent → stdin is ignored. `spawnBackground` ignores it. */
+  readonly stdin?: string;
 }
 
 /**

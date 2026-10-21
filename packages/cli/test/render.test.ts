@@ -30,6 +30,29 @@ describe("render", () => {
     ).toBe("[result:error] boom\n");
   });
 
+  test("a hook block shows the hook line and its reason only; a modify adds a line (H1)", () => {
+    expect(
+      render({
+        type: "tool_result",
+        id: "1",
+        name: "shell",
+        result: {
+          content: "Blocked by a hook: `shell` was not run. Reason: nope",
+          isError: true,
+          hook: { action: "blocked", name: "no-rm", reason: "nope" },
+        },
+      }),
+    ).toBe("[hook] no-rm blocked Bash\nnope\n");
+    expect(
+      render({
+        type: "tool_result",
+        id: "1",
+        name: "shell",
+        result: { content: "ok", hook: { action: "modified", name: "fmt" } },
+      }),
+    ).toBe("[hook] fmt modified Bash input\n[result:ok] ok\n");
+  });
+
   test("turn_end reports non-normal stops", () => {
     expect(render({ type: "turn_end", reason: "end_turn" })).toBe("\n");
     expect(render({ type: "turn_end", reason: "max_iterations" })).toBe(

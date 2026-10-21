@@ -418,3 +418,60 @@ describe("toolTitle labels", () => {
     });
   });
 });
+
+describe("hook annotation (H1)", () => {
+  const blocked = (reason?: string): ToolItem => ({
+    kind: "tool",
+    id: "h1",
+    name: "shell",
+    args: JSON.stringify({ command: "rm -rf build" }),
+    status: "error",
+    resultText: `Blocked by a hook: \`shell\` was not run. Reason: ${reason ?? ""}`,
+    startedAt: 0,
+    endedAt: 1,
+    hook: { action: "blocked", name: "no-rm", ...(reason !== undefined ? { reason } : {}) },
+  });
+
+  test("blocked with a reason: the ⎿ hook line, then only the reason (never the model-facing text)", () => {
+    const lines = itemLines(blocked("rm -rf not allowed in this repo"), opts).map(strip);
+    expect(lines.slice(1).map((l) => l.trim())).toEqual([
+      "⎿ hook no-rm blocked Bash",
+      "rm -rf not allowed in this repo",
+    ]);
+    expect(lines.join("\n")).not.toContain("Blocked by a hook");
+  });
+
+  test("blocked without a reason: only the ⎿ line", () => {
+    expect(
+      itemLines(blocked(), opts)
+        .map(strip)
+        .slice(1)
+        .map((l) => l.trim()),
+    ).toEqual(["⎿ hook no-rm blocked Bash"]);
+  });
+
+  test("a modified fs_edit: the ⎿ hook line, then still its diff", () => {
+    const tool: ToolItem = {
+      kind: "tool",
+      id: "h2",
+      name: "fs_edit",
+      args: JSON.stringify({ path: "a.ts" }),
+      status: "ok",
+      resultText: "edited a.ts",
+      detail: {
+        kind: "diff",
+        path: "a.ts",
+        patch: "@@ -1 +1 @@\n-old\n+new\n",
+        added: 1,
+        removed: 1,
+      },
+      startedAt: 0,
+      endedAt: 1,
+      hook: { action: "modified", name: "fmt" },
+    };
+    const lines = itemLines(tool, opts).map(strip);
+    expect(lines[1]?.trim()).toBe("⎿ hook fmt modified Edit input");
+    expect(lines.join("\n")).toContain("new");
+    expect(lines.length).toBeGreaterThan(2);
+  });
+});

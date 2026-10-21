@@ -4,6 +4,7 @@
  * whatever it returns.
  */
 import type { AgentEvent } from "@tentacle/agent";
+import { toolLabel } from "@tentacle/core";
 
 export function render(event: AgentEvent): string {
   switch (event.type) {
@@ -15,11 +16,18 @@ export function render(event: AgentEvent): string {
     case "tool_start":
       return `\n[tool] ${event.name} ${event.arguments}\n`;
     case "tool_result": {
+      // H1: a hook's intervention, as in the TUI; a block shows only its reason.
+      const hook = event.result.hook;
+      if (hook?.action === "blocked") {
+        const reason = hook.reason ? `${hook.reason.replace(/\n+$/, "")}\n` : "";
+        return `[hook] ${hook.name} blocked ${toolLabel(event.name)}\n${reason}`;
+      }
+      const note = hook ? `[hook] ${hook.name} modified ${toolLabel(event.name)} input\n` : "";
       const details = event.result.details;
       if (details?.kind === "diff") {
-        return `[diff] ${details.path} (+${details.added} -${details.removed})\n`;
+        return `${note}[diff] ${details.path} (+${details.added} -${details.removed})\n`;
       }
-      return `[result:${event.result.isError ? "error" : "ok"}] ${firstLine(event.result.content)}\n`;
+      return `${note}[result:${event.result.isError ? "error" : "ok"}] ${firstLine(event.result.content)}\n`;
     }
     case "usage":
       return `\n(tokens ↑${event.usage.promptTokens} ↓${event.usage.completionTokens})\n`;
