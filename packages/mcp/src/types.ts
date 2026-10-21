@@ -1,8 +1,9 @@
 /**
  * MCP (Model Context Protocol) types — just what this client needs.
  *
- * We speak MCP's JSON-RPC 2.0 over a transport (stdio or Streamable HTTP), negotiate
- * capabilities, list the server's tools and call them. Resources/prompts are
+ * We speak MCP's JSON-RPC 2.0 over a transport (stdio or Streamable HTTP),
+ * negotiate the protocol era (modern 2026-07-28, or a legacy `initialize`
+ * handshake), list the server's tools and call them. Resources/prompts are
  * out of scope for this first slice.
  */
 
@@ -60,8 +61,38 @@ export interface McpTransport {
   onMessage(listener: (message: unknown) => void): void;
   /** `reason` says why the channel died, when the transport knows (never secrets). */
   onClose(listener: (reason?: string) => void): void;
+  /**
+   * Stop waiting for request `id` without telling the server (no
+   * `notifications/cancelled`). Streamable HTTP closes that request's stream;
+   * a transport with nothing per-request to release omits it.
+   */
+  abandon?(id: number | string): void;
   close(): void;
 }
 
-/** Protocol version this client advertises during `initialize`. */
-export const MCP_PROTOCOL_VERSION = "2024-11-05";
+/**
+ * Modern protocol versions this client speaks (per-request `_meta`, no
+ * handshake — MCP 2026-07-28 and later), newest first; the first is preferred.
+ */
+export const MCP_MODERN_VERSIONS: readonly string[] = ["2026-07-28"];
+
+/**
+ * Legacy protocol versions this client accepts (`initialize` handshake —
+ * 2025-11-25 and earlier), newest first; the first is the one it offers.
+ */
+export const MCP_LEGACY_VERSIONS: readonly string[] = [
+  "2025-11-25",
+  "2025-06-18",
+  "2025-03-26",
+  "2024-11-05",
+];
+
+/** The `_meta` keys a modern request carries. */
+export const MCP_META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion";
+export const MCP_META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
+export const MCP_META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities";
+
+/** JSON-RPC error codes the MCP spec reserves (-32020…-32099): a modern server sent them. */
+export const MCP_ERROR_HEADER_MISMATCH = -32020;
+export const MCP_ERROR_MISSING_CLIENT_CAPABILITY = -32021;
+export const MCP_ERROR_UNSUPPORTED_PROTOCOL_VERSION = -32022;

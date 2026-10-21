@@ -1011,10 +1011,14 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
 
 ## Earlier deferrals (from prior slices)
 
+- [ ] **MCP — full compatibility across both protocol eras** (2026-07-28 + legacy):
+      reconnect & safe re-issue, tool-set change notifications, result content,
+      warnings + version in `/mcp`, elicitation, OAuth — six tasks, in order.
+      **Eval:** `docs/eval/mcp-full-compat.md` (owner-approved split; deprecated
+      Sampling/Roots/Logging/HTTP+SSE excluded by decision). Transport + dual-era
+      client: `docs/feat/mcp-remote-transport.md`.
 - [ ] **MCP**: resources & prompts; MCP in the `serve` daemon; `headersCommand`
-      (secret headers off the config file); reconnect after a dropped server.
-      Streamable HTTP transport: `docs/feat/mcp-remote-transport.md`
-      (Type: feat · Size: M · Blast: cross-module · Suited: standard + standard Review).
+      (secret headers off the config file).
 - [ ] **Sub-agents**: background / parallel execution (SA.d).
       **Eval:** `docs/eval/parallel-subagents.md` (open — leans background-first, must split; needs a use-case).
 - [ ] **Parallel tool calls within a round** (today strictly sequential,

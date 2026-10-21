@@ -7,7 +7,7 @@
  * app. The returned `dispose` closes every connection (killing stdio subprocesses).
  */
 import type { Tool } from "@tentacle/core";
-import { McpClient } from "./client.ts";
+import { McpClient, McpHandshakeClosedError } from "./client.ts";
 import { createStreamableHttpTransport } from "./http-transport.ts";
 import { mcpToolToTool } from "./tool-adapter.ts";
 import { type StdioTransportOptions, createStdioTransport } from "./transport.ts";
@@ -60,6 +60,8 @@ export interface ConnectOptions {
   readonly timeoutMs?: number;
   /** Injectable transport factory (tests pass an in-memory one). */
   readonly createTransport?: (spec: McpServerSpec, opts?: StdioTransportOptions) => McpTransport;
+  /** Era-probe timeout per server (tests shorten it); omitted → the client default. */
+  readonly probeTimeoutMs?: number;
   /** Receives a server's stderr lines (server name + line); omitted → dropped. */
   readonly onStderr?: (server: string, line: string) => void;
 }
@@ -77,13 +79,43 @@ export async function connectServer(
   spec: McpServerSpec,
   options: ConnectOptions = {},
 ): Promise<McpConnection> {
-  const transport = (options.createTransport ?? createTransport)(spec, {
-    ...(options.onStderr ? { onStderr: (line: string) => options.onStderr?.(name, line) } : {}),
-  });
-  const client = new McpClient(transport);
   const timeout = options.timeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const toError = (error: unknown): Error =>
+    error instanceof Error ? error : new Error(String(error));
+  /** Spawn/reach the server and negotiate; on failure the half-open client is closed. */
+  const open = async (legacyOnly: boolean): Promise<McpClient> => {
+    const transport = (options.createTransport ?? createTransport)(spec, {
+      ...(options.onStderr ? { onStderr: (line: string) => options.onStderr?.(name, line) } : {}),
+    });
+    const opened = new McpClient(transport, undefined, {
+      ...(options.probeTimeoutMs !== undefined ? { probeTimeoutMs: options.probeTimeoutMs } : {}),
+    });
+    try {
+      await withTimeout(
+        opened.initialize({ legacyOnly }),
+        timeout,
+        `MCP server "${name}" initialize`,
+      );
+      return opened;
+    } catch (error) {
+      opened.close();
+      throw toError(error);
+    }
+  };
+  let client: McpClient;
   try {
-    await withTimeout(client.initialize(), timeout, `MCP server "${name}" initialize`);
+    client = await open(false);
+  } catch (error) {
+    // Some legacy stdio servers exit when the first message is not `initialize`
+    // (our era probe) — at once, or after answering it. Respawn once,
+    // legacy-only: the spec's dual-era client must work with them. Over HTTP a
+    // close before the handshake means unreachable.
+    if (!(error instanceof McpHandshakeClosedError) || spec.type === "http") {
+      throw error;
+    }
+    client = await open(true);
+  }
+  try {
     const defs = await withTimeout(client.listTools(), timeout, `MCP server "${name}" tools/list`);
     const tools = defs.map((def) => mcpToolToTool(name, client, def));
     return {
@@ -97,7 +129,7 @@ export async function connectServer(
     };
   } catch (error) {
     client.close();
-    throw error instanceof Error ? error : new Error(String(error));
+    throw toError(error);
   }
 }
 
