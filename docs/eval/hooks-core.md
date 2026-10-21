@@ -65,10 +65,16 @@ export interface ExecOptions {
   ```
   ⏺ Bash rm -rf build
     ⎿ hook no-rm blocked Bash
+      rm -rf not allowed in this repo
   ```
 
   `blocked` when a hook denied the call, `modified` when a hook rewrote its
-  input (`⎿ hook <name> modified Bash input`). `<name>` is the hook's `name`
+  input (`⎿ hook <name> modified Bash input`). Format (owner, 2026-10-21):
+  `hook` in lowercase, because the line is an annotation under the tool
+  title, not a second title. The hook name is unquoted and may be coloured
+  (accent). On `blocked`, the body below shows **only the hook's reason**
+  (subtle), never the model-facing text `Blocked by a hook: … Reason: …`,
+  which would repeat the line. The model still gets that full text. `<name>` is the hook's `name`
   (a new optional config field), defaulting to the basename of the first
   word of `command`. `Bash` is the display label (`toolLabel`, from
   [`tool-naming.md`](./tool-naming.md)). No protocol bump: the information
@@ -334,7 +340,8 @@ Order inside `authorize`:
   without hooks);
 - H4: when `modified`, prefix the returned content with the `[hook] input
   modified by hook <name>…` line;
-- H1: set `result.hook = { action: "blocked", name }` on a hook refusal and
+- H1: set `result.hook = { action: "blocked", name, reason }` on a hook
+  refusal (`reason` = the hook's own reason; omitted when it gave none) and
   `{ action: "modified", name }` when the input was rewritten (`name` = the
   last hook that modified it). `GateOutcome` therefore carries
   `hookName?: string` on both branches, and `ToolCallVerdict` records the
@@ -387,16 +394,18 @@ Order inside `authorize`:
 How the information travels, with no new update type and no protocol bump:
 
 1. **core**: `ToolResult` (`core/src/tool.ts:30-34`) gains
-   `readonly hook?: { readonly action: "blocked" | "modified"; readonly name: string }`.
-   It is a separate field, not a new `ToolResultDetail` kind, because a
-   modified `fs_edit` also carries a diff in `details`.
+   `readonly hook?: { readonly action: "blocked" | "modified"; readonly name: string; readonly reason?: string }`
+   (`reason`: the hook's own reason, set on `blocked` only; absent if the
+   hook gave none). It is a separate field, not a new `ToolResultDetail`
+   kind, because a modified `fs_edit` also carries a diff in `details`.
 2. **daemon**: `toolResultContent` (`daemon/src/mapping.ts:113-130`) appends,
    when `result.hook` is set, a block
-   `{ type: "resource", uri: "hook://<action>/<name>", mimeType: "application/x-tentacle-hook" }`.
+   `{ type: "resource", uri: "hook://<action>/<name>", mimeType: "application/x-tentacle-hook", text: <reason, if any> }`.
    This follows exactly the diff pattern (`diff://<path>`, same function).
 3. **client**: `toolResultFromContent` (`client/src/mapping.ts:95-120`)
    recognises `uri.startsWith("hook://")`, parses `<action>/<name>` (the name
-   may contain `/`: split on the **first** `/` only), and sets `hook`.
+   may contain `/`: split on the **first** `/` only), takes `reason` from the
+   block's `text`, and sets `hook`.
    **Compatibility:** an older client skips unknown resource blocks (the
    `else if` chain only takes `diff://`, `client/src/mapping.ts:103-113`), so
    this is additive.
@@ -404,12 +413,20 @@ How the information travels, with no new update type and no protocol bump:
    - `tui/src/state.ts` copies `result.hook` onto the tool item, exactly
      where it copies `result.details` (`tui/src/state.ts:242`);
    - `render-lines.ts` `toolBody` (`:250-282`) puts as the **first** body
-     line `theme.subtle("⎿ ") + text`, where text is
-     `hook ${name} blocked ${toolLabel(tool.name)}` or
-     `hook ${name} modified ${toolLabel(tool.name)} input`. The rest of the
-     body (result text, diff) follows unchanged.
-5. **plain renderer** (`cli/src/render.ts`): the same text on its own line
-   after the tool line.
+     line `theme.subtle("⎿ hook ") + theme.accent(name) + theme.subtle(rest)`,
+     where `rest` is ` blocked ${toolLabel(tool.name)}` or
+     ` modified ${toolLabel(tool.name)} input`. Then:
+     - `blocked`: the body is the ⎿ line plus, if `reason` is set, `reason`
+       split into lines and indented under it (`theme.subtle`). `resultText`
+       is **not** rendered;
+     - `modified`: the rest of the body (result text, diff) follows
+       unchanged.
+
+     The pure choice "which lines" belongs in a small function next to
+     `toolBody` (`hookLines(tool): string[] | null`), so it can be unit-tested
+     without SGR (§7).
+5. **plain renderer** (`cli/src/render.ts`): the same text, and on `blocked`
+   the reason, each on its own line after the tool line.
 
 UI text is in English, like every other TUI string.
 
@@ -492,9 +509,14 @@ H1 (red first: today none of this exists):
 - client `toolResultFromContent` round-trips it, including a name containing
   `/`; a content array **without** it yields no `hook` (old-daemon
   compatibility);
-- `tui/test/render-lines.test.ts`: a blocked `shell` item renders
-  `⎿ hook no-rm blocked Bash` as the first body line; a modified `fs_edit`
-  renders `⎿ hook fmt modified Edit input` **and** still its diff;
+- `tui/test/render-lines.test.ts`:
+  - a blocked `shell` item with reason `rm -rf not allowed in this repo`
+    renders exactly two body lines, `⎿ hook no-rm blocked Bash` and the
+    reason. The model-facing `Blocked by a hook…` text must **not** appear;
+  - blocked without a reason → only the ⎿ line;
+  - a modified `fs_edit` renders `⎿ hook fmt modified Edit input` **and**
+    still its diff;
+- the daemon/client round-trip carries `reason` in the resource `text`;
 - loop level (`permission.test.ts`): a hook deny yields a `tool_result`
   whose `result.hook` is `{ action: "blocked", name }`; the default name is
   the basename of the command's first word.
