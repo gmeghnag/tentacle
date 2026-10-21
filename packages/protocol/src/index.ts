@@ -12,4 +12,5 @@ export * from "./session.ts";
 export * from "./updates.ts";
 export * from "./permission.ts";
 export * from "./model.ts";
+export * from "./mcp.ts";
 export * from "./methods.ts";

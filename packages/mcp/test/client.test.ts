@@ -178,3 +178,33 @@ describe("McpClient per-call timeout + cancellation", () => {
     expect(sent).toHaveLength(0);
   });
 });
+
+describe("McpClient ping (reachability)", () => {
+  test("resolves when the server answers ping", async () => {
+    const { transport, sent } = scriptedTransport({ ping: () => ({}) });
+    const client = new McpClient(transport);
+    await client.ping(50);
+    expect(methodsOf(sent)).toEqual(["ping"]);
+  });
+
+  test("an error response still proves the server is reachable", async () => {
+    const { transport } = scriptedTransport({}); // no `ping` handler → error response
+    const client = new McpClient(transport);
+    await client.ping(50);
+  });
+
+  test("rejects on timeout", async () => {
+    const { transport } = silentTransport();
+    const client = new McpClient(transport);
+    await expect(client.ping(20)).rejects.toThrow(/timed out/);
+  });
+
+  test("rejects once closed, and isClosed reports it", async () => {
+    const { transport } = scriptedTransport({ ping: () => ({}) });
+    const client = new McpClient(transport);
+    expect(client.isClosed).toBe(false);
+    client.close();
+    expect(client.isClosed).toBe(true);
+    await expect(client.ping(50)).rejects.toThrow("closed");
+  });
+});

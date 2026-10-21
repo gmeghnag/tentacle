@@ -455,6 +455,58 @@
       "required": ["id", "jsonrpc"],
       "type": "object"
     },
+    "McpServerState": {
+      "enum": ["connecting", "connected", "unresponsive", "closed", "failed"],
+      "type": "string"
+    },
+    "McpServerStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "maxLength": 1000,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "latencyMs": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/McpServerState"
+        },
+        "tools": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["name", "state", "tools"],
+      "type": "object"
+    },
+    "McpStatusParams": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "McpStatusResult": {
+      "additionalProperties": false,
+      "properties": {
+        "servers": {
+          "items": {
+            "$ref": "#/$defs/McpServerStatus"
+          },
+          "maxItems": 256,
+          "type": "array"
+        }
+      },
+      "required": ["servers"],
+      "type": "object"
+    },
     "ModelStreamChunkedParams": {
       "additionalProperties": false,
       "properties": {
@@ -1405,6 +1457,14 @@
       },
       "result": {
         "$ref": "#/$defs/InitializeResult"
+      }
+    },
+    "mcp/status": {
+      "params": {
+        "$ref": "#/$defs/McpStatusParams"
+      },
+      "result": {
+        "$ref": "#/$defs/McpStatusResult"
       }
     },
     "model/stream": {

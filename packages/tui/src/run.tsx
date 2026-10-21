@@ -2,7 +2,7 @@ import type { Agent } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import { render } from "ink";
 import { App, type NoticeFeed, type SessionController } from "./App.tsx";
-import type { SlashSkill } from "./commands.ts";
+import type { McpServerView, SlashSkill } from "./commands.ts";
 import type { LinkFeed } from "./link-status.ts";
 import { messagesToItems } from "./resume.ts";
 import {
@@ -31,6 +31,8 @@ export interface TuiOptions {
   readonly link?: LinkFeed;
   /** The skills the user can activate as `/name` (the daemon's catalog, a getter). */
   readonly skills?: () => readonly SlashSkill[];
+  /** The daemon's MCP servers, probed live (`/mcp`). */
+  readonly mcpStatus?: () => Promise<readonly McpServerView[]>;
 }
 
 /**
@@ -77,6 +79,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       {...(options.notices ? { notices: options.notices } : {})}
       {...(options.link ? { link: options.link } : {})}
       {...(options.skills ? { skills: options.skills } : {})}
+      {...(options.mcpStatus ? { mcpStatus: options.mcpStatus } : {})}
     />,
     { exitOnCtrlC: false },
   );

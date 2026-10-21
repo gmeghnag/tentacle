@@ -30,6 +30,8 @@ import {
   type HistoryCut,
   type InitializeResult,
   JsonRpcErrorCode,
+  type McpServerStatus,
+  type McpStatusResult,
   Method,
   type ModelStreamChunkedParams,
   type ModelStreamChunkedResult,
@@ -266,6 +268,20 @@ export class RemoteClient {
    */
   skills(): readonly SkillSummary[] {
     return this.skillCatalog;
+  }
+
+  /**
+   * The daemon's MCP servers and whether each is reachable now (`/mcp`). Not
+   * re-sent after a drop: it is a fresh probe, the user just asks again. An
+   * older daemon rejects with `MethodNotFound`. Schema-validated by the peer.
+   */
+  mcpStatus(): Promise<readonly McpServerStatus[]> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.McpStatus, {}).then(
+      (result) => (result as McpStatusResult).servers,
+    );
   }
 
   /** A controller the Ink App drives exactly like a local `Session`. */

@@ -18,6 +18,7 @@ import {
   type EnqueueResult,
   type InitializeParams,
   type InitializeResult,
+  type McpStatusResult,
   Method,
   type ModelStreamChunkedResult,
   type ModelStreamResult,
@@ -167,9 +168,17 @@ export class Connection {
         return this.enqueue(params as EnqueueParams);
       case Method.ResolvePermission:
         return this.resolvePermission(params as ResolvePermissionParams);
+      case Method.McpStatus:
+        return this.mcpStatus();
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }
+  }
+
+  // A live probe (up to its ping timeout): concurrent with every other request,
+  // like all handlers here (AGENTS §7) — never awaited under a lock.
+  private async mcpStatus(): Promise<McpStatusResult> {
+    return { servers: [...(await this.host.mcpStatus())] };
   }
 
   private snapshot(params: SnapshotParams): SnapshotResult {

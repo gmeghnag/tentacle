@@ -5,6 +5,7 @@
  * place keeps client and daemon provably in sync.
  */
 import type { z } from "zod";
+import { McpStatusParamsSchema, McpStatusResultSchema } from "./mcp.ts";
 import {
   CancelRequestParamsSchema,
   ModelStreamChunkedParamsSchema,
@@ -45,6 +46,7 @@ export const Method = {
   ResolvePermission: "session/resolve_permission",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
+  McpStatus: "mcp/status",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -80,6 +82,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: ModelStreamChunkedParamsSchema,
     result: ModelStreamChunkedResultSchema,
   },
+  [Method.McpStatus]: { params: McpStatusParamsSchema, result: McpStatusResultSchema },
 };
 
 /** params schema for every notification method. */

@@ -7,6 +7,8 @@ import {
   lastAssistantText,
   lastUserText,
   matchCommands,
+  mcpStatusError,
+  mcpStatusText,
   paletteWindow,
   quitAction,
   resolveSlash,
@@ -75,6 +77,13 @@ describe("last-message lookup", () => {
 
   test("returns null when absent", () => {
     expect(lastAssistantText([])).toBeNull();
+    // A command's notice (`/mcp`, `/model`) is not a reply: /copy skips it.
+    expect(
+      lastAssistantText([
+        { kind: "assistant", text: "the reply" },
+        { kind: "assistant", text: "Model: `m`", notice: true },
+      ]),
+    ).toBe("the reply");
     expect(lastUserText([{ kind: "assistant", text: "x" }])).toBeNull();
   });
 });
@@ -227,5 +236,52 @@ describe("skills as /name (docs/feat/skills-slash.md)", () => {
       const w = paletteWindow(30, sel);
       expect(sel >= w.start && sel < w.end && w.end - w.start === PALETTE_MAX_ROWS).toBe(true);
     }
+  });
+});
+
+describe("/mcp (docs/feat/mcp-status.md)", () => {
+  test("is a built-in, not session-mutating", () => {
+    expect(SLASH_COMMANDS.map((c) => c.name)).toContain("/mcp");
+    expect(isSessionMutating("/mcp")).toBe(false);
+  });
+
+  test("no servers: says so", () => {
+    expect(mcpStatusText([])).toBe("_No MCP servers on this daemon._");
+  });
+
+  test("one row per server in daemon order, with a reachable count", () => {
+    const text = mcpStatusText([
+      { name: "github", state: "connected", tools: 12, latencyMs: 4 },
+      { name: "one", state: "connected", tools: 1, latencyMs: 0 },
+      { name: "db", state: "failed", tools: 0, error: "spawn ENOENT" },
+      { name: "slow", state: "connecting", tools: 0 },
+      { name: "gone", state: "closed", tools: 2, error: "the server process exited" },
+      { name: "stuck", state: "unresponsive", tools: 3, error: "timed out after 2000ms" },
+    ]);
+    expect(text.split("\n")).toEqual([
+      "**MCP servers** — 2 of 6 reachable",
+      "- `github` — ● connected · 12 tools · 4 ms",
+      "- `one` — ● connected · 1 tool · 0 ms",
+      "- `db` — ✗ failed: spawn ENOENT",
+      "- `slow` — … connecting",
+      "- `gone` — ○ closed · 2 tools: the server process exited",
+      "- `stuck` — ! unresponsive · 3 tools: timed out after 2000ms",
+    ]);
+  });
+
+  test("names and errors are display-safe (bidi, zero-width, backticks dropped)", () => {
+    const text = mcpStatusText([
+      { name: "a\u202eb`c\u200b", state: "failed", tools: 0, error: "x\u2066y`z" },
+    ]);
+    expect(text).toContain("- `abc` — ✗ failed: xyz");
+  });
+
+  test("errors: MethodNotFound → unsupported daemon; anything else → its message", () => {
+    expect(mcpStatusError(Object.assign(new Error("unknown method"), { code: -32601 }))).toBe(
+      "_This daemon doesn't support /mcp (it predates it)._",
+    );
+    expect(mcpStatusError(new Error("not connected to the daemon"))).toBe(
+      "_MCP status unavailable: not connected to the daemon_",
+    );
   });
 });

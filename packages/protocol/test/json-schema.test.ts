@@ -119,6 +119,16 @@ const FIXTURES: Record<string, Json[]> = {
     { sessionId: "s", requestId: "r", optionId: "allow_once" },
   ],
   "methods/session~1resolve_permission/result": [{}],
+  "methods/mcp~1status/params": [{}],
+  "methods/mcp~1status/result": [
+    { servers: [] },
+    {
+      servers: [
+        { name: "github", state: "connected", tools: 12, latencyMs: 4 },
+        { name: "db", state: "failed", tools: 0, error: "spawn ENOENT" },
+      ],
+    },
+  ],
   "methods/model~1stream/params": [
     {
       request: {

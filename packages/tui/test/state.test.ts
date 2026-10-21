@@ -8,6 +8,7 @@ import {
   applySessionEvent,
   backgroundExitNotice,
   initialState,
+  pushNoticeItem,
   resetHistory,
   startTurn,
 } from "../src/state.ts";
@@ -200,6 +201,28 @@ describe("reconnect events (docs/feat/client-reattach.md)", () => {
     expect(s.items).toEqual([
       { kind: "user", text: "go" },
       { kind: "assistant", text: "ok" },
+    ]);
+  });
+});
+
+describe("a command notice is never extended by model text (docs/feat/mcp-status.md F1)", () => {
+  test("text after a notice starts a new assistant item; the notice is untouched", () => {
+    let s = fold(startTurn(initialState, "q", 1), [{ type: "text", delta: "part one " }]);
+    s = pushNoticeItem(s, "**MCP servers** — 1 of 1 reachable");
+    s = fold(s, [{ type: "text", delta: "part two" }]);
+    expect(s.items.slice(1)).toEqual([
+      { kind: "assistant", text: "part one " },
+      { kind: "assistant", text: "**MCP servers** — 1 of 1 reachable", notice: true },
+      { kind: "assistant", text: "part two" },
+    ]);
+  });
+
+  test("a notice pushed while idle is not the start of the next reply", () => {
+    let s = pushNoticeItem(initialState, "Model: `m`");
+    s = fold(s, [{ type: "text", delta: "reply" }]);
+    expect(s.items).toEqual([
+      { kind: "assistant", text: "Model: `m`", notice: true },
+      { kind: "assistant", text: "reply" },
     ]);
   });
 });

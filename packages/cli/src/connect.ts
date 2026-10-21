@@ -122,6 +122,7 @@ export async function connectTui(
       createSession: () => client.newSession(undefined, crypto.randomUUID()),
       link: client,
       skills: () => client.skills(),
+      mcpStatus: () => client.mcpStatus(),
     });
   } finally {
     // The daemon keeps sessions past a disconnect: quitting ends ours (turn +
