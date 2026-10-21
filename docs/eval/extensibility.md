@@ -65,7 +65,7 @@ robust, the percentages are not.
 | D7 | Hook input on **stdin, added to the core** (`ExecOptions` has none today, `core/src/execution.ts:15-20`) |
 | D8 | Own wire format; native tentacle tool names in matchers. Semantics adopted on merit: exit 2 = block (stderr = reason), other non-zero = non-blocking error unless `onFailure: "block"`, `turn_end` may continue the turn (bounded), default timeout **600 s** |
 | D9 | Hook input: common fields (session id, cwd, event, tool name / input / call id, sub-agent identity). No transcript path, no foreign env aliases |
-| D10 | Tool **names in code stay** (`shell`, `fs_read`, `fs_edit`, …: model-facing, used by hook matchers and agent-defs). Only the **display** gets CamelCase labels (`Bash`, `Read`, `Edit`, `MultiEdit`, …), from one shared map. A full rename was considered and dropped: its claimed model benefit did not hold up ([`tool-naming.md`](./tool-naming.md)) |
+| D10 | Tool **names in code stay** (`shell`, `fs_read`, `fs_edit`, …: model-facing, used by hook matchers and agent-defs). Only the **display** gets CamelCase labels (`Bash`, `Read`, `Edit`, `MultiEdit`, …), from one shared map. A full rename was considered and dropped: its claimed model benefit did not hold up ([`tool-naming.md`](../feat/tool-naming.md)) |
 | D11 | Packages: **tentacle's own format**; sources local path + git in v1, npm later; **not** shipped to the pod in v1 |
 | D12 | Model-request hooks that *modify* or *block*, and any laptop-side ("identity") hook: **out of scope**, a follow-up eval |
 | R2 | (`hooks-turn`) at most **3** `turn_end` continues per turn |
@@ -97,7 +97,7 @@ proposed defaults.
 
 | # | Child eval | What | Size · Blast | Executor per §10 |
 |---|---|---|---|---|
-| 1 | [`tool-naming.md`](./tool-naming.md) | CamelCase display labels only (names unchanged), shared `toolLabel` in core | S · contained | weaker model OK |
+| 1 | [`tool-naming.md`](../feat/tool-naming.md) | CamelCase display labels only (names unchanged), shared `toolLabel` in core | S · contained | weaker model OK |
 | 2 | [`hooks-core.md`](./hooks-core.md) | config `hooks`, `stdin` in core, `HookRunner`, `tool_call` → `PermissionGate`, `tool_result` → pipeline | M · load-bearing | strong model |
 | 3 | [`hooks-turn.md`](./hooks-turn.md) | `turn_start`, `turn_end` (+ continue, max 3), `model_request` notify; **protocol 7 → 8** | M · load-bearing | strong model |
 | 4 | [`hooks-project-trust.md`](./hooks-project-trust.md) | `.agents/hooks.json`, `hooks/trust`, laptop resolver + store, auto-approve exclusion | M · load-bearing (§7) | strong model |
@@ -125,7 +125,7 @@ mandatory fresh-context Review (§10).
   "persist only `ChatMessage`") and hosting `pi-tui` components across the
   worker↔main RPC.
 - **Full tool rename to `Bash`/`Read`/…** and a **`tool_` name prefix**: see
-  D10 and [`tool-naming.md`](./tool-naming.md).
+  D10 and [`tool-naming.md`](../feat/tool-naming.md).
 
 ## Implementation
 

@@ -7,7 +7,9 @@ import type {
   JobOutput,
   ToolContext,
 } from "@tentacle/core";
+import { toolLabel } from "@tentacle/core";
 import {
+  builtinTools,
   fsEditTool,
   fsMultiEditTool,
   fsReadTool,
@@ -362,5 +364,13 @@ describe("built-in tools", () => {
     expect(jobs.kills).toEqual(["bg-1"]);
     expect(result.isError).toBe(false);
     expect(result.content).toContain("killed background job bg-1");
+  });
+});
+
+describe("tool display labels", () => {
+  test("every built-in tool (plus agent_task and skill) has a label distinct from its name", () => {
+    const names = [...builtinTools.map((t) => t.name), "agent_task", "skill"];
+    const unlabelled = names.filter((name) => toolLabel(name) === name);
+    expect(unlabelled).toEqual([]);
   });
 });

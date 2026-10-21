@@ -8,7 +8,12 @@
  * auto-run; for other tools it is the whole tool. The gate checks its rules
  * before prompting, so an approved-prefix command runs without a round-trip.
  */
-import type { PermissionRequest, PermissionRequester, Tool } from "@tentacle/core";
+import {
+  type PermissionRequest,
+  type PermissionRequester,
+  type Tool,
+  toolLabel,
+} from "@tentacle/core";
 import { commandCoveredByPrefixes, suggestShellPrefix } from "./shell-prefix.ts";
 
 function asRecord(input: unknown): Record<string, unknown> {
@@ -43,7 +48,7 @@ export function describeToolCall(tool: Tool, input: unknown): PermissionRequest 
     case "fs_edit":
       return { ...base, title: "Edit a file", ...detail(str("path")) };
     default:
-      return { ...base, title: `Run ${tool.name}` };
+      return { ...base, title: `Run ${toolLabel(tool.name)}` };
   }
 }
 
