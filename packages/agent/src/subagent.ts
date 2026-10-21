@@ -11,11 +11,12 @@
  * recursion). This module builds the child; the `agent_task` tool (in
  * `@tentacle/tools`) is the model-facing surface that calls it.
  */
-import type {
-  ExecutionEnvironment,
-  ModelProvider,
-  PermissionRequester,
-  ToolProgressEvent,
+import {
+  type ExecutionEnvironment,
+  type ModelProvider,
+  type PermissionRequester,
+  type ToolProgressEvent,
+  toolLabel,
 } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
 import { Agent, type AgentStopReason } from "./agent.ts";
@@ -110,7 +111,7 @@ export function childToolLabel(name: string, args: string): string {
     case "fs_edit":
       return `Edit ${str("path") ?? ""}`.trimEnd();
     default:
-      return name;
+      return toolLabel(name);
   }
 }
 

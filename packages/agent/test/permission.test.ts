@@ -6,9 +6,11 @@ import type {
   PermissionRequest,
   PermissionResponse,
   StreamEvent,
+  Tool,
 } from "@tentacle/core";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { Agent, type AgentEvent } from "../src/agent.ts";
+import { describeToolCall } from "../src/permission-gate.ts";
 
 function toolCallTurn(command: string): StreamEvent[] {
   return [
@@ -181,5 +183,17 @@ describe("permission gate in the agent loop", () => {
     expect(requests.map((r) => r.detail)).toEqual(["npm run build", "rm -rf /"]);
     // Both npm commands ran; the rm never did.
     expect(execCalls).toEqual(["npm run build", "npm run test"]);
+  });
+});
+
+describe("describeToolCall titles", () => {
+  test("a tool without a dedicated title is shown by its display label", () => {
+    const tool = { name: "fs_multi_edit", permission: "ask" } as unknown as Tool;
+    expect(describeToolCall(tool, {}).title).toBe("Run MultiEdit");
+  });
+
+  test("an unlabelled tool (MCP) is shown by its name", () => {
+    const tool = { name: "mcp__x__y", permission: "ask" } as unknown as Tool;
+    expect(describeToolCall(tool, {}).title).toBe("Run mcp__x__y");
   });
 });

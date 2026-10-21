@@ -13,3 +13,4 @@ export * from "./tool.ts";
 export * from "./permission.ts";
 export * from "./context.ts";
 export * from "./token-counter.ts";
+export * from "./tool-labels.ts";

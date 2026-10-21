@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
 import { ToolRegistry, fsReadTool, shellTool } from "@tentacle/tools";
-import { createSubagentRunner } from "../src/subagent.ts";
+import { childToolLabel, createSubagentRunner } from "../src/subagent.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -217,5 +217,19 @@ describe("createSubagentRunner", () => {
     });
     await run({ description: "d", prompt: "run ls", type: "general-purpose" });
     expect(execCalls).toEqual([]); // denied by the inherited requester
+  });
+});
+
+describe("childToolLabel", () => {
+  test("keeps the dedicated shell / fs strings", () => {
+    expect(childToolLabel("shell", '{"command":"ls -la"}')).toBe("$ ls -la");
+    expect(childToolLabel("fs_read", '{"path":"a.ts"}')).toBe("Read a.ts");
+    expect(childToolLabel("fs_edit", '{"path":"a.ts"}')).toBe("Edit a.ts");
+  });
+
+  test("any other tool shows its display label, or its name when it has none", () => {
+    expect(childToolLabel("fs_multi_edit", '{"path":"a.ts","edits":[]}')).toBe("MultiEdit");
+    expect(childToolLabel("shell_output", '{"job_id":"j1"}')).toBe("BashOutput");
+    expect(childToolLabel("mcp__x__y", "{}")).toBe("mcp__x__y");
   });
 });

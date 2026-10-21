@@ -8,7 +8,7 @@
  *
  * Pure and framework-free: no React, no Ink — just strings in, strings out.
  */
-import type { ToolResultDetail } from "@tentacle/core";
+import { type ToolResultDetail, toolLabel } from "@tentacle/core";
 import chalk from "chalk";
 import wrapAnsi from "wrap-ansi";
 import { renderMarkdown } from "./markdown.ts";
@@ -304,21 +304,39 @@ export function toolTitle(tool: ToolItem): { label: string; subtitle: string } {
   const str = (key: string): string | undefined =>
     typeof args[key] === "string" ? (args[key] as string) : undefined;
 
+  return { label: toolLabel(tool.name), subtitle: toolSubtitle(tool, args, str) };
+}
+
+/** The primary target shown after a tool's label. */
+function toolSubtitle(
+  tool: ToolItem,
+  args: Record<string, unknown>,
+  str: (key: string) => string | undefined,
+): string {
   switch (tool.name) {
     case "fs_read":
-      return { label: "Read", subtitle: str("path") ?? "" };
     case "fs_write":
-      return { label: "Write", subtitle: str("path") ?? "" };
     case "fs_edit":
-      return { label: "Edit", subtitle: str("path") ?? "" };
+      return str("path") ?? "";
+    case "fs_multi_edit": {
+      const path = str("path") ?? "";
+      if (!Array.isArray(args.edits)) {
+        return path;
+      }
+      const n = args.edits.length;
+      return `${path} · ${n} ${n === 1 ? "edit" : "edits"}`;
+    }
     case "shell":
-      return { label: "Bash", subtitle: str("command") ?? "" };
+      return str("command") ?? "";
+    case "shell_output":
+    case "shell_kill":
+      return str("job_id") ?? "";
     case "agent_task":
-      return { label: "Agent", subtitle: str("description") ?? str("subagent_type") ?? "" };
+      return str("description") ?? str("subagent_type") ?? "";
     case "skill":
-      return { label: "Skill", subtitle: str("name") ?? "" };
+      return str("name") ?? "";
     default:
-      return { label: tool.name, subtitle: tool.args };
+      return tool.args;
   }
 }
 

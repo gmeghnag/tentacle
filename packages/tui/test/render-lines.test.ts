@@ -4,6 +4,7 @@ import {
   itemLines,
   layoutTranscript,
   sliceLaid,
+  toolTitle,
   transcriptLines,
   transcriptRows,
   warmRowsChunk,
@@ -363,5 +364,57 @@ describe("warmRowsChunk (non-blocking resize warm)", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("toolTitle labels", () => {
+  const tool = (name: string, args: string): ToolItem => ({
+    kind: "tool",
+    id: "t",
+    name,
+    args,
+    status: "ok",
+    startedAt: 0,
+  });
+
+  test("fs_multi_edit shows MultiEdit + path + edit count", () => {
+    const item = tool("fs_multi_edit", '{"path":"a.ts","edits":[{},{}]}');
+    expect(toolTitle(item)).toEqual({ label: "MultiEdit", subtitle: "a.ts · 2 edits" });
+    expect(itemLines(item, opts).map(strip).join("\n")).toContain("MultiEdit a.ts · 2 edits");
+  });
+
+  test("fs_multi_edit with one edit uses the singular", () => {
+    expect(toolTitle(tool("fs_multi_edit", '{"path":"a.ts","edits":[{}]}')).subtitle).toBe(
+      "a.ts · 1 edit",
+    );
+  });
+
+  test("fs_multi_edit with malformed args falls back to path alone, or empty", () => {
+    expect(toolTitle(tool("fs_multi_edit", '{"path":"a.ts","edits":"x"}'))).toEqual({
+      label: "MultiEdit",
+      subtitle: "a.ts",
+    });
+    expect(toolTitle(tool("fs_multi_edit", "not json"))).toEqual({
+      label: "MultiEdit",
+      subtitle: "",
+    });
+  });
+
+  test("shell_output / shell_kill show their label + job id", () => {
+    expect(toolTitle(tool("shell_output", '{"job_id":"j1"}'))).toEqual({
+      label: "BashOutput",
+      subtitle: "j1",
+    });
+    expect(toolTitle(tool("shell_kill", '{"job_id":"j2"}'))).toEqual({
+      label: "BashKill",
+      subtitle: "j2",
+    });
+  });
+
+  test("an unlabelled (MCP) tool keeps its name and raw args", () => {
+    expect(toolTitle(tool("mcp__x__y", '{"q":1}'))).toEqual({
+      label: "mcp__x__y",
+      subtitle: '{"q":1}',
+    });
   });
 });

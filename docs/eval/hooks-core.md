@@ -3,7 +3,7 @@
 > **Status:** eval. Owner decisions D1–D9 in the umbrella; sub-decisions H1–H4 **decided 2026-10-21**. Implementation drafted below, approved at promotion.
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10). Promote to `feat/hooks-core`.
 > **Type:** eval → feat · **Size:** M · **Blast:** load-bearing (the agent loop's tool path, `PermissionGate`, core `ExecOptions`) · **Suited:** §10: a **strong model executes**; mandatory fresh-context Review
-> **Umbrella:** [`extensibility.md`](./extensibility.md) (child 2 of 5) · **Needs:** `tool-naming` merged (the H1 line uses `toolLabel`) · **Note:** matchers use tool **names** (`shell`, `fs_edit`, …), never the CamelCase display labels of [`tool-naming.md`](./tool-naming.md)
+> **Umbrella:** [`extensibility.md`](./extensibility.md) (child 2 of 5) · **Needs:** `tool-naming` merged (the H1 line uses `toolLabel`) · **Note:** matchers use tool **names** (`shell`, `fs_edit`, …), never the CamelCase display labels of [`tool-naming.md`](../feat/tool-naming.md)
 
 ## Context
 
@@ -77,7 +77,7 @@ export interface ExecOptions {
   which would repeat the line. The model still gets that full text. `<name>` is the hook's `name`
   (a new optional config field), defaulting to the basename of the first
   word of `command`. `Bash` is the display label (`toolLabel`, from
-  [`tool-naming.md`](./tool-naming.md)). No protocol bump: the information
+  [`tool-naming.md`](../feat/tool-naming.md)). No protocol bump: the information
   rides as an extra `resource` block in the existing `tool_call_update`
   content, like the diff does (design §7). Hook *failures* (crash/timeout
   with `onFailure: "ignore"`) go to the daemon log only.
