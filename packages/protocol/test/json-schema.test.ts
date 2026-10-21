@@ -124,8 +124,9 @@ const FIXTURES: Record<string, Json[]> = {
     { servers: [] },
     {
       servers: [
-        { name: "github", state: "connected", tools: 12, latencyMs: 4 },
-        { name: "db", state: "failed", tools: 0, error: "spawn ENOENT" },
+        { name: "github", state: "connected", tools: ["a", "b"], moreTools: 0, latencyMs: 4 },
+        { name: "big", state: "unresponsive", tools: ["a"], moreTools: 300, error: "no reply" },
+        { name: "db", state: "failed", tools: [], moreTools: 0, error: "spawn ENOENT" },
       ],
     },
   ],

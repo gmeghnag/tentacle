@@ -9,6 +9,8 @@ import { z } from "zod";
 
 /** At most this many servers in one `mcp/status` result. */
 export const MAX_MCP_SERVERS = 256;
+/** At most this many tool names per server (the rest are counted in `moreTools`). */
+export const MAX_MCP_TOOL_NAMES = 128;
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point
 const NO_CONTROL = /^[^\u0000-\u001f\u007f-\u009f]*$/;
@@ -26,8 +28,14 @@ export const McpServerStatusSchema = z
   .object({
     name: z.string().min(1).max(256).regex(NO_CONTROL),
     state: McpServerStateSchema,
-    /** Tools the server contributed (0 unless it connected). */
-    tools: z.number().int().nonnegative(),
+    /**
+     * The bare MCP names of the tools the server contributed (none unless it
+     * connected), in its order — the first `MAX_MCP_TOOL_NAMES`
+     * (docs/feat/mcp-tools-panel.md).
+     */
+    tools: z.array(z.string().min(1).max(128).regex(NO_CONTROL)).max(MAX_MCP_TOOL_NAMES),
+    /** Tools beyond the names listed (truncated or unnameable): count = `tools.length + moreTools`. */
+    moreTools: z.number().int().nonnegative(),
     /** Round trip of the probe `ping`, in ms (`connected` only). */
     latencyMs: z.number().nonnegative().optional(),
     /** Why it is not `connected` (one line). */

@@ -1155,83 +1155,129 @@ describe("input editing: navigation, history & selection", () => {
   });
 });
 
-describe("/mcp (docs/feat/mcp-status.md)", () => {
+describe("/mcp panel (docs/feat/mcp-tools-panel.md)", () => {
   const agent = new Agent({
     model: new ScriptedProvider([]),
     tools: new ToolRegistry(),
     env: noopEnv,
   });
+  const SERVERS = [
+    {
+      name: "github",
+      state: "connected" as const,
+      tools: ["create_issue", "list_prs"],
+      moreTools: 0,
+      latencyMs: 4,
+    },
+    { name: "db", state: "failed" as const, tools: [], moreTools: 0, error: "spawn ENOENT" },
+  ];
+  /** 1-based terminal row of the first frame line containing `text`, or 0. */
+  const rowOf = (frame: string, text: string): number =>
+    frame.split("\n").findIndex((line) => line.includes(text)) + 1;
 
-  test("shows each server's live state from the provider, asked once per /mcp", async () => {
+  async function openMcp(
+    mcpStatus: () => Promise<typeof SERVERS>,
+    a: Agent = agent,
+  ): Promise<ReturnType<typeof render>> {
+    const r = render(<App agent={a} model="qwen3" cwd="/tmp/work" mcpStatus={mcpStatus} />);
+    await delay(30);
+    r.stdin.write("/mcp");
+    await delay(30);
+    r.stdin.write("\r");
+    await delay(30);
+    return r;
+  }
+
+  test("opens at once with a probing placeholder, then lists the servers (asked once)", async () => {
     let asked = 0;
-    const mcpStatus = async () => {
+    const { lastFrame, unmount } = await openMcp(async () => {
       asked += 1;
-      return [
-        { name: "github", state: "connected" as const, tools: 12, latencyMs: 4 },
-        { name: "db", state: "failed" as const, tools: 0, error: "spawn ENOENT" },
-      ];
-    };
-    const { stdin, lastFrame, unmount } = render(
-      <App agent={agent} model="qwen3" cwd="/tmp/work" mcpStatus={mcpStatus} />,
-    );
-    await delay(30);
-    stdin.write("/mcp");
-    await delay(30);
-    stdin.write("\r");
-    await delay(80);
+      await delay(80);
+      return SERVERS;
+    });
+    expect(lastFrame() ?? "").toContain("MCP servers · probing…");
+    await delay(120);
     const frame = lastFrame() ?? "";
     expect(asked).toBe(1);
-    expect(frame).toContain("1 of 2 reachable");
-    expect(frame).toContain("github — ● connected · 12 tools · 4 ms");
-    expect(frame).toContain("db — ✗ failed: spawn ENOENT");
+    expect(frame).toContain("MCP servers · 1 of 2 reachable");
+    expect(frame).toContain("❯ ▸ github  ● connected · 2 tools · 4 ms");
+    expect(frame).toContain("  ▸ db      ✗ failed");
+    expect(frame).not.toContain("Type a task or /command"); // the panel replaces the input
     unmount();
   });
 
-  test("a probe answering mid-reply never merges with the model's text (review F1)", async () => {
-    // The reply streams HEAD, pauses, then TAIL; the probe lands in the pause.
-    const slow: ModelProvider = {
-      id: "slow",
-      async *stream(): AsyncIterable<StreamEvent> {
-        yield { type: "text", delta: "HEAD" };
-        await delay(120);
-        yield { type: "text", delta: "TAIL" };
-        yield { type: "done" };
-      },
-    };
-    const slowAgent = new Agent({ model: slow, tools: new ToolRegistry(), env: noopEnv });
-    const mcpStatus = async () => {
-      await delay(60);
-      return [{ name: "github", state: "connected" as const, tools: 1, latencyMs: 3 }];
-    };
-    const { stdin, lastFrame, unmount } = render(
-      <App agent={slowAgent} model="qwen3" cwd="/tmp/work" mcpStatus={mcpStatus} />,
-    );
-    await delay(30);
-    stdin.write("/mcp");
-    await delay(30);
-    stdin.write("\r"); // idle: allowed; the probe is now in flight
-    stdin.write("go");
-    await delay(10);
+  test("enter expands the selected server to its tool names; esc closes and the input is back", async () => {
+    const { stdin, lastFrame, unmount } = await openMcp(async () => SERVERS);
     stdin.write("\r");
-    await delay(300);
+    await delay(30);
+    let frame = lastFrame() ?? "";
+    expect(frame).toContain("❯ ▾ github");
+    expect(frame).toContain("create_issue");
+    expect(frame).toContain("list_prs");
+    stdin.write("\u001B");
+    await delay(60);
+    frame = lastFrame() ?? "";
+    expect(frame).not.toContain("create_issue");
+    expect(frame).not.toContain("MCP servers");
+    expect(frame).toContain("Type a task or /command");
+    // Typing works again (no key was swallowed by a closed panel).
+    stdin.write("hi");
+    await delay(30);
+    expect(lastFrame() ?? "").toContain("hi");
+    unmount();
+  });
+
+  test("a click on a server row expands it (and keys typed meanwhile never reach the input)", async () => {
+    const { stdin, lastFrame, unmount } = await openMcp(async () => SERVERS);
+    stdin.write("zz"); // swallowed while the panel is open
+    await delay(20);
+    const y = rowOf(lastFrame() ?? "", "▸ db");
+    expect(y).toBeGreaterThan(0);
+    stdin.write(press(5, y));
+    stdin.write(release(5, y));
+    await delay(40);
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("github — ● connected · 1 tool · 3 ms");
-    expect(frame).not.toContain("3 msTAIL");
-    expect(frame).toContain("TAIL");
+    expect(frame).toContain("❯ ▾ db");
+    expect(frame).toContain("spawn ENOENT");
+    stdin.write("q");
+    await delay(40);
+    expect(lastFrame() ?? "").not.toContain("zz");
     unmount();
   });
 
-  test("a failed request shows why", async () => {
-    const mcpStatus = () => Promise.reject(new Error("not connected to the daemon"));
-    const { stdin, lastFrame, unmount } = render(
-      <App agent={agent} model="qwen3" cwd="/tmp/work" mcpStatus={mcpStatus} />,
+  test("an answer that lands after the panel closed is dropped", async () => {
+    const { stdin, lastFrame, unmount } = await openMcp(async () => {
+      await delay(80);
+      return SERVERS;
+    });
+    stdin.write("\u001B");
+    await delay(150);
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("MCP servers");
+    expect(frame).not.toContain("github");
+    unmount();
+  });
+
+  test("a late failure after the panel closed is dropped too", async () => {
+    const { stdin, lastFrame, unmount } = await openMcp(async () => {
+      await delay(80);
+      throw new Error("not connected to the daemon");
+    });
+    stdin.write("\u001B");
+    await delay(150);
+    expect(lastFrame() ?? "").not.toContain("MCP status unavailable");
+    unmount();
+  });
+
+  test("a failed request closes the panel and says why", async () => {
+    const { lastFrame, unmount } = await openMcp(() =>
+      Promise.reject(new Error("not connected to the daemon")),
     );
     await delay(30);
-    stdin.write("/mcp");
-    await delay(30);
-    stdin.write("\r");
-    await delay(80);
-    expect(lastFrame() ?? "").toContain("MCP status unavailable: not connected to the daemon");
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("MCP status unavailable: not connected to the daemon");
+    expect(frame).not.toContain("MCP servers");
+    expect(frame).toContain("Type a task or /command");
     unmount();
   });
 
@@ -1247,6 +1293,79 @@ describe("/mcp (docs/feat/mcp-status.md)", () => {
     const frame = lastFrame() ?? "";
     expect(frame).toContain("MCP status isn't available on this runtime");
     expect(frame).not.toContain("Unknown command");
+    expect(frame).not.toContain("MCP servers");
     unmount();
+  });
+
+  test("mid-turn: the panel sits under the working line; a click maps past it; esc closes the panel, not the turn", async () => {
+    const slow: ModelProvider = {
+      id: "slow",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { type: "text", delta: "HEAD" };
+        await delay(400);
+        yield { type: "text", delta: "TAIL" };
+        yield { type: "done" };
+      },
+    };
+    const slowAgent = new Agent({ model: slow, tools: new ToolRegistry(), env: noopEnv });
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={slowAgent} model="qwen3" cwd="/tmp/work" mcpStatus={async () => SERVERS} />,
+    );
+    await delay(30);
+    stdin.write("go");
+    await delay(10);
+    stdin.write("\r");
+    await delay(40);
+    stdin.write("/mcp");
+    await delay(20);
+    stdin.write("\r");
+    await delay(40);
+    let frame = lastFrame() ?? "";
+    expect(frame).toContain("working…");
+    expect(frame).toContain("▸ github");
+    const y = rowOf(frame, "▸ db");
+    stdin.write(press(5, y));
+    stdin.write(release(5, y));
+    await delay(40);
+    expect(lastFrame() ?? "").toContain("❯ ▾ db");
+    stdin.write("\u001B");
+    await delay(500);
+    frame = lastFrame() ?? "";
+    expect(frame).not.toContain("MCP servers");
+    expect(frame).toContain("HEADTAIL"); // the turn ran to the end
+    unmount();
+  });
+
+  test("a permission prompt takes over the keys; the panel is back after it", async () => {
+    const broker = new PermissionBroker();
+    const r = render(
+      <App
+        agent={agent}
+        model="qwen3"
+        cwd="/tmp/work"
+        permissions={broker}
+        mcpStatus={async () => SERVERS}
+      />,
+    );
+    await delay(30);
+    r.stdin.write("/mcp");
+    await delay(30);
+    r.stdin.write("\r");
+    await delay(40);
+    const decision = broker.request({
+      tool: "shell",
+      level: "ask",
+      title: "Run command",
+      detail: "ls",
+      input: {},
+    });
+    await delay(40);
+    expect(r.lastFrame() ?? "").toContain("Run command");
+    r.stdin.write("n"); // the prompt's key, not the panel's
+    expect((await decision).allowed).toBe(false);
+    await delay(40);
+    const frame = r.lastFrame() ?? "";
+    expect(frame).toContain("❯ ▸ github");
+    r.unmount();
   });
 });

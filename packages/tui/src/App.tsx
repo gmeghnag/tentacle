@@ -4,7 +4,6 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import {
-  type McpServerView,
   type SlashSkill,
   helpText,
   isSessionMutating,
@@ -12,7 +11,6 @@ import {
   lastUserText,
   matchCommands,
   mcpStatusError,
-  mcpStatusText,
   paletteWindow,
   quitAction,
   resolveSlash,
@@ -21,6 +19,7 @@ import {
 } from "./commands.ts";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { LineInput } from "./components/LineInput.tsx";
+import { McpPanel } from "./components/McpPanel.tsx";
 import { PermissionPrompt, permissionPromptRows } from "./components/PermissionPrompt.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
@@ -28,6 +27,18 @@ import { pushHistory, recall } from "./history.ts";
 import { useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import type { LinkFeed } from "./link-status.ts";
+import {
+  type McpPanel as McpPanelState,
+  type McpServerView,
+  applyPanel,
+  loadPanel,
+  openPanel,
+  panelClick,
+  panelHeight,
+  panelKey,
+  panelMaxBody,
+  panelView,
+} from "./mcp-panel.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
 import { sanitizePasted, stepPaste } from "./paste.ts";
 import { usePermissionBroker } from "./permission-ui.ts";
@@ -175,6 +186,11 @@ export function App({
   const [queued, setQueued] = useState<readonly string[]>([]);
   // Interactive tool-approval dialog + auto-accept (Shift+Tab), all self-contained.
   const permission = usePermissionBroker(permissions);
+  // The `/mcp` panel (docs/feat/mcp-tools-panel.md), open or null. Each open
+  // and close bumps the generation, so a probe answering after its panel
+  // closed (or was reopened) is dropped instead of landing on the screen.
+  const [mcpPanel, setMcpPanel] = useState<McpPanelState | null>(null);
+  const mcpGenRef = useRef(0);
   const [selection, setSelectionState] = useState<Selection | null>(null);
   const selectionRef = useRef<Selection | null>(null);
   // Partial SGR mouse report held across data chunks (see the mouse handling
@@ -330,7 +346,7 @@ export function App({
   const termRows = Math.max(8, size.rows);
   // Slash-command autocomplete: open only while idle and typing a `/command`.
   const paletteCommands =
-    !permission.pending && !st.running ? matchCommands(field.value, skills()) : [];
+    !permission.pending && !st.running && !mcpPanel ? matchCommands(field.value, skills()) : [];
   const paletteOpen = paletteCommands.length > 0;
   const commandSel = paletteOpen
     ? Math.min(Math.max(0, commandIndex), paletteCommands.length - 1)
@@ -345,15 +361,20 @@ export function App({
     MAX_INPUT_ROWS,
   );
   const inputBoxRows = inputContentLines + 2;
-  // Rows the bottom area occupies: the permission dialog; or, while running, the
-  // thinking line (1) + the queued-message lines + the input box; or, when idle,
-  // the input box plus any open palette rows.
+  const mcpView = mcpPanel ? panelView(mcpPanel, columns, panelMaxBody(termRows)) : null;
+  // Rows above the input/panel while a turn runs: the thinking line + the
+  // queued-message lines (each one row: `wrap="truncate-end"`).
+  const runningRows = st.running ? 1 + queued.length : 0;
+  // Rows the bottom area occupies: the permission dialog; or the running rows,
+  // then the `/mcp` panel or the input box (plus any open palette rows, which
+  // only open while idle).
   const activeRows = permission.pending
     ? permissionPromptRows(permission.choices.length)
-    : st.running
-      ? 1 + queued.length + inputBoxRows
-      : inputBoxRows + paletteRows.length;
+    : runningRows + (mcpView ? panelHeight(mcpView) : inputBoxRows + paletteRows.length);
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
+  // Terminal row (1-based) of the panel's first body row: the transcript
+  // viewport, the bottom area's marginTop row, the running rows, the title rule.
+  const mcpBodyTop = viewport + 1 + runningRows + 2;
   // Positional layout only (O(items) cache lookups, no full array): take the
   // row `total` for scroll maths and materialise just the visible window. The
   // whole transcript is assembled on demand (sliceLaid 0..total) only where a
@@ -387,6 +408,11 @@ export function App({
     },
     [flushNow],
   );
+
+  const closeMcpPanel = useCallback(() => {
+    mcpGenRef.current += 1;
+    setMcpPanel(null);
+  }, []);
 
   const run = useCallback(
     async (text: string, opts?: { continuation?: boolean; skill?: string }) => {
@@ -524,16 +550,29 @@ export function App({
         case "/model":
           pushNotice(`Model: \`${model}\``);
           return;
-        case "/mcp":
+        case "/mcp": {
           if (!mcpStatus) {
             pushNotice("_MCP status isn't available on this runtime._");
             return;
           }
+          mcpGenRef.current += 1;
+          const gen = mcpGenRef.current;
+          setMcpPanel(openPanel());
           void mcpStatus().then(
-            (servers) => pushNotice(mcpStatusText(servers)),
-            (e) => pushNotice(mcpStatusError(e)),
+            (servers) => {
+              if (mcpGenRef.current === gen) {
+                setMcpPanel(loadPanel(servers));
+              }
+            },
+            (e) => {
+              if (mcpGenRef.current === gen) {
+                closeMcpPanel();
+                pushNotice(mcpStatusError(e));
+              }
+            },
           );
           return;
+        }
         case "/tokens": {
           const t = stateRef.current.sessionTokens;
           pushNotice(
@@ -585,6 +624,7 @@ export function App({
     [
       makeSession,
       clipboard,
+      closeMcpPanel,
       cwd,
       exit,
       flushNow,
@@ -798,6 +838,20 @@ export function App({
       }
       return;
     }
+    // The `/mcp` panel: its keys first (so Esc closes it rather than stopping
+    // a running turn). Mouse reports fall through to the dispatch below; any
+    // other key is swallowed there — no line editing behind the panel.
+    if (mcpPanel) {
+      const action = panelKey(char, key);
+      if (action === "close") {
+        closeMcpPanel();
+        return;
+      }
+      if (action !== "none") {
+        setMcpPanel((p) => (p ? applyPanel(p, action) : p));
+        return;
+      }
+    }
     if (key.escape && stateRef.current.running && abortRef.current) {
       abortRef.current.abort();
       return;
@@ -851,6 +905,15 @@ export function App({
       if (r.btn & 64) {
         const dir = r.btn & 1 ? -WHEEL_LINES : WHEEL_LINES;
         setScrollOffset((o) => clampOffset(o + dir, total, viewport));
+        return;
+      }
+      // A left press on a `/mcp` panel body row selects it (a server row also
+      // expands/collapses). Drags and releases there do nothing.
+      if (mcpView && r.y >= mcpBodyTop && r.y < mcpBodyTop + mcpView.rows.length) {
+        if (r.press && r.btn === 0) {
+          const bodyIndex = r.y - mcpBodyTop;
+          setMcpPanel((p) => (p ? panelClick(p, mcpView, bodyIndex) : p));
+        }
         return;
       }
       // Left button: release copies the selection, press/drag starts/extends it.
@@ -909,6 +972,10 @@ export function App({
       !key.delete;
     if (isMousePrefix(data) && plainKey) {
       holdMouse(data);
+      return;
+    }
+    // Behind the `/mcp` panel nothing edits the (hidden) input.
+    if (mcpPanel) {
       return;
     }
     // Not a report or a continuable prefix: a held bare "[" was a typed bracket,
@@ -1043,61 +1110,53 @@ export function App({
             cwd={cwd}
             columns={columns}
           />
-        ) : st.running ? (
-          <Box flexDirection="column" width={columns}>
-            <Thinking
-              since={
-                st.reasoning && st.reasoningStartedAt !== null
-                  ? st.reasoningStartedAt
-                  : (st.turnStartedAt ?? Date.now())
-              }
-              label={st.reasoning ? "thinking…" : "working…"}
-            />
-            {queued.map((q, i) => (
-              <Text key={`q-${i}-${q}`} dimColor wrap="truncate-end">
-                ⏳ {q}
-              </Text>
-            ))}
-            <Box
-              width={columns}
-              borderStyle="round"
-              borderColor="gray"
-              borderLeft={false}
-              borderRight={false}
-            >
-              <LineInput
-                value={field.value}
-                cursor={field.cursor}
-                anchor={field.anchor}
-                placeholder="Queue a task…"
-                maxRows={MAX_INPUT_ROWS}
-              />
-            </Box>
-          </Box>
         ) : (
           <Box flexDirection="column" width={columns}>
-            {paletteOpen ? (
-              <CommandPalette
-                commands={paletteRows}
-                selected={commandSel - paletteWin.start}
-                columns={columns}
+            {st.running ? (
+              <Thinking
+                since={
+                  st.reasoning && st.reasoningStartedAt !== null
+                    ? st.reasoningStartedAt
+                    : (st.turnStartedAt ?? Date.now())
+                }
+                label={st.reasoning ? "thinking…" : "working…"}
               />
             ) : null}
-            <Box
-              width={columns}
-              borderStyle="round"
-              borderColor="gray"
-              borderLeft={false}
-              borderRight={false}
-            >
-              <LineInput
-                value={field.value}
-                cursor={field.cursor}
-                anchor={field.anchor}
-                placeholder={INPUT_PLACEHOLDER}
-                maxRows={MAX_INPUT_ROWS}
-              />
-            </Box>
+            {st.running
+              ? queued.map((q, i) => (
+                  <Text key={`q-${i}-${q}`} dimColor wrap="truncate-end">
+                    ⏳ {q}
+                  </Text>
+                ))
+              : null}
+            {mcpView ? (
+              <McpPanel view={mcpView} columns={columns} />
+            ) : (
+              <>
+                {paletteOpen ? (
+                  <CommandPalette
+                    commands={paletteRows}
+                    selected={commandSel - paletteWin.start}
+                    columns={columns}
+                  />
+                ) : null}
+                <Box
+                  width={columns}
+                  borderStyle="round"
+                  borderColor="gray"
+                  borderLeft={false}
+                  borderRight={false}
+                >
+                  <LineInput
+                    value={field.value}
+                    cursor={field.cursor}
+                    anchor={field.anchor}
+                    placeholder={st.running ? "Queue a task…" : INPUT_PLACEHOLDER}
+                    maxRows={MAX_INPUT_ROWS}
+                  />
+                </Box>
+              </>
+            )}
           </Box>
         )}
       </Box>

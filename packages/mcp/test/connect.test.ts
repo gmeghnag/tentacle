@@ -59,6 +59,9 @@ describe("connectMcpServers", () => {
     expect(result.errors).toEqual({});
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual(["mcp__alpha__t-x", "mcp__beta__t-y"]);
+    // Each connection also keeps its server's bare tool names (what `/mcp` lists).
+    const bare = Object.fromEntries(result.connections.map((c) => [c.name, c.toolNames]));
+    expect(bare).toEqual({ alpha: ["t-x"], beta: ["t-y"] });
     result.dispose();
   });
 

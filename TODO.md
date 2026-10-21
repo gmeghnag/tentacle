@@ -482,15 +482,21 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       async notice until the reply's text ends, or insert it before the item
       that is still streaming. Display/export only, never persisted.
       Type: fix · Size: S · Blast: contained.
-- [ ] 🔵 **A late `/mcp` answer appears after `/clear`.** A probe still in flight
-      when the user clears lands on the fresh screen. The content is still
-      correct (daemon-scoped, not session-scoped). Drop it if `/clear` ran in
-      between. Type: fix · Size: S · Blast: contained.
+- [x] 🔵 **A late `/mcp` answer appears after `/clear`.** FIXED by
+      `feat/mcp-tools-panel` (2026-10-21): `/mcp` is a panel now; a probe that
+      answers after its panel closed is dropped (generation token).
+- [ ] 🟡 **`/mcp` — interactive panel listing each server's tools.**
+      `docs/feat/mcp-tools-panel.md`. Type: feat · Size: L · Blast:
+      load-bearing (wire v7→v8 + a new in-session modal) · Suited: strong
+      model; fresh-context Review waived by the owner (budget).
 - [ ] 🔵 **`/mcp` polish.**
-      - No "probing…" placeholder during the ≤2 s probe.
-      - The tool count includes tools skipped for a name clash at register time.
+      - ~~No "probing…" placeholder during the ≤2 s probe.~~ Done by
+        `feat/mcp-tools-panel`.
+      - The tool list includes tools skipped for a name clash at register time.
       - The `methods.ts:1-6` header says the peer validates `result` before
         replying. Only the receiver validates (`peer.ts:436-444`).
+      - With the panel open, a paste or a lone typed `[` still lands in the
+        hidden input (seen once the panel closes).
       Type: feat · Size: S · Blast: contained.
 
 ### Block 11 — new capabilities under evaluation (2026-10-19)

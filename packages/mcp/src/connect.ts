@@ -15,6 +15,8 @@ import type { McpServers, McpStdioServerSpec, McpTransport } from "./types.ts";
 export interface McpConnection {
   readonly name: string;
   readonly tools: readonly Tool[];
+  /** The server's own (bare) tool names, in its `tools/list` order — what `/mcp` lists. */
+  readonly toolNames: readonly string[];
   close(): void;
   /** False once the server process is gone (or `close()` ran). */
   isOpen(): boolean;
@@ -80,6 +82,7 @@ export async function connectServer(
     return {
       name,
       tools,
+      toolNames: defs.map((def) => def.name),
       close: () => client.close(),
       isOpen: () => !client.isClosed,
       ping: (ms) => client.ping(ms),

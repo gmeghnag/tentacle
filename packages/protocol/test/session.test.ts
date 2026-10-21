@@ -104,7 +104,7 @@ describe("skills on the wire (docs/feat/skills-slash.md)", () => {
   });
 
   test("the version is bumped for the breaking change", () => {
-    expect(PROTOCOL_VERSION).toBe(7);
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(7);
   });
 
   test("initialize result requires the catalog (empty is fine)", () => {

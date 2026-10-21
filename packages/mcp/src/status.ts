@@ -15,8 +15,10 @@ export type McpServerState = "connecting" | "connected" | "unresponsive" | "clos
 export interface McpServerStatus {
   readonly name: string;
   readonly state: McpServerState;
-  /** Tools the server contributed (0 unless it connected). */
-  readonly tools: number;
+  /** The bare names of the tools it contributed (none unless it connected), the first `MAX_TOOL_NAMES`. */
+  readonly tools: string[];
+  /** Tools beyond `tools` (past the cap, or with no displayable name). */
+  readonly moreTools: number;
   /** Round trip of the probe `ping` (`connected` only). */
   readonly latencyMs?: number;
   /** Why it is not `connected` (one line, no control characters). */
@@ -29,6 +31,9 @@ export const DEFAULT_PROBE_TIMEOUT_MS = 2_000;
 const MAX_ERROR_LENGTH = 500;
 /** Max length of a reported name (the wire caps it at 256). */
 const MAX_NAME_LENGTH = 200;
+/** Max tool names reported per server, and max length of each (the wire's caps). */
+const MAX_TOOL_NAMES = 128;
+const MAX_TOOL_NAME_LENGTH = 128;
 
 /** One display-safe line: control characters (C0, DEL, C1) and whitespace runs → one space. */
 function oneLine(text: string, max = MAX_ERROR_LENGTH): string {
@@ -43,6 +48,22 @@ function oneLine(text: string, max = MAX_ERROR_LENGTH): string {
 
 /** A config key as the wire accepts it: one ≤200-char line, never empty — so one odd name can't fail the whole result. */
 const displayName = (name: string): string => oneLine(name, MAX_NAME_LENGTH) || "(unnamed)";
+
+/**
+ * A server's tool names as the wire accepts them: each one ≤128-char line, at
+ * most `MAX_TOOL_NAMES`. A name that cleans to nothing is counted, not listed —
+ * a server's odd name can't fail the whole result.
+ */
+function toolList(names: readonly string[]): Pick<McpServerStatus, "tools" | "moreTools"> {
+  const tools = names
+    .map((n) => oneLine(n, MAX_TOOL_NAME_LENGTH))
+    .filter((n) => n !== "")
+    .slice(0, MAX_TOOL_NAMES);
+  return { tools, moreTools: names.length - tools.length };
+}
+
+/** A server that contributed no tools (a fresh array each time: results are handed out). */
+const noTools = (): Pick<McpServerStatus, "tools" | "moreTools"> => ({ tools: [], moreTools: 0 });
 
 type Outcome =
   | { readonly kind: "pending" }
@@ -88,23 +109,23 @@ export class McpStatusTracker {
   private async probeOne(name: string, timeoutMs: number): Promise<McpServerStatus> {
     const outcome = this.outcome;
     if (outcome.kind === "pending") {
-      return { name, state: "connecting", tools: 0 };
+      return { name, state: "connecting", ...noTools() };
     }
     if (outcome.kind === "failed") {
-      return { name, state: "failed", tools: 0, error: oneLine(outcome.error) };
+      return { name, state: "failed", ...noTools(), error: oneLine(outcome.error) };
     }
     const connection = outcome.connections.get(name);
     if (!connection) {
       return {
         name,
         state: "failed",
-        tools: 0,
+        ...noTools(),
         error: oneLine(outcome.errors[name] ?? "not started"),
       };
     }
-    const tools = connection.tools.length;
+    const tools = toolList(connection.toolNames);
     if (!connection.isOpen()) {
-      return { name, state: "closed", tools, error: "the server process exited" };
+      return { name, state: "closed", ...tools, error: "the server process exited" };
     }
     const start = this.now();
     try {
@@ -112,12 +133,12 @@ export class McpStatusTracker {
       return {
         name,
         state: "connected",
-        tools,
+        ...tools,
         latencyMs: Math.max(0, Math.round(this.now() - start)),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return { name, state: "unresponsive", tools, error: oneLine(message) };
+      return { name, state: "unresponsive", ...tools, error: oneLine(message) };
     }
   }
 }
