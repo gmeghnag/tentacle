@@ -544,7 +544,10 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       - [x] **skills-slash** (`/skill-name`: catalog on the wire, structured
         activation, protocol v7) — DONE 2026-10-21, `feat/skills-slash`:
         `docs/feat/skills-slash.md`. Type: feat · Size: M · Blast: load-bearing.
-      - [ ] skills-subagent
+      - [ ] **skills-subagent** (`agent_task{skill}`: the parent passes the name,
+        the sub-agent loads it before its first round) — eval written 2026-10-21,
+        owner decisions Q1–Q8 open: `docs/eval/skills-subagent.md`. Type: eval →
+        feat · Size: S–M · Blast: load-bearing (model-facing schema).
 
 - [x] **Remove `TENTACLE_CWD` / config `cwd`: the launch folder IS the working
       folder** — DONE 2026-10-20, `feat/remove-tentacle-cwd`: `docs/feat/remove-tentacle-cwd.md`. (owner decision 2026-10-20, as in Claude Code / opencode / pi).
