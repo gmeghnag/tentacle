@@ -56,8 +56,14 @@ function rawDaemon(reply: () => Record<string, unknown>): DuplexChannel {
 describe("mcp/status", () => {
   test("round-trips the host's live status", async () => {
     const servers: McpServerStatus[] = [
-      { name: "github", state: "connected", tools: 12, latencyMs: 4 },
-      { name: "db", state: "failed", tools: 0, error: "spawn ENOENT" },
+      {
+        name: "github",
+        state: "connected",
+        tools: ["create_issue", "list_prs"],
+        moreTools: 10,
+        latencyMs: 4,
+      },
+      { name: "db", state: "failed", tools: [], moreTools: 0, error: "spawn ENOENT" },
     ];
     let probes = 0;
     const client = connected(
@@ -105,7 +111,9 @@ describe("mcp/status", () => {
   test("a hostile daemon's terminal escape in a name is rejected, never returned", async () => {
     const client = new RemoteClient(
       rawDaemon(() => ({
-        result: { servers: [{ name: "evil\u001b[2J", state: "connected", tools: 0 }] },
+        result: {
+          servers: [{ name: "evil\u001b[2J", state: "connected", tools: [], moreTools: 0 }],
+        },
       })),
       new PermissionBroker(),
     );
@@ -118,8 +126,67 @@ describe("mcp/status", () => {
     const client = new RemoteClient(
       rawDaemon(() => ({
         result: {
-          servers: [{ name: "x", state: "failed", tools: 0, error: "a\u001b]8;;http://e\u0007" }],
+          servers: [
+            {
+              name: "x",
+              state: "failed",
+              tools: [],
+              moreTools: 0,
+              error: "a\u001b]8;;http://e\u0007",
+            },
+          ],
         },
+      })),
+      new PermissionBroker(),
+    );
+    await client.initialize();
+    await expect(client.mcpStatus()).rejects.toThrow();
+    client.close();
+  });
+
+  test("the same shapes minus the hostile part are accepted (the rejections above are not vacuous)", async () => {
+    const client = new RemoteClient(
+      rawDaemon(() => ({
+        result: {
+          servers: [
+            { name: "evil", state: "connected", tools: ["ok"], moreTools: 0 },
+            { name: "x", state: "failed", tools: [], moreTools: 0, error: "a" },
+          ],
+        },
+      })),
+      new PermissionBroker(),
+    );
+    await client.initialize();
+    expect((await client.mcpStatus()).map((s) => s.name)).toEqual(["evil", "x"]);
+    client.close();
+  });
+
+  test("a hostile daemon's terminal escape in a tool name is rejected (docs/feat/mcp-tools-panel.md)", async () => {
+    const client = new RemoteClient(
+      rawDaemon(() => ({
+        result: {
+          servers: [
+            {
+              name: "x",
+              state: "connected",
+              tools: ["ok", "pwn\u001b]52;c;AAAA\u0007"],
+              moreTools: 0,
+            },
+          ],
+        },
+      })),
+      new PermissionBroker(),
+    );
+    await client.initialize();
+    await expect(client.mcpStatus()).rejects.toThrow();
+    client.close();
+  });
+
+  test("a hostile daemon's oversized tool list is rejected", async () => {
+    const tools = Array.from({ length: 129 }, (_, i) => `t${i}`);
+    const client = new RemoteClient(
+      rawDaemon(() => ({
+        result: { servers: [{ name: "x", state: "connected", tools, moreTools: 0 }] },
       })),
       new PermissionBroker(),
     );
@@ -160,7 +227,8 @@ describe("mcp/status", () => {
     const many = Array.from({ length: 257 }, (_, i) => ({
       name: `s${i}`,
       state: "closed",
-      tools: 0,
+      tools: [],
+      moreTools: 0,
     }));
     const client = new RemoteClient(
       rawDaemon(() => ({ result: { servers: many } })),

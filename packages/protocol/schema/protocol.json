@@ -471,6 +471,10 @@
           "minimum": 0,
           "type": "number"
         },
+        "moreTools": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "name": {
           "maxLength": 256,
           "minLength": 1,
@@ -481,11 +485,17 @@
           "$ref": "#/$defs/McpServerState"
         },
         "tools": {
-          "minimum": 0,
-          "type": "integer"
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+            "type": "string"
+          },
+          "maxItems": 128,
+          "type": "array"
         }
       },
-      "required": ["name", "state", "tools"],
+      "required": ["moreTools", "name", "state", "tools"],
       "type": "object"
     },
     "McpStatusParams": {
@@ -1563,5 +1573,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 7
+  "x-protocol-version": 8
 }

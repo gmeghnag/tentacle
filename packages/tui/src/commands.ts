@@ -32,7 +32,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "/copy", description: "copy the last assistant reply to the clipboard" },
   { name: "/save", description: "save the transcript to a Markdown file" },
   { name: "/tokens", description: "show token usage for the session" },
-  { name: "/mcp", description: "list the MCP servers and whether each is reachable" },
+  { name: "/mcp", description: "MCP servers: reachability and their tools" },
   { name: "/exit", description: "quit (also /quit)" },
 ];
 
@@ -44,7 +44,7 @@ const BUILTIN_NAMES: ReadonlySet<string> = new Set([...SLASH_COMMANDS.map((c) =>
  * space; bidi overrides/isolates and zero-width characters (which can make a
  * pod-supplied description display differently from what it says) are dropped.
  */
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
   return (
     text
       // biome-ignore lint/suspicious/noControlCharactersInRegex: replacing them is the point
@@ -229,49 +229,8 @@ export function helpText(skills: readonly SlashSkill[] = []): string {
   return `**Commands**\n${rows}${skillBlock}\n\n**Keys**: Shift+Tab auto-accept tools · \\+Enter newline · Ctrl+C stop/quit`;
 }
 
-/** One MCP server as `mcp/status` reports it (docs/feat/mcp-status.md). */
-export interface McpServerView {
-  readonly name: string;
-  readonly state: "connecting" | "connected" | "unresponsive" | "closed" | "failed";
-  readonly tools: number;
-  readonly latencyMs?: number;
-  readonly error?: string;
-}
-
-const MCP_GLYPH: Readonly<Record<McpServerView["state"], string>> = {
-  connected: "●",
-  connecting: "…",
-  unresponsive: "!",
-  closed: "○",
-  failed: "✗",
-};
-
 /** A daemon-supplied string, safe inside a Markdown code span or after a colon. */
 const mcpSafe = (text: string): string => oneLine(text).replace(/`/g, "");
-
-const toolCount = (n: number): string => `${n} tool${n === 1 ? "" : "s"}`;
-
-/** The `/mcp` notice: one row per server, in the daemon's order. */
-export function mcpStatusText(servers: readonly McpServerView[]): string {
-  if (servers.length === 0) {
-    return "_No MCP servers on this daemon._";
-  }
-  const reachable = servers.filter((s) => s.state === "connected").length;
-  const rows = servers.map((s) => {
-    const head = `- \`${mcpSafe(s.name)}\` — ${MCP_GLYPH[s.state]} ${s.state}`;
-    switch (s.state) {
-      case "connected":
-        return `${head} · ${toolCount(s.tools)} · ${s.latencyMs ?? 0} ms`;
-      case "connecting":
-        return head;
-      case "failed":
-        return `${head}: ${mcpSafe(s.error ?? "unknown error")}`;
-      default:
-        return `${head} · ${toolCount(s.tools)}: ${mcpSafe(s.error ?? "no reply")}`;
-    }
-  });
-  return [`**MCP servers** — ${reachable} of ${servers.length} reachable`, ...rows].join("\n");
-}
 
 /** The `/mcp` notice when the status request itself failed. */
 export function mcpStatusError(error: unknown): string {

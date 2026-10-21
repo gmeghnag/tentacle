@@ -110,9 +110,10 @@ describe("startWorkerRuntime (real worker spawn)", () => {
         await Bun.sleep(50);
         servers = await runtime.mcpStatus();
       }
-      expect(servers.map((s) => [s.name, s.state, s.tools])).toEqual([
-        ["echo", "connected", 1],
-        ["missing", "failed", 0],
+      // The real server's bare tool names come through end to end (`/mcp` lists them).
+      expect(servers.map((s) => [s.name, s.state, s.tools, s.moreTools])).toEqual([
+        ["echo", "connected", ["echo"], 0],
+        ["missing", "failed", [], 0],
       ]);
       expect(servers[1]?.error).toBeTruthy();
     } finally {

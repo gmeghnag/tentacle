@@ -2,8 +2,9 @@ import type { Agent } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import { render } from "ink";
 import { App, type NoticeFeed, type SessionController } from "./App.tsx";
-import type { McpServerView, SlashSkill } from "./commands.ts";
+import type { SlashSkill } from "./commands.ts";
 import type { LinkFeed } from "./link-status.ts";
+import type { McpServerView } from "./mcp-panel.ts";
 import { messagesToItems } from "./resume.ts";
 import {
   ENTER_FULLSCREEN,

@@ -2,14 +2,21 @@ import { describe, expect, test } from "bun:test";
 import { type McpConnection, connectMcpServers } from "../src/connect.ts";
 import { McpStatusTracker } from "../src/status.ts";
 
-/** A connection double: a tool count, a liveness flag and a scripted ping. */
+/** A connection double: its tools (`t0`, `t1`, … unless named), a liveness flag and a scripted ping. */
 function fakeConnection(
   name: string,
-  opts: { tools?: number; open?: boolean; ping?: () => Promise<void> } = {},
+  opts: {
+    tools?: number;
+    toolNames?: readonly string[];
+    open?: boolean;
+    ping?: () => Promise<void>;
+  } = {},
 ): McpConnection {
+  const toolNames = opts.toolNames ?? Array.from({ length: opts.tools ?? 0 }, (_, i) => `t${i}`);
   return {
     name,
-    tools: Array.from({ length: opts.tools ?? 0 }, () => ({}) as McpConnection["tools"][number]),
+    tools: toolNames.map(() => ({}) as McpConnection["tools"][number]),
+    toolNames,
     close() {},
     isOpen: () => opts.open ?? true,
     ping: opts.ping ?? (async () => {}),
@@ -27,8 +34,8 @@ describe("McpStatusTracker", () => {
   test("before the connect settles, every configured server is connecting", async () => {
     const tracker = new McpStatusTracker(["a", "b"]);
     expect(await tracker.probe()).toEqual([
-      { name: "a", state: "connecting", tools: 0 },
-      { name: "b", state: "connecting", tools: 0 },
+      { name: "a", state: "connecting", tools: [], moreTools: 0 },
+      { name: "b", state: "connecting", tools: [], moreTools: 0 },
     ]);
   });
 
@@ -45,10 +52,22 @@ describe("McpStatusTracker", () => {
       ),
     );
     expect(await tracker.probe()).toEqual([
-      { name: "ok", state: "connected", tools: 3, latencyMs: 0 },
-      { name: "broken", state: "failed", tools: 0, error: "spawn ENOENT" },
-      { name: "dead", state: "closed", tools: 2, error: "the server process exited" },
-      { name: "wedged", state: "unresponsive", tools: 0, error: "ping timed out" },
+      { name: "ok", state: "connected", tools: ["t0", "t1", "t2"], moreTools: 0, latencyMs: 0 },
+      { name: "broken", state: "failed", tools: [], moreTools: 0, error: "spawn ENOENT" },
+      {
+        name: "dead",
+        state: "closed",
+        tools: ["t0", "t1"],
+        moreTools: 0,
+        error: "the server process exited",
+      },
+      {
+        name: "wedged",
+        state: "unresponsive",
+        tools: [],
+        moreTools: 0,
+        error: "ping timed out",
+      },
     ]);
   });
 
@@ -126,7 +145,28 @@ describe("McpStatusTracker", () => {
     const tracker = new McpStatusTracker(["x"]);
     tracker.settle(await connectMcpServers({}));
     expect(await tracker.probe()).toEqual([
-      { name: "x", state: "failed", tools: 0, error: "not started" },
+      { name: "x", state: "failed", tools: [], moreTools: 0, error: "not started" },
     ]);
+  });
+
+  test("tool names are made wire-safe: one line, ≤128 chars; an empty one is counted, not listed (docs/feat/mcp-tools-panel.md)", async () => {
+    const tracker = new McpStatusTracker(["a"]);
+    tracker.settle(
+      settled([
+        fakeConnection("a", { toolNames: ["ok", "bad\u001b[2J\nname", "", "n".repeat(200)] }),
+      ]),
+    );
+    const [status] = await tracker.probe();
+    expect(status?.tools).toEqual(["ok", "bad [2J name", "n".repeat(128)]);
+    expect(status?.moreTools).toBe(1);
+  });
+
+  test("at most 128 names are reported; the rest are counted in moreTools", async () => {
+    const tracker = new McpStatusTracker(["big"]);
+    tracker.settle(settled([fakeConnection("big", { tools: 300 })]));
+    const [status] = await tracker.probe();
+    expect(status?.tools.length).toBe(128);
+    expect(status?.tools[127]).toBe("t127");
+    expect(status?.moreTools).toBe(172);
   });
 });
