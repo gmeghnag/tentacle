@@ -134,7 +134,7 @@ export class HostExecution implements ExecutionEnvironment {
    * exits or is killed).
    */
   spawnBackground(command: string, options?: ExecOptions): BackgroundHandle {
-    const proc = this.spawnShell(command, options);
+    const proc = this.spawnShell(command, { ...options, stdin: undefined });
     return {
       pid: proc.pid,
       stdout: proc.stdout,
@@ -151,11 +151,15 @@ export class HostExecution implements ExecutionEnvironment {
    * kill can reach everything it starts. The group is registered with the
    * process-exit net until it is empty (see `releaseGroup`).
    */
-  private spawnShell(command: string, options?: ExecOptions): Subprocess<"ignore", "pipe", "pipe"> {
+  private spawnShell(
+    command: string,
+    options?: ExecOptions,
+  ): Subprocess<"ignore" | Uint8Array, "pipe", "pipe"> {
     const proc = Bun.spawn(["/bin/sh", "-c", command], {
       cwd: options?.cwd ?? this.defaultCwd,
       env: this.childEnv(options),
-      stdin: "ignore",
+      // Bytes are written to the child's stdin, which is then closed (EOF).
+      stdin: options?.stdin !== undefined ? new TextEncoder().encode(options.stdin) : "ignore",
       stdout: "pipe",
       stderr: "pipe",
       // Not in Bun's TS types, but honoured: the child gets pgid = its pid.

@@ -31,6 +31,16 @@ export interface ToolResult {
   readonly content: string;
   readonly isError?: boolean;
   readonly details?: ToolResultDetail;
+  /**
+   * Set when a user hook intervened on this call (H1): it `blocked` the call
+   * (`reason` = the hook's own reason, if it gave one) or `modified` its input.
+   * Separate from `details`: a modified `fs_edit` still carries its diff.
+   */
+  readonly hook?: {
+    readonly action: "blocked" | "modified";
+    readonly name: string;
+    readonly reason?: string;
+  };
 }
 
 /**

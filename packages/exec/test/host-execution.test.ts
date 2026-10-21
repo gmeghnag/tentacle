@@ -23,6 +23,17 @@ describe("HostExecution", () => {
     expect(r.exitCode).toBe(0);
   });
 
+  test("writes options.stdin to the child and closes it", async () => {
+    const r = await env.exec("cat", { stdin: "hello" });
+    expect(r.stdout).toBe("hello");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("without options.stdin the child's stdin is empty (ignored)", async () => {
+    const r = await env.exec("cat");
+    expect(r.stdout).toBe("");
+  });
+
   test("reports a non-zero exit code and stderr", async () => {
     const r = await env.exec("echo oops 1>&2; exit 3");
     expect(r.exitCode).toBe(3);

@@ -11,6 +11,7 @@ import {
   Agent,
   type AgentType,
   BUILTIN_AGENT_TYPES,
+  HookRunner,
   type ResultTransform,
   collapseRepeatedLines,
   createSubagentRunner,
@@ -18,6 +19,7 @@ import {
   mergeAgentTypes,
   parseAgentDefinition,
   redactSecrets,
+  runResultHooks,
   spillLargeOutput,
   summarizeLargeOutput,
   summarizeText,
@@ -125,6 +127,11 @@ export interface BuildAgentOptions {
    * installs its prompt on — two brokers silently decouple (AGENTS §7).
    */
   readonly permissions?: PermissionBroker;
+  /**
+   * Daemon-side log for hook failures (`onFailure: "ignore"`). Never the
+   * terminal while Ink owns it (AGENTS §7): a log file / the piped stderr.
+   */
+  readonly log?: (line: string) => void;
 }
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
@@ -148,8 +155,21 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // A `skill` result is instructions the model asked for: never spilled,
   // summarised or reshaped (the tool bounds it itself) — but still redacted.
   const shaping = (t: ResultTransform): ResultTransform => exemptTools([SKILL_TOOL_NAME], t);
+  // User hooks (docs/feat/hooks-core.md): `tool_call` runs in the gate,
+  // `tool_result` right after redaction (a hook never sees a redacted secret)
+  // and before shaping (unwrapped: a `skill` result reaches hooks too).
+  const hooks =
+    config.hooks.length > 0
+      ? new HookRunner({
+          specs: config.hooks,
+          env,
+          cwd: config.cwd,
+          ...(options.log ? { log: options.log } : {}),
+        })
+      : undefined;
   const resultTransforms: ResultTransform[] = [
     ...(config.redactSecrets ? [redactSecrets()] : []),
+    runResultHooks,
     ...(config.dedupOutput ? [shaping(collapseRepeatedLines())] : []),
     ...(config.tabulateJson ? [shaping(tabulateJson())] : []),
     shaping(largeOutput),
@@ -195,6 +215,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       maxIterations: config.subagentMaxIterations,
       types: agentTypes,
       resultTransforms,
+      ...(hooks ? { hooks } : {}),
     });
     tools.register(createTaskTool((opts, controls) => run(opts, controls), types));
   }
@@ -209,6 +230,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     maxIterations: config.maxIterations,
     requestPermission: (req) => permissions.request(req),
     skills,
+    ...(hooks ? { hooks } : {}),
   });
   return { agent, permissions, jobs, tools };
 }

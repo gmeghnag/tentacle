@@ -632,9 +632,9 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         unchanged; shared `toolLabel` in core; first, hooks-core's H1 line needs
         it) — DONE 2026-10-22 (`feat/tool-naming`):
         `docs/feat/tool-naming.md`. Type: feat · Size: S · Blast: contained.
-      - [ ] **hooks-core** (config `hooks`, `stdin` in core, `HookRunner`,
+      - [x] **hooks-core** (config `hooks`, `stdin` in core, `HookRunner`,
         `tool_call` → `PermissionGate`, `tool_result` → pipeline; TUI line
-        `⎿ hook <name> blocked <Tool>`) — H1–H4 decided: `docs/eval/hooks-core.md`. Type: eval → feat ·
+        `⎿ hook <name> blocked <Tool>`) — DONE 2026-10-22 (`feat/hooks-core`): `docs/feat/hooks-core.md`. Type: feat ·
         Size: M · Blast: load-bearing.
       - [ ] **hooks-turn** (`turn_start`, `turn_end` + continue ≤3,
         `model_request` notify; protocol 7 → 8) — R1–R4 decided:

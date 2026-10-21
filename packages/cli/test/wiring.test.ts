@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Session } from "@tentacle/agent";
@@ -281,5 +281,60 @@ describe("buildAgent skills (docs/feat/skills-core.md)", () => {
     const roles = session.messages.map((m) => m.role);
     expect(roles.slice(1)).toEqual(["user", "assistant", "tool", "assistant"]);
     expect(session.messages[3]?.content).toStartWith('<skill_content name="big">\n# Big skill\n');
+  });
+});
+
+describe("hooks wiring (docs/feat/hooks-core.md)", () => {
+  test("real hook processes: tool_call deny in the gate; tool_result after redaction, replacing the result", async () => {
+    const seen = join(dir, "hook-seen.json");
+    const SECRET = "AKIAABCDEFGHIJKLMNOP";
+    const model = new ScriptedModel([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "h1", name: "shell", arguments: JSON.stringify({ command: "rm -rf x" }) },
+        },
+        {
+          type: "tool_call",
+          toolCall: {
+            id: "h2",
+            name: "shell",
+            arguments: JSON.stringify({ command: `echo ${SECRET}` }),
+          },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const { agent } = buildAgent(
+      {
+        ...config,
+        hooks: [
+          {
+            event: "tool_call",
+            matcher: "shell",
+            name: "no-rm",
+            command: `grep -q 'rm -rf' && { echo "no rm here" >&2; exit 2; }; exit 0`,
+          },
+          {
+            event: "tool_result",
+            matcher: "shell",
+            command: `cat > '${seen}'; printf '{"content":"replaced"}'`,
+          },
+        ],
+      },
+      { modelOverride: model },
+    );
+    const results: { content: string; hook?: unknown }[] = [];
+    for await (const event of agent.run("s", [{ role: "user", content: "go" }])) {
+      if (event.type === "tool_result") results.push(event.result);
+    }
+    expect(results[0]?.hook).toEqual({ action: "blocked", name: "no-rm", reason: "no rm here" });
+    // The blocked call's refusal text also went through the tool_result hook.
+    expect(results.map((r) => r.content)).toEqual(["replaced", "replaced"]);
+    const input = JSON.parse(await readFile(seen, "utf8"));
+    expect(input.tool_call_id).toBe("h2");
+    expect(input.tool_result.content).toContain("[REDACTED]");
+    expect(input.tool_result.content).not.toContain(SECRET);
   });
 });

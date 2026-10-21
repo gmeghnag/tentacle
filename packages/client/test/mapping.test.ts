@@ -158,3 +158,42 @@ describe("classifyUpdate (event classes: skip unknown display, fail loudly other
     expect(classifyUpdate(frame({ type: "toString" }))).toEqual({ kind: "ignore" });
   });
 });
+
+describe("hook resource blocks (H1)", () => {
+  const result = (content: unknown[]) => {
+    const event = updateToEvent(
+      { type: "tool_call_update", toolCallId: "h1", status: "failed", content } as SessionUpdate,
+      new Map([["h1", "shell"]]),
+    );
+    return event?.type === "tool_result" ? event.result : undefined;
+  };
+
+  test("a hook:// block becomes result.hook; the reason comes from its text", () => {
+    expect(
+      result([
+        { type: "text", text: "Blocked by a hook: `shell` was not run. Reason: no rm" },
+        {
+          type: "resource",
+          uri: "hook://blocked/no-rm",
+          mimeType: "application/x-tentacle-hook",
+          text: "no rm",
+        },
+      ])?.hook,
+    ).toEqual({ action: "blocked", name: "no-rm", reason: "no rm" });
+  });
+
+  test("a name containing / is split on the first / only; no text → no reason", () => {
+    expect(result([{ type: "resource", uri: "hook://modified/team/fmt" }])?.hook).toEqual({
+      action: "modified",
+      name: "team/fmt",
+    });
+  });
+
+  test("content without a hook block (an older daemon) yields no hook", () => {
+    expect(result([{ type: "text", text: "ok" }])).not.toHaveProperty("hook");
+  });
+
+  test("a malformed hook uri is ignored", () => {
+    expect(result([{ type: "resource", uri: "hook://exploded/x" }])).not.toHaveProperty("hook");
+  });
+});

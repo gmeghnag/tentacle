@@ -61,6 +61,12 @@ describe("resolveConfig precedence", () => {
     expect(fell.sources.autoWake).toBe("default");
   });
 
+  test("hooks are file-only and default to []", () => {
+    expect(resolveConfig(ctx({})).hooks).toEqual([]);
+    const hooks = [{ event: "tool_result" as const, command: "redact" }];
+    expect(resolveConfig(ctx({ fileConfig: { hooks } })).hooks).toEqual(hooks);
+  });
+
   test("sub-agent step limit resolves env > file > default, and allows -1 (unlimited)", () => {
     // File value wins over the default.
     expect(

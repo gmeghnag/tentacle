@@ -38,6 +38,7 @@ import {
 } from "@tentacle/tools";
 import { type CarriedSkill, summarizeConversation } from "./compact.ts";
 import { EventQueue } from "./event-queue.ts";
+import type { HookRunner } from "./hooks.ts";
 import { PermissionGate } from "./permission-gate.ts";
 import { type ResultTransform, applyResultTransforms } from "./result-pipeline.ts";
 import { suspendedCalls } from "./resume.ts";
@@ -175,6 +176,8 @@ export interface AgentConfig {
   readonly temperature?: number;
   /** Authorizes `"ask"` tools before they run. Defaults to approving all. */
   readonly requestPermission?: PermissionRequester;
+  /** User hooks (docs/feat/hooks-core.md): `tool_call` in the gate, `tool_result` in the pipeline. */
+  readonly hooks?: HookRunner;
   /** Background-job registry; when set, the shell tools can launch jobs and
    * their exits are surfaced to the model (and frontend) on the next turn. */
   readonly jobs?: JobController;
@@ -225,7 +228,7 @@ export class Agent {
 
   constructor(config: AgentConfig) {
     this.config = config;
-    this.gate = new PermissionGate(config.requestPermission ?? allowAll);
+    this.gate = new PermissionGate(config.requestPermission ?? allowAll, config.hooks);
     // Collect background-job exits as they happen; they are flushed into the
     // conversation (and event stream) at the top of the next turn.
     config.jobs?.onExit((job) => this.pendingExits.push(job));
@@ -286,7 +289,8 @@ export class Agent {
       // A read can hang (a pod's exec, a stuck mount) and `readFile` takes no
       // signal: a cancel must still end the compaction and free the busy slot.
       const result = await unlessAborted(
-        (async () => this.transformResult(call, await activator.activate(name, ctx), signal))(),
+        (async () =>
+          this.transformResult(call, await activator.activate(name, ctx), signal, { sessionId }))(),
         signal,
       );
       // Only the skill's own content is fresh: an error, or a result a
@@ -624,8 +628,11 @@ export class Agent {
       for await (const event of progress.drain()) {
         yield event;
       }
-      const raw = await resultPromise;
-      const result = await this.transformResult(call, raw, signal);
+      const { result: raw, input } = await resultPromise;
+      const result = await this.transformResult(call, raw, signal, {
+        sessionId: toolContext.sessionId,
+        input,
+      });
       yield { type: "tool_result", id: call.id, name: call.name, result };
       messages.push({ role: "tool", content: result.content, toolCallId: call.id });
       // After the push, not before: the `tool_result` above precedes it.
@@ -665,7 +672,9 @@ export class Agent {
       // a cancel must not wait for it.
       result = await unlessAborted(
         (async () =>
-          this.transformResult(call, await activator.activate(name, toolContext), signal))(),
+          this.transformResult(call, await activator.activate(name, toolContext), signal, {
+            sessionId: toolContext.sessionId,
+          }))(),
         signal,
       ).catch(
         (error: unknown): ToolResult =>
@@ -718,18 +727,23 @@ export class Agent {
   private async transformResult(
     call: ToolCall,
     result: ToolResult,
-    signal?: AbortSignal,
+    signal: AbortSignal | undefined,
+    extra: { readonly sessionId: string; readonly input?: unknown },
   ): Promise<ToolResult> {
     const transforms = this.config.resultTransforms;
     if (!transforms || transforms.length === 0) {
       return result;
     }
+    const hooks = this.config.hooks;
     const safe = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 60);
     const path = `.tentacle/tool-output/${safe(call.name)}-${safe(call.id)}.txt`;
     return applyResultTransforms(result, transforms, {
       toolName: call.name,
       toolCallId: call.id,
       ...(signal ? { signal } : {}),
+      sessionId: extra.sessionId,
+      input: "input" in extra ? extra.input : parseArguments(call.arguments),
+      ...(hooks ? { hooks } : {}),
       writeSpill: async (contents) => {
         try {
           await this.config.env.writeFile(path, contents);
@@ -741,31 +755,84 @@ export class Agent {
     });
   }
 
-  /** Authorize (if the tool needs it) and then run a single tool call. */
-  private async runTool(call: ToolCall, ctx: ToolContext): Promise<ToolResult> {
+  /**
+   * Authorize (if the tool needs it) and then run a single tool call. Returns
+   * the result and the input it ran with (a `tool_call` hook may rewrite it),
+   * for the `tool_result` hooks.
+   */
+  private async runTool(
+    call: ToolCall,
+    ctx: ToolContext,
+  ): Promise<{ result: ToolResult; input: unknown }> {
     const tool = this.config.tools.get(call.name);
-    if (tool) {
-      let input: unknown = {};
-      try {
-        input = call.arguments.trim() === "" ? {} : JSON.parse(call.arguments);
-      } catch {
-        input = {};
-      }
-      const allowed = await this.gate.authorize(tool, input);
-      // The abort first, whatever the answer: a request settled by a cancel
-      // comes back as a refusal (the daemon's `cancelled`) and must read as
-      // cancelled, never as a denial the user did not give; and an approval
-      // that lands after a cancel must not start the tool.
-      if (ctx.signal.aborted) {
-        return { content: CANCELLED_TOOL_NOTE, isError: true };
-      }
-      if (!allowed) {
+    const input = parseArguments(call.arguments);
+    if (!tool) {
+      return { result: await this.config.tools.execute(call.name, call.arguments, ctx), input };
+    }
+    const outcome = await this.gate.authorize(tool, input, {
+      sessionId: ctx.sessionId,
+      toolCallId: call.id,
+      signal: ctx.signal,
+    });
+    // The abort first, whatever the answer: a request settled by a cancel
+    // comes back as a refusal (the daemon's `cancelled`) and must read as
+    // cancelled, never as a denial the user did not give; and an approval
+    // that lands after a cancel must not start the tool.
+    if (ctx.signal.aborted) {
+      return { result: { content: CANCELLED_TOOL_NOTE, isError: true }, input: outcome.input };
+    }
+    if (!outcome.allowed) {
+      if (outcome.by === "hook") {
+        const name = outcome.hookName ?? "hook";
         return {
-          content: `Permission denied by the user: \`${call.name}\` was not run.`,
-          isError: true,
+          result: {
+            content: `Blocked by a hook: \`${call.name}\` was not run. Reason: ${outcome.reason ?? ""}`,
+            isError: true,
+            hook: {
+              action: "blocked",
+              name,
+              ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+            },
+          },
+          input: outcome.input,
         };
       }
+      return {
+        result: {
+          content: `Permission denied by the user: \`${call.name}\` was not run.`,
+          isError: true,
+        },
+        input: outcome.input,
+      };
     }
-    return await this.config.tools.execute(call.name, call.arguments, ctx);
+    if (!outcome.modified) {
+      // Unchanged: the raw argument string, byte-identical to a hook-less run.
+      return { result: await this.config.tools.execute(call.name, call.arguments, ctx), input };
+    }
+    const name = outcome.hookName ?? "hook";
+    const result = await this.config.tools.execute(call.name, JSON.stringify(outcome.input), ctx);
+    // H4: the history keeps the model's original arguments, so say what ran.
+    const ran = clipText(JSON.stringify(outcome.input), 500);
+    return {
+      result: {
+        ...result,
+        content: `[hook] input modified by hook ${name}; ran with: ${ran}\n${result.content}`,
+        hook: { action: "modified", name },
+      },
+      input: outcome.input,
+    };
   }
+}
+
+/** A call's parsed arguments; `{}` when empty or malformed (the registry reports those). */
+function parseArguments(args: string): unknown {
+  try {
+    return args.trim() === "" ? {} : JSON.parse(args);
+  } catch {
+    return {};
+  }
+}
+
+function clipText(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }

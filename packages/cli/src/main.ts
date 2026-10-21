@@ -501,7 +501,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // Plain line-based REPL (scripting / no-TTY fallback). No interactive
   // permission prompt here, so the broker stays headless (approves all).
   if (mode === "plain") {
-    return await startTerminal(buildAgent(config).agent);
+    // Ink is not mounted here: an ignored hook failure goes to stderr.
+    return await startTerminal(
+      buildAgent(config, { log: (l) => process.stderr.write(`[hook] ${l}\n`) }).agent,
+    );
   }
 
   // Rich interactive TUI. `--resume [uid]` also enters it (resuming a session).
@@ -606,7 +609,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     return 1;
   }
 
-  const { agent, tools } = buildAgent(config);
+  // One-shot, no Ink: an ignored hook failure goes to stderr.
+  const { agent, tools } = buildAgent(config, {
+    log: (l) => process.stderr.write(`[hook] ${l}\n`),
+  });
   const mcp = await connectConfiguredMcp(config, tools);
   for (const [name, message] of Object.entries(mcp.errors)) {
     write(`[mcp] server "${name}" failed to connect: ${message}\n`);

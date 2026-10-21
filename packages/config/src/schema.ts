@@ -81,9 +81,71 @@ export const McpServerSchema = z.preprocess(
 
 export type McpServerConfig = z.infer<typeof McpServerSchema>;
 
+const HookEventSchema = z.enum([
+  "tool_call",
+  "tool_result",
+  "turn_start",
+  "turn_end",
+  "model_request",
+]);
+
+/** Plain tool names, optionally `a|b` alternatives: matched exactly, not as a regex. */
+const PLAIN_MATCHER = /^[A-Za-z0-9_-]+(\|[A-Za-z0-9_-]+)*$/;
+
+/**
+ * One user hook (docs/feat/hooks-core.md): a shell command run on an agent
+ * event with a JSON input on stdin. Structurally identical to core's `HookSpec`.
+ */
+export const HookSpecSchema = z
+  .object({
+    event: HookEventSchema,
+    /** Shown in the TUI ("hook <name> blocked Bash") and in logs. Default: basename of the first word of `command`. */
+    name: z.string().min(1).max(40).optional(),
+    /** Tool events only: a name, `a|b` alternatives, or a JS regex (unanchored). Absent / "*" = all. */
+    matcher: z.string().min(1).optional(),
+    /** Run with /bin/sh -c in the session's working folder; JSON input on stdin. */
+    command: z.string().min(1),
+    /** Seconds; default 600. */
+    timeout: z.number().int().positive().optional(),
+    /** A failed hook (crash, timeout, bad output): "ignore" (default) or "block". */
+    onFailure: z.enum(["ignore", "block"]).optional(),
+  })
+  .strict()
+  .superRefine((h, ctx) => {
+    const label = h.name ?? h.command;
+    if (h.matcher === undefined) {
+      return;
+    }
+    if (h.event !== "tool_call" && h.event !== "tool_result") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `hook "${label}": matcher is only valid on tool_call / tool_result`,
+      });
+      return;
+    }
+    if (h.matcher === "*" || PLAIN_MATCHER.test(h.matcher)) {
+      return;
+    }
+    try {
+      new RegExp(h.matcher);
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `hook "${label}": invalid matcher regex ${JSON.stringify(h.matcher)} (${(err as Error).message})`,
+      });
+    }
+  });
+
+export type HookSpecConfig = z.infer<typeof HookSpecSchema>;
+
 /** The settings a config file — and each of its profiles — can hold. */
 const settingsShape = {
   model: ModelConfigSchema.optional(),
+  /**
+   * User hooks: shell commands run on agent events (docs/feat/hooks-core.md).
+   * A top-level setting, so a profile's `hooks` replaces the base list.
+   */
+  hooks: z.array(HookSpecSchema).optional(),
   /**
    * Path to a file holding the system prompt, relative to the config dir
    * (default `PROMPT.md`) or absolute.

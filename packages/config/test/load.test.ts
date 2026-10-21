@@ -114,6 +114,34 @@ describe("loadConfig reading", () => {
     );
   });
 
+  test("hooks: parsed and threaded; a bad matcher is a ConfigError naming the hook", async () => {
+    const cd = await mkdtemp(join(dir, "hooks-"));
+    await loadConfig({ env: baseEnv(), configDir: cd, cwd: "/launch" });
+    const hook = {
+      event: "tool_call",
+      matcher: "shell|fs_edit",
+      command: "./no-rm.sh",
+      onFailure: "block",
+    } as const;
+    await writeFile(join(cd, CONFIG_FILENAME), JSON.stringify({ hooks: [hook] }), "utf8");
+    const cfg = await loadConfig({ env: baseEnv(), configDir: cd, cwd: "/launch" });
+    expect(cfg.hooks).toEqual([hook]);
+
+    for (const [bad, msg] of [
+      [
+        { event: "tool_call", name: "rx", matcher: "mcp__(", command: "x" },
+        /hook "rx": invalid matcher regex/,
+      ],
+      [{ event: "turn_start", matcher: "shell", command: "y" }, /hook "y": matcher is only valid/],
+      [{ event: "on_save", command: "z" }, /Invalid/],
+    ] as const) {
+      await writeFile(join(cd, CONFIG_FILENAME), JSON.stringify({ hooks: [bad] }), "utf8");
+      await expect(loadConfig({ env: baseEnv(), configDir: cd, cwd: "/launch" })).rejects.toThrow(
+        msg,
+      );
+    }
+  });
+
   test("rejects the removed `cwd` key with a hint (top level and in a profile)", async () => {
     for (const body of [`{ "cwd": "/x" }`, `{ "profiles": { "p": { "cwd": "/x" } } }`]) {
       const cd = await mkdtemp(join(dir, "cwd-"));

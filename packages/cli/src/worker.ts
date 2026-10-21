@@ -101,7 +101,11 @@ port.addEventListener("message", (event: { data: unknown }) => {
       logDaemonError(config.configDir, error);
     },
     createAgent: (cwd) => {
-      const wired = buildAgent({ ...config, cwd });
+      const wired = buildAgent(
+        { ...config, cwd },
+        // Hook failures go to the daemon error log, never the terminal Ink owns.
+        { log: (line) => logDaemonError(config.configDir, line) },
+      );
       register(wired.tools);
       // If MCP hasn't resolved yet, register into this registry once it does.
       if (!mcpReady) {

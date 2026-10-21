@@ -65,6 +65,7 @@ export interface TentacleConfig {
   readonly dedupOutput: boolean;
   readonly tabulateJson: boolean;
   readonly autoWake: boolean;
+  readonly hooks: ResolvedConfig["hooks"];
   readonly mcpServers: ResolvedConfig["mcpServers"];
   readonly apiKey?: string;
   readonly configDir: string;
@@ -297,6 +298,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     dedupOutput: resolved.dedupOutput,
     tabulateJson: resolved.tabulateJson,
     autoWake: resolved.autoWake,
+    hooks: resolved.hooks,
     mcpServers: resolved.mcpServers,
     ...(apiKey !== undefined ? { apiKey } : {}),
     configDir,

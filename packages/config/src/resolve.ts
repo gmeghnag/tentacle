@@ -24,7 +24,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_TABULATE_JSON,
 } from "./defaults.ts";
-import type { FileConfig, McpServerConfig } from "./schema.ts";
+import type { FileConfig, HookSpecConfig, McpServerConfig } from "./schema.ts";
 import { type SkillInfo, renderSkillsCatalog } from "./skills.ts";
 
 export type Env = Record<string, string | undefined>;
@@ -64,6 +64,8 @@ export interface ResolvedConfig {
   readonly tabulateJson: boolean;
   /** Whether a background-job exit auto-starts a continuation turn while idle. */
   readonly autoWake: boolean;
+  /** User hooks (file-only, no env form); empty when unset. */
+  readonly hooks: readonly HookSpecConfig[];
   /** MCP servers to connect to (from the config file), keyed by name. */
   readonly mcpServers: Readonly<Record<string, McpServerConfig>>;
   /** Present when the key is known without running a command. */
@@ -304,6 +306,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     dedupOutput: dedupOutput.value,
     tabulateJson: tabulateJson.value,
     autoWake: autoWake.value,
+    hooks: fileConfig.hooks ?? [],
     // MCP servers are file-only (no env form); empty when unset.
     mcpServers: fileConfig.mcpServers ?? {},
     ...(apiKey !== undefined ? { apiKey } : {}),

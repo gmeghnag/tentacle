@@ -104,6 +104,17 @@ export const DEFAULT_CONFIG_JSONC = `{
   // set false to require a manual prompt instead.
   // "autoWake": ${DEFAULT_AUTO_WAKE},
 
+  // Hooks: shell commands run on agent events, with a JSON input on stdin
+  // (contract: docs/feat/hooks-core.md). "tool_call" can allow / ask / deny /
+  // rewrite a call (exit 2 = deny, stderr = reason); "tool_result" can replace
+  // a result. "matcher" is a tool name ("shell"), "a|b" names, or a regex
+  // ("mcp__.*"). "onFailure": "ignore" (default) | "block". turn_start /
+  // turn_end / model_request are accepted but not run yet. A profile's "hooks"
+  // replaces this list.
+  // "hooks": [
+  //   { "event": "tool_call", "matcher": "shell", "command": "~/.config/tentacle/hooks/no-rm.sh" }
+  // ],
+
   // MCP servers to connect to (keyed by name). A "command" server is spawned
   // over stdio; a "type": "http" server is reached over Streamable HTTP at its
   // "url" ("headers" are sent only to that url — e.g. a bearer token). Their
