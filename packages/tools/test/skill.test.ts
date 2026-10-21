@@ -9,6 +9,8 @@ import {
   activeSkillNames,
   createSkillTool,
   formatSkillContent,
+  skillActivations,
+  skillContentName,
 } from "../src/skill.ts";
 
 const entry = (name: string, over: Partial<SkillToolEntry> = {}): SkillToolEntry => ({
@@ -133,6 +135,71 @@ describe("activeSkillNames", () => {
       ...activated("3", '<skill_content name="b">\nx'),
     ];
     expect(activeSkillNames(h)).toEqual(["b", 'a&"']);
+  });
+});
+
+describe("skillActivations", () => {
+  test("each skill's call and content, first activation per name, in activation order", () => {
+    const h = [
+      ...activated("1", '<skill_content name="b">\nB1'),
+      { role: "user", content: "next" } as ChatMessage,
+      ...activated("2", '<skill_content name="a">\nA'),
+      ...activated("3", '<skill_content name="b">\nB2'),
+    ];
+    expect(skillActivations(h)).toEqual([
+      {
+        name: "b",
+        call: { id: "1", name: SKILL_TOOL_NAME, arguments: "{}" },
+        content: '<skill_content name="b">\nB1',
+        resultIndex: 1,
+      },
+      {
+        name: "a",
+        call: { id: "2", name: SKILL_TOOL_NAME, arguments: "{}" },
+        content: '<skill_content name="a">\nA',
+        resultIndex: 4,
+      },
+    ]);
+  });
+
+  test("error results, dedup notes, other tools and unanswered calls are not activations", () => {
+    const h: ChatMessage[] = [
+      ...activated("e", 'Could not read skill "a" (/s/a/SKILL.md): ENOENT'),
+      ...activated("d", 'Skill "a" is already loaded: … (<skill_content name="a">).'),
+      ...activated("f", '<skill_content name="a">\nfake', "fs_read"),
+      // A call cut short before its result (an interrupted turn).
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "u", name: SKILL_TOOL_NAME, arguments: "{}" }],
+      },
+      // An orphan result (no matching call).
+      { role: "tool", content: '<skill_content name="a">\norphan', toolCallId: "nope" },
+      // The marker quoted in a user message.
+      { role: "user", content: '<skill_content name="a">\nquoted' },
+    ];
+    expect(skillActivations(h)).toEqual([]);
+  });
+
+  test("a server reusing call ids: each result pairs with its own round's call", () => {
+    const round = (name: string): ChatMessage[] => [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call_0", name: SKILL_TOOL_NAME, arguments: JSON.stringify({ name }) }],
+      },
+      { role: "tool", content: `<skill_content name="${name}">\n${name}`, toolCallId: "call_0" },
+    ];
+    const got = skillActivations([...round("a"), ...round("b")]);
+    expect(got.map((a) => [a.name, a.call.arguments])).toEqual([
+      ["a", '{"name":"a"}'],
+      ["b", '{"name":"b"}'],
+    ]);
+  });
+
+  test("skillContentName reads only an opening marker", () => {
+    expect(skillContentName('<skill_content name="x&amp;y">\nbody')).toBe("x&y");
+    expect(skillContentName('note <skill_content name="x">')).toBeUndefined();
   });
 });
 

@@ -7,7 +7,7 @@
  */
 import type { ChatMessage } from "@tentacle/core";
 import type { Agent, AgentEvent } from "./agent.ts";
-import { type CompactResult, compactedHistory } from "./compact.ts";
+import { type CompactResult, carryOverSkills, compactedHistory } from "./compact.ts";
 
 /** A serialisable view of a session's durable state (for persistence/resume). */
 export interface SessionSnapshot {
@@ -110,8 +110,10 @@ export class Session {
 
   /**
    * Compact the conversation: summarise it, then replace the history with the
-   * system prompt + that summary. Returns the summary and the message counts.
-   * An abort wins over a summary that lands after it (a provider may ignore the
+   * system prompt + that summary + the skills that were active, read again
+   * (docs/feat/skills-compaction.md). Returns the summary and the message
+   * counts. Everything is read before the history is replaced; an abort wins
+   * over a read or a summary that lands after it (a provider may ignore the
    * signal): the history is then left untouched and the call rejects.
    *
    * `onReplaced` runs synchronously right after the replacement — no microtask
@@ -120,9 +122,11 @@ export class Session {
    */
   async compact(signal?: AbortSignal, onReplaced?: () => void): Promise<CompactResult> {
     const before = this.messages.length;
-    const summary = await this.agent.summarize(this.messages, signal);
+    const skills = carryOverSkills(await this.agent.reloadSkills(this.id, this.messages, signal));
     signal?.throwIfAborted();
-    const next = compactedHistory(this.messages, summary);
+    const summary = await this.agent.summarize(this.messages, signal, skills.kept);
+    signal?.throwIfAborted();
+    const next = compactedHistory(this.messages, summary, skills);
     this.messages.length = 0;
     this.messages.push(...next);
     onReplaced?.();
