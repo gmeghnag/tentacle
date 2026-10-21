@@ -29,8 +29,13 @@ import {
   type Usage,
   allowAll,
 } from "@tentacle/core";
-import type { ToolRegistry } from "@tentacle/tools";
-import { summarizeConversation } from "./compact.ts";
+import {
+  SKILL_TOOL_NAME,
+  type ToolRegistry,
+  skillActivations,
+  skillContentName,
+} from "@tentacle/tools";
+import { type CarriedSkill, summarizeConversation } from "./compact.ts";
 import { EventQueue } from "./event-queue.ts";
 import { PermissionGate } from "./permission-gate.ts";
 import { type ResultTransform, applyResultTransforms } from "./result-pipeline.ts";
@@ -157,6 +162,43 @@ export interface AgentConfig {
   readonly resultTransforms?: readonly ResultTransform[];
 }
 
+/**
+ * `work`'s outcome, unless `signal` aborts first: then reject with its reason
+ * at once (the work is left to finish unobserved — only for work that is safe
+ * to abandon, like a read).
+ */
+/** A call's arguments as JSON (`{}` when empty or not JSON — as `runTool` reads them). */
+function parseArguments(call: ToolCall): unknown {
+  try {
+    return call.arguments.trim() === "" ? {} : JSON.parse(call.arguments);
+  } catch {
+    return {};
+  }
+}
+
+function unlessAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) {
+    return work;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    if (signal.aborted) {
+      onAbort();
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export class Agent {
   private readonly config: AgentConfig;
   private readonly gate: PermissionGate;
@@ -176,9 +218,63 @@ export class Agent {
     return this.config.systemPrompt ? [{ role: "system", content: this.config.systemPrompt }] : [];
   }
 
-  /** Summarise a conversation (for `/compact`) using the configured model. */
-  summarize(messages: readonly ChatMessage[], signal?: AbortSignal): Promise<string> {
-    return summarizeConversation(this.config.model, messages, signal);
+  /**
+   * Summarise a conversation (for `/compact`) using the configured model,
+   * leaving out the bodies of the skills in `keep` (the rebuilt history
+   * carries them).
+   */
+  summarize(
+    messages: readonly ChatMessage[],
+    signal?: AbortSignal,
+    keep: readonly CarriedSkill[] = [],
+  ): Promise<string> {
+    return summarizeConversation(this.config.model, messages, signal, keep);
+  }
+
+  /**
+   * The skills active in `messages`, each with its content read again (for
+   * `/compact`): the original activation call is run again through the same
+   * path as in a turn (gate, tool, result transforms), with an empty history
+   * so it is not deduplicated. When the skill is no longer offered
+   * (`unavailable`: not run at all) or the run does not yield it
+   * (`unreadable`), the content from the history is used instead. Emits no
+   * events: not a turn.
+   */
+  async reloadSkills(
+    sessionId: string,
+    messages: readonly ChatMessage[],
+    signal?: AbortSignal,
+  ): Promise<CarriedSkill[]> {
+    const ctx: ToolContext = {
+      sessionId,
+      signal: signal ?? new AbortController().signal,
+      env: this.config.env,
+      history: [],
+    };
+    const skills: CarriedSkill[] = [];
+    const tool = this.config.tools.get(SKILL_TOOL_NAME);
+    for (const { name, call, content, resultIndex } of skillActivations(messages)) {
+      const stored = { name, call, content, resultIndex };
+      // No longer offered (removed, hidden, skills disabled): nothing to read.
+      if (!tool || !tool.inputSchema.safeParse(parseArguments(call)).success) {
+        skills.push({ ...stored, source: "unavailable" });
+        continue;
+      }
+      // A read can hang (a pod's exec, a stuck mount) and `readFile` takes no
+      // signal: a cancel must still end the compaction and free the busy slot.
+      const result = await unlessAborted(
+        (async () => this.transformResult(call, await this.runTool(call, ctx), signal))(),
+        signal,
+      );
+      // Only the skill's own content is fresh: an error, or a result a
+      // transform reshaped (no marker), keeps the earlier copy.
+      if (!result.isError && skillContentName(result.content) === name) {
+        skills.push({ ...stored, content: result.content, source: "fresh" });
+      } else {
+        skills.push({ ...stored, source: "unreadable" });
+      }
+    }
+    return skills;
   }
 
   /** Single-shot: run to completion over the system prompt + the given user messages. */

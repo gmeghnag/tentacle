@@ -141,3 +141,5 @@ per-model strategies, with a heuristic fallback and optional delegation to a ser
 - **F4** — pod execution (`run`/`attach` over the k8s exec channel, model reverse-tunnel). Design: `docs/architecture/F4-pod-execution.md`. (The original F4 scope — compaction, session persistence/resume, permission engine — shipped outside this numbering.)
 - **F5** — MCP client + sub-agents + TUI (Ink).
 - **F6** — observability, cost routing, hardening.
+
+Feature references (how a shipped feature behaves, with its limits): Agent Skills — `docs/architecture/skills.md`.

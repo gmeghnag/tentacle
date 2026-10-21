@@ -1197,6 +1197,34 @@ describe("persisted-session (pure)", () => {
     expect(r.turns).toEqual([{ turnId: "T", end: RESTART_TURN_END }]);
   });
 
+  test("reconcile: a compacted history's skill round is left as is (idle, or a later turn cut short)", () => {
+    // docs/feat/skills-compaction.md: compaction appends a fully answered
+    // `skill` round after the summary. Reload must not treat it as a turn's
+    // unanswered calls.
+    const compacted: ChatMessage[] = [
+      { role: "system", content: "SYS" },
+      { role: "user", content: "Summary of the earlier conversation …" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "c1", name: "skill", arguments: '{"name":"a"}' }],
+      },
+      { role: "tool", content: '<skill_content name="a">\nbody', toolCallId: "c1" },
+    ];
+    const idle = reconcileOnReload(base({ messages: compacted }));
+    expect(idle.messages).toEqual(compacted);
+    // The next turn died before its first model reply: only its prompt is in.
+    const cut = reconcileOnReload(
+      base({
+        messages: [...compacted, { role: "user", content: "next" }],
+        turns: [{ turnId: "T" }],
+        turn: { turnId: "T", steering: [] },
+      }),
+    );
+    expect(cut.messages).toEqual([...compacted, { role: "user", content: "next" }]);
+    expect(cut.turns).toEqual([{ turnId: "T", end: RESTART_TURN_END }]);
+  });
+
   test("reconcile: a pending id that is not the first unanswered call → 'Interrupted' (conservative)", () => {
     const r = reconcileOnReload(
       base({

@@ -229,6 +229,48 @@ describe("buildPayload (ChatRequest → Messages wire)", () => {
     expect(at(payload.messages, 3)).toEqual({ role: "user", content: "and now?" });
   });
 
+  test("a compacted history (summary, then one `skill` round per kept skill) is a valid alternation", () => {
+    // The shape `compactedHistory` builds (docs/feat/skills-compaction.md),
+    // followed by the next user prompt.
+    const round = (id: string, name: string): ChatMessage[] => [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id, name: "skill", arguments: JSON.stringify({ name }) }],
+      },
+      { role: "tool", content: `<skill_content name="${name}">\nbody`, toolCallId: id },
+    ];
+    const payload = buildPayload("m", {
+      messages: [
+        { role: "system", content: "SYS" },
+        { role: "user", content: "Summary of the earlier conversation …" },
+        ...round("toolu_a", "a"),
+        ...round("toolu_b", "b"),
+        { role: "user", content: "go on" },
+      ],
+    }) as { system: string; messages: { role: string; content: unknown }[] };
+    expect(payload.system).toBe("SYS");
+    // user / assistant / user … — the last user turn is tool_result + the prompt,
+    // which the API merges (consecutive same-role turns).
+    expect(payload.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+      "user",
+    ]);
+    const used = payload.messages.flatMap((m) =>
+      Array.isArray(m.content)
+        ? (m.content as { type: string; id?: string; tool_use_id?: string }[])
+        : [],
+    );
+    const ids = (type: string, key: "id" | "tool_use_id"): unknown[] =>
+      used.filter((b) => b.type === type).map((b) => b[key]);
+    expect(ids("tool_use", "id")).toEqual(["toolu_a", "toolu_b"]);
+    expect(ids("tool_result", "tool_use_id")).toEqual(["toolu_a", "toolu_b"]);
+  });
+
   test("maps tools to input_schema and always sends max_tokens", () => {
     const payload = buildPayload("m", {
       messages: [{ role: "user", content: "hi" }],

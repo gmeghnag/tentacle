@@ -7,10 +7,10 @@
  *
  * Whether a skill is already active is DERIVED from the history (its marker
  * in a `skill` result), never kept as separate state: it stays right across
- * resume, re-attach and compaction (which drops the body, so the skill can be
- * loaded again).
+ * resume and re-attach, and compaction carries an active skill over by
+ * re-running its activation (docs/feat/skills-compaction.md).
  */
-import type { ChatMessage, Tool, ToolContext, ToolResult } from "@tentacle/core";
+import type { ChatMessage, Tool, ToolCall, ToolContext, ToolResult } from "@tentacle/core";
 import { z } from "zod";
 
 export const SKILL_TOOL_NAME = "skill";
@@ -58,32 +58,59 @@ function unescapeAttr(s: string): string {
 
 const MARKER = /^<skill_content name="([^"]*)">/;
 
+/** The skill a `skill` result loaded (its opening marker), or undefined. */
+export function skillContentName(content: string): string | undefined {
+  const match = MARKER.exec(content);
+  return match?.[1] !== undefined ? unescapeAttr(match[1]) : undefined;
+}
+
+/** One skill loaded in a history: the `skill` call and the content it returned. */
+export interface SkillActivation {
+  readonly name: string;
+  readonly call: ToolCall;
+  readonly content: string;
+  /** Index in the history of the result message (ids alone may repeat across rounds). */
+  readonly resultIndex: number;
+}
+
 /**
- * Names of the skills whose content is in `history`, in activation order: a
- * `skill` call's result that opens with the `<skill_content name="…">` marker.
- * An error result, a dedup note or another tool's output never counts.
+ * The skills loaded in `history`, in activation order: a `skill` call whose
+ * result opens with the `<skill_content name="…">` marker; the first one per
+ * name. An error result, a dedup note or another tool's output never counts.
+ * A result is paired with a call of the assistant message before it (where
+ * the loop always writes it), so a server that reuses call ids across rounds
+ * cannot pair it with another round's call.
  */
-export function activeSkillNames(history: readonly ChatMessage[]): string[] {
-  const skillCallIds = new Set<string>();
-  for (const message of history) {
-    for (const call of message.toolCalls ?? []) {
-      if (call.name === SKILL_TOOL_NAME) {
-        skillCallIds.add(call.id);
-      }
-    }
-  }
-  const names: string[] = [];
-  for (const message of history) {
-    if (message.role !== "tool" || !message.toolCallId || !skillCallIds.has(message.toolCallId)) {
+export function skillActivations(history: readonly ChatMessage[]): SkillActivation[] {
+  let skillCalls = new Map<string, ToolCall>();
+  const activations: SkillActivation[] = [];
+  for (const [index, message] of history.entries()) {
+    if (message.role === "assistant") {
+      skillCalls = new Map(
+        (message.toolCalls ?? [])
+          .filter((c) => c.name === SKILL_TOOL_NAME)
+          .map((c) => [c.id, c] as const),
+      );
       continue;
     }
-    const match = MARKER.exec(message.content);
-    const name = match?.[1] !== undefined ? unescapeAttr(match[1]) : undefined;
-    if (name !== undefined && !names.includes(name)) {
-      names.push(name);
+    const call =
+      message.role === "tool" && message.toolCallId !== undefined
+        ? skillCalls.get(message.toolCallId)
+        : undefined;
+    if (!call) {
+      continue;
+    }
+    const name = skillContentName(message.content);
+    if (name !== undefined && !activations.some((a) => a.name === name)) {
+      activations.push({ name, call, content: message.content, resultIndex: index });
     }
   }
-  return names;
+  return activations;
+}
+
+/** Names of the skills whose content is in `history`, in activation order. */
+export function activeSkillNames(history: readonly ChatMessage[]): string[] {
+  return skillActivations(history).map((a) => a.name);
 }
 
 /** The activation result: marker, (bounded) body, directory, bundled files. */

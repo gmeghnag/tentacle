@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Session } from "@tentacle/agent";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { buildAgent, inProcessAgents } from "../src/wiring.ts";
@@ -116,6 +117,41 @@ describe("buildAgent skills (docs/feat/skills-core.md)", () => {
       const sent = model.requests[1]?.messages.find((m) => m.role === "tool");
       expect(sent?.content).toBe(content);
     }
+  });
+
+  test("/compact re-reads an active skill through the real transforms: edited, verbatim, still redacted", async () => {
+    // docs/feat/skills-compaction.md: the re-run takes the same path as an
+    // activation — exempt from spill/dedup/summary, but not from redaction.
+    const cfg = await skillConfig({ summarizeLargeOutput: true, dedupOutput: true });
+    const location = cfg.skills[0]?.location;
+    if (!location) throw new Error("expected the big skill");
+    const model = new ScriptedModel([
+      [
+        { type: "tool_call", toolCall: { id: "k1", name: "skill", arguments: '{"name":"big"}' } },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+      [{ type: "text", delta: "the brief" }, { type: "done" }],
+    ]);
+    const { agent } = buildAgent(cfg, { modelOverride: model });
+    const session = new Session(agent);
+    for await (const _ of session.send("go")) {
+      // run the activation turn
+    }
+    const SECRET = "AKIAABCDEFGHIJKLMNOP";
+    await writeFile(
+      location,
+      `---\nname: big\ndescription: a big skill\n---\n${BODY}EDITED with key ${SECRET}\n`,
+    );
+
+    await session.compact();
+
+    const round = session.messages.find((m) => m.role === "tool" && m.toolCallId === "k1");
+    expect(round?.content).toStartWith('<skill_content name="big">\n# Big skill\n');
+    expect(round?.content).toContain(`${BODY}EDITED with key [REDACTED]`);
+    expect(round?.content).not.toContain(SECRET);
+    expect(model.requests.length).toBe(3); // the turn's two rounds + the summary; no output summarising
+    expect(model.requests[2]?.messages[1]?.content).not.toContain("step 500:");
   });
 
   test("another tool's large output is still spilled (the exemption is per tool)", async () => {

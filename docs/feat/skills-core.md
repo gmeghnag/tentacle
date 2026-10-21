@@ -287,8 +287,8 @@ Known limits (deliberate, not bugs):
   names) but not the catalog: sub-task 4 decides the sub-agent shape.
 - Tests that call `loadConfig` with the real `HOME` (`cli/test/wiring.test.ts`
   first case) now also scan `~/.agents/skills`; no assertion depends on it.
-- A skill edit is read at activation; a new or renamed skill needs a restart
-  (decision 3).
+- A skill edit is read at activation (and, since `feat/skills-compaction`, again
+  at `/compact`); a new or renamed skill needs a restart (decision 3).
 
 Behaviour of the implementing model: found the spill/summary hazard while
 verifying the plan (before any code) and designed it in. The test fixes in
