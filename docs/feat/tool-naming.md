@@ -1,8 +1,8 @@
-# eval/tool-naming — CamelCase display labels for every built-in tool (names in code unchanged)
+# feat/tool-naming — CamelCase display labels for every built-in tool (names in code unchanged)
 
-> **Status:** eval — **decided by the owner 2026-10-21** (display-only labels). Implementation drafted below, approved at promotion.
-> **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10). Promote to `feat/tool-labels`.
-> **Type:** eval → feat · **Size:** S · **Blast:** contained (display only: no model-facing name, protocol, persistence or terminal-IO change) · **Suited:** a weaker model may execute (§10: contained, S); standard Review
+> **Status:** feat — promoted 2026-10-22 (owner decided 2026-10-21: display-only labels). Implementation approved.
+> **Branch:** `feat/tool-naming`
+> **Type:** eval → feat · **Size:** S · **Blast:** contained (display only: no model-facing name, protocol, persistence or terminal-IO change) · **Suited:** any executor; standard Review
 > **Umbrella:** [`extensibility.md`](./extensibility.md) (child 1 of 5; goes **first**: `hooks-core`'s H1 line uses `toolLabel`)
 
 ## Context

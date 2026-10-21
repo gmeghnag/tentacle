@@ -630,8 +630,8 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       Blast: load-bearing.
       - [ ] **tool-naming** (CamelCase display labels only, names in code
         unchanged; shared `toolLabel` in core; first, hooks-core's H1 line needs
-        it) — promotion-ready:
-        `docs/eval/tool-naming.md`. Type: eval → feat · Size: S · Blast: contained.
+        it) — in progress (`feat/tool-naming`):
+        `docs/feat/tool-naming.md`. Type: feat · Size: S · Blast: contained.
       - [ ] **hooks-core** (config `hooks`, `stdin` in core, `HookRunner`,
         `tool_call` → `PermissionGate`, `tool_result` → pipeline; TUI line
         `⎿ hook <name> blocked <Tool>`) — H1–H4 decided: `docs/eval/hooks-core.md`. Type: eval → feat ·
