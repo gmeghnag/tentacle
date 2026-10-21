@@ -37,9 +37,9 @@ import {
   buildPodManifest,
   podIsReady,
 } from "@tentacle/k8s";
-import { createModelProvider } from "@tentacle/providers";
 import type { DuplexChannel } from "@tentacle/transport";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
+import { configuredModelProvider } from "./model-provider.ts";
 import { resolvePodBinary } from "./pod-binary-build.ts";
 import { injectAgentBinary, probePodArch } from "./pod-binary.ts";
 import type { SessionSaver } from "./session-saver.ts";
@@ -333,13 +333,7 @@ export async function startPodRuntime(
     const redial = execChannelFactory(deps.kube, target, execOptions);
     // The pod reaches the model through us (reverse-tunnel): serve the local
     // provider, so the endpoint and API key never leave the laptop.
-    const modelProvider = createModelProvider({
-      provider: config.provider,
-      baseURL: config.baseURL,
-      model: config.model,
-      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
-    });
+    const modelProvider = configuredModelProvider(config);
     return await createLocalRuntime({
       channel,
       channelFactory: async () => {
@@ -527,13 +521,7 @@ export async function startAttachRuntime(
     const redial = execChannelFactory(deps.kube, target, execOptions);
     // The pod reaches the model through us (reverse-tunnel): serve the local
     // provider, so the endpoint and API key never leave the laptop.
-    const modelProvider = createModelProvider({
-      provider: config.provider,
-      baseURL: config.baseURL,
-      model: config.model,
-      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
-    });
+    const modelProvider = configuredModelProvider(config);
     return await createLocalRuntime({
       channel,
       channelFactory: async () => {

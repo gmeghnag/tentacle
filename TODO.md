@@ -410,8 +410,9 @@ Daily-driver work (done 2026-10-14):
 - [ ] 🟡 **No retry on a transient model-connection drop** (`ECONNRESET` kills
       the turn and the sub-agent; only manual `/retry`), and the error log says
       `(no stack)` with no phase. Recommends retry pre-first-byte only + phase
-      diagnostics. **Eval:** `docs/eval/model-connection-resilience.md`.
-      Type: eval → feat · Size: M · Blast: load-bearing.
+      diagnostics. **Feat (promoted 2026-10-21, `feat/model-connection-resilience`):**
+      `docs/feat/model-connection-resilience.md` — implemented; reviewed (APPROVE-WITH-NITS, nits fixed).
+      Type: feat · Size: M · Blast: load-bearing.
 - [x] 🟡 **`shell_kill` leaves grandchildren running** (only `sh` gets the signal;
       a compound command's child is re-parented to PID 1). FIXED (2026-10-19,
       `fix/background-process-groups`): every shell runs in its own process
