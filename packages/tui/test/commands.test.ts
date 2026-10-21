@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
+  PALETTE_MAX_ROWS,
   SLASH_COMMANDS,
   helpText,
   isSessionMutating,
   lastAssistantText,
   lastUserText,
   matchCommands,
+  paletteWindow,
   quitAction,
+  resolveSlash,
+  retryPlan,
+  slashCatalog,
   transcriptToMarkdown,
 } from "../src/commands.ts";
 import type { DisplayItem } from "../src/state.ts";
@@ -109,5 +114,118 @@ describe("quitAction", () => {
     expect(quitAction("ctrl-c", true, false)).toBe("stop");
     expect(quitAction("command", true, true)).toBe("exit");
     expect(quitAction("ctrl-c", true, true)).toBe("exit");
+  });
+});
+
+describe("skills as /name (docs/feat/skills-slash.md)", () => {
+  const skills = [
+    { name: "deploy-app", description: "Deploy the app\nto staging." },
+    { name: "help", description: "a skill named like a built-in" },
+    { name: "quit", description: "shadowed by the /exit alias" },
+    { name: "deploy-app", description: "duplicate" },
+    { name: "compact-notes", description: "Notes." },
+  ];
+
+  test("resolveSlash: only an exact first token selects a skill; the rest is never parsed", () => {
+    const cases: [string, ReturnType<typeof resolveSlash>][] = [
+      ["/deploy-app", { kind: "skill", name: "deploy-app", text: "/deploy-app" }],
+      [
+        "/deploy-app to staging, then /tmp/x",
+        { kind: "skill", name: "deploy-app", text: "/deploy-app to staging, then /tmp/x" },
+      ],
+      ["/deploy-app\nmore", { kind: "skill", name: "deploy-app", text: "/deploy-app\nmore" }],
+      ["/help", { kind: "builtin", command: "/help" }],
+      ["/help me", { kind: "builtin", command: "/help" }],
+      ["/quit", { kind: "builtin", command: "/quit" }],
+      ["/tmp/x is broken", { kind: "unknown", command: "/tmp/x" }],
+      ["/deploy-app/x", { kind: "unknown", command: "/deploy-app/x" }],
+      ["/Deploy-App", { kind: "unknown", command: "/Deploy-App" }],
+      ["/deploy", { kind: "unknown", command: "/deploy" }],
+      ["/", { kind: "unknown", command: "/" }],
+    ];
+    for (const [text, want] of cases) {
+      expect({ text, got: resolveSlash(text, skills) }).toEqual({ text, got: want });
+    }
+    // Without the daemon's catalog nothing is a skill.
+    expect(resolveSlash("/deploy-app", [])).toEqual({ kind: "unknown", command: "/deploy-app" });
+  });
+
+  test("slashCatalog: built-ins first, skills after; a built-in name shadows a skill (reported)", () => {
+    const catalog = slashCatalog(skills);
+    expect(catalog.commands.slice(0, SLASH_COMMANDS.length)).toEqual([...SLASH_COMMANDS]);
+    expect(catalog.commands.slice(SLASH_COMMANDS.length)).toEqual([
+      { name: "/deploy-app", description: "Deploy the app to staging.", skill: true },
+      { name: "/compact-notes", description: "Notes.", skill: true },
+    ]);
+    expect(catalog.shadowed).toEqual(["help", "quit"]);
+    expect([...catalog.skillNames]).toEqual(["deploy-app", "compact-notes"]);
+  });
+
+  test("matchCommands lists skills by prefix; /compact keeps the palette open for /compact-notes", () => {
+    expect(matchCommands("/dep", skills).map((c) => c.name)).toEqual(["/deploy-app"]);
+    expect(matchCommands("/compact", skills).map((c) => c.name)).toEqual([
+      "/compact",
+      "/compact-notes",
+    ]);
+    expect(matchCommands("/deploy-app", skills)).toEqual([]);
+    expect(matchCommands("/", skills)).toHaveLength(SLASH_COMMANDS.length + 2);
+    expect(matchCommands("/dep")).toEqual([]);
+  });
+
+  test("an exactly typed name comes first, so Enter/Tab run what was typed (review finding 1)", () => {
+    // Precedence order across scopes is not alphabetical: project deploy-prod
+    // before user deploy. Built-ins are listed first: a skill `c` after /clear.
+    const ordered = [
+      { name: "deploy-prod", description: "p" },
+      { name: "deploy", description: "d" },
+      { name: "c", description: "c" },
+    ];
+    expect(matchCommands("/deploy", ordered).map((c) => c.name)).toEqual([
+      "/deploy",
+      "/deploy-prod",
+    ]);
+    expect(matchCommands("/c", ordered)[0]?.name).toBe("/c");
+    // No exact match: catalog order, unchanged.
+    expect(matchCommands("/dep", ordered).map((c) => c.name)).toEqual(["/deploy-prod", "/deploy"]);
+  });
+
+  test("descriptions drop bidi overrides and zero-width characters (review finding 5)", () => {
+    const [entry] = slashCatalog([
+      { name: "a", description: "safe\u202e txt.exe\u200b\u2066x\u2069\ufeff" },
+    ]).commands.filter((c) => c.skill);
+    expect(entry?.description).toBe("safe txt.exex");
+  });
+
+  test("helpText lists the skills and the shadowed ones; unchanged without skills", () => {
+    const help = helpText(skills);
+    expect(help).toContain("**Skills**");
+    expect(help).toContain("`/deploy-app [what to do]` — Deploy the app to staging.");
+    expect(help).toContain("skill `help` is hidden by the built-in `/help`");
+    expect(helpText([])).toBe(helpText());
+    expect(helpText()).not.toContain("Skills");
+  });
+
+  test("retryPlan: a prompt as is; a past activation is an activation again, or gone", () => {
+    expect(retryPlan("fix the bug", skills)).toEqual({ kind: "prompt", text: "fix the bug" });
+    expect(retryPlan("/deploy-app now", skills)).toEqual({
+      kind: "skill",
+      name: "deploy-app",
+      text: "/deploy-app now",
+    });
+    expect(retryPlan("/deploy-app now", [])).toEqual({ kind: "gone", command: "/deploy-app" });
+  });
+
+  test("paletteWindow keeps the selection visible within PALETTE_MAX_ROWS rows", () => {
+    expect(paletteWindow(0, 0)).toEqual({ start: 0, end: 0 });
+    expect(paletteWindow(3, 2)).toEqual({ start: 0, end: 3 });
+    expect(paletteWindow(200, 0)).toEqual({ start: 0, end: PALETTE_MAX_ROWS });
+    expect(paletteWindow(200, PALETTE_MAX_ROWS - 1)).toEqual({ start: 0, end: PALETTE_MAX_ROWS });
+    expect(paletteWindow(200, PALETTE_MAX_ROWS)).toEqual({ start: 1, end: PALETTE_MAX_ROWS + 1 });
+    expect(paletteWindow(200, 199)).toEqual({ start: 200 - PALETTE_MAX_ROWS, end: 200 });
+    expect(paletteWindow(200, 999)).toEqual({ start: 200 - PALETTE_MAX_ROWS, end: 200 });
+    for (let sel = 0; sel < 30; sel++) {
+      const w = paletteWindow(30, sel);
+      expect(sel >= w.start && sel < w.end && w.end - w.start === PALETTE_MAX_ROWS).toBe(true);
+    }
   });
 });

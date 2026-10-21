@@ -559,6 +559,7 @@ describe("permission events at the client (router + broker over a fake daemon)",
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
+            skills: [],
           };
         }
         if (method === Method.ResolvePermission) {
@@ -673,6 +674,7 @@ describe("permission events at the client (router + broker over a fake daemon)",
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
+            skills: [],
           };
         }
         if (method === Method.Open) {
@@ -780,7 +782,11 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
     const daemon: RpcPeer = new RpcPeer(daemonCh, {
       onRequest: async (method, params) => {
         if (method === Method.Initialize) {
-          return { protocolVersion: 1, agentCapabilities: { tools: true, permissions: true } };
+          return {
+            protocolVersion: 1,
+            agentCapabilities: { tools: true, permissions: true },
+            skills: [],
+          };
         }
         if (method === Method.Open) {
           return { sessionId: "s1", epoch: "e", created: true, resync: false };
@@ -883,6 +889,7 @@ describe("unknown / malformed session/update frames (event classes)", () => {
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
+            skills: [],
           };
         }
         if (method === Method.Open)
@@ -1002,6 +1009,7 @@ describe("unknown / malformed session/update frames (event classes)", () => {
           : {
               protocolVersion: PROTOCOL_VERSION,
               agentCapabilities: { tools: true, permissions: true },
+              skills: [],
             },
     });
     const errors: Error[] = [];
@@ -1077,6 +1085,7 @@ describe("RemoteSession ends turns from the stream (turn_start/turn_end)", () =>
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
+            skills: [],
           };
         }
         if (method === Method.Open)
@@ -1254,6 +1263,7 @@ describe("RemoteSession ends turns from the stream (turn_start/turn_end)", () =>
             return {
               protocolVersion: PROTOCOL_VERSION,
               agentCapabilities: { tools: true, permissions: true },
+              skills: [],
             };
           }
           if (method === Method.Open)
@@ -1382,6 +1392,7 @@ describe("RemoteSession steering bound to its turn (review fixes)", () => {
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
+            skills: [],
           };
         }
         if (method === Method.Open)
@@ -1440,6 +1451,7 @@ describe("RemoteClient.snapshot (paged history at the cut)", () => {
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
+            skills: [],
           };
         }
         return answer(params as { cursor?: string }, ++n);
@@ -1546,6 +1558,7 @@ describe("closing sessions (sessions outlive connections)", () => {
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
+            skills: [],
           };
         }
         if (method === Method.Open) {

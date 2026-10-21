@@ -7,10 +7,12 @@ import {
   type SkillBody,
   type SkillToolEntry,
   activeSkillNames,
+  createSkillActivator,
   createSkillTool,
   formatSkillContent,
   skillActivations,
   skillContentName,
+  userSkillCall,
 } from "../src/skill.ts";
 
 const entry = (name: string, over: Partial<SkillToolEntry> = {}): SkillToolEntry => ({
@@ -234,5 +236,72 @@ describe("formatSkillContent truncation", () => {
   test("a body at the cap is untouched", () => {
     const body = "z".repeat(MAX_SKILL_BODY_CHARS);
     expect(formatSkillContent(entry("a"), { body, bodyLine: 1 })).not.toContain("truncated");
+  });
+});
+
+describe("createSkillActivator (one activation path: model, user, compaction)", () => {
+  const reader = async () => ({ body: "Do X.\n", bodyLine: 5 });
+  const activator = createSkillActivator(
+    [
+      { ...entry("open"), userInvocable: true },
+      { ...entry("hidden"), userInvocable: true },
+      { ...entry("model-only"), userInvocable: false },
+    ],
+    reader,
+  );
+
+  test("knows every entry, and which ones the user may activate", () => {
+    expect(["open", "hidden", "model-only", "nope"].map((n) => activator.has(n))).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+    expect(["open", "model-only", "nope"].map((n) => activator.userInvocable(n))).toEqual([
+      true,
+      false,
+      false,
+    ]);
+  });
+
+  test("activates a skill the model's enum would reject (hidden from the model)", async () => {
+    const r = await activator.activate("hidden", ctxWith());
+    expect(r.isError).toBeUndefined();
+    expect(skillContentName(r.content)).toBe("hidden");
+    // The model-facing tool built over the offered list still refuses it.
+    const { tool } = build([entry("open")]);
+    const registry = new ToolRegistry().register(tool);
+    const viaTool = await registry.execute(SKILL_TOOL_NAME, '{"name":"hidden"}', ctxWith());
+    expect(viaTool.isError).toBe(true);
+  });
+
+  test("dedups from the history, and reports an unknown name as an error", async () => {
+    const first = await activator.activate("open", ctxWith());
+    const again = await activator.activate("open", ctxWith(activated("c1", first.content)));
+    expect(again.content).toContain("already loaded");
+    expect((await activator.activate("nope", ctxWith())).isError).toBe(true);
+  });
+
+  test("a read failure is an error result, never a throw", async () => {
+    const failing = createSkillActivator([{ ...entry("a"), userInvocable: true }], async () => {
+      throw new Error("ENOENT");
+    });
+    const r = await failing.activate("a", ctxWith());
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("ENOENT");
+  });
+
+  test("userSkillCall is a `skill` call the derivation reads like the model's", async () => {
+    const call = userSkillCall("open");
+    expect(call.name).toBe(SKILL_TOOL_NAME);
+    expect(JSON.parse(call.arguments)).toEqual({ name: "open" });
+    expect(userSkillCall("open").id).not.toBe(call.id);
+    const r = await activator.activate("open", ctxWith());
+    const history: ChatMessage[] = [
+      { role: "user", content: "/open go" },
+      { role: "assistant", content: "", toolCalls: [call] },
+      { role: "tool", content: r.content, toolCallId: call.id },
+    ];
+    expect(activeSkillNames(history)).toEqual(["open"]);
   });
 });

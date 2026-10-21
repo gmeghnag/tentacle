@@ -61,10 +61,46 @@ export const InitializeParamsSchema = z
   .strict();
 export type InitializeParams = z.infer<typeof InitializeParamsSchema>;
 
+// --- skills (the `/name` catalog) -----------------------------------------
+// The skills the user can activate on this daemon, so a client can offer
+// `/name` with autocomplete (docs/feat/skills-slash.md). Per daemon (built at
+// its start), so it rides `initialize`, refreshed on every reconnect. The
+// daemon may be a pod (not trusted, AGENTS §7): the client's result
+// validation pins names to the spec pattern and keeps control characters (a
+// terminal escape) out of descriptions before anything reaches the UI.
+
+/** A skill name as the agentskills.io spec defines it: lowercase alnum + single hyphens. */
+export const SkillNameSchema = z
+  .string()
+  .max(64)
+  .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/);
+export type SkillName = z.infer<typeof SkillNameSchema>;
+
+/** At most this many entries in the `initialize` skill catalog. */
+export const MAX_SKILL_CATALOG = 200;
+/** Max length of a catalog description (the spec's limit). */
+export const MAX_SKILL_DESCRIPTION = 1024;
+
+export const SkillSummarySchema = z
+  .object({
+    name: SkillNameSchema,
+    /** One line: no control characters (C0, DEL, C1). */
+    description: z
+      .string()
+      .min(1)
+      .max(MAX_SKILL_DESCRIPTION)
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point
+      .regex(/^[^\u0000-\u001f\u007f-\u009f]*$/),
+  })
+  .strict();
+export type SkillSummary = z.infer<typeof SkillSummarySchema>;
+
 export const InitializeResultSchema = z
   .object({
     protocolVersion: z.number().int(),
     agentCapabilities: AgentCapabilitiesSchema,
+    /** The skills a user can activate with `/name` (`session/prompt{skill}`); may be empty. */
+    skills: z.array(SkillSummarySchema).max(MAX_SKILL_CATALOG),
   })
   .strict();
 export type InitializeResult = z.infer<typeof InitializeResultSchema>;
@@ -84,6 +120,13 @@ export const PromptParamsSchema = z
     sessionId: SessionIdSchema,
     turnId: TurnIdSchema,
     content: z.array(ContentBlockSchema).min(1),
+    /**
+     * The user activates this skill (`/name`, from the `initialize` catalog):
+     * the daemon loads it as a `skill` tool round right after the prompt,
+     * before the model's first round. Structured on purpose — the daemon never
+     * parses the text. One the daemon cannot activate → `InvalidParams`.
+     */
+    skill: SkillNameSchema.optional(),
   })
   .strict();
 export type PromptParams = z.infer<typeof PromptParamsSchema>;

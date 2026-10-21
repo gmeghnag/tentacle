@@ -9,7 +9,11 @@ import {
   type ContentBlock,
   JsonRpcErrorCode,
   type KnownSessionUpdateParams,
+  MAX_SKILL_CATALOG,
+  MAX_SKILL_DESCRIPTION,
   type SessionUpdate,
+  SkillNameSchema,
+  type SkillSummary,
   type StopReason,
   UPDATE_CLASS,
   type UpdateClass,
@@ -19,6 +23,34 @@ import { RpcError } from "@tentacle/transport";
 
 /** MIME type used for the embedded unified-diff resource block. */
 export const DIFF_MIME = "text/x-diff";
+
+/** Control characters (C0, DEL, C1): never in a wire skill description. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]+/g;
+
+/**
+ * The `initialize` skill catalog from the daemon's `/name` skills: always
+ * valid for `SkillSummarySchema` (the client rejects the whole handshake
+ * otherwise) — a non-spec name is dropped, a description becomes one line
+ * (control characters → a space, whitespace collapsed), cut to the limit;
+ * an empty one drops the skill; at most `MAX_SKILL_CATALOG`, in order.
+ */
+export function toSkillCatalog(
+  skills: readonly { readonly name: string; readonly description: string }[],
+): SkillSummary[] {
+  const out: SkillSummary[] = [];
+  for (const { name, description } of skills) {
+    if (out.length >= MAX_SKILL_CATALOG) {
+      break;
+    }
+    const line = description.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim();
+    const cut = line.slice(0, MAX_SKILL_DESCRIPTION).trimEnd();
+    if (SkillNameSchema.safeParse(name).success && cut !== "") {
+      out.push({ name, description: cut });
+    }
+  }
+  return out;
+}
 
 /** Flatten a prompt's content blocks to the plain-text the agent loop consumes. */
 export function contentToText(content: readonly ContentBlock[]): string {

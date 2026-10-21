@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   MAX_CATALOG_SKILLS,
+  MAX_SLASH_SKILLS,
   SKILLS_PROMPT_HEADER,
   type SkillInfo,
   catalogCapDiagnostic,
@@ -8,6 +9,8 @@ import {
   offeredSkills,
   parseSkillManifest,
   renderSkillsCatalog,
+  slashCapDiagnostic,
+  slashSkills,
   splitFrontmatter,
 } from "../src/skills.ts";
 
@@ -19,6 +22,7 @@ const skill = (over: Partial<SkillInfo> & { name: string }): SkillInfo => ({
   files: [],
   filesTruncated: false,
   modelInvocable: true,
+  userInvocable: true,
   ...over,
 });
 
@@ -57,6 +61,7 @@ describe("parseSkillManifest (lenient, per the agentskills.io client guide)", ()
       name: "a",
       description: "multi line",
       modelInvocable: true,
+      userInvocable: true,
       warnings: [],
     });
   });
@@ -111,6 +116,24 @@ describe("parseSkillManifest (lenient, per the agentskills.io client guide)", ()
       "a",
     );
     expect(off.ok && off.modelInvocable).toBe(true);
+  });
+
+  test("user-invocable: false (bool or string) hides it from the user", () => {
+    for (const v of ["false", '"false"', "False"]) {
+      const p = parseSkillManifest(`---\ndescription: d\nuser-invocable: ${v}\n---\n`, "a");
+      expect(p.ok && p.userInvocable).toBe(false);
+      expect(p.ok && p.modelInvocable).toBe(true);
+    }
+    const on = parseSkillManifest("---\ndescription: d\nuser-invocable: true\n---\n", "a");
+    expect(on.ok && on.userInvocable).toBe(true);
+  });
+
+  test("hidden from both the model and the user → still loads, with a warning", () => {
+    const p = parseSkillManifest(
+      "---\nname: a\ndescription: d\ndisable-model-invocation: true\nuser-invocable: false\n---\n",
+      "a",
+    );
+    expect(p.ok && p.warnings.some((w) => w.includes("neither the model nor the user"))).toBe(true);
   });
 
   test("allowed-tools is reported as ignored", () => {
@@ -168,5 +191,34 @@ describe("renderSkillsCatalog / offeredSkills", () => {
     expect(renderSkillsCatalog(many)).not.toContain(`<name>s${MAX_CATALOG_SKILLS}</name>`);
     expect(catalogCapDiagnostic(many)).toContain(`${MAX_CATALOG_SKILLS + 3} skills found`);
     expect(catalogCapDiagnostic(many.slice(0, 3))).toBeUndefined();
+  });
+});
+
+describe("slashSkills (the /name catalog — one rule for the wire and the prompt check)", () => {
+  test("keeps user-invocable skills, model-hidden ones included, in precedence order", () => {
+    const got = slashSkills([
+      skill({ name: "b" }),
+      skill({ name: "hidden", modelInvocable: false }),
+      skill({ name: "no-slash", userInvocable: false }),
+      skill({ name: "a" }),
+    ]);
+    expect(got.map((s) => s.name)).toEqual(["b", "hidden", "a"]);
+  });
+
+  test("drops a name that is not spec-valid (it cannot be typed as one /token)", () => {
+    const got = slashSkills([
+      skill({ name: "My Skill" }),
+      skill({ name: "UPPER" }),
+      skill({ name: "a/b" }),
+      skill({ name: "ok-name" }),
+    ]);
+    expect(got.map((s) => s.name)).toEqual(["ok-name"]);
+  });
+
+  test("caps at MAX_SLASH_SKILLS and reports it", () => {
+    const many = Array.from({ length: MAX_SLASH_SKILLS + 3 }, (_, i) => skill({ name: `s${i}` }));
+    expect(slashSkills(many)).toHaveLength(MAX_SLASH_SKILLS);
+    expect(slashCapDiagnostic(many)).toContain(`only the first ${MAX_SLASH_SKILLS}`);
+    expect(slashCapDiagnostic(many.slice(0, MAX_SLASH_SKILLS))).toBeUndefined();
   });
 });

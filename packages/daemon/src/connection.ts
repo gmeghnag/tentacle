@@ -221,6 +221,7 @@ export class Connection {
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: { tools: true, permissions: true },
+      skills: [...this.host.skillCatalog],
     };
   }
 
@@ -287,7 +288,7 @@ export class Connection {
   // stream, so its outcome survives a lost response.
   private prompt(params: PromptParams): PromptResult {
     const hosted = this.lookup(params.sessionId);
-    return hosted.prompt(params.turnId, params.content);
+    return hosted.prompt(params.turnId, params.content, params.skill);
   }
 
   private onNotification(method: string, params: unknown): void {

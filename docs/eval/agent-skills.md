@@ -1,6 +1,6 @@
 # eval/agent-skills — support for Agent Skills (`SKILL.md`, agentskills.io)
 
-> **Status:** promoted (2026-10-20) — sub-task 1 → `docs/feat/skills-core.md` (`feat/skills-core`, done); sub-task 2 → `docs/feat/skills-compaction.md` (`feat/skills-compaction`, done 2026-10-21; owner chose re-reading `SKILL.md` at compaction); sub-tasks 3–4 still to open. This eval stays the umbrella decision record.
+> **Status:** promoted (2026-10-20) — sub-task 1 → `docs/feat/skills-core.md` (`feat/skills-core`, done); sub-task 2 → `docs/feat/skills-compaction.md` (`feat/skills-compaction`, done 2026-10-21; owner chose re-reading `SKILL.md` at compaction); sub-task 3 → `docs/feat/skills-slash.md` (`feat/skills-slash`, done 2026-10-21); sub-task 4 still to open. This eval stays the umbrella decision record.
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10)
 > **Type:** eval → feat ×4 · **Size:** L → split into 4 sub-tasks (see "Owner decisions") · **Blast:** load-bearing (compaction, protocol, model-facing tool schemas) · **Suited:** strong model executes each sub-task; mandatory fresh-context Review on 2–4
 

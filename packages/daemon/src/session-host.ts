@@ -8,7 +8,7 @@
  */
 import { type Agent, Session } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
-import type { OpenParams } from "@tentacle/protocol";
+import type { OpenParams, SkillSummary } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import {
   type Attachment,
@@ -16,6 +16,7 @@ import {
   type RestoredSessionState,
   type TurnErrorPolicy,
 } from "./hosted-session.ts";
+import { toSkillCatalog } from "./mapping.ts";
 import {
   type DaemonSessionRecord,
   reconcileOnReload,
@@ -54,6 +55,11 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * and `restore` reloads one. Pod daemons and the worker never pass it.
    */
   readonly persister?: SessionPersister;
+  /**
+   * The skills a user can activate with `/name` on this daemon (config's
+   * `slashSkills`), returned by `initialize` as its catalog. Absent → none.
+   */
+  readonly skills?: readonly { readonly name: string; readonly description: string }[];
 }
 
 /** What `open` did: the session, whether it was built now, and the replay verdict. */
@@ -68,8 +74,12 @@ export class SessionHost {
   private readonly opts: SessionHostOptions;
   private readonly sessions = new Map<string, HostedSession>();
 
+  /** The `initialize` skill catalog (built once: skills are fixed at daemon start). */
+  readonly skillCatalog: readonly SkillSummary[];
+
   constructor(opts: SessionHostOptions) {
     this.opts = opts;
+    this.skillCatalog = toSkillCatalog(opts.skills ?? []);
   }
 
   /** The live session `id`, if any. */

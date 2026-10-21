@@ -121,6 +121,7 @@ export async function connectTui(
       permissions,
       createSession: () => client.newSession(undefined, crypto.randomUUID()),
       link: client,
+      skills: () => client.skills(),
     });
   } finally {
     // The daemon keeps sessions past a disconnect: quitting ends ours (turn +

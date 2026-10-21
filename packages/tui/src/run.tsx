@@ -2,6 +2,7 @@ import type { Agent } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import { render } from "ink";
 import { App, type NoticeFeed, type SessionController } from "./App.tsx";
+import type { SlashSkill } from "./commands.ts";
 import type { LinkFeed } from "./link-status.ts";
 import { messagesToItems } from "./resume.ts";
 import {
@@ -28,6 +29,8 @@ export interface TuiOptions {
   readonly notices?: NoticeFeed;
   /** The runtime's link status, shown in the StatusBar while it is not up. */
   readonly link?: LinkFeed;
+  /** The skills the user can activate as `/name` (the daemon's catalog, a getter). */
+  readonly skills?: () => readonly SlashSkill[];
 }
 
 /**
@@ -73,6 +76,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       {...(initialItems ? { initialItems } : {})}
       {...(options.notices ? { notices: options.notices } : {})}
       {...(options.link ? { link: options.link } : {})}
+      {...(options.skills ? { skills: options.skills } : {})}
     />,
     { exitOnCtrlC: false },
   );

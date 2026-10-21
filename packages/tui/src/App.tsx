@@ -4,12 +4,16 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import {
+  type SlashSkill,
   helpText,
   isSessionMutating,
   lastAssistantText,
   lastUserText,
   matchCommands,
+  paletteWindow,
   quitAction,
+  resolveSlash,
+  retryPlan,
   transcriptToMarkdown,
 } from "./commands.ts";
 import { CommandPalette } from "./components/CommandPalette.tsx";
@@ -47,8 +51,15 @@ import {
  * session identically.
  */
 export interface SessionController {
-  /** A remote session also yields the reconnect events (`history_reset`, `user_message`). */
-  send(prompt: string, signal?: AbortSignal): AsyncIterable<SessionEvent>;
+  /**
+   * A remote session also yields the reconnect events (`history_reset`,
+   * `user_message`). `opts.skill`: the user activates that skill (`/name`).
+   */
+  send(
+    prompt: string,
+    signal?: AbortSignal,
+    opts?: { readonly skill?: string },
+  ): AsyncIterable<SessionEvent>;
   /** Compact the conversation (summarise + replace history); optional. */
   compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
   /** Queue a message mid-turn (steering); optional. Local is sync, remote a Promise. */
@@ -86,6 +97,12 @@ export interface AppProps {
   readonly notices?: NoticeFeed;
   /** The runtime's link status, shown in the StatusBar while it is not up. */
   readonly link?: LinkFeed;
+  /**
+   * The skills the user can activate as `/name` (the daemon's catalog). A
+   * getter, read at each render and submit: a reconnect's refreshed catalog
+   * applies from the next keystroke.
+   */
+  readonly skills?: () => readonly SlashSkill[];
   /** Injectable for tests (defaults to the OS clipboard + Bun.write). */
   readonly clipboard?: (text: string) => Promise<void>;
   /** Injectable for tests (defaults to the OS clipboard read). */
@@ -129,6 +146,7 @@ export function App({
   autoWakeOnJobExit = true,
   notices,
   link,
+  skills = () => [],
   clipboard = copyToClipboard,
   paste = readClipboard,
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
@@ -304,11 +322,15 @@ export function App({
   const columns = Math.max(20, size.columns);
   const termRows = Math.max(8, size.rows);
   // Slash-command autocomplete: open only while idle and typing a `/command`.
-  const paletteCommands = !permission.pending && !st.running ? matchCommands(field.value) : [];
+  const paletteCommands =
+    !permission.pending && !st.running ? matchCommands(field.value, skills()) : [];
   const paletteOpen = paletteCommands.length > 0;
   const commandSel = paletteOpen
     ? Math.min(Math.max(0, commandIndex), paletteCommands.length - 1)
     : 0;
+  // With many skills a bare "/" lists them all: show a window around the selection.
+  const paletteWin = paletteWindow(paletteCommands.length, commandSel);
+  const paletteRows = paletteCommands.slice(paletteWin.start, paletteWin.end);
   // The input box grows with a multi-line prompt (paste / `\`-continuation),
   // capped at MAX_INPUT_ROWS content lines; +2 for its top/bottom borders.
   const inputContentLines = Math.min(
@@ -323,7 +345,7 @@ export function App({
     ? permissionPromptRows(permission.choices.length)
     : st.running
       ? 1 + queued.length + inputBoxRows
-      : inputBoxRows + paletteCommands.length;
+      : inputBoxRows + paletteRows.length;
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
   // Positional layout only (O(items) cache lookups, no full array): take the
   // row `total` for scroll maths and materialise just the visible window. The
@@ -363,7 +385,7 @@ export function App({
   );
 
   const run = useCallback(
-    async (text: string, opts?: { continuation?: boolean }) => {
+    async (text: string, opts?: { continuation?: boolean; skill?: string }) => {
       const session = sessionRef.current;
       if (!session) {
         return;
@@ -383,7 +405,12 @@ export function App({
       setScrollOffset(0);
       flushNow();
       try {
-        for await (const event of session.send(continuation ? "" : text, controller.signal)) {
+        const sendOpts = opts?.skill !== undefined ? { skill: opts.skill } : undefined;
+        for await (const event of session.send(
+          continuation ? "" : text,
+          controller.signal,
+          sendOpts,
+        )) {
           stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
           // A queued message was just injected — drop it from the pending list.
           if (event.type === "steer") {
@@ -424,6 +451,22 @@ export function App({
 
   const handleCommand = useCallback(
     (raw: string): void => {
+      const resolved = resolveSlash(raw, skills());
+      if (resolved.kind === "skill") {
+        // A skill activation is a prompt (it starts a turn): recallable with
+        // ↑, and refused mid-turn — it is a round, not a steering message.
+        historyRef.current = pushHistory(historyRef.current, resolved.text);
+        histIndexRef.current = historyRef.current.length;
+        draftRef.current = "";
+        if (stateRef.current.running) {
+          pushNotice(
+            `_Can't run /${resolved.name} while a turn is running — stop it first (esc)._`,
+          );
+          return;
+        }
+        void run(resolved.text, { skill: resolved.name });
+        return;
+      }
       const cmd = raw.split(/\s+/)[0];
       // Guard turn-starting / session-swapping commands while a turn runs: they
       // would corrupt the session (concurrent send) or cancel-handle state.
@@ -445,7 +488,7 @@ export function App({
           abortRef.current?.abort();
           return;
         case "/help":
-          pushNotice(helpText());
+          pushNotice(helpText(skills()));
           return;
         case "/clear":
           // The old session ends (with its jobs) on every runtime, before the
@@ -486,10 +529,17 @@ export function App({
         }
         case "/retry": {
           const last = lastUserRef.current ?? lastUserText(stateRef.current.items);
-          if (last) {
-            void run(last);
-          } else {
+          if (!last) {
             pushNotice("_Nothing to retry yet._");
+            return;
+          }
+          const plan = retryPlan(last, skills());
+          if (plan.kind === "gone") {
+            pushNotice(`_Can't retry: ${plan.command} is no longer available._`);
+          } else if (plan.kind === "skill") {
+            void run(plan.text, { skill: plan.name });
+          } else {
+            void run(plan.text);
           }
           return;
         }
@@ -518,7 +568,7 @@ export function App({
           pushNotice(`_Unknown command: ${cmd}. Try /help._`);
       }
     },
-    [makeSession, clipboard, cwd, exit, flushNow, model, pushNotice, run, saveFile],
+    [makeSession, clipboard, cwd, exit, flushNow, model, pushNotice, run, saveFile, skills],
   );
 
   const submit = useCallback(
@@ -1001,7 +1051,11 @@ export function App({
         ) : (
           <Box flexDirection="column" width={columns}>
             {paletteOpen ? (
-              <CommandPalette commands={paletteCommands} selected={commandSel} columns={columns} />
+              <CommandPalette
+                commands={paletteRows}
+                selected={commandSel - paletteWin.start}
+                columns={columns}
+              />
             ) : null}
             <Box
               width={columns}

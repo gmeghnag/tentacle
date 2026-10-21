@@ -23,18 +23,37 @@ import {
   summarizeText,
   tabulateJson,
 } from "@tentacle/agent";
-import { type TentacleConfig, offeredSkills, splitFrontmatter } from "@tentacle/config";
+import {
+  type TentacleConfig,
+  offeredSkills,
+  slashSkills,
+  splitFrontmatter,
+} from "@tentacle/config";
 import { type JobController, type ModelProvider, PermissionBroker } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
 import { createModelProvider } from "@tentacle/providers";
 import {
   SKILL_TOOL_NAME,
+  type SkillBodyReader,
   ToolRegistry,
   builtinTools,
+  createSkillActivator,
   createSkillTool,
   createTaskTool,
 } from "@tentacle/tools";
+
+/**
+ * The daemon's `/name` catalog for `initialize` (`SessionHostOptions.skills`):
+ * name + description of `slashSkills` — the same rule the agent's activator
+ * uses for `userInvocable`, so the catalog and what `session/prompt{skill}`
+ * accepts never disagree.
+ */
+export function skillCatalog(
+  config: Pick<TentacleConfig, "skills">,
+): { name: string; description: string }[] {
+  return slashSkills(config.skills).map(({ name, description }) => ({ name, description }));
+}
 
 /** Load user-defined agent types from `<configDir>/agents/*.md` (missing dir → none). */
 function loadUserAgentTypes(configDir: string): AgentType[] {
@@ -120,13 +139,26 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // Skills: the tool offers exactly the cataloged skills (one rule,
   // `offeredSkills`); none → no tool. The body is read at activation through
   // the session env (in a pod: the pod's filesystem, where discovery ran).
-  const skillTool = createSkillTool(offeredSkills(config.skills), async (skill, ctx) => {
+  const readSkillBody: SkillBodyReader = async (skill, ctx) => {
     const { body, bodyLine } = splitFrontmatter(await ctx.env.readFile(skill.location));
     return { body, bodyLine };
-  });
+  };
+  const offered = offeredSkills(config.skills);
+  const skillTool = createSkillTool(offered, readSkillBody);
   if (skillTool) {
     tools.register(skillTool);
   }
+  // The activator behind every activation (the user's `/name` round, the
+  // `/compact` re-read): the offered skills plus the user's `slashSkills`
+  // (hidden-from-the-model ones included, eval decision 5).
+  const userNames = new Set(slashSkills(config.skills).map((s) => s.name));
+  const offeredNames = new Set(offered.map((s) => s.name));
+  const skills = createSkillActivator(
+    config.skills
+      .filter((s) => offeredNames.has(s.name) || userNames.has(s.name))
+      .map((s) => ({ ...s, userInvocable: userNames.has(s.name) })),
+    readSkillBody,
+  );
 
   // Sub-agents: when enabled, register the `agent_task` delegation tool. Children
   // inherit the same confined env + permission requester; the runner filters
@@ -165,6 +197,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     systemPrompt: config.systemPrompt,
     maxIterations: config.maxIterations,
     requestPermission: (req) => permissions.request(req),
+    skills,
   });
   return { agent, permissions, jobs, tools };
 }

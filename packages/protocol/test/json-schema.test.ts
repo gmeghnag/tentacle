@@ -64,7 +64,12 @@ const FIXTURES: Record<string, Json[]> = {
     { protocolVersion: 1, clientCapabilities: {} },
   ],
   "methods/initialize/result": [
-    { protocolVersion: 1, agentCapabilities: { tools: true, permissions: false } },
+    { protocolVersion: 1, agentCapabilities: { tools: true, permissions: false }, skills: [] },
+    {
+      protocolVersion: 1,
+      agentCapabilities: { tools: true, permissions: true },
+      skills: [{ name: "deploy-app", description: "Deploy the app (staging; prod)." }],
+    },
   ],
   "methods/session~1open/params": [
     {
@@ -83,6 +88,12 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1close/params": [{ sessionId: "s" }],
   "methods/session~1close/result": [{}],
   "methods/session~1prompt/params": [
+    {
+      sessionId: "s",
+      turnId: "t",
+      content: [{ type: "text", text: "/deploy-app to staging" }],
+      skill: "deploy-app",
+    },
     {
       sessionId: "s",
       turnId: "t",

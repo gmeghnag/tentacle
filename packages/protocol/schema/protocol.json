@@ -329,9 +329,16 @@
         },
         "protocolVersion": {
           "type": "integer"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/SkillSummary"
+          },
+          "maxItems": 200,
+          "type": "array"
         }
       },
-      "required": ["agentCapabilities", "protocolVersion"],
+      "required": ["agentCapabilities", "protocolVersion", "skills"],
       "type": "object"
     },
     "JsonRpcError": {
@@ -756,6 +763,9 @@
         "sessionId": {
           "$ref": "#/$defs/SessionId"
         },
+        "skill": {
+          "$ref": "#/$defs/SkillName"
+        },
         "turnId": {
           "$ref": "#/$defs/TurnId"
         }
@@ -949,6 +959,27 @@
         }
       },
       "required": ["seq", "sessionId", "update"],
+      "type": "object"
+    },
+    "SkillName": {
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "type": "string"
+    },
+    "SkillSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/SkillName"
+        }
+      },
+      "required": ["description", "name"],
       "type": "object"
     },
     "SnapshotParams": {
@@ -1472,5 +1503,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 6
+  "x-protocol-version": 7
 }

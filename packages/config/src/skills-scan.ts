@@ -196,6 +196,7 @@ export async function scanSkills(
         files,
         filesTruncated: truncated,
         modelInvocable: parsed.modelInvocable,
+        userInvocable: parsed.userInvocable,
       });
     }
   }

@@ -148,33 +148,40 @@ export function formatSkillContent(skill: SkillToolEntry, { body, bodyLine }: Sk
   return lines.join("\n");
 }
 
-/**
- * Build the `skill` tool for the skills offered to the model (the same list
- * as the system-prompt catalog), or undefined when there is none — then the
- * tool is not registered at all. `name` is an enum, so a model cannot invent
- * a skill or a path.
- */
-export function createSkillTool(
-  skills: readonly SkillToolEntry[],
-  readBody: SkillBodyReader,
-): Tool | undefined {
-  const [first, ...rest] = skills.map((s) => s.name);
-  if (first === undefined) {
-    return undefined;
-  }
-  const byName = new Map(skills.map((s) => [s.name, s] as const));
-  const inputSchema = z.object({
-    name: z.enum([first, ...rest]).describe("The skill to load, from the Skills list"),
-  });
+/** A skill the activator can load, and whether the USER may (`/name`). */
+export interface SkillActivatorEntry extends SkillToolEntry {
+  readonly userInvocable: boolean;
+}
 
+/**
+ * The one path that activates a skill — for the model (the `skill` tool), for
+ * the user (`/name`, a `skill` round the agent writes before the model's first
+ * round) and for `/compact` (the re-read). It knows every activatable skill,
+ * including the ones hidden from the model (`disable-model-invocation`); the
+ * tool's enum is the model's narrower gate. docs/feat/skills-slash.md.
+ */
+export interface SkillActivator {
+  /** Whether `name` can be activated at all. */
+  has(name: string): boolean;
+  /** Whether the user may activate `name` with `/name`. */
+  userInvocable(name: string): boolean;
+  /**
+   * Load `name`: its content; the "already loaded" note when `ctx.history`
+   * has it; an `isError` result when it is unknown or cannot be read.
+   * Never throws.
+   */
+  activate(name: string, ctx: ToolContext): Promise<ToolResult>;
+}
+
+export function createSkillActivator(
+  entries: readonly SkillActivatorEntry[],
+  readBody: SkillBodyReader,
+): SkillActivator {
+  const byName = new Map(entries.map((s) => [s.name, s] as const));
   return {
-    name: SKILL_TOOL_NAME,
-    description:
-      'Load a skill: packaged instructions for a specific kind of task. When the task matches a skill listed under "# Skills" in the system prompt, call this FIRST with the skill\'s name, then follow the instructions it returns. A skill already loaded in this conversation does not need loading again.',
-    inputSchema,
-    permission: "none",
-    async execute(input, ctx): Promise<ToolResult> {
-      const { name } = input as z.infer<typeof inputSchema>;
+    has: (name) => byName.has(name),
+    userInvocable: (name) => byName.get(name)?.userInvocable === true,
+    async activate(name, ctx) {
       const skill = byName.get(name);
       if (!skill) {
         return { content: `Unknown skill "${name}".`, isError: true };
@@ -195,6 +202,46 @@ export function createSkillTool(
         };
       }
       return { content: formatSkillContent(skill, body) };
+    },
+  };
+}
+
+/** The `skill` call the loop writes when the USER activates `name` (`/name`). */
+export function userSkillCall(name: string): ToolCall {
+  return { id: crypto.randomUUID(), name: SKILL_TOOL_NAME, arguments: JSON.stringify({ name }) };
+}
+
+/**
+ * Build the `skill` tool for the skills offered to the model (the same list
+ * as the system-prompt catalog), or undefined when there is none — then the
+ * tool is not registered at all. `name` is an enum, so a model cannot invent
+ * a skill or a path. The activation itself is the activator's.
+ */
+export function createSkillTool(
+  skills: readonly SkillToolEntry[],
+  readBody: SkillBodyReader,
+): Tool | undefined {
+  const [first, ...rest] = skills.map((s) => s.name);
+  if (first === undefined) {
+    return undefined;
+  }
+  const activator = createSkillActivator(
+    skills.map((s) => ({ ...s, userInvocable: false })),
+    readBody,
+  );
+  const inputSchema = z.object({
+    name: z.enum([first, ...rest]).describe("The skill to load, from the Skills list"),
+  });
+
+  return {
+    name: SKILL_TOOL_NAME,
+    description:
+      'Load a skill: packaged instructions for a specific kind of task. When the task matches a skill listed under "# Skills" in the system prompt, call this FIRST with the skill\'s name, then follow the instructions it returns. A skill already loaded in this conversation does not need loading again.',
+    inputSchema,
+    permission: "none",
+    execute(input, ctx): Promise<ToolResult> {
+      const { name } = input as z.infer<typeof inputSchema>;
+      return activator.activate(name, ctx);
     },
   };
 }

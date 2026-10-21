@@ -40,6 +40,7 @@ import {
   PROTOCOL_VERSION,
   type PromptResult,
   type SessionUpdateParams,
+  type SkillSummary,
   type SnapshotResult,
   type WireStreamEvent,
   text,
@@ -214,6 +215,8 @@ export class RemoteClient {
   /** Session-independent listeners for background-job exits (idle or mid-turn). */
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
   private readonly statusListeners = new Set<(status: LinkStatus) => void>();
+  /** The daemon's `/name` skills, from the latest handshake (a reconnect refreshes it). */
+  private skillCatalog: readonly SkillSummary[] = [];
   private readonly historyLostListeners = new Set<(notice: HistoryLostNotice) => void>();
   /** Conditions re-checked after every state change (session live, link stopped, …). */
   private readonly waiters = new Set<() => boolean>();
@@ -254,6 +257,15 @@ export class RemoteClient {
   /** Handshake; rejects on an incompatible daemon version. */
   async initialize(): Promise<InitializeResult> {
     return this.handshake(this.peer);
+  }
+
+  /**
+   * The skills the user can activate on the daemon (`/name`), as of the latest
+   * handshake: empty before the first one; refreshed by every reconnect (a
+   * restarted daemon may have other skills). Schema-validated by the peer.
+   */
+  skills(): readonly SkillSummary[] {
+    return this.skillCatalog;
   }
 
   /** A controller the Ink App drives exactly like a local `Session`. */
@@ -401,19 +413,22 @@ export class RemoteClient {
 
   /**
    * Start a turn; resolves with the daemon's ack (the turn ends in the stream).
-   * Re-sent after a drop. `onSent` fires when the frame is first written to a
-   * channel: until then no daemon can have run it.
+   * Re-sent after a drop (with the same params, `skill` included). `onSent`
+   * fires when the frame is first written to a channel: until then no daemon
+   * can have run it. `skill`: the user's `/name` activation (structured — the
+   * daemon never parses `prompt`).
    */
   prompt(
     sessionId: string,
     turnId: string,
     prompt: string,
     onSent?: () => void,
+    skill?: string,
   ): Promise<PromptResult> {
     return this.sessionCall(
       sessionId,
       Method.Prompt,
-      { sessionId, turnId, content: [text(prompt)] },
+      { sessionId, turnId, content: [text(prompt)], ...(skill !== undefined ? { skill } : {}) },
       "keyed",
       onSent,
     ).then((result) => result as PromptResult);
@@ -547,7 +562,17 @@ export class RemoteClient {
     return this.call(peer, Method.Initialize, {
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: { streaming: true },
-    }).then((result) => result as InitializeResult);
+    }).then((raw) => {
+      const result = raw as InitializeResult;
+      // Only the current link's answer: a superseded handshake must not
+      // overwrite the catalog of the daemon we are now talking to. Defensive:
+      // a peer is replaced only after it closed, and closing rejects its
+      // pending requests (transport/peer.ts), so this should never trigger.
+      if (peer === this.peer) {
+        this.skillCatalog = result.skills;
+      }
+      return result;
+    });
   }
 
   /**

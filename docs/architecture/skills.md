@@ -5,9 +5,9 @@ How tentacle finds, offers, loads and keeps [Agent Skills](https://agentskills.i
 decisions, and the reasons behind them, are in the task docs listed at the end.
 
 Status (2026-10-21): discovery, catalog and the `skill` tool
-(`feat/skills-core`), and skills kept across `/compact` (`feat/skills-compaction`)
-are built. `/skill-name` and sub-agents launched with a skill are not built yet
-(see [Not supported yet](#not-supported-yet)).
+(`feat/skills-core`), skills kept across `/compact` (`feat/skills-compaction`)
+and `/skill-name` typed by the user (`feat/skills-slash`) are built. Sub-agents
+launched with a skill are not built yet (see [Not supported yet](#not-supported-yet)).
 
 ## The short version
 
@@ -18,6 +18,8 @@ are built. `/skill-name` and sub-agents launched with a skill are not built yet
 4. A skill already loaded is not loaded twice.
 5. On `/compact`, the active skills are **read again from disk** and put back
    after the summary, so the model keeps following them.
+6. The **user** can load one too: `/skill-name [what to do]` in the TUI
+   (autocompleted from the daemon's list).
 
 ## What a skill is
 
@@ -39,7 +41,8 @@ description: Deploy this project to staging or production. Use when the user ask
 |---|---|
 | `name` | The skill's name. It should equal the folder name. |
 | `description` | Required. Goes into the catalog: it is what the model matches tasks against. |
-| `disable-model-invocation: true` | Hidden from the model (catalog and tool). Meant for `/skill-name`, which is not built yet, so for now such a skill is unused. |
+| `disable-model-invocation: true` | Hidden from the model (catalog and tool). The user can still load it with `/skill-name`. |
+| `user-invocable: false` | Not offered as `/skill-name` (the model can still load it). With both, the skill is unreachable (a warning says so). |
 | `allowed-tools` | **Ignored**, with a warning. Tools keep their normal permission prompts. |
 | `license`, `compatibility`, `metadata` | Parsed, not used. |
 
@@ -180,11 +183,12 @@ tool result. tentacle keeps the active skills instead.
 
 ### What happens, in order (`Session.compact`)
 
-1. **Re-read.** For each active skill, the original `skill` call is **run
-   again**, through the same path as an activation: permission gate, tool,
-   result transforms (so redaction too). The empty history it is given means
-   the dedup does not stop it. An edit made to `SKILL.md` since activation is
-   picked up.
+1. **Re-read.** Each active skill is **activated again** through the skill
+   activator (the path every activation takes: the model's tool, the user's
+   `/name`) and the result transforms (so redaction too). The empty history it
+   is given means the dedup does not stop it. An edit made to `SKILL.md` since
+   activation is picked up, and a skill the user loaded that is hidden from the
+   model is re-read like any other.
 2. **Budget.** At most **100 000 characters** of skill content are kept (two
    bodies at the 50 000 cap, or about 20 typical skills). Going from the most
    recent activation backwards, the first skill that does not fit, and every
@@ -212,7 +216,7 @@ The summary ends with a note for the model, only when there is something to say:
 |---|---|---|
 | `SKILL.md` read again | The fresh body | `fresh` |
 | The read fails (file deleted, unreadable), or a transform reshaped the result | The copy already in the history | `unreadable` |
-| The skill is no longer offered (removed, renamed, hidden, or skills disabled): nothing is read | The copy already in the history | `unavailable` |
+| The skill can no longer be activated (removed, renamed, or skills disabled): nothing is read | The copy already in the history | `unavailable` |
 
 An active skill is **never dropped silently**: it is either kept (fresh or from
 the earlier copy) or named as dropped.
@@ -236,6 +240,36 @@ removes it.
   llama.cpp server.
 - The TUI prints `Context compacted — N → M messages`: M now counts the skill
   rounds (2 messages per kept skill).
+
+## The user's `/skill-name`
+
+The daemon sends the skills the user can load in its `initialize` answer
+(`skills: [{ name, description }]`, protocol version 7): the user-invocable
+ones (hidden-from-the-model ones included) whose name follows the spec, at most
+200. The TUI merges them with its built-in commands:
+
+- Typing `/de…` shows `/deploy-app` in the palette (at most 8 rows, scrolling
+  with the selection). Tab completes, Enter runs it with no extra words.
+- `/deploy-app to staging` is sent as the prompt text **plus** a structured
+  `skill: "deploy-app"` on `session/prompt`. Only an exact first token picks a
+  skill; the daemon never parses the text. `/tmp/x`, `/deploy-app/x` or
+  `/Deploy-App` stay `Unknown command`, as before.
+- The daemon checks the name (unknown or not user-invocable → `InvalidParams`,
+  nothing starts). Then, right after the user's message and **before the
+  model's first round**, the agent writes a `skill` round — the call, then the
+  content — exactly as if the model had called the tool. So it shows as
+  `Skill deploy-app`, counts as active, is not loaded twice (a second
+  `/deploy-app` gets the "already loaded" note) and survives `/compact`.
+- A built-in wins over a skill of the same name (`help`, `clear`, `compact`,
+  `model`, `retry`, `copy`, `save`, `tokens`, `exit`, `quit`); `/help` names
+  the hidden skill.
+- Mid-turn, `/skill-name` is refused (it is a round, not a steering message).
+  `/retry` repeats the activation; ↑ recalls it.
+- After a reconnect the list is refreshed (a restarted daemon may have other
+  skills). Pods and `connect` show the daemon host's skills, as everywhere.
+- A pod is not trusted: the laptop validates the list (names in the spec
+  pattern, descriptions without control characters, at most 200) before the
+  TUI shows it.
 
 ## Where it runs
 
@@ -273,6 +307,8 @@ one-shot, `serve`), not for `run`/`attach`/`connect`.
 | Limit | Value | Where |
 |---|---|---|
 | Skills offered (catalog and enum) | 100 | `MAX_CATALOG_SKILLS`, `config/src/skills.ts` |
+| Skills offered as `/name` | 200 | `MAX_SLASH_SKILLS`, `config/src/skills.ts`; `MAX_SKILL_CATALOG`, `protocol/src/session.ts` |
+| Palette rows shown | 8 | `PALETTE_MAX_ROWS`, `tui/src/commands.ts` |
 | Name length | 64 chars (warning) | `config/src/skills.ts` |
 | Description length | 1024 chars (cut, warning) | `config/src/skills.ts` |
 | Folders scanned per root | 200 | `config/src/skills-scan.ts` |
@@ -284,8 +320,7 @@ one-shot, `serve`), not for `run`/`attach`/`connect`.
 
 ## Not supported yet
 
-- **`/skill-name`** typed by the user (sub-task `skills-slash`: the catalog
-  goes on the wire so the TUI can autocomplete).
+- **`/skill-name` in the plain REPL** (`--plain`): TUI only.
 - **Launching a sub-agent with a skill** (sub-task `skills-subagent`).
 - **`allowed-tools`**: ignored on purpose. Honouring it would let a cloned
   repo, or a pod, pre-approve shell commands.
@@ -301,7 +336,10 @@ one-shot, `serve`), not for `run`/`attach`/`connect`.
 | Parse, precedence, catalog (pure) | `packages/config/src/skills.ts` |
 | Folder scan (I/O) | `packages/config/src/skills-scan.ts` |
 | Config switch, diagnostics, catalog in the prompt | `packages/config/src/{schema,resolve,load}.ts` |
-| `skill` tool, "active" derivation | `packages/tools/src/skill.ts` |
+| `skill` tool, activator, "active" derivation | `packages/tools/src/skill.ts` |
+| The user's `skill` round | `Agent.runUserSkill`, `packages/agent/src/agent.ts` |
+| Wire catalog, `prompt{skill}` check | `packages/daemon/src/{mapping,session-host,connection,hosted-session}.ts` |
+| `/name` resolution, palette, `/help` (pure) | `packages/tui/src/commands.ts` |
 | Tool registration, transform exemption | `packages/cli/src/wiring.ts` |
 | Re-read at compaction | `Agent.reloadSkills`, `packages/agent/src/agent.ts` |
 | Budget, summary note, rebuilt history | `packages/agent/src/compact.ts` |
@@ -315,3 +353,4 @@ one-shot, `serve`), not for `run`/`attach`/`connect`.
   split into four sub-tasks).
 - `docs/feat/skills-core.md`: discovery, catalog, the `skill` tool.
 - `docs/feat/skills-compaction.md`: keeping skills across `/compact`.
+- `docs/feat/skills-slash.md`: `/skill-name`.

@@ -5,7 +5,11 @@ import { DomainErrorCode, RpcError } from "../src/errors.ts";
 import { RpcPeer } from "../src/peer.ts";
 
 const INIT_PARAMS = { protocolVersion: 1, clientCapabilities: { streaming: true } };
-const INIT_RESULT = { protocolVersion: 1, agentCapabilities: { tools: true, permissions: true } };
+const INIT_RESULT = {
+  protocolVersion: 1,
+  agentCapabilities: { tools: true, permissions: true },
+  skills: [],
+};
 
 describe("RpcPeer", () => {
   test("correlates a request with its validated response", async () => {
