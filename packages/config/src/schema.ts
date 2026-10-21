@@ -39,8 +39,9 @@ export const ModelConfigSchema = z
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 
 /** A stdio MCP server: a command to spawn, exchanging JSON-RPC over stdio. */
-export const McpServerSchema = z
+const McpStdioServerSchema = z
   .object({
+    type: z.literal("stdio"),
     /** Executable to spawn. */
     command: z.string().min(1),
     /** Arguments passed to the command. */
@@ -51,6 +52,32 @@ export const McpServerSchema = z
     cwd: z.string().min(1).optional(),
   })
   .strict();
+
+/** A remote MCP server reached over Streamable HTTP (one endpoint URL). */
+const McpHttpServerSchema = z
+  .object({
+    type: z.literal("http"),
+    /** The server's MCP endpoint, e.g. `https://mcp.example.com/mcp`. */
+    url: z.string().url(),
+    /** Extra request headers (e.g. `Authorization`); sent only to `url`. */
+    headers: z.record(z.string()).optional(),
+  })
+  .strict();
+
+/**
+ * An MCP server, discriminated by `type`. Omitted, it is inferred: `"http"` for
+ * a `url` without a `command` (the shape other MCP clients use), else
+ * `"stdio"` (so existing configs keep working). Discriminating before
+ * validating keeps each branch's own issue first — a plain union would report
+ * only "Invalid input".
+ */
+export const McpServerSchema = z.preprocess(
+  (value) =>
+    typeof value === "object" && value !== null && !("type" in value)
+      ? { type: "url" in value && !("command" in value) ? "http" : "stdio", ...value }
+      : value,
+  z.discriminatedUnion("type", [McpStdioServerSchema, McpHttpServerSchema]),
+);
 
 export type McpServerConfig = z.infer<typeof McpServerSchema>;
 

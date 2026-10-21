@@ -32,6 +32,13 @@ export interface McpCallOptions {
 /** A JSON-RPC error response: the server is reachable, it refused the call. */
 export class McpServerError extends Error {}
 
+/**
+ * An HTTP error status in place of a reply (Streamable HTTP: a proxy 503, an
+ * expired token's 401). The call failed, but no MCP server answered, so unlike
+ * `McpServerError` it does not prove reachability.
+ */
+export class McpHttpStatusError extends Error {}
+
 const DEFAULT_CLIENT_INFO: McpClientInfo = { name: "tentacle", version: "0.0.0" };
 // A wedged server must not hang the turn forever; the turn's abort signal still
 // cancels sooner. Generous so a legitimately slow tool completes.
@@ -41,6 +48,7 @@ export class McpClient {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private closed = false;
+  private reason: string | undefined;
   private readonly callTimeoutMs: number;
 
   constructor(
@@ -50,7 +58,7 @@ export class McpClient {
   ) {
     this.callTimeoutMs = options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
     transport.onMessage((message) => this.handleMessage(message));
-    transport.onClose(() => this.handleClose());
+    transport.onClose((reason) => this.handleClose(reason));
   }
 
   /** Run the MCP handshake; resolves once the server has initialized. */
@@ -85,7 +93,8 @@ export class McpClient {
   /**
    * Prove the server is reachable: MCP `ping`, bounded by `timeoutMs`. Any
    * response counts — an error reply (e.g. a server without `ping`) still
-   * answered. Rejects on timeout or a closed connection.
+   * answered. Rejects on timeout, a closed connection, or an HTTP error status
+   * (`McpHttpStatusError`: no MCP server answered).
    */
   async ping(timeoutMs: number): Promise<void> {
     try {
@@ -100,6 +109,11 @@ export class McpClient {
   /** True once the transport closed (the server process is gone) or `close()` ran. */
   get isClosed(): boolean {
     return this.closed;
+  }
+
+  /** Why the transport closed, when it said (e.g. the server became unreachable). */
+  get closeReason(): string | undefined {
+    return this.reason;
   }
 
   close(): void {
@@ -171,7 +185,7 @@ export class McpClient {
       id?: unknown;
       method?: unknown;
       result?: unknown;
-      error?: { message?: string };
+      error?: { message?: string; data?: { httpStatus?: unknown } };
     };
     // An inbound server-initiated message (has a `method`). We implement no
     // server→client methods (e.g. sampling), so a *request* (one with an id)
@@ -196,19 +210,26 @@ export class McpClient {
     }
     this.pending.delete(msg.id);
     if (msg.error) {
-      pending.reject(new McpServerError(msg.error.message ?? "MCP error"));
+      const message = msg.error.message ?? "MCP error";
+      pending.reject(
+        typeof msg.error.data?.httpStatus === "number"
+          ? new McpHttpStatusError(message)
+          : new McpServerError(message),
+      );
     } else {
       pending.resolve(msg.result);
     }
   }
 
-  private handleClose(): void {
+  private handleClose(reason?: string): void {
     if (this.closed) {
       return;
     }
     this.closed = true;
+    this.reason = reason;
+    const error = new Error(reason ? `MCP connection closed: ${reason}` : "MCP connection closed");
     for (const pending of this.pending.values()) {
-      pending.reject(new Error("MCP connection closed"));
+      pending.reject(error);
     }
     this.pending.clear();
   }

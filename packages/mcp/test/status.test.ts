@@ -9,6 +9,7 @@ function fakeConnection(
     tools?: number;
     toolNames?: readonly string[];
     open?: boolean;
+    closeReason?: string;
     ping?: () => Promise<void>;
   } = {},
 ): McpConnection {
@@ -19,6 +20,7 @@ function fakeConnection(
     toolNames,
     close() {},
     isOpen: () => opts.open ?? true,
+    closeReason: () => opts.closeReason,
     ping: opts.ping ?? (async () => {}),
   };
 }
@@ -69,6 +71,19 @@ describe("McpStatusTracker", () => {
         error: "ping timed out",
       },
     ]);
+  });
+
+  test("a closed connection shows the transport's reason; without one, the stdio default", async () => {
+    const tracker = new McpStatusTracker(["remote", "local"]);
+    tracker.settle(
+      settled([
+        fakeConnection("remote", { open: false, closeReason: "Unable to connect\nto host" }),
+        fakeConnection("local", { open: false }),
+      ]),
+    );
+    const [remote, local] = await tracker.probe();
+    expect(remote).toMatchObject({ state: "closed", error: "Unable to connect to host" });
+    expect(local).toMatchObject({ state: "closed", error: "the server process exited" });
   });
 
   test("a closed server is not pinged", async () => {

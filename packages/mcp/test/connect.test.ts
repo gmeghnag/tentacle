@@ -54,7 +54,9 @@ describe("connectMcpServers", () => {
         alpha: { command: "x" },
         beta: { command: "y" },
       },
-      { createTransport: (spec) => okTransport(`t-${spec.command}`) },
+      {
+        createTransport: (spec) => okTransport(`t-${"command" in spec ? spec.command : spec.url}`),
+      },
     );
     expect(result.errors).toEqual({});
     const names = result.tools.map((t) => t.name).sort();
@@ -73,7 +75,8 @@ describe("connectMcpServers", () => {
       },
       {
         timeoutMs: 50,
-        createTransport: (spec) => (spec.command === "y" ? silentTransport() : okTransport("ok")),
+        createTransport: (spec) =>
+          "command" in spec && spec.command === "y" ? silentTransport() : okTransport("ok"),
       },
     );
     expect(result.tools.map((t) => t.name)).toEqual(["mcp__good__ok"]);

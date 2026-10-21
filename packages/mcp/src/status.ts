@@ -125,7 +125,8 @@ export class McpStatusTracker {
     }
     const tools = toolList(connection.toolNames);
     if (!connection.isOpen()) {
-      return { name, state: "closed", ...tools, error: "the server process exited" };
+      const reason = connection.closeReason?.() ?? "the server process exited";
+      return { name, state: "closed", ...tools, error: oneLine(reason) };
     }
     const start = this.now();
     try {

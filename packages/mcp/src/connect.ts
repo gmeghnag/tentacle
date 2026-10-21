@@ -1,16 +1,17 @@
 /**
  * Connect to configured MCP servers and surface their tools.
  *
- * Each server is spawned, handshaken and queried for its tools; failures are
- * isolated (a broken server is skipped, not fatal to startup) and bounded by a
- * timeout so a hanging server can't block the app. The returned `dispose` kills
- * every spawned subprocess.
+ * Each server is spawned (stdio) or reached (Streamable HTTP), handshaken and
+ * queried for its tools; failures are isolated (a broken server is skipped, not
+ * fatal to startup) and bounded by a timeout so a hanging server can't block the
+ * app. The returned `dispose` closes every connection (killing stdio subprocesses).
  */
 import type { Tool } from "@tentacle/core";
 import { McpClient } from "./client.ts";
+import { createStreamableHttpTransport } from "./http-transport.ts";
 import { mcpToolToTool } from "./tool-adapter.ts";
 import { type StdioTransportOptions, createStdioTransport } from "./transport.ts";
-import type { McpServers, McpStdioServerSpec, McpTransport } from "./types.ts";
+import type { McpServerSpec, McpServers, McpTransport } from "./types.ts";
 
 export interface McpConnection {
   readonly name: string;
@@ -18,8 +19,10 @@ export interface McpConnection {
   /** The server's own (bare) tool names, in its `tools/list` order — what `/mcp` lists. */
   readonly toolNames: readonly string[];
   close(): void;
-  /** False once the server process is gone (or `close()` ran). */
+  /** False once the server process is gone / unreachable (or `close()` ran). */
   isOpen(): boolean;
+  /** Why the connection closed, when the transport said (e.g. unreachable). */
+  closeReason?(): string | undefined;
   /** MCP `ping`: resolves if the server answers within `timeoutMs`. */
   ping(timeoutMs: number): Promise<void>;
 }
@@ -56,21 +59,25 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
 export interface ConnectOptions {
   readonly timeoutMs?: number;
   /** Injectable transport factory (tests pass an in-memory one). */
-  readonly createTransport?: (
-    spec: McpStdioServerSpec,
-    opts?: StdioTransportOptions,
-  ) => McpTransport;
+  readonly createTransport?: (spec: McpServerSpec, opts?: StdioTransportOptions) => McpTransport;
   /** Receives a server's stderr lines (server name + line); omitted → dropped. */
   readonly onStderr?: (server: string, line: string) => void;
 }
 
-/** Connect one stdio server: spawn, handshake, list tools, adapt them. */
+/** The transport a spec names: Streamable HTTP for `type: "http"`, else stdio. */
+function createTransport(spec: McpServerSpec, opts?: StdioTransportOptions): McpTransport {
+  return spec.type === "http"
+    ? createStreamableHttpTransport(spec)
+    : createStdioTransport(spec, opts);
+}
+
+/** Connect one server: spawn/reach it, handshake, list tools, adapt them. */
 export async function connectServer(
   name: string,
-  spec: McpStdioServerSpec,
+  spec: McpServerSpec,
   options: ConnectOptions = {},
 ): Promise<McpConnection> {
-  const transport = (options.createTransport ?? createStdioTransport)(spec, {
+  const transport = (options.createTransport ?? createTransport)(spec, {
     ...(options.onStderr ? { onStderr: (line: string) => options.onStderr?.(name, line) } : {}),
   });
   const client = new McpClient(transport);
@@ -85,6 +92,7 @@ export async function connectServer(
       toolNames: defs.map((def) => def.name),
       close: () => client.close(),
       isOpen: () => !client.isClosed,
+      closeReason: () => client.closeReason,
       ping: (ms) => client.ping(ms),
     };
   } catch (error) {

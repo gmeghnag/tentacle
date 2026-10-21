@@ -1011,8 +1011,10 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
 
 ## Earlier deferrals (from prior slices)
 
-- [ ] **MCP**: SSE/HTTP transport; resources & prompts; MCP in the `serve` daemon.
-      **Eval:** `docs/eval/mcp-remote-transport.md` (recommends Streamable HTTP, transport-only first).
+- [ ] **MCP**: resources & prompts; MCP in the `serve` daemon; `headersCommand`
+      (secret headers off the config file); reconnect after a dropped server.
+      Streamable HTTP transport: `docs/feat/mcp-remote-transport.md`
+      (Type: feat · Size: M · Blast: cross-module · Suited: standard + standard Review).
 - [ ] **Sub-agents**: background / parallel execution (SA.d).
       **Eval:** `docs/eval/parallel-subagents.md` (open — leans background-first, must split; needs a use-case).
 - [ ] **Parallel tool calls within a round** (today strictly sequential,
