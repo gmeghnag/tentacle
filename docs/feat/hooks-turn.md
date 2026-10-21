@@ -1,9 +1,9 @@
-# eval/hooks-turn — `turn_start` context, `turn_end` (may continue), `model_request` notification
+# feat/hooks-turn — `turn_start` context, `turn_end` (may continue), `model_request` notification
 
-> **Status:** eval. Owner decisions D2, D8 in the umbrella; **R1–R4 decided 2026-10-21**. Implementation drafted below, approved at promotion.
-> **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10). Promote to `feat/hooks-turn`.
-> **Type:** eval → feat · **Size:** M · **Blast:** load-bearing (the end-of-turn no-await invariant, history validity, **protocol bump 7 → 8**) · **Suited:** §10: a **strong model executes**; mandatory fresh-context Review
-> **Umbrella:** [`extensibility.md`](./extensibility.md) (child 3 of 5) · **Needs:** `hooks-core` merged (config key, `stdin`, `HookRunner`)
+> **Status:** feat — promoted 2026-10-22. Owner decisions D2, D8 in the umbrella; R1–R4 decided 2026-10-21. Implementation approved.
+> **Branch:** `feat/hooks-turn`
+> **Type:** eval → feat · **Size:** M · **Blast:** load-bearing (the end-of-turn no-await invariant, history validity, **protocol bump 7 → 8**) · **Review:** mandatory fresh-context
+> **Umbrella:** [`extensibility.md`](../eval/extensibility.md) (child 3 of 5) · **Needs:** `hooks-core` merged ✓ (config key, `stdin`, `HookRunner`)
 
 ## Context
 

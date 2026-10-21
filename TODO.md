@@ -637,8 +637,8 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         `⎿ hook <name> blocked <Tool>`) — DONE 2026-10-22 (`feat/hooks-core`): `docs/feat/hooks-core.md`. Type: feat ·
         Size: M · Blast: load-bearing.
       - [ ] **hooks-turn** (`turn_start`, `turn_end` + continue ≤3,
-        `model_request` notify; protocol 7 → 8) — R1–R4 decided:
-        `docs/eval/hooks-turn.md`. Type: eval → feat · Size: M · Blast: load-bearing.
+        `model_request` notify; protocol 7 → 8) — in progress (`feat/hooks-turn`):
+        `docs/feat/hooks-turn.md`. Type: feat · Size: M · Blast: load-bearing.
       - [ ] **hooks-project-trust** (`.agents/hooks.json`, `hooks/trust`
         daemon→client, laptop store for the local worker only, auto-approve
         excluded) — P1–P3 decided: `docs/eval/hooks-project-trust.md`.
