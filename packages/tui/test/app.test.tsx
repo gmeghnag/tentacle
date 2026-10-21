@@ -1245,6 +1245,78 @@ describe("/mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     unmount();
   });
 
+  // Behind the panel nothing edits the hidden input — pasted text and a held
+  // "[" included (each is inserted outside the key path, the last two by a timer).
+  test("a paste while the panel is open never reaches the hidden input", async () => {
+    const { stdin, lastFrame, unmount } = await openMcp(async () => SERVERS);
+    stdin.write("\u001b[200~PASTED\u001b[201~");
+    await delay(40);
+    stdin.write("\u001B");
+    await delay(60);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Type a task or /command");
+    expect(frame).not.toContain("PASTED");
+    unmount();
+  });
+
+  test("a truncated paste flushed by its timeout while the panel is open is dropped too", async () => {
+    const { stdin, lastFrame, unmount } = await openMcp(async () => SERVERS);
+    stdin.write("\u001b[200~CUTOFF");
+    await delay(320); // past PASTE_TIMEOUT_MS
+    stdin.write("\u001B");
+    await delay(60);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Type a task or /command");
+    expect(frame).not.toContain("CUTOFF");
+    // Input is not frozen afterwards.
+    stdin.write("ok");
+    await delay(40);
+    expect(lastFrame() ?? "").toContain("ok");
+    unmount();
+  });
+
+  test("a clipboard read (Ctrl+V) that answers after the panel opened is dropped", async () => {
+    const r = render(
+      <App
+        agent={agent}
+        model="qwen3"
+        cwd="/tmp/work"
+        mcpStatus={async () => SERVERS}
+        paste={async () => {
+          await delay(150);
+          return "CLIP";
+        }}
+      />,
+    );
+    await delay(30);
+    r.stdin.write("\u0016"); // Ctrl+V
+    await delay(20);
+    r.stdin.write("/mcp");
+    await delay(30);
+    r.stdin.write("\r");
+    await delay(200); // the clipboard answers with the panel open
+    r.stdin.write("\u001B");
+    await delay(60);
+    const frame = r.lastFrame() ?? "";
+    expect(frame).toContain("Type a task or /command");
+    expect(frame).not.toContain("CLIP");
+    r.unmount();
+  });
+
+  test("a lone '[' typed while the panel is open is not restored into the input", async () => {
+    const { stdin, lastFrame, unmount } = await openMcp(async () => SERVERS);
+    stdin.write("[");
+    await delay(160); // past the mouse hold
+    stdin.write("\u001B");
+    await delay(60);
+    stdin.write("z");
+    await delay(40);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("z");
+    expect(frame).not.toContain("[z");
+    unmount();
+  });
+
   test("an answer that lands after the panel closed is dropped", async () => {
     const { stdin, lastFrame, unmount } = await openMcp(async () => {
       await delay(80);
@@ -1367,5 +1439,163 @@ describe("/mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     const frame = r.lastFrame() ?? "";
     expect(frame).toContain("❯ ▸ github");
     r.unmount();
+  });
+});
+
+describe("/skills panel (docs/feat/skills-panel.md)", () => {
+  const agent = new Agent({
+    model: new ScriptedProvider([]),
+    tools: new ToolRegistry(),
+    env: noopEnv,
+  });
+  const LIST = {
+    skills: [
+      {
+        name: "review",
+        description: "review a diff",
+        scope: "project" as const,
+        user: true,
+        model: true,
+        location: "/w/.agents/skills/review/SKILL.md",
+      },
+      {
+        name: "lint-fix",
+        description: "fix lint",
+        scope: "user" as const,
+        user: false,
+        model: true,
+        location: "/h/.agents/skills/lint-fix/SKILL.md",
+      },
+    ],
+    problems: ["skipped skill at /x/SKILL.md: no description"],
+    moreProblems: 0,
+  };
+
+  async function openSkills(
+    skillsList?: () => Promise<typeof LIST>,
+    mcpStatus?: () => Promise<never[]>,
+  ): Promise<ReturnType<typeof render>> {
+    const r = render(
+      <App
+        agent={agent}
+        model="qwen3"
+        cwd="/tmp/work"
+        skillsList={skillsList}
+        mcpStatus={mcpStatus}
+      />,
+    );
+    await delay(30);
+    r.stdin.write("/skills");
+    await delay(30);
+    r.stdin.write("\r");
+    await delay(30);
+    return r;
+  }
+
+  test("opens with a loading placeholder, then lists every skill, who may invoke it, and the problems", async () => {
+    let asked = 0;
+    const { lastFrame, unmount } = await openSkills(async () => {
+      asked += 1;
+      await delay(80);
+      return LIST;
+    });
+    expect(lastFrame() ?? "").toContain("Skills · loading…");
+    await delay(120);
+    const frame = lastFrame() ?? "";
+    expect(asked).toBe(1);
+    expect(frame).toContain("Skills · 2 found · 1 problem");
+    expect(frame).toContain("❯ ▸ review    you + model  review a diff");
+    expect(frame).toContain("  ▸ lint-fix  model only   fix lint");
+    expect(frame).toContain("  ▸ ! 1 discovery problem");
+    expect(frame).not.toContain("Type a task or /command");
+    unmount();
+  });
+
+  test("enter expands a skill; esc closes and the input is back", async () => {
+    const { stdin, lastFrame, unmount } = await openSkills(async () => LIST);
+    stdin.write("\r");
+    await delay(30);
+    let frame = lastFrame() ?? "";
+    expect(frame).toContain("❯ ▾ review");
+    expect(frame).toContain("/review · offered to the model");
+    expect(frame).toContain("project · /w/.agents/skills/review/SKILL.md");
+    stdin.write("\u001B");
+    await delay(60);
+    frame = lastFrame() ?? "";
+    expect(frame).not.toContain("Skills ·");
+    expect(frame).toContain("Type a task or /command");
+    unmount();
+  });
+
+  test("a click on the problems row lists them", async () => {
+    const { stdin, lastFrame, unmount } = await openSkills(async () => LIST);
+    const y =
+      (lastFrame() ?? "").split("\n").findIndex((l) => l.includes("! 1 discovery problem")) + 1;
+    expect(y).toBeGreaterThan(0);
+    stdin.write(press(5, y));
+    stdin.write(release(5, y));
+    await delay(40);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("❯ ▾ ! 1 discovery problem");
+    expect(frame).toContain("skipped skill at /x/SKILL.md: no description");
+    unmount();
+  });
+
+  test("a failed request closes the panel and says why", async () => {
+    const { lastFrame, unmount } = await openSkills(() =>
+      Promise.reject(new Error("not connected to the daemon")),
+    );
+    await delay(30);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Skill list unavailable: not connected to the daemon");
+    expect(frame).not.toContain("Skills ·");
+    expect(frame).toContain("Type a task or /command");
+    unmount();
+  });
+
+  test("an older daemon (MethodNotFound) is named as such", async () => {
+    const { lastFrame, unmount } = await openSkills(() =>
+      Promise.reject(Object.assign(new Error("Method not found"), { code: -32601 })),
+    );
+    await delay(30);
+    expect(lastFrame() ?? "").toContain("This daemon doesn't support /skills (it predates it).");
+    unmount();
+  });
+
+  test("an answer after the panel closed is dropped", async () => {
+    const { stdin, lastFrame, unmount } = await openSkills(async () => {
+      await delay(80);
+      return LIST;
+    });
+    stdin.write("\u001B");
+    await delay(150);
+    expect(lastFrame() ?? "").not.toContain("review a diff");
+    unmount();
+  });
+
+  test("without a provider it says so instead of 'Unknown command'", async () => {
+    const { lastFrame, unmount } = await openSkills();
+    await delay(50);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("The skill list isn't available on this runtime.");
+    expect(frame).not.toContain("Unknown command");
+    unmount();
+  });
+
+  test("/mcp after /skills opens the MCP panel (one panel state, not two)", async () => {
+    const { stdin, lastFrame, unmount } = await openSkills(
+      async () => LIST,
+      async () => [],
+    );
+    stdin.write("\u001B");
+    await delay(40);
+    stdin.write("/mcp");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("No MCP servers on this daemon.");
+    expect(frame).not.toContain("review a diff");
+    unmount();
   });
 });

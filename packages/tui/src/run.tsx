@@ -6,6 +6,7 @@ import type { SlashSkill } from "./commands.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { messagesToItems } from "./resume.ts";
+import type { SkillsListView } from "./skills-panel.ts";
 import {
   ENTER_FULLSCREEN,
   LEAVE_FULLSCREEN,
@@ -34,6 +35,8 @@ export interface TuiOptions {
   readonly skills?: () => readonly SlashSkill[];
   /** The daemon's MCP servers, probed live (`/mcp`). */
   readonly mcpStatus?: () => Promise<readonly McpServerView[]>;
+  /** Every skill the daemon discovered and its problems (`/skills`). */
+  readonly skillsList?: () => Promise<SkillsListView>;
 }
 
 /**
@@ -81,6 +84,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       {...(options.link ? { link: options.link } : {})}
       {...(options.skills ? { skills: options.skills } : {})}
       {...(options.mcpStatus ? { mcpStatus: options.mcpStatus } : {})}
+      {...(options.skillsList ? { skillsList: options.skillsList } : {})}
     />,
     { exitOnCtrlC: false },
   );

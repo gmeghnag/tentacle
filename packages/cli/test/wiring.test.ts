@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Session } from "@tentacle/agent";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
-import { buildAgent, inProcessAgents, skillCatalog } from "../src/wiring.ts";
+import { buildAgent, inProcessAgents, skillCatalog, skillListing } from "../src/wiring.ts";
 
 let dir: string;
 let config: TentacleConfig;
@@ -220,6 +220,44 @@ describe("buildAgent skills (docs/feat/skills-core.md)", () => {
     // The model's enum stays the offered list: the hidden skill is not in it.
     const skillDef = tools.definitions().find((d) => d.name === "skill");
     expect(JSON.stringify(skillDef)).not.toContain('"hidden"');
+  });
+
+  test("/skills: the listing's user/model flags are the agent's own rules (docs/feat/skills-panel.md)", async () => {
+    const cfg = await skillConfig();
+    const base = cfg.skills[0];
+    if (!base) {
+      throw new Error("expected a skill");
+    }
+    const skills = [
+      base,
+      { ...base, name: "hidden", modelInvocable: false },
+      { ...base, name: "model-only", userInvocable: false, scope: "user" as const },
+      { ...base, name: "Bad Name" },
+      { ...base, name: "neither", modelInvocable: false, userInvocable: false },
+    ];
+    const c = {
+      ...cfg,
+      skills,
+      skillDiagnostics: ["skipped skill at /x/SKILL.md: no description"],
+    };
+    const listing = skillListing(c);
+    expect(listing.problems).toEqual(["skipped skill at /x/SKILL.md: no description"]);
+    expect(listing.skills.map((s) => [s.name, s.scope, s.location])).toEqual(
+      skills.map((s) => [s.name, s.scope, s.location]),
+    );
+    const { agent, tools } = buildAgent(c);
+    const skillDef = JSON.stringify(tools.definitions().find((d) => d.name === "skill"));
+    for (const s of listing.skills) {
+      expect({ name: s.name, user: s.user, model: s.model }).toEqual({
+        name: s.name,
+        user: agent.canActivateForUser(s.name),
+        model: skillDef.includes(`"${s.name}"`),
+      });
+    }
+    expect(listing.skills.find((s) => s.name === "neither")).toMatchObject({
+      user: false,
+      model: false,
+    });
   });
 
   test("/name end-to-end: a user-activated hidden skill's body reaches the model's first round", async () => {

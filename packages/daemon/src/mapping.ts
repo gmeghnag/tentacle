@@ -11,9 +11,13 @@ import {
   type KnownSessionUpdateParams,
   MAX_SKILL_CATALOG,
   MAX_SKILL_DESCRIPTION,
+  MAX_SKILL_LIST,
+  MAX_SKILL_PROBLEMS,
   type SessionUpdate,
+  type SkillListEntry,
   SkillNameSchema,
   type SkillSummary,
+  type SkillsListResult,
   type StopReason,
   UPDATE_CLASS,
   type UpdateClass,
@@ -50,6 +54,40 @@ export function toSkillCatalog(
     }
   }
   return out;
+}
+
+/** One wire line: control characters → a space, whitespace collapsed, cut to `max`. */
+function wireLine(text: string, max: number): string {
+  return text.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, max).trimEnd();
+}
+
+/**
+ * The `skills/list` result from the daemon's discovery (docs/feat/skills-panel.md):
+ * always valid for `SkillsListResultSchema` (the client rejects the whole
+ * result otherwise) — every string one line cut to its cap, an entry left
+ * with an empty one dropped; past `MAX_SKILL_LIST` skills one problem says how
+ * many were left out; past `MAX_SKILL_PROBLEMS` problems the rest are counted.
+ */
+export function toSkillList(listing: {
+  readonly skills: readonly SkillListEntry[];
+  readonly problems: readonly string[];
+}): SkillsListResult {
+  const skills: SkillListEntry[] = [];
+  for (const s of listing.skills.slice(0, MAX_SKILL_LIST)) {
+    const name = wireLine(s.name, 256);
+    const description = wireLine(s.description, MAX_SKILL_DESCRIPTION);
+    const location = wireLine(s.location, 4096);
+    if (name !== "" && description !== "" && location !== "") {
+      skills.push({ name, description, scope: s.scope, user: s.user, model: s.model, location });
+    }
+  }
+  const left = listing.skills.length - MAX_SKILL_LIST;
+  const all = [
+    ...(left > 0 ? [`${left} more skills not listed (at most ${MAX_SKILL_LIST})`] : []),
+    ...listing.problems.map((p) => wireLine(p, 1000)).filter((p) => p !== ""),
+  ];
+  const problems = all.slice(0, MAX_SKILL_PROBLEMS);
+  return { skills, problems, moreProblems: all.length - problems.length };
 }
 
 /** Flatten a prompt's content blocks to the plain-text the agent loop consumes. */

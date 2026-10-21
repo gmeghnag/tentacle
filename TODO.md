@@ -485,18 +485,26 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
 - [x] 🔵 **A late `/mcp` answer appears after `/clear`.** FIXED by
       `feat/mcp-tools-panel` (2026-10-21): `/mcp` is a panel now; a probe that
       answers after its panel closed is dropped (generation token).
-- [ ] 🟡 **`/mcp` — interactive panel listing each server's tools.**
+- [x] 🟡 **`/mcp` — interactive panel listing each server's tools.**
       `docs/feat/mcp-tools-panel.md`. Type: feat · Size: L · Blast:
       load-bearing (wire v7→v8 + a new in-session modal) · Suited: strong
-      model; fresh-context Review waived by the owner (budget).
+      model; fresh-context Review waived by the owner (budget). Merged 2a7a913.
+- [ ] 🟡 **`/skills` — panel listing every skill the daemon found.** Who may
+      invoke each one (you / model), where it lives, and the discovery problems
+      (now visible on `run`/`attach` too). New wire method `skills/list`
+      (additive, v8 kept); the `/mcp` panel logic generalised into
+      `tree-panel.ts`. `docs/feat/skills-panel.md`. Type: feat · Size: L ·
+      Blast: load-bearing · Suited: strong model; fresh-context Review waived
+      by the owner (budget).
 - [ ] 🔵 **`/mcp` polish.**
       - ~~No "probing…" placeholder during the ≤2 s probe.~~ Done by
         `feat/mcp-tools-panel`.
       - The tool list includes tools skipped for a name clash at register time.
       - The `methods.ts:1-6` header says the peer validates `result` before
         replying. Only the receiver validates (`peer.ts:436-444`).
-      - With the panel open, a paste or a lone typed `[` still lands in the
-        hidden input (seen once the panel closes).
+      - ~~With the panel open, a paste or a lone typed `[` still lands in the
+        hidden input.~~ Done by `feat/skills-panel` (bracketed paste, its
+        timeout flush, a held `[`, and a late Ctrl+V clipboard read).
       Type: feat · Size: S · Blast: contained.
 
 ### Block 11 — new capabilities under evaluation (2026-10-19)

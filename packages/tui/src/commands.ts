@@ -33,6 +33,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "/save", description: "save the transcript to a Markdown file" },
   { name: "/tokens", description: "show token usage for the session" },
   { name: "/mcp", description: "MCP servers: reachability and their tools" },
+  { name: "/skills", description: "every skill found: who can use it, and any problems" },
   { name: "/exit", description: "quit (also /quit)" },
 ];
 
@@ -232,19 +233,26 @@ export function helpText(skills: readonly SlashSkill[] = []): string {
 /** A daemon-supplied string, safe inside a Markdown code span or after a colon. */
 const mcpSafe = (text: string): string => oneLine(text).replace(/`/g, "");
 
-/** The `/mcp` notice when the status request itself failed. */
-export function mcpStatusError(error: unknown): string {
-  // JSON-RPC MethodNotFound: a daemon from before `mcp/status`.
+/** The notice when a panel's request (`command`, showing `what`) failed. */
+function requestError(command: string, what: string, error: unknown): string {
+  // JSON-RPC MethodNotFound: a daemon from before the method.
   if (
     typeof error === "object" &&
     error !== null &&
     (error as { code?: unknown }).code === -32601
   ) {
-    return "_This daemon doesn't support /mcp (it predates it)._";
+    return `_This daemon doesn't support ${command} (it predates it)._`;
   }
   const message = error instanceof Error ? error.message : String(error);
-  return `_MCP status unavailable: ${mcpSafe(message)}_`;
+  return `_${what} unavailable: ${mcpSafe(message)}_`;
 }
+
+/** The `/mcp` notice when the status request itself failed. */
+export const mcpStatusError = (error: unknown): string => requestError("/mcp", "MCP status", error);
+
+/** The `/skills` notice when the list request failed. */
+export const skillsListError = (error: unknown): string =>
+  requestError("/skills", "Skill list", error);
 
 /** The text of the most recent assistant reply (never a command's notice), or null. */
 export function lastAssistantText(items: readonly DisplayItem[]): string | null {

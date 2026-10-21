@@ -1,17 +1,17 @@
 /**
- * The `/mcp` panel (docs/feat/mcp-tools-panel.md), framed like the permission
- * dialog: a title rule, one row per server (and per tool of an expanded one),
- * a key hint. Everything shown is precomputed by `mcp-panel.ts`; keys and
- * clicks are routed in `App`.
+ * A list panel (`/mcp`, `/skills`; docs/feat/skills-panel.md), framed like the
+ * permission dialog: a title rule, the head rows (and the children of an
+ * expanded one), a key hint. Everything shown is precomputed by
+ * `tree-panel.ts`; keys and clicks are routed in `App`.
  */
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
-import type { PanelView } from "../mcp-panel.ts";
 import { accentHex } from "../theme.ts";
+import type { PanelView } from "../tree-panel.ts";
 
 const ACCENT = accentHex;
 
-export function McpPanel({ view, columns }: { view: PanelView; columns: number }): ReactElement {
+export function ListPanel({ view, columns }: { view: PanelView; columns: number }): ReactElement {
   const titlePrefix = `╭─ ${view.title} `;
   const dashes = Math.max(0, columns - titlePrefix.length - 1);
   return (
@@ -25,7 +25,7 @@ export function McpPanel({ view, columns }: { view: PanelView; columns: number }
           key={`${view.start + i}`}
           color={row.selected ? ACCENT : undefined}
           bold={row.selected}
-          dimColor={!row.selected && row.kind !== "server"}
+          dimColor={!row.selected && row.kind !== "head"}
           wrap="truncate-end"
         >
           {row.text}

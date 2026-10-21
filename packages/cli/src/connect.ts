@@ -123,6 +123,7 @@ export async function connectTui(
       link: client,
       skills: () => client.skills(),
       mcpStatus: () => client.mcpStatus(),
+      skillsList: () => client.skillsList(),
     });
   } finally {
     // The daemon keeps sessions past a disconnect: quitting ends ours (turn +

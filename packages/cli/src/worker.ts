@@ -23,7 +23,7 @@ import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { ToolRegistry } from "@tentacle/tools";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
-import { buildAgent, skillCatalog } from "./wiring.ts";
+import { buildAgent, skillCatalog, skillListing } from "./wiring.ts";
 
 // `globalThis` in a worker exposes postMessage/addEventListener at runtime; the
 // non-DOM TS lib doesn't type them, so go through the endpoint shape.
@@ -91,6 +91,7 @@ port.addEventListener("message", (event: { data: unknown }) => {
   const host = new SessionHost({
     defaultCwd: config.cwd,
     skills: skillCatalog(config),
+    skillList: skillListing(config),
     mcpStatus: () => mcpTracker.probe(),
     // A failed turn now ends in the stream (`turn_end.error`), not as a handler
     // throw: same policy as below — the real message to this LOCAL client, the

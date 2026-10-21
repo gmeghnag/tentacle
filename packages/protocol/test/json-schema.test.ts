@@ -130,6 +130,24 @@ const FIXTURES: Record<string, Json[]> = {
       ],
     },
   ],
+  "methods/skills~1list/params": [{}],
+  "methods/skills~1list/result": [
+    { skills: [], problems: [], moreProblems: 0 },
+    {
+      skills: [
+        {
+          name: "review",
+          description: "review a diff",
+          scope: "project",
+          user: true,
+          model: true,
+          location: "/w/.agents/skills/review/SKILL.md",
+        },
+      ],
+      problems: ["skipped skill at /w/x/SKILL.md: no description"],
+      moreProblems: 3,
+    },
+  ],
   "methods/model~1stream/params": [
     {
       request: {

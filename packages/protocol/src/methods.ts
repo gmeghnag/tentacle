@@ -32,6 +32,7 @@ import {
   SnapshotParamsSchema,
   SnapshotResultSchema,
 } from "./session.ts";
+import { SkillsListParamsSchema, SkillsListResultSchema } from "./skills.ts";
 import { SessionUpdateParamsSchema } from "./updates.ts";
 
 /** Request methods (expect a response). */
@@ -47,6 +48,7 @@ export const Method = {
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
   McpStatus: "mcp/status",
+  SkillsList: "skills/list",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -83,6 +85,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     result: ModelStreamChunkedResultSchema,
   },
   [Method.McpStatus]: { params: McpStatusParamsSchema, result: McpStatusResultSchema },
+  [Method.SkillsList]: { params: SkillsListParamsSchema, result: SkillsListResultSchema },
 };
 
 /** params schema for every notification method. */
