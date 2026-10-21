@@ -8,7 +8,7 @@
  */
 import { type Agent, Session } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
-import type { OpenParams, SkillSummary } from "@tentacle/protocol";
+import type { McpServerStatus, OpenParams, SkillSummary } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import {
   type Attachment,
@@ -60,6 +60,11 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * `slashSkills`), returned by `initialize` as its catalog. Absent → none.
    */
   readonly skills?: readonly { readonly name: string; readonly description: string }[];
+  /**
+   * This daemon's MCP servers, probed live (`mcp/status`, the TUI's `/mcp`).
+   * Absent → none (`serve` and pod daemons start no MCP servers today).
+   */
+  readonly mcpStatus?: () => Promise<readonly McpServerStatus[]>;
 }
 
 /** What `open` did: the session, whether it was built now, and the replay verdict. */
@@ -80,6 +85,11 @@ export class SessionHost {
   constructor(opts: SessionHostOptions) {
     this.opts = opts;
     this.skillCatalog = toSkillCatalog(opts.skills ?? []);
+  }
+
+  /** This daemon's MCP servers and their live state; empty when it runs none. */
+  mcpStatus(): Promise<readonly McpServerStatus[]> {
+    return this.opts.mcpStatus?.() ?? Promise.resolve([]);
   }
 
   /** The live session `id`, if any. */

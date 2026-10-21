@@ -7,3 +7,4 @@ export * from "./transport.ts";
 export * from "./client.ts";
 export * from "./tool-adapter.ts";
 export * from "./connect.ts";
+export * from "./status.ts";

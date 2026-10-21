@@ -1154,3 +1154,99 @@ describe("input editing: navigation, history & selection", () => {
     unmount();
   });
 });
+
+describe("/mcp (docs/feat/mcp-status.md)", () => {
+  const agent = new Agent({
+    model: new ScriptedProvider([]),
+    tools: new ToolRegistry(),
+    env: noopEnv,
+  });
+
+  test("shows each server's live state from the provider, asked once per /mcp", async () => {
+    let asked = 0;
+    const mcpStatus = async () => {
+      asked += 1;
+      return [
+        { name: "github", state: "connected" as const, tools: 12, latencyMs: 4 },
+        { name: "db", state: "failed" as const, tools: 0, error: "spawn ENOENT" },
+      ];
+    };
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" mcpStatus={mcpStatus} />,
+    );
+    await delay(30);
+    stdin.write("/mcp");
+    await delay(30);
+    stdin.write("\r");
+    await delay(80);
+    const frame = lastFrame() ?? "";
+    expect(asked).toBe(1);
+    expect(frame).toContain("1 of 2 reachable");
+    expect(frame).toContain("github — ● connected · 12 tools · 4 ms");
+    expect(frame).toContain("db — ✗ failed: spawn ENOENT");
+    unmount();
+  });
+
+  test("a probe answering mid-reply never merges with the model's text (review F1)", async () => {
+    // The reply streams HEAD, pauses, then TAIL; the probe lands in the pause.
+    const slow: ModelProvider = {
+      id: "slow",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { type: "text", delta: "HEAD" };
+        await delay(120);
+        yield { type: "text", delta: "TAIL" };
+        yield { type: "done" };
+      },
+    };
+    const slowAgent = new Agent({ model: slow, tools: new ToolRegistry(), env: noopEnv });
+    const mcpStatus = async () => {
+      await delay(60);
+      return [{ name: "github", state: "connected" as const, tools: 1, latencyMs: 3 }];
+    };
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={slowAgent} model="qwen3" cwd="/tmp/work" mcpStatus={mcpStatus} />,
+    );
+    await delay(30);
+    stdin.write("/mcp");
+    await delay(30);
+    stdin.write("\r"); // idle: allowed; the probe is now in flight
+    stdin.write("go");
+    await delay(10);
+    stdin.write("\r");
+    await delay(300);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("github — ● connected · 1 tool · 3 ms");
+    expect(frame).not.toContain("3 msTAIL");
+    expect(frame).toContain("TAIL");
+    unmount();
+  });
+
+  test("a failed request shows why", async () => {
+    const mcpStatus = () => Promise.reject(new Error("not connected to the daemon"));
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" mcpStatus={mcpStatus} />,
+    );
+    await delay(30);
+    stdin.write("/mcp");
+    await delay(30);
+    stdin.write("\r");
+    await delay(80);
+    expect(lastFrame() ?? "").toContain("MCP status unavailable: not connected to the daemon");
+    unmount();
+  });
+
+  test("without a provider it says so instead of 'Unknown command'", async () => {
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/mcp");
+    await delay(30);
+    stdin.write("\r");
+    await delay(80);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("MCP status isn't available on this runtime");
+    expect(frame).not.toContain("Unknown command");
+    unmount();
+  });
+});

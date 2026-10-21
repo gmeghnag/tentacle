@@ -29,6 +29,9 @@ export interface McpCallOptions {
   readonly timeoutMs?: number;
 }
 
+/** A JSON-RPC error response: the server is reachable, it refused the call. */
+export class McpServerError extends Error {}
+
 const DEFAULT_CLIENT_INFO: McpClientInfo = { name: "tentacle", version: "0.0.0" };
 // A wedged server must not hang the turn forever; the turn's abort signal still
 // cancels sooner. Generous so a legitimately slow tool completes.
@@ -77,6 +80,26 @@ export class McpClient {
       { name, arguments: args },
       { signal: options.signal, timeoutMs: options.timeoutMs ?? this.callTimeoutMs },
     )) as McpCallResult;
+  }
+
+  /**
+   * Prove the server is reachable: MCP `ping`, bounded by `timeoutMs`. Any
+   * response counts — an error reply (e.g. a server without `ping`) still
+   * answered. Rejects on timeout or a closed connection.
+   */
+  async ping(timeoutMs: number): Promise<void> {
+    try {
+      await this.request("ping", {}, { timeoutMs });
+    } catch (error) {
+      if (!(error instanceof McpServerError)) {
+        throw error;
+      }
+    }
+  }
+
+  /** True once the transport closed (the server process is gone) or `close()` ran. */
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   close(): void {
@@ -173,7 +196,7 @@ export class McpClient {
     }
     this.pending.delete(msg.id);
     if (msg.error) {
-      pending.reject(new Error(msg.error.message ?? "MCP error"));
+      pending.reject(new McpServerError(msg.error.message ?? "MCP error"));
     } else {
       pending.resolve(msg.result);
     }

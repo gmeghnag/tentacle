@@ -19,7 +19,7 @@ import type { TentacleConfig } from "@tentacle/config";
 import type { Tool } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { setGroupForwarder } from "@tentacle/exec";
-import { connectMcpServers } from "@tentacle/mcp";
+import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { ToolRegistry } from "@tentacle/tools";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
@@ -66,8 +66,11 @@ port.addEventListener("message", (event: { data: unknown }) => {
       }
     }
   };
+  // What `/mcp` reports (`mcp/status`): `connecting` until this settles.
+  const mcpTracker = new McpStatusTracker(Object.keys(config.mcpServers));
   connectMcpServers(config.mcpServers)
     .then((result) => {
+      mcpTracker.settle(result);
       mcpTools = result.tools;
       mcpReady = true;
       for (const registry of pending) {
@@ -79,6 +82,7 @@ port.addEventListener("message", (event: { data: unknown }) => {
       }
     })
     .catch((error) => {
+      mcpTracker.fail(String(error));
       mcpReady = true;
       pending.clear();
       postObject({ type: "mcp-errors", errors: { "*": String(error) } });
@@ -87,6 +91,7 @@ port.addEventListener("message", (event: { data: unknown }) => {
   const host = new SessionHost({
     defaultCwd: config.cwd,
     skills: skillCatalog(config),
+    mcpStatus: () => mcpTracker.probe(),
     // A failed turn now ends in the stream (`turn_end.error`), not as a handler
     // throw: same policy as below — the real message to this LOCAL client, the
     // full error (with stack) to the daemon error log.

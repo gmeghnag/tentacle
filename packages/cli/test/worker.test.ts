@@ -81,4 +81,42 @@ describe("startWorkerRuntime (real worker spawn)", () => {
       runtime.dispose();
     }
   });
+
+  test("/mcp: the worker reports each configured MCP server's live state", async () => {
+    const server = join(import.meta.dir, "fixtures", "mcp-stdio-server.ts");
+    const runtime = await startWorkerRuntime(
+      {
+        ...config,
+        mcpServers: {
+          echo: { command: process.execPath, args: [server] },
+          missing: { command: join(dir, "no-such-mcp-server") },
+        },
+      },
+      {
+        permissions: new PermissionBroker(),
+        saver: new SessionSaver(new JsonSessionStore(join(dir, "sessions-mcp")), () => {}),
+        resume: null,
+      },
+      () => {},
+    );
+    expect(runtime).not.toBeNull();
+    if (!runtime) {
+      return;
+    }
+    try {
+      // The connect runs in the background: poll until it has settled.
+      let servers = await runtime.mcpStatus();
+      for (let i = 0; i < 100 && servers.some((s) => s.state === "connecting"); i++) {
+        await Bun.sleep(50);
+        servers = await runtime.mcpStatus();
+      }
+      expect(servers.map((s) => [s.name, s.state, s.tools])).toEqual([
+        ["echo", "connected", 1],
+        ["missing", "failed", 0],
+      ]);
+      expect(servers[1]?.error).toBeTruthy();
+    } finally {
+      await runtime.dispose();
+    }
+  });
 });

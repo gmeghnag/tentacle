@@ -22,6 +22,13 @@ export interface UserItem {
 export interface AssistantItem {
   readonly kind: "assistant";
   readonly text: string;
+  /**
+   * A command's reply (`/mcp`, `/model`, …), rendered like the model's text.
+   * Model text never extends it: a notice can land mid-reply (or, for an async
+   * one like `/mcp`, after the next prompt started), so the next chunk opens a
+   * new item instead of merging into the notice.
+   */
+  readonly notice?: true;
 }
 
 /** A standalone system line (e.g. a background job finishing). */
@@ -185,12 +192,17 @@ export function startContinuation(state: DisplayState, now: number): DisplayStat
   };
 }
 
+/** Append a command's reply (see `AssistantItem.notice`). */
+export function pushNoticeItem(state: DisplayState, text: string): DisplayState {
+  return { ...state, items: append(state.items, { kind: "assistant", text, notice: true }) };
+}
+
 /** Fold one agent event into the display state. */
 export function applyEvent(state: DisplayState, event: AgentEvent, now: number): DisplayState {
   switch (event.type) {
     case "text": {
       const last = state.items.at(-1);
-      if (last && last.kind === "assistant") {
+      if (last && last.kind === "assistant" && !last.notice) {
         const items = state.items.slice(0, -1);
         items.push({ kind: "assistant", text: last.text + event.delta });
         return { ...state, items, reasoning: false };

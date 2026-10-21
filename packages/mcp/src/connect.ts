@@ -16,6 +16,10 @@ export interface McpConnection {
   readonly name: string;
   readonly tools: readonly Tool[];
   close(): void;
+  /** False once the server process is gone (or `close()` ran). */
+  isOpen(): boolean;
+  /** MCP `ping`: resolves if the server answers within `timeoutMs`. */
+  ping(timeoutMs: number): Promise<void>;
 }
 
 export interface ConnectMcpResult {
@@ -73,7 +77,13 @@ export async function connectServer(
     await withTimeout(client.initialize(), timeout, `MCP server "${name}" initialize`);
     const defs = await withTimeout(client.listTools(), timeout, `MCP server "${name}" tools/list`);
     const tools = defs.map((def) => mcpToolToTool(name, client, def));
-    return { name, tools, close: () => client.close() };
+    return {
+      name,
+      tools,
+      close: () => client.close(),
+      isOpen: () => !client.isClosed,
+      ping: (ms) => client.ping(ms),
+    };
   } catch (error) {
     client.close();
     throw error instanceof Error ? error : new Error(String(error));

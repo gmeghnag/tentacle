@@ -4,12 +4,15 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import {
+  type McpServerView,
   type SlashSkill,
   helpText,
   isSessionMutating,
   lastAssistantText,
   lastUserText,
   matchCommands,
+  mcpStatusError,
+  mcpStatusText,
   paletteWindow,
   quitAction,
   resolveSlash,
@@ -41,6 +44,7 @@ import {
   backgroundExitNotice,
   failTurn,
   initialState,
+  pushNoticeItem,
   startContinuation,
   startTurn,
 } from "./state.ts";
@@ -103,6 +107,8 @@ export interface AppProps {
    * applies from the next keystroke.
    */
   readonly skills?: () => readonly SlashSkill[];
+  /** The daemon's MCP servers, probed live (`/mcp`). Absent → `/mcp` says it's unavailable. */
+  readonly mcpStatus?: () => Promise<readonly McpServerView[]>;
   /** Injectable for tests (defaults to the OS clipboard + Bun.write). */
   readonly clipboard?: (text: string) => Promise<void>;
   /** Injectable for tests (defaults to the OS clipboard read). */
@@ -147,6 +153,7 @@ export function App({
   notices,
   link,
   skills = () => [],
+  mcpStatus,
   clipboard = copyToClipboard,
   paste = readClipboard,
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
@@ -374,10 +381,7 @@ export function App({
 
   const pushNotice = useCallback(
     (text: string) => {
-      stateRef.current = {
-        ...stateRef.current,
-        items: [...stateRef.current.items, { kind: "assistant", text }],
-      };
+      stateRef.current = pushNoticeItem(stateRef.current, text);
       setScrollOffset(0);
       flushNow();
     },
@@ -520,6 +524,16 @@ export function App({
         case "/model":
           pushNotice(`Model: \`${model}\``);
           return;
+        case "/mcp":
+          if (!mcpStatus) {
+            pushNotice("_MCP status isn't available on this runtime._");
+            return;
+          }
+          void mcpStatus().then(
+            (servers) => pushNotice(mcpStatusText(servers)),
+            (e) => pushNotice(mcpStatusError(e)),
+          );
+          return;
         case "/tokens": {
           const t = stateRef.current.sessionTokens;
           pushNotice(
@@ -568,7 +582,19 @@ export function App({
           pushNotice(`_Unknown command: ${cmd}. Try /help._`);
       }
     },
-    [makeSession, clipboard, cwd, exit, flushNow, model, pushNotice, run, saveFile, skills],
+    [
+      makeSession,
+      clipboard,
+      cwd,
+      exit,
+      flushNow,
+      mcpStatus,
+      model,
+      pushNotice,
+      run,
+      saveFile,
+      skills,
+    ],
   );
 
   const submit = useCallback(

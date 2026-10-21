@@ -25,7 +25,7 @@ import {
   deletePodFromEnv,
   loadKubeClientOptions,
 } from "@tentacle/k8s";
-import { connectMcpServers } from "@tentacle/mcp";
+import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import { type SessionController, pickSession, startTui } from "@tentacle/tui";
 import { type TentacleConfig, loadConfig } from "./config.ts";
 import { connectTui } from "./connect.ts";
@@ -382,6 +382,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           createSession: runtime.createSession,
           link: runtime.link,
           skills: runtime.skills,
+          mcpStatus: runtime.mcpStatus,
           ...sessionOptions,
         }),
       teardown: () => runtime.dispose(),
@@ -530,6 +531,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               createSession: runtime.createSession,
               link: runtime.link,
               skills: runtime.skills,
+              mcpStatus: runtime.mcpStatus,
               ...sessionOptions,
             }),
           teardown: () => runtime.dispose(),
@@ -548,6 +550,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     for (const [name, message] of Object.entries(mcp.errors)) {
       write(`[mcp] server "${name}" failed to connect: ${message}\n`);
     }
+    const mcpTracker = new McpStatusTracker(Object.keys(config.mcpServers));
+    mcpTracker.settle(mcp);
     const { createSession, jobs } = inProcessSessions({
       build,
       mcpTools: mcp.tools,
@@ -574,6 +578,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           autoWakeOnJobExit: config.autoWake,
           createSession,
           skills: () => catalog,
+          mcpStatus: () => mcpTracker.probe(),
           ...sessionOptions,
         }),
       teardown: () => mcp.dispose(),
