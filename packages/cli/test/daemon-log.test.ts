@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { daemonErrorLogPath, logDaemonError } from "../src/daemon-log.ts";
+import { daemonErrorLogPath, logDaemonError, logModelRetry } from "../src/daemon-log.ts";
 
 let dir: string;
 beforeAll(async () => {
@@ -58,5 +58,40 @@ describe("logDaemonError", () => {
     const path = logDaemonError(dir, new RequestErrorLike(fullBody));
     const contents = await readFile(path, "utf8");
     expect(contents).toContain(fullBody);
+  });
+
+  test("logs the cause chain: the original error's name, message and code", async () => {
+    // Bun's connection errors carry their identity on `code` and have no
+    // stack; a wrapper that keeps them as `cause` must not lose either.
+    const original = Object.assign(new TypeError("ECONNRESET: socket closed"), {
+      code: "ECONNRESET",
+    });
+    const wrapped = new Error("model connection lost before any event was delivered", {
+      cause: original,
+    });
+    const path = logDaemonError(dir, wrapped);
+    const contents = await readFile(path, "utf8");
+    expect(contents).toContain("Cause: TypeError: ECONNRESET: socket closed (code ECONNRESET)");
+  });
+});
+
+describe("logModelRetry", () => {
+  test("appends one line naming the attempt, code, boundary, provider and wait", async () => {
+    logModelRetry(dir, {
+      attempt: 1,
+      maxAttempts: 3,
+      code: "ECONNRESET",
+      delayMs: 412,
+      providerId: "openai:qwen",
+    });
+    const body = await readFile(daemonErrorLogPath(dir), "utf8");
+    expect(body).toMatch(
+      /\[\d{4}-\d{2}-\d{2}T[\d:.]+Z\] model retry 1\/2 after ECONNRESET \(no event delivered yet, openai:qwen\), waiting 412ms\n/,
+    );
+  });
+
+  test("best-effort: an unwritable target does not throw", () => {
+    const info = { attempt: 1, maxAttempts: 3, code: "EPIPE", delayMs: 1, providerId: "p" };
+    expect(() => logModelRetry("/dev/null/logs-cannot-exist", info)).not.toThrow();
   });
 });

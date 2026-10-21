@@ -34,6 +34,18 @@ export function logDaemonError(configDir: string, error: unknown): string {
     if (typeof body === "string" && body.length > 0 && !err.message.includes(body)) {
       entry += `Full response body:\n${body}\n`;
     }
+    // A wrapper (e.g. ModelConnectionError) keeps the original as `cause`.
+    // Bun's connection errors have no stack and carry their identity on
+    // `code`, so name, message and code are written out explicitly.
+    const cause = err.cause;
+    if (cause !== undefined) {
+      const c = cause instanceof Error ? cause : new Error(String(cause));
+      const code = (c as { code?: unknown }).code;
+      entry += `Cause: ${c.name}: ${c.message}${code !== undefined ? ` (code ${String(code)})` : ""}\n`;
+      if (c.stack) {
+        entry += `${c.stack}\n`;
+      }
+    }
     entry += "\n";
     mkdirSync(dirname(path), { recursive: true });
     appendFileSync(path, entry);
@@ -41,4 +53,31 @@ export function logDaemonError(configDir: string, error: unknown): string {
     // best-effort — logging must never break the daemon.
   }
   return path;
+}
+
+/** What `logModelRetry` records (structurally the providers' `RetryInfo`). */
+export interface ModelRetryLogEntry {
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly code: string;
+  readonly delayMs: number;
+  readonly providerId: string;
+}
+
+/**
+ * Append one line for a retried model-connection drop. Nothing reaches the
+ * screen when the retry recovers, so this line is the only trace — and what
+ * tells how often the connection actually blips. Best-effort, never throws.
+ */
+export function logModelRetry(configDir: string, info: ModelRetryLogEntry): void {
+  try {
+    const path = daemonErrorLogPath(configDir);
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(
+      path,
+      `[${new Date().toISOString()}] model retry ${info.attempt}/${info.maxAttempts - 1} after ${info.code} (no event delivered yet, ${info.providerId}), waiting ${info.delayMs}ms\n\n`,
+    );
+  } catch {
+    // best-effort — logging must never break the daemon.
+  }
 }

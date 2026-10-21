@@ -7,6 +7,7 @@
 import type { ModelProvider } from "@tentacle/core";
 import { AnthropicProvider } from "./anthropic-provider.ts";
 import { OpenAIProvider } from "./openai-provider.ts";
+import { type RetryInfo, RetryingModelProvider } from "./retry.ts";
 
 /** A provider kind understood by the harness. */
 export type ProviderKind = "openai" | "anthropic";
@@ -23,9 +24,16 @@ export interface CreateModelProviderOptions {
   readonly maxTokens?: number;
   /** Injectable fetch, for tests. */
   readonly fetch?: typeof fetch;
+  /** Told about each retried connection drop (the caller logs it). */
+  readonly onRetry?: (info: RetryInfo) => void;
 }
 
-export function createModelProvider(options: CreateModelProviderOptions): ModelProvider {
+/**
+ * The provider for `options.provider`, wrapped in `RetryingModelProvider` so a
+ * connection that drops before any output is retried for every construction
+ * site at once.
+ */
+export function createModelProvider(options: CreateModelProviderOptions): RetryingModelProvider {
   const config = {
     baseURL: options.baseURL,
     model: options.model,
@@ -35,8 +43,7 @@ export function createModelProvider(options: CreateModelProviderOptions): ModelP
   };
   // `openai` is the default (existing behaviour); the config schema is the
   // first gate against an unknown kind, so this only branches on `anthropic`.
-  if (options.provider === "anthropic") {
-    return new AnthropicProvider(config);
-  }
-  return new OpenAIProvider(config);
+  const inner: ModelProvider =
+    options.provider === "anthropic" ? new AnthropicProvider(config) : new OpenAIProvider(config);
+  return new RetryingModelProvider(inner, options.onRetry ? { onRetry: options.onRetry } : {});
 }

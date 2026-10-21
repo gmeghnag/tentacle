@@ -32,7 +32,6 @@ import {
 import { type JobController, type ModelProvider, PermissionBroker } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
-import { createModelProvider } from "@tentacle/providers";
 import {
   SKILL_TOOL_NAME,
   type SkillBodyReader,
@@ -42,6 +41,7 @@ import {
   createSkillTool,
   createTaskTool,
 } from "@tentacle/tools";
+import { configuredModelProvider } from "./model-provider.ts";
 
 /**
  * The daemon's `/name` catalog for `initialize` (`SessionHostOptions.skills`):
@@ -101,15 +101,7 @@ export interface BuildAgentOptions {
 }
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
-  const model =
-    options.modelOverride ??
-    createModelProvider({
-      provider: config.provider,
-      baseURL: config.baseURL,
-      model: config.model,
-      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-      ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
-    });
+  const model = options.modelOverride ?? configuredModelProvider(config);
   const env = new HostExecution({ cwd: config.cwd, root: config.cwd });
   const tools = new ToolRegistry().registerAll(builtinTools);
   const permissions = options.permissions ?? new PermissionBroker();
@@ -169,15 +161,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       model,
       // Per-type model override: same endpoint, a different model id. Over a
       // model tunnel the override provider is used for every type.
-      modelFor: (modelId) =>
-        options.modelOverride ??
-        createModelProvider({
-          provider: config.provider,
-          baseURL: config.baseURL,
-          model: modelId,
-          ...(config.apiKey ? { apiKey: config.apiKey } : {}),
-          ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
-        }),
+      modelFor: (modelId) => options.modelOverride ?? configuredModelProvider(config, modelId),
       env,
       tools,
       requestPermission: (req) => permissions.request(req),
