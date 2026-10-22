@@ -28,7 +28,7 @@ import {
 } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import { type SessionController, pickSession, startTui } from "@tentacle/tui";
-import { type TentacleConfig, loadConfig } from "./config.ts";
+import { type TentacleConfig, loadConfig, longToolNameWarnings } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import {
   ARGS,
@@ -44,6 +44,7 @@ import {
 } from "./flags.ts";
 import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
+import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { startAttachRuntime, startPodRuntime } from "./pod-runtime.ts";
 import { render } from "./render.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
@@ -54,6 +55,7 @@ import {
   buildAgent,
   connectConfiguredMcp,
   inProcessAgents,
+  loadUserAgentTypes,
   skillCatalog,
   skillListing,
 } from "./wiring.ts";
@@ -89,6 +91,10 @@ Usage:
   tentacle connect <url>   drive a remote daemon with the TUI
   tentacle hooks trust --list | --revoke <folder>
                            list / revoke stored project-hooks trust decisions
+  tentacle packages install <path|git-url>[#ref] | list | remove <name> | update [<name>]
+                           manage packages (skills, agent types, MCP servers,
+                           hooks) in <configDir>/packages; installing trusts
+                           a package's hooks like your own
   tentacle --help          show this help
   tentacle --version       print the version and exit
   tentacle --profile <name> ...
@@ -248,6 +254,16 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     return 1;
   }
 
+  // `tentacle packages …` (docs/feat/packages.md): no TUI, plain output.
+  if (mode === "packages") {
+    return packagesCommand(parsed.positional, {
+      configDir: config.configDir,
+      enabled: config.packagesEnabled,
+      git: spawnGit,
+      write,
+    });
+  }
+
   // `tentacle hooks trust --list | --revoke <folder>` (P3): no TUI, plain output.
   if (mode === "hooks") {
     const revoke = parsed.flags.get("revoke");
@@ -277,6 +293,18 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     if (wireProblem) {
       writeErr(`[hooks] ${wireProblem}\n`);
     }
+    const agentTypes = loadUserAgentTypes(config.configDir, config.packageAgentDirs);
+    for (const line of config.packageDiagnostics) {
+      writeErr(`[packages] ${line}\n`);
+    }
+    for (const line of agentTypes.diagnostics) {
+      writeErr(`[agents] ${line}\n`);
+    }
+  } else if (config.packages.length > 0) {
+    // D11: laptop packages are not shipped to the pod in v1.
+    writeErr(
+      `[packages] ${config.packages.length} installed package(s) are not loaded in a pod session (the pod uses its own config)\n`,
+    );
   }
 
   // Host the remote-control daemon and run until interrupted.
@@ -586,6 +614,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     for (const [name, message] of Object.entries(mcp.errors)) {
       write(`[mcp] server "${name}" failed to connect: ${message}\n`);
     }
+    for (const line of longToolNameWarnings(mcp.tools.map((t) => t.name))) {
+      write(`[mcp] ${line}\n`);
+    }
     const mcpTracker = new McpStatusTracker(Object.keys(config.mcpServers));
     mcpTracker.settle(mcp);
     const { createSession, jobs } = inProcessSessions({
@@ -640,6 +671,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const mcp = await connectConfiguredMcp(config, tools);
   for (const [name, message] of Object.entries(mcp.errors)) {
     write(`[mcp] server "${name}" failed to connect: ${message}\n`);
+  }
+  for (const line of longToolNameWarnings(mcp.tools.map((t) => t.name))) {
+    write(`[mcp] ${line}\n`);
   }
   const controller = new AbortController();
   const onSignal = (): void => controller.abort();

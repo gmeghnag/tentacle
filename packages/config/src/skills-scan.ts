@@ -42,13 +42,16 @@ function errorCode(error: unknown): string | undefined {
  * The scope roots in precedence order: every `.agents/skills` from the launch
  * cwd up (nearest first) — stopping after the repo root (`.git`), at the
  * filesystem root, or BEFORE `home` (`~/.agents/skills` is the user scope,
- * never a project one) — then `<configDir>/skills`, then `~/.agents/skills`.
+ * never a project one) — then `<configDir>/skills`, then `~/.agents/skills`,
+ * then the installed packages' `skills/` dirs (so the user's own skills win).
  * A root reached twice (same real path) is kept once, at its first position.
  */
 export async function skillRoots(
   launchCwd: string,
   home: string,
   configDir: string,
+  /** Package `skills/` dirs (user scope), after every root the user owns. */
+  packageRoots: readonly string[] = [],
 ): Promise<SkillRoot[]> {
   const roots: SkillRoot[] = [];
   const homeDir = resolvePath(home);
@@ -66,6 +69,9 @@ export async function skillRoots(
   }
   roots.push({ path: join(configDir, "skills"), scope: "user" });
   roots.push({ path: join(homeDir, ".agents", "skills"), scope: "user" });
+  for (const path of packageRoots) {
+    roots.push({ path, scope: "user" });
+  }
 
   const seen = new Set<string>();
   const unique: SkillRoot[] = [];

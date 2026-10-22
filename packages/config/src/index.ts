@@ -14,3 +14,4 @@ export * from "./load.ts";
 export * from "./skills.ts";
 export * from "./skills-scan.ts";
 export * from "./hooks-scan.ts";
+export * from "./packages.ts";

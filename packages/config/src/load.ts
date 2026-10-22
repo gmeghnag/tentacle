@@ -16,6 +16,12 @@ import {
   PROMPT_FILENAME,
 } from "./defaults.ts";
 import { type ProjectHooks, discoverProjectHooks } from "./hooks-scan.ts";
+import {
+  type PackageHook,
+  type PackageInfo,
+  mergePackageContributions,
+  scanPackages,
+} from "./packages.ts";
 import { applyProfile } from "./profile.ts";
 import {
   type ApiKeySource,
@@ -66,8 +72,18 @@ export interface TentacleConfig {
   readonly dedupOutput: boolean;
   readonly tabulateJson: boolean;
   readonly autoWake: boolean;
-  readonly hooks: ResolvedConfig["hooks"];
+  /** The user's hooks, then the enabled packages' (tagged with `source`). */
+  readonly hooks: readonly (ResolvedConfig["hooks"][number] | PackageHook)[];
+  /** The user's servers plus the packages' (`<pkg>-<server>`; the user's win a clash). */
   readonly mcpServers: ResolvedConfig["mcpServers"];
+  /** Enabled, valid installed packages (docs/feat/packages.md), by name. */
+  readonly packages: readonly PackageInfo[];
+  /** The config's `packages` map (after the profile): `false` = disabled. */
+  readonly packagesEnabled: Readonly<Record<string, boolean>>;
+  /** The packages' `agents/` dirs, read after `<configDir>/agents` (first wins). */
+  readonly packageAgentDirs: readonly string[];
+  /** Packages skipped (malformed) and contributions ignored (name clash), for the user. */
+  readonly packageDiagnostics: readonly string[];
   readonly apiKey?: string;
   readonly configDir: string;
   readonly configPath: string;
@@ -253,13 +269,19 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     }
   }
 
+  // Installed packages (user scope: installing is the trust decision, D11).
+  // Best-effort: a broken package is a diagnostic, skipped whole.
+  const scanned = await scanPackages(configDir, fileConfig.packages ?? {});
+  const packageDiagnostics = [...scanned.diagnostics];
+
   // Discover skills from the launch folder (the same root as AGENTS.md) and the
   // user scopes. Best-effort like AGENTS.md: problems are diagnostics, never
   // a failed startup. Disabled → no I/O at all.
   let skills: SkillInfo[] = [];
   const skillDiagnostics: string[] = [];
   if (skillsEnabled(fileConfig, env)) {
-    const scan = await scanSkills(await skillRoots(launchCwd, home, configDir));
+    const packageSkillRoots = scanned.packages.flatMap((p) => (p.skillsDir ? [p.skillsDir] : []));
+    const scan = await scanSkills(await skillRoots(launchCwd, home, configDir, packageSkillRoots));
     const merged = mergeSkills(scan.candidates);
     skills = merged.skills;
     skillDiagnostics.push(...scan.diagnostics, ...merged.diagnostics);
@@ -295,6 +317,12 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
   }
 
   const cwd = resolvePath(expandTilde(resolved.cwd, home));
+  const contributed = mergePackageContributions(
+    resolved.mcpServers,
+    resolved.hooks,
+    scanned.packages,
+  );
+  packageDiagnostics.push(...contributed.diagnostics);
 
   return {
     provider: resolved.provider,
@@ -313,8 +341,12 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     dedupOutput: resolved.dedupOutput,
     tabulateJson: resolved.tabulateJson,
     autoWake: resolved.autoWake,
-    hooks: resolved.hooks,
-    mcpServers: resolved.mcpServers,
+    hooks: contributed.hooks,
+    mcpServers: contributed.mcpServers,
+    packages: scanned.packages,
+    packagesEnabled: fileConfig.packages ?? {},
+    packageAgentDirs: scanned.packages.flatMap((p) => (p.agentsDir ? [p.agentsDir] : [])),
+    packageDiagnostics,
     ...(apiKey !== undefined ? { apiKey } : {}),
     configDir,
     configPath,

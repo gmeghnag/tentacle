@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { type AskHooksTrust, type HookRunner, Session } from "@tentacle/agent";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
-import { buildAgent, inProcessAgents, skillCatalog, skillListing } from "../src/wiring.ts";
+import {
+  buildAgent,
+  inProcessAgents,
+  loadUserAgentTypes,
+  skillCatalog,
+  skillListing,
+} from "../src/wiring.ts";
 
 let dir: string;
 let config: TentacleConfig;
@@ -407,5 +413,44 @@ describe("project hooks wiring (docs/feat/hooks-project-trust.md)", () => {
       expect(await ask({ ...request, sessionId: "s1" })).toBe(true);
     }
     expect(kinds).toEqual(["hooks_trust"]);
+  });
+});
+
+describe("loadUserAgentTypes with package dirs (docs/feat/packages.md)", () => {
+  test("package agent types are offered; a clash keeps <configDir>/agents' and names both", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agent-types-"));
+    const cfg = join(root, "cfg");
+    const pkgA = join(cfg, "packages", "a", "agents");
+    const pkgB = join(cfg, "packages", "b", "agents");
+    for (const d of [join(cfg, "agents"), pkgA, pkgB]) await mkdir(d, { recursive: true });
+    await writeFile(join(cfg, "agents", "scout.md"), "---\ndescription: mine\n---\nmine");
+    await writeFile(join(pkgA, "scout.md"), "---\ndescription: from a\n---\na");
+    await writeFile(join(pkgA, "linter.md"), "---\ndescription: a linter\n---\nlint");
+    // Same type name via frontmatter, different file: the first package wins.
+    await writeFile(join(pkgB, "other.md"), "---\nname: linter\ndescription: b\n---\nb");
+    const { types, diagnostics } = loadUserAgentTypes(cfg, [pkgA, pkgB]);
+    expect(types.map((t) => [t.name, t.description])).toEqual([
+      ["scout", "mine"],
+      ["linter", "a linter"],
+    ]);
+    expect(diagnostics).toEqual([
+      `agent type "scout" in ${join(pkgA, "scout.md")} ignored (already defined by ${join(cfg, "agents", "scout.md")})`,
+      `agent type "linter" in ${join(pkgB, "other.md")} ignored (already defined by ${join(pkgA, "linter.md")})`,
+    ]);
+  });
+});
+
+describe("loadUserAgentTypes: built-in shadowing (post-review)", () => {
+  test("a package type replacing a built-in is reported; the user's own is not", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agent-builtin-"));
+    const cfg = join(root, "cfg");
+    const pkg = join(root, "pkg", "agents");
+    for (const d of [join(cfg, "agents"), pkg]) await mkdir(d, { recursive: true });
+    await writeFile(join(cfg, "agents", "explore.md"), "mine");
+    await writeFile(join(pkg, "general-purpose.md"), "theirs");
+    const { diagnostics } = loadUserAgentTypes(cfg, [pkg]);
+    expect(diagnostics).toEqual([
+      `agent type "general-purpose" in ${join(pkg, "general-purpose.md")} replaces the built-in one`,
+    ]);
   });
 });

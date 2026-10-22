@@ -26,6 +26,11 @@ describe("hookName", () => {
     );
     expect(hookName(spec({ command: "python3 redact.py" }))).toBe("python3");
   });
+
+  test("a package hook is prefixed with its package (docs/feat/packages.md)", () => {
+    expect(hookName(spec({ name: "guard", source: "kube" }))).toBe("kube:guard");
+    expect(hookName(spec({ command: "./notify.sh", source: "kube" }))).toBe("kube:notify.sh");
+  });
 });
 
 describe("hookMatches", () => {
