@@ -644,7 +644,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         excluded) — DONE 2026-10-22 (`feat/hooks-project-trust`): `docs/feat/hooks-project-trust.md`.
         Type: feat · Size: M · Blast: load-bearing (§7).
       - [ ] **packages** (own format; path + git; `tentacle packages …`; not in
-        pod v1) — K1–K3 decided: `docs/eval/packages.md`. Type: eval →
+        pod v1) — in progress (`feat/packages`): `docs/feat/packages.md`. Type:
         feat · Size: M · Blast: cross-module.
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)

@@ -1,9 +1,9 @@
-# eval/packages — declarative bundles of skills, agents, MCP servers and hooks
+# feat/packages — declarative bundles of skills, agents, MCP servers and hooks
 
-> **Status:** eval. Owner decision D11 in the umbrella. K1–K3 **decided 2026-10-21**. Implementation drafted below, approved at promotion.
-> **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10). Promote to `feat/packages`.
-> **Type:** eval → feat · **Size:** M · **Blast:** cross-module (config loading, skills scan, agent defs, MCP config, a new CLI subcommand; no protocol / persistence-format / agent-loop change) · **Suited:** a weaker model may execute with a standard Review; fresh-context Review if the scope grows to touch trust
-> **Umbrella:** [`extensibility.md`](./extensibility.md) (child 5 of 5) · **Needs:** `hooks-core` merged (packages may carry hooks)
+> **Status:** feat — promoted 2026-10-22. Owner decision D11 in the umbrella; K1–K3 decided 2026-10-21. Implementation approved.
+> **Branch:** `feat/packages`
+> **Type:** eval → feat · **Size:** M · **Blast:** cross-module (config loading, skills scan, agent defs, MCP config, a new CLI subcommand; no protocol / persistence-format / agent-loop change) · **Review:** fresh-context (packages carry hooks → touches the trust model)
+> **Umbrella:** [`extensibility.md`](../eval/extensibility.md) (child 5 of 5) · **Needs:** `hooks-core` merged ✓ (packages may carry hooks)
 
 ## Context
 
