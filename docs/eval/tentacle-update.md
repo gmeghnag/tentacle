@@ -1,6 +1,6 @@
 # eval/tentacle-update — `tentacle update`: self-update the CLI and its cached pod binaries
 
-> **Status:** eval (Context + open decisions; Review verdict after discussion; Implementation empty until promoted)
+> **Status:** eval — **all decisions taken by the owner 2026-10-22** (see *Owner decisions*); ready to promote as three children
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10)
 > **Type:** eval · **Size:** M overall → split on promotion (see *Proposed split*) · **Blast:** cross-module (cli + pod-binary resolution + the release workflow; it rewrites the user's own executable) · **Suited:** strong model executes; standard Review plus a manual end-to-end run against a real release
 
@@ -179,7 +179,7 @@ is embedded in the same file.
 
 ### Proposed split on promotion
 
-1. **`fix/attach-version-skew`** (S, cross-module): preflight compares
+1. ~~**`fix/attach-version-skew`**~~ dropped (D4). (S, cross-module): preflight compares
    versions; re-inject via temp + `mv` (D4, F4/F5). Independent; can go first.
 2. **`feat/pod-binary-download`** (S, contained): D1 (download helper used by
    `update`; `run`/`attach` error on a missing/stale binary) + D2 manifest in
@@ -188,35 +188,18 @@ is embedded in the same file.
    download/verify/commit, `--check` / `--version`, plus the CI step that signs
    `SHA256SUMS` (D3). Reuses the download + verify helpers from task 2.
 
-### Open questions (pending discussion with the user)
+### Owner decisions (2026-10-22) — these supersede the proposals above
 
-Nothing above is approved. Each item needs an explicit answer before
-promotion. The recommendation is Claude's; the user decides.
-
-1. **D1 — pod binaries:** DECIDED 2026-10-22 — downloaded by `tentacle update`
-   (both Linux arches), never lazily; `run`/`attach` stay offline. Sub-question:
-   `--no-pods`?
-2. **D2 — cached version tracking:** sidecar `<configDir>/bin/manifest.json`,
-   or the version in the file name?
-3. **D3 — integrity:** SHA-256 only, or Ed25519-signed `SHA256SUMS` with the
-   public key embedded in the binary (needs a signing key in a repo secret and
-   a rotation story)?
-4. **D4 — attach skew:** separate `fix/attach-version-skew` first? On a
-   version mismatch in a user-owned pod, **re-inject silently or ask**, given
-   another session may be running the old daemon there (it keeps running on
-   its inode either way)?
-5. **D5 — unwritable install dir:** fail with a `sudo` hint (no auto-escalation)?
-   How to detect a future package-manager install (path prefix vs marker)?
-6. **D6 — notifications:** confirm no startup network check in v1 (explicit
-   `update` / `--check` only)?
-7. **D7 — versioning:** who bumps `packages/cli/package.json` and when (by
-   hand before tagging, or a release script)? Is `0.1.0` the first public tag?
-8. **Order of work:** confirm the split and the order (fix skew → pod-binary
-   download → `update`).
-
-**Repro (capability missing, 2026-10-20):** `tentacle update` is not a
-subcommand. `rg -n '"update"' packages/cli/src/main.ts` finds no handler, and
-there is no download path in `pod-binary-build.ts` (F3 lists every source).
+| # | Decision |
+|---|---|
+| D1 | `tentacle update` downloads **both** Linux pod binaries at the target version (also filling missing/stale ones when the CLI is current). Never lazily: `run`/`attach` stay offline and fail with "run `tentacle update`" on a missing or stale pod binary |
+| D2 | **No `manifest.json`.** A version **marker** constant compiled into the binary (e.g. `TENTACLE_VERSION_MARKER:<version>:END`); tentacle reads a Linux pod binary's version by scanning the file **from the end** (the bundle sits in the last MBs). Never modify the binary after build (macOS code signature; Bun's trailing payload on Linux). A build test asserts the marker matches the version. A binary without a marker (e.g. 0.1.0-beta.1) = unknown version → replaced by `update` |
+| D3 | **HTTPS + SHA-256 only** (`SHA256SUMS` of the same release). No attestations, no signing in v1; Ed25519-signed `SHA256SUMS` recorded in `TODO.md` as later hardening |
+| D4 | **Unchanged:** `attach` keeps reusing whatever tentacle binary is already in the pod; no re-inject. (Protocol 10 already turns a skew into a clean `VersionMismatch` at `initialize`.) No `fix/attach-version-skew` task |
+| D5 | Install dir not writable → `update` says so and fails (with the `sudo` hint); never escalates itself |
+| D6 | No startup "new version available" check; only explicit `update` / `update --check` |
+| D7 | A **release script** (`bun run release <version>`): bumps every `package.json`, turns `[Unreleased]` into `[<version>] - <date>` in `CHANGELOG.md`, commits and tags; refuses on a dirty tree or a red gate. `0.1.0` is the first public tag |
+| D8 | No `--no-pods` flag. **Everything ships in v0.1.0.** Order: (1) `feat/pod-binary-download` (marker + download/verify helper + `run`/`attach` offline error) → (2) `feat/tentacle-update` (the command) → (3) `feat/release-script` |
 
 ## Implementation
 

@@ -615,10 +615,21 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       spec per command; flags anywhere (`attach mypod -n dev`); typos, missing
       values, repeats and stray words are errors before any cluster/model call.
       Type: fix · Size: S–M · Blast: cross-module.
-- [ ] **No `tentacle update`** (self-update + cached pod binaries), and `attach`
-      reuses a pod binary of any version (silent skew). Open questions 1–8
-      pending discussion. **Eval:** `docs/eval/tentacle-update.md`. Type: eval →
-      fix + feat ×2 · Size: M overall · Blast: cross-module.
+- [ ] **No `tentacle update`** (self-update from GitHub releases + the pod
+      binaries). All decisions D1–D8 taken 2026-10-22; ships in **v0.1.0**.
+      **Eval:** `docs/eval/tentacle-update.md`. Type: eval → feat ×3 · Size: M
+      overall · Blast: cross-module. Children, in order:
+      - [ ] **pod-binary-download** — version marker in the binary, download +
+        SHA-256 verify helper, `run`/`attach` offline error on a missing/stale
+        pod binary. Type: feat · Size: S–M · Blast: cross-module.
+      - [ ] **tentacle-update** — `tentacle update [--check] [--version vX]`:
+        staged download, verify, atomic rename (self last). Type: feat · Size: M
+        · Blast: cross-module.
+      - [ ] **release-script** — `bun run release <version>`: bump every
+        `package.json`, CHANGELOG `[Unreleased]` → version, commit + tag.
+        Type: feat · Size: S · Blast: contained.
+      - [ ] 🔵 **Later hardening:** Ed25519-signed `SHA256SUMS` verified by
+        `update` (D3 deferred).
 - [x] **Extensibility: users extend tentacle themselves (hooks + packages)** —
       out-of-process hooks (`tool_call` → `PermissionGate`, `tool_result` →
       result pipeline, `turn_start`, `turn_end`, `model_request`) + declarative
