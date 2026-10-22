@@ -24,65 +24,6 @@ Options, as environment variables: `TENTACLE_VERSION=v0.1.0` (pin a release;
 (skip the pod binaries). The script is
 [`scripts/install.sh`](scripts/install.sh); read it before piping it to `sh`.
 
-### Manual install
-
-Prebuilt binaries are on the
-[Releases](https://github.com/gmeghnag/tentacle/releases) page. Download them
-from there, or with the GitHub CLI:
-
-```sh
-gh release download v0.1.0 -R gmeghnag/tentacle -D tentacle-dl
-cd tentacle-dl
-shasum -a 256 -c SHA256SUMS        # on Linux: sha256sum -c SHA256SUMS
-```
-
-Or with `curl`, one file at a time:
-
-```sh
-base=https://github.com/gmeghnag/tentacle/releases/download/v0.1.0
-curl -fLO "$base/tentacle-bun-darwin-arm64" -fLO "$base/SHA256SUMS"
-shasum -a 256 -c SHA256SUMS --ignore-missing
-```
-
-**1. The CLI.** Take the file for your machine (`tentacle-bun-darwin-arm64`,
-`tentacle-bun-darwin-x64`, `tentacle-bun-linux-x64` or `tentacle-bun-linux-arm64`)
-and put it on your `PATH` as `tentacle`:
-
-```sh
-mkdir -p ~/.local/bin
-install -m 755 tentacle-bun-darwin-arm64 ~/.local/bin/tentacle   # e.g. Apple Silicon
-tentacle --version
-```
-
-**2. The pod binaries** (only for `tentacle run` / `tentacle attach`). tentacle
-copies a Linux binary into the pod. Fetch both (x64 and arm64) for your
-version once, after installing the CLI:
-
-```sh
-tentacle update
-```
-
-They go in `~/.config/tentacle/bin/` (`tentacle-bun-linux-x64`,
-`tentacle-bun-linux-arm64`), verified against the release's `SHA256SUMS`.
-`run` and `attach` never download anything: if a pod binary is missing, or is
-not the same version as the CLI, they stop and tell you to run
-`tentacle update`.
-
-Notes:
-
-- If you set `TENTACLE_CONFIG_DIR` (or `XDG_CONFIG_HOME`), the pod binaries go
-  in that directory's `bin/` instead.
-- The pod image must be a Linux **glibc** image with `sh` and `head` (Debian,
-  UBI, RHEL…). Alpine/busybox (musl) cannot run tentacle.
-- Downloaded with a browser on macOS? Clear the quarantine flag, or the binary
-  is blocked: `xattr -d com.apple.quarantine tentacle-bun-darwin-*`.
-- **Updating:** `tentacle update` replaces the CLI and both pod binaries
-  together with the latest release (`--version vX.Y.Z` picks one, including an
-  older one). `tentacle update --check` only reports, and exits 10 when there is
-  something to update. If the CLI sits in a directory you cannot write to, the
-  command stops and prints the `sudo` line to run. `attach` reuses the tentacle
-  already in a pod, so after an update, use a fresh pod.
-
 ## Getting started
 
 The first run creates `~/.config/tentacle/` with a commented `config.jsonc` and
