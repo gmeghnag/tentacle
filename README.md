@@ -295,7 +295,8 @@ bun install
 bun run check        # typecheck + lint + test (the CI gate — must pass)
 ```
 
-Building the binaries yourself: [`docs/BUILD.md`](./docs/BUILD.md). Design and
+Building the binaries yourself: [`docs/BUILD.md`](./docs/BUILD.md). Cutting a
+release: [`docs/RELEASING.md`](./docs/RELEASING.md). Design and
 decision records: [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 | Package | Purpose |
