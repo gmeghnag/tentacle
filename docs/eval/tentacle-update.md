@@ -98,7 +98,8 @@ tentacle update --version v0.4.0   # pin / downgrade to a specific tag
 3. Download `SHA256SUMS`, then, each to a temp file **in the destination
    directory** (same filesystem, so the final `rename` is atomic):
    - the laptop asset `tentacle-bun-<os>-<arch>`, next to `process.execPath`;
-   - the Linux pod assets, into `<configDir>/bin/` (which ones: decision D1).
+   - both Linux pod assets (`linux-x64`, `linux-arm64`), into `<configDir>/bin/`
+     (D1, decided).
 4. Verify every temp file against `SHA256SUMS`, plus the signature if D3 says
    so, then `chmod 755`. Run the new laptop binary's `--version` (same
    arch, so it runs) and require exactly `tentacle <tag without v>`.
@@ -113,21 +114,22 @@ is embedded in the same file.
 
 ### Decisions to take
 
-- **D1 — which pod binaries.** (a) Only refresh the ones already in
-  `<configDir>/bin/`. (b) Always install both Linux arches (~2 × 89 MB). (c)
-  **Lazy download**: `resolvePodBinary` gets a new step before "build from
-  source": download `tentacle-<target>` **of the laptop's own version** from
-  the matching release, into `<configDir>/bin/`. `update` then only refreshes
-  what is present (a). *Recommendation: (c) + (a).* It also fixes F3's
-  "release-only install cannot `run`" gap, and it only downloads the arch a
-  cluster actually needs.
+- **D1 — which pod binaries. DECIDED by the owner (2026-10-22): downloaded by
+  `tentacle update`, never lazily at the first `run`/`attach`.** `update`
+  installs **both** Linux pod binaries (`linux-x64`, `linux-arm64`) at the
+  target version, and fills in missing or out-of-date ones even when the CLI is
+  already up to date (so `tentacle update` is also the first-time setup of the
+  pod binaries for a release-only install). `run`/`attach` never touch the
+  network: a missing pod binary, or one whose version (D2) ≠ `APP_VERSION`, is
+  an error that says `run: tentacle update`. Open sub-question: a
+  `--no-pods` flag for users who never use pods (saves ~2 × 89 MB)?
 - **D2 — how a cached pod binary knows its version.** The laptop cannot
   execute a Linux binary to ask it (macOS laptop). Options: (a) put the version
   in the file name (`tentacle-<version>-<target>`, old ones garbage-collected);
   (b) a sidecar `<configDir>/bin/manifest.json` `{version, sha256 per target}`.
   *Recommendation: (b).* The F3 lookup path stays the same, and the manifest
   doubles as the integrity record. `resolvePodBinary` treats a
-  version ≠ `APP_VERSION` as a miss, so it re-downloads under D1(c).
+  version ≠ `APP_VERSION` as a miss: an error pointing to `tentacle update` (D1).
 - **D3 — integrity beyond HTTPS.** `SHA256SUMS` from the same release catches
   corruption and truncation, **not** a compromised release or account.
   Options: (a) SHA-256 only; (b) GitHub artifact attestations
@@ -179,7 +181,8 @@ is embedded in the same file.
 
 1. **`fix/attach-version-skew`** (S, cross-module): preflight compares
    versions; re-inject via temp + `mv` (D4, F4/F5). Independent; can go first.
-2. **`feat/pod-binary-download`** (S, contained): D1(c) + D2 manifest in
+2. **`feat/pod-binary-download`** (S, contained): D1 (download helper used by
+   `update`; `run`/`attach` error on a missing/stale binary) + D2 manifest in
    `resolvePodBinary`, with an injected `fetch` seam and `SpyFetch` tests.
 3. **`feat/tentacle-update`** (M, cross-module): the command, staged
    download/verify/commit, `--check` / `--version`, plus the CI step that signs
@@ -190,9 +193,9 @@ is embedded in the same file.
 Nothing above is approved. Each item needs an explicit answer before
 promotion. The recommendation is Claude's; the user decides.
 
-1. **D1 — pod binaries:** lazy download of the laptop's version in
-   `resolvePodBinary` + `update` refreshes only what is present? Or always
-   install both Linux arches?
+1. **D1 — pod binaries:** DECIDED 2026-10-22 — downloaded by `tentacle update`
+   (both Linux arches), never lazily; `run`/`attach` stay offline. Sub-question:
+   `--no-pods`?
 2. **D2 — cached version tracking:** sidecar `<configDir>/bin/manifest.json`,
    or the version in the file name?
 3. **D3 — integrity:** SHA-256 only, or Ed25519-signed `SHA256SUMS` with the
