@@ -35,7 +35,7 @@ import {
 import { type JobController, type ModelProvider, PermissionBroker } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
-import type { SkillListEntry } from "@tentacle/protocol";
+import { HooksTrustParamsSchema, type SkillListEntry } from "@tentacle/protocol";
 import {
   SKILL_TOOL_NAME,
   type SkillBodyReader,
@@ -45,6 +45,7 @@ import {
   createSkillTool,
   createTaskTool,
 } from "@tentacle/tools";
+import { logDaemonError } from "./daemon-log.ts";
 import { createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
 import { configuredModelProvider } from "./model-provider.ts";
 
@@ -310,19 +311,28 @@ export function inProcessAgents(config: TentacleConfig): {
     interactive: true,
     store: fileTrustStore(config.configDir),
   });
-  const askHooksTrust: AskHooksTrust = async ({ sessionId, ...request }, signal) =>
-    (
-      await resolve(
-        {
-          sessionId,
-          ...request,
-          files: [...request.files],
-          hooks: request.hooks.map((h) => ({ ...h })),
-        },
-        signal,
-      )
-    ).trusted;
-  return { permissions, build: () => buildAgent(config, { permissions, askHooksTrust }) };
+  // The same gate as the wire: on RPC the peer validates `hooks/trust` against
+  // `HooksTrustParamsSchema` before the laptop sees it. Here nothing does, so
+  // check it the same way — hooks over the limits, or with control / bidi
+  // characters, are never offered: the throw makes the runner decline and log.
+  const askHooksTrust: AskHooksTrust = async ({ sessionId, ...request }, signal) => {
+    const parsed = HooksTrustParamsSchema.safeParse({ sessionId, ...request });
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const where = issue && issue.path.length > 0 ? `${issue.path.join(".")}: ` : "";
+      throw new Error(`invalid hooks/trust request (${where}${issue?.message ?? "invalid"})`);
+    }
+    return (await resolve(parsed.data, signal)).trusted;
+  };
+  // Hook lines (failures, a declined trust) go to the daemon error log, as in
+  // the worker — never the terminal Ink owns (AGENTS §7).
+  const log = (line: string): void => {
+    logDaemonError(config.configDir, line);
+  };
+  return {
+    permissions,
+    build: () => buildAgent(config, { permissions, askHooksTrust, log }),
+  };
 }
 
 /**
