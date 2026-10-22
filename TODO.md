@@ -625,7 +625,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       - [x] **tentacle-update** — DONE 2026-10-22 (`feat/tentacle-update`, `docs/feat/tentacle-update.md`): `tentacle update [--check] [--version vX]`:
         staged download, verify, atomic rename (self last). Type: feat · Size: M
         · Blast: cross-module.
-      - [ ] **release-script** — `bun run release <version>`: bump every
+      - [x] **release-script** — DONE 2026-10-22 (`feat/release-script`, `docs/feat/release-script.md`, `docs/RELEASING.md`): `bun run release <version>`: bump every
         `package.json`, CHANGELOG `[Unreleased]` → version, commit + tag.
         Type: feat · Size: S · Blast: contained.
       - [ ] 🔵 **Later hardening:** Ed25519-signed `SHA256SUMS` verified by
