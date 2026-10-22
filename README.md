@@ -12,13 +12,21 @@ Kubernetes pod, or on a remote host, and drive it from a rich TUI.
 ## Install
 
 Prebuilt binaries for macOS and Linux (x64 and arm64) are on the
-[Releases](https://github.com/gmeghnag/tentacle/releases) page. While the repo
-is private, download them with the GitHub CLI (after `gh auth login`):
+[Releases](https://github.com/gmeghnag/tentacle/releases) page. Download them
+from there, or with the GitHub CLI:
 
 ```sh
-gh release download v0.1.0-beta.1 -R gmeghnag/tentacle -D tentacle-dl
+gh release download v0.1.0 -R gmeghnag/tentacle -D tentacle-dl
 cd tentacle-dl
 shasum -a 256 -c SHA256SUMS        # on Linux: sha256sum -c SHA256SUMS
+```
+
+Or with `curl`, one file at a time:
+
+```sh
+base=https://github.com/gmeghnag/tentacle/releases/download/v0.1.0
+curl -fLO "$base/tentacle-bun-darwin-arm64" -fLO "$base/SHA256SUMS"
+shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
 **1. The CLI.** Take the file for your machine (`tentacle-bun-darwin-arm64`,

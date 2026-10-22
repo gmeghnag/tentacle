@@ -2,6 +2,7 @@
   "name": "@tentacle/tui",
   "version": "0.1.0-beta.1",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
