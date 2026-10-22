@@ -38,7 +38,7 @@ import {
 } from "@tentacle/tools";
 import { type CarriedSkill, summarizeConversation } from "./compact.ts";
 import { EventQueue } from "./event-queue.ts";
-import { type HookRunner, hookNote } from "./hooks.ts";
+import { type AskHooksTrust, type HookRunner, hookNote } from "./hooks.ts";
 import { PermissionGate } from "./permission-gate.ts";
 import { type ResultTransform, applyResultTransforms } from "./result-pipeline.ts";
 import { suspendedCalls } from "./resume.ts";
@@ -85,6 +85,12 @@ export interface RunOptions {
    * `canActivateForUser`; not combinable with `resumeFrom`.
    */
   readonly skill?: string;
+  /**
+   * Asks the client with a human behind this turn whether to run the
+   * project's hooks (docs/feat/hooks-project-trust.md); beats the agent's own
+   * `askHooksTrust`. Asked once per session, before a fresh turn's hooks.
+   */
+  readonly askHooksTrust?: AskHooksTrust;
 }
 
 /** Max consecutive empty-response auto-nudges before a stall ends the turn. */
@@ -191,6 +197,8 @@ export interface AgentConfig {
   readonly requestPermission?: PermissionRequester;
   /** User hooks (docs/feat/hooks-core.md): `tool_call` in the gate, `tool_result` in the pipeline. */
   readonly hooks?: HookRunner;
+  /** The trust asker when a turn brings none (the in-process TUI: no RPC). */
+  readonly askHooksTrust?: AskHooksTrust;
   /** Background-job registry; when set, the shell tools can launch jobs and
    * their exits are surfaced to the model (and frontend) on the next turn. */
   readonly jobs?: JobController;
@@ -376,6 +384,17 @@ export class Agent {
 
     // The user's prompt for `turn_start` hooks, read before any note lands.
     const prompt = lastUserText(messages);
+
+    // Project hooks run only once trusted: decided before a fresh turn runs
+    // any hook or tool (never on a resumed turn, which already started).
+    const runner = this.config.hooks;
+    if (opts.resumeFrom === undefined && runner?.needsProjectTrust()) {
+      await runner.resolveProjectTrust(
+        sessionId,
+        opts.askHooksTrust ?? this.config.askHooksTrust,
+        signal,
+      );
+    }
 
     // A resumed turn first finishes its suspended round — exactly the calls an
     // uninterrupted run would still have run, each asked again — so the round's

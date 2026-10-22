@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Session } from "@tentacle/agent";
+import { type AskHooksTrust, type HookRunner, Session } from "@tentacle/agent";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { buildAgent, inProcessAgents, skillCatalog, skillListing } from "../src/wiring.ts";
@@ -358,5 +358,54 @@ describe("hooks wiring (docs/feat/hooks-core.md)", () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(notes).toEqual(["[hook turn_start] from hook"]);
     expect(await Bun.file(mr).exists()).toBe(false);
+  });
+});
+
+describe("project hooks wiring (docs/feat/hooks-project-trust.md)", () => {
+  const projectHooks = {
+    folder: "/repo",
+    hash: "h1",
+    hooks: [{ event: "turn_start" as const, command: "./a.sh" }],
+    files: [".agents/hooks.json"],
+  };
+  /** The agent's private config, read for the wiring only. */
+  const agentConfig = (wired: ReturnType<typeof buildAgent>) =>
+    (
+      wired.agent as unknown as {
+        config: { hooks?: HookRunner; askHooksTrust?: AskHooksTrust };
+      }
+    ).config;
+  const unusedModel: ModelProvider = {
+    id: "unused",
+    // biome-ignore lint/correctness/useYield: never called
+    async *stream() {
+      throw new Error("unused");
+    },
+  };
+
+  test("a project hook may allow locally, never over the pod model tunnel (D6)", () => {
+    const local = agentConfig(buildAgent({ ...config, projectHooks }));
+    expect(local.hooks?.projectTrustRequest()?.canAllow).toBe(true);
+    const pod = agentConfig(
+      buildAgent({ ...config, projectHooks }, { modelOverride: unusedModel }),
+    );
+    expect(pod.hooks?.projectTrustRequest()?.canAllow).toBe(false);
+  });
+
+  test("in-process: the trust question goes to the ONE broker the TUI prompts on", async () => {
+    const { permissions, build } = inProcessAgents({ ...config, projectHooks });
+    const kinds: (string | undefined)[] = [];
+    permissions.setRequester(async (req) => {
+      kinds.push(req.kind);
+      return { allowed: true, scope: "once" };
+    });
+    const ask = agentConfig(build()).askHooksTrust;
+    const request = agentConfig(build()).hooks?.projectTrustRequest();
+    expect(ask).toBeDefined();
+    expect(request).toBeDefined();
+    if (ask && request) {
+      expect(await ask({ ...request, sessionId: "s1" })).toBe(true);
+    }
+    expect(kinds).toEqual(["hooks_trust"]);
   });
 });

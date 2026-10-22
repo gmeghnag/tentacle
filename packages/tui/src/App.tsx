@@ -39,7 +39,7 @@ import {
   skillsPanel,
 } from "./panel.ts";
 import { sanitizePasted, stepPaste } from "./paste.ts";
-import { usePermissionBroker } from "./permission-ui.ts";
+import { permissionDetailLines, permissionShowsCwd, usePermissionBroker } from "./permission-ui.ts";
 import { layoutTranscript, sliceLaid, stripAnsi, warmRowsChunk } from "./render-lines.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import { type Selection, extractSelection, isNonEmpty, rowSelectionRange } from "./selection.ts";
@@ -377,7 +377,11 @@ export function App({
   // then the list panel or the input box (plus any open palette rows, which
   // only open while idle).
   const activeRows = permission.pending
-    ? permissionPromptRows(permission.choices.length)
+    ? permissionPromptRows(
+        permission.choices.length,
+        permissionDetailLines(permission.pending).length,
+        permissionShowsCwd(permission.pending),
+      )
     : runningRows + (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length);
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
   // Terminal row (1-based) of the panel's first body row: the transcript

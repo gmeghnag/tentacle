@@ -639,9 +639,9 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       - [x] **hooks-turn** (`turn_start`, `turn_end` + continue ≤3,
         `model_request` notify; protocol 8 → 9) — DONE 2026-10-22 (`feat/hooks-turn`):
         `docs/feat/hooks-turn.md`. Type: feat · Size: M · Blast: load-bearing.
-      - [ ] **hooks-project-trust** (`.agents/hooks.json`, `hooks/trust`
+      - [x] **hooks-project-trust** (`.agents/hooks.json`, `hooks/trust`
         daemon→client, laptop store for the local worker only, auto-approve
-        excluded) — in progress (`feat/hooks-project-trust`): `docs/feat/hooks-project-trust.md`.
+        excluded) — DONE 2026-10-22 (`feat/hooks-project-trust`): `docs/feat/hooks-project-trust.md`.
         Type: feat · Size: M · Blast: load-bearing (§7).
       - [ ] **packages** (own format; path + git; `tentacle packages …`; not in
         pod v1) — K1–K3 decided: `docs/eval/packages.md`. Type: eval →

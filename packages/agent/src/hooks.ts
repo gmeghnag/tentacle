@@ -312,6 +312,54 @@ export function combineToolCallVotes(input: unknown, votes: readonly NamedVote[]
     : { kind: "gate", input: current, modified: false, force };
 }
 
+/**
+ * D6 (docs/feat/hooks-project-trust.md): a project hook may vote `allow` only
+ * where it may approve (local); elsewhere (a pod) its `allow` is no vote and
+ * a `modify` keeps its rewrite but loses its forced `allow`.
+ */
+export function projectVote(vote: ToolCallVote, canAllow: boolean): ToolCallVote {
+  if (canAllow) {
+    return vote;
+  }
+  if (vote.kind === "allow") {
+    return { kind: "none" };
+  }
+  if (vote.kind === "modify" && vote.decision === "allow") {
+    return { kind: "modify", input: vote.input };
+  }
+  return vote;
+}
+
+/** What the laptop is asked before a session runs the project's hooks (no `sessionId`). */
+export interface ProjectHooksTrustRequest {
+  readonly folder: string;
+  readonly hash: string;
+  readonly files: readonly string[];
+  readonly hooks: readonly { event: string; matcher?: string; command: string }[];
+  readonly canAllow: boolean;
+}
+
+/** Ask whether to trust the project hooks; `true` = run them this session. */
+export type AskHooksTrust = (
+  request: ProjectHooksTrustRequest & { readonly sessionId: string },
+  signal?: AbortSignal,
+) => Promise<boolean>;
+
+/** The repo's `.agents/hooks.json` hooks, run only once trusted. */
+export interface ProjectHooksOptions {
+  readonly specs: readonly HookSpec[];
+  readonly folder: string;
+  readonly hash: string;
+  readonly files: readonly string[];
+  /** May a project hook `allow` here (local: yes; a pod: no, D6). */
+  readonly canAllow: boolean;
+}
+
+/** Per-session trust of the project hooks, shared by a runner and its sub-agents' runners. */
+export interface ProjectTrustState {
+  state: "unknown" | "trusted" | "declined";
+}
+
 export interface HookAgentInfo {
   readonly type: string;
   readonly description: string;
@@ -332,6 +380,10 @@ export interface HookRunnerOptions {
    * itself. In a pod the request is built in the untrusted pod (D2): false.
    */
   readonly modelRequestHooks?: boolean;
+  /** Project hooks: run after the user's for the same event, and only once trusted. */
+  readonly project?: ProjectHooksOptions;
+  /** Shared with `forAgent` runners: one trust decision per session. */
+  readonly projectTrust?: ProjectTrustState;
 }
 
 interface ToolEventInput {
@@ -350,7 +402,98 @@ export class HookRunner {
   /** Sessions whose current drop burst was already logged (R3). */
   private readonly modelRequestDropLogged = new Set<string>();
 
-  constructor(private readonly opts: HookRunnerOptions) {}
+  private readonly opts: HookRunnerOptions;
+  private readonly trust: ProjectTrustState;
+
+  constructor(opts: HookRunnerOptions) {
+    this.trust = opts.projectTrust ?? { state: "unknown" };
+    this.opts = { ...opts, projectTrust: this.trust };
+  }
+
+  /** Project hooks exist and nobody decided on them yet this session. */
+  needsProjectTrust(): boolean {
+    return this.opts.project !== undefined && this.trust.state === "unknown";
+  }
+
+  /** What to ask the laptop (undefined when there are no project hooks). */
+  projectTrustRequest(): ProjectHooksTrustRequest | undefined {
+    const p = this.opts.project;
+    if (p === undefined) {
+      return undefined;
+    }
+    return {
+      folder: p.folder,
+      hash: p.hash,
+      files: p.files,
+      hooks: p.specs.map((s) =>
+        s.matcher !== undefined
+          ? { event: s.event, matcher: s.matcher, command: s.command }
+          : { event: s.event, command: s.command },
+      ),
+      canAllow: p.canAllow,
+    };
+  }
+
+  /**
+   * Decide on the project hooks once per session (before the first fresh
+   * turn's hooks run): ask through `ask`. Declined on no asker or a rejection
+   * (an old laptop's `MethodNotFound`, a disconnect) — logged. A cancel is no
+   * decision: not run this turn, and the next turn asks again. Never throws.
+   */
+  async resolveProjectTrust(
+    sessionId: string,
+    ask: AskHooksTrust | undefined,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const request = this.projectTrustRequest();
+    if (request === undefined || !this.needsProjectTrust()) {
+      return;
+    }
+    let trusted = false;
+    let cancelled = false;
+    let why = "declined";
+    if (ask === undefined) {
+      why = "no client to ask";
+    } else if (signal?.aborted) {
+      cancelled = true;
+    } else {
+      let onAbort: (() => void) | undefined;
+      const aborted = new Promise<"aborted">((resolve) => {
+        onAbort = () => resolve("aborted");
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+      try {
+        const answer = await Promise.race([ask({ ...request, sessionId }, signal), aborted]);
+        if (answer === "aborted") {
+          cancelled = true;
+        } else {
+          trusted = answer === true;
+        }
+      } catch (error) {
+        why = `the ask failed: ${error instanceof Error ? error.message : String(error)}`;
+      } finally {
+        if (onAbort) {
+          signal?.removeEventListener("abort", onAbort);
+        }
+      }
+    }
+    if (cancelled) {
+      this.opts.log?.(`project hooks of ${request.folder} not run this turn (cancelled)`);
+      return;
+    }
+    // A concurrent decision (a sub-agent's) is kept; ours only fills "unknown".
+    this.setProjectTrust(trusted);
+    if (!trusted) {
+      this.opts.log?.(`project hooks of ${request.folder} not run this session (${why})`);
+    }
+  }
+
+  /** Record the session's decision (once: a later call is ignored). */
+  setProjectTrust(trusted: boolean): void {
+    if (this.trust.state === "unknown") {
+      this.trust.state = trusted ? "trusted" : "declined";
+    }
+  }
 
   /**
    * A runner for a sub-agent: same specs/env, `agent` set (H2); `modelId`
@@ -365,7 +508,19 @@ export class HookRunner {
   }
 
   hasAny(event: HookEvent): boolean {
-    return this.opts.specs.some((s) => s.event === event);
+    return this.specs().some((s) => s.event === event);
+  }
+
+  /** The user's specs, then the project's when trusted (user first, same event). */
+  private specs(): readonly HookSpec[] {
+    const p = this.opts.project;
+    return p !== undefined && this.trust.state === "trusted"
+      ? [...this.opts.specs, ...p.specs]
+      : this.opts.specs;
+  }
+
+  private isProject(spec: HookSpec): boolean {
+    return this.opts.project?.specs.includes(spec) === true;
   }
 
   async toolCall(i: ToolEventInput & { readonly signal: AbortSignal }): Promise<ToolCallVerdict> {
@@ -381,7 +536,10 @@ export class HookRunner {
       if (i.signal.aborted) {
         break;
       }
-      const vote = parseToolCallOutcome(r, spec.onFailure);
+      const parsed = parseToolCallOutcome(r, spec.onFailure);
+      const vote = this.isProject(spec)
+        ? projectVote(parsed, this.opts.project?.canAllow === true)
+        : parsed;
       this.logFailure(hook, "tool_call", vote.kind === "none" ? vote.failure : undefined);
       votes.push({ hook, vote });
       if (vote.kind === "deny") {
@@ -556,7 +714,7 @@ export class HookRunner {
   }
 
   private byEvent(event: HookEvent): HookSpec[] {
-    return this.opts.specs.filter((s) => s.event === event);
+    return this.specs().filter((s) => s.event === event);
   }
 
   private base(event: HookEvent, sessionId: string): Record<string, unknown> {
@@ -564,7 +722,7 @@ export class HookRunner {
   }
 
   private matching(event: HookEvent, toolName: string): HookSpec[] {
-    return this.opts.specs.filter((s) => s.event === event && hookMatches(s, toolName));
+    return this.specs().filter((s) => s.event === event && hookMatches(s, toolName));
   }
 
   private payload(event: HookEvent, i: ToolEventInput, input: unknown): Record<string, unknown> {

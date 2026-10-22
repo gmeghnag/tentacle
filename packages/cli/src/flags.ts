@@ -95,6 +95,12 @@ export const ARGS = {
     positional: { min: 0, max: 0 },
   },
   plain: { bools: { plain: {} }, positional: { min: 0, max: 0 } },
+  hooks: {
+    values: { revoke: {} },
+    bools: { list: {} },
+    conflicts: [["list", "revoke"]],
+    positional: { min: 1, max: 1 },
+  },
 } as const satisfies Record<string, ArgSpec>;
 
 /**
@@ -365,6 +371,7 @@ const COMMANDS = new Set([
   "run",
   "attach",
   "connect",
+  "hooks",
   "-i",
   "--interactive",
   "--resume",
@@ -422,7 +429,16 @@ export function extractGlobalOptions(args: readonly string[]): GlobalOptions {
 }
 
 /** Which path `main` takes, decided from the first argument alone. */
-export type CliMode = "connect" | "serve" | "run" | "attach" | "plain" | "tui" | "prompt" | "empty";
+export type CliMode =
+  | "connect"
+  | "serve"
+  | "run"
+  | "attach"
+  | "hooks"
+  | "plain"
+  | "tui"
+  | "prompt"
+  | "empty";
 
 /**
  * A subcommand → its own arguments; `--plain` → the REPL; any other leading
@@ -434,7 +450,13 @@ export function cliMode(args: readonly string[]): CliMode {
   if (first === undefined) {
     return "empty";
   }
-  if (first === "connect" || first === "serve" || first === "run" || first === "attach") {
+  if (
+    first === "connect" ||
+    first === "serve" ||
+    first === "run" ||
+    first === "attach" ||
+    first === "hooks"
+  ) {
     return first;
   }
   if (first === "--plain") {
@@ -456,5 +478,6 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   attach:
     "tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]|--continue]",
   plain: "tentacle --plain",
+  hooks: "tentacle hooks trust --list | --revoke <folder>",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process]",
 };

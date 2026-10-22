@@ -8,6 +8,7 @@
 import type { ChatMessage } from "@tentacle/core";
 import { type Agent, type AgentEvent, UnknownSkillError } from "./agent.ts";
 import { type CompactResult, carryOverSkills, compactedHistory } from "./compact.ts";
+import type { AskHooksTrust } from "./hooks.ts";
 
 /** A serialisable view of a session's durable state (for persistence/resume). */
 export interface SessionSnapshot {
@@ -19,6 +20,8 @@ export interface SessionSnapshot {
 export interface SendOptions {
   /** The user activates this skill (`/name`) with this turn (see `RunOptions.skill`). */
   readonly skill?: string;
+  /** Asks the prompting client whether to run the project's hooks (see `RunOptions.askHooksTrust`). */
+  readonly askHooksTrust?: AskHooksTrust;
 }
 
 export interface SessionOptions {
@@ -84,13 +87,10 @@ export class Session {
       this.messages.push({ role: "user", content: text });
     }
     try {
-      yield* this.agent.runMessages(
-        this.messages,
-        this.id,
-        signal,
-        () => this.steering.splice(0),
-        opts.skill !== undefined ? { skill: opts.skill } : {},
-      );
+      yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
+        ...(opts.skill !== undefined ? { skill: opts.skill } : {}),
+        ...(opts.askHooksTrust !== undefined ? { askHooksTrust: opts.askHooksTrust } : {}),
+      });
     } finally {
       // Persist once the turn settles (normal end, error, or abort), so a
       // crash/exit mid-session still leaves the latest history on disk.

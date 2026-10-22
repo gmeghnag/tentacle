@@ -1,6 +1,7 @@
 import type { PermissionRequest } from "@tentacle/core";
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
+import { permissionDetailLines, permissionShowsCwd } from "../permission-ui.ts";
 import { accentHex } from "../theme.ts";
 
 // Brand accent (matches the theme's `accent`), used for the frame + selection.
@@ -10,10 +11,10 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
-/** Fixed row count of the dialog for a given option count (App sizes the viewport). */
-export function permissionPromptRows(optionCount: number): number {
-  // title + subject + cwd + options + footer
-  return 4 + optionCount;
+/** Fixed row count of the dialog for a given option / detail-row count (App sizes the viewport). */
+export function permissionPromptRows(optionCount: number, detailRows = 1, cwdRow = true): number {
+  // title + subject rows + cwd (tool calls only) + options + footer
+  return 2 + detailRows + (cwdRow ? 1 : 0) + optionCount;
 }
 
 /**
@@ -43,8 +44,15 @@ export function PermissionPrompt({
         {titlePrefix}
         {"─".repeat(dashes)}
       </Text>
-      <Text dimColor> {req.detail ? truncate(req.detail, Math.max(10, columns - 3)) : "—"}</Text>
-      <Text dimColor> {truncate(cwd, Math.max(10, columns - 24))} · writes confined here</Text>
+      {permissionDetailLines(req).map((line, i) => (
+        <Text key={i} dimColor>
+          {" "}
+          {truncate(line, Math.max(10, columns - 3))}
+        </Text>
+      ))}
+      {permissionShowsCwd(req) ? (
+        <Text dimColor> {truncate(cwd, Math.max(10, columns - 24))} · writes confined here</Text>
+      ) : null}
       {options.map((label, i) => {
         const active = i === selected;
         return (

@@ -200,6 +200,17 @@ Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyComma
   by the pod daemon. Your laptop's hooks do not run there, and a pod hook
   `allow` can skip the pod-side prompt. The pod-side gate is UX, never a
   security boundary (the pod is not trusted).
+- **Project hooks:** a repository can bring hooks in `.agents/hooks.json`
+  (`{ "hooks": [ … ] }`, same entries; found from the launch folder up to the
+  repo root, nearest first). They run **only after you trust them**, asked
+  once per session, after your own hooks for the same event. Locally you can
+  trust them once or always (stored per folder with a hash of the
+  definitions: a changed definition asks again; the scripts' contents are not
+  tracked), decline, or say "never". In a pod you are asked every session,
+  nothing is stored, and a project hook's `allow` never skips a prompt.
+  Auto-accept never answers this question; a non-interactive run never loads
+  them. `tentacle hooks trust --list` / `--revoke <folder>` manage the stored
+  decisions.
 
 ## Features
 

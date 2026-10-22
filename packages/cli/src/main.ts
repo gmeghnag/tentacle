@@ -42,6 +42,7 @@ import {
   resolveTls,
   resolveToken,
 } from "./flags.ts";
+import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
 import { startAttachRuntime, startPodRuntime } from "./pod-runtime.ts";
 import { render } from "./render.ts";
@@ -86,6 +87,8 @@ Usage:
   tentacle -- <prompt...>  the same, for a prompt that starts with '-'
   tentacle serve [opts]    host the remote-control daemon
   tentacle connect <url>   drive a remote daemon with the TUI
+  tentacle hooks trust --list | --revoke <folder>
+                           list / revoke stored project-hooks trust decisions
   tentacle --help          show this help
   tentacle --version       print the version and exit
   tentacle --profile <name> ...
@@ -245,6 +248,20 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     return 1;
   }
 
+  // `tentacle hooks trust --list | --revoke <folder>` (P3): no TUI, plain output.
+  if (mode === "hooks") {
+    const revoke = parsed.flags.get("revoke");
+    return hooksTrustCommand(
+      fileTrustStore(config.configDir),
+      {
+        positional: parsed.positional,
+        list: parsed.bools.has("list"),
+        ...(revoke !== undefined ? { revoke } : {}),
+      },
+      write,
+    );
+  }
+
   // Skill discovery problems, once, before any Ink mount (AGENTS §7: no raw
   // write while Ink owns the terminal). Only where THIS config builds the
   // agent: `run`/`attach` sessions use the pod's own skills, discovered (and
@@ -252,6 +269,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   if (mode !== "run" && mode !== "attach") {
     for (const line of config.skillDiagnostics) {
       writeErr(`[skills] ${line}\n`);
+    }
+    for (const line of config.projectHooksDiagnostics) {
+      writeErr(`[hooks] ${line}\n`);
+    }
+    const wireProblem = config.projectHooks && projectHooksWireProblem(config.projectHooks);
+    if (wireProblem) {
+      writeErr(`[hooks] ${wireProblem}\n`);
     }
   }
 

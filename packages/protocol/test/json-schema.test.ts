@@ -130,6 +130,17 @@ const FIXTURES: Record<string, Json[]> = {
       ],
     },
   ],
+  "methods/hooks~1trust/params": [
+    {
+      sessionId: "s1",
+      folder: "/repo",
+      hash: "h1",
+      files: [".agents/hooks.json"],
+      hooks: [{ event: "tool_call", matcher: "shell", command: "./guard.sh" }],
+      canAllow: false,
+    },
+  ],
+  "methods/hooks~1trust/result": [{ trusted: true }, { trusted: false }],
   "methods/skills~1list/params": [{}],
   "methods/skills~1list/result": [
     { skills: [], problems: [], moreProblems: 0 },

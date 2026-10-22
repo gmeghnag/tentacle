@@ -15,6 +15,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   PROMPT_FILENAME,
 } from "./defaults.ts";
+import { type ProjectHooks, discoverProjectHooks } from "./hooks-scan.ts";
 import { applyProfile } from "./profile.ts";
 import {
   type ApiKeySource,
@@ -81,6 +82,13 @@ export interface TentacleConfig {
   readonly skills: readonly SkillInfo[];
   /** Skill discovery problems (skipped, shadowed, ignored fields) for the user. */
   readonly skillDiagnostics: readonly string[];
+  /**
+   * The repo's `.agents/hooks.json` hooks (docs/feat/hooks-project-trust.md),
+   * absent when none. They run only once the user trusts them.
+   */
+  readonly projectHooks?: ProjectHooks;
+  /** Project hooks files skipped (malformed, unreadable) for the user. */
+  readonly projectHooksDiagnostics: readonly string[];
   /** The profile applied from the config file (`--profile` / `TENTACLE_PROFILE`), if any. */
   readonly profile?: string;
   readonly sources: ResolvedConfig["sources"] & { readonly apiKey: ApiKeySource };
@@ -262,6 +270,13 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     }
   }
 
+  // Project hooks (`.agents/hooks.json`, same walk as skills): best-effort,
+  // a broken file is a diagnostic. Loaded here; trusted per session later.
+  const { projectHooks, diagnostics: projectHooksDiagnostics } = await discoverProjectHooks(
+    launchCwd,
+    home,
+  );
+
   const resolved = resolveConfig({
     fileConfig,
     env,
@@ -307,6 +322,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.agentsMdLoaded && agentsFile ? { agentsPath: agentsFile } : {}),
     skills: resolved.skills,
     skillDiagnostics,
+    ...(projectHooks !== undefined ? { projectHooks } : {}),
+    projectHooksDiagnostics,
     ...(profile !== undefined ? { profile } : {}),
     sources: { ...resolved.sources, apiKey: resolved.apiKeySource },
   };
