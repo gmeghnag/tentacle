@@ -489,11 +489,11 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       `docs/feat/mcp-tools-panel.md`. Type: feat · Size: L · Blast:
       load-bearing (wire v7→v8 + a new in-session modal) · Suited: strong
       model; fresh-context Review waived by the owner (budget). Merged 2a7a913.
-- [ ] 🟡 **`/skills` — panel listing every skill the daemon found.** Who may
+- [x] 🟡 **`/skills` — panel listing every skill the daemon found.** Who may
       invoke each one (you / model), where it lives, and the discovery problems
       (now visible on `run`/`attach` too). New wire method `skills/list`
       (additive, v8 kept); the `/mcp` panel logic generalised into
-      `tree-panel.ts`. `docs/feat/skills-panel.md`. Type: feat · Size: L ·
+      `tree-panel.ts`. DONE — merged (`c2027c8`): `docs/feat/skills-panel.md`. Type: feat · Size: L ·
       Blast: load-bearing · Suited: strong model; fresh-context Review waived
       by the owner (budget).
 - [ ] 🔵 **`/mcp` polish.**
