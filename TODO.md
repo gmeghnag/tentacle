@@ -698,6 +698,14 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
           Type: fix · Size: S · Blast: contained.
       - **User guide:** `docs/extensions.md` (hooks + packages, worked examples).
 
+- [ ] **Send now (`Ctrl+X Ctrl+S`)** — interrupt the running turn (stream,
+      tools, a pending permission, a hook or `/compact`) and send this client's
+      queued messages as one prompt, atomically via a new `session/send_now`
+      (additive in protocol 10). Owner decisions S1–S3, D1–D5 taken; D3c (queue
+      locally during `/compact`) awaits confirmation. **Eval:**
+      `docs/eval/send-now.md`. Type: eval → feat ×3 · Size: L → split · Blast:
+      load-bearing.
+
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
 Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked up).
