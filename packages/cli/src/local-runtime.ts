@@ -29,6 +29,7 @@ import type { McpServerStatus, SkillsListResult } from "@tentacle/protocol";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
 import { logDaemonError } from "./daemon-log.ts";
+import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
 import type { SessionSaver } from "./session-saver.ts";
 
 export interface LocalRuntime {
@@ -190,6 +191,12 @@ export interface LocalRuntimeDeps {
   /** Local model the daemon can tunnel calls back to (pod reverse-tunnel, F4.d). */
   readonly modelProvider?: ModelProvider;
   /**
+   * Where the laptop stores project-hooks trust decisions — the local worker
+   * ONLY (docs/feat/hooks-project-trust.md, D4). Ignored when the daemon
+   * proxies the model through us (a pod, D5: asked every session, never stored).
+   */
+  readonly hooksTrustStore?: HooksTrustStore;
+  /**
    * Non-fatal errors of the laptop-side peer (a stray/malformed daemon frame, a
    * local model failure the daemon only sees as opaque). Route to a buffered
    * sink — never a raw terminal write while Ink owns it (AGENTS §7).
@@ -199,9 +206,20 @@ export interface LocalRuntimeDeps {
 
 /** Handshake the daemon and return a session factory that persists each turn. */
 export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalRuntime> {
+  // The laptop decides `hooks/trust`, through THE single broker (AGENTS §7).
+  // A pod (it tunnels the model through us) never gets the store, whatever
+  // the caller passed: a pod-originated prompt never creates a lasting approval.
+  const hooksTrust = createHooksTrustResolver({
+    broker: deps.permissions,
+    // Every RPC runtime drives the TUI, whose prompt answers the broker.
+    interactive: true,
+    ...(deps.hooksTrustStore && !deps.modelProvider ? { store: deps.hooksTrustStore } : {}),
+    ...(deps.notify ? { notify: deps.notify } : {}),
+  });
   const client = new RemoteClient(deps.channel, deps.permissions, deps.modelProvider, {
     ...(deps.onPeerError ? { onError: deps.onPeerError } : {}),
     ...(deps.channelFactory ? { channelFactory: deps.channelFactory } : {}),
+    hooksTrust,
   });
   await client.initialize();
   client.onHistoryLost(({ turns }) => {
@@ -344,6 +362,10 @@ export async function startWorkerRuntime(
         cwd: config.cwd,
         model: config.model,
         resume: deps.resume,
+        // The local worker is the one runtime whose trust decisions persist (D4).
+        hooksTrustStore: fileTrustStore(config.configDir, (message) => {
+          logDaemonError(config.configDir, new Error(message));
+        }),
         // Laptop-side peer errors (a malformed daemon frame with no turn to
         // fail) go to the same file log as the worker's own errors — never a
         // raw terminal write while Ink owns it (AGENTS §7).

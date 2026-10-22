@@ -14,6 +14,12 @@
 import type { PermissionLevel } from "./tool.ts";
 
 export interface PermissionRequest {
+  /**
+   * What is asked (laptop-internal, never on the wire): a tool call (absent =
+   * `"tool"`) or whether to trust a project's hooks (`"hooks_trust"`,
+   * docs/feat/hooks-project-trust.md) — which auto-approve never answers.
+   */
+  readonly kind?: "tool" | "hooks_trust";
   readonly tool: string;
   readonly level: PermissionLevel;
   /** Human-readable action, e.g. "Run a shell command". */

@@ -28,6 +28,8 @@ import {
   type CompactResult,
   DomainErrorCode,
   type HistoryCut,
+  type HooksTrustParams,
+  type HooksTrustResult,
   type InitializeResult,
   JsonRpcErrorCode,
   type McpServerStatus,
@@ -131,6 +133,15 @@ export interface RemoteClientOptions {
   readonly clock?: Clock;
   /** Jitter source for the backoff, in [0, 1). */
   readonly random?: () => number;
+  /**
+   * Answers the daemon's `hooks/trust` (docs/feat/hooks-project-trust.md):
+   * the laptop decides, through the single broker. `signal` aborts when the
+   * link drops (the prompt is withdrawn). Absent → `{ trusted: false }`.
+   */
+  readonly hooksTrust?: (
+    params: HooksTrustParams,
+    signal?: AbortSignal,
+  ) => Promise<HooksTrustResult>;
 }
 
 /** One session this client opened (or is opening) and has not closed. */
@@ -233,6 +244,9 @@ export class RemoteClient {
   private readonly channelFactory?: () => Promise<DuplexChannel>;
   private readonly clock: Clock;
   private readonly random: () => number;
+  private readonly hooksTrust?: RemoteClientOptions["hooksTrust"];
+  /** Sessions with a `hooks/trust` prompt in flight (at most one each). */
+  private readonly trustAsking = new Set<string>();
 
   constructor(
     channel: DuplexChannel,
@@ -252,6 +266,9 @@ export class RemoteClient {
     }
     this.clock = options.clock ?? systemClock;
     this.random = options.random ?? Math.random;
+    if (options.hooksTrust) {
+      this.hooksTrust = options.hooksTrust;
+    }
     this.link = { ...initialLink, upSince: this.clock.now() };
     this.lastInboundAt = this.clock.now();
     this.peer = this.makePeer(channel, 0);
@@ -522,6 +539,27 @@ export class RemoteClient {
     this.peer.close();
   }
 
+  /**
+   * `hooks/trust`: never trusted without a resolver, for a session this
+   * client did not open (or is closing), or while one is already asked for
+   * that session — a daemon (maybe a pod) cannot spam prompts.
+   */
+  private async onHooksTrust(
+    params: HooksTrustParams,
+    signal?: AbortSignal,
+  ): Promise<HooksTrustResult> {
+    const entry = this.sessions.get(params.sessionId);
+    if (!this.hooksTrust || !entry || entry.closing || this.trustAsking.has(params.sessionId)) {
+      return { trusted: false };
+    }
+    this.trustAsking.add(params.sessionId);
+    try {
+      return await this.hooksTrust(params, signal);
+    } finally {
+      this.trustAsking.delete(params.sessionId);
+    }
+  }
+
   // --- generations -------------------------------------------------------
 
   private makePeer(raw: DuplexChannel, gen: number): RpcPeer {
@@ -555,6 +593,9 @@ export class RemoteClient {
             params as ModelStreamChunkedParams,
             context as RequestContext,
           );
+        }
+        if (method === Method.HooksTrust) {
+          return this.onHooksTrust(params as HooksTrustParams, context?.signal);
         }
         throw new RpcError(JsonRpcErrorCode.MethodNotFound, `unexpected request: ${method}`);
       },

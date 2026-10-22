@@ -100,7 +100,7 @@ proposed defaults.
 | 1 | [`tool-naming.md`](../feat/tool-naming.md) | CamelCase display labels only (names unchanged), shared `toolLabel` in core | S · contained | weaker model OK |
 | 2 | [`hooks-core.md`](../feat/hooks-core.md) | config `hooks`, `stdin` in core, `HookRunner`, `tool_call` → `PermissionGate`, `tool_result` → pipeline | M · load-bearing | strong model |
 | 3 | [`hooks-turn.md`](../feat/hooks-turn.md) | `turn_start`, `turn_end` (+ continue, max 3), `model_request` notify; **protocol 7 → 8** | M · load-bearing | strong model |
-| 4 | [`hooks-project-trust.md`](./hooks-project-trust.md) | `.agents/hooks.json`, `hooks/trust`, laptop resolver + store, auto-approve exclusion | M · load-bearing (§7) | strong model |
+| 4 | [`hooks-project-trust.md`](../feat/hooks-project-trust.md) | `.agents/hooks.json`, `hooks/trust`, laptop resolver + store, auto-approve exclusion | M · load-bearing (§7) | strong model |
 | 5 | [`packages.md`](./packages.md) | package layout, `tentacle packages install/list/remove/update`, loading into existing paths | M · cross-module | weaker model OK, standard Review |
 | — | *(follow-up, not written)* | laptop identity hooks: deny-only permission policy; `model_request` audit / redaction for pod sessions | — | — |
 

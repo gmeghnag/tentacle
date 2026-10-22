@@ -16,6 +16,7 @@ import {
   type CompactResult,
   type EnqueueParams,
   type EnqueueResult,
+  type HooksTrustResult,
   type InitializeParams,
   type InitializeResult,
   type McpStatusResult,
@@ -299,7 +300,15 @@ export class Connection {
   // stream, so its outcome survives a lost response.
   private prompt(params: PromptParams): PromptResult {
     const hosted = this.lookup(params.sessionId);
-    return hosted.prompt(params.turnId, params.content, params.skill);
+    // The PROMPTING connection is asked about project hooks: it is the client
+    // with a human behind this turn (docs/feat/hooks-project-trust.md). The
+    // laptop decides; a rejection (an old laptop's `MethodNotFound`, a drop)
+    // is "declined" in the runner.
+    return hosted.prompt(params.turnId, params.content, params.skill, (request, signal) =>
+      this.peer
+        .request(Method.HooksTrust, request, signal ? { signal } : undefined)
+        .then((result) => (result as HooksTrustResult).trusted === true),
+    );
   }
 
   private onNotification(method: string, params: unknown): void {

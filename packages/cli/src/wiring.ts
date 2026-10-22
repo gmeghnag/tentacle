@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   Agent,
   type AgentType,
+  type AskHooksTrust,
   BUILTIN_AGENT_TYPES,
   HookRunner,
   type ResultTransform,
@@ -44,6 +45,7 @@ import {
   createSkillTool,
   createTaskTool,
 } from "@tentacle/tools";
+import { createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
 import { configuredModelProvider } from "./model-provider.ts";
 
 /**
@@ -132,6 +134,11 @@ export interface BuildAgentOptions {
    * terminal while Ink owns it (AGENTS §7): a log file / the piped stderr.
    */
   readonly log?: (line: string) => void;
+  /**
+   * Asks whether to run the project's hooks when a turn brings no asker (the
+   * in-process TUI, which has no RPC). Absent → project hooks are declined.
+   */
+  readonly askHooksTrust?: AskHooksTrust;
 }
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
@@ -158,8 +165,12 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // User hooks (docs/feat/hooks-core.md): `tool_call` runs in the gate,
   // `tool_result` right after redaction (a hook never sees a redacted secret)
   // and before shaping (unwrapped: a `skill` result reaches hooks too).
+  // Project hooks (`.agents/hooks.json`) join them only once the session
+  // trusts them (docs/feat/hooks-project-trust.md); they may `allow` only
+  // where this process is local (D6): over the pod model tunnel, never.
+  const project = config.projectHooks;
   const hooks =
-    config.hooks.length > 0
+    config.hooks.length > 0 || project !== undefined
       ? new HookRunner({
           specs: config.hooks,
           env,
@@ -169,6 +180,17 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
           // Only when this process calls the provider itself: over the pod
           // model tunnel the request is built in the untrusted pod (D2).
           modelRequestHooks: options.modelOverride === undefined,
+          ...(project !== undefined
+            ? {
+                project: {
+                  specs: project.hooks,
+                  folder: project.folder,
+                  hash: project.hash,
+                  files: project.files,
+                  canAllow: options.modelOverride === undefined,
+                },
+              }
+            : {}),
         })
       : undefined;
   const resultTransforms: ResultTransform[] = [
@@ -235,6 +257,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     requestPermission: (req) => permissions.request(req),
     skills,
     ...(hooks ? { hooks } : {}),
+    ...(options.askHooksTrust ? { askHooksTrust: options.askHooksTrust } : {}),
   });
   return { agent, permissions, jobs, tools };
 }
@@ -250,7 +273,26 @@ export function inProcessAgents(config: TentacleConfig): {
   readonly build: () => WiredAgent;
 } {
   const permissions = new PermissionBroker();
-  return { permissions, build: () => buildAgent(config, { permissions }) };
+  // No RPC here: the agent asks the laptop's resolver directly — on the SAME
+  // broker, with the laptop's store (the in-process fallback is local, D4).
+  const resolve = createHooksTrustResolver({
+    broker: permissions,
+    interactive: true,
+    store: fileTrustStore(config.configDir),
+  });
+  const askHooksTrust: AskHooksTrust = async ({ sessionId, ...request }, signal) =>
+    (
+      await resolve(
+        {
+          sessionId,
+          ...request,
+          files: [...request.files],
+          hooks: request.hooks.map((h) => ({ ...h })),
+        },
+        signal,
+      )
+    ).trusted;
+  return { permissions, build: () => buildAgent(config, { permissions, askHooksTrust }) };
 }
 
 /**

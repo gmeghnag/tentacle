@@ -107,3 +107,59 @@ describe("auto-accept mode (Shift+Tab)", () => {
     unmount();
   });
 });
+
+describe("auto-accept never answers a hooks trust request (docs/feat/hooks-project-trust.md)", () => {
+  const trustReq = (storeBacked: boolean) =>
+    ({
+      kind: "hooks_trust",
+      tool: "hooks",
+      level: "ask",
+      title: "Trust the hooks of this project?",
+      detail: "/repo\nturn_start → ./a.sh",
+      input: { storeBacked },
+    }) as const;
+
+  test("with auto-accept ON, a trust request still prompts (and stays pending)", async () => {
+    const { permissions, agent } = buildApp();
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} permissions={permissions} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write(SHIFT_TAB);
+    await delay(20);
+    expect(lastFrame() ?? "").toContain("auto-accept on");
+    let answered: unknown = null;
+    void permissions.request(trustReq(true)).then((r) => {
+      answered = r;
+    });
+    await delay(30);
+    expect(answered).toBeNull();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Always trust this project");
+    expect(frame).toContain("Never for this project");
+    expect(frame).toContain("turn_start → ./a.sh");
+    // Not a tool call: no "writes confined here" row.
+    expect(frame).not.toContain("writes confined here");
+    unmount();
+  });
+
+  test("turning auto-accept on while a trust prompt is on screen does not grant it", async () => {
+    const { permissions, agent } = buildApp();
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} permissions={permissions} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    let answered: unknown = null;
+    void permissions.request(trustReq(false)).then((r) => {
+      answered = r;
+    });
+    await delay(30);
+    expect(lastFrame() ?? "").toContain("Trust for this session");
+    stdin.write(SHIFT_TAB);
+    await delay(30);
+    expect(answered).toBeNull();
+    // The store-less menu (pod, connect): no "always"/"never".
+    expect(lastFrame() ?? "").not.toContain("Always trust");
+    unmount();
+  });
+});

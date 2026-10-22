@@ -37,7 +37,7 @@
  * Sound because the history is append-only past any cut within an epoch (the
  * agent's one `pop` is never behind a marker; compaction starts a new epoch).
  */
-import type { AgentEvent, Session } from "@tentacle/agent";
+import type { AgentEvent, AskHooksTrust, Session } from "@tentacle/agent";
 import type {
   JobController,
   PermissionBroker,
@@ -632,6 +632,7 @@ export class HostedSession {
     turnId: string,
     content: Parameters<typeof contentToText>[0],
     skill?: string,
+    askHooksTrust?: AskHooksTrust,
   ): PromptResult {
     // The key first: a retry is answered even while a turn runs, or after it ended.
     const known = this.turns.get(turnId);
@@ -661,7 +662,10 @@ export class HostedSession {
     }
     void this.drive(
       turnId,
-      this.session.send(text, controller.signal, skill !== undefined ? { skill } : {}),
+      this.session.send(text, controller.signal, {
+        ...(skill !== undefined ? { skill } : {}),
+        ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
+      }),
       controller,
     );
     // After `drive` started: the generator has pushed the prompt by now (it

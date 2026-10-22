@@ -290,6 +290,81 @@
       "type": "object",
       "x-event-class": "mandatory"
     },
+    "HooksTrustParams": {
+      "additionalProperties": false,
+      "properties": {
+        "canAllow": {
+          "type": "boolean"
+        },
+        "files": {
+          "items": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "folder": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$",
+          "type": "string"
+        },
+        "hash": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$",
+          "type": "string"
+        },
+        "hooks": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "command": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$",
+                "type": "string"
+              },
+              "event": {
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$",
+                "type": "string"
+              },
+              "matcher": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]*$",
+                "type": "string"
+              }
+            },
+            "required": ["command", "event"],
+            "type": "object"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "type": "array"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["canAllow", "files", "folder", "hash", "hooks", "sessionId"],
+      "type": "object"
+    },
+    "HooksTrustResult": {
+      "additionalProperties": false,
+      "properties": {
+        "trusted": {
+          "type": "boolean"
+        }
+      },
+      "required": ["trusted"],
+      "type": "object"
+    },
     "ImageContent": {
       "additionalProperties": true,
       "properties": {
@@ -1529,6 +1604,14 @@
     "VersionMismatch": -32002
   },
   "methods": {
+    "hooks/trust": {
+      "params": {
+        "$ref": "#/$defs/HooksTrustParams"
+      },
+      "result": {
+        "$ref": "#/$defs/HooksTrustResult"
+      }
+    },
     "initialize": {
       "params": {
         "$ref": "#/$defs/InitializeParams"

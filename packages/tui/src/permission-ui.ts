@@ -32,8 +32,62 @@ export interface PermissionChoice {
   readonly response: PermissionResponse;
 }
 
+/**
+ * Whether auto-accept (Shift+Tab) may answer `req`. Never a project-hooks
+ * trust request (docs/feat/hooks-project-trust.md): trusting a repo's code is
+ * a human decision, not a tool call to wave through.
+ */
+export function autoApproves(req: PermissionRequest): boolean {
+  return req.kind !== "hooks_trust";
+}
+
+/** Whether the dialog shows the "writes confined here" row: tool calls only, not a trust request. */
+export function permissionShowsCwd(req: PermissionRequest): boolean {
+  return req.kind !== "hooks_trust";
+}
+
+/** At most this many detail rows in the dialog (a hooks trust request lists several). */
+export const MAX_DETAIL_ROWS = 10;
+
+/**
+ * The dialog's detail rows: one for a tool (its subject, or "—"); for a hooks
+ * trust request, each line of `detail`, capped at `MAX_DETAIL_ROWS` (the last
+ * row then says how many were left out). The component truncates each row.
+ */
+export function permissionDetailLines(req: PermissionRequest): string[] {
+  if (req.kind !== "hooks_trust") {
+    return [req.detail ? req.detail : "—"];
+  }
+  const lines = (req.detail ?? "—").split("\n");
+  if (lines.length <= MAX_DETAIL_ROWS) {
+    return lines;
+  }
+  const kept = lines.slice(0, MAX_DETAIL_ROWS - 1);
+  return [...kept, `… ${lines.length - kept.length} more lines`];
+}
+
+/** The trust menu: 4 choices when the laptop stores decisions, else this session only. */
+function hooksTrustChoices(req: PermissionRequest): PermissionChoice[] {
+  const input = req.input as { storeBacked?: unknown } | null;
+  const storeBacked = input !== null && typeof input === "object" && input.storeBacked === true;
+  return storeBacked
+    ? [
+        { label: "Trust for this session", response: { allowed: true, scope: "once" } },
+        { label: "Always trust this project", response: { allowed: true, scope: "session" } },
+        { label: "Don't trust", response: { allowed: false } },
+        { label: "Never for this project", response: { allowed: false, scope: "session" } },
+      ]
+    : [
+        { label: "Trust for this session", response: { allowed: true, scope: "once" } },
+        { label: "Don't trust", response: { allowed: false } },
+      ];
+}
+
 /** The arrow-menu options for a request: once / always (scoped) / deny. */
 export function buildPermissionChoices(req: PermissionRequest): PermissionChoice[] {
+  if (req.kind === "hooks_trust") {
+    return hooksTrustChoices(req);
+  }
   const always = req.suggestion
     ? `Yes, and don't ask again for \`${req.suggestion.prefix}\` commands`
     : "Yes, and don't ask again this session";
@@ -66,10 +120,12 @@ export function usePermissionBroker(permissions?: PermissionBroker): PermissionC
   const [autoApprove, setAutoApprove] = useState(false);
   const resolveRef = useRef<((r: PermissionResponse) => void) | null>(null);
   const autoApproveRef = useRef(false);
+  const pendingRef = useRef<PermissionRequest | null>(null);
 
   const answer = useCallback((response: PermissionResponse) => {
     const resolve = resolveRef.current;
     resolveRef.current = null;
+    pendingRef.current = null;
     setPending(null);
     resolve?.(response);
   }, []);
@@ -78,8 +134,9 @@ export function usePermissionBroker(permissions?: PermissionBroker): PermissionC
     const next = !autoApproveRef.current;
     autoApproveRef.current = next;
     setAutoApprove(next);
-    // If a request is on screen when auto-accept turns on, grant it immediately.
-    if (next && resolveRef.current) {
+    // If a request is on screen when auto-accept turns on, grant it immediately
+    // — unless auto-accept may not answer it (a hooks trust request).
+    if (next && resolveRef.current && pendingRef.current && autoApproves(pendingRef.current)) {
       answer({ allowed: true, scope: "once" });
     }
   }, [answer]);
@@ -94,7 +151,7 @@ export function usePermissionBroker(permissions?: PermissionBroker): PermissionC
         return Promise.resolve(DISMISSED);
       }
       // Auto-accept mode: grant without prompting (not remembered — scope once).
-      if (autoApproveRef.current) {
+      if (autoApproveRef.current && autoApproves(req)) {
         return Promise.resolve({ allowed: true, scope: "once" });
       }
       return new Promise<PermissionResponse>((resolve) => {
@@ -102,6 +159,7 @@ export function usePermissionBroker(permissions?: PermissionBroker): PermissionC
           // Withdrawn: close the dialog only if it is still this request's.
           if (resolveRef.current === settle) {
             resolveRef.current = null;
+            pendingRef.current = null;
             setPending(null);
           }
           resolve(DISMISSED);
@@ -112,6 +170,7 @@ export function usePermissionBroker(permissions?: PermissionBroker): PermissionC
         };
         signal?.addEventListener("abort", onAbort, { once: true });
         resolveRef.current = settle;
+        pendingRef.current = req;
         setSelected(0);
         setPending(req);
       });

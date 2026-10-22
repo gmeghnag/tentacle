@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@tentacle/agent";
+import { Agent, HookRunner } from "@tentacle/agent";
 import {
   type ChatRequest,
   type ExecutionEnvironment,
@@ -18,6 +18,7 @@ import {
   MODEL_STREAM_BATCH_MAX_CHARS,
   MODEL_STREAM_COALESCE_MS,
   RemoteClient,
+  type RemoteClientOptions,
 } from "../src/remote-client.ts";
 import { type WebSocketChannel, connectWebSocket } from "../src/ws-channel.ts";
 
@@ -1664,6 +1665,235 @@ describe("closing sessions (sessions outlive connections)", () => {
       code: DomainErrorCode.UnknownSession,
     });
     expect(host.size).toBe(0);
+    client.close();
+  });
+});
+
+describe("hooks/trust (docs/feat/hooks-project-trust.md)", () => {
+  const PARAMS = {
+    sessionId: "s1",
+    folder: "/repo",
+    hash: "h1",
+    files: [".agents/hooks.json"],
+    hooks: [{ event: "turn_start", command: "proj-start" }],
+    canAllow: false,
+  };
+  type Frame = { id?: unknown; method?: string; result?: unknown; error?: { code: number } };
+
+  /**
+   * A raw daemon (it could be a hostile pod) speaking JSON-RPC frames by hand:
+   * it answers `initialize` / `session/open`, and `ask` sends a raw
+   * `hooks/trust` frame — never validated by a daemon-side peer — and resolves
+   * with the laptop's response frame.
+   */
+  async function rawTrust(hooksTrust?: RemoteClientOptions["hooksTrust"]) {
+    const [daemonCh, clientCh] = createChannelPair();
+    const waiting = new Map<string, (f: Frame) => void>();
+    const reply = (id: unknown, result: unknown) =>
+      daemonCh.send(JSON.stringify({ jsonrpc: "2.0", id, result }));
+    daemonCh.setOnMessage((data) => {
+      const f = JSON.parse(data) as Frame;
+      if (f.method === Method.Initialize) {
+        reply(f.id, {
+          protocolVersion: PROTOCOL_VERSION,
+          agentCapabilities: { tools: true, permissions: true },
+          skills: [],
+        });
+      } else if (f.method === Method.Open) {
+        reply(f.id, { sessionId: "s1", epoch: "e", created: true, resync: false });
+      } else if (f.method === undefined && typeof f.id === "string") {
+        waiting.get(f.id)?.(f);
+      }
+    });
+    const client = new RemoteClient(
+      clientCh,
+      new PermissionBroker(),
+      undefined,
+      hooksTrust ? { hooksTrust } : {},
+    );
+    await client.initialize();
+    await client.openSession(undefined, undefined, "s1");
+    let n = 0;
+    const ask = (params: unknown): Promise<Frame> => {
+      const id = `raw-${++n}`;
+      const answered = new Promise<Frame>((r) => waiting.set(id, r));
+      daemonCh.send(JSON.stringify({ jsonrpc: "2.0", id, method: Method.HooksTrust, params }));
+      return answered;
+    };
+    return { client, ask };
+  }
+
+  test("a client with no resolver answers { trusted: false } (never MethodNotFound, never trusted)", async () => {
+    const { client, ask } = await rawTrust();
+    expect((await ask(PARAMS)).result).toEqual({ trusted: false });
+    client.close();
+  });
+
+  test("with a resolver: its answer, given the params and a signal the link drop aborts", async () => {
+    const seen: unknown[] = [];
+    let signal: AbortSignal | undefined;
+    const { client, ask } = await rawTrust((p, s) => {
+      seen.push(p);
+      signal = s;
+      return new Promise(() => {}); // the human never answers
+    });
+    void ask(PARAMS);
+    expect(await waitFor(() => seen.length === 1)).toBe(true);
+    expect(seen[0]).toEqual(PARAMS);
+    expect(signal?.aborted).toBe(false);
+    client.close(); // the laptop goes away while asked
+    expect(signal?.aborted).toBe(true);
+  });
+
+  test("a session this client never opened → { trusted: false }, nobody is asked", async () => {
+    let calls = 0;
+    const { client, ask } = await rawTrust(async () => {
+      calls++;
+      return { trusted: true };
+    });
+    expect((await ask({ ...PARAMS, sessionId: "other" })).result).toEqual({ trusted: false });
+    expect(calls).toBe(0);
+    client.close();
+  });
+
+  test("at most one trust prompt in flight per session: a second one → { trusted: false }", async () => {
+    let calls = 0;
+    let answer: (r: { trusted: boolean }) => void = () => {};
+    const { client, ask } = await rawTrust(() => {
+      calls++;
+      return new Promise((r) => {
+        answer = r;
+      });
+    });
+    const first = ask(PARAMS);
+    expect(await waitFor(() => calls === 1)).toBe(true);
+    expect((await ask(PARAMS)).result).toEqual({ trusted: false });
+    expect(calls).toBe(1);
+    answer({ trusted: true });
+    expect((await first).result).toEqual({ trusted: true });
+    client.close();
+  });
+
+  for (const [label, folder] of [
+    ["an ANSI escape", "/repo\u001b[2J"],
+    ["a bidi override (U+202E)", "/repo‮hs.lave"],
+  ] as const) {
+    test(`a hostile daemon's ${label} never reaches the resolver (InvalidParams)`, async () => {
+      let called = false;
+      const { client, ask } = await rawTrust(async () => {
+        called = true;
+        return { trusted: true };
+      });
+      const response = await ask({ ...PARAMS, folder });
+      expect(response.error?.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(called).toBe(false);
+      client.close();
+    });
+  }
+
+  /** A daemon whose session has a project `turn_start` hook; records the hooks it ran. */
+  function projectDaemon() {
+    const [daemonCh, clientCh] = createChannelPair();
+    const ran: string[] = [];
+    const env: ExecutionEnvironment = {
+      ...noopEnv,
+      exec: (command) => {
+        ran.push(command);
+        return Promise.resolve({ stdout: "", stderr: "", exitCode: 0 });
+      },
+    };
+    const logs: string[] = [];
+    const host = new SessionHost({
+      defaultCwd: "/w",
+      createAgent: () => {
+        const hooks = new HookRunner({
+          specs: [],
+          env,
+          cwd: "/w",
+          log: (l) => logs.push(l),
+          project: {
+            specs: [{ event: "turn_start", command: "proj-start" }],
+            folder: "/repo",
+            hash: "h1",
+            files: [".agents/hooks.json"],
+            canAllow: true,
+          },
+        });
+        const agent = new Agent({
+          model: new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]),
+          tools: new ToolRegistry(),
+          env,
+          hooks,
+        });
+        return { agent, permissions: new PermissionBroker() };
+      },
+    });
+    const connection = new Connection(daemonCh, host);
+    return { connection, clientCh, ran, logs };
+  }
+
+  test("an old laptop (no hooks/trust handler: real MethodNotFound) → the turn runs without the project hooks", async () => {
+    const { connection, clientCh, ran, logs } = projectDaemon();
+    const updates: { type?: string }[] = [];
+    // A laptop that predates `hooks/trust`: its handler knows no such method.
+    const laptop = new RpcPeer(clientCh, {
+      onRequest: async (method) => {
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, `unexpected request: ${method}`);
+      },
+      onNotification: (_method, params) => {
+        updates.push((params as { update: { type?: string } }).update);
+      },
+    });
+    await laptop.request(Method.Initialize, {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true },
+    });
+    await laptop.request(Method.Open, { sessionId: "s1", create: true });
+    await laptop.request(Method.Prompt, {
+      sessionId: "s1",
+      turnId: "t1",
+      content: [{ type: "text", text: "hi" }],
+    });
+    expect(await waitFor(() => updates.some((u) => u.type === "turn_end"))).toBe(true);
+    expect(ran).toEqual([]);
+    expect(logs.some((l) => l.includes("unexpected request: hooks/trust"))).toBe(true);
+    connection.close();
+    laptop.close();
+  });
+
+  test("the laptop answers { trusted: false } → the project hook never runs", async () => {
+    const { connection, clientCh, ran } = projectDaemon();
+    let asked = 0;
+    const client = new RemoteClient(clientCh, new PermissionBroker(), undefined, {
+      hooksTrust: async () => {
+        asked++;
+        return { trusted: false };
+      },
+    });
+    await client.initialize();
+    await collect(client.newSession().send("hi"));
+    expect(asked).toBe(1);
+    expect(ran).toEqual([]);
+    connection.close();
+    client.close();
+  });
+
+  test("the prompting laptop trusts → the project hook runs, asked once per session", async () => {
+    const { connection, clientCh, ran } = projectDaemon();
+    let asked = 0;
+    const client = new RemoteClient(clientCh, new PermissionBroker(), undefined, {
+      hooksTrust: async () => {
+        asked++;
+        return { trusted: true };
+      },
+    });
+    await client.initialize();
+    const session = client.newSession();
+    await collect(session.send("one"));
+    await collect(session.send("two"));
+    expect(asked).toBe(1);
+    expect(ran).toEqual(["proj-start", "proj-start"]);
+    connection.close();
     client.close();
   });
 });
