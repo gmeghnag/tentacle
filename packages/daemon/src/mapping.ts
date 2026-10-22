@@ -6,6 +6,7 @@
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
 import type { ToolResult } from "@tentacle/core";
 import {
+  BLOCKING_UPDATE_TYPES,
   type ContentBlock,
   JsonRpcErrorCode,
   type KnownSessionUpdateParams,
@@ -21,6 +22,7 @@ import {
   type StopReason,
   UPDATE_CLASS,
   type UpdateClass,
+  clientSupportsUpdate,
   text,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
@@ -115,14 +117,14 @@ export function assertTextOnly(content: readonly ContentBlock[]): void {
   }
 }
 
-/** One `session/update` frame: `mandatory: true` iff the update's class is mandatory, else omitted. */
+/** One `session/update` frame: `mandatory: true` iff the update's class is mandatory or blocking, else omitted. */
 export function toUpdateParams(
   sessionId: string,
   seq: number,
   update: SessionUpdate,
   classes: Readonly<Record<SessionUpdate["type"], UpdateClass>> = UPDATE_CLASS,
 ): KnownSessionUpdateParams {
-  return classes[update.type] === "mandatory"
+  return classes[update.type] !== "display"
     ? { sessionId, seq, mandatory: true, update }
     : { sessionId, seq, update };
 }
@@ -230,4 +232,26 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
     case "turn_end":
       return null;
   }
+}
+
+/**
+ * The frame as one client receives it: a BLOCKING update its client did not
+ * declare at `initialize` goes WITHOUT `mandatory` (it shows `unsupported` and
+ * never fails or cancels the shared turn); `seq` is unchanged, so the stream
+ * stays contiguous (docs/feat/protocol-v10-forward-compat.md).
+ */
+export function frameFor(
+  params: KnownSessionUpdateParams,
+  declared: readonly string[] | undefined,
+): KnownSessionUpdateParams {
+  const type = params.update.type;
+  if (
+    params.mandatory &&
+    BLOCKING_UPDATE_TYPES.has(type) &&
+    !clientSupportsUpdate(declared, type)
+  ) {
+    const { mandatory: _drop, ...display } = params;
+    return display;
+  }
+  return params;
 }

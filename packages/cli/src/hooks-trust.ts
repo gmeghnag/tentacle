@@ -66,7 +66,10 @@ export function trustOutcome(response: PermissionResponse): {
 export function hooksTrustDetail(p: HooksTrustParams): string {
   const lines = [p.folder];
   for (const h of p.hooks) {
-    lines.push(`${h.event}${h.matcher !== undefined ? ` ${h.matcher}` : ""} → ${h.command}`);
+    const model = h.model !== undefined ? ` (model: ${h.model})` : "";
+    lines.push(
+      `${h.event}${h.matcher !== undefined ? ` ${h.matcher}` : ""} → ${h.command}${model}`,
+    );
   }
   if (p.files.length > 0) {
     lines.push(`from ${p.files.join(", ")}`);

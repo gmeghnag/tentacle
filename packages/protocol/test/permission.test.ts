@@ -45,9 +45,9 @@ describe("permission_request update", () => {
     );
   });
 
-  test("is a member of the update union, class mandatory", () => {
+  test("is a member of the update union, class blocking", () => {
     expect(SessionUpdateSchema.safeParse(request).success).toBe(true);
-    expect(UPDATE_CLASS.permission_request).toBe("mandatory");
+    expect(UPDATE_CLASS.permission_request).toBe("blocking");
   });
 });
 
@@ -76,17 +76,19 @@ describe("permission_resolved update", () => {
 });
 
 describe("session/resolve_permission", () => {
-  test("params: sessionId, requestId, optionId — strict", () => {
+  test("params: sessionId, requestId, optionId (unknown fields stripped)", () => {
     const params = { sessionId: "s", requestId: "r1", optionId: "allow_once" };
     expect(ResolvePermissionParamsSchema.safeParse(params).success).toBe(true);
     expect(ResolvePermissionParamsSchema.safeParse({ ...params, optionId: "" }).success).toBe(
       false,
     );
-    // An answer is an option; cancelling is the turn's own command.
-    expect(
-      ResolvePermissionParamsSchema.safeParse({ ...params, outcome: { outcome: "cancelled" } })
-        .success,
-    ).toBe(false);
+    // An answer is an option; cancelling is the turn's own command: an
+    // `outcome` field is stripped, never read.
+    const extra = ResolvePermissionParamsSchema.safeParse({
+      ...params,
+      outcome: { outcome: "cancelled" },
+    });
+    expect(extra.success && extra.data).toEqual(params);
     expect(ResolvePermissionResultSchema.safeParse({}).success).toBe(true);
   });
 

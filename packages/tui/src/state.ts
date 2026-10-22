@@ -354,7 +354,14 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
 export type SessionEvent =
   | AgentEvent
   | { readonly type: "history_reset"; readonly messages: readonly ChatMessage[] }
-  | { readonly type: "user_message"; readonly text: string };
+  | { readonly type: "user_message"; readonly text: string }
+  /** A newer daemon's update type this client does not know (once per type per session). */
+  | { readonly type: "unsupported"; readonly kind: string };
+
+/** The notice for an update type this client does not know. */
+export function unsupportedNotice(kind: string): string {
+  return `the daemon uses features newer than this client (\`${kind}\`): update tentacle`;
+}
 
 /**
  * Replace the transcript with `messages` (a resync), keeping the turn's state.
@@ -381,6 +388,9 @@ export function applySessionEvent(
   }
   if (event.type === "user_message") {
     return { ...state, items: append(state.items, { kind: "user", text: event.text }) };
+  }
+  if (event.type === "unsupported") {
+    return appendNotice(state, unsupportedNotice(event.kind));
   }
   return applyEvent(state, event, now);
 }

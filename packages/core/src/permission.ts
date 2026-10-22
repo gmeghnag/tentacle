@@ -53,6 +53,12 @@ export interface PermissionResponse {
    * RPC client sends NOTHING for it — the request stays pending daemon-side.
    */
   readonly dismissed?: true;
+  /**
+   * No human could be asked, and why (e.g. the client cannot show a
+   * permission request): a refusal the model is told about, never a decision
+   * the user made (docs/feat/protocol-v10-forward-compat.md).
+   */
+  readonly reason?: string;
 }
 
 export interface PermissionRequestOptions {

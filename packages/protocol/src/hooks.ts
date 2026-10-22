@@ -19,25 +19,35 @@ export const MAX_TRUST_HOOKS = 100;
 const NO_CONTROL = /^[^\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]*$/;
 const line = (max: number) => z.string().min(1).max(max).regex(NO_CONTROL);
 
-export const HooksTrustParamsSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-    /** The project folder (repo root) the hooks come from. */
-    folder: line(4096),
-    /** Hash of the hook definitions: a changed definition asks again. */
-    hash: line(128),
-    files: z.array(line(4096)).max(MAX_TRUST_HOOKS),
-    hooks: z
-      .array(
-        z.object({ event: line(64), matcher: line(1024).optional(), command: line(4096) }).strict(),
-      )
-      .min(1)
-      .max(MAX_TRUST_HOOKS),
-    /** Whether these hooks may `allow` here (false in a pod, D6). Display only. */
-    canAllow: z.boolean(),
-  })
-  .strict();
+export const HooksTrustParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  /** The project folder (repo root) the hooks come from. */
+  folder: line(4096),
+  /** Hash of the hook definitions: a changed definition asks again. */
+  hash: line(128),
+  files: z.array(line(4096)).max(MAX_TRUST_HOOKS),
+  hooks: z
+    .array(
+      z.object({
+        event: line(64),
+        matcher: line(1024).optional(),
+        command: line(4096),
+        /**
+         * RESERVED (protocol 10): the named judge model a hook may call
+         * (docs/eval/hook-model-access.md, M3/M6). Declared now so a v10 peer
+         * validates it (bounded, no control/bidi) instead of stripping it.
+         * Nothing sends it yet: the config hook spec still rejects `model`.
+         * Shown in the prompt.
+         */
+        model: line(64).optional(),
+      }),
+    )
+    .min(1)
+    .max(MAX_TRUST_HOOKS),
+  /** Whether these hooks may `allow` here (false in a pod, D6). Display only. */
+  canAllow: z.boolean(),
+});
 export type HooksTrustParams = z.infer<typeof HooksTrustParamsSchema>;
 
-export const HooksTrustResultSchema = z.object({ trusted: z.boolean() }).strict();
+export const HooksTrustResultSchema = z.object({ trusted: z.boolean() });
 export type HooksTrustResult = z.infer<typeof HooksTrustResultSchema>;

@@ -37,11 +37,11 @@ describe("skills/list (docs/feat/skills-panel.md)", () => {
     expect(parse({ ...ok, problems: [evil] })).toBe(false);
   });
 
-  test("rejects empty or overlong strings, an unknown scope, extra keys", () => {
+  test("rejects empty or overlong strings, an unknown scope; strips extra keys", () => {
     expect(parse({ ...ok, skills: [{ ...skill, name: "" }] })).toBe(false);
     expect(parse({ ...ok, skills: [{ ...skill, description: "d".repeat(1025) }] })).toBe(false);
     expect(parse({ ...ok, skills: [{ ...skill, scope: "system" }] })).toBe(false);
-    expect(parse({ ...ok, skills: [{ ...skill, extra: 1 }] })).toBe(false);
+    expect(parse({ ...ok, skills: [{ ...skill, extra: 1 }] })).toBe(true); // stripped
     expect(parse({ ...ok, problems: ["p".repeat(1001)] })).toBe(false);
   });
 

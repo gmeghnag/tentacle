@@ -7,6 +7,7 @@ import {
   JsonRpcNotificationSchema,
   JsonRpcRequestSchema,
   JsonRpcSuccessResponseSchema,
+  parseJsonRpcMessage,
 } from "../src/index.ts";
 
 describe("JSON-RPC envelopes", () => {
@@ -30,22 +31,20 @@ describe("JSON-RPC envelopes", () => {
     expect(r.success).toBe(false);
   });
 
-  test("notification must not carry an id (strict)", () => {
+  test("a frame with `method` and an `id` is a request; without, a notification", () => {
     expect(
       JsonRpcNotificationSchema.safeParse({ jsonrpc: "2.0", method: "session/update" }).success,
     ).toBe(true);
-    expect(
-      JsonRpcNotificationSchema.safeParse({ jsonrpc: "2.0", id: 1, method: "session/update" })
-        .success,
-    ).toBe(false);
+    const r = parseJsonRpcMessage({ jsonrpc: "2.0", id: 1, method: "session/update" });
+    expect(r.success && "id" in r.data && r.data.id).toBe(1);
   });
 
-  test("success response may not also carry an error (strict)", () => {
+  test("a response may not carry both result and error (ambiguous)", () => {
     expect(
       JsonRpcSuccessResponseSchema.safeParse({ jsonrpc: "2.0", id: 1, result: {} }).success,
     ).toBe(true);
     expect(
-      JsonRpcSuccessResponseSchema.safeParse({
+      parseJsonRpcMessage({
         jsonrpc: "2.0",
         id: 1,
         result: {},
@@ -78,5 +77,35 @@ describe("JSON-RPC envelopes", () => {
   test("constants", () => {
     expect(JSONRPC_VERSION).toBe("2.0");
     expect(JsonRpcErrorCode.MethodNotFound).toBe(-32601);
+  });
+});
+
+describe("parseJsonRpcMessage: classified by the members present (v10 forward compat)", () => {
+  test("each kind tolerates (and strips) an unknown member", () => {
+    const cases = [
+      { jsonrpc: "2.0", id: 1, method: "m", params: {} },
+      { jsonrpc: "2.0", method: "m" },
+      { jsonrpc: "2.0", id: 1, result: {} },
+      { jsonrpc: "2.0", id: null, error: { code: 1, message: "x" } },
+    ];
+    for (const frame of cases) {
+      const r = parseJsonRpcMessage({ ...frame, extra: 1 });
+      expect(r.success).toBe(true);
+      expect(r.success ? (r.data as unknown) : null).toEqual(frame);
+    }
+  });
+
+  test("ambiguous or classless frames are rejected", () => {
+    for (const frame of [
+      { jsonrpc: "2.0", id: 1, method: "m", result: {} },
+      { jsonrpc: "2.0", id: 1, result: {}, error: { code: 1, message: "x" } },
+      { jsonrpc: "2.0", id: 1 },
+      { jsonrpc: "1.0", id: 1, method: "m" },
+      { jsonrpc: "2.0", id: null, method: "m" },
+      "x",
+      null,
+    ]) {
+      expect(parseJsonRpcMessage(frame).success).toBe(false);
+    }
   });
 });

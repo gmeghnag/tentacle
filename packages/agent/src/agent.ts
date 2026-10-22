@@ -922,6 +922,15 @@ export class Agent {
           input: outcome.input,
         };
       }
+      if (outcome.by === "unavailable") {
+        return {
+          result: {
+            content: `Permission could not be requested: ${outcome.reason ?? "no client to ask"}. \`${call.name}\` was not run.`,
+            isError: true,
+          },
+          input: outcome.input,
+        };
+      }
       return {
         result: {
           content: `Permission denied by the user: \`${call.name}\` was not run.`,

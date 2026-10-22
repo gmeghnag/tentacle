@@ -29,20 +29,26 @@ import { DIFF_SCHEME, HOOK_SCHEME } from "./constants.ts";
 export type SessionEvent =
   | AgentEvent
   | { readonly type: "history_reset"; readonly messages: readonly ChatMessage[] }
-  | { readonly type: "user_message"; readonly text: string };
+  | { readonly type: "user_message"; readonly text: string }
+  /**
+   * The daemon sent an update type this client does not know (a newer
+   * daemon's, display class): shown once per type per session, then skipped.
+   */
+  | { readonly type: "unsupported"; readonly kind: string };
 
 /** What the client does with one `session/update` frame. */
 export type ClassifiedUpdate =
   | { readonly kind: "update"; readonly update: SessionUpdate }
-  | { readonly kind: "ignore" }
+  | { readonly kind: "unsupported"; readonly type: string }
   | { readonly kind: "error"; readonly error: Error };
 
 /**
  * Apply the event-class rule (parent `session-reattach` §14, decision E) to a
  * frame the peer already validated against the catch-all union: a known valid
  * update is handled; a known type that fails its member is malformed; an
- * unknown one is skipped unless the frame says it is mandatory. Never silent
- * on anything a client must act on.
+ * unknown one is `unsupported` (skipped, and the user is told once per type —
+ * docs/feat/protocol-v10-forward-compat.md) unless the frame says it is
+ * mandatory. Never silent on anything a client must act on.
  */
 export function classifyUpdate(params: SessionUpdateParams): ClassifiedUpdate {
   const known = SessionUpdateSchema.safeParse(params.update);
@@ -59,7 +65,7 @@ export function classifyUpdate(params: SessionUpdateParams): ClassifiedUpdate {
       ),
     };
   }
-  return { kind: "ignore" };
+  return { kind: "unsupported", type };
 }
 
 export function stopReasonFromProtocol(reason: StopReason): AgentStopReason {

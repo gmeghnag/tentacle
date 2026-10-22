@@ -145,7 +145,6 @@ describe("session/update frame (event classes, catch-all, required seq)", () => 
       .sort();
     expect(mandatory).toEqual([
       "history_replaced",
-      "permission_request",
       "permission_resolved",
       "session_closed",
       "turn_end",
@@ -178,6 +177,6 @@ describe("context_note reason 'hook' (docs/feat/hooks-turn.md)", () => {
     expect(ContextNoteSchema.safeParse(note).success).toBe(true);
     expect(SessionUpdateSchema.safeParse(note).success).toBe(true);
     expect(ContextNoteSchema.safeParse({ ...note, reason: "other" }).success).toBe(false);
-    expect(PROTOCOL_VERSION).toBe(9);
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(9);
   });
 });

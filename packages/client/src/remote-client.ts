@@ -32,6 +32,7 @@ import {
   type HooksTrustResult,
   type InitializeResult,
   JsonRpcErrorCode,
+  KNOWN_UPDATE_TYPES,
   type McpServerStatus,
   type McpStatusResult,
   Method,
@@ -632,7 +633,9 @@ export class RemoteClient {
   private handshake(peer: RpcPeer): Promise<InitializeResult> {
     return this.call(peer, Method.Initialize, {
       protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: { streaming: true },
+      // Every update type this build understands: the daemon emits a
+      // BLOCKING type only to a client that lists it (protocol 10).
+      clientCapabilities: { streaming: true, updates: [...KNOWN_UPDATE_TYPES] },
     }).then((raw) => {
       const result = raw as InitializeResult;
       // Only the current link's answer: a superseded handshake must not

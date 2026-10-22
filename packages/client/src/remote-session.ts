@@ -63,6 +63,8 @@ export class RemoteSession implements SessionStreamListener {
   private turnId: string | null = null;
   /** The turn being streamed, or null when idle. */
   private active: ActiveTurn | null = null;
+  /** `unsupported` notices that arrived while idle: shown at the start of the next turn. */
+  private idleNotices: SessionEvent[] = [];
 
   constructor(client: RemoteClient, seedMessages?: readonly ChatMessage[], desiredId?: string) {
     this.client = client;
@@ -172,6 +174,9 @@ export class RemoteSession implements SessionStreamListener {
       abortWanted: false,
     };
     this.active = turn;
+    for (const notice of this.idleNotices.splice(0)) {
+      turn.queue.push(notice);
+    }
     const onAbort = (): void => {
       turn.abortWanted = true;
       this.client.cancel(id);
@@ -217,6 +222,11 @@ export class RemoteSession implements SessionStreamListener {
   output(out: StreamOutput): void {
     const turn = this.active;
     if (!turn || turn.ended) {
+      // The reducer reports an unknown type once: keep it for the next turn,
+      // never drop it (docs/feat/protocol-v10-forward-compat.md).
+      if (out.kind === "unsupported") {
+        this.idleNotices.push({ type: "unsupported", kind: out.type });
+      }
       return; // idle: a turn started elsewhere is not rendered (known limit)
     }
     switch (out.kind) {
@@ -242,6 +252,9 @@ export class RemoteSession implements SessionStreamListener {
         // unobserved.
         this.fail(turn, out.error);
         if (this.id) this.client.cancel(this.id);
+        return;
+      case "unsupported":
+        turn.queue.push({ type: "unsupported", kind: out.type });
         return;
       case "turn_lost":
         if (!turn.sent) {

@@ -252,3 +252,13 @@ describe("a command notice is never extended by model text (docs/feat/mcp-status
     ]);
   });
 });
+
+describe("unsupported update kinds (docs/feat/protocol-v10-forward-compat.md)", () => {
+  test("an 'unsupported' event shows one dim notice naming the kind", () => {
+    const next = applySessionEvent(initialState, { type: "unsupported", kind: "progress" }, 0);
+    expect(next.items.at(-1)).toEqual({
+      kind: "notice",
+      text: "the daemon uses features newer than this client (`progress`): update tentacle",
+    });
+  });
+});

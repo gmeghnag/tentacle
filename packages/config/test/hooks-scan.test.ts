@@ -104,6 +104,11 @@ describe("parseProjectHooksFile", () => {
         parseProjectHooksFile(JSON.stringify({ hooks: [{ event: "nope", command: "x" }] })),
     ).toBe(true);
     expect(parseProjectHooksFile(JSON.stringify({ hooks: [guard] }))).toEqual({ hooks: [guard] });
+    // `model` is reserved on the wire only (docs/feat/protocol-v10-forward-compat.md):
+    // the config hook spec still rejects it, so nothing sends it yet.
+    expect(
+      "error" in parseProjectHooksFile(JSON.stringify({ hooks: [{ ...guard, model: "j" }] })),
+    ).toBe(true);
   });
 });
 

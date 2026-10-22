@@ -63,6 +63,8 @@ export interface StreamState {
   readonly pending: readonly string[];
   /** When each recent forced reopen happened (the guard). */
   readonly reopens: readonly number[];
+  /** Unknown update types already reported (`unsupported`: once per type per session). */
+  readonly unsupported: readonly string[];
 }
 
 export const initialStream: StreamState = {
@@ -73,6 +75,7 @@ export const initialStream: StreamState = {
   turn: null,
   pending: [],
   reopens: [],
+  unsupported: [],
 };
 
 export type StreamInput =
@@ -114,6 +117,8 @@ export type StreamOutput =
   | { readonly kind: "update"; readonly seq: number; readonly update: SessionUpdate }
   /** A frame this client cannot act on (malformed known type, unknown mandatory). */
   | { readonly kind: "error"; readonly error: Error }
+  /** The first frame of an unknown display type in this session (then skipped). */
+  | { readonly kind: "unsupported"; readonly type: string }
   /** The session was recreated: whatever turn was in flight is gone (never re-run). */
   | { readonly kind: "turn_lost" }
   | { readonly kind: "failed"; readonly reason: string };
@@ -213,8 +218,13 @@ class Stepper {
     }
     this.set({ applied: params.seq });
     const classified = classifyUpdate(params);
-    if (classified.kind === "ignore") {
-      return; // an unknown display event: counted, not shown
+    if (classified.kind === "unsupported") {
+      // An unknown display event: counted; reported once per type, then skipped.
+      if (!this.state.unsupported.includes(classified.type)) {
+        this.set({ unsupported: [...this.state.unsupported, classified.type] });
+        this.out.push({ kind: "unsupported", type: classified.type });
+      }
+      return;
     }
     if (classified.kind === "error") {
       this.out.push({ kind: "error", error: classified.error });
