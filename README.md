@@ -226,12 +226,14 @@ A package bundles skills, sub-agent types, MCP servers and hooks so you can
 install and share them with one command:
 
 ```sh
-tentacle packages install ./my-pack              # a local directory (copied)
-tentacle packages install https://host/pack.git#v1   # git (shallow clone, optional #ref)
-tentacle packages list                           # name, version, enabled, source, counts
-tentacle packages update [<name>]                # git: pull --ff-only; a path: reinstall
-tentacle packages remove <name>
+tentacle package install ./my-pack              # a local directory (copied)
+tentacle package install https://host/pack.git#v1   # git (shallow clone, optional #ref)
+tentacle package list                           # name, version, enabled, source, counts
+tentacle package update [<name>]                # git: pull --ff-only; a path: reinstall
+tentacle package remove <name>
 ```
+
+`tentacle install <path|git-url>[#ref]` is a shortcut for `tentacle package install`.
 
 Each package lives in `<configDir>/packages/<name>/`:
 
