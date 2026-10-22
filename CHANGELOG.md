@@ -53,6 +53,8 @@ release. Items marked *(since 0.1.0-beta.1)* changed after the beta.
   servers and hooks: `tentacle package install <path | git-url>[#ref]` (or
   `tentacle install …`), `list`, `update`, `remove`. Install and update print
   every hook and MCP command they will run.
+- **One-line install:** `curl -fsSL tentacle.so/install | sh` (`scripts/install.sh`):
+  verified download, no sudo, then `tentacle update` for the pod binaries.
 - **Developer guide** for hooks and packages: `docs/extensions.md`
   *(since 0.1.0-beta.1)*.
 
