@@ -665,6 +665,13 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         or the project root, so a package or project hook launched from a
         subfolder can't find its own script by relative path. DONE 2026-10-22 (`feat/hook-env-dirs`): `TENTACLE_PROJECT_DIR` / `TENTACLE_PACKAGE_DIR`, `docs/feat/hook-env-dirs.md`. Type: feat ·
         Size: S · Blast: contained.
+      - [ ] **Hook model access (LLM-judge seam)** — hooks call a model
+        through tentacle (unix-socket HTTP + per-invocation token), judge
+        model from a laptop-side `hookModels` map, resolved and capped on the
+        laptop; in a pod via a new daemon→client `model/complete` (keys never
+        leave the laptop). Owner decisions M1–M8 open. **Eval:**
+        `docs/eval/hook-model-access.md`. Type: eval → feat · Size: L (split
+        A local / B pod+protocol) · Blast: load-bearing.
       - **User guide:** `docs/extensions.md` (hooks + packages, worked examples).
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
