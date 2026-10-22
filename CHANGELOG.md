@@ -73,6 +73,9 @@ release. Items marked *(since 0.1.0-beta.1)* changed after the beta.
   permission prompt.
 - Secret-looking environment variables are removed from the environment of
   shell commands, hooks and MCP servers.
+- Optional secret redaction of tool output (keys, tokens, private keys, URL
+  credentials) before it reaches the model or disk: `"tools": { "redactSecrets": true }`.
+  Off by default.
 - Every background process runs in its own process group and is killed when
   tentacle exits.
 - A package symlink that points outside the package is refused at install and

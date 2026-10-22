@@ -26,7 +26,7 @@ export const DEFAULT_CONTEXT_WINDOW = 128000;
 /** Max characters of a tool result kept inline before it is spilled to a file. */
 export const DEFAULT_MAX_INLINE_OUTPUT_CHARS = 16000;
 /** Secret redaction of tool output is on by default (security). */
-export const DEFAULT_REDACT_SECRETS = true;
+export const DEFAULT_REDACT_SECRETS = false;
 /** LLM summarisation of large output is off by default (costs a model call). */
 export const DEFAULT_SUMMARIZE_LARGE_OUTPUT = false;
 /** Collapsing repeated consecutive output lines is on by default. */
@@ -128,7 +128,7 @@ export const DEFAULT_CONFIG_JSONC = `{
   // Tool-output handling.
   //  - maxInlineOutputChars: a result longer than this is spilled to a file under
   //    .tentacle/tool-output/ and the model is told to read it selectively (0 = off).
-  //  - redactSecrets: mask keys/tokens/credentials in tool output (on by default).
+  //  - redactSecrets: mask keys/tokens/credentials in tool output. Off by default.
   //  - summarizeLargeOutput: replace large output with an LLM summary instead of a
   //    preview (full output still spilled to a file). Costs a model call; off by default.
   //  - dedupOutput: collapse runs of identical consecutive lines (log spam). On by default.

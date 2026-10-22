@@ -1164,8 +1164,9 @@ Users then run `tentacle package install https://host/you/demo-pack.git#v0.1.0`.
   `tentacle hooks trust --revoke <folder>` when in doubt.
 - **What a hook sees:**
   - `tool_input` is the model's own arguments, **unredacted**. Secret
-    redaction (`tools.redactSecrets`) applies to tool **results** only.
-  - A `tool_result` hook sees the output **after** tentacle's redaction.
+    redaction (`tools.redactSecrets`, **off by default**) applies to tool
+    **results** only.
+  - A `tool_result` hook sees the output **after** tentacle's redaction, when it is on.
   - When an input was rewritten, the content starts with the
     `[hook] input modified by hook <name>; ran with: …` line.
   - `model_request` hooks see the new messages of every request, including

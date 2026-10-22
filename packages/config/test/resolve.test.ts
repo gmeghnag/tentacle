@@ -42,6 +42,9 @@ describe("resolveConfig precedence", () => {
     expect(c.autoWake).toBe(DEFAULT_AUTO_WAKE);
     expect(c.autoWake).toBe(true);
     expect(c.sources.autoWake).toBe("default");
+    // Secret redaction of tool output is opt-in (`tools.redactSecrets: true`).
+    expect(c.redactSecrets).toBe(false);
+    expect(c.sources.redactSecrets).toBe("default");
     // The provider defaults to OpenAI-compatible (existing behaviour).
     expect(c.provider).toBe(DEFAULT_PROVIDER);
     expect(c.provider).toBe("openai");

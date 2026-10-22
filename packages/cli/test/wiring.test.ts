@@ -129,7 +129,11 @@ describe("buildAgent skills (docs/feat/skills-core.md)", () => {
   test("/compact re-reads an active skill through the real transforms: edited, verbatim, still redacted", async () => {
     // docs/feat/skills-compaction.md: the re-run takes the same path as an
     // activation — exempt from spill/dedup/summary, but not from redaction.
-    const cfg = await skillConfig({ summarizeLargeOutput: true, dedupOutput: true });
+    const cfg = await skillConfig({
+      summarizeLargeOutput: true,
+      dedupOutput: true,
+      redactSecrets: true,
+    });
     const location = cfg.skills[0]?.location;
     if (!location) throw new Error("expected the big skill");
     const model = new ScriptedModel([
@@ -316,6 +320,7 @@ describe("hooks wiring (docs/feat/hooks-core.md)", () => {
     const { agent } = buildAgent(
       {
         ...config,
+        redactSecrets: true,
         hooks: [
           {
             event: "tool_call",

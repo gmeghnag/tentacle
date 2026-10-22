@@ -185,14 +185,14 @@ Full reference and worked examples: [docs/extensions.md](docs/extensions.md#3-ho
   and stdio MCP servers only (its own directory; an inherited value is
   dropped). Secret-looking env vars are
   scrubbed: a hook reads its own secrets. `tool_input` is the model's own
-  arguments, **unredacted** (secret redaction applies to tool results only).
+  arguments, **unredacted** (secret redaction, opt-in with `tools.redactSecrets: true`, applies to tool results only).
 - **`tool_call` output:** exit 0 with empty stdout = no opinion; a JSON object
   with `decision` (`allow` skips the prompt for this call only, `ask` forces
   it, `deny` + `reason` refuses) and/or `input` (rewrites the call; the model
   is told). Exit 2 = deny, stderr is the reason. A `"deny"`-level tool stays
   refused whatever a hook says.
 - **`tool_result` output:** `{"content": "…", "is_error": bool}` replaces the
-  result (it already went through secret redaction); exit 2 = an error result
+  result (after secret redaction, when `tools.redactSecrets` is on); exit 2 = an error result
   with stderr. When a `tool_call` hook rewrote the input, the result it sees
   starts with the `[hook] input modified by hook <name>; ran with: …` line
   the model also gets.

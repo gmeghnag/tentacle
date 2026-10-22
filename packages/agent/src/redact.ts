@@ -5,8 +5,8 @@
  *
  * This is defence-in-depth, not a guarantee: patterns catch common, high-signal
  * secret shapes (keys, tokens, private-key blocks, URL credentials, obvious
- * `KEY=value` assignments). It errs toward masking; `tools.redactSecrets` in the
- * config disables it.
+ * `KEY=value` assignments). It errs toward masking. Opt-in: `tools.redactSecrets`
+ * in the config enables it (off by default).
  */
 import type { ResultTransform } from "./result-pipeline.ts";
 
