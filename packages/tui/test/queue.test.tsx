@@ -4,6 +4,7 @@ import type { ChatRequest, ExecutionEnvironment, ModelProvider } from "@tentacle
 import { ToolRegistry } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
+import { ARC } from "../src/spinner.ts";
 
 const noopEnv: ExecutionEnvironment = {
   id: "noop",
@@ -12,6 +13,8 @@ const noopEnv: ExecutionEnvironment = {
   writeFile: () => Promise.resolve(),
 };
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** A queued row: any `arc` spinner frame, then the text. */
+const queuedRow = (text: string) => new RegExp(`[${ARC.frames.join("")}] ${text}`);
 
 /** Round 1 streams, then pauses so a task can be queued into the running turn. */
 class SlowProvider implements ModelProvider {
@@ -49,7 +52,7 @@ describe("mid-turn task queue (steering)", () => {
     await delay(40);
 
     // The queued task is visible with its pending marker while the turn runs.
-    expect(lastFrame() ?? "").toContain("⏳ also do X");
+    expect(lastFrame() ?? "").toMatch(queuedRow("also do X"));
 
     await delay(300); // let the turn end, steer, and run the injected round
     const all = frames.join("\n");
@@ -64,7 +67,7 @@ describe("mid-turn steering reconciliation (RPC delivery failure)", () => {
   /**
    * A remote-like session whose `send` keeps the turn running (a tool in
    * flight) and whose `enqueue` resolves/rejects like a daemon would, so the
-   * App's mid-turn steering branch (optimistic ⏳ + reconciliation) is driven
+   * App's mid-turn steering branch (optimistic queued + reconciliation) is driven
    * without a real daemon.
    */
   function makeController(enqueueImpl: (text: string) => void | Promise<void>) {
@@ -78,7 +81,7 @@ describe("mid-turn steering reconciliation (RPC delivery failure)", () => {
     };
   }
 
-  test("an enqueue that REJECTS removes the optimistic ⏳ row and warns", async () => {
+  test("an enqueue that REJECTS removes the optimistic queued row and warns", async () => {
     let enqueued = 0;
     const { stdin, lastFrame, unmount } = render(
       <App
@@ -86,7 +89,7 @@ describe("mid-turn steering reconciliation (RPC delivery failure)", () => {
           makeController((text) => {
             enqueued += 1;
             void text;
-            // Reject after a beat so the optimistic ⏳ renders first, then the
+            // Reject after a beat so the optimistic queued renders first, then the
             // reconciliation removes it (the observable we assert).
             return new Promise<void>((_resolve, reject) => {
               setTimeout(() => reject(new Error("method not found")), 80);
@@ -105,24 +108,24 @@ describe("mid-turn steering reconciliation (RPC delivery failure)", () => {
     stdin.write("steer me");
     await delay(20);
     stdin.write("\r");
-    await delay(20); // optimistic ⏳ is up; the reject (80 ms) has not fired yet
+    await delay(20); // optimistic queued is up; the reject (80 ms) has not fired yet
 
     // Optimistic: the queued task shows while delivery is pending.
-    expect(lastFrame() ?? "").toContain("⏳ steer me");
+    expect(lastFrame() ?? "").toMatch(queuedRow("steer me"));
     expect(enqueued).toBe(1);
 
     // Delivery rejects → the optimistic row is reconciled away and a warning
     // surfaces (otherwise it would mask a send that never happened).
     await delay(140);
     const after = lastFrame() ?? "";
-    expect(after).not.toContain("⏳ steer me");
+    expect(after).not.toMatch(queuedRow("steer me"));
     expect(after).toContain("not queued");
     // The notice carries the actual cause, not a guess ("old daemon").
     expect(after).toContain("method not found");
     unmount();
   });
 
-  test("an enqueue that RESOLVES keeps the ⏳ row until a steer echo / turn_end", async () => {
+  test("an enqueue that RESOLVES keeps the queued row until a steer echo / turn_end", async () => {
     const { stdin, lastFrame, unmount } = render(
       <App
         createSession={() => makeController(() => Promise.resolve())}
@@ -143,7 +146,7 @@ describe("mid-turn steering reconciliation (RPC delivery failure)", () => {
     // Resolving does NOT clear the row: it waits for the `steer` echo (or the
     // turn_end clear) — matching local semantics, so a resolved-but-not-injected
     // task is still visible, not silently dropped.
-    expect(lastFrame() ?? "").toContain("⏳ steer me");
+    expect(lastFrame() ?? "").toMatch(queuedRow("steer me"));
     unmount();
   });
 });
