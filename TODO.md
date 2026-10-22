@@ -652,6 +652,20 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
           warning channel (a raw write would corrupt Ink, §7). Route it through
           the worker's MCP status (`McpStatusTracker` / `mcp/status`). Type: feat
           · Size: S · Blast: contained.
+      - [ ] 🔴 **In-process trust path skips the `hooks/trust` schema** — in the
+        `--in-process` TUI and the worker fallback, `askHooksTrust`
+        (`cli/src/wiring.ts:308-324`) calls the resolver with no
+        `HooksTrustParamsSchema` check, so a project hook over the wire limits
+        (5,000-char command reproduced) is offered, trusted and loaded.
+        Found by the `docs/extensions.md` accuracy review. **Doc:**
+        `docs/fix/in-process-hooks-trust-schema.md`. Type: fix · Size: S ·
+        Blast: load-bearing (§7 trust).
+      - [ ] 🔵 **No package-dir / repo-root pointer for hooks and MCP servers** —
+        hooks run in the session cwd with no env var naming their package dir
+        or the project root, so a package or project hook launched from a
+        subfolder can't find its own script by relative path. Type: eval ·
+        Size: S · Blast: contained.
+      - **User guide:** `docs/extensions.md` (hooks + packages, worked examples).
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 

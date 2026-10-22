@@ -137,6 +137,8 @@ Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyComma
 
 ### Hooks
 
+Full reference and worked examples: [docs/extensions.md](docs/extensions.md#3-hook-reference).
+
 `hooks` in `config.jsonc` runs your shell commands on tool and turn events
 (user scope; a profile's `hooks` replaces the base list):
 
@@ -213,6 +215,8 @@ Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyComma
   decisions.
 
 ### Packages
+
+Full reference and a complete example package: [docs/extensions.md](docs/extensions.md#5-packages).
 
 A package bundles skills, sub-agent types, MCP servers and hooks so you can
 install and share them with one command:
