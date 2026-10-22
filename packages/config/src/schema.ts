@@ -192,6 +192,12 @@ const settingsShape = {
   autoWake: z.boolean().optional(),
   /** MCP servers to connect to, keyed by name; their tools are added to the agent. */
   mcpServers: z.record(McpServerSchema).optional(),
+  /**
+   * Installed packages (`<configDir>/packages/<name>`, docs/feat/packages.md)
+   * to switch off: `{ "<name>": false }`. Default: every package enabled. A
+   * top-level setting, so a profile's `packages` replaces the base map.
+   */
+  packages: z.record(z.boolean()).optional(),
   /** Tool-output handling. */
   tools: z
     .object({

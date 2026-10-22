@@ -86,25 +86,52 @@ export function skillListing(config: Pick<TentacleConfig, "skills" | "skillDiagn
   };
 }
 
-/** Load user-defined agent types from `<configDir>/agents/*.md` (missing dir → none). */
-function loadUserAgentTypes(configDir: string): AgentType[] {
-  const dir = join(configDir, "agents");
-  let entries: string[];
-  try {
-    entries = readdirSync(dir).filter((f) => f.endsWith(".md"));
-  } catch {
-    return [];
-  }
+/**
+ * Load user-defined agent types from `<configDir>/agents/*.md`, then from each
+ * package `agents/` dir (docs/feat/packages.md). A missing dir → none. On a
+ * type-name clash the first wins and a diagnostic names both; an unreadable
+ * package definition is a diagnostic (the user's own is skipped silently).
+ */
+export function loadUserAgentTypes(
+  configDir: string,
+  packageDirs: readonly string[] = [],
+): { types: AgentType[]; diagnostics: string[] } {
   const types: AgentType[] = [];
-  for (const file of entries.sort()) {
+  const diagnostics: string[] = [];
+  const from = new Map<string, string>();
+  for (const [index, dir] of [join(configDir, "agents"), ...packageDirs].entries()) {
+    let entries: string[];
     try {
-      const text = readFileSync(join(dir, file), "utf8");
-      types.push(parseAgentDefinition(text, file.replace(/\.md$/, "")));
+      entries = readdirSync(dir).filter((f) => f.endsWith(".md"));
     } catch {
-      // Skip an unreadable definition rather than failing startup.
+      continue;
+    }
+    for (const file of entries.sort()) {
+      const path = join(dir, file);
+      let type: AgentType;
+      try {
+        type = parseAgentDefinition(readFileSync(path, "utf8"), file.replace(/\.md$/, ""));
+      } catch (error) {
+        if (index > 0) {
+          diagnostics.push(`${path}: skipped (${error instanceof Error ? error.message : error})`);
+        }
+        continue;
+      }
+      const prior = from.get(type.name);
+      if (prior !== undefined) {
+        diagnostics.push(
+          `agent type "${type.name}" in ${path} ignored (already defined by ${prior})`,
+        );
+        continue;
+      }
+      if (index > 0 && BUILTIN_AGENT_TYPES.some((b) => b.name === type.name)) {
+        diagnostics.push(`agent type "${type.name}" in ${path} replaces the built-in one`);
+      }
+      from.set(type.name, path);
+      types.push(type);
     }
   }
-  return types;
+  return { types, diagnostics };
 }
 
 export interface WiredAgent {
@@ -229,7 +256,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // inherit the same confined env + permission requester; the runner filters
   // out `agent_task` itself so a sub-agent cannot spawn further sub-agents.
   if (config.subagentsEnabled) {
-    const agentTypes = mergeAgentTypes(BUILTIN_AGENT_TYPES, loadUserAgentTypes(config.configDir));
+    const agentTypes = mergeAgentTypes(
+      BUILTIN_AGENT_TYPES,
+      loadUserAgentTypes(config.configDir, config.packageAgentDirs).types,
+    );
     const { run, types } = createSubagentRunner({
       model,
       // Per-type model override: same endpoint, a different model id. Over a

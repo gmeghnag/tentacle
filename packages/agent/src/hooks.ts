@@ -53,17 +53,21 @@ export type ResultVote =
   | { readonly kind: "pass"; readonly failure?: string }
   | { readonly kind: "replace"; readonly content: string; readonly isError?: boolean };
 
-/** A hook's display name: its `name`, else the basename of the first word of `command`. */
+/**
+ * A hook's display name: its `name`, else the basename of the first word of
+ * `command` — prefixed `<package>:` for a package hook.
+ */
 export function hookName(spec: HookSpec): string {
+  const prefix = spec.source !== undefined ? `${spec.source}:` : "";
   if (spec.name !== undefined) {
-    return spec.name;
+    return `${prefix}${spec.name}`;
   }
   const first = spec.command.trim().split(/\s+/)[0] ?? spec.command;
   const base = first
     .split("/")
     .filter((p) => p.length > 0)
     .pop();
-  return base ?? first;
+  return `${prefix}${base ?? first}`;
 }
 
 const PLAIN_MATCHER = /^[A-Za-z0-9_-]+(\|[A-Za-z0-9_-]+)*$/;

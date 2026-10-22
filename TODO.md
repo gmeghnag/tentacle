@@ -619,7 +619,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       reuses a pod binary of any version (silent skew). Open questions 1–8
       pending discussion. **Eval:** `docs/eval/tentacle-update.md`. Type: eval →
       fix + feat ×2 · Size: M overall · Blast: cross-module.
-- [ ] **Extensibility: users extend tentacle themselves (hooks + packages)** —
+- [x] **Extensibility: users extend tentacle themselves (hooks + packages)** —
       out-of-process hooks (`tool_call` → `PermissionGate`, `tool_result` →
       result pipeline, `turn_start`, `turn_end`, `model_request`) + declarative
       packages; no in-process API, no pi/Claude Code compatibility. Eval written
@@ -643,9 +643,15 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         daemon→client, laptop store for the local worker only, auto-approve
         excluded) — DONE 2026-10-22 (`feat/hooks-project-trust`): `docs/feat/hooks-project-trust.md`.
         Type: feat · Size: M · Blast: load-bearing (§7).
-      - [ ] **packages** (own format; path + git; `tentacle packages …`; not in
-        pod v1) — K1–K3 decided: `docs/eval/packages.md`. Type: eval →
+      - [x] **packages** (own format; path + git; `tentacle packages …`; not in
+        pod v1) — DONE 2026-10-22 (`feat/packages`): `docs/feat/packages.md`. Type:
         feat · Size: M · Blast: cross-module.
+        - [ ] 🔵 **Debt: no 64-char MCP tool-name warning in the TUI** (K2). It is
+          printed only in `--plain` / one-shot mode (`cli/src/main.ts`, after
+          `connectMcpServers`). The TUI connects MCP in the worker, which has no
+          warning channel (a raw write would corrupt Ink, §7). Route it through
+          the worker's MCP status (`McpStatusTracker` / `mcp/status`). Type: feat
+          · Size: S · Blast: contained.
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 

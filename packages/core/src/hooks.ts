@@ -17,4 +17,6 @@ export interface HookSpec {
   readonly timeout?: number;
   /** A failed hook (crash, timeout, bad output): "ignore" (default) or "block". */
   readonly onFailure?: "ignore" | "block";
+  /** The package that contributed it (docs/feat/packages.md); prefixes its display name. */
+  readonly source?: string;
 }

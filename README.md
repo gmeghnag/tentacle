@@ -212,6 +212,49 @@ Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyComma
   them. `tentacle hooks trust --list` / `--revoke <folder>` manage the stored
   decisions.
 
+### Packages
+
+A package bundles skills, sub-agent types, MCP servers and hooks so you can
+install and share them with one command:
+
+```sh
+tentacle packages install ./my-pack              # a local directory (copied)
+tentacle packages install https://host/pack.git#v1   # git (shallow clone, optional #ref)
+tentacle packages list                           # name, version, enabled, source, counts
+tentacle packages update [<name>]                # git: pull --ff-only; a path: reinstall
+tentacle packages remove <name>
+```
+
+Each package lives in `<configDir>/packages/<name>/`:
+
+```
+tentacle-package.json   { "name": "<name>", "version": "1.0.0", "description": "…" }  (required)
+skills/<skill>/SKILL.md agents/<type>.md                                             (optional)
+mcp.json                { "<server>": { "command": "…", "args": [ … ] } }            (optional)
+hooks.json              { "hooks": [ … ] }  (the same entries as `hooks`)            (optional)
+```
+
+- Names (package and server) match `^[a-z0-9][a-z0-9-]{0,31}$`. A server is
+  named `<package>-<server>`, so its tools are `mcp__<package>-<server>__<tool>`.
+- **Installing is trusting:** package hooks run as your own hooks, after
+  yours (no project-trust prompt). `install` prints every hook command.
+- Your own skills, agent types and MCP servers always win a name clash; a
+  clash or a broken package is reported at startup, and the broken package is
+  skipped whole. Agent types now resolve **first wins** everywhere: two files
+  in `<configDir>/agents` defining the same type keep the first (by file
+  name), with an `[agents]` notice. A package type replacing a built-in one is
+  reported too.
+- `update` trusts the **whole new version**, like installing: it prints every
+  hook / MCP command that is new or changed, plus `git diff --stat` of the
+  pulled range (a script a hook runs can change while its command does not).
+  A `#tag` install is pinned: `update` leaves it.
+- A symlink pointing outside the package (or dangling) rejects the package, at
+  install and at every load; links inside it are kept as written. A package
+  with more than 5000 files (`.git` excluded) is rejected.
+- `"packages": { "<name>": false }` in the config (or a profile) disables one.
+- Changes take effect at the next session start. Packages are **not**
+  loaded in a pod session (`run` / `attach`): the pod uses its own config.
+
 ## Features
 
 - **Tools:** `fs_read`, `fs_write`, `fs_edit` (with diffs), `shell`, background jobs.
