@@ -702,7 +702,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       tools, a pending permission, a hook or `/compact`) and send this client's
       queued messages as one prompt, atomically via a new `session/send_now`
       (additive in protocol 10). Owner decisions S1–S3, D1–D5 taken; D3c (queue
-      locally during `/compact`) awaits confirmation. **Eval:**
+      locally during `/compact`) confirmed 2026-10-22. **Eval:**
       `docs/eval/send-now.md`. Type: eval → feat ×3 · Size: L → split · Blast:
       load-bearing.
 

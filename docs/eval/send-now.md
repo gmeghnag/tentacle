@@ -1,6 +1,6 @@
 # eval/send-now — interrupt the running turn and send the queued messages now (`Ctrl+X Ctrl+S`)
 
-> **Status:** eval (context + drafted implementation; all owner decisions taken — S1–S3, D1–D5 — one consequence flagged for confirmation: D3c)
+> **Status:** eval (context + drafted implementation; all owner decisions taken — S1–S3, D1–D5 — D3c confirmed by the owner 2026-10-22)
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10). Promotion → `feat/send-now` (split proposed: see *Files*)
 > **Type:** eval → feat · **Size:** L (split into three: A = M, B = M, C = S) · **Blast:** load-bearing (the daemon busy slot, the steering no-await window, protocol, the single session path — AGENTS §7) · **Suited:** fresh-context Review mandatory (§10)
 
@@ -13,11 +13,11 @@
 | S3 | Queued rows | Show the `arc` spinner — **done** (`feat/queued-arc-spinner`, merged `d72606e`: `packages/tui/src/spinner.ts`, `components/QueuedMessages.tsx`); this task does not touch the row's glyph | decided |
 | D1 | Join | All queued texts concatenated into **ONE user message, exactly as typed**, separated by **one blank line (`"\n\n"`)**, in queue order. No prefix, no numbering, no trimming | decided |
 | D2 | Empty queue | Send-now does **nothing**: no request, no cancel, no notice | decided |
-| D3 | Pending permission / running `/compact` / running hook | **Cancel it** (the suspended turn, the compaction, the hook) and send the queued messages | decided — see D3a–D3c in *Design*; **D3c is a consequence to confirm** (below) |
+| D3 | Pending permission / running `/compact` / running hook | **Cancel it** (the suspended turn, the compaction, the hook) and send the queued messages | decided — see D3a–D3c in *Design*; D3c **confirmed by the owner 2026-10-22** (below) |
 | D4 | Multi-client | Send **only the queued messages of the client that pressed the key**: the method's params carry that client's texts (with their enqueue ids), never the daemon's shared queue. Other clients' accepted-but-undrained steers **stay queued for the new turn** | decided |
 | D5 | Keys | **Only `Ctrl+X Ctrl+S`** (a chord, 1500 ms window). No `Ctrl+Enter` | decided |
 
-**D3c — consequence to confirm (not a new question, a gap the decision exposes):**
+**D3c — confirmed by the owner (2026-10-22): queue locally during `/compact` (slice C).**
 today the TUI has **no queue during `/compact`** — the TUI is not `running`
 while a compaction runs (`/compact` is fire-and-forget, `App.tsx:573-588`), so
 Enter starts a prompt the daemon rejects `CompactInProgress`
