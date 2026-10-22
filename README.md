@@ -11,7 +11,22 @@ Kubernetes pod, or on a remote host, and drive it from a rich TUI.
 
 ## Install
 
-Prebuilt binaries for macOS and Linux (x64 and arm64) are on the
+On macOS or Linux (x64 and arm64):
+
+```sh
+curl -fsSL tentacle.so/install | sh
+```
+
+It installs the CLI in `~/.local/bin` (no sudo), checks it against the
+release's `SHA256SUMS`, then runs `tentacle update` to fetch the pod binaries.
+Options, as environment variables: `TENTACLE_VERSION=v0.1.0` (pin a release;
+0.1.0 is the oldest), `TENTACLE_INSTALL_DIR`, and `TENTACLE_NO_POD_BINARIES=1`
+(skip the pod binaries). The script is
+[`scripts/install.sh`](scripts/install.sh); read it before piping it to `sh`.
+
+### Manual install
+
+Prebuilt binaries are on the
 [Releases](https://github.com/gmeghnag/tentacle/releases) page. Download them
 from there, or with the GitHub CLI:
 
