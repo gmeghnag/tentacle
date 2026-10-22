@@ -16,13 +16,20 @@ export function isSensitiveEnvKey(key: string): boolean {
   return SENSITIVE_KEY.test(key);
 }
 
-/** A copy of `env` with secret-looking keys (and `undefined` values) removed. */
+/**
+ * Set by tentacle per child, never inherited: a stale value from the parent
+ * would point a non-package hook or MCP server at some package
+ * (docs/feat/hook-env-dirs.md).
+ */
+const PER_CHILD_KEYS = new Set(["TENTACLE_PACKAGE_DIR"]);
+
+/** A copy of `env` with secret-looking and per-child keys (and `undefined` values) removed. */
 export function scrubSensitiveEnv(
   env: Readonly<Record<string, string | undefined>>,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
-    if (value === undefined || isSensitiveEnvKey(key)) {
+    if (value === undefined || isSensitiveEnvKey(key) || PER_CHILD_KEYS.has(key)) {
       continue;
     }
     out[key] = value;

@@ -120,18 +120,25 @@ export async function projectHooksFiles(
 export async function discoverProjectHooks(
   launchCwd: string,
   home: string,
-): Promise<{ projectHooks?: ProjectHooks; diagnostics: string[] }> {
+): Promise<{ projectHooks?: ProjectHooks; root?: string; diagnostics: string[] }> {
   const { folder, files } = await projectHooksFiles(launchCwd, home);
   const diagnostics: string[] = [];
+  const real = async (p: string): Promise<string> => {
+    try {
+      return await realpath(p);
+    } catch {
+      return p; // Keep the resolved path.
+    }
+  };
+  // The project root for `TENTACLE_PROJECT_DIR` (docs/feat/hook-env-dirs.md):
+  // the repo root (`.git` holder) whenever found, hooks or not; else the
+  // folder holding the nearest valid hooks file (below). Never in the hash.
+  const repoRoot = (await exists(join(folder, ".git"))) ? await real(folder) : undefined;
+  const withRoot = repoRoot !== undefined ? { root: repoRoot } : {};
   if (files.length === 0) {
-    return { diagnostics };
+    return { ...withRoot, diagnostics };
   }
-  let realFolder = folder;
-  try {
-    realFolder = await realpath(folder);
-  } catch {
-    // Keep the resolved path.
-  }
+  const realFolder = await real(folder);
   const entries: { file: string; hooks: HookSpecConfig[] }[] = [];
   for (const file of files) {
     let text: string;
@@ -155,9 +162,11 @@ export async function discoverProjectHooks(
     }
   }
   if (entries.length === 0) {
-    return { diagnostics };
+    return { ...withRoot, diagnostics };
   }
+  const nearest = join(folder, entries[0]?.file ?? "");
   return {
+    root: repoRoot ?? (await real(dirname(dirname(nearest)))),
     projectHooks: {
       folder: realFolder,
       hash: projectHooksHash(entries),

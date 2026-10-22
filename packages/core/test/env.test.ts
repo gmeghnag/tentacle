@@ -52,3 +52,11 @@ describe("scrubSensitiveEnv", () => {
     expect(scrubbed).not.toHaveProperty("TENTACLE_POD_TLS_CA");
   });
 });
+
+describe("scrubSensitiveEnv: tentacle-scoped vars (docs/feat/hook-env-dirs.md)", () => {
+  test("an inherited TENTACLE_PACKAGE_DIR never reaches a child; tentacle sets it per child", () => {
+    expect(scrubSensitiveEnv({ PATH: "/bin", TENTACLE_PACKAGE_DIR: "/stale" })).toEqual({
+      PATH: "/bin",
+    });
+  });
+});

@@ -19,4 +19,6 @@ export interface HookSpec {
   readonly onFailure?: "ignore" | "block";
   /** The package that contributed it (docs/feat/packages.md); prefixes its display name. */
   readonly source?: string;
+  /** That package's directory: exported to the hook as `TENTACLE_PACKAGE_DIR`. */
+  readonly packageDir?: string;
 }

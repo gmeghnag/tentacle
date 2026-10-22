@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AskHooksTrust, type HookRunner, Session } from "@tentacle/agent";
@@ -476,5 +476,46 @@ describe("loadUserAgentTypes: built-in shadowing (post-review)", () => {
     expect(diagnostics).toEqual([
       `agent type "general-purpose" in ${join(pkg, "general-purpose.md")} replaces the built-in one`,
     ]);
+  });
+});
+
+describe("hook env dirs wiring (docs/feat/hook-env-dirs.md)", () => {
+  const runnerOpts = (wired: ReturnType<typeof buildAgent>) =>
+    (
+      wired.agent as unknown as {
+        config: { hooks?: { opts: { projectDir?: string; cwd: string } } };
+      }
+    ).config.hooks?.opts;
+
+  test("buildAgent always hands the runner config.projectDir", () => {
+    const user = {
+      ...config,
+      cwd: "/repo/sub",
+      projectDir: "/repo",
+      hooks: [{ event: "turn_start" as const, command: "u" }],
+    };
+    expect(runnerOpts(buildAgent(user))?.projectDir).toBe("/repo");
+  });
+});
+
+describe("project dir without project hooks (post-review)", () => {
+  test("git repo, no .agents/hooks.json, launched from src/api → hooks see the repo root", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "proj-dir-")));
+    const repo = join(root, "repo");
+    const sub = join(repo, "src", "api");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(sub, { recursive: true });
+    const cfgDir = join(root, "cfg");
+    await mkdir(cfgDir);
+    await writeFile(
+      join(cfgDir, "config.jsonc"),
+      '{ "hooks": [{ "event": "turn_end", "command": "u" }] }',
+    );
+    const cfg = await loadConfig({ env: { HOME: root }, configDir: cfgDir, cwd: sub });
+    const wired = buildAgent(cfg);
+    const opts = (
+      wired.agent as unknown as { config: { hooks?: { opts: { projectDir?: string } } } }
+    ).config.hooks?.opts;
+    expect(opts?.projectDir).toBe(repo);
   });
 });

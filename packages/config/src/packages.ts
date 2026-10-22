@@ -46,7 +46,11 @@ const McpFileSchema = z.record(McpServerSchema).superRefine((servers, ctx) => {
 export type PackageManifest = z.infer<typeof ManifestSchema>;
 
 /** A package hook: a user-scope hook tagged with the package it came from. */
-export type PackageHook = HookSpecConfig & { readonly source: string };
+export type PackageHook = HookSpecConfig & {
+  readonly source: string;
+  /** Exported to the hook as `TENTACLE_PACKAGE_DIR` (docs/feat/hook-env-dirs.md). */
+  readonly packageDir: string;
+};
 
 /** One loaded (valid) package and what it contributes. */
 export interface PackageInfo {
@@ -206,7 +210,7 @@ export async function loadPackage(
       if ("error" in parsed) {
         return { error: `hooks.json: ${parsed.error}` };
       }
-      hooks = parsed.hooks.map((h) => ({ ...h, source: manifest.name }));
+      hooks = parsed.hooks.map((h) => ({ ...h, source: manifest.name, packageDir: dir }));
     }
     const skillsDir = join(dir, "skills");
     const agentsDir = join(dir, "agents");
@@ -293,7 +297,10 @@ export function mergePackageContributions(
         continue;
       }
       owner.set(key, `package ${pkg.name}`);
-      mcpServers[key] = def;
+      // A stdio server learns its package dir (docs/feat/hook-env-dirs.md);
+      // ours wins over a same-named key in `mcp.json`.
+      mcpServers[key] =
+        def.type === "stdio" ? { ...def, env: { ...def.env, TENTACLE_PACKAGE_DIR: pkg.dir } } : def;
     }
     hooks.push(...pkg.hooks);
   }

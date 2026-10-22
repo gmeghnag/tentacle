@@ -203,6 +203,8 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
           specs: config.hooks,
           env,
           cwd: config.cwd,
+          // Hooks find the repo from a subfolder (docs/feat/hook-env-dirs.md).
+          projectDir: config.projectDir,
           ...(options.log ? { log: options.log } : {}),
           modelId: config.model,
           // Only when this process calls the provider itself: over the pod

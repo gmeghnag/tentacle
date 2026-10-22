@@ -373,6 +373,11 @@ export interface HookRunnerOptions {
   readonly specs: readonly HookSpec[];
   readonly env: ExecutionEnvironment;
   readonly cwd: string;
+  /**
+   * `TENTACLE_PROJECT_DIR` for every hook: the project root where project
+   * hooks were found (docs/feat/hook-env-dirs.md); default `cwd`.
+   */
+  readonly projectDir?: string;
   /** Daemon-side log sink for hook failures (never the terminal while Ink owns it). */
   readonly log?: (line: string) => void;
   /** Set for a sub-agent's runner (H2). */
@@ -755,7 +760,8 @@ export class HookRunner {
         cwd: this.opts.cwd,
         env: {
           TENTACLE_HOOK_EVENT: String((payload as { event: string }).event),
-          TENTACLE_PROJECT_DIR: this.opts.cwd,
+          TENTACLE_PROJECT_DIR: this.opts.projectDir ?? this.opts.cwd,
+          ...(spec.packageDir !== undefined ? { TENTACLE_PACKAGE_DIR: spec.packageDir } : {}),
         },
         ...(signal ? { signal } : {}),
       });

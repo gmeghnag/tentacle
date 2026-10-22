@@ -234,11 +234,20 @@ MCP tools are named `mcp__<server>__<tool>`. Their default permission is
 | Shell | `/bin/sh -c "<command>"` |
 | Working folder | The session's working folder (the `cwd` in the payload) |
 | stdin | One JSON object (the payload), then EOF. A hook does not have to read it |
-| Environment | The parent's environment **minus secret-looking variables** (names matching `API_KEY`, `ACCESS_KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `CREDENTIAL(S)`, `PRIVATE_KEY`, `AUTH`, `TLS_KEY/CERT/CA`, case-insensitive; `packages/core/src/env.ts`), plus `TENTACLE_HOOK_EVENT` (the event) and `TENTACLE_PROJECT_DIR` (equal to `cwd`). A hook that needs a secret must read it from a file or a keychain itself |
+| Environment | The parent's environment **minus secret-looking variables** (names matching `API_KEY`, `ACCESS_KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD`, `CREDENTIAL(S)`, `PRIVATE_KEY`, `AUTH`, `TLS_KEY/CERT/CA`, case-insensitive; `packages/core/src/env.ts`), plus the variables below. A hook that needs a secret must read it from a file or a keychain itself |
 | stdout | Empty, or **one JSON object**. More than 1 MiB is a failure |
 | stderr | Read only on exit 2: it is the reason (trimmed, clipped at 2,000 chars). Otherwise it appears only in the failure log line (first 200 chars) |
 | Timeout | `timeout` seconds (default 600). The process is killed |
 | Runs | Hooks for the same event run **one after another**, in the order of 3.1 |
+
+| Variable | Set for | Value |
+|---|---|---|
+| `TENTACLE_HOOK_EVENT` | every hook | the event |
+| `TENTACLE_PROJECT_DIR` | every hook | the project root: the repo root (the `.git` holder, real path) whenever the launch folder is inside a repository, with or without project hooks; outside a repository, the folder holding the nearest `.agents/hooks.json`; else the session folder (`cwd`) |
+| `TENTACLE_PACKAGE_DIR` | a package's hooks **and** its stdio MCP servers | that package's directory (`<configDir>/packages/<name>`); it overrides the same key in `mcp.json` `env`; an inherited value is dropped for every other hook and server |
+
+In a pod these are the pod's own paths (the pod daemon runs the hooks; laptop
+packages are not loaded there).
 
 **Common payload fields**, present in every event:
 
@@ -564,7 +573,7 @@ A repository can bring hooks in **`.agents/hooks.json`**:
 ```json
 {
   "hooks": [
-    { "event": "turn_start", "command": "sh \"$(git rev-parse --show-toplevel)/.agents/hooks/context.sh\"" }
+    { "event": "turn_start", "command": "sh \"$TENTACLE_PROJECT_DIR/.agents/hooks/context.sh\"" }
   ]
 }
 ```
@@ -715,13 +724,13 @@ with `[packages] package <name>: skipped (<why>)`.
 
 **Paths inside a package:** hooks run in the **session's** working folder,
 and an MCP server starts in the folder tentacle runs in (unless you set
-`cwd`). Nothing expands a "package directory" variable. To run a script
-shipped in the package:
+`cwd`). Both get **`TENTACLE_PACKAGE_DIR`**, the package's own directory
+(the env table in 3.3). To run a script shipped in the package:
 
-- **Hook:** the command is shell, so build the path from the config dir:
-  `"\"${TENTACLE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tentacle}/packages/<name>/bin/x.sh\""`.
+- **Hook:** the command is shell: `"\"$TENTACLE_PACKAGE_DIR/bin/x.sh\""`.
 - **MCP server:** `command` and `args` are not shell-expanded. Use a command
-  on `PATH` (`npx`, `uvx`, `bunx`), or wrap it in `sh -c` the same way.
+  on `PATH` (`npx`, `uvx`, `bunx`), or wrap it in `sh -c`:
+  `{ "command": "sh", "args": ["-c", "exec \"$TENTACLE_PACKAGE_DIR/bin/server\""] }`.
 
 ### 5.3 Commands
 
@@ -759,7 +768,7 @@ installed demo 0.1.0 → /home/me/.config/tentacle/packages/demo
   MCP servers: demo-memory
   runs as you, like your own config — installing trusts them:
     MCP demo-memory: npx -y @modelcontextprotocol/server-memory
-    hook tool_call [shell]: "${TENTACLE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tentacle}/packages/demo/bin/guard-rm.sh"
+    hook tool_call [shell]: "$TENTACLE_PACKAGE_DIR/bin/guard-rm.sh"
 ```
 
 If the package is disabled in your config, `install` adds a note.
@@ -1085,8 +1094,9 @@ tools: [fs_read, shell]
 You review the diff you are given. Report bugs first, then risky changes. Do not edit files.
 ```
 
-`hooks.json`. The script is addressed through the config dir, because hooks
-run in the session's working folder (5.2):
+`hooks.json`. The script is addressed through `$TENTACLE_PACKAGE_DIR` (the
+package's own directory), because hooks run in the session's working folder
+(5.2):
 
 ```json
 {
@@ -1095,7 +1105,7 @@ run in the session's working folder (5.2):
       "event": "tool_call",
       "name": "guard-rm",
       "matcher": "shell",
-      "command": "\"${TENTACLE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/tentacle}/packages/demo/bin/guard-rm.sh\""
+      "command": "\"$TENTACLE_PACKAGE_DIR/bin/guard-rm.sh\""
     }
   ]
 }
@@ -1222,7 +1232,7 @@ To capture the real payloads, add a temporary hook:
 | The rewritten call lost its options | `input` replaces the whole input. Merge: `.tool_input + {command: $c}` |
 | A tool result became empty and is marked as an error | The hook exited 2 with empty stderr |
 | `exited 127` | The command was not found. `PATH` is the agent process's `PATH`, the hook runs in the session folder, and relative script paths resolve from there |
-| The project hook script is not found from a subfolder | Hooks run in the session's folder, not the repo root. Use `"$(git rev-parse --show-toplevel)/…"` |
+| The project hook script is not found from a subfolder | Hooks run in the session's folder, not the repo root. Use `"$TENTACLE_PROJECT_DIR/…"` |
 | A `turn_end` hook runs the tests after a cancel | It received the `cancelled` notification. Check `reason == "end_turn"` |
 | The hook needs a token but sees none | Secret-looking variables are scrubbed. Read the token from a file or a keychain |
 | A project hook never runs in CI or scripts | `--plain` and one-shot never run project hooks |
@@ -1251,9 +1261,6 @@ These are recorded as debt or out of scope in the task docs
 - **The 64-character tool-name warning** for MCP tools is shown only in
   one-shot mode and the `--in-process` / fallback TUI, not in the default
   (worker) TUI.
-- **No package-directory variable.** Hooks and MCP servers have to locate
-  package files through the config dir (5.2). Project hooks have no
-  repo-root variable either: `TENTACLE_PROJECT_DIR` is the session folder.
 - **`--plain` and one-shot approve every prompt**, so a hook `ask` has no
   effect there. Project hooks never run there.
 - **Unverified on a live cluster:** hook stdin and the project-trust flow in a

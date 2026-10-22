@@ -105,6 +105,12 @@ export interface TentacleConfig {
   readonly projectHooks?: ProjectHooks;
   /** Project hooks files skipped (malformed, unreadable) for the user. */
   readonly projectHooksDiagnostics: readonly string[];
+  /**
+   * `TENTACLE_PROJECT_DIR` for every hook (docs/feat/hook-env-dirs.md): the
+   * repo root (`.git` holder), else the folder of the nearest project hooks
+   * file, else `cwd`.
+   */
+  readonly projectDir: string;
   /** The profile applied from the config file (`--profile` / `TENTACLE_PROFILE`), if any. */
   readonly profile?: string;
   readonly sources: ResolvedConfig["sources"] & { readonly apiKey: ApiKeySource };
@@ -294,10 +300,11 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
 
   // Project hooks (`.agents/hooks.json`, same walk as skills): best-effort,
   // a broken file is a diagnostic. Loaded here; trusted per session later.
-  const { projectHooks, diagnostics: projectHooksDiagnostics } = await discoverProjectHooks(
-    launchCwd,
-    home,
-  );
+  const {
+    projectHooks,
+    root: projectRoot,
+    diagnostics: projectHooksDiagnostics,
+  } = await discoverProjectHooks(launchCwd, home);
 
   const resolved = resolveConfig({
     fileConfig,
@@ -356,6 +363,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     skillDiagnostics,
     ...(projectHooks !== undefined ? { projectHooks } : {}),
     projectHooksDiagnostics,
+    projectDir: projectRoot ?? cwd,
     ...(profile !== undefined ? { profile } : {}),
     sources: { ...resolved.sources, apiKey: resolved.apiKeySource },
   };

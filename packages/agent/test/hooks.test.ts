@@ -360,3 +360,46 @@ describe("HookRunner / runResultHooks", () => {
     expect(lines).toEqual([]);
   });
 });
+
+describe("hook env dirs (docs/feat/hook-env-dirs.md)", () => {
+  const envOf = async (opts: { projectDir?: string }, spec: HookSpec) => {
+    const { env, calls } = fakeEnv(() => "");
+    const hooks = new HookRunner({ specs: [spec], env, cwd: "/w/sub", ...opts });
+    await runResultHooks(
+      { content: "x" },
+      {
+        toolName: "shell",
+        toolCallId: "c",
+        sessionId: "s",
+        input: {},
+        hooks,
+        writeSpill: async () => null,
+      },
+    );
+    return calls[0]?.opts?.env;
+  };
+
+  test("TENTACLE_PROJECT_DIR is the project root when given; PACKAGE_DIR only for a package hook", async () => {
+    expect(await envOf({ projectDir: "/w" }, { event: "tool_result", command: "u" })).toEqual({
+      TENTACLE_HOOK_EVENT: "tool_result",
+      TENTACLE_PROJECT_DIR: "/w",
+    });
+    expect(
+      await envOf(
+        { projectDir: "/w" },
+        { event: "tool_result", command: "p", source: "pk", packageDir: "/cfg/packages/pk" },
+      ),
+    ).toEqual({
+      TENTACLE_HOOK_EVENT: "tool_result",
+      TENTACLE_PROJECT_DIR: "/w",
+      TENTACLE_PACKAGE_DIR: "/cfg/packages/pk",
+    });
+  });
+
+  test("no project root → the session cwd (unchanged); sub-agent runners keep it", async () => {
+    expect(await envOf({}, { event: "tool_result", command: "u" })).toEqual({
+      TENTACLE_HOOK_EVENT: "tool_result",
+      TENTACLE_PROJECT_DIR: "/w/sub",
+    });
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -135,5 +135,49 @@ describe("projectHooksHash", () => {
     expect(projectHooksHash([{ file, hooks: [guard] }])).not.toBe(
       projectHooksHash([{ file, hooks: [{ ...guard, command: "./other.sh" }] }]),
     );
+  });
+});
+
+describe("project root (docs/feat/hook-env-dirs.md)", () => {
+  test("launched from a subfolder: root is the repo root", async () => {
+    const repo = tree();
+    mkdirSync(join(repo, ".git"));
+    const sub = join(repo, "a", "b");
+    mkdirSync(sub, { recursive: true });
+    writeHooks(repo, { hooks: [guard] });
+    expect((await discoverProjectHooks(sub, "/nonexistent-home")).root).toBe(repo);
+  });
+
+  test("no .git: root is the folder holding the nearest hooks file, not the launch folder", async () => {
+    const top = tree();
+    const sub = join(top, "a");
+    mkdirSync(sub);
+    writeHooks(top, { hooks: [guard] });
+    const { projectHooks, root } = await discoverProjectHooks(sub, "/nonexistent-home");
+    expect(projectHooks?.folder).toBe(sub);
+    expect(root).toBe(top);
+  });
+});
+
+describe("project root without project hooks (post-review)", () => {
+  test("a git repo with no hooks file, launched from a subfolder: root is the repo", async () => {
+    const repo = tree();
+    mkdirSync(join(repo, ".git"));
+    const sub = join(repo, "src", "api");
+    mkdirSync(sub, { recursive: true });
+    const r = await discoverProjectHooks(sub, "/nonexistent-home");
+    expect(r.projectHooks).toBeUndefined();
+    expect(r.root).toBe(repo);
+  });
+
+  test("no .git: the hooks file's folder, as a realpath; nothing at all → no root", async () => {
+    const top = tree();
+    const elsewhere = tree();
+    mkdirSync(join(top, "a"));
+    writeHooks(top, { hooks: [guard] });
+    symlinkSync(top, join(elsewhere, "lnk"));
+    const viaLink = await discoverProjectHooks(join(elsewhere, "lnk", "a"), "/nonexistent-home");
+    expect(viaLink.root).toBe(top);
+    expect((await discoverProjectHooks(tree(), "/nonexistent-home")).root).toBeUndefined();
   });
 });

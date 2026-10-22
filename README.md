@@ -163,7 +163,11 @@ Full reference and worked examples: [docs/extensions.md](docs/extensions.md#3-ho
 - **Input (stdin, JSON):** `event`, `session_id`, `cwd`, `agent` (`null`, or
   `{type, description}` in a sub-agent), `tool_name`, `tool_call_id`,
   `tool_input`; `tool_result` adds `tool_result: {content, is_error}`. Env:
-  `TENTACLE_HOOK_EVENT`, `TENTACLE_PROJECT_DIR`. Secret-looking env vars are
+  `TENTACLE_HOOK_EVENT`, `TENTACLE_PROJECT_DIR` (the repo root whenever
+  inside a repository, else the folder of the nearest `.agents/hooks.json`,
+  else the session folder), and `TENTACLE_PACKAGE_DIR` for a package's hooks
+  and stdio MCP servers only (its own directory; an inherited value is
+  dropped). Secret-looking env vars are
   scrubbed: a hook reads its own secrets. `tool_input` is the model's own
   arguments, **unredacted** (secret redaction applies to tool results only).
 - **`tool_call` output:** exit 0 with empty stdout = no opinion; a JSON object
