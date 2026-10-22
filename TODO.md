@@ -643,7 +643,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         daemon→client, laptop store for the local worker only, auto-approve
         excluded) — DONE 2026-10-22 (`feat/hooks-project-trust`): `docs/feat/hooks-project-trust.md`.
         Type: feat · Size: M · Blast: load-bearing (§7).
-      - [x] **packages** (own format; path + git; `tentacle packages …`; not in
+      - [x] **packages** (own format; path + git; `tentacle package …` (alias `tentacle install`); not in
         pod v1) — DONE 2026-10-22 (`feat/packages`): `docs/feat/packages.md`. Type:
         feat · Size: M · Blast: cross-module.
         - [ ] 🔵 **Debt: no 64-char MCP tool-name warning in the TUI** (K2). It is

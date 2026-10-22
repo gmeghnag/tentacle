@@ -91,10 +91,12 @@ Usage:
   tentacle connect <url>   drive a remote daemon with the TUI
   tentacle hooks trust --list | --revoke <folder>
                            list / revoke stored project-hooks trust decisions
-  tentacle packages install <path|git-url>[#ref] | list | remove <name> | update [<name>]
+  tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]
                            manage packages (skills, agent types, MCP servers,
                            hooks) in <configDir>/packages; installing trusts
                            a package's hooks like your own
+  tentacle install <path|git-url>[#ref]
+                           alias of \`tentacle package install\`
   tentacle --help          show this help
   tentacle --version       print the version and exit
   tentacle --profile <name> ...
@@ -254,8 +256,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     return 1;
   }
 
-  // `tentacle packages …` (docs/feat/packages.md): no TUI, plain output.
-  if (mode === "packages") {
+  // `tentacle package …` (docs/feat/packages.md): no TUI, plain output.
+  if (mode === "package") {
     return packagesCommand(parsed.positional, {
       configDir: config.configDir,
       enabled: config.packagesEnabled,

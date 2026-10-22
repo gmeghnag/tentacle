@@ -735,11 +735,14 @@ and an MCP server starts in the folder tentacle runs in (unless you set
 ### 5.3 Commands
 
 ```sh
-tentacle packages install <dir | git-url[#ref]>
-tentacle packages list
-tentacle packages update [<name>]
-tentacle packages remove <name>
+tentacle package install <dir | git-url[#ref]>
+tentacle package list
+tentacle package update [<name>]
+tentacle package remove <name>
 ```
+
+`tentacle install <dir | git-url[#ref]>` is an alias of `tentacle package install`
+(only as the first word; `--profile` still goes before it).
 
 They run before any TUI, need no API key, and print plain text.
 
@@ -784,7 +787,7 @@ demo	0.1.0	enabled	/path/to/demo-pack	1 skills, 1 agents, 1 MCP, 1 hooks
 
 | Source | What happens |
 |---|---|
-| path | Nothing. It prints `<name>: not installed from git — reinstall: tentacle packages remove <name> && tentacle packages install <path>` |
+| path | Nothing. It prints `<name>: not installed from git — reinstall: tentacle package remove <name> && tentacle package install <path>` |
 | git, installed with `#<tag>` (detached HEAD) | **Pinned:** `<name>: pinned to <tag>, unchanged (reinstall to change version)` |
 | git, on a branch (no `#ref`, or `#<branch>`) | `git pull --ff-only`. With no new commit: `<name>: already up to date` |
 
@@ -1122,7 +1125,7 @@ package's own directory), because hooks run in the session's working folder
 }
 ```
 
-Install it with `tentacle packages install ./demo-pack`. The output is shown
+Install it with `tentacle package install ./demo-pack`. The output is shown
 in 5.3. Verified after install by loading the config:
 
 - the hooks are `[<your hooks>…, "demo:guard-rm"]`;
@@ -1133,7 +1136,7 @@ in 5.3. Verified after install by loading the config:
   server was ignored, with a `[packages]` line.
 
 To publish it, push the directory to a git repository and tag a release.
-Users then run `tentacle packages install https://host/you/demo-pack.git#v0.1.0`.
+Users then run `tentacle package install https://host/you/demo-pack.git#v0.1.0`.
 
 ---
 

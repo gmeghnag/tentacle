@@ -101,7 +101,7 @@ export const ARGS = {
     conflicts: [["list", "revoke"]],
     positional: { min: 1, max: 1 },
   },
-  packages: { positional: { min: 1, max: 2 } },
+  package: { positional: { min: 1, max: 2 } },
 } as const satisfies Record<string, ArgSpec>;
 
 /**
@@ -373,7 +373,8 @@ const COMMANDS = new Set([
   "attach",
   "connect",
   "hooks",
-  "packages",
+  "package",
+  "install",
   "-i",
   "--interactive",
   "--resume",
@@ -382,6 +383,11 @@ const COMMANDS = new Set([
 ]);
 
 const isProfileFlag = (arg: string): boolean => arg === "--profile" || arg.startsWith("--profile=");
+
+/** Leading-word aliases, expanded before dispatch: `tentacle install …` = `tentacle package install …`. */
+const ALIASES: Readonly<Record<string, readonly string[]>> = {
+  install: ["package", "install"],
+};
 
 /**
  * Take the LEADING global options off argv, before `main` dispatches on
@@ -414,7 +420,9 @@ export function extractGlobalOptions(args: readonly string[]): GlobalOptions {
     }
     profile = value;
   }
-  const rest = args.slice(i);
+  const tail = args.slice(i);
+  const alias = tail[0] !== undefined ? ALIASES[tail[0]] : undefined;
+  const rest = alias !== undefined ? [...alias, ...tail.slice(1)] : tail;
   const first = rest[0];
   const isMode =
     first !== undefined && (COMMANDS.has(first) || (first.startsWith("-") && first !== "--"));
@@ -437,7 +445,7 @@ export type CliMode =
   | "run"
   | "attach"
   | "hooks"
-  | "packages"
+  | "package"
   | "plain"
   | "tui"
   | "prompt"
@@ -459,7 +467,7 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "run" ||
     first === "attach" ||
     first === "hooks" ||
-    first === "packages"
+    first === "package"
   ) {
     return first;
   }
@@ -483,7 +491,6 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
     "tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]|--continue]",
   plain: "tentacle --plain",
   hooks: "tentacle hooks trust --list | --revoke <folder>",
-  packages:
-    "tentacle packages install <path|git-url>[#ref] | list | remove <name> | update [<name>]",
+  package: "tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process]",
 };

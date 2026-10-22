@@ -1,5 +1,5 @@
 /**
- * `tentacle packages install|list|remove|update` (docs/feat/packages.md).
+ * `tentacle package install|list|remove|update` (docs/feat/packages.md).
  * Runs before any TUI, so plain output is fine (AGENTS §7). Installing IS the
  * trust decision (D11): a package's hooks become user-scope hooks, so every
  * hook command is printed at install. An install is staged in
@@ -212,7 +212,7 @@ async function install(arg: string, deps: PackagesCmdDeps): Promise<number> {
     const target = join(root, info.name);
     if (existsSync(target)) {
       write(
-        `packages: ${info.name} is already installed (use: tentacle packages update ${info.name})\n`,
+        `packages: ${info.name} is already installed (use: tentacle package update ${info.name})\n`,
       );
       return 1;
     }
@@ -302,7 +302,7 @@ async function update(name: string | undefined, deps: PackagesCmdDeps): Promise<
     const source = readSource(dir);
     if (source?.type !== "git") {
       deps.write(
-        `${n}: not installed from git — reinstall: tentacle packages remove ${n} && tentacle packages install ${source?.type === "path" ? source.path : "<path>"}\n`,
+        `${n}: not installed from git — reinstall: tentacle package remove ${n} && tentacle package install ${source?.type === "path" ? source.path : "<path>"}\n`,
       );
       continue;
     }
@@ -354,7 +354,7 @@ async function update(name: string | undefined, deps: PackagesCmdDeps): Promise<
   return status;
 }
 
-/** Dispatch `tentacle packages <sub> [arg]`; returns the exit code. */
+/** Dispatch `tentacle package <sub> [arg]`; returns the exit code. */
 export async function packagesCommand(
   positional: readonly string[],
   deps: PackagesCmdDeps,
@@ -366,6 +366,6 @@ export async function packagesCommand(
     if (sub === "remove" && arg !== undefined) return remove(arg, deps);
     if (sub === "update") return update(arg, deps);
   }
-  deps.write(`usage: ${USAGE.packages}\n`);
+  deps.write(`usage: ${USAGE.package}\n`);
   return 1;
 }

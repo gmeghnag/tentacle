@@ -247,7 +247,7 @@ describe("packages list / remove / update", () => {
     expect(git.calls).toContainEqual(["-C", join(h.packagesDir, "kube"), "pull", "--ff-only"]);
     expect(h.out()).toContain("kube: git pull failed: fatal: Not possible to fast-forward");
     expect(h.out()).toContain(
-      `local: not installed from git — reinstall: tentacle packages remove local && tentacle packages install ${src}`,
+      `local: not installed from git — reinstall: tentacle package remove local && tentacle package install ${src}`,
     );
   });
 
@@ -265,21 +265,39 @@ describe("packages list / remove / update", () => {
     const h = harness();
     expect(await packagesCommand(["frob"], h.deps)).toBe(1);
     expect(await packagesCommand(["install"], h.deps)).toBe(1);
-    expect(h.out()).toContain("usage: tentacle packages install");
+    expect(h.out()).toContain("usage: tentacle package install");
   });
 });
 
-describe("`tentacle packages` dispatch", () => {
-  test("`packages` is a subcommand taking 1–2 words and no flags", () => {
-    expect(cliMode(["packages", "list"])).toBe("packages");
-    expect(extractGlobalOptions(["--profile", "p", "packages", "list"])).toEqual({
+describe("`tentacle package` dispatch", () => {
+  test("`package` is a subcommand taking 1–2 words and no flags", () => {
+    expect(cliMode(["package", "list"])).toBe("package");
+    expect(extractGlobalOptions(["--profile", "p", "package", "list"])).toEqual({
       ok: true,
       profile: "p",
-      rest: ["packages", "list"],
+      rest: ["package", "list"],
     });
-    expect(parseArgs(["install", "/x"], ARGS.packages).ok).toBe(true);
-    expect(parseArgs(["install", "/x", "y"], ARGS.packages).ok).toBe(false);
-    expect(parseArgs(["list", "--force"], ARGS.packages).ok).toBe(false);
+    expect(parseArgs(["install", "/x"], ARGS.package).ok).toBe(true);
+    expect(parseArgs(["install", "/x", "y"], ARGS.package).ok).toBe(false);
+    expect(parseArgs(["list", "--force"], ARGS.package).ok).toBe(false);
+  });
+
+  test("`install` is an alias of `package install`", () => {
+    expect(extractGlobalOptions(["install", "/x#v1"])).toEqual({
+      ok: true,
+      rest: ["package", "install", "/x#v1"],
+    });
+    expect(extractGlobalOptions(["--profile", "p", "install", "/x"])).toEqual({
+      ok: true,
+      profile: "p",
+      rest: ["package", "install", "/x"],
+    });
+    expect(extractGlobalOptions(["install", "/x", "--profile", "p"]).ok).toBe(false);
+    // Only the leading word: `install` later in a one-shot prompt stays prompt text.
+    expect(extractGlobalOptions(["please", "install", "deps"])).toEqual({
+      ok: true,
+      rest: ["please", "install", "deps"],
+    });
   });
 });
 
