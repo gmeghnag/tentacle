@@ -21,15 +21,19 @@ describe("session lifecycle schemas", () => {
     expect(parsed.clientCapabilities.streaming).toBe(true);
   });
 
-  test("initialize rejects unknown capability keys (strict)", () => {
+  test("initialize strips unknown capability keys; a bad known one is rejected", () => {
     const r = InitializeParamsSchema.safeParse({
       protocolVersion: 1,
       clientCapabilities: { streaming: true, bogus: 1 },
     });
-    expect(r.success).toBe(false);
+    expect(r.success && r.data.clientCapabilities).toEqual({ streaming: true });
+    expect(
+      InitializeParamsSchema.safeParse({ protocolVersion: 1, clientCapabilities: { streaming: 1 } })
+        .success,
+    ).toBe(false);
   });
 
-  test("session/open accepts empty params and the full shape, and rejects unknown keys", () => {
+  test("session/open accepts empty params and the full shape, and strips unknown keys", () => {
     expect(OpenParamsSchema.safeParse({}).success).toBe(true);
     const full = {
       sessionId: "s",
@@ -39,7 +43,8 @@ describe("session lifecycle schemas", () => {
       cwd: "/w",
     };
     expect(OpenParamsSchema.safeParse(full).success).toBe(true);
-    expect(OpenParamsSchema.safeParse({ ...full, incarnation: "x" }).success).toBe(false);
+    const extra = OpenParamsSchema.safeParse({ ...full, incarnation: "x" });
+    expect(extra.success && "incarnation" in extra.data).toBe(false);
     // `since` is a cut, never a bare number (decision D1).
     expect(OpenParamsSchema.safeParse({ since: 3 }).success).toBe(false);
   });
@@ -134,9 +139,10 @@ describe("skills on the wire (docs/feat/skills-slash.md)", () => {
     }));
     expect(InitializeResultSchema.safeParse(result(many)).success).toBe(false);
     expect(InitializeResultSchema.safeParse(result(many.slice(1))).success).toBe(true);
-    expect(
-      InitializeResultSchema.safeParse(result([{ name: "a", description: "d", extra: 1 }])).success,
-    ).toBe(false);
+    const extra = InitializeResultSchema.safeParse(
+      result([{ name: "a", description: "d", extra: 1 }]),
+    );
+    expect(extra.success && extra.data.skills[0]).toEqual({ name: "a", description: "d" });
   });
 
   test("session/prompt carries an optional, spec-named skill", () => {

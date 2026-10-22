@@ -77,14 +77,12 @@ export type PermissionResolvedUpdate = z.infer<typeof PermissionResolvedUpdateSc
 // Answer a pending request with one of its offered options. Needs an `open`
 // of the session on this connection, like every session command.
 
-export const ResolvePermissionParamsSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-    requestId: PermissionRequestIdSchema,
-    optionId: z.string().min(1),
-  })
-  .strict();
+export const ResolvePermissionParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  requestId: PermissionRequestIdSchema,
+  optionId: z.string().min(1),
+});
 export type ResolvePermissionParams = z.infer<typeof ResolvePermissionParamsSchema>;
 
-export const ResolvePermissionResultSchema = z.object({}).strict();
+export const ResolvePermissionResultSchema = z.object({});
 export type ResolvePermissionResult = z.infer<typeof ResolvePermissionResultSchema>;

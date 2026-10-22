@@ -26,6 +26,7 @@ import {
   createHooksTrustResolver,
   fileTrustStore,
   hooksTrustCommand,
+  hooksTrustDetail,
   projectHooksWireProblem,
   trustOutcome,
   trustPrecheck,
@@ -348,5 +349,20 @@ describe("revoke and startup diagnostics", () => {
     expect(bad).toContain("hooks.0.command");
     const many = Array.from({ length: 101 }, () => base.hooks[0] as (typeof base.hooks)[0]);
     expect(projectHooksWireProblem({ ...base, hooks: many })).toContain("hooks");
+  });
+});
+
+describe("hooksTrustDetail", () => {
+  test("shows a hook's judge model when present, nothing when absent", () => {
+    const detail = hooksTrustDetail({
+      ...PARAMS,
+      hooks: [
+        { event: "tool_call", matcher: "shell", command: "./judge.sh", model: "judge" },
+        { event: "turn_start", command: "./a.sh" },
+      ],
+    });
+    expect(detail).toContain("tool_call shell → ./judge.sh (model: judge)");
+    expect(detail).toContain("turn_start → ./a.sh\n");
+    expect(detail).not.toContain("turn_start → ./a.sh (model");
   });
 });

@@ -672,6 +672,19 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         leave the laptop). Owner decisions M1–M8 open. **Eval:**
         `docs/eval/hook-model-access.md`. Type: eval → feat · Size: L (split
         A local / B pod+protocol) · Blast: load-bearing.
+      - [x] **protocol-v10-forward-compat** (protocol 9 → 10). Strip schemas
+        and a tolerant JSON-RPC envelope. Unknown update kinds become
+        `unsupported`. Update classes are display / mandatory / blocking, and
+        blocking kinds are gated by the `initialize` list. The `hooks/trust`
+        `model` field is reserved. DONE 2026-10-22 (`feat/protocol-v10-forward-compat`):
+        `docs/feat/protocol-v10-forward-compat.md`. Type: feat · Size: M ·
+        Blast: load-bearing (protocol).
+        - [ ] 🔵 **Nit: re-check pending asks after a throwing send** — a client
+          whose send throws in `emit` is dropped without `recheckAsks()` (needs a
+          programming error; next attach/detach re-checks). Fix: one
+          `recheckAsks()` after the fan-out loop (never inside: `settle` emits).
+          Also optional: default `requestTimeoutMs` for requests to a pod.
+          Type: fix · Size: S · Blast: contained.
       - **User guide:** `docs/extensions.md` (hooks + packages, worked examples).
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)

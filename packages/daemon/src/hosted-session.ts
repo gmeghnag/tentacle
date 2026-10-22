@@ -45,6 +45,7 @@ import type {
   PermissionResponse,
 } from "@tentacle/core";
 import {
+  BLOCKING_UPDATE_TYPES,
   type HistoryCut,
   JsonRpcErrorCode,
   type KnownSessionUpdateParams,
@@ -54,12 +55,14 @@ import {
   type SnapshotResult,
   type TurnEnd,
   type TurnError,
+  clientSupportsUpdate,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import {
   assertTextOnly,
   contentToText,
   eventToUpdate,
+  frameFor,
   stopReasonToProtocol,
   toUpdateParams,
 } from "./mapping.ts";
@@ -81,6 +84,11 @@ export type UpdateSink = (params: KnownSessionUpdateParams) => void;
 /** One client attached to a session (one per connection that opened it). */
 export interface Attachment {
   readonly send: UpdateSink;
+  /**
+   * The update types its client declared at `initialize` (protocol 10);
+   * absent = the v10 base set. Gates BLOCKING types (`BLOCKING_UPDATE_TYPES`).
+   */
+  readonly updates?: readonly string[];
 }
 
 /** A permission request waiting for its first answer (keyed by its nonce). */
@@ -88,8 +96,11 @@ interface PendingAsk {
   readonly offered: ReadonlySet<string>;
   /** Streamed to the clients yet (only once its record is durable). */
   shown: boolean;
-  /** Resolve the gate's wait with this outcome (detaches the abort listener). */
-  readonly settle: (outcome: PermissionOutcome) => void;
+  /**
+   * Resolve the gate's wait with this outcome (detaches the abort listener);
+   * `reason`: nobody could answer (the gate tells the model why).
+   */
+  readonly settle: (outcome: PermissionOutcome, reason?: string) => void;
 }
 
 /**
@@ -309,6 +320,14 @@ export class HostedSession {
       // it as cancelled) — not a decision: there is no turn to approve for.
       return Promise.resolve(outcomeToResponse({ outcome: "cancelled" }));
     }
+    // A blocking update only to a session one of whose clients can answer it
+    // (docs/feat/protocol-v10-forward-compat.md): otherwise refuse at once,
+    // with the reason the model sees — never suspend on a client that cannot
+    // show it. Nobody attached: unchanged (held for a client to attach).
+    const unsupported = this.blockingUnsupported("permission_request");
+    if (unsupported !== undefined) {
+      return Promise.resolve({ allowed: false, reason: unsupported });
+    }
     const requestId = crypto.randomUUID();
     const update = toPermissionRequestUpdate(requestId, this.currentToolCallId || "pending", req);
     const record: PendingPermission = {
@@ -322,14 +341,14 @@ export class HostedSession {
       ),
       requestedAt: this.now(),
     };
-    const decided = new Promise<PermissionOutcome>((resolve) => {
+    const decided = new Promise<{ outcome: PermissionOutcome; reason?: string }>((resolve) => {
       const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
       this.asks.set(requestId, {
         offered: new Set(update.options.map((o) => o.optionId)),
         shown: false,
-        settle: (outcome) => {
+        settle: (outcome, reason) => {
           signal.removeEventListener("abort", onAbort);
-          resolve(outcome);
+          resolve(reason !== undefined ? { outcome, reason } : { outcome });
         },
       });
       signal.addEventListener("abort", onAbort, { once: true });
@@ -351,7 +370,7 @@ export class HostedSession {
         this.reportTurnError(error);
       }
     });
-    return decided.then(async (outcome) => {
+    return decided.then(async ({ outcome, reason }) => {
       if (this.pending === record) {
         this.pending = undefined;
         this.persist();
@@ -361,8 +380,40 @@ export class HostedSession {
         // the tool and "pending on disk ⇒ never started" still holds.
         await untilAborted(this.persisted(), signal);
       }
-      return outcomeToResponse(outcome);
+      return reason !== undefined ? { allowed: false, reason } : outcomeToResponse(outcome);
     });
+  }
+
+  /**
+   * Why a BLOCKING update `type` cannot be answered — some client is attached
+   * and none declared it — or undefined (one can, or none is attached: then
+   * the ask waits for a client, the owner's exception; a cancel settles it).
+   */
+  private blockingUnsupported(type: SessionUpdate["type"]): string | undefined {
+    if (!BLOCKING_UPDATE_TYPES.has(type) || this.attachments.size === 0) {
+      return undefined;
+    }
+    for (const attachment of this.attachments) {
+      if (clientSupportsUpdate(attachment.updates, type)) {
+        return undefined;
+      }
+    }
+    return `client does not support ${type}; update tentacle`;
+  }
+
+  /**
+   * The attached clients changed (an attach or a detach): a pending ask that
+   * no attached client can answer any more takes the fallback now — denied
+   * with the reason — instead of waiting on a client that cannot show it.
+   */
+  private recheckAsks(): void {
+    const reason = this.blockingUnsupported("permission_request");
+    if (reason === undefined) {
+      return;
+    }
+    for (const requestId of [...this.asks.keys()]) {
+      this.settle(requestId, { outcome: "cancelled" }, reason);
+    }
   }
 
   /**
@@ -389,7 +440,7 @@ export class HostedSession {
    * `permission_resolved` goes out BEFORE the gate is woken, so its seq
    * precedes everything the tool's execution streams.
    */
-  private settle(requestId: string, outcome: PermissionOutcome): void {
+  private settle(requestId: string, outcome: PermissionOutcome, reason?: string): void {
     const ask = this.asks.get(requestId);
     if (!ask) {
       return;
@@ -401,7 +452,7 @@ export class HostedSession {
         this.emit({ type: "permission_resolved", requestId, outcome });
       }
     } finally {
-      ask.settle(outcome);
+      ask.settle(outcome, reason);
     }
   }
 
@@ -510,16 +561,18 @@ export class HostedSession {
       replay = fromCut.replay;
     }
     for (const update of replay) {
-      attachment.send(update);
+      attachment.send(frameFor(update, attachment.updates));
     }
     this.attachments.delete(attachment);
     this.attachments.add(attachment);
+    this.recheckAsks();
     return { resync: covered === undefined || !("replay" in covered), epoch: this.cut.epoch };
   }
 
   /** Stop delivering to `attachment` (its connection went away). The session lives on. */
   detach(attachment: Attachment): void {
     this.removeAttachment(attachment);
+    this.recheckAsks();
   }
 
   /**
@@ -610,7 +663,7 @@ export class HostedSession {
     this.ring.push(params, this.cut.seq);
     for (const attachment of [...this.attachments]) {
       try {
-        attachment.send(params);
+        attachment.send(frameFor(params, attachment.updates));
       } catch (error) {
         this.removeAttachment(attachment);
         this.reportTurnError(error);

@@ -57,6 +57,7 @@ function run(inputs: readonly StreamInput[], from: StreamState = initialStream) 
       else if (o.kind === "reset")
         out.push(`reset(${o.messages.length}, turn=${o.turn}, keep=${o.keepRequests.join("|")})`);
       else if (o.kind === "error") out.push(`error:${o.error.message}`);
+      else if (o.kind === "unsupported") out.push(`unsupported:${o.type}`);
       else out.push(o.kind);
     }
     effects.push(...step.effects.map((e) => e.kind));
@@ -225,22 +226,26 @@ describe("session stream reducer (pure)", () => {
     ]);
   });
 
-  test("event classes: unknown display counted silently, unknown mandatory and malformed known are errors", () => {
+  test("event classes: unknown display is 'unsupported' once per kind; unknown mandatory and malformed known are errors", () => {
     const r = run(
       [
         upd(frame(2, { type: "progress_bar" })),
         upd(frame(3, { type: "future_mandatory" }, true)),
         upd(frame(4, { type: "agent_message_chunk" })),
         upd(chunk(5)),
+        upd(frame(6, { type: "progress_bar", pct: 2 })),
+        upd(frame(7, { type: "other_future" })),
       ],
       live(1),
     );
     expect(r.out).toEqual([
+      "unsupported:progress_bar",
       'error:unknown mandatory update "future_mandatory": the daemon is newer than this client — update tentacle',
       "error:malformed agent_message_chunk update from the daemon",
       "5:agent_message_chunk",
+      "unsupported:other_future",
     ]);
-    expect(r.state.applied).toBe(5); // no gap: every seq counted
+    expect(r.state.applied).toBe(7); // no gap: every seq counted
   });
 
   test("turn and permission tracking; keepRequests = requests the replay leaves pending", () => {

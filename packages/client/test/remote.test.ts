@@ -10,7 +10,13 @@ import {
   type StreamEvent,
 } from "@tentacle/core";
 import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
-import { JsonRpcErrorCode, Method, Notification, PROTOCOL_VERSION } from "@tentacle/protocol";
+import {
+  JsonRpcErrorCode,
+  KNOWN_UPDATE_TYPES,
+  Method,
+  Notification,
+  PROTOCOL_VERSION,
+} from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import type { SessionEvent } from "../src/mapping.ts";
@@ -962,21 +968,85 @@ describe("unknown / malformed session/update frames (event classes)", () => {
     expect(r.outcome).toMatchObject({ code: DomainErrorCode.UnknownSession });
   });
 
-  test("an unknown display event is skipped silently and the turn completes", async () => {
+  test("an unknown display event does not break the turn: one 'unsupported' event per kind", async () => {
     const r = await run(
       [
         chunk(1, "a"),
         { sessionId: "s1", seq: 2, update: { type: "progress", pct: 3 } },
         chunk(3, "b"),
+        { sessionId: "s1", seq: 4, update: { type: "progress", pct: 4 } },
       ],
       true,
     );
     expect(r.outcome).toBe("ended");
     expect(r.events).toEqual([
       { type: "text", delta: "a" },
+      { type: "unsupported", kind: "progress" },
       { type: "text", delta: "b" },
       { type: "turn_end", reason: "end_turn" },
     ]);
+    expect(r.errors).toEqual([]);
+  });
+
+  test("an unknown kind that arrives while idle is shown at the next turn (once)", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    let seq = 0;
+    const frame = (update: unknown, mandatory?: true) =>
+      daemon.notify(Notification.SessionUpdate, {
+        sessionId: "s1",
+        seq: ++seq,
+        ...(mandatory ? { mandatory } : {}),
+        update,
+      });
+    const daemon: RpcPeer = new RpcPeer(daemonCh, {
+      onRequest: async (method, params) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+            skills: [],
+          };
+        }
+        if (method === Method.Open)
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
+        if (method === Method.Prompt) {
+          const { turnId } = params as { turnId: string };
+          frame({ type: "turn_end", turnId, stopReason: "end_turn" }, true);
+          return { turnId };
+        }
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, method);
+      },
+    });
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    await collect(session.send("one"));
+    frame({ type: "future_status", x: 1 }); // idle: no turn running
+    frame({ type: "future_status", x: 2 });
+    await new Promise((r) => setTimeout(r, 10));
+    const second = await collect(session.send("two"));
+    expect(second.filter((e) => e.type === "unsupported")).toEqual([
+      { type: "unsupported", kind: "future_status" },
+    ]);
+    expect(second.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    client.close();
+    daemon.close();
+  });
+
+  test("a known update with an unknown field is applied (the field is stripped)", async () => {
+    const r = await run(
+      [
+        {
+          sessionId: "s1",
+          seq: 1,
+          future: true,
+          update: { type: "agent_message_chunk", content: { type: "text", text: "a" }, future: 1 },
+        },
+      ],
+      true,
+    );
+    expect(r.outcome).toBe("ended");
+    expect(r.events[0]).toEqual({ type: "text", delta: "a" });
     expect(r.errors).toEqual([]);
   });
 
@@ -1745,6 +1815,22 @@ describe("hooks/trust (docs/feat/hooks-project-trust.md)", () => {
     expect(signal?.aborted).toBe(true);
   });
 
+  test("a pod's unknown fields are stripped: the resolver never sees them", async () => {
+    const seen: unknown[] = [];
+    const { client, ask } = await rawTrust(async (p) => {
+      seen.push(p);
+      return { trusted: false };
+    });
+    const response = await ask({
+      ...PARAMS,
+      future: "x",
+      hooks: [{ ...PARAMS.hooks[0], future: "y" }],
+    });
+    expect(response.result).toEqual({ trusted: false });
+    expect(seen).toEqual([PARAMS]);
+    client.close();
+  });
+
   test("a session this client never opened → { trusted: false }, nobody is asked", async () => {
     let calls = 0;
     const { client, ask } = await rawTrust(async () => {
@@ -1895,5 +1981,178 @@ describe("hooks/trust (docs/feat/hooks-project-trust.md)", () => {
     expect(ran).toEqual(["proj-start", "proj-start"]);
     connection.close();
     client.close();
+  });
+});
+
+describe("blocking updates are gated by the initialize list (docs/feat/protocol-v10-forward-compat.md)", () => {
+  const callShell: StreamEvent[] = [
+    { type: "tool_call", toolCall: { id: "c1", name: "shell", arguments: '{"command":"ls"}' } },
+    { type: "done" },
+  ];
+  const reply: StreamEvent[] = [{ type: "text", delta: "ok" }, { type: "done" }];
+
+  /** A raw laptop declaring `updates` at initialize; records every update it receives. */
+  async function laptop(updates: readonly string[] | undefined) {
+    const [daemonCh, clientCh] = createChannelPair();
+    const host = makeHost(new ScriptedProvider([callShell, reply]), noopEnv);
+    const connection = new Connection(daemonCh, host);
+    const frames: { type: string; [k: string]: unknown }[] = [];
+    const peer = new RpcPeer(clientCh, {
+      onNotification: (_m, params) => {
+        frames.push((params as { update: { type: string } }).update);
+      },
+    });
+    // Every request carries an unknown field (a newer laptop's): the daemon
+    // strips it on inbound parse — the session runs as if it were absent.
+    await peer.request(Method.Initialize, {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true, future: 1, ...(updates ? { updates } : {}) },
+      future: 1,
+    });
+    await peer.request(Method.Open, { sessionId: "s1", create: true, future: 1 });
+    await peer.request(Method.Prompt, {
+      sessionId: "s1",
+      turnId: "t1",
+      content: [{ type: "text", text: "go", future: 1 }],
+      future: 1,
+    });
+    return { connection, peer, frames };
+  }
+
+  test("a client that does not list permission_request: denied with the reason at once, never suspended", async () => {
+    const without = KNOWN_UPDATE_TYPES.filter((t) => t !== "permission_request");
+    const { connection, peer, frames } = await laptop(without);
+    expect(await waitFor(() => frames.some((f) => f.type === "turn_end"), 1000)).toBe(true);
+    expect(frames.some((f) => f.type === "permission_request")).toBe(false);
+    const text = JSON.stringify(frames);
+    expect(text).toContain("client does not support permission_request");
+    expect(text).toContain("update tentacle");
+    connection.close();
+    peer.close();
+  });
+
+  test("a client that lists it (or sends no list: the v10 base set) is prompted as before", async () => {
+    for (const updates of [[...KNOWN_UPDATE_TYPES], undefined]) {
+      const { connection, peer, frames } = await laptop(updates);
+      expect(await waitFor(() => frames.some((f) => f.type === "permission_request"), 1000)).toBe(
+        true,
+      );
+      expect(frames.some((f) => f.type === "turn_end")).toBe(false); // suspended on the ask
+      connection.close();
+      peer.close();
+    }
+  });
+
+  type Frame = { mandatory?: boolean; update: { type: string; requestId?: string } };
+  /** One more raw client on `host` (its own connection), attached to `s1`. */
+  async function client(host: SessionHost, updates: readonly string[]) {
+    const [daemonCh, clientCh] = createChannelPair();
+    const connection = new Connection(daemonCh, host);
+    const frames: Frame[] = [];
+    const peer = new RpcPeer(clientCh, {
+      onNotification: (_m, params) => {
+        frames.push(params as Frame);
+      },
+    });
+    await peer.request(Method.Initialize, {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true, updates },
+    });
+    await peer.request(Method.Open, { sessionId: "s1", create: true });
+    const has = (type: string) => frames.some((f) => f.update.type === type);
+    return { connection, peer, frames, has };
+  }
+  const ALL = [...KNOWN_UPDATE_TYPES];
+  const NO_ASK = KNOWN_UPDATE_TYPES.filter((t) => t !== "permission_request");
+  const prompt = (peer: RpcPeer) =>
+    peer.request(Method.Prompt, {
+      sessionId: "s1",
+      turnId: "t1",
+      content: [{ type: "text", text: "go" }],
+    });
+
+  test("mixed attach: the declaring client is prompted; the other gets it WITHOUT mandatory; the turn survives", async () => {
+    const host = makeHost(new ScriptedProvider([callShell, reply]), noopEnv);
+    const a = await client(host, ALL);
+    const b = await client(host, NO_ASK);
+    await prompt(a.peer);
+    expect(await waitFor(() => a.has("permission_request") && b.has("permission_request"))).toBe(
+      true,
+    );
+    const toA = a.frames.find((f) => f.update.type === "permission_request");
+    const toB = b.frames.find((f) => f.update.type === "permission_request");
+    expect(toA?.mandatory).toBe(true);
+    expect(toB?.mandatory).toBeUndefined();
+    expect(toA?.update.requestId).toBe(toB?.update.requestId as string); // same frame, same seq
+    await a.peer.request(Method.ResolvePermission, {
+      sessionId: "s1",
+      requestId: toA?.update.requestId,
+      optionId: "allow_once",
+    });
+    expect(await waitFor(() => a.has("turn_end") && b.has("turn_end"), 1000)).toBe(true);
+    // seq stays contiguous for the non-declaring client.
+    const seqs = b.frames.map((f) => (f as unknown as { seq: number }).seq);
+    expect(seqs).toEqual(seqs.map((_, i) => (seqs[0] ?? 0) + i));
+    for (const c of [a, b]) c.connection.close();
+  });
+
+  test("an ask pending while detached: a non-declaring client attaching → denied with the reason", async () => {
+    const host = makeHost(new ScriptedProvider([callShell, reply]), noopEnv);
+    const a = await client(host, ALL);
+    await prompt(a.peer);
+    expect(await waitFor(() => a.has("permission_request"))).toBe(true);
+    a.connection.close(); // nobody attached: stays suspended (the owner's exception)
+    const b = await client(host, NO_ASK);
+    expect(await waitFor(() => b.has("turn_end"), 1000)).toBe(true);
+    expect(JSON.stringify(b.frames)).toContain("client does not support permission_request");
+    b.connection.close();
+  });
+
+  test("an ask pending while detached: a declaring client attaching is prompted (still suspended)", async () => {
+    const host = makeHost(new ScriptedProvider([callShell, reply]), noopEnv);
+    const a = await client(host, ALL);
+    await prompt(a.peer);
+    expect(await waitFor(() => a.has("permission_request"))).toBe(true);
+    a.connection.close();
+    const c = await client(host, ALL);
+    expect(await waitFor(() => c.has("permission_request"))).toBe(true);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(c.has("turn_end")).toBe(false);
+    c.connection.close();
+  });
+
+  test("the only declaring client detaches while a non-declaring one stays → denied with the reason", async () => {
+    const host = makeHost(new ScriptedProvider([callShell, reply]), noopEnv);
+    const a = await client(host, ALL);
+    const b = await client(host, NO_ASK);
+    await prompt(a.peer);
+    expect(await waitFor(() => a.has("permission_request"))).toBe(true);
+    a.connection.close();
+    expect(await waitFor(() => b.has("turn_end"), 1000)).toBe(true);
+    expect(JSON.stringify(b.frames)).toContain("client does not support permission_request");
+    b.connection.close();
+  });
+
+  test("RemoteClient declares every update type it knows at initialize (round-trip)", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    let declared: unknown;
+    const daemon = new RpcPeer(daemonCh, {
+      onRequest: (method, params) => {
+        if (method === Method.Initialize) {
+          declared = (params as { clientCapabilities: { updates?: unknown } }).clientCapabilities
+            .updates;
+        }
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          agentCapabilities: { tools: true, permissions: true },
+          skills: [],
+        };
+      },
+    });
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    expect(declared).toEqual([...KNOWN_UPDATE_TYPES]);
+    client.close();
+    daemon.close();
   });
 });

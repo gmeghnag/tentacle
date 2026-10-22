@@ -21,44 +21,53 @@ export type SessionId = z.infer<typeof SessionIdSchema>;
 // Mirrors `@tentacle/core`'s `ChatMessage`/`ToolCall` on the wire, so a
 // session can be seeded on `session/open` and read back via `session/snapshot`.
 
-export const WireToolCallSchema = z
-  .object({ id: z.string(), name: z.string(), arguments: z.string() })
-  .strict();
+export const WireToolCallSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  arguments: z.string(),
+});
 
-export const ChatMessageSchema = z
-  .object({
-    role: z.enum(["system", "user", "assistant", "tool"]),
-    content: z.string(),
-    toolCalls: z.array(WireToolCallSchema).optional(),
-    toolCallId: z.string().optional(),
-  })
-  .strict();
+export const ChatMessageSchema = z.object({
+  role: z.enum(["system", "user", "assistant", "tool"]),
+  content: z.string(),
+  toolCalls: z.array(WireToolCallSchema).optional(),
+  toolCallId: z.string().optional(),
+});
 export type WireChatMessage = z.infer<typeof ChatMessageSchema>;
 
 // --- initialize ---------------------------------------------------------
 
-export const ClientCapabilitiesSchema = z
-  .object({
-    /** Client can render streamed `session/update` notifications. */
-    streaming: z.boolean().default(true),
-  })
-  .strict();
+export const ClientCapabilitiesSchema = z.object({
+  /** Client can render streamed `session/update` notifications. */
+  streaming: z.boolean().default(true),
+  /**
+   * The `session/update` types this client understands (protocol 10). The
+   * daemon emits a BLOCKING type (`BLOCKING_UPDATE_TYPES`) only to a client
+   * that lists it. Absent = the v10 base set.
+   */
+  updates: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .max(64)
+        .regex(/^[a-z][a-z0-9_]*$/),
+    )
+    .max(256)
+    .optional(),
+});
 export type ClientCapabilities = z.infer<typeof ClientCapabilitiesSchema>;
 
-export const AgentCapabilitiesSchema = z
-  .object({
-    tools: z.boolean().default(true),
-    permissions: z.boolean().default(true),
-  })
-  .strict();
+export const AgentCapabilitiesSchema = z.object({
+  tools: z.boolean().default(true),
+  permissions: z.boolean().default(true),
+});
 export type AgentCapabilities = z.infer<typeof AgentCapabilitiesSchema>;
 
-export const InitializeParamsSchema = z
-  .object({
-    protocolVersion: z.number().int(),
-    clientCapabilities: ClientCapabilitiesSchema,
-  })
-  .strict();
+export const InitializeParamsSchema = z.object({
+  protocolVersion: z.number().int(),
+  clientCapabilities: ClientCapabilitiesSchema,
+});
 export type InitializeParams = z.infer<typeof InitializeParamsSchema>;
 
 // --- skills (the `/name` catalog) -----------------------------------------
@@ -81,28 +90,24 @@ export const MAX_SKILL_CATALOG = 200;
 /** Max length of a catalog description (the spec's limit). */
 export const MAX_SKILL_DESCRIPTION = 1024;
 
-export const SkillSummarySchema = z
-  .object({
-    name: SkillNameSchema,
-    /** One line: no control characters (C0, DEL, C1). */
-    description: z
-      .string()
-      .min(1)
-      .max(MAX_SKILL_DESCRIPTION)
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point
-      .regex(/^[^\u0000-\u001f\u007f-\u009f]*$/),
-  })
-  .strict();
+export const SkillSummarySchema = z.object({
+  name: SkillNameSchema,
+  /** One line: no control characters (C0, DEL, C1). */
+  description: z
+    .string()
+    .min(1)
+    .max(MAX_SKILL_DESCRIPTION)
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point
+    .regex(/^[^\u0000-\u001f\u007f-\u009f]*$/),
+});
 export type SkillSummary = z.infer<typeof SkillSummarySchema>;
 
-export const InitializeResultSchema = z
-  .object({
-    protocolVersion: z.number().int(),
-    agentCapabilities: AgentCapabilitiesSchema,
-    /** The skills a user can activate with `/name` (`session/prompt{skill}`); may be empty. */
-    skills: z.array(SkillSummarySchema).max(MAX_SKILL_CATALOG),
-  })
-  .strict();
+export const InitializeResultSchema = z.object({
+  protocolVersion: z.number().int(),
+  agentCapabilities: AgentCapabilitiesSchema,
+  /** The skills a user can activate with `/name` (`session/prompt{skill}`); may be empty. */
+  skills: z.array(SkillSummarySchema).max(MAX_SKILL_CATALOG),
+});
 export type InitializeResult = z.infer<typeof InitializeResultSchema>;
 
 // --- session/prompt -----------------------------------------------------
@@ -115,20 +120,18 @@ export type InitializeResult = z.infer<typeof InitializeResultSchema>;
 export const TurnIdSchema = z.string().min(1).max(128);
 export type TurnId = z.infer<typeof TurnIdSchema>;
 
-export const PromptParamsSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-    turnId: TurnIdSchema,
-    content: z.array(ContentBlockSchema).min(1),
-    /**
-     * The user activates this skill (`/name`, from the `initialize` catalog):
-     * the daemon loads it as a `skill` tool round right after the prompt,
-     * before the model's first round. Structured on purpose — the daemon never
-     * parses the text. One the daemon cannot activate → `InvalidParams`.
-     */
-    skill: SkillNameSchema.optional(),
-  })
-  .strict();
+export const PromptParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  turnId: TurnIdSchema,
+  content: z.array(ContentBlockSchema).min(1),
+  /**
+   * The user activates this skill (`/name`, from the `initialize` catalog):
+   * the daemon loads it as a `skill` tool round right after the prompt,
+   * before the model's first round. Structured on purpose — the daemon never
+   * parses the text. One the daemon cannot activate → `InvalidParams`.
+   */
+  skill: SkillNameSchema.optional(),
+});
 export type PromptParams = z.infer<typeof PromptParamsSchema>;
 
 export const StopReasonSchema = z.enum([
@@ -160,39 +163,31 @@ export type TurnEnd = z.infer<typeof TurnEndSchema>;
  * The ack: the turn was accepted (or, on a retry, already exists). `ended` is
  * present only when a retried `turnId` names a turn that already finished.
  */
-export const PromptResultSchema = z
-  .object({
-    turnId: TurnIdSchema,
-    ended: TurnEndSchema.optional(),
-  })
-  .strict();
+export const PromptResultSchema = z.object({
+  turnId: TurnIdSchema,
+  ended: TurnEndSchema.optional(),
+});
 export type PromptResult = z.infer<typeof PromptResultSchema>;
 
 // --- session/cancel (notification) -------------------------------------
 
-export const CancelParamsSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-  })
-  .strict();
+export const CancelParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+});
 export type CancelParams = z.infer<typeof CancelParamsSchema>;
 
 // --- session/compact ----------------------------------------------------
 
-export const CompactParamsSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-  })
-  .strict();
+export const CompactParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+});
 export type CompactParams = z.infer<typeof CompactParamsSchema>;
 
-export const CompactResultSchema = z
-  .object({
-    /** Message count before and after compaction. */
-    before: z.number().int().nonnegative(),
-    after: z.number().int().nonnegative(),
-  })
-  .strict();
+export const CompactResultSchema = z.object({
+  /** Message count before and after compaction. */
+  before: z.number().int().nonnegative(),
+  after: z.number().int().nonnegative(),
+});
 export type CompactResult = z.infer<typeof CompactResultSchema>;
 
 // --- session/snapshot ---------------------------------------------------
@@ -216,41 +211,35 @@ export type CompactResult = z.infer<typeof CompactResultSchema>;
  * compare it for equality only. `seq` is comparable with update `seq`s of the
  * same epoch.
  */
-export const HistoryCutSchema = z
-  .object({
-    epoch: z.string().min(1).max(128),
-    seq: z.number().int().nonnegative(),
-  })
-  .strict();
+export const HistoryCutSchema = z.object({
+  epoch: z.string().min(1).max(128),
+  seq: z.number().int().nonnegative(),
+});
 export type HistoryCut = z.infer<typeof HistoryCutSchema>;
 
-export const SnapshotParamsSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-    /** Opaque: a previous page's `cursor` (an older slice). Absent → the newest page. */
-    cursor: z.string().min(1).max(256).optional(),
-    /** Max messages in this page. Absent → everything up to the cut, in one page. */
-    limit: z.number().int().min(1).optional(),
-  })
-  .strict();
+export const SnapshotParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  /** Opaque: a previous page's `cursor` (an older slice). Absent → the newest page. */
+  cursor: z.string().min(1).max(256).optional(),
+  /** Max messages in this page. Absent → everything up to the cut, in one page. */
+  limit: z.number().int().min(1).optional(),
+});
 export type SnapshotParams = z.infer<typeof SnapshotParamsSchema>;
 
 /** The turn running at the cut (its `turn_start` is at or before `since`). */
-export const SnapshotTurnSchema = z.object({ turnId: TurnIdSchema }).strict();
+export const SnapshotTurnSchema = z.object({ turnId: TurnIdSchema });
 export type SnapshotTurn = z.infer<typeof SnapshotTurnSchema>;
 
-export const SnapshotResultSchema = z
-  .object({
-    /** Chronological slice of the history, ending at the cut (or at the cursor). */
-    messages: z.array(ChatMessageSchema),
-    /** The cut this snapshot is consistent with. First page only. */
-    since: HistoryCutSchema.optional(),
-    /** Present iff a turn was running at the cut. First page only. */
-    turn: SnapshotTurnSchema.optional(),
-    /** Present iff older messages exist: pass it back for the previous page. */
-    cursor: z.string().min(1).optional(),
-  })
-  .strict();
+export const SnapshotResultSchema = z.object({
+  /** Chronological slice of the history, ending at the cut (or at the cursor). */
+  messages: z.array(ChatMessageSchema),
+  /** The cut this snapshot is consistent with. First page only. */
+  since: HistoryCutSchema.optional(),
+  /** Present iff a turn was running at the cut. First page only. */
+  turn: SnapshotTurnSchema.optional(),
+  /** Present iff older messages exist: pass it back for the previous page. */
+  cursor: z.string().min(1).optional(),
+});
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 
 // --- session/open -------------------------------------------------------
@@ -275,33 +264,29 @@ export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 // buffers) a session's updates from the moment it sends `open`.
 // Any authenticated client may open any session (one token = one principal).
 
-export const OpenParamsSchema = z
-  .object({
-    /** Client-chosen id (so the client owns the persistence uid); absent → daemon-chosen. */
-    sessionId: SessionIdSchema.optional(),
-    /** The last cut this client applied: a snapshot's `since`, advanced by each applied update. */
-    since: HistoryCutSchema.optional(),
-    /** Create the session if it is not live (a fresh, empty one unless `messages`). */
-    create: z.boolean().optional(),
-    /** Seed history: recreate a session that is not live from the client's copy. */
-    messages: z.array(ChatMessageSchema).optional(),
-    /** Working directory the session's tools operate against (not honoured: the daemon confines it). */
-    cwd: z.string().optional(),
-  })
-  .strict();
+export const OpenParamsSchema = z.object({
+  /** Client-chosen id (so the client owns the persistence uid); absent → daemon-chosen. */
+  sessionId: SessionIdSchema.optional(),
+  /** The last cut this client applied: a snapshot's `since`, advanced by each applied update. */
+  since: HistoryCutSchema.optional(),
+  /** Create the session if it is not live (a fresh, empty one unless `messages`). */
+  create: z.boolean().optional(),
+  /** Seed history: recreate a session that is not live from the client's copy. */
+  messages: z.array(ChatMessageSchema).optional(),
+  /** Working directory the session's tools operate against (not honoured: the daemon confines it). */
+  cwd: z.string().optional(),
+});
 export type OpenParams = z.infer<typeof OpenParamsSchema>;
 
-export const OpenResultSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-    /** The session's current epoch: with the last applied `seq`, the client's next `since`. */
-    epoch: z.string().min(1).max(128),
-    /** A new session was built (vs attached to a live one). */
-    created: z.boolean(),
-    /** `since` could not be honoured: snapshot, then apply the buffered updates past its cut. */
-    resync: z.boolean(),
-  })
-  .strict();
+export const OpenResultSchema = z.object({
+  sessionId: SessionIdSchema,
+  /** The session's current epoch: with the last applied `seq`, the client's next `since`. */
+  epoch: z.string().min(1).max(128),
+  /** A new session was built (vs attached to a live one). */
+  created: z.boolean(),
+  /** `since` could not be honoured: snapshot, then apply the buffered updates past its cut. */
+  resync: z.boolean(),
+});
 export type OpenResult = z.infer<typeof OpenResultSchema>;
 
 // --- session/close ------------------------------------------------------
@@ -309,14 +294,12 @@ export type OpenResult = z.infer<typeof OpenResultSchema>;
 // every attached client (`session_closed`), forget it. Idempotent: an unknown
 // or already-closed id is a no-op success. Needs no prior `open`.
 
-export const CloseParamsSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-  })
-  .strict();
+export const CloseParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+});
 export type CloseParams = z.infer<typeof CloseParamsSchema>;
 
-export const CloseResultSchema = z.object({}).strict();
+export const CloseResultSchema = z.object({});
 export type CloseResult = z.infer<typeof CloseResultSchema>;
 
 // --- session/enqueue (steering) ------------------------------------------
@@ -329,15 +312,13 @@ export type CloseResult = z.infer<typeof CloseResultSchema>;
 // typed during: a (retried) enqueue never lands in a later turn — it is
 // `NoTurnRunning` unless that exact turn is still running.
 
-export const EnqueueParamsSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-    id: z.string().min(1).max(128),
-    turnId: TurnIdSchema,
-    text: z.string().min(1),
-  })
-  .strict();
+export const EnqueueParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  id: z.string().min(1).max(128),
+  turnId: TurnIdSchema,
+  text: z.string().min(1),
+});
 export type EnqueueParams = z.infer<typeof EnqueueParamsSchema>;
 
-export const EnqueueResultSchema = z.object({}).strict();
+export const EnqueueResultSchema = z.object({});
 export type EnqueueResult = z.infer<typeof EnqueueResultSchema>;

@@ -79,6 +79,8 @@ export class Connection {
   private readonly attached = new Map<string, Attached>();
   private readonly servesModel: boolean;
   private initialized = false;
+  /** The update types the client declared at `initialize`; undefined = the v10 base set. */
+  private updateTypes: readonly string[] | undefined;
 
   constructor(
     channel: DuplexChannel,
@@ -230,6 +232,11 @@ export class Connection {
       );
     }
     this.initialized = true;
+    // The update types this client understands (protocol 10): gates BLOCKING
+    // ones per attachment (docs/feat/protocol-v10-forward-compat.md).
+    if (params.clientCapabilities.updates) {
+      this.updateTypes = params.clientCapabilities.updates;
+    }
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: { tools: true, permissions: true },
@@ -272,6 +279,7 @@ export class Connection {
     }
     const attachment: Attachment = {
       send: (update) => this.peer.notify(Notification.SessionUpdate, update),
+      ...(this.updateTypes ? { updates: this.updateTypes } : {}),
     };
     const { hosted, created, resync, epoch } = this.host.open(params, attachment);
     this.attached.set(hosted.id, { hosted, attachment });

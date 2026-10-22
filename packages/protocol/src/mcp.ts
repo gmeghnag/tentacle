@@ -24,30 +24,28 @@ export const McpServerStateSchema = z.enum([
 ]);
 export type McpServerState = z.infer<typeof McpServerStateSchema>;
 
-export const McpServerStatusSchema = z
-  .object({
-    name: z.string().min(1).max(256).regex(NO_CONTROL),
-    state: McpServerStateSchema,
-    /**
-     * The bare MCP names of the tools the server contributed (none unless it
-     * connected), in its order — the first `MAX_MCP_TOOL_NAMES`
-     * (docs/feat/mcp-tools-panel.md).
-     */
-    tools: z.array(z.string().min(1).max(128).regex(NO_CONTROL)).max(MAX_MCP_TOOL_NAMES),
-    /** Tools beyond the names listed (truncated or unnameable): count = `tools.length + moreTools`. */
-    moreTools: z.number().int().nonnegative(),
-    /** Round trip of the probe `ping`, in ms (`connected` only). */
-    latencyMs: z.number().nonnegative().optional(),
-    /** Why it is not `connected` (one line). */
-    error: z.string().max(1000).regex(NO_CONTROL).optional(),
-  })
-  .strict();
+export const McpServerStatusSchema = z.object({
+  name: z.string().min(1).max(256).regex(NO_CONTROL),
+  state: McpServerStateSchema,
+  /**
+   * The bare MCP names of the tools the server contributed (none unless it
+   * connected), in its order — the first `MAX_MCP_TOOL_NAMES`
+   * (docs/feat/mcp-tools-panel.md).
+   */
+  tools: z.array(z.string().min(1).max(128).regex(NO_CONTROL)).max(MAX_MCP_TOOL_NAMES),
+  /** Tools beyond the names listed (truncated or unnameable): count = `tools.length + moreTools`. */
+  moreTools: z.number().int().nonnegative(),
+  /** Round trip of the probe `ping`, in ms (`connected` only). */
+  latencyMs: z.number().nonnegative().optional(),
+  /** Why it is not `connected` (one line). */
+  error: z.string().max(1000).regex(NO_CONTROL).optional(),
+});
 export type McpServerStatus = z.infer<typeof McpServerStatusSchema>;
 
-export const McpStatusParamsSchema = z.object({}).strict();
+export const McpStatusParamsSchema = z.object({});
 export type McpStatusParams = z.infer<typeof McpStatusParamsSchema>;
 
-export const McpStatusResultSchema = z
-  .object({ servers: z.array(McpServerStatusSchema).max(MAX_MCP_SERVERS) })
-  .strict();
+export const McpStatusResultSchema = z.object({
+  servers: z.array(McpServerStatusSchema).max(MAX_MCP_SERVERS),
+});
 export type McpStatusResult = z.infer<typeof McpStatusResultSchema>;

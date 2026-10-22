@@ -51,13 +51,11 @@ export const WireStreamEventSchema = z.discriminatedUnion("type", [
 export type WireStreamEvent = z.infer<typeof WireStreamEventSchema>;
 
 /** `model/stream` request: the daemon asks the client to run a model turn. */
-export const ModelStreamParamsSchema = z.object({ request: WireChatRequestSchema }).strict();
+export const ModelStreamParamsSchema = z.object({ request: WireChatRequestSchema });
 export type ModelStreamParams = z.infer<typeof ModelStreamParamsSchema>;
 
 /** The collected events of that turn (first cut: delivered as one batch). */
-export const ModelStreamResultSchema = z
-  .object({ events: z.array(WireStreamEventSchema) })
-  .strict();
+export const ModelStreamResultSchema = z.object({ events: z.array(WireStreamEventSchema) });
 export type ModelStreamResult = z.infer<typeof ModelStreamResultSchema>;
 
 // --- model/streamChunked (streaming cut) ---------------------------------
@@ -79,7 +77,7 @@ export const ModelStreamProgressValueSchema = z.array(WireStreamEventSchema).min
 export type ModelStreamProgressValue = z.infer<typeof ModelStreamProgressValueSchema>;
 
 /** `model/streamChunked` request: the same shape as `model/stream`. */
-export const ModelStreamChunkedParamsSchema = z.object({ request: WireChatRequestSchema }).strict();
+export const ModelStreamChunkedParamsSchema = z.object({ request: WireChatRequestSchema });
 export type ModelStreamChunkedParams = z.infer<typeof ModelStreamChunkedParamsSchema>;
 
 /**
@@ -87,11 +85,9 @@ export type ModelStreamChunkedParams = z.infer<typeof ModelStreamChunkedParamsSc
  * FRAMES sent for this request (not events: a frame carries a batch). The
  * daemon verifies it against the frames it received — a mismatch is a loud
  * error, never a silent truncation. No `usage`: it rides the in-stream `done`
- * event (a redundant field on a strict result would be permanent once shipped).
+ * event (a redundant field would be permanent once shipped).
  */
-export const ModelStreamChunkedResultSchema = z
-  .object({ chunks: z.number().int().nonnegative() })
-  .strict();
+export const ModelStreamChunkedResultSchema = z.object({ chunks: z.number().int().nonnegative() });
 export type ModelStreamChunkedResult = z.infer<typeof ModelStreamChunkedResultSchema>;
 
 // --- $/progress / $/cancelRequest (generic peer primitives) ---------------
@@ -107,15 +103,13 @@ export type ModelStreamChunkedResult = z.infer<typeof ModelStreamChunkedResultSc
  * streams validates its own `value` shape (e.g. `ModelStreamProgressValueSchema`),
  * so new streaming methods reuse this notification without a schema change.
  */
-export const ProgressParamsSchema = z
-  .object({
-    id: z.string().min(1),
-    seq: z.number().int().nonnegative(),
-    value: z.unknown(),
-  })
-  .strict();
+export const ProgressParamsSchema = z.object({
+  id: z.string().min(1),
+  seq: z.number().int().nonnegative(),
+  value: z.unknown(),
+});
 export type ProgressParams = z.infer<typeof ProgressParamsSchema>;
 
 /** `$/cancelRequest` params: cancel one in-flight request by its id. */
-export const CancelRequestParamsSchema = z.object({ id: z.string().min(1) }).strict();
+export const CancelRequestParamsSchema = z.object({ id: z.string().min(1) });
 export type CancelRequestParams = z.infer<typeof CancelRequestParamsSchema>;

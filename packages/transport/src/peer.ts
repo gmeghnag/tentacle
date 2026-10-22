@@ -13,7 +13,6 @@ import {
   type CancelRequestParams,
   JSONRPC_VERSION,
   JsonRpcErrorCode,
-  JsonRpcMessageSchema,
   Notification,
   NotificationSchemas,
   type ProgressParams,
@@ -21,6 +20,7 @@ import {
   RequestSchemas,
   isMethodName,
   isNotificationName,
+  parseJsonRpcMessage,
 } from "@tentacle/protocol";
 import type { DuplexChannel } from "./channel.ts";
 import { RpcError } from "./errors.ts";
@@ -291,9 +291,21 @@ export class RpcPeer {
       this.sendErrorResponse(null, JsonRpcErrorCode.ParseError, "parse error");
       return;
     }
-    const parsed = JsonRpcMessageSchema.safeParse(raw);
+    const parsed = parseJsonRpcMessage(raw);
     if (!parsed.success) {
       const id = extractId(raw);
+      // A response-shaped frame (no `method`) for a request we sent: reject
+      // that request now — an unreadable answer must never leave it pending.
+      const key = id !== null ? String(id) : undefined;
+      const pending = key !== undefined ? this.pending.get(key) : undefined;
+      if (key !== undefined && pending && !Object.hasOwn(raw as object, "method")) {
+        this.settlePending(key, pending, () =>
+          pending.reject(
+            new RpcError(JsonRpcErrorCode.InternalError, `invalid response for ${pending.method}`),
+          ),
+        );
+        return;
+      }
       this.sendErrorResponse(id, JsonRpcErrorCode.InvalidRequest, "invalid request");
       return;
     }

@@ -569,3 +569,60 @@ describe("RpcPeer", () => {
     expect(errors).toEqual(["invalid params for notification session/update", "hook failed"]);
   });
 });
+
+describe("JSON-RPC envelope tolerance (docs/feat/protocol-v10-forward-compat.md)", () => {
+  /** A raw end on `cb`: what the peer on `ca` sends, and a way to send it raw frames. */
+  function raw() {
+    const [ca, cb] = createChannelPair();
+    const out: Record<string, unknown>[] = [];
+    cb.setOnMessage((d) => out.push(JSON.parse(d) as Record<string, unknown>));
+    const send = (frame: unknown) => cb.send(JSON.stringify(frame));
+    return { ca, out, send };
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+
+  test("a request with an unknown envelope member is handled (the member is ignored)", async () => {
+    const { ca, out, send } = raw();
+    const peer = new RpcPeer(ca, { onRequest: async () => INIT_RESULT });
+    send({ jsonrpc: "2.0", id: 7, method: "initialize", params: INIT_PARAMS, trace: "x" });
+    await tick();
+    expect(out).toEqual([{ jsonrpc: "2.0", id: 7, result: INIT_RESULT }]);
+    peer.close();
+  });
+
+  test("a notification and a response with unknown envelope members are accepted", async () => {
+    const { ca, out, send } = raw();
+    const seen: string[] = [];
+    const peer = new RpcPeer(ca, {
+      onNotification: (method) => {
+        seen.push(method);
+      },
+    });
+    send({ jsonrpc: "2.0", method: "$/cancelRequest", params: { id: "1" }, trace: "x" });
+    const pending = peer.request("initialize", INIT_PARAMS);
+    await tick();
+    const id = out[0]?.id;
+    send({ jsonrpc: "2.0", id, result: INIT_RESULT, trace: "x" });
+    expect(await pending).toEqual(INIT_RESULT);
+    expect(out.filter((f) => "error" in f)).toEqual([]);
+    peer.close();
+  });
+
+  test("an invalid response carrying a known id rejects that request at once (never pending)", async () => {
+    const { ca, out, send } = raw();
+    const peer = new RpcPeer(ca);
+    const pending = peer.request("initialize", INIT_PARAMS).catch((e: unknown) => e);
+    await tick();
+    const id = out[0]?.id;
+    send({ jsonrpc: "2.0", id, error: "boom" }); // `error` must be an object
+    const outcome = await Promise.race([
+      pending,
+      tick()
+        .then(() => tick())
+        .then(() => "pending"),
+    ]);
+    expect(outcome).toBeInstanceOf(RpcError);
+    expect(String((outcome as RpcError).message)).toMatch(/invalid response/);
+    peer.close();
+  });
+});

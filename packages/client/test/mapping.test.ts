@@ -124,7 +124,7 @@ describe("updateToEvent", () => {
   });
 });
 
-describe("classifyUpdate (event classes: skip unknown display, fail loudly otherwise)", () => {
+describe("classifyUpdate (event classes: unknown display is 'unsupported', fail loudly otherwise)", () => {
   const frame = (update: unknown, mandatory?: true): SessionUpdateParams =>
     ({
       sessionId: "s1",
@@ -138,8 +138,11 @@ describe("classifyUpdate (event classes: skip unknown display, fail loudly other
     expect(classifyUpdate(frame(update))).toEqual({ kind: "update", update });
   });
 
-  test("an unknown display update is ignored", () => {
-    expect(classifyUpdate(frame({ type: "progress", pct: 3 }))).toEqual({ kind: "ignore" });
+  test("an unknown display update is 'unsupported' (never thrown, never silent)", () => {
+    expect(classifyUpdate(frame({ type: "progress", pct: 3 }))).toEqual({
+      kind: "unsupported",
+      type: "progress",
+    });
   });
 
   test("an unknown mandatory update is an error that says to update the client", () => {
@@ -154,8 +157,11 @@ describe("classifyUpdate (event classes: skip unknown display, fail loudly other
     if (r.kind === "error") expect(r.error.message).toMatch(/malformed agent_message_chunk/);
   });
 
-  test("an Object.prototype key is unknown, not known (ignored, not 'malformed')", () => {
-    expect(classifyUpdate(frame({ type: "toString" }))).toEqual({ kind: "ignore" });
+  test("an Object.prototype key is unknown, not known ('unsupported', not 'malformed')", () => {
+    expect(classifyUpdate(frame({ type: "toString" }))).toEqual({
+      kind: "unsupported",
+      type: "toString",
+    });
   });
 });
 

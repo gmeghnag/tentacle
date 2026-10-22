@@ -154,11 +154,17 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
 /**
- * Event class (parent `session-reattach` §14, decision E). A client MUST skip
- * an unknown `display` event and MUST fail loudly on an unknown `mandatory`
- * one (a turn/permission/history event it cannot act on would be a hang).
+ * Event class (parent `session-reattach` §14, decision E; protocol 10). A
+ * client MUST skip an unknown `display` event (reporting it once as
+ * `unsupported`) and MUST fail loudly on an unknown `mandatory` one (a
+ * turn/history event it cannot act on would be a hang). `blocking` is a
+ * mandatory event the daemon WAITS on a client to answer: it is sent
+ * `mandatory` only to a client that declared it at `initialize`
+ * (`clientCapabilities.updates`); another client gets it as display, and with
+ * no declaring client attached the daemon takes the type's fallback at once
+ * (docs/feat/protocol-v10-forward-compat.md).
  */
-export type UpdateClass = "display" | "mandatory";
+export type UpdateClass = "display" | "mandatory" | "blocking";
 
 /**
  * The class of every known update type — the source of truth for the per-frame
@@ -179,9 +185,31 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   turn_end: "mandatory",
   history_replaced: "mandatory",
   session_closed: "mandatory",
-  permission_request: "mandatory",
+  permission_request: "blocking",
   permission_resolved: "mandatory",
 };
+
+/** Every update type this build knows — what a client declares at `initialize`. */
+export const KNOWN_UPDATE_TYPES: readonly SessionUpdate["type"][] = Object.keys(
+  UPDATE_CLASS,
+) as SessionUpdate["type"][];
+
+/** The `blocking` types, derived from `UPDATE_CLASS` (each type is classified there, once). */
+export const BLOCKING_UPDATE_TYPES: ReadonlySet<SessionUpdate["type"]> = new Set(
+  KNOWN_UPDATE_TYPES.filter((type) => UPDATE_CLASS[type] === "blocking"),
+);
+
+/**
+ * Does a client that declared `declared` at `initialize` understand `type`?
+ * No list (a defensive case: every v10 client sends one) = the v10 base set,
+ * i.e. every type this build knows.
+ */
+export function clientSupportsUpdate(
+  declared: readonly string[] | undefined,
+  type: string,
+): boolean {
+  return declared === undefined ? isKnownUpdateType(type) : declared.includes(type);
+}
 
 /** Own keys only: a frame with `type: "toString"` is unknown, not known. */
 export function isKnownUpdateType(type: string): type is SessionUpdate["type"] {
@@ -208,16 +236,14 @@ export const SessionUpdateOrUnknownSchema = z
   .describe("A known SessionUpdate, or an UnknownSessionUpdate (see its client rule).");
 
 /** Params of the `session/update` notification. */
-export const SessionUpdateParamsSchema = z
-  .object({
-    sessionId: SessionIdSchema,
-    /** Monotonic per-session sequence number; counts unknown (skipped) events too. */
-    seq: z.number().int().nonnegative(),
-    /** Present (always `true`) iff the update's class is `mandatory`; never `false`. */
-    mandatory: z.literal(true).optional(),
-    update: SessionUpdateOrUnknownSchema,
-  })
-  .strict();
+export const SessionUpdateParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  /** Monotonic per-session sequence number; counts unknown (skipped) events too. */
+  seq: z.number().int().nonnegative(),
+  /** Present (always `true`) iff the update's class is `mandatory`; never `false`. */
+  mandatory: z.literal(true).optional(),
+  update: SessionUpdateOrUnknownSchema,
+});
 export type SessionUpdateParams = z.infer<typeof SessionUpdateParamsSchema>;
 /** A frame whose update is a known type — what an emitter (the daemon) builds. */
 export type KnownSessionUpdateParams = Omit<SessionUpdateParams, "update"> & {

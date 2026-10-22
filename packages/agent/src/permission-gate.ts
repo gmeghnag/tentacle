@@ -75,8 +75,9 @@ export type GateOutcome =
   | {
       readonly allowed: false;
       readonly input: unknown;
-      readonly by: "user" | "hook";
-      /** The hook's own reason (`by: "hook"`). */
+      /** `unavailable`: nobody could be asked (`reason` says why). */
+      readonly by: "user" | "hook" | "unavailable";
+      /** The hook's own reason (`by: "hook"`), or why nobody could be asked (`unavailable`). */
       readonly reason?: string;
       /** The hook that refused (`by: "hook"`). */
       readonly hookName?: string;
@@ -154,7 +155,12 @@ export class PermissionGate {
     if (response.allowed && response.scope === "session") {
       this.remember(tool, request);
     }
-    return response.allowed ? run : { allowed: false, input: effective, by: "user" };
+    if (response.allowed) {
+      return run;
+    }
+    return response.reason !== undefined
+      ? { allowed: false, input: effective, by: "unavailable", reason: response.reason }
+      : { allowed: false, input: effective, by: "user" };
   }
 
   /** Whether an existing session rule already covers this call. */

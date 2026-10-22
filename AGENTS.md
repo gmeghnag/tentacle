@@ -205,12 +205,35 @@ assume.
     cleanest shape. A breaking change MUST bump `PROTOCOL_VERSION`, so a
     mixed-version pair fails with a clean `VersionMismatch` at `initialize`
     instead of a confusing mid-session error.
-  - **Additive work keeps the version.** A new method → an old peer returns
-    `MethodNotFound` (clean, catchable — handle it). Caveat: an unknown update
-    *discriminant* is NOT silently ignored by an old client, so a new update
-    variant is breaking for mixed-version `connect` — bump if that matters.
-  - **Once public** (first release, or a mobile client in a store) this flips
-    back to additive-only + versioned negotiation; revisit this rule then.
+  - **Forward compatibility (since v10; holds once public too).** Design:
+    `docs/feat/protocol-v10-forward-compat.md`.
+    - **Fields and methods are free.** Payloads are strip schemas, never
+      `.strict()`: an unknown field is dropped on inbound parse, and known
+      fields keep full validation. The JSON-RPC envelope tolerates extra
+      members too: a frame is classified by its one `method` / `result` /
+      `error` member. An unreadable response to a pending request rejects
+      that request. An unknown method → `MethodNotFound` (handle it).
+    - **Each update kind has ONE class, in `UPDATE_CLASS`
+      (`protocol/updates.ts`):**
+      - **display:** free to add. An older client shows `unsupported` once
+        per kind.
+      - **mandatory:** an older client fails the turn loudly. So it needs a
+        `PROTOCOL_VERSION` bump, unless the daemon gives a client that did not
+        declare it (`initialize` `clientCapabilities.updates`) a fallback,
+        e.g. a resync.
+      - **blocking:** the daemon WAITS on a client to answer it. It must be
+        declared, and it must have a fallback: it is sent `mandatory` only to
+        a client that declared it, and as display to the others. When no
+        attached client declared it (checked on raise, attach and detach),
+        the fallback is taken at once. Anything else the daemon waits on is
+        an RPC request.
+    - **Truly breaking** (a changed or removed field, a changed meaning) →
+      bump `PROTOCOL_VERSION`.
+    - **On-disk records are versioned separately from the wire.** A daemon
+      record carries `schemaVersion` (`DAEMON_RECORD_VERSION`), and an unknown
+      one is refused and left untouched. The laptop's session store parser is
+      strict. A newer build's record is rejected loudly by an older one, never
+      half-loaded.
 - **Don't serialize the RPC peer.** `transport/peer.ts` dispatches inbound
   requests concurrently (`void handleRequest`, no per-connection mutex) on
   purpose: a long-running `session/prompt` must not block a short

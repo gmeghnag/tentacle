@@ -40,7 +40,7 @@ describe("method registry", () => {
     expect(schema.safeParse({ protocolVersion: 1 }).success).toBe(false);
   });
 
-  test("model/streamChunked is a registered method with strict params/result", () => {
+  test("model/streamChunked is a registered method; unknown fields are stripped", () => {
     expect(isMethodName("model/streamChunked")).toBe(true);
     const params = RequestSchemas[Method.ModelStreamChunked].params;
     expect(
@@ -48,16 +48,17 @@ describe("method registry", () => {
         request: { messages: [{ role: "user", content: "hi" }] },
       }).success,
     ).toBe(true);
-    // strict: an unknown field is rejected (additive, not a loosened schema).
-    expect(params.safeParse({ request: { messages: [] }, bogus: 1 }).success).toBe(false);
+    // (v10 forward compat: an unknown field is stripped, never used)
+    const extra = params.safeParse({ request: { messages: [] }, bogus: 1 });
+    expect(extra.success && "bogus" in extra.data).toBe(false);
     const result = RequestSchemas[Method.ModelStreamChunked].result;
     expect(result.safeParse({ chunks: 3 }).success).toBe(true);
-    // No `usage`: it already rides the in-stream `done` event; a redundant field
-    // on a strict result would be permanent once shipped (an old laptop sending
-    // it would be rejected by a daemon that dropped it).
-    expect(
-      result.safeParse({ chunks: 3, usage: { promptTokens: 1, completionTokens: 2 } }).success,
-    ).toBe(false);
+    // No `usage`: it already rides the in-stream `done` event; a sent one is stripped.
+    const withUsage = result.safeParse({
+      chunks: 3,
+      usage: { promptTokens: 1, completionTokens: 2 },
+    });
+    expect(withUsage.success && withUsage.data).toEqual({ chunks: 3 });
     expect(result.safeParse({ events: [] }).success).toBe(false); // not the batch result
   });
 
@@ -79,15 +80,16 @@ describe("method registry", () => {
       expect(EnqueueParamsSchema.safeParse({ ...ok, [key]: "" }).success).toBe(false);
       expect(EnqueueParamsSchema.safeParse({ ...ok, [key]: "x".repeat(129) }).success).toBe(false);
     }
-    // Rejects an empty session id and unknown fields (strict, additive).
+    // Rejects an empty session id; an unknown field is stripped (v10 forward compat: an unknown field is stripped, never used).
     expect(EnqueueParamsSchema.safeParse({ ...ok, sessionId: "" }).success).toBe(false);
-    expect(EnqueueParamsSchema.safeParse({ ...ok, bogus: 1 }).success).toBe(false);
+    const extra = EnqueueParamsSchema.safeParse({ ...ok, bogus: 1 });
+    expect(extra.success && "bogus" in extra.data).toBe(false);
     // The result is an empty object (the daemon accepts; the model sees it later).
     expect(entry.result.safeParse({}).success).toBe(true);
-    expect(entry.result.safeParse({ ok: true }).success).toBe(false); // strict, no extra fields
+    expect(entry.result.safeParse({ ok: true }).data).toEqual({}); // stripped
   });
 
-  test("$/progress and $/cancelRequest are registered notifications with strict params", () => {
+  test("$/progress and $/cancelRequest are registered notifications (bad known fields rejected)", () => {
     expect(isNotificationName("$/progress")).toBe(true);
     expect(isNotificationName("$/cancelRequest")).toBe(true);
     const progress = ProgressParamsSchema;
@@ -98,13 +100,17 @@ describe("method registry", () => {
         value: { type: "text", delta: "a" },
       }).success,
     ).toBe(true);
-    // strict + ordered: a bad seq or unknown field is rejected.
+    // Ordered: a bad seq is rejected; an unknown field is stripped.
     expect(
       progress.safeParse({ id: "1", seq: -1, value: { type: "text", delta: "a" } }).success,
     ).toBe(false);
-    expect(
-      progress.safeParse({ id: "1", seq: 0, value: { type: "text", delta: "a" }, x: 1 }).success,
-    ).toBe(false);
+    const extra = progress.safeParse({
+      id: "1",
+      seq: 0,
+      value: { type: "text", delta: "a" },
+      x: 1,
+    });
+    expect(extra.success && "x" in extra.data).toBe(false);
     const cancel = CancelRequestParamsSchema;
     expect(cancel.safeParse({ id: "1" }).success).toBe(true);
     expect(cancel.safeParse({}).success).toBe(false);
@@ -130,22 +136,20 @@ describe("method registry", () => {
     );
   });
 
-  test("initialize carries NO capability field (old daemon must accept a new laptop's handshake)", () => {
-    // Regression for the rejected `chunkedModel` capability: `ClientCapabilitiesSchema`
-    // is .strict() and validated INBOUND by the daemon, so adding a field there would
-    // make an old daemon reject a new laptop's `initialize` with InvalidParams.
+  test("initialize: an unknown capability is stripped (a newer laptop's handshake still parses)", () => {
+    // Was the regression for the rejected `chunkedModel` capability while
+    // capabilities were strict; since v10 an unknown capability is stripped.
     expect(
       InitializeParamsSchema.safeParse({
         protocolVersion: 1,
         clientCapabilities: { streaming: true },
       }).success,
     ).toBe(true);
-    expect(
-      InitializeParamsSchema.safeParse({
-        protocolVersion: 1,
-        clientCapabilities: { streaming: true, chunkedModel: true },
-      }).success,
-    ).toBe(false);
+    const extra = InitializeParamsSchema.safeParse({
+      protocolVersion: 1,
+      clientCapabilities: { streaming: true, chunkedModel: true },
+    });
+    expect(extra.success && "chunkedModel" in extra.data.clientCapabilities).toBe(false);
     // And a new client's real payload (no chunkedModel) still parses.
     expect(
       InitializeParamsSchema.safeParse({ protocolVersion: 1, clientCapabilities: {} }).success,

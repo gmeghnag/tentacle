@@ -17,33 +17,29 @@ export const MAX_SKILL_PROBLEMS = 100;
 const NO_CONTROL = /^[^\u0000-\u001f\u007f-\u009f]*$/;
 const line = (max: number) => z.string().min(1).max(max).regex(NO_CONTROL);
 
-export const SkillListEntrySchema = z
-  .object({
-    /** As discovered: a non-spec name still loads (it just can't be a `/name`). */
-    name: line(256),
-    description: line(1024),
-    /** `project` skills are repo-supplied; `user` ones come from the user's dirs. */
-    scope: z.enum(["project", "user"]),
-    /** Offered to the user as `/name`. */
-    user: z.boolean(),
-    /** Offered to the model (its catalog and the `skill` tool). */
-    model: z.boolean(),
-    /** Its `SKILL.md`, on the daemon's filesystem. */
-    location: line(4096),
-  })
-  .strict();
+export const SkillListEntrySchema = z.object({
+  /** As discovered: a non-spec name still loads (it just can't be a `/name`). */
+  name: line(256),
+  description: line(1024),
+  /** `project` skills are repo-supplied; `user` ones come from the user's dirs. */
+  scope: z.enum(["project", "user"]),
+  /** Offered to the user as `/name`. */
+  user: z.boolean(),
+  /** Offered to the model (its catalog and the `skill` tool). */
+  model: z.boolean(),
+  /** Its `SKILL.md`, on the daemon's filesystem. */
+  location: line(4096),
+});
 export type SkillListEntry = z.infer<typeof SkillListEntrySchema>;
 
-export const SkillsListParamsSchema = z.object({}).strict();
+export const SkillsListParamsSchema = z.object({});
 export type SkillsListParams = z.infer<typeof SkillsListParamsSchema>;
 
-export const SkillsListResultSchema = z
-  .object({
-    /** In precedence order. */
-    skills: z.array(SkillListEntrySchema).max(MAX_SKILL_LIST),
-    /** Discovery problems: skipped skills, warnings, shadowing, caps. */
-    problems: z.array(line(1000)).max(MAX_SKILL_PROBLEMS),
-    moreProblems: z.number().int().nonnegative(),
-  })
-  .strict();
+export const SkillsListResultSchema = z.object({
+  /** In precedence order. */
+  skills: z.array(SkillListEntrySchema).max(MAX_SKILL_LIST),
+  /** Discovery problems: skipped skills, warnings, shadowing, caps. */
+  problems: z.array(line(1000)).max(MAX_SKILL_PROBLEMS),
+  moreProblems: z.number().int().nonnegative(),
+});
 export type SkillsListResult = z.infer<typeof SkillsListResultSchema>;

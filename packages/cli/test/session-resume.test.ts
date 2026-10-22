@@ -206,9 +206,7 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
     { role: "robot", content: "x" },
     { role: "user" },
     { role: "user", content: 1 },
-    { role: "user", content: "x", extra: true },
     { role: "assistant", content: "", toolCalls: [{ id: "1", name: "sh" }] },
-    { role: "assistant", content: "", toolCalls: [{ id: "1", name: "sh", arguments: "{}", x: 1 }] },
     { role: "assistant", content: "", toolCalls: {} },
     { role: "tool", content: "", toolCallId: 5 },
     "not an object",
@@ -219,6 +217,18 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
       const wire = ChatMessageSchema.safeParse(message).success;
       const store = parseSessionRecord({ ...rec("m", 1), messages: [message] }, "m").ok;
       expect(store).toBe(wire);
+    });
+  }
+  // Unknown keys: the wire STRIPS them since protocol 10 (forward compat), the
+  // store still rejects them — stricter is safe: a record that loads still
+  // seeds `session/open`.
+  for (const message of [
+    { role: "user", content: "x", extra: true },
+    { role: "assistant", content: "", toolCalls: [{ id: "1", name: "sh", arguments: "{}", x: 1 }] },
+  ]) {
+    test(`an unknown key: the store rejects, the wire strips — ${JSON.stringify(message)}`, () => {
+      expect(ChatMessageSchema.safeParse(message).success).toBe(true);
+      expect(parseSessionRecord({ ...rec("m", 1), messages: [message] }, "m").ok).toBe(false);
     });
   }
   // Tripwire: a new wire key must be added to the store's mirror (session-store.ts).
