@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { type AskHooksTrust, type HookRunner, Session } from "@tentacle/agent";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
+import { daemonErrorLogPath } from "../src/daemon-log.ts";
 import {
   buildAgent,
   inProcessAgents,
@@ -396,6 +397,29 @@ describe("project hooks wiring (docs/feat/hooks-project-trust.md)", () => {
       buildAgent({ ...config, projectHooks }, { modelOverride: unusedModel }),
     );
     expect(pod.hooks?.projectTrustRequest()?.canAllow).toBe(false);
+  });
+
+  test("in-process: hooks the wire schema rejects are declined, never asked, and logged (fix/in-process-hooks-trust-schema)", async () => {
+    const overLimit = {
+      ...projectHooks,
+      hooks: [{ event: "turn_start" as const, command: `echo ${"x".repeat(5000)}` }],
+    };
+    const { permissions, build } = inProcessAgents({ ...config, projectHooks: overLimit });
+    let asked = 0;
+    permissions.setRequester(async () => {
+      asked++;
+      return { allowed: true, scope: "once" };
+    });
+    const { hooks, askHooksTrust } = agentConfig(build());
+    expect(hooks).toBeDefined();
+    if (hooks) {
+      await hooks.resolveProjectTrust("s1", askHooksTrust);
+      expect(hooks.hasAny("turn_start")).toBe(false);
+      expect(hooks.needsProjectTrust()).toBe(false); // declined for the session
+    }
+    expect(asked).toBe(0);
+    const log = await readFile(daemonErrorLogPath(config.configDir), "utf8").catch(() => "");
+    expect(log).toContain("hooks.0.command");
   });
 
   test("in-process: the trust question goes to the ONE broker the TUI prompts on", async () => {

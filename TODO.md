@@ -652,7 +652,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
           warning channel (a raw write would corrupt Ink, §7). Route it through
           the worker's MCP status (`McpStatusTracker` / `mcp/status`). Type: feat
           · Size: S · Blast: contained.
-      - [ ] 🔴 **In-process trust path skips the `hooks/trust` schema** — in the
+      - [x] 🔴 **In-process trust path skips the `hooks/trust` schema** (DONE 2026-10-22) — in the
         `--in-process` TUI and the worker fallback, `askHooksTrust`
         (`cli/src/wiring.ts:308-324`) calls the resolver with no
         `HooksTrustParamsSchema` check, so a project hook over the wire limits
