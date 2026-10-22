@@ -73,7 +73,7 @@ describe("scanPackages", () => {
         skillsDir: join(dir, "skills"),
         agentsDir: join(dir, "agents"),
         mcpServers: { docs: { type: "stdio", command: "docs-server" } },
-        hooks: [{ event: "turn_end", command: "./notify.sh", source: "demo" }],
+        hooks: [{ event: "turn_end", command: "./notify.sh", source: "demo", packageDir: dir }],
       },
     ]);
   });
@@ -136,7 +136,9 @@ describe("mergePackageContributions", () => {
       [],
       [pkg("kube", { mcpServers: { docs: { type: "stdio" as const, command: "d" } } })],
     );
-    expect(merged.mcpServers).toEqual({ "kube-docs": { type: "stdio" as const, command: "d" } });
+    expect(merged.mcpServers).toEqual({
+      "kube-docs": { type: "stdio", command: "d", env: { TENTACLE_PACKAGE_DIR: "/p/kube" } },
+    });
     expect(merged.diagnostics).toEqual([]);
   });
 
@@ -161,7 +163,9 @@ describe("mergePackageContributions", () => {
         pkg("a", { mcpServers: { "b-c": { type: "stdio" as const, command: "second" } } }),
       ],
     );
-    expect(merged.mcpServers).toEqual({ "a-b-c": { type: "stdio" as const, command: "first" } });
+    expect(merged.mcpServers).toEqual({
+      "a-b-c": { type: "stdio", command: "first", env: { TENTACLE_PACKAGE_DIR: "/p/a-b" } },
+    });
     expect(merged.diagnostics).toEqual([
       'package a: MCP server "a-b-c" ignored (already defined by package a-b)',
     ]);
@@ -169,7 +173,12 @@ describe("mergePackageContributions", () => {
 
   test("package hooks come after the user's, in package order", () => {
     const user = { event: "turn_end" as const, command: "mine" };
-    const h = (source: string) => ({ event: "turn_end" as const, command: source, source });
+    const h = (source: string) => ({
+      event: "turn_end" as const,
+      command: source,
+      source,
+      packageDir: `/p/${source}`,
+    });
     const merged = mergePackageContributions(
       {},
       [user],
@@ -253,5 +262,33 @@ describe("loadPackage symlinks (post-review)", () => {
       "package dangling: skipped (skills/gone points outside the package)",
       "package evil: skipped (hooks.json.x points outside the package)",
     ]);
+  });
+});
+
+describe("TENTACLE_PACKAGE_DIR (docs/feat/hook-env-dirs.md)", () => {
+  test("package hooks carry packageDir; a stdio MCP server gets it in env (overriding), http does not", async () => {
+    const cfg = tree();
+    const dir = fullPackage(cfg, "demo");
+    write(join(dir, "mcp.json"), {
+      docs: { command: "srv", env: { A: "1", TENTACLE_PACKAGE_DIR: "/fake" } },
+      web: { type: "http", url: "https://example.invalid/mcp" },
+    });
+    const { packages } = await scanPackages(cfg);
+    expect(packages[0]?.hooks[0]?.packageDir).toBe(dir);
+    const merged = mergePackageContributions(
+      { mine: { type: "stdio", command: "m" } },
+      [],
+      packages,
+    );
+    expect(merged.mcpServers["demo-docs"]).toEqual({
+      type: "stdio",
+      command: "srv",
+      env: { A: "1", TENTACLE_PACKAGE_DIR: dir },
+    });
+    expect(merged.mcpServers["demo-web"]).toEqual({
+      type: "http",
+      url: "https://example.invalid/mcp",
+    });
+    expect(merged.mcpServers.mine).toEqual({ type: "stdio", command: "m" });
   });
 });
