@@ -407,11 +407,11 @@ Daily-driver work (done 2026-10-14):
       back.** Quality-only or a hard 400 in tool loops: undetermined, needs a live
       test. **Eval:** `docs/eval/anthropic-thinking-echo.md`. Type: eval · Size: M ·
       Blast: cross-module.
-- [ ] 🟡 **No retry on a transient model-connection drop** (`ECONNRESET` kills
+- [x] 🟡 **No retry on a transient model-connection drop** (`ECONNRESET` kills
       the turn and the sub-agent; only manual `/retry`), and the error log says
       `(no stack)` with no phase. Recommends retry pre-first-byte only + phase
       diagnostics. **Feat (promoted 2026-10-21, `feat/model-connection-resilience`):**
-      `docs/feat/model-connection-resilience.md` — implemented; reviewed (APPROVE-WITH-NITS, nits fixed).
+      `docs/feat/model-connection-resilience.md` — DONE — merged (`399ea0b`); reviewed (APPROVE-WITH-NITS, nits fixed).
       Type: feat · Size: M · Blast: load-bearing.
 - [x] 🟡 **`shell_kill` leaves grandchildren running** (only `sh` gets the signal;
       a compound command's child is re-parented to PID 1). FIXED (2026-10-19,
