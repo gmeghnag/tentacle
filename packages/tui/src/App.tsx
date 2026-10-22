@@ -22,6 +22,7 @@ import { CommandPalette } from "./components/CommandPalette.tsx";
 import { LineInput } from "./components/LineInput.tsx";
 import { ListPanel } from "./components/ListPanel.tsx";
 import { PermissionPrompt, permissionPromptRows } from "./components/PermissionPrompt.tsx";
+import { QueuedMessages } from "./components/QueuedMessages.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
 import { pushHistory, recall } from "./history.ts";
@@ -1163,13 +1164,7 @@ export function App({
                 label={st.reasoning ? "thinking…" : "working…"}
               />
             ) : null}
-            {st.running
-              ? queued.map((q, i) => (
-                  <Text key={`q-${i}-${q}`} dimColor wrap="truncate-end">
-                    ⏳ {q}
-                  </Text>
-                ))
-              : null}
+            {st.running ? <QueuedMessages queued={queued} /> : null}
             {listView ? (
               <ListPanel view={listView} columns={columns} />
             ) : (
