@@ -40,7 +40,7 @@ import {
 import type { DuplexChannel } from "@tentacle/transport";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { configuredModelProvider } from "./model-provider.ts";
-import { resolvePodBinary } from "./pod-binary-build.ts";
+import { checkPodBinaries, resolvePodBinary } from "./pod-binary-build.ts";
 import { injectAgentBinary, probePodArch } from "./pod-binary.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
@@ -114,6 +114,8 @@ export interface PodRuntimeDeps {
   readonly log: (line: string) => void;
   /** In-TUI notices (the session's `NoticeHub`), e.g. a reconnect that lost the last turn. */
   readonly notify?: (text: string) => void;
+  /** This tentacle's version for the pod-binary check (tests); defaults to `APP_VERSION`. */
+  readonly appVersion?: string;
 }
 
 /**
@@ -273,6 +275,11 @@ export async function startPodRuntime(
     }
   };
 
+  // Offline pod-binary check BEFORE any cluster mutation (D1): a missing or
+  // stale <configDir>/bin binary fails here, so no pod is created and none
+  // needs deleting. Both arches: the pod's is unknown until it exists.
+  await checkPodBinaries({ configDir: config.configDir, appVersion: deps.appVersion });
+
   phase(`[pod] creating ${name} (image ${deps.image}) in namespace ${deps.namespace}…`);
   try {
     await deps.kube.createPod(
@@ -307,6 +314,7 @@ export async function startPodRuntime(
       resolveBinary: (target) =>
         resolvePodBinary(target, {
           configDir: config.configDir,
+          appVersion: deps.appVersion,
           // Keep the single-line invariant + stay concise: in interactive mode
           // the "resolving … binary…" phase line is enough, so the resolver's
           // verbose cache/build path is dropped; in piped mode log it for the
@@ -378,6 +386,8 @@ export interface PodAttachRuntimeDeps {
   readonly container?: string;
   /** Install dir for the injected binary (default `/usr/local/bin`; `--bin-dir` for a read-only rootfs). */
   readonly binDir?: string;
+  /** This tentacle's version for the pod-binary check (tests); defaults to `APP_VERSION`. */
+  readonly appVersion?: string;
   readonly permissions: PermissionBroker;
   readonly saver: SessionSaver;
   readonly resume: SessionRecord | null;
@@ -495,6 +505,7 @@ export async function startAttachRuntime(
         resolveBinary: (target) =>
           resolvePodBinary(target, {
             configDir: config.configDir,
+            appVersion: deps.appVersion,
             // Same single-line invariant as `run`: interactive mode folds the
             // resolver's verbose path into the "resolving … binary…" phase.
             log: status ? () => {} : deps.log,

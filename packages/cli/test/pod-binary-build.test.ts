@@ -3,8 +3,17 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { configBinPath, resolvePodBinary } from "../src/pod-binary-build.ts";
+import {
+  PodBinaryError,
+  buildBinary,
+  checkPodBinaries,
+  cliVersion,
+  configBinPath,
+  resolvePodBinary,
+} from "../src/pod-binary-build.ts";
 import type { PodBinaryTarget } from "../src/pod-binary.ts";
+import { readBinaryVersion } from "../src/version-marker.ts";
+import { formatVersionMarker } from "../src/version.ts";
 
 /** A fake build that "compiles" by writing a marker file (no real build). */
 function fakeBuild(marker: (outfile: string) => string) {
@@ -146,4 +155,168 @@ describe("resolvePodBinary", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+});
+
+/** A fake compiled binary: filler bytes with an optional version marker near the end. */
+function fakeBinary(version: string | undefined): string {
+  return `ELF-HEADER-${"_".repeat(200)}${version ? formatVersionMarker(version) : ""}${"_".repeat(50)}`;
+}
+
+/** Run `fn` with `TENTACLE_POD_BIN` unset (restored after). */
+async function withoutPodBinEnv(fn: () => Promise<void>): Promise<void> {
+  const saved = process.env.TENTACLE_POD_BIN;
+  Reflect.deleteProperty(process.env, "TENTACLE_POD_BIN");
+  try {
+    await fn();
+  } finally {
+    if (saved !== undefined) {
+      process.env.TENTACLE_POD_BIN = saved;
+    }
+  }
+}
+
+describe("resolvePodBinary in a release build (D1/D2: offline, exact version)", () => {
+  const seed = async (bins: Partial<Record<PodBinaryTarget, string>>) => {
+    const dir = await mkdtemp(join(tmpdir(), "harness-podbin-rel-"));
+    const configDir = join(dir, "config");
+    mkdirSync(join(configDir, "bin"), { recursive: true });
+    for (const [target, body] of Object.entries(bins)) {
+      writeFileSync(configBinPath(configDir, target as PodBinaryTarget), body);
+    }
+    return { dir, configDir, cacheDir: join(dir, "cache") };
+  };
+
+  test("a <configDir>/bin binary whose marker equals the app version is injected", async () => {
+    const { dir, configDir, cacheDir } = await seed({ "bun-linux-x64": fakeBinary("0.3.0") });
+    const { built, build } = fakeBuild(() => "SHOULD-NOT-BUILD");
+    try {
+      await withoutPodBinEnv(async () => {
+        const bytes = await resolvePodBinary("bun-linux-x64", {
+          configDir,
+          cacheDir,
+          build,
+          appVersion: "0.3.0",
+        });
+        expect(Buffer.from(bytes).toString()).toBe(fakeBinary("0.3.0"));
+      });
+      expect(built).toHaveLength(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  for (const [label, body, message] of [
+    [
+      "missing",
+      undefined,
+      /pod binary for x64 is missing .*this tentacle is 0\.3\.0\): run `tentacle update`/,
+    ],
+    [
+      "stale",
+      fakeBinary("0.2.0"),
+      /pod binary for x64 is at version 0\.2\.0 .*this tentacle is 0\.3\.0\): run `tentacle update`/,
+    ],
+    [
+      "unknown (no marker)",
+      fakeBinary(undefined),
+      /pod binary for x64 is of unknown version .*run `tentacle update`/,
+    ],
+  ] as const) {
+    test(`a ${label} binary is an error naming \`tentacle update\` — never the repo cache or a build`, async () => {
+      const { dir, configDir, cacheDir } = await seed(
+        body === undefined ? {} : { "bun-linux-x64": body },
+      );
+      // A repo cache that dev mode WOULD use: release mode must ignore it.
+      mkdirSync(cacheDir, { recursive: true });
+      writeFileSync(join(cacheDir, "tentacle-bun-linux-x64"), "CACHED");
+      const { built, build } = fakeBuild(() => "SHOULD-NOT-BUILD");
+      try {
+        await withoutPodBinEnv(async () => {
+          const p = resolvePodBinary("bun-linux-x64", {
+            configDir,
+            cacheDir,
+            build,
+            appVersion: "0.3.0",
+          });
+          await expect(p).rejects.toBeInstanceOf(PodBinaryError);
+          await expect(p).rejects.toThrow(message);
+        });
+        expect(built).toHaveLength(0);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("TENTACLE_POD_BIN still wins in a release build (the explicit escape hatch)", async () => {
+    const { dir, configDir } = await seed({});
+    const override = join(dir, "mine");
+    writeFileSync(override, "MINE-NO-MARKER");
+    const saved = process.env.TENTACLE_POD_BIN;
+    process.env.TENTACLE_POD_BIN = override;
+    try {
+      const bytes = await resolvePodBinary("bun-linux-arm64", { configDir, appVersion: "0.3.0" });
+      expect(Buffer.from(bytes).toString()).toBe("MINE-NO-MARKER");
+      await checkPodBinaries({ configDir, appVersion: "0.3.0" }); // no throw
+    } finally {
+      if (saved === undefined) {
+        Reflect.deleteProperty(process.env, "TENTACLE_POD_BIN");
+      } else {
+        process.env.TENTACLE_POD_BIN = saved;
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("checkPodBinaries: both arches at the version pass; any missing/stale one is listed", async () => {
+    const { dir, configDir } = await seed({
+      "bun-linux-x64": fakeBinary("0.3.0"),
+      "bun-linux-arm64": fakeBinary("0.2.9"),
+    });
+    try {
+      await withoutPodBinEnv(async () => {
+        const p = checkPodBinaries({ configDir, appVersion: "0.3.0" });
+        await expect(p).rejects.toBeInstanceOf(PodBinaryError);
+        const message = await p.catch((error: Error) => error.message);
+        expect(message).toMatch(/arm64 is at version 0\.2\.9/);
+        expect(message).not.toMatch(/for x64/); // the good one is not listed
+        writeFileSync(configBinPath(configDir, "bun-linux-arm64"), fakeBinary("0.3.0"));
+        await checkPodBinaries({ configDir, appVersion: "0.3.0" }); // no throw
+        // From source ("dev") it never checks, even with nothing there.
+        await checkPodBinaries({ configDir: join(dir, "empty"), appVersion: "dev" });
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("dev mode keeps today's order: a marker-less <configDir>/bin binary is still used", async () => {
+    const { dir, configDir, cacheDir } = await seed({ "bun-linux-x64": "STABLE-NO-MARKER" });
+    try {
+      await withoutPodBinEnv(async () => {
+        const bytes = await resolvePodBinary("bun-linux-x64", {
+          configDir,
+          cacheDir,
+          appVersion: "dev",
+        });
+        expect(Buffer.from(bytes).toString()).toBe("STABLE-NO-MARKER");
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("version marker in a real compiled binary (D2)", () => {
+  test("buildBinary embeds a marker equal to packages/cli version, read without executing it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "harness-podbin-real-"));
+    const outfile = join(dir, "tentacle");
+    try {
+      // Host target: no cross-compile runtime download, no network.
+      expect(await buildBinary(outfile, undefined)).toBe(true);
+      expect(await readBinaryVersion(outfile)).toBe(cliVersion());
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

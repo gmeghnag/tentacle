@@ -40,13 +40,18 @@ tentacle --version
 ```
 
 **2. The pod binaries** (only for `tentacle run` / `tentacle attach`). tentacle
-copies a Linux binary into the pod and looks for it in `~/.config/tentacle/bin/`,
-under its release file name. Keep both, so pods of either architecture work:
+copies a Linux binary into the pod. Fetch both (x64 and arm64) for your
+version once, after installing the CLI:
 
 ```sh
-mkdir -p ~/.config/tentacle/bin
-install -m 755 tentacle-bun-linux-x64 tentacle-bun-linux-arm64 ~/.config/tentacle/bin/
+tentacle update
 ```
+
+They go in `~/.config/tentacle/bin/` (`tentacle-bun-linux-x64`,
+`tentacle-bun-linux-arm64`), verified against the release's `SHA256SUMS`.
+`run` and `attach` never download anything: if a pod binary is missing, or is
+not the same version as the CLI, they stop and tell you to run
+`tentacle update`.
 
 Notes:
 
@@ -56,7 +61,7 @@ Notes:
   UBI, RHEL…). Alpine/busybox (musl) cannot run tentacle.
 - Downloaded with a browser on macOS? Clear the quarantine flag, or the binary
   is blocked: `xattr -d com.apple.quarantine tentacle-bun-darwin-*`.
-- **Updating:** download the new release and replace all three binaries
+- **Updating:** `tentacle update` replaces the CLI and both pod binaries
   together. `attach` reuses the tentacle already in a pod, so after an update,
   use a fresh pod.
 

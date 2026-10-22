@@ -619,7 +619,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       binaries). All decisions D1–D8 taken 2026-10-22; ships in **v0.1.0**.
       **Eval:** `docs/eval/tentacle-update.md`. Type: eval → feat ×3 · Size: M
       overall · Blast: cross-module. Children, in order:
-      - [ ] **pod-binary-download** — version marker in the binary, download +
+      - [x] **pod-binary-download** — DONE 2026-10-22 (`feat/pod-binary-download`, `docs/feat/pod-binary-download.md`): version marker in the binary, download +
         SHA-256 verify helper, `run`/`attach` offline error on a missing/stale
         pod binary. Type: feat · Size: S–M · Blast: cross-module.
       - [ ] **tentacle-update** — `tentacle update [--check] [--version vX]`:
