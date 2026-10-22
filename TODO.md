@@ -615,7 +615,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       spec per command; flags anywhere (`attach mypod -n dev`); typos, missing
       values, repeats and stray words are errors before any cluster/model call.
       Type: fix · Size: S–M · Blast: cross-module.
-- [ ] **No `tentacle update`** (self-update from GitHub releases + the pod
+- [x] **No `tentacle update`** (self-update from GitHub releases + the pod
       binaries). All decisions D1–D8 taken 2026-10-22; ships in **v0.1.0**.
       **Eval:** `docs/eval/tentacle-update.md`. Type: eval → feat ×3 · Size: M
       overall · Blast: cross-module. Children, in order:
