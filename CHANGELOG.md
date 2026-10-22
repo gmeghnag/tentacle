@@ -8,6 +8,8 @@ those.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-22
+
 The first public release, 0.1.0. Everything below is new compared with no
 release. Items marked *(since 0.1.0-beta.1)* changed after the beta.
 
