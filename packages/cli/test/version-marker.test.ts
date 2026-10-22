@@ -119,3 +119,25 @@ describe("readBinaryVersion (from the end, then a full scan)", () => {
     await expect(readBinaryVersion(join(dir, "nope"))).rejects.toThrow();
   });
 });
+
+describe("findAllVersionMarkers (build check, review N1)", () => {
+  test("lists every well-formed marker in file order, skipping malformed ones", async () => {
+    const { findAllVersionMarkers } = await import("../src/version-marker.ts");
+    const bytes = concat(
+      enc(formatVersionMarker("0.1.0")),
+      enc(`${MARKER_PREFIX}"`),
+      enc(formatVersionMarker("0.2.0")),
+    );
+    expect(findAllVersionMarkers(bytes)).toEqual(["0.1.0", "0.2.0"]);
+    expect(findAllVersionMarkers(filler(100))).toEqual([]);
+  });
+});
+
+describe("APP_VERSION source (review N2)", () => {
+  test("from source, a TENTACLE_VERSION_MARKER env var cannot fake a release version", () => {
+    const proc = Bun.spawnSync(["bun", join(import.meta.dir, "../src/main.ts"), "--version"], {
+      env: { ...process.env, TENTACLE_VERSION_MARKER: formatVersionMarker("9.9.9") },
+    });
+    expect(proc.stdout.toString()).toBe("tentacle dev\n");
+  });
+});

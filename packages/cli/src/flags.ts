@@ -102,6 +102,7 @@ export const ARGS = {
     positional: { min: 1, max: 1 },
   },
   package: { positional: { min: 1, max: 2 } },
+  update: { values: { version: {} }, bools: { check: {} }, positional: { min: 0, max: 0 } },
 } as const satisfies Record<string, ArgSpec>;
 
 /**
@@ -374,6 +375,7 @@ const COMMANDS = new Set([
   "connect",
   "hooks",
   "package",
+  "update",
   "install",
   "-i",
   "--interactive",
@@ -446,6 +448,7 @@ export type CliMode =
   | "attach"
   | "hooks"
   | "package"
+  | "update"
   | "plain"
   | "tui"
   | "prompt"
@@ -467,7 +470,8 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "run" ||
     first === "attach" ||
     first === "hooks" ||
-    first === "package"
+    first === "package" ||
+    first === "update"
   ) {
     return first;
   }
@@ -492,5 +496,6 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   plain: "tentacle --plain",
   hooks: "tentacle hooks trust --list | --revoke <folder>",
   package: "tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]",
+  update: "tentacle update [--check] [--version vX.Y.Z]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process]",
 };

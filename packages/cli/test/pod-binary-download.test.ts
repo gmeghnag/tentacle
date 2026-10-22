@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type FetchLike,
+  HttpStatusError,
   commitDownload,
   downloadVerifiedAsset,
   fetchSha256Sums,
@@ -137,5 +138,42 @@ describe("downloadVerifiedAsset", () => {
       /download failed: https:\/\/github\.com\/.*ENOTFOUND/,
     );
     expect(readdirSync(destDir)).toEqual([]);
+  });
+});
+
+describe("hardening (review nits N3/N4)", () => {
+  test("SHA256SUMS listing one name with two different digests is an error", () => {
+    const a = "a".repeat(64);
+    const b = "b".repeat(64);
+    expect(() => parseSha256Sums(`${a}  x\n${b}  x\n`)).toThrow(/x twice with different digests/);
+    // The same digest twice is harmless.
+    expect(parseSha256Sums(`${a}  x\n${a}  x\n`).get("x")).toBe(a);
+  });
+
+  test("a body larger than maxBytes is aborted and its temp removed", async () => {
+    const { fetch } = fakeFetch({ [url]: () => new Response(BODY) });
+    await expect(
+      downloadVerifiedAsset({ tag: "v0.3.0", asset: ASSET, destDir, sums, fetch, maxBytes: 100 }),
+    ).rejects.toThrow(/larger than 100 bytes/);
+    expect(readdirSync(destDir)).toEqual([]);
+  });
+
+  test("a redirect that ends on a non-HTTPS URL is refused", async () => {
+    const { fetch } = fakeFetch({
+      [url]: () => {
+        const response = new Response(BODY);
+        Object.defineProperty(response, "url", { value: "http://evil.example/asset" });
+        return response;
+      },
+    });
+    await expect(download(fetch)).rejects.toThrow(/non-HTTPS URL \(http:\/\/evil\.example/);
+    expect(readdirSync(destDir)).toEqual([]);
+  });
+
+  test("an HTTP error is an HttpStatusError carrying the status", async () => {
+    const { fetch } = fakeFetch({});
+    const error = await fetchSha256Sums("v1.0.0", { fetch }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(HttpStatusError);
+    expect((error as HttpStatusError).status).toBe(404);
   });
 });

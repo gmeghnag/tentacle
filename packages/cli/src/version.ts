@@ -34,7 +34,20 @@ export function parseVersionMarker(marker: string | undefined): string | undefin
 }
 
 /**
+ * The marker literal, replaced at compile time by `buildBinary`'s `define`.
+ * A dedicated identifier, NOT `process.env.*`: from source it is simply
+ * undeclared (the `typeof` guard), so no environment variable can fake a
+ * release version (review nit N2, docs/feat/tentacle-update.md).
+ */
+declare const __TENTACLE_VERSION_MARKER__: string | undefined;
+
+/** The compiled-in marker, or `undefined` from source. */
+export function compiledVersionMarker(): string | undefined {
+  return typeof __TENTACLE_VERSION_MARKER__ === "string" ? __TENTACLE_VERSION_MARKER__ : undefined;
+}
+
+/**
  * The app version: parsed from the marker literal injected at compile time
  * (`define` in `buildBinary`), or `"dev"` when running from source.
  */
-export const APP_VERSION: string = parseVersionMarker(process.env.TENTACLE_VERSION_MARKER) ?? "dev";
+export const APP_VERSION: string = parseVersionMarker(compiledVersionMarker()) ?? "dev";

@@ -622,7 +622,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       - [x] **pod-binary-download** — DONE 2026-10-22 (`feat/pod-binary-download`, `docs/feat/pod-binary-download.md`): version marker in the binary, download +
         SHA-256 verify helper, `run`/`attach` offline error on a missing/stale
         pod binary. Type: feat · Size: S–M · Blast: cross-module.
-      - [ ] **tentacle-update** — `tentacle update [--check] [--version vX]`:
+      - [x] **tentacle-update** — DONE 2026-10-22 (`feat/tentacle-update`, `docs/feat/tentacle-update.md`): `tentacle update [--check] [--version vX]`:
         staged download, verify, atomic rename (self last). Type: feat · Size: M
         · Blast: cross-module.
       - [ ] **release-script** — `bun run release <version>`: bump every
