@@ -62,8 +62,11 @@ Notes:
 - Downloaded with a browser on macOS? Clear the quarantine flag, or the binary
   is blocked: `xattr -d com.apple.quarantine tentacle-bun-darwin-*`.
 - **Updating:** `tentacle update` replaces the CLI and both pod binaries
-  together. `attach` reuses the tentacle already in a pod, so after an update,
-  use a fresh pod.
+  together with the latest release (`--version vX.Y.Z` picks one, including an
+  older one). `tentacle update --check` only reports, and exits 10 when there is
+  something to update. If the CLI sits in a directory you cannot write to, the
+  command stops and prints the `sudo` line to run. `attach` reuses the tentacle
+  already in a pod, so after an update, use a fresh pod.
 
 ## Getting started
 

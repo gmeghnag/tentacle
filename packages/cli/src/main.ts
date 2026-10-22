@@ -28,7 +28,12 @@ import {
 } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import { type SessionController, pickSession, startTui } from "@tentacle/tui";
-import { type TentacleConfig, loadConfig, longToolNameWarnings } from "./config.ts";
+import {
+  type TentacleConfig,
+  configDirFromEnv,
+  loadConfig,
+  longToolNameWarnings,
+} from "./config.ts";
 import { connectTui } from "./connect.ts";
 import {
   ARGS,
@@ -51,6 +56,7 @@ import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { startTerminal } from "./terminal.ts";
 import { type TuiSessions, openTuiSessions, runSessionTui } from "./tui-sessions.ts";
+import { runUpdate, spawnVersion } from "./update.ts";
 import { APP_VERSION } from "./version.ts";
 import {
   buildAgent,
@@ -92,6 +98,10 @@ Usage:
                            a package's hooks like your own
   tentacle install <path|git-url>[#ref]
                            alias of \`tentacle package install\`
+  tentacle update [--check] [--version vX.Y.Z]
+                           update tentacle and its Linux pod binaries (in
+                           <configDir>/bin) from the GitHub release; --check
+                           only reports (exit 10: an update is available)
   tentacle --help          show this help
   tentacle --version       print the version and exit
   tentacle --profile <name> ...
@@ -229,6 +239,25 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       write(`\n[connect error] ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
     }
+  }
+
+  // `tentacle update` needs only the config DIR (for <configDir>/bin), never
+  // the model config: it must work even when config.jsonc is broken.
+  if (mode === "update") {
+    const version = parsed.flags.get("version");
+    return runUpdate(
+      { check: parsed.bools.has("check"), ...(version !== undefined ? { version } : {}) },
+      {
+        appVersion: APP_VERSION,
+        execPath: process.execPath,
+        configDir: configDirFromEnv(),
+        platform: process.platform,
+        arch: process.arch,
+        fetch,
+        runVersion: spawnVersion,
+        write,
+      },
+    );
   }
 
   // Everything below needs configuration; load it once (scaffolds on first run).

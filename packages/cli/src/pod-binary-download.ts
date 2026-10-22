@@ -42,21 +42,53 @@ export function parseSha256Sums(text: string): Map<string, string> {
   for (const line of text.split("\n")) {
     const match = /^([0-9a-fA-F]{64}) [ *](.+)$/.exec(line.trim());
     if (match?.[1] && match[2]) {
-      sums.set(match[2], match[1].toLowerCase());
+      const digest = match[1].toLowerCase();
+      const seen = sums.get(match[2]);
+      // One name, two digests: ambiguous, never "the last one wins" (review N3).
+      if (seen !== undefined && seen !== digest) {
+        throw new Error(`SHA256SUMS lists ${match[2]} twice with different digests`);
+      }
+      sums.set(match[2], digest);
     }
   }
   return sums;
 }
 
+/** A non-2xx HTTP status from a release URL (`status` lets callers explain a 404). */
+export class HttpStatusError extends Error {
+  override readonly name = "HttpStatusError";
+  constructor(
+    readonly url: string,
+    readonly status: number,
+  ) {
+    super(`download failed: ${url}: HTTP ${status}`);
+  }
+}
+
+const errorText = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/**
+ * GET `url`, following redirects (GitHub sends release assets to
+ * `release-assets.githubusercontent.com` / `objects.githubusercontent.com`).
+ * A non-2xx status or a redirect that ends on a non-HTTPS URL throws, and the
+ * unread body is cancelled so the connection is released (review N4).
+ */
 async function get(url: string, doFetch: FetchLike): Promise<Response> {
   let response: Response;
   try {
     response = await doFetch(url, { redirect: "follow" });
   } catch (error) {
-    throw new Error(`download failed: ${url}: ${error instanceof Error ? error.message : error}`);
+    throw new Error(`download failed: ${url}: ${errorText(error)}`);
   }
   if (!response.ok) {
-    throw new Error(`download failed: ${url}: HTTP ${response.status}`);
+    await response.body?.cancel().catch(() => {});
+    throw new HttpStatusError(url, response.status);
+  }
+  // `response.url` is the final URL after redirects ("" for a synthetic Response).
+  if (response.url !== "" && !response.url.startsWith("https://")) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`download failed: ${url}: redirected to a non-HTTPS URL (${response.url})`);
   }
   return response;
 }
@@ -72,7 +104,7 @@ export async function fetchSha256Sums(
   try {
     text = await response.text();
   } catch (error) {
-    throw new Error(`download failed: ${url}: ${error instanceof Error ? error.message : error}`);
+    throw new Error(`download failed: ${url}: ${errorText(error)}`);
   }
   return parseSha256Sums(text);
 }
@@ -85,14 +117,21 @@ export interface DownloadAssetOptions extends ReleaseOptions {
   readonly destDir: string;
   /** The release's `SHA256SUMS` (from `fetchSha256Sums`, fetched once per release). */
   readonly sums: ReadonlyMap<string, string>;
+  /** Abort a body larger than this (default 512 MiB; a binary is ~90 MB). */
+  readonly maxBytes?: number;
 }
+
+/** The default `maxBytes`: far above a tentacle binary, far below a runaway body. */
+export const DEFAULT_MAX_ASSET_BYTES = 512 * 1024 * 1024;
 
 /**
  * Download `asset` into a temp file in `destDir`, verify its SHA-256 against
  * `sums`, `chmod 755` it, and return the temp path (commit it with
  * `commitDownload`, or `rm` it). Throws, with no temp file left behind, when
  * the asset is not in `SHA256SUMS` (before any download), on an HTTP error, a
- * dropped body, a write error, or a checksum mismatch.
+ * dropped body, a body over `maxBytes`, a write error, or a checksum mismatch.
+ * The file is `fsync`ed before it is closed, so a crash after the caller's
+ * rename can never leave a truncated binary in place (review N4).
  */
 export async function downloadVerifiedAsset(options: DownloadAssetOptions): Promise<string> {
   const expected = options.sums.get(options.asset);
@@ -104,9 +143,17 @@ export async function downloadVerifiedAsset(options: DownloadAssetOptions): Prom
   const url = releaseAssetUrl(options.tag, options.asset, options.repo);
   const response = await get(url, options.fetch ?? fetch);
   const temp = join(options.destDir, `.${options.asset}.${randomBytes(6).toString("hex")}.tmp`);
+  const maxBytes = options.maxBytes ?? DEFAULT_MAX_ASSET_BYTES;
   try {
     const hash = createHash("sha256");
-    const file = await open(temp, "wx", 0o600);
+    let file: Awaited<ReturnType<typeof open>>;
+    try {
+      file = await open(temp, "wx", 0o600);
+    } catch (error) {
+      await response.body?.cancel().catch(() => {});
+      throw error;
+    }
+    let total = 0;
     try {
       if (!response.body) {
         throw new Error("empty response body");
@@ -117,12 +164,15 @@ export async function downloadVerifiedAsset(options: DownloadAssetOptions): Prom
         try {
           chunk = await reader.read();
         } catch (error) {
-          throw new Error(
-            `download failed: ${url}: ${error instanceof Error ? error.message : error}`,
-          );
+          throw new Error(`download failed: ${url}: ${errorText(error)}`);
         }
         if (chunk.done) {
           break;
+        }
+        total += chunk.value.length;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw new Error(`download failed: ${url}: larger than ${maxBytes} bytes`);
         }
         hash.update(chunk.value);
         try {
@@ -133,6 +183,7 @@ export async function downloadVerifiedAsset(options: DownloadAssetOptions): Prom
           throw error;
         }
       }
+      await file.sync();
     } finally {
       await file.close();
     }

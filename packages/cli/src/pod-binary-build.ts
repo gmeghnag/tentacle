@@ -109,7 +109,7 @@ export async function buildBinary(outfile: string, target: string | undefined): 
     // is parsed from it, and `readBinaryVersion` finds it in the file without
     // executing it. From source it is undefined → "dev".
     define: {
-      "process.env.TENTACLE_VERSION_MARKER": JSON.stringify(formatVersionMarker(cliVersion())),
+      __TENTACLE_VERSION_MARKER__: JSON.stringify(formatVersionMarker(cliVersion())),
     },
     minify: true,
     plugins: [

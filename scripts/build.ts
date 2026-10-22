@@ -18,7 +18,7 @@
  */
 import { resolve } from "node:path";
 import { buildBinary, cliVersion } from "../packages/cli/src/pod-binary-build.ts";
-import { readBinaryVersion } from "../packages/cli/src/version-marker.ts";
+import { findAllVersionMarkers, readBinaryVersion } from "../packages/cli/src/version-marker.ts";
 
 const root = resolve(import.meta.dir, "..");
 const outfile = resolve(root, "dist/tentacle");
@@ -47,11 +47,13 @@ if (process.platform === "darwin" && targetsMac) {
 // final file (after the re-sign) and match the CLI version: `run`/`attach`
 // refuse a pod binary whose marker differs from the laptop's version. Read
 // only — the binary is never modified here. CI runs this for every target.
+// Exactly ONE well-formed marker (review N1): a second one could shadow it.
 const expected = cliVersion();
+const markers = findAllVersionMarkers(new Uint8Array(await Bun.file(outfile).arrayBuffer()));
 const marked = await readBinaryVersion(outfile);
-if (marked !== expected) {
+if (markers.length !== 1 || markers[0] !== expected || marked !== expected) {
   console.error(
-    `error: ${outfile} carries version marker ${marked ?? "(none)"}, expected ${expected}`,
+    `error: ${outfile} carries version marker(s) [${markers.join(", ") || "none"}], expected exactly one: ${expected}`,
   );
   process.exit(1);
 }

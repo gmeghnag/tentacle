@@ -67,6 +67,28 @@ export function findVersionMarker(bytes: Uint8Array): string | undefined {
   }
 }
 
+/**
+ * Every well-formed marker's version in `bytes`, in file order. The build
+ * check (`scripts/build.ts`) requires exactly one: a second, constant-folded
+ * marker literal would otherwise be able to shadow the real one (review N1).
+ */
+export function findAllVersionMarkers(bytes: Uint8Array): string[] {
+  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const found: string[] = [];
+  let from = 0;
+  for (;;) {
+    const at = buf.indexOf(PREFIX, from);
+    if (at < 0) {
+      return found;
+    }
+    const version = versionAt(buf, at + PREFIX.length);
+    if (version !== undefined) {
+      found.push(version);
+    }
+    from = at + 1;
+  }
+}
+
 export interface ReadBinaryVersionOptions {
   /** Bytes read from the end first (default 16 MiB: the bundle sits there). */
   readonly tailBytes?: number;
@@ -76,7 +98,7 @@ export interface ReadBinaryVersionOptions {
 
 /**
  * The tentacle version compiled into the binary at `path`, or `undefined` when
- * it carries no marker (an unknown version, e.g. a build that predates D2).
+ * it carries no marker (an unknown version: never valid, D2).
  * Reads the tail first, then scans the rest backwards in chunks that overlap by
  * `MAX_MARKER_BYTES`, so a marker split across a chunk boundary is still found.
  * Throws only on I/O errors (e.g. the file does not exist).

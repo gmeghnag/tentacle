@@ -161,6 +161,14 @@ async function findAgentsFile(startDir: string): Promise<string | undefined> {
   return undefined;
 }
 
+/**
+ * The config dir `loadConfig` would use, without loading or scaffolding
+ * anything (for commands that need only the dir, e.g. `tentacle update`).
+ */
+export function configDirFromEnv(env: Env = process.env): string {
+  return resolveConfigDir(undefined, env, env.HOME ?? homedir());
+}
+
 function resolveConfigDir(override: string | undefined, env: Env, home: string): string {
   if (override) {
     return resolvePath(expandTilde(override, home));
