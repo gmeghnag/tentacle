@@ -7,8 +7,11 @@
  * Resolution order for a target (see `resolvePodBinary`):
  *   1. `TENTACLE_POD_BIN` — an explicit path to a prebuilt binary (the primary
  *      "I build it myself" knob); read directly, never cached/built.
- *   2. The cache at `dist/pod-bin/tentacle-<target>` (git-ignored).
- *   3. Build into the cache with the SAME options as the CLI build
+ *   2. A release build: `<configDir>/bin/tentacle-<target>`, only at exactly
+ *      this tentacle's version (its marker, D2); else an error ("run
+ *      `tentacle update`", D1). From source ("dev"): `<configDir>/bin`, then
+ *      the cache at `dist/pod-bin/tentacle-<target>` (git-ignored), then
+ *   3. build into the cache with the SAME options as the CLI build
  *      (`buildBinary`), so the pod binary and the local binary never drift.
  *
  * The build options are shared with `scripts/build.ts` (which imports
@@ -18,6 +21,8 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { PodBinaryTarget } from "./pod-binary.ts";
+import { readBinaryVersion } from "./version-marker.ts";
+import { APP_VERSION, formatVersionMarker } from "./version.ts";
 
 /**
  * Resolve the monorepo root so the cache/build paths work in BOTH run modes:
@@ -99,12 +104,12 @@ export async function buildBinary(outfile: string, target: string | undefined): 
     ],
     // @ts-expect-error - `compile` is supported by the Bun bundler
     compile: { outfile, ...(target ? { target } : {}) },
-    // Inject the CLI package version as a literal (`--version` reads
-    // `process.env.TENTACLE_APP_VERSION`; from source it falls back to "dev").
+    // Inject the CLI package version as the marker literal
+    // `TENTACLE_VERSION_MARKER:<version>:END` (D2): `APP_VERSION` (version.ts)
+    // is parsed from it, and `readBinaryVersion` finds it in the file without
+    // executing it. From source it is undefined → "dev".
     define: {
-      "process.env.TENTACLE_APP_VERSION": JSON.stringify(
-        JSON.parse(readFileSync(resolve(root, "packages/cli/package.json"), "utf8")).version,
-      ),
+      "process.env.TENTACLE_VERSION_MARKER": JSON.stringify(formatVersionMarker(cliVersion())),
     },
     minify: true,
     plugins: [
@@ -135,6 +140,11 @@ export async function buildBinary(outfile: string, target: string | undefined): 
   return true;
 }
 
+/** `packages/cli/package.json` `version`: the single source of a build's version. */
+export function cliVersion(): string {
+  return JSON.parse(readFileSync(resolve(repoRoot(), "packages/cli/package.json"), "utf8")).version;
+}
+
 /** The default pod-binary cache directory (git-ignored, next to `dist/`). */
 export function podBinCacheDir(): string {
   return resolve(repoRoot(), "dist/pod-bin");
@@ -163,13 +173,82 @@ export interface ResolvePodBinaryOptions {
   /** Override the build step (tests); defaults to `buildBinary`. */
   readonly build?: (outfile: string, target: string) => Promise<boolean>;
   readonly log?: (line: string) => void;
+  /**
+   * This tentacle's version (tests); defaults to `APP_VERSION`. `"dev"` (from
+   * source) keeps the cache/build path; a release requires a
+   * `<configDir>/bin` binary whose version marker equals it (D1/D2).
+   */
+  readonly appVersion?: string;
+}
+
+/** A pod binary that is missing or not at this tentacle's version (D1). */
+export class PodBinaryError extends Error {
+  override readonly name = "PodBinaryError";
+}
+
+/** The Linux targets `tentacle update` installs; `run` needs both (D1). */
+export const POD_BINARY_TARGETS: readonly PodBinaryTarget[] = ["bun-linux-x64", "bun-linux-arm64"];
+
+/**
+ * Release mode: why `<configDir>/bin/tentacle-<target>` cannot be injected, or
+ * `null` when it exists and its version marker equals `appVersion`. Read-only.
+ */
+export async function podBinaryProblem(
+  target: PodBinaryTarget,
+  configDir: string | undefined,
+  appVersion: string,
+): Promise<string | null> {
+  const arch = target.slice("bun-linux-".length);
+  const fix = "run `tentacle update`";
+  if (!configDir) {
+    return `the Linux pod binary for ${arch} is missing (no config dir): ${fix}`;
+  }
+  const path = configBinPath(configDir, target);
+  if (!existsSync(path)) {
+    return `the Linux pod binary for ${arch} is missing (${path}; this tentacle is ${appVersion}): ${fix}`;
+  }
+  const version = await readBinaryVersion(path);
+  if (version === appVersion) {
+    return null;
+  }
+  const at = version === undefined ? "of unknown version" : `at version ${version}`;
+  return `the Linux pod binary for ${arch} is ${at} (${path}; this tentacle is ${appVersion}): ${fix}`;
+}
+
+/**
+ * `run`'s preflight, BEFORE the pod is created (the pod's arch is not known
+ * yet, so both targets must be ready — `tentacle update` installs both, D1).
+ * A no-op from source (`"dev"`) and with `TENTACLE_POD_BIN` (an explicit
+ * binary the user vouches for), the two cases `resolvePodBinary` does not check.
+ * Throws a `PodBinaryError` listing every problem.
+ */
+export async function checkPodBinaries(
+  options: Pick<ResolvePodBinaryOptions, "configDir" | "appVersion"> = {},
+): Promise<void> {
+  const appVersion = options.appVersion ?? APP_VERSION;
+  if (appVersion === "dev" || process.env.TENTACLE_POD_BIN) {
+    return;
+  }
+  const problems: string[] = [];
+  for (const target of POD_BINARY_TARGETS) {
+    const problem = await podBinaryProblem(target, options.configDir, appVersion);
+    if (problem) {
+      problems.push(problem);
+    }
+  }
+  if (problems.length > 0) {
+    throw new PodBinaryError(problems.join("\n"));
+  }
 }
 
 /**
  * Resolve the bytes of the `tentacle` binary for `target`, in order:
- * `TENTACLE_POD_BIN` (explicit prebuilt) → `<configDir>/bin/tentacle-<target>`
- * (the stable per-arch home, cwd-independent) → the repo cache → build into the
- * cache (only possible when run from the source tree). Returns the file bytes.
+ * `TENTACLE_POD_BIN` (explicit prebuilt) → then, from source (`"dev"`):
+ * `<configDir>/bin/tentacle-<target>` (the stable per-arch home,
+ * cwd-independent) → the repo cache → build into the cache; in a release
+ * build: `<configDir>/bin/tentacle-<target>` ONLY if its version marker equals
+ * this tentacle's version, else a `PodBinaryError` ("run `tentacle update`").
+ * Returns the file bytes.
  */
 export async function resolvePodBinary(
   target: PodBinaryTarget,
@@ -183,6 +262,20 @@ export async function resolvePodBinary(
     log(`[pod-binary] using TENTACLE_POD_BIN → ${override}\n`);
     return new Uint8Array(readFileSync(override));
   }
+  // 2r) A release build (D1/D2): only <configDir>/bin, and only at exactly this
+  // version (its marker, read without executing it). Never the repo cache or a
+  // build, never the network: a miss is an error pointing at `tentacle update`.
+  const appVersion = options.appVersion ?? APP_VERSION;
+  if (appVersion !== "dev") {
+    const problem = await podBinaryProblem(target, options.configDir, appVersion);
+    if (problem || !options.configDir) {
+      throw new PodBinaryError(problem ?? "no config dir");
+    }
+    const stable = configBinPath(options.configDir, target);
+    log(`[pod-binary] using ${stable} (${appVersion})\n`);
+    return new Uint8Array(readFileSync(stable));
+  }
+  // From source ("dev"), unchanged:
   // 2) The stable, cwd-independent home: <configDir>/bin/tentacle-<target>.
   // This is what makes `run`/`exec` work from an arbitrary working directory:
   // a compiled binary there has no source tree to build from.

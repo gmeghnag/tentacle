@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,6 +37,7 @@ import {
   startPodRuntime,
 } from "../src/pod-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
+import { formatVersionMarker } from "../src/version.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -792,6 +793,106 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     expect(req.title).toBe("Write a file");
     expect(req.detail).toBe("/tmp/x.txt");
     runtime.dispose();
+  });
+});
+
+describe("pod binary version check (D1/D2: offline, before any cluster mutation)", () => {
+  /** A release-mode setup: TENTACLE_POD_BIN unset, a config dir with `bins`. */
+  const release = async (
+    label: string,
+    bins: Partial<Record<"bun-linux-x64" | "bun-linux-arm64", string>>,
+    fn: (config: TentacleConfig) => Promise<void>,
+  ): Promise<void> => {
+    const configDir = join(dir, `release-${label}`);
+    mkdirSync(join(configDir, "bin"), { recursive: true });
+    for (const [target, version] of Object.entries(bins)) {
+      writeFileSync(
+        join(configDir, "bin", `tentacle-${target}`),
+        `ELF___${version ? formatVersionMarker(version) : ""}___`,
+      );
+    }
+    const saved = process.env.TENTACLE_POD_BIN;
+    Reflect.deleteProperty(process.env, "TENTACLE_POD_BIN");
+    try {
+      await fn({ ...baseConfig("/pod/work"), configDir } as TentacleConfig);
+    } finally {
+      if (saved !== undefined) {
+        process.env.TENTACLE_POD_BIN = saved;
+      }
+    }
+  };
+  const runDeps = (kube: PodCluster, label: string) => ({
+    kube,
+    namespace: "dev",
+    image: "repo/img:tag",
+    permissions: new PermissionBroker(),
+    saver: new SessionSaver(new JsonSessionStore(join(dir, `rel-store-${label}`)), () => {}),
+    resume: null,
+    log: () => {},
+    appVersion: "0.3.0",
+  });
+
+  for (const [label, bins, message] of [
+    ["missing", {}, /pod binary for x64 is missing[\s\S]*arm64 is missing/],
+    [
+      "stale",
+      { "bun-linux-x64": "0.2.0", "bun-linux-arm64": "0.3.0" },
+      /x64 is at version 0\.2\.0 .*this tentacle is 0\.3\.0\): run `tentacle update`/,
+    ],
+    ["unknown", { "bun-linux-x64": "", "bun-linux-arm64": "0.3.0" }, /x64 is of unknown version/],
+  ] as const) {
+    test(`run: a ${label} pod binary fails before any pod is created`, async () => {
+      await release(label, bins, async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        await expect(startPodRuntime(config, runDeps(kube, label))).rejects.toThrow(message);
+        expect(kube.calls).toEqual([]); // no create, no exec, nothing to delete
+      });
+    });
+  }
+
+  test("run: binaries at the app version are injected (the exact bytes)", async () => {
+    await release(
+      "match",
+      { "bun-linux-x64": "0.3.0", "bun-linux-arm64": "0.3.0" },
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        const runtime = await startPodRuntime(config, runDeps(kube, "match"));
+        const size = `ELF___${formatVersionMarker("0.3.0")}___`.length;
+        expect(kube.calls[0]).toMatch(/^create:tentacle-/);
+        expect(kube.calls.some((c) => c.includes(`head -c ${size} >`))).toBe(true);
+        runtime.dispose();
+      },
+    );
+  });
+
+  test("attach: a pod that already has tentacle never needs the local binary (D4)", async () => {
+    await release("attach-has", {}, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const runtime = await startAttachRuntime(config, {
+        ...runDeps(kube, "attach-has"),
+        podName: "mypod",
+      });
+      expect(kube.calls).toContain("exec:mypod:-:tentacle serve --stdio --model-proxy");
+      runtime.dispose();
+    });
+  });
+
+  test("attach: a pod without tentacle and a stale local binary errors before any write, never deletes", async () => {
+    await release("attach-stale", { "bun-linux-x64": "0.2.0" }, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const original = kube.runExec.bind(kube);
+      kube.runExec = (target, input, options) =>
+        target.command.join(" ") === "tentacle --version"
+          ? Promise.resolve({ exitCode: 127, stdout: "", stderr: "not found" })
+          : original(target, input, options);
+      await expect(
+        startAttachRuntime(config, { ...runDeps(kube, "attach-stale"), podName: "mypod" }),
+      ).rejects.toThrow(/x64 is at version 0\.2\.0 .*run `tentacle update`/);
+      expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
+      expect(kube.calls.some((c) => c.startsWith("delete:") || c.startsWith("besteffort:"))).toBe(
+        false,
+      );
+    });
   });
 });
 

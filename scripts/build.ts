@@ -5,7 +5,7 @@
  * version `define`) live in `packages/cli/src/pod-binary-build.ts`
  * (`buildBinary`) and are shared with the pod-binary cache (F4.e) so the CLI
  * build and the injected pod binary never drift. This script adds only the
- * `TARGET` env plumbing and the macOS re-sign:
+ * `TARGET` env plumbing, the macOS re-sign, and the version-marker check:
  *
  * macOS note: Bun appends the JS payload *after* the linker ad-hoc signs the
  * executable, leaving an invalid signature. That runs where it was built but is
@@ -17,7 +17,8 @@
  * to cross-compile; see `bun build --help` for target triples).
  */
 import { resolve } from "node:path";
-import { buildBinary } from "../packages/cli/src/pod-binary-build.ts";
+import { buildBinary, cliVersion } from "../packages/cli/src/pod-binary-build.ts";
+import { readBinaryVersion } from "../packages/cli/src/version-marker.ts";
 
 const root = resolve(import.meta.dir, "..");
 const outfile = resolve(root, "dist/tentacle");
@@ -41,5 +42,19 @@ if (process.platform === "darwin" && targetsMac) {
     console.log("ad-hoc signed (codesign)");
   }
 }
+
+// The version marker (D2, docs/feat/pod-binary-download.md) must be in the
+// final file (after the re-sign) and match the CLI version: `run`/`attach`
+// refuse a pod binary whose marker differs from the laptop's version. Read
+// only — the binary is never modified here. CI runs this for every target.
+const expected = cliVersion();
+const marked = await readBinaryVersion(outfile);
+if (marked !== expected) {
+  console.error(
+    `error: ${outfile} carries version marker ${marked ?? "(none)"}, expected ${expected}`,
+  );
+  process.exit(1);
+}
+console.log(`version marker ${marked} ok`);
 
 console.log(`compiled → ${outfile}`);

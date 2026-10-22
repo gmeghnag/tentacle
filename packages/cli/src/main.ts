@@ -51,6 +51,7 @@ import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { startTerminal } from "./terminal.ts";
 import { type TuiSessions, openTuiSessions, runSessionTui } from "./tui-sessions.ts";
+import { APP_VERSION } from "./version.ts";
 import {
   buildAgent,
   connectConfiguredMcp,
@@ -59,12 +60,6 @@ import {
   skillCatalog,
   skillListing,
 } from "./wiring.ts";
-
-/**
- * The app version: a literal injected at compile time (`define` in
- * `scripts/build.ts`), or `"dev"` when running from source.
- */
-const APP_VERSION = process.env.TENTACLE_APP_VERSION ?? "dev";
 
 const HELP = `tentacle — run an agent task
 
