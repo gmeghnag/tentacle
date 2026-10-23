@@ -13,6 +13,7 @@
  */
 import { z } from "zod";
 import { ContentBlockSchema } from "./content.ts";
+import { line } from "./text-line.ts";
 
 export const SessionIdSchema = z.string().min(1);
 export type SessionId = z.infer<typeof SessionIdSchema>;
@@ -322,3 +323,59 @@ export type EnqueueParams = z.infer<typeof EnqueueParamsSchema>;
 
 export const EnqueueResultSchema = z.object({});
 export type EnqueueResult = z.infer<typeof EnqueueResultSchema>;
+
+// --- session/list --------------------------------------------------------
+// The daemon's sessions, one page at a time (docs/feat/session-list.md). A
+// read: it does not attach, and it moves no session's TTL clock. Order:
+// `updatedAt` desc, then `sessionId` asc. `updatedAt` is the last change of the
+// CONVERSATION (a turn starting or ending, a successful compaction, or
+// creation) — opening, viewing or closing a session never reorders the list; a
+// running session sits at its turn's start. Paging is keyset: `cursor` is a
+// position, not an index, so it survives a closed session and a daemon
+// restart, and skips or repeats no entry — assuming the daemon's clock does
+// not step back (a stamp taken after a backward step is smaller). A session
+// updated while paging moves above the cursor: it is not in later pages, it is
+// at the top of the next listing. Additive (an older daemon answers
+// `MethodNotFound`). The daemon may be a pod (not trusted, AGENTS §7): every
+// string is bounded and control-free before anything reaches a UI.
+// Any authenticated client may list (one token = one principal).
+
+/** At most this many entries in one `session/list` page (and the max `limit`). */
+export const MAX_SESSION_LIST = 200;
+/** Max length of a listed title. */
+export const MAX_SESSION_TITLE = 256;
+
+export const SessionListParamsSchema = z.object({
+  /** Max entries in this page, 1..MAX_SESSION_LIST. Absent → MAX_SESSION_LIST. */
+  limit: z.number().int().min(1).max(MAX_SESSION_LIST).optional(),
+  /** Opaque: a previous page's `cursor`. Absent → the first (most recent) page. */
+  cursor: z.string().min(1).optional(),
+});
+export type SessionListParams = z.infer<typeof SessionListParamsSchema>;
+
+export const SessionListEntrySchema = z.object({
+  sessionId: SessionIdSchema,
+  /** One line, no control characters, never empty ("(empty)" before the first prompt). */
+  title: line(MAX_SESSION_TITLE),
+  /** The directory the session's tools run against (the daemon's project today). */
+  cwd: line(4096),
+  /** ms since epoch. */
+  createdAt: z.number().int().nonnegative(),
+  /** ms since epoch, the daemon's clock: the last conversation change. Never decreases while that clock does not step back. */
+  updatedAt: z.number().int().nonnegative(),
+  /** A turn or a compaction is running. */
+  running: z.boolean(),
+  /** Clients attached right now (the lister itself is not one). */
+  attached: z.number().int().nonnegative(),
+  /** Persisted but not loaded. Always false for now. */
+  archived: z.boolean(),
+});
+export type SessionListEntry = z.infer<typeof SessionListEntrySchema>;
+
+export const SessionListResultSchema = z.object({
+  /** Most recently updated first; ties by `sessionId` ascending. */
+  sessions: z.array(SessionListEntrySchema).max(MAX_SESSION_LIST),
+  /** Present iff more entries follow: pass it back for the next page. */
+  cursor: z.string().min(1).optional(),
+});
+export type SessionListResult = z.infer<typeof SessionListResultSchema>;

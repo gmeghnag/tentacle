@@ -61,7 +61,7 @@ export function toSkillCatalog(
 }
 
 /** One wire line: control characters → a space, whitespace collapsed, cut to `max`. */
-function wireLine(text: string, max: number): string {
+export function wireLine(text: string, max: number): string {
   return text.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, max).trimEnd();
 }
 

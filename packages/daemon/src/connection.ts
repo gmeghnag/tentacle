@@ -31,6 +31,7 @@ import {
   type PromptResult,
   type ResolvePermissionParams,
   type ResolvePermissionResult,
+  type SessionListParams,
   type SnapshotParams,
   type SnapshotResult,
   type WireChatRequest,
@@ -175,6 +176,9 @@ export class Connection {
         return this.mcpStatus();
       case Method.SkillsList:
         return this.host.skillList;
+      // A read of the registry: does not attach this connection to anything.
+      case Method.SessionList:
+        return this.host.list(params as SessionListParams);
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }

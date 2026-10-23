@@ -37,7 +37,7 @@
  * Sound because the history is append-only past any cut within an epoch (the
  * agent's one `pop` is never behind a marker; compaction starts a new epoch).
  */
-import type { AgentEvent, AskHooksTrust, Session } from "@tentacle/agent";
+import { type AgentEvent, type AskHooksTrust, type Session, sessionTitle } from "@tentacle/agent";
 import type {
   JobController,
   PermissionBroker,
@@ -75,6 +75,7 @@ import {
   classifyPending,
 } from "./persisted-session.ts";
 import { SessionRing } from "./ring.ts";
+import type { SessionSummary } from "./session-list.ts";
 import type { SessionPersister } from "./session-persister.ts";
 import type { SessionLiveness } from "./session-reaper.ts";
 
@@ -127,6 +128,8 @@ interface Cut {
 export interface RestoredSessionState {
   readonly createdAt: number;
   readonly lastActiveAt: number;
+  /** The last conversation change: the record's `updatedAt`, or the reload itself. */
+  readonly lastChangeAt: number;
   readonly turns: readonly PersistedTurnKey[];
   readonly enqueueIds: readonly string[];
   /** A turn suspended on a permission at the restart: it runs again (re-asked). */
@@ -220,6 +223,13 @@ export class HostedSession {
   /** Liveness stamps for the reaper (meaning: `SessionLiveness`). */
   private lastActiveAt: number;
   private lastDetachAt: number;
+  /**
+   * The last change of the CONVERSATION — a turn's start (once accepted) or
+   * end, a SUCCESSFUL compaction, or creation — and `session/list`'s
+   * `updatedAt` as is. Never moved by an attach, a detach, a view, an answer,
+   * a refused prompt or a failed compaction: unlike `lastActiveAt` (the TTL).
+   */
+  private lastChangeAt: number;
 
   constructor(
     id: string,
@@ -238,6 +248,7 @@ export class HostedSession {
     this.createdAt = restored?.createdAt ?? now();
     this.lastActiveAt = restored?.lastActiveAt ?? now();
     this.lastDetachAt = this.lastActiveAt;
+    this.lastChangeAt = restored?.lastChangeAt ?? now();
     for (const key of restored?.turns ?? []) {
       this.turns.set(key.turnId, key.end ? { end: key.end } : {});
     }
@@ -483,6 +494,7 @@ export class HostedSession {
       id: this.id,
       createdAt: this.createdAt,
       lastActiveAt: this.lastActiveAt,
+      lastChangeAt: this.lastChangeAt,
       messages: [...this.session.messages],
       turns,
       enqueueIds: [...this.enqueued],
@@ -511,6 +523,18 @@ export class HostedSession {
   /** Number of attached clients. */
   get attachedCount(): number {
     return this.attachments.size;
+  }
+
+  /** What `session/list` shows of this session. A read: no stamp, no write. */
+  summary(): SessionSummary {
+    return {
+      id: this.id,
+      createdAt: this.createdAt,
+      lastChangeAt: this.lastChangeAt,
+      running: this.running,
+      attached: this.attachments.size,
+      title: sessionTitle(this.session.messages),
+    };
   }
 
   /** What the reaper decides on (rules in `session-reaper.ts`). */
@@ -706,6 +730,10 @@ export class HostedSession {
     this.controller = controller;
     this.activeTurnId = turnId;
     this.turns.set(turnId, {});
+    // The prompt joins the history: a conversation change. It is also the
+    // running session's `session/list` key — stable for the whole turn (the
+    // keyset cursor needs that), and never above the stamp its end will set.
+    this.lastChangeAt = this.now();
     try {
       this.emit({ type: "turn_start", turnId, prompt: text });
     } catch (error) {
@@ -827,6 +855,7 @@ export class HostedSession {
       this.controller = null;
       this.activeTurnId = null;
       this.lastActiveAt = this.now();
+      this.lastChangeAt = this.lastActiveAt;
     }
     try {
       this.emit({ type: "turn_end", turnId, ...end });
@@ -882,6 +911,9 @@ export class HostedSession {
       const { before, after } = await this.session.compact(controller.signal, () =>
         this.historyReplaced(),
       );
+      // Only a compaction that replaced the history is a conversation change:
+      // a failed or cancelled one left it as it was (the `finally` writes it).
+      this.lastChangeAt = this.now();
       return { before, after };
     } catch (error) {
       // Providers throw anything on abort; give the client one clean code.

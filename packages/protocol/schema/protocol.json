@@ -1013,6 +1013,88 @@
       "minLength": 1,
       "type": "string"
     },
+    "SessionListEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "archived": {
+          "type": "boolean"
+        },
+        "attached": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "createdAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cwd": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "title": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "updatedAt": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "archived",
+        "attached",
+        "createdAt",
+        "cwd",
+        "running",
+        "sessionId",
+        "title",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "SessionListParams": {
+      "additionalProperties": true,
+      "properties": {
+        "cursor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "limit": {
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "SessionListResult": {
+      "additionalProperties": true,
+      "properties": {
+        "cursor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/SessionListEntry"
+          },
+          "maxItems": 200,
+          "type": "array"
+        }
+      },
+      "required": ["sessions"],
+      "type": "object"
+    },
     "SessionUpdate": {
       "discriminator": {
         "mapping": {
@@ -1682,6 +1764,14 @@
       },
       "result": {
         "$ref": "#/$defs/EnqueueResult"
+      }
+    },
+    "session/list": {
+      "params": {
+        "$ref": "#/$defs/SessionListParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SessionListResult"
       }
     },
     "session/open": {

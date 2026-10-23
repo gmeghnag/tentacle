@@ -44,6 +44,8 @@ import {
   type OpenResult,
   PROTOCOL_VERSION,
   type PromptResult,
+  type SessionListParams,
+  type SessionListResult,
   type SessionUpdateParams,
   type SkillSummary,
   type SkillsListResult,
@@ -314,6 +316,21 @@ export class RemoteClient {
       return Promise.reject(new Error("not connected to the daemon"));
     }
     return this.call(this.peer, Method.SkillsList, {}).then((result) => result as SkillsListResult);
+  }
+
+  /**
+   * One page of the daemon's sessions (`session/list`), most recent first; pass
+   * `cursor` back for the next. Not re-sent after a drop (a fresh read: ask
+   * again). An older daemon rejects with `MethodNotFound`. Schema-validated by
+   * the peer.
+   */
+  sessionList(params: SessionListParams = {}): Promise<SessionListResult> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.SessionList, params).then(
+      (result) => result as SessionListResult,
+    );
   }
 
   /** A controller the Ink App drives exactly like a local `Session`. */

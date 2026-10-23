@@ -7,15 +7,12 @@
  * characters before anything reaches the UI.
  */
 import { z } from "zod";
+import { line } from "./text-line.ts";
 
 /** At most this many skills in one `skills/list` result. */
 export const MAX_SKILL_LIST = 512;
 /** At most this many discovery problems (the rest are counted in `moreProblems`). */
 export const MAX_SKILL_PROBLEMS = 100;
-
-// biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point
-const NO_CONTROL = /^[^\u0000-\u001f\u007f-\u009f]*$/;
-const line = (max: number) => z.string().min(1).max(max).regex(NO_CONTROL);
 
 export const SkillListEntrySchema = z.object({
   /** As discovered: a non-spec name still loads (it just can't be a `/name`). */

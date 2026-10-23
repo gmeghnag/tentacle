@@ -33,7 +33,6 @@ export interface PersisterOptions {
   readonly cwd: string;
   readonly model: string;
   readonly onError: (error: Error) => void;
-  readonly now?: () => number;
 }
 
 const asError = (error: unknown): Error =>
@@ -83,10 +82,12 @@ export class SessionPersister {
     let saving: Promise<void>;
     try {
       const state = build();
+      // `updatedAt` = the last conversation change, never the write time: a
+      // detach or a restart writes too, and must not reorder `session/list`.
       const record = toDaemonRecord(
         state,
         { cwd: this.opts.cwd, model: this.opts.model, title: sessionTitle(state.messages) },
-        this.now(),
+        state.lastChangeAt,
       );
       saving = this.opts.store.save(record);
     } catch (error) {
@@ -122,10 +123,6 @@ export class SessionPersister {
   async stop(): Promise<void> {
     this.stopped = true;
     await Promise.all([this.opts.store.drain(), ...this.removals]);
-  }
-
-  private now(): number {
-    return (this.opts.now ?? Date.now)();
   }
 
   private report(error: unknown): void {
