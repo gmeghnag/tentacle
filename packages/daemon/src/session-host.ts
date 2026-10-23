@@ -11,6 +11,8 @@ import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/cor
 import type {
   McpServerStatus,
   OpenParams,
+  SessionListParams,
+  SessionListResult,
   SkillListEntry,
   SkillSummary,
   SkillsListResult,
@@ -28,6 +30,7 @@ import {
   reconcileOnReload,
   restoredActivity,
 } from "./persisted-session.ts";
+import { toSessionList } from "./session-list.ts";
 import type { SessionPersister } from "./session-persister.ts";
 import { type Expired, type ReapPolicy, selectExpired } from "./session-reaper.ts";
 
@@ -125,6 +128,20 @@ export class SessionHost {
   }
 
   /**
+   * One `session/list` page (rules in `session-list.ts`). SYNCHRONOUS, like
+   * `open`: a consistent read of the registry with no lock — each session is
+   * either fully registered or gone. A read only: it attaches nothing and
+   * moves no stamp, so a list never keeps a session alive.
+   */
+  list(params: SessionListParams): SessionListResult {
+    return toSessionList(
+      [...this.sessions.values()].map((hosted) => hosted.summary()),
+      this.opts.defaultCwd,
+      params,
+    );
+  }
+
+  /**
    * Look up or create, then attach — SYNCHRONOUS on purpose (no `await`
    * anywhere): two concurrent opens of one absent id run one after the other,
    * so the second finds the first's session instead of building a second agent,
@@ -178,10 +195,14 @@ export class SessionHost {
       throw new Error(`session ${record.id} is already live`);
     }
     const reconciled = reconcileOnReload(record);
-    const lastActiveAt = restoredActivity(record, this.now());
+    const now = this.now();
+    const lastActiveAt = restoredActivity(record, now);
     const hosted = this.build(record.id, reconciled.messages, {
       createdAt: record.createdAt,
       lastActiveAt,
+      // A turn cut short is reconciled now (notes appended, or re-asked): a
+      // change at the restart. Otherwise the record's last change, kept.
+      lastChangeAt: record.turn ? now : record.updatedAt,
       turns: reconciled.turns,
       enqueueIds: reconciled.enqueueIds,
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),

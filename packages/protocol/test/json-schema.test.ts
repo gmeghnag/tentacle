@@ -115,6 +115,25 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1snapshot/result": [{ messages: [{ role: "user", content: "q" }] }],
   "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
   "methods/session~1enqueue/result": [{}],
+  "methods/session~1list/params": [{}, { limit: 50, cursor: "1:s" }],
+  "methods/session~1list/result": [
+    { sessions: [] },
+    {
+      sessions: [
+        {
+          sessionId: "s",
+          title: "fix the build",
+          cwd: "/w",
+          createdAt: 1,
+          updatedAt: 2,
+          running: true,
+          attached: 2,
+          archived: false,
+        },
+      ],
+      cursor: "2:s",
+    },
+  ],
   "methods/session~1resolve_permission/params": [
     { sessionId: "s", requestId: "r", optionId: "allow_once" },
   ],

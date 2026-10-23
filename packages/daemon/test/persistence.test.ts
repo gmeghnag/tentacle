@@ -142,7 +142,6 @@ function rig(
     cwd: CWD,
     model: "m",
     onError: (e) => errors.push(e),
-    now,
   });
   const host = new SessionHost({
     defaultCwd: CWD,
@@ -575,7 +574,17 @@ describe("daemon persistence: what is written, when", () => {
       {},
       undefined,
       Date.now,
-      { persister, restored: { createdAt: 1, lastActiveAt: 1, turns: [], enqueueIds: [], resume } },
+      {
+        persister,
+        restored: {
+          createdAt: 1,
+          lastActiveAt: 1,
+          lastChangeAt: 1,
+          turns: [],
+          enqueueIds: [],
+          resume,
+        },
+      },
     );
     expect(hosted.running).toBe(true);
     hosted.cancel();
@@ -929,6 +938,7 @@ describe("daemon persistence: after a restart", () => {
       id: "bad",
       createdAt: 1,
       lastActiveAt: 1,
+      lastChangeAt: 1,
       messages: [],
       turns: [],
       enqueueIds: [],
@@ -1044,6 +1054,7 @@ describe("daemon persistence: review fixes (the TTL clock, compaction, shutdown)
       id: "s",
       createdAt: 1,
       lastActiveAt: 1,
+      lastChangeAt: 1,
       messages: [],
       turns: [],
       enqueueIds: [],
@@ -1064,6 +1075,7 @@ describe("daemon persistence: review fixes (the TTL clock, compaction, shutdown)
       id,
       createdAt: 1,
       lastActiveAt: 1,
+      lastChangeAt: 1,
       messages: [],
       turns: [],
       enqueueIds: [],
@@ -1077,6 +1089,76 @@ describe("daemon persistence: review fixes (the TTL clock, compaction, shutdown)
       expect.stringMatching(/session bad is not persisted: its file could not be loaded/),
       expect.stringMatching(/session "\.\.\/evil" is not persisted: not a valid file name/),
     ]);
+  });
+});
+
+describe("daemon persistence: the record's updatedAt is the last conversation change (session/list)", () => {
+  const idleRecord = (over: Partial<DaemonSessionRecord> = {}): DaemonSessionRecord =>
+    reread({
+      id: "back",
+      cwd: CWD,
+      model: "m",
+      createdAt: 1,
+      updatedAt: 7,
+      title: "t",
+      messages: [{ role: "user", content: "go" }],
+      kind: "tentacle.daemon-session",
+      schemaVersion: 1,
+      lastActiveAt: 7,
+      turns: [],
+      enqueueIds: [],
+      ...over,
+    });
+
+  test("R7 the detach write carries the turn's end, not the detach time", async () => {
+    // Mutations M7 (detach stamps lastChangeAt), M8 (persister writes its clock) → red.
+    let now = 1_000;
+    const r = rig(
+      [text("hi")],
+      () => [],
+      new SpyStore(),
+      () => now,
+    );
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.ended("T1"));
+    now = 50_000;
+    hosted.detach(c.attachment);
+    await hosted.persisted();
+    const record = reread(r.store.durable.get(hosted.id));
+    expect(record.updatedAt).toBe(1_000);
+    expect(record.lastActiveAt).toBe(50_000);
+  });
+
+  test("R8 a restart re-stamps nothing: the reload write keeps the record's updatedAt", async () => {
+    // Mutations M8, M9 (restore ignores record.updatedAt) → red.
+    const r = rig(
+      [],
+      () => [],
+      new SpyStore(),
+      () => 100,
+    );
+    const hosted = r.host.restore(idleRecord());
+    await hosted.persisted();
+    expect(reread(r.store.durable.get("back")).updatedAt).toBe(7);
+    expect(r.host.list({}).sessions.map((s) => s.updatedAt)).toEqual([7]);
+  });
+
+  test("R9 a record cut mid-turn is reconciled at reload: a change at the restart", async () => {
+    const r = rig(
+      [],
+      () => [],
+      new SpyStore(),
+      () => 100,
+    );
+    const hosted = r.host.restore(
+      idleRecord({ turns: [{ turnId: "T" }], turn: { turnId: "T", steering: [] } }),
+    );
+    expect(hosted.running).toBe(false);
+    await hosted.persisted();
+    expect(reread(r.store.durable.get("back")).updatedAt).toBe(100);
+    expect(r.host.list({}).sessions.map((s) => s.updatedAt)).toEqual([100]);
   });
 });
 
@@ -1142,6 +1224,21 @@ describe("persisted-session (pure)", () => {
     turns: [],
     enqueueIds: [],
     ...over,
+  });
+
+  test("parseDaemonRecord refuses wire stamps that are not non-negative safe integers (Review finding 2)", () => {
+    // Mutation: drop the integer check → a record with `updatedAt: 1.5` loads, and its
+    // `session/list` entry makes the client reject the WHOLE page.
+    const reason = (over: Partial<DaemonSessionRecord>) => {
+      const p = parseDaemonRecord(base(over), (c) => c === CWD);
+      return p.ok ? "ok" : p.reason;
+    };
+    expect(reason({})).toBe("ok");
+    expect(reason({ createdAt: 0, updatedAt: Number.MAX_SAFE_INTEGER })).toBe("ok");
+    for (const bad of [1.5, -1, 2 ** 53]) {
+      expect(reason({ updatedAt: bad })).toBe('"updatedAt" is not a non-negative integer');
+      expect(reason({ createdAt: bad })).toBe('"createdAt" is not a non-negative integer');
+    }
   });
 
   test("parseDaemonRecord rejects another kind, another version, another project", () => {

@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROTOCOL_VERSION } from "@tentacle/protocol";
+import { PROTOCOL_VERSION, SessionListResultSchema } from "@tentacle/protocol";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { daemonStoreDir, startDaemon } from "../src/serve.ts";
 
@@ -224,6 +224,41 @@ describe("serve persistence (end to end, real disk)", () => {
     for (const [id, text] of Object.entries(bad)) {
       expect(await readFile(join(store, `${id}.json`), "utf8")).toBe(text);
     }
+  });
+
+  test("R10 a record with a non-integer updatedAt is skipped loudly; session/list stays valid for the rest", async () => {
+    // Review finding 2. Mutation: drop the integer check in parseDaemonRecord → the
+    // record loads, its entry carries 1.5 and the list fails the client's schema.
+    const first = await serve();
+    const a = await client(first.url);
+    await a.request("session/open", { sessionId: "good", messages: seed });
+    a.ws.close();
+    await first.stop();
+    const store = daemonStoreDir(config);
+    const good = JSON.parse(await readFile(join(store, "good.json"), "utf8"));
+    const badText = JSON.stringify({ ...good, id: "bad-stamp", updatedAt: 1.5 });
+    await writeFile(join(store, "bad-stamp.json"), badText);
+
+    const notices: string[] = [];
+    const second = await serve(config, notices);
+    try {
+      const b = await client(second.url);
+      const result = (await b.request("session/list", {}))?.result;
+      // What a RemoteClient's peer checks: one bad entry would reject the whole page.
+      expect(SessionListResultSchema.safeParse(result).success).toBe(true);
+      expect(
+        (result as { sessions: { sessionId: string }[] }).sessions.map((s) => s.sessionId),
+      ).toEqual(["good"]);
+      b.ws.close();
+      // Hidden, never silently: the existing startup report names the file and why.
+      expect(notices.find((l) => l.includes("bad-stamp.json"))).toMatch(
+        /^skipped .*"updatedAt" is not a non-negative integer \(left as is\)$/,
+      );
+      expect(notices.some((l) => l.startsWith("restored 1 session"))).toBe(true);
+    } finally {
+      await second.stop();
+    }
+    expect(await readFile(join(store, "bad-stamp.json"), "utf8")).toBe(badText);
   });
 
   test("R6 the same project reached through a symlink restores its sessions", async () => {

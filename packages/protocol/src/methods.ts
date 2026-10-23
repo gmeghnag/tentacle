@@ -30,6 +30,8 @@ import {
   OpenResultSchema,
   PromptParamsSchema,
   PromptResultSchema,
+  SessionListParamsSchema,
+  SessionListResultSchema,
   SnapshotParamsSchema,
   SnapshotResultSchema,
 } from "./session.ts";
@@ -45,6 +47,7 @@ export const Method = {
   Compact: "session/compact",
   Snapshot: "session/snapshot",
   Enqueue: "session/enqueue",
+  SessionList: "session/list",
   ResolvePermission: "session/resolve_permission",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
@@ -78,6 +81,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.Compact]: { params: CompactParamsSchema, result: CompactResultSchema },
   [Method.Snapshot]: { params: SnapshotParamsSchema, result: SnapshotResultSchema },
   [Method.Enqueue]: { params: EnqueueParamsSchema, result: EnqueueResultSchema },
+  [Method.SessionList]: { params: SessionListParamsSchema, result: SessionListResultSchema },
   [Method.ResolvePermission]: {
     params: ResolvePermissionParamsSchema,
     result: ResolvePermissionResultSchema,

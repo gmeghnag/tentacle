@@ -42,6 +42,8 @@ export interface DaemonSessionState {
   readonly id: string;
   readonly createdAt: number;
   readonly lastActiveAt: number;
+  /** The last conversation change (a turn's start or end, a successful compaction, creation): the record's `updatedAt`. */
+  readonly lastChangeAt: number;
   readonly messages: readonly ChatMessage[];
   readonly turns: readonly PersistedTurnKey[];
   readonly enqueueIds: readonly string[];
@@ -89,6 +91,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 const isFiniteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const isWireStamp = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
 const isStringArray = (v: unknown): v is string[] =>
   Array.isArray(v) && v.every((x) => typeof x === "string");
 const STOP_REASONS = new Set(["end_turn", "max_tokens", "max_iterations", "cancelled", "error"]);
@@ -157,6 +160,13 @@ export function parseDaemonRecord(
   }
   if (!isFiniteNumber(value.lastActiveAt)) {
     return { ok: false, reason: '"lastActiveAt" is not a finite number' };
+  }
+  // Both go on the wire as they are (`session/list`, whose client rejects the
+  // whole page on one bad entry): the store's finite check is not enough.
+  for (const key of ["createdAt", "updatedAt"] as const) {
+    if (!isWireStamp(value[key])) {
+      return { ok: false, reason: `"${key}" is not a non-negative integer` };
+    }
   }
   if (!isStringArray(value.enqueueIds)) {
     return { ok: false, reason: '"enqueueIds" is not a string array' };
