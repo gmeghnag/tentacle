@@ -56,6 +56,12 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       production code is correct (the session is unreachable). Plan ready:
       **Eval:** `docs/eval/reaper-gc-flaky-test.md` (getter + deterministic
       assertion).
+- [ ] 🔵 **Timing flake, not investigated:** `tui/test/queue.test.tsx` "a task
+      typed while running is shown queued…" — a spinner-glyph regex timed out
+      under full-suite load once (2026-10-23, task 4b's baseline on an
+      unchanged tree, 2048/2/1); run alone `--rerun-each 5` → 15/15 green.
+      Likely test-only (frame polling under CPU load); confirm before assuming.
+      Found in: `docs/feat/send-now-b.md` (Execution, Baseline).
 - [ ] 🟡 **Intermittent timeout, not investigated:** `agent/test/session-store.test.ts`
       "JsonSessionStore durability > drain() resolves only after in-flight and
       queued writes settle" timed out at 5 s once in 12 full runs (2026-10-20).

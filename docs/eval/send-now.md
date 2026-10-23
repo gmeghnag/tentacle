@@ -412,3 +412,61 @@ in-memory daemon).
 ## Execution
 
 ## Review
+
+## Addendum — decisions taken during execution
+
+*— claude-opus-5-5 (orchestrator), 2026-10-23. Owner decisions, recorded so
+every nuance lives in the repo, not only in a task doc.*
+
+Principle behind all of them (owner): **the client never guesses what the
+daemon knows; the daemon never guesses by text or by shape.**
+
+**Task 4a (`session/send_now`, daemon) — merged `e0f38e3`; detail in
+`docs/feat/send-now-a.md` Execution follow-ups 1–3 + Review round 2.**
+1. *send_now after Esc already cancelled the turn* → still accepted: it
+   starts a new turn with the queued texts (reviewer: consistent with S1/S2).
+2. *Texts already delivered but unanswered* (crash before the hand-off, the
+   `max_iterations` end-of-turn drain, a `turn_start` hook stop) → a
+   **continuation turn** (prompt `""`), stamping `lastChangeAt` like any turn
+   start. `NoTurnRunning` only when there is nothing to answer.
+3. *"Unanswered" is decided STRUCTURALLY*: the history's last message is a
+   `user` message (whoever wrote it — a continuation answers another
+   client's text too, which is correct). Rejected: matching the caller's
+   texts against the history (`ChatMessage` has no id; texts repeat;
+   compaction rewrites them).
+4. *The compaction summary* (a `user` message by construction) does not count
+   as unanswered; it is recognised by **identity** (the hosted session marks
+   the message it installed), never by position — `[system, summary]` has the
+   same shape as a first turn `[system, first prompt]`.
+5. *After a daemon restart* the marker is gone: an idle `[system?, user]`
+   record → `NoTurnRunning` (an unrequested turn could run tools). The text
+   stays in the history; the next normal prompt gets it answered (re-sending
+   the same text would put it in the history twice). A turn cut short by a
+   crash (`cutShort`) is still continued. Stated in the contract comment.
+6. *Collateral fix:* ids placed in a send-now prompt are marked delivered, so
+   a second send_now never re-sends them.
+7. *Known, documented, no code:* after the resume of a permission-suspended
+   turn the D1 order inverts (only after a crash).
+
+**Task 4b (client + cli) — in progress on `feat/send-now-b`; detail in
+`docs/feat/send-now-b.md`.**
+8. *Ambiguous resync* (the successor's `turn_start` hidden by the cut, then
+   `cancelled`) → the client no longer infers "not delivered": the daemon
+   reports it (an additive `delivered`-style field where the recovery path
+   reads the outcome). Restore-the-texts (possible visible duplicate, never a
+   silent loss) remains ONLY as the fallback for an older daemon without the
+   field.
+9. *The old turn's label after a resync past the hand-off* → exact if the
+   real outcome is recoverable through an EXISTING path (the idempotent
+   retry's `ended`) with no protocol change; otherwise it stays `cancelled`,
+   documented as an approximation (label only — the content is complete via
+   the resync snapshot).
+10. *Carry-overs for 4c (TUI):* `createSession` still returns
+    `SessionController` — c must widen it for `sendNow`; a local
+    `NoTurnRunning` must not be treated as silent (the queued texts must still
+    reach the daemon); an enqueue during a compaction while the send-now
+    request is in flight is not covered by 4b's tests (c's TUI path).
+11. *Compaction target* (4b drift): no live turn exists during a compaction,
+    so the send-now turn is installed at once and an enqueue in that window
+    binds to the reserved turn, which the daemon can only fold.
+

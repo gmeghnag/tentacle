@@ -377,6 +377,33 @@ the "a new target adds only a transport" shape, AGENTS §7).
   - on the device, trust the developer once (Settings → General → VPN &
     Device Management).
 
+- **Task 2 plan** (approved 2026-10-23, all four answers as recommended):
+  the detached-session cap ARCHIVES the oldest idle detached session (never
+  one with a running turn) instead of refusing; `DAEMON_RECORD_VERSION` 1→2,
+  v1 records read as not archived; a runtime TTL change is NOT persisted (the
+  `--session-ttl` flag wins at restart) and the method says so
+  (`persisted: false`); split into **2b `session-ttl-control`** (S ·
+  cross-module, approved, runs FIRST) and **2a `session-archive`** (M–L ·
+  load-bearing, approval pending). `session/list` gets a per-entry `cwd` in
+  2a (task 1 nit).
+- **Task 4 (`send_now`) decisions taken during execution** — recorded in
+  `docs/eval/send-now.md` (addendum) and in the task docs.
+
+- **Carry-overs from executed tasks (to honour in later tasks):**
+  - *From task 0 → task 11:* the `paths` pin to React 19 types in
+    `apps/mobile/tsconfig.json` is not protected by the gate (removing it
+    still passes `tsc`); iOS reports both a bad token and an Origin rejection
+    as close 1006 with the 401 only in `reason`, and the daemon logs both as
+    `auth-failure` — never classify by `reason` alone; the spike screen
+    (`App.tsx`) is throwaway (URL shadowing, no effect cleanup).
+  - *From task 1 → tasks 7 / 11:* render `sessionId` safely (it is
+    daemon-supplied); treat `MethodNotFound` on `session/list` as "daemon too
+    old"; `updatedAt` is the DAEMON's clock (monotonic only if that clock
+    is); one `cwd` for all entries until 2a.
+  - *From task 4a/4b → tasks 13 / 4c:* see `docs/eval/send-now.md` addendum
+    (continuation turns, the post-restart `NoTurnRunning` case, the
+    `delivered` flag, what the TUI must not silence).
+
 ### Dependencies (must land before / with the app)
 
 - **`send_now`** — `docs/eval/send-now.md` (decided, not built): the app's
