@@ -192,7 +192,7 @@ the "a new target adds only a transport" shape, AGENTS §7).
       built for them), model / profile switch from the phone (v1 shows the
       model only), manual compaction, skills and MCP panels, cross-session
       search, Android.
-12. **Minimum iOS 26 / iPadOS 26** (owner, 2026-10-23). iPhone 11 and later.
+12. **Minimum iOS 26 / iPadOS 26** (owner, 2026-10-23) — **superseded: minimum 18 + iOS 26 enhancements, see "Owner decisions after the eval was committed".** iPhone 11 and later.
     Liquid Glass everywhere, no fallback styling branch; every v1 feature
     (push-to-start 17.2, interactive Live Activity 17) is available without a
     version check.
@@ -347,6 +347,18 @@ the "a new target adds only a transport" shape, AGENTS §7).
 - **Task 1 plan** (approved 2026-10-23): sessions ordered by the last
   CONVERSATION change (turn / compaction end), never by open / view / close;
   pagination from v1; unreadable records hidden.
+
+- **Minimum iOS lowered to 18, iOS 26 as progressive enhancement**
+  (owner, 2026-10-23 — supersedes decision 12). Found while testing on the
+  owner's iPhone (iOS 18.3.1): many users have not updated. Every v1 feature
+  works on 18 (push-to-start 17.2, interactive Live Activity 17, NSE, Face
+  ID). On iOS 26 the app adds what 26 brings: native components get Liquid
+  Glass by themselves; explicit glass effects and iOS 26-only SwiftUI
+  components are enabled only there, with a clean fallback on 18. The version
+  check lives in ONE pure, unit-tested module (a "feature available on this
+  device?" table), never as scattered `if`s in components (AGENTS §7). E2E
+  runs on both an iOS 18 and an iOS 26 simulator (the iOS 18 runtime must be
+  installed before task 11). Deployment target `18.0`.
 
 ### Dependencies (must land before / with the app)
 
