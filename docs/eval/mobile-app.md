@@ -360,6 +360,23 @@ the "a new target adds only a transport" shape, AGENTS §7).
   runs on both an iOS 18 and an iOS 26 simulator (the iOS 18 runtime must be
   installed before task 11). Deployment target `18.0`.
 
+- **First run on a real iPhone: GREEN** (2026-10-23). The task 0 spike,
+  deployment target lowered locally to 18.0, ran on the owner's iPhone 12 Pro
+  (iOS 18.3.1) over Wi-Fi against `serve` on the Mac through the throwaway
+  Origin-stripping proxy: `Origin: http://192.168.1.8:4001` stripped, the five
+  mock deltas streamed, turn closed cleanly (ws close 1000). Lessons for task
+  11 (and the TestFlight checklist):
+  - `ios.infoPlist` needs `NSLocalNetworkUsageDescription` (iOS asks for the
+    local-network permission on a real device, never on the simulator) and
+    ATS `NSAllowsLocalNetworking` for the LAN / Tailscale-by-IP path;
+  - `ios.appleTeamId` = the owner's team; first device build needs Xcode
+    signed in to the Apple account and
+    `xcodebuild -allowProvisioningUpdates -allowProvisioningDeviceRegistration`
+    (registers the device, creates the dev profile); then `expo run:ios
+    --device` works;
+  - on the device, trust the developer once (Settings → General → VPN &
+    Device Management).
+
 ### Dependencies (must land before / with the app)
 
 - **`send_now`** — `docs/eval/send-now.md` (decided, not built): the app's
