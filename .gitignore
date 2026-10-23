@@ -26,3 +26,8 @@ coverage/
 .tentacle/
 .harness/
 
+
+# Expo app: generated native projects (CNG) and Expo state
+apps/mobile/ios/
+apps/mobile/android/
+apps/mobile/.expo/

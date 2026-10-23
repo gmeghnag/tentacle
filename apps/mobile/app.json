@@ -1,0 +1,8 @@
+{
+  "expo": {
+    "name": "tentacle",
+    "slug": "tentacle",
+    "ios": { "bundleIdentifier": "so.tentacle.spike", "supportsTablet": true },
+    "plugins": [["expo-build-properties", { "ios": { "deploymentTarget": "26.0" } }]]
+  }
+}
