@@ -583,6 +583,7 @@ describe("daemon persistence: what is written, when", () => {
           turns: [],
           enqueueIds: [],
           resume,
+          cutShort: true,
         },
       },
     );

@@ -324,6 +324,52 @@ export type EnqueueParams = z.infer<typeof EnqueueParamsSchema>;
 export const EnqueueResultSchema = z.object({});
 export type EnqueueResult = z.infer<typeof EnqueueResultSchema>;
 
+// --- session/send_now ----------------------------------------------------
+// Cancel what runs and start a new turn whose prompt is the queued texts,
+// joined with "\n\n", in one daemon step: no other client's prompt can start
+// in between (docs/feat/send-now-a.md). `turnId` is the NEW turn's id and
+// idempotency key (a retry acks it, like `session/prompt`). `interrupt` names
+// what the client believes is running: a stale request (it already ended)
+// never cancels some OTHER turn — `TurnInProgress` instead. A message whose
+// `id` the daemon already injected (drained as a steer) is left out of the
+// prompt. If all were and nothing runs, the new turn is a continuation
+// (prompt "") when the history ends with an unanswered user message (whoever
+// wrote it; a compaction summary alone does not count); otherwise
+// `NoTurnRunning` (nothing to send, nothing to restore). After a daemon
+// restart, an idle history of one user message (after the system one) reads
+// as a compaction summary → `NoTurnRunning` even if that text is unanswered:
+// the text stays in the history, and the next prompt gets it answered. A successor
+// cancelled (or its session closed) before it started ends with a `turn_end`
+// and NO `turn_start`: it delivered nothing — neither its prompt nor any steer
+// enqueued to it; the client that owns the texts restores them. Additive (an
+// older daemon answers `MethodNotFound`).
+
+export const SendNowTargetSchema = z.discriminatedUnion("kind", [
+  /** The turn the client sees running. */
+  z.object({ kind: z.literal("turn"), turnId: TurnIdSchema }),
+  z.object({ kind: z.literal("compaction") }),
+]);
+export type SendNowTarget = z.infer<typeof SendNowTargetSchema>;
+
+export const SendNowMessageSchema = z.object({
+  /** The client's enqueue key (`session/enqueue` `id`); a fresh one if never enqueued. */
+  id: z.string().min(1).max(128),
+  text: z.string().min(1),
+});
+export type SendNowMessage = z.infer<typeof SendNowMessageSchema>;
+
+export const SendNowParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  turnId: TurnIdSchema,
+  interrupt: SendNowTargetSchema,
+  /** In queue order. An empty send-now never reaches the wire. */
+  messages: z.array(SendNowMessageSchema).min(1),
+});
+export type SendNowParams = z.infer<typeof SendNowParamsSchema>;
+
+/** The ack of the new turn: `PromptResultSchema` (`ended` only on a retry of an ended one). */
+export type SendNowResult = PromptResult;
+
 // --- session/list --------------------------------------------------------
 // The daemon's sessions, one page at a time (docs/feat/session-list.md). A
 // read: it does not attach, and it moves no session's TTL clock. Order:

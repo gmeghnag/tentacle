@@ -22,6 +22,12 @@ export interface SendOptions {
   readonly skill?: string;
   /** Asks the prompting client whether to run the project's hooks (see `RunOptions.askHooksTrust`). */
   readonly askHooksTrust?: AskHooksTrust;
+  /**
+   * The turn's steering queue at its start (copied), drained at its first
+   * boundary like any steer: the daemon's send-now carries a cancelled turn's
+   * undrained steers over (docs/feat/send-now-a.md). Absent → empty.
+   */
+  readonly steering?: readonly string[];
 }
 
 export interface SessionOptions {
@@ -80,9 +86,9 @@ export class Session {
     if (opts.skill !== undefined && (text === "" || !this.canActivateSkill(opts.skill))) {
       throw new UnknownSkillError(opts.skill);
     }
-    // A fresh turn starts with an empty steering queue (abort may have left
-    // undrained items from a previous turn).
-    this.steering = [];
+    // A fresh turn starts with its seed only (abort may have left undrained
+    // items from a previous turn; a caller that keeps them passes them).
+    this.steering = [...(opts.steering ?? [])];
     if (text !== "") {
       this.messages.push({ role: "user", content: text });
     }

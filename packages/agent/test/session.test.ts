@@ -190,3 +190,42 @@ describe("Session.pendingSteering", () => {
     expect(session.pendingSteering()).toEqual(["a", "b"]);
   });
 });
+
+describe("Session.send steering seed (docs/feat/send-now-a.md)", () => {
+  const collect = async (events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> => {
+    const out: AgentEvent[] = [];
+    for await (const event of events) out.push(event);
+    return out;
+  };
+  const once = () => new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+
+  test("a seeded queue is drained at the turn's first boundary, after the prompt", async () => {
+    // Mutation: keep the reset (`this.steering = []`) → no steer, the model never sees "S".
+    const model = once();
+    const session = new Session(new Agent({ model, tools: new ToolRegistry(), env: noopEnv }));
+    const events = await collect(session.send("P", undefined, { steering: ["S", "T"] }));
+    expect(events.filter((e) => e.type === "steer")).toEqual([
+      { type: "steer", text: "S" },
+      { type: "steer", text: "T" },
+    ]);
+    expect(model.requests[0]?.messages.slice(-3).map((m) => m.content)).toEqual(["P", "S", "T"]);
+  });
+
+  test("without a seed a turn still starts with an empty queue (a stale steer is dropped)", async () => {
+    const model = once();
+    const session = new Session(new Agent({ model, tools: new ToolRegistry(), env: noopEnv }));
+    session.enqueue("stale");
+    const events = await collect(session.send("P"));
+    expect(events.some((e) => e.type === "steer")).toBe(false);
+    expect(model.requests[0]?.messages.at(-1)?.content).toBe("P");
+  });
+
+  test("the seed is copied: the caller's array is not the live queue", async () => {
+    const session = new Session(
+      new Agent({ model: once(), tools: new ToolRegistry(), env: noopEnv }),
+    );
+    const seed = ["S"];
+    await collect(session.send("P", undefined, { steering: seed }));
+    expect(seed).toEqual(["S"]);
+  });
+});
