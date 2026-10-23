@@ -554,8 +554,9 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       — **Feat (DONE 2026-10-20, `feat/pod-attach-resilience`):** `docs/feat/pod-attach-resilience.md` — Layer 1: exec-channel keepalive (WS ping + blank stdin + pong-gated dead-man) · S · contained
       — **Eval (DECIDED 2026-10-23):** `docs/eval/mobile-app.md` — iOS-first React Native (Expo) app: E2E-encrypted
         channel over the tentacle.so relay / Tailscale / cloudflared / own domain, per-computer QR pairing, E2E push
-        + Live Activity in v1. 21 owner decisions; 19 tasks + TestFlight in 7 phases (decision 21), next: task 0
-        (spike). Absorbs the open questions of 9. Type: eval → feat · Size: L → split · Blast: load-bearing
+        + Live Activity in v1. 21 owner decisions; 19 tasks + TestFlight in 7 phases (decision 21). Task 0 DONE
+        2026-10-23 (`feat/mobile-spike`, `docs/feat/mobile-spike.md`); task 1 (`feat/session-list`) executing;
+        plans ready: 1, 8; planning: 4. Absorbs the open questions of 9. Type: eval → feat · Size: L → split · Blast: load-bearing
       — **Eval (deferred, low):** `docs/eval/reaper-gc-flaky-test.md` — test-only flake, at the end of v2
 
 - [x] **`connect` cannot trust a self-signed daemon** (`serve --tls-cert/--tls-key`

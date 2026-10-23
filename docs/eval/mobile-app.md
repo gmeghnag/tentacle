@@ -330,6 +330,24 @@ the "a new target adds only a transport" shape, AGENTS §7).
     so terminal → phone → terminal works as soon as the app exists; the relay
     comes after the app, which is tried first over Tailscale.
 
+### Owner decisions after the eval was committed
+
+- **Bundle id: `so.tentacle.app`** (owner, 2026-10-23). Reverse-DNS of the
+  owned `tentacle.so`; not tied to the relay's domain (a later `tntcl.so`
+  changes nothing). Fixed before task 11; the spike keeps
+  `so.tentacle.spike`.
+- **`serve` rejects any `Origin` header** (`daemon/src/ws-server.ts:116-121`),
+  and iOS's WebSocket always sends one (= the address dialled) — found by task
+  0. The policy is decided in task 9; recommendation: connections
+  authenticated by a device key (Noise, task 8/9) are exempt from the Origin
+  check, since a web page cannot hold that key.
+- **Task 8 plan** (approved 2026-10-23): Noise_IK_25519_ChaChaPoly_SHA256 on
+  `@noble/*`; the official snow / cacophony vectors are a blocking first step
+  (decision 20's "spec vectors" — the Noise spec publishes none).
+- **Task 1 plan** (approved 2026-10-23): sessions ordered by the last
+  CONVERSATION change (turn / compaction end), never by open / view / close;
+  pagination from v1; unreadable records hidden.
+
 ### Dependencies (must land before / with the app)
 
 - **`send_now`** — `docs/eval/send-now.md` (decided, not built): the app's
