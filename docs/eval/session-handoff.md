@@ -1,6 +1,7 @@
 # eval/session-handoff — continue the same daemon session from another device
 
 > **Status:** context — owner decision recorded (2026-10-20); open questions Q1–Q8 deliberately left open, to be resumed later (owner, 2026-10-20)
+> **Update (2026-10-23):** Q1–Q8 answered in `docs/eval/mobile-app.md` (decisions 3–7, 21); the work is tasks 1, 2, 6, 7 of its decision 21.
 > **Branch:** none (an `eval` is committed directly to `main`, AGENTS §10)
 > **Type:** eval → feat (likely split, see Q8) · **Size:** L → split · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (protocol, session lifecycle, TUI-over-RPC, AGENTS §7)
 

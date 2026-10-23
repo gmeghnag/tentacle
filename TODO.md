@@ -552,7 +552,10 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       9. **Eval:** `docs/eval/session-handoff.md` — continue a `serve` session from another device (owner requirement 2026-10-20: mobile → TUI, live) · L → split · load-bearing
       — **Eval:** `docs/eval/attachments.md` (sister) · 4 sub-tasks · load-bearing
       — **Feat (DONE 2026-10-20, `feat/pod-attach-resilience`):** `docs/feat/pod-attach-resilience.md` — Layer 1: exec-channel keepalive (WS ping + blank stdin + pong-gated dead-man) · S · contained
-      — mobile app (React Native or Swift) — own eval, after 8b; carries the JSON re-attach test vectors deferred by 8a (R-Q3)
+      — **Eval (DECIDED 2026-10-23):** `docs/eval/mobile-app.md` — iOS-first React Native (Expo) app: E2E-encrypted
+        channel over the tentacle.so relay / Tailscale / cloudflared / own domain, per-computer QR pairing, E2E push
+        + Live Activity in v1. 21 owner decisions; 19 tasks + TestFlight in 7 phases (decision 21), next: task 0
+        (spike). Absorbs the open questions of 9. Type: eval → feat · Size: L → split · Blast: load-bearing
       — **Eval (deferred, low):** `docs/eval/reaper-gc-flaky-test.md` — test-only flake, at the end of v2
 
 - [x] **`connect` cannot trust a self-signed daemon** (`serve --tls-cert/--tls-key`
