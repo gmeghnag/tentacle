@@ -39,6 +39,7 @@
  */
 import { type AgentEvent, type AskHooksTrust, type Session, sessionTitle } from "@tentacle/agent";
 import type {
+  ChatMessage,
   JobController,
   PermissionBroker,
   PermissionRequest,
@@ -51,6 +52,8 @@ import {
   type KnownSessionUpdateParams,
   type PermissionOutcome,
   type PromptResult,
+  type SendNowMessage,
+  type SendNowTarget,
   type SessionUpdate,
   type SnapshotResult,
   type TurnEnd,
@@ -124,6 +127,21 @@ interface Cut {
   readonly turnId: string | null;
 }
 
+/**
+ * A `session/send_now` accepted while its target unwinds: the turn it starts
+ * once the slot is free (`settleSuccessor`). Memory only — never on disk, never
+ * in `turns`, before it starts (docs/feat/send-now-a.md).
+ */
+interface Successor {
+  readonly turnId: string;
+  readonly messages: readonly SendNowMessage[];
+  /** `session/enqueue`s bound to the successor's own `turnId` while it waits. */
+  readonly steers: { readonly id: string; readonly text: string }[];
+  /** A cancel (or close) landed first: it ends without starting. */
+  cancelled: boolean;
+  readonly askHooksTrust?: AskHooksTrust;
+}
+
 /** What a reloaded session brings back besides its history (`SessionHost.restore`). */
 export interface RestoredSessionState {
   readonly createdAt: number;
@@ -134,6 +152,8 @@ export interface RestoredSessionState {
   readonly enqueueIds: readonly string[];
   /** A turn suspended on a permission at the restart: it runs again (re-asked). */
   readonly resume?: ResumedTurn;
+  /** The record had a turn in flight (cut short, or resumed): its history is not a summary. */
+  readonly cutShort: boolean;
 }
 
 /**
@@ -200,6 +220,25 @@ export class HostedSession {
   private readonly turns = new Map<string, { end?: TurnEnd }>();
   /** Every accepted `enqueue` id, for its lifetime (retries). */
   private readonly enqueued = new Set<string>();
+  /**
+   * Parallel to the agent's steering queue, in order: each entry's enqueue id
+   * (`undefined`: a resumed turn's restored steer — ids are not on disk).
+   * Shifted on every `steer` the turn streams (one per drained text).
+   */
+  private steeringIds: (string | undefined)[] = [];
+  /** Enqueue ids injected into the history (drained) in this incarnation. */
+  private readonly drained = new Set<string>();
+  /** Enqueue ids a previous incarnation accepted: their text is in the history already. */
+  private readonly restoredIds = new Set<string>();
+  /** The send-now waiting for the slot (see `Successor`). */
+  private successor: Successor | null = null;
+  /**
+   * The summary message the last compaction installed (the object itself:
+   * `awaitsAnswer` compares identity). Any later message makes it no longer
+   * the tail, so it never needs clearing. Memory only; see the constructor
+   * for a reload.
+   */
+  private compactionSummary: ChatMessage | undefined;
   private readonly errorPolicy: TurnErrorPolicy;
   private currentToolCallId = "";
   private currentToolName = "";
@@ -254,6 +293,19 @@ export class HostedSession {
     }
     for (const enqueueId of restored?.enqueueIds ?? []) {
       this.enqueued.add(enqueueId);
+      this.restoredIds.add(enqueueId);
+    }
+    // A reload lost the summary's identity. An IDLE record whose history is a
+    // lone user message after the system prompt may be a just-compacted one
+    // (or a first turn that ended with no reply): read it as the summary, so a
+    // send-now there is `NoTurnRunning`, never an unasked turn that may run
+    // tools. A record cut short mid-turn is never a summary (it continues).
+    if (restored && !restored.cutShort) {
+      const history = session.messages;
+      const at = history[0]?.role === "system" ? 1 : 0;
+      if (history.length === at + 1 && history[at]?.role === "user") {
+        this.compactionSummary = history[at];
+      }
     }
     this.session = session;
     this.jobs = jobs;
@@ -295,6 +347,7 @@ export class HostedSession {
     if (resume) {
       for (const text of resume.steering) {
         session.enqueue(text);
+        this.steeringIds.push(undefined);
       }
       this.controller = new AbortController();
       this.activeTurnId = resume.turnId;
@@ -741,6 +794,8 @@ export class HostedSession {
       // as "running" forever — run it anyway; it ends through `finishTurn`.
       this.reportTurnError(error);
     }
+    // The agent resets its queue at `send`: so does its id mirror.
+    this.steeringIds = [];
     void this.drive(
       turnId,
       this.session.send(text, controller.signal, {
@@ -754,6 +809,169 @@ export class HostedSession {
     // and the prompt are on disk together, before the model is called.
     this.persist();
     return { turnId };
+  }
+
+  /**
+   * `session/send_now`: cancel `interrupt` and start turn `turnId` whose
+   * prompt is `messages`' texts not injected yet, joined with "\n\n". Acks at
+   * once, synchronously (like `prompt`). While the target unwinds the new turn
+   * is RESERVED (memory only); the code that frees the slot hands it over in
+   * the same synchronous stretch (`settleSuccessor`), so no other request can
+   * take the slot in between. A target that no longer runs is never replaced
+   * by a cancel of something else: `TurnInProgress` if the slot is held.
+   */
+  sendNow(
+    turnId: string,
+    interrupt: SendNowTarget,
+    messages: readonly SendNowMessage[],
+    askHooksTrust?: AskHooksTrust,
+  ): PromptResult {
+    const known = this.turns.get(turnId);
+    if (known) {
+      return known.end ? { turnId, ended: known.end } : { turnId };
+    }
+    if (this.successor?.turnId === turnId) {
+      return { turnId };
+    }
+    if (this.successor !== null) {
+      throw new RpcError(DomainErrorCode.TurnInProgress, "a send-now is already waiting");
+    }
+    const reserve = (): Successor => ({
+      turnId,
+      messages,
+      steers: [],
+      cancelled: false,
+      ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
+    });
+    const running =
+      interrupt.kind === "turn"
+        ? !this.compacting && this.activeTurnId === interrupt.turnId
+        : this.compacting;
+    if (running && this.controller) {
+      this.successor = reserve();
+      this.controller.abort();
+      return { turnId };
+    }
+    // The target ended already: someone else's turn or compaction holds the slot.
+    this.assertIdle();
+    // Every text reached the history: a continuation turn (prompt "") if one
+    // still waits for its answer (a drain with no model round after it — a
+    // reload, the `max_iterations` or hook-stop drain), else nothing to send.
+    if (messages.every((m) => this.isDelivered(m.id)) && !this.awaitsAnswer()) {
+      throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
+    }
+    this.successor = reserve();
+    this.settleSuccessor();
+    return { turnId };
+  }
+
+  /**
+   * The history awaits an answer: STRUCTURAL, never by text (a `ChatMessage`
+   * has no id; texts repeat, and compaction rewrites them). Its last message is
+   * a user turn — whoever wrote it — and not the compaction summary this
+   * session installed (`compactionSummary`, by identity: `[system?, user]` is
+   * also a first turn's shape). An `assistant`, `tool` (a turn cancelled after
+   * a tool ran) or `system` tail, or an empty history, awaits nothing.
+   */
+  private awaitsAnswer(): boolean {
+    const last = this.session.messages.at(-1);
+    return last?.role === "user" && last !== this.compactionSummary;
+  }
+
+  /** The text of enqueue `id` is in the history (drained here, or accepted before a reload). */
+  private isDelivered(id: string): boolean {
+    return this.drained.has(id) || this.restoredIds.has(id);
+  }
+
+  /**
+   * Hand the freed slot to the reserved send-now, if any. Called LAST by the
+   * code that frees the slot (`finishTurn`, `compact`), in its synchronous
+   * stretch: no `await` — the steering window (`drive`'s INVARIANT) runs
+   * through here.
+   */
+  private settleSuccessor(): void {
+    const next = this.successor;
+    if (next === null || this.controller !== null) {
+      return;
+    }
+    if (this.closed || next.cancelled) {
+      this.endUnstarted(next);
+    } else {
+      this.startSuccessor(next);
+    }
+  }
+
+  /** Start the reserved turn: one path, like `prompt` past its checks. */
+  private startSuccessor(next: Successor): void {
+    const remaining = next.messages.filter((m) => !this.isDelivered(m.id));
+    const ours = new Set(remaining.map((m) => m.id));
+    // The cancelled turn's undrained steers carry over (foreign or resumed
+    // ones too, in order), minus ours — those are in the prompt — then the
+    // steers typed for the successor itself.
+    const seed: string[] = [];
+    const seedIds: (string | undefined)[] = [];
+    this.session.pendingSteering().forEach((text, i) => {
+      const id = this.steeringIds[i];
+      if (id !== undefined && ours.has(id)) {
+        return;
+      }
+      seed.push(text);
+      seedIds.push(id);
+    });
+    for (const steer of next.steers) {
+      seed.push(steer.text);
+      seedIds.push(steer.id);
+    }
+    // Delivered from here on: a late `session/enqueue` of one is a no-op success.
+    for (const id of [...next.messages.map((m) => m.id), ...next.steers.map((s) => s.id)]) {
+      this.enqueued.add(id);
+    }
+    // In the prompt = in the history: a later send-now never sends them again.
+    for (const id of ours) {
+      this.drained.add(id);
+    }
+    this.steeringIds = seedIds;
+    const controller = new AbortController();
+    this.controller = controller;
+    this.activeTurnId = next.turnId;
+    this.turns.set(next.turnId, {});
+    this.successor = null;
+    // A turn start, like `prompt`'s (task 1's `session/list` key).
+    this.lastChangeAt = this.now();
+    // "" when every text was injected meanwhile: a continuation turn answers them.
+    const prompt = remaining.map((m) => m.text).join("\n\n");
+    try {
+      this.emit({ type: "turn_start", turnId: next.turnId, prompt });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    void this.drive(
+      next.turnId,
+      this.session.send(prompt, controller.signal, {
+        steering: seed,
+        ...(next.askHooksTrust !== undefined ? { askHooksTrust: next.askHooksTrust } : {}),
+      }),
+      controller,
+    );
+    // As `prompt`: the turn key and the prompt reach the disk together.
+    this.persist();
+  }
+
+  /**
+   * A reserved send-now cancelled (or its session closed) before it started.
+   * The wire contract: a `turn_end` with no `turn_start` delivered NOTHING —
+   * neither its prompt nor a steer enqueued to it; its client restores them.
+   */
+  private endUnstarted(next: Successor): void {
+    this.successor = null;
+    const end: TurnEnd = { stopReason: "cancelled" };
+    this.turns.set(next.turnId, { end });
+    try {
+      this.emit({ type: "turn_end", turnId: next.turnId, ...end });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    this.persist();
   }
 
   /**
@@ -805,6 +1023,13 @@ export class HostedSession {
         if (event.type === "tool_start") {
           this.currentToolCallId = event.id;
           this.currentToolName = event.name;
+        }
+        if (event.type === "steer") {
+          // One per drained text, in queue order: the mirror's head is its id.
+          const id = this.steeringIds.shift();
+          if (id !== undefined) {
+            this.drained.add(id);
+          }
         }
         const update = eventToUpdate(event);
         if (update) {
@@ -865,6 +1090,8 @@ export class HostedSession {
       // and `persist` only captures — the I/O starts after the window.
       this.pending = undefined;
       this.persist();
+      // Last, in the same stretch: a reserved send-now takes the slot now.
+      this.settleSuccessor();
     }
   }
 
@@ -878,6 +1105,16 @@ export class HostedSession {
     if (this.enqueued.has(id)) {
       return;
     }
+    // Typed for a reserved send-now: it is that turn's first steer. Memory
+    // only until it starts (an unstarted successor delivered nothing).
+    const next = this.successor;
+    if (next !== null && next.turnId === turnId) {
+      const known = next.steers.some((s) => s.id === id) || next.messages.some((m) => m.id === id);
+      if (!known) {
+        next.steers.push({ id, text });
+      }
+      return;
+    }
     // Accepting it while idle would be a fake success: the next turn starts by
     // resetting the steering queue, so the text would be dropped silently. And
     // it must be THIS turn: a retry that outlived its turn must not steer the
@@ -887,6 +1124,7 @@ export class HostedSession {
     }
     this.enqueued.add(id);
     this.session.enqueue(text);
+    this.steeringIds.push(id);
     this.persist();
   }
 
@@ -930,6 +1168,8 @@ export class HostedSession {
       // The compaction's write (history replaced, or untouched on a failure)
       // with its clock: after the slot is free, so the record has no `turn`.
       this.persist();
+      // Last, in the same stretch: a reserved send-now takes the slot now.
+      this.settleSuccessor();
     }
   }
 
@@ -942,6 +1182,9 @@ export class HostedSession {
     // The cut is final BEFORE the emit — it names the barrier's own seq (the
     // next one) — so even a sink that reads the snapshot re-entrantly sees a
     // consistent new epoch, never the new epoch with the old history length.
+    // `compactedHistory` builds `[system?, summary, (skill call, result)*]`:
+    // its first user message is the summary.
+    this.compactionSummary = this.session.messages.find((m) => m.role === "user");
     this.epochStart = this.seq + 1;
     this.cut = {
       epoch: crypto.randomUUID(),
@@ -956,9 +1199,12 @@ export class HostedSession {
     }
   }
 
-  /** Abort the active turn or compaction (if any). */
+  /** Abort the active turn or compaction (if any), and a send-now waiting on it. */
   cancel(): void {
     this.controller?.abort();
+    if (this.successor) {
+      this.successor.cancelled = true;
+    }
   }
 
   /**
@@ -981,6 +1227,11 @@ export class HostedSession {
       } catch (error) {
         this.reportTurnError(error);
       }
+    }
+    // A send-now still waiting (its compaction unwinds asynchronously): ended
+    // unstarted, before `session_closed`.
+    if (this.successor) {
+      this.endUnstarted(this.successor);
     }
     try {
       this.emit({ type: "session_closed", reason: "closed" });

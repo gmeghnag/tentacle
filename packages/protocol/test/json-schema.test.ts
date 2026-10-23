@@ -115,6 +115,24 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1snapshot/result": [{ messages: [{ role: "user", content: "q" }] }],
   "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
   "methods/session~1enqueue/result": [{}],
+  "methods/session~1send_now/params": [
+    {
+      sessionId: "s",
+      turnId: "t2",
+      interrupt: { kind: "turn", turnId: "t1" },
+      messages: [{ id: "e", text: "now" }],
+    },
+    {
+      sessionId: "s",
+      turnId: "t2",
+      interrupt: { kind: "compaction" },
+      messages: [{ id: "e", text: "now" }],
+    },
+  ],
+  "methods/session~1send_now/result": [
+    { turnId: "t2" },
+    { turnId: "t2", ended: { stopReason: "cancelled" } },
+  ],
   "methods/session~1list/params": [{}, { limit: 50, cursor: "1:s" }],
   "methods/session~1list/result": [
     { sessions: [] },
@@ -360,7 +378,7 @@ describe("tagged-union shape (what codegen needs)", () => {
         expect(typeof ref === "string" && isRecord(defs[ref.replace("#/$defs/", "")])).toBe(true);
       }
     }
-    expect(unions).toBe(4);
+    expect(unions).toBe(5);
   });
 
   test("every $ref names a $def", () => {

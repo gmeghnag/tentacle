@@ -205,6 +205,7 @@ export class SessionHost {
       lastChangeAt: record.turn ? now : record.updatedAt,
       turns: reconciled.turns,
       enqueueIds: reconciled.enqueueIds,
+      cutShort: record.turn !== undefined,
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
     });
     this.sessions.set(record.id, hosted);

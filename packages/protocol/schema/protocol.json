@@ -993,6 +993,87 @@
       "required": ["type", "uri"],
       "type": "object"
     },
+    "SendNowMessage": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["id", "text"],
+      "type": "object"
+    },
+    "SendNowParams": {
+      "additionalProperties": true,
+      "properties": {
+        "interrupt": {
+          "$ref": "#/$defs/SendNowTarget"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/SendNowMessage"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["interrupt", "messages", "sessionId", "turnId"],
+      "type": "object"
+    },
+    "SendNowTarget": {
+      "discriminator": {
+        "mapping": {
+          "compaction": "#/$defs/SendNowTargetCompaction",
+          "turn": "#/$defs/SendNowTargetTurn"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SendNowTargetTurn"
+        },
+        {
+          "$ref": "#/$defs/SendNowTargetCompaction"
+        }
+      ]
+    },
+    "SendNowTargetCompaction": {
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "const": "compaction",
+          "type": "string"
+        }
+      },
+      "required": ["kind"],
+      "type": "object"
+    },
+    "SendNowTargetTurn": {
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "const": "turn",
+          "type": "string"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        }
+      },
+      "required": ["kind", "turnId"],
+      "type": "object"
+    },
     "SessionClosed": {
       "additionalProperties": true,
       "properties": {
@@ -1796,6 +1877,14 @@
       },
       "result": {
         "$ref": "#/$defs/ResolvePermissionResult"
+      }
+    },
+    "session/send_now": {
+      "params": {
+        "$ref": "#/$defs/SendNowParams"
+      },
+      "result": {
+        "$ref": "#/$defs/PromptResult"
       }
     },
     "session/snapshot": {

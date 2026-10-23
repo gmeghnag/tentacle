@@ -8,6 +8,7 @@
  * Methods other than `initialize` are refused until the handshake completes, and
  * an incompatible protocol major is rejected — security/versioning live here.
  */
+import type { AskHooksTrust } from "@tentacle/agent";
 import {
   type CancelParams,
   type CloseParams,
@@ -31,6 +32,7 @@ import {
   type PromptResult,
   type ResolvePermissionParams,
   type ResolvePermissionResult,
+  type SendNowParams,
   type SessionListParams,
   type SnapshotParams,
   type SnapshotResult,
@@ -170,6 +172,8 @@ export class Connection {
         return this.snapshot(params as SnapshotParams);
       case Method.Enqueue:
         return this.enqueue(params as EnqueueParams);
+      case Method.SendNow:
+        return this.sendNow(params as SendNowParams);
       case Method.ResolvePermission:
         return this.resolvePermission(params as ResolvePermissionParams);
       case Method.McpStatus:
@@ -316,12 +320,20 @@ export class Connection {
     // with a human behind this turn (docs/feat/hooks-project-trust.md). The
     // laptop decides; a rejection (an old laptop's `MethodNotFound`, a drop)
     // is "declined" in the runner.
-    return hosted.prompt(params.turnId, params.content, params.skill, (request, signal) =>
-      this.peer
-        .request(Method.HooksTrust, request, signal ? { signal } : undefined)
-        .then((result) => (result as HooksTrustResult).trusted === true),
-    );
+    return hosted.prompt(params.turnId, params.content, params.skill, this.askHooksTrust);
   }
+
+  // Acks at once, like `prompt`: the cancel and the new turn happen daemon-side
+  // in one step; the new turn is asked about hooks through THIS connection.
+  private sendNow(params: SendNowParams): PromptResult {
+    const hosted = this.lookup(params.sessionId);
+    return hosted.sendNow(params.turnId, params.interrupt, params.messages, this.askHooksTrust);
+  }
+
+  private readonly askHooksTrust: AskHooksTrust = (request, signal) =>
+    this.peer
+      .request(Method.HooksTrust, request, signal ? { signal } : undefined)
+      .then((result) => (result as HooksTrustResult).trusted === true);
 
   private onNotification(method: string, params: unknown): void {
     if (method === Notification.Cancel) {
