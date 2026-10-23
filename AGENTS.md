@@ -91,14 +91,16 @@ style suggestions.
 
 - Bun workspaces monorepo, **14 packages** (`agent`, `cli`, `client`, `config`,
   `core`, `daemon`, `exec`, `k8s`, `mcp`, `protocol`, `providers`, `tools`,
-  `transport`, `tui`), TypeScript strict, Biome. **Bun ≥ 1.4.3 required**
+  `transport`, `tui`) + **1 app** (`apps/mobile`, Expo / React Native, React
+  19 — the TUI stays on React 18; CI installs with
+  `--filter '!@tentacle/mobile'`), TypeScript strict, Biome. **Bun ≥ 1.4.3 required**
   (`engines.bun`; the compiled-binary worker path needs it — see the TODO entry).
   - `bun test` — full suite. **Baseline: all pass except the two opt-in
     skips** — live-k8s (`TENTACLE_K8S_SERVER`) and the real-socket keepalive
     test (`TENTACLE_SLOW_TESTS=1`, ~12 s); those skips are NOT failures. The total grows with every
     task, so no exact count is pinned here — it only goes stale; run it, and any
     *new* fail (or a non-opt-in skip) is yours.
-  - `bun run typecheck` — `tsc --noEmit`.
+  - `bun run typecheck` — `tsc --noEmit && tsc -p apps/mobile`.
   - `bun run lint` — `biome check .` (checks TS/JS/JSON; not Markdown).
   - `bun run check` — typecheck **then** lint **then** test, in order (a
     typecheck failure short-circuits before tests run). Green before "done".
