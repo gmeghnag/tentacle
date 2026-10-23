@@ -26,7 +26,7 @@ confirmation on the computer, and projects appear by themselves. Every client
 is a view of the session (terminal → phone → terminal, nothing lost); leaving
 detaches, idle sessions archive and are deleted only by hand. v1 includes
 end-to-end encrypted push with Approve / Deny under Face ID and a Live
-Activity. Open source (MIT), no third-party telemetry, TestFlight first and
+Activity. Open source (Apache-2.0), no third-party telemetry, TestFlight first and
 App Store-ready.
 
 **Repro (2026-10-23): the TS client is portable off Bun/Node.**
@@ -254,7 +254,9 @@ the "a new target adds only a transport" shape, AGENTS §7).
       never overwritten.
     - The daemon owns the title; a change is broadcast to every attached
       device (list, notifications, Live Activity, TUI picker show the same).
-18. **Open source: yes, same repo, same licence (MIT)** (owner, 2026-10-23).
+18. **Open source: yes, same repo, same licence** (owner, 2026-10-23; the
+    repo licence changed from MIT to Apache-2.0 the same day —
+    `docs/feat/license-apache.md`).
     The E2E promise is only verifiable with open code; the relay is already
     self-hostable; the app imports workspace packages directly. Rules from the
     first commit: no secret in the repo (the APNs key lives only on the relay
