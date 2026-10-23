@@ -112,6 +112,8 @@ export const TurnEndUpdateSchema = z.object({
   // exports as an anonymous cross-$def ref, which the exporter refuses.
   stopReason: StopReasonSchema,
   error: TurnErrorSchema.optional(),
+  /** As `TurnEnd.delivered`: on a `session/send_now` turn's end only. */
+  delivered: z.boolean().optional(),
 });
 
 /**

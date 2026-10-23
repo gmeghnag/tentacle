@@ -41,4 +41,14 @@ describe("AsyncQueue", () => {
     ).rejects.toThrow("boom");
     expect(seen).toEqual([1]);
   });
+
+  test("takeBuffered returns the unconsumed items once, also after a fail", async () => {
+    const q = new AsyncQueue<number>();
+    q.push(1);
+    q.push(2);
+    q.fail(new Error("refused"));
+    expect(q.takeBuffered()).toEqual([1, 2]);
+    expect(q.takeBuffered()).toEqual([]);
+    await expect(collect(q)).rejects.toThrow("refused");
+  });
 });

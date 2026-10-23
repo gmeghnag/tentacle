@@ -156,6 +156,13 @@ export const TurnEndSchema = z.object({
   stopReason: StopReasonSchema,
   /** Present on `stopReason: "error"`. */
   error: TurnErrorSchema.optional(),
+  /**
+   * Set by the daemon on the end of a `session/send_now` turn only: `true`
+   * if it started (its texts reached the history), `false` if it was
+   * cancelled before it started (it delivered nothing). Absent on other turns
+   * and from an older daemon.
+   */
+  delivered: z.boolean().optional(),
 });
 // Not `.strict()`: it also rides `turn_end`, whose members stay open (see updates.ts).
 export type TurnEnd = z.infer<typeof TurnEndSchema>;
@@ -341,8 +348,10 @@ export type EnqueueResult = z.infer<typeof EnqueueResultSchema>;
 // the text stays in the history, and the next prompt gets it answered. A successor
 // cancelled (or its session closed) before it started ends with a `turn_end`
 // and NO `turn_start`: it delivered nothing — neither its prompt nor any steer
-// enqueued to it; the client that owns the texts restores them. Additive (an
-// older daemon answers `MethodNotFound`).
+// enqueued to it; the client that owns the texts restores them. The turn's end
+// says which (`delivered`, in its `turn_end` and in a retried ack's `ended`):
+// a client never infers it from a `turn_start` it may not have seen (a resync
+// can hide one). Additive (an older daemon answers `MethodNotFound`).
 
 export const SendNowTargetSchema = z.discriminatedUnion("kind", [
   /** The turn the client sees running. */

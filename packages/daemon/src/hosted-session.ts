@@ -218,6 +218,11 @@ export class HostedSession {
   private activeTurnId: string | null = null;
   /** Every turn this session accepted, by client `turnId`, for its lifetime (retries). */
   private readonly turns = new Map<string, { end?: TurnEnd }>();
+  /**
+   * The turns `session/send_now` started (memory only): their end carries
+   * `delivered: true`. An unstarted one ends `delivered: false` (`endUnstarted`).
+   */
+  private readonly sendNowTurns = new Set<string>();
   /** Every accepted `enqueue` id, for its lifetime (retries). */
   private readonly enqueued = new Set<string>();
   /**
@@ -935,6 +940,7 @@ export class HostedSession {
     this.controller = controller;
     this.activeTurnId = next.turnId;
     this.turns.set(next.turnId, {});
+    this.sendNowTurns.add(next.turnId);
     this.successor = null;
     // A turn start, like `prompt`'s (task 1's `session/list` key).
     this.lastChangeAt = this.now();
@@ -964,7 +970,7 @@ export class HostedSession {
    */
   private endUnstarted(next: Successor): void {
     this.successor = null;
-    const end: TurnEnd = { stopReason: "cancelled" };
+    const end: TurnEnd = { stopReason: "cancelled", delivered: false };
     this.turns.set(next.turnId, { end });
     try {
       this.emit({ type: "turn_end", turnId: next.turnId, ...end });
@@ -1070,11 +1076,13 @@ export class HostedSession {
    * Synchronous, and idempotent per turn. State is set BEFORE the emit, so a
    * throwing sink can never leave the session "running" — nor skip the cut.
    */
-  private finishTurn(turnId: string, end: TurnEnd): void {
+  private finishTurn(turnId: string, outcome: TurnEnd): void {
     const record = this.turns.get(turnId);
     if (!record || record.end) {
       return;
     }
+    // A send-now turn that reached here started: its texts are in the history.
+    const end = this.sendNowTurns.has(turnId) ? { ...outcome, delivered: true } : outcome;
     record.end = end;
     if (this.activeTurnId === turnId) {
       this.controller = null;

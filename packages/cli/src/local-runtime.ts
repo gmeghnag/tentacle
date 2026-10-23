@@ -15,7 +15,12 @@
  * session still open on `dispose` — the same on every runtime (AGENTS §7).
  */
 import { type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
-import { type LinkStatus, RemoteClient, type RemoteSession } from "@tentacle/client";
+import {
+  type LinkStatus,
+  RemoteClient,
+  type RemoteSession,
+  type SessionEvent,
+} from "@tentacle/client";
 import type { TentacleConfig } from "@tentacle/config";
 import type {
   ChatMessage,
@@ -84,6 +89,10 @@ export const FLUSH_ON_EXIT_TIMEOUT_MS = 3000;
 
 /** A `SessionController` whose post-turn saves can be awaited. */
 export interface PersistingController extends SessionController {
+  /** `RemoteSession.enqueue`: `id` is the caller's key for the text (a `sendNow` cites it). */
+  enqueue(text: string, id?: string): Promise<void>;
+  /** `RemoteSession.sendNow`; the new turn is saved once it settles, like `send`'s. */
+  sendNow(...args: Parameters<RemoteSession["sendNow"]>): Promise<AsyncIterable<SessionEvent>>;
   /** Resolves once no save is pending (never rejects). */
   flushed(): Promise<void>;
 }
@@ -131,23 +140,32 @@ export function persistingController(
     });
   };
   const flushed = (): Promise<void> => running ?? Promise.resolve();
-  return {
-    async *send(prompt, signal, opts) {
-      // A turn that failed before its first event (the link is gone for good,
-      // the session closed) changed nothing: reading the history back would
-      // only fail and report a save failure for a complete file.
-      let changed = false;
-      try {
-        for await (const event of inner.send(prompt, signal, opts)) {
-          changed = true;
-          yield event;
-        }
+  // A turn that failed before its first event (the link is gone for good, the
+  // session closed, a send-now cancelled before it started) changed nothing:
+  // reading the history back would only fail and report a save failure for a
+  // complete file.
+  async function* saved(events: AsyncIterable<SessionEvent>): AsyncGenerator<SessionEvent> {
+    let changed = false;
+    try {
+      for await (const event of events) {
         changed = true;
-      } finally {
-        if (changed) {
-          flush();
-        }
+        yield event;
       }
+      changed = true;
+    } finally {
+      if (changed) {
+        flush();
+      }
+    }
+  }
+  return {
+    send(prompt, signal, opts) {
+      return saved(inner.send(prompt, signal, opts));
+    },
+    // A refusal rejects untouched (the caller falls back); the old turn is
+    // saved by its own `send`.
+    async sendNow(messages, target, signal) {
+      return saved(await inner.sendNow(messages, target, signal));
     },
     async compact() {
       const result = await inner.compact();
@@ -156,8 +174,8 @@ export function persistingController(
     },
     // Propagate the inner Promise (don't swallow it) so the TUI can reconcile
     // its optimistic entry on a delivery failure.
-    enqueue(text) {
-      return inner.enqueue(text);
+    enqueue(text, id) {
+      return inner.enqueue(text, id);
     },
     close() {
       void flushed().then(() => inner.close());
