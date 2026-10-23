@@ -470,3 +470,25 @@ daemon knows; the daemon never guesses by text or by shape.**
     so the send-now turn is installed at once and an enqueue in that window
     binds to the reserved turn, which the daemon can only fold.
 
+**As built (4b follow-up 1, Review 2026-10-23):**
+- *Item 8:* the field is `delivered?: boolean` on `TurnEnd`
+  (`protocol/src/session.ts`, mirrored in the `turn_end` update in
+  `updates.ts`) — the one shape both recovery paths share (the streamed
+  `turn_end` and the re-sent `send_now`'s `ended`, both ending in
+  `RemoteSession.finish`). The daemon sets `false` on a send-now turn
+  cancelled before it started, `true` once it started; it survives a daemon
+  restart (persisted with the cached turn end). An older daemon omits it → the
+  client keeps restore-the-texts as the fallback only.
+- *Item 9:* exact, no protocol change — the daemon answers a re-sent
+  `session/prompt` for a known turn with its cached outcome, and the client's
+  recovery re-sends it after the reset, so the old turn takes its REAL end
+  (e.g. `end_turn`). "A turn started by another client" cannot be a session's
+  active turn on this client, so it does not arise.
+- *Record version:* **no `DAEMON_RECORD_VERSION` bump** for `delivered`
+  (reviewer, verified by a repro on the pre-change parser; orchestrator
+  agreed). The older parser keeps the field, rewrites it and serves it on
+  retries — the record is NOT half-loaded; at worst an older daemon does not
+  add it to turns it closes itself → the fallback (a visible duplicate, never
+  a silent loss). A bump would make every older daemon refuse all records of
+  this build (sessions disappear on a downgrade). When task 2a bumps the
+  version to 2, `delivered` rides along with no migration.
