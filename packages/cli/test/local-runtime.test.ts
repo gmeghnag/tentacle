@@ -323,6 +323,73 @@ describe("createLocalRuntime (local over RPC)", () => {
     await expect(rejEnqueue?.("nope")).rejects.toThrow(/method not found/);
   });
 
+  // docs/feat/send-now-b.md: the send-now turn is saved like a `send` turn.
+  test("persistingController.sendNow: forwarded as is, saved once after the new turn settles", async () => {
+    const log: string[] = [];
+    let release = (): void => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const inner = {
+      sendNow: async (messages: readonly { id: string; text: string }[], target: string) => {
+        log.push(`sendNow:${messages.map((m) => `${m.id}=${m.text}`).join(",")}:${target}`);
+        return (async function* () {
+          yield { type: "user_message", text: "A" };
+          await gate;
+          yield { type: "turn_end", reason: "end_turn" };
+        })();
+      },
+      enqueue: async (text: string, id?: string) => {
+        log.push(`enqueue:${text}:${id}`);
+      },
+      snapshot: async () => {
+        log.push("snapshot");
+        return [{ role: "user", content: "A" }];
+      },
+    } as unknown as RemoteSession;
+    const saved: string[][] = [];
+    const ctl = persistingController(inner, (m) => saved.push(m.map((x) => String(x.content))));
+    await ctl.enqueue("A", "a");
+    const events = await ctl.sendNow([{ id: "a", text: "A" }], "turn");
+    const it = events[Symbol.asyncIterator]();
+    expect((await it.next()).value).toEqual({ type: "user_message", text: "A" });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(log).toEqual(["enqueue:A:a", "sendNow:a=A:turn"]); // no save mid-turn
+    release();
+    expect((await it.next()).value).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect((await it.next()).done).toBe(true);
+    await ctl.flushed();
+    expect(log.filter((l) => l === "snapshot")).toHaveLength(1);
+    expect(saved).toEqual([["A"]]);
+  });
+
+  test("persistingController.sendNow: a refusal and a cancel-before-start save nothing", async () => {
+    const refusal = Object.assign(new Error("unknown method: session/send_now"), { code: -32601 });
+    const cancelled = new Error("send-now cancelled before it started");
+    let snapshots = 0;
+    let next: "refuse" | "cancel" = "refuse";
+    const inner = {
+      sendNow: async () => {
+        if (next === "refuse") throw refusal;
+        return {
+          [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(cancelled) }),
+        };
+      },
+      snapshot: async () => {
+        snapshots += 1;
+        return [];
+      },
+    } as unknown as RemoteSession;
+    const ctl = persistingController(inner, () => {});
+    // The very error, untouched: the caller falls back on its code.
+    await expect(ctl.sendNow([{ id: "a", text: "A" }], "turn")).rejects.toBe(refusal);
+    next = "cancel";
+    const events = await ctl.sendNow([{ id: "a", text: "A" }], "turn");
+    await expect(drain(events)).rejects.toBe(cancelled);
+    await ctl.flushed();
+    expect(snapshots).toBe(0);
+  });
+
   // docs/feat/client-reattach-frontends.md §6: the post-turn save is detached
   // (a drop before its snapshot must not hold the turn open), serialized and
   // coalesced, and its failure is reported, never thrown.

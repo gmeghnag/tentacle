@@ -44,6 +44,8 @@ import {
   type OpenResult,
   PROTOCOL_VERSION,
   type PromptResult,
+  type SendNowMessage,
+  type SendNowTarget,
   type SessionListParams,
   type SessionListResult,
   type SessionUpdateParams,
@@ -494,6 +496,29 @@ export class RemoteClient {
       sessionId,
       Method.Prompt,
       { sessionId, turnId, content: [text(prompt)], ...(skill !== undefined ? { skill } : {}) },
+      "keyed",
+      onSent,
+    ).then((result) => result as PromptResult);
+  }
+
+  /**
+   * `session/send_now`: cancel `interrupt` and start turn `turnId` whose prompt
+   * is `messages` (contract: `protocol/src/session.ts`). Resolves with the new
+   * turn's ack, keyed by `turnId` like `prompt` (re-sent after a drop, run
+   * once); rejects with the daemon's refusal (`MethodNotFound` from an older
+   * daemon, `TurnInProgress`, `NoTurnRunning`). `onSent` as for `prompt`.
+   */
+  sendNow(
+    sessionId: string,
+    turnId: string,
+    interrupt: SendNowTarget,
+    messages: readonly SendNowMessage[],
+    onSent?: () => void,
+  ): Promise<PromptResult> {
+    return this.sessionCall(
+      sessionId,
+      Method.SendNow,
+      { sessionId, turnId, interrupt, messages },
       "keyed",
       onSent,
     ).then((result) => result as PromptResult);

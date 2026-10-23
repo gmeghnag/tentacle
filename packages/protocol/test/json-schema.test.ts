@@ -132,6 +132,8 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1send_now/result": [
     { turnId: "t2" },
     { turnId: "t2", ended: { stopReason: "cancelled" } },
+    { turnId: "t2", ended: { stopReason: "cancelled", delivered: false } },
+    { turnId: "t2", ended: { stopReason: "end_turn", delivered: true } },
   ],
   "methods/session~1list/params": [{}, { limit: 50, cursor: "1:s" }],
   "methods/session~1list/result": [
@@ -242,6 +244,7 @@ const FIXTURES: Record<string, Json[]> = {
     update({ type: "steer", text: "x" }),
     update({ type: "turn_start", turnId: "t", prompt: "go" }),
     update({ type: "turn_end", turnId: "t", stopReason: "cancelled" }),
+    update({ type: "turn_end", turnId: "t", stopReason: "cancelled", delivered: false }),
     update({ type: "turn_end", turnId: "t", stopReason: "error", error: { message: "boom" } }),
     update({
       type: "permission_request",

@@ -40,6 +40,11 @@ export class AsyncQueue<T> {
     this.wake();
   }
 
+  /** Remove and return the items not consumed yet (e.g. of a queue never iterated). */
+  takeBuffered(): T[] {
+    return this.items.splice(0);
+  }
+
   private wake(): void {
     const waiter = this.waiter;
     if (waiter) {

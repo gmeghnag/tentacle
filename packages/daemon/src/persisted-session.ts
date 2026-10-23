@@ -109,6 +109,9 @@ function turnEndProblem(end: unknown): string | null {
       return "has an invalid end error code";
     }
   }
+  if (end.delivered !== undefined && typeof end.delivered !== "boolean") {
+    return "has an invalid end delivered";
+  }
   return null;
 }
 

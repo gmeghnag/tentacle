@@ -7,7 +7,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { Agent } from "@tentacle/agent";
-import { type ModelProvider, PermissionBroker } from "@tentacle/core";
+import { type ModelProvider, PermissionBroker, allowAll } from "@tentacle/core";
 import {
   Connection,
   type DaemonSessionRecord,
@@ -1115,5 +1115,323 @@ describe("re-attach: liveness (docs/feat/client-reattach-frontends.md §4)", () 
     client.close();
     expect(time.pending()).toBe(0);
     expect(String(await turn)).toMatch(/connection closed/);
+  });
+});
+
+describe("re-attach: send-now across a drop (docs/feat/send-now-b.md)", () => {
+  test("T-B5: a drop after the ack — the replay hands over, the successor streams to its end, send_now runs once", async () => {
+    const runs = { n: 0 };
+    const model = new GatedModel([
+      [t("a"), { kind: "gate" }, t("b"), done],
+      [t("x"), done],
+    ]);
+    const target = new Target(makeHost(model, runs));
+    const dial = dialer(target);
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const old = drain(session.send("go"));
+    await until(() => model.waiting);
+    const events = await session.sendNow([{ id: "a", text: "A" }], "turn");
+    // Down: T1 unwinds, the successor runs and ends — all of it only in the ring.
+    dial.hold();
+    target.last?.close();
+    await tick();
+    model.open();
+    await until(() => model.calls === 2);
+    dial.release();
+    const nextEvents: SessionEvent[] = [];
+    const collect = (async () => {
+      for await (const e of events) nextEvents.push(e);
+    })();
+    expect(await outcome(collect, 2000)).toBe("completed");
+    expect(nextEvents).toEqual([
+      { type: "user_message", text: "A" },
+      { type: "text", delta: "x" },
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    const oldEvents = await old;
+    expect(oldEvents.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    expect(oldEvents.some((e) => e.type === "text" && e.delta === "x")).toBe(false);
+    // Re-sent on the new link (same key) and answered from the cache: one "A",
+    // two model calls.
+    expect(methods(target.frames[1] ?? [])).toContain("session/send_now");
+    const history = await client.snapshot("S");
+    expect(history.filter((m) => m.role === "user" && m.content === "A")).toHaveLength(1);
+    expect(model.calls).toBe(2);
+    client.close();
+  });
+
+  /**
+   * A host whose ring holds ~1 KB: a long outage forces a resync from a
+   * snapshot. Tools are approved daemon-side (`allowAll`): a tool runs while
+   * no client is attached to answer a prompt.
+   */
+  function tinyRingHost(model: ModelProvider): SessionHost {
+    return new SessionHost({
+      defaultCwd: CWD,
+      ringBytes: 1000,
+      createAgent: () => {
+        const permissions = new PermissionBroker();
+        const agent = new Agent({
+          model,
+          tools: new ToolRegistry().register(shellTool),
+          env: {
+            id: "e",
+            exec: async () => ({ stdout: "ok", stderr: "", exitCode: 0 }),
+            readFile: async () => "",
+            writeFile: async () => {},
+          },
+          requestPermission: allowAll,
+        });
+        return { agent, permissions };
+      },
+    });
+  }
+
+  test("T-B5b: both turns end behind a resync cut — the re-sent send_now's `ended` closes the successor", async () => {
+    const model = new GatedModel([[t("a"), { kind: "gate" }, t("b"), done], long(60)]);
+    const target = new Target(tinyRingHost(model));
+    const dial = dialer(target);
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const old = drain(session.send("go"));
+    await until(() => model.waiting);
+    const events = await session.sendNow([{ id: "a", text: "A" }], "turn");
+    dial.hold();
+    target.last?.close();
+    await tick();
+    model.open();
+    await until(() => model.calls === 2);
+    await new Promise((r) => setTimeout(r, 200)); // the successor's 60 deltas overflow the ring
+    dial.release();
+    const nextEvents: SessionEvent[] = [];
+    const collect = (async () => {
+      for await (const e of events) nextEvents.push(e);
+    })();
+    expect(await outcome(collect, 2000)).toBe("completed");
+    expect(nextEvents.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    const oldEvents = await old;
+    expect(oldEvents.some((e) => e.type === "history_reset")).toBe(true);
+    expect(oldEvents.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    expect(methods(target.frames[1] ?? [])).toContain("session/send_now");
+    client.close();
+  });
+
+  /**
+   * Drop after the send-now's ack; while down, T1 unwinds and the successor
+   * runs `successor` until its gate, overflowing the ring. Then reconnect
+   * (a resync) and open the gate: the successor's tail is "z". `esc`: the
+   * user cancels the successor first (after the resync), then the gate opens.
+   */
+  async function resyncMidSuccessor(successor: Step[][], opts: { esc?: boolean } = {}) {
+    const esc = new AbortController();
+    const model = new GatedModel([[t("a"), { kind: "gate" }, t("b"), done], ...successor]);
+    const target = new Target(tinyRingHost(model));
+    const dial = dialer(target);
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const old = drain(session.send("go"));
+    await until(() => model.waiting);
+    const events = await session.sendNow([{ id: "a", text: "A" }], "turn", esc.signal);
+    dial.hold();
+    target.last?.close();
+    await tick();
+    model.open();
+    await until(() => model.calls === 1 + successor.length && model.waiting);
+    dial.release();
+    await until(() => methods(target.frames[1] ?? []).includes("session/send_now"));
+    await new Promise((r) => setTimeout(r, 20));
+    if (opts.esc) {
+      esc.abort();
+      await until(() => methods(target.frames[1] ?? []).includes("session/cancel"));
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    model.open();
+    const nextEvents: SessionEvent[] = [];
+    const collect = (async () => {
+      for await (const e of events) nextEvents.push(e);
+    })();
+    const settled = await outcome(collect, 2000);
+    return { client, old, nextEvents, settled, frames: target.frames };
+  }
+  const tail = (n: number): Step[] => [...long(n).slice(0, -1), { kind: "gate" }, t("z"), done];
+
+  test("T-B5c: a resync cut before the successor committed a round — the reset goes to the old turn, the rest to the successor", async () => {
+    // The cut is still at T1's end: the snapshot shows T1's history, and the
+    // successor's prompt arrives as history only (no `turn_start` replayed).
+    const r = await resyncMidSuccessor([tail(60)]);
+    expect(r.settled).toBe("completed");
+    const oldEvents = await r.old;
+    expect(oldEvents.some((e) => e.type === "history_reset")).toBe(true);
+    expect(oldEvents.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    expect(oldEvents.some((e) => e.type === "text" && e.delta === "z")).toBe(false);
+    expect(r.nextEvents).toEqual([
+      { type: "text", delta: "z" },
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    r.client.close();
+  });
+
+  test("T-B5d: a resync cut past the hand-off (the successor runs at the cut) — the old turn ends, the reset and the rest go to the successor", async () => {
+    // The successor's round 1 is a tool call: its commit moves the cut, which
+    // then names the successor as the turn running.
+    const r = await resyncMidSuccessor([[shell("s1"), done], tail(60)]);
+    expect(r.settled).toBe("completed");
+    const oldEvents = await r.old;
+    expect(oldEvents.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    expect(oldEvents.some((e) => e.type === "history_reset")).toBe(false);
+    expect(oldEvents.some((e) => e.type === "text" && e.delta === "z")).toBe(false);
+    // The reset, then the replay past the cut (round 2's deltas), then the tail.
+    expect(r.nextEvents[0]?.type).toBe("history_reset");
+    expect(r.nextEvents.slice(1)).toEqual([
+      ...Array.from({ length: 60 }, (_, i) => ({ type: "text" as const, delta: `${i} ` })),
+      { type: "text", delta: "z" },
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    r.client.close();
+  });
+
+  /**
+   * T1 ends on its own while the link is dying (its `turn_end` never reaches
+   * the client), so the client's send-now takes the daemon's slot-free path:
+   * the successor starts at once. Then the link drops and a resync follows,
+   * with the cut past the hand-off: the old turn is left settling, and its
+   * prompt is re-sent on the new link. `onResentPrompt` runs right after that
+   * frame is forwarded (to kill the link while the call is in flight).
+   */
+  async function pastHandOff(
+    onResentPrompt?: (ctl: { target: Target; refuseDials: () => void }) => void,
+  ) {
+    const model = new GatedModel([
+      [t("a"), { kind: "gate" }, t("b"), done],
+      [shell("s1"), done],
+      tail(60),
+    ]);
+    const target = new Target(tinyRingHost(model));
+    const dial = dialer(target);
+    let refused = false;
+    const mute = { on: false };
+    const first = target.connect();
+    const client = new RemoteClient(
+      {
+        send: (data) => first.send(data),
+        close: () => first.close(),
+        setOnMessage: (h) => first.setOnMessage((data: string) => (mute.on ? undefined : h(data))),
+        setOnClose: (h) => first.setOnClose(h),
+      },
+      new PermissionBroker(),
+      undefined,
+      {
+        channelFactory: async () => {
+          if (refused) throw new ChannelError("unauthorized", "401");
+          return dial.factory();
+        },
+        random: () => 0,
+      },
+    );
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const old = drain(session.send("go")).catch((e: Error) => e);
+    await until(() => model.waiting);
+    mute.on = true; // from here the daemon's frames on this link are lost
+    model.open();
+    await until(() => target.host.get("S")?.running === false);
+    const sent = session.sendNow([{ id: "a", text: "A" }], "turn"); // T1 still live here
+    await until(() => model.calls === 3 && model.waiting);
+    dial.hold();
+    first.close();
+    await tick();
+    if (onResentPrompt) {
+      target.onFrame = (frame) => {
+        if (target.frames.length === 2 && frame.method === "session/prompt") {
+          target.onFrame = null;
+          onResentPrompt({
+            target,
+            refuseDials: () => {
+              refused = true;
+            },
+          });
+        }
+      };
+    }
+    dial.release();
+    return { client, old, sent, target, model };
+  }
+
+  test("T-B5e (follow-up 1): a resync cut past the hand-off — the old turn gets its REAL end (end_turn) from its re-sent prompt, not a guess", async () => {
+    const { client, old, sent, target, model } = await pastHandOff();
+    const events = await sent; // the re-sent send_now's cached ack
+    await until(() => methods(target.frames[1] ?? []).includes("session/prompt"));
+    await new Promise((r) => setTimeout(r, 20));
+    model.open();
+    const nextEvents: SessionEvent[] = [];
+    const collect = (async () => {
+      for await (const e of events) nextEvents.push(e);
+    })();
+    expect(await outcome(collect, 2000)).toBe("completed");
+    const oldEvents = await old;
+    if (oldEvents instanceof Error) throw oldEvents;
+    expect(oldEvents.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(oldEvents.some((e) => e.type === "history_reset")).toBe(false);
+    expect(nextEvents[0]?.type).toBe("history_reset");
+    expect(nextEvents.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    client.close();
+  });
+
+  // Review finding 3: a settling old turn always has its keyed `prompt` in
+  // flight, and `sessionCall` rejects that call on every terminal path, so the
+  // turn fails through its own call; no separate branch is needed.
+  test("follow-up 2: settling, then the link stops for good — the old turn fails through its in-flight prompt", async () => {
+    const r = await pastHandOff(({ target, refuseDials }) => {
+      refuseDials();
+      target.last?.close(); // the re-sent prompt's answer is lost with this link
+    });
+    const end = await Promise.race([
+      r.old,
+      new Promise((res) => setTimeout(() => res("hung"), 2000)),
+    ]);
+    expect(String(end)).toMatch(/rejected the credentials: 401/);
+    await r.sent.catch(() => undefined);
+    r.client.close();
+  });
+
+  test("follow-up 2: settling, then the daemon loses the session — the old turn fails, never re-run", async () => {
+    const fresh = new GatedModel([]);
+    const r = await pastHandOff(({ target }) => {
+      target.host = tinyRingHost(fresh); // a new daemon that never heard of S
+      target.last?.close();
+    });
+    const end = await Promise.race([
+      r.old,
+      new Promise((res) => setTimeout(() => res("hung"), 2000)),
+    ]);
+    expect(String(end)).toMatch(/lost the session/);
+    expect(fresh.calls).toBe(0);
+    await r.sent.catch(() => undefined);
+    r.client.close();
+  });
+
+  test("T-B5f (follow-up 1): the resync hid the successor's turn_start, then Esc — it delivered, so it ends cancelled (no restore, no duplicate)", async () => {
+    // As T-B5c (the cut is at T1's end: no `turn_start` reaches the client),
+    // then the user cancels the started successor.
+    const r = await resyncMidSuccessor([tail(60)], { esc: true });
+    expect(r.settled).toBe("completed"); // not "send-now cancelled before it started"
+    expect(r.nextEvents.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
+    expect(r.nextEvents.some((e) => e.type === "user_message")).toBe(false); // the start was hidden
+    const history = await r.client.snapshot("S");
+    expect(history.filter((m) => m.role === "user" && m.content === "A")).toHaveLength(1);
+    r.client.close();
   });
 });

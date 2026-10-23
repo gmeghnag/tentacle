@@ -1506,6 +1506,9 @@
     "TurnEnd": {
       "additionalProperties": true,
       "properties": {
+        "delivered": {
+          "type": "boolean"
+        },
         "error": {
           "$ref": "#/$defs/TurnError"
         },
@@ -1519,6 +1522,9 @@
     "TurnEndUpdate": {
       "additionalProperties": true,
       "properties": {
+        "delivered": {
+          "type": "boolean"
+        },
         "error": {
           "$ref": "#/$defs/TurnError"
         },

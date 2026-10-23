@@ -469,13 +469,19 @@ describe("session/send_now — cancel, close, retries, stale targets", () => {
     await tick(10);
     expect(t.c.started("T2")).toBe(false);
     expect(t.c.end("T1")).toMatchObject({ stopReason: "cancelled" });
-    expect(t.c.end("T2")).toEqual({ type: "turn_end", turnId: "T2", stopReason: "cancelled" });
+    // The end says it delivered nothing (follow-up 1): the stream and the retry.
+    expect(t.c.end("T2")).toEqual({
+      type: "turn_end",
+      turnId: "T2",
+      stopReason: "cancelled",
+      delivered: false,
+    });
     expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go"]);
     expect(t.hosted.running).toBe(false);
     // The retry reads the outcome; the slot is free for anyone.
     expect(t.hosted.sendNow("T2", turn("T1"), [msg("a", "A")])).toEqual({
       turnId: "T2",
-      ended: { stopReason: "cancelled" },
+      ended: { stopReason: "cancelled", delivered: false },
     });
     // Its steer was not accepted: a retry of it is honest (nothing runs).
     expectRpc(() => t.hosted.enqueue("y", "T2", "Y"), DomainErrorCode.NoTurnRunning);
@@ -487,7 +493,7 @@ describe("session/send_now — cancel, close, retries, stale targets", () => {
     t.hosted.close();
     expect(t.c.stream().slice(-3)).toEqual([
       { type: "turn_end", turnId: "T1", stopReason: "cancelled" },
-      { type: "turn_end", turnId: "T2", stopReason: "cancelled" },
+      { type: "turn_end", turnId: "T2", stopReason: "cancelled", delivered: false },
       { type: "session_closed", reason: "closed" },
     ]);
     t.gate.release();
@@ -505,7 +511,7 @@ describe("session/send_now — cancel, close, retries, stale targets", () => {
     hosted.sendNow("T2", { kind: "compaction" }, [msg("a", "A")]);
     hosted.close();
     expect(c.stream().slice(-2)).toEqual([
-      { type: "turn_end", turnId: "T2", stopReason: "cancelled" },
+      { type: "turn_end", turnId: "T2", stopReason: "cancelled", delivered: false },
       { type: "session_closed", reason: "closed" },
     ]);
     const count = c.updates.length;
@@ -526,10 +532,13 @@ describe("session/send_now — cancel, close, retries, stale targets", () => {
     );
     t.gate.release();
     await until(() => t.c.ended("T2"));
+    // A started send-now turn's end says it delivered; T1 (a prompt turn) carries no field.
     expect(t.hosted.sendNow("T2", turn("T1"), [msg("a", "A")])).toEqual({
       turnId: "T2",
-      ended: { stopReason: "end_turn" },
+      ended: { stopReason: "end_turn", delivered: true },
     });
+    expect(t.c.end("T2")).toMatchObject({ delivered: true });
+    expect(t.c.end("T1")).not.toHaveProperty("delivered");
     expect(t.c.stream().filter((u) => u.type === "turn_start" && u.turnId === "T2")).toHaveLength(
       1,
     );
@@ -633,6 +642,30 @@ describe("session/send_now — persistence", () => {
       { type: "turn_start", turnId: "T2", prompt: "B" },
     ]);
     expect(userTexts(restored.snapshotPage().messages)).toEqual(["go", "A", "B"]);
+  });
+
+  test("follow-up 1: `delivered` survives a restart (the retried ack reads it); a bad one is refused", async () => {
+    const store = new SpyStore();
+    const t = await blockedT1([call("c1", "block")], { store });
+    t.hosted.sendNow("T2", turn("T1"), [msg("a", "A")]);
+    t.hosted.cancel();
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    await t.hosted.persisted();
+    const last = store.saves.at(-1);
+    if (!last) throw new Error("no record");
+    const raw = JSON.parse(JSON.stringify(last));
+    const parsed = parseDaemonRecord(raw, (cwd) => cwd === CWD);
+    if (!parsed.ok) throw new Error(parsed.reason);
+    const restored = rig([], { store: new SpyStore() }).host.restore(parsed.record);
+    expect(restored.sendNow("T2", turn("T1"), [msg("a", "A")])).toEqual({
+      turnId: "T2",
+      ended: { stopReason: "cancelled", delivered: false },
+    });
+    for (const key of raw.turns) {
+      if (key.turnId === "T2") key.end.delivered = "no";
+    }
+    expect(parseDaemonRecord(raw, (cwd) => cwd === CWD)).toMatchObject({ ok: false });
   });
 });
 
