@@ -1,7 +1,7 @@
 {
   "name": "@tentacle/mobile",
   "private": true,
-  "license": "MIT",
+  "license": "Apache-2.0",
   "main": "index.ts",
   "dependencies": {
     "@tentacle/client": "workspace:*",
