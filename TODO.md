@@ -746,9 +746,17 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       mismatch there. Verify every path shows it (`connect` at start, a
       reconnect after the daemon was upgraded — the TUI link status —,
       `attach`, the app later). Order: BEFORE 2a (2a bumps the protocol to
-      11 — the first time it will happen). Not planned yet (slug
-      `version-mismatch-notice`). Type: feat · Size: S–M · Blast:
-      cross-module.
+      11 — the first time it will happen). **Planned 2026-10-24** (slug
+      `version-mismatch-notice`, plan in the gitignored plan folder, awaiting
+      the owner): re-sized M · cross-module; optional `clientInfo` on
+      `initialize` (malformed = absent, never fails `initialize`) + a
+      structured `data` on the `VersionMismatch` error; no `PROTOCOL_VERSION`
+      bump. Findings: `run` CAN mismatch with a dev build or
+      `TENTACLE_POD_BIN`; the TUI status line truncates the advice
+      (`StatusBar.tsx:90`) → also a notice on reconnect; `attach` installs via
+      a temp file + `mv` (overwriting a running binary fails with
+      `ETXTBSY`); constraint for 2a: `initialize` params must stay readable
+      by every daemon, or an `InvalidParams` would hide the mismatch.
 
 - [ ] **Permission prompt: "No, let's talk about it"** (owner, 2026-10-24) — a
       third answer next to Yes / Yes, always / No: it opens a text field; the
@@ -760,9 +768,16 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       optional text on the permission answer (additive, no
       `PROTOCOL_VERSION` bump); the text leaves the laptop like every answer,
       so it holds for every target. Order: after send-now 4d, before the app's
-      tasks (task 13's approvals inherit it). Not planned yet (slug
-      `permission-reply`). Type: feat · Size: S–M · Blast: load-bearing
-      (permission path, single broker).
+      tasks (task 13's approvals inherit it). **Planned 2026-10-24** (slug
+      `permission-reply`, awaiting the owner): re-sized M · load-bearing. A
+      rejection already does not end the turn (it becomes the call's `tool`
+      result and the model runs again — proved), so only the rejection's
+      content changes. Wire: `permission_request.reply?: {maxChars}` (the
+      DAEMON declares the request accepts a text — the client never guesses)
+      and `session/resolve_permission.message?` (≤ 2000 chars, no control
+      chars but `\n`/`\t`); no bump. Rejected: a new option kind (an older
+      client could no longer parse the whole blocking update); sending text
+      to an older daemon (it would drop the user's words silently).
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
