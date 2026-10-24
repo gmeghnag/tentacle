@@ -523,10 +523,27 @@ daemon knows; the daemon never guesses by text or by shape.**
   `/clear`).
 - *Daemon restart:* reloaded `[user "A"]` → `NoTurnRunning`, no turn, no model
   call; "A" stays unanswered until the next prompt (item 5).
-- *Open, for the owner — `endUnstarted` gap (from 4a):* when ANOTHER client's
+- *DECIDED (owner, 2026-10-24) — `endUnstarted` gap (from 4a):* when ANOTHER client's
   reserved send-now is cancelled before it starts, or another client presses
   Esc on my turn, my undrained queued texts are dropped with no notice.
   Reviewer: a separate `fix` task (S–M, load-bearing), not in 4c — it changes
   4a's contract. Options and repro in `docs/feat/send-now-c.md` (Execution
   follow-up 3).
+  **UX rule (owner, 2026-10-24): a queued message goes back to whoever wrote
+  it, on their own device, visibly — never re-sent by itself.** When another
+  device stops the turn (Esc) or cancels its send-now before it starts, the
+  writer's undelivered rows do not vanish: on the PC they go back into the
+  input field (joined, as send-now joins them) with a notice, e.g. "Turn
+  stopped from another device: your 2 queued messages are back in the
+  input"; on the phone they go back into the compose field with a banner.
+  The writer decides: Enter to send, or delete. Nothing changes for whoever
+  pressed Esc (the turn stops, as they wanted). Rejected: re-sending them
+  automatically as a new turn (it would override the other device's Esc);
+  keeping them queued for the next turn, whoever starts it (they would ride
+  someone else's prompt by surprise). The daemon tells the writer which ids
+  came back (a daemon fact, never inferred). **Built in task 5
+  (`queued-broadcast`)**, not as a separate fix: task 5 already broadcasts
+  the queue and redefines the fate of rows left at a turn's end (its
+  question 1) — one design, not two. Low urgency: it needs two clients on
+  one session (the app arrives at task 11).
 - *Debt:* some dispatch branching stays in `App.tsx` (listed in the 4c doc).

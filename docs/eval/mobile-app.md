@@ -436,6 +436,11 @@ the "a new target adds only a transport" shape, AGENTS §7).
     compaction (4d) and offline]; persist steer ids riding 2a's record bump so
     every client still recognises its own rows after a restart [yes]. Open:
     how many existing tests break on the new update (executor's first step).
+    **Added to task 5 (owner, 2026-10-24):** the 4a `endUnstarted` gap — a
+    queued message goes back to whoever wrote it, on their device, visibly,
+    never re-sent by itself (rule and rejected options in
+    `docs/eval/send-now.md` addendum, 4c as-built). This also settles the
+    fate of rows left at a turn's end (question 1) for the writer's side.
   - *Task 6 `tui-foreign-turns`* — **L** → 6a `cancel{turnId?}` (S ·
     load-bearing), 6b client (M · load-bearing), 6c TUI (M · cross-module,
     only after 4c, 4d and 5b are merged). "Mine vs foreign" is decided by the
