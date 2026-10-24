@@ -388,6 +388,14 @@ the "a new target adds only a transport" shape, AGENTS §7).
   cross-module, approved, runs FIRST) and **2a `session-archive`** (M–L ·
   load-bearing, approval pending). `session/list` gets a per-entry `cwd` in
   2a (task 1 nit).
+  **2a re-approved by the owner after the split (2026-10-24)**, with one
+  addition: a reconnect re-open must not revive a session another device
+  archived meanwhile (found by the task 7 planner; decisive test: A's link
+  drops, B closes, A reconnects → still archived, A told it ended). The
+  owner acknowledged that 2a bumps `PROTOCOL_VERSION` 10→11 (`close` /
+  `open` change meaning): an older tentacle (e.g. 0.1.0) fails `initialize`
+  with `VersionMismatch` against a new `serve` — clean, never mid-session —
+  so both ends are updated together.
 - **Task 4 (`send_now`) decisions taken during execution** — recorded in
   `docs/eval/send-now.md` (addendum) and in the task docs.
 
