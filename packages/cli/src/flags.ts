@@ -217,7 +217,8 @@ export function parseDuration(text: string): number {
 
 /** `serve`'s session bounds, as given on the command line (unset → `startDaemon`'s default). */
 export interface ServeLimits {
-  readonly sessionTtlMs?: number;
+  /** `null` = `--session-ttl never` (no idle expiry). */
+  readonly sessionTtlMs?: number | null;
   readonly adminCapMs?: number;
   readonly maxSessions?: number;
   readonly maxDetachedSessions?: number;
@@ -228,7 +229,7 @@ export interface ServeLimits {
 const MAX_WS_IDLE_TIMEOUT_SEC = 960;
 
 /**
- * `--session-ttl <dur>`, `--session-admin-cap <dur>`, `--max-sessions <n>`,
+ * `--session-ttl <dur>|never`, `--session-admin-cap <dur>`, `--max-sessions <n>`,
  * `--max-detached-sessions <n>`, `--ws-idle-timeout <dur>`. Throws on an
  * invalid value — or a flag given without one — so `serve` fails before binding.
  */
@@ -265,7 +266,7 @@ export function parseServeLimits(parsed: Pick<ParsedFlags, "flags" | "bools">): 
     throw new Error(`--ws-idle-timeout must be whole seconds, at most ${MAX_WS_IDLE_TIMEOUT_SEC}s`);
   }
   const limits = {
-    sessionTtlMs: duration("session-ttl"),
+    sessionTtlMs: parsed.flags.get("session-ttl") === "never" ? null : duration("session-ttl"),
     adminCapMs: duration("session-admin-cap"),
     maxSessions: count("max-sessions"),
     maxDetachedSessions: count("max-detached-sessions"),

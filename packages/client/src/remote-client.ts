@@ -48,6 +48,7 @@ import {
   type SendNowTarget,
   type SessionListParams,
   type SessionListResult,
+  type SessionTtlResult,
   type SessionUpdateParams,
   type SkillSummary,
   type SkillsListResult,
@@ -318,6 +319,24 @@ export class RemoteClient {
       return Promise.reject(new Error("not connected to the daemon"));
     }
     return this.call(this.peer, Method.SkillsList, {}).then((result) => result as SkillsListResult);
+  }
+
+  /**
+   * Read (no argument) or change this daemon's idle TTL (`daemon/session_ttl`);
+   * `"never"` = never. Resolves to the value now in force. A change lasts until
+   * the daemon restarts (`persisted: false`). An older daemon, a pod or the
+   * worker (no idle reaper) rejects with `MethodNotFound`. Not re-sent after a
+   * drop (a fresh read or set is the caller's call). Schema-validated by the peer.
+   */
+  sessionTtl(idleTtlMs?: number | "never"): Promise<SessionTtlResult> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(
+      this.peer,
+      Method.SessionTtl,
+      idleTtlMs === undefined ? {} : { idleTtlMs },
+    ).then((result) => result as SessionTtlResult);
   }
 
   /**

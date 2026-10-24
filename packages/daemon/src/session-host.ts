@@ -8,14 +8,17 @@
  */
 import { type Agent, Session } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
-import type {
-  McpServerStatus,
-  OpenParams,
-  SessionListParams,
-  SessionListResult,
-  SkillListEntry,
-  SkillSummary,
-  SkillsListResult,
+import {
+  JsonRpcErrorCode,
+  type McpServerStatus,
+  type OpenParams,
+  type SessionListParams,
+  type SessionListResult,
+  type SessionTtlParams,
+  type SessionTtlResult,
+  type SkillListEntry,
+  type SkillSummary,
+  type SkillsListResult,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import {
@@ -45,6 +48,16 @@ export type AgentFactory = (cwd: string) => {
   jobs?: JobController;
 };
 
+/**
+ * Read / change the idle TTL the reaper runs with (`daemon/session_ttl`). The
+ * reaper's owner (`serve`) implements it; `set` takes effect at once.
+ * `null` = never.
+ */
+export interface SessionTtlControl {
+  get(): number | null;
+  set(idleTtlMs: number | null): void;
+}
+
 export interface SessionHostOptions extends TurnErrorPolicy {
   readonly createAgent: AgentFactory;
   /** The confined working directory every hosted session runs against. */
@@ -64,6 +77,11 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * and `restore` reloads one. Pod daemons and the worker never pass it.
    */
   readonly persister?: SessionPersister;
+  /**
+   * `serve` only: the handle on its idle reaper's TTL. Absent (a pod daemon,
+   * the worker: no reaper) → `daemon/session_ttl` answers `MethodNotFound`.
+   */
+  readonly sessionTtl?: SessionTtlControl;
   /**
    * The skills a user can activate with `/name` on this daemon (config's
    * `slashSkills`), returned by `initialize` as its catalog. Absent → none.
@@ -105,6 +123,26 @@ export class SessionHost {
     this.opts = opts;
     this.skillCatalog = toSkillCatalog(opts.skills ?? []);
     this.skillList = toSkillList(opts.skillList ?? { skills: [], problems: [] });
+  }
+
+  /**
+   * `daemon/session_ttl`: set the idle TTL when `params` carries one, then
+   * report the value in force. Synchronous (two concurrent sets are ordered,
+   * the later wins). A change is not persisted.
+   */
+  sessionTtl(params: SessionTtlParams): SessionTtlResult {
+    const control = this.opts.sessionTtl;
+    if (!control) {
+      throw new RpcError(
+        JsonRpcErrorCode.MethodNotFound,
+        "session TTL is not configurable on this daemon",
+      );
+    }
+    // The wire says "never"; inside the daemon it is `null` (`ReapPolicy`).
+    if (params.idleTtlMs !== undefined) {
+      control.set(params.idleTtlMs === "never" ? null : params.idleTtlMs);
+    }
+    return { idleTtlMs: control.get() ?? "never", persisted: false };
   }
 
   /** This daemon's MCP servers and their live state; empty when it runs none. */

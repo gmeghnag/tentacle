@@ -111,7 +111,7 @@ Usage:
 Remote control:
   tentacle serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
                       [--tls-cert FILE --tls-key FILE]
-                      [--session-ttl 24h] [--session-admin-cap DUR] [--max-sessions 64]
+                      [--session-ttl 24h|never] [--session-admin-cap DUR] [--max-sessions 64]
                       [--max-detached-sessions 16] [--ws-idle-timeout 60s]
   tentacle connect ws(s)://host:port [--token T|--token-command CMD]
                       [--ca-cert FILE | --insecure-skip-tls-verify]

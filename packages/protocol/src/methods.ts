@@ -5,6 +5,7 @@
  * place keeps client and daemon provably in sync.
  */
 import type { z } from "zod";
+import { SessionTtlParamsSchema, SessionTtlResultSchema } from "./daemon.ts";
 import { HooksTrustParamsSchema, HooksTrustResultSchema } from "./hooks.ts";
 import { McpStatusParamsSchema, McpStatusResultSchema } from "./mcp.ts";
 import {
@@ -55,6 +56,7 @@ export const Method = {
   ModelStreamChunked: "model/streamChunked",
   McpStatus: "mcp/status",
   SkillsList: "skills/list",
+  SessionTtl: "daemon/session_ttl",
   /** Daemon → client: may this session run the project's hooks? */
   HooksTrust: "hooks/trust",
 } as const;
@@ -96,6 +98,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   },
   [Method.McpStatus]: { params: McpStatusParamsSchema, result: McpStatusResultSchema },
   [Method.SkillsList]: { params: SkillsListParamsSchema, result: SkillsListResultSchema },
+  [Method.SessionTtl]: { params: SessionTtlParamsSchema, result: SessionTtlResultSchema },
   [Method.HooksTrust]: { params: HooksTrustParamsSchema, result: HooksTrustResultSchema },
 };
 

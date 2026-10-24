@@ -180,6 +180,11 @@ const FIXTURES: Record<string, Json[]> = {
     },
   ],
   "methods/hooks~1trust/result": [{ trusted: true }, { trusted: false }],
+  "methods/daemon~1session_ttl/params": [{}, { idleTtlMs: 3600000 }, { idleTtlMs: "never" }],
+  "methods/daemon~1session_ttl/result": [
+    { idleTtlMs: "never", persisted: false },
+    { idleTtlMs: 86400000, persisted: false },
+  ],
   "methods/skills~1list/params": [{}],
   "methods/skills~1list/result": [
     { skills: [], problems: [], moreProblems: 0 },

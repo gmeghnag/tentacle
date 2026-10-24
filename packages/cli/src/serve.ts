@@ -11,34 +11,55 @@ import {
   DEFAULT_MAX_DETACHED_SESSIONS,
   DEFAULT_MAX_SESSIONS,
   DEFAULT_SESSION_TTL_MS,
-  DEFAULT_SWEEP_INTERVAL_MS,
   type ModelStreamChunkedSender,
   type ModelStreamSender,
   ProxyModelProvider,
+  type ReapPolicy,
+  type Reapable,
   SessionHost,
   SessionPersister,
+  type SessionTtlControl,
   acquireStoreLock,
   parseDaemonRecord,
   startReaper,
   startWsServer,
+  sweepIntervalFor,
 } from "@tentacle/daemon";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import type { ServeLimits } from "./flags.ts";
 import { buildAgent, skillCatalog, skillListing } from "./wiring.ts";
 
-/** Floor for the derived sweep period. */
-const MIN_SWEEP_INTERVAL_MS = 1000;
-
 /**
- * The reaper's period: never coarser than the TTL or the cap (a short
- * `--session-ttl` is honoured to within one TTL, not one minute), never finer
- * than 1 s (a `1ms` TTL must not spin the event loop).
+ * The host takes its `SessionTtlControl` at construction, before `listen`
+ * exists to own the reaper: this forwards to the one `listen` binds. Used
+ * unbound it is a programming error (it throws), never a silent no-op.
  */
-export function sweepIntervalFor(idleTtlMs: number, adminCapMs?: number): number {
-  return Math.max(
-    MIN_SWEEP_INTERVAL_MS,
-    Math.min(DEFAULT_SWEEP_INTERVAL_MS, idleTtlMs, adminCapMs ?? idleTtlMs),
-  );
+class BoundSessionTtl implements SessionTtlControl {
+  private impl: SessionTtlControl | undefined;
+
+  bind(impl: SessionTtlControl): void {
+    this.impl = impl;
+  }
+
+  get(): number | null {
+    return this.bound().get();
+  }
+
+  set(idleTtlMs: number | null): void {
+    this.bound().set(idleTtlMs);
+  }
+
+  private bound(): SessionTtlControl {
+    if (!this.impl) {
+      throw new Error("session TTL control used before the reaper was bound");
+    }
+    return this.impl;
+  }
+}
+
+/** A TTL for the audit line: `never`, or milliseconds. */
+function describeTtl(idleTtlMs: number | null): string {
+  return idleTtlMs === null ? "never" : `${idleTtlMs}ms`;
 }
 
 export interface ServeOptions extends ServeLimits {
@@ -93,8 +114,9 @@ export async function startDaemon(
       model: config.model,
       onError: options.onError ?? (() => {}),
     });
-    const sessionHost = await reloadedHost(config, options, store, persister);
-    return listen(sessionHost, options, async () => {
+    const ttl = new BoundSessionTtl();
+    const sessionHost = await reloadedHost(config, options, store, persister, ttl);
+    return listen(sessionHost, options, ttl, async () => {
       await persister?.stop();
       lock.release();
     });
@@ -111,6 +133,7 @@ async function reloadedHost(
   options: ServeOptions,
   store: JsonSessionStore,
   persister: SessionPersister,
+  sessionTtl: SessionTtlControl,
 ): Promise<SessionHost> {
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
@@ -129,6 +152,7 @@ async function reloadedHost(
     // A remote client gets an opaque turn error; the real one is logged here.
     ...(options.onError ? { onTurnError: options.onError } : {}),
     persister,
+    sessionTtl,
   });
   const notice = options.onNotice ?? (() => {});
   const { records, skipped } = await store.list();
@@ -172,6 +196,7 @@ async function reloadedHost(
 function listen(
   sessionHost: SessionHost,
   options: ServeOptions,
+  ttl: BoundSessionTtl,
   release: () => Promise<void>,
 ): ServeHandle {
   const server = startWsServer({
@@ -184,26 +209,80 @@ function listen(
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
   });
-  const idleTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
-  const stopReaper = startReaper(
-    sessionHost,
-    {
-      idleTtlMs,
-      ...(options.adminCapMs !== undefined ? { adminCapMs: options.adminCapMs } : {}),
+  // The reaper's policy has ONE owner: this function. A runtime change
+  // (`daemon/session_ttl`) swaps `policy` and re-arms the interval — nothing
+  // else caches the TTL. `null` = never (`--session-ttl never`).
+  let policy: ReapPolicy = {
+    idleTtlMs: options.sessionTtlMs === undefined ? DEFAULT_SESSION_TTL_MS : options.sessionTtlMs,
+    ...(options.adminCapMs !== undefined ? { adminCapMs: options.adminCapMs } : {}),
+  };
+  let stopReaper: (() => void) | undefined;
+  let stopped = false;
+  // The running reaper's period (null = none) and the ABSOLUTE time of its next
+  // sweep: set when it is armed (its first sweep may be sooner than a period)
+  // and moved on at each sweep.
+  let armedMs: number | null = null;
+  let nextSweepAt = 0;
+  const sweeping: Reapable = {
+    reapExpired: (p, onError) => {
+      nextSweepAt = Date.now() + (armedMs ?? 0);
+      return sessionHost.reapExpired(p, onError);
     },
-    {
-      sweepIntervalMs: options.sweepIntervalMs ?? sweepIntervalFor(idleTtlMs, options.adminCapMs),
+  };
+  /**
+   * Make the running reaper fit `policy`. The sweep reads the CURRENT policy
+   * itself, so a change that keeps the period needs no restart; restarting on
+   * every set would push the next sweep later each time and a client setting
+   * more often than the period would starve the TTL and the admin cap. Only
+   * a period change (or none ↔ some) restarts, and the new reaper's first
+   * sweep is `min(next due, now + new period)`: never later than the earliest
+   * due time, however many changes land before it runs.
+   */
+  const arm = (): void => {
+    // Nothing to sweep for (never, no cap) → no timer at all.
+    const wanted = stopped
+      ? null
+      : (options.sweepIntervalMs ?? sweepIntervalFor(policy.idleTtlMs, policy.adminCapMs));
+    if (wanted === armedMs) {
+      return;
+    }
+    stopReaper?.();
+    stopReaper = undefined;
+    const now = Date.now();
+    const pending = armedMs !== null;
+    armedMs = wanted;
+    if (wanted === null) {
+      return;
+    }
+    // From no timer: a full period. Else the sooner of what was already due and a new period.
+    const firstSweepInMs = pending ? Math.min(wanted, Math.max(0, nextSweepAt - now)) : wanted;
+    nextSweepAt = now + firstSweepInMs;
+    stopReaper = startReaper(sweeping, () => policy, {
+      sweepIntervalMs: wanted,
+      ...(pending ? { firstSweepInMs } : {}),
       ...(options.onAudit ? { onAudit: options.onAudit } : {}),
       ...(options.onError ? { onError: options.onError } : {}),
+    });
+  };
+  arm();
+  ttl.bind({
+    get: () => policy.idleTtlMs,
+    set: (idleTtlMs) => {
+      options.onAudit?.(
+        `session-ttl ${describeTtl(policy.idleTtlMs)} -> ${describeTtl(idleTtlMs)}`,
+      );
+      policy = { ...policy, idleTtlMs };
+      arm();
     },
-  );
+  });
   let stopping: Promise<void> | undefined;
   return {
     url: server.url,
     port: server.port,
     stop: () => {
       stopping ??= (async () => {
-        stopReaper();
+        stopped = true;
+        stopReaper?.();
         server.stop();
         await release();
       })();
