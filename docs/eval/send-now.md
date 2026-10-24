@@ -492,3 +492,41 @@ daemon knows; the daemon never guesses by text or by shape.**
   a silent loss). A bump would make every older daemon refuse all records of
   this build (sessions disappear on a downgrade). When task 2a bumps the
   version to 2, `delivered` rides along with no migration.
+
+**As built (4c, Review rounds 1–3, 2026-10-24 — pending the owner's OK to merge):**
+- *No client-side guessing (owner principle, applied overnight; owner to
+  confirm):* the 4b client's `RemoteSession.sendNow` sends even when its own
+  turn already ended (naming the last turn) and, while the first `send` is
+  still opening the session, waits for its id; refused locally only with no
+  daemon-side session or turn at all. The daemon decides: a turn with the
+  texts it did not get, a continuation, or `NoTurnRunning`. The TUI reads
+  `NoTurnRunning` as "the daemon already has everything": a notice, no
+  re-send, no restore into the input. Guesses survive only in the
+  older-daemon fallback (`MethodNotFound`), documented.
+- *Refusal reports what the daemon holds:* a refused `send_now`
+  (`TurnInProgress`, `CompactInProgress`) carries `error.data.held`
+  (`SendNowRefusalSchema`, `protocol/src/session.ts`) — the request's ids the
+  daemon will really keep: in the history, or queued for a turn that will
+  drain them (a reserved send-now NOT cancelled, a running turn NOT aborted,
+  not during a compaction). The client restores exactly the others. Additive:
+  no `PROTOCOL_VERSION` bump, JSON Schema regenerated; an older daemon sends
+  no `data` → the client restores all (a visible duplicate, never a loss); an
+  older client ignores it. Found by the review: restoring on every
+  `TurnInProgress` duplicated texts another client's send-now had carried
+  over; first `held` version also counted a queue whose only consumer was
+  cancelled → silent loss; both fixed and pinned by tests.
+- *Permission dialog:* the chord no longer dismisses it up front — if the
+  `send_now` is accepted the daemon withdraws the request (the dialog stays
+  visible for one round trip); if refused it stays answerable. Both
+  fallbacks (latched and first `MethodNotFound`) dismiss it like Ctrl+C.
+- *Fallback notice and `MethodNotFound` latch are per session* (reset on
+  `/clear`).
+- *Daemon restart:* reloaded `[user "A"]` → `NoTurnRunning`, no turn, no model
+  call; "A" stays unanswered until the next prompt (item 5).
+- *Open, for the owner — `endUnstarted` gap (from 4a):* when ANOTHER client's
+  reserved send-now is cancelled before it starts, or another client presses
+  Esc on my turn, my undrained queued texts are dropped with no notice.
+  Reviewer: a separate `fix` task (S–M, load-bearing), not in 4c — it changes
+  4a's contract. Options and repro in `docs/feat/send-now-c.md` (Execution
+  follow-up 3).
+- *Debt:* some dispatch branching stays in `App.tsx` (listed in the 4c doc).
