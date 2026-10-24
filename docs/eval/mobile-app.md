@@ -250,6 +250,14 @@ the "a new target adds only a transport" shape, AGENTS §7).
       3–6 word title in the language of the first message; on failure the
       current truncated title stays (never untitled). Optionally a cheaper
       model of the same provider, if configured.
+      **Amended by the owner 2026-10-24 (task 3 Review):** model titles are
+      OPT-IN — `model.autoTitle`, default `false`; off, no title model call
+      is ever made and the title is the first message. `model.titleModel`
+      works on every runtime, containers included: the pod's title call
+      reaches the laptop marked `purpose: "title"` and the laptop decides
+      whether and with which model to serve it. **Task 3 DONE 2026-10-24**
+      (`docs/feat/session-titles.md`, merged `4c8c86d`; Opus executed and
+      fixed, two fresh Opus reviews; daemon record v3, protocol stays 11).
     - Rename by hand in the app or the TUI (`/rename`); a user-chosen title is
       never overwritten.
     - The daemon owns the title; a change is broadcast to every attached
