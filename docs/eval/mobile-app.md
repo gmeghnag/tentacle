@@ -479,6 +479,12 @@ the "a new target adds only a transport" shape, AGENTS §7).
     "archived session revived by a reconnect" fix; order constraints 6c after
     4c/4d/5b, 7 after 6 and 2a.
 
+- **Permission prompt gets a third answer, "No, let's talk about it"**
+  (owner, 2026-10-24): the rejection plus the user's text reach the model and
+  the turn continues. Its own task (`TODO.md`, slug `permission-reply`),
+  after send-now 4d and before task 11, so task 13's approvals on the phone
+  offer it from the start.
+
 ### Dependencies (must land before / with the app)
 
 - **`send_now`** — `docs/eval/send-now.md` (decided, not built): the app's

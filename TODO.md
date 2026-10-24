@@ -716,6 +716,20 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       `docs/eval/send-now.md`. Type: eval → feat ×3 · Size: L → split · Blast:
       load-bearing.
 
+- [ ] **Permission prompt: "No, let's talk about it"** (owner, 2026-10-24) — a
+      third answer next to Yes / Yes, always / No: it opens a text field; the
+      model gets the rejection TOGETHER with the user's text (e.g. "Rejected
+      by the user: why do you need to delete build/? Try just bun run build
+      first") and the turn CONTINUES — the agent answers or changes plan, and
+      asks again if it still needs the tool. Unlike `Ctrl+X Ctrl+S` (stops the
+      turn, sends the queue), the text answers that one request. Shape: an
+      optional text on the permission answer (additive, no
+      `PROTOCOL_VERSION` bump); the text leaves the laptop like every answer,
+      so it holds for every target. Order: after send-now 4d, before the app's
+      tasks (task 13's approvals inherit it). Not planned yet (slug
+      `permission-reply`). Type: feat · Size: S–M · Blast: load-bearing
+      (permission path, single broker).
+
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
 Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked up).
