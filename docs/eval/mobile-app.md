@@ -475,6 +475,12 @@ the "a new target adds only a transport" shape, AGENTS §7).
     turns [yes]; progressive render of the latest history page [later, after
     measuring on WAN]; loop notes reappear as user messages after a reset —
     a small task after 6, before 12 [yes].
+    **Owner (2026-10-24): approved as ONE task, no split** (L ·
+    load-bearing); all five answers as recommended. On question 2 the owner
+    confirmed the meaning: Ctrl+C / Esc = "stop what is running", whoever
+    started it (a foreign turn too — the other device sees it interrupted);
+    `/exit` = "I leave, everything stays as it is" (the foreign turn goes on
+    daemon-side); only `serve` / `connect` sessions have foreign turns.
   - *Task 7 `connect-sessions`* — re-sized **L** (5 packages) → 7a / 7b, each
     M · cross-module [yes]. Quit = just close the socket (proved: the session
     stays live and re-attachable, the turn finishes daemon-side). New method
