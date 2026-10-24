@@ -53,6 +53,8 @@ describe("mid-turn task queue (steering)", () => {
 
     // The queued task is visible with its pending marker while the turn runs.
     expect(lastFrame() ?? "").toMatch(queuedRow("also do X"));
+    // …with the send-now keys beside it.
+    expect(lastFrame() ?? "").toContain("also do X · ctrl+x ctrl+s to send now");
 
     await delay(300); // let the turn end, steer, and run the injected round
     const all = frames.join("\n");

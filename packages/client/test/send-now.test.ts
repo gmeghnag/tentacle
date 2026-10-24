@@ -363,6 +363,127 @@ describe("RemoteSession.sendNow — the hand-off on the stream", () => {
   });
 });
 
+// Follow-up 1 of task c (owner principle: the client never guesses what the
+// daemon knows). With no live turn client-side the request still goes out,
+// naming the last-known turn: the daemon decides (a turn with the undelivered
+// texts, a continuation, or `NoTurnRunning`).
+describe("RemoteSession.sendNow — no client-side guess", () => {
+  test("CF-1: the old turn already ended client-side → send_now still reaches the daemon, interrupt = the last turn", async () => {
+    const d = scriptedDaemon(({ turnId }, notify) => {
+      notify({ type: "turn_start", turnId, prompt: "A" });
+      notify({ type: "turn_end", turnId, stopReason: "end_turn", delivered: true });
+      return { turnId };
+    });
+    const client = new RemoteClient(d.clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    const oldDone = drain(session.send("go"), []);
+    expect(await waitFor(() => d.promptTurn() !== "")).toBe(true);
+    d.notify({ type: "turn_end", turnId: d.promptTurn(), stopReason: "end_turn" });
+    expect(await oldDone).toBe("ended");
+
+    const newEvents: SessionEvent[] = [];
+    expect(await drain(await session.sendNow([{ id: "a", text: "A" }], "turn"), newEvents)).toBe(
+      "ended",
+    );
+    expect(d.sendNows).toHaveLength(1);
+    expect(d.sendNows[0]).toMatchObject({
+      interrupt: { kind: "turn", turnId: d.promptTurn() },
+      messages: [{ id: "a", text: "A" }],
+    });
+    expect(newEvents).toEqual([
+      { type: "user_message", text: "A" },
+      { type: "turn_end", reason: "end_turn" },
+    ]);
+    client.close();
+  });
+
+  test("CF-2: the daemon's NoTurnRunning (nothing to answer) is what rejects, not a local guess", async () => {
+    const d = scriptedDaemon(() => {
+      throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
+    });
+    const client = new RemoteClient(d.clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    const oldDone = drain(session.send("go"), []);
+    expect(await waitFor(() => d.promptTurn() !== "")).toBe(true);
+    d.notify({ type: "turn_end", turnId: d.promptTurn(), stopReason: "end_turn" });
+    expect(await oldDone).toBe("ended");
+    await expect(session.sendNow([{ id: "a", text: "A" }], "turn")).rejects.toMatchObject({
+      code: DomainErrorCode.NoTurnRunning,
+    });
+    expect(d.sendNows).toHaveLength(1);
+    // Refused: left as before — steering still names the last turn.
+    await session.enqueue("B", "b");
+    expect(d.enqueues.at(-1)).toMatchObject({ id: "b", turnId: d.promptTurn() });
+    client.close();
+  });
+
+  test("CF-3: the first send is still opening the session → the request waits for it and interrupts that turn", async () => {
+    const d = scriptedDaemon(({ turnId }, notify) => {
+      notify({ type: "turn_end", turnId: d.promptTurn(), stopReason: "cancelled" });
+      notify({ type: "turn_start", turnId, prompt: "A" });
+      notify({ type: "turn_end", turnId, stopReason: "end_turn", delivered: true });
+      return { turnId };
+    });
+    const client = new RemoteClient(d.clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    const oldDone = drain(session.send("go"), []); // runs up to the open's await
+    const newEvents: SessionEvent[] = [];
+    expect(await drain(await session.sendNow([{ id: "a", text: "A" }], "turn"), newEvents)).toBe(
+      "ended",
+    );
+    expect(await oldDone).toBe("ended");
+    expect(d.requests.filter((m) => m !== Method.Initialize)).toEqual([
+      Method.Open,
+      Method.Prompt,
+      Method.SendNow,
+    ]);
+    expect(d.sendNows[0]).toMatchObject({ interrupt: { kind: "turn", turnId: d.promptTurn() } });
+    expect(newEvents.at(0)).toEqual({ type: "user_message", text: "A" });
+    client.close();
+  });
+
+  test("CF-4: close() while the first send is still opening → sendNow rejects UnknownSession, nothing sent", async () => {
+    // Review finding 3 (mutation M-R1: no `closed` re-check after the open).
+    const d = scriptedDaemon(({ turnId }) => ({ turnId }));
+    const client = new RemoteClient(d.clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    void drain(session.send("go"), [], 300); // runs up to the open's await
+    const refused = session.sendNow([{ id: "a", text: "A" }], "turn");
+    session.close(); // during the open
+    await expect(refused).rejects.toMatchObject({ code: DomainErrorCode.UnknownSession });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(d.sendNows).toHaveLength(0);
+    client.close();
+  });
+
+  test("CF-5: a refusal's `data` (what the daemon holds) reaches the caller untouched", async () => {
+    const d = scriptedDaemon(() => {
+      throw new RpcError(DomainErrorCode.TurnInProgress, "a send-now is already waiting", {
+        held: ["a"],
+      });
+    });
+    const client = new RemoteClient(d.clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    void drain(session.send("go"), [], 300);
+    expect(await waitFor(() => d.promptTurn() !== "")).toBe(true);
+    await expect(
+      session.sendNow(
+        [
+          { id: "a", text: "A" },
+          { id: "b", text: "B" },
+        ],
+        "turn",
+      ),
+    ).rejects.toMatchObject({ code: DomainErrorCode.TurnInProgress, data: { held: ["a"] } });
+    client.close();
+  });
+});
+
 // Follow-up 1 (owner decision 2026-10-23): whether a send-now turn delivered
 // its texts is the daemon's fact (`delivered` on its end), never inferred from
 // a `turn_start` the client may not have seen. Absent (an older daemon): the

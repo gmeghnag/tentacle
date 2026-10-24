@@ -351,7 +351,9 @@ export type EnqueueResult = z.infer<typeof EnqueueResultSchema>;
 // enqueued to it; the client that owns the texts restores them. The turn's end
 // says which (`delivered`, in its `turn_end` and in a retried ack's `ended`):
 // a client never infers it from a `turn_start` it may not have seen (a resync
-// can hide one). Additive (an older daemon answers `MethodNotFound`).
+// can hide one). Additive (an older daemon answers `MethodNotFound`). A
+// refusal (`TurnInProgress`, `CompactInProgress`) says in `error.data` which
+// texts the daemon holds anyway (`SendNowRefusalSchema`): never inferred.
 
 export const SendNowTargetSchema = z.discriminatedUnion("kind", [
   /** The turn the client sees running. */
@@ -378,6 +380,21 @@ export type SendNowParams = z.infer<typeof SendNowParamsSchema>;
 
 /** The ack of the new turn: `PromptResultSchema` (`ended` only on a retry of an ended one). */
 export type SendNowResult = PromptResult;
+
+/**
+ * `error.data` of a refused `session/send_now` (`TurnInProgress`,
+ * `CompactInProgress`): which of the request's messages the daemon HOLDS — in
+ * the history, or queued in the running turn or the reserved send-now (which
+ * carries that queue over), so they share any queued text's fate. The others
+ * did not reach it: the client restores exactly those. Additive: an older
+ * daemon sends no `data` (the client then restores them all — a possible
+ * duplicate, never a loss); an older client ignores it.
+ */
+export const SendNowRefusalSchema = z.object({
+  /** Message ids, in request order. */
+  held: z.array(z.string()),
+});
+export type SendNowRefusal = z.infer<typeof SendNowRefusalSchema>;
 
 // --- session/list --------------------------------------------------------
 // The daemon's sessions, one page at a time (docs/feat/session-list.md). A

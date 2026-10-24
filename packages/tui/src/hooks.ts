@@ -100,6 +100,8 @@ export interface LineEditor extends EditorState {
   moveVertical(dir: -1 | 1, extend?: boolean): void;
   /** Replace the whole value (cursor defaults to the end). */
   set(value: string, cursor?: number): void;
+  /** Replace the value with `f(current value)` (cursor at the end): no stale draft. */
+  update(f: (value: string) => string): void;
   /** Clear to empty. */
   reset(): void;
 }
@@ -133,6 +135,21 @@ export function useLineEditor(): LineEditor {
     (value: string, cursor?: number) => setState(editorSet(value, cursor)),
     [],
   );
+  const update = useCallback(
+    (f: (value: string) => string) => setState((s) => editorSet(f(s.value))),
+    [],
+  );
   const reset = useCallback(() => setState(EMPTY_EDITOR), []);
-  return { ...state, insert, deleteBack, moveCursor, moveWord, moveLine, moveVertical, set, reset };
+  return {
+    ...state,
+    insert,
+    deleteBack,
+    moveCursor,
+    moveWord,
+    moveLine,
+    moveVertical,
+    set,
+    update,
+    reset,
+  };
 }
