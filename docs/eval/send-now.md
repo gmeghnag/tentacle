@@ -494,8 +494,8 @@ daemon knows; the daemon never guesses by text or by shape.**
   version to 2, `delivered` rides along with no migration.
 
 **As built (4c, Review rounds 1–3, 2026-10-24 — pending the owner's OK to merge):**
-- *No client-side guessing (owner principle, applied overnight; owner to
-  confirm):* the 4b client's `RemoteSession.sendNow` sends even when its own
+- *No client-side guessing (owner principle, applied overnight; CONFIRMED by
+  the owner 2026-10-24):* the 4b client's `RemoteSession.sendNow` sends even when its own
   turn already ended (naming the last turn) and, while the first `send` is
   still opening the session, waits for its id; refused locally only with no
   daemon-side session or turn at all. The daemon decides: a turn with the
