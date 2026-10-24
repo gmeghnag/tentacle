@@ -181,6 +181,24 @@ describe("selectExpired (pure rules)", () => {
     }
   });
 
+  test("idleTtlMs null (never): an idle session is kept; the admin cap still applies; attached never", () => {
+    // Mutation: `null` treated as 0 (`now - lastActiveAt >= (idleTtlMs ?? 0)`) → every idle row is reaped.
+    const never: ReapPolicy = { idleTtlMs: null };
+    const neverCap: ReapPolicy = { idleTtlMs: null, adminCapMs: 48 * H };
+    const rows: [SessionLiveness, number, ReapPolicy, ReapReason | null][] = [
+      [live({}), 999 * 24 * H, never, null],
+      [live({ busy: true }), 999 * 24 * H, never, null],
+      [live({}), 48 * H, neverCap, "admin_cap"],
+      [live({}), 48 * H - 1, neverCap, null],
+      [live({ busy: true }), 48 * H, neverCap, "admin_cap"],
+      [live({ attached: 1 }), 999 * H, neverCap, null],
+    ];
+    for (const [session, now, policy, want] of rows) {
+      const got = selectExpired([session], now, policy);
+      expect({ session, now, got: got[0]?.reason ?? null }).toEqual({ session, now, got: want });
+    }
+  });
+
   test("returns every expired session, by id", () => {
     const got = selectExpired(
       [live({ id: "a" }), live({ id: "b", attached: 1 }), live({ id: "c" })],
@@ -533,6 +551,56 @@ describe("startReaper (the loop)", () => {
     expect(audit).toEqual(["session-reaped x idle_ttl"]);
     stop();
     expect(cleared).toEqual([handle]);
+  });
+
+  test("firstSweepInMs: the first sweep on its own timer, then the interval; the policy is read per sweep; stop clears whichever is live", () => {
+    // Mutation: ignore `firstSweepInMs` (start the interval at once) → no timeout is set.
+    const handle = { unref: () => {} };
+    let first: { fn: () => void; ms: number } | undefined;
+    let tick: (() => void) | undefined;
+    let intervalMs: number | undefined;
+    const clearedTimeouts: unknown[] = [];
+    const clearedIntervals: unknown[] = [];
+    const seen: (number | null)[] = [];
+    let current: ReapPolicy = { idleTtlMs: 5 };
+    const host = {
+      reapExpired: (policy: ReapPolicy) => {
+        seen.push(policy.idleTtlMs);
+        return [];
+      },
+    };
+    const make = () =>
+      startReaper(host, () => current, {
+        sweepIntervalMs: 1000,
+        firstSweepInMs: 200,
+        setTimeout: (fn, ms) => {
+          first = { fn, ms };
+          return handle;
+        },
+        clearTimeout: (h) => clearedTimeouts.push(h),
+        setInterval: (fn, ms) => {
+          tick = fn;
+          intervalMs = ms;
+          return handle;
+        },
+        clearInterval: (h) => clearedIntervals.push(h),
+      });
+    const stopBefore = make();
+    expect(first?.ms).toBe(200);
+    expect(intervalMs).toBeUndefined(); // no interval until the first sweep
+    stopBefore(); // stopped before its first sweep: only the timeout is live
+    expect(clearedTimeouts).toEqual([handle]);
+    expect(clearedIntervals).toEqual([]);
+
+    const stop = make();
+    current = { idleTtlMs: null }; // read at the sweep, not captured at start
+    first?.fn();
+    expect(seen).toEqual([null]);
+    expect(intervalMs).toBe(1000); // then the regular interval
+    tick?.();
+    expect(seen).toEqual([null, null]);
+    stop();
+    expect(clearedIntervals).toEqual([handle]);
   });
 
   test("a sweep that throws is reported and the loop keeps going", () => {

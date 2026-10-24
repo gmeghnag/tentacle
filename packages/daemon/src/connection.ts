@@ -34,6 +34,7 @@ import {
   type ResolvePermissionResult,
   type SendNowParams,
   type SessionListParams,
+  type SessionTtlParams,
   type SnapshotParams,
   type SnapshotResult,
   type WireChatRequest,
@@ -183,6 +184,9 @@ export class Connection {
       // A read of the registry: does not attach this connection to anything.
       case Method.SessionList:
         return this.host.list(params as SessionListParams);
+      // Daemon-wide: reads/sets the reaper's TTL, attaches this connection to nothing.
+      case Method.SessionTtl:
+        return this.host.sessionTtl(params as SessionTtlParams);
       default:
         throw new RpcError(DomainErrorCode.NotInitialized, `unexpected method: ${method}`);
     }
