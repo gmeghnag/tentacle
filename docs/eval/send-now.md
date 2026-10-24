@@ -519,6 +519,13 @@ daemon knows; the daemon never guesses by text or by shape.**
   `send_now` is accepted the daemon withdraws the request (the dialog stays
   visible for one round trip); if refused it stays answerable. Both
   fallbacks (latched and first `MethodNotFound`) dismiss it like Ctrl+C.
+  **Owner OK (2026-10-24):** keep it visible until the daemon withdraws it —
+  dismissing it at once would guess the daemon accepts; on a refusal the
+  request would be left unanswered. Why the chord is used with a dialog open
+  at all (D3): to change course in one gesture — the turn stops, the request
+  is withdrawn with NO "no" sent to the model, the queued correction goes out
+  now — instead of answering "no" first and letting the model react to it
+  before it reads the correction.
 - *Fallback notice and `MethodNotFound` latch are per session* (reset on
   `/clear`).
 - *Daemon restart:* reloaded `[user "A"]` → `NoTurnRunning`, no turn, no model
