@@ -173,11 +173,18 @@ export class RemoteSession implements SessionStreamListener {
    * new turn's events: a `user_message` with the prompt the daemon actually
    * sent (none for a continuation, prompt ""), then the turn as `send` yields
    * it. REJECTS, with nothing changed, on a refusal: `MethodNotFound` (an
-   * older daemon), `TurnInProgress`, `NoTurnRunning` (also locally: no turn
-   * to interrupt, no session yet), `InvalidParams` (no messages). The events
-   * reject `Cancelled` if the turn was cancelled before it started: it
-   * delivered nothing, so the caller restores its texts. Enqueues keep binding
-   * to the old turn until it ends (the daemon carries them over).
+   * older daemon), `TurnInProgress`, `NoTurnRunning`, `InvalidParams` (no
+   * messages). The events reject `Cancelled` if the turn was cancelled before
+   * it started: it delivered nothing, so the caller restores its texts.
+   * Enqueues keep binding to the old turn until it ends (the daemon carries
+   * them over).
+   *
+   * Never a client-side guess (owner principle): with no live turn here (the
+   * old one already ended, e.g. its `turn_end` arrived first) the request
+   * still goes out, naming the last turn — the daemon decides: a turn with
+   * the texts it did not get, a continuation, or `NoTurnRunning`. While the
+   * first `send` is still opening the session it waits for the id. Refused
+   * locally only when there is no daemon-side session or turn at all.
    */
   async sendNow(
     messages: readonly SendNowMessage[],
@@ -190,9 +197,14 @@ export class RemoteSession implements SessionStreamListener {
     if (this.closed) {
       throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
     }
-    const id = this.id;
+    // The first send's open resumes first (it awaited first): its turn is
+    // installed and its prompt written before this request.
+    const id = this.id ?? (this.opening ? await this.opening : null);
+    if (this.closed) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
+    }
     const current = this.active && !this.active.ended ? this.active : null;
-    if (!id || (target === "turn" && (this.turnId === null || !current))) {
+    if (!id || (target === "turn" && this.turnId === null)) {
       throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
     }
     if (this.next) {

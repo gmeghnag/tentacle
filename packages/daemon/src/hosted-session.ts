@@ -53,6 +53,7 @@ import {
   type PermissionOutcome,
   type PromptResult,
   type SendNowMessage,
+  type SendNowRefusal,
   type SendNowTarget,
   type SessionUpdate,
   type SnapshotResult,
@@ -839,7 +840,10 @@ export class HostedSession {
       return { turnId };
     }
     if (this.successor !== null) {
-      throw new RpcError(DomainErrorCode.TurnInProgress, "a send-now is already waiting");
+      throw this.refusal(
+        new RpcError(DomainErrorCode.TurnInProgress, "a send-now is already waiting"),
+        messages,
+      );
     }
     const reserve = (): Successor => ({
       turnId,
@@ -858,7 +862,11 @@ export class HostedSession {
       return { turnId };
     }
     // The target ended already: someone else's turn or compaction holds the slot.
-    this.assertIdle();
+    try {
+      this.assertIdle();
+    } catch (error) {
+      throw error instanceof RpcError ? this.refusal(error, messages) : error;
+    }
     // Every text reached the history: a continuation turn (prompt "") if one
     // still waits for its answer (a drain with no model round after it — a
     // reload, the `max_iterations` or hook-stop drain), else nothing to send.
@@ -881,6 +889,29 @@ export class HostedSession {
   private awaitsAnswer(): boolean {
     const last = this.session.messages.at(-1);
     return last?.role === "user" && last !== this.compactionSummary;
+  }
+
+  /**
+   * A refused send-now, with the fact the caller must not guess
+   * (`SendNowRefusal`): which of its texts this daemon holds. In the history
+   * (`isDelivered`), or queued for a turn that WILL drain them — a reserved
+   * send-now not cancelled (it carries the queue over, `startSuccessor`), or
+   * a running turn not aborted. A queue whose only consumer is already
+   * cancelled or aborted is NOT held: `endUnstarted` / the next `prompt`
+   * drops it (debt, docs/feat/send-now-c.md follow-up 3), so the caller
+   * restores it.
+   */
+  private refusal(error: RpcError, messages: readonly SendNowMessage[]): RpcError {
+    const next = this.successor;
+    const turn = this.controller;
+    const live =
+      (next !== null && !next.cancelled) ||
+      (turn !== null && !turn.signal.aborted && !this.compacting);
+    const queued = new Set(live ? this.steeringIds : []);
+    const data: SendNowRefusal = {
+      held: messages.filter((m) => this.isDelivered(m.id) || queued.has(m.id)).map((m) => m.id),
+    };
+    return new RpcError(error.code, error.message, data);
   }
 
   /** The text of enqueue `id` is in the history (drained here, or accepted before a reload). */

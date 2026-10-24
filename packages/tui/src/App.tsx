@@ -2,6 +2,7 @@ import { type Agent, Session } from "@tentacle/agent";
 import { DISMISSED, type JobController, type PermissionBroker } from "@tentacle/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
+import { idleChord, stepChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import {
   type SlashSkill,
@@ -41,9 +42,33 @@ import {
 } from "./panel.ts";
 import { sanitizePasted, stepPaste } from "./paste.ts";
 import { permissionDetailLines, permissionShowsCwd, usePermissionBroker } from "./permission-ui.ts";
+import {
+  type QueuedMessage,
+  type QueuedRows,
+  addRow,
+  handOff,
+  onReject,
+  onSteer,
+  onTurnEnd,
+  rowTexts,
+  takeAll,
+  takeForSendNow,
+} from "./queued.ts";
 import { layoutTranscript, sliceLaid, stripAnsi, warmRowsChunk } from "./render-lines.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import { type Selection, extractSelection, isNonEmpty, rowSelectionRange } from "./selection.ts";
+import {
+  NOTHING_TO_SEND,
+  SEND_NOW_HINT,
+  SendNowErrorCode,
+  afterOldTurn,
+  errorCode,
+  fallbackNotice,
+  onSuccessorError,
+  planRefusal,
+  planSendNow,
+  withRestored,
+} from "./send-now.ts";
 import type { SkillsListView } from "./skills-panel.ts";
 import {
   type DisplayItem,
@@ -78,8 +103,24 @@ export interface SessionController {
   ): AsyncIterable<SessionEvent>;
   /** Compact the conversation (summarise + replace history); optional. */
   compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
-  /** Queue a message mid-turn (steering); optional. Local is sync, remote a Promise. */
-  enqueue?(text: string): void | Promise<void>;
+  /**
+   * Queue a message mid-turn (steering); optional. Local is sync, remote a
+   * Promise. `id`: the TUI's key for the text, which a `sendNow` cites.
+   */
+  enqueue?(text: string, id?: string): void | Promise<void>;
+  /**
+   * Send the queued messages now (`Ctrl+X Ctrl+S`, docs/feat/send-now-c.md):
+   * cancel the running turn and start one whose prompt is `messages`, in one
+   * daemon step. Resolves with the new turn's events (a `user_message` with
+   * the prompt the daemon sent; none for a continuation); rejects on a
+   * refusal, and the events reject `Cancelled` if it never started. Optional:
+   * without it the TUI stops the turn, then sends.
+   */
+  sendNow?(
+    messages: readonly QueuedMessage[],
+    target: "turn" | "compaction",
+    signal?: AbortSignal,
+  ): Promise<AsyncIterable<SessionEvent>>;
   /** End the session (its background jobs included) — `/clear` replaces it; optional. */
   close?(): void;
 }
@@ -155,6 +196,22 @@ const flattenPasted = (text: string): string => sanitizePasted(text).trim();
 
 const INPUT_PLACEHOLDER = "Type a task or /command";
 
+/**
+ * A send-now in progress (docs/feat/send-now-c.md). `atomic`: the request is
+ * out, or its new turn waits for the old turn's end. `fallback` (an older
+ * daemon, or no `sendNow`): what is left of the rows is sent once the old
+ * turn ends.
+ */
+interface PendingSendNow {
+  mode: "atomic" | "fallback";
+  /** The new turn's controller (`atomic`): Esc in the window cancels through it. */
+  readonly next: AbortController | null;
+  /** The new turn's events, once acknowledged. */
+  successor: AsyncIterable<SessionEvent> | null;
+  /** A resync replaced the transcript since the chord (read by the fallback only). */
+  resetSeen: boolean;
+}
+
 export function App({
   agent,
   createSession,
@@ -187,7 +244,22 @@ export function App({
   const [commandIndex, setCommandIndex] = useState(0);
   // Messages the user queued while a turn is running (steering), shown above
   // the input until the agent injects them (a `steer` event clears them FIFO).
-  const [queued, setQueued] = useState<readonly string[]>([]);
+  // The ref is the truth (a send-now reads it synchronously); the state renders.
+  const [queued, setQueued] = useState<QueuedRows>([]);
+  const rowsRef = useRef<QueuedRows>([]);
+  const setRows = useCallback((f: (rows: QueuedRows) => QueuedRows) => {
+    rowsRef.current = f(rowsRef.current);
+    setQueued(rowsRef.current);
+  }, []);
+  // Send-now (`Ctrl+X Ctrl+S`): the chord's state, the one in progress, the
+  // ids it ever took (a late enqueue refusal of one says nothing), and the
+  // per-session latches (reset when `/clear` opens a new session): the daemon
+  // answered `MethodNotFound`; the fallback notice shown.
+  const chordRef = useRef(idleChord);
+  const sendNowRef = useRef<PendingSendNow | null>(null);
+  const ownedIdsRef = useRef(new Set<string>());
+  const sendNowUnsupportedRef = useRef(false);
+  const fallbackNoticedRef = useRef(false);
   // Interactive tool-approval dialog + auto-accept (Shift+Tab), all self-contained.
   const permission = usePermissionBroker(permissions);
   // The open list panel (`/mcp`, `/skills`; docs/feat/skills-panel.md) or null.
@@ -228,7 +300,12 @@ export function App({
         : [{ kind: "assistant", text: WELCOME }],
   });
   const sessionRef = useRef<SessionController | null>(null);
+  // What Esc/Ctrl+C aborts: the streamed turn's controller — or, while a
+  // send-now's new turn is pending, that turn's (the old one is the daemon's
+  // to cancel).
   const abortRef = useRef<AbortController | null>(null);
+  // The controller of the turn being streamed, or null when none is.
+  const streamCtrlRef = useRef<AbortController | null>(null);
   // A quit asked for mid-turn: exit as soon as the turn settles (it is saved then).
   const exitPendingRef = useRef(false);
   const lastUserRef = useRef<string | null>(null);
@@ -242,7 +319,9 @@ export function App({
   const wakePendingRef = useRef(false);
   // Latest `run`, so the jobs subscription and the post-turn check can start a
   // continuation turn without re-subscribing or a circular callback dependency.
-  const runRef = useRef<((text: string, opts?: { continuation?: boolean }) => void) | null>(null);
+  const runRef = useRef<
+    ((text: string, opts?: { continuation?: boolean; fallback?: boolean }) => void) | null
+  >(null);
   // Build a session from the factory, or from the local agent by default.
   const makeSession = useCallback((): SessionController => {
     if (createSession) {
@@ -454,8 +533,185 @@ export function App({
     [closePanel, pushNotice],
   );
 
+  /** Put texts a send-now did not deliver back in the input field (after any draft), and say why. */
+  const restoreInput = useCallback(
+    (text: string, why: string) => {
+      if (text !== "") {
+        field.update((draft) => withRestored(draft, text));
+      }
+      pushNotice(why);
+    },
+    [field.update, pushNotice],
+  );
+
+  /** No turn streams any more: show the TUI idle (a send-now kept it running). */
+  const showIdle = useCallback(() => {
+    if (stateRef.current.running && !streamCtrlRef.current) {
+      stateRef.current = applySessionEvent(
+        stateRef.current,
+        { type: "turn_end", reason: "cancelled" },
+        Date.now(),
+      );
+    }
+  }, []);
+
+  /**
+   * A background job that exited mid-turn could not be seen by the turn that
+   * was running (the agent flushes exits at turn start). Now idle, fire a
+   * continuation so the agent reacts to it.
+   */
+  const wakeIfPending = useCallback(() => {
+    if (!wakePendingRef.current) {
+      return;
+    }
+    wakePendingRef.current = false;
+    setTimeout(() => {
+      if (!stateRef.current.running) {
+        runRef.current?.("", { continuation: true });
+      }
+    }, 0);
+  }, []);
+
+  // `streamTurn`, through a ref: it and `settleSendNow` call each other.
+  const streamTurnRef = useRef<
+    | ((
+        open: () => AsyncIterable<SessionEvent>,
+        controller: AbortController,
+        opts: { readonly successor?: boolean; readonly fallbackText?: string },
+      ) => Promise<void>)
+    | null
+  >(null);
+
+  /**
+   * The old turn is over (or was found over): settle the send-now waiting on
+   * it. `atomic`: its new turn starts, or, with the ack still on its way, the
+   * TUI keeps showing a running turn (the rows stay up). `fallback` (an older
+   * daemon: no facts to ask for): what is left of the rows is sent as a
+   * prompt, or restored after a resync.
+   * True when a turn goes on (do not end the TUI's turn).
+   */
+  const settleSendNow = useCallback(
+    (p: PendingSendNow): boolean => {
+      if (p.mode === "atomic") {
+        stateRef.current = startContinuation(stateRef.current, Date.now());
+        const events = p.successor;
+        if (events && p.next) {
+          sendNowRef.current = null;
+          wakePendingRef.current = false; // the new turn flushes the job exits at its start
+          void streamTurnRef.current?.(() => events, p.next, { successor: true });
+        }
+        return true;
+      }
+      sendNowRef.current = null;
+      const { text } = takeAll(rowsRef.current);
+      setRows(() => []);
+      const step = afterOldTurn({ text, resetSeen: p.resetSeen });
+      if (step === "send") {
+        wakePendingRef.current = false;
+        runRef.current?.(text, { fallback: true });
+        return true;
+      }
+      if (step === "restore") {
+        restoreInput(
+          text,
+          "_send-now (older daemon): the transcript was resynced — your queued messages are back in the input; check them before sending_",
+        );
+      }
+      return false;
+    },
+    [restoreInput, setRows],
+  );
+
+  /**
+   * Stream one turn's events into the transcript: a prompt's (`run`) or a
+   * send-now's new turn (`successor`, its rows hand off on its first event).
+   * `fallbackText`: the prompt is a fallback send-now's, restored if another
+   * prompt won the gap.
+   */
+  const streamTurn = useCallback(
+    async (
+      open: () => AsyncIterable<SessionEvent>,
+      controller: AbortController,
+      opts: { readonly successor?: boolean; readonly fallbackText?: string },
+    ) => {
+      streamCtrlRef.current = controller;
+      let handedOff = !opts.successor;
+      try {
+        for await (const event of open()) {
+          if (!handedOff && event.type !== "unsupported") {
+            handedOff = true;
+            setRows(handOff); // the sent texts are its prompt now
+          }
+          stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
+          // A queued message was just injected — drop it from the pending list.
+          if (event.type === "steer") {
+            setRows(onSteer);
+          }
+          const pending = sendNowRef.current;
+          if (event.type === "history_reset" && pending) {
+            pending.resetSeen = true;
+          }
+          if (event.type === "text") {
+            scheduleFlush();
+          } else {
+            flushNow();
+          }
+        }
+      } catch (error) {
+        const code = errorCode(error);
+        const failed = opts.successor
+          ? onSuccessorError(error, rowsRef.current)
+          : ({ kind: "fail" } as const);
+        if (failed.kind === "restore") {
+          setRows(() => []);
+          stateRef.current = applySessionEvent(
+            stateRef.current,
+            { type: "turn_end", reason: "cancelled" },
+            Date.now(),
+          );
+          restoreInput(failed.text, failed.notice);
+        } else {
+          stateRef.current = failTurn(stateRef.current, String(error), Date.now());
+          if (opts.fallbackText !== undefined && code === SendNowErrorCode.TurnInProgress) {
+            // Another client's prompt won the fallback's non-atomic gap.
+            restoreInput(
+              opts.fallbackText,
+              "_send-now: another prompt started first — your queued messages are back in the input_",
+            );
+          }
+        }
+      } finally {
+        if (streamCtrlRef.current === controller) {
+          streamCtrlRef.current = null;
+        }
+        // Only this turn's: a send-now's new turn installed its own.
+        if (abortRef.current === controller) {
+          abortRef.current = null;
+        }
+        const pending = sendNowRef.current;
+        // A quit asked for mid-turn: the turn has settled (and was saved by the
+        // session's own `finally`), so exit now — and wake nothing. A send-now's
+        // new turn then runs daemon-side unobserved, as any turn after a quit.
+        if (exitPendingRef.current) {
+          sendNowRef.current = null;
+          setRows(onTurnEnd);
+          flushNow();
+          exit();
+        } else if (!(pending && settleSendNow(pending))) {
+          setRows(onTurnEnd); // the turn is over; nothing stays queued
+          flushNow();
+          wakeIfPending();
+        } else {
+          flushNow();
+        }
+      }
+    },
+    [flushNow, scheduleFlush, exit, restoreInput, setRows, settleSendNow, wakeIfPending],
+  );
+  streamTurnRef.current = streamTurn;
+
   const run = useCallback(
-    async (text: string, opts?: { continuation?: boolean; skill?: string }) => {
+    async (text: string, opts?: { continuation?: boolean; skill?: string; fallback?: boolean }) => {
       const session = sessionRef.current;
       if (!session) {
         return;
@@ -474,50 +730,136 @@ export function App({
         : startTurn(stateRef.current, text, Date.now());
       setScrollOffset(0);
       flushNow();
-      try {
-        const sendOpts = opts?.skill !== undefined ? { skill: opts.skill } : undefined;
-        for await (const event of session.send(
-          continuation ? "" : text,
-          controller.signal,
-          sendOpts,
-        )) {
-          stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
-          // A queued message was just injected — drop it from the pending list.
-          if (event.type === "steer") {
-            setQueued((q) => q.slice(1));
-          }
-          if (event.type === "text") {
-            scheduleFlush();
-          } else {
-            flushNow();
-          }
-        }
-      } catch (error) {
-        stateRef.current = failTurn(stateRef.current, String(error), Date.now());
-      } finally {
-        abortRef.current = null;
-        setQueued([]); // the turn is over; nothing stays queued
-        flushNow();
-        // A quit asked for mid-turn: the turn has settled (and was saved by the
-        // session's own `finally`), so exit now — and wake nothing.
-        if (exitPendingRef.current) {
-          exit();
-        } else if (wakePendingRef.current) {
-          // A background job that exited mid-turn could not be seen by the turn
-          // that was running (the agent flushes exits at turn start). Now idle,
-          // fire a continuation so the agent reacts to it.
-          wakePendingRef.current = false;
-          setTimeout(() => {
-            if (!stateRef.current.running) {
-              runRef.current?.("", { continuation: true });
-            }
-          }, 0);
-        }
-      }
+      const sendOpts = opts?.skill !== undefined ? { skill: opts.skill } : undefined;
+      await streamTurn(
+        () => session.send(continuation ? "" : text, controller.signal, sendOpts),
+        controller,
+        opts?.fallback ? { fallbackText: text } : {},
+      );
     },
-    [flushNow, scheduleFlush, exit],
+    [flushNow, streamTurn],
   );
   runRef.current = run;
+
+  /** The fallback's notice, once per App (it does not repeat on later chords). */
+  const noticeFallback = useCallback(
+    (who: "daemon" | "session") => {
+      if (!fallbackNoticedRef.current) {
+        fallbackNoticedRef.current = true;
+        pushNotice(fallbackNotice(who));
+      }
+    },
+    [pushNotice],
+  );
+
+  /**
+   * `Ctrl+X Ctrl+S`: send my queued rows now (docs/feat/send-now-c.md). The
+   * decisions are `send-now.ts`'s; this executes them. False: nothing to do
+   * (the key changes nothing, e.g. the permission dialog stays).
+   */
+  const sendNow = useCallback((): boolean => {
+    const ctrl = sessionRef.current;
+    const plan = planSendNow({
+      hasQueued: rowsRef.current.some((r) => r.state === "queued"),
+      running: stateRef.current.running && streamCtrlRef.current !== null,
+      pending: sendNowRef.current !== null,
+      canSendNow: ctrl?.sendNow !== undefined,
+      latchedUnsupported: sendNowUnsupportedRef.current,
+    });
+    if (plan === "none" || !ctrl) {
+      return false;
+    }
+    const taken = takeForSendNow(rowsRef.current);
+    setRows(() => taken.rows);
+    for (const m of taken.messages) {
+      ownedIdsRef.current.add(m.id);
+    }
+    if (plan === "fallback" || !ctrl.sendNow) {
+      // The fallback stops the turn itself, for sure: like Ctrl+C, dismissed
+      // (not denied) — the turn's cancel settles the ask.
+      if (permission.pending) {
+        permission.answer(DISMISSED);
+      }
+      sendNowRef.current = { mode: "fallback", next: null, successor: null, resetSeen: false };
+      noticeFallback(ctrl.sendNow ? "daemon" : "session");
+      streamCtrlRef.current?.abort();
+      return true;
+    }
+    // An open permission dialog stays: an accepted send-now aborts the turn
+    // daemon-side, which withdraws the ask (the dialog closes, nothing is
+    // sent); a refused one leaves the turn — and its ask — to the user.
+    // The new turn's controller from now on: Esc in the window cancels it (the
+    // daemon already cancels the old one; a second abort of it sends nothing).
+    const next = new AbortController();
+    const pending: PendingSendNow = { mode: "atomic", next, successor: null, resetSeen: false };
+    sendNowRef.current = pending;
+    abortRef.current = next;
+    ctrl.sendNow(taken.messages, "turn", next.signal).then(
+      (events) => {
+        if (sendNowRef.current !== pending) {
+          return; // settled otherwise (a quit)
+        }
+        pending.successor = events;
+        if (!streamCtrlRef.current) {
+          settleSendNow(pending); // the old turn is already over
+          flushNow();
+        }
+      },
+      (error: unknown) => {
+        if (sendNowRef.current !== pending) {
+          return;
+        }
+        const old = streamCtrlRef.current;
+        if (abortRef.current === next) {
+          abortRef.current = old;
+        }
+        const step = planRefusal(error, rowsRef.current, old !== null);
+        if (step.kind !== "fallback") {
+          sendNowRef.current = null;
+          setRows(() => step.rows);
+          if (!old) {
+            showIdle();
+            wakeIfPending();
+          }
+          if (step.kind === "restore") {
+            restoreInput(step.text, step.notice);
+          } else {
+            pushNotice(NOTHING_TO_SEND);
+          }
+          return;
+        }
+        pending.mode = "fallback";
+        sendNowUnsupportedRef.current = true;
+        noticeFallback("daemon");
+        if (old) {
+          // As the latched fallback: it stops the turn itself, so an open
+          // dialog (that turn's ask) is dismissed — not denied — at once; an
+          // older daemon may never withdraw it. `answer` acts on whatever is
+          // pending NOW (a no-op when nothing is), never on a stale render.
+          permission.answer(DISMISSED);
+          old.abort();
+          return; // its end settles the send-now
+        }
+        if (!settleSendNow(pending)) {
+          showIdle();
+          wakeIfPending();
+        }
+        flushNow();
+      },
+    );
+    return true;
+  }, [
+    flushNow,
+    noticeFallback,
+    permission.answer,
+    permission.pending,
+    pushNotice,
+    restoreInput,
+    setRows,
+    settleSendNow,
+    showIdle,
+    wakeIfPending,
+  ]);
 
   const handleCommand = useCallback(
     (raw: string): void => {
@@ -565,6 +907,9 @@ export function App({
           // fresh one starts (decision D3).
           sessionRef.current?.close?.();
           sessionRef.current = makeSession();
+          // The send-now latches are per session: the new one asks (and says) afresh.
+          sendNowUnsupportedRef.current = false;
+          fallbackNoticedRef.current = false;
           stateRef.current = initialState;
           setExpandAll(false);
           setScrollOffset(0);
@@ -703,16 +1048,20 @@ export function App({
       if (stateRef.current.running) {
         const ctrl = sessionRef.current;
         if (ctrl?.enqueue) {
-          setQueued((q) => [...q, text]); // optimistic (responsive UX)
+          // The row's id is the enqueue key: a send-now names exactly this row.
+          const id = crypto.randomUUID();
+          setRows((rows) => addRow(rows, text, id)); // optimistic (responsive UX)
           // enqueue is sync (local) or a Promise (worker/pod/remote). On a
           // reject (e.g. MethodNotFound from an older remote daemon, or a
           // transport drop) the entry will never get a `steer` echo, so drop
           // it — otherwise it masks a send that never happened. `Promise.resolve`
           // normalises the sync case (it never rejects → no local behaviour change).
-          // Remove ONE entry (the list is count-based, like the FIFO removal on
-          // `steer`); which label is cosmetic.
-          Promise.resolve(ctrl.enqueue(text)).catch((error: unknown) => {
-            setQueued((q) => (q.length > 0 ? q.slice(0, -1) : q));
+          Promise.resolve(ctrl.enqueue(text, id)).catch((error: unknown) => {
+            const res = onReject(rowsRef.current, id, ownedIdsRef.current);
+            if (!res.notify) {
+              return; // a send-now took it: its text travels with the send-now
+            }
+            setRows(() => res.rows);
             const reason = error instanceof Error ? error.message : String(error);
             pushNotice(`_message not queued: ${reason}_`);
           });
@@ -721,7 +1070,7 @@ export function App({
       }
       void run(text);
     },
-    [handleCommand, pushNotice, run, field.reset],
+    [handleCommand, pushNotice, run, field.reset, setRows],
   );
 
   // All line editing lives in `useLineEditor` (pure `editor.ts` ops), so no
@@ -816,6 +1165,18 @@ export function App({
     // prompt showing). Checked first so it never reaches the palette's Tab.
     if (key.tab && key.shift) {
       permission.toggleAutoApprove();
+      return;
+    }
+    // The `Ctrl+X Ctrl+S` chord (send the queued messages now): before the
+    // permission dialog, so it works while one is up (D3). A key that breaks
+    // the chord goes on below unchanged.
+    const chord = stepChord(chordRef.current, char, key, Date.now());
+    chordRef.current = chord.state;
+    if (chord.action === "consumed") {
+      return;
+    }
+    if (chord.action === "sendNow") {
+      sendNow();
       return;
     }
     // While the permission dialog is up, keys drive it (nothing else). Arrows
@@ -1164,7 +1525,7 @@ export function App({
                 label={st.reasoning ? "thinking…" : "working…"}
               />
             ) : null}
-            {st.running ? <QueuedMessages queued={queued} /> : null}
+            {st.running ? <QueuedMessages queued={rowTexts(queued)} hint={SEND_NOW_HINT} /> : null}
             {listView ? (
               <ListPanel view={listView} columns={columns} />
             ) : (

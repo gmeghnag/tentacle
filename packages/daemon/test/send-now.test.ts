@@ -1020,3 +1020,136 @@ describe("session/send_now — the queued-id mirror (review F2)", () => {
     expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go", "A", "B", "X"]);
   });
 });
+
+// send-now-c follow-up 2 (owner principle: the client never guesses what the
+// daemon knows). A refused send-now (`TurnInProgress`, `CompactInProgress`)
+// reports in `error.data.held` which of the caller's texts the daemon holds —
+// in the history, or queued in the live turn / the reserved send-now that
+// carries them — so the client restores exactly the others. Each case also
+// checks the FATE the report claims.
+describe("session/send_now — a refusal reports what the daemon holds", () => {
+  /** The refusal `fn` throws: its code and data. */
+  const refusal = (fn: () => unknown): { code: unknown; data: unknown } => {
+    try {
+      fn();
+    } catch (error) {
+      if (error instanceof RpcError) return { code: error.code, data: error.data };
+      throw error;
+    }
+    throw new Error("not refused");
+  };
+  /** T1 drains "A" (id a) at its round-2 boundary and ends; then T2 blocks in its tool. */
+  async function t1DoneT2Blocked() {
+    const t = await blockedT1([call("c1", "block"), say("t1 done"), call("c2", "block")]);
+    t.hosted.enqueue("a", "T1", "A");
+    t.gate.release();
+    await until(() => t.c.ended("T1"));
+    t.hosted.prompt("T2", go);
+    await until(() => t.gate.waiting === 1);
+    return t;
+  }
+
+  test("F-1 (`:841`) another client's send-now waits on MY running turn: my queued steer is held (carried), an unsent text is not", async () => {
+    const t = await blockedT1();
+    t.hosted.enqueue("a", "T1", "A");
+    expect(t.hosted.sendNow("S", turn("T1"), [msg("x", "X")])).toEqual({ turnId: "S" });
+    const r = refusal(() => t.hosted.sendNow("M", turn("T1"), [msg("a", "A"), msg("b", "B")]));
+    expect(r).toEqual({ code: DomainErrorCode.TurnInProgress, data: { held: ["a"] } });
+    t.gate.release();
+    await until(() => t.c.ended("S"));
+    // The fate: "A" carried into S (once), "B" never reached the daemon.
+    const users = userTexts(t.hosted.snapshotPage().messages);
+    expect(users.filter((u) => u === "A")).toHaveLength(1);
+    expect(users).not.toContain("B");
+  });
+
+  test("F-2 (`:841`) my target already ended, a send-now waits on another turn: a drained text is held", async () => {
+    const t = await t1DoneT2Blocked();
+    expect(t.hosted.sendNow("S", turn("T2"), [msg("x", "X")])).toEqual({ turnId: "S" });
+    const r = refusal(() => t.hosted.sendNow("M", turn("T1"), [msg("a", "A"), msg("b", "B")]));
+    expect(r).toEqual({ code: DomainErrorCode.TurnInProgress, data: { held: ["a"] } });
+    t.gate.release();
+    await until(() => t.c.ended("S"));
+    const users = userTexts(t.hosted.snapshotPage().messages);
+    expect(users.filter((u) => u === "A")).toHaveLength(1);
+    expect(users).not.toContain("B");
+  });
+
+  test("F-3 (`assertIdle`) my target ended, another client's turn runs: a drained text is held", async () => {
+    const t = await t1DoneT2Blocked();
+    const r = refusal(() => t.hosted.sendNow("M", turn("T1"), [msg("a", "A"), msg("b", "B")]));
+    expect(r).toEqual({ code: DomainErrorCode.TurnInProgress, data: { held: ["a"] } });
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go", "A", "go"]);
+  });
+
+  test("F-4 (`assertIdle`) my turn was cancelled with a steer pending, then another client's PROMPT started: nothing is held (the prompt dropped it)", async () => {
+    const t = await blockedT1([call("c1", "block"), call("c2", "block")]);
+    t.hosted.enqueue("a", "T1", "A");
+    t.hosted.cancel();
+    t.gate.release();
+    await until(() => t.c.ended("T1"));
+    t.hosted.prompt("T2", go);
+    await until(() => t.gate.waiting === 1);
+    const r = refusal(() => t.hosted.sendNow("M", turn("T1"), [msg("a", "A")]));
+    expect(r).toEqual({ code: DomainErrorCode.TurnInProgress, data: { held: [] } });
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    expect(userTexts(t.hosted.snapshotPage().messages)).not.toContain("A");
+  });
+
+  test("F-5 (`assertIdle`) a compaction runs: CompactInProgress carries the same report", async () => {
+    const t = await blockedT1([call("c1", "block"), say("t1 done"), PARK]);
+    t.hosted.enqueue("a", "T1", "A");
+    t.gate.release();
+    await until(() => t.c.ended("T1"));
+    const compacting = t.hosted.compact().catch(() => undefined);
+    await until(() => t.model.waiting === 1);
+    const r = refusal(() => t.hosted.sendNow("M", turn("T1"), [msg("a", "A"), msg("b", "B")]));
+    expect(r).toEqual({ code: DomainErrorCode.CompactInProgress, data: { held: ["a"] } });
+    t.model.release();
+    await compacting;
+  });
+
+  test("F-7 (`:843`, review R2-1) another client's send-now on my turn is cancelled before it starts: my queued steer is NOT held (it is dropped)", async () => {
+    // Ported from the reviewer's repro (.tentacle/tmp/send-now-c/endunstarted.test.ts,
+    // REVIEW-R2). Mutation M-R4 (no successor term in `live`) is killed by F-1.
+    const t = await blockedT1([call("c1", "block"), call("c2", "block")]);
+    t.hosted.enqueue("a", "T1", "A"); // my steer, accepted for T1
+    expect(t.hosted.sendNow("S", turn("T1"), [msg("x", "X")])).toEqual({ turnId: "S" }); // client B
+    t.hosted.cancel(); // B's Esc in the window: S is cancelled while reserved
+    const r = refusal(() => t.hosted.sendNow("M", turn("T1"), [msg("a", "A")]));
+    expect(r).toEqual({ code: DomainErrorCode.TurnInProgress, data: { held: [] } });
+    t.gate.release();
+    await until(() => t.c.ended("S"));
+    expect(t.c.end("S")).toMatchObject({ stopReason: "cancelled", delivered: false });
+    t.hosted.prompt("T2", go);
+    await until(() => t.gate.waiting === 1);
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    // The fate the report must not hide: "A" never reached the history (the
+    // `endUnstarted` gap, debt) — so the client restores it.
+    expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go", "go"]);
+  });
+
+  test("F-6 (`assertIdle`) my turn was cancelled with a steer pending, then a compaction runs: not held (no turn will drain it)", async () => {
+    const t = await blockedT1([call("c1", "block"), PARK, call("c2", "block")]);
+    t.hosted.enqueue("a", "T1", "A");
+    t.hosted.cancel();
+    t.gate.release();
+    await until(() => t.c.ended("T1"));
+    const compacting = t.hosted.compact().catch(() => undefined);
+    await until(() => t.model.waiting === 1);
+    const r = refusal(() => t.hosted.sendNow("M", turn("T1"), [msg("a", "A")]));
+    expect(r).toEqual({ code: DomainErrorCode.CompactInProgress, data: { held: [] } });
+    t.model.release();
+    await compacting;
+    // The fate it reports: the next prompt drops the leftover queue.
+    t.hosted.prompt("T2", go);
+    await until(() => t.gate.waiting === 1);
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    expect(userTexts(t.hosted.snapshotPage().messages)).not.toContain("A");
+  });
+});

@@ -17,7 +17,7 @@ import {
   parseDaemonRecord,
 } from "@tentacle/daemon";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
-import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
+import { DomainErrorCode, type DuplexChannel, createChannelPair } from "@tentacle/transport";
 import { ChannelError, LIVENESS_MS, type LinkStatus } from "../src/link-machine.ts";
 import type { SessionEvent } from "../src/mapping.ts";
 import { type Clock, RemoteClient } from "../src/remote-client.ts";
@@ -525,6 +525,71 @@ describe("re-attach: a `serve` restart with a turn suspended on approval (suspen
     expect(afterReset.some((o) => o.kind === "update" && o.update.type === "turn_start")).toBe(
       false,
     );
+    client.close();
+  });
+});
+
+describe("re-attach: send-now after a `serve` restart (send-now-c follow-up 1)", () => {
+  test("R1: an idle reloaded [user] record → the daemon answers NoTurnRunning (no turn); an undelivered text → a turn", async () => {
+    // Mutation: the client's local NoTurnRunning (no live turn) → red: the
+    // daemon is never asked (0 calls) and "Z" never runs.
+    const runs = { n: 0 };
+    const store = new MemStore();
+    const model1 = new GatedModel([[t("a"), { kind: "gate" }, done]]);
+    const target = new Target(makeHost(model1, runs, persisterFor(store)));
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const turn = drain(session.send("go"));
+    await until(() => model1.waiting);
+    await session.enqueue("A", "a");
+    await target.host.get("S")?.persisted();
+    const durable = store.durable.get("S");
+    if (!durable?.turn) throw new Error("no running turn on disk");
+    expect(durable.enqueueIds).toContain("a");
+    // What the restart reads: T1 ended after draining "A" with no reply (a
+    // hook-stop / max_iterations drain), so the idle history is [user "A"] —
+    // the shape a reload reads as a compaction summary (addendum item 5).
+    const { turn: running, ...idle } = durable;
+    const record = {
+      ...idle,
+      messages: [{ role: "user", content: "A" }],
+      turns: [{ turnId: running.turnId, end: { stopReason: "end_turn" } }],
+    };
+    const parsed = parseDaemonRecord(JSON.parse(JSON.stringify(record)), (c) => c === CWD);
+    if (!parsed.ok) throw new Error(parsed.reason);
+    const model2 = new GatedModel([[t("Z-answer"), done]]);
+    const host2 = makeHost(model2, runs, persisterFor(new MemStore()));
+    const restored = host2.restore(parsed.record);
+    let daemonCalls = 0;
+    const original = restored.sendNow.bind(restored);
+    restored.sendNow = (...args: Parameters<typeof original>) => {
+      daemonCalls += 1;
+      return original(...args);
+    };
+    target.host = host2;
+    target.last?.close();
+    // The old turn's prompt is re-sent; the restarted daemon answers its cached end.
+    const old = await turn;
+    expect(old.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+
+    // Delivered before the restart, nothing to answer (by the reload's rule).
+    await expect(session.sendNow([{ id: "a", text: "A" }], "turn")).rejects.toMatchObject({
+      code: DomainErrorCode.NoTurnRunning,
+    });
+    expect(daemonCalls).toBe(1);
+    expect(model2.calls).toBe(0);
+    expect((await client.snapshot("S")).map((m) => m.content)).toEqual(["A"]);
+
+    // Never delivered: the daemon runs it.
+    const events = await drain(await session.sendNow([{ id: "z", text: "Z" }], "turn"));
+    expect(daemonCalls).toBe(2);
+    expect(events[0]).toEqual({ type: "user_message", text: "Z" });
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(model2.calls).toBe(1);
     client.close();
   });
 });

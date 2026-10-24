@@ -1032,6 +1032,19 @@
       "required": ["interrupt", "messages", "sessionId", "turnId"],
       "type": "object"
     },
+    "SendNowRefusal": {
+      "additionalProperties": true,
+      "properties": {
+        "held": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["held"],
+      "type": "object"
+    },
     "SendNowTarget": {
       "discriminator": {
         "mapping": {
