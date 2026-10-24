@@ -58,15 +58,21 @@ import { layoutTranscript, sliceLaid, stripAnsi, warmRowsChunk } from "./render-
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import { type Selection, extractSelection, isNonEmpty, rowSelectionRange } from "./selection.ts";
 import {
+  COMPACTING_NO_TURN,
+  type CompactionResult,
   NOTHING_TO_SEND,
   SEND_NOW_HINT,
   SendNowErrorCode,
+  afterCompactionUnsupported,
   afterOldTurn,
+  compactionWaitNotice,
   errorCode,
   fallbackNotice,
+  onCompactionSettled,
   onSuccessorError,
   planRefusal,
   planSendNow,
+  planTurnStart,
   withRestored,
 } from "./send-now.ts";
 import type { SkillsListView } from "./skills-panel.ts";
@@ -260,6 +266,17 @@ export function App({
   const ownedIdsRef = useRef(new Set<string>());
   const sendNowUnsupportedRef = useRef(false);
   const fallbackNoticedRef = useRef(false);
+  // This TUI's own `/compact` is running (docs/feat/send-now-d.md): Enter
+  // queues a local row (no turn to enqueue to), the chord targets it. The ref
+  // is the truth; the state renders the rows. `compactionOwnedRef`: a send-now
+  // of ours took it — the rows are the send-now's, not the settle hook's.
+  const compactingRef = useRef(false);
+  const [compacting, setCompactingState] = useState(false);
+  const setCompacting = useCallback((on: boolean) => {
+    compactingRef.current = on;
+    setCompactingState(on);
+  }, []);
+  const compactionOwnedRef = useRef(false);
   // Interactive tool-approval dialog + auto-accept (Shift+Tab), all self-contained.
   const permission = usePermissionBroker(permissions);
   // The open list panel (`/mcp`, `/skills`; docs/feat/skills-panel.md) or null.
@@ -452,7 +469,7 @@ export function App({
   const listView = panel ? panelView(panel, columns, panelMaxBody(termRows)) : null;
   // Rows above the input/panel while a turn runs: the thinking line + the
   // queued-message lines (each one row: `wrap="truncate-end"`).
-  const runningRows = st.running ? 1 + queued.length : 0;
+  const runningRows = (st.running ? 1 : 0) + (st.running || compacting ? queued.length : 0);
   // Rows the bottom area occupies: the permission dialog; or the running rows,
   // then the list panel or the input box (plus any open palette rows, which
   // only open while idle).
@@ -720,6 +737,18 @@ export function App({
       // background-job exit): no user bubble, and an empty prompt to `send` so
       // the session runs over existing history without appending a user message.
       const continuation = opts?.continuation ?? false;
+      // No turn of ours during our own `/compact` (docs/feat/send-now-d.md
+      // follow-up 1): the daemon would refuse it, and its end would clear the
+      // compaction-time rows. A wake waits for the compaction's end.
+      const start = planTurnStart({ compacting: compactingRef.current, continuation });
+      if (start === "defer") {
+        wakePendingRef.current = true;
+        return;
+      }
+      if (start === "refuse") {
+        pushNotice(COMPACTING_NO_TURN);
+        return;
+      }
       if (!continuation) {
         lastUserRef.current = text;
       }
@@ -737,7 +766,7 @@ export function App({
         opts?.fallback ? { fallbackText: text } : {},
       );
     },
-    [flushNow, streamTurn],
+    [flushNow, pushNotice, streamTurn],
   );
   runRef.current = run;
 
@@ -762,19 +791,25 @@ export function App({
     const plan = planSendNow({
       hasQueued: rowsRef.current.some((r) => r.state === "queued"),
       running: stateRef.current.running && streamCtrlRef.current !== null,
+      compacting: compactingRef.current,
       pending: sendNowRef.current !== null,
       canSendNow: ctrl?.sendNow !== undefined,
       latchedUnsupported: sendNowUnsupportedRef.current,
     });
-    if (plan === "none" || !ctrl) {
+    if (plan.kind === "none" || !ctrl) {
       return false;
+    }
+    if (plan.kind === "wait") {
+      // No way to cancel the compaction: the rows stay, its end sends them.
+      pushNotice(compactionWaitNotice(ctrl.sendNow ? "daemon" : "session"));
+      return true;
     }
     const taken = takeForSendNow(rowsRef.current);
     setRows(() => taken.rows);
     for (const m of taken.messages) {
       ownedIdsRef.current.add(m.id);
     }
-    if (plan === "fallback" || !ctrl.sendNow) {
+    if (plan.kind === "fallback" || !ctrl.sendNow) {
       // The fallback stops the turn itself, for sure: like Ctrl+C, dismissed
       // (not denied) — the turn's cancel settles the ask.
       if (permission.pending) {
@@ -794,7 +829,16 @@ export function App({
     const pending: PendingSendNow = { mode: "atomic", next, successor: null, resetSeen: false };
     sendNowRef.current = pending;
     abortRef.current = next;
-    ctrl.sendNow(taken.messages, "turn", next.signal).then(
+    const onCompaction = plan.target === "compaction";
+    if (onCompaction) {
+      // The rows are the send-now's now (the compaction's end sends nothing),
+      // and the TUI shows its turn at once — the client installs it at once
+      // (no live turn to wait for), so Enter enqueues to it from here on.
+      compactionOwnedRef.current = true;
+      stateRef.current = startContinuation(stateRef.current, Date.now());
+      flushNow();
+    }
+    ctrl.sendNow(taken.messages, plan.target, next.signal).then(
       (events) => {
         if (sendNowRef.current !== pending) {
           return; // settled otherwise (a quit)
@@ -814,6 +858,27 @@ export function App({
           abortRef.current = old;
         }
         const step = planRefusal(error, rowsRef.current, old !== null);
+        if (onCompaction) {
+          compactionOwnedRef.current = false; // the rows are not the send-now's any more
+        }
+        if (step.kind === "fallback" && onCompaction) {
+          // An older daemon: it cannot cancel the compaction, so the rows
+          // wait for its end — or go now if it already ended meanwhile.
+          sendNowRef.current = null;
+          sendNowUnsupportedRef.current = true;
+          const after = afterCompactionUnsupported(rowsRef.current, compactingRef.current);
+          setRows(() => after.rows);
+          showIdle();
+          pushNotice(compactionWaitNotice("daemon"));
+          if (after.send !== null) {
+            wakePendingRef.current = false; // its turn flushes the job exits at its start
+            void runRef.current?.(after.send, { fallback: true });
+          } else {
+            wakeIfPending(); // while still compacting, `run` defers it again
+          }
+          flushNow();
+          return;
+        }
         if (step.kind !== "fallback") {
           sendNowRef.current = null;
           setRows(() => step.rows);
@@ -910,9 +975,22 @@ export function App({
           // The send-now latches are per session: the new one asks (and says) afresh.
           sendNowUnsupportedRef.current = false;
           fallbackNoticedRef.current = false;
+          // A wake deferred during the old session's compaction is that
+          // session's: it must not fire in the new one.
+          wakePendingRef.current = false;
           stateRef.current = initialState;
           setExpandAll(false);
           setScrollOffset(0);
+          // Rows queued during the old session's compaction never reach the
+          // new one: back to the input field, visibly (never sent by itself).
+          setCompacting(false);
+          if (rowsRef.current.length > 0) {
+            restoreInput(
+              takeAll(rowsRef.current).text,
+              "_your queued messages are back in the input_",
+            );
+            setRows(() => []);
+          }
           flushNow();
           return;
         case "/compact": {
@@ -925,10 +1003,44 @@ export function App({
             pushNotice("_Can't compact while a turn is running._");
             return;
           }
+          if (compactingRef.current) {
+            pushNotice("_A compaction is already running._");
+            return;
+          }
           pushNotice("_Compacting the conversation…_");
+          setCompacting(true);
+          compactionOwnedRef.current = false;
+          // Its one settle (success or failure) ends the compaction-time queue
+          // (D3c): sent as one prompt unless a send-now took it. A `/clear`
+          // meanwhile already took the rows (a new session: ignore it).
+          const settled = (result: CompactionResult) => {
+            if (sessionRef.current !== session) {
+              return;
+            }
+            setCompacting(false);
+            const out = onCompactionSettled({
+              result,
+              rows: rowsRef.current,
+              sendNowOwns: compactionOwnedRef.current,
+              turnRunning: stateRef.current.running,
+            });
+            pushNotice(out.notice);
+            if (out.send !== null) {
+              setRows(() => []);
+              wakePendingRef.current = false; // its turn flushes the job exits at its start
+              // As a fallback send: restored if another client's prompt won the slot.
+              void run(out.send, { fallback: true });
+              return;
+            }
+            if (out.restore !== null) {
+              setRows(() => []);
+              restoreInput(out.restore, "_your queued messages are back in the input_");
+            }
+            wakeIfPending(); // a wake deferred during the compaction
+          };
           void session.compact().then(
-            (r) => pushNotice(`_Context compacted — ${r.before} → ${r.after} messages._`),
-            (e) => pushNotice(`_Compact failed: ${String(e)}_`),
+            (r) => settled({ ok: true, before: r.before, after: r.after }),
+            (error: unknown) => settled({ ok: false, error }),
           );
           return;
         }
@@ -1018,9 +1130,13 @@ export function App({
       skillsList,
       model,
       pushNotice,
+      restoreInput,
       run,
       saveFile,
+      setCompacting,
+      setRows,
       skills,
+      wakeIfPending,
     ],
   );
 
@@ -1066,6 +1182,12 @@ export function App({
             pushNotice(`_message not queued: ${reason}_`);
           });
         }
+        return;
+      }
+      // During this TUI's `/compact` no turn runs, so nothing to enqueue to:
+      // a local row, sent when the compaction ends or by the chord (D3c).
+      if (compactingRef.current) {
+        setRows((rows) => addRow(rows, text, crypto.randomUUID()));
         return;
       }
       void run(text);
@@ -1525,7 +1647,9 @@ export function App({
                 label={st.reasoning ? "thinking…" : "working…"}
               />
             ) : null}
-            {st.running ? <QueuedMessages queued={rowTexts(queued)} hint={SEND_NOW_HINT} /> : null}
+            {st.running || compacting ? (
+              <QueuedMessages queued={rowTexts(queued)} hint={SEND_NOW_HINT} />
+            ) : null}
             {listView ? (
               <ListPanel view={listView} columns={columns} />
             ) : (

@@ -4,19 +4,23 @@ import { DomainErrorCode, JsonRpcErrorCode } from "../../protocol/src/jsonrpc.ts
 import { addRow, takeForSendNow } from "../src/queued.ts";
 import {
   SendNowErrorCode,
+  afterCompactionUnsupported,
   afterOldTurn,
   fallbackNotice,
   heldIds,
+  onCompactionSettled,
   onSendNowError,
   onSuccessorError,
   planRefusal,
   planSendNow,
+  planTurnStart,
   withRestored,
 } from "../src/send-now.ts";
 
 const base = {
   hasQueued: true,
   running: true,
+  compacting: false,
   pending: false,
   canSendNow: true,
   latchedUnsupported: false,
@@ -25,14 +29,120 @@ const rpc = (code: number) => Object.assign(new Error(`code ${code}`), { code })
 
 describe("planSendNow", () => {
   test.each([
-    ["no queued rows (D2)", { hasQueued: false }, "none"],
-    ["no turn running", { running: false }, "none"],
-    ["a send-now already pending", { pending: true }, "none"],
-    ["the controller has sendNow", {}, "atomic"],
-    ["no sendNow (local session)", { canSendNow: false }, "fallback"],
-    ["latched after a MethodNotFound", { latchedUnsupported: true }, "fallback"],
-  ] as const)("%s", (_name, over, kind) => {
-    expect(planSendNow({ ...base, ...over })).toBe(kind);
+    ["no queued rows (D2)", { hasQueued: false }, { kind: "none" }],
+    ["no turn running, no compaction", { running: false }, { kind: "none" }],
+    ["a send-now already pending", { pending: true }, { kind: "none" }],
+    ["the controller has sendNow", {}, { kind: "atomic", target: "turn" }],
+    ["no sendNow (local session)", { canSendNow: false }, { kind: "fallback" }],
+    ["latched after a MethodNotFound", { latchedUnsupported: true }, { kind: "fallback" }],
+    // D3c (docs/feat/send-now-d.md): this TUI's own `/compact` is running.
+    [
+      "compacting → cancel it and send",
+      { running: false, compacting: true },
+      { kind: "atomic", target: "compaction" },
+    ],
+    [
+      "compacting, a send-now pending",
+      { running: false, compacting: true, pending: true },
+      { kind: "none" },
+    ],
+    [
+      "compacting, no queued row",
+      { running: false, compacting: true, hasQueued: false },
+      { kind: "none" },
+    ],
+    [
+      "compacting, no sendNow → the rows wait for its end",
+      { running: false, compacting: true, canSendNow: false },
+      { kind: "wait" },
+    ],
+    [
+      "compacting, latched → the rows wait for its end",
+      { running: false, compacting: true, latchedUnsupported: true },
+      { kind: "wait" },
+    ],
+  ] as const)("%s", (_name, over, plan) => {
+    expect(planSendNow({ ...base, ...over })).toEqual(plan);
+  });
+});
+
+describe("onCompactionSettled (D3c)", () => {
+  const rows = addRow(addRow([], "A", "a"), "B", "b");
+  const ok = { ok: true, before: 9, after: 2 } as const;
+  const failed = (error: unknown) => ({ ok: false, error }) as const;
+  const idle = { rows, sendNowOwns: false, turnRunning: false };
+
+  test("success or failure with rows and no send-now → ONE joined prompt, after the notice", () => {
+    expect(onCompactionSettled({ ...idle, result: ok })).toEqual({
+      notice: "_Context compacted — 9 → 2 messages._",
+      send: "A\n\nB",
+      restore: null,
+    });
+    expect(onCompactionSettled({ ...idle, result: failed(new Error("down")) })).toEqual({
+      notice: "_Compact failed: Error: down_",
+      send: "A\n\nB",
+      restore: null,
+    });
+  });
+
+  test("no rows → nothing to send", () => {
+    expect(onCompactionSettled({ ...idle, result: ok, rows: [] })).toMatchObject({
+      send: null,
+      restore: null,
+    });
+  });
+
+  test("a send-now owns the rows → nothing sent here; its Cancelled reads as the send-now's", () => {
+    const cancelled = failed(rpc(DomainErrorCode.Cancelled));
+    expect(onCompactionSettled({ ...idle, result: cancelled, sendNowOwns: true })).toEqual({
+      notice: "_Compaction cancelled — sending now._",
+      send: null,
+      restore: null,
+    });
+    // It ended before the cancel landed: its own notice, still nothing sent here.
+    expect(onCompactionSettled({ ...idle, result: ok, sendNowOwns: true })).toEqual({
+      notice: "_Context compacted — 9 → 2 messages._",
+      send: null,
+      restore: null,
+    });
+  });
+
+  test("Cancelled with no send-now of ours (another client's cancel) → a failure; the rows are sent", () => {
+    const out = onCompactionSettled({ ...idle, result: failed(rpc(DomainErrorCode.Cancelled)) });
+    expect(out.notice).toContain("Compact failed");
+    expect(out.send).toBe("A\n\nB");
+  });
+
+  test("a turn already streams here → no second prompt: the texts go back to the input", () => {
+    expect(onCompactionSettled({ ...idle, result: ok, turnRunning: true })).toMatchObject({
+      send: null,
+      restore: "A\n\nB",
+    });
+  });
+});
+
+describe("planTurnStart (follow-up 1: no turn of ours during our compaction)", () => {
+  test("not compacting → start; compacting → a wake is deferred, anything else refused", () => {
+    expect(planTurnStart({ compacting: false, continuation: false })).toBe("start");
+    expect(planTurnStart({ compacting: false, continuation: true })).toBe("start");
+    expect(planTurnStart({ compacting: true, continuation: true })).toBe("defer");
+    expect(planTurnStart({ compacting: true, continuation: false })).toBe("refuse");
+  });
+});
+
+describe("afterCompactionUnsupported (MethodNotFound on a compaction's send-now)", () => {
+  const sending = takeForSendNow(addRow(addRow([], "A", "a"), "B", "b")).rows;
+  test("still compacting → every row queued again, nothing sent now", () => {
+    expect(afterCompactionUnsupported(sending, true)).toEqual({
+      rows: addRow(addRow([], "A", "a"), "B", "b"),
+      send: null,
+    });
+  });
+  test("it already ended → one joined prompt now, no row left", () => {
+    expect(afterCompactionUnsupported(sending, false)).toEqual({ rows: [], send: "A\n\nB" });
+  });
+  test("no rows → nothing", () => {
+    expect(afterCompactionUnsupported([], false)).toEqual({ rows: [], send: null });
   });
 });
 

@@ -3,7 +3,7 @@
  * sends, atomically or by the fallback, and what a refusal or a finished old
  * turn leads to. The App only executes them.
  */
-import { type QueuedRows, afterRefusal, takeAll } from "./queued.ts";
+import { type QueuedRows, afterRefusal, requeue, takeAll } from "./queued.ts";
 
 /** The error codes it acts on: a copy of `@tentacle/protocol`'s (the TUI does not depend on it). */
 export const SendNowErrorCode = {
@@ -22,23 +22,43 @@ export function errorCode(error: unknown): number | undefined {
   return undefined;
 }
 
+/** What the chord does (`planSendNow`). */
+export type SendNowPlan =
+  | { readonly kind: "none" }
+  | { readonly kind: "atomic"; readonly target: "turn" | "compaction" }
+  | { readonly kind: "fallback" }
+  | { readonly kind: "wait" };
+
 /**
- * What the chord does. `none`: no queued row (D2), no turn, or a send-now
- * still pending. `atomic`: `session/send_now`. `fallback`: stop the turn,
- * then send the texts as a prompt — the controller has no `sendNow` (the
- * in-process session) or the daemon answered `MethodNotFound` once.
+ * What the chord does. `none`: no queued row (D2), no turn nor compaction of
+ * ours, or a send-now still pending. `atomic`: `session/send_now`, against
+ * the running turn or this TUI's own `/compact` (docs/feat/send-now-d.md).
+ * `fallback`: stop the turn, then send the texts as a prompt — the
+ * controller has no `sendNow` (the in-process session) or the daemon
+ * answered `MethodNotFound` once. `wait`: the same during a compaction —
+ * the TUI has no way to cancel it, so the rows go when it ends (D3c).
  */
 export function planSendNow(input: {
   readonly hasQueued: boolean;
   readonly running: boolean;
+  readonly compacting: boolean;
   readonly pending: boolean;
   readonly canSendNow: boolean;
   readonly latchedUnsupported: boolean;
-}): "none" | "atomic" | "fallback" {
-  if (!input.hasQueued || !input.running || input.pending) {
-    return "none";
+}): SendNowPlan {
+  if (!input.hasQueued || input.pending || !(input.running || input.compacting)) {
+    return { kind: "none" };
   }
-  return input.canSendNow && !input.latchedUnsupported ? "atomic" : "fallback";
+  const atomic = input.canSendNow && !input.latchedUnsupported;
+  if (input.running) {
+    return atomic ? { kind: "atomic", target: "turn" } : { kind: "fallback" };
+  }
+  return atomic ? { kind: "atomic", target: "compaction" } : { kind: "wait" };
+}
+
+/** The notice when the chord cannot cancel a compaction (`wait`); `who` cannot. */
+export function compactionWaitNotice(who: "daemon" | "session"): string {
+  return `_this ${who} can't cancel a compaction to send now — your queued messages go out when it ends_`;
 }
 
 /**
@@ -60,6 +80,80 @@ export function onSendNowError(error: unknown): "fallback" | "delivered" | "rest
     default:
       return "restore";
   }
+}
+
+/** How this TUI's `/compact` settled: `session.compact()`'s one outcome. */
+export type CompactionResult =
+  | { readonly ok: true; readonly before: number; readonly after: number }
+  | { readonly ok: false; readonly error: unknown };
+
+/**
+ * This TUI's `/compact` settled (D3c, docs/feat/send-now-d.md): its notice,
+ * and the rows queued meanwhile as ONE joined prompt (D1) — on success or
+ * failure alike, the only option that loses nothing. `sendNowOwns`: a
+ * send-now of ours took the compaction (in flight or accepted), so its
+ * outcome decides the rows: nothing is sent here, and its `Cancelled` is the
+ * send-now's doing, not a failure. `turnRunning`: a turn already streams here
+ * (one the user started during the compaction): a second prompt cannot start,
+ * so the texts go back to the input field instead (`restore`).
+ */
+export function onCompactionSettled(input: {
+  readonly result: CompactionResult;
+  readonly rows: QueuedRows;
+  readonly sendNowOwns: boolean;
+  readonly turnRunning: boolean;
+}): { readonly notice: string; readonly send: string | null; readonly restore: string | null } {
+  const { result } = input;
+  const notice = result.ok
+    ? `_Context compacted — ${result.before} → ${result.after} messages._`
+    : input.sendNowOwns && errorCode(result.error) === SendNowErrorCode.Cancelled
+      ? "_Compaction cancelled — sending now._"
+      : `_Compact failed: ${String(result.error)}_`;
+  const { text } = takeAll(input.rows);
+  if (input.sendNowOwns || text === "") {
+    return { notice, send: null, restore: null };
+  }
+  return input.turnRunning
+    ? { notice, send: null, restore: text }
+    : { notice, send: text, restore: null };
+}
+
+/**
+ * A turn this TUI is about to start (a prompt, `/retry`, a skill, a job-exit
+ * wake) while its own `/compact` runs: the daemon would refuse it
+ * (`CompactInProgress`), and its end would clear the compaction-time rows.
+ * So it does not start. `defer`: a wake waits for the compaction's end (the
+ * settle fires it, unless the joined rows' turn takes the exits). `refuse`:
+ * the user is told (the command stays in ↑ history).
+ */
+export function planTurnStart(input: {
+  readonly compacting: boolean;
+  readonly continuation: boolean;
+}): "start" | "defer" | "refuse" {
+  if (!input.compacting) {
+    return "start";
+  }
+  return input.continuation ? "defer" : "refuse";
+}
+
+/** The notice of a turn refused during this TUI's compaction (`planTurnStart`). */
+export const COMPACTING_NO_TURN =
+  "_A compaction is running — wait for it to end (Enter queues a message meanwhile)._";
+
+/**
+ * An older daemon refused a compaction's send-now (`MethodNotFound`): it
+ * cannot cancel the compaction, so the rows are queued again for its end
+ * (`send: null`) — or, if it already ended meanwhile (its settle left them
+ * to the send-now), they go now as one joined prompt.
+ */
+export function afterCompactionUnsupported(
+  rows: QueuedRows,
+  compacting: boolean,
+): { readonly rows: QueuedRows; readonly send: string | null } {
+  if (compacting || rows.length === 0) {
+    return { rows: requeue(rows), send: null };
+  }
+  return { rows: [], send: takeAll(rows).text };
 }
 
 /** The keys hint beside the last queued row (like the spinner's "esc/ctrl+c to stop"). */

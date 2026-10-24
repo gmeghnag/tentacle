@@ -7,6 +7,7 @@ import {
   onReject,
   onSteer,
   onTurnEnd,
+  requeue,
   rowTexts,
   takeAll,
   takeForSendNow,
@@ -102,5 +103,9 @@ describe("queued rows", () => {
     const rows = addRow(takeForSendNow(three()).rows, "D", "d");
     expect(takeAll(rows)).toEqual({ rows: [], text: "A\n\nB\n\nC\n\nD" });
     expect(takeAll([])).toEqual({ rows: [], text: "" });
+  });
+
+  test("requeue (an older daemon refused a compaction's send-now): every row queued again, ids and order kept", () => {
+    expect(requeue(takeForSendNow(three()).rows)).toEqual(three());
   });
 });
