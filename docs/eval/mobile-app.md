@@ -452,6 +452,11 @@ the "a new target adds only a transport" shape, AGENTS §7).
     never re-sent by itself (rule and rejected options in
     `docs/eval/send-now.md` addendum, 4c as-built). This also settles the
     fate of rows left at a turn's end (question 1) for the writer's side.
+    **Owner (2026-10-24): approved as ONE task, no split** (M ·
+    load-bearing). Question 1 answered by the writer rule (rows left at a
+    turn's end go back to their writer, never discarded, never re-sent by
+    themselves); questions 3 and 4 as recommended (TUI switches to the
+    daemon's queue in task 6; steer ids persisted with 2a's record bump).
   - *Task 6 `tui-foreign-turns`* — **L** → 6a `cancel{turnId?}` (S ·
     load-bearing), 6b client (M · load-bearing), 6c TUI (M · cross-module,
     only after 4c, 4d and 5b are merged). "Mine vs foreign" is decided by the
