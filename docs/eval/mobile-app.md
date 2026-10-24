@@ -396,6 +396,17 @@ the "a new target adds only a transport" shape, AGENTS §7).
   `open` change meaning): an older tentacle (e.g. 0.1.0) fails `initialize`
   with `VersionMismatch` against a new `serve` — clean, never mid-session —
   so both ends are updated together.
+  **2a DONE 2026-10-24** (`docs/feat/session-archive.md`, merged `c4c7cd9`;
+  executed by Opus, Review round-1 fixes by Opus, round-2 fixes by Sonnet,
+  three fresh Opus reviews). Owner decisions taken in Review: a deleted id is
+  tombstoned on disk and an open/reattach of it gets `SessionDeleted`
+  (additive, -32015) — the client drops its local copy and shows "this
+  session was deleted from another device", never recreates it; `reopen`
+  counts against `--max-sessions` (refused with `TooManySessions`, record
+  stays archived, nothing evicted); an unreadable tombstone file stops
+  `serve` from starting (file + cause named). Left as debt: a failed archive
+  write is retried only by reaper sweeps (surfaced, not silent); **steer ids
+  were NOT persisted in 2a** — task 5 carries them (its own record bump).
 - **Task 4 (`send_now`) decisions taken during execution** — recorded in
   `docs/eval/send-now.md` (addendum) and in the task docs.
 
