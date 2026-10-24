@@ -406,6 +406,74 @@ the "a new target adds only a transport" shape, AGENTS §7).
     (continuation turns, the post-restart `NoTurnRunning` case, the
     `delivered` flag, what the TUI must not silence).
 
+- **Plans for tasks 3, 5, 6, 7 written** (2026-10-24, planners on a `main`
+  snapshot; plans in the gitignored plan folder until each task starts —
+  they move into `docs/feat/<slug>.md` on the task branch). All awaiting the
+  owner's approval, one at a time. Planner recommendations in brackets.
+  - *Task 3 `session-titles`* — re-sized **L · load-bearing** (7 packages) →
+    split 3a (protocol + daemon) / 3b (laptop store, cli, TUI) [yes]. New
+    method `session/rename`, display update `session_title`,
+    `SnapshotResult.title`, `OpenParams.title` (seed, honoured only when the
+    open creates the session); no `PROTOCOL_VERSION` bump (additive). The
+    title travels as update AND snapshot/list field (a late attacher may only
+    have the snapshot after a cut). Generation is cancelled when a turn starts
+    (never delays the user); on pods the laptop's main model answers (no
+    separate `titleModel`). Questions: laptop store keeps a plain string for
+    the automatic title and an object for model/user titles, so an older
+    build rejects only the latter, loudly [accept]; no `model_request` hook on
+    the title call, documented [no hook]; `DAEMON_RECORD_VERSION` bump [yes:
+    2→3, after 2a's 1→2].
+  - *Task 5 `queued-broadcast`* — **M** → split 5a (protocol + daemon, S–M ·
+    load-bearing) / 5b (client exposes the queue, S · cross-module) [yes].
+    One display update `queued{entries:[{id,text}]}` carrying the FULL queue
+    (converges after resync / ring overflow by itself), plus optional
+    `queued` on the first `SnapshotResult` page; no bump, no new method.
+    Questions: undelivered steers left at a turn's end with no send-now
+    waiting are DROPPED (today a later `send_now` on a free slot revives
+    them) — a semantic change [yes, else "still queued?" has no single
+    answer]; the TUI switches to the daemon's queue in task 6, not now [yes:
+    4c owns the row model, local rows are still needed before the ack, during
+    compaction (4d) and offline]; persist steer ids riding 2a's record bump so
+    every client still recognises its own rows after a restart [yes]. Open:
+    how many existing tests break on the new update (executor's first step).
+  - *Task 6 `tui-foreign-turns`* — **L** → 6a `cancel{turnId?}` (S ·
+    load-bearing), 6b client (M · load-bearing), 6c TUI (M · cross-module,
+    only after 4c, 4d and 5b are merged). "Mine vs foreign" is decided by the
+    `turnId` the client generated and the daemon echoes — never by text.
+    Load-bearing fact: the daemon has at most one open turn and every update
+    of a turn lies between its `turn_start` and `turn_end` (code + a 210-update
+    repro, 0 violations). Only protocol change: optional `turnId` on
+    `session/cancel` (an older daemon ignores it); no bump. Eager open with
+    full history only for sessions opened with `attach: true` (task 7's
+    `--resume` / `/sessions`); new sessions stay lazy. Found: a latent routing
+    bug — a foreign turn's chunks would land in the client's own turn
+    (`client/src/remote-session.ts` ~:529-536 on main), fixed in 6b.
+    Questions: include 6a [yes — a late Esc on the laptop could cancel the
+    turn the phone just started]; `/exit` during a foreign turn leaves it
+    running, Ctrl+C stops it [yes]; Shift+Tab auto-accept applies only to own
+    turns [yes]; progressive render of the latest history page [later, after
+    measuring on WAN]; loop notes reappear as user messages after a reset —
+    a small task after 6, before 12 [yes].
+  - *Task 7 `connect-sessions`* — re-sized **L** (5 packages) → 7a / 7b, each
+    M · cross-module [yes]. Quit = just close the socket (proved: the session
+    stays live and re-attachable, the turn finishes daemon-side). New method
+    `session/detach` (switch sessions without dropping the socket); no bump;
+    an older daemon's `MethodNotFound` refuses the switch with a message, no
+    shim. Worker and pods keep closing on quit (their daemon dies with them).
+    `connect` keeps no laptop copy (the daemon is the truth). Found: a session
+    ended on another device makes the TUI's next prompts fail with a cryptic
+    id error → a notice and a fresh session. Questions: refuse switching
+    sessions mid-turn in v1 [yes; quitting mid-turn still detaches]; delete
+    from `/sessions` (press `x` twice, 2a's delete) [yes]; `/close` = end and
+    quit, plus an AGENTS §7 line that `connect` keeps no laptop copy [yes];
+    a reconnect after another device archived the session silently revives
+    it — reachable from 2a's design [fix in 2a]. Depends on task 6's eager
+    open (opening a gone id must fail, not create an empty session) and on 2a.
+  - *Cross-plan consequences:* `DAEMON_RECORD_VERSION` chain 2a 1→2 (steer
+    ids from task 5 may ride it) then task 3 2→3; 2a must absorb task 7's
+    "archived session revived by a reconnect" fix; order constraints 6c after
+    4c/4d/5b, 7 after 6 and 2a.
+
 ### Dependencies (must land before / with the app)
 
 - **`send_now`** — `docs/eval/send-now.md` (decided, not built): the app's
