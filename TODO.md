@@ -748,7 +748,12 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       `attach`, the app later). Order: BEFORE 2a (2a bumps the protocol to
       11 — the first time it will happen). **Planned 2026-10-24** (slug
       `version-mismatch-notice`, plan in the gitignored plan folder, awaiting
-      the owner): re-sized M · cross-module; optional `clientInfo` on
+      the owner → **APPROVED 2026-10-24**: container older → `… — update the
+      container's tentacle: run "tentacle attach" again from an up-to-date
+      laptop (it replaces an older one)`; daemon without versions → "the
+      daemon runs an older tentacle" (a deduction pinned by a test); `attach`
+      from a dev build → reuse the container's tentacle as today): re-sized M
+      · cross-module; optional `clientInfo` on
       `initialize` (malformed = absent, never fails `initialize`) + a
       structured `data` on the `VersionMismatch` error; no `PROTOCOL_VERSION`
       bump. Findings: `run` CAN mismatch with a dev build or
