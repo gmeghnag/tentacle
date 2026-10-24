@@ -720,7 +720,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       by the owner by hand), 4d compaction-time queue (`send-now-d.md`, merged
       2026-10-24). Send-now COMPLETE.
 
-- [ ] **Version mismatch: say who is older and what to do — never a silent
+- [x] **Version mismatch: say who is older and what to do — never a silent
       failure** (owner, 2026-10-24). Today the daemon refuses `initialize`
       with `protocol version mismatch: client 10, daemon 11` (code
       `VersionMismatch`, `daemon/src/connection.ts`); the owner likes the
@@ -748,7 +748,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       `attach`, the app later). Order: BEFORE 2a (2a bumps the protocol to
       11 — the first time it will happen). **Planned 2026-10-24** (slug
       `version-mismatch-notice`, plan in the gitignored plan folder, awaiting
-      the owner → **APPROVED 2026-10-24**: container older → `… — update the
+      the owner → **APPROVED 2026-10-24**, **DONE 2026-10-24** (`docs/feat/version-mismatch-notice.md`, merged `90c22af`): container older → `… — update the
       container's tentacle: run "tentacle attach" again from an up-to-date
       laptop (it replaces an older one)`; daemon without versions → "the
       daemon runs an older tentacle" (a deduction pinned by a test); `attach`
