@@ -34,7 +34,7 @@ describe("hooks/trust hook item `model` (docs/feat/protocol-v10-forward-compat.m
     expect(parsed.success ? parsed.data.hooks : null).toEqual(base.hooks);
   });
 
-  test("the breaking item change bumps the version to 10", () => {
-    expect(PROTOCOL_VERSION).toBe(10);
+  test("the breaking item change bumped the version to 10 (or later)", () => {
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(10);
   });
 });

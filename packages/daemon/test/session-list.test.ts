@@ -33,17 +33,23 @@ import { type RecordStore, SessionPersister } from "../src/session-persister.ts"
 const CWD = "/tmp/session-list";
 const tick = (ms = 1): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-const summary = (id: string, lastChangeAt: number, over: Partial<SessionSummary> = {}) => ({
+const summary = (
+  id: string,
+  lastChangeAt: number,
+  over: Partial<SessionSummary> = {},
+): SessionSummary => ({
   id,
   createdAt: 1,
   lastChangeAt,
   running: false,
   attached: 0,
   title: `title ${id}`,
+  cwd: CWD,
+  archived: false,
   ...over,
 });
 const list = (summaries: SessionSummary[], params: SessionListParams = {}) =>
-  toSessionList(summaries, CWD, params);
+  toSessionList(summaries, params);
 const ids = (r: SessionListResult): string[] => r.sessions.map((s) => s.sessionId);
 
 /** Every page, following the cursors. */
@@ -165,6 +171,29 @@ describe("toSessionList (pure)", () => {
     expect(page2.cursor).toBeUndefined();
   });
 
+  test("L-cwd each entry carries its OWN cwd and archived flag; live + archived page as one list", () => {
+    // Mutation M6: one cwd (the host's) for every entry → red.
+    const all = [
+      summary("live-new", 9, { running: true, attached: 1 }),
+      summary("arch-a", 7, { archived: true, cwd: "/w/other" }),
+      summary("live-old", 7),
+      summary("arch-b", 3, { archived: true, cwd: "/w/third" }),
+      summary("arch-c", 1, { archived: true, cwd: "/w/other" }),
+    ];
+    const r = list(all);
+    expect(r.sessions.map((s) => [s.sessionId, s.cwd, s.archived])).toEqual([
+      ["live-new", CWD, false],
+      ["arch-a", "/w/other", true],
+      ["live-old", CWD, false],
+      ["arch-b", "/w/third", true],
+      ["arch-c", "/w/other", true],
+    ]);
+    // Keyset paging across the mix: no entry twice, none skipped.
+    for (const limit of [1, 2, 3, 4]) {
+      expect(pages(all, limit).flatMap(ids)).toEqual(r.sessions.map((s) => s.sessionId));
+    }
+  });
+
   test("L6 a malformed cursor → InvalidParams", () => {
     for (const cursor of ["x", "abc:s", ":s", "1:", "-1:s", "1.5:s", "1e3:s", " 1:s"]) {
       let error: unknown;
@@ -181,9 +210,9 @@ describe("toSessionList (pure)", () => {
   test("L7 every output is schema-valid, whatever the titles and the cwd", () => {
     // Mutation M1 → red (a control character reaches the result).
     const hostile = ["", " ", "\u001b[2J", "a\nb", "\u009b31m", "t".repeat(10_000), "ok"];
-    const summaries = hostile.map((title, i) => summary(`s${i}`, i, { title }));
-    for (const cwd of [CWD, "/w\u0007x", "x".repeat(5_000)]) {
-      const r = toSessionList(summaries, cwd, {});
+    for (const cwd of [CWD, "/w\u0007x", "x".repeat(5_000), ""]) {
+      const summaries = hostile.map((title, i) => summary(`s${i}`, i, { title, cwd }));
+      const r = toSessionList(summaries, {});
       expect(SessionListResultSchema.safeParse(r).success).toBe(true);
       expect(r.sessions.length).toBe(hostile.length);
     }
@@ -224,6 +253,9 @@ class NullStore implements RecordStore {
   }
   async remove(): Promise<void> {}
   async drain(): Promise<void> {}
+  async load(): Promise<{ status: "absent" }> {
+    return { status: "absent" };
+  }
 }
 
 function daemon(opts: { persist?: boolean } = {}) {
@@ -347,8 +379,8 @@ describe("SessionHost.list over the wire", () => {
     expect((await c.list()).sessions).toEqual([]);
   });
 
-  test("H3 a closed session is not listed; a restored record lists its own stamps", async () => {
-    // Mutation M9 (restore ignores record.updatedAt) → red.
+  test("H3 a closed session is listed ARCHIVED (persisting host); a restored record lists its own stamps", async () => {
+    // Mutation M9 (restore ignores record.updatedAt) → red. (Before session-archive: "not listed".)
     const d = daemon({ persist: true });
     d.clock.t = 100;
     d.host.open({ sessionId: "gone", create: true }, detached);
@@ -362,7 +394,7 @@ describe("SessionHost.list over the wire", () => {
       title: "t",
       messages: [{ role: "user", content: "an old question" }],
       kind: "tentacle.daemon-session",
-      schemaVersion: 1,
+      schemaVersion: 2,
       lastActiveAt: 9,
       turns: [],
       enqueueIds: [],
@@ -370,6 +402,16 @@ describe("SessionHost.list over the wire", () => {
     d.host.restore(record);
     const c = await d.connect();
     expect((await c.list()).sessions).toEqual([
+      {
+        sessionId: "gone",
+        title: "(empty)",
+        cwd: CWD,
+        createdAt: 100,
+        updatedAt: 100,
+        running: false,
+        attached: 0,
+        archived: true,
+      },
       {
         sessionId: "back",
         title: "an old question",

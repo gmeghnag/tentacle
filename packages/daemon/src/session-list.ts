@@ -21,7 +21,7 @@ import {
 import { RpcError } from "@tentacle/transport";
 import { wireLine } from "./mapping.ts";
 
-/** What the registry knows of one session (`HostedSession.summary`). */
+/** What the registry knows of one session (`HostedSession.summary`, or an archived entry). */
 export interface SessionSummary {
   readonly id: string;
   readonly createdAt: number;
@@ -30,6 +30,10 @@ export interface SessionSummary {
   readonly running: boolean;
   readonly attached: number;
   readonly title: string;
+  /** The session's own directory (an archived one: its record's). */
+  readonly cwd: string;
+  /** Ended and kept, not loaded (`running: false`, `attached: 0`). */
+  readonly archived: boolean;
 }
 
 /** A position in the order: the sort key of one entry. */
@@ -64,25 +68,24 @@ function compare(a: ListCursor, b: ListCursor): number {
 
 export function toSessionList(
   summaries: Iterable<SessionSummary>,
-  cwd: string,
   params: SessionListParams,
 ): SessionListResult {
   const after = params.cursor !== undefined ? parseListCursor(params.cursor) : undefined;
   const limit = params.limit ?? MAX_SESSION_LIST;
-  const wireCwd = wireLine(cwd, 4096) || "(unknown)";
   const entries: SessionListEntry[] = [];
   for (const s of summaries) {
     const entry: SessionListEntry = {
       sessionId: s.id,
       title: wireLine(s.title, MAX_SESSION_TITLE) || "(empty)",
-      cwd: wireCwd,
+      cwd: wireLine(s.cwd, 4096) || "(unknown)",
       createdAt: s.createdAt,
       // Never the clock, even while running: a key that moved between two
       // requests would make the cursor skip entries (Review finding 1).
+      // Archived: the record's `updatedAt`, the same stamp — one order.
       updatedAt: s.lastChangeAt,
       running: s.running,
       attached: s.attached,
-      archived: false,
+      archived: s.archived,
     };
     if (after === undefined || compare(entry, after) > 0) {
       entries.push(entry);

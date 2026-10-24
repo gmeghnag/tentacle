@@ -264,7 +264,9 @@ describe("runSessionTui", () => {
     const notices = new NoticeHub();
     const sessions = {
       notices,
-      saver: new SessionSaver({ save: () => Bun.sleep(50) }, (t) => notices.notify(t)),
+      saver: new SessionSaver({ save: () => Bun.sleep(50), remove: async () => {} }, (t) =>
+        notices.notify(t),
+      ),
       resume: null,
     };
     const out: string[] = [];

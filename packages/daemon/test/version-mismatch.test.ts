@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { PROTOCOL_VERSION, VersionMismatchDataSchema } from "@tentacle/protocol";
+import {
+  InitializeParamsSchema,
+  PROTOCOL_VERSION,
+  VersionMismatchDataSchema,
+} from "@tentacle/protocol";
 import { DomainErrorCode, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { Connection } from "../src/connection.ts";
 import { SessionHost } from "../src/session-host.ts";
@@ -117,6 +121,47 @@ describe("Connection refuses initialize with the worded message and its data", (
       expect(error.message).not.toContain("\u001b");
     });
   }
+
+  test("10 ↔ 11 (session-archive's bump): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
+    // What a tentacle 0.1.0 sends (protocol 10, clientInfo since version-mismatch-notice).
+    expect(PROTOCOL_VERSION as number).toBe(11);
+    const error = await refuse(
+      {
+        protocolVersion: 10,
+        clientCapabilities: { streaming: true },
+        clientInfo: { name: "tentacle", version: "0.1.0" },
+      },
+      { tentacle: "0.2.0", kind: "serve" },
+    );
+    expect(error.code).toBe(DomainErrorCode.VersionMismatch);
+    expect(error.message).toBe(
+      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 11 (tentacle 0.2.0) — update this client: "tentacle update"',
+    );
+    expect(error.data).toEqual({
+      client: { protocol: 10, tentacle: "0.1.0" },
+      daemon: { protocol: 11, tentacle: "0.2.0" },
+      update: "client",
+    });
+  });
+
+  test("11 → a v10 daemon: the v11 initialize frame is one a v10 daemon parses (no InvalidParams), so it words the refusal", () => {
+    // InitializeParamsSchema is unchanged by the bump (a v10 daemon validates with the same
+    // schema): the frame a v11 client sends must parse, extras stripped, or the user would get
+    // InvalidParams instead of the mismatch message (version-mismatch-notice constraint).
+    const frame = {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { streaming: true, updates: ["agent_message_chunk"] },
+      clientInfo: { name: "tentacle", version: "0.2.0" },
+    };
+    expect(InitializeParamsSchema.safeParse(frame).success).toBe(true);
+    // And the v10 daemon's wording for it (`versionMismatch` is unchanged since v10).
+    expect(
+      versionMismatch(
+        { protocol: PROTOCOL_VERSION, tentacle: "0.2.0", name: "tentacle" },
+        { protocol: 10, identity: { tentacle: "0.1.0", kind: "serve" } },
+      ).data.update,
+    ).toBe("daemon");
+  });
 
   test("the host's identity and the client's clientInfo reach the message", async () => {
     const error = await refuse(

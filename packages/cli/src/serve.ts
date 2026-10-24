@@ -19,6 +19,7 @@ import {
   SessionHost,
   SessionPersister,
   type SessionTtlControl,
+  TombstoneFile,
   acquireStoreLock,
   parseDaemonRecord,
   startReaper,
@@ -97,8 +98,9 @@ export function daemonStoreDir(config: Pick<TentacleConfig, "configDir" | "cwd">
  * reaper, owned with the registry and stopped with the server — and where they
  * outlive the PROCESS: the only daemon that persists (its host is the user's
  * own machine; a pod daemon never does, AGENTS §7). Before listening it takes
- * the store's lock (one daemon per store) and reloads every session it left,
- * detached; a file it cannot use is reported and left untouched.
+ * the store's lock (one daemon per store) and reloads every live session it
+ * left, detached, and indexes every archived one (reopened on demand); a file
+ * it cannot use is reported and left untouched.
  */
 export async function startDaemon(
   config: TentacleConfig,
@@ -109,14 +111,30 @@ export async function startDaemon(
   let persister: SessionPersister | undefined;
   try {
     const store = new JsonSessionStore(dir);
+    // By project key, not by string: the same project through a symlink (or a
+    // trailing slash) shares this directory and must restore its sessions.
+    const key = projectKey(config.cwd);
+    const sameProject = (cwd: string): boolean => projectKey(cwd) === key;
+    // Deleted ids, for good: in the store directory beside the records (F1).
+    const tombstones = new TombstoneFile(dir);
     persister = new SessionPersister({
       store,
       cwd: config.cwd,
       model: config.model,
       onError: options.onError ?? (() => {}),
+      sameProject,
+      tombstones,
     });
     const ttl = new BoundSessionTtl();
-    const sessionHost = await reloadedHost(config, options, store, persister, ttl);
+    const sessionHost = await reloadedHost(
+      config,
+      options,
+      store,
+      persister,
+      ttl,
+      sameProject,
+      tombstones,
+    );
     return listen(sessionHost, options, ttl, async () => {
       await persister?.stop();
       lock.release();
@@ -128,13 +146,15 @@ export async function startDaemon(
   }
 }
 
-/** The registry, with every usable record of `store` restored into it. */
+/** The registry: every usable live record of `store` restored, every archived one indexed. */
 async function reloadedHost(
   config: TentacleConfig,
   options: ServeOptions,
   store: JsonSessionStore,
   persister: SessionPersister,
   sessionTtl: SessionTtlControl,
+  sameProject: (cwd: string) => boolean,
+  tombstones: TombstoneFile,
 ): Promise<SessionHost> {
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
@@ -157,23 +177,57 @@ async function reloadedHost(
     identity: { tentacle: APP_VERSION, kind: "serve" },
   });
   const notice = options.onNotice ?? (() => {});
-  const { records, skipped } = await store.list();
-  for (const bad of skipped) {
-    persister.block(bad.id);
-    notice(`skipped ${bad.file}: ${bad.reason} (left as is)`);
-  }
   let restored = 0;
   let resumed = 0;
-  // By project key, not by string: the same project through a symlink (or a
-  // trailing slash) shares this directory and must restore its sessions.
-  const key = projectKey(config.cwd);
-  for (const record of records) {
-    const parsed = parseDaemonRecord(record, (cwd) => projectKey(cwd) === key);
-    if (!parsed.ok) {
-      persister.block(record.id);
+  let archived = 0;
+  // Tombstones first: a record still beside its tombstone (a delete cut short
+  // between the two writes) is never restored.
+  // An unreadable file refuses the start (fail-closed: else offline clients
+  // could revive deleted sessions); a garbled line is skipped with a notice.
+  let ids: string[];
+  try {
+    ids = await tombstones.load((line) =>
       notice(
-        `skipped ${join(daemonStoreDir(config), `${record.id}.json`)}: ${parsed.reason} (left as is)`,
+        `skipped an unreadable line in ${tombstones.path}: ${JSON.stringify(line)} — that session, if deleted, may be recreated by a client`,
+      ),
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `can't start: couldn't read ${tombstones.path}: ${reason} (fix its permissions or contents; it records the sessions deleted earlier, and removing it lets a client recreate them)`,
+      { cause: error },
+    );
+  }
+  for (const id of ids) {
+    sessionHost.addDeleted(id);
+  }
+  // One record at a time (`scan`): an archived one keeps only its metadata,
+  // so the peak is one record plus the live sessions, however many are kept.
+  for await (const { id, result } of store.scan()) {
+    if (result.status === "absent") {
+      continue;
+    }
+    if (sessionHost.isDeleted(id)) {
+      // Finish the removal the user asked for (its tombstone is already on disk).
+      persister.remove(id, false);
+      continue;
+    }
+    if (result.status === "unreadable") {
+      persister.block(id);
+      notice(`skipped ${result.file}: ${result.reason} (left as is)`);
+      continue;
+    }
+    const parsed = parseDaemonRecord(result.record, sameProject);
+    if (!parsed.ok) {
+      persister.block(id);
+      notice(
+        `skipped ${join(daemonStoreDir(config), `${id}.json`)}: ${parsed.reason} (left as is)`,
       );
+      continue;
+    }
+    if (parsed.record.archivedAt !== undefined) {
+      sessionHost.addArchived(parsed.record);
+      archived++;
       continue;
     }
     // Running right after a restore = a turn suspended on a permission, asked again.
@@ -182,13 +236,14 @@ async function reloadedHost(
     }
     restored++;
   }
-  if (restored > 0) {
+  if (restored > 0 || archived > 0) {
     const waiting =
       resumed > 0
         ? ` (${resumed} resumed a turn waiting for approval — answer it from any client)`
         : "";
+    const kept = archived > 0 ? `, ${archived} archived,` : "";
     notice(
-      `restored ${restored} session${restored === 1 ? "" : "s"} from ${daemonStoreDir(config)}${waiting}`,
+      `restored ${restored} session${restored === 1 ? "" : "s"}${kept} from ${daemonStoreDir(config)}${waiting}`,
     );
   }
   return sessionHost;

@@ -109,6 +109,9 @@ class SpyStore implements RecordStore {
   }
   async remove(): Promise<void> {}
   async drain(): Promise<void> {}
+  async load(): Promise<{ status: "absent" }> {
+    return { status: "absent" };
+  }
 }
 
 interface RigOptions {
@@ -306,7 +309,7 @@ describe("session/send_now — atomic hand-off", () => {
     const ref: { hosted?: HostedSession } = {};
     const t = await blockedT1([call("c1", "block")], { now: () => ++clock }, (u) => {
       if ((u.type === "turn_end" || u.type === "turn_start") && ref.hosted) {
-        stamps[`${u.type}:${u.turnId}`] = ref.hosted.summary().lastChangeAt;
+        stamps[`${u.type}:${u.turnId}`] = ref.hosted.summary(CWD).lastChangeAt;
       }
     });
     ref.hosted = t.hosted;
@@ -326,10 +329,10 @@ describe("session/send_now — atomic hand-off", () => {
     const { hosted } = r.host.open({ create: true }, c.attachment);
     hosted.prompt("T1", go);
     await until(() => c.ended("T1"));
-    expect(hosted.summary().lastChangeAt).toBe(100);
+    expect(hosted.summary(CWD).lastChangeAt).toBe(100);
     clock = 200;
     expect(hosted.sendNow("T2", turn("T1"), [msg("b", "B")])).toEqual({ turnId: "T2" });
-    expect(hosted.summary().lastChangeAt).toBe(200);
+    expect(hosted.summary(CWD).lastChangeAt).toBe(200);
     await until(() => c.ended("T2"));
   });
 });
@@ -699,7 +702,7 @@ describe("session/send_now — delivered but unanswered (review F1)", () => {
     clock = 600;
     expect(restored.sendNow("T2", turn("T1"), [msg("a", "A")])).toEqual({ turnId: "T2" });
     // Stamped like any turn start.
-    expect(restored.summary().lastChangeAt).toBe(600);
+    expect(restored.summary(CWD).lastChangeAt).toBe(600);
     await until(() => c2.ended("T2"));
     expect(c2.start("T2")).toEqual({ type: "turn_start", turnId: "T2", prompt: "" });
     expect(c2.end("T2")).toMatchObject({ stopReason: "end_turn" });

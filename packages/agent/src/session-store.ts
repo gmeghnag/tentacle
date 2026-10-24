@@ -430,26 +430,37 @@ export class JsonSessionStore {
   }
 
   /**
-   * All valid sessions, newest-updated first, plus the files that could not be
-   * used (reported, never silently dropped). A missing directory → empty.
-   * Also sweeps temp files left by a crashed write (best-effort, see `sweepTemps`).
+   * Every `<uid>.json` file, loaded ONE AT A TIME in directory order (a caller
+   * that keeps only what it needs holds one record at a time, however many
+   * there are). A file gone since the directory read yields `absent`. A missing
+   * directory yields nothing. Sweeps crash leftovers first, like `list`.
    */
-  async list(): Promise<ListResult> {
+  async *scan(): AsyncIterable<{ readonly id: string; readonly result: LoadResult }> {
     let names: string[];
     try {
       names = await readdir(this.dir);
     } catch {
-      return { records: [], skipped: [] };
+      return;
     }
     await this.sweepTemps();
-    const records: SessionRecord[] = [];
-    const skipped: SkippedSession[] = [];
     for (const name of names) {
       if (!name.endsWith(".json")) {
         continue;
       }
       const id = name.slice(0, -".json".length);
-      const result = await this.load(id);
+      yield { id, result: await this.load(id) };
+    }
+  }
+
+  /**
+   * All valid sessions, newest-updated first, plus the files that could not be
+   * used (reported, never silently dropped). A missing directory → empty.
+   * Also sweeps temp files left by a crashed write (best-effort, see `sweepTemps`).
+   */
+  async list(): Promise<ListResult> {
+    const records: SessionRecord[] = [];
+    const skipped: SkippedSession[] = [];
+    for await (const { id, result } of this.scan()) {
       if (result.status === "ok") {
         records.push(result.record);
       } else if (result.status === "unreadable") {

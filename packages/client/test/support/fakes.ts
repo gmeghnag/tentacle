@@ -88,7 +88,19 @@ export function approver() {
 
 export const tick = () => new Promise((r) => setTimeout(r, 1));
 
-export async function until(pred: () => boolean, ms = 3000): Promise<boolean> {
+/**
+ * Wait for `pred`; THROWS on a timeout, so a wait whose result is ignored can
+ * never let a test pass vacuously. Resolves `true` (callers may still assert it).
+ */
+export async function until(pred: () => boolean, ms = 3000): Promise<true> {
+  if (!(await poll(pred, ms))) {
+    throw new Error(`until: timed out after ${ms} ms waiting for ${String(pred)}`);
+  }
+  return true;
+}
+
+/** Like `until`, but answers `false` on a timeout: only for a caller that BRANCHES on it. */
+export async function poll(pred: () => boolean, ms = 3000): Promise<boolean> {
   const start = Date.now();
   while (!pred()) {
     if (Date.now() - start > ms) return false;

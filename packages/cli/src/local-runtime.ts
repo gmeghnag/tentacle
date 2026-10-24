@@ -253,6 +253,14 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       } (no longer in the model's context, and not saved).`,
     );
   });
+  // The daemon says (by code) the session was deleted elsewhere: it is not
+  // recreated, so our copy goes too — through the saver, never a raw write.
+  client.onSessionDeleted(({ sessionId }) => {
+    deps.saver.remove(sessionId);
+    deps.notify?.(
+      "⚠ This session was deleted from another device: it was not restored, and its local copy was removed.",
+    );
+  });
 
   let seed = deps.resume;
   const createSession = (): SessionController => {

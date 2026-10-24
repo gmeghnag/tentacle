@@ -295,11 +295,28 @@ export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 //     (absent, another epoch, evicted, …) → `resync: true` and the updates
 //     after the session's current cut are replayed: take a `session/snapshot`
 //     and apply the buffered updates past its `since` on top of it.
-//   - not live (or no `sessionId`) and `create: true` or `messages` → a new
-//     session (seeded with `messages`), `created: true`. No `sessionId` → the
-//     daemon picks one.
-//   - not live, neither → `UnknownSession`: the daemon lost it (a restart, a
-//     close); the client decides whether to recreate it from its own history.
+//   - `sessionId` ARCHIVED (a `serve` daemon keeps an ended session: closed,
+//     idle past the TTL, evicted by the detached cap) and `reopen: true` →
+//     reloaded with its full history, as after a daemon restart: `created:
+//     false`, `resync: true` (a new epoch: snapshot). `create`/`messages` are
+//     ignored: the daemon's copy wins. Without `reopen` → `SessionArchived`,
+//     whatever `create`/`messages` say: a reconnect (or any open that did not
+//     mean to reopen) never revives a session someone ended, and never builds
+//     a second session over its record. Only a person's explicit "reopen"
+//     sends `reopen: true` (docs/feat/session-archive.md). A reopen builds a
+//     live session, so it is admitted like a new one: past `maxSessions` →
+//     `TooManySessions` (same `data`), and the record stays archived.
+//   - `sessionId` DELETED (removed by `session/delete`; the daemon keeps a
+//     tombstone of the id, durable on a `serve` daemon) → `SessionDeleted`,
+//     whatever `create`/`messages`/`reopen` say: the id is never reused. A
+//     client does not recreate it and drops its own copy.
+//   - not live, not archived (or no `sessionId`) and `create: true` or
+//     `messages` → a new session (seeded with `messages`), `created: true`. No
+//     `sessionId` → the daemon picks one.
+//   - not live, not archived, neither → `UnknownSession`: the daemon does not
+//     have it (never existed, or a daemon that persists nothing lost
+//     it: a pod restart, a close); the client decides whether to recreate it
+//     from its own history.
 //
 // ORDERING: replayed updates are ordinary `session/update` notifications, sent
 // before any live one and possibly BEFORE this response: a client routes (or
@@ -317,6 +334,8 @@ export const OpenParamsSchema = z.object({
   messages: z.array(ChatMessageSchema).optional(),
   /** Working directory the session's tools operate against (not honoured: the daemon confines it). */
   cwd: z.string().optional(),
+  /** Reload `sessionId` if it is archived (a person's explicit reopen). Absent → an archived id is `SessionArchived`. */
+  reopen: z.boolean().optional(),
 });
 export type OpenParams = z.infer<typeof OpenParamsSchema>;
 
@@ -333,7 +352,10 @@ export type OpenResult = z.infer<typeof OpenResultSchema>;
 
 // --- session/close ------------------------------------------------------
 // End the session for everyone: abort its turn, stop its background jobs, tell
-// every attached client (`session_closed`), forget it. Idempotent: an unknown
+// every attached client (`session_closed{closed}`). On a daemon that persists
+// (`serve`) it is kept ARCHIVED: listed (`archived: true`), reopenable
+// (`session/open{reopen}`), removed only by `session/delete`. Elsewhere (a pod
+// daemon, the in-process worker) it is gone. Idempotent: an unknown, archived
 // or already-closed id is a no-op success. Needs no prior `open`.
 
 export const CloseParamsSchema = z.object({
@@ -343,6 +365,26 @@ export type CloseParams = z.infer<typeof CloseParamsSchema>;
 
 export const CloseResultSchema = z.object({});
 export type CloseResult = z.infer<typeof CloseResultSchema>;
+
+// --- session/delete -----------------------------------------------------
+// Remove a session for good: a live one is ended first (its turn aborted, its
+// jobs stopped, `session_closed{deleted}` to every attached client), then its
+// daemon record is removed; an archived one just loses its record. The daemon
+// keeps a tombstone of the id (on a `serve` daemon it survives a restart): a
+// later `open` of it is `SessionDeleted`, so an offline client's reconnect
+// never recreates it. Idempotent: an unknown id is a no-op success. Needs no prior `open`. A record the daemon could not load (corrupt,
+// a newer daemon's, another project's) is not listed and not deletable here:
+// the daemon's start notice names its file. Only the DAEMON's copy: a
+// client's own store is the client's to delete. Any authenticated client may
+// delete (one token = one principal).
+
+export const DeleteParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+});
+export type DeleteParams = z.infer<typeof DeleteParamsSchema>;
+
+export const DeleteResultSchema = z.object({});
+export type DeleteResult = z.infer<typeof DeleteResultSchema>;
 
 // --- session/enqueue (steering) ------------------------------------------
 // Queue a user message for injection into the turn currently running, at the
@@ -463,7 +505,7 @@ export const SessionListEntrySchema = z.object({
   sessionId: SessionIdSchema,
   /** One line, no control characters, never empty ("(empty)" before the first prompt). */
   title: line(MAX_SESSION_TITLE),
-  /** The directory the session's tools run against (the daemon's project today). */
+  /** The directory the session's tools run against (the session's own: an archived one carries its record's). */
   cwd: line(4096),
   /** ms since epoch. */
   createdAt: z.number().int().nonnegative(),
@@ -473,7 +515,7 @@ export const SessionListEntrySchema = z.object({
   running: z.boolean(),
   /** Clients attached right now (the lister itself is not one). */
   attached: z.number().int().nonnegative(),
-  /** Persisted but not loaded. Always false for now. */
+  /** Ended and kept, not loaded (`running: false`, `attached: 0`): `session/open{reopen}` reloads it. */
   archived: z.boolean(),
 });
 export type SessionListEntry = z.infer<typeof SessionListEntrySchema>;

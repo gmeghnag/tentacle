@@ -17,14 +17,27 @@
  */
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { type SessionRecord, isValidSessionId, sessionTitle } from "@tentacle/agent";
-import { type DaemonSessionState, toDaemonRecord } from "./persisted-session.ts";
+import {
+  type LoadResult,
+  type SessionRecord,
+  isValidSessionId,
+  sessionTitle,
+} from "@tentacle/agent";
+import {
+  type DaemonSessionRecord,
+  type DaemonSessionState,
+  parseDaemonRecord,
+  toDaemonRecord,
+} from "./persisted-session.ts";
+import type { TombstoneStore } from "./session-tombstones.ts";
 
 /** The slice of `JsonSessionStore` the persister uses (tests pass a spy). */
 export interface RecordStore {
   save(record: SessionRecord): Promise<void>;
   remove(id: string): Promise<void>;
   drain(): Promise<void>;
+  /** One record by id (an archived session's, on its reopen). */
+  load(id: string): Promise<LoadResult>;
 }
 
 export interface PersisterOptions {
@@ -33,7 +46,22 @@ export interface PersisterOptions {
   readonly cwd: string;
   readonly model: string;
   readonly onError: (error: Error) => void;
+  /**
+   * Whether a record's cwd is this daemon's project (`serve` compares project
+   * keys: a symlinked cwd is the same project). Default: the same string as `cwd`.
+   */
+  readonly sameProject?: (cwd: string) => boolean;
+  /**
+   * Where a deleted id is recorded for good (`serve`: `TombstoneFile`), before
+   * its file is removed. Absent → the host's tombstone is in memory only.
+   */
+  readonly tombstones?: TombstoneStore;
 }
+
+/** A record read back by `load`: the parsed record, or why it cannot be used. */
+export type LoadedRecord =
+  | { readonly ok: true; readonly record: DaemonSessionRecord }
+  | { readonly ok: false; readonly reason: string };
 
 const asError = (error: unknown): Error =>
   error instanceof Error ? error : new Error(String(error));
@@ -63,9 +91,103 @@ export class SessionPersister {
 
   /** Write `build()` for `id`, captured NOW. Synchronous; never awaited, never throws. */
   schedule(id: string, build: () => DaemonSessionState): void {
-    if (this.stopped) {
+    if (this.stopped || !this.persistable(id)) {
       return;
     }
+    let record: DaemonSessionRecord;
+    try {
+      record = this.toRecord(build());
+    } catch (error) {
+      this.report(error);
+      return;
+    }
+    void this.writeRecord(record);
+  }
+
+  /**
+   * Write `state` as an ARCHIVED record (stamped `archivedAt`), captured now,
+   * through the same per-id queue as `schedule`. Returns the record (`null`:
+   * `id` cannot be persisted — a blocked file, an unsafe name — nothing is
+   * kept) and whether the write landed (a failure is reported, never thrown).
+   */
+  archive(
+    state: DaemonSessionState,
+    archivedAt: number,
+  ): { readonly record: DaemonSessionRecord | null; readonly written: Promise<boolean> } {
+    if (!this.persistable(state.id)) {
+      return { record: null, written: Promise.resolve(false) };
+    }
+    let record: DaemonSessionRecord;
+    try {
+      record = this.toRecord({ ...state, archivedAt });
+    } catch (error) {
+      this.report(error);
+      return { record: null, written: Promise.resolve(false) };
+    }
+    return { record, written: this.writeRecord(record) };
+  }
+
+  /**
+   * Write an already-built record (an archived one whose write failed, again);
+   * resolves whether it landed. `report: false` → a failure is not reported
+   * (the caller already said it once). After `stop`: not written, `false`.
+   */
+  writeRecord(record: DaemonSessionRecord, report = true): Promise<boolean> {
+    if (this.stopped) {
+      return Promise.resolve(false);
+    }
+    let saving: Promise<void>;
+    try {
+      saving = this.opts.store.save(record);
+    } catch (error) {
+      if (report) {
+        this.report(error);
+      }
+      return Promise.resolve(false);
+    }
+    const landed = saving.then(
+      () => true,
+      (error) => {
+        if (report) {
+          this.report(error);
+        }
+        return false;
+      },
+    );
+    this.latest.set(
+      record.id,
+      landed.then(() => {}),
+    );
+    return landed;
+  }
+
+  /**
+   * Read `id`'s record back (an archived session's reopen): after its latest
+   * pending write has landed, parsed and checked like at start (version,
+   * project). Never throws.
+   */
+  async load(id: string): Promise<LoadedRecord> {
+    await this.flush(id);
+    let result: LoadResult;
+    try {
+      result = await this.opts.store.load(id);
+    } catch (error) {
+      return { ok: false, reason: asError(error).message };
+    }
+    if (result.status === "absent") {
+      return { ok: false, reason: "its file is gone" };
+    }
+    if (result.status === "unreadable") {
+      return { ok: false, reason: result.reason };
+    }
+    return parseDaemonRecord(
+      result.record,
+      this.opts.sameProject ?? ((cwd) => cwd === this.opts.cwd),
+    );
+  }
+
+  /** Whether `id` may be written; reports once (per id) why not. */
+  private persistable(id: string): boolean {
     const unpersisted = this.blocked.has(id)
       ? `session ${id} is not persisted: its file could not be loaded and is left as is`
       : !isValidSessionId(id)
@@ -77,26 +199,18 @@ export class SessionPersister {
         this.reported.add(id);
         this.report(new Error(unpersisted));
       }
-      return;
+      return false;
     }
-    let saving: Promise<void>;
-    try {
-      const state = build();
-      // `updatedAt` = the last conversation change, never the write time: a
-      // detach or a restart writes too, and must not reorder `session/list`.
-      const record = toDaemonRecord(
-        state,
-        { cwd: this.opts.cwd, model: this.opts.model, title: sessionTitle(state.messages) },
-        state.lastChangeAt,
-      );
-      saving = this.opts.store.save(record);
-    } catch (error) {
-      this.report(error);
-      return;
-    }
-    this.latest.set(
-      id,
-      saving.catch((error) => this.report(error)),
+    return true;
+  }
+
+  private toRecord(state: DaemonSessionState): DaemonSessionRecord {
+    // `updatedAt` = the last conversation change, never the write time: a
+    // detach or a restart writes too, and must not reorder `session/list`.
+    return toDaemonRecord(
+      state,
+      { cwd: this.opts.cwd, model: this.opts.model, title: sessionTitle(state.messages) },
+      state.lastChangeAt,
     );
   }
 
@@ -105,15 +219,28 @@ export class SessionPersister {
     return this.latest.get(id) ?? Promise.resolve();
   }
 
-  /** Delete `id`'s file (the session was closed). Fire-and-forget; `stop` waits for it. */
-  remove(id: string): void {
+  /**
+   * Delete `id`'s file (`session/delete`): its tombstone is recorded FIRST, so
+   * no crash can leave the id with neither (a file left beside its tombstone
+   * is removed at the next start). `tombstone: false` → only finish a removal
+   * (the tombstone is already on disk). A failure of either step is reported,
+   * and the file is removed anyway (the user asked for it). Fire-and-forget;
+   * `stop` waits for it.
+   */
+  remove(id: string, tombstone = true): void {
     this.latest.delete(id);
     this.reported.delete(id);
-    if (this.blocked.has(id) || !isValidSessionId(id)) {
+    if (!isValidSessionId(id)) {
       return;
     }
-    const removal = this.opts.store
-      .remove(id)
+    // Tombstoned even when blocked: the id was deleted whatever its file is.
+    const recorded = tombstone
+      ? this.opts.tombstones?.add(id).catch((error) => this.report(error))
+      : undefined;
+    // A blocked id's file is left as is (unreadable: not ours to remove).
+    const removing = (): Promise<void> =>
+      this.blocked.has(id) ? Promise.resolve() : this.opts.store.remove(id);
+    const removal = (recorded ? recorded.then(removing) : removing())
       .catch((error) => this.report(error))
       .finally(() => this.removals.delete(removal));
     this.removals.add(removal);
@@ -125,7 +252,8 @@ export class SessionPersister {
     await Promise.all([this.opts.store.drain(), ...this.removals]);
   }
 
-  private report(error: unknown): void {
+  /** Report through `onError` (never throws): the host's archive problems go to the same log. */
+  report(error: unknown): void {
     try {
       this.opts.onError(asError(error));
     } catch {

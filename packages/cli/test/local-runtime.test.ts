@@ -294,6 +294,51 @@ describe("createLocalRuntime (local over RPC)", () => {
     rt2.dispose();
   });
 
+  test("F1 a session deleted from another device: never recreated, the local copy is removed, the TUI is told", async () => {
+    // Mutation: drop the `onSessionDeleted` subscription → no notice, the file stays.
+    const model = new ScriptedProvider([]);
+    const { channel, dispose, host } = daemon(model);
+    // Another device had S on this daemon and deleted it: tombstoned.
+    host.open({ sessionId: "S", create: true }, { send: () => {} });
+    expect(host.delete("S")).toBe(true);
+    const store = new JsonSessionStore(join(dir, "deleted-elsewhere"));
+    const record = {
+      id: "S",
+      cwd: "/tmp/work",
+      model: "qwen3",
+      createdAt: 1,
+      updatedAt: 1,
+      title: "mine",
+      messages: [{ role: "user" as const, content: "mine" }],
+    };
+    await store.save(record);
+    const notices: string[] = [];
+    const saver = new SessionSaver(store, (t) => notices.push(t));
+    const runtime = await createLocalRuntime({
+      channel,
+      disposeTransport: dispose,
+      permissions: new PermissionBroker(),
+      saver,
+      notify: (t) => notices.push(t),
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: record,
+    });
+    const failed = await drain(runtime.createSession().send("again")).then(
+      () => null,
+      (error: Error) => error,
+    );
+    expect(failed).not.toBeNull();
+    await runtime.dispose();
+    expect(await saver.drain()).toEqual([]);
+    expect(notices).toEqual([
+      "⚠ This session was deleted from another device: it was not restored, and its local copy was removed.",
+    ]);
+    expect((await store.load("S")).status).toBe("absent");
+    expect(host.get("S")).toBeUndefined();
+    expect(model.requests).toHaveLength(0);
+  });
+
   test("persistingController.enqueue propagates the inner Promise (resolves AND rejects)", async () => {
     // A stub session whose enqueue resolves — the controller must return that
     // very Promise (not swallow it) so the TUI can await/reconcile it.

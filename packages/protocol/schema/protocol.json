@@ -256,6 +256,21 @@
       "type": "object",
       "x-event-class": "display"
     },
+    "DeleteParams": {
+      "additionalProperties": true,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["sessionId"],
+      "type": "object"
+    },
+    "DeleteResult": {
+      "additionalProperties": true,
+      "properties": {},
+      "type": "object"
+    },
     "EnqueueParams": {
       "additionalProperties": true,
       "properties": {
@@ -708,6 +723,9 @@
           },
           "type": "array"
         },
+        "reopen": {
+          "type": "boolean"
+        },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
         },
@@ -1109,7 +1127,7 @@
       "additionalProperties": true,
       "properties": {
         "reason": {
-          "enum": ["closed"],
+          "enum": ["closed", "deleted"],
           "type": "string"
         },
         "type": {
@@ -1892,6 +1910,8 @@
     "NotInitialized": -32005,
     "ParseError": -32700,
     "PermissionNotPending": -32013,
+    "SessionArchived": -32014,
+    "SessionDeleted": -32015,
     "StaleCursor": -32011,
     "TooManySessions": -32006,
     "TurnInProgress": -32004,
@@ -1962,6 +1982,14 @@
       },
       "result": {
         "$ref": "#/$defs/CompactResult"
+      }
+    },
+    "session/delete": {
+      "params": {
+        "$ref": "#/$defs/DeleteParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DeleteResult"
       }
     },
     "session/enqueue": {
@@ -2052,5 +2080,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 10
+  "x-protocol-version": 11
 }

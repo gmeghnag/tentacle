@@ -20,6 +20,7 @@ import { DomainErrorCode, RpcPeer, createChannelPair } from "@tentacle/transport
 import { Connection } from "../src/connection.ts";
 import type { Attachment } from "../src/hosted-session.ts";
 import { SessionHost, type SessionHostOptions } from "../src/session-host.ts";
+import * as Reaper from "../src/session-reaper.ts";
 import {
   type ReapPolicy,
   type ReapReason,
@@ -209,6 +210,29 @@ describe("selectExpired (pure rules)", () => {
       { id: "a", reason: "idle_ttl" },
       { id: "c", reason: "idle_ttl" },
     ]);
+  });
+});
+
+describe("selectEvictable (pure: the detached cap's victim)", () => {
+  test("U1 the oldest idle detached session; attached and busy are never picked; ties by id", () => {
+    // Mutation M4: ignore `busy` → the busy (suspended on a permission) one is picked.
+    const select = (rows: SessionLiveness[]) =>
+      (
+        Reaper as unknown as { selectEvictable?: (r: Iterable<SessionLiveness>) => string | null }
+      ).selectEvictable?.(rows);
+    expect(
+      select([
+        live({ id: "newer", lastActiveAt: 50 }),
+        live({ id: "busy-oldest", lastActiveAt: 1, busy: true }),
+        live({ id: "attached-old", lastActiveAt: 2, attached: 1 }),
+        live({ id: "older", lastActiveAt: 10 }),
+      ]),
+    ).toBe("older");
+    expect(select([live({ id: "b", lastActiveAt: 5 }), live({ id: "a", lastActiveAt: 5 })])).toBe(
+      "a",
+    );
+    expect(select([live({ id: "x", busy: true }), live({ id: "y", attached: 2 })])).toBeNull();
+    expect(select([])).toBeNull();
   });
 });
 

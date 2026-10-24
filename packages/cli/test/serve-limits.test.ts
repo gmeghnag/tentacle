@@ -182,12 +182,16 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
         sessionId: string;
       };
       await new Promise((r) => setTimeout(r, 400));
-      expect(audit.some((l) => l.startsWith("session-reaped"))).toBe(false); // attached
+      expect(audit.some((l) => l.startsWith("session-archived"))).toBe(false); // attached
       a.ws.close();
-      await until(() => audit.includes(`session-reaped ${opened.sessionId} idle_ttl`));
+      await until(() => audit.includes(`session-archived ${opened.sessionId} idle_ttl`));
       const b = await client(server.url);
-      const reopen = await b.request("session/open", { sessionId: opened.sessionId });
-      expect(reopen?.error?.code).toBe(DomainErrorCode.UnknownSession);
+      // Archived, not deleted: a plain open (a reconnect) is refused as such;
+      // only an explicit reopen reloads it.
+      const plain = await b.request("session/open", { sessionId: opened.sessionId });
+      expect(plain?.error?.code).toBe(DomainErrorCode.SessionArchived);
+      const reopen = await b.request("session/open", { sessionId: opened.sessionId, reopen: true });
+      expect(reopen?.result).toMatchObject({ created: false, resync: true });
       b.ws.close();
     } finally {
       await server.stop();
@@ -209,7 +213,7 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
         sessionId: string;
       };
       a.ws.close();
-      await until(() => audit.includes(`session-reaped ${opened.sessionId} admin_cap`));
+      await until(() => audit.includes(`session-archived ${opened.sessionId} admin_cap`));
     } finally {
       await server.stop();
     }
@@ -240,7 +244,7 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
     try {
       const id = await detachedSession(server.url);
       await new Promise((r) => setTimeout(r, 300)); // many sweeps
-      expect(audit.filter((l) => l.startsWith("session-reaped"))).toEqual([]);
+      expect(audit.filter((l) => l.startsWith("session-archived"))).toEqual([]);
       const b = await client(server.url);
       expect((await b.request("daemon/session_ttl", {}))?.result).toEqual({
         idleTtlMs: "never",
@@ -250,7 +254,7 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
         idleTtlMs: 100,
         persisted: false,
       });
-      await until(() => audit.includes(`session-reaped ${id} idle_ttl`));
+      await until(() => audit.includes(`session-archived ${id} idle_ttl`));
       expect(audit).toContain("session-ttl never -> 100ms");
       b.ws.close();
     } finally {
@@ -272,7 +276,7 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
       const b = await client(server.url);
       // 1 ms: the derived period is the 1 s floor.
       await b.request("daemon/session_ttl", { idleTtlMs: 1 });
-      await until(() => audit.includes(`session-reaped ${id} idle_ttl`), 4000);
+      await until(() => audit.includes(`session-archived ${id} idle_ttl`), 4000);
       // And back to never: the interval is cleared (nothing left to reap anyway).
       expect((await b.request("daemon/session_ttl", { idleTtlMs: "never" }))?.result).toEqual({
         idleTtlMs: "never",
@@ -326,7 +330,7 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
     await b.request("daemon/session_ttl", { idleTtlMs: 300 });
     await server.stop();
     await new Promise((r) => setTimeout(r, 700)); // past the 300 ms TTL, many sweeps
-    expect(audit.filter((l) => l.startsWith("session-reaped"))).toEqual([]);
+    expect(audit.filter((l) => l.startsWith("session-archived"))).toEqual([]);
   });
 
   test("repeated sets with the same period do not starve the sweep (the session is still reaped on time)", async () => {
@@ -344,11 +348,14 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
       const b = await client(server.url);
       const startedAt = Date.now();
       // TTL 100 ms → derived period is the 1 s floor; every set keeps it.
-      while (Date.now() - startedAt < 3500 && !audit.some((l) => l.startsWith("session-reaped"))) {
+      while (
+        Date.now() - startedAt < 3500 &&
+        !audit.some((l) => l.startsWith("session-archived"))
+      ) {
         await b.request("daemon/session_ttl", { idleTtlMs: 100 });
         await new Promise((r) => setTimeout(r, 400));
       }
-      expect(audit).toContain(`session-reaped ${id} idle_ttl`);
+      expect(audit).toContain(`session-archived ${id} idle_ttl`);
       expect(Date.now() - startedAt).toBeLessThan(3000);
       b.ws.close();
     } finally {
@@ -375,12 +382,15 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
       a.ws.close();
       const startedAt = Date.now();
       let ttl = 1200;
-      while (Date.now() - startedAt < 4000 && !audit.some((l) => l.startsWith("session-reaped"))) {
+      while (
+        Date.now() - startedAt < 4000 &&
+        !audit.some((l) => l.startsWith("session-archived"))
+      ) {
         await b.request("daemon/session_ttl", { idleTtlMs: ttl });
         ttl = ttl === 1200 ? 1300 : 1200; // periods 1200 / 1300
         await new Promise((r) => setTimeout(r, 300));
       }
-      expect(audit).toContain(`session-reaped ${opened.sessionId} idle_ttl`);
+      expect(audit).toContain(`session-archived ${opened.sessionId} idle_ttl`);
       expect(Date.now() - startedAt).toBeLessThan(3000);
       b.ws.close();
     } finally {
@@ -445,7 +455,7 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
     );
     await until(() => audit.some((l) => l.startsWith("session-ttl")));
     await new Promise((r) => setTimeout(r, 2500)); // > the 1 s floor period, twice
-    expect(audit.filter((l) => l.startsWith("session-reaped"))).toEqual([]);
+    expect(audit.filter((l) => l.startsWith("session-archived"))).toEqual([]);
     await server.stop();
   });
 
@@ -504,7 +514,7 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
     await a.request("session/open", { create: true });
     await server.stop();
     await new Promise((r) => setTimeout(r, 400));
-    expect(audit.filter((l) => l.startsWith("session-reaped"))).toEqual([]);
+    expect(audit.filter((l) => l.startsWith("session-archived"))).toEqual([]);
   });
 
   test("defaults applied: the 65th live session is refused (max 64)", async () => {
@@ -525,33 +535,41 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
     }
   });
 
-  test("defaults applied: the 17th session is refused while 16 are detached", async () => {
-    // Mutation: drop the `?? DEFAULT_MAX_DETACHED_SESSIONS` → the 17th is created.
-    const server = await startDaemon(config, { host: "127.0.0.1", port: 0 });
+  test("defaults applied: with 16 idle detached, the 17th ARCHIVES the oldest (Q1), never refused", async () => {
+    // Mutation: drop the `?? DEFAULT_MAX_DETACHED_SESSIONS` → nothing is ever evicted.
+    const audit: string[] = [];
+    const server = await startDaemon(config, {
+      host: "127.0.0.1",
+      port: 0,
+      onAudit: (line) => audit.push(line),
+    });
     try {
       const a = await client(server.url);
+      const mine: string[] = [];
       for (let i = 0; i < 16; i++) {
-        expect((await a.request("session/open", { create: true }))?.result).toBeDefined();
+        const reply = await a.request("session/open", { create: true });
+        mine.push((reply?.result as { sessionId: string }).sessionId);
       }
       a.ws.close();
       const b = await client(server.url);
       // The socket close reaches the server asynchronously: poll until A's 16
       // sessions count as detached (an early create is closed again at once).
-      let refused: { code: number; data?: unknown } | undefined;
       const deadline = Date.now() + 3000;
-      while (refused === undefined && Date.now() < deadline) {
+      while (!audit.some((l) => l.endsWith(" evicted")) && Date.now() < deadline) {
         const reply = await b.request("session/open", { create: true });
-        if (reply?.error) {
-          refused = reply.error;
-        } else {
-          const { sessionId } = reply?.result as { sessionId: string };
+        expect(reply?.error).toBeUndefined();
+        const { sessionId } = reply?.result as { sessionId: string };
+        if (!audit.some((l) => l.endsWith(" evicted"))) {
           await b.request("session/close", { sessionId });
         }
       }
-      expect(refused).toMatchObject({
-        code: DomainErrorCode.TooManySessions,
-        data: { limit: "detached", max: 16 },
-      });
+      const evicted = audit.find((l) => l.endsWith(" evicted"))?.split(" ")[1] ?? "";
+      expect(mine).toContain(evicted);
+      expect(audit.some((l) => l.startsWith("session-refused"))).toBe(false);
+      const listed = (await b.request("session/list", {}))?.result as {
+        sessions: { sessionId: string; archived: boolean }[];
+      };
+      expect(listed.sessions.find((s) => s.sessionId === evicted)?.archived).toBe(true);
       b.ws.close();
     } finally {
       await server.stop();

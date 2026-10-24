@@ -11,8 +11,14 @@ import type { ChatMessage } from "@tentacle/core";
 import { DomainErrorCode, type TurnEnd } from "@tentacle/protocol";
 
 export const DAEMON_RECORD_KIND = "tentacle.daemon-session";
-/** Version of THIS record's shape, independent of `PROTOCOL_VERSION`. */
-export const DAEMON_RECORD_VERSION = 1;
+/**
+ * Version of THIS record's shape, independent of `PROTOCOL_VERSION`. 2 added
+ * `archivedAt`: a v1 daemon must refuse an archived record (it would restore
+ * it live), never half-load it. A v1 record reads as a v2 one, not archived.
+ */
+export const DAEMON_RECORD_VERSION = 2;
+/** Every version `parseDaemonRecord` reads (each read as the current shape). */
+const READABLE_VERSIONS: readonly number[] = [1, DAEMON_RECORD_VERSION];
 
 /** The permission request a turn was suspended on at the write. */
 export interface PendingPermission {
@@ -48,6 +54,8 @@ export interface DaemonSessionState {
   readonly turns: readonly PersistedTurnKey[];
   readonly enqueueIds: readonly string[];
   readonly turn?: PersistedTurn;
+  /** Present iff the session was ended and kept (`SessionHost.archive`): when. */
+  readonly archivedAt?: number;
 }
 
 export interface DaemonSessionRecord extends SessionRecord {
@@ -57,6 +65,11 @@ export interface DaemonSessionRecord extends SessionRecord {
   readonly turns: readonly PersistedTurnKey[];
   readonly enqueueIds: readonly string[];
   readonly turn?: PersistedTurn;
+  /**
+   * Present iff ARCHIVED (ended and kept): not restored at start, listed as
+   * archived, reloaded by an explicit reopen. Absent → restored live at start.
+   */
+  readonly archivedAt?: number;
 }
 
 /** A live session's state as a record (`title` as the client store derives it). */
@@ -79,6 +92,7 @@ export function toDaemonRecord(
     turns: state.turns,
     enqueueIds: state.enqueueIds,
     ...(state.turn ? { turn: state.turn } : {}),
+    ...(state.archivedAt !== undefined ? { archivedAt: state.archivedAt } : {}),
   };
 }
 
@@ -152,10 +166,10 @@ export function parseDaemonRecord(
       reason: `not a daemon session record (kind ${JSON.stringify(value.kind)})`,
     };
   }
-  if (value.schemaVersion !== DAEMON_RECORD_VERSION) {
+  if (typeof value.schemaVersion !== "number" || !READABLE_VERSIONS.includes(value.schemaVersion)) {
     return {
       ok: false,
-      reason: `unsupported record version ${JSON.stringify(value.schemaVersion)} (this daemon reads ${DAEMON_RECORD_VERSION})`,
+      reason: `unsupported record version ${JSON.stringify(value.schemaVersion)} (this daemon reads ${READABLE_VERSIONS.join(", ")})`,
     };
   }
   if (!sameProject(record.cwd)) {
@@ -191,6 +205,17 @@ export function parseDaemonRecord(
     if (problem) {
       return { ok: false, reason: problem };
     }
+  }
+  if (value.schemaVersion === 1) {
+    // v1 had no archive: whatever it carries, it reads as a live v2 record.
+    const { archivedAt: _ignored, ...rest } = value;
+    return {
+      ok: true,
+      record: { ...rest, schemaVersion: DAEMON_RECORD_VERSION } as unknown as DaemonSessionRecord,
+    };
+  }
+  if (value.archivedAt !== undefined && !isWireStamp(value.archivedAt)) {
+    return { ok: false, reason: '"archivedAt" is not a non-negative integer' };
   }
   return { ok: true, record: record as DaemonSessionRecord };
 }
@@ -238,6 +263,19 @@ export const INTERRUPTED_NOTE =
 /** For an `agent_task` whose sub-agent was waiting for approval (decision D4). */
 export const SUBAGENT_INTERRUPTED_NOTE =
   "Interrupted: the daemon restarted while a sub-agent of this task was waiting for approval; its partial work is lost and may have had side effects. Check before retrying.";
+
+/** `NOT_RUN_NOTE` for a session that was ENDED mid-turn (closed, admin-capped) and archived. */
+export const ENDED_NOT_RUN_NOTE =
+  "Not run: the session was ended before this call ran (it was waiting for approval or queued behind one). Ask again if it is still needed.";
+/** `INTERRUPTED_NOTE` for an ended session. */
+export const ENDED_INTERRUPTED_NOTE =
+  "Interrupted: the session was ended while this tool was running; it may or may not have completed. Check before retrying.";
+/** `SUBAGENT_INTERRUPTED_NOTE` for an ended session. */
+export const ENDED_SUBAGENT_INTERRUPTED_NOTE =
+  "Interrupted: the session was ended while a sub-agent of this task was waiting for approval; its partial work is lost and may have had side effects. Check before retrying.";
+
+/** The end of a turn its session's close cut short: what the live close streamed. */
+export const ARCHIVED_TURN_END: TurnEnd = { stopReason: "cancelled" };
 
 /** The cached end of the turn a restart cut short (a retried `prompt` gets it). */
 export const RESTART_TURN_END: TurnEnd = {
@@ -298,6 +336,12 @@ function resumableTurn(record: DaemonSessionRecord): ResumedTurn | undefined {
  * answer (which one: see the notes above; only the FIRST unanswered call can
  * have started — calls run in order), the steering queue is kept as user
  * messages, and the turn gets its restart end.
+ *
+ * An ARCHIVED record's turn (`archivedAt`: the session was ENDED mid-turn — a
+ * close, the admin cap) is never continued: whoever ended the session ended
+ * its turn too, so a pending permission is not asked again. It is closed the
+ * same honest way, with the "session was ended" notes and the end the live
+ * close streamed (`cancelled`).
  */
 export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
   const messages = [...record.messages];
@@ -305,10 +349,18 @@ export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
   if (!turn) {
     return { messages, turns: record.turns, enqueueIds: record.enqueueIds };
   }
-  const resume = resumableTurn(record);
+  const ended = record.archivedAt !== undefined;
+  const resume = ended ? undefined : resumableTurn(record);
   if (resume) {
     return { messages, turns: record.turns, enqueueIds: record.enqueueIds, resume };
   }
+  const notes = ended
+    ? {
+        notRun: ENDED_NOT_RUN_NOTE,
+        interrupted: ENDED_INTERRUPTED_NOTE,
+        subagent: ENDED_SUBAGENT_INTERRUPTED_NOTE,
+      }
+    : { notRun: NOT_RUN_NOTE, interrupted: INTERRUPTED_NOTE, subagent: SUBAGENT_INTERRUPTED_NOTE };
   const trailing = trailingCalls(messages);
   if (trailing) {
     let first = true;
@@ -316,14 +368,10 @@ export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
       if (trailing.answered.has(call.id)) {
         continue;
       }
-      let content = NOT_RUN_NOTE;
+      let content = notes.notRun;
       if (first) {
         const pending = turn.pending?.toolCallId === call.id ? turn.pending : undefined;
-        content = !pending
-          ? INTERRUPTED_NOTE
-          : pending.resumable
-            ? NOT_RUN_NOTE
-            : SUBAGENT_INTERRUPTED_NOTE;
+        content = !pending ? notes.interrupted : pending.resumable ? notes.notRun : notes.subagent;
         first = false;
       }
       messages.push({ role: "tool", content, toolCallId: call.id });
@@ -332,8 +380,9 @@ export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
   for (const text of turn.steering) {
     messages.push({ role: "user", content: text });
   }
+  const end = ended ? ARCHIVED_TURN_END : RESTART_TURN_END;
   const turns = record.turns.map((key) =>
-    key.turnId === turn.turnId && !key.end ? { turnId: key.turnId, end: RESTART_TURN_END } : key,
+    key.turnId === turn.turnId && !key.end ? { turnId: key.turnId, end } : key,
   );
   return { messages, turns, enqueueIds: record.enqueueIds };
 }

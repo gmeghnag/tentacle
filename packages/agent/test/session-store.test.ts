@@ -92,6 +92,45 @@ describe("JsonSessionStore", () => {
     expect((await store.latest()).record?.id).toBe("new");
   });
 
+  test("scan yields every .json file once, one at a time, unreadable ones included", async () => {
+    const d = join(dir, "scan");
+    const store = new JsonSessionStore(d);
+    await store.save(
+      recordFromSnapshot({ id: "a", messages: messages("a") }, { cwd: "/w", model: "m" }),
+    );
+    await store.save(
+      recordFromSnapshot({ id: "b", messages: messages("b") }, { cwd: "/w", model: "m" }),
+    );
+    await writeFile(join(d, "bad.json"), "{nope");
+    await writeFile(join(d, "notes.txt"), "not a session");
+    const scan = (
+      store as unknown as { scan?: () => AsyncIterable<{ id: string; result: { status: string } }> }
+    ).scan;
+    const seen: [string, string][] = [];
+    for await (const { id, result } of scan?.call(store) ?? []) {
+      seen.push([id, result.status]);
+    }
+    expect(seen.sort()).toEqual([
+      ["a", "ok"],
+      ["b", "ok"],
+      ["bad", "unreadable"],
+    ]);
+    // `list` is built on it: same records, same skipped file.
+    const listed = await store.list();
+    expect(listed.records.map((r) => r.id).sort()).toEqual(["a", "b"]);
+    expect(listed.skipped.map((s) => s.id)).toEqual(["bad"]);
+  });
+
+  test("scan of a missing directory yields nothing", async () => {
+    const store = new JsonSessionStore(join(dir, "scan-missing"));
+    const scan = (store as unknown as { scan?: () => AsyncIterable<unknown> }).scan;
+    const seen: unknown[] = [];
+    for await (const item of scan?.call(store) ?? [1]) {
+      seen.push(item);
+    }
+    expect(seen).toEqual([]);
+  });
+
   test("list/latest tolerate a missing directory", async () => {
     const store = new JsonSessionStore(join(dir, "does-not-exist"));
     expect(await store.list()).toEqual({ records: [], skipped: [] });

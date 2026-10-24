@@ -9,8 +9,8 @@
  */
 import type { JsonSessionStore, SessionRecord } from "@tentacle/agent";
 
-/** All the saver needs from a store: a `save` whose promise settles with the write. */
-export type SaveTarget = Pick<JsonSessionStore, "save">;
+/** All the saver needs from a store: a `save` whose promise settles with the write, and `remove`. */
+export type SaveTarget = Pick<JsonSessionStore, "save" | "remove">;
 
 /** A uid's last save outcome: fine, or failing with the latest error. */
 export type SaveState =
@@ -59,6 +59,8 @@ export class SessionSaver {
    * orders its internal settling.
    */
   private readonly pending = new Map<Promise<void>, string>();
+  /** Uids whose local copy was removed: a later save of one is dropped (never written back). */
+  private readonly removed = new Set<string>();
 
   constructor(
     private readonly target: SaveTarget,
@@ -67,6 +69,9 @@ export class SessionSaver {
 
   /** Save in the background; the outcome is reported, never thrown. */
   save(record: SessionRecord): void {
+    if (this.removed.has(record.id)) {
+      return;
+    }
     const settled = this.target.save(record).then(
       () => this.settle(record.id, { ok: true }),
       (error: unknown) =>
@@ -88,10 +93,39 @@ export class SessionSaver {
     this.settle(id, { ok: false, error });
   }
 
+  /**
+   * Remove `id`'s local copy for good (the daemon says the session was
+   * deleted): queued after any save in flight (the store's per-uid queue), and
+   * no later save writes it back. A failure is one notice; `drain` waits for it.
+   */
+  remove(id: string): void {
+    this.removed.add(id);
+    this.states.delete(id);
+    const settled = this.target.remove(id).then(
+      () => {},
+      (error: unknown) => {
+        try {
+          this.notify(
+            `⚠ Session ${id.slice(0, 8)}'s local copy could not be removed — ${
+              error instanceof Error ? error.message : String(error)
+            }.`,
+          );
+        } catch {
+          // A broken listener must not become an unhandled rejection.
+        }
+      },
+    );
+    this.pending.set(settled, id);
+    void settled.finally(() => this.pending.delete(settled));
+  }
+
   private settle(
     id: string,
     outcome: { readonly ok: true } | { readonly ok: false; readonly error: string },
   ): void {
+    if (this.removed.has(id)) {
+      return; // deleted (a save in flight, a failed read): nothing left to save or report
+    }
     const { state, notice } = nextSaveState(this.states.get(id) ?? { failing: false }, id, outcome);
     this.states.set(id, state);
     if (notice) {

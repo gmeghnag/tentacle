@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { Agent, Session } from "@tentacle/agent";
+import { appendFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Agent, JsonSessionStore, type LoadResult, Session } from "@tentacle/agent";
 import {
   type ChatMessage,
   type ChatRequest,
@@ -16,12 +19,16 @@ import {
   type PermissionRequestUpdate,
 } from "@tentacle/protocol";
 import { ToolRegistry, createTaskTool } from "@tentacle/tools";
-import { RpcPeer, createChannelPair } from "@tentacle/transport";
+import { RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { z } from "zod";
 import { Connection } from "../src/connection.ts";
 import { type Attachment, HostedSession, untilAborted } from "../src/hosted-session.ts";
 import {
+  ARCHIVED_TURN_END,
   type DaemonSessionRecord,
+  ENDED_INTERRUPTED_NOTE,
+  ENDED_NOT_RUN_NOTE,
+  ENDED_SUBAGENT_INTERRUPTED_NOTE,
   INTERRUPTED_NOTE,
   NOT_RUN_NOTE,
   RESTART_TURN_END,
@@ -31,8 +38,9 @@ import {
   reconcileOnReload,
   restoredActivity,
 } from "../src/persisted-session.ts";
-import { SessionHost } from "../src/session-host.ts";
+import { SessionHost, type SessionHostOptions } from "../src/session-host.ts";
 import { type RecordStore, SessionPersister } from "../src/session-persister.ts";
+import { TOMBSTONE_FILE, TombstoneFile } from "../src/session-tombstones.ts";
 
 // `serve` persists each session (docs/feat/daemon-side-persistence.md). A
 // restart is simulated as: the durable record (what reached the "disk") →
@@ -78,6 +86,23 @@ class SpyStore implements RecordStore {
     this.durable.delete(id);
   }
   async drain(): Promise<void> {}
+  /** Ids read back; `holdLoads` parks a read until `releaseLoads()`; `loadAs` overrides its result. */
+  readonly loads: string[] = [];
+  holdLoads = false;
+  loadAs: LoadResult | null = null;
+  private heldLoads: Array<() => void> = [];
+  async load(id: string): Promise<LoadResult> {
+    this.loads.push(id);
+    if (this.holdLoads) await new Promise<void>((r) => this.heldLoads.push(r));
+    if (this.loadAs) return this.loadAs;
+    const record = this.durable.get(id);
+    return record
+      ? { status: "ok", record: JSON.parse(JSON.stringify(record)) }
+      : { status: "absent" };
+  }
+  releaseLoads(): void {
+    for (const r of this.heldLoads.splice(0)) r();
+  }
 }
 
 /** Plays one scripted round per model call; counts the calls. */
@@ -133,6 +158,7 @@ function rig(
   tools: (broker: PermissionBroker) => Tool[],
   store: SpyStore = new SpyStore(),
   now: () => number = Date.now,
+  extra: Partial<SessionHostOptions> = {},
 ): Rig {
   const errors: Error[] = [];
   const brokers: PermissionBroker[] = [];
@@ -144,6 +170,7 @@ function rig(
     onError: (e) => errors.push(e),
   });
   const host = new SessionHost({
+    ...extra,
     defaultCwd: CWD,
     persister,
     now,
@@ -876,8 +903,8 @@ describe("daemon persistence: after a restart", () => {
     expect(outcome.epoch).not.toBe(since.epoch);
   });
 
-  test("A9 close (and the reaper's close) deletes the record; nothing is written after", async () => {
-    // Mutation: drop `persister.remove` in SessionHost.close → the file outlives the session.
+  test("A9′ close (and the reaper's close) ARCHIVES: the record is kept, stamped, listed; one write", async () => {
+    // Mutation M1: SessionHost.close → today's `persister.remove` → red (removed, not listed).
     let now = 1_000_000;
     const r = rig(
       [text("hi")],
@@ -891,11 +918,15 @@ describe("daemon persistence: after a restart", () => {
     await until(() => c.ended("T1"));
     await a.persisted();
     const saves = r.store.saves.length;
+    now += 1;
     r.host.close(a.id);
     await tick();
-    expect(r.store.removed).toEqual([a.id]);
-    expect(r.store.durable.has(a.id)).toBe(false);
-    expect(r.store.saves.length).toBe(saves);
+    expect(r.store.removed).toEqual([]);
+    expect(reread(r.store.durable.get(a.id)).archivedAt).toBe(now);
+    expect(reread(r.store.durable.get(a.id)).messages).toEqual(a.snapshotPage().messages);
+    // Exactly the archive write; nothing after it.
+    expect(r.store.saves.length).toBe(saves + 1);
+    expect(r.host.get(a.id)).toBeUndefined();
 
     const d = client();
     const b = r.host.open({ create: true }, d.attachment).hosted;
@@ -903,7 +934,13 @@ describe("daemon persistence: after a restart", () => {
     now += 10_000;
     expect(r.host.reapExpired({ idleTtlMs: 5_000 }).map((e) => e.id)).toEqual([b.id]);
     await tick();
-    expect(r.store.removed).toEqual([a.id, b.id]);
+    expect(r.store.removed).toEqual([]);
+    expect(reread(r.store.durable.get(b.id)).archivedAt).toBe(now);
+    const listed = r.host.list({}).sessions;
+    expect(listed.map((s) => [s.sessionId, s.archived, s.cwd, s.running, s.attached])).toEqual([
+      [b.id, true, CWD, false, 0],
+      [a.id, true, CWD, false, 0],
+    ]);
   });
 
   test("A10 a failing store is reported, never thrown or unhandled; the turn completes", async () => {
@@ -1036,7 +1073,7 @@ describe("daemon persistence: review fixes (the TTL clock, compaction, shutdown)
         title: "t",
         messages: [{ role: "user", content: "go" }],
         kind: "tentacle.daemon-session",
-        schemaVersion: 1,
+        schemaVersion: 2,
         lastActiveAt: 5,
         turns: [{ turnId: "T" }],
         enqueueIds: [],
@@ -1104,7 +1141,7 @@ describe("daemon persistence: the record's updatedAt is the last conversation ch
       title: "t",
       messages: [{ role: "user", content: "go" }],
       kind: "tentacle.daemon-session",
-      schemaVersion: 1,
+      schemaVersion: 2,
       lastActiveAt: 7,
       turns: [],
       enqueueIds: [],
@@ -1220,7 +1257,7 @@ describe("persisted-session (pure)", () => {
     title: "t",
     messages: [],
     kind: "tentacle.daemon-session",
-    schemaVersion: 1,
+    schemaVersion: 2,
     lastActiveAt: 2,
     turns: [],
     enqueueIds: [],
@@ -1249,7 +1286,7 @@ describe("persisted-session (pure)", () => {
       return p.ok ? "ok" : p.reason;
     };
     expect(reason({ ...base(), kind: undefined })).toMatch(/not a daemon session record/);
-    expect(reason({ ...base(), schemaVersion: 2 })).toMatch(/unsupported record version 2/);
+    expect(reason({ ...base(), schemaVersion: 3 })).toMatch(/unsupported record version 3/);
     expect(reason(base(), "/elsewhere")).toMatch(/another project/);
     expect(reason({ ...base(), turns: [{ turnId: "x", end: { stopReason: "nope" } }] })).toMatch(
       /invalid end/,
@@ -1397,10 +1434,658 @@ describe("persisted-session (pure)", () => {
     ).toBeUndefined();
   });
 
+  test("U2 parseDaemonRecord: a v1 record reads as v2, not archived; archivedAt is a wire stamp; v3 refused", () => {
+    // Mutation: refuse v1 → every session of the previous build is skipped at the upgrade.
+    const parse = (r: unknown) => parseDaemonRecord(r as DaemonSessionRecord, (c) => c === CWD);
+    const v1 = parse({ ...base(), schemaVersion: 1, archivedAt: 9 });
+    expect(v1.ok ? [v1.record.schemaVersion, v1.record.archivedAt] : v1.reason).toEqual([
+      2,
+      undefined,
+    ]);
+    const v2 = parse(base({ archivedAt: 5 }));
+    expect(v2.ok ? v2.record.archivedAt : v2.reason).toBe(5);
+    expect(parse(base()).ok).toBe(true);
+    for (const bad of [1.5, -1, "5", 2 ** 53]) {
+      const p = parse({ ...base(), archivedAt: bad });
+      expect(p.ok ? "ok" : p.reason).toBe('"archivedAt" is not a non-negative integer');
+    }
+    const v3 = parse({ ...base(), schemaVersion: 3 });
+    expect(v3.ok ? "ok" : v3.reason).toMatch(
+      /unsupported record version 3 \(this daemon reads 1, 2\)/,
+    );
+  });
+
+  test("U3 reconcile of an ARCHIVED record cut mid-turn: ended, never resumed nor re-asked", () => {
+    // Mutation M3: reconcileOnReload ignores archivedAt → resumed (asked again) / restart notes.
+    const pending = { toolCallId: "c2", tool: "run", resumable: true, requestedAt: 1 };
+    const messages: ChatMessage[] = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "c1", name: "look", arguments: "{}" },
+          { id: "c2", name: "run", arguments: "{}" },
+          { id: "c3", name: "run", arguments: "{}" },
+        ],
+      },
+      { role: "tool", content: "ok", toolCallId: "c1" },
+    ];
+    const r = reconcileOnReload(
+      base({
+        archivedAt: 10,
+        messages,
+        turns: [{ turnId: "T" }],
+        turn: { turnId: "T", steering: ["s1"], pending },
+      }),
+    );
+    expect(r.resume).toBeUndefined();
+    expect(shape(r.messages).slice(-3)).toEqual([
+      `tool(c2):${ENDED_NOT_RUN_NOTE}`,
+      `tool(c3):${ENDED_NOT_RUN_NOTE}`,
+      "user:s1",
+    ]);
+    expect(r.turns).toEqual([{ turnId: "T", end: ARCHIVED_TURN_END }]);
+    expect(ARCHIVED_TURN_END).toEqual({ stopReason: "cancelled" });
+    // In flight (no pending) → the ended "Interrupted"; a sub-agent's ask → its ended note.
+    const inFlight = reconcileOnReload(
+      base({ archivedAt: 10, messages, turns: [], turn: { turnId: "T", steering: [] } }),
+    );
+    expect(shape(inFlight.messages).at(-2)).toBe(`tool(c2):${ENDED_INTERRUPTED_NOTE}`);
+    const sub = reconcileOnReload(
+      base({
+        archivedAt: 10,
+        messages,
+        turns: [],
+        turn: { turnId: "T", steering: [], pending: { ...pending, resumable: false } },
+      }),
+    );
+    expect(shape(sub.messages).at(-2)).toBe(`tool(c2):${ENDED_SUBAGENT_INTERRUPTED_NOTE}`);
+    // A turn key the close already ended keeps its end.
+    const keyed = reconcileOnReload(
+      base({
+        archivedAt: 10,
+        messages,
+        turns: [{ turnId: "T", end: { stopReason: "cancelled" } }],
+        turn: { turnId: "T", steering: [], pending },
+      }),
+    );
+    expect(keyed.turns).toEqual([{ turnId: "T", end: { stopReason: "cancelled" } }]);
+    // Archived idle (the TTL, the detached cap: never busy) → as is.
+    const idle = reconcileOnReload(base({ archivedAt: 10, messages: messages.slice(0, 1) }));
+    expect(idle.messages).toEqual(messages.slice(0, 1));
+    expect(idle.resume).toBeUndefined();
+  });
+
   test("restoredActivity: idle → the recorded clock; mid-turn → now (keep it longer)", () => {
     expect(restoredActivity(base({ lastActiveAt: 5 }), 100)).toBe(5);
     expect(
       restoredActivity(base({ lastActiveAt: 5, turn: { turnId: "T", steering: [] } }), 100),
     ).toBe(100);
+  });
+});
+
+// --- session archive (docs/feat/session-archive.md) ------------------------
+
+/** The RPC code `fn` throws (or "no throw"). */
+function codeOf(fn: () => unknown): number | string {
+  try {
+    fn();
+    return "no throw";
+  } catch (error) {
+    return error instanceof RpcError ? error.code : String(error);
+  }
+}
+
+/** One idle, ended turn on a new session; returns it (attached to `c`). */
+async function idleSession(r: Rig, c: ReturnType<typeof client>): Promise<HostedSession> {
+  const { hosted } = r.host.open({ create: true }, c.attachment);
+  hosted.prompt("T1", go);
+  await until(() => c.ended("T1"));
+  await hosted.persisted();
+  return hosted;
+}
+
+describe("session archive: the host (close keeps, reopen reloads, delete removes)", () => {
+  test("A20 reopen: full history, created false, resync, new epoch; create/messages ignored; live again", async () => {
+    // Mutation: open of an archived id ignores `reopen` (always reloads) → the plain open succeeds.
+    const r = rig([text("hi")], () => []);
+    const a = await idleSession(r, client());
+    const before = a.snapshotPage();
+    r.host.close(a.id);
+    await tick();
+    const saves = r.store.saves.length;
+    // Without `reopen`: refused as archived, whatever create/messages say — nothing written.
+    const seed = [{ role: "user" as const, content: "other" }];
+    for (const params of [
+      { sessionId: a.id },
+      { sessionId: a.id, create: true },
+      { sessionId: a.id, messages: seed },
+    ]) {
+      expect(codeOf(() => r.host.open(params, client().attachment))).toBe(
+        DomainErrorCode.SessionArchived,
+      );
+    }
+    expect(r.store.saves.length).toBe(saves);
+    const d = client();
+    const params = { sessionId: a.id, reopen: true, create: true, messages: seed };
+    const out = r.host.open(params, d.attachment, await r.host.prepareOpen(params));
+    expect([out.created, out.resync]).toEqual([false, true]);
+    expect(out.epoch).not.toBe(before.since?.epoch);
+    expect(out.hosted.snapshotPage().messages).toEqual(before.messages);
+    await out.hosted.persisted();
+    expect(r.store.durable.get(a.id)?.archivedAt).toBeUndefined();
+    expect(r.host.list({}).sessions.map((s) => [s.sessionId, s.archived, s.attached])).toEqual([
+      [a.id, false, 1],
+    ]);
+  });
+
+  test("A21 reopen from disk over the wire: two concurrent reopens → one read, one restore, both attached", async () => {
+    // Mutation M2: open ignores `prepared` (resident record only) → UnknownSession.
+    const r = rig([text("hi")], () => []);
+    const a = await idleSession(r, client());
+    r.host.close(a.id);
+    await tick();
+    const record = reread(r.store.durable.get(a.id));
+    expect(record.archivedAt).toEqual(expect.any(Number));
+    const store = new SpyStore();
+    store.durable.set(a.id, record);
+    const r2 = rig([], () => [], store);
+    r2.host.addArchived(record);
+    const connect = async () => {
+      const [d, c] = createChannelPair();
+      new Connection(d, r2.host);
+      const peer = new RpcPeer(c, { onNotification: () => {} });
+      await peer.request("initialize", {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      return peer;
+    };
+    const [p1, p2] = [await connect(), await connect()];
+    store.holdLoads = true;
+    const o1 = p1.request("session/open", { sessionId: a.id, reopen: true });
+    const o2 = p2.request("session/open", { sessionId: a.id, reopen: true });
+    await until(() => store.loads.length === 1);
+    await tick(5);
+    store.releaseLoads();
+    const [res1, res2] = (await Promise.all([o1, o2])) as { epoch: string; created: boolean }[];
+    expect(store.loads).toEqual([a.id]);
+    expect(r2.host.size).toBe(1);
+    expect(r2.host.archivedCount).toBe(0);
+    expect(res1?.epoch).toBe(res2?.epoch ?? "");
+    expect(r2.host.get(a.id)?.attachedCount).toBe(2);
+  });
+
+  test("A22 a reopen before the archive write lands works from memory; the final record is the live one", async () => {
+    // Mutation: the archive keeps no resident record → the reopen reads a disk that has nothing yet.
+    const r = rig([text("hi")], () => []);
+    const a = await idleSession(r, client());
+    r.store.hold = true;
+    r.host.close(a.id);
+    const params = { sessionId: a.id, reopen: true };
+    const out = r.host.open(params, client().attachment, await r.host.prepareOpen(params));
+    expect(r.store.loads).toEqual([]);
+    expect(out.hosted.snapshotPage().messages).toEqual(a.snapshotPage().messages);
+    r.store.release();
+    await out.hosted.persisted();
+    expect(reread(r.store.durable.get(a.id)).archivedAt).toBeUndefined();
+  });
+
+  test("A23 a failed archive write: reported once, reopen from memory, sweeps retry quietly, landed → memory freed", async () => {
+    // Mutation M5: drop the resident record even on a failed write → X's reopen finds nothing.
+    const r = rig([text("hi"), text("hi")], () => []);
+    const x = await idleSession(r, client());
+    const y = await idleSession(r, client());
+    const errors = r.errors.length;
+    r.store.fail = new Error("couldn't write x.json: no space left on device (ENOSPC)");
+    r.host.close(x.id);
+    r.host.close(y.id);
+    await tick(5);
+    expect(r.errors.length).toBe(errors + 2);
+    expect(r.host.list({}).sessions.every((s) => s.archived)).toBe(true);
+    // X: reopened from memory (nothing on disk to read).
+    r.store.fail = null;
+    const px = { sessionId: x.id, reopen: true };
+    r.host.open(px, client().attachment, await r.host.prepareOpen(px));
+    expect(r.store.loads).toEqual([]);
+    expect(r.host.get(x.id)?.snapshotPage().messages).toEqual(x.snapshotPage().messages);
+    await r.host.get(x.id)?.persisted();
+    // Y: a sweep with the disk still full retries without a new report.
+    r.store.fail = new Error("still full");
+    r.host.reapExpired({ idleTtlMs: null });
+    await tick(5);
+    expect(r.errors.length).toBe(errors + 2);
+    expect(r.store.durable.get(y.id)?.archivedAt).toBeUndefined();
+    r.store.fail = null;
+    r.host.reapExpired({ idleTtlMs: null });
+    await tick(5);
+    expect(reread(r.store.durable.get(y.id)).archivedAt).toEqual(expect.any(Number));
+    // Landed → the resident copy is gone: the reopen reads the disk.
+    const py = { sessionId: y.id, reopen: true };
+    r.host.open(py, client().attachment, await r.host.prepareOpen(py));
+    expect(r.store.loads).toEqual([y.id]);
+  });
+
+  test("A24 delete: a live attached running session ends `deleted` and its record goes; open is SessionDeleted", async () => {
+    // Mutation M7: delete skips `persister.remove` for a live id → the record survives.
+    const runs: string[] = [];
+    let unpark: () => void = () => {};
+    const parked = new Promise<void>((resolve) => {
+      unpark = resolve;
+    });
+    const r = rig([[call("c1", "slow"), { type: "done" }]], () => [
+      tool("slow", "none", runs, () => parked),
+    ]);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => runs.length === 1);
+    await hosted.persisted();
+    expect(r.host.delete(hosted.id)).toBe(true);
+    const tail = c.updates.slice(-2).map((u) => u.update);
+    expect(tail).toEqual([
+      { type: "turn_end", turnId: "T1", stopReason: "cancelled" },
+      { type: "session_closed", reason: "deleted" },
+    ]);
+    await tick();
+    expect(r.store.removed).toEqual([hosted.id]);
+    expect(r.store.durable.has(hosted.id)).toBe(false);
+    expect(r.host.list({}).sessions).toEqual([]);
+    // Tombstoned (F1): never reattached, reopened, recreated nor reused.
+    const seed = [{ role: "user" as const, content: "mine" }];
+    for (const params of [
+      { sessionId: hosted.id },
+      { sessionId: hosted.id, reopen: true },
+      { sessionId: hosted.id, create: true },
+      { sessionId: hosted.id, messages: seed },
+    ]) {
+      expect(codeOf(() => r.host.open(params, client().attachment))).toBe(
+        DomainErrorCode.SessionDeleted,
+      );
+    }
+    expect(r.host.size).toBe(0);
+    expect(r.host.delete(hosted.id)).toBe(false);
+    expect(r.host.delete("never-existed")).toBe(false);
+    // An unknown id is not tombstoned by a delete: it can still be created.
+    expect(
+      r.host.open({ sessionId: "never-existed", create: true }, client().attachment).created,
+    ).toBe(true);
+    unpark();
+  });
+
+  test("A24b delete of an archived session whose write is still in flight: the file is gone at the end (real store)", async () => {
+    // Mutation: delete of an archived id skips `persister.remove` → the file stays.
+    const dir = await mkdtemp(join(tmpdir(), "archive-delete-"));
+    try {
+      const store = new JsonSessionStore(dir);
+      const persister = new SessionPersister({ store, cwd: CWD, model: "m", onError: () => {} });
+      const host = new SessionHost({
+        defaultCwd: CWD,
+        persister,
+        createAgent: () => ({
+          agent: new Agent({ model: new Scripted([]), tools: new ToolRegistry(), env }),
+          permissions: new PermissionBroker(),
+        }),
+      });
+      const { hosted } = host.open(
+        { create: true, messages: [{ role: "user", content: "x" }] },
+        client().attachment,
+      );
+      await store.drain();
+      expect(await readdir(dir)).toContain(`${hosted.id}.json`);
+      host.close(hosted.id); // the archive write starts …
+      expect(host.delete(hosted.id)).toBe(true); // … the removal is queued after it
+      await persister.stop();
+      expect(await readdir(dir)).not.toContain(`${hosted.id}.json`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("F1 the tombstone is recorded BEFORE the file is removed; a failed one is reported and the file still goes", async () => {
+    // Mutation: remove the file without waiting for the tombstone → `removed` before `added`.
+    const order: string[] = [];
+    const store = new SpyStore();
+    const remove = store.remove.bind(store);
+    store.remove = async (id) => {
+      order.push(`removed ${id}`);
+      await remove(id);
+    };
+    const errors: Error[] = [];
+    const persister = new SessionPersister({
+      store,
+      cwd: CWD,
+      model: "m",
+      onError: (e) => errors.push(e),
+      tombstones: {
+        add: async (id) => {
+          await tick();
+          if (id === "b") throw new Error("disk full");
+          order.push(`added ${id}`);
+        },
+      },
+    });
+    persister.remove("a");
+    persister.remove("b");
+    persister.remove("c", false); // a removal finished at start: no new tombstone
+    await persister.stop();
+    expect(order).toEqual(["removed c", "added a", "removed a", "removed b"]);
+    expect(errors.map((e) => e.message)).toEqual(["disk full"]);
+  });
+
+  test("F1 TombstoneFile: appended in order, survives a reload, a torn last line is dropped", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "tombstones-"));
+    try {
+      const file = new TombstoneFile(dir);
+      expect(await file.load()).toEqual([]); // no file yet
+      await Promise.all([file.add("s-1"), file.add("s-2")]);
+      await appendFile(file.path, "s-3-torn"); // a crash mid-append: no newline
+      expect(await new TombstoneFile(dir).load()).toEqual(["s-1", "s-2"]);
+      await expect(file.add("../x")).rejects.toThrow("invalid session id");
+      expect(await readdir(dir)).toEqual([TOMBSTONE_FILE]); // never a `.json`: the scan skips it
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("R2-1 a torn tail does not swallow the NEXT tombstone (the Review's repro)", async () => {
+    // Mutation: append `${id}\n` without the leading newline → the id glues onto the torn tail.
+    const dir = await mkdtemp(join(tmpdir(), "tombstones-"));
+    try {
+      const file = new TombstoneFile(dir);
+      const first = "a1b2c3d4-0000-4000-8000-000000000001";
+      const second = "ffffffff-0000-4000-8000-000000000002";
+      await file.add(first);
+      await appendFile(file.path, "a1b2c3d4-0000-40"); // a crash mid-append: no newline
+      expect(await file.load()).toEqual([first]);
+      await file.add(second);
+      const ids = await new TombstoneFile(dir).load();
+      expect(ids).toContain(first);
+      expect(ids).toContain(second);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("R2-3 a garbled line is skipped and reported (not silently)", async () => {
+    // Mutation: the filter drops invalid lines without calling `onGarbled`.
+    const dir = await mkdtemp(join(tmpdir(), "tombstones-"));
+    try {
+      const file = new TombstoneFile(dir);
+      await writeFile(file.path, "s-1\n../evil\n\ns-2\n");
+      const garbled: string[] = [];
+      expect(await file.load((line) => garbled.push(line))).toEqual(["s-1", "s-2"]);
+      expect(garbled).toEqual(["../evil"]); // the blank line is not garbled
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("R2-5 a blocked id is still tombstoned (its file is left as is)", async () => {
+    // Mutation: `remove` returns early for a blocked id → no tombstone.
+    const store = new SpyStore();
+    const added: string[] = [];
+    const persister = new SessionPersister({
+      store,
+      cwd: CWD,
+      model: "m",
+      onError: () => {},
+      tombstones: {
+        add: async (id) => {
+          added.push(id);
+        },
+      },
+    });
+    persister.block("x");
+    persister.remove("x");
+    await persister.stop();
+    expect(added).toEqual(["x"]);
+  });
+
+  test("A24c delete during a reopen's disk read → the reopen is SessionDeleted", async () => {
+    const r = rig([text("hi")], () => []);
+    const a = await idleSession(r, client());
+    r.host.close(a.id);
+    await tick();
+    const record = reread(r.store.durable.get(a.id));
+    const store = new SpyStore();
+    store.durable.set(a.id, record);
+    const r2 = rig([], () => [], store);
+    r2.host.addArchived(record);
+    store.holdLoads = true;
+    const params = { sessionId: a.id, reopen: true };
+    const preparing = r2.host.prepareOpen(params);
+    await until(() => store.loads.length === 1);
+    expect(r2.host.delete(a.id)).toBe(true);
+    store.releaseLoads();
+    const prepared = await preparing;
+    expect(codeOf(() => r2.host.open(params, client().attachment, prepared))).toBe(
+      DomainErrorCode.SessionDeleted,
+    );
+    expect(store.removed).toEqual([a.id]);
+  });
+
+  test("F2 a reopen counts against maxSessions: TooManySessions (same data), the record stays archived, untouched", async () => {
+    // Mutation: the reopen branch skips the live-cap check → a second live session.
+    const audits: string[] = [];
+    const r = rig([text("hi"), text("hi")], () => [], new SpyStore(), Date.now, {
+      maxSessions: 1,
+      onAudit: (l) => audits.push(l),
+    });
+    const a = await idleSession(r, client());
+    r.host.close(a.id);
+    await tick(5);
+    const b = await idleSession(r, client());
+    const bytes = JSON.stringify(r.store.durable.get(a.id));
+    const saves = r.store.saves.length;
+    const params = { sessionId: a.id, reopen: true };
+    let refused: unknown;
+    try {
+      r.host.open(params, client().attachment, await r.host.prepareOpen(params));
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused instanceof RpcError ? [refused.code, refused.data] : refused).toEqual([
+      DomainErrorCode.TooManySessions,
+      { limit: "sessions", max: 1 },
+    ]);
+    expect(audits).toEqual(["session-refused sessions 1/1"]);
+    expect(r.host.size).toBe(1);
+    expect(r.host.list({}).sessions.map((s) => [s.sessionId, s.archived])).toEqual(
+      expect.arrayContaining([
+        [a.id, true],
+        [b.id, false],
+      ]),
+    );
+    await tick(5);
+    expect(r.store.saves.length).toBe(saves);
+    expect(JSON.stringify(r.store.durable.get(a.id))).toBe(bytes);
+    // Room again → the same reopen succeeds; nothing was evicted to make room.
+    r.host.close(b.id);
+    const out = r.host.open(params, client().attachment, await r.host.prepareOpen(params));
+    expect(out.created).toBe(false);
+    expect(r.host.size).toBe(1);
+  });
+
+  test("A25 an archived record damaged after start: reopen → UnknownSession, hidden, reported, never touched", async () => {
+    // Mutation: a failed load keeps the entry → still listed, the open answers "not loaded".
+    const r = rig([text("hi")], () => []);
+    const a = await idleSession(r, client());
+    r.host.close(a.id);
+    await tick();
+    const record = reread(r.store.durable.get(a.id));
+    const store = new SpyStore();
+    store.loadAs = { status: "unreadable", file: `/x/${a.id}.json`, reason: "invalid JSON (boom)" };
+    const r2 = rig([], () => [], store);
+    r2.host.addArchived(record);
+    const params = { sessionId: a.id, reopen: true };
+    const prepared = await r2.host.prepareOpen(params);
+    expect(prepared).toBeUndefined();
+    expect(codeOf(() => r2.host.open(params, client().attachment, prepared))).toBe(
+      DomainErrorCode.UnknownSession,
+    );
+    expect(r2.host.list({}).sessions).toEqual([]);
+    expect(r2.errors.map((e) => e.message)).toEqual([
+      `archived session ${a.id} could not be reopened: invalid JSON (boom) (left as is)`,
+    ]);
+    // Blocked: a new session under that id lives in memory only — never written, never removed.
+    const fresh = r2.host.open({ sessionId: a.id, create: true }, client().attachment).hosted;
+    r2.host.delete(fresh.id);
+    await tick();
+    expect(store.saves.filter((s) => s.id === a.id)).toEqual([]);
+    expect(store.removed).toEqual([]);
+  });
+
+  test("A26 a turn suspended on a permission: the idle TTL skips it; the admin cap archives it; reopen ends it, never re-asks", async () => {
+    // Mutation M3: reconcileOnReload ignores archivedAt → the restart notes, not the ended ones.
+    let now = 1_000_000;
+    const runs: string[] = [];
+    const r = rig(
+      [[call("c1", "run"), { type: "done" }]],
+      () => [tool("run", "ask", runs)],
+      new SpyStore(),
+      () => now,
+    );
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 1);
+    hosted.detach(c.attachment);
+    now += 10 * 24 * 60 * 60 * 1000;
+    expect(r.host.reapExpired({ idleTtlMs: 1000 })).toEqual([]);
+    expect(r.host.reapExpired({ idleTtlMs: 1000, adminCapMs: 1000 })).toEqual([
+      { id: hosted.id, reason: "admin_cap", archived: true },
+    ]);
+    await tick(5);
+    const d = client();
+    const params = { sessionId: hosted.id, reopen: true };
+    const out = r.host.open(params, d.attachment, await r.host.prepareOpen(params));
+    expect(out.hosted.running).toBe(false);
+    await tick(5);
+    expect(d.updates.some((u) => u.update.type === "permission_request")).toBe(false);
+    expect(shape(out.hosted.snapshotPage().messages).at(-1)).toBe(`tool(c1):${ENDED_NOT_RUN_NOTE}`);
+    expect(out.hosted.prompt("T1", go)).toEqual({
+      turnId: "T1",
+      ended: { stopReason: "cancelled" },
+    });
+    expect(runs).toEqual([]);
+  });
+
+  test("A27 the detached cap archives the oldest idle detached session; all busy → refused; no persister → refused", async () => {
+    // Mutation M4: selectEvictable ignores busy → a session suspended on a permission is evicted.
+    let now = 1_000;
+    const audit: string[] = [];
+    const r = rig(
+      [],
+      () => [],
+      new SpyStore(),
+      () => now,
+      { maxDetachedSessions: 2, onAudit: (l) => audit.push(l) },
+    );
+    const make = () => {
+      const c = client();
+      const h = r.host.open({ create: true }, c.attachment).hosted;
+      h.detach(c.attachment);
+      now += 10;
+      return h;
+    };
+    const older = make();
+    const newer = make();
+    const third = r.host.open({ create: true }, client().attachment);
+    expect(third.created).toBe(true);
+    expect(audit).toEqual([`session-archived ${older.id} evicted`]);
+    expect(r.host.get(older.id)).toBeUndefined();
+    expect(r.host.get(newer.id)).toBeDefined();
+    expect(r.host.list({}).sessions.find((s) => s.sessionId === older.id)?.archived).toBe(true);
+
+    // Every detached session busy (suspended on a permission) → refused, nothing evicted.
+    const busy = rig(
+      [
+        [call("c1", "run"), { type: "done" }],
+        [call("c2", "run"), { type: "done" }],
+      ],
+      () => [tool("run", "ask", [])],
+      new SpyStore(),
+      () => now,
+      { maxDetachedSessions: 2 },
+    );
+    for (const turnId of ["A", "B"]) {
+      const c = client();
+      const h = busy.host.open({ create: true }, c.attachment).hosted;
+      h.prompt(turnId, go);
+      await until(() => c.asks.length === 1);
+      h.detach(c.attachment);
+    }
+    expect(codeOf(() => busy.host.open({ create: true }, client().attachment))).toBe(
+      DomainErrorCode.TooManySessions,
+    );
+    expect(busy.host.size).toBe(2);
+
+    // No persister: an archive would be a deletion → refused.
+    const bare = new SessionHost({
+      defaultCwd: CWD,
+      maxDetachedSessions: 1,
+      createAgent: () => ({
+        agent: new Agent({ model: new Scripted([]), tools: new ToolRegistry(), env }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const c = client();
+    bare.open({ create: true }, c.attachment).hosted.detach(c.attachment);
+    expect(codeOf(() => bare.open({ create: true }, client().attachment))).toBe(
+      DomainErrorCode.TooManySessions,
+    );
+  });
+
+  test("A28 no id is ever both live and archived (create, archive, reopen, delete)", async () => {
+    const r = rig([text("hi")], () => []);
+    const consistent = (): void => {
+      const listed = r.host.list({}).sessions;
+      expect(new Set(listed.map((s) => s.sessionId)).size).toBe(listed.length);
+      for (const s of listed) {
+        expect({ id: s.sessionId, live: r.host.get(s.sessionId) !== undefined }).toEqual({
+          id: s.sessionId,
+          live: !s.archived,
+        });
+      }
+    };
+    const a = await idleSession(r, client());
+    consistent();
+    r.host.close(a.id);
+    consistent();
+    const params = { sessionId: a.id, reopen: true };
+    r.host.open(params, client().attachment, await r.host.prepareOpen(params));
+    consistent();
+    r.host.close(a.id);
+    await tick();
+    consistent();
+    expect(() => r.host.restore(reread(r.store.durable.get(a.id)))).toThrow(/already known/);
+    r.host.delete(a.id);
+    consistent();
+    expect(r.host.list({}).sessions).toEqual([]);
+  });
+
+  test("A29 no persister (pod daemon, worker): close forgets; delete of a live one says `deleted`; unknown is a no-op", () => {
+    const host = new SessionHost({
+      defaultCwd: CWD,
+      createAgent: () => ({
+        agent: new Agent({ model: new Scripted([]), tools: new ToolRegistry(), env }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const c = client();
+    const a = host.open({ create: true }, c.attachment).hosted;
+    expect(host.close(a.id)).toBe(true);
+    expect(host.list({}).sessions).toEqual([]);
+    expect(codeOf(() => host.open({ sessionId: a.id }, client().attachment))).toBe(
+      DomainErrorCode.UnknownSession,
+    );
+    const d = client();
+    const b = host.open({ create: true }, d.attachment).hosted;
+    expect(host.delete(b.id)).toBe(true);
+    expect(d.updates.at(-1)?.update).toEqual({ type: "session_closed", reason: "deleted" });
+    expect(host.delete(b.id)).toBe(false);
+    expect(host.list({}).sessions).toEqual([]);
   });
 });

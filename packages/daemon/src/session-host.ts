@@ -33,9 +33,9 @@ import {
   reconcileOnReload,
   restoredActivity,
 } from "./persisted-session.ts";
-import { toSessionList } from "./session-list.ts";
+import { type SessionSummary, toSessionList } from "./session-list.ts";
 import type { SessionPersister } from "./session-persister.ts";
-import { type Expired, type ReapPolicy, selectExpired } from "./session-reaper.ts";
+import { type Expired, type ReapPolicy, selectEvictable, selectExpired } from "./session-reaper.ts";
 import type { DaemonIdentity } from "./version-mismatch.ts";
 
 /** `serve`'s defaults (the exposure boundary sets the limits; unset = none). */
@@ -67,15 +67,17 @@ export interface SessionHostOptions extends TurnErrorPolicy {
   readonly ringBytes?: number;
   /** The clock for liveness stamps and the sweep (default `Date.now`). */
   readonly now?: () => number;
-  /** Refuse to CREATE a session past this many live ones on the daemon. Unset = no limit. */
+  /** Refuse to CREATE (or reopen) a session past this many live ones on the daemon. Unset = no limit. */
   readonly maxSessions?: number;
   /** Refuse to CREATE a session while this many are detached. Unset = no limit. */
   readonly maxDetachedSessions?: number;
   /** One line per refused create, naming the limit and the count (decision D6). */
   readonly onAudit?: (line: string) => void;
   /**
-   * `serve` only: every session writes itself here, `close` deletes its file,
-   * and `restore` reloads one. Pod daemons and the worker never pass it.
+   * `serve` only: every session writes itself here, `close` (and the reaper,
+   * the detached cap) keeps it ARCHIVED, `delete` removes its file, `restore`
+   * reloads one. Pod daemons and the worker never pass it: there, a close
+   * forgets the session.
    */
   readonly persister?: SessionPersister;
   /**
@@ -117,9 +119,49 @@ export interface OpenOutcome {
   readonly epoch: string;
 }
 
+/**
+ * An ARCHIVED session (ended and kept on a `serve` daemon): metadata only, so
+ * memory stays bounded however many there are — plus its full `record` while
+ * that record's write is not confirmed (then a reopen and a listing work from
+ * memory, and the reaper's sweeps retry the write).
+ */
+interface ArchivedEntry {
+  readonly id: string;
+  readonly title: string;
+  readonly cwd: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  record: DaemonSessionRecord | undefined;
+  /** The last write of `record` failed: a sweep retries it. */
+  unwritten: boolean;
+  retrying: boolean;
+}
+
+function archivedEntry(
+  record: DaemonSessionRecord,
+  resident: DaemonSessionRecord | undefined,
+): ArchivedEntry {
+  return {
+    id: record.id,
+    title: record.title,
+    cwd: record.cwd,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    record: resident,
+    unwritten: false,
+    retrying: false,
+  };
+}
+
 export class SessionHost {
   private readonly opts: SessionHostOptions;
   private readonly sessions = new Map<string, HostedSession>();
+  /** ARCHIVED sessions (a persisting host only). An id is in ONE of the two maps, never both. */
+  private readonly archived = new Map<string, ArchivedEntry>();
+  /** In-flight reopen loads, by id: concurrent reopens share one read. */
+  private readonly loads = new Map<string, Promise<DaemonSessionRecord | undefined>>();
+  /** Tombstones: ids removed by `delete` (with a persister, also on disk). Never live, never archived. */
+  private readonly deleted = new Set<string>();
 
   /** The `initialize` skill catalog (built once: skills are fixed at daemon start). */
   readonly skillCatalog: readonly SkillSummary[];
@@ -182,11 +224,72 @@ export class SessionHost {
    * moves no stamp, so a list never keeps a session alive.
    */
   list(params: SessionListParams): SessionListResult {
-    return toSessionList(
-      [...this.sessions.values()].map((hosted) => hosted.summary()),
-      this.opts.defaultCwd,
-      params,
-    );
+    const summaries: SessionSummary[] = [];
+    for (const hosted of this.sessions.values()) {
+      summaries.push(hosted.summary(this.opts.defaultCwd));
+    }
+    // From memory only: a listing never reads the disk, however many there are.
+    for (const entry of this.archived.values()) {
+      summaries.push({
+        id: entry.id,
+        createdAt: entry.createdAt,
+        lastChangeAt: entry.updatedAt,
+        running: false,
+        attached: 0,
+        title: entry.title,
+        cwd: entry.cwd,
+        archived: true,
+      });
+    }
+    return toSessionList(summaries, params);
+  }
+
+  /** Number of ARCHIVED sessions (not in `size`). */
+  get archivedCount(): number {
+    return this.archived.size;
+  }
+
+  /**
+   * The only ASYNCHRONOUS step of an open, run BEFORE the synchronous `open`:
+   * an explicit reopen (`reopen: true`) of an archived id whose record is not
+   * in memory reads it from disk (concurrent reopens share one read). Returns
+   * the record, PINNED for that `open` (a write confirmation that drops the
+   * resident copy meanwhile cannot lose it); `undefined` when there is
+   * nothing to prepare. A record that cannot be read back (gone, damaged,
+   * another project) → the entry is dropped (hidden, like at start), its id
+   * blocked (the file is never touched) and the failure reported; the open
+   * then answers `UnknownSession`.
+   */
+  prepareOpen(params: OpenParams): Promise<DaemonSessionRecord | undefined> {
+    const id = params.sessionId;
+    const persister = this.opts.persister;
+    const entry = id !== undefined ? this.archived.get(id) : undefined;
+    if (id === undefined || !entry || !persister || params.reopen !== true) {
+      return Promise.resolve(undefined);
+    }
+    if (entry.record) {
+      return Promise.resolve(entry.record);
+    }
+    const pending = this.loads.get(id);
+    if (pending) {
+      return pending;
+    }
+    const loading = persister.load(id).then((loaded) => {
+      this.loads.delete(id);
+      if (loaded.ok) {
+        return loaded.record;
+      }
+      if (this.archived.get(id) === entry) {
+        this.archived.delete(id);
+        persister.block(id);
+        persister.report(
+          new Error(`archived session ${id} could not be reopened: ${loaded.reason} (left as is)`),
+        );
+      }
+      return undefined;
+    });
+    this.loads.set(id, loading);
+    return loading;
   }
 
   /**
@@ -194,13 +297,45 @@ export class SessionHost {
    * anywhere): two concurrent opens of one absent id run one after the other,
    * so the second finds the first's session instead of building a second agent,
    * and the replay and the live stream join without a gap. A live id is never
-   * overwritten. Rules: `session/open` in `@tentacle/protocol`.
+   * overwritten. An ARCHIVED id is reloaded only on an explicit `reopen`
+   * (from `prepared`, `prepareOpen`'s record, or the resident one), else it
+   * is `SessionArchived`: never revived by a reconnect, never shadowed by a
+   * new session. A DELETED id is `SessionDeleted`, whatever the params say: it
+   * is never reused. Rules: `session/open` in `@tentacle/protocol`.
    */
-  open(params: OpenParams, attachment: Attachment): OpenOutcome {
+  open(params: OpenParams, attachment: Attachment, prepared?: DaemonSessionRecord): OpenOutcome {
+    if (params.sessionId !== undefined && this.deleted.has(params.sessionId)) {
+      throw new RpcError(DomainErrorCode.SessionDeleted, `session ${params.sessionId} was deleted`);
+    }
     const live = params.sessionId !== undefined ? this.sessions.get(params.sessionId) : undefined;
     if (live) {
       const { resync, epoch } = live.attach(attachment, params.since);
       return { hosted: live, created: false, resync, epoch };
+    }
+    const entry = params.sessionId !== undefined ? this.archived.get(params.sessionId) : undefined;
+    if (entry) {
+      if (params.reopen !== true) {
+        throw new RpcError(
+          DomainErrorCode.SessionArchived,
+          `session ${entry.id} was ended and is archived: reopen it to resume it`,
+        );
+      }
+      const record = (prepared?.id === entry.id ? prepared : undefined) ?? entry.record;
+      if (!record) {
+        // Only a caller that skipped `prepareOpen`.
+        throw new RpcError(
+          DomainErrorCode.UnknownSession,
+          `archived session not loaded: ${entry.id}`,
+        );
+      }
+      // A reopen BUILDS a live session: the live cap applies (refused → still
+      // archived, untouched). It is attached at once, so the detached cap does not.
+      this.admitLive();
+      // One step: out of the archive, live, attached (the restart path, mid-life).
+      this.archived.delete(entry.id);
+      const hosted = this.restore(record);
+      const { resync, epoch } = hosted.attach(attachment, params.since);
+      return { hosted, created: false, resync, epoch };
     }
     const seeded = params.messages !== undefined && params.messages.length > 0;
     if (params.sessionId !== undefined && params.create !== true && !seeded) {
@@ -215,17 +350,113 @@ export class SessionHost {
     return { hosted, created: true, resync: false, epoch };
   }
 
-  /** End and forget a session. Idempotent: true iff a live session was closed. */
+  /**
+   * End a session for every client. With a persister it is kept ARCHIVED;
+   * without one it is forgotten. Idempotent: true iff a live session was closed.
+   */
   close(id: string): boolean {
+    return this.archive(id).closed;
+  }
+
+  /**
+   * Remove a session for good: a live one is ended (`session_closed{deleted}`)
+   * and its file removed; an archived one loses its file. Either way its id
+   * is TOMBSTONED (a later open is `SessionDeleted`; with a persister the
+   * tombstone is written before the file goes). Synchronous: true iff there
+   * was one. The removal is queued after any pending write of the id (the
+   * store's per-id queue), so the file is gone at the end.
+   */
+  delete(id: string): boolean {
+    const hosted = this.sessions.get(id);
+    if (hosted) {
+      this.sessions.delete(id);
+      this.deleted.add(id);
+      hosted.close("deleted");
+      // After `close`: the session writes nothing more, so nothing can recreate the file.
+      this.opts.persister?.remove(id);
+      return true;
+    }
+    if (this.archived.delete(id)) {
+      this.deleted.add(id);
+      this.opts.persister?.remove(id);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * A tombstone read at start (`serve`): the id stays deleted. A record still
+   * on disk for it (a delete cut short) must not be restored: `isDeleted`.
+   */
+  addDeleted(id: string): void {
+    if (this.sessions.has(id) || this.archived.has(id)) {
+      throw new Error(`session ${id} is already known`);
+    }
+    this.deleted.add(id);
+  }
+
+  /** Whether `id` was removed by `delete` (its tombstone). */
+  isDeleted(id: string): boolean {
+    return this.deleted.has(id);
+  }
+
+  /** Live, archived or deleted: an id in exactly one of the three, never two. */
+  private known(id: string): boolean {
+    return this.sessions.has(id) || this.archived.has(id) || this.deleted.has(id);
+  }
+
+  /**
+   * Index an archived record found at start: metadata only (the record is
+   * read again on its reopen). Never live, never counted by the limits.
+   */
+  addArchived(record: DaemonSessionRecord): void {
+    if (this.known(record.id)) {
+      throw new Error(`session ${record.id} is already known`);
+    }
+    this.archived.set(record.id, archivedEntry(record, undefined));
+  }
+
+  /**
+   * End live session `id` (synchronously) and, with a persister, keep it
+   * archived: its state is captured around the close (`HostedSession.archive`),
+   * written stamped, and indexed with the record RESIDENT until the write is
+   * confirmed. `archived: false` with `closed: true` → it could not be kept
+   * (no persister, or a file the daemon may not write): it is gone.
+   */
+  private archive(id: string): { closed: boolean; archived: boolean } {
     const hosted = this.sessions.get(id);
     if (!hosted) {
-      return false;
+      return { closed: false, archived: false };
     }
     this.sessions.delete(id);
-    hosted.close();
-    // After `close`: the session writes nothing more, so nothing can recreate the file.
-    this.opts.persister?.remove(id);
-    return true;
+    const persister = this.opts.persister;
+    if (!persister) {
+      hosted.close();
+      return { closed: true, archived: false };
+    }
+    const { record, written } = persister.archive(hosted.archive(), this.now());
+    if (!record) {
+      return { closed: true, archived: false };
+    }
+    const entry = archivedEntry(record, record);
+    this.archived.set(id, entry);
+    void written.then((ok) => this.settleWrite(entry, ok));
+    return { closed: true, archived: true };
+  }
+
+  /** A write of `entry.record` settled: landed → memory drops the record; failed → a sweep retries. */
+  private settleWrite(entry: ArchivedEntry, ok: boolean): void {
+    entry.retrying = false;
+    // Reopened, deleted or replaced meanwhile: not this entry's business any more.
+    if (this.archived.get(entry.id) !== entry) {
+      return;
+    }
+    if (ok) {
+      entry.record = undefined;
+      entry.unwritten = false;
+    } else {
+      entry.unwritten = true;
+    }
   }
 
   /**
@@ -239,8 +470,8 @@ export class SessionHost {
    * epoch makes any returning client resync. Synchronous, like `open`.
    */
   restore(record: DaemonSessionRecord): HostedSession {
-    if (this.sessions.has(record.id)) {
-      throw new Error(`session ${record.id} is already live`);
+    if (this.known(record.id)) {
+      throw new Error(`session ${record.id} is already known`);
     }
     const reconciled = reconcileOnReload(record);
     const now = this.now();
@@ -261,21 +492,17 @@ export class SessionHost {
   }
 
   /**
-   * Admission control for a new session. Limits only ever REFUSE new work —
-   * attaching to a live session is never refused and nothing is evicted
-   * (owner decisions G, D6). Counts are derived from the registry at check
-   * time, never kept as counters that could drift.
+   * Admission control for a new session. Attaching to a live session is never
+   * refused (owner decision G). `maxSessions` only refuses. At the detached
+   * cap a persisting host ARCHIVES the idle detached session idle the longest
+   * to make room (owner decision Q1: `selectEvictable`, never a busy one) and
+   * refuses only when every detached session is busy; without a persister an
+   * archive would be a deletion, so it refuses (D6). Counts are derived from
+   * the registry at check time, never kept as counters that could drift.
    */
   private admit(): void {
-    const { maxSessions, maxDetachedSessions } = this.opts;
-    if (maxSessions !== undefined && this.sessions.size >= maxSessions) {
-      this.opts.onAudit?.(`session-refused sessions ${this.sessions.size}/${maxSessions}`);
-      throw new RpcError(
-        DomainErrorCode.TooManySessions,
-        `too many sessions on this daemon (max ${maxSessions})`,
-        { limit: "sessions", max: maxSessions },
-      );
-    }
+    this.admitLive();
+    const { maxDetachedSessions } = this.opts;
     if (maxDetachedSessions === undefined) {
       return;
     }
@@ -285,12 +512,36 @@ export class SessionHost {
         detached++;
       }
     }
-    if (detached >= maxDetachedSessions) {
-      this.opts.onAudit?.(`session-refused detached ${detached}/${maxDetachedSessions}`);
+    if (detached < maxDetachedSessions) {
+      return;
+    }
+    if (this.opts.persister) {
+      const victim = selectEvictable([...this.sessions.values()].map((h) => h.liveness()));
+      if (victim !== null) {
+        const { archived } = this.archive(victim);
+        this.opts.onAudit?.(`session-${archived ? "archived" : "reaped"} ${victim} evicted`);
+        return;
+      }
+    }
+    this.opts.onAudit?.(`session-refused detached ${detached}/${maxDetachedSessions}`);
+    throw new RpcError(
+      DomainErrorCode.TooManySessions,
+      this.opts.persister
+        ? `too many detached sessions on this daemon (max ${maxDetachedSessions}) — every detached session is running a turn`
+        : `too many detached sessions on this daemon (max ${maxDetachedSessions}) — close one with session/close, or wait for the idle TTL`,
+      { limit: "detached", max: maxDetachedSessions },
+    );
+  }
+
+  /** `maxSessions`: refuse one more LIVE session (a new one, or a reopen). Never evicts. */
+  private admitLive(): void {
+    const { maxSessions } = this.opts;
+    if (maxSessions !== undefined && this.sessions.size >= maxSessions) {
+      this.opts.onAudit?.(`session-refused sessions ${this.sessions.size}/${maxSessions}`);
       throw new RpcError(
         DomainErrorCode.TooManySessions,
-        `too many detached sessions on this daemon (max ${maxDetachedSessions}) — close one with session/close, or wait for the idle TTL`,
-        { limit: "detached", max: maxDetachedSessions },
+        `too many sessions on this daemon (max ${maxSessions})`,
+        { limit: "sessions", max: maxSessions },
       );
     }
   }
@@ -299,11 +550,15 @@ export class SessionHost {
    * Close every session expired under `policy` (rules: `selectExpired`).
    * SYNCHRONOUS, like `open`: a sweep and an attach never interleave, so a
    * session is either attached first (and skipped) or closed first (and the
-   * attach gets `UnknownSession`). Reaping IS `close` — one teardown path.
+   * attach finds it archived — or, without a persister, `UnknownSession`).
+   * Reaping IS `close` — one teardown path (archived where it can be kept).
    * A close that throws is reported and the sweep goes on; the session is
-   * already out of the registry by then.
+   * already out of the registry by then. Each sweep also retries, once, the
+   * write of every archived record whose last write failed (reported once,
+   * at the archive; the retries are quiet).
    */
   reapExpired(policy: ReapPolicy, onError?: (error: Error) => void): Expired[] {
+    this.retryUnwritten();
     const now = this.now();
     const expired = selectExpired(
       [...this.sessions.values()].map((hosted) => hosted.liveness()),
@@ -312,14 +567,28 @@ export class SessionHost {
     );
     const reaped: Expired[] = [];
     for (const entry of expired) {
+      let archived = false;
       try {
-        this.close(entry.id);
+        archived = this.archive(entry.id).archived;
       } catch (error) {
         onError?.(error instanceof Error ? error : new Error(String(error)));
       }
-      reaped.push(entry);
+      reaped.push(archived ? { ...entry, archived } : entry);
     }
     return reaped;
+  }
+
+  private retryUnwritten(): void {
+    const persister = this.opts.persister;
+    if (!persister) {
+      return;
+    }
+    for (const entry of this.archived.values()) {
+      if (entry.unwritten && entry.record && !entry.retrying) {
+        entry.retrying = true;
+        void persister.writeRecord(entry.record, false).then((ok) => this.settleWrite(entry, ok));
+      }
+    }
   }
 
   private now(): number {

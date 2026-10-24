@@ -6,7 +6,7 @@
  * `reattach.e2e.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@tentacle/agent";
+import { Agent, type LoadResult } from "@tentacle/agent";
 import { type ModelProvider, PermissionBroker, allowAll } from "@tentacle/core";
 import {
   Connection,
@@ -474,6 +474,10 @@ class MemStore implements RecordStore {
     this.durable.delete(id);
   }
   async drain(): Promise<void> {}
+  async load(id: string): Promise<LoadResult> {
+    const record = this.durable.get(id);
+    return record ? { status: "ok", record } : { status: "absent" };
+  }
 }
 
 const persisterFor = (store: MemStore): SessionPersister =>
@@ -1498,5 +1502,153 @@ describe("re-attach: send-now across a drop (docs/feat/send-now-b.md)", () => {
     const history = await r.client.snapshot("S");
     expect(history.filter((m) => m.role === "user" && m.content === "A")).toHaveLength(1);
     r.client.close();
+  });
+});
+
+describe("session archive across devices (docs/feat/session-archive.md)", () => {
+  test("DECISIVE: A's link drops, B closes the session, A reconnects → still archived, A told it ended, never revived", async () => {
+    // Owner's addition to 2a. Mutation: SessionHost.open reloads an archived id without
+    // `reopen` → A's reconnect silently revives it (live again, archived: false).
+    const store = new MemStore();
+    const target = new Target(makeHost(new GatedModel([]), { n: 0 }, persisterFor(store)));
+    const errors: Error[] = [];
+    const dial = dialer(target);
+    const aLink = target.connect();
+    const a = new RemoteClient(aLink, new PermissionBroker(), undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+      onError: (e) => errors.push(e),
+    });
+    await a.initialize();
+    await a.openSession(undefined, undefined, "S");
+    const b = new RemoteClient(target.connect(), new PermissionBroker());
+    await b.initialize();
+    dial.hold();
+    aLink.close(); // A goes offline (and stays: the dial is held)
+    await tick();
+    await b.closeSession("S"); // B ends it meanwhile: archived
+    expect(target.host.archivedCount).toBe(1);
+    dial.release();
+    expect(await until(() => errors.length > 0)).toBe(true);
+    expect(errors[0]?.message).toMatch(/session S: recovery failed: .*archived/);
+    // Never revived, never recreated from A's copy.
+    expect(target.host.get("S")).toBeUndefined();
+    const list = await b.sessionList();
+    expect(list.sessions.map((s) => [s.sessionId, s.archived])).toEqual([["S", true]]);
+    const reopens = (target.frames.at(-1) ?? []).filter((f) => f.method === "session/open");
+    expect(reopens.length).toBeGreaterThan(0);
+    for (const frame of reopens) {
+      expect(frame.params?.create).toBeUndefined();
+      expect(frame.params?.messages).toBeUndefined();
+      expect(frame.params?.reopen).toBeUndefined();
+    }
+    a.close();
+    b.close();
+  });
+
+  test("deleteSession: an attached client sees session_closed{deleted}; the record is gone; a second delete is a no-op", async () => {
+    const store = new MemStore();
+    const target = new Target(makeHost(new GatedModel([]), { n: 0 }, persisterFor(store)));
+    const a = new RemoteClient(target.connect(), new PermissionBroker());
+    await a.initialize();
+    const reasons: string[] = [];
+    await a.openSession(undefined, undefined, "S", {
+      output: (out) => {
+        if (out.kind === "update" && out.update.type === "session_closed") {
+          reasons.push(out.update.reason);
+        }
+      },
+      recovered: () => {},
+      linkClosed: () => {},
+    });
+    // `until` here answers false on a timeout (it never throws): assert it.
+    expect(await until(() => store.durable.has("S"))).toBe(true);
+    const b = new RemoteClient(target.connect(), new PermissionBroker());
+    await b.initialize();
+    await b.deleteSession("S");
+    expect(await until(() => reasons.length === 1)).toBe(true);
+    expect(reasons).toEqual(["deleted"]);
+    expect(await until(() => !store.durable.has("S"), 500)).toBe(true);
+    expect((await b.sessionList()).sessions).toEqual([]);
+    await b.deleteSession("S");
+    a.close();
+    b.close();
+  });
+
+  test("R2-2: the delete lands between the reconnect's UnknownSession and the recreate → A is told, S is not recreated", async () => {
+    // Mutation: drop `noteDeleted` in `recreate`'s catch → the listener never fires.
+    const target = new Target(makeHost(new GatedModel([]), { n: 0 }));
+    const a = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+      onError: () => {},
+    });
+    const deleted: string[] = [];
+    a.onSessionDeleted(({ sessionId }) => deleted.push(sessionId));
+    await a.initialize();
+    await a.openSession(undefined, [{ role: "user", content: "mine" }], "S");
+    // A daemon that never heard of S: the reconnect is UnknownSession...
+    const fresh = makeHost(new GatedModel([]), { n: 0 });
+    const open = fresh.open.bind(fresh);
+    let opens = 0;
+    fresh.open = (params, attachment, prepared) => {
+      opens += 1;
+      try {
+        return open(params, attachment, prepared);
+      } finally {
+        // ...and another device deletes S right after, before A's recreate.
+        if (opens === 1) fresh.addDeleted("S");
+      }
+    };
+    target.host = fresh;
+    target.last?.close();
+    expect(await until(() => deleted.length > 0)).toBe(true);
+    expect(deleted).toEqual(["S"]);
+    expect(opens).toBe(2); // the reconnect, then the recreate that was refused
+    expect(fresh.get("S")).toBeUndefined();
+    a.close();
+  });
+
+  test("F1: A's link drops, B DELETES the session, A reconnects → SessionDeleted, never recreated, A is told (by code)", async () => {
+    // The Review's repro, through the client. Mutation: the daemon keeps no
+    // tombstone → UnknownSession → A recreates S from its own copy (live again).
+    const store = new MemStore();
+    const target = new Target(makeHost(new GatedModel([]), { n: 0 }, persisterFor(store)));
+    const dial = dialer(target);
+    const aLink = target.connect();
+    const a = new RemoteClient(aLink, new PermissionBroker(), undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+      onError: () => {},
+    });
+    const deleted: string[] = [];
+    a.onSessionDeleted(({ sessionId }) => deleted.push(sessionId));
+    await a.initialize();
+    await a.openSession(undefined, [{ role: "user", content: "mine" }], "S");
+    const b = new RemoteClient(target.connect(), new PermissionBroker());
+    await b.initialize();
+    dial.hold();
+    aLink.close();
+    await tick();
+    await b.deleteSession("S");
+    dial.release();
+    expect(await until(() => deleted.length > 0)).toBe(true);
+    expect(deleted).toEqual(["S"]);
+    expect(target.host.get("S")).toBeUndefined();
+    expect(await until(() => !store.durable.has("S"), 500)).toBe(true);
+    expect((await b.sessionList()).sessions).toEqual([]);
+    const opens = (target.frames.at(-1) ?? []).filter((f) => f.method === "session/open");
+    expect(opens.length).toBe(1); // the reconnect only: no recreate after it
+    expect(opens[0]?.params?.messages).toBeUndefined();
+    // A later open of it (a `--resume` of the local copy) is refused the same way.
+    await expect(
+      a.openSession(undefined, [{ role: "user", content: "mine" }], "S"),
+    ).rejects.toMatchObject({
+      code: DomainErrorCode.SessionDeleted,
+    });
+    expect(deleted).toEqual(["S", "S"]);
+    expect(target.host.get("S")).toBeUndefined();
+    a.close();
+    b.close();
   });
 });
