@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { DISMISSED, PermissionBroker, type PermissionResponse } from "@tentacle/core";
+import {
+  type BackgroundJob,
+  DISMISSED,
+  type JobController,
+  PermissionBroker,
+  type PermissionResponse,
+} from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
+import { SEND_NOW_HINT } from "../src/send-now.ts";
 import { ARC } from "../src/spinner.ts";
 import type { SessionEvent } from "../src/state.ts";
 
@@ -33,6 +40,7 @@ type Release = (opts?: { steers?: readonly string[]; reset?: boolean }) => void;
 function fakeSession(script: {
   readonly sendNow?: (call: SendNowCall, release: Release) => Promise<AsyncIterable<SessionEvent>>;
   readonly enqueue?: () => Promise<void>;
+  readonly compact?: () => Promise<{ before: number; after: number }>;
 }) {
   const log = {
     sends: [] as string[],
@@ -71,7 +79,10 @@ function fakeSession(script: {
       return script.enqueue ? script.enqueue() : Promise.resolve();
     },
   };
-  const { sendNow } = script;
+  const { sendNow, compact } = script;
+  if (compact) {
+    ctrl.compact = compact;
+  }
   if (sendNow) {
     ctrl.sendNow = (messages, target, signal) => {
       const call = { messages, target, ...(signal ? { signal } : {}) };
@@ -575,5 +586,483 @@ describe("Ctrl+X Ctrl+S — send the queued messages now", () => {
     await delay(60);
     expect(t.log.sends).toEqual(["go", "alpha\n\nbravo"]);
     t.unmount();
+  });
+});
+
+/** A compaction the test settles: `resolve` / `reject` it; `started` counts the calls. */
+function heldCompaction() {
+  const state = { started: 0 };
+  let resolveIt: (r: { before: number; after: number }) => void = () => {};
+  let rejectIt: (e: unknown) => void = () => {};
+  const compact = () =>
+    new Promise<{ before: number; after: number }>((resolve, reject) => {
+      state.started += 1;
+      resolveIt = resolve;
+      rejectIt = reject;
+    });
+  return {
+    compact,
+    state,
+    resolve: (r = { before: 9, after: 2 }) => resolveIt(r),
+    reject: (e: unknown) => rejectIt(e),
+  };
+}
+
+/** Open the app, answer one prompt (the session exists), start `/compact`, queue `rows`. */
+async function compactingWithRows(ctrl: SessionController, rows: readonly string[]) {
+  const app = render(<App createSession={() => ctrl} model="m" cwd="/tmp/work" />);
+  await delay(30);
+  app.stdin.write("first");
+  await delay(20);
+  app.stdin.write("\r");
+  await delay(60);
+  app.stdin.write("/compact");
+  await delay(20);
+  app.stdin.write("\r");
+  await delay(40);
+  for (const row of rows) {
+    app.stdin.write(row);
+    await delay(20);
+    app.stdin.write("\r");
+    await delay(30);
+  }
+  return app;
+}
+
+describe("D3c — queue while /compact runs (docs/feat/send-now-d.md)", () => {
+  test("T-D1: Enter during a compaction queues a row (with the send-now hint) instead of sending", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({ compact: c.compact });
+    const { lastFrame, unmount } = await compactingWithRows(ctrl, ["hi"]);
+    expect(c.state.started).toBe(1);
+    expect(log.sends).toEqual(["first"]);
+    expect(log.enqueues).toEqual([]); // no turn runs: nothing to enqueue to
+    const frame = lastFrame() ?? "";
+    expect(frame).toMatch(queuedRow("hi"));
+    expect(frame).toContain(SEND_NOW_HINT);
+    unmount();
+  });
+
+  test("T-D2: the compaction succeeds → the rows go out as ONE joined prompt, after its notice", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({ compact: c.compact });
+    const { lastFrame, unmount } = await compactingWithRows(ctrl, ["A", "B"]);
+    c.resolve();
+    await delay(80);
+    expect(log.sends).toEqual(["first", "A\n\nB"]);
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toMatch(queuedRow("A"));
+    const notice = frame.indexOf("Context compacted — 9 → 2 messages");
+    expect(notice).toBeGreaterThan(-1);
+    expect(frame.indexOf("reply to A")).toBeGreaterThan(notice);
+    unmount();
+  });
+
+  test("T-D3: the compaction fails → the same one joined prompt, on the old history", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({ compact: c.compact });
+    const { lastFrame, unmount } = await compactingWithRows(ctrl, ["A", "B"]);
+    c.reject(new Error("model down"));
+    await delay(80);
+    expect(log.sends).toEqual(["first", "A\n\nB"]);
+    expect(lastFrame() ?? "").toContain("Compact failed: Error: model down");
+    unmount();
+  });
+
+  test("T-D3b: no row when it settles → nothing is sent", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({ compact: c.compact });
+    const { unmount } = await compactingWithRows(ctrl, []);
+    c.resolve();
+    await delay(80);
+    expect(log.sends).toEqual(["first"]);
+    unmount();
+  });
+
+  test("T-D4: the chord during a compaction → sendNow(rows, compaction); its Cancelled sends nothing more", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({
+      compact: c.compact,
+      sendNow: async (call) => {
+        // The daemon aborts the compaction, then acks the new turn.
+        c.reject(rpcError(CANCELLED, "compaction cancelled"));
+        await delay(10);
+        return successor(call.messages.map((m) => m.text).join("\n\n"));
+      },
+    });
+    const { stdin, lastFrame, unmount } = await compactingWithRows(ctrl, ["A", "B"]);
+    await chord(stdin);
+    await delay(60);
+    expect(log.sendNows).toHaveLength(1);
+    expect(log.sendNows[0]?.target).toBe("compaction");
+    expect(log.sendNows[0]?.messages.map((m) => m.text)).toEqual(["A", "B"]);
+    expect(log.sends).toEqual(["first"]); // the settle hook did not send them again
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Compaction cancelled — sending now.");
+    expect(frame).not.toContain("Compact failed");
+    expect(frame).not.toContain("back in the input"); // nor restored: the send-now has them
+    expect(frame).toContain("answered now");
+    expect(frame).not.toMatch(queuedRow("A"));
+    unmount();
+  });
+
+  test("T-D4b: the ack before the compaction's Cancelled → still one turn, nothing re-sent", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({
+      compact: c.compact,
+      sendNow: async (call) => {
+        setTimeout(() => c.reject(rpcError(CANCELLED, "compaction cancelled")), 30);
+        return successor(call.messages.map((m) => m.text).join("\n\n"));
+      },
+    });
+    const { stdin, lastFrame, unmount } = await compactingWithRows(ctrl, ["A"]);
+    await chord(stdin);
+    await delay(80);
+    expect(log.sends).toEqual(["first"]);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("answered now");
+    expect(frame).toContain("Compaction cancelled — sending now.");
+    expect(frame).not.toContain("back in the input");
+    unmount();
+  });
+
+  test("T-D5: a row typed after the chord is enqueued to the new turn (never sent again at the settle)", async () => {
+    const c = heldCompaction();
+    let ack: () => void = () => {};
+    const { ctrl, log } = fakeSession({
+      compact: c.compact,
+      sendNow: async (call) => {
+        c.reject(rpcError(CANCELLED, "compaction cancelled"));
+        await new Promise<void>((r) => {
+          ack = r;
+        });
+        return successor(call.messages.map((m) => m.text).join("\n\n"));
+      },
+    });
+    const { stdin, lastFrame, unmount } = await compactingWithRows(ctrl, ["A"]);
+    await chord(stdin);
+    stdin.write("late");
+    await delay(20);
+    stdin.write("\r");
+    await delay(40);
+    expect(log.enqueues.map((e) => e.text)).toEqual(["late"]);
+    expect(lastFrame() ?? "").toMatch(queuedRow("late"));
+    ack();
+    await delay(80);
+    expect(log.sends).toEqual(["first"]);
+    unmount();
+  });
+
+  test("T-D6b: after a refused send-now, a row typed while the compaction still runs goes out at its end", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({
+      compact: c.compact,
+      sendNow: async () => {
+        throw rpcError(-32004, "a send-now is already waiting");
+      },
+    });
+    const { stdin, lastFrame, unmount } = await compactingWithRows(ctrl, ["A"]);
+    await chord(stdin);
+    // The restored "A" is in the input: edit it and queue it again.
+    stdin.write("C");
+    await delay(20);
+    stdin.write("\r");
+    await delay(30);
+    expect(lastFrame() ?? "").toMatch(queuedRow("AC"));
+    c.resolve();
+    await delay(80);
+    expect(log.sends).toEqual(["first", "AC"]);
+    unmount();
+  });
+
+  test("T-D6: the send-now is refused (no `held`) → the texts are back in the input; the settle sends nothing", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({
+      compact: c.compact,
+      sendNow: async () => {
+        throw rpcError(-32004, "a send-now is already waiting");
+      },
+    });
+    const { stdin, lastFrame, unmount } = await compactingWithRows(ctrl, ["A", "B"]);
+    await chord(stdin);
+    expect(lastFrame() ?? "").toContain("your queued messages are back in the input");
+    c.resolve();
+    await delay(80);
+    expect(log.sends).toEqual(["first"]);
+    stdin.write("\r");
+    await delay(60);
+    expect(log.sends).toEqual(["first", "A\n\nB"]);
+    unmount();
+  });
+
+  test("T-D7: MethodNotFound (an older daemon) → the compaction is not cancelled; the rows go when it ends", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({
+      compact: c.compact,
+      sendNow: async () => {
+        throw rpcError(METHOD_NOT_FOUND, "method not found");
+      },
+    });
+    const { stdin, lastFrame, unmount } = await compactingWithRows(ctrl, ["A", "B"]);
+    await chord(stdin);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("can't cancel a compaction to send now");
+    expect(frame).toMatch(queuedRow("A"));
+    expect(log.sends).toEqual(["first"]);
+    c.resolve();
+    await delay(80);
+    expect(log.sends).toEqual(["first", "A\n\nB"]);
+    // Latched: a later compaction's chord does not ask the daemon again.
+    stdin.write("/compact");
+    await delay(20);
+    stdin.write("\r");
+    await delay(40);
+    stdin.write("C");
+    await delay(20);
+    stdin.write("\r");
+    await delay(30);
+    await chord(stdin);
+    expect(log.sendNows).toHaveLength(1);
+    c.resolve();
+    await delay(80);
+    expect(log.sends).toEqual(["first", "A\n\nB", "C"]);
+    unmount();
+  });
+
+  test("T-D7b: the joined send is refused TurnInProgress (another client's turn took the slot) → back in the input", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({ compact: c.compact });
+    const send = ctrl.send.bind(ctrl);
+    ctrl.send = (prompt, signal, opts) => {
+      if (prompt === "A") {
+        log.sends.push(prompt);
+        return rejecting(rpcError(-32004, "a turn is in progress"));
+      }
+      return send(prompt, signal, opts);
+    };
+    const { lastFrame, unmount } = await compactingWithRows(ctrl, ["A"]);
+    c.resolve();
+    await delay(80);
+    expect(log.sends).toEqual(["first", "A"]);
+    expect(lastFrame() ?? "").toContain("your queued messages are back in the input");
+    unmount();
+  });
+
+  test("T-D8: /compact while one runs is refused (one compaction at a time)", async () => {
+    const c = heldCompaction();
+    const { ctrl } = fakeSession({ compact: c.compact });
+    const { stdin, lastFrame, unmount } = await compactingWithRows(ctrl, []);
+    stdin.write("/compact");
+    await delay(20);
+    stdin.write("\r");
+    await delay(40);
+    expect(c.state.started).toBe(1);
+    expect(lastFrame() ?? "").toContain("A compaction is already running.");
+    unmount();
+  });
+
+  test("T-D9: /clear during a compaction → its rows come back to the input, never sent to the new session", async () => {
+    const c = heldCompaction();
+    const { ctrl, log } = fakeSession({ compact: c.compact });
+    const { stdin, lastFrame, unmount } = await compactingWithRows(ctrl, ["A"]);
+    stdin.write("/clear");
+    await delay(20);
+    stdin.write("\r");
+    await delay(40);
+    expect(lastFrame() ?? "").not.toMatch(queuedRow("A"));
+    c.resolve();
+    await delay(80);
+    expect(log.sends).toEqual(["first"]);
+    expect(lastFrame() ?? "").toContain("your queued messages are back in the input");
+    stdin.write("\r");
+    await delay(60);
+    expect(log.sends).toEqual(["first", "A"]);
+    unmount();
+  });
+});
+
+// Follow-up 1 (review F1, F2): a turn this TUI would start during its own
+// compaction, and a compaction settling after `/clear` replaced its session.
+const COMPACT_IN_PROGRESS = -32005;
+
+/** `send` refuses like the real daemon while the held compaction runs. */
+function refusingWhileCompacting() {
+  const c = heldCompaction();
+  let compacting = false;
+  const s = fakeSession({
+    compact: () => {
+      compacting = true;
+      return c.compact().finally(() => {
+        compacting = false;
+      });
+    },
+  });
+  const send = s.ctrl.send.bind(s.ctrl);
+  s.ctrl.send = (prompt, signal, opts) => {
+    if (compacting) {
+      s.log.sends.push(prompt);
+      return rejecting(rpcError(COMPACT_IN_PROGRESS, "a compaction is in progress"));
+    }
+    return send(prompt, signal, opts);
+  };
+  return { ...s, c };
+}
+
+/** A JobController whose exits the test fires. */
+class FakeJobs implements JobController {
+  private readonly listeners = new Set<(job: BackgroundJob) => void>();
+  start(): BackgroundJob {
+    throw new Error("unused");
+  }
+  read(): undefined {
+    return undefined;
+  }
+  kill(): boolean {
+    return false;
+  }
+  list(): readonly BackgroundJob[] {
+    return [];
+  }
+  dispose(): void {}
+  onExit(listener: (job: BackgroundJob) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  fire(job: BackgroundJob): void {
+    for (const listener of this.listeners) {
+      listener(job);
+    }
+  }
+}
+
+const jobExit: BackgroundJob = {
+  id: "j1",
+  command: "make",
+  startedAt: 0,
+  status: "exited",
+  exitCode: 0,
+};
+
+/** Type each line + Enter. */
+async function typeLines(stdin: { write(data: string): void }, lines: readonly string[]) {
+  for (const line of lines) {
+    stdin.write(line);
+    await delay(20);
+    stdin.write("\r");
+    await delay(60);
+  }
+}
+
+describe("D3c follow-up 1 — no turn of ours during our compaction; a stale settle is ignored", () => {
+  test("T-D10 (review repro): /retry during a compaction → refused here, the row survives and goes out at its end", async () => {
+    const { ctrl, log, c } = refusingWhileCompacting();
+    const { stdin, lastFrame, unmount } = await compactingWithRows(ctrl, ["A"]);
+    await typeLines(stdin, ["/retry"]);
+    expect(log.sends).toEqual(["first"]); // no turn started during the compaction
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("A compaction is running");
+    expect(frame).toMatch(queuedRow("A"));
+    c.resolve();
+    await delay(80);
+    expect(log.sends).toEqual(["first", "A"]);
+    unmount();
+  });
+
+  test("T-D10b: a /skill during a compaction → refused here, the row survives", async () => {
+    const { ctrl, log, c } = refusingWhileCompacting();
+    const app = render(
+      <App
+        createSession={() => ctrl}
+        model="m"
+        cwd="/tmp/work"
+        skills={() => [{ name: "review", description: "review it" }]}
+      />,
+    );
+    await delay(30);
+    await typeLines(app.stdin, ["first", "/compact", "A", "/review now"]);
+    expect(log.sends).toEqual(["first"]);
+    expect(app.lastFrame() ?? "").toMatch(queuedRow("A"));
+    c.resolve();
+    await delay(80);
+    expect(log.sends).toEqual(["first", "A"]);
+    app.unmount();
+  });
+
+  test("T-D10c: a job exit during a compaction → no wake during it; the joined rows' turn takes the exit", async () => {
+    const { ctrl, log, c } = refusingWhileCompacting();
+    const jobs = new FakeJobs();
+    const app = render(<App createSession={() => ctrl} model="m" cwd="/tmp/work" jobs={jobs} />);
+    await delay(30);
+    await typeLines(app.stdin, ["first", "/compact", "A"]);
+    jobs.fire(jobExit);
+    await delay(60);
+    expect(log.sends).toEqual(["first"]);
+    expect(app.lastFrame() ?? "").toMatch(queuedRow("A"));
+    c.resolve();
+    await delay(100);
+    // The joined prompt's turn flushes the exit at its start: no extra wake.
+    expect(log.sends).toEqual(["first", "A"]);
+    app.unmount();
+  });
+
+  test("T-D10d: a job exit during a compaction with no rows → the wake fires once it ends", async () => {
+    const { ctrl, log, c } = refusingWhileCompacting();
+    const jobs = new FakeJobs();
+    const app = render(<App createSession={() => ctrl} model="m" cwd="/tmp/work" jobs={jobs} />);
+    await delay(30);
+    await typeLines(app.stdin, ["first", "/compact"]);
+    jobs.fire(jobExit);
+    await delay(60);
+    expect(log.sends).toEqual(["first"]);
+    c.resolve();
+    await delay(100);
+    expect(log.sends).toEqual(["first", ""]); // the continuation, after the compaction
+    app.unmount();
+  });
+
+  test("T-D11 (review F2): /compact → /clear → /compact; the OLD settle leaves the new compaction alone", async () => {
+    const c1 = heldCompaction();
+    const c2 = heldCompaction();
+    const one = fakeSession({ compact: c1.compact });
+    const two = fakeSession({ compact: c2.compact });
+    const sessions = [one.ctrl, two.ctrl];
+    const app = render(
+      <App createSession={() => sessions.shift() ?? two.ctrl} model="m" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    await typeLines(app.stdin, ["first", "/compact", "/clear", "/compact", "B"]);
+    expect(c2.state.started).toBe(1);
+    c1.resolve();
+    await delay(80);
+    expect(two.log.sends).toEqual([]); // B still waits for the NEW compaction
+    expect(app.lastFrame() ?? "").toMatch(queuedRow("B"));
+    c2.resolve();
+    await delay(80);
+    expect(two.log.sends).toEqual(["B"]);
+    app.unmount();
+  });
+
+  test("T-D12 (review F5): a wake deferred during our compaction does not survive /clear into the new session", async () => {
+    const one = fakeSession({ compact: heldCompaction().compact });
+    const two = fakeSession({});
+    const sessions = [one.ctrl, two.ctrl];
+    const jobs = new FakeJobs();
+    const app = render(
+      <App
+        createSession={() => sessions.shift() ?? two.ctrl}
+        model="m"
+        cwd="/tmp/work"
+        jobs={jobs}
+      />,
+    );
+    await delay(30);
+    await typeLines(app.stdin, ["first", "/compact"]);
+    jobs.fire(jobExit);
+    await delay(40);
+    await typeLines(app.stdin, ["/clear", "hello"]);
+    await delay(150);
+    expect(one.log.sends).toEqual(["first"]);
+    expect(two.log.sends).toEqual(["hello"]); // no unasked "" continuation
+    app.unmount();
   });
 });

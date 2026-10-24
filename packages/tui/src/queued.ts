@@ -102,6 +102,14 @@ export function afterRefusal(
   return { rows: kept, text: join(back) };
 }
 
+/**
+ * A compaction's send-now that an older daemon refused (`MethodNotFound`):
+ * no text left, so every row is queued again — they go out when the
+ * compaction ends (docs/feat/send-now-d.md).
+ */
+export const requeue = (rows: QueuedRows): QueuedRows =>
+  rows.map((r) => ({ ...r, state: "queued" as const }));
+
 /** Every remaining text, in order, and no row left (a fallback send, or a full restore). */
 export function takeAll(rows: QueuedRows): { readonly rows: QueuedRows; readonly text: string } {
   return { rows: [], text: join(rows) };
