@@ -783,6 +783,13 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       chars but `\n`/`\t`); no bump. Rejected: a new option kind (an older
       client could no longer parse the whole blocking update); sending text
       to an older daemon (it would drop the user's words silently).
+      **APPROVED by the owner 2026-10-24:** the model sees today's rejection,
+      then `The user replied:` + the text, then one guidance line; empty text
+      + Enter = a plain No; **Shift+Tab while typing turns auto-accept on AND
+      approves the request being answered** (owner's change; the draft moves
+      to the main input with a notice, never lost); a request withdrawn while
+      typing (send-now, cancel, another device) → the draft moves to the main
+      input with a notice.
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
