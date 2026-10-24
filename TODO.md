@@ -766,6 +766,33 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       [`docs/feat/version-mismatch-notice.md`](docs/feat/version-mismatch-notice.md)
       (Execution filled; Review pending).
 
+- [ ] **TUI: sent messages on a full-width background; queued messages
+      look sent, in grey** (owner, 2026-10-25) — `feat/tui-message-style`,
+      S · contained, Sonnet executes, Opus reviews; runs right AFTER task 5
+      (`feat/queued-broadcast`) merges (both touch the TUI queue rows; one
+      code branch at a time).
+      - **Sent user message:** every line of it on a background colour that
+        spans the whole terminal row, left edge to right edge ("così sarà
+        anche più facile individuarli quando si scrolla una sessione
+        lunga"). Today only the `›` is coloured (`render-lines.ts`
+        `userLines`). The tint comes from the theme: subtle on dark, a
+        matching light tint on light themes; wrapped lines and blank lines
+        inside the message keep it.
+      - **Queued messages:** the rotating arc goes away. Each queued message
+        sits at the bottom of the conversation, just above the input, shaped
+        exactly like a sent message (same `›`, same row background); the ONLY
+        difference is the text colour: grey (the theme's subtle colour)
+        instead of the normal text colour (white on dark). Further queued
+        messages stack below it, one per row; under the last one, in grey as
+        today, "ctrl+x ctrl+s to send now". While the turn streams, the
+        model's output grows above them; they stay pinned at the bottom.
+      - **When it is delivered** (the daemon says so — the steer reached the
+        model, `TurnEnd.delivered` / the steer event — never a client guess)
+        the message turns to the normal text colour and stays in the
+        conversation at the point where the model received it.
+      - Logic (which rows, which state) in a pure module; the component only
+        maps it to colours. Tests on frames (ink-testing-library), plus a
+        theme check for dark and light.
 - [ ] **Permission prompt: "No, let's talk about it"** (owner, 2026-10-24) — a
       third answer next to Yes / Yes, always / No: it opens a text field; the
       model gets the rejection TOGETHER with the user's text (e.g. "Rejected
