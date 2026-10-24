@@ -348,7 +348,8 @@ describe("createLocalRuntime (local over RPC)", () => {
         Promise.resolve().then(() => {
           seen.push(text);
         }),
-      snapshot: async () => null,
+      readBack: async () => null,
+      onTitle: () => () => {},
       compact: async () => ({ before: 0, after: 0 }),
     } as unknown as RemoteSession;
 
@@ -360,7 +361,8 @@ describe("createLocalRuntime (local over RPC)", () => {
     // And a rejecting inner must propagate the rejection (the TUI reconciles).
     const rejInner: RemoteSession = {
       enqueue: () => Promise.reject(new Error("method not found")),
-      snapshot: async () => null,
+      readBack: async () => null,
+      onTitle: () => () => {},
       compact: async () => ({ before: 0, after: 0 }),
     } as unknown as RemoteSession;
     const rejCtl = persistingController(rejInner, () => {});
@@ -387,10 +389,11 @@ describe("createLocalRuntime (local over RPC)", () => {
       enqueue: async (text: string, id?: string) => {
         log.push(`enqueue:${text}:${id}`);
       },
-      snapshot: async () => {
+      readBack: async () => {
         log.push("snapshot");
-        return [{ role: "user", content: "A" }];
+        return { messages: [{ role: "user", content: "A" }] };
       },
+      onTitle: () => () => {},
     } as unknown as RemoteSession;
     const saved: string[][] = [];
     const ctl = persistingController(inner, (m) => saved.push(m.map((x) => String(x.content))));
@@ -420,10 +423,11 @@ describe("createLocalRuntime (local over RPC)", () => {
           [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(cancelled) }),
         };
       },
-      snapshot: async () => {
+      readBack: async () => {
         snapshots += 1;
-        return [];
+        return { messages: [] };
       },
+      onTitle: () => () => {},
     } as unknown as RemoteSession;
     const ctl = persistingController(inner, () => {});
     // The very error, untouched: the caller falls back on its code.
@@ -449,11 +453,12 @@ describe("createLocalRuntime (local over RPC)", () => {
         log.push(`send:${prompt}`);
         yield { type: "text", delta: prompt };
       },
-      snapshot: () =>
+      readBack: () =>
         new Promise((resolve, reject) => {
           log.push("snapshot");
-          held.push({ resolve, reject });
+          held.push({ resolve: (messages) => resolve({ messages }), reject });
         }),
+      onTitle: () => () => {},
       compact: async () => ({ before: 2, after: 1 }),
       enqueue: async () => {},
       close: () => {
@@ -600,10 +605,11 @@ describe("createLocalRuntime (local over RPC)", () => {
       async *send() {
         throw new Error("the connection target is gone");
       },
-      snapshot: async () => {
+      readBack: async () => {
         reads.push("snapshot");
         throw new Error("gone");
       },
+      onTitle: () => () => {},
     } as unknown as RemoteSession;
     const ctl = persistingController(
       inner,

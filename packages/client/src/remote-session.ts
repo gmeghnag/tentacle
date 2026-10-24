@@ -13,6 +13,7 @@ import type { ChatMessage } from "@tentacle/core";
 import {
   DomainErrorCode,
   JsonRpcErrorCode,
+  type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
   type SessionUpdate,
@@ -22,7 +23,12 @@ import { RpcError } from "@tentacle/transport";
 import { turnRecovery } from "./link-machine.ts";
 import { type SessionEvent, stopReasonFromProtocol, updateToEvent } from "./mapping.ts";
 import { AsyncQueue } from "./queue.ts";
-import type { RemoteClient, SessionStreamListener } from "./remote-client.ts";
+import type {
+  ReadBack,
+  RemoteClient,
+  SessionStreamListener,
+  SessionTitleNotice,
+} from "./remote-client.ts";
 import type { StreamOutput } from "./session-reducer.ts";
 
 /** The turn this session is streaming. */
@@ -61,6 +67,8 @@ export class RemoteSession implements SessionStreamListener {
   private readonly client: RemoteClient;
   private readonly seedMessages?: readonly ChatMessage[];
   private readonly desiredId?: string;
+  /** The resumed record's chosen title: seeds the open that creates the session daemon-side. */
+  private readonly seedTitle: SeedTitle | undefined;
   private id: string | null = null;
   /** The in-flight `session/open` of the first `send`, until `id` is known. */
   private opening: Promise<string> | null = null;
@@ -90,10 +98,47 @@ export class RemoteSession implements SessionStreamListener {
   /** `unsupported` notices that arrived while idle: shown at the start of the next turn. */
   private idleNotices: SessionEvent[] = [];
 
-  constructor(client: RemoteClient, seedMessages?: readonly ChatMessage[], desiredId?: string) {
+  constructor(
+    client: RemoteClient,
+    seedMessages?: readonly ChatMessage[],
+    desiredId?: string,
+    seedTitle?: SeedTitle,
+  ) {
     this.client = client;
     this.seedMessages = seedMessages;
     this.desiredId = desiredId;
+    this.seedTitle = seedTitle;
+  }
+
+  /**
+   * Rename this session daemon-side (`session/rename`); resolves with the
+   * text the daemon stored. Before the first send there is no daemon-side
+   * session: rejects "nothing to rename yet". While that send is still
+   * opening it, waits for the id.
+   */
+  async rename(title: string): Promise<string> {
+    const id = this.id ?? (this.opening ? await this.opening : null);
+    if (!id || this.closed) {
+      throw new Error("nothing to rename yet — send a first message");
+    }
+    return (await this.client.rename(id, title)).text;
+  }
+
+  /**
+   * Subscribe to this session's title changes (the daemon's `session_title`,
+   * idle or mid-turn, or one a resync revealed); returns an unsubscribe.
+   */
+  onTitle(listener: (notice: SessionTitleNotice) => void): () => void {
+    return this.client.onSessionTitle((notice) => {
+      if (notice.sessionId === this.id) {
+        listener(notice);
+      }
+    });
+  }
+
+  /** `snapshot`, with the daemon's title (see `RemoteClient.readBack`); null before the first send. */
+  async readBack(): Promise<ReadBack | null> {
+    return this.id ? this.client.readBack(this.id) : null;
   }
 
   /**
@@ -311,7 +356,13 @@ export class RemoteSession implements SessionStreamListener {
       throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
     }
     if (!this.id) {
-      this.opening = this.client.openSession(undefined, this.seedMessages, this.desiredId, this);
+      this.opening = this.client.openSession(
+        undefined,
+        this.seedMessages,
+        this.desiredId,
+        this,
+        this.seedTitle,
+      );
       try {
         this.id = await this.opening;
       } finally {
@@ -529,12 +580,13 @@ export class RemoteSession implements SessionStreamListener {
       }
       return;
     }
-    // Owned elsewhere: the permission router (the dialog) and the job-exit
-    // listeners (they fire even while idle).
+    // Owned elsewhere: the permission router (the dialog), the job-exit and
+    // the title listeners (they fire even while idle).
     if (
       update.type === "permission_request" ||
       update.type === "permission_resolved" ||
-      update.type === "background_exit"
+      update.type === "background_exit" ||
+      update.type === "session_title"
     ) {
       return;
     }

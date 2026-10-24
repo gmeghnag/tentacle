@@ -27,6 +27,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "/help", description: "show this help" },
   { name: "/clear", description: "clear the transcript and start a fresh session" },
   { name: "/compact", description: "summarise the conversation to free up context" },
+  { name: "/rename", description: "rename this session (the title every device shows)" },
   { name: "/model", description: "show the active model" },
   { name: "/retry", description: "re-send the last prompt" },
   { name: "/copy", description: "copy the last assistant reply to the clipboard" },
@@ -158,6 +159,30 @@ const SESSION_MUTATING = new Set(["/retry", "/clear"]);
 /** Whether `command` (the leading token, e.g. "/retry") must wait for an idle turn. */
 export function isSessionMutating(command: string): boolean {
   return SESSION_MUTATING.has(command);
+}
+
+/**
+ * `/rename <title>`: the rest of the line, trimmed, is the title — the daemon
+ * makes it one line and says what it stored. Nothing after the command → the
+ * usage notice. (`/rename` is not session-mutating: allowed mid-turn.)
+ */
+export function parseRename(raw: string): { readonly title: string } | { readonly usage: string } {
+  const title = raw
+    .trim()
+    .replace(/^\/rename\b/, "")
+    .trim();
+  return title === "" ? { usage: "_Usage: `/rename <title>`_" } : { title };
+}
+
+/** The notice for a title the daemon stored (pod-supplied text: one display line). */
+export function renamedNotice(text: string): string {
+  return `_Renamed: ${oneLine(text)}_`;
+}
+
+/** The notice for a refused or failed rename. */
+export function renameFailedNotice(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return `_Rename failed: ${oneLine(message)}_`;
 }
 
 /**

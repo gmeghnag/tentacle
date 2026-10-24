@@ -9,6 +9,7 @@
  */
 import {
   DEFAULT_ANTHROPIC_BASE_URL,
+  DEFAULT_AUTO_TITLE,
   DEFAULT_AUTO_WAKE,
   DEFAULT_BASE_URL,
   DEFAULT_CONTEXT_WINDOW,
@@ -39,6 +40,10 @@ export interface ResolvedConfig {
   readonly provider: "openai" | "anthropic";
   readonly baseURL: string;
   readonly model: string;
+  /** Whether a model names each session (file-only, default false). */
+  readonly autoTitle: boolean;
+  /** The model id that names sessions when `autoTitle` (file-only); unset → `model`. */
+  readonly titleModel?: string;
   readonly cwd: string;
   readonly maxIterations: number;
   readonly contextWindow: number;
@@ -291,6 +296,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     provider: providerValue,
     baseURL: baseURL.value,
     model: modelId.value,
+    autoTitle: model.autoTitle ?? DEFAULT_AUTO_TITLE,
+    ...(model.titleModel !== undefined ? { titleModel: model.titleModel } : {}),
     cwd,
     maxIterations: maxIterations.value,
     contextWindow: contextWindow.value,
@@ -330,4 +337,18 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       autoWake: autoWake.source,
     },
   };
+}
+
+/**
+ * The startup notice for a title setting that does nothing: `titleModel` set
+ * while `autoTitle` is off (docs/feat/session-titles.md). `null` otherwise.
+ * Shown once through the caller's notice path, never a raw terminal write.
+ */
+export function titleConfigNotice(config: {
+  readonly autoTitle: boolean;
+  readonly titleModel?: string;
+}): string | null {
+  return config.titleModel !== undefined && !config.autoTitle
+    ? "model.titleModel is set but model.autoTitle is false; titles are not generated"
+    : null;
 }

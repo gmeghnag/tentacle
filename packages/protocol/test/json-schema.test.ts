@@ -84,6 +84,7 @@ const FIXTURES: Record<string, Json[]> = {
     },
     {},
     { sessionId: "s", reopen: true },
+    { sessionId: "s", create: true, title: { text: "Fix the login bug", source: "user" } },
   ],
   "methods/session~1open/result": [{ sessionId: "s", epoch: "e", created: true, resync: false }],
   "methods/session~1close/params": [{ sessionId: "s" }],
@@ -115,7 +116,12 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1compact/params": [{ sessionId: "s" }],
   "methods/session~1compact/result": [{ before: 10, after: 2 }],
   "methods/session~1snapshot/params": [{ sessionId: "s" }],
-  "methods/session~1snapshot/result": [{ messages: [{ role: "user", content: "q" }] }],
+  "methods/session~1snapshot/result": [
+    { messages: [{ role: "user", content: "q" }] },
+    { messages: [], since: { epoch: "e", seq: 0 }, title: { text: "(empty)", source: "auto" } },
+  ],
+  "methods/session~1rename/params": [{ sessionId: "s", title: " Fix\tlogin " }],
+  "methods/session~1rename/result": [{ title: { text: "Fix login", source: "user" } }],
   "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
   "methods/session~1enqueue/result": [{}],
   "methods/session~1send_now/params": [
@@ -267,6 +273,8 @@ const FIXTURES: Record<string, Json[]> = {
     update({ type: "permission_resolved", requestId: "r", outcome: { outcome: "cancelled" } }),
     update({ type: "session_closed", reason: "closed" }),
     update({ type: "session_closed", reason: "deleted" }),
+    update({ type: "session_title", title: "Fix the login bug", source: "model" }),
+    update({ type: "session_title", title: "Mine", source: "user" }),
     // The catch-all (decision E): unknown display / mandatory events are valid frames.
     update({ type: "progress", pct: 3 }),
     { sessionId: "s", seq: 2, mandatory: true, update: { type: "future_mandatory", id: "p" } },

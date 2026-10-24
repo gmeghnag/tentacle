@@ -24,6 +24,7 @@ import {
   type InitializeResult,
   type McpStatusResult,
   Method,
+  type ModelPurpose,
   type ModelStreamChunkedResult,
   type ModelStreamResult,
   Notification,
@@ -32,6 +33,8 @@ import {
   PROTOCOL_VERSION,
   type PromptParams,
   type PromptResult,
+  type RenameParams,
+  type RenameResult,
   type ResolvePermissionParams,
   type ResolvePermissionResult,
   type SendNowParams,
@@ -127,10 +130,11 @@ export class Connection {
    * Ask the connected client to run a model turn on our behalf (the pod
    * reverse-tunnel), batch cut: the client returns the whole turn's events in
    * one response. Outbound daemon→client request (the only kind, with the chunked cut).
+   * `purpose` marks a non-turn call (a title): the CLIENT picks its model.
    */
-  requestModelStream(request: WireChatRequest): Promise<ModelStreamResult> {
+  requestModelStream(request: WireChatRequest, purpose?: ModelPurpose): Promise<ModelStreamResult> {
     return this.peer
-      .request(Method.ModelStream, { request })
+      .request(Method.ModelStream, { request, ...(purpose ? { purpose } : {}) })
       .then((result) => result as ModelStreamResult);
   }
 
@@ -138,7 +142,7 @@ export class Connection {
    * Ask the connected client to run a model turn on our behalf (the pod
    * reverse-tunnel), streaming the events as `$/progress` as they are produced
    * (the chunked cut). `signal` cancels it; `onProgress` receives each event
-   * in `seq` order. Outbound daemon→client request.
+   * in `seq` order. Outbound daemon→client request. `purpose`: as `requestModelStream`.
    */
   requestModelStreamChunked(
     request: WireChatRequest,
@@ -146,9 +150,10 @@ export class Connection {
       readonly signal?: AbortSignal;
       readonly onProgress: (value: unknown, seq: number) => void;
     },
+    purpose?: ModelPurpose,
   ): Promise<ModelStreamChunkedResult> {
     return this.peer
-      .request(Method.ModelStreamChunked, { request }, handlers)
+      .request(Method.ModelStreamChunked, { request, ...(purpose ? { purpose } : {}) }, handlers)
       .then((result) => result as ModelStreamChunkedResult);
   }
 
@@ -189,6 +194,11 @@ export class Connection {
       // A read of the registry: does not attach this connection to anything.
       case Method.SessionList:
         return this.host.list(params as SessionListParams);
+      // Host-level, like `close`: needs no `open` here (an archived session can be renamed).
+      case Method.Rename: {
+        const { sessionId, title } = params as RenameParams;
+        return { title: this.host.rename(sessionId, title) } satisfies RenameResult;
+      }
       // Daemon-wide: reads/sets the reaper's TTL, attaches this connection to nothing.
       case Method.SessionTtl:
         return this.host.sessionTtl(params as SessionTtlParams);

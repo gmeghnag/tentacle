@@ -17,12 +17,7 @@
  */
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import {
-  type LoadResult,
-  type SessionRecord,
-  isValidSessionId,
-  sessionTitle,
-} from "@tentacle/agent";
+import { type LoadResult, type SessionRecord, isValidSessionId } from "@tentacle/agent";
 import {
   type DaemonSessionRecord,
   type DaemonSessionState,
@@ -209,7 +204,7 @@ export class SessionPersister {
     // detach or a restart writes too, and must not reorder `session/list`.
     return toDaemonRecord(
       state,
-      { cwd: this.opts.cwd, model: this.opts.model, title: sessionTitle(state.messages) },
+      { cwd: this.opts.cwd, model: this.opts.model },
       state.lastChangeAt,
     );
   }

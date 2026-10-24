@@ -21,6 +21,8 @@ export const DEFAULT_SUBAGENT_MAX_ITERATIONS = 50;
  * turn so the model reacts to the exit without the user prompting. On by default.
  */
 export const DEFAULT_AUTO_WAKE = true;
+/** Model-generated session titles are opt-in (docs/feat/session-titles.md). */
+export const DEFAULT_AUTO_TITLE = false;
 /** Token budget used for the TUI context-fill meter. */
 export const DEFAULT_CONTEXT_WINDOW = 128000;
 /** Max characters of a tool result kept inline before it is spilled to a file. */
@@ -75,6 +77,15 @@ export const DEFAULT_CONFIG_JSONC = `{
 
     // Model id sent to the endpoint.
     // "model": "${DEFAULT_MODEL}",
+
+    // Ask a model to name each session after its first exchange. Off: the title
+    // is the first message you typed (rename it with /rename). On a pod
+    // (run/attach) this laptop's setting decides.
+    // "autoTitle": ${DEFAULT_AUTO_TITLE},
+
+    // Model id (same endpoint) that writes those titles when "autoTitle" is on,
+    // e.g. a cheaper one. Unset: the model above.
+    // "titleModel": "a-small-model",
 
     // API key. Prefer "apiKeyCommand" below so the secret is NOT stored here in plaintext.
     // "apiKey": "sk-...",

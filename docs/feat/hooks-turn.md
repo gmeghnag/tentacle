@@ -20,6 +20,11 @@ Hooks at the turn's boundaries and before each model call:
 | `turn_end` with `cancelled` / `max_iterations` | the turn stops for another reason | nothing (notification) | **no** (fire-and-forget) |
 | `model_request` | before **every** model call (D2: notification, read-only, local only) | nothing | **no** |
 
+> Note (`docs/feat/session-titles.md`, owner Q3): "every model call" means every
+> call of the **agent loop**. The daemon's session-title request (one short,
+> tool-less call after the first exchange) is not an agent-loop round and fires
+> **no** `model_request` hook.
+
 ### State today (verified against `main` @ 399ea0b)
 
 | Fact | Evidence |

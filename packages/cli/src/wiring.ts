@@ -143,6 +143,8 @@ export interface WiredAgent {
   readonly jobs: JobController;
   /** The tool registry — MCP tools are registered into it after connecting. */
   readonly tools: ToolRegistry;
+  /** The provider a daemon asks for the session's title (`AgentFactory.titleModel`); absent with `autoTitle` off. */
+  readonly titleModel?: ModelProvider;
 }
 
 export interface BuildAgentOptions {
@@ -151,6 +153,8 @@ export interface BuildAgentOptions {
    *  and for sub-agents (per-type model overrides are ignored over the
    *  tunnel). */
   readonly modelOverride?: ModelProvider;
+  /** The title's own override: the pod's tunnel that marks a call as a title one (`purpose: "title"`). */
+  readonly titleModelOverride?: ModelProvider;
   /**
    * Reuse this broker instead of a fresh one: several agents behind ONE
    * frontend (one in-process agent per session) must share the broker the TUI
@@ -292,7 +296,18 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     ...(hooks ? { hooks } : {}),
     ...(options.askHooksTrust ? { askHooksTrust: options.askHooksTrust } : {}),
   });
-  return { agent, permissions, jobs, tools };
+  // Names the session after its first exchange (docs/feat/session-titles.md),
+  // only with `model.autoTitle` (opt-in; off → no title model, no call):
+  // `model.titleModel` on the same endpoint, else the main model. Over the pod
+  // model tunnel the title tunnel answers — the laptop picks its model.
+  const titleModel = config.autoTitle
+    ? (options.titleModelOverride ??
+      options.modelOverride ??
+      (config.titleModel !== undefined
+        ? configuredModelProvider(config, config.titleModel)
+        : model))
+    : undefined;
+  return { agent, permissions, jobs, tools, ...(titleModel ? { titleModel } : {}) };
 }
 
 /**

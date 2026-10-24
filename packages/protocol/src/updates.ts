@@ -9,7 +9,14 @@
 import { z } from "zod";
 import { ContentBlockSchema } from "./content.ts";
 import { PermissionRequestUpdateSchema, PermissionResolvedUpdateSchema } from "./permission.ts";
-import { SessionIdSchema, StopReasonSchema, TurnErrorSchema, TurnIdSchema } from "./session.ts";
+import {
+  MAX_SESSION_TITLE,
+  SessionIdSchema,
+  StopReasonSchema,
+  TurnErrorSchema,
+  TurnIdSchema,
+} from "./session.ts";
+import { line } from "./text-line.ts";
 
 export const ToolCallStatusSchema = z.enum(["pending", "in_progress", "completed", "failed"]);
 export type ToolCallStatus = z.infer<typeof ToolCallStatusSchema>;
@@ -138,6 +145,18 @@ export const SessionClosedSchema = z.object({
   reason: z.enum(["closed", "deleted"]),
 });
 
+/**
+ * The session's chosen title changed (generated after the first exchange, or
+ * set by `session/rename`): every attached client gets it, while idle too.
+ * Not turn-scoped. Display only — the title is also in the snapshot and in
+ * `session/list`, so a client that skips it misses nothing it must act on.
+ */
+export const SessionTitleUpdateSchema = z.object({
+  type: z.literal("session_title"),
+  title: line(MAX_SESSION_TITLE),
+  source: z.enum(["model", "user"]),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -154,6 +173,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   SessionClosedSchema,
   PermissionRequestUpdateSchema,
   PermissionResolvedUpdateSchema,
+  SessionTitleUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -191,6 +211,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   session_closed: "mandatory",
   permission_request: "blocking",
   permission_resolved: "mandatory",
+  // A label: skipping it hangs nothing (the snapshot and the list carry it).
+  session_title: "display",
 };
 
 /** Every update type this build knows — what a client declares at `initialize`. */

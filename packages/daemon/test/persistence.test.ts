@@ -1073,7 +1073,7 @@ describe("daemon persistence: review fixes (the TTL clock, compaction, shutdown)
         title: "t",
         messages: [{ role: "user", content: "go" }],
         kind: "tentacle.daemon-session",
-        schemaVersion: 2,
+        schemaVersion: 3,
         lastActiveAt: 5,
         turns: [{ turnId: "T" }],
         enqueueIds: [],
@@ -1141,7 +1141,7 @@ describe("daemon persistence: the record's updatedAt is the last conversation ch
       title: "t",
       messages: [{ role: "user", content: "go" }],
       kind: "tentacle.daemon-session",
-      schemaVersion: 2,
+      schemaVersion: 3,
       lastActiveAt: 7,
       turns: [],
       enqueueIds: [],
@@ -1257,7 +1257,7 @@ describe("persisted-session (pure)", () => {
     title: "t",
     messages: [],
     kind: "tentacle.daemon-session",
-    schemaVersion: 2,
+    schemaVersion: 3,
     lastActiveAt: 2,
     turns: [],
     enqueueIds: [],
@@ -1286,7 +1286,7 @@ describe("persisted-session (pure)", () => {
       return p.ok ? "ok" : p.reason;
     };
     expect(reason({ ...base(), kind: undefined })).toMatch(/not a daemon session record/);
-    expect(reason({ ...base(), schemaVersion: 3 })).toMatch(/unsupported record version 3/);
+    expect(reason({ ...base(), schemaVersion: 4 })).toMatch(/unsupported record version 4/);
     expect(reason(base(), "/elsewhere")).toMatch(/another project/);
     expect(reason({ ...base(), turns: [{ turnId: "x", end: { stopReason: "nope" } }] })).toMatch(
       /invalid end/,
@@ -1434,12 +1434,13 @@ describe("persisted-session (pure)", () => {
     ).toBeUndefined();
   });
 
-  test("U2 parseDaemonRecord: a v1 record reads as v2, not archived; archivedAt is a wire stamp; v3 refused", () => {
+  test("U2 parseDaemonRecord: a v1 record reads as current, not archived; archivedAt is a wire stamp; v4 refused", () => {
     // Mutation: refuse v1 → every session of the previous build is skipped at the upgrade.
+    // (Task 3 took the current version to 3: v1 and v2 both read as v3.)
     const parse = (r: unknown) => parseDaemonRecord(r as DaemonSessionRecord, (c) => c === CWD);
     const v1 = parse({ ...base(), schemaVersion: 1, archivedAt: 9 });
     expect(v1.ok ? [v1.record.schemaVersion, v1.record.archivedAt] : v1.reason).toEqual([
-      2,
+      3,
       undefined,
     ]);
     const v2 = parse(base({ archivedAt: 5 }));
@@ -1449,9 +1450,9 @@ describe("persisted-session (pure)", () => {
       const p = parse({ ...base(), archivedAt: bad });
       expect(p.ok ? "ok" : p.reason).toBe('"archivedAt" is not a non-negative integer');
     }
-    const v3 = parse({ ...base(), schemaVersion: 3 });
-    expect(v3.ok ? "ok" : v3.reason).toMatch(
-      /unsupported record version 3 \(this daemon reads 1, 2\)/,
+    const v4 = parse({ ...base(), schemaVersion: 4 });
+    expect(v4.ok ? "ok" : v4.reason).toMatch(
+      /unsupported record version 4 \(this daemon reads 1, 2, 3\)/,
     );
   });
 

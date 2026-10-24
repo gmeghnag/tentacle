@@ -50,8 +50,21 @@ export const WireStreamEventSchema = z.discriminatedUnion("type", [
 ]);
 export type WireStreamEvent = z.infer<typeof WireStreamEventSchema>;
 
+/**
+ * What a tunnelled model call is for. Absent: an agent turn (the main model).
+ * `"title"`: the session's title (docs/feat/session-titles.md) — the LAPTOP
+ * picks the model that serves it (`model.titleModel`, else the main one) and
+ * refuses it when its `model.autoTitle` is off. The pod never names a model.
+ * A new value is breaking for an older laptop (refused at parse, loudly).
+ */
+export const ModelPurposeSchema = z.enum(["title"]);
+export type ModelPurpose = z.infer<typeof ModelPurposeSchema>;
+
 /** `model/stream` request: the daemon asks the client to run a model turn. */
-export const ModelStreamParamsSchema = z.object({ request: WireChatRequestSchema });
+export const ModelStreamParamsSchema = z.object({
+  request: WireChatRequestSchema,
+  purpose: ModelPurposeSchema.optional(),
+});
 export type ModelStreamParams = z.infer<typeof ModelStreamParamsSchema>;
 
 /** The collected events of that turn (first cut: delivered as one batch). */
@@ -77,7 +90,10 @@ export const ModelStreamProgressValueSchema = z.array(WireStreamEventSchema).min
 export type ModelStreamProgressValue = z.infer<typeof ModelStreamProgressValueSchema>;
 
 /** `model/streamChunked` request: the same shape as `model/stream`. */
-export const ModelStreamChunkedParamsSchema = z.object({ request: WireChatRequestSchema });
+export const ModelStreamChunkedParamsSchema = z.object({
+  request: WireChatRequestSchema,
+  purpose: ModelPurposeSchema.optional(),
+});
 export type ModelStreamChunkedParams = z.infer<typeof ModelStreamChunkedParamsSchema>;
 
 /**
