@@ -431,6 +431,9 @@ the "a new target adds only a transport" shape, AGENTS §7).
     build rejects only the latter, loudly [accept]; no `model_request` hook on
     the title call, documented [no hook]; `DAEMON_RECORD_VERSION` bump [yes:
     2→3, after 2a's 1→2].
+    **Owner (2026-10-24): approved as ONE task, no split** ("a task like
+    that can be worked by a single agent") — L · load-bearing, strong model,
+    mandatory fresh-context Review; questions 2–4 as recommended.
   - *Task 5 `queued-broadcast`* — **M** → split 5a (protocol + daemon, S–M ·
     load-bearing) / 5b (client exposes the queue, S · cross-module) [yes].
     One display update `queued{entries:[{id,text}]}` carrying the FULL queue
