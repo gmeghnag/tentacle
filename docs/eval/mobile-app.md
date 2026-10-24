@@ -509,6 +509,16 @@ the "a new target adds only a transport" shape, AGENTS §7).
   after send-now 4d and before task 11, so task 13's approvals on the phone
   offer it from the start.
 
+- **Token budget and model choice** (owner, 2026-10-24). Estimate from two
+  days of data: the remaining tasks need ~250% of one account-week (range
+  200–300%; S ≈ 3–4%, a delicate M ≈ 10–12%, L ≈ 15% est.) against ~160%
+  available this week for executors and reviewers — enough to reach about
+  task 11 this week. Decision: small, isolated tasks (S, `contained` or a
+  small `cross-module`, and small review fixes) are EXECUTED by Sonnet
+  (`claude-sonnet-5-5`); their fresh-context Review stays on Opus; M/L and
+  load-bearing tasks stay on Opus (AGENTS §10 "Suited"). Each task doc's
+  Execution names the model that executed it.
+
 ### Dependencies (must land before / with the app)
 
 - **`send_now`** — `docs/eval/send-now.md` (decided, not built): the app's
