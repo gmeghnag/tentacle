@@ -44,6 +44,10 @@ export const DomainErrorCode = {
   DaemonRestarted: -32012,
   /** A `session/resolve_permission` for a request that is not pending (answered, cancelled, unknown). */
   PermissionNotPending: -32013,
+  /** A `session/open` of an archived session without `reopen` (it was ended; never revived by itself). */
+  SessionArchived: -32014,
+  /** A `session/open` of an id removed by `session/delete` (the daemon keeps a tombstone): never recreate it. */
+  SessionDeleted: -32015,
 } as const;
 
 /**

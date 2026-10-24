@@ -4,6 +4,15 @@
 > **Branch:** `feat/daemon-side-persistence`
 > **Type:** feat · **Size:** M (Part A) · **Blast:** load-bearing (persistence + pod-trust invariants, steering window, AGENTS §7 rule change) · **Suited:** strong model executes; mandatory fresh-context Review
 
+> **Superseded in part by `docs/feat/session-archive.md` (2026-10-24): close archives; delete removes.**
+> Below, "close deletes the record" (Open question 5, the `close` row of the
+> write table, A9) is no longer true. A close — and the reaper's, and the
+> detached cap's eviction — writes the record once more stamped `archivedAt`
+> (`DAEMON_RECORD_VERSION` 2) and keeps it; `serve` indexes archived records at
+> start without restoring them; `session/open{reopen: true}` reloads one
+> through the same `restore` path as a restart; `session/delete` is the only
+> removal. A v1 record reads as a live v2 one.
+
 ## Context
 
 *— claude-opus-5-5, 2026-10-19*

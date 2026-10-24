@@ -116,7 +116,10 @@ describe("SessionSaver", () => {
     // Pins the saver's own pending set: a target with no `drain` at all, whose
     // write fails late. Mutation: return before waiting → no line.
     const saver = new SessionSaver(
-      { save: () => Bun.sleep(20).then(() => Promise.reject(new Error("late EIO"))) },
+      {
+        save: () => Bun.sleep(20).then(() => Promise.reject(new Error("late EIO"))),
+        remove: async () => {},
+      },
       () => {},
     );
     saver.save(rec("late", 1));
@@ -126,7 +129,10 @@ describe("SessionSaver", () => {
   });
 
   test("a hung save: drain says it is waiting, then gives up and reports it — never hangs", async () => {
-    const saver = new SessionSaver({ save: () => new Promise<void>(() => {}) }, () => {});
+    const saver = new SessionSaver(
+      { save: () => new Promise<void>(() => {}), remove: async () => {} },
+      () => {},
+    );
     saver.save(rec("hung", 1));
     const slow: string[][] = [];
     const started = Date.now();
@@ -143,7 +149,7 @@ describe("SessionSaver", () => {
   });
 
   test("a fast drain neither calls onSlow nor waits for the timeout", async () => {
-    const saver = new SessionSaver({ save: async () => {} }, () => {});
+    const saver = new SessionSaver({ save: async () => {}, remove: async () => {} }, () => {});
     saver.save(rec("fast", 1));
     let slowCalls = 0;
     const started = Date.now();
@@ -181,5 +187,32 @@ describe("SessionSaver", () => {
     saver.save(rec("abcdef0123", 2));
     expect(await saver.drain()).toEqual([]);
     expect(notices.at(-1)).toBe("Session abcdef01 saved again.");
+  });
+
+  test("remove (a session deleted elsewhere): after a save in flight, never written back, nothing left to report", async () => {
+    // Mutations: `save` ignores `removed` → the late save writes the file again;
+    // `settle` ignores it → the failing in-flight save is reported.
+    const { store, control } = flakyStore("removed");
+    const notices: string[] = [];
+    const saver = new SessionSaver(store, (t) => notices.push(t));
+    saver.save(rec("gone", 1));
+    saver.remove("gone");
+    saver.save(rec("gone", 2)); // a turn's late save
+    expect(await saver.drain()).toEqual([]);
+    expect((await store.load("gone")).status).toBe("absent");
+    saver.save(rec("late", 1));
+    saver.remove("late");
+    control.failing = new Error("EIO"); // the save in flight fails after the remove
+    saver.failed("late", "could not read the history back"); // the deleted session's read
+    expect(await saver.drain()).toEqual([]);
+    expect(notices).toEqual([]);
+    // A failed removal is one notice, never thrown.
+    const broken = new SessionSaver(
+      { save: async () => {}, remove: () => Promise.reject(new Error("EACCES")) },
+      (t) => notices.push(t),
+    );
+    broken.remove("abcdef0123");
+    expect(await broken.drain()).toEqual([]);
+    expect(notices).toEqual(["⚠ Session abcdef01's local copy could not be removed — EACCES."]);
   });
 });

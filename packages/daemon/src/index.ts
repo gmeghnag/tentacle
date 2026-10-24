@@ -11,6 +11,7 @@ export * from "./session-host.ts";
 export * from "./session-reaper.ts";
 export * from "./persisted-session.ts";
 export * from "./session-persister.ts";
+export * from "./session-tombstones.ts";
 export * from "./connection.ts";
 export * from "./proxy-model.ts";
 export * from "./ws-server.ts";

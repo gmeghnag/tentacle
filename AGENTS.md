@@ -178,8 +178,13 @@ assume.
   daemon write inside a turn is `SessionPersister.schedule` (synchronous
   capture, never awaited) — the steering window. On reload a turn suspended
   on its own call's permission runs again and is re-asked (pending on disk ⇒
-  never started); any other turn cut short is closed honestly. Design:
-  `docs/feat/daemon-side-persistence.md`, `docs/feat/suspended-turn-resume.md`.
+  never started); any other turn cut short is closed honestly. A `serve`
+  session that ends (`session/close`, the idle TTL, the detached cap) is kept
+  ARCHIVED (record stamped `archivedAt`, indexed by metadata only, reloaded
+  only by an explicit `session/open{reopen}` — a reconnect never revives it)
+  until `session/delete`; nothing is ever purged automatically. Design:
+  `docs/feat/daemon-side-persistence.md`, `docs/feat/suspended-turn-resume.md`,
+  `docs/feat/session-archive.md`.
 - **Model stays on the laptop (pod reverse-tunnel).** A pod reaches the model
   THROUGH us (`model/stream` over RPC, `ProxyModelProvider`): the daemon is given
   the LOCAL provider so the endpoint + API key never leave the laptop. Never put

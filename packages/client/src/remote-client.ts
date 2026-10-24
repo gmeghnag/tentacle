@@ -191,6 +191,15 @@ export interface HistoryLostNotice {
   readonly turns: number;
 }
 
+/**
+ * The daemon answered `SessionDeleted` for a session this client opened: it
+ * was removed with `session/delete` (another device, while this one was
+ * away). The client never recreates it; a frontend drops its own copy.
+ */
+export interface SessionDeletedNotice {
+  readonly sessionId: string;
+}
+
 /** A command that must not cross a session recreate (its turn/request is gone). */
 class SessionLostError extends RpcError {
   constructor() {
@@ -244,6 +253,7 @@ export class RemoteClient {
   /** The daemon's `/name` skills, from the latest handshake (a reconnect refreshes it). */
   private skillCatalog: readonly SkillSummary[] = [];
   private readonly historyLostListeners = new Set<(notice: HistoryLostNotice) => void>();
+  private readonly sessionDeletedListeners = new Set<(notice: SessionDeletedNotice) => void>();
   /** Conditions re-checked after every state change (session live, link stopped, …). */
   private readonly waiters = new Set<() => boolean>();
   /** Which permission request is prompted / answered (pure; see its module). */
@@ -381,6 +391,16 @@ export class RemoteClient {
     return () => this.historyLostListeners.delete(listener);
   }
 
+  /**
+   * Subscribe to "the daemon says this session was deleted" (see
+   * `SessionDeletedNotice`); returns an unsubscribe. Decided by the error
+   * CODE, never its text.
+   */
+  onSessionDeleted(listener: (notice: SessionDeletedNotice) => void): () => void {
+    this.sessionDeletedListeners.add(listener);
+    return () => this.sessionDeletedListeners.delete(listener);
+  }
+
   /** Subscribe to the link's status (for a frontend's "reconnecting…"); returns an unsubscribe. */
   onLinkStatus(listener: (status: LinkStatus) => void): () => void {
     this.statusListeners.add(listener);
@@ -432,12 +452,30 @@ export class RemoteClient {
 
   /**
    * End a session daemon-side (its turn, its background jobs) — sessions
-   * outlive connections, so a client that is done with one says so. Resolves
-   * when the daemon answered — or the request failed (peer closed: moot);
-   * never rejects. While the link is down it resolves at once (the daemon
-   * reaps a detached idle session).
+   * outlive connections, so a client that is done with one says so. A daemon
+   * that persists (`serve`) keeps it ARCHIVED (listed, reopenable); elsewhere
+   * it is gone. Resolves when the daemon answered — or the request failed
+   * (peer closed: moot); never rejects. While the link is down it resolves at
+   * once (the daemon reaps a detached idle session).
    */
   closeSession(sessionId: string): Promise<void> {
+    return this.endSession(Method.Close, sessionId);
+  }
+
+  /**
+   * Remove a session daemon-side for good (`session/delete`): a live one is
+   * ended first (`session_closed{deleted}` to every client), then the
+   * DAEMON's record is removed (this client's own store is its caller's to
+   * clean). Same guarantees as `closeSession`; needs no `open`.
+   */
+  deleteSession(sessionId: string): Promise<void> {
+    return this.endSession(Method.SessionDelete, sessionId);
+  }
+
+  private endSession(
+    method: typeof Method.Close | typeof Method.SessionDelete,
+    sessionId: string,
+  ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     // Routed until the daemon answers: the turn it cancels ends in the stream
     // (`turn_end`, `session_closed`), and those frames precede the response.
@@ -455,7 +493,7 @@ export class RemoteClient {
       forget();
       return Promise.resolve();
     }
-    return this.call(this.peer, Method.Close, { sessionId }).then(forget, forget);
+    return this.call(this.peer, method, { sessionId }).then(forget, forget);
   }
 
   /**
@@ -1005,6 +1043,7 @@ export class RemoteClient {
       if (gen !== this.gen || !this.up) {
         return; // a drop: the next generation opens it again
       }
+      this.noteDeleted(entry, error);
       const unknown = error instanceof RpcError && error.code === DomainErrorCode.UnknownSession;
       if (unknown && params.create !== true) {
         await this.recreate(entry, gen);
@@ -1029,10 +1068,25 @@ export class RemoteClient {
   }
 
   /**
-   * The daemon lost the session (a new stdio daemon, a close or reap while we
-   * were away): recreate it from the newest history this client read. The turn
-   * in flight is reported lost, never re-run (the dead daemon may have run its
-   * tools). A second device racing the recreate attaches instead.
+   * `error` is the daemon's `SessionDeleted` (by code): tell the frontend, so
+   * it drops its own copy. The caller still fails the open — never recreates.
+   */
+  private noteDeleted(entry: SessionEntry, error: unknown): void {
+    if (!(error instanceof RpcError) || error.code !== DomainErrorCode.SessionDeleted) {
+      return;
+    }
+    for (const listener of this.sessionDeletedListeners) {
+      listener({ sessionId: entry.id });
+    }
+  }
+
+  /**
+   * The daemon lost the session (a daemon that persists nothing: a new stdio
+   * daemon, a pod daemon's close or reap while we were away): recreate it from
+   * the newest history this client read. A `serve` daemon never gets here for
+   * a session it ended or deleted (`SessionArchived` / `SessionDeleted`). The
+   * turn in flight is reported lost, never re-run (the dead daemon may have
+   * run its tools). A second device racing the recreate attaches instead.
    */
   private async recreate(entry: SessionEntry, gen: number): Promise<void> {
     if (entry.closing) {
@@ -1040,10 +1094,17 @@ export class RemoteClient {
     }
     const messages = entry.history;
     const lostTurns = entry.turnEndsApplied - entry.turnEndsInHistory;
-    const result = (await this.call(this.peer, Method.Open, {
-      sessionId: entry.id,
-      ...(messages.length > 0 ? { messages } : { create: true }),
-    })) as OpenResult;
+    let result: OpenResult;
+    try {
+      result = (await this.call(this.peer, Method.Open, {
+        sessionId: entry.id,
+        ...(messages.length > 0 ? { messages } : { create: true }),
+      })) as OpenResult;
+    } catch (error) {
+      // Deleted between the reconnect and this recreate (another device).
+      if (gen === this.gen && this.up) this.noteDeleted(entry, error);
+      throw error;
+    }
     if (gen !== this.gen || this.sessions.get(entry.id) !== entry) {
       return;
     }

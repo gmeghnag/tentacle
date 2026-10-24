@@ -20,7 +20,7 @@ import type { SessionEvent } from "../src/mapping.ts";
 import { RemoteClient } from "../src/remote-client.ts";
 import type { RemoteSession } from "../src/remote-session.ts";
 import type { StreamOutput } from "../src/session-reducer.ts";
-import { GatedModel, type Step, approver, done, t, tick, until } from "./support/fakes.ts";
+import { GatedModel, type Step, approver, done, poll, t, tick, until } from "./support/fakes.ts";
 import { cutLink, delayOutbound, stripSince } from "./support/link-cutter.ts";
 import { type Item, foldEvents, foldOutputs, fromMessages } from "./support/transcript.ts";
 
@@ -174,11 +174,11 @@ async function scenario(script: "S1" | "S2", k: number, path: Path): Promise<Run
   const check = async (where: string): Promise<void> => {
     await ensureFresh();
     // Compare the RECOVERED state, not the one from before the drop.
-    if (path !== "fresh" && link.cut() && !(await until(() => recoveries > 0, 2000))) {
+    if (path !== "fresh" && link.cut() && !(await poll(() => recoveries > 0, 2000))) {
       mismatches.push(`${where}: never recovered`);
     }
     const same = () => JSON.stringify(foldOutputs(consumerLog())) === JSON.stringify(reference());
-    if (!(await until(same, 2000))) {
+    if (!(await poll(same, 2000))) {
       mismatches.push(
         `${where}: client ${JSON.stringify(foldOutputs(consumerLog()))} != reference ${JSON.stringify(reference())}`,
       );
@@ -225,7 +225,7 @@ async function scenario(script: "S1" | "S2", k: number, path: Path): Promise<Run
     }
     await until(idle);
     await check("turn 1 ended");
-    const outcome1 = await Promise.race([turn1, until(() => false, 2000).then(() => "hung")]);
+    const outcome1 = await Promise.race([turn1, Bun.sleep(2000).then(() => "hung")]);
     if (path !== "fresh" && outcome1 !== "ok") mismatches.push(`turn 1: ${outcome1}`);
     if (path !== "fresh" && script === "S1") {
       // The TUI's own fold of its turn (no upsert: a duplicate tool would show).

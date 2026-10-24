@@ -127,13 +127,15 @@ export const HistoryReplacedSchema = z.object({
 });
 
 /**
- * The session was closed (`session/close`, by any client): the last update an
- * attached client gets. Drop the session; a command on it now is
- * `UnknownSession`. A running turn's `turn_end{cancelled}` precedes it.
+ * The session ended for every client: the last update an attached client
+ * gets. Drop the session; a command on it now is `UnknownSession`. A running
+ * turn's `turn_end{cancelled}` precedes it. `closed`: `session/close` or the
+ * daemon's idle reaper / detached cap — on `serve` it is kept archived
+ * (listed, reopenable). `deleted`: `session/delete` — it is gone.
  */
 export const SessionClosedSchema = z.object({
   type: z.literal("session_closed"),
-  reason: z.enum(["closed"]),
+  reason: z.enum(["closed", "deleted"]),
 });
 
 export const SessionUpdateSchema = z.discriminatedUnion("type", [

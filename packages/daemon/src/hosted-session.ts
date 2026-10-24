@@ -584,8 +584,8 @@ export class HostedSession {
     return this.attachments.size;
   }
 
-  /** What `session/list` shows of this session. A read: no stamp, no write. */
-  summary(): SessionSummary {
+  /** What `session/list` shows of this session (it runs in `cwd`). A read: no stamp, no write. */
+  summary(cwd: string): SessionSummary {
     return {
       id: this.id,
       createdAt: this.createdAt,
@@ -593,6 +593,8 @@ export class HostedSession {
       running: this.running,
       attached: this.attachments.size,
       title: sessionTitle(this.session.messages),
+      cwd,
+      archived: false,
     };
   }
 
@@ -1253,8 +1255,10 @@ export class HostedSession {
    * detached, and an attached client would wait for it forever. Then
    * `session_closed` (the last update anyone gets), detach all, stop
    * listening to job exits, and kill the jobs (no exit notice for the kills).
+   * `reason` is what `session_closed` tells the clients: `deleted` by
+   * `session/delete`, else `closed`.
    */
-  close(): void {
+  close(reason: "closed" | "deleted" = "closed"): void {
     if (this.closed) {
       return;
     }
@@ -1273,12 +1277,28 @@ export class HostedSession {
       this.endUnstarted(this.successor);
     }
     try {
-      this.emit({ type: "session_closed", reason: "closed" });
+      this.emit({ type: "session_closed", reason });
     } catch (error) {
       this.reportTurnError(error);
     }
     this.attachments.clear();
     this.unsubscribeExit?.();
     this.jobs?.dispose();
+  }
+
+  /**
+   * `close` this session and return the state its ARCHIVED record keeps. The
+   * history and the turn are taken just BEFORE the close: a turn cut short
+   * keeps its pending ask and its steers, the shape a crash leaves, which the
+   * reopen closes as ended (`reconcileOnReload`). The turn keys and the stamps
+   * are taken AFTER it: the ends the close streamed (`turn_end{cancelled}`,
+   * and a waiting send-now's `delivered: false` — memory only until here) are
+   * the ends a retried `prompt` / `send_now` must get after the reopen.
+   */
+  archive(): DaemonSessionState {
+    const before = this.persistedState();
+    this.close("closed");
+    const after = this.persistedState();
+    return { ...after, ...(before.turn ? { turn: before.turn } : {}) };
   }
 }

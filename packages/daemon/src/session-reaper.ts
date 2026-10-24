@@ -5,7 +5,8 @@
  * background jobs do not count (a forgotten dev server is exactly what this
  * frees). An idle session is closed once it has been idle for `idleTtlMs`. The
  * opt-in admin cap closes a detached session after `adminCapMs` even if it is
- * busy. An attached session is never closed, whatever the policy.
+ * busy. An attached session is never closed, whatever the policy. On `serve`
+ * "closed" means ARCHIVED (kept, reopenable: docs/feat/session-archive.md).
  *
  * `selectExpired` is the pure decision (no clock read, no I/O); the sweep that
  * acts on it is `SessionHost.reapExpired`, and `startReaper` only runs that
@@ -48,6 +49,31 @@ export type ReapReason = "idle_ttl" | "admin_cap";
 export interface Expired {
   readonly id: string;
   readonly reason: ReapReason;
+  /** The sweep kept it ARCHIVED (a `serve` host): audited as such, not as reaped. */
+  readonly archived?: boolean;
+}
+
+/**
+ * The session the detached cap archives to make room (owner decision Q1):
+ * the IDLE detached one (nothing attached, no turn or compaction — a turn
+ * suspended on a permission is busy) idle the longest; ties by id. `null`
+ * when every detached session is busy: then nothing is evicted.
+ */
+export function selectEvictable(sessions: Iterable<SessionLiveness>): string | null {
+  let victim: SessionLiveness | null = null;
+  for (const s of sessions) {
+    if (s.attached > 0 || s.busy) {
+      continue;
+    }
+    if (
+      victim === null ||
+      s.lastActiveAt < victim.lastActiveAt ||
+      (s.lastActiveAt === victim.lastActiveAt && s.id < victim.id)
+    ) {
+      victim = s;
+    }
+  }
+  return victim?.id ?? null;
 }
 
 /** Which sessions expire at `now` under `policy`. `idle_ttl` wins when both apply. */
@@ -145,8 +171,8 @@ export function startReaper(
   const sweep = (): void => {
     try {
       const current = typeof policy === "function" ? policy() : policy;
-      for (const { id, reason } of host.reapExpired(current, report)) {
-        opts.onAudit?.(`session-reaped ${id} ${reason}`);
+      for (const { id, reason, archived } of host.reapExpired(current, report)) {
+        opts.onAudit?.(`session-${archived ? "archived" : "reaped"} ${id} ${reason}`);
       }
     } catch (error) {
       report(error);

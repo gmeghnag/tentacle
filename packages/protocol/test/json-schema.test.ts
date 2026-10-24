@@ -83,10 +83,13 @@ const FIXTURES: Record<string, Json[]> = {
       ],
     },
     {},
+    { sessionId: "s", reopen: true },
   ],
   "methods/session~1open/result": [{ sessionId: "s", epoch: "e", created: true, resync: false }],
   "methods/session~1close/params": [{ sessionId: "s" }],
   "methods/session~1close/result": [{}],
+  "methods/session~1delete/params": [{ sessionId: "s" }],
+  "methods/session~1delete/result": [{}],
   "methods/session~1prompt/params": [
     {
       sessionId: "s",
@@ -262,6 +265,8 @@ const FIXTURES: Record<string, Json[]> = {
       options: [{ optionId: "allow_once", name: "Allow once", kind: "allow_once" }],
     }),
     update({ type: "permission_resolved", requestId: "r", outcome: { outcome: "cancelled" } }),
+    update({ type: "session_closed", reason: "closed" }),
+    update({ type: "session_closed", reason: "deleted" }),
     // The catch-all (decision E): unknown display / mandatory events are valid frames.
     update({ type: "progress", pct: 3 }),
     { sessionId: "s", seq: 2, mandatory: true, update: { type: "future_mandatory", id: "p" } },

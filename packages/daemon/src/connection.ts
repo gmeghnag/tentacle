@@ -15,6 +15,8 @@ import {
   type CloseResult,
   type CompactParams,
   type CompactResult,
+  type DeleteParams,
+  type DeleteResult,
   type EnqueueParams,
   type EnqueueResult,
   type HooksTrustResult,
@@ -166,6 +168,8 @@ export class Connection {
         return this.open(params as OpenParams);
       case Method.Close:
         return this.closeSession(params as CloseParams);
+      case Method.SessionDelete:
+        return this.deleteSession(params as DeleteParams);
       case Method.Prompt:
         return this.prompt(params as PromptParams);
       case Method.Compact:
@@ -286,11 +290,14 @@ export class Connection {
     );
   }
 
-  // Synchronous on purpose, like the host's `open` it wraps (see there): no
+  // One await FIRST — an explicit reopen of an archived session may read its
+  // record from disk (`prepareOpen`; no lock: other requests run meanwhile) —
+  // then a synchronous body, like the host's `open` it wraps (see there): no
   // update falls between the replay and the live stream, and two opens of one
-  // id never build two agents. The replay goes out as notifications BEFORE the
-  // response.
-  private open(params: OpenParams): OpenResult {
+  // id never build two agents (the host re-checks live / archived there). The
+  // replay goes out as notifications BEFORE the response.
+  private async open(params: OpenParams): Promise<OpenResult> {
+    const prepared = await this.host.prepareOpen(params);
     // A session closed by another client must not stay referenced here.
     this.dropStale();
     const previous =
@@ -305,7 +312,7 @@ export class Connection {
       send: (update) => this.peer.notify(Notification.SessionUpdate, update),
       ...(this.updateTypes ? { updates: this.updateTypes } : {}),
     };
-    const { hosted, created, resync, epoch } = this.host.open(params, attachment);
+    const { hosted, created, resync, epoch } = this.host.open(params, attachment, prepared);
     this.attached.set(hosted.id, { hosted, attachment });
     return { sessionId: hosted.id, epoch, created, resync };
   }
@@ -325,6 +332,14 @@ export class Connection {
   private closeSession(params: CloseParams): CloseResult {
     this.attached.delete(params.sessionId);
     this.host.close(params.sessionId);
+    return {};
+  }
+
+  // Like `close`: needs no `open`; an unknown id is a no-op success. Attached
+  // clients (this one included) get `session_closed{deleted}` first.
+  private deleteSession(params: DeleteParams): DeleteResult {
+    this.attached.delete(params.sessionId);
+    this.host.delete(params.sessionId);
     return {};
   }
 

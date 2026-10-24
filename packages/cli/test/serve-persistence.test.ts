@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PROTOCOL_VERSION, SessionListResultSchema } from "@tentacle/protocol";
+import { DomainErrorCode, PROTOCOL_VERSION, SessionListResultSchema } from "@tentacle/protocol";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { daemonStoreDir, startDaemon } from "../src/serve.ts";
 
@@ -100,13 +100,105 @@ describe("serve persistence (end to end, real disk)", () => {
         messages: unknown[];
       };
       expect(snap.messages).toEqual(seed);
-      // close deletes the daemon's record (the client keeps its own copy).
+      // close ARCHIVES the daemon's record; only delete removes it.
       await b.request("session/close", { sessionId: "s-e2e" });
       b.ws.close();
     } finally {
       await second.stop();
     }
+    const kept = JSON.parse(await readFile(join(daemonStoreDir(config), "s-e2e.json"), "utf8"));
+    expect(kept.archivedAt).toEqual(expect.any(Number));
+    const third = await serve();
+    try {
+      const c = await client(third.url);
+      expect((await c.request("session/delete", { sessionId: "s-e2e" }))?.result).toEqual({});
+      c.ws.close();
+    } finally {
+      await third.stop();
+    }
     expect(await readdir(daemonStoreDir(config))).not.toContain("s-e2e.json");
+  });
+
+  test("S1 a restart brings archived records back ARCHIVED (indexed, not live), live ones live; one list", async () => {
+    // Mutation M8: parseDaemonRecord drops archivedAt (an archived record restored live) → red.
+    const first = await serve();
+    const a = await client(first.url);
+    await a.request("session/open", { sessionId: "s-live", messages: seed });
+    await a.request("session/open", { sessionId: "s-arch", messages: seed });
+    await a.request("session/close", { sessionId: "s-arch" });
+    a.ws.close();
+    await first.stop();
+    const archivedFile = JSON.parse(
+      await readFile(join(daemonStoreDir(config), "s-arch.json"), "utf8"),
+    );
+    expect(archivedFile.schemaVersion).toBe(2);
+    expect(archivedFile.archivedAt).toEqual(expect.any(Number));
+
+    const notices: string[] = [];
+    const second = await serve(config, notices);
+    try {
+      expect(notices.some((l) => l.startsWith("restored 1 session, 1 archived, from"))).toBe(true);
+      const b = await client(second.url);
+      const result = (await b.request("session/list", {}))?.result;
+      expect(SessionListResultSchema.safeParse(result).success).toBe(true);
+      const byId = Object.fromEntries(
+        (
+          result as { sessions: { sessionId: string; archived: boolean; cwd: string }[] }
+        ).sessions.map((s) => [s.sessionId, [s.archived, s.cwd]]),
+      );
+      expect(byId).toEqual({ "s-live": [false, config.cwd], "s-arch": [true, config.cwd] });
+      // Not live: a plain open is refused as archived; the explicit reopen reads it from disk.
+      const plain = await b.request("session/open", { sessionId: "s-arch" });
+      expect(plain?.error?.code).toBe(DomainErrorCode.SessionArchived);
+      const reopened = await b.request("session/open", { sessionId: "s-arch", reopen: true });
+      expect(reopened?.result).toMatchObject({ created: false, resync: true });
+      const snap = (await b.request("session/snapshot", { sessionId: "s-arch" }))?.result as {
+        messages: unknown[];
+      };
+      expect(snap.messages).toEqual(seed);
+      b.ws.close();
+    } finally {
+      await second.stop();
+    }
+    // Reopened = live again: its record lost the stamp.
+    const after = JSON.parse(await readFile(join(daemonStoreDir(config), "s-arch.json"), "utf8"));
+    expect(after.archivedAt).toBeUndefined();
+  });
+
+  test("S2 a v1 record (the previous build's format) restores live after the upgrade, rewritten v2", async () => {
+    // Mutation: refuse schemaVersion 1 → skipped "unsupported record version 1".
+    const record = {
+      id: "s-v1",
+      cwd: config.cwd,
+      model: config.model,
+      createdAt: 1,
+      updatedAt: 2,
+      title: "t",
+      kind: "tentacle.daemon-session",
+      schemaVersion: 1,
+      lastActiveAt: 2,
+      enqueueIds: [],
+      turns: [],
+      messages: seed,
+    };
+    await mkdir(daemonStoreDir(config), { recursive: true });
+    const file = join(daemonStoreDir(config), "s-v1.json");
+    await writeFile(file, JSON.stringify(record));
+    const notices: string[] = [];
+    const daemon = await serve(config, notices);
+    try {
+      expect(notices.filter((l) => l.startsWith("skipped"))).toEqual([]);
+      expect(notices.some((l) => l.startsWith("restored 1 session from"))).toBe(true);
+      const c = await client(daemon.url);
+      const opened = await c.request("session/open", { sessionId: "s-v1" });
+      expect(opened?.result).toMatchObject({ created: false });
+      c.ws.close();
+    } finally {
+      await daemon.stop();
+    }
+    const after = JSON.parse(await readFile(file, "utf8"));
+    expect(after.schemaVersion).toBe(2);
+    expect(after.archivedAt).toBeUndefined();
   });
 
   test("B7 a turn suspended at a restart is asked again over the wire; cancel converges on disk", async () => {
@@ -194,7 +286,7 @@ describe("serve persistence (end to end, real disk)", () => {
     const bad: Record<string, string> = {
       truncated: JSON.stringify({ ...good, id: "truncated" }).slice(0, 40),
       "client-shaped": JSON.stringify({ ...good, id: "client-shaped", kind: undefined }),
-      newer: JSON.stringify({ ...good, id: "newer", schemaVersion: 2 }),
+      newer: JSON.stringify({ ...good, id: "newer", schemaVersion: 3 }),
       foreign: JSON.stringify({ ...good, id: "foreign", cwd: "/another/project" }),
     };
     for (const [id, text] of Object.entries(bad)) await writeFile(join(store, `${id}.json`), text);
@@ -204,7 +296,7 @@ describe("serve persistence (end to end, real disk)", () => {
     try {
       const skipped = notices.filter((l) => l.startsWith("skipped "));
       expect(skipped).toHaveLength(4);
-      expect(skipped.find((l) => l.includes("newer.json"))).toMatch(/unsupported record version 2/);
+      expect(skipped.find((l) => l.includes("newer.json"))).toMatch(/unsupported record version 3/);
       expect(skipped.find((l) => l.includes("foreign.json"))).toMatch(/another project/);
       expect(skipped.find((l) => l.includes("client-shaped.json"))).toMatch(/not a daemon session/);
       expect(skipped.find((l) => l.includes("truncated.json"))).toMatch(/invalid JSON/);
@@ -317,5 +409,122 @@ describe("serve persistence (end to end, real disk)", () => {
     await writeFile(join(daemonStoreDir(config), ".lock"), String(dead));
     const takeover = await serve();
     await takeover.stop();
+  });
+
+  test("F1 a deleted session is never revived: its tombstone survives a restart (the Review's repro)", async () => {
+    // Mutation: `delete` keeps no tombstone (or `serve` does not reload it) → the
+    // reconnect is UnknownSession and the client's recreate builds it again.
+    const first = await serve();
+    const a = await client(first.url);
+    await a.request("session/open", { sessionId: "s-del", messages: seed });
+    await a.request("session/open", { sessionId: "s-del-arch", messages: seed });
+    await a.request("session/close", { sessionId: "s-del-arch" });
+    expect((await a.request("session/delete", { sessionId: "s-del" }))?.result).toEqual({});
+    expect((await a.request("session/delete", { sessionId: "s-del-arch" }))?.result).toEqual({});
+    a.ws.close();
+    await first.stop();
+    const files = await readdir(daemonStoreDir(config));
+    expect(files).not.toContain("s-del.json");
+    expect(files).not.toContain("s-del-arch.json");
+
+    const second = await serve();
+    try {
+      const b = await client(second.url);
+      for (const id of ["s-del", "s-del-arch"]) {
+        // The offline client's reconnect, then its recreate from its own copy.
+        for (const params of [
+          { sessionId: id, since: { epoch: "e", seq: 3 } },
+          { sessionId: id, messages: seed },
+          { sessionId: id, create: true },
+          { sessionId: id, reopen: true },
+        ]) {
+          expect((await b.request("session/open", params))?.error?.code).toBe(
+            DomainErrorCode.SessionDeleted,
+          );
+        }
+      }
+      const listed = SessionListResultSchema.parse(
+        (await b.request("session/list", {}))?.result,
+      ).sessions;
+      expect(listed).toEqual([]);
+      // Idempotent, and a fresh id is unaffected.
+      expect((await b.request("session/delete", { sessionId: "s-del" }))?.result).toEqual({});
+      const fresh = await b.request("session/open", { sessionId: "s-other", create: true });
+      expect(fresh?.result).toMatchObject({ created: true });
+      b.ws.close();
+    } finally {
+      await second.stop();
+    }
+    expect(await readdir(daemonStoreDir(config))).not.toContain("s-del.json");
+  });
+
+  test("R2-3 a garbled tombstone line is skipped WITH a start notice; the valid ones still hold", async () => {
+    // Mutation: the load drops invalid lines without reporting them → no notice.
+    const store = daemonStoreDir(config);
+    await mkdir(store, { recursive: true });
+    await writeFile(join(store, "deleted-sessions"), "s-gone\n../evil\n");
+    const notices: string[] = [];
+    const handle = await serve(config, notices);
+    try {
+      expect(notices.some((l) => l.includes("deleted-sessions") && l.includes("../evil"))).toBe(
+        true,
+      );
+      const c = await client(handle.url);
+      expect(
+        (await c.request("session/open", { sessionId: "s-gone", create: true }))?.error?.code,
+      ).toBe(DomainErrorCode.SessionDeleted);
+      c.ws.close();
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  test("R2-4 an unreadable tombstone file → serve refuses to start (naming file and cause); a missing one is fine", async () => {
+    // Mutation: the start only warns (the old behaviour) → startDaemon resolves.
+    const store = daemonStoreDir(config);
+    await mkdir(join(store, "deleted-sessions"), { recursive: true }); // exists, cannot be read (EISDIR)
+    const error = await serve().then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(join(store, "deleted-sessions"));
+    expect((error as Error).message).toContain("EISDIR");
+    // The lock was released: with the file gone, the next start works.
+    await rm(join(store, "deleted-sessions"), { recursive: true });
+    const handle = await serve();
+    await handle.stop();
+  });
+
+  test("F1 a record left by a delete cut short (tombstone written, file not yet removed) is not restored", async () => {
+    // Mutation: the start loop ignores the tombstones → the record is restored live.
+    const first = await serve();
+    const a = await client(first.url);
+    await a.request("session/open", { sessionId: "s-half", messages: seed });
+    a.ws.close();
+    await first.stop();
+    const file = join(daemonStoreDir(config), "s-half.json");
+    const bytes = await readFile(file, "utf8");
+    const second = await serve();
+    const b = await client(second.url);
+    await b.request("session/delete", { sessionId: "s-half" });
+    b.ws.close();
+    await second.stop();
+    // The crash window: the file is back as it was, the tombstone is on disk.
+    await writeFile(file, bytes);
+    const notices: string[] = [];
+    const third = await serve(config, notices);
+    try {
+      expect(notices.some((l) => l.startsWith("restored"))).toBe(false);
+      const c = await client(third.url);
+      expect((await c.request("session/open", { sessionId: "s-half" }))?.error?.code).toBe(
+        DomainErrorCode.SessionDeleted,
+      );
+      c.ws.close();
+    } finally {
+      await third.stop();
+    }
+    // The interrupted removal is finished.
+    expect(await readdir(daemonStoreDir(config))).not.toContain("s-half.json");
   });
 });
