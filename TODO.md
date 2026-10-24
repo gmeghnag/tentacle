@@ -719,6 +719,36 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       (`send-now-b.md`), 4c TUI (`send-now-c.md`, merged 2026-10-24, tried
       by the owner by hand). Next: 4d (compaction-time queue).
 
+- [ ] **Version mismatch: say who is older and what to do — never a silent
+      failure** (owner, 2026-10-24). Today the daemon refuses `initialize`
+      with `protocol version mismatch: client 10, daemon 11` (code
+      `VersionMismatch`, `daemon/src/connection.ts`); the owner likes the
+      line — keep it and add, on the SAME line, each side's tentacle version
+      and the action. Wording (owner-approved; commands in double quotes so
+      the command stays clear inside the sentence):
+      - client older: `protocol version mismatch: client 10 (tentacle 0.1.0),
+        daemon 11 (tentacle 0.2.0) — update this client: "tentacle update"`
+      - daemon older: `protocol version mismatch: client 11 (tentacle 0.2.0),
+        daemon 10 (tentacle 0.1.0) — update the daemon: run "tentacle update"
+        on that host and restart "tentacle serve"`
+      The DAEMON writes the advice (it knows both numbers — a fact, not a
+      guess), so even an old client that prints the message verbatim shows
+      it. A new client meeting an old daemon (no versions in the error) still
+      shows a clear notice from the error CODE, never by parsing the text.
+      **Container (`attach`):** say "container", not "pod". `attach` already
+      probes `tentacle --version` in the container and today reuses whatever
+      answers; instead, when that version differs from the laptop's, REPLACE
+      it with the laptop's binary (the same injection used when none is
+      there) and say so, e.g. `the container had tentacle 0.1.0; replaced
+      with 0.2.0 (this laptop's)`; if the replacement fails, a clear error
+      with the advice. `run` creates its pod with the laptop's binary, so no
+      mismatch there. Verify every path shows it (`connect` at start, a
+      reconnect after the daemon was upgraded — the TUI link status —,
+      `attach`, the app later). Order: BEFORE 2a (2a bumps the protocol to
+      11 — the first time it will happen). Not planned yet (slug
+      `version-mismatch-notice`). Type: feat · Size: S–M · Blast:
+      cross-module.
+
 - [ ] **Permission prompt: "No, let's talk about it"** (owner, 2026-10-24) — a
       third answer next to Yes / Yes, always / No: it opens a text field; the
       model gets the rejection TOGETHER with the user's text (e.g. "Rejected
