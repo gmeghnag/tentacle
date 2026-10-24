@@ -161,15 +161,19 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
 
   // `mkdir -p` first: minimal images (busybox, scratch-based) have no
   // `/usr/local/bin`, and the redirect would fail on the missing directory.
+  // Written beside it, then renamed over it: `attach` may replace a binary an
+  // older daemon is still running, and writing into it fails (ETXTBSY) where a
+  // rename does not.
   const binPath = deps.binPath ?? POD_BIN_PATH;
   const binDir = binPath.slice(0, binPath.lastIndexOf("/"));
+  const tmpPath = `${binPath}.new`;
   const installTarget: ExecTarget = {
     pod: deps.podName,
     container: deps.container,
     command: [
       "sh",
       "-c",
-      `mkdir -p ${binDir} && head -c ${n} > ${binPath} && chmod 755 ${binPath}`,
+      `mkdir -p ${binDir} && head -c ${n} > ${tmpPath} && chmod 755 ${tmpPath} && mv -f ${tmpPath} ${binPath}`,
     ],
   };
   const install = await deps.kube.runExec(installTarget, bytes, {

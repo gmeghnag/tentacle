@@ -8,9 +8,10 @@ import { ChannelError } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
-import { createChannelPair } from "@tentacle/transport";
+import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { bufferedErrorSink, connectTui, tlsTrustHint } from "../src/connect.ts";
 import { resolveTls } from "../src/flags.ts";
+import { APP_VERSION } from "../src/version.ts";
 
 describe("resolveTls (connect flags, docs/feat/client-tls-trust.md)", () => {
   const flags = (entries: [string, string][] = []) => new Map(entries);
@@ -298,6 +299,39 @@ describe("connect: the reconnecting client (docs/feat/client-reattach-frontends.
     expect(opened.length).toBeGreaterThanOrEqual(2);
     expect(String(opened[0])).toMatch(/^[0-9a-f-]{36}$/);
     expect(new Set(opened).size).toBe(1); // re-attached by the same id
+  });
+
+  test("a version skew at startup: this client's version is sent, the advice is thrown before any mount", async () => {
+    // Mutations: no `clientInfo` in connectTui → the daemon never sees it; no
+    // `explainVersionMismatch` in the handshake → the old daemon's bare line.
+    const seen: unknown[] = [];
+    const [daemonCh, clientCh] = createChannelPair();
+    new RpcPeer(daemonCh, {
+      onRequest: (_method, params) => {
+        seen.push(params);
+        // A daemon older than the report: the bare line, no `data`.
+        throw new RpcError(
+          DomainErrorCode.VersionMismatch,
+          "protocol version mismatch: client 10, daemon 9",
+        );
+      },
+      onNotification: () => {},
+    });
+    let mounted = false;
+    await expect(
+      connectTui({ url: "ws://fake" }, () => {}, {
+        dial: () => async () => clientCh,
+        startTui: async () => {
+          mounted = true;
+        },
+      }),
+    ).rejects.toThrow(
+      'protocol version mismatch: client 10, daemon 9 — the daemon runs an older tentacle (it does not report its version): update the daemon: run "tentacle update" on that host and restart "tentacle serve"',
+    );
+    expect(mounted).toBe(false);
+    expect(seen).toEqual([
+      expect.objectContaining({ clientInfo: { name: "tentacle", version: APP_VERSION } }),
+    ]);
   });
 
   test("a rejected token at startup surfaces the factory's message before the TUI mounts", async () => {

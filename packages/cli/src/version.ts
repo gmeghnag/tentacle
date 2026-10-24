@@ -51,3 +51,6 @@ export function compiledVersionMarker(): string | undefined {
  * (`define` in `buildBinary`), or `"dev"` when running from source.
  */
 export const APP_VERSION: string = parseVersionMarker(compiledVersionMarker()) ?? "dev";
+
+/** Who this CLI is in `initialize` (a daemon words a version skew with it). */
+export const CLIENT_INFO = { name: "tentacle", version: APP_VERSION } as const;

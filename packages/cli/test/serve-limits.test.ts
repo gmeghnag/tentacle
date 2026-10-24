@@ -8,6 +8,7 @@ import { DomainErrorCode } from "@tentacle/transport";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { ARGS, parseArgs, parseDuration, parseServeLimits } from "../src/flags.ts";
 import { startDaemon } from "../src/serve.ts";
+import { APP_VERSION } from "../src/version.ts";
 
 describe("parseDuration", () => {
   test("whole positive amount + ms|s|m|h", () => {
@@ -111,11 +112,11 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
   });
 
   /** A raw JSON-RPC client over the daemon's WebSocket. */
-  async function client(url: string) {
+  async function client(url: string, protocolVersion: number = PROTOCOL_VERSION) {
     const ws = new WebSocket(url);
     const replies = new Map<
       number,
-      { result?: unknown; error?: { code: number; data?: unknown } }
+      { result?: unknown; error?: { code: number; message?: string; data?: unknown } }
     >();
     ws.onmessage = (event) => {
       const msg = JSON.parse(String(event.data));
@@ -131,11 +132,11 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
       await until(() => replies.has(n));
       return replies.get(n);
     };
-    await request("initialize", {
-      protocolVersion: PROTOCOL_VERSION,
+    const init = await request("initialize", {
+      protocolVersion,
       clientCapabilities: { streaming: true },
     });
-    return { ws, request };
+    return { ws, request, init };
   }
   async function until(cond: () => boolean, ms = 3000): Promise<void> {
     const deadline = Date.now() + ms;
@@ -144,6 +145,26 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
       await new Promise((r) => setTimeout(r, 10));
     }
   }
+
+  test("a version skew: serve names its own tentacle and says how to update a `serve` daemon", async () => {
+    // Mutation: drop `identity` from `startDaemon`'s SessionHost → no `(tentacle …)`.
+    const server = await startDaemon(config, { host: "127.0.0.1", port: 0 });
+    try {
+      const old = await client(server.url, PROTOCOL_VERSION + 1);
+      expect(old.init?.error).toEqual({
+        code: DomainErrorCode.VersionMismatch,
+        message: `protocol version mismatch: client ${PROTOCOL_VERSION + 1}, daemon ${PROTOCOL_VERSION} (tentacle ${APP_VERSION}) — update the daemon: run "tentacle update" on that host and restart "tentacle serve"`,
+        data: {
+          client: { protocol: PROTOCOL_VERSION + 1 },
+          daemon: { protocol: PROTOCOL_VERSION, tentacle: APP_VERSION },
+          update: "daemon",
+        },
+      });
+      old.ws.close();
+    } finally {
+      await server.stop();
+    }
+  });
 
   test("the reaper runs: a detached session is closed after the TTL and audited", async () => {
     // Mutation: drop `startReaper` from `startDaemon` → never audited.

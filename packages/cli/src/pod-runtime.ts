@@ -38,12 +38,20 @@ import {
   podIsReady,
 } from "@tentacle/k8s";
 import type { DuplexChannel } from "@tentacle/transport";
+import {
+  containerDecision,
+  expectedContainerVersion,
+  parseVersionLine,
+  replaceFailedWarning,
+} from "./container-version.ts";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { configuredModelProvider } from "./model-provider.ts";
-import { checkPodBinaries, resolvePodBinary } from "./pod-binary-build.ts";
+import { PodBinaryError, checkPodBinaries, resolvePodBinary } from "./pod-binary-build.ts";
 import { injectAgentBinary, probePodArch } from "./pod-binary.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
+import { readBinaryVersion } from "./version-marker.ts";
+import { APP_VERSION } from "./version.ts";
 
 /** A bounded stderr collector that flushes once, on teardown. */
 export interface PodStderrSink {
@@ -361,6 +369,7 @@ export async function startPodRuntime(
       model: config.model,
       resume: deps.resume,
       modelProvider,
+      daemonKind: "container",
       // Laptop-side RPC errors (incl. a local model failure, which the pod only
       // sees opaque) join the buffered daemon stderr: flushed after unmount.
       onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),
@@ -491,28 +500,77 @@ export async function startAttachRuntime(
       // A wrong container surfaces here (the first exec) — translate it.
       throw containerExecError(error, name, container, deps.namespace);
     }
+    // Reused only when it is exactly what this laptop would inject (a
+    // re-attach); any other version is replaced, so the daemon speaks this
+    // client's protocol. From source with no override: reused as before.
+    const expected = await expectedContainerVersion({
+      appVersion: deps.appVersion ?? APP_VERSION,
+      ...(process.env.TENTACLE_POD_BIN ? { podBinOverride: process.env.TENTACLE_POD_BIN } : {}),
+      readMarker: (path) => readBinaryVersion(path),
+    });
+    const decision = containerDecision(probe, expected);
     let version: string;
-    if (probe.exitCode === 0) {
+    if (decision.kind === "reuse") {
       version = probe.stdout.trim() || "tentacle";
     } else {
       serveBin = binPath; // injected to our dir → exec by absolute path
-      version = await injectAgentBinary({
-        kube: deps.kube,
-        podName: name,
-        binPath,
-        container,
-        podArch: () => probePodArch(deps.kube, name, container),
-        resolveBinary: (target) =>
-          resolvePodBinary(target, {
-            configDir: config.configDir,
-            appVersion: deps.appVersion,
-            // Same single-line invariant as `run`: interactive mode folds the
-            // resolver's verbose path into the "resolving … binary…" phase.
-            log: status ? () => {} : deps.log,
-          }),
-        log: deps.log,
-        onStatus: status ? (text) => status.set(text) : undefined,
-      });
+      try {
+        version = await injectAgentBinary({
+          kube: deps.kube,
+          podName: name,
+          binPath,
+          container,
+          podArch: () => probePodArch(deps.kube, name, container),
+          resolveBinary: (target) =>
+            resolvePodBinary(target, {
+              configDir: config.configDir,
+              appVersion: deps.appVersion,
+              // Same single-line invariant as `run`: interactive mode folds the
+              // resolver's verbose path into the "resolving … binary…" phase.
+              log: status ? () => {} : deps.log,
+            }),
+          log: deps.log,
+          onStatus: status ? (text) => status.set(text) : undefined,
+        });
+      } catch (error) {
+        // A plain injection failure: unchanged (nothing else to run).
+        if (decision.kind !== "replace") {
+          throw error;
+        }
+        // Replacing failed (orchestrator decision, follow-up 1): do not abort —
+        // go on with the container's own tentacle, IF it still answers (the
+        // failure may have come after the rename), and warn. `initialize` still
+        // refuses a protocol skew with its full message.
+        const again = await deps.kube
+          .runExec({ pod: name, container, command: ["tentacle", "--version"] }, undefined, {
+            timeoutMs: 15_000,
+          })
+          .catch(() => null);
+        if (again?.exitCode !== 0) {
+          throw error;
+        }
+        serveBin = "tentacle";
+        version = again.stdout.trim() || "tentacle";
+        const line = replaceFailedWarning({
+          had: decision.had,
+          expected,
+          now: parseVersionLine(again.stdout),
+          cause: error instanceof Error ? error.message : String(error),
+          // The laptop's own pod binary is not ready (its `tentacle update` advice).
+          localBinary: error instanceof PodBinaryError,
+        });
+        deps.notify?.(line);
+        if (!status) {
+          deps.log(`${line}\n`);
+        }
+      }
+      if (decision.kind === "replace" && serveBin === binPath) {
+        const line = `the container had tentacle ${decision.had ?? "of an unknown version"}; replaced with ${expected} (this laptop's)`;
+        deps.notify?.(line);
+        if (!status) {
+          deps.log(`${line}\n`);
+        }
+      }
     }
     status?.finish();
     // Piped only: the TUI opening IS the confirmation in interactive mode.
@@ -552,6 +610,7 @@ export async function startAttachRuntime(
       model: config.model,
       resume: deps.resume,
       modelProvider,
+      daemonKind: "container",
       // Laptop-side RPC errors (incl. a local model failure, which the pod only
       // sees opaque) join the buffered daemon stderr: flushed after unmount.
       onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),

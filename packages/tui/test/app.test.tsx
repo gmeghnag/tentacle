@@ -234,6 +234,61 @@ describe("App", () => {
     expect(listeners.size).toBe(0);
   });
 
+  test("a stop with a long reason (a version skew) is shown whole in the transcript, once", async () => {
+    // The StatusBar truncates its one row, cutting the advice at the end.
+    // Mutation: `stoppedNotice` returns null → the advice never renders.
+    const listeners = new Set<(status: LinkStatusView) => void>();
+    const link = {
+      onLinkStatus(listener: (status: LinkStatusView) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    const agent = new Agent({
+      model: new ScriptedProvider([]),
+      tools: new ToolRegistry(),
+      env: noopEnv,
+    });
+    const { lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" link={link} />,
+    );
+    await delay(30);
+    const reason =
+      'incompatible daemon: protocol version mismatch: client 10 (tentacle 0.1.0), daemon 11 (tentacle 0.2.0) — update this client: "tentacle update"';
+    for (const listener of listeners) listener({ state: "stopped", reason });
+    await delay(30);
+    const flat = (lastFrame() ?? "").replace(/\s+/g, " ");
+    expect(flat).toContain('— update this client: "tentacle update"');
+    expect(flat.split("Link stopped:").length - 1).toBe(1);
+    unmount();
+  });
+
+  test("the same stop reported twice is one transcript line", async () => {
+    // Mutation: drop the `text === last` check in the App effect → two lines.
+    const listeners = new Set<(status: LinkStatusView) => void>();
+    const link = {
+      onLinkStatus(listener: (status: LinkStatusView) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    const agent = new Agent({
+      model: new ScriptedProvider([]),
+      tools: new ToolRegistry(),
+      env: noopEnv,
+    });
+    const { lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" link={link} />,
+    );
+    await delay(30);
+    for (let i = 0; i < 2; i++) {
+      for (const listener of listeners) listener({ state: "stopped", reason: "gone: 404" });
+      await delay(20);
+    }
+    expect((lastFrame() ?? "").split("Link stopped: gone: 404").length - 1).toBe(1);
+    unmount();
+  });
+
   /** A session whose turn streams once, then runs until aborted (or forever, if `deaf`). */
   function slowTurnSession(log: string[], deaf = false) {
     return () => ({

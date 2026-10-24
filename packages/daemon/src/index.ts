@@ -14,3 +14,4 @@ export * from "./session-persister.ts";
 export * from "./connection.ts";
 export * from "./proxy-model.ts";
 export * from "./ws-server.ts";
+export * from "./version-mismatch.ts";

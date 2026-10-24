@@ -29,7 +29,7 @@ import { Thinking } from "./components/Thinking.tsx";
 import { pushHistory, recall } from "./history.ts";
 import { useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import { resolveLineInput } from "./input-actions.ts";
-import type { LinkFeed } from "./link-status.ts";
+import { type LinkFeed, stoppedNotice } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
 import {
@@ -398,6 +398,25 @@ export function App({
       flushNow();
     });
   }, [notices, flushNow]);
+
+  // --- a link stop's full reason (the StatusBar row truncates it) -------------
+  useEffect(() => {
+    if (!link) {
+      return;
+    }
+    // A client stops once; the last text guards a re-subscribe all the same.
+    let last: string | null = null;
+    return link.onLinkStatus((status) => {
+      const text = stoppedNotice(status);
+      if (text === null || text === last) {
+        return;
+      }
+      last = text;
+      stateRef.current = appendNotice(stateRef.current, text);
+      setScrollOffset(0);
+      flushNow();
+    });
+  }, [link, flushNow]);
 
   // --- terminal resize -----------------------------------------------------
   useEffect(() => {

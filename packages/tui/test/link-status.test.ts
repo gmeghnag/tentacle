@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { linkIndicator, nextTickMs } from "../src/link-status.ts";
+import { STOP_NOTICE_MAX, linkIndicator, nextTickMs, stoppedNotice } from "../src/link-status.ts";
 
 describe("linkIndicator (pure)", () => {
   test("up, none and our own close show nothing", () => {
@@ -45,5 +45,34 @@ describe("linkIndicator (pure)", () => {
     expect(nextTickMs({ state: "up" }, 0)).toBeNull();
     expect(nextTickMs({ state: "stopped", reason: "x" }, 0)).toBeNull();
     expect(nextTickMs(null, 0)).toBeNull();
+  });
+});
+
+describe("stoppedNotice (pure: the full reason, once, in the transcript)", () => {
+  test("a stop with a reason → the whole reason, untruncated", () => {
+    const reason =
+      'incompatible daemon: protocol version mismatch: client 10 (tentacle 0.1.0), daemon 11 (tentacle 0.2.0) — update this client: "tentacle update"';
+    expect(stoppedNotice({ state: "stopped", reason })).toBe(`Link stopped: ${reason}`);
+  });
+
+  test("a hostile daemon's reason: no control characters reach the terminal, and it is capped", () => {
+    // The reason embeds a daemon-supplied message (a container is not trusted, AGENTS §7).
+    const hostile = "incompatible daemon: \u001b[2J\u001b]0;pwned\u0007ok\r\nnext‮evil";
+    const text = stoppedNotice({ state: "stopped", reason: hostile }) ?? "";
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting their absence
+    expect(text).not.toMatch(/[\u0000-\u001f\u007f-\u009f‮]/);
+    expect(text).toBe("Link stopped: incompatible daemon: [2J ]0;pwned ok nextevil");
+    const huge = stoppedNotice({ state: "stopped", reason: "x".repeat(10_240) }) ?? "";
+    expect(huge.length).toBeLessThanOrEqual(STOP_NOTICE_MAX + "Link stopped: ".length);
+    expect(huge.endsWith("…")).toBe(true);
+  });
+
+  test("our own close, a plain disconnect, up and reconnecting → nothing", () => {
+    expect(stoppedNotice({ state: "stopped", reason: "closed" })).toBeNull();
+    expect(stoppedNotice({ state: "stopped", reason: "disconnected" })).toBeNull();
+    expect(stoppedNotice({ state: "up" })).toBeNull();
+    expect(
+      stoppedNotice({ state: "reconnecting", attempt: 1, nextAtMs: 0, error: "x" }),
+    ).toBeNull();
   });
 });

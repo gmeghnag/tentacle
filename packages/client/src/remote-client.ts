@@ -25,6 +25,7 @@ import {
   type PermissionBroker,
 } from "@tentacle/core";
 import {
+  type ClientInfo,
   type CompactResult,
   DomainErrorCode,
   type HistoryCut,
@@ -81,6 +82,7 @@ import {
   reduceStream,
   sinceOf,
 } from "./session-reducer.ts";
+import { type DaemonKind, explainVersionMismatch } from "./version-mismatch.ts";
 
 /** How long the exit path waits for the daemon to acknowledge `session/close`s. */
 export const CLOSE_SESSIONS_TIMEOUT_MS = 1000;
@@ -148,6 +150,10 @@ export interface RemoteClientOptions {
     params: HooksTrustParams,
     signal?: AbortSignal,
   ) => Promise<HooksTrustResult>;
+  /** Who this client is, sent in `initialize` (a daemon words a version skew with it). */
+  readonly clientInfo?: ClientInfo;
+  /** Where the daemon runs (default `serve`): picks the advice for a daemon too old to give its own. */
+  readonly daemonKind?: DaemonKind;
 }
 
 /** One session this client opened (or is opening) and has not closed. */
@@ -251,6 +257,8 @@ export class RemoteClient {
   private readonly clock: Clock;
   private readonly random: () => number;
   private readonly hooksTrust?: RemoteClientOptions["hooksTrust"];
+  private readonly clientInfo?: ClientInfo;
+  private readonly daemonKind: DaemonKind;
   /** Sessions with a `hooks/trust` prompt in flight (at most one each). */
   private readonly trustAsking = new Set<string>();
 
@@ -275,6 +283,10 @@ export class RemoteClient {
     if (options.hooksTrust) {
       this.hooksTrust = options.hooksTrust;
     }
+    if (options.clientInfo) {
+      this.clientInfo = options.clientInfo;
+    }
+    this.daemonKind = options.daemonKind ?? "serve";
     this.link = { ...initialLink, upSince: this.clock.now() };
     this.lastInboundAt = this.clock.now();
     this.peer = this.makePeer(channel, 0);
@@ -697,17 +709,24 @@ export class RemoteClient {
       // Every update type this build understands: the daemon emits a
       // BLOCKING type only to a client that lists it (protocol 10).
       clientCapabilities: { streaming: true, updates: [...KNOWN_UPDATE_TYPES] },
-    }).then((raw) => {
-      const result = raw as InitializeResult;
-      // Only the current link's answer: a superseded handshake must not
-      // overwrite the catalog of the daemon we are now talking to. Defensive:
-      // a peer is replaced only after it closed, and closing rejects its
-      // pending requests (transport/peer.ts), so this should never trigger.
-      if (peer === this.peer) {
-        this.skillCatalog = result.skills;
-      }
-      return result;
-    });
+      ...(this.clientInfo ? { clientInfo: this.clientInfo } : {}),
+    }).then(
+      (raw) => {
+        const result = raw as InitializeResult;
+        // Only the current link's answer: a superseded handshake must not
+        // overwrite the catalog of the daemon we are now talking to. Defensive:
+        // a peer is replaced only after it closed, and closing rejects its
+        // pending requests (transport/peer.ts), so this should never trigger.
+        if (peer === this.peer) {
+          this.skillCatalog = result.skills;
+        }
+        return result;
+      },
+      // A version skew says who must update — at start and on every reconnect.
+      (error: unknown) => {
+        throw explainVersionMismatch(error, this.daemonKind) ?? error;
+      },
+    );
   }
 
   /**

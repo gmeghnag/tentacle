@@ -243,7 +243,11 @@ describe("daemon ↔ client (in-memory)", () => {
         protocolVersion: 999,
         clientCapabilities: { streaming: true },
       }),
-    ).rejects.toMatchObject({ code: DomainErrorCode.VersionMismatch });
+    ).rejects.toMatchObject({
+      code: DomainErrorCode.VersionMismatch,
+      message: `protocol version mismatch: client 999, daemon ${PROTOCOL_VERSION} — update the daemon: run "tentacle update" on that host and restart "tentacle serve"`,
+      data: { client: { protocol: 999 }, daemon: { protocol: PROTOCOL_VERSION }, update: "daemon" },
+    });
   });
 
   // --- session/enqueue (steering) ----------------------------------------

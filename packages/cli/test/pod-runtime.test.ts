@@ -15,7 +15,7 @@ import type {
   StreamEvent,
 } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import { Connection, SessionHost, versionMismatch } from "@tentacle/daemon";
 import {
   type ExecChannelOptions,
   type ExecTarget,
@@ -25,8 +25,15 @@ import {
   type RunExecResult,
   type WaitForReadyOptions,
 } from "@tentacle/k8s";
+import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry, fsWriteTool } from "@tentacle/tools";
-import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
+import {
+  DomainErrorCode,
+  type DuplexChannel,
+  RpcError,
+  RpcPeer,
+  createChannelPair,
+} from "@tentacle/transport";
 import type { TentacleConfig } from "../src/config.ts";
 import { POD_BIN_PATH } from "../src/pod-binary.ts";
 import {
@@ -257,7 +264,10 @@ describe("startPodRuntime", () => {
     // exec'd by the absolute path (a non-PATH dir like /tmp still works).
     expect(
       kube.calls.some(
-        (c) => c.includes("mkdir -p /tmp && head -c") && c.includes("> /tmp/tentacle && chmod"),
+        (c) =>
+          c.includes("mkdir -p /tmp && head -c") &&
+          c.includes("> /tmp/tentacle.new && chmod") &&
+          c.endsWith("mv -f /tmp/tentacle.new /tmp/tentacle"),
       ),
     ).toBe(true);
     expect(kube.calls.some((c) => c.includes("/tmp/tentacle serve --stdio"))).toBe(true);
@@ -290,7 +300,7 @@ describe("startPodRuntime", () => {
     const installIdx = kube.calls.findIndex(
       (c) =>
         c ===
-        `runexec:${podName}:sh -c mkdir -p /usr/local/bin && head -c 8 > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`,
+        `runexec:${podName}:sh -c mkdir -p /usr/local/bin && head -c 8 > ${POD_BIN_PATH}.new && chmod 755 ${POD_BIN_PATH}.new && mv -f ${POD_BIN_PATH}.new ${POD_BIN_PATH}`,
     );
     const versionIdx = kube.calls.findIndex(
       (c) => c === `runexec:${podName}:${POD_BIN_PATH} --version`,
@@ -865,15 +875,286 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
     );
   });
 
-  test("attach: a pod that already has tentacle never needs the local binary (D4)", async () => {
+  /** The container's on-PATH `tentacle --version` answers `stdout` (the post-injection verify is untouched). */
+  const containerHas = (kube: FakeCluster, stdout: string) => {
+    const original = kube.runExec.bind(kube);
+    kube.runExec = (target, input, options) => {
+      if (target.command.join(" ") === "tentacle --version") {
+        kube.calls.push(`runexec:${target.pod}:tentacle --version`);
+        return Promise.resolve({ exitCode: 0, stdout, stderr: "" });
+      }
+      return original(target, input, options);
+    };
+  };
+
+  test("attach: a container with THIS laptop's tentacle never needs the local binary (D4)", async () => {
     await release("attach-has", {}, async (config) => {
       const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      containerHas(kube, "tentacle 0.3.0\n");
+      const notices: string[] = [];
       const runtime = await startAttachRuntime(config, {
         ...runDeps(kube, "attach-has"),
         podName: "mypod",
+        notify: (text) => notices.push(text),
       });
       expect(kube.calls).toContain("exec:mypod:-:tentacle serve --stdio --model-proxy");
+      expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
+      expect(notices).toEqual([]);
       runtime.dispose();
+    });
+  });
+
+  for (const [label, had] of [
+    ["older", "0.2.0"],
+    ["newer", "0.4.0"],
+  ] as const) {
+    test(`attach: a container with an ${label} tentacle is replaced by this laptop's, and says so`, async () => {
+      // Mutation: reuse whatever answers (today) → no injection, `tentacle serve`.
+      await release(
+        `attach-${label}`,
+        { "bun-linux-x64": "0.3.0", "bun-linux-arm64": "0.3.0" },
+        async (config) => {
+          const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+          containerHas(kube, `tentacle ${had}\n`);
+          const notices: string[] = [];
+          const logs: string[] = [];
+          const runtime = await startAttachRuntime(config, {
+            ...runDeps(kube, `attach-${label}`),
+            podName: "mypod",
+            log: (line) => logs.push(line),
+            notify: (text) => notices.push(text),
+          });
+          const size = `ELF___${formatVersionMarker("0.3.0")}___`.length;
+          expect(kube.calls.some((c) => c.includes(`head -c ${size} > ${POD_BIN_PATH}.new`))).toBe(
+            true,
+          );
+          expect(kube.calls).toContain(`exec:mypod:-:${POD_BIN_PATH} serve --stdio --model-proxy`);
+          const line = `the container had tentacle ${had}; replaced with 0.3.0 (this laptop's)`;
+          expect(notices).toEqual([line]);
+          expect(logs).toContain(`${line}\n`); // piped: the same line on the log
+          expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
+          runtime.dispose();
+        },
+      );
+    });
+  }
+
+  test("attach: a container tentacle of an unknown version is replaced too", async () => {
+    await release(
+      "attach-unknown",
+      { "bun-linux-x64": "0.3.0", "bun-linux-arm64": "0.3.0" },
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerHas(kube, "some other program\n");
+        const notices: string[] = [];
+        const runtime = await startAttachRuntime(config, {
+          ...runDeps(kube, "attach-unknown"),
+          podName: "mypod",
+          notify: (text) => notices.push(text),
+        });
+        expect(notices).toEqual([
+          "the container had tentacle of an unknown version; replaced with 0.3.0 (this laptop's)",
+        ]);
+        runtime.dispose();
+      },
+    );
+  });
+
+  /** The container's install (`sh -c … head -c …`) exits 1: a read-only directory. */
+  const readOnly = (kube: FakeCluster) => {
+    const original = kube.runExec.bind(kube);
+    kube.runExec = (target, input, options) =>
+      target.command[0] === "sh"
+        ? Promise.resolve({
+            exitCode: 1,
+            stdout: "",
+            stderr: "sh: can't create: Read-only file system",
+          })
+        : original(target, input, options);
+  };
+  const BOTH_BINS = { "bun-linux-x64": "0.3.0", "bun-linux-arm64": "0.3.0" } as const;
+
+  // Orchestrator decision (follow-up 1): a failed replace does NOT abort
+  // `attach` — it goes on with the container's tentacle and warns; the
+  // `initialize` handshake still refuses a protocol skew with its full message.
+  test("attach: replacing fails (read-only dir), same protocol → attached with the container's tentacle and a warning", async () => {
+    // Mutation: rethrow on a failed replace (the old abort) → rejects.
+    await release("attach-replace-fails", BOTH_BINS, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      containerHas(kube, "tentacle 0.2.0\n");
+      readOnly(kube);
+      const notices: string[] = [];
+      const logs: string[] = [];
+      const runtime = await startAttachRuntime(config, {
+        ...runDeps(kube, "attach-replace-fails"),
+        podName: "mypod",
+        log: (line) => logs.push(line),
+        notify: (text) => notices.push(text),
+      });
+      const warning =
+        "⚠ the container has tentacle 0.2.0, this laptop 0.3.0; replacing it failed: [pod mypod] failed to inject tentacle (exit 1): sh: can't create: Read-only file system — continuing with the container's tentacle 0.2.0 (a protocol mismatch is still refused). To replace it: re-run \"tentacle attach\" with --bin-dir <a writable directory, e.g. /tmp>, or install tentacle 0.3.0 in the container image";
+      expect(notices).toEqual([warning]);
+      expect(logs).toContain(`${warning}\n`);
+      // The container's own tentacle, from PATH (never the half-written path).
+      expect(kube.calls).toContain("exec:mypod:-:tentacle serve --stdio --model-proxy");
+      expect(kube.calls.some((c) => c.startsWith("delete:") || c.startsWith("besteffort:"))).toBe(
+        false,
+      );
+      runtime.dispose();
+    });
+  });
+
+  test("attach: the rename landed and only the verify failed → the warning names the version now running", async () => {
+    // Mutation: name `had` (not the re-probed version) → says 0.2.0.
+    await release("attach-replace-landed", BOTH_BINS, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      let probes = 0;
+      const original = kube.runExec.bind(kube);
+      kube.runExec = (target, input, options) => {
+        const cmd = target.command.join(" ");
+        if (cmd === "tentacle --version") {
+          probes += 1;
+          return Promise.resolve({
+            exitCode: 0,
+            stdout: probes === 1 ? "tentacle 0.2.0\n" : "tentacle 0.3.0\n",
+            stderr: "",
+          });
+        }
+        if (cmd === `${POD_BIN_PATH} --version`) {
+          return Promise.resolve({ exitCode: 1, stdout: "", stderr: "timed out" });
+        }
+        return original(target, input, options);
+      };
+      const notices: string[] = [];
+      const runtime = await startAttachRuntime(config, {
+        ...runDeps(kube, "attach-replace-landed"),
+        podName: "mypod",
+        notify: (text) => notices.push(text),
+      });
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain("the container has tentacle 0.2.0, this laptop 0.3.0");
+      expect(notices[0]).toContain("continuing with the container's tentacle 0.3.0 ");
+      runtime.dispose();
+    });
+  });
+
+  test("attach: no local binary to replace with (release), same protocol → attached, the warning says `tentacle update`", async () => {
+    await release("attach-replace-stale", { "bun-linux-x64": "0.2.0" }, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      containerHas(kube, "tentacle 0.1.0\n");
+      const notices: string[] = [];
+      const runtime = await startAttachRuntime(config, {
+        ...runDeps(kube, "attach-replace-stale"),
+        podName: "mypod",
+        notify: (text) => notices.push(text),
+      });
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toMatch(
+        /^⚠ the container has tentacle 0\.1\.0, this laptop 0\.3\.0; replacing it failed: .*x64 is at version 0\.2\.0.* — continuing with the container's tentacle 0\.1\.0 \(a protocol mismatch is still refused\)\. To replace it: run "tentacle update" on this laptop, then "tentacle attach" again$/,
+      );
+      expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
+      expect(kube.calls).toContain("exec:mypod:-:tentacle serve --stdio --model-proxy");
+      runtime.dispose();
+    });
+  });
+
+  test("attach: replacing fails and the container speaks another protocol → its full mismatch message", async () => {
+    await release("attach-replace-skew", BOTH_BINS, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      containerHas(kube, "tentacle 0.2.0\n");
+      readOnly(kube);
+      // The container's daemon (an older protocol) refuses `initialize`, as a
+      // real one built from this task would.
+      kube.openExec = (target) => {
+        kube.calls.push(`exec:${target.pod}:-:${target.command.join(" ")}`);
+        const [daemonCh, clientCh] = createChannelPair();
+        new RpcPeer(daemonCh, {
+          onRequest: () => {
+            const { message, data } = versionMismatch(
+              { protocol: PROTOCOL_VERSION, tentacle: "0.3.0", name: "tentacle" },
+              {
+                protocol: PROTOCOL_VERSION - 1,
+                identity: { tentacle: "0.2.0", kind: "container" },
+              },
+            );
+            throw new RpcError(DomainErrorCode.VersionMismatch, message, data);
+          },
+          onNotification: () => {},
+        });
+        return clientCh;
+      };
+      const notices: string[] = [];
+      await expect(
+        startAttachRuntime(config, {
+          ...runDeps(kube, "attach-replace-skew"),
+          podName: "mypod",
+          notify: (text) => notices.push(text),
+        }),
+      ).rejects.toThrow(
+        `protocol version mismatch: client ${PROTOCOL_VERSION} (tentacle 0.3.0), daemon ${PROTOCOL_VERSION - 1} (tentacle 0.2.0) — update the container's tentacle: run "tentacle attach" again from an up-to-date laptop (it replaces an older one)`,
+      );
+      expect(notices).toHaveLength(1); // the replace warning came first
+      expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
+    });
+  });
+
+  test("attach: an old report-less container daemon gets the container advice, never `serve`", async () => {
+    // Mutation: drop `daemonKind: "container"` from startAttachRuntime → the `serve` advice.
+    await release("attach-old-daemon", {}, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      containerHas(kube, "tentacle 0.3.0\n");
+      kube.openExec = (target) => {
+        kube.calls.push(`exec:${target.pod}:-:${target.command.join(" ")}`);
+        const [daemonCh, clientCh] = createChannelPair();
+        new RpcPeer(daemonCh, {
+          onRequest: () => {
+            throw new RpcError(
+              DomainErrorCode.VersionMismatch,
+              "protocol version mismatch: client 10, daemon 9",
+            );
+          },
+          onNotification: () => {},
+        });
+        return clientCh;
+      };
+      const error = await startAttachRuntime(config, {
+        ...runDeps(kube, "attach-old-daemon"),
+        podName: "mypod",
+      }).then(
+        () => null,
+        (e: Error) => e,
+      );
+      expect(error?.message).toBe(
+        'protocol version mismatch: client 10, daemon 9 — the daemon runs an older tentacle (it does not report its version): update the container\'s tentacle: run "tentacle attach" again from an up-to-date laptop (it replaces an older one)',
+      );
+    });
+  });
+
+  test("attach: the replace broke the container's tentacle (verify fails, nothing answers) → the injection's error", async () => {
+    await release("attach-replace-broken", BOTH_BINS, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      let probes = 0;
+      const original = kube.runExec.bind(kube);
+      kube.runExec = (target, input, options) => {
+        const cmd = target.command.join(" ");
+        if (cmd === "tentacle --version") {
+          probes += 1;
+          return Promise.resolve(
+            probes === 1
+              ? { exitCode: 0, stdout: "tentacle 0.2.0\n", stderr: "" }
+              : { exitCode: 1, stdout: "", stderr: "Exec format error" },
+          );
+        }
+        if (cmd === `${POD_BIN_PATH} --version`) {
+          return Promise.resolve({ exitCode: 1, stdout: "", stderr: "Exec format error" });
+        }
+        return original(target, input, options);
+      };
+      await expect(
+        startAttachRuntime(config, { ...runDeps(kube, "attach-replace-broken"), podName: "mypod" }),
+      ).rejects.toThrow(/tentacle --version failed \(exit 1\): Exec format error/);
+      expect(probes).toBe(2); // re-probed before falling back
+      expect(kube.calls.some((c) => c.startsWith("exec:"))).toBe(false);
     });
   });
 

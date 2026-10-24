@@ -56,6 +56,7 @@ import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { startTerminal } from "./terminal.ts";
 import { type TuiSessions, openTuiSessions, runSessionTui } from "./tui-sessions.ts";
+import { untrustedText } from "./untrusted-text.ts";
 import { runUpdate, spawnVersion } from "./update.ts";
 import { APP_VERSION } from "./version.ts";
 import {
@@ -236,7 +237,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       await connectTui({ url, ...(token ? { token } : {}), ...(tls ? { tls } : {}) }, write);
       return 0;
     } catch (error) {
-      write(`\n[connect error] ${error instanceof Error ? error.message : String(error)}\n`);
+      write(
+        `\n[connect error] ${untrustedText(error instanceof Error ? error.message : String(error))}\n`,
+      );
       return 1;
     }
   }
@@ -525,7 +528,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         notify: (text) => sessions.notices.notify(text),
       });
     } catch (error) {
-      write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      write(
+        `[pod] failed: ${untrustedText(error instanceof Error ? error.message : String(error))}\n`,
+      );
       return 1;
     }
     return await runPodTui(runtime, permissions, sessions);
@@ -570,7 +575,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         notify: (text) => sessions.notices.notify(text),
       });
     } catch (error) {
-      write(`[pod] failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      write(
+        `[pod] failed: ${untrustedText(error instanceof Error ? error.message : String(error))}\n`,
+      );
       return 1;
     }
     return await runPodTui(runtime, permissions, sessions);

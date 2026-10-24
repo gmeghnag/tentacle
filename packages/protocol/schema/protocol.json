@@ -161,6 +161,21 @@
       },
       "type": "object"
     },
+    "ClientInfo": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "pattern": "^[a-z][a-z0-9-]{0,31}$",
+          "type": "string"
+        },
+        "version": {
+          "pattern": "^[0-9A-Za-z.+-]{1,64}$",
+          "type": "string"
+        }
+      },
+      "required": ["name", "version"],
+      "type": "object"
+    },
     "CloseParams": {
       "additionalProperties": true,
       "properties": {
@@ -404,6 +419,9 @@
       "properties": {
         "clientCapabilities": {
           "$ref": "#/$defs/ClientCapabilities"
+        },
+        "clientInfo": {
+          "$ref": "#/$defs/ClientInfo"
         },
         "protocolVersion": {
           "type": "integer"
@@ -1645,6 +1663,43 @@
         }
       },
       "required": ["type"],
+      "type": "object"
+    },
+    "VersionMismatchData": {
+      "additionalProperties": true,
+      "properties": {
+        "client": {
+          "additionalProperties": true,
+          "properties": {
+            "protocol": {
+              "type": "integer"
+            },
+            "tentacle": {
+              "type": "string"
+            }
+          },
+          "required": ["protocol"],
+          "type": "object"
+        },
+        "daemon": {
+          "additionalProperties": true,
+          "properties": {
+            "protocol": {
+              "type": "integer"
+            },
+            "tentacle": {
+              "type": "string"
+            }
+          },
+          "required": ["protocol"],
+          "type": "object"
+        },
+        "update": {
+          "enum": ["client", "daemon"],
+          "type": "string"
+        }
+      },
+      "required": ["client", "daemon", "update"],
       "type": "object"
     },
     "WireChatMessage": {

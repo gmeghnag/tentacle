@@ -9,6 +9,7 @@ import {
   PromptParamsSchema,
   PromptResultSchema,
   StopReasonSchema,
+  VersionMismatchDataSchema,
   isMethodName,
 } from "../src/index.ts";
 
@@ -31,6 +32,46 @@ describe("session lifecycle schemas", () => {
       InitializeParamsSchema.safeParse({ protocolVersion: 1, clientCapabilities: { streaming: 1 } })
         .success,
     ).toBe(false);
+  });
+
+  test("initialize carries an optional clientInfo; a malformed one parses as absent", () => {
+    const base = { protocolVersion: 10, clientCapabilities: {} };
+    const info = { name: "tentacle", version: "0.2.0+build.1" };
+    expect(InitializeParamsSchema.parse({ ...base, clientInfo: info }).clientInfo).toEqual(info);
+    expect(InitializeParamsSchema.parse(base).clientInfo).toBeUndefined();
+    for (const bad of [
+      { name: "tentacle", version: "x".repeat(65) },
+      { name: "tentacle", version: "0.1.0\u001b[2J" },
+      { name: "Tentacle", version: "0.1.0" },
+      { name: "tentacle" },
+      "tentacle 0.1.0",
+      42,
+    ]) {
+      const r = InitializeParamsSchema.safeParse({ ...base, clientInfo: bad });
+      expect(r.success).toBe(true);
+      expect(r.success && r.data.clientInfo).toBeUndefined();
+    }
+  });
+
+  test("a later protocol's initialize (extra fields) still parses, so the version check is reached", () => {
+    const r = InitializeParamsSchema.safeParse({
+      protocolVersion: PROTOCOL_VERSION + 1,
+      clientCapabilities: { streaming: true, updates: ["text"], laterCapability: { x: 1 } },
+      clientInfo: { name: "tentacle", version: "9.9.9", laterField: true },
+      laterParam: [1, 2, 3],
+    });
+    expect(r.success && r.data.protocolVersion).toBe(PROTOCOL_VERSION + 1);
+  });
+
+  test("the VersionMismatch error data: both sides' protocol, optional tentacle, who updates", () => {
+    const data = {
+      client: { protocol: 10, tentacle: "0.1.0" },
+      daemon: { protocol: 11 },
+      update: "client" as const,
+    };
+    expect(VersionMismatchDataSchema.parse(data)).toEqual(data);
+    expect(VersionMismatchDataSchema.safeParse({ ...data, update: "both" }).success).toBe(false);
+    expect(VersionMismatchDataSchema.safeParse(undefined).success).toBe(false);
   });
 
   test("session/open accepts empty params and the full shape, and strips unknown keys", () => {

@@ -185,14 +185,15 @@ describe("injectAgentBinary", () => {
     const result = await injectAgentBinary(deps);
 
     expect(kube.calls).toHaveLength(2);
-    // 1) the raw transfer: sh -c mkdir -p dir && head -c N > path && chmod,
-    //    with the exact bytes
+    // 1) the raw transfer: sh -c mkdir -p dir && head -c N > path.new && chmod
+    //    && mv over path (a rename, never a write into a running binary:
+    //    ETXTBSY), with the exact bytes
     const installCall = callAt(kube.calls, 0);
     expect(installCall.command[0]).toBe("sh");
     expect(installCall.command[1]).toBe("-c");
     const shellCmd = installCall.command[2];
     expect(shellCmd).toBe(
-      `mkdir -p /usr/local/bin && head -c ${bytes.length} > ${POD_BIN_PATH} && chmod 755 ${POD_BIN_PATH}`,
+      `mkdir -p /usr/local/bin && head -c ${bytes.length} > ${POD_BIN_PATH}.new && chmod 755 ${POD_BIN_PATH}.new && mv -f ${POD_BIN_PATH}.new ${POD_BIN_PATH}`,
     );
     expect(installCall.input).toBeDefined();
     expect(installCall.input).toEqual(bytes);
@@ -214,7 +215,7 @@ describe("injectAgentBinary", () => {
     await injectAgentBinary(deps);
     // Install writes under /tmp (mkdir -p /tmp), not /usr/local/bin.
     expect(callAt(kube.calls, 0).command[2]).toBe(
-      `mkdir -p /tmp && head -c ${bytes.length} > /tmp/tentacle && chmod 755 /tmp/tentacle`,
+      `mkdir -p /tmp && head -c ${bytes.length} > /tmp/tentacle.new && chmod 755 /tmp/tentacle.new && mv -f /tmp/tentacle.new /tmp/tentacle`,
     );
     // Verify execs the injected binary by its absolute path (the dir may be off PATH).
     expect(callAt(kube.calls, 1).command).toEqual(["/tmp/tentacle", "--version"]);
