@@ -708,7 +708,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
           Type: fix · Size: S · Blast: contained.
       - **User guide:** `docs/extensions.md` (hooks + packages, worked examples).
 
-- [ ] **Send now (`Ctrl+X Ctrl+S`)** — interrupt the running turn (stream,
+- [x] **Send now (`Ctrl+X Ctrl+S`)** — interrupt the running turn (stream,
       tools, a pending permission, a hook or `/compact`) and send this client's
       queued messages as one prompt, atomically via a new `session/send_now`
       (additive in protocol 10). Owner decisions S1–S3, D1–D5 taken; D3c (queue
@@ -717,7 +717,8 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       load-bearing.
       DONE: 4a daemon (`docs/feat/send-now-a.md`), 4b client
       (`send-now-b.md`), 4c TUI (`send-now-c.md`, merged 2026-10-24, tried
-      by the owner by hand). Next: 4d (compaction-time queue).
+      by the owner by hand), 4d compaction-time queue (`send-now-d.md`, merged
+      2026-10-24). Send-now COMPLETE.
 
 - [ ] **Version mismatch: say who is older and what to do — never a silent
       failure** (owner, 2026-10-24). Today the daemon refuses `initialize`
