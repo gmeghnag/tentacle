@@ -715,6 +715,9 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       locally during `/compact`) confirmed 2026-10-22. **Eval:**
       `docs/eval/send-now.md`. Type: eval → feat ×3 · Size: L → split · Blast:
       load-bearing.
+      DONE: 4a daemon (`docs/feat/send-now-a.md`), 4b client
+      (`send-now-b.md`), 4c TUI (`send-now-c.md`, merged 2026-10-24, tried
+      by the owner by hand). Next: 4d (compaction-time queue).
 
 - [ ] **Permission prompt: "No, let's talk about it"** (owner, 2026-10-24) — a
       third answer next to Yes / Yes, always / No: it opens a text field; the
