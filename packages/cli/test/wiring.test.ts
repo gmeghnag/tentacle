@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AskHooksTrust, type HookRunner, Session } from "@tentacle/agent";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
+import { SessionHost } from "@tentacle/daemon";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { daemonErrorLogPath } from "../src/daemon-log.ts";
 import {
@@ -500,6 +501,74 @@ describe("hook env dirs wiring (docs/feat/hook-env-dirs.md)", () => {
       hooks: [{ event: "turn_start" as const, command: "u" }],
     };
     expect(runnerOpts(buildAgent(user))?.projectDir).toBe("/repo");
+  });
+});
+
+describe("session titles: which model names a session (docs/feat/session-titles.md)", () => {
+  const titleModelOf = (wired: object): ModelProvider | undefined =>
+    (wired as { titleModel?: ModelProvider }).titleModel;
+
+  // `config` is loaded in `beforeAll`: read it lazily.
+  const on = (): TentacleConfig => ({ ...config, autoTitle: true });
+
+  test("over the pod model tunnel the override answers (the laptop's model; no creds in the pod)", () => {
+    const tunnel: ModelProvider = { id: "tunnel", stream: () => (async function* () {})() };
+    const wired = buildAgent({ ...on(), titleModel: "small" }, { modelOverride: tunnel });
+    expect(titleModelOf(wired)).toBe(tunnel);
+    // The pod's title tunnel (purpose "title") wins over the turn's one.
+    const titled: ModelProvider = { id: "titled", stream: () => (async function* () {})() };
+    const both = buildAgent(on(), { modelOverride: tunnel, titleModelOverride: titled } as never);
+    expect(titleModelOf(both)).toBe(titled);
+  });
+
+  test("locally: model.titleModel on the same endpoint, else the main model", () => {
+    const small = titleModelOf(buildAgent({ ...on(), titleModel: "small" }));
+    expect(small?.id).toBe(`${config.provider}:small`);
+    expect(titleModelOf(buildAgent(on()))?.id).toBe(`${config.provider}:${config.model}`);
+  });
+
+  test("model.autoTitle off (the default): NO title model at all, whatever else is set", () => {
+    expect(config.autoTitle).toBe(false);
+    const tunnel: ModelProvider = { id: "tunnel", stream: () => (async function* () {})() };
+    expect(titleModelOf(buildAgent(config))).toBeUndefined();
+    expect(titleModelOf(buildAgent({ ...config, titleModel: "small" }))).toBeUndefined();
+    expect(titleModelOf(buildAgent(config, { modelOverride: tunnel }))).toBeUndefined();
+    expect(
+      titleModelOf(
+        buildAgent(config, { modelOverride: tunnel, titleModelOverride: tunnel } as never),
+      ),
+    ).toBeUndefined();
+  });
+
+  test("end to end: off → a spy model sees ZERO title calls (the turn only); on → one", async () => {
+    const run = async (autoTitle: boolean): Promise<ChatRequest[]> => {
+      const seen: ChatRequest[] = [];
+      const spy: ModelProvider = {
+        id: "spy",
+        async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+          seen.push(request);
+          await new Promise((r) => setTimeout(r, 1));
+          yield { type: "text", delta: "Spy reply" };
+          yield { type: "done" };
+        },
+      };
+      const host = new SessionHost({
+        defaultCwd: dir,
+        createAgent: (cwd) => buildAgent({ ...config, cwd, autoTitle }, { modelOverride: spy }),
+      });
+      const { hosted } = host.open({ sessionId: "s", create: true }, { send: () => {} });
+      hosted.prompt("t1", [{ type: "text", text: "please fix the login bug" }]);
+      while (hosted.running) await new Promise((r) => setTimeout(r, 2));
+      await new Promise((r) => setTimeout(r, 30));
+      host.get("s")?.close();
+      return seen;
+    };
+    const isTitle = (r: ChatRequest) => r.messages[0]?.content.includes("3–6 word title") === true;
+    const off = await run(false);
+    expect(off).toHaveLength(1);
+    expect(off.filter(isTitle)).toEqual([]);
+    const enabled = await run(true);
+    expect(enabled.filter(isTitle)).toHaveLength(1);
   });
 });
 

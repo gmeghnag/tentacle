@@ -11,8 +11,6 @@ import {
   DEFAULT_MAX_DETACHED_SESSIONS,
   DEFAULT_MAX_SESSIONS,
   DEFAULT_SESSION_TTL_MS,
-  type ModelStreamChunkedSender,
-  type ModelStreamSender,
   ProxyModelProvider,
   type ReapPolicy,
   type Reapable,
@@ -26,10 +24,11 @@ import {
   startWsServer,
   sweepIntervalFor,
 } from "@tentacle/daemon";
+import type { ModelPurpose } from "@tentacle/protocol";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import type { ServeLimits } from "./flags.ts";
 import { APP_VERSION } from "./version.ts";
-import { buildAgent, skillCatalog, skillListing } from "./wiring.ts";
+import { type WiredAgent, buildAgent, skillCatalog, skillListing } from "./wiring.ts";
 
 /**
  * The host takes its `SessionTtlControl` at construction, before `listen`
@@ -348,6 +347,45 @@ function listen(
   };
 }
 
+/** The two tunnel requests of a pod daemon's connection to the laptop. */
+export type ModelLink = Pick<Connection, "requestModelStream" | "requestModelStreamChunked">;
+
+/**
+ * A pod daemon's agent (`serve --stdio --model-proxy`): every model call
+ * travels back to the laptop over `link` — the chunked (streaming) path, and
+ * the batch path the provider falls back to on a `MethodNotFound` from an old
+ * laptop. With `autoTitle` (the LAPTOP's flag, `--auto-title`; the pod's own
+ * `model.autoTitle` is overridden), the title call rides a second tunnel that
+ * marks it `purpose: "title"`, so the laptop serves it with ITS
+ * `model.titleModel`; the pod never names a model (docs/feat/session-titles.md).
+ */
+export function tunnelledAgent(
+  config: TentacleConfig,
+  link: () => ModelLink | null,
+  options: { readonly autoTitle: boolean; readonly log?: (line: string) => void },
+): WiredAgent {
+  const ready = (): ModelLink => {
+    const connection = link();
+    if (!connection) {
+      throw new Error("model proxy transport not ready");
+    }
+    return connection;
+  };
+  const tunnelFor = (purpose?: ModelPurpose): ProxyModelProvider =>
+    new ProxyModelProvider(
+      (request) => ready().requestModelStream(request, purpose),
+      (request, handlers) => ready().requestModelStreamChunked(request, handlers, purpose),
+    );
+  return buildAgent(
+    { ...config, autoTitle: options.autoTitle },
+    {
+      ...(options.log ? { log: options.log } : {}),
+      modelOverride: tunnelFor(),
+      ...(options.autoTitle ? { titleModelOverride: tunnelFor("title") } : {}),
+    },
+  );
+}
+
 /**
  * Host the daemon over **stdio** — one `Connection` bound to a newline-delimited
  * `streamChannel` over `process.stdin`/`process.stdout`. This is how the daemon
@@ -360,16 +398,13 @@ function listen(
 export function startStdioDaemon(
   config: TentacleConfig,
   log?: (line: string) => void,
-  options: { modelProxy?: boolean } = {},
+  options: { modelProxy?: boolean; autoTitle?: boolean } = {},
 ): Promise<void> {
   // With `--model-proxy`, the agent's model calls are tunnelled back to the
-  // client over this same channel (the pod reverse-tunnel): the provider is set
+  // client over this same channel (the pod reverse-tunnel): the link is set
   // after the Connection exists, but a session (hence the agent) is only built
   // on `session/open`, which arrives later, so the binding is always ready.
-  // Both transports are wired: the chunked (streaming) path, and the batch
-  // path the provider falls back to on a `MethodNotFound` from an old laptop.
-  let sendModel: ModelStreamSender | null = null;
-  let sendModelChunked: ModelStreamChunkedSender | null = null;
+  let tunnel: Connection | null = null;
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
     // `run`/`attach`'s daemon: a skew is fixed by attaching again (it replaces it).
@@ -383,26 +418,12 @@ export function startStdioDaemon(
     ...(log ? { onTurnError: (error: Error) => log(`error: ${error.message}`) } : {}),
     createAgent: (cwd) =>
       options.modelProxy
-        ? buildAgent(
-            { ...config, cwd },
-            {
-              ...(log ? { log } : {}),
-              modelOverride: new ProxyModelProvider(
-                (request) => {
-                  if (!sendModel) {
-                    throw new Error("model proxy transport not ready");
-                  }
-                  return sendModel(request);
-                },
-                (request, handlers) => {
-                  if (!sendModelChunked) {
-                    throw new Error("model proxy transport not ready");
-                  }
-                  return sendModelChunked(request, handlers);
-                },
-              ),
-            },
-          )
+        ? tunnelledAgent({ ...config, cwd }, () => tunnel, {
+            // `--auto-title`: the LAPTOP's `model.autoTitle` (it launched us);
+            // the pod's own config never turns titles on.
+            autoTitle: options.autoTitle === true,
+            ...(log ? { log } : {}),
+          })
         : buildAgent({ ...config, cwd }, log ? { log } : {}),
   });
   const channel = streamChannel(
@@ -418,9 +439,7 @@ export function startStdioDaemon(
     { servesModel: options.modelProxy === true },
   );
   if (options.modelProxy) {
-    sendModel = (request) => connection.requestModelStream(request);
-    sendModelChunked = (request, handlers) =>
-      connection.requestModelStreamChunked(request, handlers);
+    tunnel = connection;
   }
   return new Promise<void>((resolve) => {
     let done = false;

@@ -158,6 +158,7 @@ describe("toUpdateParams (the session/update frame)", () => {
       options: [{ optionId: "allow_once", name: "Allow once", kind: "allow_once" }],
     },
     { type: "permission_resolved", requestId: "r", outcome: { outcome: "cancelled" } },
+    { type: "session_title", title: "Fix login", source: "model" },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {

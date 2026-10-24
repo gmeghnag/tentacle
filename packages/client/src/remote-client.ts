@@ -37,6 +37,7 @@ import {
   type McpServerStatus,
   type McpStatusResult,
   Method,
+  type ModelPurpose,
   type ModelStreamChunkedParams,
   type ModelStreamChunkedResult,
   type ModelStreamParams,
@@ -45,10 +46,13 @@ import {
   type OpenResult,
   PROTOCOL_VERSION,
   type PromptResult,
+  type RenameResult,
+  type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
   type SessionListParams,
   type SessionListResult,
+  type SessionTitle,
   type SessionTtlResult,
   type SessionUpdateParams,
   type SkillSummary,
@@ -117,6 +121,23 @@ export interface BackgroundExitNotice {
   readonly exitCode: number | null;
 }
 
+/**
+ * The daemon's chosen title of a session changed (generated, or renamed by
+ * any client) — or a resync showed one this client had missed. Not
+ * turn-scoped: it arrives while idle too. The daemon's fact, never derived.
+ */
+export interface SessionTitleNotice {
+  readonly sessionId: string;
+  readonly title: string;
+  readonly source: "model" | "user";
+}
+
+/** A session's history read back, with the daemon's title (absent: an older daemon has none). */
+export interface ReadBack {
+  readonly messages: readonly ChatMessage[];
+  readonly title?: SessionTitle;
+}
+
 /** Timers, injectable so tests drive reconnects deterministically. */
 export interface Clock {
   now(): number;
@@ -154,6 +175,21 @@ export interface RemoteClientOptions {
   readonly clientInfo?: ClientInfo;
   /** Where the daemon runs (default `serve`): picks the advice for a daemon too old to give its own. */
   readonly daemonKind?: DaemonKind;
+  /**
+   * Serves the daemon's TITLE calls on the model tunnel (`purpose: "title"`):
+   * `model.titleModel`, else the main model. Absent → this laptop's
+   * `model.autoTitle` is off and a title call is refused — the gate is here,
+   * on the laptop; the pod never names a model (docs/feat/session-titles.md).
+   */
+  readonly titleModelProvider?: ModelProvider;
+}
+
+/** A snapshot read in full: the history, the cut and turn of its first page, the title. */
+interface Snap {
+  readonly messages: readonly ChatMessage[];
+  readonly since?: HistoryCut;
+  readonly turn?: string;
+  readonly title?: SessionTitle;
 }
 
 /** One session this client opened (or is opening) and has not closed. */
@@ -179,6 +215,12 @@ interface SessionEntry {
   turnEndsApplied: number;
   /** `turn_end`s already applied when `history` was read: fewer than applied ⇒ `history` lags. */
   turnEndsInHistory: number;
+  /**
+   * The newest CHOSEN title this client knows (its seed, a `session_title`, a
+   * read-back): what a recreate seeds the daemon with, so a lost session is
+   * never regenerated over a rename.
+   */
+  title: SeedTitle | undefined;
 }
 
 /**
@@ -249,6 +291,8 @@ export class RemoteClient {
   private readonly sessions = new Map<string, SessionEntry>();
   /** Session-independent listeners for background-job exits (idle or mid-turn). */
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
+  /** Session-independent listeners for title changes (idle or mid-turn). */
+  private readonly titleListeners = new Set<(notice: SessionTitleNotice) => void>();
   private readonly statusListeners = new Set<(status: LinkStatus) => void>();
   /** The daemon's `/name` skills, from the latest handshake (a reconnect refreshes it). */
   private skillCatalog: readonly SkillSummary[] = [];
@@ -262,6 +306,7 @@ export class RemoteClient {
   private readonly prompts = new Map<string, AbortController>();
 
   private readonly modelProvider?: ModelProvider;
+  private readonly titleModelProvider?: ModelProvider;
   private readonly onError?: (error: Error) => void;
   private readonly channelFactory?: () => Promise<DuplexChannel>;
   private readonly clock: Clock;
@@ -297,6 +342,9 @@ export class RemoteClient {
       this.clientInfo = options.clientInfo;
     }
     this.daemonKind = options.daemonKind ?? "serve";
+    if (options.titleModelProvider) {
+      this.titleModelProvider = options.titleModelProvider;
+    }
     this.link = { ...initialLink, upSince: this.clock.now() };
     this.lastInboundAt = this.clock.now();
     this.peer = this.makePeer(channel, 0);
@@ -376,9 +424,47 @@ export class RemoteClient {
     );
   }
 
-  /** A controller the Ink App drives exactly like a local `Session`. */
-  newSession(seedMessages?: readonly ChatMessage[], sessionId?: string): RemoteSession {
-    return new RemoteSession(this, seedMessages, sessionId);
+  /**
+   * Rename a session (`session/rename`): resolves with the title the daemon
+   * stored (one line, its rules). Not re-sent after a drop (the user asks
+   * again). Needs no `open`. An older daemon → rejects `MethodNotFound`
+   * with "this daemon is too old to rename sessions — update tentacle".
+   */
+  rename(sessionId: string, title: string): Promise<SessionTitle> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(this.peer, Method.Rename, { sessionId, title }).then(
+      (result) => (result as RenameResult).title,
+      (error: unknown) => {
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          throw new RpcError(
+            JsonRpcErrorCode.MethodNotFound,
+            "this daemon is too old to rename sessions — update tentacle",
+          );
+        }
+        throw error;
+      },
+    );
+  }
+
+  /**
+   * A controller the Ink App drives exactly like a local `Session`. `seedTitle`:
+   * the chosen title of the record it resumes (sent with the open that
+   * recreates it; a daemon that has it keeps its own).
+   */
+  newSession(
+    seedMessages?: readonly ChatMessage[],
+    sessionId?: string,
+    seedTitle?: SeedTitle,
+  ): RemoteSession {
+    return new RemoteSession(this, seedMessages, sessionId, seedTitle);
+  }
+
+  /** Subscribe to title changes across all sessions (see `SessionTitleNotice`); returns an unsubscribe. */
+  onSessionTitle(listener: (notice: SessionTitleNotice) => void): () => void {
+    this.titleListeners.add(listener);
+    return () => this.titleListeners.delete(listener);
   }
 
   /**
@@ -421,23 +507,25 @@ export class RemoteClient {
     messages?: readonly ChatMessage[],
     sessionId?: string,
     listener?: SessionStreamListener,
+    title?: SeedTitle,
   ): Promise<string> {
     const seed = messages ?? [];
     const params = {
       create: true,
       ...(cwd ? { cwd } : {}),
       ...(seed.length > 0 ? { messages: seed } : {}),
+      ...(title ? { title } : {}),
     };
     if (sessionId === undefined) {
       const gen = this.gen;
       const result = (await this.call(this.peer, Method.Open, params)) as OpenResult;
-      const entry = this.register(result.sessionId, seed, listener);
+      const entry = this.register(result.sessionId, seed, listener, title);
       this.step(entry, { kind: "open_sent" });
       this.applyOpenResult(entry, gen, result);
       await this.whenLive(entry);
       return result.sessionId;
     }
-    const entry = this.register(sessionId, seed, listener);
+    const entry = this.register(sessionId, seed, listener, title);
     try {
       await this.openOn(entry, this.gen, { ...params, sessionId });
       await this.whenLive(entry);
@@ -527,20 +615,32 @@ export class RemoteClient {
    * factory it waits out a drop (read-only: safe to repeat).
    */
   async snapshot(sessionId: string): Promise<readonly ChatMessage[]> {
+    return (await this.readBack(sessionId)).messages;
+  }
+
+  /**
+   * `snapshot`, with the daemon's title as of the same read (absent: an older
+   * daemon sends none — the caller keeps what it had, never derives one).
+   */
+  async readBack(sessionId: string): Promise<ReadBack> {
     const entry = this.sessions.get(sessionId);
+    const result = (snap: Snap): ReadBack => {
+      if (entry) this.titleRead(entry, snap.title);
+      return { messages: snap.messages, ...(snap.title ? { title: snap.title } : {}) };
+    };
     if (!this.channelFactory || !entry) {
       const mark = entry?.turnEndsApplied ?? 0;
-      const { messages } = await this.readSnapshot(sessionId, this.peer);
-      if (entry) this.historyRead(entry, messages, mark);
-      return messages;
+      const snap = await this.readSnapshot(sessionId, this.peer);
+      if (entry) this.historyRead(entry, snap.messages, mark);
+      return result(snap);
     }
     for (;;) {
       const gen = await this.whenLive(entry);
       const mark = entry.turnEndsApplied;
       try {
-        const { messages } = await this.readSnapshot(sessionId, this.peer);
-        this.historyRead(entry, messages, mark);
-        return messages;
+        const snap = await this.readSnapshot(sessionId, this.peer);
+        this.historyRead(entry, snap.messages, mark);
+        return result(snap);
       } catch (error) {
         if (gen === this.gen && this.up) throw error;
       }
@@ -973,6 +1073,7 @@ export class RemoteClient {
     id: string,
     seed: readonly ChatMessage[],
     listener: SessionStreamListener | undefined,
+    title?: SeedTitle,
   ): SessionEntry {
     const existing = this.sessions.get(id);
     if (existing && !existing.closing) {
@@ -992,9 +1093,33 @@ export class RemoteClient {
       closing: false,
       turnEndsApplied: 0,
       turnEndsInHistory: 0,
+      title,
     };
     this.sessions.set(id, entry);
     return entry;
+  }
+
+  /**
+   * The daemon's title as a read showed it: a chosen one this client did not
+   * know (an update it missed past a cut) is learned and announced like a
+   * `session_title`. An `auto` one, or none (an older daemon), changes nothing.
+   */
+  private titleRead(entry: SessionEntry, title: SessionTitle | undefined): void {
+    if (!title || title.source === "auto") {
+      return;
+    }
+    const known = entry.title;
+    if (known && known.text === title.text && known.source === title.source) {
+      return;
+    }
+    this.titleChanged(entry, { text: title.text, source: title.source });
+  }
+
+  private titleChanged(entry: SessionEntry, title: SeedTitle): void {
+    entry.title = title;
+    for (const listener of this.titleListeners) {
+      listener({ sessionId: entry.id, title: title.text, source: title.source });
+    }
   }
 
   /** Re-attach one session on a new generation. */
@@ -1015,6 +1140,7 @@ export class RemoteClient {
               sessionId: entry.id,
               create: true,
               ...(entry.history.length > 0 ? { messages: entry.history } : {}),
+              ...(entry.title ? { title: entry.title } : {}),
             },
       );
     } catch (error) {
@@ -1032,6 +1158,7 @@ export class RemoteClient {
       create?: boolean;
       messages?: readonly ChatMessage[];
       cwd?: string;
+      title?: SeedTitle;
     },
   ): Promise<void> {
     this.step(entry, { kind: "open_sent" });
@@ -1099,6 +1226,8 @@ export class RemoteClient {
       result = (await this.call(this.peer, Method.Open, {
         sessionId: entry.id,
         ...(messages.length > 0 ? { messages } : { create: true }),
+        // Our copy of its chosen title: a recreate is never regenerated over a rename.
+        ...(entry.title ? { title: entry.title } : {}),
       })) as OpenResult;
     } catch (error) {
       // Deleted between the reconnect and this recreate (another device).
@@ -1127,7 +1256,7 @@ export class RemoteClient {
 
   /** Page a snapshot and fold it in (a resync, or the barrier after a compaction). */
   private async resync(entry: SessionEntry, gen: number): Promise<void> {
-    let snap: { messages: readonly ChatMessage[]; since?: HistoryCut; turn?: string };
+    let snap: Snap;
     const mark = entry.turnEndsApplied;
     try {
       snap = await this.readSnapshot(entry.id, this.peer);
@@ -1143,6 +1272,8 @@ export class RemoteClient {
       return;
     }
     this.historyRead(entry, snap.messages, mark);
+    // A title change behind the cut is only in the snapshot.
+    this.titleRead(entry, snap.title);
     this.step(entry, {
       kind: "snapshot",
       messages: snap.messages,
@@ -1247,6 +1378,9 @@ export class RemoteClient {
         for (const listener of this.exitListeners) {
           listener({ jobId, command, status, exitCode });
         }
+      } else if (update.type === "session_title") {
+        // Not turn-scoped either: the title listeners fire while idle too.
+        this.titleChanged(entry, { text: update.title, source: update.source });
       }
       // Closed daemon-side (by any client): nothing left to close at exit,
       // nothing left to answer.
@@ -1353,10 +1487,7 @@ export class RemoteClient {
     }
   }
 
-  private async readSnapshot(
-    sessionId: string,
-    peer: RpcPeer,
-  ): Promise<{ messages: readonly ChatMessage[]; since?: HistoryCut; turn?: string }> {
+  private async readSnapshot(sessionId: string, peer: RpcPeer): Promise<Snap> {
     for (let attempt = 1; ; attempt++) {
       try {
         return await this.readSnapshotPages(sessionId, peer);
@@ -1369,10 +1500,7 @@ export class RemoteClient {
     }
   }
 
-  private async readSnapshotPages(
-    sessionId: string,
-    peer: RpcPeer,
-  ): Promise<{ messages: readonly ChatMessage[]; since?: HistoryCut; turn?: string }> {
+  private async readSnapshotPages(sessionId: string, peer: RpcPeer): Promise<Snap> {
     const pages: (readonly ChatMessage[])[] = [];
     let first: SnapshotResult | undefined;
     let cursor: string | undefined;
@@ -1398,6 +1526,7 @@ export class RemoteClient {
       messages: pages.reverse().flat(),
       ...(first?.since ? { since: first.since } : {}),
       ...(first?.turn ? { turn: first.turn.turnId } : {}),
+      ...(first?.title ? { title: first.title } : {}),
     };
   }
 
@@ -1408,14 +1537,33 @@ export class RemoteClient {
    * against a new laptop.
    */
   private async onModelStream(params: ModelStreamParams): Promise<ModelStreamResult> {
-    if (!this.modelProvider) {
-      throw new RpcError(JsonRpcErrorCode.MethodNotFound, "no local model to serve model/stream");
-    }
+    const model = this.servingModel(Method.ModelStream, params.purpose);
     const events: WireStreamEvent[] = [];
-    for await (const event of this.modelProvider.stream(params.request as unknown as ChatRequest)) {
+    for await (const event of model.stream(params.request as unknown as ChatRequest)) {
       events.push(event as WireStreamEvent);
     }
     return { events };
+  }
+
+  /**
+   * The LOCAL model that serves a tunnelled call. A turn → the main one; a
+   * title (`purpose: "title"`) → `titleModelProvider`, refused when this
+   * laptop's `model.autoTitle` is off. The laptop decides, never the pod.
+   */
+  private servingModel(method: string, purpose: ModelPurpose | undefined): ModelProvider {
+    if (!this.modelProvider) {
+      throw new RpcError(JsonRpcErrorCode.MethodNotFound, `no local model to serve ${method}`);
+    }
+    if (purpose !== "title") {
+      return this.modelProvider;
+    }
+    if (!this.titleModelProvider) {
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidRequest,
+        "titles are off on this laptop (model.autoTitle is false)",
+      );
+    }
+    return this.titleModelProvider;
   }
 
   /**
@@ -1436,12 +1584,7 @@ export class RemoteClient {
     params: ModelStreamChunkedParams,
     context: RequestContext,
   ): Promise<ModelStreamChunkedResult> {
-    if (!this.modelProvider) {
-      throw new RpcError(
-        JsonRpcErrorCode.MethodNotFound,
-        "no local model to serve model/streamChunked",
-      );
-    }
+    const model = this.servingModel(Method.ModelStreamChunked, params.purpose);
     const signal = context.signal;
     const id = String(context.id);
     // Coalesce into batches (see MODEL_STREAM_COALESCE_MS): one frame per
@@ -1491,7 +1634,7 @@ export class RemoteClient {
       sendBatch();
     };
     try {
-      for await (const event of this.modelProvider.stream({
+      for await (const event of model.stream({
         ...(params.request as unknown as ChatRequest),
         ...(signal ? { signal } : {}),
       })) {

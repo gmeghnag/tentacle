@@ -71,7 +71,8 @@ export const ARGS = {
       "max-detached-sessions": {},
       "ws-idle-timeout": {},
     },
-    bools: { stdio: {}, "model-proxy": {} },
+    // `--auto-title` (with `--model-proxy`): the laptop's `model.autoTitle`.
+    bools: { stdio: {}, "model-proxy": {}, "auto-title": {} },
     positional: { min: 0, max: 0 },
   },
   run: {

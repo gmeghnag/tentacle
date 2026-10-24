@@ -114,7 +114,13 @@ port.addEventListener("message", (event: { data: unknown }) => {
       if (!mcpReady) {
         pending.add(wired.tools);
       }
-      return { agent: wired.agent, permissions: wired.permissions, jobs: wired.jobs };
+      return {
+        agent: wired.agent,
+        permissions: wired.permissions,
+        jobs: wired.jobs,
+        // The main thread's config (the laptop's): absent with `autoTitle` off.
+        ...(wired.titleModel ? { titleModel: wired.titleModel } : {}),
+      };
     },
   });
   // Bind one Connection to this worker's port; the main thread is the client.

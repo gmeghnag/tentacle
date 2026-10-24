@@ -14,7 +14,12 @@
  * opened: the previous session on `/clear` (`SessionController.close`), every
  * session still open on `dispose` — the same on every runtime (AGENTS §7).
  */
-import { type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
+import {
+  type SessionRecord,
+  type TitleState,
+  recordFromSnapshot,
+  recordTitleState,
+} from "@tentacle/agent";
 import {
   type DaemonKind,
   type LinkStatus,
@@ -31,7 +36,7 @@ import type {
   PermissionBroker,
 } from "@tentacle/core";
 import { applyGroupMessage } from "@tentacle/exec";
-import type { McpServerStatus, SkillsListResult } from "@tentacle/protocol";
+import type { McpServerStatus, SessionTitle, SkillsListResult } from "@tentacle/protocol";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
 import { logDaemonError } from "./daemon-log.ts";
@@ -95,8 +100,15 @@ export interface PersistingController extends SessionController {
   enqueue(text: string, id?: string): Promise<void>;
   /** `RemoteSession.sendNow`; the new turn is saved once it settles, like `send`'s. */
   sendNow(...args: Parameters<RemoteSession["sendNow"]>): Promise<AsyncIterable<SessionEvent>>;
+  /** `RemoteSession.rename`: the daemon's stored text; its `session_title` triggers a save. */
+  rename(title: string): Promise<string>;
   /** Resolves once no save is pending (never rejects). */
   flushed(): Promise<void>;
+}
+
+/** The daemon's wire title as the store's `TitleState`. */
+function titleState(title: SessionTitle): TitleState {
+  return title.source === "auto" ? { source: "auto" } : { source: title.source, text: title.text };
 }
 
 /**
@@ -111,21 +123,32 @@ export interface PersistingController extends SessionController {
  * waits; it reads the newest history when it runs). A failed read goes to
  * `onFlushError`, never thrown. `close` follows the pending save, so a `/clear`
  * right after a turn does not close the session under its own save.
+ *
+ * The title saved is the DAEMON's (docs/feat/session-titles.md): the one the
+ * read-back carries; a read-back without one (an older daemon) keeps the last
+ * known — `initialTitle`, the resumed record's — never re-derived over it. A
+ * title change while idle (`session_title`: generated, or renamed by any
+ * client) triggers a save too: pod and worker daemons keep nothing on disk.
  */
 export function persistingController(
   inner: RemoteSession,
-  persist: (messages: readonly ChatMessage[]) => void,
+  persist: (messages: readonly ChatMessage[], title: TitleState) => void,
   onFlushError: (error: Error) => void = () => {},
+  initialTitle: TitleState = { source: "auto" },
 ): PersistingController {
   let running: Promise<void> | null = null;
   let again = false;
+  let lastTitle = initialTitle;
   const run = async (): Promise<void> => {
     do {
       again = false;
       try {
-        const messages = await inner.snapshot();
-        if (messages && messages.length > 0) {
-          persist(messages);
+        const back = await inner.readBack();
+        if (back && back.messages.length > 0) {
+          if (back.title) {
+            lastTitle = titleState(back.title);
+          }
+          persist(back.messages, lastTitle);
         }
       } catch (error) {
         onFlushError(error instanceof Error ? error : new Error(String(error)));
@@ -142,6 +165,7 @@ export function persistingController(
     });
   };
   const flushed = (): Promise<void> => running ?? Promise.resolve();
+  const unsubscribeTitle = inner.onTitle(() => flush());
   // A turn that failed before its first event (the link is gone for good, the
   // session closed, a send-now cancelled before it started) changed nothing:
   // reading the history back would only fail and report a save failure for a
@@ -179,7 +203,11 @@ export function persistingController(
     enqueue(text, id) {
       return inner.enqueue(text, id);
     },
+    rename(title) {
+      return inner.rename(title);
+    },
     close() {
+      unsubscribeTitle();
       void flushed().then(() => inner.close());
     },
     flushed,
@@ -210,6 +238,8 @@ export interface LocalRuntimeDeps {
   readonly resume: SessionRecord | null;
   /** Local model the daemon can tunnel calls back to (pod reverse-tunnel, F4.d). */
   readonly modelProvider?: ModelProvider;
+  /** Serves the pod's TITLE calls; absent → refused (the laptop's `model.autoTitle` is off). */
+  readonly titleModelProvider?: ModelProvider;
   /** `container` for `run`/`attach`: picks the advice for a daemon too old to give its own. */
   readonly daemonKind?: DaemonKind;
   /**
@@ -244,6 +274,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     hooksTrust,
     clientInfo: CLIENT_INFO,
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
+    ...(deps.titleModelProvider ? { titleModelProvider: deps.titleModelProvider } : {}),
   });
   await client.initialize();
   client.onHistoryLost(({ turns }) => {
@@ -268,18 +299,31 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     seed = null; // only the first session resumes; /clear starts fresh
     const uid = record?.id ?? crypto.randomUUID();
     const createdAt = record?.createdAt;
-    const session = client.newSession(record?.messages, uid);
+    // A resumed record's chosen title seeds the open that recreates it (pod,
+    // worker: they keep nothing), so it is never regenerated over a rename.
+    const title = record ? recordTitleState(record) : ({ source: "auto" } as const);
+    const session = client.newSession(
+      record?.messages,
+      uid,
+      title.source === "auto" ? undefined : { text: title.text, source: title.source },
+    );
     const controller = persistingController(
       session,
-      (messages) => {
+      (messages, latest) => {
         deps.saver.save(
           recordFromSnapshot(
             { id: uid, messages },
-            { cwd: deps.cwd, model: deps.model, ...(createdAt !== undefined ? { createdAt } : {}) },
+            {
+              cwd: deps.cwd,
+              model: deps.model,
+              title: latest,
+              ...(createdAt !== undefined ? { createdAt } : {}),
+            },
           ),
         );
       },
       (error) => deps.saver.failed(uid, `could not read the history back: ${error.message}`),
+      title,
     );
     controllers.add(controller);
     return controller;

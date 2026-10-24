@@ -568,6 +568,78 @@ describe("startPodRuntime", () => {
   });
 });
 
+/** A `FakeCluster` that exposes the pod daemon's end of the tunnel. */
+class TunnelCluster extends FakeCluster {
+  link(): Connection | null {
+    return this.connection;
+  }
+}
+
+// docs/feat/session-titles.md, follow-up 1: on a pod the LAPTOP's
+// `model.autoTitle` decides. It launches the daemon with `--auto-title`, and
+// the laptop serves (or refuses) the pod's title calls itself.
+describe("pod titles: the laptop's model.autoTitle decides", () => {
+  const deps = (kube: PodCluster, name: string) => ({
+    kube,
+    namespace: "dev",
+    podName: "mypod",
+    permissions: new PermissionBroker(),
+    saver: new SessionSaver(new JsonSessionStore(join(dir, name)), () => {}),
+    resume: null,
+    log: () => {},
+  });
+  const ask = { messages: [{ role: "user" as const, content: "name this" }] };
+  type Purposeful = { requestModelStream: (r: unknown, purpose?: string) => Promise<unknown> };
+  // An endpoint that fails at once (no retry): the call was SERVED, not refused.
+  const failing = (cwd: string, extra: Partial<TentacleConfig>) =>
+    ({
+      ...baseConfig(cwd),
+      provider: "openai",
+      baseURL: "not a url",
+      ...extra,
+    }) as TentacleConfig;
+
+  // `run` builds its command with the same `podDaemonCommand`; driven here through `attach`.
+  test("autoTitle on → the daemon is launched with --auto-title; off → without", async () => {
+    const on = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const a = await startAttachRuntime(failing("/pod/work", { autoTitle: true }), deps(on, "t-on"));
+    expect(on.calls[2]).toBe("exec:mypod:-:tentacle serve --stdio --model-proxy --auto-title");
+    a.dispose();
+    const off = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const b = await startAttachRuntime(
+      failing("/pod/work", { autoTitle: false }),
+      deps(off, "t-off"),
+    );
+    expect(off.calls[2]).toBe("exec:mypod:-:tentacle serve --stdio --model-proxy");
+    b.dispose();
+  });
+
+  test("the laptop's gate: off → a pod's title call is refused even unasked-for; on → the laptop serves it", async () => {
+    const off = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const b = await startAttachRuntime(
+      failing("/pod/work", { autoTitle: false }),
+      deps(off, "g-off"),
+    );
+    const refused = await (off.link() as unknown as Purposeful)
+      .requestModelStream(ask, "title")
+      .catch((e: unknown) => e);
+    expect(String((refused as Error).message)).toContain("titles are off");
+    b.dispose();
+    const on = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const a = await startAttachRuntime(
+      failing("/pod/work", { autoTitle: true, titleModel: "small" }),
+      deps(on, "g-on"),
+    );
+    const served = await (on.link() as unknown as Purposeful)
+      .requestModelStream(ask, "title")
+      .catch((e: unknown) => e);
+    // Reached the laptop's (failing) endpoint: served, never refused.
+    expect(served).toBeInstanceOf(Error);
+    expect(String((served as Error).message)).not.toContain("titles are off");
+    a.dispose();
+  });
+});
+
 describe("startAttachRuntime (attach to an existing pod)", () => {
   const deps = (kube: PodCluster, store: JsonSessionStore) => ({
     kube,

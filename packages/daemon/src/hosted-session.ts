@@ -37,10 +37,11 @@
  * Sound because the history is append-only past any cut within an epoch (the
  * agent's one `pop` is never behind a marker; compaction starts a new epoch).
  */
-import { type AgentEvent, type AskHooksTrust, type Session, sessionTitle } from "@tentacle/agent";
+import type { AgentEvent, AskHooksTrust, Session } from "@tentacle/agent";
 import type {
   ChatMessage,
   JobController,
+  ModelProvider,
   PermissionBroker,
   PermissionRequest,
   PermissionResponse,
@@ -50,11 +51,13 @@ import {
   type HistoryCut,
   JsonRpcErrorCode,
   type KnownSessionUpdateParams,
+  MAX_SESSION_TITLE,
   type PermissionOutcome,
   type PromptResult,
   type SendNowMessage,
   type SendNowRefusal,
   type SendNowTarget,
+  type SessionTitle,
   type SessionUpdate,
   type SnapshotResult,
   type TurnEnd,
@@ -69,6 +72,7 @@ import {
   frameFor,
   stopReasonToProtocol,
   toUpdateParams,
+  wireLine,
 } from "./mapping.ts";
 import { outcomeToResponse, toPermissionRequestUpdate } from "./permission-map.ts";
 import {
@@ -82,6 +86,18 @@ import { SessionRing } from "./ring.ts";
 import type { SessionSummary } from "./session-list.ts";
 import type { SessionPersister } from "./session-persister.ts";
 import type { SessionLiveness } from "./session-reaper.ts";
+import {
+  TITLE_TIMEOUT_MS,
+  type TitleState,
+  applyGenerated,
+  applyRename,
+  cleanTitle,
+  renameText,
+  shouldGenerate,
+  titleInput,
+  titleRequest,
+  titleText,
+} from "./session-title.ts";
 
 /** Receives each streamed `session/update` (one per emitted update). Synchronous; never awaited. */
 export type UpdateSink = (params: KnownSessionUpdateParams) => void;
@@ -155,6 +171,20 @@ export interface RestoredSessionState {
   readonly resume?: ResumedTurn;
   /** The record had a turn in flight (cut short, or resumed): its history is not a summary. */
   readonly cutShort: boolean;
+  /** The record's title (absent = `auto`). */
+  readonly title?: TitleState;
+}
+
+/**
+ * The session's title generation (docs/feat/session-titles.md). `model`: the
+ * provider that answers the title request (absent → never generated: the
+ * title stays `auto` unless renamed). `seed`: the title of a session created
+ * by `open{title}`. `timeoutMs`: the request's bound (default `TITLE_TIMEOUT_MS`).
+ */
+export interface SessionTitling {
+  readonly model?: ModelProvider;
+  readonly seed?: TitleState;
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -275,6 +305,16 @@ export class HostedSession {
    * a refused prompt or a failed compaction: unlike `lastActiveAt` (the TTL).
    */
   private lastChangeAt: number;
+  /** The title, one truth (`session-title.ts`). */
+  private title: TitleState;
+  private readonly titleModel: ModelProvider | undefined;
+  private readonly titleTimeoutMs: number;
+  /** The title request in flight; aborted by whatever takes the slot (never in the user's way). */
+  private titleJob: AbortController | null = null;
+  /** A title request scheduled at a turn's end (after the steering window), not started yet. */
+  private titleKick: ReturnType<typeof setTimeout> | null = null;
+  /** Failed title requests in this incarnation (an abort by the slot is not one). */
+  private titleFailures = 0;
 
   constructor(
     id: string,
@@ -285,11 +325,15 @@ export class HostedSession {
     ringBytes: number = DEFAULT_RING_BYTES,
     now: () => number = Date.now,
     persistence?: SessionPersistence,
+    titling: SessionTitling = {},
   ) {
     this.id = id;
     this.now = now;
     const restored = persistence?.restored;
     this.persister = persistence?.persister ?? null;
+    this.title = restored?.title ?? titling.seed ?? { source: "auto" };
+    this.titleModel = titling.model;
+    this.titleTimeoutMs = titling.timeoutMs ?? TITLE_TIMEOUT_MS;
     this.createdAt = restored?.createdAt ?? now();
     this.lastActiveAt = restored?.lastActiveAt ?? now();
     this.lastDetachAt = this.lastActiveAt;
@@ -557,6 +601,7 @@ export class HostedSession {
       messages: [...this.session.messages],
       turns,
       enqueueIds: [...this.enqueued],
+      title: this.title,
       ...(turnId !== null
         ? {
             turn: {
@@ -592,7 +637,7 @@ export class HostedSession {
       lastChangeAt: this.lastChangeAt,
       running: this.running,
       attached: this.attachments.size,
-      title: sessionTitle(this.session.messages),
+      title: titleText(this.title, this.session.messages),
       cwd,
       archived: false,
     };
@@ -700,7 +745,14 @@ export class HostedSession {
       ...(cursor === undefined ? { since: { epoch: cut.epoch, seq: cut.seq } } : {}),
       ...(cursor === undefined && cut.turnId !== null ? { turn: { turnId: cut.turnId } } : {}),
       ...(start > 0 ? { cursor: `${cut.epoch}/${start}` } : {}),
+      ...(cursor === undefined ? { title: this.wireTitle() } : {}),
     };
+  }
+
+  /** The title as the wire carries it: one line, never empty (as `session/list` shows it). */
+  private wireTitle(): SessionTitle {
+    const text = wireLine(titleText(this.title, this.session.messages), MAX_SESSION_TITLE);
+    return { text: text || "(empty)", source: this.title.source };
   }
 
   /** `"<epoch>/<end>"` → `end`, validated against the current cut. */
@@ -787,6 +839,8 @@ export class HostedSession {
       );
     }
     this.assertIdle();
+    // Accepted: a title request never competes with the user's turn.
+    this.abortTitle();
     const controller = new AbortController();
     this.controller = controller;
     this.activeTurnId = turnId;
@@ -941,6 +995,7 @@ export class HostedSession {
 
   /** Start the reserved turn: one path, like `prompt` past its checks. */
   private startSuccessor(next: Successor): void {
+    this.abortTitle();
     const remaining = next.messages.filter((m) => !this.isDelivered(m.id));
     const ours = new Set(remaining.map((m) => m.id));
     // The cancelled turn's undrained steers carry over (foreign or resumed
@@ -1133,7 +1188,140 @@ export class HostedSession {
       this.persist();
       // Last, in the same stretch: a reserved send-now takes the slot now.
       this.settleSuccessor();
+      // Only SCHEDULES (a macrotask): no work in the steering window.
+      this.kickTitle();
     }
+  }
+
+  /**
+   * After a turn's end: ask for a title on the next macrotask — outside the
+   * steering window (`drive`'s INVARIANT) — if the session may still get one.
+   * The macrotask re-checks everything: the slot may be taken by then (a
+   * send-now successor, a new prompt), the title renamed, the session closed.
+   */
+  private kickTitle(): void {
+    if (
+      this.closed ||
+      !this.titleModel ||
+      this.titleKick !== null ||
+      this.title.source !== "auto"
+    ) {
+      return;
+    }
+    this.titleKick = setTimeout(() => {
+      this.titleKick = null;
+      if (this.running || !this.mayGenerate()) {
+        return;
+      }
+      void this.generateTitle();
+    }, 0);
+  }
+
+  private mayGenerate(): boolean {
+    return shouldGenerate({
+      state: this.title,
+      messages: this.session.messages,
+      failures: this.titleFailures,
+      inFlight: this.titleJob !== null,
+      closed: this.closed,
+    });
+  }
+
+  /** Abort the title request in flight (synchronous). Not a failure: the next turn end retries. */
+  private abortTitle(): void {
+    const job = this.titleJob;
+    this.titleJob = null;
+    job?.abort();
+  }
+
+  /**
+   * One title request, fire-and-forget: never awaited by anything, never
+   * throws out. Success over an `auto` title → `model`, persisted, streamed.
+   * An error, a timeout or an unusable reply → still `auto` (the first
+   * message — never untitled), logged through the turn-error sink (the
+   * daemon's log, never a terminal), counted. An abort by the slot (or a
+   * rename, a close) → nothing, not counted.
+   */
+  private async generateTitle(): Promise<void> {
+    const model = this.titleModel;
+    const input = titleInput(this.session.messages);
+    if (!model || !input) {
+      return;
+    }
+    const job = new AbortController();
+    this.titleJob = job;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      job.abort();
+    }, this.titleTimeoutMs);
+    let raw = "";
+    let failure: string | null = null;
+    try {
+      for await (const event of model.stream({ ...titleRequest(input), signal: job.signal })) {
+        if (event.type === "text") {
+          raw += event.delta;
+        }
+      }
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (this.titleJob === job) {
+      this.titleJob = null;
+    }
+    // Taken over (a turn, a compaction, a rename, a close): not ours to finish.
+    if ((job.signal.aborted && !timedOut) || this.closed) {
+      return;
+    }
+    // A provider may end its stream quietly on an abort.
+    if (timedOut) {
+      failure = `no answer within ${this.titleTimeoutMs}ms`;
+    }
+    const text = failure === null ? cleanTitle(raw) : null;
+    if (text === null) {
+      this.titleFailures++;
+      this.reportTurnError(
+        new Error(`title generation failed: ${failure ?? "the model returned no usable title"}`),
+      );
+      return;
+    }
+    const next = applyGenerated(this.title, text);
+    if (next === this.title || next.source === "auto") {
+      return;
+    }
+    this.setTitle(next);
+  }
+
+  /** A chosen title is now the session's: on disk (a capture), then to every client. */
+  private setTitle(next: Extract<TitleState, { readonly text: string }>): void {
+    this.title = next;
+    this.persist();
+    try {
+      this.emit({ type: "session_title", title: next.text, source: next.source });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+  }
+
+  /**
+   * `session/rename`: the user's title wins, now and later (a request in
+   * flight is aborted; a late answer changes nothing). Synchronous, no lock:
+   * allowed mid-turn (it touches neither the history nor the slot). Not a
+   * conversation change (`lastChangeAt` stays). Nothing visible → `InvalidParams`.
+   */
+  rename(raw: string): SessionTitle {
+    const text = renameText(raw);
+    if (text === null) {
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidParams,
+        "a title needs at least one visible character",
+      );
+    }
+    this.abortTitle();
+    this.setTitle(applyRename(this.title, text));
+    return { text, source: "user" };
   }
 
   /**
@@ -1181,6 +1369,8 @@ export class HostedSession {
     if (signal?.aborted) {
       throw new RpcError(DomainErrorCode.Cancelled, "compaction cancelled");
     }
+    // The compaction's model call goes first (one slot on a local server).
+    this.abortTitle();
     const controller = new AbortController();
     this.controller = controller;
     this.compacting = true;
@@ -1264,6 +1454,11 @@ export class HostedSession {
     }
     this.closed = true;
     this.controller?.abort();
+    this.abortTitle();
+    if (this.titleKick !== null) {
+      clearTimeout(this.titleKick);
+      this.titleKick = null;
+    }
     if (this.activeTurnId !== null) {
       try {
         this.finishTurn(this.activeTurnId, { stopReason: "cancelled" });

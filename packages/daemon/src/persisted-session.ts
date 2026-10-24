@@ -6,7 +6,7 @@
  * Only `serve` persists (its host is the user's own machine). A pod daemon
  * never does: a record it wrote would be pod-supplied history (AGENTS §7).
  */
-import { type SessionRecord, suspendedCalls } from "@tentacle/agent";
+import { type SessionRecord, type TitleState, encodeTitle, suspendedCalls } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
 import { DomainErrorCode, type TurnEnd } from "@tentacle/protocol";
 
@@ -15,10 +15,13 @@ export const DAEMON_RECORD_KIND = "tentacle.daemon-session";
  * Version of THIS record's shape, independent of `PROTOCOL_VERSION`. 2 added
  * `archivedAt`: a v1 daemon must refuse an archived record (it would restore
  * it live), never half-load it. A v1 record reads as a v2 one, not archived.
+ * 3: `title` may be a chosen title (`{ text, source }`, docs/feat/session-titles.md):
+ * a v2 daemon refuses every v3 record instead of dropping a rename at its next
+ * write. A v1/v2 record's string title reads as `auto`.
  */
-export const DAEMON_RECORD_VERSION = 2;
+export const DAEMON_RECORD_VERSION = 3;
 /** Every version `parseDaemonRecord` reads (each read as the current shape). */
-const READABLE_VERSIONS: readonly number[] = [1, DAEMON_RECORD_VERSION];
+const READABLE_VERSIONS: readonly number[] = [1, 2, DAEMON_RECORD_VERSION];
 
 /** The permission request a turn was suspended on at the write. */
 export interface PendingPermission {
@@ -56,6 +59,8 @@ export interface DaemonSessionState {
   readonly turn?: PersistedTurn;
   /** Present iff the session was ended and kept (`SessionHost.archive`): when. */
   readonly archivedAt?: number;
+  /** The session's title (absent = `auto`, derived from `messages`). */
+  readonly title?: TitleState;
 }
 
 export interface DaemonSessionRecord extends SessionRecord {
@@ -72,10 +77,10 @@ export interface DaemonSessionRecord extends SessionRecord {
   readonly archivedAt?: number;
 }
 
-/** A live session's state as a record (`title` as the client store derives it). */
+/** A live session's state as a record (`title` in the client store's form: `encodeTitle`). */
 export function toDaemonRecord(
   state: DaemonSessionState,
-  meta: { readonly cwd: string; readonly model: string; readonly title: string },
+  meta: { readonly cwd: string; readonly model: string },
   updatedAt: number,
 ): DaemonSessionRecord {
   return {
@@ -84,7 +89,7 @@ export function toDaemonRecord(
     model: meta.model,
     createdAt: state.createdAt,
     updatedAt,
-    title: meta.title,
+    title: encodeTitle(state.title ?? { source: "auto" }, state.messages),
     messages: state.messages,
     kind: DAEMON_RECORD_KIND,
     schemaVersion: DAEMON_RECORD_VERSION,
@@ -206,8 +211,15 @@ export function parseDaemonRecord(
       return { ok: false, reason: problem };
     }
   }
+  // v1/v2 never wrote a chosen title: an object there is not a record of ours.
+  if (value.schemaVersion !== DAEMON_RECORD_VERSION && typeof value.title !== "string") {
+    return {
+      ok: false,
+      reason: `"title" is not a string (record version ${value.schemaVersion})`,
+    };
+  }
   if (value.schemaVersion === 1) {
-    // v1 had no archive: whatever it carries, it reads as a live v2 record.
+    // v1 had no archive: whatever it carries, it reads as a live record.
     const { archivedAt: _ignored, ...rest } = value;
     return {
       ok: true,
@@ -217,7 +229,11 @@ export function parseDaemonRecord(
   if (value.archivedAt !== undefined && !isWireStamp(value.archivedAt)) {
     return { ok: false, reason: '"archivedAt" is not a non-negative integer' };
   }
-  return { ok: true, record: record as DaemonSessionRecord };
+  // A v2 record is a v3 one with an `auto` title.
+  return {
+    ok: true,
+    record: { ...value, schemaVersion: DAEMON_RECORD_VERSION } as unknown as DaemonSessionRecord,
+  };
 }
 
 /**

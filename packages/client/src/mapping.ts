@@ -196,7 +196,9 @@ export function updateToEvent(
     // cannot arrive inside a turn (a compaction is exclusive with one), and the
     // client that compacted reads the new history back itself. `session_closed`
     // is consumed by `RemoteClient`/`RemoteSession` (it ends the session). The
-    // permission events are consumed by `RemoteClient`'s `PermissionRouter`.
+    // permission events are consumed by `RemoteClient`'s `PermissionRouter`;
+    // `session_title` by its title listeners (it is not turn-scoped).
+    case "session_title":
     case "plan":
     case "turn_start":
     case "turn_end":

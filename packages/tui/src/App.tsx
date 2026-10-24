@@ -13,7 +13,10 @@ import {
   matchCommands,
   mcpStatusError,
   paletteWindow,
+  parseRename,
   quitAction,
+  renameFailedNotice,
+  renamedNotice,
   resolveSlash,
   retryPlan,
   skillsListError,
@@ -129,6 +132,11 @@ export interface SessionController {
   ): Promise<AsyncIterable<SessionEvent>>;
   /** End the session (its background jobs included) — `/clear` replaces it; optional. */
   close?(): void;
+  /**
+   * Rename the session daemon-side (`/rename`); resolves with the title the
+   * daemon stored. Optional: absent where no daemon owns the session.
+   */
+  rename?(title: string): Promise<string>;
 }
 
 /**
@@ -1060,6 +1068,23 @@ export function App({
           void session.compact().then(
             (r) => settled({ ok: true, before: r.before, after: r.after }),
             (error: unknown) => settled({ ok: false, error }),
+          );
+          return;
+        }
+        case "/rename": {
+          const session = sessionRef.current;
+          if (!session?.rename) {
+            pushNotice("_Renaming isn't available on this runtime._");
+            return;
+          }
+          const parsed = parseRename(raw);
+          if ("usage" in parsed) {
+            pushNotice(parsed.usage);
+            return;
+          }
+          void session.rename(parsed.title).then(
+            (text) => pushNotice(renamedNotice(text)),
+            (error: unknown) => pushNotice(renameFailedNotice(error)),
           );
           return;
         }

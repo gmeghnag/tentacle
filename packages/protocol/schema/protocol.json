@@ -641,9 +641,16 @@
       "required": ["servers"],
       "type": "object"
     },
+    "ModelPurpose": {
+      "enum": ["title"],
+      "type": "string"
+    },
     "ModelStreamChunkedParams": {
       "additionalProperties": true,
       "properties": {
+        "purpose": {
+          "$ref": "#/$defs/ModelPurpose"
+        },
         "request": {
           "$ref": "#/$defs/WireChatRequest"
         }
@@ -665,6 +672,9 @@
     "ModelStreamParams": {
       "additionalProperties": true,
       "properties": {
+        "purpose": {
+          "$ref": "#/$defs/ModelPurpose"
+        },
         "request": {
           "$ref": "#/$defs/WireChatRequest"
         }
@@ -731,6 +741,9 @@
         },
         "since": {
           "$ref": "#/$defs/HistoryCut"
+        },
+        "title": {
+          "$ref": "#/$defs/SeedTitle"
         }
       },
       "type": "object"
@@ -975,6 +988,31 @@
       "required": ["turnId"],
       "type": "object"
     },
+    "RenameParams": {
+      "additionalProperties": true,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "title": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["sessionId", "title"],
+      "type": "object"
+    },
+    "RenameResult": {
+      "additionalProperties": true,
+      "properties": {
+        "title": {
+          "$ref": "#/$defs/SessionTitle"
+        }
+      },
+      "required": ["title"],
+      "type": "object"
+    },
     "RequestId": {
       "anyOf": [
         {
@@ -1027,6 +1065,23 @@
         }
       },
       "required": ["type", "uri"],
+      "type": "object"
+    },
+    "SeedTitle": {
+      "additionalProperties": true,
+      "properties": {
+        "source": {
+          "enum": ["model", "user"],
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["source", "text"],
       "type": "object"
     },
     "SendNowMessage": {
@@ -1225,6 +1280,44 @@
       "required": ["sessions"],
       "type": "object"
     },
+    "SessionTitle": {
+      "additionalProperties": true,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/TitleSource"
+        },
+        "text": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        }
+      },
+      "required": ["source", "text"],
+      "type": "object"
+    },
+    "SessionTitleUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "source": {
+          "enum": ["model", "user"],
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+          "type": "string"
+        },
+        "type": {
+          "const": "session_title",
+          "type": "string"
+        }
+      },
+      "required": ["source", "title", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
     "SessionTtlParams": {
       "additionalProperties": true,
       "properties": {
@@ -1281,6 +1374,7 @@
           "permission_resolved": "#/$defs/PermissionResolvedUpdate",
           "plan": "#/$defs/Plan",
           "session_closed": "#/$defs/SessionClosed",
+          "session_title": "#/$defs/SessionTitleUpdate",
           "steer": "#/$defs/Steer",
           "tool_call": "#/$defs/ToolCall",
           "tool_call_update": "#/$defs/ToolCallUpdate",
@@ -1334,6 +1428,9 @@
         },
         {
           "$ref": "#/$defs/PermissionResolvedUpdate"
+        },
+        {
+          "$ref": "#/$defs/SessionTitleUpdate"
         }
       ]
     },
@@ -1493,6 +1590,9 @@
         "since": {
           "$ref": "#/$defs/HistoryCut"
         },
+        "title": {
+          "$ref": "#/$defs/SessionTitle"
+        },
         "turn": {
           "$ref": "#/$defs/SnapshotTurn"
         }
@@ -1542,6 +1642,10 @@
       },
       "required": ["text", "type"],
       "type": "object"
+    },
+    "TitleSource": {
+      "enum": ["auto", "model", "user"],
+      "type": "string"
     },
     "ToolCall": {
       "additionalProperties": true,
@@ -2022,6 +2126,14 @@
       },
       "result": {
         "$ref": "#/$defs/PromptResult"
+      }
+    },
+    "session/rename": {
+      "params": {
+        "$ref": "#/$defs/RenameParams"
+      },
+      "result": {
+        "$ref": "#/$defs/RenameResult"
       }
     },
     "session/resolve_permission": {

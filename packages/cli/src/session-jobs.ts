@@ -11,7 +11,14 @@
  * `inProcessSessions` is the factory that pairs each session with its jobs.
  * No I/O of their own (agents come from the injected `build`).
  */
-import { type Agent, Session, type SessionRecord, type SessionSnapshot } from "@tentacle/agent";
+import {
+  type Agent,
+  Session,
+  type SessionRecord,
+  type SessionSnapshot,
+  type TitleState,
+  recordTitleState,
+} from "@tentacle/agent";
 import type { BackgroundJob, JobController, Tool } from "@tentacle/core";
 import type { ToolRegistry } from "@tentacle/tools";
 import type { SessionController } from "@tentacle/tui";
@@ -82,9 +89,15 @@ export interface InProcessDeps {
   readonly mcpTools: readonly Tool[];
   /** The first session resumes this record (its uid + history); later ones start fresh. */
   readonly resume: SessionRecord | null;
+  /**
+   * `title`: the resumed record's, carried through unchanged — no daemon here,
+   * so nothing generates or renames one, and a save must not drop a rename
+   * made on another runtime (docs/feat/session-titles.md).
+   */
   readonly persist: (
     snapshot: SessionSnapshot,
     createdAt: SessionRecord["createdAt"] | undefined,
+    title: TitleState,
   ) => void;
 }
 
@@ -112,9 +125,10 @@ export function inProcessSessions(deps: InProcessDeps): {
     }
     view.use(jobs);
     const createdAt = record?.createdAt;
+    const title = record ? recordTitleState(record) : ({ source: "auto" } as const);
     const session = new Session(agent, record?.id, {
       ...(record ? { messages: [...record.messages] } : {}),
-      onPersist: (snapshot) => deps.persist(snapshot, createdAt),
+      onPersist: (snapshot) => deps.persist(snapshot, createdAt, title),
     });
     let closed = false;
     return {

@@ -6,14 +6,15 @@
  * confinement is a server-side concern, so a client-requested `cwd` is NOT
  * honoured in v1 — every session runs against the daemon's own `defaultCwd`.
  */
-import { type Agent, Session } from "@tentacle/agent";
-import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
+import { type Agent, type RecordTitle, Session, recordTitleText } from "@tentacle/agent";
+import type { ChatMessage, JobController, ModelProvider, PermissionBroker } from "@tentacle/core";
 import {
   JsonRpcErrorCode,
   type McpServerStatus,
   type OpenParams,
   type SessionListParams,
   type SessionListResult,
+  type SessionTitle,
   type SessionTtlParams,
   type SessionTtlResult,
   type SkillListEntry,
@@ -36,6 +37,7 @@ import {
 import { type SessionSummary, toSessionList } from "./session-list.ts";
 import type { SessionPersister } from "./session-persister.ts";
 import { type Expired, type ReapPolicy, selectEvictable, selectExpired } from "./session-reaper.ts";
+import { type TitleState, renameText, seedState } from "./session-title.ts";
 import type { DaemonIdentity } from "./version-mismatch.ts";
 
 /** `serve`'s defaults (the exposure boundary sets the limits; unset = none). */
@@ -47,6 +49,12 @@ export type AgentFactory = (cwd: string) => {
   permissions: PermissionBroker;
   /** Optional: when present, the hosted session streams its job exits live. */
   jobs?: JobController;
+  /**
+   * Optional: the provider that names the session after its first exchange
+   * (docs/feat/session-titles.md). On a pod daemon it is the model proxy, so
+   * the request runs on the laptop. Absent → titles are never generated.
+   */
+  titleModel?: ModelProvider;
 };
 
 /**
@@ -109,6 +117,8 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * refusal names only the protocol on the daemon side.
    */
   readonly identity?: DaemonIdentity;
+  /** The bound on one title request (default `TITLE_TIMEOUT_MS`; tests shorten it). */
+  readonly titleTimeoutMs?: number;
 }
 
 /** What `open` did: the session, whether it was built now, and the replay verdict. */
@@ -127,7 +137,14 @@ export interface OpenOutcome {
  */
 interface ArchivedEntry {
   readonly id: string;
-  readonly title: string;
+  /** What `session/list` shows (the record's title, or a rename's). */
+  title: string;
+  /**
+   * A `session/rename` of the archived session: the record is rewritten with
+   * it (a write, no reopen), and a reopen — even one racing that write —
+   * restores with it.
+   */
+  renamed: RecordTitle | undefined;
   readonly cwd: string;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -143,7 +160,8 @@ function archivedEntry(
 ): ArchivedEntry {
   return {
     id: record.id,
-    title: record.title,
+    title: recordTitleText(record),
+    renamed: undefined,
     cwd: record.cwd,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -333,7 +351,8 @@ export class SessionHost {
       this.admitLive();
       // One step: out of the archive, live, attached (the restart path, mid-life).
       this.archived.delete(entry.id);
-      const hosted = this.restore(record);
+      // A rename of the archived session wins over the record it was read from.
+      const hosted = this.restore(record, entry.renamed);
       const { resync, epoch } = hosted.attach(attachment, params.since);
       return { hosted, created: false, resync, epoch };
     }
@@ -343,7 +362,8 @@ export class SessionHost {
     }
     this.admit();
     const id = params.sessionId ?? crypto.randomUUID();
-    const hosted = this.build(id, params.messages);
+    // `title` seeds only a session this open creates (a live or archived id never got here).
+    const hosted = this.build(id, params.messages, undefined, seedState(params.title));
     // Registered BEFORE attaching: nothing can observe the id half-built.
     this.sessions.set(id, hosted);
     const { epoch } = hosted.attach(attachment);
@@ -382,6 +402,77 @@ export class SessionHost {
       return true;
     }
     return false;
+  }
+
+  /**
+   * `session/rename` (rules: `@tentacle/protocol`). Synchronous: a live
+   * session renames itself and streams `session_title`; an ARCHIVED one is
+   * renamed in place — listed with it at once, its record rewritten in the
+   * background (read back first if not resident; a reopen meanwhile carries
+   * the new title, `entry.renamed`), never reopened. A deleted id →
+   * `SessionDeleted`; else `UnknownSession`.
+   */
+  rename(id: string, raw: string): SessionTitle {
+    if (this.deleted.has(id)) {
+      throw new RpcError(DomainErrorCode.SessionDeleted, `session ${id} was deleted`);
+    }
+    const live = this.sessions.get(id);
+    if (live) {
+      return live.rename(raw);
+    }
+    const entry = this.archived.get(id);
+    if (!entry) {
+      throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${id}`);
+    }
+    const text = renameText(raw);
+    if (text === null) {
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidParams,
+        "a title needs at least one visible character",
+      );
+    }
+    entry.title = text;
+    entry.renamed = { text, source: "user" };
+    void this.rewriteArchived(entry);
+    return { text, source: "user" };
+  }
+
+  /**
+   * Write an archived entry's record with its `renamed` title (the latest one
+   * when renames overlap). Read back first when the record is not resident; a
+   * read that fails leaves the rename in memory only (listed, kept by a
+   * reopen), reported. Skipped once the entry is no longer archived (reopened:
+   * the live session carries the title; deleted). The rewritten record stays
+   * resident until its write lands; a failed write is retried by the sweeps.
+   */
+  private async rewriteArchived(entry: ArchivedEntry): Promise<void> {
+    const persister = this.opts.persister;
+    if (!persister) {
+      return;
+    }
+    let base = entry.record;
+    if (!base) {
+      const loaded = await persister.load(entry.id);
+      if (!loaded.ok) {
+        if (this.archived.get(entry.id) === entry) {
+          persister.report(
+            new Error(
+              `archived session ${entry.id} was renamed in memory only: its record could not be read back (${loaded.reason})`,
+            ),
+          );
+        }
+        return;
+      }
+      base = loaded.record;
+    }
+    const renamed = entry.renamed;
+    if (this.archived.get(entry.id) !== entry || !renamed) {
+      return;
+    }
+    const record: DaemonSessionRecord = { ...(entry.record ?? base), title: renamed };
+    entry.record = record;
+    entry.unwritten = false;
+    void persister.writeRecord(record).then((ok) => this.settleWrite(entry, ok, record));
   }
 
   /**
@@ -440,12 +531,19 @@ export class SessionHost {
     }
     const entry = archivedEntry(record, record);
     this.archived.set(id, entry);
-    void written.then((ok) => this.settleWrite(entry, ok));
+    void written.then((ok) => this.settleWrite(entry, ok, record));
     return { closed: true, archived: true };
   }
 
-  /** A write of `entry.record` settled: landed → memory drops the record; failed → a sweep retries. */
-  private settleWrite(entry: ArchivedEntry, ok: boolean): void {
+  /**
+   * A write of `record` for `entry` settled: landed → memory drops the record;
+   * failed → a sweep retries. Only for the entry's CURRENT record: an older
+   * write settling after a rename rewrote it changes nothing.
+   */
+  private settleWrite(entry: ArchivedEntry, ok: boolean, record: DaemonSessionRecord): void {
+    if (entry.record !== record) {
+      return;
+    }
     entry.retrying = false;
     // Reopened, deleted or replaced meanwhile: not this entry's business any more.
     if (this.archived.get(entry.id) !== entry) {
@@ -469,14 +567,16 @@ export class SessionHost {
    * limits (they only refuse NEW sessions, decision G); the new incarnation's
    * epoch makes any returning client resync. Synchronous, like `open`.
    */
-  restore(record: DaemonSessionRecord): HostedSession {
+  restore(record: DaemonSessionRecord, renamed?: RecordTitle): HostedSession {
     if (this.known(record.id)) {
       throw new Error(`session ${record.id} is already known`);
     }
     const reconciled = reconcileOnReload(record);
     const now = this.now();
     const lastActiveAt = restoredActivity(record, now);
+    const kept = renamed ?? (typeof record.title === "string" ? undefined : record.title);
     const hosted = this.build(record.id, reconciled.messages, {
+      title: seedState(kept),
       createdAt: record.createdAt,
       lastActiveAt,
       // A turn cut short is reconciled now (notes appended, or re-asked): a
@@ -584,9 +684,10 @@ export class SessionHost {
       return;
     }
     for (const entry of this.archived.values()) {
-      if (entry.unwritten && entry.record && !entry.retrying) {
+      const record = entry.record;
+      if (entry.unwritten && record && !entry.retrying) {
         entry.retrying = true;
-        void persister.writeRecord(entry.record, false).then((ok) => this.settleWrite(entry, ok));
+        void persister.writeRecord(record, false).then((ok) => this.settleWrite(entry, ok, record));
       }
     }
   }
@@ -600,8 +701,9 @@ export class SessionHost {
     id: string,
     messages: readonly ChatMessage[] | undefined,
     restored?: RestoredSessionState,
+    seed?: TitleState,
   ): HostedSession {
-    const { agent, permissions, jobs } = this.opts.createAgent(this.opts.defaultCwd);
+    const { agent, permissions, jobs, titleModel } = this.opts.createAgent(this.opts.defaultCwd);
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
     const { exposeTurnErrors, onTurnError } = this.opts;
@@ -619,6 +721,12 @@ export class SessionHost {
       this.opts.persister
         ? { persister: this.opts.persister, ...(restored ? { restored } : {}) }
         : undefined,
+      {
+        ...(titleModel ? { model: titleModel } : {}),
+        // A reload's title too: it does not depend on persisting from here on.
+        ...((seed ?? restored?.title) ? { seed: seed ?? restored?.title } : {}),
+        ...(this.opts.titleTimeoutMs !== undefined ? { timeoutMs: this.opts.titleTimeoutMs } : {}),
+      },
     );
   }
 }

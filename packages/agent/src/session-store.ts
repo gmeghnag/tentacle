@@ -25,9 +25,54 @@ export interface SessionRecord {
   readonly model: string;
   readonly createdAt: number;
   readonly updatedAt: number;
-  /** First user message, trimmed — a human-readable label for `--resume` lists. */
-  readonly title: string;
+  /**
+   * The label for `--resume` lists: a string for the automatic title (the
+   * first user message, trimmed — what every build reads), an object for a
+   * chosen one (generated or renamed). An older build rejects the object form
+   * loudly ("title" is not a string): a file with a chosen title is never
+   * half-loaded and silently rewritten without it (docs/feat/session-titles.md).
+   */
+  readonly title: string | RecordTitle;
   readonly messages: readonly ChatMessage[];
+}
+
+/** A chosen title as a record stores it. */
+export interface RecordTitle {
+  readonly text: string;
+  readonly source: "model" | "user";
+}
+
+/**
+ * A session's title as its owner (the daemon) holds it: `auto` is derived from
+ * the history (`sessionTitle`); `model` / `user` were chosen and are kept as is.
+ */
+export type TitleState =
+  | { readonly source: "auto" }
+  | { readonly source: "model" | "user"; readonly text: string };
+
+/** Max length of a chosen title in a record (the wire's `MAX_SESSION_TITLE`). */
+export const RECORD_TITLE_MAX = 256;
+
+/** The title a record shows (`--resume` lists, the archive index). */
+export function recordTitleText(record: Pick<SessionRecord, "title">): string {
+  return typeof record.title === "string" ? record.title : record.title.text;
+}
+
+/** The record's title as a `TitleState` (a string is the derived, `auto` one). */
+export function recordTitleState(record: Pick<SessionRecord, "title">): TitleState {
+  return typeof record.title === "string"
+    ? { source: "auto" }
+    : { source: record.title.source, text: record.title.text };
+}
+
+/** The record form of `state`: `auto` → today's string (derived from `messages`), chosen → the object. */
+export function encodeTitle(
+  state: TitleState,
+  messages: readonly ChatMessage[],
+): string | RecordTitle {
+  return state.source === "auto"
+    ? sessionTitle(messages)
+    : { text: state.text, source: state.source };
 }
 
 const TITLE_MAX = 80;
@@ -42,10 +87,18 @@ export function sessionTitle(messages: readonly ChatMessage[]): string {
   return text.length > TITLE_MAX ? `${text.slice(0, TITLE_MAX - 1)}…` : text;
 }
 
-/** Build a record from a session snapshot plus its metadata. */
+/**
+ * Build a record from a session snapshot plus its metadata. `title`: the
+ * daemon's title as last known (absent → `auto`, derived from the messages).
+ */
 export function recordFromSnapshot(
   snapshot: SessionSnapshot,
-  meta: { readonly cwd: string; readonly model: string; readonly createdAt?: number },
+  meta: {
+    readonly cwd: string;
+    readonly model: string;
+    readonly createdAt?: number;
+    readonly title?: TitleState;
+  },
 ): SessionRecord {
   const now = Date.now();
   return {
@@ -54,7 +107,7 @@ export function recordFromSnapshot(
     model: meta.model,
     createdAt: meta.createdAt ?? now,
     updatedAt: now,
-    title: sessionTitle(snapshot.messages),
+    title: encodeTitle(meta.title ?? { source: "auto" }, snapshot.messages),
     messages: snapshot.messages,
   };
 }
@@ -198,6 +251,29 @@ function messageProblem(value: unknown): string | null {
   return null;
 }
 
+const TITLE_KEYS = new Set(["text", "source"]);
+
+/** A string, or a chosen title with exactly `text` (non-empty, bounded) and `source` model|user. */
+function titleProblem(title: unknown): string | null {
+  if (typeof title === "string") {
+    return null;
+  }
+  if (!isObject(title)) {
+    return '"title" is not a string or a chosen title';
+  }
+  const extra = Object.keys(title).find((key) => !TITLE_KEYS.has(key));
+  if (extra !== undefined) {
+    return `"title" has unknown key "${extra}"`;
+  }
+  if (typeof title.text !== "string" || title.text === "" || title.text.length > RECORD_TITLE_MAX) {
+    return '"title" has an invalid text';
+  }
+  if (title.source !== "model" && title.source !== "user") {
+    return '"title" has an invalid source';
+  }
+  return null;
+}
+
 /**
  * Check that a parsed session file is a usable record for uid `id`. Extra
  * top-level fields are kept as-is (a record type may extend this one).
@@ -214,10 +290,14 @@ export function parseSessionRecord(
   if (value.id !== id) {
     return { ok: false, reason: `id ${JSON.stringify(value.id)} does not match the file name` };
   }
-  for (const key of ["cwd", "model", "title"]) {
+  for (const key of ["cwd", "model"]) {
     if (typeof value[key] !== "string") {
       return { ok: false, reason: `"${key}" is not a string` };
     }
+  }
+  const titleIssue = titleProblem(value.title);
+  if (titleIssue) {
+    return { ok: false, reason: titleIssue };
   }
   for (const key of ["createdAt", "updatedAt"]) {
     if (typeof value[key] !== "number" || !Number.isFinite(value[key])) {

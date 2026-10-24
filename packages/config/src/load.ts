@@ -59,6 +59,10 @@ export interface TentacleConfig {
   readonly provider: ResolvedConfig["provider"];
   readonly baseURL: string;
   readonly model: string;
+  /** Whether a model names each session (default false; on a pod the laptop's value). */
+  readonly autoTitle: boolean;
+  /** The model id that names sessions when `autoTitle`; unset → `model`. */
+  readonly titleModel?: string;
   readonly cwd: string;
   readonly maxIterations: number;
   readonly contextWindow: number;
@@ -343,6 +347,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     provider: resolved.provider,
     baseURL: resolved.baseURL,
     model: resolved.model,
+    autoTitle: resolved.autoTitle,
+    ...(resolved.titleModel !== undefined ? { titleModel: resolved.titleModel } : {}),
     cwd,
     maxIterations: resolved.maxIterations,
     contextWindow: resolved.contextWindow,

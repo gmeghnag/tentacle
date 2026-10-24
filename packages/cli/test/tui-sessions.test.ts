@@ -57,6 +57,31 @@ describe("openTuiSessions", () => {
     expect(out).toEqual([]);
   });
 
+  test("a startup notice (model.titleModel without autoTitle) reaches the TUI once, never a raw write", async () => {
+    // docs/feat/session-titles.md follow-up 1. Mutation: drop the queueing → the TUI gets nothing.
+    const out: string[] = [];
+    const notice = "model.titleModel is set but model.autoTitle is false; titles are not generated";
+    const open = opened(
+      await (openTuiSessions as (...args: unknown[]) => ReturnType<typeof openTuiSessions>)(
+        { root: join(dir, "startup"), cwd: "/w" },
+        { wanted: false },
+        (l: string) => out.push(l),
+        undefined,
+        [notice],
+      ),
+    );
+    let seen: string[] = [];
+    await runSessionTui(open, {
+      start: async (options) => {
+        seen = received(options);
+      },
+      teardown: () => {},
+      write: (l) => out.push(l),
+    });
+    expect(seen).toEqual([notice]);
+    expect(out).toEqual([]);
+  });
+
   test("--resume with a skipped file: the warning is written pre-mount AND reaches the TUI", async () => {
     // Mutation: drop the `notices.notify` of resume warnings → the TUI gets nothing.
     const d = join(dir, "skipped");

@@ -16,6 +16,7 @@ import {
   type SessionRecord,
   isValidSessionId,
   projectKey,
+  recordTitleText,
 } from "@tentacle/agent";
 import type { SessionChoice, SessionPick } from "@tentacle/tui";
 
@@ -131,7 +132,7 @@ export async function resolveResume(
 function toChoice(record: SessionRecord): SessionChoice {
   return {
     id: record.id,
-    title: record.title,
+    title: recordTitleText(record),
     updatedAt: record.updatedAt,
     messageCount: record.messages.filter((m) => m.role !== "system").length,
   };
@@ -144,7 +145,10 @@ function fatal(line: string): ResumeResolution {
 function found(record: SessionRecord, warning: readonly string[]): ResumeResolution {
   return {
     record,
-    lines: [...warning.map((w) => `[resume] ${w}\n`), `[resume] ${record.id} — ${record.title}\n`],
+    lines: [
+      ...warning.map((w) => `[resume] ${w}\n`),
+      `[resume] ${record.id} — ${recordTitleText(record)}\n`,
+    ],
     notices: warning,
     fatal: false,
   };

@@ -19,6 +19,18 @@ export const ModelConfigSchema = z
     /** Model id passed to the endpoint. */
     model: z.string().min(1).optional(),
     /**
+     * Ask a model for each session's title after its first exchange. Default
+     * false: the title is the first user message (and `/rename`). On a pod
+     * (`run`/`attach`) the LAPTOP's value decides.
+     */
+    autoTitle: z.boolean().optional(),
+    /**
+     * Model id (same endpoint) that names sessions when `autoTitle` is on —
+     * e.g. a cheaper one. Unset → `model`. On a pod the laptop serves the
+     * title call with it (the pod never names a model).
+     */
+    titleModel: z.string().min(1).optional(),
+    /**
      * Literal API key. Discouraged — prefer `apiKeyCommand` so the secret is
      * never stored in plaintext inside the config file.
      */

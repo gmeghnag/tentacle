@@ -33,6 +33,7 @@ import {
   configDirFromEnv,
   loadConfig,
   longToolNameWarnings,
+  titleConfigNotice,
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import {
@@ -346,6 +347,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       try {
         await startStdioDaemon(config, (line) => process.stderr.write(`[daemon] ${line}\n`), {
           modelProxy: bools.has("model-proxy"),
+          // The laptop that launched us decides (`podDaemonCommand`).
+          autoTitle: bools.has("auto-title"),
         });
         return 0;
       } catch (error) {
@@ -384,6 +387,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         onNotice: (line) => write(`[daemon] ${line}\n`),
       });
       write(`daemon listening on ${server.url}\n`);
+      // `serve`'s own config decides its titles; no Ink here, so its log line.
+      const titleNotice = titleConfigNotice(config);
+      if (titleNotice) {
+        write(`[daemon] ${titleNotice}\n`);
+      }
       // First Ctrl+C: stop, let the session writes land, release the store
       // lock. A second one exits at once (a hung disk must not trap the user).
       await new Promise<void>((resolve) => {
@@ -443,6 +451,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       },
       write,
       process.stdin.isTTY && process.stdout.isTTY ? (choices) => pickSession(choices) : undefined,
+      // This laptop's config decides titles in every TUI runtime (worker, pod
+      // `run`/`attach`): a `titleModel` that does nothing is said once, in the TUI.
+      [titleConfigNotice(config)].filter((text): text is string => text !== null),
     );
   // `run` and `attach` both end in the same local TUI over the pod runtime. The
   // `permissions` broker MUST be the SAME instance handed to the runtime AND the
@@ -656,11 +667,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       build,
       mcpTools: mcp.tools,
       resume: resumeRecord,
-      persist: (snapshot, createdAt) =>
+      persist: (snapshot, createdAt, title) =>
         saver.save(
           recordFromSnapshot(snapshot, {
             cwd: config.cwd,
             model: config.model,
+            title,
             ...(createdAt !== undefined ? { createdAt } : {}),
           }),
         ),

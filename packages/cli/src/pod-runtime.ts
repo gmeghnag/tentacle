@@ -23,7 +23,7 @@
 import type { SessionRecord } from "@tentacle/agent";
 import { ChannelError } from "@tentacle/client";
 import type { TentacleConfig } from "@tentacle/config";
-import type { PermissionBroker } from "@tentacle/core";
+import type { ModelProvider, PermissionBroker } from "@tentacle/core";
 import {
   AGENT_CONTAINER,
   type ExecChannelOptions,
@@ -52,6 +52,37 @@ import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
 import { readBinaryVersion } from "./version-marker.ts";
 import { APP_VERSION } from "./version.ts";
+
+/**
+ * The pod daemon's command line (`run` and `attach`). `--auto-title` carries
+ * the LAPTOP's `model.autoTitle` (docs/feat/session-titles.md): the pod's own
+ * config never turns model titles on. Not a secret, so argv is fine.
+ */
+export function podDaemonCommand(bin: string, config: Pick<TentacleConfig, "autoTitle">): string[] {
+  return [bin, "serve", "--stdio", "--model-proxy", ...(config.autoTitle ? ["--auto-title"] : [])];
+}
+
+/**
+ * The laptop's models the pod reaches through us (reverse-tunnel), so the
+ * endpoint and API key never leave the laptop: the main one for turns and,
+ * with `model.autoTitle`, the one for the pod's title calls
+ * (`model.titleModel`, else the main one). Off → no title provider: the
+ * laptop refuses a title call (the gate is here, not in the pod).
+ */
+export function laptopModels(config: TentacleConfig): {
+  readonly modelProvider: ModelProvider;
+  readonly titleModelProvider?: ModelProvider;
+} {
+  const modelProvider = configuredModelProvider(config);
+  if (!config.autoTitle) {
+    return { modelProvider };
+  }
+  const titleModelProvider =
+    config.titleModel !== undefined
+      ? configuredModelProvider(config, config.titleModel)
+      : modelProvider;
+  return { modelProvider, titleModelProvider };
+}
 
 /** A bounded stderr collector that flushes once, on teardown. */
 export interface PodStderrSink {
@@ -341,16 +372,14 @@ export async function startPodRuntime(
     const target: ExecTarget = {
       pod: name,
       container: AGENT_CONTAINER,
-      command: [binPath, "serve", "--stdio", "--model-proxy"],
+      command: podDaemonCommand(binPath, config),
     };
     const execOptions: ExecChannelOptions = { onStderr: stderr.onStderr };
     // The current exec; a reconnect replaces it (and teardown closes that one).
     let channel = deps.kube.openExec(target, execOptions);
     const redial = execChannelFactory(deps.kube, target, execOptions);
-    // The pod reaches the model through us (reverse-tunnel): serve the local
-    // provider, so the endpoint and API key never leave the laptop.
-    const modelProvider = configuredModelProvider(config);
     return await createLocalRuntime({
+      ...laptopModels(config),
       channel,
       channelFactory: async () => {
         channel = await redial();
@@ -368,7 +397,6 @@ export async function startPodRuntime(
       cwd: config.cwd,
       model: config.model,
       resume: deps.resume,
-      modelProvider,
       daemonKind: "container",
       // Laptop-side RPC errors (incl. a local model failure, which the pod only
       // sees opaque) join the buffered daemon stderr: flushed after unmount.
@@ -582,16 +610,14 @@ export async function startAttachRuntime(
     const target: ExecTarget = {
       pod: name,
       container,
-      command: [serveBin, "serve", "--stdio", "--model-proxy"],
+      command: podDaemonCommand(serveBin, config),
     };
     const execOptions: ExecChannelOptions = { onStderr: stderr.onStderr };
     // The current exec; a reconnect replaces it (and teardown closes that one).
     let channel = deps.kube.openExec(target, execOptions);
     const redial = execChannelFactory(deps.kube, target, execOptions);
-    // The pod reaches the model through us (reverse-tunnel): serve the local
-    // provider, so the endpoint and API key never leave the laptop.
-    const modelProvider = configuredModelProvider(config);
     return await createLocalRuntime({
+      ...laptopModels(config),
       channel,
       channelFactory: async () => {
         channel = await redial();
@@ -609,7 +635,6 @@ export async function startAttachRuntime(
       cwd: config.cwd,
       model: config.model,
       resume: deps.resume,
-      modelProvider,
       daemonKind: "container",
       // Laptop-side RPC errors (incl. a local model failure, which the pod only
       // sees opaque) join the buffered daemon stderr: flushed after unmount.

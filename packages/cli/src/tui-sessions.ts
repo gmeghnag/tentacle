@@ -42,13 +42,15 @@ export interface ResumeRequest {
  * 1 when the requested session is unreadable, its uid invalid or the picker
  * failed; 0 when the user cancelled the picker. `pick` is given only on a
  * terminal (docs/feat/resume-picker.md); without it `--resume` takes the newest
- * session and says why.
+ * session and says why. `startup` notices (a config setting that does
+ * nothing, e.g. `titleConfigNotice`) are queued for the TUI, never written.
  */
 export async function openTuiSessions(
   where: { readonly root: string; readonly cwd: string },
   resume: ResumeRequest,
   write: (line: string) => void,
   pick?: SessionPick,
+  startup: readonly string[] = [],
 ): Promise<TuiSessions | { readonly exit: number }> {
   // One directory per project (docs/fix/session-store-per-project.md): the
   // resume AND the saver use it, so this folder's sessions are the only ones
@@ -56,6 +58,9 @@ export async function openTuiSessions(
   const key = projectKey(where.cwd);
   const store = new JsonSessionStore(join(where.root, key));
   const notices = new NoticeHub();
+  for (const text of startup) {
+    notices.notify(text);
+  }
   const saver = new SessionSaver(store, (text) => notices.notify(text));
   if (!resume.wanted) {
     return { notices, saver, resume: null };
