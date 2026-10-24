@@ -496,6 +496,8 @@ the "a new target adds only a transport" shape, AGENTS §7).
     a reconnect after another device archived the session silently revives
     it — reachable from 2a's design [fix in 2a]. Depends on task 6's eager
     open (opening a gone id must fail, not create an empty session) and on 2a.
+    **Owner (2026-10-24): approved as ONE task, no split** (L ·
+    cross-module); answers 2–4 as recommended, question 5 fixed in 2a.
   - *Cross-plan consequences:* `DAEMON_RECORD_VERSION` chain 2a 1→2 (steer
     ids from task 5 may ride it) then task 3 2→3; 2a must absorb task 7's
     "archived session revived by a reconnect" fix; order constraints 6c after
