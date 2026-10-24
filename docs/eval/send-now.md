@@ -554,3 +554,13 @@ daemon knows; the daemon never guesses by text or by shape.**
   question 1) — one design, not two. Low urgency: it needs two clients on
   one session (the app arrives at task 11).
 - *Debt:* some dispatch branching stays in `App.tsx` (listed in the 4c doc).
+
+**4d decision (owner, 2026-10-24):** with an OLDER daemon (no `send_now`,
+`MethodNotFound`) the chord during a `/compact` does NOT cancel the
+compaction: the TUI has no abort path for it (`compact()` takes no signal
+through `cli/src/local-runtime.ts` / `client/src/remote-session.ts`), and
+adding one is a client + cli change. The rows wait for the compaction's end
+and go out joined (D3c's default), with the notice "this daemon can't cancel
+a compaction to send now — your queued messages go out when it ends".
+Accepted as is ("if the daemon is old, so be it"): only older daemons, which
+2a's protocol bump will refuse anyway; nothing is lost, the user only waits.
