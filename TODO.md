@@ -762,6 +762,9 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       a temp file + `mv` (overwriting a running binary fails with
       `ETXTBSY`); constraint for 2a: `initialize` params must stay readable
       by every daemon, or an `InvalidParams` would hide the mismatch.
+      **Executed 2026-10-24** on `feat/version-mismatch-notice` → task doc
+      [`docs/feat/version-mismatch-notice.md`](docs/feat/version-mismatch-notice.md)
+      (Execution filled; Review pending).
 
 - [ ] **Permission prompt: "No, let's talk about it"** (owner, 2026-10-24) — a
       third answer next to Yes / Yes, always / No: it opens a text field; the

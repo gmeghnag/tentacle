@@ -36,6 +36,7 @@ import {
 import { toSessionList } from "./session-list.ts";
 import type { SessionPersister } from "./session-persister.ts";
 import { type Expired, type ReapPolicy, selectExpired } from "./session-reaper.ts";
+import type { DaemonIdentity } from "./version-mismatch.ts";
 
 /** `serve`'s defaults (the exposure boundary sets the limits; unset = none). */
 export const DEFAULT_MAX_SESSIONS = 64;
@@ -100,6 +101,12 @@ export interface SessionHostOptions extends TurnErrorPolicy {
     readonly skills: readonly SkillListEntry[];
     readonly problems: readonly string[];
   };
+  /**
+   * This daemon's tentacle version and kind, injected by the cli (the daemon
+   * cannot import `APP_VERSION`): it words a `VersionMismatch`. Absent → the
+   * refusal names only the protocol on the daemon side.
+   */
+  readonly identity?: DaemonIdentity;
 }
 
 /** What `open` did: the session, whether it was built now, and the replay verdict. */
@@ -118,9 +125,12 @@ export class SessionHost {
   readonly skillCatalog: readonly SkillSummary[];
   /** The `skills/list` result, wire-safe (built once, like the catalog). */
   readonly skillList: SkillsListResult;
+  /** Who this daemon is (`SessionHostOptions.identity`). */
+  readonly identity: DaemonIdentity | undefined;
 
   constructor(opts: SessionHostOptions) {
     this.opts = opts;
+    this.identity = opts.identity;
     this.skillCatalog = toSkillCatalog(opts.skills ?? []);
     this.skillList = toSkillList(opts.skillList ?? { skills: [], problems: [] });
   }

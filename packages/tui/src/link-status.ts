@@ -4,6 +4,7 @@
  * changes. Pure; the status type mirrors `@tentacle/client`'s `LinkStatus`
  * structurally (the TUI does not depend on the client package).
  */
+import { oneLine } from "./commands.ts";
 
 export type LinkStatusView =
   | { readonly state: "up" }
@@ -47,6 +48,30 @@ export function linkIndicator(status: LinkStatusView | null, nowMs: number): Lin
   const when = left > 0 ? `retry in ${left}s` : "retrying now";
   const why = status.error ? ` — ${status.error}` : "";
   return { text: `reconnecting… (attempt ${status.attempt}, ${when})${why}`, tone: "warn" };
+}
+
+/** The most of a stop reason the transcript shows (it may carry a daemon's own message). */
+export const STOP_NOTICE_MAX = 1000;
+
+/**
+ * A transcript line for a stop that has a reason (e.g. a version skew and
+ * what to do about it): the StatusBar truncates its one row, which cuts the
+ * advice at the end. Nothing for our own `closed` or a plain `disconnected`.
+ * The reason may embed a daemon's message, and a container is not trusted
+ * (AGENTS §7): one line, no control or bidi characters, capped.
+ */
+export function stoppedNotice(status: LinkStatusView): string | null {
+  if (
+    status.state !== "stopped" ||
+    status.reason === "closed" ||
+    status.reason === "disconnected"
+  ) {
+    return null;
+  }
+  const reason = oneLine(status.reason);
+  const shown =
+    reason.length > STOP_NOTICE_MAX ? `${reason.slice(0, STOP_NOTICE_MAX - 1)}…` : reason;
+  return `Link stopped: ${shown}`;
 }
 
 /** Milliseconds until `linkIndicator`'s text changes on its own; null: only a new status changes it. */

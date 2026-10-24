@@ -16,6 +16,7 @@
  */
 import { type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
 import {
+  type DaemonKind,
   type LinkStatus,
   RemoteClient,
   type RemoteSession,
@@ -36,6 +37,7 @@ import type { SessionController } from "@tentacle/tui";
 import { logDaemonError } from "./daemon-log.ts";
 import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
 import type { SessionSaver } from "./session-saver.ts";
+import { CLIENT_INFO } from "./version.ts";
 
 export interface LocalRuntime {
   readonly createSession: () => SessionController;
@@ -208,6 +210,8 @@ export interface LocalRuntimeDeps {
   readonly resume: SessionRecord | null;
   /** Local model the daemon can tunnel calls back to (pod reverse-tunnel, F4.d). */
   readonly modelProvider?: ModelProvider;
+  /** `container` for `run`/`attach`: picks the advice for a daemon too old to give its own. */
+  readonly daemonKind?: DaemonKind;
   /**
    * Where the laptop stores project-hooks trust decisions — the local worker
    * ONLY (docs/feat/hooks-project-trust.md, D4). Ignored when the daemon
@@ -238,6 +242,8 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     ...(deps.onPeerError ? { onError: deps.onPeerError } : {}),
     ...(deps.channelFactory ? { channelFactory: deps.channelFactory } : {}),
     hooksTrust,
+    clientInfo: CLIENT_INFO,
+    ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
   });
   await client.initialize();
   client.onHistoryLost(({ turns }) => {

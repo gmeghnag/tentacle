@@ -28,6 +28,7 @@ export const JsonRpcErrorCode = {
  */
 export const DomainErrorCode = {
   Unauthorized: -32001,
+  /** `initialize` refused; `data` is a `VersionMismatchData` (absent from a daemon older than it). */
   VersionMismatch: -32002,
   UnknownSession: -32003,
   TurnInProgress: -32004,

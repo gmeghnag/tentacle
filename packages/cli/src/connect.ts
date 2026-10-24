@@ -19,6 +19,7 @@ import { PermissionBroker } from "@tentacle/core";
 import type { DuplexChannel } from "@tentacle/transport";
 import { startTui } from "@tentacle/tui";
 import { createHooksTrustResolver } from "./hooks-trust.ts";
+import { CLIENT_INFO } from "./version.ts";
 
 export interface ConnectOptions {
   readonly url: string;
@@ -115,6 +116,7 @@ export async function connectTui(
     channelFactory: dial,
     // Asked through the same broker; never stored (the folder is on another host).
     hooksTrust: createHooksTrustResolver({ broker: permissions, interactive: true }),
+    clientInfo: CLIENT_INFO,
   });
   try {
     await client.initialize();

@@ -14,3 +14,4 @@ export * from "./ws-channel.ts";
 export * from "./remote-client.ts";
 export * from "./remote-session.ts";
 export * from "./session-reducer.ts";
+export * from "./version-mismatch.ts";

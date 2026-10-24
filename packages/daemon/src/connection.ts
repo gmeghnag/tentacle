@@ -48,6 +48,7 @@ import {
 } from "@tentacle/transport";
 import type { Attachment, HostedSession } from "./hosted-session.ts";
 import type { SessionHost } from "./session-host.ts";
+import { versionMismatch } from "./version-mismatch.ts";
 
 /**
  * Per-connection resource limits (the daemon's exposure boundary sets these).
@@ -238,10 +239,21 @@ export class Connection {
       throw new RpcError(DomainErrorCode.AlreadyInitialized, "already initialized");
     }
     if (params.protocolVersion !== PROTOCOL_VERSION) {
-      throw new RpcError(
-        DomainErrorCode.VersionMismatch,
-        `protocol version mismatch: client ${params.protocolVersion}, daemon ${PROTOCOL_VERSION}`,
+      // Worded from facts, with `data` ALWAYS: a client deduces "the daemon
+      // predates this" from its absence (docs/feat/version-mismatch-notice.md).
+      const { message, data } = versionMismatch(
+        {
+          protocol: params.protocolVersion,
+          ...(params.clientInfo
+            ? { tentacle: params.clientInfo.version, name: params.clientInfo.name }
+            : {}),
+        },
+        {
+          protocol: PROTOCOL_VERSION,
+          ...(this.host.identity ? { identity: this.host.identity } : {}),
+        },
       );
+      throw new RpcError(DomainErrorCode.VersionMismatch, message, data);
     }
     this.initialized = true;
     // The update types this client understands (protocol 10): gates BLOCKING

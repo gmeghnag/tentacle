@@ -24,7 +24,7 @@ lifecycle:
 | Input | `--image <ref>` obbligatorio | **nome pod** (posizionale), no `--image` |
 | Pod | `createPod` (manifest `buildPodManifest`) | `getPod` — deve già esistere |
 | Ready | `waitForReady` (default 120 s) | se non ready: **attesa breve** (~60 s, `waitForReady` riusato); terminale/missing → errore |
-| Iniezione binario | sì (F4.e) | sì, **identica** — ma con preflight: se `tentacle --version` già risponde, **salta l'intera iniezione** (pod riagganciato / image pre-baked) |
+| Iniezione binario | sì (F4.e) | sì, **identica** — ma con preflight: se `tentacle --version` già risponde, **salta l'intera iniezione** (pod riagganciato / image pre-baked) — *aggiornato 2026-10-24* (`docs/feat/version-mismatch-notice.md`): riusato solo se è **esattamente** la versione che il laptop inietterebbe; un'altra versione (più vecchia o più nuova, o illeggibile) viene **sostituita** (stessa iniezione, temp + `mv`) con un avviso |
 | Daemon exec | `openExec(["tentacle","serve","--stdio","--model-proxy"])` | **identica** |
 | TUI / persist / model-proxy / permissions | `startTui` + `createLocalRuntime` | **identica** (sessioni su laptop, reverse-tunnel invariato) |
 | Delete su exit | **sì**: `dispose` → `deletePod` + safety net `process.once("exit")` → `deletePodBestEffort` | **NO**: al detach il pod resta `Running`. Nessun `deletePod`, **nessun `registerPodCleanup`** |

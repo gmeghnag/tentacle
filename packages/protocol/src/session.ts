@@ -65,11 +65,45 @@ export const AgentCapabilitiesSchema = z.object({
 });
 export type AgentCapabilities = z.infer<typeof AgentCapabilitiesSchema>;
 
+/**
+ * Who the client is: a program name and its version (the CLI sends
+ * `{ name: "tentacle", version: APP_VERSION }`). Optional and informational —
+ * a daemon only uses it to word a `VersionMismatch` (docs/feat/version-mismatch-notice.md).
+ */
+export const ClientInfoSchema = z.object({
+  name: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
+  version: z.string().regex(/^[0-9A-Za-z.+-]{1,64}$/),
+});
+export type ClientInfo = z.infer<typeof ClientInfoSchema>;
+
+/**
+ * Every daemon must be able to read the `initialize` of every later client far
+ * enough to reach the version check: a param this schema refuses ends in
+ * `InvalidParams` and hides the real `VersionMismatch`. So fields here stay
+ * additive and lenient — `clientInfo` that does not validate is dropped, never
+ * an error.
+ */
 export const InitializeParamsSchema = z.object({
   protocolVersion: z.number().int(),
   clientCapabilities: ClientCapabilitiesSchema,
+  clientInfo: ClientInfoSchema.optional().catch(undefined),
 });
 export type InitializeParams = z.infer<typeof InitializeParamsSchema>;
+
+/**
+ * The `data` of a `VersionMismatch` error from `initialize`: both sides'
+ * protocol (and tentacle version, when known) and which side must update — a
+ * fact from the protocol numbers, which only grow. Every daemon since this
+ * field sends it; its absence means the daemon predates it. Its shape only
+ * GROWS (additive fields, like `initialize`'s): a client keys on its presence,
+ * and shows a report it cannot read as the daemon's own words.
+ */
+export const VersionMismatchDataSchema = z.object({
+  client: z.object({ protocol: z.number().int(), tentacle: z.string().optional() }),
+  daemon: z.object({ protocol: z.number().int(), tentacle: z.string().optional() }),
+  update: z.enum(["client", "daemon"]),
+});
+export type VersionMismatchData = z.infer<typeof VersionMismatchDataSchema>;
 
 // --- skills (the `/name` catalog) -----------------------------------------
 // The skills the user can activate on this daemon, so a client can offer

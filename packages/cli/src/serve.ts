@@ -27,6 +27,7 @@ import {
 } from "@tentacle/daemon";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import type { ServeLimits } from "./flags.ts";
+import { APP_VERSION } from "./version.ts";
 import { buildAgent, skillCatalog, skillListing } from "./wiring.ts";
 
 /**
@@ -153,6 +154,7 @@ async function reloadedHost(
     ...(options.onError ? { onTurnError: options.onError } : {}),
     persister,
     sessionTtl,
+    identity: { tentacle: APP_VERSION, kind: "serve" },
   });
   const notice = options.onNotice ?? (() => {});
   const { records, skipped } = await store.list();
@@ -315,6 +317,8 @@ export function startStdioDaemon(
   let sendModelChunked: ModelStreamChunkedSender | null = null;
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
+    // `run`/`attach`'s daemon: a skew is fixed by attaching again (it replaces it).
+    identity: { tentacle: APP_VERSION, kind: "container" },
     // The pod's own skills (Q4): its config, its filesystem.
     skills: skillCatalog(config),
     skillList: skillListing(config),

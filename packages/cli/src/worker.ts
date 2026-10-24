@@ -23,6 +23,7 @@ import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { ToolRegistry } from "@tentacle/tools";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
+import { APP_VERSION } from "./version.ts";
 import { buildAgent, skillCatalog, skillListing } from "./wiring.ts";
 
 // `globalThis` in a worker exposes postMessage/addEventListener at runtime; the
@@ -90,6 +91,8 @@ port.addEventListener("message", (event: { data: unknown }) => {
 
   const host = new SessionHost({
     defaultCwd: config.cwd,
+    // The client's own build: no skew possible, named for completeness.
+    identity: { tentacle: APP_VERSION, kind: "worker" },
     skills: skillCatalog(config),
     skillList: skillListing(config),
     mcpStatus: () => mcpTracker.probe(),

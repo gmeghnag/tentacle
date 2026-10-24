@@ -80,6 +80,9 @@ const SUPPORTED_KINDS = new Set([
   "ZodOptional",
   "ZodNullable",
   "ZodDefault",
+  // Emitted as its inner schema: what a sender must send. The receiver's
+  // leniency (a value that fails it is dropped) is not part of that contract.
+  "ZodCatch",
   "ZodUnknown",
   "ZodNull",
 ]);
