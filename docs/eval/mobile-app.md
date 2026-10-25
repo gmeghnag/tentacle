@@ -476,6 +476,13 @@ the "a new target adds only a transport" shape, AGENTS §7).
     turn's end go back to their writer, never discarded, never re-sent by
     themselves); questions 3 and 4 as recommended (TUI switches to the
     daemon's queue in task 6; steer ids persisted with 2a's record bump).
+    **Task 5 DONE 2026-10-25** (`docs/feat/queued-broadcast.md`, merged
+    `d4a2c16`; Opus executed, two fresh Opus reviews, Sonnet added the
+    reopen/reclaim race test; daemon record v4, protocol 11 with
+    `session/reclaim`; each steer carries its row id). Left as debt: two
+    overlapping reclaims may be acked before the disk write (no loss), and
+    `/clear` closes the session before a reclaim so the rows stay in the
+    archive (tasks 6/13).
   - *Task 6 `tui-foreign-turns`* — **L** → 6a `cancel{turnId?}` (S ·
     load-bearing), 6b client (M · load-bearing), 6c TUI (M · cross-module,
     only after 4c, 4d and 5b are merged). "Mine vs foreign" is decided by the
