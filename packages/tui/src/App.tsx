@@ -495,8 +495,11 @@ export function App({
   const inputBoxRows = inputContentLines + 2;
   const listView = panel ? panelView(panel, columns, panelMaxBody(termRows)) : null;
   // Rows above the input/panel while a turn runs: the thinking line + the
-  // queued-message lines (each one row: `wrap="truncate-end"`).
-  const runningRows = (st.running ? 1 : 0) + (st.running || compacting ? queued.length : 0);
+  // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now
+  // hint row under them.
+  const runningRows =
+    (st.running ? 1 : 0) +
+    (st.running || compacting ? queued.length + (queued.length > 0 ? 1 : 0) : 0);
   // Rows the bottom area occupies: the permission dialog; or the running rows,
   // then the list panel or the input box (plus any open palette rows, which
   // only open while idle).
@@ -1692,7 +1695,7 @@ export function App({
               />
             ) : null}
             {st.running || compacting ? (
-              <QueuedMessages queued={rowTexts(queued)} hint={SEND_NOW_HINT} />
+              <QueuedMessages queued={rowTexts(queued)} hint={SEND_NOW_HINT} columns={columns} />
             ) : null}
             {listView ? (
               <ListPanel view={listView} columns={columns} />

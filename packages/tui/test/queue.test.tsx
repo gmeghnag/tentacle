@@ -4,7 +4,7 @@ import type { ChatRequest, ExecutionEnvironment, ModelProvider } from "@tentacle
 import { ToolRegistry } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
-import { ARC } from "../src/spinner.ts";
+import { queuedRow } from "./queued-row.ts";
 
 const noopEnv: ExecutionEnvironment = {
   id: "noop",
@@ -13,8 +13,6 @@ const noopEnv: ExecutionEnvironment = {
   writeFile: () => Promise.resolve(),
 };
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-/** A queued row: any `arc` spinner frame, then the text. */
-const queuedRow = (text: string) => new RegExp(`[${ARC.frames.join("")}] ${text}`);
 
 /** Round 1 streams, then pauses so a task can be queued into the running turn. */
 class SlowProvider implements ModelProvider {
@@ -53,14 +51,57 @@ describe("mid-turn task queue (steering)", () => {
 
     // The queued task is visible with its pending marker while the turn runs.
     expect(lastFrame() ?? "").toMatch(queuedRow("also do X"));
-    // …with the send-now keys beside it.
-    expect(lastFrame() ?? "").toContain("also do X · ctrl+x ctrl+s to send now");
+    // …with the send-now keys on their own row under it.
+    expect(lastFrame() ?? "").toContain("› also do X\n  ctrl+x ctrl+s to send now\n");
 
     await delay(300); // let the turn end, steer, and run the injected round
     const all = frames.join("\n");
     // It entered the conversation as a user turn and the model ran again.
     expect(all).toContain("also do X");
     expect(model.turn).toBeGreaterThanOrEqual(2);
+    unmount();
+  });
+});
+
+/** A long first round (fills the viewport), then a pause so tasks can be queued. */
+class LongProvider implements ModelProvider {
+  readonly id = "long";
+  async *stream(_req: ChatRequest) {
+    const lines = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n\n");
+    yield { type: "text", delta: lines } as const;
+    await delay(400);
+    yield { type: "done" } as const;
+  }
+}
+
+describe("bottom-area height with queued messages", () => {
+  test("queued rows + the hint row do not change the frame's line count", async () => {
+    const agent = new Agent({
+      model: new LongProvider(),
+      tools: new ToolRegistry(),
+      env: noopEnv,
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("go");
+    await delay(20);
+    stdin.write("\r");
+    await delay(150); // running, transcript full
+    const before = (lastFrame() ?? "").split("\n").length;
+
+    stdin.write("one");
+    await delay(20);
+    stdin.write("\r");
+    await delay(40);
+    stdin.write("two");
+    await delay(20);
+    stdin.write("\r");
+    await delay(40);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("ctrl+x ctrl+s to send now"); // the hint row is up
+    expect(frame.split("\n").length).toBe(before);
     unmount();
   });
 });

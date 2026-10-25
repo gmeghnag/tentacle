@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
+import { formatTokens } from "../format.ts";
 import type { LinkIndicator } from "../link-status.ts";
 import type { TokenTotals } from "../state.ts";
 import { accentHex } from "../theme.ts";
@@ -10,14 +11,8 @@ function shortCwd(cwd: string): string {
   return path.length > 40 ? `…${path.slice(-39)}` : path;
 }
 
-/** Compact token count: 1234 → "1.2k", 54000 → "54k". */
-export function formatTokens(n: number): string {
-  if (n < 1000) {
-    return String(n);
-  }
-  const k = n / 1000;
-  return k < 10 ? `${k.toFixed(1)}k` : `${Math.round(k)}k`;
-}
+// The compact count lives in the pure `format.ts`; re-exported for callers.
+export { formatTokens } from "../format.ts";
 
 const METER_WIDTH = 10;
 
@@ -95,7 +90,7 @@ export function StatusBar({
       <Box flexGrow={1} flexShrink={1} minWidth={0}>
         <Text wrap="truncate-end">
           <Text dimColor>
-            {shortCwd(cwd)} · ↑{tokens.prompt} ↓{tokens.completion} ·{" "}
+            {shortCwd(cwd)} · ↑{formatTokens(tokens.prompt)} ↓{formatTokens(tokens.completion)} ·{" "}
           </Text>
           <ContextMeter used={contextTokens} window={contextWindow} />
           {scrolledUp ? (

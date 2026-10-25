@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import { type ReactElement, useEffect, useState } from "react";
+import { formatDuration } from "../format.ts";
 import { useElapsed } from "../hooks.ts";
 import { accentHex } from "../theme.ts";
 
@@ -27,7 +28,7 @@ export function Thinking({
       <Text color={CLAUDE}>{glyph}</Text>
       <Text dimColor>
         {" "}
-        {label} {seconds}s · esc/ctrl+c to stop
+        {label} {formatDuration(seconds)} · esc/ctrl+c to stop
       </Text>
     </Box>
   );
