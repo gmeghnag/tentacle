@@ -130,8 +130,8 @@ per user message.
    riparte da zero")
 14. **Separate from this feature: the default `maxIterations` becomes `-1`
    (unlimited)** — today 16 (`packages/config/src/defaults.ts:11`). Owner:
-   "voglio che di default maxIterations sia -1". Its own small task in
-   `TODO.md`.
+   "voglio che di default maxIterations sia -1". Sub-agents' default too (50
+   → `-1`, `:18`; "si grazie"). Its own small task in `TODO.md`.
 
 ## Review
 
