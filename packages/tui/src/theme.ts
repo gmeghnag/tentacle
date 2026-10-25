@@ -23,7 +23,8 @@ export const accentHex = "#06b6d4";
  * a light terminal (the TUI has no light-mode switch yet).
  */
 export const messageRgb = {
-  dark: { bg: [38, 38, 46], queuedFg: [140, 140, 140] },
+  // #373737 (owner, 2026-10-25).
+  dark: { bg: [55, 55, 55], queuedFg: [140, 140, 140] },
   light: { bg: [232, 232, 240], queuedFg: [110, 110, 120] },
 } as const;
 

@@ -146,3 +146,9 @@ describe("queued marker", () => {
     expect(marker(queued)).toBe(marker(sent));
   });
 });
+
+describe("message background on a dark terminal", () => {
+  test("is #373737 (owner, 2026-10-25)", () => {
+    expect(messageRgb.dark.bg).toEqual([0x37, 0x37, 0x37]);
+  });
+});
