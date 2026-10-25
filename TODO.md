@@ -854,6 +854,13 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       (`[large … output: …]` + preview); it could use the structured `spill`
       field like the TUI does. Decide whether an export should show what the
       model saw (today) or the user-facing note. S · contained.
+- [ ] 🔵 **TUI: Fn+Delete (forward delete) deletes BACKWARD** (found in the
+      `fix/tui-input-wrap-cursor` Review round 2, 2026-10-25; pre-existing) —
+      Ink 5.0.1 reports `\x1b[3~` (Fn+Delete) like `\x7f` (Backspace), so the
+      prompt deletes the character before the cursor; Alt+Fn+Delete
+      (`\x1b[3;3~`) deletes the previous word instead of the next. Needs the
+      raw sequence (Ink's `useInput` does not expose it) — check
+      `docs/library-bugs.md` and Ink's parser first. S · contained.
 - [ ] **Permission prompt: "No, let's talk about it"** (owner, 2026-10-24) — a
       third answer next to Yes / Yes, always / No: it opens a text field; the
       model gets the rejection TOGETHER with the user's text (e.g. "Rejected
