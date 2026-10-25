@@ -1,7 +1,12 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import stringWidth from "string-width";
+import wrapAnsi from "wrap-ansi";
+import * as wrapAnsiModule from "wrap-ansi";
+import * as format from "../src/format.ts";
+import { expandTabs } from "../src/input-view.ts";
 import * as markdown from "../src/markdown.ts";
 import {
+  carryColor,
   itemLines,
   layoutTranscript,
   sliceLaid,
@@ -203,6 +208,71 @@ describe("wrapLines", () => {
     }
     expect(rows.slice(1).map(strip).join("")).toBe("abcdefghijklmnopqrstuvwxyz");
   });
+
+  // The pre-fast-path implementation, kept as the reference.
+  const reference = (lines: readonly string[], width: number): string[] =>
+    lines.flatMap((line) =>
+      line === ""
+        ? [""]
+        : carryColor(
+            wrapAnsi(expandTabs(line), width, { hard: true, trim: false, wordWrap: true }).split(
+              "\n",
+            ),
+          ),
+    );
+
+  const VARIED = [
+    "",
+    "plain text",
+    "exactly ten",
+    "exactly 10",
+    "trailing spaces   ",
+    "ten spaces         ",
+    "\x1b[31mred\x1b[39m and \x1b[1mbold\x1b[22m",
+    "\x1b[38;2;10;20;30mtruecolor, unclosed",
+    "\x1b[38;2;10;20;30mtrue\x1b[39m",
+    "\x1b[48;2;1;2;3m\x1b[38;2;4;5;6m 12 + bar \x1b[0m",
+    "\x1b[42m  added bar line       \x1b[49m",
+    "日本語のテキスト",
+    "日本語のテキストです。",
+    "emoji 👍🏽 and 🇮🇹 ok",
+    "é decomposed (NFD)",
+    "tab\there",
+    "has\rcarriage",
+    "two\nlogical\nlines",
+    "crlf\r\nline",
+    "a very long line that certainly does not fit in the narrow width at all",
+    "\x1b]8;;http://x\x07link\x1b]8;;\x07 text",
+  ];
+
+  test("is identical to the reference wrap for lines that fit and lines that do not", () => {
+    for (const width of [1, 5, 10, 11, 12, 20, 80]) {
+      expect(wrapLines(VARIED, width)).toEqual(reference(VARIED, width));
+    }
+  });
+
+  test("a line that fits is not handed to wrapAnsi; one that overflows is", () => {
+    const spy = spyOn(wrapAnsiModule, "default");
+    try {
+      const fit = ["short", "\x1b[38;2;1;2;3mcolour\x1b[39m", "exactly 10", "日本語"];
+      wrapLines(fit, 10);
+      expect(spy.mock.calls.length).toBe(0);
+      wrapLines(["this one is longer than ten columns"], 10);
+      expect(spy.mock.calls.length).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("a fitting line that wrapAnsi would rewrite still takes the full path", () => {
+    const spy = spyOn(wrapAnsiModule, "default");
+    try {
+      wrapLines(["two\nlines", "é", "a\r\nb"], 40);
+      expect(spy.mock.calls.length).toBe(3);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("transcriptRows", () => {
@@ -331,6 +401,70 @@ describe("windowed layout (layoutTranscript + sliceLaid)", () => {
     const full = transcriptRows(items, opts);
     const { laid, total } = layoutTranscript(items, opts);
     expect(sliceLaid(laid, total - 2, total + 50)).toEqual(full.slice(total - 2));
+  });
+});
+
+describe("two layout slots per item (Ctrl+O both ways)", () => {
+  const body = Array.from({ length: 20 }, (_, i) => `result line ${i}`).join("\n");
+  const mkTool = (id: string): ToolItem => ({
+    kind: "tool",
+    id,
+    name: "shell",
+    args: '{"command":"ls"}',
+    status: "ok",
+    startedAt: 0,
+    endedAt: 500,
+    resultText: body,
+  });
+  // `toolLines` calls formatDurationMs once per (re)layout of a finished tool.
+  test("a second toggle in either direction lays nothing out again", () => {
+    const items: DisplayItem[] = [mkTool("a"), mkTool("b")];
+    const spy = spyOn(format, "formatDurationMs");
+    try {
+      const c = (expandAll: boolean) => layoutTranscript(items, { expandAll, width: 40 });
+      const collapsed = c(false);
+      const expanded = c(true);
+      expect(spy.mock.calls.length).toBe(4); // 2 items × 2 views
+      expect(expanded.total).toBeGreaterThan(collapsed.total);
+      // Flip back and forth: all hits, same rows.
+      expect(c(false).total).toBe(collapsed.total);
+      expect(c(true).total).toBe(expanded.total);
+      expect(c(false).laid[0]?.rows === collapsed.laid[0]?.rows).toBe(true); // same array
+      expect(spy.mock.calls.length).toBe(4);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("a width change invalidates both slots", () => {
+    const items: DisplayItem[] = [mkTool("w")];
+    const spy = spyOn(format, "formatDurationMs");
+    try {
+      layoutTranscript(items, { expandAll: false, width: 40 });
+      layoutTranscript(items, { expandAll: true, width: 40 });
+      expect(spy.mock.calls.length).toBe(2);
+      layoutTranscript(items, { expandAll: true, width: 30 }); // new width
+      expect(spy.mock.calls.length).toBe(3);
+      layoutTranscript(items, { expandAll: false, width: 30 }); // old collapsed slot is gone
+      expect(spy.mock.calls.length).toBe(4);
+      layoutTranscript(items, { expandAll: true, width: 30 });
+      layoutTranscript(items, { expandAll: false, width: 30 });
+      expect(spy.mock.calls.length).toBe(4);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("a changed threshold re-lays-out the collapsed view; rows stay correct", () => {
+    const items: DisplayItem[] = [mkTool("t")];
+    const a = layoutTranscript(items, { expandAll: false, width: 40, collapseThreshold: 8 });
+    const b = layoutTranscript(items, { expandAll: false, width: 40, collapseThreshold: 50 });
+    expect(b.total).toBeGreaterThan(a.total); // 20 lines now fit under the threshold
+    const expected = wrapLines(
+      itemLines(mkTool("t"), { expandAll: false, collapseThreshold: 50 }),
+      40,
+    );
+    expect(b.laid[0]?.rows).toEqual(expected);
   });
 });
 

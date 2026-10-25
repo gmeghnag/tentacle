@@ -560,10 +560,27 @@ export function wrapLines(lines: readonly string[], width: number): string[] {
       out.push("");
       continue;
     }
-    const wrapped = wrapAnsi(expandTabs(line), w, { hard: true, trim: false, wordWrap: true });
+    const text = expandTabs(line);
+    if (fitsUnchanged(text, w)) {
+      // wrapAnsi would return `text` as is (see `fitsUnchanged`); skip its
+      // per-escape regex scan, the bulk of an expanded transcript's layout cost.
+      out.push(...carryColor([text]));
+      continue;
+    }
+    const wrapped = wrapAnsi(text, w, { hard: true, trim: false, wordWrap: true });
     out.push(...carryColor(wrapped.split("\n")));
   }
   return out;
+}
+
+/**
+ * True when `wrapAnsi(text, w, { hard, trim: false, wordWrap })` provably
+ * returns `text` unchanged: one line (no `\n` to split, no `\r\n` to rewrite),
+ * already NFC-normalised (wrap-ansi normalises first), and no wider than `w`
+ * (so no break is inserted, and with no break it appends no SGR close/reopen).
+ */
+function fitsUnchanged(text: string, w: number): boolean {
+  return !/[\r\n]/.test(text) && stringWidth(text) <= w && text.normalize() === text;
 }
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI SGR codes
@@ -607,12 +624,16 @@ export function carryColor(rows: readonly string[]): string[] {
 // recomputes only the streaming tail — O(1) per frame instead of O(transcript).
 // Width / expand / collapse options are part of the key: a resize or Ctrl+O
 // legitimately re-lays-out everything (once), which is unavoidable.
+//
+// Two slots per item, collapsed and expanded, so a Ctrl+O flip in either
+// direction finds the other view already laid out. A width / threshold /
+// preview change invalidates both (a fresh entry holds only the view just built).
 interface RowCacheEntry {
   readonly width: number;
-  readonly expand: boolean;
   readonly threshold: number;
   readonly preview: number;
-  readonly rows: readonly string[];
+  collapsed?: readonly string[];
+  expanded?: readonly string[];
 }
 const rowCache = new WeakMap<DisplayItem, RowCacheEntry>();
 
@@ -622,23 +643,28 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   const expand = opts.expandAll;
   const threshold = opts.collapseThreshold ?? DEFAULT_THRESHOLD;
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
-  const hit = rowCache.get(item);
   // Only `tool` items collapse, so only their layout depends on
-  // expand/threshold/preview; every other kind is a function of width alone.
-  // Keying those options for non-tool items too made a Ctrl+O (expandAll) flip
-  // needlessly invalidate the whole transcript — now it re-lays-out just the
-  // tool items that can actually change.
+  // expand/threshold/preview; every other kind is a function of width alone
+  // (always the `collapsed` slot). Keying those options for non-tool items too
+  // made a Ctrl+O (expandAll) flip needlessly invalidate the whole transcript.
   const expandMatters = item.kind === "tool";
+  const slot = expandMatters && expand ? "expanded" : "collapsed";
+  let entry = rowCache.get(item);
   if (
-    hit &&
-    hit.width === width &&
-    (!expandMatters ||
-      (hit.expand === expand && hit.threshold === threshold && hit.preview === preview))
+    entry &&
+    entry.width === width &&
+    (!expandMatters || (entry.threshold === threshold && entry.preview === preview))
   ) {
-    return hit.rows;
+    const hit = entry[slot];
+    if (hit) {
+      return hit;
+    }
+  } else {
+    entry = { width, threshold, preview };
+    rowCache.set(item, entry);
   }
   const rows = wrapLines(itemLines(item, opts), width);
-  rowCache.set(item, { width, expand, threshold, preview, rows });
+  entry[slot] = rows;
   return rows;
 }
 

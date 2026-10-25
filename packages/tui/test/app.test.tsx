@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Agent } from "@tentacle/agent";
 import {
   type ChatMessage,
@@ -12,7 +12,11 @@ import {
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
+import * as format from "../src/format.ts";
+import * as idleWarm from "../src/idle-warm.ts";
+import { IDLE_WARM_DELAY_MS, type IdleWarmState } from "../src/idle-warm.ts";
 import type { LinkStatusView } from "../src/link-status.ts";
+import * as renderLines from "../src/render-lines.ts";
 import { messagesToItems } from "../src/resume.ts";
 
 class ScriptedProvider implements ModelProvider {
@@ -1778,5 +1782,161 @@ describe("a spilled tool result in the App (the --resume path)", () => {
     await delay(50);
     expect(lastFrame() ?? "").toContain(`saved in the pod to ${PATH}`);
     unmount();
+  });
+});
+
+// docs/fix/tui-expand-latency.md: once the transcript is quiet the other Ctrl+O view is warmed.
+describe("idle warm of the other Ctrl+O view", () => {
+  const history: ChatMessage[] = [{ role: "user", content: "list it" }];
+  for (let i = 0; i < 6; i++) {
+    history.push(
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: `c${i}`, name: "shell", arguments: JSON.stringify({ command: "ls" }) }],
+      },
+      {
+        role: "tool",
+        content: Array.from({ length: 20 }, (_, n) => `out ${i}.${n}`).join("\n"),
+        toolCallId: `c${i}`,
+      },
+    );
+  }
+
+  test("the first Ctrl+O after the quiet delay lays out no item again", async () => {
+    const spy = spyOn(format, "formatDurationMs");
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+      />,
+    );
+    try {
+      await delay(IDLE_WARM_DELAY_MS + 300);
+      const settled = spy.mock.calls.length;
+      expect(settled).toBeGreaterThanOrEqual(12); // 6 tools × (shown + warmed view)
+      stdin.write("\u000F"); // Ctrl+O
+      await delay(50);
+      expect(lastFrame() ?? "").toContain("out 5.19"); // expanded: the last line is visible
+      expect(spy.mock.calls.length).toBe(settled); // ...and nothing was laid out for it
+    } finally {
+      spy.mockRestore();
+      unmount();
+    }
+  });
+
+  // Review finding 2: the App's three wirings of the warm, observed through the
+  // `startIdleWarm` seam (what the App schedules and cancels) — no timers involved.
+  describe("what the App feeds the scheduler", () => {
+    function spyScheduler() {
+      const states: IdleWarmState[] = [];
+      const cancels = { count: 0 };
+      const spy = spyOn(idleWarm, "startIdleWarm").mockImplementation((state) => {
+        states.push(state);
+        return () => {
+          cancels.count += 1;
+        };
+      });
+      return { states, cancels, spy };
+    }
+    const idleAgent = () =>
+      new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv });
+
+    test("a pending permission prompt counts as running: no idle warm", async () => {
+      // Mutation: drop `permission.pending !== null` from `idleRunning` → red.
+      const { states, spy } = spyScheduler();
+      const broker = new PermissionBroker();
+      const app = render(
+        <App agent={idleAgent()} model="qwen3" cwd="/tmp/work" permissions={broker} />,
+      );
+      try {
+        await delay(40);
+        expect(states.at(-1)?.running).toBe(false); // idle: the warm may be scheduled
+        const answer = broker.request({
+          tool: "shell",
+          level: "ask",
+          title: "Run a shell command",
+          detail: "make deploy",
+          input: {},
+        });
+        await delay(40);
+        expect(app.lastFrame() ?? "").toContain("make deploy");
+        expect(states.at(-1)?.running).toBe(true);
+        app.stdin.write("\u001B"); // deny
+        await answer;
+        await delay(40);
+        expect(states.at(-1)?.running).toBe(false); // and it is allowed again after
+      } finally {
+        spy.mockRestore();
+        app.unmount();
+      }
+    });
+
+    test("a history warm in flight counts as busy: no idle warm", async () => {
+      // Mutation: `idleBusy = false` (drop `loading` / `warmingRef`) → red.
+      const { states, spy } = spyScheduler();
+      // Hold the history warm in flight: no progress until the gate opens.
+      let open = false;
+      const real = renderLines.warmRowsChunk;
+      const chunk = spyOn(renderLines, "warmRowsChunk").mockImplementation((...args) =>
+        open ? real(...args) : args[2],
+      );
+      const messages: ChatMessage[] = Array.from({ length: 60 }, (_, i) => ({
+        role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: `message ${i}`,
+      }));
+      const createSession = () => ({
+        async *send() {
+          yield { type: "history_reset" as const, messages };
+          yield { type: "turn_end" as const, reason: "end_turn" as const };
+        },
+      });
+      const app = render(<App createSession={createSession} model="qwen3" cwd="/tmp/work" />);
+      try {
+        await delay(30);
+        app.stdin.write("hi");
+        await delay(20);
+        app.stdin.write("\r");
+        await delay(80);
+        expect(states.at(-1)?.busy).toBe(true); // loading bar up, warm held in flight
+        open = true;
+        await delay(120);
+        expect(states.at(-1)?.busy).toBe(false); // finished: the idle warm may run
+      } finally {
+        open = true;
+        chunk.mockRestore();
+        spy.mockRestore();
+        app.unmount();
+      }
+    });
+
+    test("a resize cancels the in-flight idle warm at once", async () => {
+      // Mutation: drop `idleWarmCancelRef.current()` from `onResize` → red.
+      const { cancels, spy } = spyScheduler();
+      const app = render(
+        <App
+          agent={idleAgent()}
+          model="qwen3"
+          cwd="/tmp/work"
+          initialItems={messagesToItems(history)}
+        />,
+      );
+      try {
+        await delay(40);
+        const before = cancels.count;
+        Object.defineProperty(app.stdout, "columns", { value: 120, configurable: true });
+        app.stdout.emit("resize");
+        // Synchronously, before the new width commits (whose effect cleanup would
+        // cancel anyway): only `onResize` itself can have done this.
+        expect(cancels.count).toBe(before + 1);
+      } finally {
+        spy.mockRestore();
+        app.unmount();
+      }
+    });
   });
 });
