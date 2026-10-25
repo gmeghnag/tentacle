@@ -997,6 +997,18 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 
 ## Roadmap (ordered)
 
+> **Owner queue (2026-10-25), next code tasks in this order:**
+> 1. task 7 `connect-sessions` (mobile app; executing);
+> 2. `context-awareness` (`docs/eval/context-awareness.md`);
+> 3. `context-reset` (`docs/eval/context-reset.md`; plan to revise for
+>    decisions 11 and 13, then 3 branches);
+> 4. default `maxIterations` = `-1` (agent and sub-agents);
+> 5. `permission-reply` ("No, let's talk about it"; plan of 2026-10-24 to
+>    refresh against today's main);
+> 6. parallel tools and parallel sub-agents (`docs/eval/parallel-tools.md`,
+>    `docs/eval/parallel-agents.md`; evaluate first).
+> Then the mobile app tasks resume (task 8 onward, `docs/eval/mobile-app.md`).
+
 - [x] **Local daemon on a worker thread** (the "TUI always over RPC" lever —
       moves model streaming + tool execution off the render thread, so the UI
       never janks and a daemon crash doesn't kill the UI). **DONE and now the
