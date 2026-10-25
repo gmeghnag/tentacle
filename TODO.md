@@ -825,6 +825,27 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       - Known limit, accepted: a preview cut starting inside a multi-line
         comment/string may colour its first lines wrongly (cosmetic).
       - Later, not now: the same colouring inside edit diffs (green/red bars).
+- [ ] **TUI: a spilled tool result shows a short note, not the model's banner**
+      (owner, 2026-10-25) — `feat/tui-spill-note`, S–M · cross-module (to
+      confirm in the plan), Sonnet executes, Opus reviews; runs BEFORE task 6
+      `tui-foreign-turns`. Today a too-large tool result shows the banner meant
+      for the model (`[large fs_read output: full output (N chars) saved to
+      .tentacle/tool-output/… do NOT read it whole]`, built in
+      `packages/agent/src/result-pipeline.ts` `spillLargeOutput`).
+      - The model keeps the banner unchanged.
+      - The daemon flags the result structurally (an additive field: spilled,
+        chars, path) — the TUI NEVER parses the banner text (owner principle:
+        the client never guesses). It must also hold on resume / reload from
+        history (persisted or derivable from a fact, never from text).
+      - TUI text in ENGLISH (owner). Normal view: a grey line
+        `40.8k chars · too large, the model reads it in parts`, then the
+        head/tail preview, syntax-coloured as in `tui-read-highlight`, with
+        the usual `… +N more lines · ctrl+o to expand`.
+      - ctrl+o: the grey line, then `saved to <path>` (in a pod:
+        `saved in the pod to <path>`), then the full head, `… N chars
+        omitted …`, the full tail. The path is shown ONLY in ctrl+o (owner).
+      - Same for every tool that spills (shell too), not only `fs_read`.
+      - The "could not be saved" case (no path) says so, without a path.
 - [ ] **Permission prompt: "No, let's talk about it"** (owner, 2026-10-24) — a
       third answer next to Yes / Yes, always / No: it opens a text field; the
       model gets the rejection TOGETHER with the user's text (e.g. "Rejected
