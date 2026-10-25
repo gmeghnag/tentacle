@@ -31,6 +31,7 @@ import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
 import { pushHistory, recall } from "./history.ts";
 import { useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
+import { startIdleWarm } from "./idle-warm.ts";
 import { resolveLineInput } from "./input-actions.ts";
 import { inputRowCount } from "./input-view.ts";
 import { type LinkFeed, stoppedNotice } from "./link-status.ts";
@@ -434,6 +435,8 @@ export function App({
   // Generation token for the background resize re-layout warm: a newer resize
   // (or unmount) bumps it so the in-flight warm aborts instead of committing.
   const warmGenRef = useRef(0);
+  // Cancels the idle warm of the other Ctrl+O view (idle-warm.ts).
+  const idleWarmCancelRef = useRef<() => void>(() => {});
   // Autonomous wake on a background-job exit: a job that finishes while a turn
   // is running sets this, so the wake fires once the current turn settles (the
   // running turn won't see the exit — the agent flushes exits at turn START).
@@ -540,6 +543,7 @@ export function App({
       // then all cache hits. A newer resize bumps the token and supersedes this
       // warm, coalescing a drag storm onto the latest width.
       warmGenRef.current += 1;
+      idleWarmCancelRef.current();
       const gen = warmGenRef.current;
       const items = stateRef.current.items;
       const opts = { expandAll, width: next.columns, spillInPod: daemonInPod };
@@ -622,6 +626,22 @@ export function App({
   });
   // The layout options a history warm uses (read off the render thread).
   layoutOptsRef.current = { expandAll, width: columns, spillInPod: daemonInPod };
+  // Once the transcript is quiet, fill the cache for the OTHER Ctrl+O view in
+  // small chunks (idle-warm.ts) so the first toggle is a hit. Any change to the
+  // deps (new items, a turn starting, a resize commit, Ctrl+O) cleans up and
+  // reschedules; a resize in flight cancels it (onResize).
+  const idleItems = st.items;
+  const idleRunning = st.running || permission.pending !== null;
+  const idleBusy = loading !== null || warmingRef.current;
+  useEffect(() => {
+    idleWarmCancelRef.current = startIdleWarm({
+      items: idleItems,
+      opts: { expandAll, width: columns, spillInPod: daemonInPod },
+      running: idleRunning,
+      busy: idleBusy,
+    });
+    return idleWarmCancelRef.current;
+  }, [idleItems, idleRunning, idleBusy, expandAll, columns, daemonInPod]);
   const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
   const visible = sliceLaid(layout.laid, win.start, win.end);
