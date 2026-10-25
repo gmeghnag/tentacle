@@ -65,8 +65,20 @@ per user message.
    nessun messaggio precedente, partiamo dal nuovo prompt")
    The model's new context holds no old message either: system prompt + the
    restart prompt (anything else carried over is decision 5).
+5. **What the fresh context carries** (owner OK to the proposal, adding
+   "naturalmente oltre ad AGENTS.md"):
+   - the system prompt, which already folds in the identity, the project
+     `AGENTS.md` and the skills catalog (`packages/config/src/resolve.ts:225-240`);
+   - the restart prompt written by the model;
+   - an automatic list of the background jobs still running (id + command),
+     appended by tentacle — the jobs keep running and their exit notices reach
+     the new context as today;
+   - the active skills, reloaded as compaction does;
+   - the user's queued messages, delivered in the new context;
+   - the reset must be the ONLY tool call of its assistant message, else it is
+     refused with the reason (the other results would land in the discarded
+     history).
 
 ## Open questions (asked one at a time)
 
-- What else survives the reset (todo list, background jobs, sub-agents).
 - Tool name and how the TUI and the phone show it.
