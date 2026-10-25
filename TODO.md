@@ -387,6 +387,18 @@ Daily-driver work (done 2026-10-14):
       while a resize warm is in flight, gate every re-layout on the pending
       width, or key the cache on both widths. S · contained.
 
+- [ ] **Parallel tool calls** ([`docs/eval/parallel-tools.md`](docs/eval/parallel-tools.md);
+      owner, 2026-10-25) — run a round's calls in parallel where safe; which
+      tools are parallel-safe to evaluate; setting `sequential` | `parallel`,
+      default to recommend (owner's first idea: sequential). AFTER task 7
+      and `context-reset`. Type: eval → feat · Blast: load-bearing.
+- [ ] **Parallel sub-agents** ([`docs/eval/parallel-agents.md`](docs/eval/parallel-agents.md);
+      owner, 2026-10-25) — run several `agent_task` calls in parallel;
+      setting `sequential` | `parallel`, default to recommend (owner's first
+      idea: parallel). Separate task from parallel tools, evaluated
+      together. AFTER task 7 and `context-reset`. Type: eval → feat · Blast:
+      load-bearing.
+
 ### Block 7 — MCP (client, stdio transport, tool adapter)
 
 - [x] 🟡 **MCP tool calls have no timeout and ignore the turn's abort signal.**
