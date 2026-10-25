@@ -319,7 +319,7 @@ Daily-driver work (done 2026-10-14):
       (`messagesToItems`). Tests in `session-store.test.ts`, `session.test.ts`,
       `resume.test.ts`.
 
-- [ ] 🟡 **TUI: a tab breaks the diff bars and long tool rows**
+- [x] 🟡 **TUI: a tab breaks the diff bars and long tool rows** — DONE 2026-10-25, merged `096069a`
       ([`docs/fix/tui-diff-tabs.md`](docs/fix/tui-diff-tabs.md); owner,
       2026-10-25, screenshots) — `renderBar` (`render-lines.ts`) counts a tab
       as 1 cell (and every char by `.length`), Ink passes the `\t` through,
