@@ -60,7 +60,11 @@ per user message.
    (`Session.compact`, `packages/agent/src/session.ts:157-169`): the
    pre-reset history is NOT kept in the record (no record-format change). The
    old transcript stays only on the screen of the clients that saw it.
-   (2026-10-25: owner answered "no" to keeping it)
+   (2026-10-25: owner answered "no" to keeping it; considered keeping the
+   last N messages on disk, configurable, then dropped it: "non salviamo
+   nessun messaggio precedente, partiamo dal nuovo prompt")
+   The model's new context holds no old message either: system prompt + the
+   restart prompt (anything else carried over is decision 5).
 
 ## Open questions (asked one at a time)
 
