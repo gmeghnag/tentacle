@@ -48,7 +48,9 @@ import { permissionDetailLines, permissionShowsCwd, usePermissionBroker } from "
 import {
   type QueuedMessage,
   type QueuedRows,
+  type ReturnedCause,
   addRow,
+  handBackRows,
   handOff,
   onReject,
   onSteer,
@@ -137,6 +139,21 @@ export interface SessionController {
    * daemon stored. Optional: absent where no daemon owns the session.
    */
   rename?(title: string): Promise<string>;
+  /**
+   * Subscribe to MY queued rows coming back from the daemon (a turn left them
+   * undrained, docs/feat/queued-broadcast.md): each row once, with my own
+   * text. Never re-sent. Optional: absent where no daemon reports the queue.
+   * Returns an unsubscribe.
+   */
+  onReturned?(
+    listener: (
+      rows: readonly {
+        readonly id: string;
+        readonly text: string;
+        readonly cause: ReturnedCause;
+      }[],
+    ) => void,
+  ): () => void;
 }
 
 /**
@@ -331,6 +348,14 @@ export function App({
   const abortRef = useRef<AbortController | null>(null);
   // The controller of the turn being streamed, or null when none is.
   const streamCtrlRef = useRef<AbortController | null>(null);
+  // This TUI stopped the current turn itself (Esc / Ctrl+C), cleared at the
+  // next turn start: a hand-back of my rows then needs no "another device".
+  const stoppedHereRef = useRef(false);
+  // The current session's `onReturned` subscription (replaced with the session).
+  const returnedSubRef = useRef<(() => void) | null>(null);
+  // Row ids this TUI put back in the input itself (a send-now cancelled before
+  // it started): the daemon's later `returned` of one is not given twice.
+  const restoredRef = useRef(new Set<string>());
   // A quit asked for mid-turn: exit as soon as the turn settles (it is saved then).
   const exitPendingRef = useRef(false);
   const lastUserRef = useRef<string | null>(null);
@@ -592,6 +617,38 @@ export function App({
     [field.update, pushNotice],
   );
 
+  /**
+   * Watch `session` for my rows coming back (docs/feat/queued-broadcast.md):
+   * they leave the list and go to the input field with the notice. Nothing is
+   * sent: the user decides (Enter, or delete).
+   */
+  const watchReturned = useCallback(
+    (session: SessionController | null) => {
+      returnedSubRef.current?.();
+      returnedSubRef.current =
+        session?.onReturned?.((back) => {
+          const step = handBackRows(
+            rowsRef.current,
+            back,
+            stoppedHereRef.current,
+            restoredRef.current,
+          );
+          setRows(() => step.rows);
+          if (step.notice !== "") {
+            restoreInput(step.text, step.notice);
+          }
+        }) ?? null;
+    },
+    [restoreInput, setRows],
+  );
+  useEffect(() => {
+    watchReturned(sessionRef.current);
+    return () => {
+      returnedSubRef.current?.();
+      returnedSubRef.current = null;
+    };
+  }, [watchReturned]);
+
   /** No turn streams any more: show the TUI idle (a send-now kept it running). */
   const showIdle = useCallback(() => {
     if (stateRef.current.running && !streamCtrlRef.current) {
@@ -693,7 +750,8 @@ export function App({
           stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
           // A queued message was just injected — drop it from the pending list.
           if (event.type === "steer") {
-            setRows(onSteer);
+            const { id } = event;
+            setRows((rows) => onSteer(rows, id));
           }
           const pending = sendNowRef.current;
           if (event.type === "history_reset" && pending) {
@@ -711,6 +769,7 @@ export function App({
           ? onSuccessorError(error, rowsRef.current)
           : ({ kind: "fail" } as const);
         if (failed.kind === "restore") {
+          for (const id of failed.ids) restoredRef.current.add(id);
           setRows(() => []);
           stateRef.current = applySessionEvent(
             stateRef.current,
@@ -785,6 +844,7 @@ export function App({
       }
       const controller = new AbortController();
       abortRef.current = controller;
+      stoppedHereRef.current = false;
       stateRef.current = continuation
         ? startContinuation(stateRef.current, Date.now())
         : startTurn(stateRef.current, text, Date.now());
@@ -860,6 +920,8 @@ export function App({
     const pending: PendingSendNow = { mode: "atomic", next, successor: null, resetSeen: false };
     sendNowRef.current = pending;
     abortRef.current = next;
+    // A new turn of ours: whoever stops it from here on is not known yet.
+    stoppedHereRef.current = false;
     const onCompaction = plan.target === "compaction";
     if (onCompaction) {
       // The rows are the send-now's now (the compaction's end sends nothing),
@@ -1003,6 +1065,7 @@ export function App({
           // fresh one starts (decision D3).
           sessionRef.current?.close?.();
           sessionRef.current = makeSession();
+          watchReturned(sessionRef.current);
           // The send-now latches are per session: the new one asks (and says) afresh.
           sendNowUnsupportedRef.current = false;
           fallbackNoticedRef.current = false;
@@ -1169,6 +1232,7 @@ export function App({
     },
     [
       makeSession,
+      watchReturned,
       clipboard,
       openPanel,
       cwd,
@@ -1362,6 +1426,7 @@ export function App({
         // (suspended, unseen) until the TUI quits.
         if (abortRef.current) {
           permission.answer(DISMISSED);
+          stoppedHereRef.current = true;
           abortRef.current.abort();
         }
       } else if (key.upArrow) {
@@ -1387,6 +1452,7 @@ export function App({
       ) {
         exit();
       } else {
+        stoppedHereRef.current = true;
         abortRef.current.abort();
       }
       return;
@@ -1426,6 +1492,7 @@ export function App({
       }
     }
     if (key.escape && stateRef.current.running && abortRef.current) {
+      stoppedHereRef.current = true;
       abortRef.current.abort();
       return;
     }

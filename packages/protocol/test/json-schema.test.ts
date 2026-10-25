@@ -119,7 +119,17 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1snapshot/result": [
     { messages: [{ role: "user", content: "q" }] },
     { messages: [], since: { epoch: "e", seq: 0 }, title: { text: "(empty)", source: "auto" } },
+    {
+      messages: [],
+      since: { epoch: "e", seq: 3 },
+      queued: {
+        entries: [{ id: "a", text: "A" }],
+        returned: [{ id: "b", text: "B", cause: "ended" }],
+      },
+    },
   ],
+  "methods/session~1reclaim/params": [{ sessionId: "s", ids: ["a", "b"] }],
+  "methods/session~1reclaim/result": [{}],
   "methods/session~1rename/params": [{ sessionId: "s", title: " Fix\tlogin " }],
   "methods/session~1rename/result": [{ title: { text: "Fix login", source: "user" } }],
   "methods/session~1enqueue/params": [{ sessionId: "s", id: "e", turnId: "t", text: "steer" }],
@@ -275,6 +285,12 @@ const FIXTURES: Record<string, Json[]> = {
     update({ type: "session_closed", reason: "deleted" }),
     update({ type: "session_title", title: "Fix the login bug", source: "model" }),
     update({ type: "session_title", title: "Mine", source: "user" }),
+    update({ type: "queued", entries: [], returned: [] }),
+    update({
+      type: "queued",
+      entries: [{ id: "a", text: "A" }],
+      returned: [{ id: "b", text: "B", cause: "cancelled" }],
+    }),
     // The catch-all (decision E): unknown display / mandatory events are valid frames.
     update({ type: "progress", pct: 3 }),
     { sessionId: "s", seq: 2, mandatory: true, update: { type: "future_mandatory", id: "p" } },

@@ -866,7 +866,9 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
     for (let r = await first; !r.done; r = await iter.next()) {
       events.push(r.value);
     }
-    expect(events.filter((e) => e.type === "steer")).toEqual([{ type: "steer", text: "early" }]);
+    expect(events.filter((e) => e.type === "steer")).toEqual([
+      { type: "steer", text: "early", id: expect.any(String) },
+    ]);
     expect(seen).toContain("early");
     client.close();
   });
@@ -1429,8 +1431,8 @@ describe("RemoteSession steering bound to its turn (review fixes)", () => {
     }
     // A shared key would make "B" a retry of "A": silently dropped.
     expect(events.filter((e) => e.type === "steer")).toEqual([
-      { type: "steer", text: "A" },
-      { type: "steer", text: "B" },
+      { type: "steer", text: "A", id: expect.any(String) },
+      { type: "steer", text: "B", id: expect.any(String) },
     ]);
     expect(seen[1]?.slice(-2)).toEqual(["A", "B"]);
     client.close();

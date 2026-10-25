@@ -988,6 +988,89 @@
       "required": ["turnId"],
       "type": "object"
     },
+    "QueueState": {
+      "additionalProperties": true,
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/QueuedEntry"
+          },
+          "type": "array"
+        },
+        "returned": {
+          "items": {
+            "$ref": "#/$defs/ReturnedEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["entries", "returned"],
+      "type": "object"
+    },
+    "QueuedEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["id", "text"],
+      "type": "object"
+    },
+    "QueuedUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/QueuedEntry"
+          },
+          "type": "array"
+        },
+        "returned": {
+          "items": {
+            "$ref": "#/$defs/ReturnedEntry"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "queued",
+          "type": "string"
+        }
+      },
+      "required": ["entries", "returned", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
+    "ReclaimParams": {
+      "additionalProperties": true,
+      "properties": {
+        "ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["ids", "sessionId"],
+      "type": "object"
+    },
+    "ReclaimResult": {
+      "additionalProperties": true,
+      "properties": {},
+      "type": "object"
+    },
     "RenameParams": {
       "additionalProperties": true,
       "properties": {
@@ -1065,6 +1148,29 @@
         }
       },
       "required": ["type", "uri"],
+      "type": "object"
+    },
+    "ReturnCause": {
+      "enum": ["cancelled", "failed", "ended"],
+      "type": "string"
+    },
+    "ReturnedEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "cause": {
+          "$ref": "#/$defs/ReturnCause"
+        },
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["cause", "id", "text"],
       "type": "object"
     },
     "SeedTitle": {
@@ -1373,6 +1479,7 @@
           "permission_request": "#/$defs/PermissionRequestUpdate",
           "permission_resolved": "#/$defs/PermissionResolvedUpdate",
           "plan": "#/$defs/Plan",
+          "queued": "#/$defs/QueuedUpdate",
           "session_closed": "#/$defs/SessionClosed",
           "session_title": "#/$defs/SessionTitleUpdate",
           "steer": "#/$defs/Steer",
@@ -1431,6 +1538,9 @@
         },
         {
           "$ref": "#/$defs/SessionTitleUpdate"
+        },
+        {
+          "$ref": "#/$defs/QueuedUpdate"
         }
       ]
     },
@@ -1587,6 +1697,9 @@
           },
           "type": "array"
         },
+        "queued": {
+          "$ref": "#/$defs/QueueState"
+        },
         "since": {
           "$ref": "#/$defs/HistoryCut"
         },
@@ -1613,6 +1726,10 @@
     "Steer": {
       "additionalProperties": true,
       "properties": {
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
         "text": {
           "type": "string"
         },
@@ -2126,6 +2243,14 @@
       },
       "result": {
         "$ref": "#/$defs/PromptResult"
+      }
+    },
+    "session/reclaim": {
+      "params": {
+        "$ref": "#/$defs/ReclaimParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ReclaimResult"
       }
     },
     "session/rename": {

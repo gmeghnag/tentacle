@@ -979,7 +979,9 @@ describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
       await client.request("session/enqueue", { sessionId, id: "late", turnId: "t3", text: "now" }),
     ).toEqual({});
     await turnEnd(updates, "t3");
-    expect(steers(updates).map((u) => u.update)).toEqual([{ type: "steer", text: "now" }]);
+    expect(steers(updates).map((u) => u.update)).toEqual([
+      { type: "steer", text: "now", id: "late" },
+    ]);
   });
 
   test("an enqueue sent right after the ack is not lost to the turn-start steering reset", async () => {
@@ -1000,7 +1002,9 @@ describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
     model.release();
     await turnEnd(updates, "t1");
     // The late drain injected it and ran a second round that saw it.
-    expect(steers(updates).map((u) => u.update)).toEqual([{ type: "steer", text: "early" }]);
+    expect(steers(updates).map((u) => u.update)).toEqual([
+      { type: "steer", text: "early", id: "e1" },
+    ]);
     expect(model.calls[1]?.at(-1)).toBe("early");
   });
 

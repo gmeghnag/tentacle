@@ -153,7 +153,8 @@ export type AgentEvent =
       readonly exitCode: number | null;
     }
   // A user message queued mid-turn ("steering") was injected into the loop.
-  | { readonly type: "steer"; readonly text: string }
+  // `id`: its enqueue id — set by the daemon (the loop knows only texts).
+  | { readonly type: "steer"; readonly text: string; readonly id?: string }
   // The loop itself added a user-role message to the history (the empty-round
   // nudge, a background-job note, a hook's note): emitted right after the
   // push, so every history message has an event and a replay can rebuild it.

@@ -46,6 +46,7 @@ import {
   type OpenResult,
   PROTOCOL_VERSION,
   type PromptResult,
+  type QueueState,
   type RenameResult,
   type SeedTitle,
   type SendNowMessage,
@@ -132,6 +133,16 @@ export interface SessionTitleNotice {
   readonly source: "model" | "user";
 }
 
+/**
+ * The session's queue as the daemon reports it (a `queued` update, or the
+ * snapshot of a resync): the full state, every writer's rows. Not
+ * turn-scoped. The daemon's fact, never derived (docs/feat/queued-broadcast.md).
+ */
+export interface SessionQueueNotice {
+  readonly sessionId: string;
+  readonly state: QueueState;
+}
+
 /** A session's history read back, with the daemon's title (absent: an older daemon has none). */
 export interface ReadBack {
   readonly messages: readonly ChatMessage[];
@@ -190,6 +201,8 @@ interface Snap {
   readonly since?: HistoryCut;
   readonly turn?: string;
   readonly title?: SessionTitle;
+  /** The queue at the cut (absent: an older daemon does not report it). */
+  readonly queued?: QueueState;
 }
 
 /** One session this client opened (or is opening) and has not closed. */
@@ -221,6 +234,8 @@ interface SessionEntry {
    * never regenerated over a rename.
    */
   title: SeedTitle | undefined;
+  /** The daemon's last reported queue; undefined until it reports one (an older daemon never does). */
+  queued: QueueState | undefined;
 }
 
 /**
@@ -293,6 +308,8 @@ export class RemoteClient {
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
   /** Session-independent listeners for title changes (idle or mid-turn). */
   private readonly titleListeners = new Set<(notice: SessionTitleNotice) => void>();
+  /** Session-independent listeners for queue changes (idle or mid-turn). */
+  private readonly queueListeners = new Set<(notice: SessionQueueNotice) => void>();
   private readonly statusListeners = new Set<(status: LinkStatus) => void>();
   /** The daemon's `/name` skills, from the latest handshake (a reconnect refreshes it). */
   private skillCatalog: readonly SkillSummary[] = [];
@@ -465,6 +482,28 @@ export class RemoteClient {
   onSessionTitle(listener: (notice: SessionTitleNotice) => void): () => void {
     this.titleListeners.add(listener);
     return () => this.titleListeners.delete(listener);
+  }
+
+  /** Subscribe to queue changes across all sessions (see `SessionQueueNotice`); returns an unsubscribe. */
+  onSessionQueued(listener: (notice: SessionQueueNotice) => void): () => void {
+    this.queueListeners.add(listener);
+    return () => this.queueListeners.delete(listener);
+  }
+
+  /** The session's queue as last reported; undefined if the daemon has not reported one. */
+  queuedOf(sessionId: string): QueueState | undefined {
+    return this.sessions.get(sessionId)?.queued;
+  }
+
+  /**
+   * `session/reclaim`: these returned rows are back with their writer (this
+   * client). Idempotent daemon-side, so re-sent after a drop. The caller
+   * reclaims only ids it sent itself (docs/feat/queued-broadcast.md).
+   */
+  reclaim(sessionId: string, ids: readonly string[]): Promise<void> {
+    return this.sessionCall(sessionId, Method.Reclaim, { sessionId, ids: [...ids] }, "keyed").then(
+      () => undefined,
+    );
   }
 
   /**
@@ -1094,6 +1133,7 @@ export class RemoteClient {
       turnEndsApplied: 0,
       turnEndsInHistory: 0,
       title,
+      queued: undefined,
     };
     this.sessions.set(id, entry);
     return entry;
@@ -1119,6 +1159,14 @@ export class RemoteClient {
     entry.title = title;
     for (const listener of this.titleListeners) {
       listener({ sessionId: entry.id, title: title.text, source: title.source });
+    }
+  }
+
+  /** The daemon's queue now (a `queued` update in seq order, or a resync's snapshot): full state. */
+  private queuedChanged(entry: SessionEntry, state: QueueState): void {
+    entry.queued = state;
+    for (const listener of this.queueListeners) {
+      listener({ sessionId: entry.id, state });
     }
   }
 
@@ -1274,6 +1322,12 @@ export class RemoteClient {
     this.historyRead(entry, snap.messages, mark);
     // A title change behind the cut is only in the snapshot.
     this.titleRead(entry, snap.title);
+    // So is a queue change: the state at the cut, then the buffered updates
+    // past it (applied by `step` below, in seq order). Only here — never from
+    // `readBack`, whose snapshot lags the live stream (it would go back).
+    if (snap.queued) {
+      this.queuedChanged(entry, snap.queued);
+    }
     this.step(entry, {
       kind: "snapshot",
       messages: snap.messages,
@@ -1381,6 +1435,9 @@ export class RemoteClient {
       } else if (update.type === "session_title") {
         // Not turn-scoped either: the title listeners fire while idle too.
         this.titleChanged(entry, { text: update.title, source: update.source });
+      } else if (update.type === "queued") {
+        // Not turn-scoped: the queue listeners fire while idle too.
+        this.queuedChanged(entry, { entries: update.entries, returned: update.returned });
       }
       // Closed daemon-side (by any client): nothing left to close at exit,
       // nothing left to answer.
@@ -1527,6 +1584,7 @@ export class RemoteClient {
       ...(first?.since ? { since: first.since } : {}),
       ...(first?.turn ? { turn: first.turn.turnId } : {}),
       ...(first?.title ? { title: first.title } : {}),
+      ...(first?.queued ? { queued: first.queued } : {}),
     };
   }
 

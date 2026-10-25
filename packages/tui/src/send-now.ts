@@ -219,20 +219,27 @@ export function planRefusal(error: unknown, rows: QueuedRows, oldRunning: boolea
  * The send-now's new turn failed. `Cancelled` before it started (Esc in the
  * window; the daemon's `delivered: false`, read by the client): it delivered
  * nothing — its prompt nor the steers typed for it — so every row comes back.
- * Anything else is an ordinary turn failure.
+ * `ids`: the rows restored, so the daemon's later `returned` of one is not
+ * given twice (`handBackRows`). Anything else is an ordinary turn failure.
  */
 export function onSuccessorError(
   error: unknown,
   rows: QueuedRows,
 ):
   | { readonly kind: "fail" }
-  | { readonly kind: "restore"; readonly text: string; readonly notice: string } {
+  | {
+      readonly kind: "restore";
+      readonly text: string;
+      readonly notice: string;
+      readonly ids: readonly string[];
+    } {
   if (errorCode(error) !== SendNowErrorCode.Cancelled) {
     return { kind: "fail" };
   }
   return {
     kind: "restore",
     text: takeAll(rows).text,
+    ids: rows.map((r) => r.id),
     notice: "_send-now cancelled before it started — your queued messages are back in the input_",
   };
 }

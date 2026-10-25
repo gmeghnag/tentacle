@@ -54,6 +54,9 @@ import {
   MAX_SESSION_TITLE,
   type PermissionOutcome,
   type PromptResult,
+  type QueueState,
+  type QueuedEntry,
+  type ReturnedEntry,
   type SendNowMessage,
   type SendNowRefusal,
   type SendNowTarget,
@@ -82,6 +85,7 @@ import {
   type ResumedTurn,
   classifyPending,
 } from "./persisted-session.ts";
+import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
 import type { SessionSummary } from "./session-list.ts";
 import type { SessionPersister } from "./session-persister.ts";
@@ -142,6 +146,8 @@ interface Cut {
   readonly length: number;
   /** The turn running at the cut, if any (its `turn_start` is at or before `seq`). */
   readonly turnId: string | null;
+  /** The queue as of the cut: the last `queued` state emitted (seq <= `seq`). */
+  readonly queued: QueueState;
 }
 
 /**
@@ -173,6 +179,8 @@ export interface RestoredSessionState {
   readonly cutShort: boolean;
   /** The record's title (absent = `auto`). */
   readonly title?: TitleState;
+  /** The rows the record kept for their writer (absent = none). */
+  readonly returned?: readonly ReturnedEntry[];
 }
 
 /**
@@ -257,11 +265,21 @@ export class HostedSession {
   /** Every accepted `enqueue` id, for its lifetime (retries). */
   private readonly enqueued = new Set<string>();
   /**
-   * Parallel to the agent's steering queue, in order: each entry's enqueue id
-   * (`undefined`: a resumed turn's restored steer — ids are not on disk).
-   * Shifted on every `steer` the turn streams (one per drained text).
+   * The agent's steering queue, mirrored in order with each text's enqueue id
+   * (a resumed turn's restored steer: its record's id, or one minted at the
+   * reload for an older record — nobody's). Shifted on every `steer` the turn
+   * streams (one per drained text); emptied at a turn's end unless a live
+   * send-now carries it over (`finishTurn`). The ONE source of the queue: the
+   * agent's own leftover after a turn is never read (docs/feat/queued-broadcast.md).
    */
-  private steeringIds: (string | undefined)[] = [];
+  private queue: QueuedEntry[] = [];
+  /**
+   * Rows a turn left undrained, back with their writer (oldest first): they
+   * leave only by a `reclaim` or a send-now that carries them. Persisted.
+   */
+  private returned: ReturnedEntry[] = [];
+  /** The last `queued` state emitted (or the initial one): what the cut records. */
+  private lastQueued: QueueState = EMPTY_QUEUE;
   /** Enqueue ids injected into the history (drained) in this incarnation. */
   private readonly drained = new Set<string>();
   /** Enqueue ids a previous incarnation accepted: their text is in the history already. */
@@ -372,7 +390,15 @@ export class HostedSession {
       seq: 0,
       length: session.messages.length,
       turnId: resume?.turnId ?? null,
+      queued: EMPTY_QUEUE,
     };
+    this.returned = (restored?.returned ?? []).map((r) => ({ ...r }));
+    // A returned row's text is with its writer, not in the history: never
+    // "delivered", so a send-now citing it sends it (a crash-cut turn's steers
+    // land here on reload, docs/feat/queued-broadcast.md Q2).
+    for (const r of this.returned) {
+      this.restoredIds.delete(r.id);
+    }
     // The agent's permission gate asks here (the factory's broker, replaced
     // synchronously before any turn can run): the turn suspends until a client
     // answers or the turn is aborted. See the module comment.
@@ -395,15 +421,23 @@ export class HostedSession {
     // entry kept: that write must still read "suspended on this call" — never
     // "idle" over a history with unanswered calls, never "in flight".
     if (resume) {
-      for (const text of resume.steering) {
+      resume.steering.forEach((text, i) => {
+        // A v4 record kept the id (its writer still knows it); an older one
+        // did not: minted, nobody's. Queued again, so not in the history.
+        const id = resume.steeringIds?.[i] ?? crypto.randomUUID();
         session.enqueue(text);
-        this.steeringIds.push(undefined);
-      }
+        this.queue.push({ id, text });
+        this.restoredIds.delete(id);
+      });
       this.controller = new AbortController();
       this.activeTurnId = resume.turnId;
       this.turns.set(resume.turnId, {});
       this.pending = resume.pending;
     }
+    // The state at the cut (seq 0): a resumed turn's steers, the reloaded
+    // returned rows. Nothing is streamed for it — the snapshot carries it.
+    this.lastQueued = this.queueState();
+    this.cut = { ...this.cut, queued: this.lastQueued };
     // On disk from the start: a session seeded by `open{messages}` (or one
     // just reloaded and reconciled) survives a restart before its next turn.
     this.persist();
@@ -602,16 +636,72 @@ export class HostedSession {
       turns,
       enqueueIds: [...this.enqueued],
       title: this.title,
+      returned: this.returned.map((r) => ({ ...r })),
+      // From the mirror (= the agent's queue in every stretch, the module's
+      // load-bearing assumption), so texts and ids never disagree.
       ...(turnId !== null
         ? {
             turn: {
               turnId,
-              steering: this.session.pendingSteering(),
+              steering: this.queue.map((r) => r.text),
+              steeringIds: this.queue.map((r) => r.id),
               ...(this.pending ? { pending: this.pending } : {}),
             },
           }
         : {}),
     };
+  }
+
+  /** The queue as every client sees it now (`queue-view.ts`). */
+  private queueState(): QueueState {
+    return queueView({
+      turnRunning: this.activeTurnId !== null && !this.compacting,
+      queue: this.queue,
+      successor: this.successorView(),
+      isDelivered: (id) => this.isDelivered(id),
+      returned: this.returned,
+    });
+  }
+
+  /** The reserved send-now as the queue sees it: a close ends it unstarted, like a cancel. */
+  private successorView(): Successor | null {
+    const next = this.successor;
+    return next && this.closed ? { ...next, cancelled: true } : next;
+  }
+
+  /**
+   * Stream the queue if it changed since the last `queued` (full state; a
+   * retried enqueue or an unchanged view sends nothing). Called LAST by every
+   * stretch that changes it — synchronous, never awaited: it runs inside the
+   * steering window. Never throws (a sink error is reported, as `emit`'s).
+   */
+  private publishQueue(): void {
+    const state = this.queueState();
+    if (sameState(state, this.lastQueued)) {
+      return;
+    }
+    this.lastQueued = state;
+    try {
+      this.emit({ type: "queued", ...state });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+  }
+
+  /**
+   * `session/reclaim`: the writer took these returned rows back (they are in
+   * its input now). Unknown or already gone → ignored (a retry is a no-op).
+   * Synchronous, like `enqueue`; on disk (a capture), then streamed.
+   */
+  reclaim(ids: readonly string[]): void {
+    const gone = new Set(ids);
+    const kept = this.returned.filter((r) => !gone.has(r.id));
+    if (kept.length === this.returned.length) {
+      return;
+    }
+    this.returned = kept;
+    this.persist();
+    this.publishQueue();
   }
 
   /** A turn or a compaction is active. */
@@ -746,6 +836,8 @@ export class HostedSession {
       ...(cursor === undefined && cut.turnId !== null ? { turn: { turnId: cut.turnId } } : {}),
       ...(start > 0 ? { cursor: `${cut.epoch}/${start}` } : {}),
       ...(cursor === undefined ? { title: this.wireTitle() } : {}),
+      // As of the cut, like the history: later changes are in the replay.
+      ...(cursor === undefined ? { queued: cut.queued } : {}),
     };
   }
 
@@ -783,6 +875,7 @@ export class HostedSession {
       seq: this.seq,
       length: this.session.messages.length,
       turnId,
+      queued: this.lastQueued,
     };
     this.ring.evict(this.seq);
   }
@@ -856,8 +949,9 @@ export class HostedSession {
       // as "running" forever — run it anyway; it ends through `finishTurn`.
       this.reportTurnError(error);
     }
-    // The agent resets its queue at `send`: so does its id mirror.
-    this.steeringIds = [];
+    // The agent resets its queue at `send`: so does its mirror (already empty:
+    // a turn's end returns or carries every leftover).
+    this.queue = [];
     void this.drive(
       turnId,
       this.session.send(text, controller.signal, {
@@ -915,6 +1009,8 @@ export class HostedSession {
     if (running && this.controller) {
       this.successor = reserve();
       this.controller.abort();
+      // The reserved turn's prompt and the rows it carries are the queue now.
+      this.publishQueue();
       return { turnId };
     }
     // The target ended already: someone else's turn or compaction holds the slot.
@@ -931,6 +1027,8 @@ export class HostedSession {
     }
     this.successor = reserve();
     this.settleSuccessor();
+    // After its `turn_start`: a cited returned row left `returned`.
+    this.publishQueue();
     return { turnId };
   }
 
@@ -953,9 +1051,9 @@ export class HostedSession {
    * (`isDelivered`), or queued for a turn that WILL drain them — a reserved
    * send-now not cancelled (it carries the queue over, `startSuccessor`), or
    * a running turn not aborted. A queue whose only consumer is already
-   * cancelled or aborted is NOT held: `endUnstarted` / the next `prompt`
-   * drops it (debt, docs/feat/send-now-c.md follow-up 3), so the caller
-   * restores it.
+   * cancelled or aborted is NOT held: its turn's end returns it to its writer
+   * (`finishTurn`, docs/feat/queued-broadcast.md), and the caller restores
+   * it now — its client then only reclaims it, never hands it back twice.
    */
   private refusal(error: RpcError, messages: readonly SendNowMessage[]): RpcError {
     const next = this.successor;
@@ -963,7 +1061,7 @@ export class HostedSession {
     const live =
       (next !== null && !next.cancelled) ||
       (turn !== null && !turn.signal.aborted && !this.compacting);
-    const queued = new Set(live ? this.steeringIds : []);
+    const queued = new Set(live ? this.queue.map((r) => r.id) : []);
     const data: SendNowRefusal = {
       held: messages.filter((m) => this.isDelivered(m.id) || queued.has(m.id)).map((m) => m.id),
     };
@@ -1000,21 +1098,16 @@ export class HostedSession {
     const ours = new Set(remaining.map((m) => m.id));
     // The cancelled turn's undrained steers carry over (foreign or resumed
     // ones too, in order), minus ours — those are in the prompt — then the
-    // steers typed for the successor itself.
-    const seed: string[] = [];
-    const seedIds: (string | undefined)[] = [];
-    this.session.pendingSteering().forEach((text, i) => {
-      const id = this.steeringIds[i];
-      if (id !== undefined && ours.has(id)) {
-        return;
-      }
-      seed.push(text);
-      seedIds.push(id);
-    });
-    for (const steer of next.steers) {
-      seed.push(steer.text);
-      seedIds.push(steer.id);
-    }
+    // steers typed for the successor itself. From the mirror, never the
+    // agent's leftover: a turn that ended with no live successor emptied it
+    // (its rows went back to their writer), so nothing is resurrected.
+    const seedRows: QueuedEntry[] = [
+      ...this.queue.filter((r) => !ours.has(r.id)),
+      ...next.steers.map((s) => ({ id: s.id, text: s.text })),
+    ];
+    const seed = seedRows.map((r) => r.text);
+    // Sent now: a returned row cited by this prompt is with its writer no more.
+    this.returned = this.returned.filter((r) => !ours.has(r.id));
     // Delivered from here on: a late `session/enqueue` of one is a no-op success.
     for (const id of [...next.messages.map((m) => m.id), ...next.steers.map((s) => s.id)]) {
       this.enqueued.add(id);
@@ -1023,7 +1116,7 @@ export class HostedSession {
     for (const id of ours) {
       this.drained.add(id);
     }
-    this.steeringIds = seedIds;
+    this.queue = seedRows;
     const controller = new AbortController();
     this.controller = controller;
     this.activeTurnId = next.turnId;
@@ -1118,16 +1211,23 @@ export class HostedSession {
           this.currentToolCallId = event.id;
           this.currentToolName = event.name;
         }
+        let named: AgentEvent = event;
         if (event.type === "steer") {
-          // One per drained text, in queue order: the mirror's head is its id.
-          const id = this.steeringIds.shift();
-          if (id !== undefined) {
-            this.drained.add(id);
+          // One per drained text, in queue order: the mirror's head is its id
+          // — streamed with it, so no client guesses whose row went.
+          const row = this.queue.shift();
+          if (row !== undefined) {
+            this.drained.add(row.id);
+            named = { ...event, id: row.id };
           }
         }
-        const update = eventToUpdate(event);
+        const update = eventToUpdate(named);
         if (update) {
           this.emit(update);
+        }
+        // `steer`, then the queue without it (same stretch).
+        if (event.type === "steer") {
+          this.publishQueue();
         }
       }
       // The generator ended without a `turn_end` (not an agent path today).
@@ -1177,6 +1277,16 @@ export class HostedSession {
       this.activeTurnId = null;
       this.lastActiveAt = this.now();
       this.lastChangeAt = this.lastActiveAt;
+      // The rows it left undrained: carried by a live send-now (D4), else
+      // back to their writer — never kept for "the next turn, whoever starts
+      // it" (docs/feat/queued-broadcast.md, D-return). State first, like the
+      // rest: the record captured below has them.
+      const back = leftovers(this.queue, this.successorView());
+      if (back !== null) {
+        const cause = returnCause(this.closed, end.stopReason);
+        this.returned.push(...back.map((r) => ({ id: r.id, text: r.text, cause })));
+        this.queue = [];
+      }
     }
     try {
       this.emit({ type: "turn_end", turnId, ...end });
@@ -1188,6 +1298,9 @@ export class HostedSession {
       this.persist();
       // Last, in the same stretch: a reserved send-now takes the slot now.
       this.settleSuccessor();
+      // After the successor's `turn_start` (a hand-off stays `turn_end`,
+      // `turn_start` back to back): the queue it left, or carried.
+      this.publishQueue();
       // Only SCHEDULES (a macrotask): no work in the steering window.
       this.kickTitle();
     }
@@ -1342,6 +1455,7 @@ export class HostedSession {
       if (!known) {
         next.steers.push({ id, text });
       }
+      this.publishQueue();
       return;
     }
     // Accepting it while idle would be a fake success: the next turn starts by
@@ -1353,8 +1467,9 @@ export class HostedSession {
     }
     this.enqueued.add(id);
     this.session.enqueue(text);
-    this.steeringIds.push(id);
+    this.queue.push({ id, text });
     this.persist();
+    this.publishQueue();
   }
 
   /**
@@ -1401,6 +1516,7 @@ export class HostedSession {
       this.persist();
       // Last, in the same stretch: a reserved send-now takes the slot now.
       this.settleSuccessor();
+      this.publishQueue();
     }
   }
 
@@ -1422,6 +1538,8 @@ export class HostedSession {
       seq: this.epochStart,
       length: this.session.messages.length,
       turnId: null,
+      // A compaction holds no turn (no queue); the returned rows stay.
+      queued: this.lastQueued,
     };
     try {
       this.emit({ type: "history_replaced", reason: "compact" });
@@ -1436,6 +1554,8 @@ export class HostedSession {
     if (this.successor) {
       this.successor.cancelled = true;
     }
+    // A cancelled send-now's rows leave the queue (its sender restores them).
+    this.publishQueue();
   }
 
   /**
@@ -1471,6 +1591,8 @@ export class HostedSession {
     if (this.successor) {
       this.endUnstarted(this.successor);
     }
+    // The rows its turn left reach every attached writer before the end.
+    this.publishQueue();
     try {
       this.emit({ type: "session_closed", reason });
     } catch (error) {
@@ -1484,16 +1606,22 @@ export class HostedSession {
   /**
    * `close` this session and return the state its ARCHIVED record keeps. The
    * history and the turn are taken just BEFORE the close: a turn cut short
-   * keeps its pending ask and its steers, the shape a crash leaves, which the
+   * keeps its pending ask, the shape a crash leaves, which the
    * reopen closes as ended (`reconcileOnReload`). The turn keys and the stamps
    * are taken AFTER it: the ends the close streamed (`turn_end{cancelled}`,
    * and a waiting send-now's `delivered: false` — memory only until here) are
    * the ends a retried `prompt` / `send_now` must get after the reopen.
+   * The turn's steers too are taken AFTER it: the close returned them to
+   * their writer (`returned`, as streamed), so the reopen must not also
+   * append them as user messages — handed back AND delivered.
    */
   archive(): DaemonSessionState {
     const before = this.persistedState();
     this.close("closed");
     const after = this.persistedState();
-    return { ...after, ...(before.turn ? { turn: before.turn } : {}) };
+    return {
+      ...after,
+      ...(before.turn ? { turn: { ...before.turn, steering: [], steeringIds: [] } } : {}),
+    };
   }
 }

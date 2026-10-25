@@ -8,7 +8,7 @@
  */
 import { type SessionRecord, type TitleState, encodeTitle, suspendedCalls } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
-import { DomainErrorCode, type TurnEnd } from "@tentacle/protocol";
+import { DomainErrorCode, type ReturnedEntry, type TurnEnd } from "@tentacle/protocol";
 
 export const DAEMON_RECORD_KIND = "tentacle.daemon-session";
 /**
@@ -18,10 +18,17 @@ export const DAEMON_RECORD_KIND = "tentacle.daemon-session";
  * 3: `title` may be a chosen title (`{ text, source }`, docs/feat/session-titles.md):
  * a v2 daemon refuses every v3 record instead of dropping a rename at its next
  * write. A v1/v2 record's string title reads as `auto`.
+ * 4: the turn's steers keep their enqueue ids (`turn.steeringIds`) and the
+ * rows returned to their writer are kept (`returned`,
+ * docs/feat/queued-broadcast.md): a v3 daemon refuses a v4 record instead of
+ * dropping them at its next write. A v1–v3 record reads with no ids and
+ * nothing returned.
  */
-export const DAEMON_RECORD_VERSION = 3;
+export const DAEMON_RECORD_VERSION = 4;
 /** Every version `parseDaemonRecord` reads (each read as the current shape). */
-const READABLE_VERSIONS: readonly number[] = [1, 2, DAEMON_RECORD_VERSION];
+const READABLE_VERSIONS: readonly number[] = [1, 2, 3, DAEMON_RECORD_VERSION];
+/** The first version whose `title` may be a chosen one (`{ text, source }`). */
+const CHOSEN_TITLE_VERSION = 3;
 
 /** The permission request a turn was suspended on at the write. */
 export interface PendingPermission {
@@ -37,6 +44,8 @@ export interface PersistedTurn {
   readonly turnId: string;
   /** The steering queue, verbatim and in order (accepted, not yet drained). */
   readonly steering: readonly string[];
+  /** Each steer's enqueue id, parallel to `steering` (v4; absent in a v1–v3 record). */
+  readonly steeringIds?: readonly string[];
   readonly pending?: PendingPermission;
 }
 
@@ -61,6 +70,8 @@ export interface DaemonSessionState {
   readonly archivedAt?: number;
   /** The session's title (absent = `auto`, derived from `messages`). */
   readonly title?: TitleState;
+  /** Rows back with their writer until reclaimed (oldest first; absent = none). */
+  readonly returned?: readonly ReturnedEntry[];
 }
 
 export interface DaemonSessionRecord extends SessionRecord {
@@ -70,6 +81,8 @@ export interface DaemonSessionRecord extends SessionRecord {
   readonly turns: readonly PersistedTurnKey[];
   readonly enqueueIds: readonly string[];
   readonly turn?: PersistedTurn;
+  /** Rows back with their writer until reclaimed (v4 always writes it; read as `[]` from v1–v3). */
+  readonly returned: readonly ReturnedEntry[];
   /**
    * Present iff ARCHIVED (ended and kept): not restored at start, listed as
    * archived, reloaded by an explicit reopen. Absent → restored live at start.
@@ -96,6 +109,7 @@ export function toDaemonRecord(
     lastActiveAt: state.lastActiveAt,
     turns: state.turns,
     enqueueIds: state.enqueueIds,
+    returned: state.returned ?? [],
     ...(state.turn ? { turn: state.turn } : {}),
     ...(state.archivedAt !== undefined ? { archivedAt: state.archivedAt } : {}),
   };
@@ -114,6 +128,7 @@ const isWireStamp = (v: unknown): v is number => Number.isSafeInteger(v) && (v a
 const isStringArray = (v: unknown): v is string[] =>
   Array.isArray(v) && v.every((x) => typeof x === "string");
 const STOP_REASONS = new Set(["end_turn", "max_tokens", "max_iterations", "cancelled", "error"]);
+const RETURN_CAUSES = new Set(["cancelled", "failed", "ended"]);
 
 function turnEndProblem(end: unknown): string | null {
   if (!isObject(end) || typeof end.stopReason !== "string" || !STOP_REASONS.has(end.stopReason)) {
@@ -134,9 +149,16 @@ function turnEndProblem(end: unknown): string | null {
   return null;
 }
 
-function turnProblem(turn: unknown): string | null {
+function turnProblem(turn: unknown, version: number): string | null {
   if (!isObject(turn) || typeof turn.turnId !== "string" || !isStringArray(turn.steering)) {
     return '"turn" is malformed';
+  }
+  // v4 always writes one id per steer: anything else is not a record of ours.
+  if (
+    version >= DAEMON_RECORD_VERSION &&
+    (!isStringArray(turn.steeringIds) || turn.steeringIds.length !== turn.steering.length)
+  ) {
+    return '"turn.steeringIds" is malformed';
   }
   if (turn.pending !== undefined) {
     const p = turn.pending;
@@ -206,34 +228,71 @@ export function parseDaemonRecord(
     }
   }
   if (value.turn !== undefined) {
-    const problem = turnProblem(value.turn);
+    const problem = turnProblem(value.turn, value.schemaVersion);
     if (problem) {
       return { ok: false, reason: problem };
     }
   }
   // v1/v2 never wrote a chosen title: an object there is not a record of ours.
-  if (value.schemaVersion !== DAEMON_RECORD_VERSION && typeof value.title !== "string") {
+  if (value.schemaVersion < CHOSEN_TITLE_VERSION && typeof value.title !== "string") {
     return {
       ok: false,
       reason: `"title" is not a string (record version ${value.schemaVersion})`,
     };
   }
+  const returned = value.schemaVersion >= DAEMON_RECORD_VERSION ? returnedRows(value.returned) : [];
+  if (returned === null) {
+    return { ok: false, reason: '"returned" is malformed' };
+  }
+  // A v1–v3 turn has no ids, whatever it carries: never read half.
+  const turn =
+    isObject(value.turn) && value.schemaVersion < DAEMON_RECORD_VERSION
+      ? withoutIds(value.turn)
+      : value.turn;
+  const current: Record<string, unknown> = {
+    ...value,
+    ...(turn !== undefined ? { turn } : {}),
+    returned,
+    schemaVersion: DAEMON_RECORD_VERSION,
+  };
   if (value.schemaVersion === 1) {
     // v1 had no archive: whatever it carries, it reads as a live record.
-    const { archivedAt: _ignored, ...rest } = value;
-    return {
-      ok: true,
-      record: { ...rest, schemaVersion: DAEMON_RECORD_VERSION } as unknown as DaemonSessionRecord,
-    };
+    const { archivedAt: _ignored, ...rest } = current;
+    return { ok: true, record: rest as unknown as DaemonSessionRecord };
   }
   if (value.archivedAt !== undefined && !isWireStamp(value.archivedAt)) {
     return { ok: false, reason: '"archivedAt" is not a non-negative integer' };
   }
-  // A v2 record is a v3 one with an `auto` title.
-  return {
-    ok: true,
-    record: { ...value, schemaVersion: DAEMON_RECORD_VERSION } as unknown as DaemonSessionRecord,
-  };
+  // A v2 record is a v3 one with an `auto` title; a v3 one a v4 one with no ids, nothing returned.
+  return { ok: true, record: current as unknown as DaemonSessionRecord };
+}
+
+/** A v4 `returned`: its well-formed rows (copied), or null. */
+function returnedRows(value: unknown): ReturnedEntry[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const rows: ReturnedEntry[] = [];
+  for (const row of value) {
+    if (
+      !isObject(row) ||
+      typeof row.id !== "string" ||
+      row.id === "" ||
+      typeof row.text !== "string" ||
+      row.text === "" ||
+      typeof row.cause !== "string" ||
+      !RETURN_CAUSES.has(row.cause)
+    ) {
+      return null;
+    }
+    rows.push({ id: row.id, text: row.text, cause: row.cause as ReturnedEntry["cause"] });
+  }
+  return rows;
+}
+
+function withoutIds(turn: Record<string, unknown>): Record<string, unknown> {
+  const { steeringIds: _ignored, ...rest } = turn;
+  return rest;
 }
 
 /**
@@ -309,6 +368,8 @@ export interface ResumedTurn {
   readonly toolCallId: string;
   /** Accepted, not yet drained — re-queued, drained where they would have been. */
   readonly steering: readonly string[];
+  /** Their enqueue ids, parallel to `steering` (v4); absent from an older record (minted at the reload). */
+  readonly steeringIds?: readonly string[];
   /** The record's pending entry, kept until the re-ask replaces it. */
   readonly pending: PendingPermission;
 }
@@ -319,6 +380,8 @@ export interface Reconciled {
   readonly enqueueIds: readonly string[];
   /** Present iff the turn is continued instead of closed (the history is then untouched). */
   readonly resume?: ResumedTurn;
+  /** The rows back with their writer, as the record kept them. */
+  readonly returned: readonly ReturnedEntry[];
 }
 
 /**
@@ -338,7 +401,13 @@ function resumableTurn(record: DaemonSessionRecord): ResumedTurn | undefined {
   if (!calls || calls[0]?.name !== pending.tool || !key || key.end) {
     return undefined;
   }
-  return { turnId: turn.turnId, toolCallId: pending.toolCallId, steering: turn.steering, pending };
+  return {
+    turnId: turn.turnId,
+    toolCallId: pending.toolCallId,
+    steering: turn.steering,
+    ...(turn.steeringIds ? { steeringIds: turn.steeringIds } : {}),
+    pending,
+  };
 }
 
 /**
@@ -350,8 +419,9 @@ function resumableTurn(record: DaemonSessionRecord): ResumedTurn | undefined {
  * the user's behalf:
  * every unanswered call of the trailing assistant message gets a synthetic
  * answer (which one: see the notes above; only the FIRST unanswered call can
- * have started — calls run in order), the steering queue is kept as user
- * messages, and the turn gets its restart end.
+ * have started — calls run in order), the steering queue goes back to its
+ * writers (v4; an older record keeps it as user messages), and the turn gets
+ * its restart end.
  *
  * An ARCHIVED record's turn (`archivedAt`: the session was ENDED mid-turn — a
  * close, the admin cap) is never continued: whoever ended the session ended
@@ -362,13 +432,14 @@ function resumableTurn(record: DaemonSessionRecord): ResumedTurn | undefined {
 export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
   const messages = [...record.messages];
   const turn = record.turn;
+  const returned = record.returned;
   if (!turn) {
-    return { messages, turns: record.turns, enqueueIds: record.enqueueIds };
+    return { messages, turns: record.turns, enqueueIds: record.enqueueIds, returned };
   }
   const ended = record.archivedAt !== undefined;
   const resume = ended ? undefined : resumableTurn(record);
   if (resume) {
-    return { messages, turns: record.turns, enqueueIds: record.enqueueIds, resume };
+    return { messages, turns: record.turns, enqueueIds: record.enqueueIds, resume, returned };
   }
   const notes = ended
     ? {
@@ -393,14 +464,36 @@ export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
       messages.push({ role: "tool", content, toolCallId: call.id });
     }
   }
-  for (const text of turn.steering) {
-    messages.push({ role: "user", content: text });
-  }
   const end = ended ? ARCHIVED_TURN_END : RESTART_TURN_END;
   const turns = record.turns.map((key) =>
     key.turnId === turn.turnId && !key.end ? { turnId: key.turnId, end } : key,
   );
-  return { messages, turns, enqueueIds: record.enqueueIds };
+  // The undrained steers (owner decision Q2, docs/feat/queued-broadcast.md).
+  // A v4 record knows their writers (`turn.steeringIds`, enforced by the
+  // parser): they go back to them like a stopped turn's (`returned`, cause
+  // `ended`), never into the history — the next prompt, anyone's, must not
+  // answer them by surprise. An id already returned is not returned twice.
+  // An older record knows no writer: they stay user messages ("delivered,
+  // unanswered"). An archived record's turn has `steering: []` (its close
+  // already returned them, `HostedSession.archive`).
+  const ids = turn.steeringIds;
+  if (ids) {
+    const known = new Set(returned.map((r) => r.id));
+    const back = turn.steering.flatMap((text, i) => {
+      const id = ids[i];
+      return id === undefined || known.has(id) ? [] : [{ id, text, cause: "ended" as const }];
+    });
+    return {
+      messages,
+      turns,
+      enqueueIds: record.enqueueIds,
+      returned: [...returned, ...back],
+    };
+  }
+  for (const text of turn.steering) {
+    messages.push({ role: "user", content: text });
+  }
+  return { messages, turns, enqueueIds: record.enqueueIds, returned };
 }
 
 /**

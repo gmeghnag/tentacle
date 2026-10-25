@@ -145,6 +145,12 @@ interface ArchivedEntry {
    * restores with it.
    */
   renamed: RecordTitle | undefined;
+  /**
+   * A `session/reclaim` of the archived session (owner F2): these returned
+   * rows are back with their writer. Dropped from the record by the same
+   * rewrite (no reopen), and from a reopen even one racing that write.
+   */
+  readonly reclaimed: Set<string>;
   readonly cwd: string;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -162,6 +168,7 @@ function archivedEntry(
     id: record.id,
     title: recordTitleText(record),
     renamed: undefined,
+    reclaimed: new Set(),
     cwd: record.cwd,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -169,6 +176,15 @@ function archivedEntry(
     unwritten: false,
     retrying: false,
   };
+}
+
+/** `record` without the `reclaimed` returned rows (itself when none of them is there). */
+function withoutReclaimed(
+  record: DaemonSessionRecord,
+  reclaimed: ReadonlySet<string>,
+): DaemonSessionRecord {
+  const returned = record.returned.filter((r) => !reclaimed.has(r.id));
+  return returned.length === record.returned.length ? record : { ...record, returned };
 }
 
 export class SessionHost {
@@ -351,8 +367,8 @@ export class SessionHost {
       this.admitLive();
       // One step: out of the archive, live, attached (the restart path, mid-life).
       this.archived.delete(entry.id);
-      // A rename of the archived session wins over the record it was read from.
-      const hosted = this.restore(record, entry.renamed);
+      // A rename (or a reclaim) of the archived session wins over the record it was read from.
+      const hosted = this.restore(withoutReclaimed(record, entry.reclaimed), entry.renamed);
       const { resync, epoch } = hosted.attach(attachment, params.since);
       return { hosted, created: false, resync, epoch };
     }
@@ -433,19 +449,40 @@ export class SessionHost {
     }
     entry.title = text;
     entry.renamed = { text, source: "user" };
-    void this.rewriteArchived(entry);
+    void this.rewriteArchived(entry, "renamed");
     return { text, source: "user" };
   }
 
   /**
-   * Write an archived entry's record with its `renamed` title (the latest one
-   * when renames overlap). Read back first when the record is not resident; a
-   * read that fails leaves the rename in memory only (listed, kept by a
-   * reopen), reported. Skipped once the entry is no longer archived (reopened:
-   * the live session carries the title; deleted). The rewritten record stays
-   * resident until its write lands; a failed write is retried by the sweeps.
+   * `session/reclaim` of a session that is no longer live (owner F2): a
+   * closed / archived one only marks the rows reclaimed in its record — no
+   * reopen, no revival, like an archived rename. Resolves once that write
+   * settled (a reclaimed row never comes back after a restart). A deleted id
+   * → `SessionDeleted`; one not archived → `UnknownSession`.
    */
-  private async rewriteArchived(entry: ArchivedEntry): Promise<void> {
+  reclaimArchived(id: string, ids: readonly string[]): Promise<void> {
+    if (this.deleted.has(id)) {
+      throw new RpcError(DomainErrorCode.SessionDeleted, `session ${id} was deleted`);
+    }
+    const entry = this.archived.get(id);
+    if (!entry) {
+      throw new RpcError(DomainErrorCode.UnknownSession, `unknown session: ${id}`);
+    }
+    for (const key of ids) entry.reclaimed.add(key);
+    return this.rewriteArchived(entry, "reclaimed");
+  }
+
+  /**
+   * Write an archived entry's record with its `renamed` title (the latest one
+   * when renames overlap) and without its `reclaimed` rows. Read back first
+   * when the record is not resident; a read that fails leaves the change in
+   * memory only (listed, kept by a reopen), reported. Skipped once the entry
+   * is no longer archived (reopened: the live session carries it; deleted),
+   * or when it changes nothing. The rewritten record stays resident until its
+   * write lands; a failed write is retried by the sweeps. Resolves once the
+   * write settled.
+   */
+  private async rewriteArchived(entry: ArchivedEntry, what: string): Promise<void> {
     const persister = this.opts.persister;
     if (!persister) {
       return;
@@ -457,7 +494,7 @@ export class SessionHost {
         if (this.archived.get(entry.id) === entry) {
           persister.report(
             new Error(
-              `archived session ${entry.id} was renamed in memory only: its record could not be read back (${loaded.reason})`,
+              `archived session ${entry.id} was ${what} in memory only: its record could not be read back (${loaded.reason})`,
             ),
           );
         }
@@ -465,14 +502,20 @@ export class SessionHost {
       }
       base = loaded.record;
     }
-    const renamed = entry.renamed;
-    if (this.archived.get(entry.id) !== entry || !renamed) {
+    if (this.archived.get(entry.id) !== entry) {
       return;
     }
-    const record: DaemonSessionRecord = { ...(entry.record ?? base), title: renamed };
+    const current = entry.record ?? base;
+    const renamed = entry.renamed;
+    const kept = withoutReclaimed(current, entry.reclaimed);
+    if (!renamed && kept === current) {
+      return;
+    }
+    const record: DaemonSessionRecord = { ...kept, ...(renamed ? { title: renamed } : {}) };
     entry.record = record;
     entry.unwritten = false;
-    void persister.writeRecord(record).then((ok) => this.settleWrite(entry, ok, record));
+    const ok = await persister.writeRecord(record);
+    this.settleWrite(entry, ok, record);
   }
 
   /**
@@ -584,6 +627,7 @@ export class SessionHost {
       lastChangeAt: record.turn ? now : record.updatedAt,
       turns: reconciled.turns,
       enqueueIds: reconciled.enqueueIds,
+      returned: reconciled.returned,
       cutShort: record.turn !== undefined,
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
     });
