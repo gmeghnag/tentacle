@@ -10,8 +10,10 @@
  */
 import { type ToolResultDetail, type ToolResultSpill, toolLabel } from "@tentacle/core";
 import chalk from "chalk";
+import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import { formatDurationMs } from "./format.ts";
+import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
@@ -63,7 +65,7 @@ function truncate(text: string, max: number): string {
 
 // Already wrapped to the width and padded, so `wrapLines` leaves the rows alone.
 function userLines(text: string, width: number): string[] {
-  return messageRows(text, width);
+  return messageRows(expandTabs(text), width);
 }
 
 function assistantLines(text: string): string[] {
@@ -117,13 +119,19 @@ function parseHunks(patch: string): DiffRow[][] {
       cur = [];
       hunks.push(cur);
     }
+    // Tabs are expanded here, once, so the word diff and the bar padding both
+    // see the text exactly as it is shown.
     if (raw.startsWith("+")) {
-      cur.push({ kind: "add", text: raw.slice(1), no: n });
+      cur.push({ kind: "add", text: expandTabs(raw.slice(1)), no: n });
       n += 1;
     } else if (raw.startsWith("-")) {
-      cur.push({ kind: "del", text: raw.slice(1), no: null });
+      cur.push({ kind: "del", text: expandTabs(raw.slice(1)), no: null });
     } else {
-      cur.push({ kind: "context", text: raw.startsWith(" ") ? raw.slice(1) : raw, no: n });
+      cur.push({
+        kind: "context",
+        text: expandTabs(raw.startsWith(" ") ? raw.slice(1) : raw),
+        no: n,
+      });
       n += 1;
     }
   }
@@ -188,10 +196,10 @@ function renderBar(row: DiffRow, gutterW: number, width: number): string {
     const side: WordOp["kind"] = isAdd ? "add" : "remove";
     const shown = row.words.filter((op) => op.kind === "same" || op.kind === side);
     content = shown.map((op) => (op.kind === "same" ? fg(op.value) : word(op.value))).join("");
-    plainLen = shown.reduce((sum, op) => sum + op.value.length, 0);
+    plainLen = shown.reduce((sum, op) => sum + stringWidth(op.value), 0);
   } else {
     content = fg(row.text);
-    plainLen = row.text.length;
+    plainLen = stringWidth(row.text);
   }
   const used = gutterW + 3 + plainLen;
   const pad = Math.max(0, width - used);
@@ -539,7 +547,11 @@ export function transcriptLines(items: readonly DisplayItem[], opts: RenderOptio
   return out;
 }
 
-/** Fold logical lines to the given display width (ANSI-aware). */
+/**
+ * Fold logical lines to the given display width (ANSI-aware). Every transcript
+ * row passes here, so it is also where a TAB byte is kept from reaching the
+ * terminal (which would expand it to an 8-column stop and overflow the row).
+ */
 export function wrapLines(lines: readonly string[], width: number): string[] {
   const w = Math.max(1, Math.floor(width));
   const out: string[] = [];
@@ -548,7 +560,7 @@ export function wrapLines(lines: readonly string[], width: number): string[] {
       out.push("");
       continue;
     }
-    const wrapped = wrapAnsi(line, w, { hard: true, trim: false, wordWrap: true });
+    const wrapped = wrapAnsi(expandTabs(line), w, { hard: true, trim: false, wordWrap: true });
     out.push(...carryColor(wrapped.split("\n")));
   }
   return out;

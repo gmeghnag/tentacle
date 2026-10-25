@@ -35,6 +35,11 @@ export const INPUT_PREFIX_WIDTH = 2;
 /** A TAB is DISPLAYED as this many spaces (the buffer keeps the `\t` byte). */
 export const TAB_WIDTH = 4;
 
+/** `text` as displayed: each TAB becomes `TAB_WIDTH` spaces (display only). */
+export function expandTabs(text: string): string {
+  return text.replaceAll("\t", " ".repeat(TAB_WIDTH));
+}
+
 /** A visual row: the half-open buffer span `[start, end)` (excluding any `\n`). */
 interface VisualRow {
   readonly start: number;
