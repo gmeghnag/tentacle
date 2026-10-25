@@ -376,6 +376,17 @@ Daily-driver work (done 2026-10-14):
       default, configurable. Next: promote and plan. Type: feat · Size: M–L
       (to confirm) · Blast: load-bearing · Suited: strong model, fresh review.
 
+- [ ] 🔵 **TUI: a re-layout at the old width can wipe a fresh resize warm**
+      (Review finding 1 of `fix/tui-expand-latency`, 2026-10-25; owner: separate
+      task) — if a new item / notice / job exit lands while a resize warm is in
+      flight (> 400 ms on a long session), the idle warm restarts at the OLD
+      width (`App.tsx` ~:546 and the idle-warm effect ~:636-645) and the
+      width-keyed `rowCache` entries just warmed are replaced: the first frame
+      after the resize costs ~305 ms instead of ~0.4 ms on a 2.6 MB session.
+      Pre-existing in kind on main (a keystroke during a resize). Fix idea:
+      while a resize warm is in flight, gate every re-layout on the pending
+      width, or key the cache on both widths. S · contained.
+
 ### Block 7 — MCP (client, stdio transport, tool adapter)
 
 - [x] 🟡 **MCP tool calls have no timeout and ignore the turn's abort signal.**
