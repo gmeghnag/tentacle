@@ -526,6 +526,14 @@ the "a new target adds only a transport" shape, AGENTS §7).
     **Task 6 DONE 2026-10-25** (`docs/feat/tui-foreign-turns.md`, merged
     `024ebb9`; Opus executed as ONE branch, fresh Opus review
     APPROVE-WITH-NITS, gate 2617 pass / 2 skip / 0 fail).
+  - *Task 7 re-plan (2026-10-25)*: L · load-bearing (the `RemoteSession`
+    path every runtime shares), one branch; one `swapSession` for `/clear`,
+    switch and closed-elsewhere; `drain()` replaces `closeSessions()` on quit
+    (QR4); the `error`-frame cancel by own turn id (task 6 F1). Owner: **QN1
+    `/clear` stays close + new in `connect` too** ("non voglio ambiguità tra
+    telefono e TUI per una stessa sessione"); **QN2** returned rows of mine
+    after quit/switch not recognised → task 13 debt, plus a notice "N queued
+    messages stay on the daemon".
   - *Task 7 `connect-sessions`* — re-sized **L** (5 packages) → 7a / 7b, each
     M · cross-module [yes]. Quit = just close the socket (proved: the session
     stays live and re-attachable, the turn finishes daemon-side). New method
