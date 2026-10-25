@@ -90,7 +90,13 @@ per user message.
    and the skills catalog — one code path, not a special case for
    `AGENTS.md`. Supersedes the "system prompt" bullet of decision 5.
    (2026-10-25: "si")
+8. **Tool `context_reset({ prompt })`**: one required argument, the text the
+   model restarts from. An empty prompt is refused (tool error). The tool
+   description tells the model what a self-sufficient restart prompt holds:
+   the goal, where the plan lives (a file path rather than everything
+   inline), what is done, the next step, constraints and decisions — the
+   model will see nothing else. (2026-10-25: "ok context_reset")
 
 ## Open questions (asked one at a time)
 
-- Tool name and how the TUI and the phone show it.
+- How the TUI and the phone show it.
