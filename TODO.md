@@ -366,6 +366,13 @@ Daily-driver work (done 2026-10-14):
       After `fix/tui-expand-latency` merges. Type: feat (refactor) · Size: S
       · Blast: contained · Suited: Sonnet executes, Opus reviews.
 
+- [ ] **The model knows how full its context is (`contextAwareness`)**
+      ([`docs/eval/context-awareness.md`](docs/eval/context-awareness.md);
+      owner, 2026-10-25, decided) — a line `context: 82k / 128k tokens (64%)`
+      once per new percentage point, on the message that crosses it; provider
+      usage when available; `"contextAwareness": { "enabled": true,
+      "stepPercent": 1 }`. BEFORE `context-reset`. Type: feat · Size: S–M ·
+      Blast: cross-module (to confirm).
 - [ ] **Model-initiated context reset (`context_reset({ prompt })`)**
       ([`docs/eval/context-reset.md`](docs/eval/context-reset.md); owner,
       2026-10-25, 9 decisions taken) — the model renews its own context when

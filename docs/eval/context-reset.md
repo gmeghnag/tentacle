@@ -104,6 +104,11 @@ per user message.
    restart prompt on (decision 4). TUI strings in English. (2026-10-25:
    "perfetto")
 
+10. **Context usage for the model is a separate task, done BEFORE this one**:
+   `docs/eval/context-awareness.md` (owner, 2026-10-25). This feature relies
+   on it for the model to know when to renew; its config key is not under
+   `context_reset`.
+
 ## Review
 
 *— claude-opus-5-5, 2026-10-25*
