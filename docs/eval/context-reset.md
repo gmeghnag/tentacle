@@ -109,6 +109,14 @@ per user message.
    on it for the model to know when to renew; its config key is not under
    `context_reset`.
 
+11. **Plan question 1 (skills at reset): A — re-read BOTH the skills catalog
+   and the `skill` tool's own list** (fixed at session start today,
+   `packages/cli/src/wiring.ts:238-260`), so a skill added mid-session is
+   usable right after a reset; no exception for skills (decision 7 kept
+   literally). If rebuilding the tool proves invasive, the planner reports
+   it with evidence before any code. (2026-10-25: "si direi proprio A,
+   prediligo il lavoro pulito e una perfetta, anzi superba UX")
+
 ## Review
 
 *— claude-opus-5-5, 2026-10-25*
