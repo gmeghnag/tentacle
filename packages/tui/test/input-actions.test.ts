@@ -154,9 +154,40 @@ describe("resolveLineInput", () => {
     });
   });
 
-  test("Backspace / Delete delete back", () => {
-    expect(resolve("", { backspace: true })).toEqual({ kind: "deleteBack" });
-    expect(resolve("", { delete: true })).toEqual({ kind: "deleteBack" });
+  // What Ink 5.0.1 `useInput` reports per raw byte sequence (probed, not assumed):
+  //   \x7f        → { delete }            (plain Backspace on macOS/Linux)
+  //   \x08        → { backspace }         (Ctrl+Backspace on Linux/Windows terminals)
+  //   \x1b\x7f    → { delete, meta }      (Option+Backspace on macOS)
+  //   \x1b\x08    → { backspace, meta }
+  //   \x17        → "w" { ctrl }          (Ctrl+W; iTerm2 natural-text Option+Backspace)
+  //   \x1bd       → "d" { meta }          (Alt+D / Option+D)
+  //   \x1b[3~     → { delete }            (forward-delete key: also one char back, as before)
+  describe("delete: one char vs word", () => {
+    test("plain Backspace (\\x7f → delete) deletes ONE char back", () => {
+      expect(resolve("", { delete: true })).toEqual({ kind: "deleteBack" });
+    });
+    test("Option+Backspace (\\x1b\\x7f → delete+meta) deletes the word back", () => {
+      expect(resolve("", { delete: true, meta: true })).toEqual({ kind: "deleteWord", dir: -1 });
+    });
+    test("\\x1b\\x08 (backspace+meta) deletes the word back", () => {
+      expect(resolve("", { backspace: true, meta: true })).toEqual({
+        kind: "deleteWord",
+        dir: -1,
+      });
+    });
+    test("a bare \\x08 (backspace, no meta: Ctrl+H / Ctrl+Backspace) deletes ONE char (owner decision)", () => {
+      expect(resolve("", { backspace: true })).toEqual({ kind: "deleteBack" });
+    });
+    test("Ctrl+W (\\x17) deletes the word back", () => {
+      expect(resolve("w", { ctrl: true })).toEqual({ kind: "deleteWord", dir: -1 });
+    });
+    test("Alt/Option+D (\\x1bd) deletes the word forward", () => {
+      expect(resolve("d", { meta: true })).toEqual({ kind: "deleteWord", dir: 1 });
+    });
+    test("a plain `d` or `w` still types", () => {
+      expect(resolve("d", {})).toEqual({ kind: "insert", text: "d" });
+      expect(resolve("w", {})).toEqual({ kind: "insert", text: "w" });
+    });
   });
 
   describe("insert", () => {

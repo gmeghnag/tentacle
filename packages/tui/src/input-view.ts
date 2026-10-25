@@ -1,103 +1,133 @@
+import stringWidth from "string-width";
+
 /**
- * Project a (possibly multi-line) prompt buffer into the fixed-height input box.
+ * Project a (possibly multi-line, possibly soft-wrapped) prompt buffer into the
+ * fixed-height input box.
  *
- * The value is split on `\n`; the cursor offset is mapped to a (row, col); and
- * when there are more rows than fit, a window is scrolled to keep the cursor
- * line visible. Pure, so the box's layout math and the renderer agree exactly.
+ * The value is split on `\n` into logical lines, and each logical line is
+ * soft-wrapped by display width into VISUAL rows (the renderer never lets Ink
+ * wrap, because Ink would wrap each sibling `<Text>` of a row in its own
+ * column and strand the cursor cell). The cursor offset is mapped to a visual
+ * (row, col); when there are more rows than fit, a window is scrolled to keep
+ * the cursor row visible. Pure, so the box's layout math and the renderer agree
+ * exactly.
  */
 export interface InputView {
-  /** The logical lines currently visible in the box. */
+  /** The visual rows currently visible in the box. */
   readonly lines: readonly string[];
-  /** Cursor position within `lines` (row relative to the window, col in chars). */
+  /** Absolute buffer offset of each visible row's first character. */
+  readonly starts: readonly number[];
+  /** Cursor position within `lines` (row relative to the window, col in UTF-16 units). */
   readonly cursorRow: number;
   readonly cursorCol: number;
-  /** True when lines are hidden above / below the window (overflow indicators). */
+  /** True when rows are hidden above / below the window (overflow indicators). */
   readonly moreAbove: boolean;
   readonly moreBelow: boolean;
-  /** Total logical line count (for the box-height / layout calculation). */
+  /** Total visual row count (for the box-height / layout calculation). */
   readonly totalLines: number;
-  /** Logical index of the first visible line (0 when not windowed). */
+  /** Index of the first visible visual row (0 when not windowed). */
   readonly windowStart: number;
+}
+
+/** Cells taken by the row prefix ("❯ " / "  " / "↑ " / "↓ "). */
+export const INPUT_PREFIX_WIDTH = 2;
+
+/** A TAB is DISPLAYED as this many spaces (the buffer keeps the `\t` byte). */
+export const TAB_WIDTH = 4;
+
+/** A visual row: the half-open buffer span `[start, end)` (excluding any `\n`). */
+interface VisualRow {
+  readonly start: number;
+  readonly end: number;
+}
+
+const segmenter = new Intl.Segmenter();
+
+/**
+ * Soft-wrap `value` into visual rows for a box `width` cells wide (prefix
+ * included; `Infinity` = no wrapping). A row holds at most `width - 2` cells and
+ * a wide character is never split. Cursor-at-EOL on a row that is exactly full
+ * goes to a fresh empty row below it (the block cursor needs a cell of its own).
+ */
+function wrapRows(value: string, cursor: number, width: number): VisualRow[] {
+  const room = Number.isFinite(width)
+    ? Math.max(1, width - INPUT_PREFIX_WIDTH)
+    : Number.POSITIVE_INFINITY;
+  const rows: VisualRow[] = [];
+  let base = 0;
+  for (const line of value.split("\n")) {
+    let rowStart = 0;
+    let rowWidth = 0;
+    if (Number.isFinite(room)) {
+      for (const { segment, index } of segmenter.segment(line)) {
+        const w = segment === "\t" ? TAB_WIDTH : stringWidth(segment);
+        if (rowWidth + w > room && index > rowStart) {
+          rows.push({ start: base + rowStart, end: base + index });
+          rowStart = index;
+          rowWidth = 0;
+        }
+        rowWidth += w;
+      }
+    }
+    rows.push({ start: base + rowStart, end: base + line.length });
+    if (rowWidth >= room && cursor === base + line.length) {
+      rows.push({ start: base + line.length, end: base + line.length });
+    }
+    base += line.length + 1; // +1 for the newline
+  }
+  return rows;
 }
 
 /**
  * @param value   the full buffer (may contain `\n`)
  * @param cursor  cursor offset into `value`
- * @param maxRows max logical lines the box may show (>= 1)
+ * @param maxRows max visual rows the box may show (>= 1)
+ * @param width   box width in cells, prefix included (default: no wrapping)
  */
-export function inputView(value: string, cursor: number, maxRows: number): InputView {
+export function inputView(
+  value: string,
+  cursor: number,
+  maxRows: number,
+  width: number = Number.POSITIVE_INFINITY,
+): InputView {
   const max = Math.max(1, Math.floor(maxRows));
-  const lines = value.split("\n");
   const clampedCursor = Math.max(0, Math.min(value.length, cursor));
+  const rows = wrapRows(value, clampedCursor, width);
 
-  // Map the offset to (row, col): walk lines, subtracting each line + its "\n".
+  // The cursor sits on the last row starting at or before it: at a wrap
+  // boundary that is the NEXT row (the cursor is on that row's first character).
   let row = 0;
-  let col = clampedCursor;
-  for (let i = 0; i < lines.length; i++) {
-    const len = lines[i]?.length ?? 0;
-    if (col <= len) {
+  for (let i = 0; i < rows.length; i++) {
+    if ((rows[i]?.start ?? 0) <= clampedCursor) {
       row = i;
-      break;
     }
-    col -= len + 1; // +1 for the newline
   }
+  const col = clampedCursor - (rows[row]?.start ?? 0);
 
-  if (lines.length <= max) {
-    return {
-      lines,
-      cursorRow: row,
-      cursorCol: col,
-      moreAbove: false,
-      moreBelow: false,
-      totalLines: lines.length,
-      windowStart: 0,
-    };
-  }
-  // Window around the cursor line, clamped to the buffer.
-  const half = Math.floor(max / 2);
-  const start = Math.max(0, Math.min(row - half, lines.length - max));
+  const start =
+    rows.length <= max ? 0 : Math.max(0, Math.min(row - Math.floor(max / 2), rows.length - max));
+  const visible = rows.slice(start, start + max);
   return {
-    lines: lines.slice(start, start + max),
+    lines: visible.map((r) => value.slice(r.start, r.end)),
+    starts: visible.map((r) => r.start),
     cursorRow: row - start,
     cursorCol: col,
     moreAbove: start > 0,
-    moreBelow: start + max < lines.length,
-    totalLines: lines.length,
+    moreBelow: start + max < rows.length,
+    totalLines: rows.length,
     windowStart: start,
   };
 }
 
-/**
- * The `[c0, c1)` character span of a buffer selection `[start, end)` (absolute
- * offsets) on logical line `row`, or `null` when the row is outside the
- * selection. Mirrors `rowSelectionRange` from `selection.ts` for the input
- * buffer, whose rows are the value split on `\n`.
- */
-export function inputSelectionSpan(
+/** Rows the input box occupies (content only, no border): visual rows, capped at `maxRows`. */
+export function inputRowCount(
   value: string,
-  start: number,
-  end: number,
-  row: number,
-): [number, number] | null {
-  if (start === end) {
-    return null;
-  }
-  const lines = value.split("\n");
-  // Absolute offsets of each row's start and end (excluding the `\n`).
-  const starts: number[] = [0];
-  for (let r = 0; r < lines.length; r++) {
-    const len = lines[r]?.length ?? 0;
-    const s = starts[r] ?? 0;
-    starts.push(s + len + 1);
-  }
-  const rowStart = starts[row];
-  const rowLen = row < lines.length ? (lines[row]?.length ?? 0) : 0;
-  if (rowStart === undefined || rowStart >= end || rowStart + rowLen <= start) {
-    return null;
-  }
-  const c0 = Math.max(0, start - (rowStart ?? 0));
-  const c1 = Math.min(rowLen, end - (rowStart ?? 0));
-  return c0 >= c1 ? null : [c0, c1];
+  cursor: number,
+  width: number,
+  maxRows: number,
+): number {
+  const clampedCursor = Math.max(0, Math.min(value.length, cursor));
+  return Math.min(wrapRows(value, clampedCursor, width).length, Math.max(1, Math.floor(maxRows)));
 }
 
 /**
@@ -112,7 +142,7 @@ export interface InputSegment {
 
 /** One rendered row of the input box: a gutter prefix plus content segments. */
 export interface InputRow {
-  /** Leading marker: "❯ " (first logical line), "  " (continuation), or an
+  /** Leading marker: "❯ " (first row), "  " (continuation / wrapped), or an
    * "↑ "/"↓ " overflow arrow. */
   readonly prefix: string;
   /** True for the overflow-arrow prefix (rendered dim/grey, not the accent). */
@@ -152,6 +182,16 @@ function toSegments(line: string, inverse: boolean[], trailingCursor: boolean): 
   return segs;
 }
 
+/** The `[from, to)` UTF-16 span of the grapheme cluster of `line` containing `col`. */
+function graphemeSpan(line: string, col: number): [number, number] {
+  for (const { segment, index } of segmenter.segment(line)) {
+    if (col < index + segment.length) {
+      return [index, index + segment.length];
+    }
+  }
+  return [col, col + 1];
+}
+
 /**
  * Project the buffer into the input box as rows of inverse/plain segments, with
  * the selection highlight and the block cursor already resolved. Pure: the
@@ -164,14 +204,16 @@ function toSegments(line: string, inverse: boolean[], trailingCursor: boolean): 
  * cell is drawn (it sits at a selection edge, already inverse).
  *
  * @param anchor selection anchor, or `null` for none.
+ * @param width  box width in cells for soft-wrapping (default: no wrapping).
  */
 export function inputRender(
   value: string,
   cursor: number,
   anchor: number | null,
   maxRows: number,
+  width: number = Number.POSITIVE_INFINITY,
 ): InputRender {
-  const view = inputView(value, cursor, maxRows);
+  const view = inputView(value, cursor, maxRows, width);
   const clampedCursor = Math.max(0, Math.min(value.length, cursor));
   const hasSel =
     anchor !== null && anchor !== clampedCursor && anchor >= 0 && anchor <= value.length;
@@ -179,8 +221,6 @@ export function inputRender(
   const selEnd = hasSel ? Math.max(anchor, clampedCursor) : 0;
 
   const rows = view.lines.map((line, r): InputRow => {
-    const li = view.windowStart + r;
-    const firstLogicalVisible = !view.moreAbove && r === 0;
     const lastVisible = r === view.lines.length - 1;
     const gutter = (view.moreAbove && r === 0) || (view.moreBelow && lastVisible);
     const prefix =
@@ -188,17 +228,20 @@ export function inputRender(
         ? "↑ "
         : view.moreBelow && lastVisible
           ? "↓ "
-          : firstLogicalVisible
+          : !view.moreAbove && r === 0
             ? "❯ "
             : "  ";
 
-    const inverse: boolean[] = new Array(line.length).fill(false);
+    // `selected` covers a whole unit (a tab: all its cells); `cursorCell` marks
+    // the block cursor (a tab: only its first cell).
+    const selected: boolean[] = new Array(line.length).fill(false);
+    const cursorCell: boolean[] = new Array(line.length).fill(false);
     if (hasSel) {
-      const span = inputSelectionSpan(value, selStart, selEnd, li);
-      if (span) {
-        for (let c = span[0]; c < span[1]; c++) {
-          inverse[c] = true;
-        }
+      const rowStart = view.starts[r] ?? 0;
+      const c0 = Math.max(0, selStart - rowStart);
+      const c1 = Math.min(line.length, selEnd - rowStart);
+      for (let c = c0; c < c1; c++) {
+        selected[c] = true;
       }
     }
     // The block cursor only shows when there is no active selection.
@@ -207,12 +250,29 @@ export function inputRender(
     let trailingCursor = false;
     if (cursorHere) {
       if (cursorCol < line.length) {
-        inverse[cursorCol] = true;
+        const [from, to] = graphemeSpan(line, cursorCol);
+        for (let c = from; c < to; c++) {
+          cursorCell[c] = true;
+        }
       } else {
         trailingCursor = true;
       }
     }
-    return { prefix, gutter, segments: toSegments(line, inverse, trailingCursor) };
+    // Expand each tab to TAB_WIDTH spaces for display.
+    let shown = "";
+    const inverse: boolean[] = [];
+    for (let c = 0; c < line.length; c++) {
+      if (line[c] === "\t") {
+        shown += " ".repeat(TAB_WIDTH);
+        for (let k = 0; k < TAB_WIDTH; k++) {
+          inverse.push((selected[c] ?? false) || (k === 0 && (cursorCell[c] ?? false)));
+        }
+      } else {
+        shown += line[c];
+        inverse.push((selected[c] ?? false) || (cursorCell[c] ?? false));
+      }
+    }
+    return { prefix, gutter, segments: toSegments(shown, inverse, trailingCursor) };
   });
 
   return { rows };

@@ -3,6 +3,7 @@ import {
   EMPTY_EDITOR,
   type EditorState,
   deleteBack as editorDeleteBack,
+  deleteWord as editorDeleteWord,
   insert as editorInsert,
   moveCursor as editorMove,
   moveLine as editorMoveLine,
@@ -92,6 +93,8 @@ export interface LineEditor extends EditorState {
   deleteBack(): void;
   /** Move by `delta` chars; `extend` selects (Shift) instead of moving. */
   moveCursor(delta: number, extend?: boolean): void;
+  /** Delete the previous (-1) / next (1) word, or the selection. */
+  deleteWord(dir: -1 | 1): void;
   /** Jump one word; `extend` selects (Shift+Option/Ctrl). */
   moveWord(dir: -1 | 1, extend?: boolean): void;
   /** Home/End within the current logical line; `extend` selects. */
@@ -115,6 +118,7 @@ export function useLineEditor(): LineEditor {
   const [state, setState] = useState<EditorState>(EMPTY_EDITOR);
   const insert = useCallback((text: string) => setState((s) => editorInsert(s, text)), []);
   const deleteBack = useCallback(() => setState((s) => editorDeleteBack(s)), []);
+  const deleteWord = useCallback((dir: -1 | 1) => setState((s) => editorDeleteWord(s, dir)), []);
   const moveCursor = useCallback(
     (delta: number, extend = false) => setState((s) => editorMove(s, delta, extend)),
     [],
@@ -144,6 +148,7 @@ export function useLineEditor(): LineEditor {
     ...state,
     insert,
     deleteBack,
+    deleteWord,
     moveCursor,
     moveWord,
     moveLine,

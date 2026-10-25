@@ -3,6 +3,7 @@ import {
   EMPTY_EDITOR,
   type EditorState,
   deleteBack,
+  deleteWord,
   insert,
   moveCursor,
   moveLine,
@@ -226,6 +227,92 @@ describe("moveWord", () => {
   test("cursor inside a word jumps to the boundary, not a full word past it", () => {
     const s = moveWord({ value: "hello world", cursor: 3, anchor: null }, 1);
     expect(s.cursor).toBe(5);
+  });
+});
+
+describe("deleteWord", () => {
+  const at = (value: string, cursor: number): EditorState => ({ value, cursor, anchor: null });
+
+  test("backward deletes the word before the cursor", () => {
+    expect(deleteWord(at("hello world", 11), -1)).toEqual({
+      value: "hello ",
+      cursor: 6,
+      anchor: null,
+      desiredCol: null,
+    });
+  });
+
+  test("backward skips the gap, then the word (same boundary as moveWord)", () => {
+    const s = deleteWord(at("hello   world  ", 15), -1);
+    expect(s.value).toBe("hello   ");
+    expect(s.cursor).toBe(8);
+    expect(s.cursor).toBe(moveWord(at("hello   world  ", 15), -1).cursor);
+  });
+
+  test("backward from inside a word deletes up to the word start only", () => {
+    expect(deleteWord(at("hello world", 8), -1)).toMatchObject({ value: "hello rld", cursor: 6 });
+  });
+
+  test("punctuation is gap: backward over `foo,bar` at the end takes only `bar`", () => {
+    expect(deleteWord(at("foo,bar", 7), -1)).toMatchObject({ value: "foo,", cursor: 4 });
+    expect(deleteWord(at("foo,", 4), -1)).toMatchObject({ value: "", cursor: 0 });
+  });
+
+  test("at the start of the buffer it is a no-op", () => {
+    const s = at("hello", 0);
+    expect(deleteWord(s, -1)).toEqual(s);
+  });
+
+  test("backward crosses a newline like moveWord does", () => {
+    // "ab\ncd" cursor at the start of "cd": the gap is the `\n`, then "ab".
+    expect(deleteWord(at("ab\ncd", 3), -1)).toMatchObject({ value: "cd", cursor: 0 });
+    expect(deleteWord(at("ab\n\ncd", 6), -1)).toMatchObject({ value: "ab\n\n", cursor: 4 });
+  });
+
+  test("unicode letters and digits are word characters", () => {
+    expect(deleteWord(at("caffè 42ù", 9), -1)).toMatchObject({ value: "caffè ", cursor: 6 });
+    expect(deleteWord(at("日本語 テスト", 7), -1)).toMatchObject({ value: "日本語 ", cursor: 4 });
+  });
+
+  test("combining marks are part of the word: NFD é, both directions, no orphan mark", () => {
+    const nfd = "café"; // 5 UTF-16 units
+    expect(moveWord(at(nfd, 0), 1).cursor).toBe(5);
+    expect(moveWord(at(nfd, 5), -1).cursor).toBe(0);
+    expect(deleteWord(at(`${nfd} bar`, 0), 1)).toMatchObject({ value: " bar", cursor: 0 });
+    expect(deleteWord(at(`${nfd} bar`, 5), -1)).toMatchObject({ value: " bar", cursor: 0 });
+  });
+
+  test("a Devanagari word with vowel signs / virama is one word", () => {
+    const word = "नमस्ते";
+    expect(deleteWord(at(word, word.length), -1)).toMatchObject({ value: "", cursor: 0 });
+    expect(deleteWord(at(`${word} x`, 0), 1)).toMatchObject({ value: " x", cursor: 0 });
+    expect(moveWord(at(word, 0), 1).cursor).toBe(word.length);
+  });
+
+  test("a keycap (digit + VS16 + enclosing mark) is not split", () => {
+    expect(deleteWord(at("1️⃣ z", 0), 1)).toMatchObject({ value: " z", cursor: 0 });
+  });
+
+  test("with a selection it deletes the selection, in both directions", () => {
+    expect(deleteWord(sel("hello world", 2, 8), -1)).toEqual({
+      value: "herld",
+      cursor: 2,
+      anchor: null,
+      desiredCol: null,
+    });
+    expect(deleteWord(sel("hello world", 8, 2), 1)).toMatchObject({ value: "herld", cursor: 2 });
+  });
+
+  test("forward deletes the gap then the next word; no-op at the end", () => {
+    expect(deleteWord(at("hello world", 0), 1)).toMatchObject({ value: " world", cursor: 0 });
+    expect(deleteWord(at("hello world", 5), 1)).toMatchObject({ value: "hello", cursor: 5 });
+    const end = at("hello", 5);
+    expect(deleteWord(end, 1)).toEqual(end);
+  });
+
+  test("clears the vertical-move memory", () => {
+    const s = deleteWord({ value: "ab cd", cursor: 5, anchor: null, desiredCol: 7 }, -1);
+    expect(s.desiredCol).toBeNull();
   });
 });
 

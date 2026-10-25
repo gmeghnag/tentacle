@@ -19,6 +19,7 @@ export function LineInput({
   anchor = null,
   placeholder,
   maxRows = 10,
+  width,
 }: {
   value: string;
   cursor: number;
@@ -26,8 +27,10 @@ export function LineInput({
   anchor?: number | null;
   placeholder: string;
   maxRows?: number;
+  /** The box width in cells, for soft-wrapping (rows are wrapped here, never by Ink). */
+  width: number;
 }): ReactElement {
-  const { rows } = inputRender(value, cursor, anchor, maxRows);
+  const { rows } = inputRender(value, cursor, anchor, maxRows, width);
   const empty = value === "";
   return (
     <Box flexDirection="column">
