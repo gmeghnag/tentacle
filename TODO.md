@@ -1008,6 +1008,16 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 > 6. parallel tools and parallel sub-agents (`docs/eval/parallel-tools.md`,
 >    `docs/eval/parallel-agents.md`; evaluate first).
 > Then the mobile app tasks resume (task 8 onward, `docs/eval/mobile-app.md`).
+>
+> **Queued fix (owner, 2026-10-26), slot to confirm (proposed: right after
+> task 7):** `fix/tool-duration-unknown` — Type: fix · Size: S · Blast:
+> contained · Suited: Sonnet exec, Opus review. A tool row rebuilt from history
+> (`--resume`, reconnect, session switch, compaction replace) shows a fake
+> `0.0s`: `messagesToItems` stamps `startedAt: 0`/`endedAt: 0`
+> (`packages/tui/src/resume.ts:31,42`) and `toolLines` prints any defined
+> `endedAt` (`render-lines.ts:489`). Repro: same `sleep 2` call → live
+> `2.0s`, replayed `0.0s`. Owner decision: when the duration is unknown the
+> row shows NO time (not a persisted duration).
 
 - [x] **Local daemon on a worker thread** (the "TUI always over RPC" lever —
       moves model streaming + tool execution off the render thread, so the UI
