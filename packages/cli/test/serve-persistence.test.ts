@@ -131,7 +131,7 @@ describe("serve persistence (end to end, real disk)", () => {
     const archivedFile = JSON.parse(
       await readFile(join(daemonStoreDir(config), "s-arch.json"), "utf8"),
     );
-    expect(archivedFile.schemaVersion).toBe(4);
+    expect(archivedFile.schemaVersion).toBe(5);
     expect(archivedFile.archivedAt).toEqual(expect.any(Number));
 
     const notices: string[] = [];
@@ -197,7 +197,7 @@ describe("serve persistence (end to end, real disk)", () => {
       await daemon.stop();
     }
     const after = JSON.parse(await readFile(file, "utf8"));
-    expect(after.schemaVersion).toBe(4);
+    expect(after.schemaVersion).toBe(5);
     expect(after.archivedAt).toBeUndefined();
   });
 
@@ -286,7 +286,7 @@ describe("serve persistence (end to end, real disk)", () => {
     const bad: Record<string, string> = {
       truncated: JSON.stringify({ ...good, id: "truncated" }).slice(0, 40),
       "client-shaped": JSON.stringify({ ...good, id: "client-shaped", kind: undefined }),
-      newer: JSON.stringify({ ...good, id: "newer", schemaVersion: 5 }),
+      newer: JSON.stringify({ ...good, id: "newer", schemaVersion: 6 }),
       foreign: JSON.stringify({ ...good, id: "foreign", cwd: "/another/project" }),
     };
     for (const [id, text] of Object.entries(bad)) await writeFile(join(store, `${id}.json`), text);
@@ -296,7 +296,7 @@ describe("serve persistence (end to end, real disk)", () => {
     try {
       const skipped = notices.filter((l) => l.startsWith("skipped "));
       expect(skipped).toHaveLength(4);
-      expect(skipped.find((l) => l.includes("newer.json"))).toMatch(/unsupported record version 5/);
+      expect(skipped.find((l) => l.includes("newer.json"))).toMatch(/unsupported record version 6/);
       expect(skipped.find((l) => l.includes("foreign.json"))).toMatch(/another project/);
       expect(skipped.find((l) => l.includes("client-shaped.json"))).toMatch(/not a daemon session/);
       expect(skipped.find((l) => l.includes("truncated.json"))).toMatch(/invalid JSON/);

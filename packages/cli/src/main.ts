@@ -483,6 +483,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           skills: runtime.skills,
           mcpStatus: runtime.mcpStatus,
           skillsList: runtime.skillsList,
+          // A fact of the runtime this laptop started, never guessed: a
+          // spilled result's file lives in the pod (docs/feat/tui-spill-note.md).
+          daemonInPod: true,
           ...sessionOptions,
         }),
       teardown: () => runtime.dispose(),

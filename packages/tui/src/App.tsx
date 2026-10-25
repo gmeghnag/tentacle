@@ -202,6 +202,12 @@ export interface AppProps {
   readonly saveFile?: (path: string, content: string) => Promise<void>;
   /** Transcript to seed on start (a resumed session); replaces the welcome line. */
   readonly initialItems?: readonly DisplayItem[];
+  /**
+   * The daemon runs in a pod (`run`/`attach`, set only by `runPodTui`): a
+   * spilled result's file is "saved in the pod to" its path. A fact of the
+   * runtime the laptop started, never guessed (docs/feat/tui-spill-note.md).
+   */
+  readonly daemonInPod?: boolean;
 }
 
 // Rows reserved below the transcript viewport: a blank spacer, the input/thinking
@@ -261,6 +267,7 @@ export function App({
   paste = readClipboard,
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
   initialItems,
+  daemonInPod = false,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -471,7 +478,7 @@ export function App({
       warmGenRef.current += 1;
       const gen = warmGenRef.current;
       const items = stateRef.current.items;
-      const opts = { expandAll, width: next.columns };
+      const opts = { expandAll, width: next.columns, spillInPod: daemonInPod };
       let idx = 0;
       const step = (): void => {
         if (warmGenRef.current !== gen) {
@@ -491,7 +498,7 @@ export function App({
       stdout.off?.("resize", onResize);
       warmGenRef.current += 1; // cancel any in-flight warm on unmount/resubscribe
     };
-  }, [stdout, size.columns, expandAll]);
+  }, [stdout, size.columns, expandAll, daemonInPod]);
 
   // Reset the palette selection whenever the typed text changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
@@ -544,7 +551,11 @@ export function App({
   // row `total` for scroll maths and materialise just the visible window. The
   // whole transcript is assembled on demand (sliceLaid 0..total) only where a
   // full buffer is genuinely needed — a text selection on mouse-release.
-  const layout = layoutTranscript(st.items, { expandAll, width: columns });
+  const layout = layoutTranscript(st.items, {
+    expandAll,
+    width: columns,
+    spillInPod: daemonInPod,
+  });
   const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
   const visible = sliceLaid(layout.laid, win.start, win.end);

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AskHooksTrust, type HookRunner, Session } from "@tentacle/agent";
-import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
+import type { ChatRequest, ModelProvider, StreamEvent, ToolResult } from "@tentacle/core";
 import { SessionHost } from "@tentacle/daemon";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { daemonErrorLogPath } from "../src/daemon-log.ts";
@@ -293,6 +293,42 @@ describe("buildAgent skills (docs/feat/skills-core.md)", () => {
     const roles = session.messages.map((m) => m.role);
     expect(roles.slice(1)).toEqual(["user", "assistant", "tool", "assistant"]);
     expect(session.messages[3]?.content).toStartWith('<skill_content name="big">\n# Big skill\n');
+  });
+});
+
+describe("large output is the LAST transform (docs/feat/tui-spill-note.md)", () => {
+  test("spill.head is cut from the redacted, deduplicated text, and content is exactly its banner + parts", async () => {
+    // Mutation (red, verified): move `shaping(largeOutput)` before the dedup
+    // transform in wiring.ts → content and spill diverge.
+    const SECRET = "AKIAABCDEFGHIJKLMNOP";
+    const command = `echo ${SECRET}; for i in 1 2 3 4 5; do echo same; done; seq 1 20000`;
+    const model = new ScriptedModel([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "o1", name: "shell", arguments: JSON.stringify({ command }) },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const { agent } = buildAgent(
+      { ...config, redactSecrets: true, dedupOutput: true, tabulateJson: true },
+      { modelOverride: model },
+    );
+    let result: ToolResult | undefined;
+    for await (const event of agent.run("s", [{ role: "user", content: "go" }])) {
+      if (event.type === "tool_result") result = event.result;
+    }
+    const spill = result?.spill;
+    expect(spill).toBeDefined();
+    if (!result || !spill) return;
+    expect(spill.head).toContain("[REDACTED]");
+    expect(spill.head).not.toContain(SECRET);
+    expect(spill.head).toContain("repeated 4 more times");
+    expect(result.content).toBe(
+      `[large shell output: full output (${spill.chars} chars) saved to ${spill.path} — read it selectively with fs_read (offset/limit) or grep; do NOT read it whole]\n${spill.head}\n…[${spill.omitted} characters omitted]…\n${spill.tail}`,
+    );
   });
 });
 

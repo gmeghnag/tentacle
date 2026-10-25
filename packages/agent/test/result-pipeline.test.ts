@@ -70,6 +70,97 @@ describe("spillLargeOutput", () => {
   });
 });
 
+// docs/feat/tui-spill-note.md: the spill is also DATA (`spill`), so a frontend
+// never parses the banner; the model's text with a path stays byte-identical.
+describe("spillLargeOutput flags the result structurally", () => {
+  const PATH = ".tentacle/tool-output/fs_read-c1.txt";
+  const big = Array.from({ length: 40_800 / 8 }, (_, i) => `${String(i).padStart(7, "0")}\n`).join(
+    "",
+  );
+
+  test("spill = chars, path, head, tail, omitted; content is today's banner + preview", async () => {
+    // Mutation (red, verified): drop `path` from the spill object → fails.
+    expect(big.length).toBe(40_800);
+    const out = await spillLargeOutput({ maxInlineChars: 16000 })(
+      { content: big },
+      ctx({ toolName: "fs_read", writeSpill: async () => PATH }),
+    );
+    const head = big.slice(0, 600);
+    const tail = big.slice(big.length - 600);
+    expect(out.spill).toEqual({ chars: 40_800, path: PATH, head, tail, omitted: 39_600 });
+    expect(out.content).toBe(
+      `[large fs_read output: full output (40800 chars) saved to ${PATH} — read it selectively with fs_read (offset/limit) or grep; do NOT read it whole]\n${head}\n…[39600 characters omitted]…\n${tail}`,
+    );
+  });
+
+  test("no path: the spill has no path key", async () => {
+    const out = await spillLargeOutput({ maxInlineChars: 16000 })(
+      { content: big },
+      ctx({ writeSpill: async () => null }),
+    );
+    expect(out.spill).toBeDefined();
+    expect(out.spill !== undefined && "path" in out.spill).toBe(false);
+    expect(out.spill?.chars).toBe(40_800);
+  });
+
+  test("nothing omitted (preview ≥ output): head is the whole output, tail is empty", async () => {
+    const content = "q".repeat(150);
+    const out = await spillLargeOutput({ maxInlineChars: 100, previewChars: 200 })(
+      { content },
+      ctx(),
+    );
+    expect(out.spill).toEqual({
+      chars: 150,
+      path: ".tentacle/tool-output/shell-c1.txt",
+      head: content,
+      tail: "",
+      omitted: 0,
+    });
+    expect(out.content.endsWith(`\n${content}`)).toBe(true);
+  });
+
+  test("under the threshold: no spill", async () => {
+    const out = await spillLargeOutput({ maxInlineChars: 100 })({ content: "small" }, ctx());
+    expect(out.spill).toBeUndefined();
+  });
+
+  test("a summarised result is not flagged (Q4)", async () => {
+    const out = await summarizeLargeOutput({ maxInlineChars: 100, summarize: async () => "s" })(
+      { content: "x".repeat(500) },
+      ctx(),
+    );
+    expect(out.spill).toBeUndefined();
+  });
+});
+
+// Owner amendment (docs/feat/tui-spill-note.md, Q2): when the spill file cannot
+// be written, the MODEL's banner says what to do next, per tool.
+describe("spillLargeOutput no-path banner (model-facing, tool-aware)", () => {
+  const big = "y".repeat(5000);
+
+  test("fs_read: re-read the file in parts", async () => {
+    const out = await spillLargeOutput({ maxInlineChars: 1000, previewChars: 200 })(
+      { content: big },
+      ctx({ toolName: "fs_read", writeSpill: async () => null }),
+    );
+    expect(out.content.split("\n")[0]).toBe(
+      "[large fs_read output (5000 chars), could not be saved to a file — only this preview is shown; read the file in parts with fs_read offset/limit]",
+    );
+  });
+
+  test("any other tool: re-run narrower ONLY if safe to repeat", async () => {
+    for (const toolName of ["shell", "web_fetch"]) {
+      const out = await spillLargeOutput({ maxInlineChars: 1000, previewChars: 200 })(
+        { content: big },
+        ctx({ toolName, writeSpill: async () => null }),
+      );
+      expect(out.content.split("\n")[0]).toBe(
+        `[large ${toolName} output (5000 chars), could not be saved to a file — only this preview is shown; to see more, re-run with narrower output (grep, head, sed -n) ONLY if the command is safe to repeat]`,
+      );
+    }
+  });
+});
+
 describe("summarizeLargeOutput", () => {
   test("replaces large output with a summary and spills the full output", async () => {
     let spilled: string | undefined;

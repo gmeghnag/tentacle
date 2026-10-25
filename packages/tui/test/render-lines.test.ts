@@ -475,3 +475,118 @@ describe("hook annotation (H1)", () => {
     expect(lines.length).toBeGreaterThan(2);
   });
 });
+
+// docs/feat/tui-spill-note.md: a spilled result shows a short note + the head/tail
+// preview from the structured spill — never the model's banner, never parsed.
+// (Colours — syntax on fs_read, the error colour — are pinned in read-highlight.test.ts,
+// which turns chalk on for the whole file: the highlighter caches its theme on first use.)
+describe("a spilled tool result", () => {
+  const PATH = ".tentacle/tool-output/fs_read-c1.txt";
+  const code = Array.from({ length: 3000 }, (_, i) => `const v${i} = ${i}; // line ${i}`).join(
+    "\n",
+  );
+  const head = code.slice(0, 600);
+  const tail = code.slice(code.length - 600);
+  const banner = `[large fs_read output: full output (40800 chars) saved to ${PATH} — read it selectively with fs_read (offset/limit) or grep; do NOT read it whole]`;
+  const spilled = (over: Partial<ToolItem> = {}): ToolItem => ({
+    kind: "tool",
+    id: "s1",
+    name: "fs_read",
+    args: JSON.stringify({ path: "src/a.ts" }),
+    status: "ok",
+    startedAt: 0,
+    endedAt: 1,
+    resultText: `${banner}\n${head}\n…[39600 characters omitted]…\n${tail}`,
+    spill: { chars: 40_800, path: PATH, head, tail, omitted: 39_600 },
+    ...over,
+  });
+  const NOTE = "40.8k chars · too large, the model reads it in parts";
+  const body = (tool: ToolItem, o: Parameters<typeof itemLines>[1]) =>
+    itemLines(tool, o)
+      .slice(1)
+      .map((l) => strip(l).replace(/^(⎿ | {2})/, ""));
+
+  test("collapsed: the note first, no banner, no path, the usual ctrl+o hint", () => {
+    // Mutation (red, verified): render `resultText` instead of the spill view → fails.
+    const lines = body(spilled(), opts);
+    expect(lines[0]).toBe(NOTE);
+    const text = lines.join("\n");
+    expect(text).not.toContain("[large ");
+    expect(text).not.toContain(PATH);
+    expect(text).not.toContain("characters omitted");
+    expect(lines.slice(1, 6)).toEqual(head.split("\n").slice(0, 5));
+    expect(lines.at(-1)).toMatch(/^… \+\d+ more lines · ctrl\+o to expand$/);
+  });
+
+  test("expanded: note, saved to <path>, the head, the omitted line, the tail — in order", () => {
+    const lines = body(spilled(), { expandAll: true });
+    expect(lines).toEqual([
+      NOTE,
+      `saved to ${PATH}`,
+      ...head.split("\n"),
+      "… 39.6k chars omitted …",
+      ...tail.split("\n"),
+    ]);
+  });
+
+  test("in a pod: saved in the pod to <path>", () => {
+    expect(body(spilled(), { expandAll: true, spillInPod: true })[1]).toBe(
+      `saved in the pod to ${PATH}`,
+    );
+  });
+
+  test("any tool that spills (shell), and the no-path note", () => {
+    const { path: _p, ...noPath } = {
+      chars: 40_800,
+      path: PATH,
+      head: "a\nb",
+      tail: "y\nz",
+      omitted: 39_600,
+    };
+    const shell = spilled({
+      name: "shell",
+      args: JSON.stringify({ command: "ls" }),
+      spill: noPath,
+    });
+    expect(body(shell, { expandAll: true })).toEqual([
+      "40.8k chars · too large, could not be saved — the model sees only this preview",
+      "a",
+      "b",
+      "… 39.6k chars omitted …",
+      "y",
+      "z",
+    ]);
+  });
+
+  test("a sub-agent whose report spilled: the tree, a blank row, then the spill view", () => {
+    const sub = spilled({
+      name: "agent_task",
+      args: "{}",
+      sub: {
+        agentType: "explore",
+        description: "d",
+        activities: ["Read a.ts"],
+        toolUses: 1,
+        done: true,
+      },
+      spill: { chars: 40_800, path: PATH, head: "report", tail: "end", omitted: 39_600 },
+    });
+    expect(body(sub, { expandAll: true })).toEqual([
+      "◆ explore · 1 tool use",
+      "└─ Read a.ts",
+      "",
+      NOTE,
+      `saved to ${PATH}`,
+      "report",
+      "… 39.6k chars omitted …",
+      "end",
+    ]);
+  });
+
+  test("an older daemon (no spill field): the banner renders verbatim, nothing is derived from it", () => {
+    const { spill: _s, ...older } = spilled({ name: "shell", args: "{}" });
+    const lines = body(older, { expandAll: true });
+    expect(lines[0]).toBe(banner);
+    expect(lines).toContain("…[39600 characters omitted]…");
+  });
+});

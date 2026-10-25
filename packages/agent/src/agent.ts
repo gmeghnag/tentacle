@@ -103,6 +103,20 @@ const CONTINUE_NUDGE = "Continue with the task.";
  * so the assistant's `toolCalls` stay answered in the history. */
 const CANCELLED_TOOL_NOTE = "Cancelled by the user before this tool ran.";
 
+/**
+ * A finished call's history message. A spill rides with it, so a resume or a
+ * snapshot shows the same note as the live row (docs/feat/tui-spill-note.md);
+ * the model never sees it (providers copy field by field).
+ */
+function toolMessage(callId: string, result: ToolResult): ChatMessage {
+  return {
+    role: "tool",
+    content: result.content,
+    toolCallId: callId,
+    ...(result.spill ? { spill: result.spill } : {}),
+  };
+}
+
 /** The last user message's text, for `turn_start` hooks ("" if none). */
 function lastUserText(messages: readonly ChatMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -760,7 +774,7 @@ export class Agent {
         input,
       });
       yield { type: "tool_result", id: call.id, name: call.name, result };
-      messages.push({ role: "tool", content: result.content, toolCallId: call.id });
+      messages.push(toolMessage(call.id, result));
       // After the push, not before: the `tool_result` above precedes it.
       yield { type: "history_commit" };
     }
@@ -813,7 +827,7 @@ export class Agent {
       );
     }
     yield { type: "tool_result", id: call.id, name: call.name, result };
-    messages.push({ role: "tool", content: result.content, toolCallId: call.id });
+    messages.push(toolMessage(call.id, result));
     yield { type: "history_commit" };
   }
 

@@ -67,6 +67,38 @@ describe("eventToUpdate", () => {
     }
   });
 
+  // docs/feat/tui-spill-note.md: the spill fact rides the update as data.
+  test("tool_result with a spill → tool_call_update.spill; without one, no key", () => {
+    // Mutation (red, verified): drop the spill spread in mapping.ts → fails.
+    const spill = {
+      chars: 40800,
+      path: ".tentacle/tool-output/x.txt",
+      head: "h",
+      tail: "t",
+      omitted: 39600,
+    };
+    const spilled = eventToUpdate({
+      type: "tool_result",
+      id: "c1",
+      name: "shell",
+      result: { content: "[large shell output: …]", spill },
+    });
+    expect(spilled).toEqual({
+      type: "tool_call_update",
+      toolCallId: "c1",
+      status: "completed",
+      content: [{ type: "text", text: "[large shell output: …]" }],
+      spill,
+    });
+    const plain = eventToUpdate({
+      type: "tool_result",
+      id: "c2",
+      name: "shell",
+      result: { content: "ok" },
+    });
+    expect(plain !== null && "spill" in plain).toBe(false);
+  });
+
   test("usage → agent_usage", () => {
     expect(
       eventToUpdate({ type: "usage", usage: { promptTokens: 10, completionTokens: 3 } }),

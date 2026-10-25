@@ -268,3 +268,46 @@ describe("review round 2", () => {
     }
   });
 });
+
+// docs/feat/tui-spill-note.md: a spilled read's head and tail keep the read colours.
+describe("a spilled fs_read", () => {
+  const code = Array.from({ length: 3000 }, (_, i) => `const v${i} = ${i}; // line ${i}`).join(
+    "\n",
+  );
+  const head = code.slice(0, 600);
+  const tail = code.slice(code.length - 600);
+  const spilled = (over: Partial<ToolItem> = {}): ToolItem => ({
+    kind: "tool",
+    id: "s1",
+    name: "fs_read",
+    args: JSON.stringify({ path: "src/a.ts" }),
+    status: "ok",
+    startedAt: 0,
+    endedAt: 1,
+    resultText: "[large fs_read output: …]",
+    spill: { chars: 40_800, path: ".tentacle/tool-output/x.txt", head, tail, omitted: 39_600 },
+    ...over,
+  });
+  const headLines = head.split("\n");
+  const tailLines = tail.split("\n");
+
+  test("of a .ts file: head and tail are syntax-coloured, each on its own; the text is the data", () => {
+    // [note, saved to …, …head, omitted, …tail]
+    const rows = itemLines(spilled(), { expandAll: true }).slice(1);
+    const headRows = rows.slice(2, 2 + headLines.length);
+    const tailRows = rows.slice(-tailLines.length);
+    expect(headRows).toEqual((highlightRead(head, "src/a.ts") ?? []).map((l) => `  ${l}`));
+    expect(tailRows).toEqual((highlightRead(tail, "src/a.ts") ?? []).map((l) => `  ${l}`));
+    expect(headRows.join("")).toContain("\x1b[38;2");
+    expect(tailRows.join("")).toContain("\x1b[38;2");
+    expect(headRows.map((l) => strip(l).slice(2))).toEqual(headLines);
+  });
+
+  test("an error result: the parts in the error colour, never syntax-coloured", () => {
+    const rows = itemLines(spilled({ status: "error" }), { expandAll: true }).slice(1);
+    expect(rows.slice(2, 2 + headLines.length)).toEqual(
+      headLines.map((l) => `  ${theme.error(l)}`),
+    );
+    expect(rows.slice(-tailLines.length)).toEqual(tailLines.map((l) => `  ${theme.error(l)}`));
+  });
+});

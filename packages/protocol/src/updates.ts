@@ -18,6 +18,7 @@ import {
   TurnErrorSchema,
   TurnIdSchema,
 } from "./session.ts";
+import { ToolResultSpillSchema } from "./spill.ts";
 import { line } from "./text-line.ts";
 
 export const ToolCallStatusSchema = z.enum(["pending", "in_progress", "completed", "failed"]);
@@ -51,6 +52,8 @@ export const ToolCallUpdateSchema = z.object({
   toolCallId: z.string().min(1),
   status: ToolCallStatusSchema,
   content: z.array(ContentBlockSchema).optional(),
+  /** Set when the result was spilled: `content` is the model's banner (docs/feat/tui-spill-note.md). */
+  spill: ToolResultSpillSchema.optional(),
 });
 
 export const PlanEntryStatusSchema = z.enum(["pending", "in_progress", "completed"]);

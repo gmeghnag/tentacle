@@ -6,6 +6,7 @@
  * `/v1/chat/completions` endpoint (local llama.cpp / vLLM / cloud) and the
  * native Anthropic Messages API (`/v1/messages`). See ADR-003.
  */
+import type { ToolResultSpill } from "./tool.ts";
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
@@ -31,6 +32,12 @@ export interface ChatMessage {
   readonly toolCalls?: readonly ToolCall[];
   /** Present on `role: "tool"` messages, linking a result to its call. */
   readonly toolCallId?: string;
+  /**
+   * On a `role: "tool"` message whose result was spilled: the spill as data,
+   * for display only (provider mappers copy field by field, so the model
+   * never sees it; `content` is what it sees).
+   */
+  readonly spill?: ToolResultSpill;
 }
 
 export interface Usage {

@@ -220,6 +220,32 @@ describe("reconnect events (docs/feat/client-reattach.md)", () => {
     expect(resetHistory(initialState, history).items.at(-1)).toMatchObject({ status: "ok" });
   });
 
+  test("a spill rides the live tool_result and a resync's history_reset (docs/feat/tui-spill-note.md)", () => {
+    // Mutation (red, verified): drop the spill spread in applyEvent → the live assertion fails.
+    const spill = {
+      chars: 40800,
+      path: ".tentacle/tool-output/x.txt",
+      head: "h",
+      tail: "t",
+      omitted: 39600,
+    };
+    const live = fold(startTurn(initialState, "hi", 1), [
+      { type: "tool_start", id: "c1", name: "shell", arguments: "{}" },
+      { type: "tool_result", id: "c1", name: "shell", result: { content: "[large …]", spill } },
+      { type: "tool_start", id: "c2", name: "shell", arguments: "{}" },
+      { type: "tool_result", id: "c2", name: "shell", result: { content: "small" } },
+    ]);
+    const tools = live.items.filter((i) => i.kind === "tool");
+    expect(tools[0]?.kind === "tool" ? tools[0].spill : undefined).toEqual(spill);
+    expect(tools[1] !== undefined && "spill" in tools[1]).toBe(false);
+    const reset = resetHistory(initialState, [
+      ...history,
+      { role: "tool", content: "[large …]", toolCallId: "c1", spill },
+    ]);
+    const item = reset.items.at(-1);
+    expect(item?.kind === "tool" ? item.spill : undefined).toEqual(spill);
+  });
+
   test("user_message appends the replayed prompt; other events still go through applyEvent", () => {
     let s = applySessionEvent(initialState, { type: "history_reset", messages: [] }, 1);
     s = applySessionEvent(s, { type: "user_message", text: "go" }, 2);

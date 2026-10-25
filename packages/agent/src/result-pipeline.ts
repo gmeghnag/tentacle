@@ -11,7 +11,7 @@
  * Transforms are pure except for the injected `writeSpill`, so they test without
  * a real filesystem.
  */
-import type { ToolResult } from "@tentacle/core";
+import type { ToolResult, ToolResultSpill } from "@tentacle/core";
 import type { HookRunner } from "./hooks.ts";
 
 export interface ResultTransformContext {
@@ -90,12 +90,31 @@ export function spillLargeOutput(options: SpillOptions): ResultTransform {
     const preview = omitted > 0 ? `${head}\n…[${omitted} characters omitted]…\n${tail}` : content;
 
     const path = await ctx.writeSpill(content);
-    const pointer = path
-      ? `full output (${content.length} chars) saved to ${path} — read it selectively with fs_read (offset/limit) or grep; do NOT read it whole`
-      : `output truncated to ${previewChars} chars (could not be saved to a file)`;
-    const banner = `[large ${ctx.toolName} output: ${pointer}]`;
-    return { ...result, content: `${banner}\n${preview}` };
+    const banner = path
+      ? `[large ${ctx.toolName} output: full output (${content.length} chars) saved to ${path} — read it selectively with fs_read (offset/limit) or grep; do NOT read it whole]`
+      : `[large ${ctx.toolName} output (${content.length} chars), could not be saved to a file — only this preview is shown; ${unsavedHint(ctx.toolName)}]`;
+    // The same parts as data, so a frontend never parses the banner
+    // (docs/feat/tui-spill-note.md). Nothing omitted: `head` is the whole output.
+    const spill: ToolResultSpill = {
+      chars: content.length,
+      ...(path ? { path } : {}),
+      head: omitted > 0 ? head : content,
+      tail: omitted > 0 ? tail : "",
+      omitted: Math.max(0, omitted),
+    };
+    return { ...result, content: `${banner}\n${preview}`, spill };
   };
+}
+
+/**
+ * What the model can do when the full output is lost. A file read can be read
+ * again (no side effects); any other output only by re-running, which is safe
+ * only for a command without side effects — so never a bare nudge to repeat.
+ */
+function unsavedHint(toolName: string): string {
+  return toolName === "fs_read"
+    ? "read the file in parts with fs_read offset/limit"
+    : "to see more, re-run with narrower output (grep, head, sed -n) ONLY if the command is safe to repeat";
 }
 
 function isPrimitive(value: unknown): value is string | number | boolean | null {

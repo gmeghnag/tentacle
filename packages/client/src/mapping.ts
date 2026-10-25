@@ -171,7 +171,11 @@ export function updateToEvent(
         type: "tool_result",
         id: update.toolCallId,
         name: toolNames.get(update.toolCallId) ?? "tool",
-        result: toolResultFromContent(update.content, update.status === "failed"),
+        result: {
+          ...toolResultFromContent(update.content, update.status === "failed"),
+          // The field only, never derived from the banner text (docs/feat/tui-spill-note.md).
+          ...(update.spill ? { spill: update.spill } : {}),
+        },
       };
     case "agent_usage":
       return {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatDuration, formatDurationMs, formatTokens } from "../src/format.ts";
+import { formatChars, formatDuration, formatDurationMs, formatTokens } from "../src/format.ts";
 
 describe("formatTokens", () => {
   test("plain under 1000, then k, then M — never a long number", () => {
@@ -14,6 +14,23 @@ describe("formatTokens", () => {
     expect(formatTokens(999_600)).toBe("1M");
     expect(formatTokens(1_234_567)).toBe("1.2M");
     expect(formatTokens(12_345_678)).toBe("12M");
+  });
+});
+
+// docs/feat/tui-spill-note.md Q3: one decimal, as the owner's `40.8k` example.
+describe("formatChars", () => {
+  test("plain under 1000, then one decimal in k / M with .0 dropped", () => {
+    expect(formatChars(0)).toBe("0");
+    expect(formatChars(999)).toBe("999");
+    expect(formatChars(1000)).toBe("1k");
+    expect(formatChars(1234)).toBe("1.2k");
+    expect(formatChars(16_000)).toBe("16k");
+    expect(formatChars(39_600)).toBe("39.6k");
+    expect(formatChars(40_800)).toBe("40.8k");
+    expect(formatChars(999_940)).toBe("999.9k");
+    expect(formatChars(999_960)).toBe("1M"); // never "1000k"
+    expect(formatChars(1_234_567)).toBe("1.2M");
+    expect(formatChars(12_000_000)).toBe("12M");
   });
 });
 

@@ -209,6 +209,45 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
     { role: "assistant", content: "", toolCalls: [{ id: "1", name: "sh" }] },
     { role: "assistant", content: "", toolCalls: {} },
     { role: "tool", content: "", toolCallId: 5 },
+    // A spilled tool result (docs/feat/tui-spill-note.md), valid and malformed.
+    {
+      role: "tool",
+      content: "b",
+      toolCallId: "1",
+      spill: { chars: 9, path: "p", head: "h", tail: "t", omitted: 7 },
+    },
+    {
+      role: "tool",
+      content: "b",
+      toolCallId: "1",
+      spill: { chars: 9, head: "h", tail: "", omitted: 0 },
+    },
+    {
+      role: "tool",
+      content: "b",
+      toolCallId: "1",
+      spill: { chars: -1, head: "h", tail: "t", omitted: 7 },
+    },
+    {
+      role: "tool",
+      content: "b",
+      toolCallId: "1",
+      spill: { chars: 1.5, head: "h", tail: "t", omitted: 7 },
+    },
+    {
+      role: "tool",
+      content: "b",
+      toolCallId: "1",
+      spill: { chars: 9, path: "", head: "h", tail: "t", omitted: 7 },
+    },
+    {
+      role: "tool",
+      content: "b",
+      toolCallId: "1",
+      spill: { chars: 9, path: "p".repeat(4097), head: "h", tail: "t", omitted: 7 },
+    },
+    { role: "tool", content: "b", toolCallId: "1", spill: { chars: 9, tail: "t", omitted: 7 } },
+    { role: "tool", content: "b", toolCallId: "1", spill: "x" },
     "not an object",
     null,
   ];
@@ -225,6 +264,12 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
   for (const message of [
     { role: "user", content: "x", extra: true },
     { role: "assistant", content: "", toolCalls: [{ id: "1", name: "sh", arguments: "{}", x: 1 }] },
+    {
+      role: "tool",
+      content: "b",
+      toolCallId: "1",
+      spill: { chars: 9, head: "h", tail: "", omitted: 0, x: 1 },
+    },
   ]) {
     test(`an unknown key: the store rejects, the wire strips — ${JSON.stringify(message)}`, () => {
       expect(ChatMessageSchema.safeParse(message).success).toBe(true);
@@ -234,6 +279,6 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
   // Tripwire: a new wire key must be added to the store's mirror (session-store.ts).
   test("the set of allowed message keys is the schema's", () => {
     const keys = Object.keys(ChatMessageSchema.shape).sort();
-    expect(keys).toEqual(["content", "role", "toolCallId", "toolCalls"]);
+    expect(keys).toEqual(["content", "role", "spill", "toolCallId", "toolCalls"]);
   });
 });

@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { appendFile, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, JsonSessionStore, type LoadResult, Session } from "@tentacle/agent";
+import {
+  Agent,
+  JsonSessionStore,
+  type LoadResult,
+  Session,
+  parseSessionRecord,
+} from "@tentacle/agent";
 import {
   type ChatMessage,
   type ChatRequest,
@@ -37,6 +43,7 @@ import {
   parseDaemonRecord,
   reconcileOnReload,
   restoredActivity,
+  toDaemonRecord,
 } from "../src/persisted-session.ts";
 import { SessionHost, type SessionHostOptions } from "../src/session-host.ts";
 import { type RecordStore, SessionPersister } from "../src/session-persister.ts";
@@ -1084,7 +1091,7 @@ describe("daemon persistence: review fixes (the TTL clock, compaction, shutdown)
         title: "t",
         messages: [{ role: "user", content: "go" }],
         kind: "tentacle.daemon-session",
-        schemaVersion: 4,
+        schemaVersion: 5,
         lastActiveAt: 5,
         turns: [{ turnId: "T" }],
         enqueueIds: [],
@@ -1153,7 +1160,7 @@ describe("daemon persistence: the record's updatedAt is the last conversation ch
       title: "t",
       messages: [{ role: "user", content: "go" }],
       kind: "tentacle.daemon-session",
-      schemaVersion: 4,
+      schemaVersion: 5,
       lastActiveAt: 7,
       turns: [],
       enqueueIds: [],
@@ -1273,7 +1280,7 @@ describe("persisted-session (pure)", () => {
     title: "t",
     messages: [],
     kind: "tentacle.daemon-session",
-    schemaVersion: 4,
+    schemaVersion: 5,
     lastActiveAt: 2,
     turns: [],
     enqueueIds: [],
@@ -1303,7 +1310,7 @@ describe("persisted-session (pure)", () => {
       return p.ok ? "ok" : p.reason;
     };
     expect(reason({ ...base(), kind: undefined })).toMatch(/not a daemon session record/);
-    expect(reason({ ...base(), schemaVersion: 5 })).toMatch(/unsupported record version 5/);
+    expect(reason({ ...base(), schemaVersion: 6 })).toMatch(/unsupported record version 6/);
     expect(reason(base(), "/elsewhere")).toMatch(/another project/);
     expect(reason({ ...base(), turns: [{ turnId: "x", end: { stopReason: "nope" } }] })).toMatch(
       /invalid end/,
@@ -1451,13 +1458,13 @@ describe("persisted-session (pure)", () => {
     ).toBeUndefined();
   });
 
-  test("U2 parseDaemonRecord: a v1 record reads as current, not archived; archivedAt is a wire stamp; v5 refused", () => {
+  test("U2 parseDaemonRecord: a v1 record reads as current, not archived; archivedAt is a wire stamp; v6 refused", () => {
     // Mutation: refuse v1 → every session of the previous build is skipped at the upgrade.
-    // (Task 3 took the current version to 3, task 5 to 4: v1–v3 all read as v4.)
+    // (Task 3 took the current version to 3, task 5 to 4, tui-spill-note to 5: v1–v4 all read as v5.)
     const parse = (r: unknown) => parseDaemonRecord(r as DaemonSessionRecord, (c) => c === CWD);
     const v1 = parse({ ...base(), schemaVersion: 1, archivedAt: 9 });
     expect(v1.ok ? [v1.record.schemaVersion, v1.record.archivedAt] : v1.reason).toEqual([
-      4,
+      5,
       undefined,
     ]);
     const v2 = parse(base({ archivedAt: 5 }));
@@ -1467,9 +1474,9 @@ describe("persisted-session (pure)", () => {
       const p = parse({ ...base(), archivedAt: bad });
       expect(p.ok ? "ok" : p.reason).toBe('"archivedAt" is not a non-negative integer');
     }
-    const v5 = parse({ ...base(), schemaVersion: 5 });
-    expect(v5.ok ? "ok" : v5.reason).toMatch(
-      /unsupported record version 5 \(this daemon reads 1, 2, 3, 4\)/,
+    const v6 = parse({ ...base(), schemaVersion: 6 });
+    expect(v6.ok ? "ok" : v6.reason).toMatch(
+      /unsupported record version 6 \(this daemon reads 1, 2, 3, 4, 5\)/,
     );
   });
 
@@ -2165,7 +2172,7 @@ describe("the v4 record: steer ids and returned rows (docs/feat/queued-broadcast
     );
     expect(
       v3.ok ? [v3.record.schemaVersion, v3.record.turn, v3.record.returned] : v3.reason,
-    ).toEqual([4, { turnId: "T", steering: ["s1"] }, []]);
+    ).toEqual([5, { turnId: "T", steering: ["s1"] }, []]);
     const v3Title = parse(v4({ schemaVersion: 3, title: { text: "Fix login", source: "user" } }));
     expect(v3Title.ok ? v3Title.record.title : v3Title.reason).toEqual({
       text: "Fix login",
@@ -2410,5 +2417,101 @@ describe("the v4 record: steer ids and returned rows (docs/feat/queued-broadcast
     expect(record.returned).toEqual([]);
     const again = rig([], () => []).host.restore(record);
     expect(again.snapshotPage().queued).toEqual({ entries: [], returned: [] });
+  });
+});
+
+describe("the v5 record: a tool message may carry its spill (docs/feat/tui-spill-note.md)", () => {
+  const spill = {
+    chars: 40800,
+    path: ".tentacle/tool-output/big-c1.txt",
+    head: "h",
+    tail: "t",
+    omitted: 39600,
+  };
+  const v4 = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: "s",
+    cwd: CWD,
+    model: "m",
+    createdAt: 1,
+    updatedAt: 2,
+    title: "t",
+    messages: [{ role: "user", content: "go" }],
+    kind: "tentacle.daemon-session",
+    schemaVersion: 4,
+    lastActiveAt: 2,
+    turns: [{ turnId: "T" }],
+    enqueueIds: ["i1"],
+    returned: [{ id: "r1", text: "R", cause: "cancelled" }],
+    turn: { turnId: "T", steering: ["s1"], steeringIds: ["i1"] },
+    ...over,
+  });
+  const parse = (r: unknown) => parseDaemonRecord(r as DaemonSessionRecord, (c) => c === CWD);
+
+  test("V5-1 a record is written as v5; a v6 one is refused (an older daemon refuses a v5 the same way)", () => {
+    // Mutation (red, verified): DAEMON_RECORD_VERSION left at 4 → written as 4, v5 refused.
+    const written = toDaemonRecord(
+      {
+        id: "s",
+        createdAt: 1,
+        lastActiveAt: 1,
+        lastChangeAt: 1,
+        messages: [],
+        turns: [],
+        enqueueIds: [],
+      },
+      { cwd: CWD, model: "m" },
+      1,
+    );
+    expect(written.schemaVersion).toBe(5);
+    expect(parse(v4({ schemaVersion: 5 })).ok).toBe(true);
+    const v6 = parse(v4({ schemaVersion: 6 }));
+    expect(v6.ok ? "ok" : v6.reason).toBe(
+      "unsupported record version 6 (this daemon reads 1, 2, 3, 4, 5)",
+    );
+  });
+
+  test("V5-2 a v4 record reads as v5 with its ids, rows and messages intact — and still refuses a v4 turn without ids", () => {
+    // The v4 gates are their OWN constant, not the current version. Mutation
+    // (red, verified): leave them at `DAEMON_RECORD_VERSION` → the v4 turn
+    // loses its ids, its rows are dropped, and an id-less v4 turn loads.
+    const ok = parse(v4());
+    expect(
+      ok.ok
+        ? [ok.record.schemaVersion, ok.record.turn, ok.record.returned, ok.record.messages]
+        : ok.reason,
+    ).toEqual([
+      5,
+      { turnId: "T", steering: ["s1"], steeringIds: ["i1"] },
+      [{ id: "r1", text: "R", cause: "cancelled" }],
+      [{ role: "user", content: "go" }],
+    ]);
+    const idless = parse(v4({ turn: { turnId: "T", steering: ["s1"] } }));
+    expect(idless.ok ? "ok" : idless.reason).toBe('"turn.steeringIds" is malformed');
+  });
+
+  test("V5-3 a restart keeps the spill: the disk bytes pass the store's strict parser and the snapshot carries it", async () => {
+    // Mutation (red, verified): drop "spill" from the store's MESSAGE_KEYS → the reread fails.
+    const big: Tool = {
+      name: "big",
+      description: "big",
+      inputSchema: anyInput,
+      permission: "none",
+      execute: async () => ({ content: "[large big output: …]", spill }),
+    };
+    const r = rig([[call("c1", "big"), { type: "done" }], text("done")], () => [big]);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.ended("T1"));
+    await hosted.persisted();
+    const durable = r.store.durable.get(hosted.id);
+    const bytes = JSON.parse(JSON.stringify(durable));
+    const stored = parseSessionRecord(bytes, hosted.id);
+    expect(stored.ok ? "ok" : stored.reason).toBe("ok");
+    const record = reread(durable);
+    expect(record.schemaVersion).toBe(5);
+    const restored = rig([], () => []).host.restore(record);
+    const toolMessage = restored.snapshotPage().messages.find((m) => m.role === "tool");
+    expect(toolMessage?.spill).toEqual(spill);
   });
 });

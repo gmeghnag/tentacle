@@ -210,8 +210,32 @@ function processAlive(pid: number): boolean {
 const ROLES = new Set(["system", "user", "assistant", "tool"]);
 // Mirrors the strict wire `ChatMessageSchema` (`@tentacle/protocol`, session.ts):
 // a record that passes here can always seed `session/open`. Pinned by a cli test.
-const MESSAGE_KEYS = new Set(["role", "content", "toolCalls", "toolCallId"]);
+const MESSAGE_KEYS = new Set(["role", "content", "toolCalls", "toolCallId", "spill"]);
 const TOOL_CALL_KEYS = ["id", "name", "arguments"];
+// `spill` (docs/feat/tui-spill-note.md): an older build refuses a record that
+// holds one (`unknown key "spill"`), loudly — never half-loaded.
+const SPILL_KEYS = new Set(["chars", "path", "head", "tail", "omitted"]);
+/** The wire's `ToolResultSpillSchema` path bound. */
+const SPILL_PATH_MAX = 4096;
+
+/** zod 3's `.int().nonnegative()`, exactly (the parity test). */
+const isCount = (v: unknown): boolean => Number.isInteger(v) && (v as number) >= 0;
+
+/** Exactly `chars`/`head`/`tail`/`omitted` (+ an optional non-empty `path`), each well-typed. */
+function isSpill(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    Object.keys(value).every((key) => SPILL_KEYS.has(key)) &&
+    isCount(value.chars) &&
+    isCount(value.omitted) &&
+    typeof value.head === "string" &&
+    typeof value.tail === "string" &&
+    (value.path === undefined ||
+      (typeof value.path === "string" &&
+        value.path.length > 0 &&
+        value.path.length <= SPILL_PATH_MAX))
+  );
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -247,6 +271,9 @@ function messageProblem(value: unknown): string | null {
     if (!valid) {
       return "has malformed toolCalls";
     }
+  }
+  if (value.spill !== undefined && !isSpill(value.spill)) {
+    return "has a malformed spill";
   }
   return null;
 }

@@ -381,6 +381,56 @@ describe("parseSessionRecord", () => {
   });
 });
 
+// docs/feat/tui-spill-note.md (Q1): a spilled tool message keeps its spill on
+// disk, so `--resume` shows the same note as the live row.
+describe("a spilled tool message in the record", () => {
+  const spill = {
+    chars: 40800,
+    path: ".tentacle/tool-output/fs_read-c1.txt",
+    head: "h",
+    tail: "t",
+    omitted: 39600,
+  };
+  const spilled = (s: unknown): unknown[] => [
+    { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "fs_read", arguments: "{}" }] },
+    { role: "tool", content: "[large fs_read output: …]", toolCallId: "c1", spill: s },
+  ];
+
+  test("round-trips save → load, with and without a path", async () => {
+    const store = new JsonSessionStore(join(dir, "spill"));
+    const { path: _path, ...noPath } = spill;
+    for (const [id, s] of [
+      ["sp1", spill],
+      ["sp2", noPath],
+    ] as const) {
+      const record = { ...rec(id, 1), messages: spilled(s) as ChatMessage[] };
+      await store.save(record);
+      expect(await store.load(id)).toEqual({ status: "ok", record });
+    }
+  });
+
+  test("a malformed spill is refused, loudly, with the reason", () => {
+    const bad: Array<[string, unknown]> = [
+      ["missing head", { chars: 1, tail: "", omitted: 0 }],
+      ["string chars", { ...spill, chars: "40800" }],
+      ["negative omitted", { ...spill, omitted: -1 }],
+      ["fractional chars", { ...spill, chars: 1.5 }],
+      ["empty path", { ...spill, path: "" }],
+      ["path too long", { ...spill, path: "p".repeat(4097) }],
+      ["extra key", { ...spill, future: true }],
+      ["not an object", "x"],
+      ["array", []],
+    ];
+    for (const [label, s] of bad) {
+      const result = parseSessionRecord({ ...rec("p", 1), messages: spilled(s) }, "p");
+      expect({ label, reason: result.ok ? "ok" : result.reason }).toEqual({
+        label,
+        reason: "message 1 has a malformed spill",
+      });
+    }
+  });
+});
+
 describe("JsonSessionStore.remove", () => {
   test("deletes the file; a write in flight and one queued never resurrect it", async () => {
     // Mutation: skip waiting for the running write → it renames over the deleted file.

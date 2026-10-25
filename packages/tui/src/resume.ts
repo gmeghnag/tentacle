@@ -35,7 +35,14 @@ export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[]
       const idx = m.toolCallId !== undefined ? toolAt.get(m.toolCallId) : undefined;
       const tool = idx !== undefined ? (items[idx] as ToolItem) : undefined;
       if (tool) {
-        items[idx as number] = { ...tool, resultText: m.content, status: "ok", endedAt: 0 };
+        items[idx as number] = {
+          ...tool,
+          resultText: m.content,
+          status: "ok",
+          endedAt: 0,
+          // A spilled result shows the same note as live (docs/feat/tui-spill-note.md).
+          ...(m.spill ? { spill: m.spill } : {}),
+        };
       } else {
         // A tool result with no matching call (truncated history): show it plainly.
         items.push({ kind: "notice", text: m.content });
