@@ -39,10 +39,15 @@ per user message.
 
 1. **Same session, history replaced (compaction-like)** — not a new linked
    session. (2026-10-25: "si confermo stessa sessione, ha molto senso")
+2. **Approval like every other tool that asks:** the prompt shows the model's
+   restart prompt with Yes / Yes, always (rest of the session) / No; with
+   auto-accept on (Shift+Tab) it passes without asking. Rationale: a reset
+   touches no file, but the model loses whatever it did not write into the
+   prompt, so the user sees it. (2026-10-25: "ok, trattiamolo come gli altri
+   tools")
 
 ## Open questions (asked one at a time)
 
-- Approval policy (always ask / "Yes, always" / follows auto-accept).
 - Anti-loop cap value.
 - What else survives the reset (todo list, background jobs, sub-agents).
 - On-disk history: is the pre-reset history kept (archive) or replaced, as
