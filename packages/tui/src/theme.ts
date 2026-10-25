@@ -40,6 +40,34 @@ function messageStyle(c: { readonly bg: Rgb; readonly queuedFg: Rgb }): MessageS
   return { bg: chalk.bgRgb(...c.bg), queuedFg: chalk.rgb(...c.queuedFg) };
 }
 
+/**
+ * Syntax colours for file reads (highlight.js token classes → RGB). `dark` is
+ * the default; `light` is the darker-on-white set for a light terminal (no
+ * light-mode switch yet — same status as `messageRgb`).
+ */
+export const syntaxRgb = {
+  dark: {
+    keyword: [198, 120, 221],
+    string: [152, 195, 121],
+    number: [209, 154, 102],
+    comment: [110, 118, 129],
+    title: [97, 175, 239],
+    type: [229, 192, 123],
+    meta: [86, 182, 194],
+    tag: [224, 108, 117],
+  },
+  light: {
+    keyword: [136, 57, 239],
+    string: [64, 128, 24],
+    number: [190, 90, 20],
+    comment: [120, 126, 135],
+    title: [30, 102, 245],
+    type: [160, 110, 10],
+    meta: [14, 130, 150],
+    tag: [200, 40, 60],
+  },
+} as const;
+
 export const theme = {
   /** Brand accent (cyan) — assistant bullets, in-progress, highlights. */
   accent: chalk.hex(accentHex),

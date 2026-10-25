@@ -14,6 +14,7 @@ import wrapAnsi from "wrap-ansi";
 import { formatDurationMs } from "./format.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
+import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 import { dashedRule, theme } from "./theme.ts";
 import { type WordOp, changeRatio, diffWords } from "./word-diff.ts";
@@ -270,17 +271,43 @@ export function hookLines(
   return { name: hook.name, rest: ` blocked ${label}`, reason, replacesBody: true };
 }
 
-function toolBody(tool: ToolItem, width: number): string[] {
+function toolBody(tool: ToolItem, width: number, headLimit?: number): string[] {
   const hook = hookLines(tool);
   if (!hook) {
-    return plainToolBody(tool, width);
+    return plainToolBody(tool, width, headLimit);
   }
   const line = theme.subtle("hook ") + theme.accent(hook.name) + theme.subtle(hook.rest);
   const reason = hook.reason.map((l) => theme.subtle(l));
-  return [line, ...reason, ...(hook.replacesBody ? [] : plainToolBody(tool, width))];
+  return [line, ...reason, ...(hook.replacesBody ? [] : plainToolBody(tool, width, headLimit))];
 }
 
-function plainToolBody(tool: ToolItem, width: number): string[] {
+// A file read's syntax-coloured lines, memoised on the tool item's identity
+// (like `rowCache`): a Ctrl+O / resize re-lay-out reuses them instead of
+// re-highlighting. `limit` (undefined = all) is the key: a collapsed preview
+// highlights only its head, the expanded view the whole file.
+// One slot per limit (preview head, full), so toggling Ctrl+O highlights each
+// view at most once; a cached `undefined` (plain) is remembered too.
+const readHlCache = new WeakMap<ToolItem, Map<number | undefined, readonly string[] | undefined>>();
+
+function readLines(tool: ToolItem, limit: number | undefined): readonly string[] | undefined {
+  let slots = readHlCache.get(tool);
+  if (!slots) {
+    slots = new Map();
+    readHlCache.set(tool, slots);
+  }
+  if (slots.has(limit)) {
+    return slots.get(limit);
+  }
+  const path = pathOfArgs(tool.args);
+  const lines =
+    path === undefined || tool.resultText === undefined
+      ? undefined
+      : highlightRead(cleanReadText(tool.resultText), path, "dark", limit);
+  slots.set(limit, lines);
+  return lines;
+}
+
+function plainToolBody(tool: ToolItem, width: number, headLimit?: number): string[] {
   if (tool.detail?.kind === "diff") {
     return diffBody(tool.detail, width);
   }
@@ -306,8 +333,15 @@ function plainToolBody(tool: ToolItem, width: number): string[] {
     return [theme.subtle("running…")];
   }
   if (tool.resultText && tool.resultText.length > 0) {
+    if (tool.name === "fs_read" && tool.status !== "error") {
+      const coloured = readLines(tool, headLimit);
+      if (coloured) {
+        return [...coloured];
+      }
+    }
     const color = tool.status === "error" ? theme.error : theme.subtle;
-    return tool.resultText
+    const text = tool.name === "fs_read" ? cleanReadText(tool.resultText) : tool.resultText;
+    return text
       .replace(/\n+$/, "")
       .split("\n")
       .map((line) => color(line));
@@ -381,9 +415,9 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const sub = subtitle ? ` ${theme.subtle(truncate(subtitle, 72))}` : "";
   const header = `${bullet(tool)} ${chalk.bold(label)}${sub}${theme.subtle(elapsed)}`;
 
-  const body = toolBody(tool, width);
   const threshold = opts.collapseThreshold ?? DEFAULT_THRESHOLD;
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
+  const body = toolBody(tool, width, opts.expandAll ? undefined : Math.max(threshold, preview));
 
   let shown = body;
   if (!opts.expandAll && body.length > threshold) {
@@ -442,11 +476,36 @@ export function wrapLines(lines: readonly string[], width: number): string[] {
       continue;
     }
     const wrapped = wrapAnsi(line, w, { hard: true, trim: false, wordWrap: true });
-    for (const piece of wrapped.split("\n")) {
-      out.push(piece);
-    }
+    out.push(...carryColor(wrapped.split("\n")));
   }
   return out;
+}
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI SGR codes
+const SGR_CODE = /\x1b\[([0-9;]*)m/g;
+
+/**
+ * Make each row of one wrapped line self-contained for truecolour foregrounds.
+ * wrap-ansi tracks only single-number SGR codes, so a `38;2;r;g;b` colour that
+ * spans a wrap point stays open at the end of its row and is missing on the
+ * next. Done on the finished rows, it changes no text and no wrap point: the
+ * open colour is re-emitted at the start of each following row and closed
+ * (`39`) at the end of each row. Rows without such a colour pass through as is.
+ */
+export function carryColor(rows: readonly string[]): string[] {
+  let open: string | null = null;
+  return rows.map((row) => {
+    const lead = open ?? "";
+    for (const m of row.matchAll(SGR_CODE)) {
+      const p = m[1] ?? "";
+      if (p.startsWith("38;2;")) {
+        open = m[0];
+      } else if (p === "39" || p === "0" || p === "") {
+        open = null;
+      }
+    }
+    return lead === "" && open === null ? row : `${lead}${row}${open === null ? "" : "\x1b[39m"}`;
+  });
 }
 
 // --- per-item layout cache -------------------------------------------------
