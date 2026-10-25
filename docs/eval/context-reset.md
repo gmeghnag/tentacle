@@ -123,6 +123,16 @@ per user message.
    security (AGENTS §7: whoever controls the pod controls the daemon); the
    laptop-side approval is the guard. (2026-10-25: "ok va bene")
 
+13. **Plan question 3 (step limit): a reset restarts the turn's
+   `maxIterations` count from zero** ("fresh context, fresh rounds"; the
+   anti-loop rule and the reset cap guard against empty loops). Rejects the
+   planner's recommendation. (2026-10-25: "a ogni rinnovo il contatore
+   riparte da zero")
+14. **Separate from this feature: the default `maxIterations` becomes `-1`
+   (unlimited)** — today 16 (`packages/config/src/defaults.ts:11`). Owner:
+   "voglio che di default maxIterations sia -1". Its own small task in
+   `TODO.md`.
+
 ## Review
 
 *— claude-opus-5-5, 2026-10-25*

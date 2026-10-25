@@ -366,6 +366,12 @@ Daily-driver work (done 2026-10-14):
       After `fix/tui-expand-latency` merges. Type: feat (refactor) · Size: S
       · Blast: contained · Suited: Sonnet executes, Opus reviews.
 
+- [ ] **Default `maxIterations` = `-1` (unlimited)** (owner, 2026-10-25,
+      from the `context-reset` plan questions) — today 16
+      (`packages/config/src/defaults.ts:11`); the commented default in the
+      generated config, docs and tests follow. Sub-agents' default (50,
+      `:18`): owner to confirm. Type: fix · Size: S · Blast: contained ·
+      Suited: Sonnet executes, Opus reviews.
 - [ ] **The model knows how full its context is (`contextAwareness`)**
       ([`docs/eval/context-awareness.md`](docs/eval/context-awareness.md);
       owner, 2026-10-25, decided) — a line `context: 82k / 128k tokens (64%)`
