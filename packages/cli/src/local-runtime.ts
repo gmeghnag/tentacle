@@ -42,7 +42,8 @@ import type { SessionController } from "@tentacle/tui";
 import { logDaemonError } from "./daemon-log.ts";
 import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
 import type { SessionSaver } from "./session-saver.ts";
-import { CLIENT_INFO } from "./version.ts";
+import { APP_VERSION, CLIENT_INFO } from "./version.ts";
+import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 
 export interface LocalRuntime {
   readonly createSession: () => SessionController;
@@ -408,7 +409,8 @@ export async function startWorkerRuntime(
     worker.addEventListener("error", (event) => {
       workerError = String((event as ErrorEvent).message);
     });
-    worker.postMessage(config); // object bootstrap (structured-cloned)
+    // Object bootstrap (structured-cloned); the worker takes its version from it.
+    worker.postMessage({ config, version: APP_VERSION } satisfies WorkerBootstrap);
   } catch (error) {
     log(`[worker] could not start (${String(error)}); using in-process\n`);
     return null;
