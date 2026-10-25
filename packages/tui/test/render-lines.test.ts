@@ -20,7 +20,7 @@ const opts = { expandAll: false };
 describe("itemLines", () => {
   test("renders a user prompt with a prefix", () => {
     const lines = itemLines({ kind: "user", text: "do a thing" }, opts).map(strip);
-    expect(lines[0]).toBe("› do a thing");
+    expect(lines[0]?.trimEnd()).toBe("› do a thing"); // the rest is the full-width pad
   });
 
   test("renders assistant markdown", () => {
@@ -187,7 +187,7 @@ describe("transcriptLines", () => {
       ],
       opts,
     ).map(strip);
-    expect(lines[0]).toBe("› hi");
+    expect(lines[0]?.trimEnd()).toBe("› hi");
     expect(lines[1]).toBe("");
     expect(lines[2]).toContain("yo");
   });

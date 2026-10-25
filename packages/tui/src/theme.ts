@@ -17,6 +17,28 @@ import chalk from "chalk";
  */
 export const accentHex = "#06b6d4";
 
+/**
+ * User-message rows: a full-width background tint and the grey of a queued
+ * one, as RGB triples. `dark` is the default; `light` is the matching tint for
+ * a light terminal (the TUI has no light-mode switch yet).
+ */
+export const messageRgb = {
+  dark: { bg: [38, 38, 46], queuedFg: [140, 140, 140] },
+  light: { bg: [232, 232, 240], queuedFg: [110, 110, 120] },
+} as const;
+
+type Rgb = readonly [number, number, number];
+
+/** The stylers a message row is dressed with. */
+export interface MessageStyle {
+  readonly bg: (s: string) => string;
+  readonly queuedFg: (s: string) => string;
+}
+
+function messageStyle(c: { readonly bg: Rgb; readonly queuedFg: Rgb }): MessageStyle {
+  return { bg: chalk.bgRgb(...c.bg), queuedFg: chalk.rgb(...c.queuedFg) };
+}
+
 export const theme = {
   /** Brand accent (cyan) — assistant bullets, in-progress, highlights. */
   accent: chalk.hex(accentHex),
@@ -40,6 +62,11 @@ export const theme = {
     delWord: chalk.bgRgb(140, 48, 58).rgb(255, 216, 221),
     /** Subtle dashed frame around a diff block. */
     border: chalk.rgb(88, 88, 96),
+  },
+  /** Row style of a user message (sent or queued); see `messageRgb`. */
+  message: {
+    dark: messageStyle(messageRgb.dark),
+    light: messageStyle(messageRgb.light),
   },
 } as const;
 

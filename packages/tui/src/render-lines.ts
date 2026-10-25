@@ -11,7 +11,9 @@
 import { type ToolResultDetail, toolLabel } from "@tentacle/core";
 import chalk from "chalk";
 import wrapAnsi from "wrap-ansi";
+import { formatDurationMs } from "./format.ts";
 import { renderMarkdown } from "./markdown.ts";
+import { messageRows } from "./message-row.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 import { dashedRule, theme } from "./theme.ts";
 import { type WordOp, changeRatio, diffWords } from "./word-diff.ts";
@@ -51,9 +53,9 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
-function userLines(text: string): string[] {
-  const [first = "", ...rest] = text.split("\n");
-  return [chalk.cyan.bold("› ") + first, ...rest.map((l) => `  ${l}`)];
+// Already wrapped to the width and padded, so `wrapLines` leaves the rows alone.
+function userLines(text: string, width: number): string[] {
+  return messageRows(text, width);
 }
 
 function assistantLines(text: string): string[] {
@@ -374,7 +376,7 @@ function toolSubtitle(
 function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const width = Math.max(20, (opts.width ?? DEFAULT_WIDTH) - INDENT.length - 1);
   const elapsed =
-    tool.endedAt !== undefined ? ` ${((tool.endedAt - tool.startedAt) / 1000).toFixed(1)}s` : "";
+    tool.endedAt !== undefined ? ` ${formatDurationMs(tool.endedAt - tool.startedAt)}` : "";
   const { label, subtitle } = toolTitle(tool);
   const sub = subtitle ? ` ${theme.subtle(truncate(subtitle, 72))}` : "";
   const header = `${bullet(tool)} ${chalk.bold(label)}${sub}${theme.subtle(elapsed)}`;
@@ -404,7 +406,7 @@ function noticeLines(text: string): string[] {
 export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
   switch (item.kind) {
     case "user":
-      return userLines(item.text);
+      return userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
     case "assistant":
       return assistantLines(item.text);
     case "tool":

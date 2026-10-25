@@ -9,15 +9,14 @@ import {
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
 import { SEND_NOW_HINT } from "../src/send-now.ts";
-import { ARC } from "../src/spinner.ts";
 import type { SessionEvent } from "../src/state.ts";
+import { queuedRow } from "./queued-row.ts";
 
 // The `Ctrl+X Ctrl+S` chord over a fake controller (docs/feat/send-now-c.md).
 const CTRL_X = "\x18";
 const CTRL_S = "\x13";
 const ESC = "\x1b";
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const queuedRow = (text: string) => new RegExp(`[${ARC.frames.join("")}] ${text}`);
 const rpcError = (code: number, message: string) => Object.assign(new Error(message), { code });
 const METHOD_NOT_FOUND = -32601;
 const NO_TURN_RUNNING = -32008;
