@@ -180,3 +180,24 @@ describe("PermissionRouter (pure)", () => {
     expect(show(r.request("S", req("r2")))).toEqual(["prompt S/r2"]);
   });
 });
+
+// docs/feat/tui-foreign-turns.md B4: the wire request has no turn id; the
+// client attributes it to the turn it was raised in, kept until it is asked.
+describe("PermissionRouter — the turn a request belongs to", () => {
+  test("the prompt carries its turn; a request queued behind another keeps its own", () => {
+    const r = new PermissionRouter();
+    const first = r.request("S", req("r1"), "X");
+    expect(first[0]?.kind === "prompt" && first[0].turnId).toBe("X");
+    expect(r.request("S", req("r2"), "Y")).toEqual([]);
+    const later = r.answered("S", "r1", { allowed: true });
+    const prompt = later.find((a) => a.kind === "prompt");
+    expect(prompt?.kind === "prompt" && prompt.requestId).toBe("r2");
+    expect(prompt?.kind === "prompt" && prompt.turnId).toBe("Y");
+  });
+
+  test("no turn (null): the prompt carries none", () => {
+    const r = new PermissionRouter();
+    const [prompt] = r.request("S", req("r1"), null);
+    expect(prompt?.kind === "prompt" && "turnId" in prompt).toBe(false);
+  });
+});

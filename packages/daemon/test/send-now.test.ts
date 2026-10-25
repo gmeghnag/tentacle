@@ -1214,3 +1214,105 @@ describe("session/send_now — a refusal reports what the daemon holds", () => {
     expect(userTexts(t.hosted.snapshotPage().messages)).not.toContain("A");
   });
 });
+
+// `session/cancel{turnId?}` (docs/feat/tui-foreign-turns.md step A): a cancel
+// names the turn the client means, so a late Esc never stops a turn another
+// device started meanwhile. Absent → whatever runs (today's blind cancel).
+describe("session/cancel — a cancel names its turn", () => {
+  test("T-A1 over the wire: a cancel naming an ended turn never cancels the turn that runs now", async () => {
+    // Mutation: drop `turnId` in `Connection.onNotification` → red (a blind cancel).
+    const r = rig([say("one"), call("c2", "block")]);
+    const [d, cl] = createChannelPair();
+    new Connection(d, r.host);
+    const updates: SessionUpdate[] = [];
+    const peer = new RpcPeer(cl, {
+      onNotification: (method, params) => {
+        if (method === "session/update") updates.push((params as KnownSessionUpdateParams).update);
+      },
+    });
+    await peer.request("initialize", { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} });
+    const { sessionId } = (await peer.request("session/open", { create: true })) as {
+      sessionId: string;
+    };
+    const ended = (id: string) => updates.find((u) => u.type === "turn_end" && u.turnId === id);
+    await peer.request("session/prompt", { sessionId, turnId: "T1", content: go });
+    await until(() => ended("T1") !== undefined);
+    await peer.request("session/prompt", { sessionId, turnId: "T2", content: go });
+    await until(() => r.gate.waiting === 1);
+    peer.notify("session/cancel", { sessionId, turnId: "T1" });
+    // Frames are handled in order: once this answers, the cancel has landed.
+    await peer.request("session/list", {});
+    r.gate.release();
+    await until(() => ended("T2") !== undefined);
+    expect(ended("T2")).toMatchObject({ stopReason: "end_turn" });
+  });
+
+  test("T-A2 naming the active turn aborts it; a reserved successor still starts", async () => {
+    const t = await blockedT1([call("c1", "block"), say("two")]);
+    t.hosted.sendNow("T2", turn("T1"), [msg("a", "A")]);
+    t.hosted.cancel("T1");
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    expect(t.c.end("T1")).toMatchObject({ stopReason: "cancelled" });
+    expect(t.c.start("T2")).toMatchObject({ prompt: "A" });
+    expect(t.c.end("T2")).toMatchObject({ stopReason: "end_turn", delivered: true });
+  });
+
+  test("T-A2b naming the active turn with no successor aborts it", async () => {
+    const t = await blockedT1();
+    t.hosted.cancel("T1");
+    t.gate.release();
+    await until(() => t.c.ended("T1"));
+    expect(t.c.end("T1")).toMatchObject({ stopReason: "cancelled" });
+  });
+
+  test("T-A3 naming the reserved successor ends it unstarted; the old turn only gets its send-now interrupt", async () => {
+    const t = await blockedT1();
+    t.hosted.sendNow("T2", turn("T1"), [msg("a", "A")]);
+    t.hosted.cancel("T2");
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    expect(t.c.end("T1")).toMatchObject({ stopReason: "cancelled" });
+    expect(t.c.end("T2")).toMatchObject({ stopReason: "cancelled", delivered: false });
+    expect(t.c.started("T2")).toBe(false);
+  });
+
+  test("T-A4 no turnId: today's cancel (the turn and its successor; a compaction)", async () => {
+    const t = await blockedT1();
+    t.hosted.sendNow("T2", turn("T1"), [msg("a", "A")]);
+    t.hosted.cancel();
+    t.gate.release();
+    await until(() => t.c.ended("T2"));
+    expect(t.c.end("T2")).toMatchObject({ stopReason: "cancelled", delivered: false });
+    const r = rig([say("first"), PARK]);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.ended("T1"));
+    const outcome = hosted.compact().then(
+      () => "resolved",
+      (error: unknown) => (error instanceof RpcError ? error.code : error),
+    );
+    await until(() => r.model.waiting === 1);
+    hosted.cancel();
+    r.model.release();
+    expect(await outcome).toBe(DomainErrorCode.Cancelled);
+  });
+
+  test("T-A5 a cancel naming any turn while a compaction runs: the compaction goes on", async () => {
+    const r = rig([say("first"), PARK]);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.ended("T1"));
+    const outcome = hosted.compact().then(
+      () => "resolved",
+      (error: unknown) => (error instanceof RpcError ? error.code : error),
+    );
+    await until(() => r.model.waiting === 1);
+    hosted.cancel("T1");
+    hosted.cancel("unknown");
+    r.model.release();
+    expect(await outcome).toBe("resolved");
+  });
+});

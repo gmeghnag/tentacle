@@ -114,7 +114,18 @@ export type StreamOutput =
       readonly turn: string | null;
       readonly keepRequests: readonly string[];
     }
-  | { readonly kind: "update"; readonly seq: number; readonly update: SessionUpdate }
+  | {
+      readonly kind: "update";
+      readonly seq: number;
+      readonly update: SessionUpdate;
+      /**
+       * The turn the update belongs to, by the stream's brackets: the running
+       * turn as of this update, null outside turns (and for a `turn_end` that
+       * closes no started turn). Session-level updates carry it too; their
+       * consumers ignore it (docs/feat/tui-foreign-turns.md).
+       */
+      readonly turn: string | null;
+    }
   /** A frame this client cannot act on (malformed known type, unknown mandatory). */
   | { readonly kind: "error"; readonly error: Error }
   /** The first frame of an unknown display type in this session (then skipped). */
@@ -231,12 +242,18 @@ class Stepper {
       return;
     }
     const update = classified.update;
+    // The turn this update belongs to, as of THIS update (one step can drain
+    // several turns): its own id for a start, the turn it closes for an end
+    // (null for an unstarted send-now's), else the turn running.
+    let turn = this.state.turn;
     switch (update.type) {
       case "turn_start":
         this.set({ turn: update.turnId });
+        turn = update.turnId;
         break;
       case "turn_end":
         if (this.state.turn === update.turnId) this.set({ turn: null });
+        else turn = null;
         break;
       case "permission_request":
         if (!this.state.pending.includes(update.requestId)) {
@@ -249,7 +266,7 @@ class Stepper {
       default:
         break;
     }
-    this.out.push({ kind: "update", seq: params.seq, update });
+    this.out.push({ kind: "update", seq: params.seq, update, turn });
     if (update.type === "history_replaced") {
       // The barrier: nothing after it may be applied over the old history.
       this.set({ phase: "resyncing", epoch: null, buffer: [] });

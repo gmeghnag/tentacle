@@ -64,6 +64,13 @@ export interface PermissionResponse {
 export interface PermissionRequestOptions {
   /** Aborted when the request is withdrawn (answered elsewhere, its turn cancelled). */
   readonly signal?: AbortSignal;
+  /**
+   * The remote turn the request was raised in, by the stream's brackets
+   * (laptop-internal, never on the wire, like `signal`). A frontend tells its
+   * own turns from another device's with it (auto-accept answers only its
+   * own: docs/feat/tui-foreign-turns.md). Absent: a local request.
+   */
+  readonly turnId?: string;
 }
 
 export type PermissionRequester = (

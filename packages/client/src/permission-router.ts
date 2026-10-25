@@ -25,6 +25,8 @@ export type RouterAction =
       readonly sessionId: string;
       readonly requestId: string;
       readonly request: PermissionRequest;
+      /** The turn it was raised in (`request`'s `turnId`); absent when none. */
+      readonly turnId?: string;
     }
   | { readonly kind: "abort"; readonly sessionId: string; readonly requestId: string }
   | {
@@ -44,6 +46,7 @@ export type RouterAction =
 interface Entry {
   readonly sessionId: string;
   readonly update: PermissionRequestUpdate;
+  readonly turnId: string | null;
 }
 
 const is = (entry: Entry | null, sessionId: string, requestId: string): boolean =>
@@ -73,8 +76,15 @@ export class PermissionRouter {
    */
   private readonly answeredIds = new Map<string, Set<string>>();
 
-  /** A `permission_request` arrived (live or replayed). */
-  request(sessionId: string, update: PermissionRequestUpdate): RouterAction[] {
+  /**
+   * A `permission_request` arrived (live or replayed). `turnId`: the turn the
+   * stream raised it in (the wire request names none), kept until it is asked.
+   */
+  request(
+    sessionId: string,
+    update: PermissionRequestUpdate,
+    turnId: string | null = null,
+  ): RouterAction[] {
     const id = update.requestId;
     if (
       is(this.current, sessionId, id) ||
@@ -84,7 +94,7 @@ export class PermissionRouter {
     ) {
       return [];
     }
-    this.queue.push({ sessionId, update });
+    this.queue.push({ sessionId, update, turnId });
     return this.next();
   }
 
@@ -205,6 +215,7 @@ export class PermissionRouter {
         sessionId: entry.sessionId,
         requestId: entry.update.requestId,
         request: toPermissionRequest(entry.update),
+        ...(entry.turnId !== null ? { turnId: entry.turnId } : {}),
       },
     ];
   }

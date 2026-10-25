@@ -123,6 +123,12 @@ describe("quitAction", () => {
     expect(quitAction("command", true, true)).toBe("exit");
     expect(quitAction("ctrl-c", true, true)).toBe("exit");
   });
+
+  test("a foreign turn (docs/feat/tui-foreign-turns.md C4): /exit exits at once, Ctrl+C still only stops it", () => {
+    expect(quitAction("command", true, false, true)).toBe("exit");
+    expect(quitAction("ctrl-c", true, false, true)).toBe("stop");
+    expect(quitAction("ctrl-c", true, true, true)).toBe("exit");
+  });
 });
 
 describe("skills as /name (docs/feat/skills-slash.md)", () => {

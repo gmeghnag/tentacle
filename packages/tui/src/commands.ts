@@ -190,17 +190,23 @@ export function renameFailedNotice(error: unknown): string {
  * stops the turn and waits for it to settle — that is where the session is
  * saved — then exits; a second request while that stop is pending quits at once
  * (a turn that won't stop must not trap the user). Ctrl+C mid-turn only stops
- * the turn (it never quits on the first press).
+ * the turn (it never quits on the first press) — whoever started it. `/exit`
+ * during a `foreign` turn (another device's) exits at once: it is not ours to
+ * stop on the way out, it goes on daemon-side (docs/feat/tui-foreign-turns.md C4).
  */
 export function quitAction(
   source: "command" | "ctrl-c",
   running: boolean,
   exitPending: boolean,
+  foreign = false,
 ): "exit" | "stop-then-exit" | "stop" {
   if (!running || exitPending) {
     return "exit";
   }
-  return source === "command" ? "stop-then-exit" : "stop";
+  if (source === "command") {
+    return foreign ? "exit" : "stop-then-exit";
+  }
+  return "stop";
 }
 
 /**

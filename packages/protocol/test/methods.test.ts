@@ -10,7 +10,7 @@ import {
   isMethodName,
   isNotificationName,
 } from "../src/index.ts";
-import { EnqueueParamsSchema, InitializeParamsSchema } from "../src/session.ts";
+import { CancelParamsSchema, EnqueueParamsSchema, InitializeParamsSchema } from "../src/session.ts";
 
 describe("method registry", () => {
   test("every request method has params+result schemas", () => {
@@ -117,6 +117,20 @@ describe("method registry", () => {
     // They are also in the notification registry (so the peer can route them).
     expect(NotificationSchemas[Notification.Progress]).toBeDefined();
     expect(NotificationSchemas[Notification.CancelRequest]).toBeDefined();
+  });
+
+  test("session/cancel: an optional turnId (additive, no bump); an older build drops it", () => {
+    const schema = NotificationSchemas[Notification.Cancel];
+    expect(schema.safeParse({ sessionId: "s1" }).data).toEqual({ sessionId: "s1" });
+    expect(schema.safeParse({ sessionId: "s1", turnId: "t1" }).data).toEqual({
+      sessionId: "s1",
+      turnId: "t1",
+    });
+    expect(schema.safeParse({ sessionId: "s1", turnId: "" }).success).toBe(false);
+    // An older protocol-11 build's schema (no `turnId`) parses the new frame
+    // and strips the field: it cancels whatever runs, as before.
+    const older = CancelParamsSchema.omit({ turnId: true });
+    expect(older.safeParse({ sessionId: "s1", turnId: "t1" }).data).toEqual({ sessionId: "s1" });
   });
 
   test("$/progress is GENERIC: any value routes; model/streamChunked validates its own batch shape", () => {

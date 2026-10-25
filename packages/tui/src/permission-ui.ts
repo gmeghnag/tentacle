@@ -35,10 +35,26 @@ export interface PermissionChoice {
 /**
  * Whether auto-accept (Shift+Tab) may answer `req`. Never a project-hooks
  * trust request (docs/feat/hooks-project-trust.md): trusting a repo's code is
- * a human decision, not a tool call to wave through.
+ * a human decision, not a tool call to wave through. Never a request of a
+ * turn that is not `own` (another device's: owner Q3, docs/feat/tui-foreign-turns.md C5).
  */
-export function autoApproves(req: PermissionRequest): boolean {
-  return req.kind !== "hooks_trust";
+export function autoApproves(req: PermissionRequest, own = true): boolean {
+  return own && req.kind !== "hooks_trust";
+}
+
+/**
+ * Is a request of MY turn? `owns`: the session's own-vs-foreign test, absent
+ * when no session decides (a local one: every request is mine). Under a
+ * session that decides, a request with no turn is not known to be mine.
+ */
+export function ownRequest(
+  turnId: string | undefined,
+  owns: ((turnId: string) => boolean) | undefined,
+): boolean {
+  if (!owns) {
+    return true;
+  }
+  return turnId !== undefined && owns(turnId);
 }
 
 /** Whether the dialog shows the "writes confined here" row: tool calls only, not a trust request. */
@@ -114,13 +130,25 @@ export interface PermissionController {
   toggleAutoApprove(): void;
 }
 
-export function usePermissionBroker(permissions?: PermissionBroker): PermissionController {
+/**
+ * `ownsTurn`: read at each request — the current session's own-vs-foreign test
+ * (`ownRequest`), or undefined when no session decides. Auto-accept answers
+ * only a request of my own turn.
+ */
+export function usePermissionBroker(
+  permissions?: PermissionBroker,
+  ownsTurn?: () => ((turnId: string) => boolean) | undefined,
+): PermissionController {
   const [pending, setPending] = useState<PermissionRequest | null>(null);
   const [selected, setSelected] = useState(0);
   const [autoApprove, setAutoApprove] = useState(false);
   const resolveRef = useRef<((r: PermissionResponse) => void) | null>(null);
   const autoApproveRef = useRef(false);
   const pendingRef = useRef<PermissionRequest | null>(null);
+  /** The request on screen is of my own turn (auto-accept may answer it). */
+  const pendingOwnRef = useRef(true);
+  const ownsTurnRef = useRef(ownsTurn);
+  ownsTurnRef.current = ownsTurn;
 
   const answer = useCallback((response: PermissionResponse) => {
     const resolve = resolveRef.current;
@@ -135,8 +163,14 @@ export function usePermissionBroker(permissions?: PermissionBroker): PermissionC
     autoApproveRef.current = next;
     setAutoApprove(next);
     // If a request is on screen when auto-accept turns on, grant it immediately
-    // — unless auto-accept may not answer it (a hooks trust request).
-    if (next && resolveRef.current && pendingRef.current && autoApproves(pendingRef.current)) {
+    // — unless auto-accept may not answer it (a hooks trust request, another
+    // device's turn).
+    if (
+      next &&
+      resolveRef.current &&
+      pendingRef.current &&
+      autoApproves(pendingRef.current, pendingOwnRef.current)
+    ) {
       answer({ allowed: true, scope: "once" });
     }
   }, [answer]);
@@ -150,8 +184,9 @@ export function usePermissionBroker(permissions?: PermissionBroker): PermissionC
       if (signal?.aborted) {
         return Promise.resolve(DISMISSED);
       }
+      const own = ownRequest(options?.turnId, ownsTurnRef.current?.());
       // Auto-accept mode: grant without prompting (not remembered — scope once).
-      if (autoApproveRef.current && autoApproves(req)) {
+      if (autoApproveRef.current && autoApproves(req, own)) {
         return Promise.resolve({ allowed: true, scope: "once" });
       }
       return new Promise<PermissionResponse>((resolve) => {
@@ -171,6 +206,7 @@ export function usePermissionBroker(permissions?: PermissionBroker): PermissionC
         signal?.addEventListener("abort", onAbort, { once: true });
         resolveRef.current = settle;
         pendingRef.current = req;
+        pendingOwnRef.current = own;
         setSelected(0);
         setPending(req);
       });

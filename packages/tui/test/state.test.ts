@@ -7,10 +7,12 @@ import {
   applyEvent,
   applySessionEvent,
   backgroundExitNotice,
+  endWithoutOutcome,
   initialState,
   pushNoticeItem,
   resetHistory,
   startTurn,
+  withdrawUserTurn,
 } from "../src/state.ts";
 
 function fold(state: DisplayState, events: AgentEvent[], from = 1000): DisplayState {
@@ -286,5 +288,28 @@ describe("unsupported update kinds (docs/feat/protocol-v10-forward-compat.md)", 
       kind: "notice",
       text: "the daemon uses features newer than this client (`progress`): update tentacle",
     });
+  });
+});
+
+// docs/feat/tui-foreign-turns.md C1/C3.
+describe("withdrawn prompt / an end with no outcome", () => {
+  test("withdrawUserTurn removes the bubble by IDENTITY (not text) and stops running", () => {
+    const before = startTurn(startTurn(initialState, "same", 1), "same", 2);
+    const item = before.items.at(-1);
+    const after = withdrawUserTurn(before, item);
+    expect(after.items).toHaveLength(1);
+    expect(after.items[0] === before.items[0]).toBe(true);
+    expect(after.running).toBe(false);
+    // A reset replaced it meanwhile: nothing to remove.
+    const reset = resetHistory(before, [{ role: "user", content: "same" }]);
+    expect(withdrawUserTurn(reset, item).items).toEqual(reset.items);
+  });
+
+  test("T-C10 endWithoutOutcome: idle with no stop reason (never guessed)", () => {
+    const running = startTurn(initialState, "x", 1);
+    const ended = endWithoutOutcome(running);
+    expect(ended.running).toBe(false);
+    expect(ended.lastStopReason).toBeNull();
+    expect(ended.items).toEqual(running.items);
   });
 });

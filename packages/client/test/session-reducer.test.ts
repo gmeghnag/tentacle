@@ -330,3 +330,50 @@ describe("session stream reducer (pure)", () => {
     expect(r.effects).toEqual(["reopen"]);
   });
 });
+
+// docs/feat/tui-foreign-turns.md B1: each update output carries the turn the
+// stream says it belongs to — per output, because one step can drain a buffer
+// spanning several turns (the shell stores only the step's final state).
+describe("the turn of each update (T-Br)", () => {
+  const start = (seq: number, turnId: string) =>
+    frame(seq, { type: "turn_start", turnId, prompt: "p" });
+  const end = (seq: number, turnId: string) =>
+    frame(seq, { type: "turn_end", turnId, stopReason: "end_turn" });
+  const turns = (step: StreamStep): (string | null)[] =>
+    step.out.flatMap((o) => (o.kind === "update" ? [o.turn] : []));
+
+  test("a drained buffer spanning two turns: X, X, X, Y, Y (never the step's final turn)", () => {
+    // Mutation: stamp every output from the step's final state → [Y, Y, Y, Y, Y].
+    let state = reduceStream(live(0), { kind: "open_sent" }).state;
+    for (const p of [start(1, "X"), chunk(2), end(3, "X"), start(4, "Y"), chunk(5)]) {
+      state = reduceStream(state, upd(p)).state;
+    }
+    const step = reduceStream(state, openReplay());
+    expect(turns(step)).toEqual(["X", "X", "X", "Y", "Y"]);
+    expect(step.state.turn).toBe("Y");
+  });
+
+  test("outside a turn: null; a turn_end that closes no started turn: null", () => {
+    const step = reduceStream(live(0), upd(chunk(1)));
+    expect(turns(step)).toEqual([null]);
+    // An unstarted send-now: its turn_end belongs to no started turn.
+    let s = reduceStream(live(0), upd(start(1, "X"))).state;
+    const unstarted = reduceStream(s, upd(end(2, "Z")));
+    expect(turns(unstarted)).toEqual([null]);
+    s = unstarted.state;
+    expect(s.turn).toBe("X");
+    expect(turns(reduceStream(s, upd(end(3, "X"))))).toEqual(["X"]);
+  });
+
+  test("after a reset, updates carry the snapshot's turn", () => {
+    const resyncing: StreamState = { ...initialStream, phase: "resyncing", buffer: [chunk(6)] };
+    const step = reduceStream(resyncing, {
+      kind: "snapshot",
+      messages: [],
+      since: { epoch: "e1", seq: 5 },
+      turn: "R",
+      now: 0,
+    });
+    expect(turns(step)).toEqual(["R"]);
+  });
+});

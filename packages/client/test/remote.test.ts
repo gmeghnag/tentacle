@@ -905,14 +905,26 @@ describe("unknown / malformed session/update frames (event classes)", () => {
         if (method === Method.Open)
           return { sessionId: "s1", epoch: "e", created: true, resync: false };
         if (method === Method.Prompt) {
-          // Ack at once; the turn ends in the stream (only if `end`).
+          // Ack at once; the turn starts, then `frames` (seq shifted past the
+          // start), then it ends in the stream (only if `end`). Like the real
+          // daemon, every turn update lies inside its turn_start/turn_end
+          // (the client routes by it: docs/feat/tui-foreign-turns.md).
           const { turnId } = params as { turnId: string };
-          for (const frame of frames) daemon.notify(Notification.SessionUpdate, frame);
+          daemon.notify(Notification.SessionUpdate, {
+            sessionId: "s1",
+            seq: 1,
+            mandatory: true,
+            update: { type: "turn_start", turnId, prompt: "hi" },
+          });
+          for (const frame of frames) {
+            const f = frame as { seq: number };
+            daemon.notify(Notification.SessionUpdate, { ...f, seq: f.seq + 1 });
+          }
           if (end) {
             daemon.notify(Notification.SessionUpdate, {
               sessionId: "s1",
               // The next seq: contiguity is checked (a jump would force a resync).
-              seq: frames.length + 1,
+              seq: frames.length + 2,
               mandatory: true,
               update: { type: "turn_end", turnId, stopReason: "end_turn" },
             });

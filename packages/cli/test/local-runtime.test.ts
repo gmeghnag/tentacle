@@ -411,6 +411,47 @@ describe("createLocalRuntime (local over RPC)", () => {
     expect(saved).toEqual([["A"]]);
   });
 
+  test("T-B12 persistingController: a foreign turn's end and an idle history each cause one save (docs/feat/tui-foreign-turns.md B8)", async () => {
+    let snapshots = 0;
+    let raise: (a: unknown) => void = () => {};
+    const inner = {
+      watch: (listener: (a: unknown) => void) => {
+        raise = listener;
+        return () => {};
+      },
+      readBack: async () => {
+        snapshots += 1;
+        return { messages: [{ role: "user", content: "theirs" }] };
+      },
+      onTitle: () => () => {},
+    } as unknown as RemoteSession;
+    const saved: string[][] = [];
+    const ctl = persistingController(inner, (m) => saved.push(m.map((x) => String(x.content))));
+    const seen: { kind: string; events?: AsyncIterable<unknown> }[] = [];
+    // Optional on purpose: before the hooks the controller had no `watch` (RED: no save).
+    (ctl as { watch?: (l: (a: { kind: string }) => void) => () => void }).watch?.((a) =>
+      seen.push(a),
+    );
+    raise({
+      kind: "turn",
+      turnId: "X",
+      cancel: () => {},
+      events: (async function* () {
+        yield { type: "user_message", text: "theirs" };
+        yield { type: "turn_end", reason: "end_turn" };
+      })(),
+    });
+    const [turn] = seen;
+    if (turn?.events) await drain(turn.events);
+    await ctl.flushed();
+    expect(snapshots).toBe(1);
+    raise({ kind: "history", messages: [], compacted: false });
+    await ctl.flushed();
+    expect(snapshots).toBe(2);
+    expect(saved).toEqual([["theirs"], ["theirs"]]);
+    expect(seen.map((a) => a.kind)).toEqual(["turn", "history"]);
+  });
+
   test("persistingController.sendNow: a refusal and a cancel-before-start save nothing", async () => {
     const refusal = Object.assign(new Error("unknown method: session/send_now"), { code: -32601 });
     const cancelled = new Error("send-now cancelled before it started");

@@ -13,6 +13,13 @@ export interface QueuedRow {
   readonly id: string;
   readonly text: string;
   readonly state: "queued" | "sending";
+  /** The daemon accepted its enqueue: from now on its list says where the row is. */
+  readonly acked?: true;
+}
+
+/** The daemon's queue as it reports it (structurally the protocol's `QueueState`). */
+export interface DaemonQueue {
+  readonly entries: readonly { readonly id: string; readonly text: string }[];
 }
 
 export type QueuedRows = readonly QueuedRow[];
@@ -68,6 +75,34 @@ export function takeForSendNow(rows: QueuedRows): {
 } {
   const messages = rows.filter((r) => r.state === "queued").map(({ id, text }) => ({ id, text }));
   return { rows: rows.map((r) => ({ ...r, state: "sending" as const })), messages };
+}
+
+/** The daemon accepted the enqueue of `id` (its `session/enqueue` resolved). */
+export const markAcked = (rows: QueuedRows, id: string): QueuedRows =>
+  rows.map((r) => (r.id === id ? { ...r, acked: true } : r));
+
+/**
+ * The rows shown (docs/feat/tui-foreign-turns.md C7). With a daemon report:
+ * its `entries` in order — every writer's waiting rows (decision 5: no
+ * per-device label); one of mine keeps my text and its local state
+ * (`sending`) — then my local rows the daemon does not list and has not
+ * acked: in flight, or a compaction's (never enqueued). An acked row of mine
+ * the daemon no longer lists is gone there (drained, returned): not shown.
+ * With no report yet (a fresh session, a local one): the local rows, as
+ * before. What a send-now sends is still the LOCAL rows (mine only, D4).
+ */
+export function shownRows(local: QueuedRows, daemon: DaemonQueue | undefined): QueuedRows {
+  if (!daemon) {
+    return local;
+  }
+  const mine = new Map(local.map((r) => [r.id, r]));
+  const listed = new Set(daemon.entries.map((e) => e.id));
+  return [
+    ...daemon.entries.map(
+      (e): QueuedRow => mine.get(e.id) ?? { id: e.id, text: e.text, state: "queued" },
+    ),
+    ...local.filter((r) => !listed.has(r.id) && r.acked !== true),
+  ];
 }
 
 /** The turn is over and nothing follows it: nothing stays queued. */

@@ -399,10 +399,10 @@ export class Connection {
 
   private onNotification(method: string, params: unknown): void {
     if (method === Notification.Cancel) {
-      const { sessionId } = params as CancelParams;
+      const { sessionId, turnId } = params as CancelParams;
       const entry = this.attached.get(sessionId);
       if (entry && this.host.get(sessionId) === entry.hosted) {
-        entry.hosted.cancel();
+        entry.hosted.cancel(turnId);
       }
     }
   }
