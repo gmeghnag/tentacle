@@ -45,10 +45,20 @@ per user message.
    touches no file, but the model loses whatever it did not write into the
    prompt, so the user sees it. (2026-10-25: "ok, trattiamolo come gli altri
    tools")
+3. **Anti-loop and config:**
+   - A reset is refused (a tool error with the reason, seen by the model) when
+     the model made no other tool call since the previous reset.
+   - A cap on resets per user message, configurable, **default `-1` =
+     unlimited**; when set and reached, the reset is refused the same way. The
+     counter restarts at each user message.
+   - The capability itself is configurable, **default on** (off = the tool is
+     not offered to the model).
+   (2026-10-25: "facciamo numero configurabile default -1 ovvero infinito, è
+   anche la funzionalità per un modello di resettare se stesso deve poter
+   essere configurabile, default attiva")
 
 ## Open questions (asked one at a time)
 
-- Anti-loop cap value.
 - What else survives the reset (todo list, background jobs, sub-agents).
 - On-disk history: is the pre-reset history kept (archive) or replaced, as
   compaction does today.
