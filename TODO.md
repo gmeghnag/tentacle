@@ -354,6 +354,18 @@ Daily-driver work (done 2026-10-14):
       Type: fix · Size: S · Blast: contained · Suited: Sonnet executes, Opus
       reviews.
 
+- [ ] 🔵 **TUI: one helper for time-budgeted background work** (owner,
+      2026-10-25) — the "slice into ≤ 6 ms chunks, yield with `setTimeout`,
+      cancel by a generation token" loop is hand-written in `App.tsx` for the
+      resize re-layout (~:535) and the long-history open (~:789,
+      `WARM_THRESHOLD`), and `fix/tui-expand-latency` adds a third (idle warm
+      of the other Ctrl+O layout). Extract one pure, tested helper (e.g.
+      `runChunked(work, { budgetMs, isStale })`) and move the three callers
+      onto it. Then measure other candidates before touching them: syntax
+      highlighting of a very large Read, `/sessions` with many sessions.
+      After `fix/tui-expand-latency` merges. Type: feat (refactor) · Size: S
+      · Blast: contained · Suited: Sonnet executes, Opus reviews.
+
 ### Block 7 — MCP (client, stdio transport, tool adapter)
 
 - [x] 🟡 **MCP tool calls have no timeout and ignore the turn's abort signal.**
