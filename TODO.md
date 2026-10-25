@@ -826,8 +826,8 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         comment/string may colour its first lines wrongly (cosmetic).
       - Later, not now: the same colouring inside edit diffs (green/red bars).
 - [ ] **TUI: a spilled tool result shows a short note, not the model's banner**
-      (owner, 2026-10-25) — `feat/tui-spill-note`, S–M · cross-module (to
-      confirm in the plan), Sonnet executes, Opus reviews; runs BEFORE task 6
+      (owner, 2026-10-25) — `feat/tui-spill-note`, L · load-bearing (record v5,
+      persisted `spill` field; owner-approved plan), Opus executes, fresh Opus review; runs BEFORE task 6
       `tui-foreign-turns`. Today a too-large tool result shows the banner meant
       for the model (`[large fs_read output: full output (N chars) saved to
       .tentacle/tool-output/… do NOT read it whole]`, built in
