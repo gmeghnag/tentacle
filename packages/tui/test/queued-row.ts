@@ -7,5 +7,5 @@
  */
 export const queuedRow = (text: string): RegExp =>
   new RegExp(
-    `› ${text}\\n(?:› [^\\n]*\\n)*(?: {2}[^\\n]*\\n)?(?:[^\\n]*(?:thinking|working)…[^\\n]*\\n)?─`,
+    `› ${text}\\n(?:› [^\\n]*\\n)*(?: {2}[^\\n]*\\n)?(?:\\n?[^\\n]*(?:thinking|working)…[^\\n]*\\n)?─`,
   );
