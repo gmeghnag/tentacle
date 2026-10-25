@@ -105,6 +105,12 @@ export interface PersistingController extends SessionController {
   rename(title: string): Promise<string>;
   /** Resolves once no save is pending (never rejects). */
   flushed(): Promise<void>;
+  /** `RemoteSession.watch`; a foreign turn is saved at its end, a `history` at once. */
+  watch: RemoteSession["watch"];
+  /** `RemoteSession.open` (the eager attach of an `attach` session; else a no-op). */
+  open: RemoteSession["open"];
+  ownsTurn: RemoteSession["ownsTurn"];
+  onQueued: RemoteSession["onQueued"];
 }
 
 /** The daemon's wire title as the store's `TitleState`. */
@@ -209,6 +215,30 @@ export function persistingController(
     },
     onReturned(listener) {
       return inner.onReturned(listener);
+    },
+    // The record is a copy of the SESSION, not of my turns (AGENTS §7
+    // Persistence): a foreign turn is saved at its end like an own one, and a
+    // history the daemon replaced the screen with is saved at once.
+    watch(listener) {
+      return inner.watch((activity) => {
+        if (activity.kind === "turn") {
+          listener({ ...activity, events: saved(activity.events) });
+          return;
+        }
+        if (activity.kind === "history") {
+          flush();
+        }
+        listener(activity);
+      });
+    },
+    open() {
+      return inner.open();
+    },
+    ownsTurn(turnId) {
+      return inner.ownsTurn(turnId);
+    },
+    onQueued(listener) {
+      return inner.onQueued(listener);
     },
     close() {
       unsubscribeTitle();

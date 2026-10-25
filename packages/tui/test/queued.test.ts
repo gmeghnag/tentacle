@@ -4,11 +4,13 @@ import {
   addRow,
   afterRefusal,
   handOff,
+  markAcked,
   onReject,
   onSteer,
   onTurnEnd,
   requeue,
   rowTexts,
+  shownRows,
   takeAll,
   takeForSendNow,
 } from "../src/queued.ts";
@@ -114,5 +116,36 @@ describe("queued rows", () => {
 
   test("requeue (an older daemon refused a compaction's send-now): every row queued again, ids and order kept", () => {
     expect(requeue(takeForSendNow(three()).rows)).toEqual(three());
+  });
+});
+
+// docs/feat/tui-foreign-turns.md C7: the rows shown are the daemon's list.
+describe("shownRows / markAcked (C7)", () => {
+  test("with a report: its entries in order (mine keep my state), then my unacked rows", () => {
+    const { rows } = takeForSendNow(addRow([], "mine", "m1"));
+    const local = addRow(rows, "typed", "m2");
+    const shown = shownRows(local, {
+      entries: [
+        { id: "p1", text: "phone" },
+        { id: "m1", text: "mine" },
+      ],
+    });
+    expect(shown.map((r) => [r.id, r.state])).toEqual([
+      ["p1", "queued"],
+      ["m1", "sending"],
+      ["m2", "queued"],
+    ]);
+  });
+
+  test("an acked row of mine the daemon no longer lists is gone; one it still lists (carried) stays after my local rows went", () => {
+    const acked = markAcked(addRow([], "mine", "m1"), "m1");
+    expect(acked[0]?.acked).toBe(true);
+    expect(shownRows(acked, { entries: [] })).toEqual([]);
+    const carried = shownRows(onTurnEnd(acked), { entries: [{ id: "m1", text: "mine" }] });
+    expect(rowTexts(carried)).toEqual(["mine"]);
+  });
+
+  test("no report yet (or a local session): the local rows, as before", () => {
+    expect(shownRows(three(), undefined)).toEqual(three());
   });
 });

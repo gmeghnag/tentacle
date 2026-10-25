@@ -1548,10 +1548,22 @@ export class HostedSession {
     }
   }
 
-  /** Abort the active turn or compaction (if any), and a send-now waiting on it. */
-  cancel(): void {
-    this.controller?.abort();
-    if (this.successor) {
+  /**
+   * Abort the active turn or compaction (if any), and a send-now waiting on
+   * it. With `turnId` (`session/cancel{turnId}`) only the turn it names: the
+   * active turn (a reserved successor is a newer intent and still starts), or
+   * the waiting send-now (its target is already being interrupted). Any other
+   * id — an ended turn, a compaction's slot — is stale: nothing is cancelled.
+   */
+  cancel(turnId?: string): void {
+    if (turnId === undefined) {
+      this.controller?.abort();
+      if (this.successor) {
+        this.successor.cancelled = true;
+      }
+    } else if (turnId === this.activeTurnId && !this.compacting) {
+      this.controller?.abort();
+    } else if (this.successor && turnId === this.successor.turnId) {
       this.successor.cancelled = true;
     }
     // A cancelled send-now's rows leave the queue (its sender restores them).

@@ -843,7 +843,13 @@ describe("D3c — queue while /compact runs (docs/feat/send-now-d.md)", () => {
     c.resolve();
     await delay(80);
     expect(log.sends).toEqual(["first", "A"]);
-    expect(lastFrame() ?? "").toContain("your queued messages are back in the input");
+    // One rule for every own prompt that loses the slot
+    // (docs/feat/tui-foreign-turns.md C3): its bubble is withdrawn, the text
+    // is back in the input, with the "another device" notice.
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("another device started a turn — your message is back in the input");
+    expect(frame).toContain("❯ A");
+    expect(frame).not.toContain("› A");
     unmount();
   });
 

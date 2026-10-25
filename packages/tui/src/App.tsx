@@ -46,16 +46,19 @@ import {
 import { sanitizePasted, stepPaste } from "./paste.ts";
 import { permissionDetailLines, permissionShowsCwd, usePermissionBroker } from "./permission-ui.ts";
 import {
+  type DaemonQueue,
   type QueuedMessage,
   type QueuedRows,
   type ReturnedCause,
   addRow,
   handBackRows,
   handOff,
+  markAcked,
   onReject,
   onSteer,
   onTurnEnd,
   rowTexts,
+  shownRows,
   takeAll,
   takeForSendNow,
 } from "./queued.ts";
@@ -89,13 +92,28 @@ import {
   appendNotice,
   applySessionEvent,
   backgroundExitNotice,
+  endWithoutOutcome,
   failTurn,
   initialState,
   pushNoticeItem,
+  resetHistory,
   startContinuation,
   startTurn,
+  withdrawUserTurn,
 } from "./state.ts";
 import { panelHeight, panelMaxBody, treeKey } from "./tree-panel.ts";
+import {
+  FOREIGN_COMPACTED_NOTICE,
+  SLOT_LOST_NOTICE,
+  type SessionActivity,
+  closedNotice,
+  commitWarmed,
+  historyAction,
+  loadingLabel,
+  lostSlot,
+  needsWarm,
+  nextStep,
+} from "./turn-feed.ts";
 
 /**
  * The conversation the App drives. Both the local agent `Session` and the
@@ -154,6 +172,20 @@ export interface SessionController {
       }[],
     ) => void,
   ): () => void;
+  /**
+   * Subscribe to what the session does that this TUI did not start: a turn of
+   * another device (rendered like an own one), a history the daemon replaced
+   * the screen with, the session ending elsewhere (docs/feat/tui-foreign-turns.md).
+   * Activities raised before it are handed over on subscribe. Optional: absent
+   * where nobody else can drive the session. Returns an unsubscribe.
+   */
+  watch?(listener: (activity: SessionActivity) => void): () => void;
+  /** Attach to an existing session eagerly (its history, then live); a no-op for a fresh one. */
+  open?(): Promise<void>;
+  /** `turnId` is one of my own turns (auto-accept answers only those). */
+  ownsTurn?(turnId: string): boolean;
+  /** Subscribe to the daemon's queue (every writer's waiting rows); returns an unsubscribe. */
+  onQueued?(listener: (state: DaemonQueue) => void): () => void;
 }
 
 /**
@@ -239,6 +271,16 @@ const INPUT_PLACEHOLDER = "Type a task or /command";
  * daemon, or no `sendNow`): what is left of the rows is sent once the old
  * turn ends.
  */
+/** What a streamed turn is (`streamTurn`). */
+interface StreamOpts {
+  /** A send-now's new turn: the rows hand off on its first event. */
+  readonly successor?: boolean;
+  /** Another device's turn (or one running when this TUI attached). */
+  readonly foreign?: boolean;
+  /** My own prompt: its bubble and text, withdrawn / restored if it loses the slot. */
+  readonly own?: { readonly item: DisplayItem | undefined; readonly text: string };
+}
+
 interface PendingSendNow {
   mode: "atomic" | "fallback";
   /** The new turn's controller (`atomic`): Esc in the window cancels through it. */
@@ -310,7 +352,11 @@ export function App({
   }, []);
   const compactionOwnedRef = useRef(false);
   // Interactive tool-approval dialog + auto-accept (Shift+Tab), all self-contained.
-  const permission = usePermissionBroker(permissions);
+  // Auto-accept answers only my own turns' requests: the current session decides.
+  const permission = usePermissionBroker(permissions, () => {
+    const session = sessionRef.current;
+    return session?.ownsTurn ? (turnId: string) => session.ownsTurn?.(turnId) === true : undefined;
+  });
   // The open list panel (`/mcp`, `/skills`; docs/feat/skills-panel.md) or null.
   // Each open and close bumps the generation, so a request answering after its
   // panel closed (or another opened) is dropped instead of landing on screen.
@@ -365,6 +411,23 @@ export function App({
   const restoredRef = useRef(new Set<string>());
   // A quit asked for mid-turn: exit as soon as the turn settles (it is saved then).
   const exitPendingRef = useRef(false);
+  // The controller of the FOREIGN turn being streamed (another device's), or
+  // null: `/exit` leaves it running (docs/feat/tui-foreign-turns.md C4).
+  const foreignRef = useRef<AbortController | null>(null);
+  // Session activities that wait for one of my runs to settle (C2), in order.
+  const heldRef = useRef<SessionActivity[]>([]);
+  // The current session's `watch` / `onQueued` subscriptions (replaced with it).
+  const activitySubRef = useRef<(() => void) | null>(null);
+  const queueSubRef = useRef<(() => void) | null>(null);
+  // My `/compact`s whose history has not arrived yet: that compaction's notice
+  // is mine ("Context compacted"), not "on another device" (C6).
+  const ownCompactionsRef = useRef(0);
+  // A long history is being warmed before it is committed (C8): activities wait.
+  const warmingRef = useRef(false);
+  const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
+  // The daemon's queue (every writer's waiting rows), as last reported (C7).
+  const [daemonQueue, setDaemonQueue] = useState<DaemonQueue | undefined>(undefined);
+  const layoutOptsRef = useRef({ expandAll: false, width: 80, spillInPod: daemonInPod });
   const lastUserRef = useRef<string | null>(null);
   const prevRowsRef = useRef(0);
   // Generation token for the background resize re-layout warm: a newer resize
@@ -529,10 +592,12 @@ export function App({
   // Rows above the input/panel while a turn runs: the thinking line + the
   // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now
   // hint row under them + one blank row between the hint and the thinking line.
+  // The rows shown: the daemon's list (every writer's) + my rows not acked yet (C7).
+  const shown = shownRows(queued, daemonQueue);
   const runningRows =
-    (st.running ? 1 : 0) +
-    (st.running || compacting ? queued.length + (queued.length > 0 ? 1 : 0) : 0) +
-    (st.running && queued.length > 0 ? 1 : 0);
+    (st.running || loading ? 1 : 0) +
+    (st.running || compacting ? shown.length + (shown.length > 0 ? 1 : 0) : 0) +
+    (st.running && shown.length > 0 ? 1 : 0);
   // Rows the bottom area occupies: the permission dialog; or the running rows,
   // then the list panel or the input box (plus any open palette rows, which
   // only open while idle).
@@ -556,6 +621,8 @@ export function App({
     width: columns,
     spillInPod: daemonInPod,
   });
+  // The layout options a history warm uses (read off the render thread).
+  layoutOptsRef.current = { expandAll, width: columns, spillInPod: daemonInPod };
   const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
   const visible = sliceLaid(layout.laid, win.start, win.end);
@@ -693,10 +760,62 @@ export function App({
     | ((
         open: () => AsyncIterable<SessionEvent>,
         controller: AbortController,
-        opts: { readonly successor?: boolean; readonly fallbackText?: string },
+        opts: StreamOpts,
       ) => Promise<void>)
     | null
   >(null);
+  // The session-activity handler, through a ref: `streamTurn`'s settle drains
+  // the held ones, and the handler starts streams (C2).
+  const onActivityRef = useRef<((activity: SessionActivity) => void) | null>(null);
+
+  /** Activities held while a run of mine streamed: handled in order once nothing is in flight. */
+  const drainHeld = useCallback(() => {
+    while (
+      heldRef.current.length > 0 &&
+      !streamCtrlRef.current &&
+      !sendNowRef.current &&
+      !warmingRef.current
+    ) {
+      const next = heldRef.current.shift();
+      if (next) onActivityRef.current?.(next);
+    }
+  }, []);
+
+  /**
+   * Commit `compute(state)` — a history replacing the transcript — after
+   * warming its rows in time-budgeted chunks when it is long (C8, the resize
+   * pattern): input stays live, the running line says how far it is. Items
+   * appended meanwhile (a notice) are kept after it.
+   */
+  const commitHistory = useCallback(
+    async (compute: (state: DisplayState) => DisplayState): Promise<void> => {
+      const before = stateRef.current.items;
+      const next = compute(stateRef.current);
+      if (needsWarm(next.items.length)) {
+        warmingRef.current = true;
+        const total = next.items.length;
+        let done = 0;
+        let shownAt = 0;
+        setLoading({ done, total });
+        while (done < total) {
+          done = warmRowsChunk(next.items, layoutOptsRef.current, done, 6);
+          if (Date.now() - shownAt > 50) {
+            shownAt = Date.now();
+            setLoading({ done, total });
+          }
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        setLoading(null);
+        warmingRef.current = false;
+      }
+      stateRef.current = {
+        ...next,
+        items: commitWarmed(before, stateRef.current.items, next.items),
+        running: stateRef.current.running,
+      };
+    },
+    [],
+  );
 
   /**
    * The old turn is over (or was found over): settle the send-now waiting on
@@ -739,26 +858,38 @@ export function App({
   );
 
   /**
-   * Stream one turn's events into the transcript: a prompt's (`run`) or a
-   * send-now's new turn (`successor`, its rows hand off on its first event).
-   * `fallbackText`: the prompt is a fallback send-now's, restored if another
-   * prompt won the gap.
+   * Stream one turn's events into the transcript — ONE loop for every turn of
+   * the session: a prompt's (`run`, `own`), a send-now's new turn
+   * (`successor`, its rows hand off on its first event), another device's
+   * (`foreign`, docs/feat/tui-foreign-turns.md C1).
    */
   const streamTurn = useCallback(
     async (
       open: () => AsyncIterable<SessionEvent>,
       controller: AbortController,
-      opts: { readonly successor?: boolean; readonly fallbackText?: string },
+      opts: StreamOpts,
     ) => {
       streamCtrlRef.current = controller;
+      if (opts.foreign) {
+        foreignRef.current = controller;
+      }
       let handedOff = !opts.successor;
+      // Anything but an `unsupported` notice streamed: the daemon ran this turn.
+      let streamed = false;
       try {
         for await (const event of open()) {
+          if (event.type !== "unsupported") {
+            streamed = true;
+          }
           if (!handedOff && event.type !== "unsupported") {
             handedOff = true;
             setRows(handOff); // the sent texts are its prompt now
           }
-          stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
+          if (event.type === "history_reset" && needsWarm(event.messages.length)) {
+            await commitHistory((s) => applySessionEvent(s, event, Date.now()));
+          } else {
+            stateRef.current = applySessionEvent(stateRef.current, event, Date.now());
+          }
           // A queued message was just injected — drop it from the pending list.
           if (event.type === "steer") {
             const { id } = event;
@@ -774,12 +905,24 @@ export function App({
             flushNow();
           }
         }
+        // A foreign stream that closed with no end: it ended behind a resync's
+        // cut — idle, with no stop reason (never a guessed one).
+        if (opts.foreign && stateRef.current.running) {
+          stateRef.current = endWithoutOutcome(stateRef.current);
+        }
       } catch (error) {
-        const code = errorCode(error);
         const failed = opts.successor
           ? onSuccessorError(error, rowsRef.current)
           : ({ kind: "fail" } as const);
-        if (failed.kind === "restore") {
+        if (opts.own && lostSlot(error, streamed)) {
+          // Another device's turn took the slot first: my prompt never ran.
+          // Its bubble goes and its text is back in the input — never lost
+          // (decision 15); the held foreign turn renders once this settles.
+          stateRef.current = withdrawUserTurn(stateRef.current, opts.own.item);
+          if (opts.own.text !== "") {
+            restoreInput(opts.own.text, SLOT_LOST_NOTICE);
+          }
+        } else if (failed.kind === "restore") {
           for (const id of failed.ids) restoredRef.current.add(id);
           setRows(() => []);
           stateRef.current = applySessionEvent(
@@ -790,17 +933,13 @@ export function App({
           restoreInput(failed.text, failed.notice);
         } else {
           stateRef.current = failTurn(stateRef.current, String(error), Date.now());
-          if (opts.fallbackText !== undefined && code === SendNowErrorCode.TurnInProgress) {
-            // Another client's prompt won the fallback's non-atomic gap.
-            restoreInput(
-              opts.fallbackText,
-              "_send-now: another prompt started first — your queued messages are back in the input_",
-            );
-          }
         }
       } finally {
         if (streamCtrlRef.current === controller) {
           streamCtrlRef.current = null;
+        }
+        if (foreignRef.current === controller) {
+          foreignRef.current = null;
         }
         // Only this turn's: a send-now's new turn installed its own.
         if (abortRef.current === controller) {
@@ -818,13 +957,25 @@ export function App({
         } else if (!(pending && settleSendNow(pending))) {
           setRows(onTurnEnd); // the turn is over; nothing stays queued
           flushNow();
+          // A foreign turn (or history) held while this ran comes now (C2).
+          drainHeld();
           wakeIfPending();
         } else {
           flushNow();
         }
       }
     },
-    [flushNow, scheduleFlush, exit, restoreInput, setRows, settleSendNow, wakeIfPending],
+    [
+      flushNow,
+      scheduleFlush,
+      exit,
+      restoreInput,
+      setRows,
+      settleSendNow,
+      wakeIfPending,
+      commitHistory,
+      drainHeld,
+    ],
   );
   streamTurnRef.current = streamTurn;
 
@@ -861,16 +1012,103 @@ export function App({
         : startTurn(stateRef.current, text, Date.now());
       setScrollOffset(0);
       flushNow();
+      // The bubble `startTurn` appended (none for a continuation): withdrawn by
+      // identity if the prompt loses the slot (C3).
+      const item = continuation ? undefined : stateRef.current.items.at(-1);
       const sendOpts = opts?.skill !== undefined ? { skill: opts.skill } : undefined;
       await streamTurn(
         () => session.send(continuation ? "" : text, controller.signal, sendOpts),
         controller,
-        opts?.fallback ? { fallbackText: text } : {},
+        { own: { item, text: continuation ? "" : text } },
       );
     },
     [flushNow, pushNotice, streamTurn],
   );
   runRef.current = run;
+
+  /**
+   * One activity of the session that this TUI did not start (C1/C2/C6): the
+   * decision is `turn-feed.ts`'s; this executes it. A foreign turn streams
+   * through the SAME loop as an own one; its controller's abort cancels it
+   * (Esc / Ctrl+C stop what runs, whoever started it — owner Q2).
+   */
+  const onActivity = useCallback(
+    (activity: SessionActivity): void => {
+      const inFlight =
+        streamCtrlRef.current !== null || sendNowRef.current !== null || warmingRef.current;
+      const step = nextStep({ inFlight, activity });
+      if (step === "hold") {
+        heldRef.current.push(activity);
+        return;
+      }
+      if (activity.kind === "closed") {
+        pushNotice(closedNotice(activity.reason));
+        return;
+      }
+      if (activity.kind === "history") {
+        const own = ownCompactionsRef.current > 0;
+        const action = historyAction({ compacted: activity.compacted, ownCompaction: own });
+        if (activity.compacted && own) {
+          ownCompactionsRef.current -= 1;
+        }
+        if (action === "notice") {
+          pushNotice(FOREIGN_COMPACTED_NOTICE);
+        } else if (action === "replace") {
+          void commitHistory((s) => resetHistory(s, activity.messages)).then(() => {
+            setScrollOffset(0);
+            flushNow();
+            drainHeld();
+          });
+        }
+        return;
+      }
+      const controller = new AbortController();
+      controller.signal.addEventListener("abort", () => activity.cancel(), { once: true });
+      abortRef.current = controller;
+      stoppedHereRef.current = false;
+      // No local bubble: its `user_message` (the daemon's prompt) draws it.
+      stateRef.current = startContinuation(stateRef.current, Date.now());
+      setScrollOffset(0);
+      flushNow();
+      void streamTurn(() => activity.events, controller, { foreign: true });
+    },
+    [commitHistory, drainHeld, flushNow, pushNotice, streamTurn],
+  );
+  onActivityRef.current = onActivity;
+
+  /**
+   * Follow `session` (C9): its activities and the daemon's queue — watch
+   * FIRST, then the eager open (a fresh session's is a no-op), so its first
+   * history is never missed. The previous session's subscriptions end, and
+   * what was held for it is dropped.
+   */
+  const watchSession = useCallback(
+    (session: SessionController | null) => {
+      activitySubRef.current?.();
+      queueSubRef.current?.();
+      heldRef.current = [];
+      setDaemonQueue(undefined);
+      activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
+      queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
+      session?.open?.().catch((error: unknown) => {
+        if (sessionRef.current === session) {
+          pushNotice(
+            `_could not open the session: ${error instanceof Error ? error.message : String(error)}_`,
+          );
+        }
+      });
+    },
+    [pushNotice],
+  );
+  useEffect(() => {
+    watchSession(sessionRef.current);
+    return () => {
+      activitySubRef.current?.();
+      activitySubRef.current = null;
+      queueSubRef.current?.();
+      queueSubRef.current = null;
+    };
+  }, [watchSession]);
 
   /** The fallback's notice, once per App (it does not repeat on later chords). */
   const noticeFallback = useCallback(
@@ -973,6 +1211,7 @@ export function App({
           const after = afterCompactionUnsupported(rowsRef.current, compactingRef.current);
           setRows(() => after.rows);
           showIdle();
+          drainHeld();
           pushNotice(compactionWaitNotice("daemon"));
           if (after.send !== null) {
             wakePendingRef.current = false; // its turn flushes the job exits at its start
@@ -988,6 +1227,7 @@ export function App({
           setRows(() => step.rows);
           if (!old) {
             showIdle();
+            drainHeld();
             wakeIfPending();
           }
           if (step.kind === "restore") {
@@ -1011,6 +1251,7 @@ export function App({
         }
         if (!settleSendNow(pending)) {
           showIdle();
+          drainHeld();
           wakeIfPending();
         }
         flushNow();
@@ -1018,6 +1259,7 @@ export function App({
     );
     return true;
   }, [
+    drainHeld,
     flushNow,
     noticeFallback,
     permission.answer,
@@ -1058,7 +1300,17 @@ export function App({
       switch (cmd) {
         case "/exit":
         case "/quit":
-          if (quitAction("command", stateRef.current.running, exitPendingRef.current) === "exit") {
+          // Another device's turn is not mine to stop on the way out: exit at
+          // once, it goes on daemon-side (C4; `connect` still closes the
+          // session on exit until task 7).
+          if (
+            quitAction(
+              "command",
+              stateRef.current.running,
+              exitPendingRef.current,
+              foreignRef.current !== null,
+            ) === "exit"
+          ) {
             exit();
             return;
           }
@@ -1077,6 +1329,8 @@ export function App({
           sessionRef.current?.close?.();
           sessionRef.current = makeSession();
           watchReturned(sessionRef.current);
+          watchSession(sessionRef.current);
+          ownCompactionsRef.current = 0;
           // The send-now latches are per session: the new one asks (and says) afresh.
           sendNowUnsupportedRef.current = false;
           fallbackNoticedRef.current = false;
@@ -1115,12 +1369,17 @@ export function App({
           pushNotice("_Compacting the conversation…_");
           setCompacting(true);
           compactionOwnedRef.current = false;
+          // Its history (if it compacts) is mine: no "on another device" (C6).
+          ownCompactionsRef.current += 1;
           // Its one settle (success or failure) ends the compaction-time queue
           // (D3c): sent as one prompt unless a send-now took it. A `/clear`
           // meanwhile already took the rows (a new session: ignore it).
           const settled = (result: CompactionResult) => {
             if (sessionRef.current !== session) {
               return;
+            }
+            if (!result.ok && ownCompactionsRef.current > 0) {
+              ownCompactionsRef.current -= 1; // it replaced nothing: no history of mine to come
             }
             setCompacting(false);
             const out = onCompactionSettled({
@@ -1244,6 +1503,7 @@ export function App({
     [
       makeSession,
       watchReturned,
+      watchSession,
       clipboard,
       openPanel,
       cwd,
@@ -1295,15 +1555,19 @@ export function App({
           // transport drop) the entry will never get a `steer` echo, so drop
           // it — otherwise it masks a send that never happened. `Promise.resolve`
           // normalises the sync case (it never rejects → no local behaviour change).
-          Promise.resolve(ctrl.enqueue(text, id)).catch((error: unknown) => {
-            const res = onReject(rowsRef.current, id, ownedIdsRef.current);
-            if (!res.notify) {
-              return; // a send-now took it: its text travels with the send-now
-            }
-            setRows(() => res.rows);
-            const reason = error instanceof Error ? error.message : String(error);
-            pushNotice(`_message not queued: ${reason}_`);
-          });
+          Promise.resolve(ctrl.enqueue(text, id)).then(
+            // Accepted: from now on the daemon's list says where the row is (C7).
+            () => setRows((rows) => markAcked(rows, id)),
+            (error: unknown) => {
+              const res = onReject(rowsRef.current, id, ownedIdsRef.current);
+              if (!res.notify) {
+                return; // a send-now took it: its text travels with the send-now
+              }
+              setRows(() => res.rows);
+              const reason = error instanceof Error ? error.message : String(error);
+              pushNotice(`_message not queued: ${reason}_`);
+            },
+          );
         }
         return;
       }
@@ -1432,9 +1696,10 @@ export function App({
       if (key.ctrl && char === "c") {
         // "Stop everything", not "I refuse this command": no deny goes out
         // (over RPC it would race the cancel and show a false "denied" on every
-        // device); the turn's cancel settles the request. With no turn of ours
-        // to cancel the dialog stays: dismissing it would orphan the request
-        // (suspended, unseen) until the TUI quits.
+        // device); the turn's cancel settles the request — whoever started the
+        // turn (a foreign one too, owner Q2). With no turn shown here to cancel
+        // the dialog stays: dismissing it would orphan the request (suspended,
+        // unseen) until the TUI quits.
         if (abortRef.current) {
           permission.answer(DISMISSED);
           stoppedHereRef.current = true;
@@ -1767,11 +2032,13 @@ export function App({
                 conversation); the thinking/working line stays just above the
                 input, under them (owner, 2026-10-25). */}
             {st.running || compacting ? (
-              <QueuedMessages queued={rowTexts(queued)} hint={SEND_NOW_HINT} columns={columns} />
+              <QueuedMessages queued={rowTexts(shown)} hint={SEND_NOW_HINT} columns={columns} />
             ) : null}
             {/* One blank row between the send-now hint and the thinking line. */}
-            {st.running && queued.length > 0 ? <Text> </Text> : null}
-            {st.running ? (
+            {st.running && shown.length > 0 ? <Text> </Text> : null}
+            {loading ? (
+              <Text dimColor>{loadingLabel(loading.done, loading.total)}</Text>
+            ) : st.running ? (
               <Thinking
                 since={
                   st.reasoning && st.reasoningStartedAt !== null

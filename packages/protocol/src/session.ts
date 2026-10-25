@@ -218,6 +218,13 @@ export type PromptResult = z.infer<typeof PromptResultSchema>;
 
 export const CancelParamsSchema = z.object({
   sessionId: SessionIdSchema,
+  /**
+   * The turn the client means (a turn's or a waiting send-now's `turnId`):
+   * any other turn is left running, so a late cancel never stops a turn
+   * another device started meanwhile. Absent → whatever runs, a compaction
+   * included. An older build drops it (strip schema) and cancels blindly.
+   */
+  turnId: TurnIdSchema.optional(),
 });
 export type CancelParams = z.infer<typeof CancelParamsSchema>;
 

@@ -1339,15 +1339,22 @@ describe("re-attach: send-now across a drop (docs/feat/send-now-b.md)", () => {
   const tail = (n: number): Step[] => [...long(n).slice(0, -1), { kind: "gate" }, t("z"), done];
 
   test("T-B5c: a resync cut before the successor committed a round — the reset goes to the old turn, the rest to the successor", async () => {
-    // The cut is still at T1's end: the snapshot shows T1's history, and the
-    // successor's prompt arrives as history only (no `turn_start` replayed).
+    // The cut is still at T1's end (taken before the successor's `turn_start`):
+    // the snapshot shows T1's history (the reset goes to T1), and the replay
+    // past the cut carries the successor's start, rounds and tail — routed by
+    // turn id to the successor (docs/feat/tui-foreign-turns.md: before, they
+    // went to T1's stream, the latent routing bug, and the start was dropped).
     const r = await resyncMidSuccessor([tail(60)]);
     expect(r.settled).toBe("completed");
     const oldEvents = await r.old;
     expect(oldEvents.some((e) => e.type === "history_reset")).toBe(true);
     expect(oldEvents.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
-    expect(oldEvents.some((e) => e.type === "text" && e.delta === "z")).toBe(false);
+    expect(oldEvents.some((e) => e.type === "text" && (e.delta === "z" || e.delta === "0 "))).toBe(
+      false,
+    );
     expect(r.nextEvents).toEqual([
+      { type: "user_message", text: "A" },
+      ...Array.from({ length: 60 }, (_, i) => ({ type: "text" as const, delta: `${i} ` })),
       { type: "text", delta: "z" },
       { type: "turn_end", reason: "end_turn" },
     ]);
@@ -1494,12 +1501,16 @@ describe("re-attach: send-now across a drop (docs/feat/send-now-b.md)", () => {
   });
 
   test("T-B5f (follow-up 1): the resync hid the successor's turn_start, then Esc — it delivered, so it ends cancelled (no restore, no duplicate)", async () => {
-    // As T-B5c (the cut is at T1's end: no `turn_start` reaches the client),
-    // then the user cancels the started successor.
+    // As T-B5c (the cut is at T1's end; the successor's `turn_start` is in
+    // the replay — before docs/feat/tui-foreign-turns.md it was misrouted to
+    // T1 and so never seen), then the user cancels the started successor.
     const r = await resyncMidSuccessor([tail(60)], { esc: true });
     expect(r.settled).toBe("completed"); // not "send-now cancelled before it started"
     expect(r.nextEvents.at(-1)).toEqual({ type: "turn_end", reason: "cancelled" });
-    expect(r.nextEvents.some((e) => e.type === "user_message")).toBe(false); // the start was hidden
+    // Its prompt shown once (from its own start), never restored.
+    expect(r.nextEvents.filter((e) => e.type === "user_message")).toEqual([
+      { type: "user_message", text: "A" },
+    ]);
     const history = await r.client.snapshot("S");
     expect(history.filter((m) => m.role === "user" && m.content === "A")).toHaveLength(1);
     r.client.close();

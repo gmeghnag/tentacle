@@ -196,6 +196,37 @@ export function startContinuation(state: DisplayState, now: number): DisplayStat
   };
 }
 
+/**
+ * An own prompt lost the slot before its turn streamed anything (another
+ * device's turn took it, docs/feat/tui-foreign-turns.md C3): its bubble —
+ * `item`, the object `startTurn` appended, removed by IDENTITY, never by text
+ * — goes, and the turn is not running. A reset meanwhile already replaced it:
+ * nothing to remove.
+ */
+export function withdrawUserTurn(state: DisplayState, item: DisplayItem | undefined): DisplayState {
+  return {
+    ...state,
+    items: item === undefined ? state.items : state.items.filter((i) => i !== item),
+    running: false,
+    reasoning: false,
+    reasoningStartedAt: null,
+  };
+}
+
+/**
+ * A foreign turn's stream closed with no end (it ended behind a resync's cut):
+ * idle, with NO stop reason — its outcome is unknown here and never guessed.
+ */
+export function endWithoutOutcome(state: DisplayState): DisplayState {
+  return {
+    ...state,
+    running: false,
+    reasoning: false,
+    reasoningStartedAt: null,
+    lastStopReason: null,
+  };
+}
+
 /** Append a command's reply (see `AssistantItem.notice`). */
 export function pushNoticeItem(state: DisplayState, text: string): DisplayState {
   return { ...state, items: append(state.items, { kind: "assistant", text, notice: true }) };

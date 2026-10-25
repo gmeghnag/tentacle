@@ -63,7 +63,34 @@ interface ActiveTurn {
    * Only the fallback when its end carries no `delivered` (an older daemon).
    */
   started: boolean;
+  /**
+   * A turn this session did not start (another device's, or one already
+   * running when it attached): never sent, never acked, never re-sent.
+   */
+  readonly foreign?: true;
 }
+
+/**
+ * What the session does that no call of this client started
+ * (docs/feat/tui-foreign-turns.md B6). One listener (`watch`).
+ */
+export type SessionActivity =
+  /** A turn this session did not start (or one already running when it attached). */
+  | {
+      readonly kind: "turn";
+      readonly turnId: string;
+      readonly events: AsyncIterable<SessionEvent>;
+      /** Stop it (`session/cancel{turnId}`): whoever started it. */
+      cancel(): void;
+    }
+  /** The daemon's history replaced what is shown while no turn runs (eager open, a resync, a compaction). */
+  | {
+      readonly kind: "history";
+      readonly messages: readonly ChatMessage[];
+      readonly compacted: boolean;
+    }
+  /** The session ended daemon-side (another device's close / delete, the reaper). */
+  | { readonly kind: "closed"; readonly reason: "closed" | "deleted" };
 
 export class RemoteSession implements SessionStreamListener {
   private readonly client: RemoteClient;
@@ -111,17 +138,108 @@ export class RemoteSession implements SessionStreamListener {
   private readonly reclaiming = new Set<string>();
   private readonly returnedListeners = new Set<(rows: readonly ReturnedRow[]) => void>();
   private unsubscribeQueue: (() => void) | null = null;
+  /** Built to attach to an existing session (`open`), never to create one. */
+  private readonly attach: { readonly reopen?: boolean } | undefined;
+  /** The memoized eager attach (`open`). */
+  private attaching: Promise<void> | null = null;
+  /**
+   * The turn the daemon's stream says runs (own or foreign): set by a
+   * `turn_start` or a reset that names one, cleared by its `turn_end`. What
+   * steering, send-now and the activity cancel bind to.
+   */
+  private streaming: string | null = null;
+  /** The foreign turn being streamed (at most one: the daemon has one slot). */
+  private foreign: ActiveTurn | null = null;
+  /** A `history_replaced` was applied: the next reset is a compaction's (a daemon fact). */
+  private compactedPending = false;
+  /** The session ended daemon-side (`session_closed`): a later send is refused clearly. */
+  private remoteClosed = false;
+  private watcher: ((activity: SessionActivity) => void) | null = null;
+  /** Activities raised before `watch`: handed over on subscribe, in order. */
+  private unwatched: SessionActivity[] = [];
 
   constructor(
     client: RemoteClient,
     seedMessages?: readonly ChatMessage[],
     desiredId?: string,
     seedTitle?: SeedTitle,
+    attach?: { readonly reopen?: boolean },
   ) {
     this.client = client;
     this.seedMessages = seedMessages;
     this.desiredId = desiredId;
     this.seedTitle = seedTitle;
+    this.attach = attach;
+  }
+
+  /**
+   * Subscribe to what the session does that this client did not start (see
+   * `SessionActivity`). One listener: a second replaces the first. Activities
+   * raised before it are delivered now, in order. Returns an unsubscribe.
+   */
+  watch(listener: (activity: SessionActivity) => void): () => void {
+    this.watcher = listener;
+    for (const activity of this.unwatched.splice(0)) {
+      listener(activity);
+    }
+    return () => {
+      if (this.watcher === listener) {
+        this.watcher = null;
+      }
+    };
+  }
+
+  /** `turnId` is one this session minted and still tracks: an own turn (else foreign). */
+  ownsTurn(turnId: string): boolean {
+    return (
+      turnId === this.turnId ||
+      [this.active, this.next, this.settling].some((turn) => turn?.turnId === turnId)
+    );
+  }
+
+  /**
+   * The eager attach of a session built with `attach` (`newSession(…, {attach})`):
+   * `session/open{sessionId, reopen?}`, never a create; its full history comes
+   * as a `history` activity (or a foreign turn, mid-turn), then live. Rejects
+   * on an archived (without `reopen`), deleted or unknown id — nothing is
+   * created; a later call tries again. A no-op for a fresh session: it stays
+   * lazy (opened by the first `send`).
+   */
+  open(): Promise<void> {
+    const id = this.desiredId;
+    if (!this.attach || id === undefined || this.id !== null) {
+      return Promise.resolve();
+    }
+    if (!this.attaching) {
+      const opening = this.client.attachSession(id, this, {
+        ...(this.attach.reopen === true ? { reopen: true } : {}),
+      });
+      this.opening = opening;
+      this.attaching = opening.then(
+        (sessionId) => {
+          this.id = sessionId;
+          this.opening = null;
+        },
+        (error: unknown) => {
+          this.opening = null;
+          this.attaching = null;
+          throw error;
+        },
+      );
+    }
+    return this.attaching;
+  }
+
+  private raise(activity: SessionActivity): void {
+    if (this.watcher) {
+      this.watcher(activity);
+      return;
+    }
+    if (activity.kind === "history") {
+      // A newer history supersedes an older one nobody saw.
+      this.unwatched = this.unwatched.filter((a) => a.kind !== "history");
+    }
+    this.unwatched.push(activity);
   }
 
   /**
@@ -157,6 +275,24 @@ export class RemoteSession implements SessionStreamListener {
    */
   get queued(): QueueState | undefined {
     return this.id ? this.client.queuedOf(this.id) : undefined;
+  }
+
+  /**
+   * Subscribe to this session's queue as the daemon reports it (every
+   * writer's rows, live or a resync's); the current state, if any, is given
+   * at once. Returns an unsubscribe (docs/feat/tui-foreign-turns.md C7).
+   */
+  onQueued(listener: (state: QueueState) => void): () => void {
+    const unsubscribe = this.client.onSessionQueued((notice) => {
+      if (notice.sessionId === this.id) {
+        listener(notice.state);
+      }
+    });
+    const now = this.queued;
+    if (now) {
+      listener(now);
+    }
+    return unsubscribe;
   }
 
   /**
@@ -279,7 +415,9 @@ export class RemoteSession implements SessionStreamListener {
    * (a later `sendNow` cites it); a fresh one when omitted.
    */
   enqueue(text: string, id?: string): Promise<void> {
-    const turnId = this.turnId;
+    // The turn the daemon runs (a foreign one: any device can steer it); an
+    // own turn not started yet keeps its own id.
+    const turnId = this.streaming ?? this.turnId;
     if (turnId === null) {
       return Promise.resolve();
     }
@@ -347,8 +485,13 @@ export class RemoteSession implements SessionStreamListener {
     if (this.closed) {
       throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
     }
-    const current = this.active && !this.active.ended ? this.active : null;
-    if (!id || (target === "turn" && this.turnId === null)) {
+    this.refuseIfRemoteClosed();
+    // A streaming foreign turn is the current one too: the successor waits
+    // for its end; the interrupt names the turn the daemon runs.
+    const foreign = this.foreign && !this.foreign.ended ? this.foreign : null;
+    const current = this.active && !this.active.ended ? this.active : foreign;
+    const bound = this.streaming ?? this.turnId;
+    if (!id || (target === "turn" && bound === null)) {
       throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
     }
     if (this.next) {
@@ -358,8 +501,8 @@ export class RemoteSession implements SessionStreamListener {
       throw refusal;
     }
     const interrupt: SendNowTarget =
-      target === "turn" && this.turnId !== null
-        ? { kind: "turn", turnId: this.turnId }
+      target === "turn" && bound !== null
+        ? { kind: "turn", turnId: bound }
         : { kind: "compaction" };
     const turn: ActiveTurn = {
       turnId: crypto.randomUUID(),
@@ -392,7 +535,7 @@ export class RemoteSession implements SessionStreamListener {
     // only then does the daemon hold the new turn) or before the caller iterates.
     const onAbort = (): void => {
       turn.abortWanted = true;
-      this.client.cancel(id);
+      this.client.cancel(id, turn.turnId);
     };
     signal?.addEventListener("abort", onAbort);
     try {
@@ -452,9 +595,22 @@ export class RemoteSession implements SessionStreamListener {
       return;
     }
     const next = this.next;
-    if (next && this.active === ended) {
+    // A send-now on a foreign turn waits for ITS end (with no own turn in
+    // flight: an own prompt that lost the slot promotes it when it fails).
+    const own = this.active && !this.active.ended ? this.active : null;
+    if (next && (this.active === ended || (ended.foreign === true && own === null))) {
       this.next = null;
       this.install(next);
+    }
+  }
+
+  /** A send after another device closed (or deleted) the session: a clear refusal. */
+  private refuseIfRemoteClosed(): void {
+    if (this.remoteClosed) {
+      throw new RpcError(
+        DomainErrorCode.UnknownSession,
+        "this session was closed on another device",
+      );
     }
   }
 
@@ -467,7 +623,11 @@ export class RemoteSession implements SessionStreamListener {
     if (this.closed) {
       throw new RpcError(DomainErrorCode.UnknownSession, "this session was closed");
     }
-    if (!this.id) {
+    this.refuseIfRemoteClosed();
+    if (this.attach) {
+      // An attach-only session is never created by a send: the attach first.
+      await this.open();
+    } else if (!this.id) {
       this.opening = this.client.openSession(
         undefined,
         this.seedMessages,
@@ -483,6 +643,9 @@ export class RemoteSession implements SessionStreamListener {
       this.client.setListener(this.id, this);
     }
     const id = this.id;
+    if (id === null) {
+      throw new RpcError(DomainErrorCode.UnknownSession, "the session is not open");
+    }
     const turn: ActiveTurn = {
       turnId,
       prompt,
@@ -503,7 +666,7 @@ export class RemoteSession implements SessionStreamListener {
     }
     const onAbort = (): void => {
       turn.abortWanted = true;
-      this.client.cancel(id);
+      this.client.cancel(id, turn.turnId);
     };
     signal?.addEventListener("abort", onAbort);
     this.sendPrompt(id, turn);
@@ -540,7 +703,7 @@ export class RemoteSession implements SessionStreamListener {
         } else if (turn.abortWanted) {
           // Esc before the daemon had the turn (e.g. while the link was down):
           // that cancel found nothing to cancel; now it does.
-          this.client.cancel(id);
+          this.client.cancel(id, turn.turnId);
         }
         settled?.();
       },
@@ -553,7 +716,13 @@ export class RemoteSession implements SessionStreamListener {
 
   // --- the session's stream (SessionStreamListener) -----------------------
 
-  /** One ordered output of the session's stream, for the turn in flight (if any). */
+  /**
+   * One ordered output of the session's stream. A turn-scoped update goes to
+   * the turn the reducer stamped it with (`out.turn`) — own or foreign, never
+   * "the active own turn" (an own prompt that lost the slot would show the
+   * other turn's output). Session-level updates are never routed to a turn
+   * (docs/feat/tui-foreign-turns.md B2).
+   */
   output(out: StreamOutput): void {
     const old = this.active;
     const next = this.next;
@@ -567,34 +736,12 @@ export class RemoteSession implements SessionStreamListener {
       this.next = null;
       this.install(next);
     }
-    const turn = this.active;
-    if (!turn || turn.ended) {
-      // The reducer reports an unknown type once: keep it for the next turn,
-      // never drop it (docs/feat/protocol-v10-forward-compat.md).
-      if (out.kind === "unsupported") {
-        this.idleNotices.push({ type: "unsupported", kind: out.type });
-      }
-      return; // idle: a turn started elsewhere is not rendered (known limit)
-    }
     switch (out.kind) {
-      case "reset": {
-        // Everything shown is replaced by the snapshot; tool calls it already
-        // lists are re-announced by the replay — shown once (upsert).
-        turn.reset = true;
-        if (out.turn === turn.turnId) {
-          turn.started = true; // running at the cut: its prompt is in the snapshot
-        }
-        turn.shownTools = new Set(
-          out.messages.flatMap((m) => (m.toolCalls ?? []).map((c) => c.id)),
-        );
-        for (const m of out.messages) {
-          for (const call of m.toolCalls ?? []) turn.toolNames.set(call.id, call.name);
-        }
-        turn.queue.push({ type: "history_reset", messages: out.messages });
+      case "reset":
+        this.onReset(out);
         return;
-      }
       case "update":
-        this.onUpdate(turn, out.update);
+        this.route(out.update, out.turn);
         return;
       case "error":
         // A frame this client cannot act on (unknown mandatory, malformed):
@@ -603,13 +750,33 @@ export class RemoteSession implements SessionStreamListener {
         this.failAll(out.error);
         if (this.id) this.client.cancel(this.id);
         return;
-      case "unsupported":
-        turn.queue.push({ type: "unsupported", kind: out.type });
+      case "unsupported": {
+        // The reducer reports an unknown type once: shown in the turn that
+        // streams, or kept for the next turn while idle — never dropped
+        // (docs/feat/protocol-v10-forward-compat.md).
+        const turn = this.streamedTurn();
+        if (turn) {
+          turn.queue.push({ type: "unsupported", kind: out.type });
+        } else {
+          this.idleNotices.push({ type: "unsupported", kind: out.type });
+        }
         return;
+      }
       case "turn_lost":
         // A settling old turn is not failed here: its re-sent `prompt` is in
         // flight, and `sessionCall` rejects it (a keyed call never crosses a
         // recreate), which fails it through `sendPrompt`.
+        this.streaming = null;
+        // A foreign turn died with the daemon's session too.
+        if (this.foreign && !this.foreign.ended) {
+          this.fail(
+            this.foreign,
+            new RpcError(
+              DomainErrorCode.UnknownSession,
+              "the daemon lost the session; the turn in flight was not re-run",
+            ),
+          );
+        }
         // The active turn, then (promoted by its failure) a waiting send-now.
         for (let lost = this.active; lost && !lost.ended; lost = this.active) {
           if (!lost.sent) {
@@ -629,6 +796,166 @@ export class RemoteSession implements SessionStreamListener {
       case "failed":
         this.failAll(new Error(out.reason));
         return;
+    }
+  }
+
+  /** The tracked turn (own or foreign) with this id, ended or not. */
+  private turnFor(turnId: string): ActiveTurn | null {
+    for (const turn of [this.settling, this.active, this.next, this.foreign]) {
+      if (turn?.turnId === turnId) {
+        return turn;
+      }
+    }
+    return null;
+  }
+
+  /** The unended turn the stream shows running, else the own turn in flight. */
+  private streamedTurn(): ActiveTurn | null {
+    const streamed = this.streaming !== null ? this.turnFor(this.streaming) : null;
+    if (streamed && !streamed.ended) {
+      return streamed;
+    }
+    return this.active && !this.active.ended ? this.active : null;
+  }
+
+  /** A turn this session did not start: tracked, announced to the watcher, never sent. */
+  private startForeign(turnId: string, prompt: string): ActiveTurn {
+    const turn: ActiveTurn = {
+      turnId,
+      prompt,
+      queue: new AsyncQueue<SessionEvent>(),
+      toolNames: new Map(),
+      shownTools: new Set(),
+      reset: false,
+      ended: false,
+      acked: false,
+      sent: false,
+      abortWanted: false,
+      started: true,
+      foreign: true,
+    };
+    this.foreign = turn;
+    for (const notice of this.idleNotices.splice(0)) {
+      turn.queue.push(notice);
+    }
+    // Its prompt, as the daemon sent it (none for a continuation, or for a
+    // turn already running at a reset: the snapshot shows it).
+    if (prompt !== "") {
+      turn.queue.push({ type: "user_message", text: prompt });
+    }
+    this.raise({
+      kind: "turn",
+      turnId,
+      events: turn.queue,
+      cancel: () => {
+        if (this.id) this.client.cancel(this.id, turnId);
+      },
+    });
+    return turn;
+  }
+
+  /**
+   * A foreign turn that ended behind a resync's cut: its outcome is not known
+   * here and is never guessed — its stream closes with no `turn_end` (the
+   * snapshot shows what it did).
+   */
+  private closeWithoutOutcome(turn: ActiveTurn): void {
+    if (turn.ended) {
+      return;
+    }
+    turn.ended = true;
+    turn.queue.close();
+    this.promote(turn);
+  }
+
+  /** A snapshot replaced the history: into the turn running at the cut, else a `history` activity. */
+  private onReset(out: Extract<StreamOutput, { kind: "reset" }>): void {
+    const compacted = this.compactedPending;
+    this.compactedPending = false;
+    const shown = this.foreign;
+    if (shown && !shown.ended && shown.turnId !== out.turn) {
+      this.closeWithoutOutcome(shown);
+    }
+    this.streaming = out.turn;
+    let turn: ActiveTurn | null = null;
+    if (out.turn !== null) {
+      // A resumed turn after a daemon restart, or one running when we
+      // attached, streams no `turn_start`: the reset names it.
+      turn = this.turnFor(out.turn) ?? this.startForeign(out.turn, "");
+    } else if (!compacted && this.active && !this.active.ended) {
+      turn = this.active; // an own prompt not started at the cut (today's reset)
+    }
+    if (!turn || turn.ended) {
+      this.raise({ kind: "history", messages: out.messages, compacted });
+      return;
+    }
+    // Everything shown is replaced by the snapshot; tool calls it already
+    // lists are re-announced by the replay — shown once (upsert).
+    turn.reset = true;
+    if (out.turn === turn.turnId) {
+      turn.started = true; // running at the cut: its prompt is in the snapshot
+    }
+    turn.shownTools = new Set(out.messages.flatMap((m) => (m.toolCalls ?? []).map((c) => c.id)));
+    for (const m of out.messages) {
+      for (const call of m.toolCalls ?? []) turn.toolNames.set(call.id, call.name);
+    }
+    turn.queue.push({ type: "history_reset", messages: out.messages });
+  }
+
+  /** One applied update: by its turn (`turnId`, the reducer's stamp), or session-level. */
+  private route(update: SessionUpdate, turnId: string | null): void {
+    switch (update.type) {
+      case "turn_start": {
+        this.streaming = update.turnId;
+        const own = this.turnFor(update.turnId);
+        if (own) {
+          if (!own.ended) this.onUpdate(own, update);
+          return;
+        }
+        this.startForeign(update.turnId, update.prompt);
+        return;
+      }
+      case "turn_end": {
+        if (this.streaming === update.turnId) {
+          this.streaming = null;
+        }
+        // None tracked: a foreign send-now that never started (it delivered nothing).
+        const turn = this.turnFor(update.turnId);
+        if (turn && !turn.ended) this.onUpdate(turn, update);
+        return;
+      }
+      case "session_closed":
+        this.onClosed(update.reason);
+        return;
+      case "history_replaced":
+        // The barrier: the next reset is a compaction's (a daemon fact, never a guess).
+        this.compactedPending = true;
+        return;
+      // Owned elsewhere: the permission router (the dialog), the job-exit, the
+      // title and the queue listeners (they fire even while idle).
+      case "permission_request":
+      case "permission_resolved":
+      case "background_exit":
+      case "session_title":
+      case "queued":
+        return;
+      default: {
+        // Turn-scoped: always inside its turn's brackets (T-B0), so a null or
+        // untracked stamp is dropped.
+        const turn = turnId !== null ? this.turnFor(turnId) : null;
+        if (turn && !turn.ended) this.onUpdate(turn, update);
+      }
+    }
+  }
+
+  /** Closed daemon-side: every open turn ends (each got `turn_end{cancelled}` before), then the notice. */
+  private onClosed(reason: "closed" | "deleted"): void {
+    this.remoteClosed = true;
+    this.streaming = null;
+    this.failAll(new RpcError(DomainErrorCode.UnknownSession, "the session was closed"));
+    if (!this.closed) {
+      // Not after my own `close` (`/clear`): that is no news to this device.
+      this.raise({ kind: "closed", reason });
     }
   }
 
@@ -659,18 +986,17 @@ export class RemoteSession implements SessionStreamListener {
    * link is fine) its real end still arrives — failing it would be a guess.
    */
   private failAll(error: unknown): void {
+    // A foreign turn too: its outcome can never arrive either.
+    if (this.foreign && !this.foreign.ended) {
+      this.fail(this.foreign, error);
+    }
     for (let turn = this.active; turn && !turn.ended; turn = this.active) {
       this.fail(turn, error);
     }
   }
 
+  /** One update of `turn` (`route` picked it by id; session-level ones never get here). */
   private onUpdate(turn: ActiveTurn, update: SessionUpdate): void {
-    // Closed (by another client): ours already got `turn_end{cancelled}`
-    // before it; fail loudly anyway rather than ever wait on a dead session.
-    if (update.type === "session_closed") {
-      this.fail(turn, new RpcError(DomainErrorCode.UnknownSession, "the session was closed"));
-      return;
-    }
     if (update.type === "turn_start") {
       // Our own prompt is already on screen — unless a reset replaced the
       // screen before the replay re-delivered it. A send-now's prompt is never

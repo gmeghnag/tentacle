@@ -236,6 +236,13 @@ interface SessionEntry {
   title: SeedTitle | undefined;
   /** The daemon's last reported queue; undefined until it reports one (an older daemon never does). */
   queued: QueueState | undefined;
+  /**
+   * Opened by `attachSession`: an existing session, never created. Until it
+   * is live once, a recovery re-sends the attach (no `create`), and an
+   * `UnknownSession` fails it instead of recreating an empty session under an
+   * id another device owns (docs/feat/tui-foreign-turns.md B7).
+   */
+  attach: { readonly reopen: boolean } | undefined;
 }
 
 /**
@@ -474,8 +481,39 @@ export class RemoteClient {
     seedMessages?: readonly ChatMessage[],
     sessionId?: string,
     seedTitle?: SeedTitle,
+    opts: { readonly attach?: { readonly reopen?: boolean } } = {},
   ): RemoteSession {
-    return new RemoteSession(this, seedMessages, sessionId, seedTitle);
+    return new RemoteSession(this, seedMessages, sessionId, seedTitle, opts.attach);
+  }
+
+  /**
+   * Attach to an EXISTING session (`session/open{sessionId, reopen?}`, never
+   * `create`, never `messages`) and resolve once it is live: its full history
+   * arrives as the listener's first `reset` (a paged snapshot). Rejects —
+   * creating nothing — on `SessionArchived` (unless `reopen`),
+   * `SessionDeleted` (`onSessionDeleted` fires) or `UnknownSession`
+   * (docs/feat/tui-foreign-turns.md B7).
+   */
+  async attachSession(
+    sessionId: string,
+    listener: SessionStreamListener,
+    opts: { readonly reopen?: boolean } = {},
+  ): Promise<string> {
+    const entry = this.register(sessionId, [], listener);
+    entry.attach ??= { reopen: opts.reopen === true };
+    try {
+      await this.openOn(entry, this.gen, {
+        sessionId,
+        ...(opts.reopen === true ? { reopen: true } : {}),
+      });
+      await this.whenLive(entry);
+    } catch (error) {
+      if (!entry.everLive && this.sessions.get(sessionId) === entry) {
+        this.sessions.delete(sessionId);
+      }
+      throw error;
+    }
+    return sessionId;
   }
 
   /** Subscribe to title changes across all sessions (see `SessionTitleNotice`); returns an unsubscribe. */
@@ -752,10 +790,17 @@ export class RemoteClient {
     ).then(() => undefined);
   }
 
-  /** A notification: lost while the link is down (the caller re-sends it after `recovered`). */
-  cancel(sessionId: string): void {
+  /**
+   * A notification: lost while the link is down (the caller re-sends it after
+   * `recovered`). `turnId` names the turn meant (any other is left running);
+   * absent → whatever runs.
+   */
+  cancel(sessionId: string, turnId?: string): void {
     if (this.up) {
-      this.peer.notify(Notification.Cancel, { sessionId });
+      this.peer.notify(
+        Notification.Cancel,
+        turnId === undefined ? { sessionId } : { sessionId, turnId },
+      );
     }
   }
 
@@ -1134,6 +1179,7 @@ export class RemoteClient {
       turnEndsInHistory: 0,
       title,
       queued: undefined,
+      attach: undefined,
     };
     this.sessions.set(id, entry);
     return entry;
@@ -1183,13 +1229,16 @@ export class RemoteClient {
         gen,
         entry.everLive
           ? { sessionId: entry.id, ...(since ? { since } : {}) }
-          : // Never live: its first open may not have reached the daemon.
-            {
-              sessionId: entry.id,
-              create: true,
-              ...(entry.history.length > 0 ? { messages: entry.history } : {}),
-              ...(entry.title ? { title: entry.title } : {}),
-            },
+          : entry.attach
+            ? // An attach never live: attach again, never create.
+              { sessionId: entry.id, ...(entry.attach.reopen ? { reopen: true } : {}) }
+            : // Never live: its first open may not have reached the daemon.
+              {
+                sessionId: entry.id,
+                create: true,
+                ...(entry.history.length > 0 ? { messages: entry.history } : {}),
+                ...(entry.title ? { title: entry.title } : {}),
+              },
       );
     } catch (error) {
       this.failSession(entry, gen, error);
@@ -1207,6 +1256,7 @@ export class RemoteClient {
       messages?: readonly ChatMessage[];
       cwd?: string;
       title?: SeedTitle;
+      reopen?: boolean;
     },
   ): Promise<void> {
     this.step(entry, { kind: "open_sent" });
@@ -1220,7 +1270,8 @@ export class RemoteClient {
       }
       this.noteDeleted(entry, error);
       const unknown = error instanceof RpcError && error.code === DomainErrorCode.UnknownSession;
-      if (unknown && params.create !== true) {
+      // An attach that was never live has nothing to recreate: the id is gone.
+      if (unknown && params.create !== true && (entry.attach === undefined || entry.everLive)) {
         await this.recreate(entry, gen);
         return;
       }
@@ -1422,7 +1473,8 @@ export class RemoteClient {
       // Permission events are session state, not turn-scoped (a re-attach
       // replays a pending one): the router decides, never the turn handler.
       if (update.type === "permission_request") {
-        this.runPermissionActions(this.router.request(entry.id, update));
+        // Attributed to the turn the stream raised it in (the wire names none).
+        this.runPermissionActions(this.router.request(entry.id, update, out.turn));
       } else if (update.type === "permission_resolved") {
         this.runPermissionActions(this.router.resolved(entry.id, update.requestId));
       } else if (update.type === "background_exit") {
@@ -1740,7 +1792,10 @@ export class RemoteClient {
           this.runPermissionActions(this.router.answered(sessionId, requestId, response));
         };
         this.permissions
-          .request(action.request, { signal: controller.signal })
+          .request(action.request, {
+            signal: controller.signal,
+            ...(action.turnId !== undefined ? { turnId: action.turnId } : {}),
+          })
           .then(answered, (error: unknown) => {
             this.onError?.(error instanceof Error ? error : new Error(String(error)));
             answered(DISMISSED);

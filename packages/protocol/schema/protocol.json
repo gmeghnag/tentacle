@@ -102,6 +102,9 @@
       "properties": {
         "sessionId": {
           "$ref": "#/$defs/SessionId"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
         }
       },
       "required": ["sessionId"],
