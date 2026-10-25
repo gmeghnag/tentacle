@@ -1010,14 +1010,21 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 > Then the mobile app tasks resume (task 8 onward, `docs/eval/mobile-app.md`).
 >
 > **Queued fix (owner, 2026-10-26), slot to confirm (proposed: right after
-> task 7):** `fix/tool-duration-unknown` — Type: fix · Size: S · Blast:
-> contained · Suited: Sonnet exec, Opus review. A tool row rebuilt from history
+> task 7):** `fix/tool-duration` — Type: fix · Size: M · Blast:
+> load-bearing (additive wire field + persisted `ChatMessage` format) ·
+> Suited: Opus exec, fresh Opus review. A tool row rebuilt from history
 > (`--resume`, reconnect, session switch, compaction replace) shows a fake
 > `0.0s`: `messagesToItems` stamps `startedAt: 0`/`endedAt: 0`
 > (`packages/tui/src/resume.ts:31,42`) and `toolLines` prints any defined
 > `endedAt` (`render-lines.ts:489`). Repro: same `sleep 2` call → live
-> `2.0s`, replayed `0.0s`. Owner decision: when the duration is unknown the
-> row shows NO time (not a persisted duration).
+> `2.0s`, replayed `0.0s`. Owner decision (2026-10-26, option A): the daemon
+> measures each tool call's duration and stores it on the tool `ChatMessage`
+> as a metadata field like `spill` (never sent to the model: zero context
+> cost), carried on the `tool_result` update; live AND replayed rows show it
+> (also more exact over `connect`, where client receipt time adds network
+> latency). A row whose duration is unknown (older records) shows NO time,
+> never a fake `0.0s`. Plan must settle: record/store versioning for the new
+> field (strict laptop parser), and sub-agent tool rows.
 
 - [x] **Local daemon on a worker thread** (the "TUI always over RPC" lever —
       moves model streaming + tool execution off the render thread, so the UI
