@@ -78,6 +78,13 @@ per user message.
    - the reset must be the ONLY tool call of its assistant message, else it is
      refused with the reason (the other results would land in the discarded
      history).
+6. **`AGENTS.md` is re-read fresh at every reset, from the first version**
+   (not the copy folded in at session start), on every runtime. Pod mode: the
+   planner must verify where `AGENTS.md` is read today for `run`/`attach`
+   (laptop config vs the pod workspace) and route the re-read through the
+   same owner; a pod-supplied file is untrusted input (AGENTS §7 "a pod is not
+   trusted"). (2026-10-25: "voglio già da ora la rilettura fresca di
+   AGENTS.md")
 
 ## Open questions (asked one at a time)
 
