@@ -1,8 +1,8 @@
 /**
  * Worker entry point: the local agent daemon, running off the render thread.
  *
- * The main thread posts the resolved `TentacleConfig` as the bootstrap message
- * (an object — distinct from the string JSON-RPC frames the `Connection` then
+ * The main thread posts the resolved `TentacleConfig` + its version
+ * (`WorkerBootstrap`) as the bootstrap message (an object — distinct from the string JSON-RPC frames the `Connection` then
  * exchanges over this same port). We build a `SessionHost` from it and bind one
  * `Connection` to the worker port; the main thread drives it with a
  * `RemoteClient`. Model streaming and tool execution happen here, so the TUI
@@ -23,8 +23,8 @@ import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { ToolRegistry } from "@tentacle/tools";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
-import { APP_VERSION } from "./version.ts";
 import { buildAgent, skillCatalog, skillListing } from "./wiring.ts";
+import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 
 // `globalThis` in a worker exposes postMessage/addEventListener at runtime; the
 // non-DOM TS lib doesn't type them, so go through the endpoint shape.
@@ -49,7 +49,10 @@ port.addEventListener("message", (event: { data: unknown }) => {
     return;
   }
   started = true;
-  const config = event.data as TentacleConfig;
+  // The version comes from the main thread, NOT from `version.ts`: importing it
+  // would inline the compile-time marker into this second bundle too (two
+  // markers in the binary; scripts/build.ts demands exactly one).
+  const { config, version } = event.data as WorkerBootstrap;
 
   // Connect MCP once, in the background. Until it resolves, `mcpTools` is empty
   // and we remember each freshly-built registry so we can register the tools
@@ -92,7 +95,7 @@ port.addEventListener("message", (event: { data: unknown }) => {
   const host = new SessionHost({
     defaultCwd: config.cwd,
     // The client's own build: no skew possible, named for completeness.
-    identity: { tentacle: APP_VERSION, kind: "worker" },
+    identity: { tentacle: version, kind: "worker" },
     skills: skillCatalog(config),
     skillList: skillListing(config),
     mcpStatus: () => mcpTracker.probe(),
