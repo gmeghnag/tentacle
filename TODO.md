@@ -340,8 +340,8 @@ Daily-driver work (done 2026-10-14):
       now; a faithful copy needs the source text kept next to each rendered
       row. S–M · contained.
 
-- [ ] 🟡 **TUI: Ctrl+O expand takes ~0.5 s on a big session**
-      (`docs/fix/tui-expand-latency.md`, to write; owner, 2026-10-25) —
+- [x] 🟡 **TUI: Ctrl+O expand takes ~0.5 s on a big session** — DONE 2026-10-25, merged `a2d8126`
+      ([`docs/fix/tui-expand-latency.md`](docs/fix/tui-expand-latency.md); owner, 2026-10-25) —
       measured on a real 630 KB session (189 tool items, 8048 expanded
       lines, width 150): layout expand 210-245 ms every time, collapse ~40 ms.
       Cause: `wrapLines` (`render-lines.ts`) runs `wrap-ansi` on every line
