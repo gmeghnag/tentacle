@@ -805,6 +805,22 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       - Logic (which rows, which state) in a pure module; the component only
         maps it to colours. Tests on frames (ink-testing-library), plus a
         theme check for dark and light.
+- [ ] **TUI: syntax colours in file reads, by the file's language** (owner,
+      2026-10-25) — `feat/tui-read-highlight`, S · contained, Sonnet
+      executes, Opus reviews; runs AFTER task 5 merges (same
+      `render-lines.ts`). A `Read` result (preview AND the ctrl+o expanded
+      view) is coloured by the language of the file it read — Go, Python,
+      JS/TS, Markdown, YAML, shell, Rust… — using the `cli-highlight`
+      (highlight.js) dependency the TUI already has for markdown code blocks.
+      - Language from the file EXTENSION, never content auto-detection (slow
+        and wrong); unknown extension → plain text as today.
+      - Computed once per tool item and cached with the existing line cache,
+        never re-highlighted on scroll; colours follow the theme (dark /
+        light). Measure the cost in the task (estimate: ~1 ms for a 40-line
+        preview, tens of ms once for a 1000-line expand).
+      - Known limit, accepted: a preview cut starting inside a multi-line
+        comment/string may colour its first lines wrongly (cosmetic).
+      - Later, not now: the same colouring inside edit diffs (green/red bars).
 - [ ] **Permission prompt: "No, let's talk about it"** (owner, 2026-10-24) — a
       third answer next to Yes / Yes, always / No: it opens a text field; the
       model gets the rejection TOGETHER with the user's text (e.g. "Rejected
