@@ -774,8 +774,12 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       sends the version in the worker bootstrap. Sonnet executed, fresh Opus
       review MERGE. Debt: no test pins that the main thread sends
       `APP_VERSION` (review finding 1).
-- [ ] **TUI: sent messages on a full-width background; queued messages
-      look sent, in grey** (owner, 2026-10-25) — `feat/tui-message-style`,
+- [x] **TUI: sent messages on a full-width background; queued messages
+      look sent, in grey** (owner, 2026-10-25) — **DONE 2026-10-25**
+      (`docs/feat/tui-message-style.md`, merged `89b1364`; built in PARALLEL
+      with task 5 at the owner's request; also compact token totals `1k` /
+      `1.2k` / `1M` and timers `1m 50s`, owner 2026-10-25; light palette
+      present but unselected until theme selection exists) — `feat/tui-message-style`,
       S · contained, Sonnet executes, Opus reviews; runs right AFTER task 5
       (`feat/queued-broadcast`) merges (both touch the TUI queue rows; one
       code branch at a time).
