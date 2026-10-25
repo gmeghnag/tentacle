@@ -331,6 +331,20 @@ Daily-driver work (done 2026-10-14):
       background, plain text colour, bright line numbers). Type: fix · Size: S
       · Blast: contained · Suited: Sonnet executes, Opus reviews.
 
+- [ ] 🟡 **TUI: Ctrl+O expand takes ~0.5 s on a big session**
+      (`docs/fix/tui-expand-latency.md`, to write; owner, 2026-10-25) —
+      measured on a real 630 KB session (189 tool items, 8048 expanded
+      lines, width 150): layout expand 210-245 ms every time, collapse ~40 ms.
+      Cause: `wrapLines` (`render-lines.ts`) runs `wrap-ansi` on every line
+      (~209 ms) though 97 % already fit the width (`string-width` over all
+      lines: 20 ms); and `rowCache` keeps ONE layout per item, so every
+      toggle re-lays-out all tool items. Plan (owner OK): fast path for lines
+      that fit (proved output-identical), two cache slots per item (collapsed
+      + expanded). Expected: first expand ~30-60 ms, later toggles ~0. Starts
+      after `fix/tui-diff-tabs` merges. Repro: `.tentacle/tmp/ctrlo-latency/`.
+      Type: fix · Size: S · Blast: contained · Suited: Sonnet executes, Opus
+      reviews.
+
 ### Block 7 — MCP (client, stdio transport, tool adapter)
 
 - [x] 🟡 **MCP tool calls have no timeout and ignore the turn's abort signal.**
