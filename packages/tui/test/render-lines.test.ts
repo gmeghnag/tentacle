@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import stringWidth from "string-width";
 import * as markdown from "../src/markdown.ts";
 import {
   itemLines,
@@ -588,5 +589,110 @@ describe("a spilled tool result", () => {
     const lines = body(older, { expandAll: true });
     expect(lines[0]).toBe(banner);
     expect(lines).toContain("…[39600 characters omitted]…");
+  });
+});
+
+describe("display cells: a tab or a wide char never makes a row overflow", () => {
+  const WIDTH = 60;
+  const o = { expandAll: true, width: WIDTH };
+  const tool = (name: string, extra: Partial<ToolItem>): ToolItem => ({
+    kind: "tool",
+    id: name,
+    name,
+    args: "{}",
+    status: "ok",
+    startedAt: 0,
+    endedAt: 1,
+    ...extra,
+  });
+  const rowsOf = (item: DisplayItem, width = WIDTH): string[] =>
+    wrapLines(itemLines(item, { ...o, width }), width).map(strip);
+  const diffTool = (patch: string): ToolItem =>
+    tool("fs_write", { detail: { kind: "diff", path: "p.go", added: 1, removed: 1, patch } });
+  const isBar = (r: string): boolean => /^ +\d* [+-] /.test(r);
+
+  const PATCH = [
+    "@@ -1,3 +1,7 @@",
+    "-\told := 1",
+    "+\tnew := 1 // a",
+    '+\t\t"strings"',
+    "+中文中文中文",
+    "+\u{1F600}\u{1F600}\u{1F600}",
+    "+x\ty",
+    " \tcontext\tline",
+    "",
+  ].join("\n");
+
+  test("no rendered diff row contains a tab", () => {
+    for (const w of [30, 60, 120]) {
+      for (const r of rowsOf(diffTool(PATCH), w)) {
+        expect(r).not.toContain("\t");
+      }
+    }
+  });
+
+  test("every bar row of one diff starts at the same column and has the same display width", () => {
+    for (const w of [30, 60, 120]) {
+      const bars = rowsOf(diffTool(PATCH), w).filter(isBar);
+      expect(bars.length).toBe(6);
+      // the +/- marker sits in the same column on every bar (a removed row has no number)
+      expect(new Set(bars.map((r) => r.search(/[+-] /))).size).toBe(1);
+      expect(new Set(bars.map((r) => stringWidth(r))).size).toBe(1);
+      expect(stringWidth(bars[0] ?? "")).toBeLessThanOrEqual(w);
+    }
+  });
+
+  test("a tab is shown as 4 spaces inside a bar", () => {
+    const rows = rowsOf(diffTool("@@ -0,0 +1 @@\n+\tx\n"));
+    expect(rows.some((r) => r.includes("+     x"))).toBe(true); // marker + space + 4 + x
+  });
+
+  test("a tab inside a word-diff pair keeps both bars aligned", () => {
+    const rows = rowsOf(diffTool("@@ -1 +1 @@\n-\tfoo(a, b)\n+\tfoo(a, c)\n"));
+    const bars = rows.filter(isBar);
+    expect(bars.length).toBe(2);
+    expect(new Set(bars.map((r) => stringWidth(r))).size).toBe(1);
+    expect(bars.join("")).not.toContain("\t");
+  });
+
+  test("a word-diff pair with CJK and emoji renders bars of exactly width cells", () => {
+    const rows = rowsOf(
+      diffTool(
+        "@@ -1,2 +1,2 @@\n-中文中文 foo \u{1F600}\u{1F600} end\n+中文中文 bar \u{1F600}\u{1F600} end\n",
+      ),
+    );
+    const bars = rows.filter(isBar);
+    expect(bars.length).toBe(2);
+    for (const b of bars) {
+      expect(stringWidth(b)).toBe(WIDTH - 1);
+    }
+  });
+
+  const long = `func main() {\n\t${"word ".repeat(20)}\n}`;
+  for (const [name, extra] of [
+    ["fs_read", { args: '{"path":"m.txt"}', resultText: long }],
+    ["shell", { args: '{"command":"cat m"}', resultText: long }],
+  ] as const) {
+    test(`${name} output with a long tabbed line has no tab and fits the width`, () => {
+      const rows = rowsOf(tool(name, extra));
+      for (const r of rows) {
+        expect(r).not.toContain("\t");
+        expect(stringWidth(r)).toBeLessThanOrEqual(WIDTH);
+      }
+    });
+  }
+
+  test("a user message with a tab has no tab and keeps its full-width row", () => {
+    const rows = rowsOf({ kind: "user", text: "a\tb" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).not.toContain("\t");
+    expect(stringWidth(rows[0] ?? "")).toBe(WIDTH);
+  });
+
+  test("wrapLines never lets a tab through, and leaves ANSI intact", () => {
+    expect(wrapLines(["a\tb", "\x1b[31mx\ty\x1b[39m"], 20)).toEqual([
+      "a    b",
+      "\x1b[31mx    y\x1b[39m",
+    ]);
   });
 });
