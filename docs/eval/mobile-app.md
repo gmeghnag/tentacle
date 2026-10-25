@@ -523,6 +523,9 @@ the "a new target adds only a transport" shape, AGENTS §7).
     (`client/src/remote-session.ts:751` on the task 6 branch) and can stop a
     phone's turn; task 7 makes it `cancel(id, <own turn id>)` or no cancel
     while only a foreign turn streams.
+    **Task 6 DONE 2026-10-25** (`docs/feat/tui-foreign-turns.md`, merged
+    `024ebb9`; Opus executed as ONE branch, fresh Opus review
+    APPROVE-WITH-NITS, gate 2617 pass / 2 skip / 0 fail).
   - *Task 7 `connect-sessions`* — re-sized **L** (5 packages) → 7a / 7b, each
     M · cross-module [yes]. Quit = just close the socket (proved: the session
     stays live and re-attachable, the turn finishes daemon-side). New method
