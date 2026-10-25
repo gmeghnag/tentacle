@@ -805,8 +805,12 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       - Logic (which rows, which state) in a pure module; the component only
         maps it to colours. Tests on frames (ink-testing-library), plus a
         theme check for dark and light.
-- [ ] **TUI: syntax colours in file reads, by the file's language** (owner,
-      2026-10-25) — `feat/tui-read-highlight`, S · contained, Sonnet
+- [x] **TUI: syntax colours in file reads, by the file's language** (owner,
+      2026-10-25) — **DONE 2026-10-25** (`docs/feat/tui-read-highlight.md`,
+      merged `d27c1ca`; Sonnet executed, two fresh Opus reviews; plain above
+      `READ_HIGHLIGHT_CAP` = 2000 lines / 200 KB, an orchestrator default the
+      owner may change; html/xml left plain, since their `<script>`/`<style>`
+      blocks would need content detection) — `feat/tui-read-highlight`, S · contained, Sonnet
       executes, Opus reviews; runs AFTER task 5 merges (same
       `render-lines.ts`). A `Read` result (preview AND the ctrl+o expanded
       view) is coloured by the language of the file it read — Go, Python,
