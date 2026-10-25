@@ -1684,6 +1684,12 @@ export function App({
           />
         ) : (
           <Box flexDirection="column" width={columns}>
+            {/* Queued messages sit where a sent message would (right under the
+                conversation); the thinking/working line stays just above the
+                input, under them (owner, 2026-10-25). */}
+            {st.running || compacting ? (
+              <QueuedMessages queued={rowTexts(queued)} hint={SEND_NOW_HINT} columns={columns} />
+            ) : null}
             {st.running ? (
               <Thinking
                 since={
@@ -1693,9 +1699,6 @@ export function App({
                 }
                 label={st.reasoning ? "thinking…" : "working…"}
               />
-            ) : null}
-            {st.running || compacting ? (
-              <QueuedMessages queued={rowTexts(queued)} hint={SEND_NOW_HINT} columns={columns} />
             ) : null}
             {listView ? (
               <ListPanel view={listView} columns={columns} />
