@@ -331,6 +331,15 @@ Daily-driver work (done 2026-10-14):
       background, plain text colour, bright line numbers). Type: fix · Size: S
       · Blast: contained · Suited: Sonnet executes, Opus reviews.
 
+- [ ] 🔵 **TUI: mouse copy turns tabs into 4 spaces** (owner decision in
+      the `fix/tui-diff-tabs` Review, 2026-10-25) — the selection copies the
+      rendered rows (`App.tsx` `finishSelection` → `extractSelection`), and
+      since that fix a tab is rendered as 4 spaces, so code copied from a
+      Read/Bash/diff block loses its tabs (Makefile, Go). The model, the
+      store and `/save` are unchanged. Owner: keep "copy what you see" for
+      now; a faithful copy needs the source text kept next to each rendered
+      row. S–M · contained.
+
 - [ ] 🟡 **TUI: Ctrl+O expand takes ~0.5 s on a big session**
       (`docs/fix/tui-expand-latency.md`, to write; owner, 2026-10-25) —
       measured on a real 630 KB session (189 tool items, 8048 expanded
