@@ -56,10 +56,13 @@ per user message.
    (2026-10-25: "facciamo numero configurabile default -1 ovvero infinito, è
    anche la funzionalità per un modello di resettare se stesso deve poter
    essere configurabile, default attiva")
+4. **On disk the history is replaced, as compaction does today**
+   (`Session.compact`, `packages/agent/src/session.ts:157-169`): the
+   pre-reset history is NOT kept in the record (no record-format change). The
+   old transcript stays only on the screen of the clients that saw it.
+   (2026-10-25: owner answered "no" to keeping it)
 
 ## Open questions (asked one at a time)
 
 - What else survives the reset (todo list, background jobs, sub-agents).
-- On-disk history: is the pre-reset history kept (archive) or replaced, as
-  compaction does today.
 - Tool name and how the TUI and the phone show it.
