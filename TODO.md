@@ -825,8 +825,11 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       - Known limit, accepted: a preview cut starting inside a multi-line
         comment/string may colour its first lines wrongly (cosmetic).
       - Later, not now: the same colouring inside edit diffs (green/red bars).
-- [ ] **TUI: a spilled tool result shows a short note, not the model's banner**
-      (owner, 2026-10-25) — `feat/tui-spill-note`, L · load-bearing (record v5,
+- [x] **TUI: a spilled tool result shows a short note, not the model's banner**
+      (owner, 2026-10-25) — **DONE 2026-10-25** (`docs/feat/tui-spill-note.md`,
+      merged `2dd5a36`; Opus executed, fresh Opus review MERGE; daemon record v5;
+      the model's no-path banner is now tool-aware; a v4 record holding `spill`
+      is accepted, harmless, left as is) — `feat/tui-spill-note`, L · load-bearing (record v5,
       persisted `spill` field; owner-approved plan), Opus executes, fresh Opus review; runs BEFORE task 6
       `tui-foreign-turns`. Today a too-large tool result shows the banner meant
       for the model (`[large fs_read output: full output (N chars) saved to
@@ -846,6 +849,11 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         omitted …`, the full tail. The path is shown ONLY in ctrl+o (owner).
       - Same for every tool that spills (shell too), not only `fs_read`.
       - The "could not be saved" case (no path) says so, without a path.
+- [ ] 🔵 **`/save` still exports the model's spill banner** (Review of
+      `tui-spill-note`, 2026-10-25) — the export writes the raw tool content
+      (`[large … output: …]` + preview); it could use the structured `spill`
+      field like the TUI does. Decide whether an export should show what the
+      model saw (today) or the user-facing note. S · contained.
 - [ ] **Permission prompt: "No, let's talk about it"** (owner, 2026-10-24) — a
       third answer next to Yes / Yes, always / No: it opens a text field; the
       model gets the rejection TOGETHER with the user's text (e.g. "Rejected
