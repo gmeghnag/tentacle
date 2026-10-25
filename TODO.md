@@ -766,6 +766,14 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       [`docs/feat/version-mismatch-notice.md`](docs/feat/version-mismatch-notice.md)
       (Execution filled; Review pending).
 
+- [x] **`bun run compile` refused its own binary: two version markers**
+      (found 2026-10-25 by the owner building locally) — DONE
+      (`docs/fix/double-version-marker.md`, merged `6b07818`). Since
+      `19fa201` the worker (a second compile entrypoint) imported
+      `APP_VERSION`, so the marker was inlined twice; the main thread now
+      sends the version in the worker bootstrap. Sonnet executed, fresh Opus
+      review MERGE. Debt: no test pins that the main thread sends
+      `APP_VERSION` (review finding 1).
 - [ ] **TUI: sent messages on a full-width background; queued messages
       look sent, in grey** (owner, 2026-10-25) — `feat/tui-message-style`,
       S · contained, Sonnet executes, Opus reviews; runs right AFTER task 5
