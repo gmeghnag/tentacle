@@ -117,6 +117,12 @@ per user message.
    it with evidence before any code. (2026-10-25: "si direi proprio A,
    prediligo il lavoro pulito e una perfetta, anzi superba UX")
 
+12. **Plan question 2 (pod settings): the two `contextReset` keys come from the
+   pod's config in `run`/`attach`**, like every other agent setting
+   (`maxIterations`, `subagents`). A limit enforced in the pod is UX, not
+   security (AGENTS §7: whoever controls the pod controls the daemon); the
+   laptop-side approval is the guard. (2026-10-25: "ok va bene")
+
 ## Review
 
 *— claude-opus-5-5, 2026-10-25*
