@@ -507,6 +507,17 @@ the "a new target adds only a transport" shape, AGENTS §7).
     started it (a foreign turn too — the other device sees it interrupted);
     `/exit` = "I leave, everything stays as it is" (the foreign turn goes on
     daemon-side); only `serve` / `connect` sessions have foreign turns.
+    **Re-plan 2026-10-25 (owner answers, all as recommended):** QR1 a
+    compaction while idle (mine or another device's) keeps the TUI transcript
+    and adds a notice ("compacted on another device" when not mine); only a
+    non-compaction resync replaces the screen. QR2 other writers' `returned`
+    rows are not shown/reclaimed on the TUI → task 13 (after task 5's F2
+    duplicate is solved). QR3 `/clear` on a shared session still closes it
+    for every device (refused while any device's turn runs) → whether it
+    should only detach is decided in task 7. QR4 `/exit` sends no cancel, but
+    `connect`'s exit still calls `closeSessions()` (`connect.ts:133-137`) and
+    so stops the phone's turn → fixed in task 7 ("quit = just close the
+    socket"); the gap lives only between the 6 and 7 merges.
   - *Task 7 `connect-sessions`* — re-sized **L** (5 packages) → 7a / 7b, each
     M · cross-module [yes]. Quit = just close the socket (proved: the session
     stays live and re-attachable, the turn finishes daemon-side). New method
