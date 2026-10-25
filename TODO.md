@@ -319,6 +319,18 @@ Daily-driver work (done 2026-10-14):
       (`messagesToItems`). Tests in `session-store.test.ts`, `session.test.ts`,
       `resume.test.ts`.
 
+- [ ] 🟡 **TUI: a tab breaks the diff bars and long tool rows**
+      ([`docs/fix/tui-diff-tabs.md`](docs/fix/tui-diff-tabs.md); owner,
+      2026-10-25, screenshots) — `renderBar` (`render-lines.ts`) counts a tab
+      as 1 cell (and every char by `.length`), Ink passes the `\t` through,
+      and the terminal expands it to the next 8-column stop: the full-width
+      bar overflows, the terminal wraps it, and a stray stripe of background
+      appears under each tabbed line. Read/Bash output rows pass tabs through
+      too. Fix: a tab shows as 4 spaces (as in the prompt input), bar width in
+      display cells; and diff colours like Claude Code (darker saturated
+      background, plain text colour, bright line numbers). Type: fix · Size: S
+      · Blast: contained · Suited: Sonnet executes, Opus reviews.
+
 ### Block 7 — MCP (client, stdio transport, tool adapter)
 
 - [x] 🟡 **MCP tool calls have no timeout and ignore the turn's abort signal.**
