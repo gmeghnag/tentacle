@@ -53,6 +53,11 @@ describe("mid-turn task queue (steering)", () => {
     expect(lastFrame() ?? "").toMatch(queuedRow("also do X"));
     // …with the send-now keys on their own row under it.
     expect(lastFrame() ?? "").toContain("› also do X\n  ctrl+x ctrl+s to send now\n");
+    // The queue sits where a sent message would; the working line is UNDER it,
+    // right above the input (owner, 2026-10-25).
+    expect(lastFrame() ?? "").toMatch(
+      /› also do X\n {2}ctrl\+x ctrl\+s to send now\n[^\n]*working…[^\n]*\n─/,
+    );
 
     await delay(300); // let the turn end, steer, and run the injected round
     const all = frames.join("\n");
