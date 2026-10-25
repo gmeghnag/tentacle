@@ -8,13 +8,14 @@
  *
  * Pure and framework-free: no React, no Ink — just strings in, strings out.
  */
-import { type ToolResultDetail, toolLabel } from "@tentacle/core";
+import { type ToolResultDetail, type ToolResultSpill, toolLabel } from "@tentacle/core";
 import chalk from "chalk";
 import wrapAnsi from "wrap-ansi";
 import { formatDurationMs } from "./format.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
+import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 import { dashedRule, theme } from "./theme.ts";
 import { type WordOp, changeRatio, diffWords } from "./word-diff.ts";
@@ -28,6 +29,12 @@ export interface RenderOptions {
   readonly collapseThreshold?: number;
   /** Lines shown in a collapsed preview (default 6). */
   readonly previewLines?: number;
+  /**
+   * The daemon runs in a pod (`run`/`attach`): a spilled result's file is
+   * "saved in the pod to" its path. Constant for an App's lifetime (the
+   * runtime the laptop started), so it is not part of the row-cache key.
+   */
+  readonly spillInPod?: boolean;
 }
 
 const DEFAULT_THRESHOLD = 8;
@@ -271,14 +278,63 @@ export function hookLines(
   return { name: hook.name, rest: ` blocked ${label}`, reason, replacesBody: true };
 }
 
-function toolBody(tool: ToolItem, width: number, headLimit?: number): string[] {
+function toolBody(tool: ToolItem, width: number, inPod: boolean, headLimit?: number): string[] {
   const hook = hookLines(tool);
   if (!hook) {
-    return plainToolBody(tool, width, headLimit);
+    return plainToolBody(tool, width, inPod, headLimit);
   }
   const line = theme.subtle("hook ") + theme.accent(hook.name) + theme.subtle(hook.rest);
   const reason = hook.reason.map((l) => theme.subtle(l));
-  return [line, ...reason, ...(hook.replacesBody ? [] : plainToolBody(tool, width, headLimit))];
+  return [
+    line,
+    ...reason,
+    ...(hook.replacesBody ? [] : plainToolBody(tool, width, inPod, headLimit)),
+  ];
+}
+
+// A spilled result's head and tail lines, memoised on the item like
+// `readHlCache` (a Ctrl+O / resize reuses them). Small (the preview), so one
+// slot: both views show the same parts.
+const spillPartsCache = new WeakMap<ToolItem, readonly [readonly string[], readonly string[]]>();
+
+function spillParts(
+  tool: ToolItem,
+  view: SpillView,
+): readonly [readonly string[], readonly string[]] {
+  const hit = spillPartsCache.get(tool);
+  if (hit) {
+    return hit;
+  }
+  const color = tool.status === "error" ? theme.error : theme.subtle;
+  const path =
+    tool.name === "fs_read" && tool.status !== "error" ? pathOfArgs(tool.args) : undefined;
+  // Discontiguous parts: each is highlighted on its own; plain when it can't be.
+  const part = (text: string): readonly string[] =>
+    text === ""
+      ? []
+      : ((path !== undefined ? highlightRead(text, path) : undefined) ??
+        text.split("\n").map((l) => color(l)));
+  const parts = [part(view.head), part(view.tail)] as const;
+  spillPartsCache.set(tool, parts);
+  return parts;
+}
+
+/** The note, the path (expanded only), the head, the omitted line, the tail. */
+function spillBody(
+  tool: ToolItem,
+  spill: ToolResultSpill,
+  expanded: boolean,
+  inPod: boolean,
+): string[] {
+  const view = spillView(spill, { expanded, inPod });
+  const [head, tail] = spillParts(tool, view);
+  return [
+    theme.subtle(view.note),
+    ...(view.where !== undefined ? [theme.subtle(view.where)] : []),
+    ...head,
+    ...(view.omitted !== undefined ? [theme.subtle(view.omitted)] : []),
+    ...tail,
+  ];
 }
 
 // A file read's syntax-coloured lines, memoised on the tool item's identity
@@ -307,18 +363,26 @@ function readLines(tool: ToolItem, limit: number | undefined): readonly string[]
   return lines;
 }
 
-function plainToolBody(tool: ToolItem, width: number, headLimit?: number): string[] {
+function plainToolBody(
+  tool: ToolItem,
+  width: number,
+  inPod: boolean,
+  headLimit?: number,
+): string[] {
   if (tool.detail?.kind === "diff") {
     return diffBody(tool.detail, width);
   }
+  // `headLimit` is undefined exactly when expanded (Ctrl+O): `toolLines`.
+  const expanded = headLimit === undefined;
   // Sub-agent (`agent_task`): show the nested activity tree, then its report (when done).
   if (tool.sub) {
     const tree = subAgentLines(tool);
     if (tool.status === "running") {
       return tree;
     }
-    const report =
-      tool.resultText && tool.resultText.length > 0
+    const report = tool.spill
+      ? ["", ...spillBody(tool, tool.spill, expanded, inPod)]
+      : tool.resultText && tool.resultText.length > 0
         ? [
             "",
             ...tool.resultText
@@ -331,6 +395,10 @@ function plainToolBody(tool: ToolItem, width: number, headLimit?: number): strin
   }
   if (tool.status === "running") {
     return [theme.subtle("running…")];
+  }
+  // Spilled: the structured fact, never the model's banner (docs/feat/tui-spill-note.md).
+  if (tool.spill) {
+    return spillBody(tool, tool.spill, expanded, inPod);
   }
   if (tool.resultText && tool.resultText.length > 0) {
     if (tool.name === "fs_read" && tool.status !== "error") {
@@ -417,7 +485,12 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
 
   const threshold = opts.collapseThreshold ?? DEFAULT_THRESHOLD;
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
-  const body = toolBody(tool, width, opts.expandAll ? undefined : Math.max(threshold, preview));
+  const body = toolBody(
+    tool,
+    width,
+    opts.spillInPod === true,
+    opts.expandAll ? undefined : Math.max(threshold, preview),
+  );
 
   let shown = body;
   if (!opts.expandAll && body.length > threshold) {

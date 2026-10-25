@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Agent } from "@tentacle/agent";
 import {
+  type ChatMessage,
   type ChatRequest,
   type ExecutionEnvironment,
   type ModelProvider,
@@ -12,6 +13,7 @@ import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
 import type { LinkStatusView } from "../src/link-status.ts";
+import { messagesToItems } from "../src/resume.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -1651,6 +1653,63 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     const frame = lastFrame() ?? "";
     expect(frame).toContain("No MCP servers on this daemon.");
     expect(frame).not.toContain("review a diff");
+    unmount();
+  });
+});
+
+// docs/feat/tui-spill-note.md: a resumed spilled result shows the note, the path only after ctrl+o.
+describe("a spilled tool result in the App (the --resume path)", () => {
+  const PATH = ".tentacle/tool-output/shell-c1.txt";
+  const history: ChatMessage[] = [
+    { role: "user", content: "list it" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "shell", arguments: JSON.stringify({ command: "ls -R" }) }],
+    },
+    {
+      role: "tool",
+      content: `[large shell output: full output (40800 chars) saved to ${PATH} — read it selectively with fs_read (offset/limit) or grep; do NOT read it whole]\nhead-1\n…[39600 characters omitted]…\ntail-1`,
+      toolCallId: "c1",
+      spill: { chars: 40_800, path: PATH, head: "head-1", tail: "tail-1", omitted: 39_600 },
+    },
+  ];
+  const mount = (daemonInPod?: true) =>
+    render(
+      <App
+        agent={
+          new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+        }
+        model="qwen3"
+        cwd="/tmp/work"
+        initialItems={messagesToItems(history)}
+        {...(daemonInPod ? { daemonInPod } : {})}
+      />,
+    );
+
+  test("the note, never the banner; ctrl+o adds `saved to <path>`", async () => {
+    const { stdin, lastFrame, unmount } = mount();
+    await delay(30);
+    const collapsed = lastFrame() ?? "";
+    expect(collapsed).toContain("40.8k chars · too large, the model reads it in parts");
+    expect(collapsed).toContain("head-1");
+    expect(collapsed).toContain("… 39.6k chars omitted …");
+    expect(collapsed).not.toContain("[large shell output");
+    expect(collapsed).not.toContain(PATH);
+    stdin.write("\u000F"); // Ctrl+O
+    await delay(50);
+    expect(lastFrame() ?? "").toContain(`saved to ${PATH}`);
+    expect(lastFrame() ?? "").not.toContain("saved in the pod");
+    unmount();
+  });
+
+  test("with the daemon in a pod (runPodTui): ctrl+o says `saved in the pod to <path>`", async () => {
+    // Mutation (red, verified): drop `spillInPod` from the App's render options → fails.
+    const { stdin, lastFrame, unmount } = mount(true);
+    await delay(30);
+    stdin.write("\u000F");
+    await delay(50);
+    expect(lastFrame() ?? "").toContain(`saved in the pod to ${PATH}`);
     unmount();
   });
 });

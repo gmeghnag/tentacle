@@ -13,6 +13,7 @@
  */
 import { z } from "zod";
 import { ContentBlockSchema } from "./content.ts";
+import { ToolResultSpillSchema } from "./spill.ts";
 import { line } from "./text-line.ts";
 
 export const SessionIdSchema = z.string().min(1);
@@ -33,6 +34,8 @@ export const ChatMessageSchema = z.object({
   content: z.string(),
   toolCalls: z.array(WireToolCallSchema).optional(),
   toolCallId: z.string().optional(),
+  /** On a spilled tool result: the spill as data (display only, docs/feat/tui-spill-note.md). */
+  spill: ToolResultSpillSchema.optional(),
 });
 export type WireChatMessage = z.infer<typeof ChatMessageSchema>;
 

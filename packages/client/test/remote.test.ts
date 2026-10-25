@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent, HookRunner } from "@tentacle/agent";
+import { Agent, HookRunner, spillLargeOutput } from "@tentacle/agent";
 import {
   type ChatRequest,
   type ExecutionEnvironment,
@@ -19,6 +19,7 @@ import {
 } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
+import { z } from "zod";
 import type { SessionEvent } from "../src/mapping.ts";
 import {
   MODEL_STREAM_BATCH_MAX_CHARS,
@@ -1485,6 +1486,60 @@ describe("RemoteSession steering bound to its turn (review fixes)", () => {
       new Promise((r) => setTimeout(() => r("hung"), 500)),
     ]);
     expect(outcome).toMatchObject({ code: DomainErrorCode.TurnInProgress });
+    client.close();
+  });
+});
+
+describe("a spilled tool result over the real stack (docs/feat/tui-spill-note.md)", () => {
+  test("the live tool_result and a later snapshot both carry the spill", async () => {
+    // Mutation (red, verified): drop `spill` from ToolCallUpdateSchema → the live
+    // assertion fails; from ChatMessageSchema → the snapshot one does.
+    const big = "row\n".repeat(200);
+    const noisy = {
+      name: "noisy",
+      description: "returns a lot",
+      inputSchema: z.object({}),
+      permission: "none" as const,
+      execute: async () => ({ content: big }),
+    };
+    const model = new ScriptedProvider([
+      [
+        { type: "tool_call", toolCall: { id: "c1", name: "noisy", arguments: "{}" } },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const host = new SessionHost({
+      defaultCwd: "/tmp/remote-work",
+      createAgent: () => {
+        const permissions = new PermissionBroker();
+        const agent = new Agent({
+          model,
+          tools: new ToolRegistry().register(noisy),
+          env: noopEnv,
+          requestPermission: (req) => permissions.request(req),
+          resultTransforms: [spillLargeOutput({ maxInlineChars: 100, previewChars: 20 })],
+        });
+        return { agent, permissions };
+      },
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, host);
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    const events = await collect(session.send("go"));
+    const expected = {
+      chars: big.length,
+      path: ".tentacle/tool-output/noisy-c1.txt",
+      head: big.slice(0, 10),
+      tail: big.slice(big.length - 10),
+      omitted: big.length - 20,
+    };
+    const live = events.find((e) => e.type === "tool_result");
+    expect(live?.type === "tool_result" ? live.result.spill : undefined).toEqual(expected);
+    const history = await session.snapshot();
+    expect(history?.find((m) => m.role === "tool")?.spill).toEqual(expected);
     client.close();
   });
 });

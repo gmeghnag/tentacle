@@ -98,6 +98,33 @@ describe("updateToEvent", () => {
     }
   });
 
+  // docs/feat/tui-spill-note.md: the spill comes from the update's field, never from the text.
+  test("a spill on tool_call_update becomes result.spill; banner text alone never does", () => {
+    // Mutation (red, verified): drop the spill spread in mapping.ts → the first assertion fails.
+    const spill = {
+      chars: 40800,
+      path: ".tentacle/tool-output/x.txt",
+      head: "h",
+      tail: "t",
+      omitted: 39600,
+    };
+    const banner =
+      "[large shell output: full output (40800 chars) saved to .tentacle/tool-output/x.txt — read it selectively with fs_read (offset/limit) or grep; do NOT read it whole]\nh\n…[39600 characters omitted]…\nt";
+    const update = (extra: object): SessionUpdate => ({
+      type: "tool_call_update",
+      toolCallId: "c4",
+      status: "completed",
+      content: [{ type: "text", text: banner }],
+      ...extra,
+    });
+    const flagged = updateToEvent(update({ spill }), names);
+    expect(flagged?.type === "tool_result" ? flagged.result.spill : undefined).toEqual(spill);
+    expect(flagged?.type === "tool_result" ? flagged.result.content : undefined).toBe(banner);
+    // An older daemon (no field): the banner stays text, nothing is derived from it.
+    const older = updateToEvent(update({}), names);
+    expect(older?.type === "tool_result" && "spill" in older.result).toBe(false);
+  });
+
   test("agent_usage → usage; plan is ignored", () => {
     expect(
       updateToEvent({ type: "agent_usage", promptTokens: 4, completionTokens: 1 }, names),

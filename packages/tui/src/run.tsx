@@ -37,6 +37,8 @@ export interface TuiOptions {
   readonly mcpStatus?: () => Promise<readonly McpServerView[]>;
   /** Every skill the daemon discovered and its problems (`/skills`). */
   readonly skillsList?: () => Promise<SkillsListView>;
+  /** The daemon runs in a pod (`runPodTui` only): spilled output is "saved in the pod". */
+  readonly daemonInPod?: boolean;
 }
 
 /**
@@ -85,6 +87,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       {...(options.skills ? { skills: options.skills } : {})}
       {...(options.mcpStatus ? { mcpStatus: options.mcpStatus } : {})}
       {...(options.skillsList ? { skillsList: options.skillsList } : {})}
+      {...(options.daemonInPod ? { daemonInPod: true } : {})}
     />,
     { exitOnCtrlC: false },
   );

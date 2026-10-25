@@ -128,6 +128,9 @@
           "enum": ["system", "user", "assistant", "tool"],
           "type": "string"
         },
+        "spill": {
+          "$ref": "#/$defs/ToolResultSpill"
+        },
         "toolCallId": {
           "type": "string"
         },
@@ -1800,6 +1803,9 @@
           },
           "type": "array"
         },
+        "spill": {
+          "$ref": "#/$defs/ToolResultSpill"
+        },
         "status": {
           "$ref": "#/$defs/ToolCallStatus"
         },
@@ -1815,6 +1821,32 @@
       "required": ["status", "toolCallId", "type"],
       "type": "object",
       "x-event-class": "display"
+    },
+    "ToolResultSpill": {
+      "additionalProperties": true,
+      "properties": {
+        "chars": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "head": {
+          "type": "string"
+        },
+        "omitted": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "tail": {
+          "type": "string"
+        }
+      },
+      "required": ["chars", "head", "omitted", "tail"],
+      "type": "object"
     },
     "TurnEnd": {
       "additionalProperties": true,

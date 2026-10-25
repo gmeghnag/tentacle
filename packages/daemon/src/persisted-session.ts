@@ -23,12 +23,17 @@ export const DAEMON_RECORD_KIND = "tentacle.daemon-session";
  * docs/feat/queued-broadcast.md): a v3 daemon refuses a v4 record instead of
  * dropping them at its next write. A v1–v3 record reads with no ids and
  * nothing returned.
+ * 5: a tool message may carry `spill` (docs/feat/tui-spill-note.md): a v4
+ * daemon refuses every v5 record instead of dropping a spill at its next
+ * write. A v1–v4 record reads as a v5 one with no spills.
  */
-export const DAEMON_RECORD_VERSION = 4;
+export const DAEMON_RECORD_VERSION = 5;
 /** Every version `parseDaemonRecord` reads (each read as the current shape). */
-const READABLE_VERSIONS: readonly number[] = [1, 2, 3, DAEMON_RECORD_VERSION];
+const READABLE_VERSIONS: readonly number[] = [1, 2, 3, 4, DAEMON_RECORD_VERSION];
 /** The first version whose `title` may be a chosen one (`{ text, source }`). */
 const CHOSEN_TITLE_VERSION = 3;
+/** The first version with steer ids (`turn.steeringIds`) and `returned` rows. */
+const STEER_IDS_VERSION = 4;
 
 /** The permission request a turn was suspended on at the write. */
 export interface PendingPermission {
@@ -153,9 +158,9 @@ function turnProblem(turn: unknown, version: number): string | null {
   if (!isObject(turn) || typeof turn.turnId !== "string" || !isStringArray(turn.steering)) {
     return '"turn" is malformed';
   }
-  // v4 always writes one id per steer: anything else is not a record of ours.
+  // v4+ always writes one id per steer: anything else is not a record of ours.
   if (
-    version >= DAEMON_RECORD_VERSION &&
+    version >= STEER_IDS_VERSION &&
     (!isStringArray(turn.steeringIds) || turn.steeringIds.length !== turn.steering.length)
   ) {
     return '"turn.steeringIds" is malformed';
@@ -240,13 +245,13 @@ export function parseDaemonRecord(
       reason: `"title" is not a string (record version ${value.schemaVersion})`,
     };
   }
-  const returned = value.schemaVersion >= DAEMON_RECORD_VERSION ? returnedRows(value.returned) : [];
+  const returned = value.schemaVersion >= STEER_IDS_VERSION ? returnedRows(value.returned) : [];
   if (returned === null) {
     return { ok: false, reason: '"returned" is malformed' };
   }
   // A v1–v3 turn has no ids, whatever it carries: never read half.
   const turn =
-    isObject(value.turn) && value.schemaVersion < DAEMON_RECORD_VERSION
+    isObject(value.turn) && value.schemaVersion < STEER_IDS_VERSION
       ? withoutIds(value.turn)
       : value.turn;
   const current: Record<string, unknown> = {

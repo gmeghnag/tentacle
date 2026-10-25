@@ -9,7 +9,7 @@
  * logic testable without React.
  */
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
-import type { ChatMessage, ToolResult, ToolResultDetail } from "@tentacle/core";
+import type { ChatMessage, ToolResult, ToolResultDetail, ToolResultSpill } from "@tentacle/core";
 import { messagesToItems } from "./resume.ts";
 
 export type ToolStatus = "running" | "ok" | "error";
@@ -59,6 +59,8 @@ export interface ToolItem {
   readonly detail?: ToolResultDetail;
   /** A user hook blocked this call or rewrote its input (H1, docs/feat/hooks-core.md). */
   readonly hook?: ToolResult["hook"];
+  /** The result was spilled: shown as a short note, not the model's banner (docs/feat/tui-spill-note.md). */
+  readonly spill?: ToolResultSpill;
   readonly startedAt: number;
   readonly endedAt?: number;
   /** Set when this tool call is a sub-agent (`agent_task`) with nested progress. */
@@ -255,6 +257,7 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
         endedAt: now,
         ...(event.result.details ? { detail: event.result.details } : {}),
         ...(event.result.hook ? { hook: event.result.hook } : {}),
+        ...(event.result.spill ? { spill: event.result.spill } : {}),
       };
       const items = state.items.slice();
       if (idx >= 0) {
