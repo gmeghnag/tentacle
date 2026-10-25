@@ -518,6 +518,11 @@ the "a new target adds only a transport" shape, AGENTS §7).
     `connect`'s exit still calls `closeSessions()` (`connect.ts:133-137`) and
     so stops the phone's turn → fixed in task 7 ("quit = just close the
     socket"); the gap lives only between the 6 and 7 merges.
+    **Task 6 Review carry-over → task 7 (owner 2026-10-25):** the cancel the
+    TUI sends on an unreadable `error` frame is still blind
+    (`client/src/remote-session.ts:751` on the task 6 branch) and can stop a
+    phone's turn; task 7 makes it `cancel(id, <own turn id>)` or no cancel
+    while only a foreign turn streams.
   - *Task 7 `connect-sessions`* — re-sized **L** (5 packages) → 7a / 7b, each
     M · cross-module [yes]. Quit = just close the socket (proved: the session
     stays live and re-attachable, the turn finishes daemon-side). New method
