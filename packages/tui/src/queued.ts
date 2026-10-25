@@ -34,12 +34,14 @@ export function addRow(rows: QueuedRows, text: string, id: string): QueuedRows {
 }
 
 /**
- * A `steer` echo: the daemon injected the oldest text. Rows are in enqueue
- * order, and the daemon injects in that order, so the front row goes —
- * `sending` or not (a text injected just before the send-now's cancel is
- * left out of its prompt by the daemon).
+ * A `steer` echo: the daemon injected the row `id` — `sending` or not (a text
+ * injected just before the send-now's cancel is left out of its prompt by the
+ * daemon). Another writer's steer names a row this list does not have, so
+ * none of mine goes (review F1: dropping the front one lost it). No `id` (an
+ * older daemon): the oldest text, the daemon injecting in enqueue order.
  */
-export const onSteer = (rows: QueuedRows): QueuedRows => rows.slice(1);
+export const onSteer = (rows: QueuedRows, id?: string): QueuedRows =>
+  id === undefined ? rows.slice(1) : rows.filter((r) => r.id !== id);
 
 /**
  * The enqueue of `id` was refused: that text never reached the daemon this
@@ -109,6 +111,63 @@ export function afterRefusal(
  */
 export const requeue = (rows: QueuedRows): QueuedRows =>
   rows.map((r) => ({ ...r, state: "queued" as const }));
+
+/** The rows minus `ids` (the ones the daemon gave back). */
+export function dropIds(rows: QueuedRows, ids: readonly string[]): QueuedRows {
+  const gone = new Set(ids);
+  return rows.filter((r) => !gone.has(r.id));
+}
+
+/** Why my rows came back: the daemon's fact (`ReturnCause`). */
+export type ReturnedCause = "cancelled" | "failed" | "ended";
+
+/**
+ * The notice for `n` rows given back (docs/feat/queued-broadcast.md).
+ * `stoppedHere`: this TUI stopped that turn itself (a client fact) — then
+ * "from another device" would be false.
+ */
+export function returnedNotice(n: number, cause: ReturnedCause, stoppedHere: boolean): string {
+  const rows =
+    n === 1
+      ? "your queued message is back in the input"
+      : `your ${n} queued messages are back in the input`;
+  switch (cause) {
+    case "cancelled":
+      return stoppedHere ? `_${upper(rows)}_` : `_Turn stopped from another device: ${rows}_`;
+    case "failed":
+      return `_The turn ended early: ${rows}_`;
+    case "ended":
+      return `_The session ended: ${rows}_`;
+  }
+}
+
+const upper = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * My rows came back from the daemon (never re-sent by themselves): drop them
+ * from the list if still there, and put their texts in the input field,
+ * joined like a send-now (D1), with the notice of the first one's cause.
+ * `restored`: the ids this TUI already put back itself (a send-now cancelled
+ * before it started restores every row it holds) — not given twice. Nothing
+ * left to give: no text, no notice.
+ */
+export function handBackRows(
+  rows: QueuedRows,
+  back: readonly { readonly id: string; readonly text: string; readonly cause: ReturnedCause }[],
+  stoppedHere: boolean,
+  restored: ReadonlySet<string> = new Set(),
+): { readonly rows: QueuedRows; readonly text: string; readonly notice: string } {
+  const give = back.filter((r) => !restored.has(r.id));
+  const first = give[0];
+  return {
+    rows: dropIds(
+      rows,
+      back.map((r) => r.id),
+    ),
+    text: give.map((r) => r.text).join("\n\n"),
+    notice: first ? returnedNotice(give.length, first.cause, stoppedHere) : "",
+  };
+}
 
 /** Every remaining text, in order, and no row left (a fallback send, or a full restore). */
 export function takeAll(rows: QueuedRows): { readonly rows: QueuedRows; readonly text: string } {

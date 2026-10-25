@@ -207,6 +207,9 @@ export function persistingController(
     rename(title) {
       return inner.rename(title);
     },
+    onReturned(listener) {
+      return inner.onReturned(listener);
+    },
     close() {
       unsubscribeTitle();
       void flushed().then(() => inner.close());

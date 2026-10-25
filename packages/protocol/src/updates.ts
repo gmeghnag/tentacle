@@ -11,6 +11,8 @@ import { ContentBlockSchema } from "./content.ts";
 import { PermissionRequestUpdateSchema, PermissionResolvedUpdateSchema } from "./permission.ts";
 import {
   MAX_SESSION_TITLE,
+  QueuedEntrySchema,
+  ReturnedEntrySchema,
   SessionIdSchema,
   StopReasonSchema,
   TurnErrorSchema,
@@ -84,10 +86,15 @@ export const BackgroundExitSchema = z.object({
   exitCode: z.number().int().nullable(),
 });
 
-/** A user message queued mid-turn (steering) was injected into the running turn. */
+/**
+ * A user message queued mid-turn (steering) was injected into the running turn.
+ * `id`: the row's enqueue id, so each client drops exactly that row — another
+ * writer's steer drops none of mine (absent from an older daemon).
+ */
 export const SteerSchema = z.object({
   type: z.literal("steer"),
   text: z.string(),
+  id: z.string().min(1).optional(),
 });
 
 /**
@@ -157,6 +164,20 @@ export const SessionTitleUpdateSchema = z.object({
   source: z.enum(["model", "user"]),
 });
 
+/**
+ * The session's queue changed (a row queued, delivered, sent now, returned to
+ * its writer or reclaimed): the FULL state, replacing any earlier one (rules:
+ * the queue comment in `session.ts`). Every attached client gets it, while
+ * idle too. Not turn-scoped. Display only: a client that skips it loses
+ * nothing daemon-side (returned rows wait for a reclaim; the snapshot carries
+ * the state) and the daemon waits on nobody.
+ */
+export const QueuedUpdateSchema = z.object({
+  type: z.literal("queued"),
+  entries: z.array(QueuedEntrySchema),
+  returned: z.array(ReturnedEntrySchema),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -174,6 +195,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   PermissionRequestUpdateSchema,
   PermissionResolvedUpdateSchema,
   SessionTitleUpdateSchema,
+  QueuedUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -213,6 +235,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   permission_resolved: "mandatory",
   // A label: skipping it hangs nothing (the snapshot and the list carry it).
   session_title: "display",
+  // Full state, also in the snapshot; returned rows wait for a reclaim (nothing hangs).
+  queued: "display",
 };
 
 /** Every update type this build knows — what a client declares at `initialize`. */

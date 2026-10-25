@@ -301,6 +301,53 @@ export type SnapshotParams = z.infer<typeof SnapshotParamsSchema>;
 export const SnapshotTurnSchema = z.object({ turnId: TurnIdSchema });
 export type SnapshotTurn = z.infer<typeof SnapshotTurnSchema>;
 
+// --- the session's queue (docs/feat/queued-broadcast.md) -----------------
+// Every attached client sees the session's queued steers, whoever typed them,
+// and sees each row leave. A row is `{id, text}`: `id` is the key its writer
+// sent (`session/enqueue` `id`, or a `session/send_now` message `id`), so
+// "mine" is an id my client sent — there is no device label. The state is
+// always FULL (the `queued` update replaces any earlier one; the snapshot's
+// first page carries it at the cut), so a client converges after any loss.
+//
+// A row leaves `entries` in the `queued` that follows its `steer` (delivered),
+// the send-now `turn_start` whose prompt carries it (sent now), or its turn's
+// `turn_end`: then it is in `returned` — back with its WRITER, never re-sent
+// by itself — or, the row of a send-now cancelled before it started, restored
+// by that send-now's own client (`delivered: false`). A row leaves `returned`
+// in the `queued` that follows a `session/reclaim` of it, or a send-now that
+// carries it in its prompt. Nothing else removes one: no expiry.
+
+/** One queued row: its writer's key and text. */
+export const QueuedEntrySchema = z.object({
+  id: z.string().min(1).max(128),
+  text: z.string().min(1),
+});
+export type QueuedEntry = z.infer<typeof QueuedEntrySchema>;
+
+/**
+ * Why a row went back to its writer (a daemon fact, for the notice):
+ * `cancelled` — its turn was cancelled (an Esc, a send-now then cancelled);
+ * `failed` — its turn ended early (an error, a limit, a hook stop);
+ * `ended` — the session was closed or deleted.
+ */
+export const ReturnCauseSchema = z.enum(["cancelled", "failed", "ended"]);
+export type ReturnCause = z.infer<typeof ReturnCauseSchema>;
+
+/** A row back with its writer, until a `session/reclaim` of it. */
+export const ReturnedEntrySchema = z.object({
+  id: z.string().min(1).max(128),
+  text: z.string().min(1),
+  cause: ReturnCauseSchema,
+});
+export type ReturnedEntry = z.infer<typeof ReturnedEntrySchema>;
+
+/** The session's queue NOW: the rows waiting, in delivery order, and the rows back with their writer (oldest first). */
+export const QueueStateSchema = z.object({
+  entries: z.array(QueuedEntrySchema),
+  returned: z.array(ReturnedEntrySchema),
+});
+export type QueueState = z.infer<typeof QueueStateSchema>;
+
 export const SnapshotResultSchema = z.object({
   /** Chronological slice of the history, ending at the cut (or at the cursor). */
   messages: z.array(ChatMessageSchema),
@@ -312,6 +359,8 @@ export const SnapshotResultSchema = z.object({
   cursor: z.string().min(1).optional(),
   /** The session's title now (first page only; an older daemon sends none). */
   title: SessionTitleSchema.optional(),
+  /** The queue at the cut (first page only; an older daemon sends none: it does not report the queue). */
+  queued: QueueStateSchema.optional(),
 });
 export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 
@@ -535,6 +584,23 @@ export const SendNowRefusalSchema = z.object({
   held: z.array(z.string()),
 });
 export type SendNowRefusal = z.infer<typeof SendNowRefusalSchema>;
+
+// --- session/reclaim -----------------------------------------------------
+// The writer took its returned rows back (they are in its input now): drop
+// `ids` from the session's `returned` (see the queue comment above). An id not
+// there (unknown, already reclaimed) is ignored: a retry is a no-op success.
+// Not gated by who asks (one token, one principal): a client reclaims only
+// the ids it sent itself, or on a person's explicit act. Additive (an older
+// daemon answers `MethodNotFound`, but it never reports `returned` either).
+
+export const ReclaimParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  ids: z.array(z.string().min(1).max(128)).min(1),
+});
+export type ReclaimParams = z.infer<typeof ReclaimParamsSchema>;
+
+export const ReclaimResultSchema = z.object({});
+export type ReclaimResult = z.infer<typeof ReclaimResultSchema>;
 
 // --- session/list --------------------------------------------------------
 // The daemon's sessions, one page at a time (docs/feat/session-list.md). A

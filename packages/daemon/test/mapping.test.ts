@@ -159,6 +159,11 @@ describe("toUpdateParams (the session/update frame)", () => {
     },
     { type: "permission_resolved", requestId: "r", outcome: { outcome: "cancelled" } },
     { type: "session_title", title: "Fix login", source: "model" },
+    {
+      type: "queued",
+      entries: [{ id: "a", text: "A" }],
+      returned: [{ id: "b", text: "B", cause: "cancelled" }],
+    },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {

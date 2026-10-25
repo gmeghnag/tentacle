@@ -186,9 +186,10 @@ export function updateToEvent(
         status: update.status,
         exitCode: update.exitCode,
       };
-    // A steering message was injected; the TUI drops the matching ⏳ entry FIFO.
+    // A steering message was injected; the TUI drops the ⏳ entry of that id
+    // (FIFO only for an older daemon, which names none).
     case "steer":
-      return { type: "steer", text: update.text };
+      return { type: "steer", text: update.text, ...(update.id ? { id: update.id } : {}) };
     case "context_note":
       return { type: "context_note", text: update.text, reason: update.reason };
     // The turn bracket is consumed by `RemoteSession` (it ends the turn by
@@ -197,8 +198,10 @@ export function updateToEvent(
     // client that compacted reads the new history back itself. `session_closed`
     // is consumed by `RemoteClient`/`RemoteSession` (it ends the session). The
     // permission events are consumed by `RemoteClient`'s `PermissionRouter`;
-    // `session_title` by its title listeners (it is not turn-scoped).
+    // `session_title` by its title listeners (it is not turn-scoped), and
+    // `queued` by its queue listeners (`RemoteClient`, not turn-scoped either).
     case "session_title":
+    case "queued":
     case "plan":
     case "turn_start":
     case "turn_end":

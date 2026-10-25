@@ -394,10 +394,11 @@ describe("SessionHost.list over the wire", () => {
       title: "t",
       messages: [{ role: "user", content: "an old question" }],
       kind: "tentacle.daemon-session",
-      schemaVersion: 3,
+      schemaVersion: 4,
       lastActiveAt: 9,
       turns: [],
       enqueueIds: [],
+      returned: [],
     };
     d.host.restore(record);
     const c = await d.connect();

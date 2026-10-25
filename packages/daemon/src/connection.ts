@@ -33,6 +33,8 @@ import {
   PROTOCOL_VERSION,
   type PromptParams,
   type PromptResult,
+  type ReclaimParams,
+  type ReclaimResult,
   type RenameParams,
   type RenameResult,
   type ResolvePermissionParams,
@@ -185,6 +187,8 @@ export class Connection {
         return this.enqueue(params as EnqueueParams);
       case Method.SendNow:
         return this.sendNow(params as SendNowParams);
+      case Method.Reclaim:
+        return this.reclaim(params as ReclaimParams);
       case Method.ResolvePermission:
         return this.resolvePermission(params as ResolvePermissionParams);
       case Method.McpStatus:
@@ -228,6 +232,23 @@ export class Connection {
   private async enqueue(params: EnqueueParams): Promise<EnqueueResult> {
     const hosted = this.lookup(params.sessionId);
     hosted.enqueue(params.id, params.turnId, params.text);
+    await hosted.persisted();
+    return {};
+  }
+
+  // Synchronous like `enqueue` (one step, no lock); only the ACK waits — on
+  // `serve`, until the reclaim is on disk (a reclaimed row never comes back
+  // after a restart). Who reclaims is not checked: one token, one principal.
+  // A session no longer live (closed, archived — its close handed the rows
+  // back just before) needs no open: its record is rewritten, never reopened
+  // (owner F2); a deleted id is `SessionDeleted`.
+  private async reclaim(params: ReclaimParams): Promise<ReclaimResult> {
+    if (this.host.get(params.sessionId) === undefined) {
+      await this.host.reclaimArchived(params.sessionId, params.ids);
+      return {};
+    }
+    const hosted = this.lookup(params.sessionId);
+    hosted.reclaim(params.ids);
     await hosted.persisted();
     return {};
   }

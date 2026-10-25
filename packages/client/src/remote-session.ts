@@ -13,6 +13,7 @@ import type { ChatMessage } from "@tentacle/core";
 import {
   DomainErrorCode,
   JsonRpcErrorCode,
+  type QueueState,
   type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
@@ -20,6 +21,7 @@ import {
   type TurnEnd,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
+import { type ReturnedRow, handBack, restoredByRefusal } from "./hand-back.ts";
 import { turnRecovery } from "./link-machine.ts";
 import { type SessionEvent, stopReasonFromProtocol, updateToEvent } from "./mapping.ts";
 import { AsyncQueue } from "./queue.ts";
@@ -97,6 +99,18 @@ export class RemoteSession implements SessionStreamListener {
   private settling: ActiveTurn | null = null;
   /** `unsupported` notices that arrived while idle: shown at the start of the next turn. */
   private idleNotices: SessionEvent[] = [];
+  /**
+   * Every row id this session sent (`enqueue`, a send-now's messages), with
+   * my text. "Mine" is exactly this — the daemon has no device identity
+   * (docs/feat/queued-broadcast.md).
+   */
+  private readonly mine = new Map<string, string>();
+  /** Ids already given back to the user by any path: never given twice. */
+  private readonly handedBack = new Set<string>();
+  /** Reclaims in flight (a failed one is re-sent at the next state that lists it). */
+  private readonly reclaiming = new Set<string>();
+  private readonly returnedListeners = new Set<(rows: readonly ReturnedRow[]) => void>();
+  private unsubscribeQueue: (() => void) | null = null;
 
   constructor(
     client: RemoteClient,
@@ -136,6 +150,85 @@ export class RemoteSession implements SessionStreamListener {
     });
   }
 
+  /**
+   * The session's queue as the daemon last reported it — every writer's rows,
+   * waiting and returned. Undefined: no report yet, or a daemon that does not
+   * report the queue (an older one) — a capability signal, never a guess.
+   */
+  get queued(): QueueState | undefined {
+    return this.id ? this.client.queuedOf(this.id) : undefined;
+  }
+
+  /**
+   * Subscribe to MY rows coming back (docs/feat/queued-broadcast.md): a row I
+   * queued that its turn left undrained, which no send-now carried on. Each
+   * row is given once, with the text I typed (never the daemon's), then
+   * reclaimed daemon-side. The listener puts them back in front of the user;
+   * nothing is ever re-sent by itself. A send-now cancelled before it started
+   * gives back only its own texts (they reject with its events); a row the
+   * listener already restored by itself meanwhile comes here too — it skips
+   * it (the client never guesses what the caller still holds). With no listener nothing is reclaimed:
+   * the rows wait daemon-side (a reclaim with nobody to show them to would be
+   * a silent drop). Returns an unsubscribe.
+   */
+  onReturned(listener: (rows: readonly ReturnedRow[]) => void): () => void {
+    this.returnedListeners.add(listener);
+    this.unsubscribeQueue ??= this.client.onSessionQueued((notice) => {
+      if (notice.sessionId === this.id) {
+        this.queueChanged(notice.state);
+      }
+    });
+    const now = this.queued;
+    if (now) {
+      this.queueChanged(now);
+    }
+    return () => {
+      this.returnedListeners.delete(listener);
+      if (this.returnedListeners.size === 0) {
+        this.unsubscribeQueue?.();
+        this.unsubscribeQueue = null;
+      }
+    };
+  }
+
+  /** A queue state (live or a resync's): give back my new returned rows, reclaim all of mine. */
+  private queueChanged(state: QueueState): void {
+    const id = this.id;
+    if (!id || this.returnedListeners.size === 0) {
+      return;
+    }
+    // The ids my live send-now carries: its end covers them (sent or restored).
+    const carried = new Set(
+      [this.active, this.next].flatMap((turn) =>
+        turn?.sendNow && !turn.ended ? turn.sendNow.messages.map((m) => m.id) : [],
+      ),
+    );
+    const { give, reclaim } = handBack(state, this.mine, this.handedBack, carried);
+    for (const row of give) {
+      this.handedBack.add(row.id);
+    }
+    if (give.length > 0) {
+      for (const listener of [...this.returnedListeners]) {
+        listener(give);
+      }
+    }
+    const ids = reclaim.filter((key) => !this.reclaiming.has(key));
+    if (ids.length === 0) {
+      return;
+    }
+    for (const key of ids) this.reclaiming.add(key);
+    // Fire-and-forget: a failure (a drop, a closed session) is retried at the
+    // next state that still lists them; never a second hand-back.
+    this.client.reclaim(id, ids).then(
+      () => {
+        for (const key of ids) this.reclaiming.delete(key);
+      },
+      () => {
+        for (const key of ids) this.reclaiming.delete(key);
+      },
+    );
+  }
+
   /** `snapshot`, with the daemon's title (see `RemoteClient.readBack`); null before the first send. */
   async readBack(): Promise<ReadBack | null> {
     return this.id ? this.client.readBack(this.id) : null;
@@ -151,6 +244,8 @@ export class RemoteSession implements SessionStreamListener {
       return;
     }
     this.closed = true;
+    this.unsubscribeQueue?.();
+    this.unsubscribeQueue = null;
     if (this.id) {
       void this.client.closeSession(this.id);
     } else if (this.opening) {
@@ -189,6 +284,10 @@ export class RemoteSession implements SessionStreamListener {
       return Promise.resolve();
     }
     const key = id ?? crypto.randomUUID();
+    // Mine from now on: if the daemon ever returns this id, it is my text.
+    if (!this.mine.has(key)) {
+      this.mine.set(key, text);
+    }
     if (this.id) {
       return this.client.enqueue(this.id, key, turnId, text);
     }
@@ -253,7 +352,10 @@ export class RemoteSession implements SessionStreamListener {
       throw new RpcError(DomainErrorCode.NoTurnRunning, "no turn is running");
     }
     if (this.next) {
-      throw new RpcError(DomainErrorCode.TurnInProgress, "a send-now is already waiting");
+      // Refused here, not by the daemon: the caller restores every text.
+      const refusal = new RpcError(DomainErrorCode.TurnInProgress, "a send-now is already waiting");
+      for (const key of restoredByRefusal(refusal, messages)) this.handedBack.add(key);
+      throw refusal;
     }
     const interrupt: SendNowTarget =
       target === "turn" && this.turnId !== null
@@ -273,6 +375,11 @@ export class RemoteSession implements SessionStreamListener {
       sendNow: { interrupt, messages: [...messages] },
       started: false,
     };
+    for (const m of messages) {
+      if (!this.mine.has(m.id)) {
+        this.mine.set(m.id, m.text);
+      }
+    }
     // Installed BEFORE the request goes out: the daemon may hand over (old
     // `turn_end`, then this turn's updates) before its ack arrives.
     const before = this.turnId;
@@ -294,6 +401,11 @@ export class RemoteSession implements SessionStreamListener {
       });
     } catch (error) {
       signal?.removeEventListener("abort", onAbort);
+      // The caller restores the texts the daemon does not report holding: those
+      // are given back already — a later `returned` of one is only reclaimed.
+      for (const key of restoredByRefusal(error, messages)) {
+        this.handedBack.add(key);
+      }
       // Refused: the client is left as before the call.
       if (this.next === turn) {
         this.next = null;
@@ -580,13 +692,14 @@ export class RemoteSession implements SessionStreamListener {
       }
       return;
     }
-    // Owned elsewhere: the permission router (the dialog), the job-exit and
-    // the title listeners (they fire even while idle).
+    // Owned elsewhere: the permission router (the dialog), the job-exit, the
+    // title and the queue listeners (they fire even while idle).
     if (
       update.type === "permission_request" ||
       update.type === "permission_resolved" ||
       update.type === "background_exit" ||
-      update.type === "session_title"
+      update.type === "session_title" ||
+      update.type === "queued"
     ) {
       return;
     }
@@ -637,6 +750,11 @@ export class RemoteSession implements SessionStreamListener {
         ? !outcome.delivered
         : !turn.started && outcome.stopReason === "cancelled";
     if (turn.sendNow && undelivered) {
+      // Its caller restores the send-now's texts: given back. Any other row of
+      // mine comes back only as the daemon's `returned` fact — a caller that
+      // also restored it itself dedupes it (review F1: a guess here lost the
+      // rows the caller no longer held).
+      for (const m of turn.sendNow.messages) this.handedBack.add(m.id);
       this.fail(
         turn,
         new RpcError(DomainErrorCode.Cancelled, "send-now cancelled before it started"),

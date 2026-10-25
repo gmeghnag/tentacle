@@ -385,6 +385,8 @@ describe("daemon persistence: what is written, when", () => {
     expect(first?.turn).toEqual({
       turnId: "T1",
       steering: ["steer-1"],
+      // v4: the steer keeps its enqueue id across the restart (docs/feat/queued-broadcast.md).
+      steeringIds: ["e1"],
       ...(record.turn?.pending ? { pending: record.turn.pending } : {}),
     });
     expect(first?.messages).toEqual(record.messages);
@@ -685,10 +687,19 @@ describe("daemon persistence: what is written, when", () => {
       "tool(c2):Cancelled by the user before this tool ran.",
       "tool(c3):Cancelled by the user before this tool ran.",
     ]);
-    // As in an uninterrupted turn, a steer still queued at a cancel is dropped
-    // (by design: docs/fix/steering-over-rpc.md — the user cancelled).
+    // As in an uninterrupted turn, a steer still queued at a cancel is not
+    // delivered (the user cancelled): it is RETURNED to its writer, with the
+    // id the v4 record kept (docs/feat/queued-broadcast.md; it was dropped
+    // before, docs/fix/steering-over-rpc.md).
     expect(runs).toEqual(["look:{}"]);
     expect(r2.model.calls).toHaveLength(0);
+    const lastQueued = c.updates.filter((u) => u.update.type === "queued").at(-1)?.update;
+    expect(lastQueued).toEqual({
+      type: "queued",
+      entries: [],
+      returned: [{ id: "e1", text: "steer-1", cause: "cancelled" }],
+    });
+    expect(shape(restored.snapshotPage().messages)).not.toContain("user:steer-1");
   });
 
   test("A4 a crash mid-tool (no pending) → 'Interrupted' for it, 'Not run' after; nothing re-runs", async () => {
@@ -1073,11 +1084,12 @@ describe("daemon persistence: review fixes (the TTL clock, compaction, shutdown)
         title: "t",
         messages: [{ role: "user", content: "go" }],
         kind: "tentacle.daemon-session",
-        schemaVersion: 3,
+        schemaVersion: 4,
         lastActiveAt: 5,
         turns: [{ turnId: "T" }],
         enqueueIds: [],
-        turn: { turnId: "T", steering: [] },
+        returned: [],
+        turn: { turnId: "T", steering: [], steeringIds: [] },
       }),
     );
     expect(restored.liveness().lastActiveAt).toBeGreaterThan(1_000_000);
@@ -1141,10 +1153,11 @@ describe("daemon persistence: the record's updatedAt is the last conversation ch
       title: "t",
       messages: [{ role: "user", content: "go" }],
       kind: "tentacle.daemon-session",
-      schemaVersion: 3,
+      schemaVersion: 4,
       lastActiveAt: 7,
       turns: [],
       enqueueIds: [],
+      returned: [],
       ...over,
     });
 
@@ -1191,7 +1204,10 @@ describe("daemon persistence: the record's updatedAt is the last conversation ch
       () => 100,
     );
     const hosted = r.host.restore(
-      idleRecord({ turns: [{ turnId: "T" }], turn: { turnId: "T", steering: [] } }),
+      idleRecord({
+        turns: [{ turnId: "T" }],
+        turn: { turnId: "T", steering: [], steeringIds: [] },
+      }),
     );
     expect(hosted.running).toBe(false);
     await hosted.persisted();
@@ -1257,10 +1273,11 @@ describe("persisted-session (pure)", () => {
     title: "t",
     messages: [],
     kind: "tentacle.daemon-session",
-    schemaVersion: 3,
+    schemaVersion: 4,
     lastActiveAt: 2,
     turns: [],
     enqueueIds: [],
+    returned: [],
     ...over,
   });
 
@@ -1286,7 +1303,7 @@ describe("persisted-session (pure)", () => {
       return p.ok ? "ok" : p.reason;
     };
     expect(reason({ ...base(), kind: undefined })).toMatch(/not a daemon session record/);
-    expect(reason({ ...base(), schemaVersion: 4 })).toMatch(/unsupported record version 4/);
+    expect(reason({ ...base(), schemaVersion: 5 })).toMatch(/unsupported record version 5/);
     expect(reason(base(), "/elsewhere")).toMatch(/another project/);
     expect(reason({ ...base(), turns: [{ turnId: "x", end: { stopReason: "nope" } }] })).toMatch(
       /invalid end/,
@@ -1434,13 +1451,13 @@ describe("persisted-session (pure)", () => {
     ).toBeUndefined();
   });
 
-  test("U2 parseDaemonRecord: a v1 record reads as current, not archived; archivedAt is a wire stamp; v4 refused", () => {
+  test("U2 parseDaemonRecord: a v1 record reads as current, not archived; archivedAt is a wire stamp; v5 refused", () => {
     // Mutation: refuse v1 → every session of the previous build is skipped at the upgrade.
-    // (Task 3 took the current version to 3: v1 and v2 both read as v3.)
+    // (Task 3 took the current version to 3, task 5 to 4: v1–v3 all read as v4.)
     const parse = (r: unknown) => parseDaemonRecord(r as DaemonSessionRecord, (c) => c === CWD);
     const v1 = parse({ ...base(), schemaVersion: 1, archivedAt: 9 });
     expect(v1.ok ? [v1.record.schemaVersion, v1.record.archivedAt] : v1.reason).toEqual([
-      3,
+      4,
       undefined,
     ]);
     const v2 = parse(base({ archivedAt: 5 }));
@@ -1450,9 +1467,9 @@ describe("persisted-session (pure)", () => {
       const p = parse({ ...base(), archivedAt: bad });
       expect(p.ok ? "ok" : p.reason).toBe('"archivedAt" is not a non-negative integer');
     }
-    const v4 = parse({ ...base(), schemaVersion: 4 });
-    expect(v4.ok ? "ok" : v4.reason).toMatch(
-      /unsupported record version 4 \(this daemon reads 1, 2, 3\)/,
+    const v5 = parse({ ...base(), schemaVersion: 5 });
+    expect(v5.ok ? "ok" : v5.reason).toMatch(
+      /unsupported record version 5 \(this daemon reads 1, 2, 3, 4\)/,
     );
   });
 
@@ -2088,5 +2105,310 @@ describe("session archive: the host (close keeps, reopen reloads, delete removes
     expect(d.updates.at(-1)?.update).toEqual({ type: "session_closed", reason: "deleted" });
     expect(host.delete(b.id)).toBe(false);
     expect(host.list({}).sessions).toEqual([]);
+  });
+});
+
+describe("the v4 record: steer ids and returned rows (docs/feat/queued-broadcast.md)", () => {
+  const v4 = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: "s",
+    cwd: CWD,
+    model: "m",
+    createdAt: 1,
+    updatedAt: 2,
+    title: "t",
+    messages: [{ role: "user", content: "go" }],
+    kind: "tentacle.daemon-session",
+    schemaVersion: 4,
+    lastActiveAt: 2,
+    turns: [{ turnId: "T" }],
+    enqueueIds: ["i1"],
+    returned: [{ id: "r1", text: "R", cause: "cancelled" }],
+    turn: { turnId: "T", steering: ["s1"], steeringIds: ["i1"] },
+    ...over,
+  });
+  const parse = (r: unknown) => parseDaemonRecord(r as DaemonSessionRecord, (c) => c === CWD);
+
+  test("P-R1 a v4 record round-trips steer ids and returned rows; a malformed one is refused, never half-loaded", () => {
+    const ok = parse(v4());
+    expect(ok.ok ? [ok.record.turn, ok.record.returned] : ok.reason).toEqual([
+      { turnId: "T", steering: ["s1"], steeringIds: ["i1"] },
+      [{ id: "r1", text: "R", cause: "cancelled" }],
+    ]);
+    const reason = (over: Record<string, unknown>) => {
+      const p = parse(v4(over));
+      return p.ok ? "ok" : p.reason;
+    };
+    expect(reason({ turn: { turnId: "T", steering: ["s1"], steeringIds: [] } })).toBe(
+      '"turn.steeringIds" is malformed',
+    );
+    expect(reason({ turn: { turnId: "T", steering: ["s1"] } })).toBe(
+      '"turn.steeringIds" is malformed',
+    );
+    expect(reason({ returned: undefined })).toBe('"returned" is malformed');
+    expect(reason({ returned: [{ id: "r1", text: "R", cause: "lost" }] })).toBe(
+      '"returned" is malformed',
+    );
+    expect(reason({ returned: [{ id: "", text: "R", cause: "ended" }] })).toBe(
+      '"returned" is malformed',
+    );
+  });
+
+  test("P-R1 a v3 record reads as v4 with no ids and nothing returned; a chosen title still loads (the title gate)", () => {
+    // Mutation: the title gate left at `schemaVersion !== DAEMON_RECORD_VERSION` → the v3 record is refused.
+    const v3 = parse(
+      v4({
+        schemaVersion: 3,
+        title: { text: "Fix login", source: "user" },
+        returned: [{ id: "forged", text: "F", cause: "ended" }],
+        turn: { turnId: "T", steering: ["s1"], steeringIds: ["i1"] },
+      }),
+    );
+    expect(
+      v3.ok ? [v3.record.schemaVersion, v3.record.turn, v3.record.returned] : v3.reason,
+    ).toEqual([4, { turnId: "T", steering: ["s1"] }, []]);
+    const v3Title = parse(v4({ schemaVersion: 3, title: { text: "Fix login", source: "user" } }));
+    expect(v3Title.ok ? v3Title.record.title : v3Title.reason).toEqual({
+      text: "Fix login",
+      source: "user",
+    });
+    // v1/v2 never wrote a chosen title: still refused.
+    expect(parse(v4({ schemaVersion: 2, title: { text: "x", source: "user" } })).ok).toBe(false);
+  });
+
+  test("Q-R2 a v4 turn cut short by a crash: its steers go back to their writer (returned, ended), never into the history", () => {
+    // Owner decision Q2 (docs/feat/queued-broadcast.md). Mutation: no v4 branch → "user:s1", nothing returned.
+    const ok = parse(v4());
+    if (!ok.ok) throw new Error(ok.reason);
+    const back = reconcileOnReload(ok.record);
+    expect(shape(back.messages)).toEqual(["user:go"]);
+    expect(back.returned).toEqual([
+      { id: "r1", text: "R", cause: "cancelled" },
+      { id: "i1", text: "s1", cause: "ended" },
+    ]);
+    expect(back.turns).toEqual([{ turnId: "T", end: RESTART_TURN_END }]);
+    expect(back.resume).toBeUndefined();
+    // An id already returned is not returned twice (the reload is idempotent).
+    // Mutation: no "already returned" guard → i1 twice.
+    const twice = parse(v4({ returned: [{ id: "i1", text: "s1", cause: "ended" }] }));
+    if (!twice.ok) throw new Error(twice.reason);
+    expect(reconcileOnReload(twice.record).returned).toEqual([
+      { id: "i1", text: "s1", cause: "ended" },
+    ]);
+  });
+
+  test("Q-R2 a v3 turn cut short by a crash keeps today's behaviour: no writer known, its steers become user messages", () => {
+    const old = parse(v4({ schemaVersion: 3 }));
+    if (!old.ok) throw new Error(old.reason);
+    const back = reconcileOnReload(old.record);
+    expect(shape(back.messages)).toEqual(["user:go", "user:s1"]);
+    expect(back.returned).toEqual([]);
+  });
+
+  /** A turn running a tool (no permission) with `steer-1` queued: what a crash mid-turn leaves on disk. */
+  async function crashedMidTool(): Promise<DaemonSessionRecord> {
+    let release = (): void => {};
+    const blocked = new Promise<void>((r) => {
+      release = r;
+    });
+    const runs: string[] = [];
+    const r = rig([[call("c1", "look"), { type: "done" }]], () => [
+      tool("look", "none", runs, () => blocked),
+    ]);
+    const { hosted } = r.host.open({ create: true }, client().attachment);
+    hosted.prompt("T1", go);
+    await until(() => runs.length === 1);
+    hosted.enqueue("e1", "T1", "steer-1");
+    await hosted.persisted();
+    const record = reread(r.store.durable.get(hosted.id));
+    release();
+    return record;
+  }
+
+  const crashReturned = [{ id: "e1", text: "steer-1", cause: "ended" as const }];
+
+  test("Q-R2 writer offline: the reload holds the row (snapshot, disk); a second crash before the reclaim neither duplicates nor loses it", async () => {
+    const record = await crashedMidTool();
+    expect(record.turn).toMatchObject({ steering: ["steer-1"], steeringIds: ["e1"] });
+    const r2 = rig([], () => []);
+    const restored = r2.host.restore(record);
+    expect(restored.running).toBe(false);
+    expect(shape(restored.snapshotPage().messages)).not.toContain("user:steer-1");
+    expect(restored.snapshotPage().queued).toEqual({ entries: [], returned: crashReturned });
+    // A writer attaching later reads it from the snapshot (its client hands it back, C5).
+    const late = client();
+    restored.attach(late.attachment);
+    expect(restored.snapshotPage().queued?.returned).toEqual(crashReturned);
+    await restored.persisted();
+    const after = reread(r2.store.durable.get(restored.id));
+    expect(after.turn).toBeUndefined();
+    expect(after.returned).toEqual(crashReturned);
+    // Second crash, after the reload's write: once, still not in the history.
+    const r3 = rig([], () => []);
+    const again = r3.host.restore(after);
+    expect(again.snapshotPage().queued?.returned).toEqual(crashReturned);
+    expect(shape(again.snapshotPage().messages)).not.toContain("user:steer-1");
+    await again.persisted();
+    expect(reread(r3.store.durable.get(again.id)).returned).toEqual(crashReturned);
+    // Second crash BEFORE the reload's write landed: the same record, the same result.
+    expect(
+      rig([], () => [])
+        .host.restore(record)
+        .snapshotPage().queued?.returned,
+    ).toEqual(crashReturned);
+    // No expiry: only a reclaim takes it.
+    again.reclaim(["e1"]);
+    await again.persisted();
+    expect(reread(r3.store.durable.get(again.id)).returned).toEqual([]);
+  });
+
+  test("Q-R2 a send-now citing a crash-returned row after the reload sends it (it was never delivered)", async () => {
+    // Mutation: the reloaded returned ids stay in `restoredIds` → read as delivered → NoTurnRunning.
+    const record = await crashedMidTool();
+    const r2 = rig([text("ok")], () => []);
+    const restored = r2.host.restore(record);
+    const c = client();
+    restored.attach(c.attachment);
+    expect(
+      restored.sendNow("T2", { kind: "turn", turnId: "T1" }, [{ id: "e1", text: "steer-1" }]),
+    ).toEqual({ turnId: "T2" });
+    await until(() => c.ended("T2"));
+    expect(
+      shape(restored.snapshotPage().messages).filter((m) => m === "user:steer-1"),
+    ).toHaveLength(1);
+    await restored.persisted();
+    expect(reread(r2.store.durable.get(restored.id)).returned).toEqual([]);
+  });
+
+  test("Q-R2 a turn suspended on its own permission is RE-RUN, not cut: its steers stay its queue (v4 ids), returned only if it is stopped", async () => {
+    const runs: string[] = [];
+    const tools = () => [tool("look", "none", runs), tool("run", "ask", runs)];
+    const { record } = await suspendedOnC2(runs, tools);
+    const r2 = rig([], tools);
+    const restored = r2.host.restore(record);
+    expect(restored.running).toBe(true);
+    expect(restored.snapshotPage().queued).toEqual({
+      entries: [{ id: "e1", text: "steer-1" }],
+      returned: [],
+    });
+    // A crash while it is still suspended: the record still resumes it, nothing returned.
+    await restored.persisted();
+    const still = reread(r2.store.durable.get(restored.id));
+    expect(still.turn).toMatchObject({ steering: ["steer-1"], steeringIds: ["e1"] });
+    expect(still.returned).toEqual([]);
+    // Delivered if it drains (B1). Stopped before: back to its writer, with its id.
+    const c = client();
+    restored.attach(c.attachment);
+    await until(() => c.asks.length === 1);
+    restored.cancel();
+    await until(() => c.ended("T1"));
+    await restored.persisted();
+    const record2 = reread(r2.store.durable.get(restored.id));
+    expect(record2.returned).toEqual([{ id: "e1", text: "steer-1", cause: "cancelled" }]);
+    expect(shape(record2.messages)).not.toContain("user:steer-1");
+  });
+
+  test("Q-R2 close of a reloaded session holding crash-returned rows: archived once, the reopen shows them, never delivers them", async () => {
+    const record = await crashedMidTool();
+    const r2 = rig([], () => []);
+    const restored = r2.host.restore(record);
+    r2.host.close(restored.id);
+    await tick(5);
+    const archived = reread(r2.store.durable.get(restored.id));
+    expect(archived.archivedAt).toEqual(expect.any(Number));
+    expect(archived.turn).toBeUndefined();
+    expect(archived.returned).toEqual(crashReturned);
+    const d = client();
+    const params = { sessionId: restored.id, reopen: true };
+    const out = r2.host.open(params, d.attachment, await r2.host.prepareOpen(params));
+    expect(shape(out.hosted.snapshotPage().messages)).not.toContain("user:steer-1");
+    expect(out.hosted.snapshotPage().queued?.returned).toEqual(crashReturned);
+  });
+
+  test("Q9 a restart resumes a suspended turn's steer with the id its writer sent (v4); a v3 record mints one, nobody's", async () => {
+    const runs: string[] = [];
+    const tools = () => [tool("look", "none", runs), tool("run", "ask", runs)];
+    const { record } = await suspendedOnC2(runs, tools);
+    expect(record.turn?.steeringIds).toEqual(["e1"]);
+    const restored = rig([], tools).host.restore(record);
+    expect(restored.snapshotPage().queued).toEqual({
+      entries: [{ id: "e1", text: "steer-1" }],
+      returned: [],
+    });
+    const old = parse({ ...JSON.parse(JSON.stringify(record)), schemaVersion: 3 });
+    if (!old.ok) throw new Error(old.reason);
+    const minted = rig([], tools).host.restore(old.record).snapshotPage().queued?.entries ?? [];
+    expect(minted.map((r) => r.text)).toEqual(["steer-1"]);
+    expect(record.enqueueIds).not.toContain(minted[0]?.id);
+  });
+
+  test("P-R3 archive mid-queue: the record keeps the row as returned, not as a steer; the reopen shows it, never delivers it", async () => {
+    // Mutation: `archive` keeps `before.turn.steering` → the reopen also appends "steer-1".
+    const runs: string[] = [];
+    const r = rig([[call("c1", "run"), { type: "done" }]], () => [tool("run", "ask", runs)]);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 1);
+    hosted.enqueue("e1", "T1", "steer-1");
+    r.host.close(hosted.id);
+    await tick(5);
+    const record = reread(r.store.durable.get(hosted.id));
+    expect(record.archivedAt).toEqual(expect.any(Number));
+    expect(record.turn?.steering).toEqual([]);
+    expect(record.returned).toEqual([{ id: "e1", text: "steer-1", cause: "ended" }]);
+    // Streamed to the attached writer before the end.
+    expect(c.updates.slice(-2).map((u) => u.update.type)).toEqual(["queued", "session_closed"]);
+    const d = client();
+    const params = { sessionId: hosted.id, reopen: true };
+    const out = r.host.open(params, d.attachment, await r.host.prepareOpen(params));
+    expect(shape(out.hosted.snapshotPage().messages)).not.toContain("user:steer-1");
+    expect(out.hosted.snapshotPage().queued?.returned).toEqual([
+      { id: "e1", text: "steer-1", cause: "ended" },
+    ]);
+    expect(runs).toEqual([]);
+  });
+
+  test("P-R5 a reclaim landing between a reopen's read and its open: the reopened session does not hand the row back", async () => {
+    // Mutation: `restore(record, …)` instead of `restore(withoutReclaimed(record, entry.reclaimed), …)` → `returned` holds e1 again.
+    const runs: string[] = [];
+    const r = rig([[call("c1", "run"), { type: "done" }]], () => [tool("run", "ask", runs)]);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 1);
+    hosted.enqueue("e1", "T1", "steer-1");
+    r.host.close(hosted.id);
+    await tick(5);
+    const params = { sessionId: hosted.id, reopen: true };
+    // The reopen's read is done (the record is pinned for its `open`) ...
+    const prepared = await r.host.prepareOpen(params);
+    expect(prepared?.returned.map((x) => x.id)).toEqual(["e1"]);
+    // ... then the reclaim lands, and the reopen's `open` runs with the stale record.
+    await r.host.reclaimArchived(hosted.id, ["e1"]);
+    const d = client();
+    const out = r.host.open(params, d.attachment, prepared);
+    expect(out.hosted.snapshotPage().queued?.returned).toEqual([]);
+  });
+
+  test("P-R4 a reclaim is on disk before its ack (serve), and survives a restart", async () => {
+    const runs: string[] = [];
+    const r = rig([[call("c1", "run"), { type: "done" }]], () => [tool("run", "ask", runs)]);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 1);
+    hosted.enqueue("e1", "T1", "steer-1");
+    hosted.cancel();
+    await until(() => c.ended("T1"));
+    await hosted.persisted();
+    expect(reread(r.store.durable.get(hosted.id)).returned).toEqual([
+      { id: "e1", text: "steer-1", cause: "cancelled" },
+    ]);
+    hosted.reclaim(["e1"]);
+    await hosted.persisted();
+    const record = reread(r.store.durable.get(hosted.id));
+    expect(record.returned).toEqual([]);
+    const again = rig([], () => []).host.restore(record);
+    expect(again.snapshotPage().queued).toEqual({ entries: [], returned: [] });
   });
 });

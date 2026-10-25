@@ -214,10 +214,10 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
         completionTokens: event.usage.completionTokens,
       };
     // A steering message was injected into the running turn; the client drops
-    // the matching optimistic ⏳ entry FIFO. Covers both injection points in
+    // the optimistic ⏳ entry of that id. Covers both injection points in
     // the agent loop (the per-round drain and the late-steer before turn_end).
     case "steer":
-      return { type: "steer", text: event.text };
+      return { type: "steer", text: event.text, ...(event.id ? { id: event.id } : {}) };
     case "context_note":
       return { type: "context_note", text: event.text, reason: event.reason };
     // Nested sub-agent progress is a local-TUI nicety; remote clients see the

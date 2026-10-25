@@ -18,6 +18,7 @@ import {
 } from "@tentacle/daemon";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { DomainErrorCode, type DuplexChannel, createChannelPair } from "@tentacle/transport";
+import type { ReturnedRow } from "../src/hand-back.ts";
 import { ChannelError, LIVENESS_MS, type LinkStatus } from "../src/link-machine.ts";
 import type { SessionEvent } from "../src/mapping.ts";
 import { type Clock, RemoteClient } from "../src/remote-client.ts";
@@ -1650,5 +1651,136 @@ describe("session archive across devices (docs/feat/session-archive.md)", () => 
     expect(target.host.get("S")).toBeUndefined();
     a.close();
     b.close();
+  });
+});
+
+describe("re-attach: a crash-cut turn's steers after a `serve` restart (docs/feat/queued-broadcast.md, owner Q2)", () => {
+  /** A writer with "A" (id `a`) queued in a running turn, and the record a crash leaves. */
+  async function crashedWriter() {
+    const runs = { n: 0 };
+    const store = new MemStore();
+    const model1 = new GatedModel([[t("a"), { kind: "gate" }, done]]);
+    const target = new Target(makeHost(model1, runs, persisterFor(store)));
+    const d = dialer(target);
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: d.factory,
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const returned: (readonly ReturnedRow[])[] = [];
+    session.onReturned((rows) => returned.push(rows));
+    const turn = drain(session.send("go")).catch((e: Error) => e);
+    await until(() => model1.waiting);
+    await session.enqueue("A", "a");
+    await target.host.get("S")?.persisted();
+    const parsed = parseDaemonRecord(
+      JSON.parse(JSON.stringify(store.durable.get("S"))),
+      (c) => c === CWD,
+    );
+    if (!parsed.ok) throw new Error(parsed.reason);
+    expect(parsed.record.turn).toMatchObject({ steering: ["A"], steeringIds: ["a"] });
+    const model2 = new GatedModel([[t("sent"), done]]);
+    const host2 = makeHost(model2, runs, persisterFor(new MemStore()));
+    return { client, session, returned, turn, target, d, record: parsed.record, host2, model2 };
+  }
+
+  test("Q-R2 the writer reconnects: its steer comes back once (ended), is reclaimed, never enters the history", async () => {
+    // Mutation: no v4 branch in reconcileOnReload → nothing returned, "A" in the history.
+    const w = await crashedWriter();
+    w.host2.restore(w.record);
+    w.target.host = w.host2;
+    w.target.last?.close();
+    await until(() => w.returned.length === 1);
+    expect(w.returned).toEqual([[{ id: "a", text: "A", cause: "ended" }]]);
+    await until(() => w.client.queuedOf("S")?.returned.length === 0);
+    await w.turn;
+    expect((await w.client.snapshot("S")).map((m) => m.content)).not.toContain("A");
+    expect(w.returned).toHaveLength(1);
+    expect(w.model2.calls).toBe(0); // never re-sent by itself
+    w.client.close();
+  });
+
+  test("Q-R2 my send-now in flight across the crash carries the returned row: sent once, never also handed back", async () => {
+    // Mutation: queueChanged ignores the live send-now's ids → "A" handed back AND sent.
+    const w = await crashedWriter();
+    w.d.hold();
+    w.target.last?.close();
+    w.host2.restore(w.record);
+    w.target.host = w.host2;
+    // The chord while the link is down: it goes out after the resync.
+    const sent = w.session.sendNow([{ id: "a", text: "A" }], "turn");
+    w.d.release();
+    const events = await drain(await sent);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(w.model2.calls).toBe(1);
+    await until(() => w.client.queuedOf("S")?.returned.length === 0);
+    expect(w.returned).toEqual([]);
+    const history = (await w.client.snapshot("S")).map((m) => m.content);
+    expect(history.filter((c) => c === "A")).toHaveLength(1);
+    await w.turn;
+    w.client.close();
+  });
+});
+
+describe("returned rows of a closed session (docs/feat/queued-broadcast.md, owner F2)", () => {
+  /** The writer with "A" (id `a`) queued in a running turn on a persisting daemon. */
+  async function queuedWriter() {
+    const runs = { n: 0 };
+    const store = new MemStore();
+    const model = new GatedModel([[t("a"), { kind: "gate" }, done]]);
+    const target = new Target(makeHost(model, runs, persisterFor(store)));
+    const d = dialer(target);
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: d.factory,
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    const returned: (readonly ReturnedRow[])[] = [];
+    session.onReturned((rows) => returned.push(rows));
+    const turn = drain(session.send("go")).catch((e: Error) => e);
+    await until(() => model.waiting);
+    await session.enqueue("A", "a");
+    return { client, returned, turn, target, d, store };
+  }
+
+  /** Reopen the archived "S" (an explicit act): the queue the reopened session holds. */
+  async function reopened(host: SessionHost) {
+    const prepared = await host.prepareOpen({ sessionId: "S", reopen: true });
+    const { hosted } = host.open({ sessionId: "S", reopen: true }, { send: () => {} }, prepared);
+    return hosted.snapshotPage().queued;
+  }
+
+  test("closed with my row queued: it comes back once, my reclaim lands in the archive, a reopen returns nothing", async () => {
+    // Mutation: `session/reclaim` refuses an archived session (UnknownSession) → the reopen returns "A" again.
+    const w = await queuedWriter();
+    w.target.host.close("S");
+    await until(() => w.returned.length === 1);
+    expect(w.returned).toEqual([[{ id: "a", text: "A", cause: "ended" }]]);
+    await until(() => w.store.durable.get("S")?.returned.length === 0);
+    expect(w.store.durable.get("S")?.archivedAt).toBeNumber();
+    // Still archived: the reclaim revived nothing.
+    expect(w.target.host.get("S")).toBeUndefined();
+    expect(await reopened(w.target.host)).toEqual({ entries: [], returned: [] });
+    expect(w.returned).toHaveLength(1);
+    await w.turn;
+    w.client.close();
+  });
+
+  test("the writer is offline at the close: its row stays held in the archive, a reopen returns it once", async () => {
+    // Mutation: the archived record loses its returned rows → the reopen returns nothing.
+    const w = await queuedWriter();
+    w.d.hold();
+    w.target.last?.close();
+    w.target.host.close("S");
+    await until(() => w.store.durable.get("S")?.archivedAt !== undefined);
+    expect(w.store.durable.get("S")?.returned).toEqual([{ id: "a", text: "A", cause: "ended" }]);
+    expect(await reopened(w.target.host)).toEqual({
+      entries: [],
+      returned: [{ id: "a", text: "A", cause: "ended" }],
+    });
+    expect(w.returned).toEqual([]);
+    w.client.close();
   });
 });

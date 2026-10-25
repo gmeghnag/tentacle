@@ -383,7 +383,7 @@ describe("session/send_now — what the new turn sends", () => {
     const stream = t.c.stream();
     const start = stream.findIndex((u) => u.type === "turn_start" && u.turnId === "T2");
     const steer = stream.findIndex((u) => u.type === "steer");
-    expect(stream[steer]).toEqual({ type: "steer", text: "X" });
+    expect(stream[steer]).toEqual({ type: "steer", text: "X", id: "x" });
     expect(steer).toBeGreaterThan(start);
     expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go", "A", "X"]);
     expect(
@@ -405,7 +405,9 @@ describe("session/send_now — what the new turn sends", () => {
     t.gate.release();
     await until(() => t.c.ended("T2"));
     expect(t.c.start("T2")).toMatchObject({ prompt: "A" });
-    expect(t.c.stream().filter((u) => u.type === "steer")).toEqual([{ type: "steer", text: "Y" }]);
+    expect(t.c.stream().filter((u) => u.type === "steer")).toEqual([
+      { type: "steer", text: "Y", id: "y" },
+    ]);
     expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go", "A", "Y"]);
     // After the hand-off: an accepted id, never "not queued", never twice.
     t.hosted.enqueue("a", "T2", "A");
@@ -494,7 +496,13 @@ describe("session/send_now — cancel, close, retries, stale targets", () => {
     const t = await blockedT1();
     t.hosted.sendNow("T2", turn("T1"), [msg("a", "A")]);
     t.hosted.close();
-    expect(t.c.stream().slice(-3)).toEqual([
+    // The queue's own updates are pinned in queued.test.ts (docs/feat/queued-broadcast.md).
+    expect(
+      t.c
+        .stream()
+        .filter((u) => u.type !== "queued")
+        .slice(-3),
+    ).toEqual([
       { type: "turn_end", turnId: "T1", stopReason: "cancelled" },
       { type: "turn_end", turnId: "T2", stopReason: "cancelled", delivered: false },
       { type: "session_closed", reason: "closed" },
@@ -513,7 +521,13 @@ describe("session/send_now — cancel, close, retries, stale targets", () => {
     await until(() => r.model.waiting === 1);
     hosted.sendNow("T2", { kind: "compaction" }, [msg("a", "A")]);
     hosted.close();
-    expect(c.stream().slice(-2)).toEqual([
+    // The queue's own updates are pinned in queued.test.ts (docs/feat/queued-broadcast.md).
+    expect(
+      c
+        .stream()
+        .filter((u) => u.type !== "queued")
+        .slice(-2),
+    ).toEqual([
       { type: "turn_end", turnId: "T2", stopReason: "cancelled", delivered: false },
       { type: "session_closed", reason: "closed" },
     ]);
@@ -681,28 +695,66 @@ describe("session/send_now — delivered but unanswered (review F1)", () => {
   const answered = (model: Scripted, text: string): void =>
     expect(model.calls.at(-1)?.messages.at(-1)?.content).toBe(text);
 
-  test("F1a a crash before the hand-off: the reload appends the steer; the resent send-now answers it", async () => {
+  /** The last record before a crash: T1 running, its steer "A" (id `a`) queued. */
+  const crashedWithSteer = async () => {
     const store = new SpyStore();
     const t = await blockedT1([call("c1", "block")], { store });
     t.hosted.enqueue("a", "T1", "A");
     await t.hosted.persisted();
-    // The last record before the crash: T1 running, its steer queued.
     const record = store.saves.at(-1);
     expect(record?.turn).toMatchObject({ turnId: "T1", steering: ["A"] });
-    const parsed = parseDaemonRecord(JSON.parse(JSON.stringify(record)), (cwd) => cwd === CWD);
-    if (!parsed.ok) throw new Error(parsed.reason);
     t.gate.release();
+    return JSON.parse(JSON.stringify(record));
+  };
 
+  test("F1a a crash before the hand-off (v4): the reload returns the steer to its writer; the resent send-now sends it", async () => {
+    // Changed on purpose by owner decision Q2 (docs/feat/queued-broadcast.md):
+    // a v4 crash-cut steer goes back to its writer, never into the history.
+    const parsed = parseDaemonRecord(await crashedWithSteer(), (cwd) => cwd === CWD);
+    if (!parsed.ok) throw new Error(parsed.reason);
     let clock = 500;
     const r2 = rig([say("answer")], { store: new SpyStore(), now: () => clock });
     const restored = r2.host.restore(parsed.record);
     const c2 = client();
     restored.attach(c2.attachment);
-    expect(userTexts(restored.snapshotPage().messages)).toEqual(["go", "A"]);
+    expect(userTexts(restored.snapshotPage().messages)).toEqual(["go"]);
+    expect(restored.snapshotPage().queued?.returned).toEqual([
+      { id: "a", text: "A", cause: "ended" },
+    ]);
     clock = 600;
     expect(restored.sendNow("T2", turn("T1"), [msg("a", "A")])).toEqual({ turnId: "T2" });
     // Stamped like any turn start.
     expect(restored.summary(CWD).lastChangeAt).toBe(600);
+    await until(() => c2.ended("T2"));
+    expect(c2.start("T2")).toEqual({ type: "turn_start", turnId: "T2", prompt: "A" });
+    expect(c2.end("T2")).toMatchObject({ stopReason: "end_turn" });
+    expect(userTexts(restored.snapshotPage().messages)).toEqual(["go", "A"]);
+    // Sent now: it left `returned` (Q11).
+    expect(
+      c2
+        .stream()
+        .filter((u) => u.type === "queued")
+        .at(-1),
+    ).toEqual({
+      type: "queued",
+      entries: [],
+      returned: [],
+    });
+    answered(r2.model, "A");
+  });
+
+  test("F1a a crash before the hand-off (v3): the reload appends the steer; the resent send-now answers it", async () => {
+    const parsed = parseDaemonRecord(
+      { ...(await crashedWithSteer()), schemaVersion: 3 },
+      (cwd) => cwd === CWD,
+    );
+    if (!parsed.ok) throw new Error(parsed.reason);
+    const r2 = rig([say("answer")], { store: new SpyStore() });
+    const restored = r2.host.restore(parsed.record);
+    const c2 = client();
+    restored.attach(c2.attachment);
+    expect(userTexts(restored.snapshotPage().messages)).toEqual(["go", "A"]);
+    expect(restored.sendNow("T2", turn("T1"), [msg("a", "A")])).toEqual({ turnId: "T2" });
     await until(() => c2.ended("T2"));
     expect(c2.start("T2")).toEqual({ type: "turn_start", turnId: "T2", prompt: "" });
     expect(c2.end("T2")).toMatchObject({ stopReason: "end_turn" });
@@ -1018,7 +1070,7 @@ describe("session/send_now — the queued-id mirror (review F2)", () => {
     const stream = t.c.stream();
     const start = stream.findIndex((u) => u.type === "turn_start" && u.turnId === "T2");
     expect(stream.slice(start).filter((u) => u.type === "steer")).toEqual([
-      { type: "steer", text: "X" },
+      { type: "steer", text: "X", id: "x" },
     ]);
     expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go", "A", "B", "X"]);
   });
@@ -1115,7 +1167,7 @@ describe("session/send_now — a refusal reports what the daemon holds", () => {
     await compacting;
   });
 
-  test("F-7 (`:843`, review R2-1) another client's send-now on my turn is cancelled before it starts: my queued steer is NOT held (it is dropped)", async () => {
+  test("F-7 (`:843`, review R2-1) another client's send-now on my turn is cancelled before it starts: my queued steer is NOT held (it is returned to me)", async () => {
     // Ported from the reviewer's repro (.tentacle/tmp/send-now-c/endunstarted.test.ts,
     // REVIEW-R2). Mutation M-R4 (no successor term in `live`) is killed by F-1.
     const t = await blockedT1([call("c1", "block"), call("c2", "block")]);
@@ -1131,9 +1183,14 @@ describe("session/send_now — a refusal reports what the daemon holds", () => {
     await until(() => t.gate.waiting === 1);
     t.gate.release();
     await until(() => t.c.ended("T2"));
-    // The fate the report must not hide: "A" never reached the history (the
-    // `endUnstarted` gap, debt) — so the client restores it.
+    // The fate the report must not hide: "A" never reached the history — so
+    // the client restores it. Since docs/feat/queued-broadcast.md the daemon
+    // says so too: "A" is returned to its writer (not B's "X": B's own client
+    // restores it through `delivered: false`), never dropped silently.
     expect(userTexts(t.hosted.snapshotPage().messages)).toEqual(["go", "go"]);
+    expect(t.hosted.snapshotPage().queued?.returned).toEqual([
+      { id: "a", text: "A", cause: "cancelled" },
+    ]);
   });
 
   test("F-6 (`assertIdle`) my turn was cancelled with a steer pending, then a compaction runs: not held (no turn will drain it)", async () => {
@@ -1148,7 +1205,8 @@ describe("session/send_now — a refusal reports what the daemon holds", () => {
     expect(r).toEqual({ code: DomainErrorCode.CompactInProgress, data: { held: [] } });
     t.model.release();
     await compacting;
-    // The fate it reports: the next prompt drops the leftover queue.
+    // The fate it reports: never delivered by a later turn (returned to its
+    // writer at T1's end since docs/feat/queued-broadcast.md).
     t.hosted.prompt("T2", go);
     await until(() => t.gate.waiting === 1);
     t.gate.release();

@@ -22,7 +22,14 @@ describe("queued rows", () => {
     expect(rows.every((r) => r.state === "queued")).toBe(true);
   });
 
-  test("a steer drops the front row (FIFO), whatever its state", () => {
+  test("a steer that names its row drops that row only; another writer's drops nothing", () => {
+    // Review F1's root: the daemon says whose steer it is, the TUI never guesses.
+    const { rows } = takeForSendNow(three());
+    expect(onSteer(rows, "b").map((r) => r.id)).toEqual(["a", "c"]);
+    expect(onSteer(three(), "zz")).toEqual(three());
+  });
+
+  test("a steer with no id (an older daemon) drops the front row (FIFO), whatever its state", () => {
     expect(rowTexts(onSteer(three()))).toEqual(["B", "C"]);
     const { rows } = takeForSendNow(three());
     expect(onSteer(rows).map((r) => r.id)).toEqual(["b", "c"]);
