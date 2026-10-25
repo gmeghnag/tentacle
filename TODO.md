@@ -366,6 +366,16 @@ Daily-driver work (done 2026-10-14):
       After `fix/tui-expand-latency` merges. Type: feat (refactor) · Size: S
       · Blast: contained · Suited: Sonnet executes, Opus reviews.
 
+- [ ] **Model-initiated context reset (`context_reset({ prompt })`)**
+      ([`docs/eval/context-reset.md`](docs/eval/context-reset.md); owner,
+      2026-10-25, 9 decisions taken) — the model renews its own context when
+      a new part of a plan starts: same session, history replaced by the
+      fresh system prompt (re-read: identity, `AGENTS.md`, skills) + the
+      model's restart prompt + running jobs list; approval like other tools;
+      anti-loop rule + configurable cap (default unlimited); feature on by
+      default, configurable. Next: promote and plan. Type: feat · Size: M–L
+      (to confirm) · Blast: load-bearing · Suited: strong model, fresh review.
+
 ### Block 7 — MCP (client, stdio transport, tool adapter)
 
 - [x] 🟡 **MCP tool calls have no timeout and ignore the turn's abort signal.**

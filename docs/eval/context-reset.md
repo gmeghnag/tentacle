@@ -1,6 +1,6 @@
 # eval/context-reset — The model renews its own context
 
-> **Status:** context — owner decisions being taken one at a time (2026-10-25)
+> **Status:** decided (2026-10-25) — 9 owner decisions; to promote to `docs/feat/`
 > **Branch:** none (an `eval`; promoted to `docs/feat/` when approved)
 > **Type:** eval · **Size:** M (estimate) · **Blast:** load-bearing (agent loop, session history, protocol update, permission broker) · **Suited:** strong model plans and executes; mandatory fresh-context Review
 
@@ -96,7 +96,23 @@ per user message.
    the goal, where the plan lives (a file path rather than everything
    inline), what is done, the next step, constraints and decisions — the
    model will see nothing else. (2026-10-25: "ok context_reset")
+9. **Display:** the TUI keeps the old transcript on screen, then a grey
+   separator `↻ context reset by the model`, then the restart prompt shown in
+   full as a message labelled "restart prompt"; the status-bar context meter
+   drops accordingly. The phone and every other attached client see the same
+   through a daemon update (as for compaction). `--resume` shows only from the
+   restart prompt on (decision 4). TUI strings in English. (2026-10-25:
+   "perfetto")
 
-## Open questions (asked one at a time)
+## Review
 
-- How the TUI and the phone show it.
+*— claude-opus-5-5, 2026-10-25*
+
+**Verdict: decided** — all nine owner decisions taken. Next: promote to
+`docs/feat/context-reset.md` with a source-verified plan (AGENTS §8). Size
+and blast to confirm in the plan: the agent loop (a tool that replaces the
+history mid-turn), the session record (no format change by decision 4), the
+protocol (a new or reused `session/update` kind — classify it in
+`UPDATE_CLASS`), config (two new keys: enable, cap), the system-prompt
+rebuild on every runtime (pod: who reads `AGENTS.md`, trust). Strong model
+plans and executes; mandatory fresh-context Review.
