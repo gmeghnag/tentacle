@@ -85,6 +85,11 @@ per user message.
    same owner; a pod-supplied file is untrusted input (AGENTS §7 "a pod is not
    trusted"). (2026-10-25: "voglio già da ora la rilettura fresca di
    AGENTS.md")
+7. **The whole system prompt is rebuilt fresh at reset**, exactly as when a
+   new session opens: identity (`PROMPT.md` / env / default), `AGENTS.md`
+   and the skills catalog — one code path, not a special case for
+   `AGENTS.md`. Supersedes the "system prompt" bullet of decision 5.
+   (2026-10-25: "si")
 
 ## Open questions (asked one at a time)
 
