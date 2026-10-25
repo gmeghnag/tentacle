@@ -22,6 +22,7 @@ export type InputAction =
   | { readonly kind: "moveCursor"; readonly delta: -1 | 1; readonly extend: boolean }
   | { readonly kind: "moveLine"; readonly edge: "start" | "end"; readonly extend: boolean }
   | { readonly kind: "deleteBack" }
+  | { readonly kind: "deleteWord"; readonly dir: -1 | 1 }
   | { readonly kind: "insert"; readonly text: string };
 
 export interface InputContext {
@@ -38,7 +39,8 @@ export interface InputContext {
  * move, falling back to history only at the first/last line; Shift never
  * recalls history), PgUp/PgDn (scroll), Ctrl+V (paste), Enter (newline on a
  * trailing `\`, else submit), word-jump, shift-select, plain arrows, Ctrl+A/E
- * (line start/end), backspace, then printable insert.
+ * (line start/end), word delete (Option+Backspace, Ctrl+W, Alt+D), backspace,
+ * then printable insert.
  */
 export function resolveLineInput(char: string, key: Key, ctx: InputContext): InputAction {
   const { value, cursor } = ctx;
@@ -115,6 +117,21 @@ export function resolveLineInput(char: string, key: Key, ctx: InputContext): Inp
   }
   if (key.ctrl && char === "e") {
     return { kind: "moveLine", edge: "end", extend: key.shift };
+  }
+  // Word delete. Ink reports \x7f (plain Backspace) as `delete` and \x08 as
+  // `backspace`; ESC+either (Option/Alt+Backspace) adds `meta` and is
+  // unambiguous. A bare \x08 is Ctrl+H / Ctrl+Backspace, or plain Backspace on
+  // a terminal set to send ^H: it deletes ONE char (never more than intended),
+  // see below. Ctrl+W is readline's (and iTerm2's Option+Backspace preset).
+  // Alt/Option+D deletes the next word.
+  if (key.meta && (key.backspace || key.delete)) {
+    return { kind: "deleteWord", dir: -1 };
+  }
+  if (key.ctrl && char === "w") {
+    return { kind: "deleteWord", dir: -1 };
+  }
+  if (key.meta && char === "d") {
+    return { kind: "deleteWord", dir: 1 };
   }
   if (key.backspace || key.delete) {
     return { kind: "deleteBack" };

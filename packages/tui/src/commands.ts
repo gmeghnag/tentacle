@@ -258,7 +258,7 @@ export function helpText(skills: readonly SlashSkill[] = []): string {
     skillRows.length + shadowed.length > 0
       ? `\n\n**Skills** (load the skill, then do the task)\n${[...skillRows, ...shadowed].join("\n")}`
       : "";
-  return `**Commands**\n${rows}${skillBlock}\n\n**Keys**: Shift+Tab auto-accept tools · \\+Enter newline · Ctrl+C stop/quit · Ctrl+X Ctrl+S send queued now`;
+  return `**Commands**\n${rows}${skillBlock}\n\n**Keys**: Shift+Tab auto-accept tools · \\+Enter newline · Ctrl+C stop/quit · Ctrl+X Ctrl+S send queued now · Option+Backspace/Ctrl+W delete previous word · Alt+D delete next word`;
 }
 
 /** A daemon-supplied string, safe inside a Markdown code span or after a colon. */

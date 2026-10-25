@@ -118,18 +118,24 @@ export function moveCursor(state: EditorState, delta: number, extend = false): E
   return { ...applyMove(state, state.cursor + delta, extend, edge), desiredCol: null };
 }
 
-const WORD = /[\p{L}\p{N}_]/u;
+// Combining marks (\p{M}: accents, vowel signs, virama, VS16, keycap) belong to
+// their base character, so a boundary never leaves an orphan mark.
+const WORD = /[\p{L}\p{M}\p{N}_]/u;
 
 /**
  * Jump to the next (forward) or previous (backward) word boundary, readline
  * style: skip the gap (non-word chars, incl. punctuation and newlines), then
  * the word. So a jump always lands on a word boundary; newlines count as gap,
  * so a jump CAN cross a logical line (the next word, wherever it is).
- * `word = /[\p{L}\p{N}_]/u`.
+ * `word = /[\p{L}\p{M}\p{N}_]/u`.
  */
 export function moveWord(state: EditorState, dir: -1 | 1, extend = false): EditorState {
-  const v = state.value;
-  const at = clampCursor(v, state.cursor);
+  const i = wordBoundary(state.value, clampCursor(state.value, state.cursor), dir);
+  return { ...applyMove(state, i, extend, dir === 1 ? "max" : "min"), desiredCol: null };
+}
+
+/** The word boundary reached from `at` going `dir` (shared by jump and delete). */
+function wordBoundary(v: string, at: number, dir: -1 | 1): number {
   let i = at;
   if (dir === 1) {
     while (i < v.length && !WORD.test(v[i] ?? "")) i++; // the gap first
@@ -138,7 +144,32 @@ export function moveWord(state: EditorState, dir: -1 | 1, extend = false): Edito
     while (i > 0 && !WORD.test(v[i - 1] ?? "")) i--; // the gap before the cursor
     while (i > 0 && WORD.test(v[i - 1] ?? "")) i--; // then the whole word
   }
-  return { ...applyMove(state, i, extend, dir === 1 ? "max" : "min"), desiredCol: null };
+  return i;
+}
+
+/**
+ * Delete the previous (`-1`) or next (`1`) word, with the SAME boundary as
+ * `moveWord` (skip the gap, then the word; crosses `\n`). With a selection it
+ * deletes the selection instead, exactly as Backspace does. A no-op at the
+ * buffer's start/end.
+ */
+export function deleteWord(state: EditorState, dir: -1 | 1): EditorState {
+  const range = selectionRange(state);
+  if (range) {
+    return deleteBack(state);
+  }
+  const at = clampCursor(state.value, state.cursor);
+  const to = wordBoundary(state.value, at, dir);
+  if (to === at) {
+    return state;
+  }
+  const [lo, hi] = to < at ? [to, at] : [at, to];
+  return {
+    value: state.value.slice(0, lo) + state.value.slice(hi),
+    cursor: lo,
+    anchor: null,
+    desiredCol: null,
+  };
 }
 
 /** 0-based index of the logical line containing offset `at`. */

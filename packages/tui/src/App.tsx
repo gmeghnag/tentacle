@@ -32,6 +32,7 @@ import { Thinking } from "./components/Thinking.tsx";
 import { pushHistory, recall } from "./history.ts";
 import { useLineEditor, useLinkIndicator, usePaintScheduler } from "./hooks.ts";
 import { resolveLineInput } from "./input-actions.ts";
+import { inputRowCount } from "./input-view.ts";
 import { type LinkFeed, stoppedNotice } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
@@ -582,11 +583,9 @@ export function App({
   const paletteWin = paletteWindow(paletteCommands.length, commandSel);
   const paletteRows = paletteCommands.slice(paletteWin.start, paletteWin.end);
   // The input box grows with a multi-line prompt (paste / `\`-continuation),
-  // capped at MAX_INPUT_ROWS content lines; +2 for its top/bottom borders.
-  const inputContentLines = Math.min(
-    field.value === "" ? 1 : field.value.split("\n").length,
-    MAX_INPUT_ROWS,
-  );
+  // (and with a soft-wrapped long line), capped at MAX_INPUT_ROWS content rows;
+  // +2 for its top/bottom borders.
+  const inputContentLines = inputRowCount(field.value, field.cursor, columns, MAX_INPUT_ROWS);
   const inputBoxRows = inputContentLines + 2;
   const listView = panel ? panelView(panel, columns, panelMaxBody(termRows)) : null;
   // Rows above the input/panel while a turn runs: the thinking line + the
@@ -1979,6 +1978,9 @@ export function App({
       case "deleteBack":
         field.deleteBack();
         return;
+      case "deleteWord":
+        field.deleteWord(action.dir);
+        return;
       case "insert":
         field.insert(action.text);
         return;
@@ -2072,6 +2074,7 @@ export function App({
                     anchor={field.anchor}
                     placeholder={st.running ? "Queue a task…" : INPUT_PLACEHOLDER}
                     maxRows={MAX_INPUT_ROWS}
+                    width={columns}
                   />
                 </Box>
               </>

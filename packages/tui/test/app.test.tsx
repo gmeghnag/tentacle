@@ -1112,6 +1112,73 @@ describe("input editing: line start/end", () => {
   });
 });
 
+describe("input soft-wrap", () => {
+  test("a value wider than the terminal wraps into contiguous rows inside the input box", async () => {
+    const model = new ScriptedProvider([]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv });
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(20);
+    stdin.write("a".repeat(130)); // ink-testing-library's stdout is 100 columns wide
+    await delay(40);
+    const lines = (lastFrame() ?? "").split("\n").map((l) => l.trimEnd());
+    const first = lines.findIndex((l) => l.startsWith("❯ a"));
+    expect(first).toBeGreaterThanOrEqual(0);
+    expect(lines[first]).toBe(`❯ ${"a".repeat(98)}`);
+    expect(lines[first + 1]).toBe(`  ${"a".repeat(32)}`);
+    // The box grew by one row: the bottom border sits right under the wrapped row.
+    expect(lines[first + 2]).toMatch(/^─+$/);
+    unmount();
+  });
+
+  test("a value wrapping over several rows keeps the frame at the terminal height", async () => {
+    // The layout budgets the input box from `inputRowCount`; counting logical
+    // lines instead (one) under-budgets it and the frame outgrows the terminal.
+    const model = new ScriptedProvider([]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv });
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(20);
+    const terminalRows = (lastFrame() ?? "").split("\n").length;
+    stdin.write("a".repeat(350)); // 98 + 98 + 98 + 56 cells at 100 columns → 4 visual rows
+    await delay(40);
+    const lines = (lastFrame() ?? "").split("\n").map((l) => l.trimEnd());
+    expect(lines).toHaveLength(terminalRows);
+    // The input's last visual row (with the cursor) is still on screen.
+    expect(lines).toContain(`  ${"a".repeat(56)}`);
+    unmount();
+  });
+});
+
+describe("input editing: word delete", () => {
+  const mkApp = () => {
+    const model = new ScriptedProvider([]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv });
+    return render(<App agent={agent} model="qwen3" cwd="/tmp/work" />);
+  };
+
+  test("Option+Backspace (ESC DEL) deletes the previous word; plain Backspace one char", async () => {
+    const { stdin, lastFrame, unmount } = mkApp();
+    await delay(20);
+    stdin.write("hello world");
+    await delay(20);
+    stdin.write("\x1b\x7f"); // Option+Backspace
+    await delay(40);
+    expect(lastFrame() ?? "").toContain("❯ hello");
+    expect(lastFrame() ?? "").not.toContain("world");
+    stdin.write("X"); // the space was kept: "hello X"
+    await delay(40);
+    expect(lastFrame() ?? "").toContain("❯ hello X");
+    stdin.write("\x7f"); // plain Backspace → exactly one char (the X)
+    stdin.write("Y");
+    await delay(40);
+    expect(lastFrame() ?? "").toContain("❯ hello Y");
+    unmount();
+  });
+});
+
 describe("input editing: navigation, history & selection", () => {
   const mkApp = () => {
     const model = new ScriptedProvider([]);

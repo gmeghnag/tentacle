@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type InputRow, inputRender, inputSelectionSpan, inputView } from "../src/input-view.ts";
+import { type InputRow, inputRender, inputRowCount, inputView } from "../src/input-view.ts";
 
 describe("inputView", () => {
   test("single line: cursor maps to row 0 and its column", () => {
@@ -50,36 +50,6 @@ describe("inputView", () => {
   });
 });
 
-describe("inputSelectionSpan", () => {
-  test("single line: the span is clamped to the row", () => {
-    expect(inputSelectionSpan("hello world", 2, 7, 0)).toEqual([2, 7]);
-    // Selection starting before the row start / ending past it.
-    expect(inputSelectionSpan("hello", 0, 9, 0)).toEqual([0, 5]);
-    expect(inputSelectionSpan("hello", -5, 3, 0)).toEqual([0, 3]);
-  });
-
-  test("row before or after the selection is null; empty span is null", () => {
-    expect(inputSelectionSpan("ab\ncd", 3, 5, 0)).toBeNull(); // row 0, selection on row 1
-    expect(inputSelectionSpan("ab\ncd", 0, 2, 1)).toBeNull(); // row 1, selection on row 0
-    expect(inputSelectionSpan("abcd", 2, 2, 0)).toBeNull(); // collapsed
-  });
-
-  test("multi-line: the start row starts at c0, the end row ends at c1, full rows in between", () => {
-    // value "ab\ncdef\ngh"; selection [1,8) = "b\ncdef" →
-    // row 0: [1,2), row 1: [0,4), row 2: null.
-    expect(inputSelectionSpan("ab\ncdef\ngh", 1, 8, 0)).toEqual([1, 2]);
-    expect(inputSelectionSpan("ab\ncdef\ngh", 1, 8, 1)).toEqual([0, 4]);
-    expect(inputSelectionSpan("ab\ncdef\ngh", 1, 8, 2)).toBeNull();
-  });
-
-  test("a selection spanning three lines: the middle row is fully selected", () => {
-    // value "aa\nbb\ncc"; selection [1,7) = "a\nbb\nc" → row 1 fully [0,2).
-    expect(inputSelectionSpan("aa\nbb\ncc", 1, 7, 0)).toEqual([1, 2]);
-    expect(inputSelectionSpan("aa\nbb\ncc", 1, 7, 1)).toEqual([0, 2]);
-    expect(inputSelectionSpan("aa\nbb\ncc", 1, 7, 2)).toEqual([0, 1]);
-  });
-});
-
 describe("inputRender", () => {
   const text = (row: InputRow): string => row.segments.map((s) => s.text).join("");
   // An inverse-mask string: "I" where a cell is inverse, "." where it is plain.
@@ -127,5 +97,123 @@ describe("inputRender", () => {
     expect(rows.map((r) => r.prefix)).toEqual(["↑ ", "  ", "  "]);
     expect(rows[0]?.gutter).toBe(true); // the ↑ overflow row
     expect(mask(rows[2] as InputRow)).toBe("..I"); // cursor at EOL of l4
+  });
+});
+
+describe("soft-wrap (width 20 → 18 content cells per row)", () => {
+  const W = 20;
+  const text = (row: InputRow): string => row.segments.map((s) => s.text).join("");
+  const mask = (row: InputRow): string =>
+    row.segments.map((s) => (s.inverse ? "I" : ".").repeat(s.text.length)).join("");
+  const v30 = "abcdefghijklmnopqrstuvwxyz0123"; // 30 chars → 18 + 12
+
+  test("cursor at the end of a wrapped value is on the LAST visual row", () => {
+    const { rows } = inputRender(v30, 30, null, 10, W);
+    expect(rows.map(text)).toEqual(["abcdefghijklmnopqr", "stuvwxyz0123 "]);
+    expect(rows.map((r) => r.prefix)).toEqual(["❯ ", "  "]);
+    expect(mask(rows[0] as InputRow)).toBe("..................");
+    expect(mask(rows[1] as InputRow)).toBe("............I");
+  });
+
+  test("a mid-text cursor lands on its own visual row and column", () => {
+    const view = inputView(v30, 25, 10, W);
+    expect(view).toMatchObject({ cursorRow: 1, cursorCol: 7 });
+    const { rows } = inputRender(v30, 25, null, 10, W);
+    expect(mask(rows[0] as InputRow)).toBe("..................");
+    expect(mask(rows[1] as InputRow)).toBe(".......I....");
+  });
+
+  test("the cursor at a wrap boundary is the first cell of the NEXT row", () => {
+    expect(inputView(v30, 18, 10, W)).toMatchObject({ cursorRow: 1, cursorCol: 0 });
+    expect(inputView(v30, 17, 10, W)).toMatchObject({ cursorRow: 0, cursorCol: 17 });
+  });
+
+  test("EOL on an exactly full row goes to a fresh row below (pinned)", () => {
+    const v18 = v30.slice(0, 18);
+    const { rows } = inputRender(v18, 18, null, 10, W);
+    expect(rows.map(text)).toEqual([v18, " "]);
+    expect(rows.map((r) => r.prefix)).toEqual(["❯ ", "  "]);
+    expect(mask(rows[1] as InputRow)).toBe("I");
+    // …but only while the cursor is there: moved off, the extra row is gone.
+    expect(inputRender(v18, 3, null, 10, W).rows).toHaveLength(1);
+    expect(inputRowCount(v18, 18, W, 10)).toBe(2);
+    expect(inputRowCount(v18, 3, W, 10)).toBe(1);
+  });
+
+  test("a wrapped line after a newline: continuation rows keep the blank gutter", () => {
+    const value = `hi\n${v30}`;
+    const { rows } = inputRender(value, value.length, null, 10, W);
+    expect(rows.map(text)).toEqual(["hi", "abcdefghijklmnopqr", "stuvwxyz0123 "]);
+    expect(rows.map((r) => r.prefix)).toEqual(["❯ ", "  ", "  "]);
+    expect(mask(rows[2] as InputRow)).toBe("............I");
+  });
+
+  test("selection highlight continues across a wrap boundary", () => {
+    const { rows } = inputRender(v30, 22, 10, 10, W); // select [10, 22)
+    expect(mask(rows[0] as InputRow)).toBe("..........IIIIIIII");
+    expect(mask(rows[1] as InputRow)).toBe("IIII........");
+  });
+
+  test("a wide character is never split across rows", () => {
+    const value = `a${"日".repeat(9)}`; // 1 + 18 cells: the 9th 日 does not fit on row 0
+    const { rows } = inputRender(value, value.length, null, 10, W);
+    expect(rows.map(text)).toEqual([`a${"日".repeat(8)}`, "日 "]);
+  });
+
+  test("an emoji (surrogate pair) stays whole and its cursor cell covers both units", () => {
+    const value = "😀".repeat(10); // 20 cells
+    expect(inputView(value, value.length, 10, W).lines).toEqual(["😀".repeat(9), "😀"]);
+    const { rows } = inputRender(value, 0, null, 10, W);
+    expect(mask(rows[0] as InputRow)).toBe(`II${".".repeat(16)}`);
+  });
+
+  test("maxRows windows VISUAL rows and keeps the cursor row visible", () => {
+    const value = "x".repeat(100); // 6 rows of 18
+    const view = inputView(value, value.length, 3, W);
+    expect(view.totalLines).toBe(6);
+    expect(view.lines).toHaveLength(3);
+    expect(view.moreAbove).toBe(true);
+    expect(view.moreBelow).toBe(false);
+    expect(view.lines[view.cursorRow]).toBe("x".repeat(10)); // the last (partial) row
+    const { rows } = inputRender(value, value.length, null, 3, W);
+    expect(rows.map((r) => r.prefix)).toEqual(["↑ ", "  ", "  "]);
+    expect(inputRowCount(value, value.length, W, 3)).toBe(3);
+  });
+
+  test("a tab is displayed as 4 spaces; the buffer rows keep the tab byte", () => {
+    const { rows } = inputRender("a\tb", 3, null, 10, W);
+    expect(rows.map(text)).toEqual(["a    b "]);
+    expect(mask(rows[0] as InputRow)).toBe("......I");
+    expect(inputView("a\tb", 3, 10, W).lines).toEqual(["a\tb"]);
+  });
+
+  test("the cursor ON a tab is an inverse cell on the first of its 4 cells (pinned)", () => {
+    const { rows } = inputRender("a\tb", 1, null, 10, W);
+    expect(text(rows[0] as InputRow)).toBe("a    b");
+    expect(mask(rows[0] as InputRow)).toBe(".I....");
+  });
+
+  test("a selection covering a tab highlights all 4 of its cells", () => {
+    const { rows } = inputRender("a\tb", 2, 0, 10, W); // select "a\t"
+    expect(mask(rows[0] as InputRow)).toBe("IIIII.");
+  });
+
+  test("a tab never splits across a wrap boundary and moves to the next row (pinned)", () => {
+    const value = `${"x".repeat(16)}\t`; // 16 + 4 > 18 cells
+    const { rows } = inputRender(value, value.length, null, 10, W);
+    expect(rows.map(text)).toEqual(["x".repeat(16), "     "]); // tab (4) + cursor cell
+    expect(inputView(value, value.length, 10, W).lines).toEqual(["x".repeat(16), "\t"]);
+  });
+
+  test("tabs count as 4 cells for the row count (box height)", () => {
+    expect(inputRowCount("\t\t\t\t", 0, W, 10)).toBe(1); // 16 cells
+    expect(inputRowCount("\t\t\t\t\t", 0, W, 10)).toBe(2); // 20 cells
+    expect(inputView("\t\t\t\t\t", 0, 10, W).totalLines).toBe(2);
+  });
+
+  test("an empty line stays one row; width Infinity never wraps", () => {
+    expect(inputRowCount("", 0, W, 10)).toBe(1);
+    expect(inputRowCount("a\n\nb", 0, W, 10)).toBe(3);
+    expect(inputView("x".repeat(100), 100, 10).lines).toHaveLength(1);
   });
 });
