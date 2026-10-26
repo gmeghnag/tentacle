@@ -1003,9 +1003,11 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 
 > **Owner queue (2026-10-25, updated 2026-10-26), next code tasks in this order:**
 > 1. ~~task 7 `connect-sessions`~~ DONE, merged `6319beb` (2026-10-26; `docs/feat/connect-sessions.md`);
-> 2. `context-awareness` (`docs/eval/context-awareness.md`);
-> 3. `context-reset` (`docs/eval/context-reset.md`; plan to revise for
->    decisions 11 and 13, then 3 branches);
+> 2. ~~`context-awareness`~~ DONE, merged `867a4d0` (2026-10-26; `docs/feat/context-awareness.md`; record v7);
+> 3. `context-reset` (`docs/eval/context-reset.md`; re-planned 2026-10-26,
+>    3 branches; owner answered CR-Q1/CR-Q2; takes record v8 if it needs one);
+> 3b. skills hot-reload for the USER (`/name` list + `/skills` panel follow a
+>    reset / new skill without restart) — owner CR-Q1, right after context-reset;
 > 4. `docker-runtime` — `run`/`attach --docker` (`docs/eval/docker-runtime.md`,
 >    owner answers 2026-10-26; promote to `feat/` when picked; slices A
 >    `packages/docker`, B neutral `SandboxHost` seam, `ssh://` dial-stdio, C CLI/docs);
@@ -1014,6 +1016,11 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 >    refresh against today's main);
 > 7. parallel tools and parallel sub-agents (`docs/eval/parallel-tools.md`,
 >    `docs/eval/parallel-agents.md`; evaluate first).
+>
+> **Debt (found in context-awareness, 2026-10-26):** `parseAgentDefinition`
+> (`packages/agent/src/agent-defs.ts`) silently ignores an invalid `model` or
+> `contextWindow` in a sub-agent's frontmatter — surface it (a load warning),
+> never a silent drop. Type: fix · Size: S · Blast: contained.
 > Then the mobile app tasks resume (task 8 onward, `docs/eval/mobile-app.md`).
 >
 > **Eval open (owner, 2026-10-26):** `docker-runtime` — `run`/`attach` on a
