@@ -81,6 +81,64 @@ export function stopReasonFromProtocol(reason: StopReason): AgentStopReason {
   }
 }
 
+const PROGRESS_TEXT_MAX = 200;
+
+/**
+ * Text from a daemon that may be a pod (not trusted): control characters
+ * (terminal escapes, newlines) become spaces and the length is capped.
+ */
+function progressText(value: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+  const clean = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+  return clean.length > PROGRESS_TEXT_MAX ? `${clean.slice(0, PROGRESS_TEXT_MAX - 1)}…` : clean;
+}
+
+/**
+ * Reverse of the daemon's `subagent_*` mapping. A progress frame is a label:
+ * an unknown kind (a newer daemon's) or a known kind missing its fields is
+ * ignored, never a thrown error that would fail the turn.
+ */
+function progressToEvent(
+  update: Extract<SessionUpdate, { type: "tool_progress" }>,
+): AgentEvent | null {
+  const id = update.toolCallId;
+  switch (update.kind) {
+    case "subagent_start":
+      return update.agentType !== undefined && update.description !== undefined
+        ? {
+            type: "subagent_start",
+            id,
+            agentType: progressText(update.agentType),
+            description: progressText(update.description),
+          }
+        : null;
+    case "subagent_tool":
+      return update.label !== undefined
+        ? { type: "subagent_tool", id, label: progressText(update.label) }
+        : null;
+    case "subagent_usage":
+      return update.promptTokens !== undefined && update.completionTokens !== undefined
+        ? {
+            type: "subagent_usage",
+            id,
+            promptTokens: update.promptTokens,
+            completionTokens: update.completionTokens,
+          }
+        : null;
+    case "subagent_end":
+      return update.toolUses !== undefined && update.stopReason !== undefined
+        ? {
+            type: "subagent_end",
+            id,
+            toolUses: update.toolUses,
+            stopReason: progressText(update.stopReason),
+          }
+        : null;
+    default:
+      return null;
+  }
+}
+
 function textOf(content: ContentBlock): string {
   return content.type === "text" ? content.text : "";
 }
@@ -198,6 +256,8 @@ export function updateToEvent(
       return { type: "steer", text: update.text, ...(update.id ? { id: update.id } : {}) };
     case "context_note":
       return { type: "context_note", text: update.text, reason: update.reason };
+    case "tool_progress":
+      return progressToEvent(update);
     // The turn bracket is consumed by `RemoteSession` (it ends the turn by
     // `turnId`); it is not an `AgentEvent` of its own. `history_replaced` is
     // the barrier the reducer resyncs on; `RemoteSession` turns the snapshot

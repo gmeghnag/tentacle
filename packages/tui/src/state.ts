@@ -50,6 +50,11 @@ export interface SubAgentProgress {
   /** Child tool-call labels, newest last (capped). */
   readonly activities: readonly string[];
   readonly toolUses: number;
+  /**
+   * The sub-agent's OWN tokens (prompt + completion, summed over its model calls).
+   * Shown on its row only: never in `sessionTokens` nor the context meter (owner 2026-10-26).
+   */
+  readonly tokens: number;
   readonly done: boolean;
 }
 
@@ -141,6 +146,7 @@ const EMPTY_SUB: SubAgentProgress = {
   description: "",
   activities: [],
   toolUses: 0,
+  tokens: 0,
   done: false,
 };
 
@@ -325,9 +331,19 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
           description: event.description,
           activities: [],
           toolUses: 0,
+          tokens: 0,
           done: false,
         },
       }));
+
+    case "subagent_usage":
+      return updateTool(state, event.id, (t) => {
+        const prev = t.sub ?? EMPTY_SUB;
+        return {
+          ...t,
+          sub: { ...prev, tokens: prev.tokens + event.promptTokens + event.completionTokens },
+        };
+      });
 
     case "subagent_tool":
       return updateTool(state, event.id, (t) => {

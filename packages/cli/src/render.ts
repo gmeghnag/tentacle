@@ -35,6 +35,8 @@ export function render(event: AgentEvent): string {
       return `  └─ ${event.agentType}: ${event.description}\n`;
     case "subagent_tool":
       return `     ${event.label}\n`;
+    case "subagent_usage":
+      return "";
     case "subagent_end":
       return `  └─ done (${event.toolUses} tool ${event.toolUses === 1 ? "use" : "uses"})\n`;
     case "background_exit": {

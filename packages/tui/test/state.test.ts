@@ -50,9 +50,33 @@ describe("display state reducer", () => {
         description: "find it",
         activities: ["Read a.ts", "Read b.ts"],
         toolUses: 2,
+        tokens: 0,
         done: true,
       });
     }
+  });
+
+  test("subagent_usage sums into the row's own tokens, never the session total or the context meter (owner 2026-10-26)", () => {
+    const base = fold(initialState, [
+      { type: "usage", usage: { promptTokens: 1000, completionTokens: 50 } },
+      { type: "tool_start", id: "t1", name: "agent_task", arguments: "{}" },
+      { type: "subagent_start", id: "t1", agentType: "explore", description: "d" },
+    ]);
+    const s = fold(base, [
+      { type: "subagent_usage", id: "t1", promptTokens: 400, completionTokens: 20 },
+      { type: "subagent_usage", id: "t1", promptTokens: 600, completionTokens: 30 },
+    ]);
+    const tool = s.items.find((i) => i.kind === "tool");
+    expect(tool?.kind === "tool" ? tool.sub?.tokens : null).toBe(1050);
+    expect(s.sessionTokens).toEqual({ prompt: 1000, completion: 50 });
+    expect(s.lastTurnTokens).toEqual({ prompt: 1000, completion: 50 });
+  });
+
+  test("subagent_usage for an unknown call changes nothing", () => {
+    const s = fold(initialState, [
+      { type: "subagent_usage", id: "nope", promptTokens: 1, completionTokens: 1 },
+    ]);
+    expect(s).toEqual(initialState);
   });
 
   test("streams assistant text into a single trailing item", () => {

@@ -242,13 +242,41 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
       return { type: "steer", text: event.text, ...(event.id ? { id: event.id } : {}) };
     case "context_note":
       return { type: "context_note", text: event.text, reason: event.reason };
-    // Nested sub-agent progress is a local-TUI nicety; remote clients see the
-    // `agent_task` tool opaquely (its final report rides the tool_call_update).
-    // A background-job exit likewise isn't streamed to remote clients yet (the
-    // model still gets its injected note server-side, so behaviour is correct).
+    // Nested sub-agent progress rides one display update keyed by the parent call
+    // (docs/feat/subagent-progress-wire.md); the final report rides tool_call_update.
     case "subagent_start":
+      return {
+        type: "tool_progress",
+        toolCallId: event.id,
+        kind: "subagent_start",
+        agentType: event.agentType,
+        description: event.description,
+      };
     case "subagent_tool":
+      return {
+        type: "tool_progress",
+        toolCallId: event.id,
+        kind: "subagent_tool",
+        label: event.label,
+      };
+    case "subagent_usage":
+      return {
+        type: "tool_progress",
+        toolCallId: event.id,
+        kind: "subagent_usage",
+        promptTokens: event.promptTokens,
+        completionTokens: event.completionTokens,
+      };
     case "subagent_end":
+      return {
+        type: "tool_progress",
+        toolCallId: event.id,
+        kind: "subagent_end",
+        toolUses: event.toolUses,
+        stopReason: event.stopReason,
+      };
+    // A background-job exit isn't streamed to remote clients yet (the
+    // model still gets its injected note server-side, so behaviour is correct).
     case "background_exit":
     case "history_commit":
     case "context_reset":

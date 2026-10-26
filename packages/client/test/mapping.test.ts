@@ -247,3 +247,80 @@ describe("hook resource blocks (H1)", () => {
     expect(result([{ type: "resource", uri: "hook://exploded/x" }])).not.toHaveProperty("hook");
   });
 });
+
+describe("updateToEvent: tool_progress (docs/feat/subagent-progress-wire.md)", () => {
+  const names = new Map<string, string>();
+  const cases: [SessionUpdate, unknown][] = [
+    [
+      {
+        type: "tool_progress",
+        toolCallId: "c1",
+        kind: "subagent_start",
+        agentType: "explore",
+        description: "find",
+      },
+      { type: "subagent_start", id: "c1", agentType: "explore", description: "find" },
+    ],
+    [
+      { type: "tool_progress", toolCallId: "c1", kind: "subagent_tool", label: "Read a.ts" },
+      { type: "subagent_tool", id: "c1", label: "Read a.ts" },
+    ],
+    [
+      {
+        type: "tool_progress",
+        toolCallId: "c1",
+        kind: "subagent_usage",
+        promptTokens: 9,
+        completionTokens: 2,
+      },
+      { type: "subagent_usage", id: "c1", promptTokens: 9, completionTokens: 2 },
+    ],
+    [
+      {
+        type: "tool_progress",
+        toolCallId: "c1",
+        kind: "subagent_end",
+        toolUses: 3,
+        stopReason: "end_turn",
+      },
+      { type: "subagent_end", id: "c1", toolUses: 3, stopReason: "end_turn" },
+    ],
+  ];
+
+  test("each kind maps back to the AgentEvent the daemon started from", () => {
+    for (const [update, event] of cases) {
+      expect(updateToEvent(update, names)).toEqual(event as never);
+    }
+  });
+
+  test("a pod's text is sanitized: control characters (terminal escapes, newlines) become spaces, length is capped", () => {
+    const label = updateToEvent(
+      {
+        type: "tool_progress",
+        toolCallId: "c1",
+        kind: "subagent_tool",
+        label: "a\u001b[31mred\nline",
+      },
+      names,
+    );
+    expect(label).toEqual({ type: "subagent_tool", id: "c1", label: "a [31mred line" });
+    const long = updateToEvent(
+      { type: "tool_progress", toolCallId: "c1", kind: "subagent_tool", label: "x".repeat(5000) },
+      names,
+    );
+    expect(long?.type === "subagent_tool" ? long.label.length : -1).toBe(200);
+  });
+
+  test("an unknown kind, or a known kind missing its fields, is ignored (null), never thrown", () => {
+    const bad: SessionUpdate[] = [
+      { type: "tool_progress", toolCallId: "c1", kind: "from_the_future" },
+      { type: "tool_progress", toolCallId: "c1", kind: "subagent_tool" },
+      { type: "tool_progress", toolCallId: "c1", kind: "subagent_usage", promptTokens: 1 },
+      { type: "tool_progress", toolCallId: "c1", kind: "subagent_end", toolUses: 1 },
+      { type: "tool_progress", toolCallId: "c1", kind: "subagent_start", agentType: "x" },
+    ];
+    for (const update of bad) {
+      expect(updateToEvent(update, names)).toBeNull();
+    }
+  });
+});

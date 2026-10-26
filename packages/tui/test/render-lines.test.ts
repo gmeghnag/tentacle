@@ -126,12 +126,14 @@ describe("itemLines", () => {
         description: "find bug",
         activities: ["Read auth.ts", "$ grep -n token"],
         toolUses: 2,
+        tokens: 12_345,
         done: true,
       },
     };
     const text = itemLines(tool, { expandAll: true }).map(strip).join("\n");
     expect(text).toContain("Agent find bug"); // header
-    expect(text).toContain("explore · 2 tool uses"); // tree head
+    // Own tokens: a bare number, the session total's formatter (12345 → "12k").
+    expect(text).toContain("explore · 2 tool uses · 12k"); // tree head
     expect(text).toContain("Read auth.ts");
     expect(text).toContain("$ grep -n token");
     expect(text).toContain("The bug is in auth.ts"); // report after the tree
@@ -691,6 +693,7 @@ describe("a spilled tool result", () => {
         description: "d",
         activities: ["Read a.ts"],
         toolUses: 1,
+        tokens: 0,
         done: true,
       },
       spill: { chars: 40_800, path: PATH, head: "report", tail: "end", omitted: 39_600 },

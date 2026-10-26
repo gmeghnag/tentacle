@@ -208,6 +208,12 @@ export function createSubagentRunner(deps: SubagentDeps): {
       } else if (event.type === "tool_start") {
         toolUses += 1;
         onEvent?.({ kind: "subagent_tool", label: childToolLabel(event.name, event.arguments) });
+      } else if (event.type === "usage") {
+        onEvent?.({
+          kind: "subagent_usage",
+          promptTokens: event.usage.promptTokens,
+          completionTokens: event.usage.completionTokens,
+        });
       } else if (event.type === "turn_end") {
         stopReason = event.reason;
       }

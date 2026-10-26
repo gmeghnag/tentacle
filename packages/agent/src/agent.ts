@@ -199,6 +199,12 @@ export type AgentEvent =
     }
   | { readonly type: "subagent_tool"; readonly id: string; readonly label: string }
   | {
+      readonly type: "subagent_usage";
+      readonly id: string;
+      readonly promptTokens: number;
+      readonly completionTokens: number;
+    }
+  | {
       readonly type: "subagent_end";
       readonly id: string;
       readonly toolUses: number;
@@ -246,6 +252,13 @@ function progressToEvent(id: string, event: ToolProgressEvent): AgentEvent {
       };
     case "subagent_tool":
       return { type: "subagent_tool", id, label: event.label };
+    case "subagent_usage":
+      return {
+        type: "subagent_usage",
+        id,
+        promptTokens: event.promptTokens,
+        completionTokens: event.completionTokens,
+      };
     case "subagent_end":
       return { type: "subagent_end", id, toolUses: event.toolUses, stopReason: event.stopReason };
   }
