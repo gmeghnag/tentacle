@@ -678,6 +678,15 @@ export class HookRunner {
   }
 
   /**
+   * The session's history was replaced (a context reset): the next
+   * `model_request` reports the whole history as new — a length-based delta
+   * cannot tell a replacement that did not shrink it.
+   */
+  forgetModelRequestBaseline(sessionId: string): void {
+    this.modelRequestCounts.delete(sessionId);
+  }
+
+  /**
    * `model_request`: a read-only notification before a model call, never
    * awaited. At most one in flight per session: a call arriving meanwhile is
    * dropped, logged once per burst (R3). Never throws.

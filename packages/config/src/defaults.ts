@@ -126,6 +126,12 @@ export const DEFAULT_CONFIG_JSONC = `{
   // the window is model.contextWindow.
   // "contextAwareness": { "enabled": ${DEFAULT_CONTEXT_AWARENESS}, "stepPercent": ${DEFAULT_CONTEXT_STEP_PERCENT} },
 
+  // Context reset: the model may renew its own context (the \`context_reset\` tool,
+  // asked like any tool): the history is replaced by the system prompt (re-read
+  // from disk) and a restart prompt the model writes. "maxPerMessage" caps the
+  // resets per user message (-1 = unlimited).
+  // "contextReset": { "enabled": ${DEFAULT_CONTEXT_RESET_ENABLED}, "maxPerMessage": ${DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE} },
+
   // Auto-wake: when a background job exits while idle, automatically start a
   // turn so the agent reacts to it (reads output, continues). On by default;
   // set false to require a manual prompt instead.
@@ -167,7 +173,7 @@ export const DEFAULT_CONFIG_JSONC = `{
   //  - "model" merges per key, but provider/baseURL/apiKey/apiKeyCommand move as
   //    one unit: set any of them and the others are NOT inherited (a key is never
   //    sent to an endpoint it was not configured for);
-  //  - "subagents"/"tools"/"contextAwareness" merge per key; other settings replace;
+  //  - "subagents"/"tools"/"contextAwareness"/"contextReset" merge per key; other settings replace;
   //  - "mcpServers" merge by name: a server is replaced whole, null removes it.
   // "profiles": {
   //   "anthropic": {

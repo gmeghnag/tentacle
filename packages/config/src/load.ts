@@ -19,6 +19,7 @@ import { type ProjectHooks, discoverProjectHooks } from "./hooks-scan.ts";
 import {
   type PackageHook,
   type PackageInfo,
+  escapingSymlink,
   mergePackageContributions,
   scanPackages,
 } from "./packages.ts";
@@ -280,13 +281,36 @@ export async function refreshSessionContext(
   const fromFile = await readPromptFile(config.promptPath, config.promptFileRequired);
   // Same precedence as `resolveConfig`: env > the prompt file > the default.
   const identity = env.TENTACLE_SYSTEM_PROMPT ?? fromFile ?? DEFAULT_SYSTEM_PROMPT;
+  // A package's tree is checked again as at start-up (`loadPackage`): one that
+  // now holds a symlink out of it (or is gone) contributes no skill. Only
+  // when skills are on: off = no I/O, as `discoverSkills`.
+  const packageSkillRoots: string[] = [];
+  const packageDiagnostics: string[] = [];
+  for (const p of config.skillsEnabled ? config.packages : []) {
+    let escaping: string | undefined;
+    try {
+      escaping = await escapingSymlink(p.dir);
+    } catch (error) {
+      packageDiagnostics.push(
+        `package ${p.name}: skills skipped (${error instanceof Error ? error.message : String(error)})`,
+      );
+      continue;
+    }
+    if (escaping !== undefined) {
+      packageDiagnostics.push(
+        `package ${p.name}: skills skipped (${escaping} points outside the package)`,
+      );
+      continue;
+    }
+    // Derived from the package's dir, not the start-up `skillsDir` (which
+    // exists only if the folder existed then).
+    packageSkillRoots.push(join(p.dir, "skills"));
+  }
   const discovered = await discoverSkills({
     launchCwd: config.cwd,
     home: env.HOME ?? homedir(),
     configDir: config.configDir,
-    // Derived from each package's dir, not the start-up `skillsDir` (which
-    // exists only if the folder existed then).
-    packageSkillRoots: config.packages.map((p) => join(p.dir, "skills")),
+    packageSkillRoots,
     enabled: config.skillsEnabled,
   });
   const agents = config.agentsMdEnabled ? await readAgentsMd(config.cwd) : undefined;
@@ -299,7 +323,7 @@ export async function refreshSessionContext(
   return {
     systemPrompt: composed.systemPrompt,
     skills: discovered.skills,
-    skillDiagnostics: discovered.diagnostics,
+    skillDiagnostics: [...packageDiagnostics, ...discovered.diagnostics],
   };
 }
 

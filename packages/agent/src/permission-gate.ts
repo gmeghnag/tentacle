@@ -20,6 +20,7 @@ import {
   type Tool,
   toolLabel,
 } from "@tentacle/core";
+import { CONTEXT_RESET_TOOL_NAME } from "@tentacle/tools";
 import type { HookRunner } from "./hooks.ts";
 import { commandCoveredByPrefixes, suggestShellPrefix } from "./shell-prefix.ts";
 
@@ -54,6 +55,13 @@ export function describeToolCall(tool: Tool, input: unknown): PermissionRequest 
       return { ...base, title: "Write a file", ...detail(str("path")) };
     case "fs_edit":
       return { ...base, title: "Edit a file", ...detail(str("path")) };
+    // The user sees what the model keeps: everything else is discarded.
+    case CONTEXT_RESET_TOOL_NAME:
+      return {
+        ...base,
+        title: "Reset the context (the model restarts from its prompt)",
+        ...detail(str("prompt")),
+      };
     default:
       return { ...base, title: `Run ${toolLabel(tool.name)}` };
   }

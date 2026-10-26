@@ -998,7 +998,13 @@ export class RemoteSession implements SessionStreamListener {
   ): void {
     const shown = this.foreign;
     this.streaming = out.turn;
-    const turn = resetIn !== null ? this.turnFor(resetIn) : null;
+    // Still running at the cut but not tracked here (its own consumer stopped
+    // reading): taken up as at any reset, so its updates past the cut are not
+    // dropped.
+    const turn =
+      resetIn === null
+        ? null
+        : (this.turnFor(resetIn) ?? (out.turn === resetIn ? this.startForeign(resetIn, "") : null));
     if (turn && !turn.ended) {
       // The calls it lists are shown by the event: a replayed `tool_call` is not shown again.
       for (const m of out.messages) {

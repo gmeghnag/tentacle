@@ -165,7 +165,11 @@ async function reloadedHost(
       buildAgent(
         { ...config, cwd },
         // Hook failures: the daemon's error sink, like a turn error.
-        options.onError ? { log: (line) => options.onError?.(new Error(line)) } : {},
+        {
+          ...(options.onError ? { log: (line) => options.onError?.(new Error(line)) } : {}),
+          // Not failures: the startup-facts sink, not the error one.
+          ...(options.onNotice ? { notice: options.onNotice } : {}),
+        },
       ),
     skills: skillCatalog(config),
     skillList: skillListing(config),
@@ -390,7 +394,7 @@ export function tunnelledAgent(
       ...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {}),
     },
     {
-      ...(options.log ? { log: options.log } : {}),
+      ...(options.log ? { log: options.log, notice: options.log } : {}),
       modelOverride: tunnelFor(),
       ...(options.autoTitle ? { titleModelOverride: tunnelFor("title") } : {}),
     },
@@ -439,7 +443,7 @@ export function startStdioDaemon(
               : {}),
             ...(log ? { log } : {}),
           })
-        : buildAgent({ ...config, cwd }, log ? { log } : {}),
+        : buildAgent({ ...config, cwd }, log ? { log, notice: log } : {}),
   });
   const channel = streamChannel(
     process.stdin as unknown as NodeReadableLike,

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   ChatMessage,
   ChatRequest,
+  ExecResult,
   ExecutionEnvironment,
   ModelProvider,
   StreamEvent,
@@ -24,6 +25,7 @@ import {
   compactedHistory,
   summarizeConversation,
 } from "../src/compact.ts";
+import { HookRunner } from "../src/hooks.ts";
 import type { ResultTransform } from "../src/result-pipeline.ts";
 import { Session } from "../src/session.ts";
 
@@ -142,6 +144,47 @@ describe("Session.compact", () => {
     expect(result.summary).toBe("a dense brief");
     expect(session.messages[0]).toEqual({ role: "system", content: "SYS" });
     expect(session.messages[1]?.content).toContain("a dense brief");
+  });
+});
+
+describe("Session.compact and the model_request hook", () => {
+  test("after a compaction, the next model_request's new_messages holds the summary", async () => {
+    // The baseline is the length at the LAST model_request, so a compacted
+    // history is not necessarily shorter than it: the length delta alone would
+    // never report the summary.
+    const inputs: Record<string, unknown>[] = [];
+    const env: ExecutionEnvironment = {
+      ...noopEnv,
+      exec: async (_command, opts): Promise<ExecResult> => {
+        inputs.push(JSON.parse(opts?.stdin ?? "{}") as Record<string, unknown>);
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+    const hooks = new HookRunner({
+      specs: [{ event: "model_request", command: "mr" }],
+      env,
+      cwd: "/w",
+      modelRequestHooks: true,
+    });
+    const model = new ScriptedProvider([
+      [{ type: "text", delta: "first answer" }, { type: "done" }],
+      [{ type: "text", delta: "SUMMARY" }, { type: "done" }],
+      [{ type: "text", delta: "second answer" }, { type: "done" }],
+    ]);
+    const agent = new Agent({ model, tools: new ToolRegistry(), env, systemPrompt: "SYS", hooks });
+    const session = new Session(agent, "mr-compact");
+    const tick = () => Bun.sleep(5);
+    for await (const _ of session.send("one")) {
+      await tick();
+    }
+    await session.compact();
+    for await (const _ of session.send("two")) {
+      await tick();
+    }
+    await tick();
+    const last = inputs.at(-1);
+    const contents = (last?.new_messages as { content: string }[]).map((m) => m.content);
+    expect(contents.some((c) => c.includes("SUMMARY"))).toBe(true);
   });
 });
 
