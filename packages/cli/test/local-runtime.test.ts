@@ -11,10 +11,11 @@ import type {
   JobController,
   ModelProvider,
   StreamEvent,
+  ToolContext,
 } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
-import { ToolRegistry } from "@tentacle/tools";
+import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
@@ -71,6 +72,7 @@ class FakeJobs implements JobController {
 function daemon(
   model: ModelProvider,
   jobs?: JobController,
+  tools: ToolRegistry = new ToolRegistry(),
 ): {
   channel: ReturnType<typeof createChannelPair>[1];
   dispose: () => void;
@@ -79,7 +81,7 @@ function daemon(
   const host = new SessionHost({
     defaultCwd: "/tmp/work",
     createAgent: () => ({
-      agent: new Agent({ model, tools: new ToolRegistry(), env: noopEnv }),
+      agent: new Agent({ model, tools, env: noopEnv }),
       permissions: new PermissionBroker(),
       ...(jobs ? { jobs } : {}),
     }),
@@ -207,6 +209,56 @@ describe("createLocalRuntime (local over RPC)", () => {
     expect(await saver.drain()).toEqual([]);
     const saved = (await store.list()).records;
     expect(saved.map((r) => r.messages.map((m) => m.content))).toEqual([["last words", "bye"]]);
+  });
+
+  test("sub-agent progress crosses the wire: start, tool, usage, end reach the client between tool_start and tool_result", async () => {
+    // docs/feat/subagent-progress-wire.md. Mutation: map the subagent_* events to
+    // null again in the daemon's eventToUpdate → no subagent_* events here.
+    const ARGS = '{"command":"x"}'; // valid for the borrowed shell input schema
+    const probe = {
+      ...shellTool,
+      name: "agent_task",
+      permission: "none" as const,
+      async execute(_input: unknown, ctx: ToolContext) {
+        ctx.emitProgress?.({ kind: "subagent_start", agentType: "explore", description: "find" });
+        ctx.emitProgress?.({ kind: "subagent_tool", label: "Read a.ts" });
+        ctx.emitProgress?.({ kind: "subagent_usage", promptTokens: 40, completionTokens: 2 });
+        ctx.emitProgress?.({ kind: "subagent_end", toolUses: 1, stopReason: "end_turn" });
+        return { content: "report" };
+      },
+    };
+    const model = new ScriptedProvider([
+      [
+        { type: "tool_call", toolCall: { id: "p1", name: "agent_task", arguments: ARGS } },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const { channel, dispose } = daemon(model, undefined, new ToolRegistry().register(probe));
+    const runtime = await createLocalRuntime({
+      channel,
+      disposeTransport: dispose,
+      permissions: new PermissionBroker(),
+      saver: new SessionSaver(new JsonSessionStore(join(dir, "progress")), () => {}),
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: null,
+    });
+    const seen: unknown[] = [];
+    for await (const event of runtime.createSession().send("go")) {
+      if (event.type.startsWith("subagent_") || event.type.startsWith("tool_")) {
+        seen.push(event.type === "tool_result" ? event.type : event);
+      }
+    }
+    expect(seen).toEqual([
+      { type: "tool_start", id: "p1", name: "agent_task", arguments: ARGS },
+      { type: "subagent_start", id: "p1", agentType: "explore", description: "find" },
+      { type: "subagent_tool", id: "p1", label: "Read a.ts" },
+      { type: "subagent_usage", id: "p1", promptTokens: 40, completionTokens: 2 },
+      { type: "subagent_end", id: "p1", toolUses: 1, stopReason: "end_turn" },
+      "tool_result",
+    ]);
+    runtime.dispose();
   });
 
   test("streams a daemon background-job exit to the client's jobs view while idle", async () => {

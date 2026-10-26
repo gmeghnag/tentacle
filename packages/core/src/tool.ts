@@ -70,6 +70,12 @@ export interface ToolResult {
 export type ToolProgressEvent =
   | { readonly kind: "subagent_start"; readonly agentType: string; readonly description: string }
   | { readonly kind: "subagent_tool"; readonly label: string }
+  // One model call's tokens of the child (its own; never added to the parent's totals).
+  | {
+      readonly kind: "subagent_usage";
+      readonly promptTokens: number;
+      readonly completionTokens: number;
+    }
   | { readonly kind: "subagent_end"; readonly toolUses: number; readonly stopReason: string };
 
 export interface ToolContext {

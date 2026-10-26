@@ -116,6 +116,30 @@ export const ContextNoteSchema = z.object({
   reason: z.enum(["continue", "background_exit", "hook"]),
 });
 
+/**
+ * Live progress of a tool that runs a nested agent (the `agent_task` sub-agent),
+ * keyed by the PARENT tool call. Display-only. `kind` is a free string so a
+ * newer daemon's kind is skipped by an older client instead of failing the
+ * turn; the fields each known kind needs are checked by the client's reverse
+ * mapping (a label never fails a turn). Known kinds: `subagent_start`
+ * (agentType, description), `subagent_tool` (label), `subagent_usage`
+ * (promptTokens, completionTokens: one child model call, the child's own),
+ * `subagent_end` (toolUses, stopReason). Text is sanitized client-side: a
+ * pod's daemon is not trusted (AGENTS §7).
+ */
+export const ToolProgressSchema = z.object({
+  type: z.literal("tool_progress"),
+  toolCallId: z.string().min(1),
+  kind: z.string().min(1),
+  agentType: z.string().optional(),
+  description: z.string().optional(),
+  label: z.string().optional(),
+  toolUses: z.number().int().nonnegative().optional(),
+  stopReason: z.string().optional(),
+  promptTokens: z.number().int().nonnegative().optional(),
+  completionTokens: z.number().int().nonnegative().optional(),
+});
+
 /** A turn began (first update of every turn); carries the prompt so a replay shows what was asked. */
 export const TurnStartSchema = z.object({
   type: z.literal("turn_start"),
@@ -196,6 +220,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   BackgroundExitSchema,
   SteerSchema,
   ContextNoteSchema,
+  ToolProgressSchema,
   TurnStartSchema,
   TurnEndUpdateSchema,
   HistoryReplacedSchema,
@@ -235,6 +260,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   background_exit: "display",
   steer: "display",
   context_note: "display",
+  // A label/meter on a running tool: skipping it hangs nothing (the result rides tool_call_update).
+  tool_progress: "display",
   turn_start: "mandatory",
   turn_end: "mandatory",
   history_replaced: "mandatory",

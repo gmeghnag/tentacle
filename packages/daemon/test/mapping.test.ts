@@ -196,6 +196,50 @@ describe("contentToText", () => {
   });
 });
 
+describe("eventToUpdate: sub-agent progress rides the wire (docs/feat/subagent-progress-wire.md)", () => {
+  test("each subagent_* event → a tool_progress keyed by the parent call", () => {
+    const events: [AgentEvent, SessionUpdate][] = [
+      [
+        { type: "subagent_start", id: "c1", agentType: "explore", description: "find" },
+        {
+          type: "tool_progress",
+          toolCallId: "c1",
+          kind: "subagent_start",
+          agentType: "explore",
+          description: "find",
+        },
+      ],
+      [
+        { type: "subagent_tool", id: "c1", label: "Read a.ts" },
+        { type: "tool_progress", toolCallId: "c1", kind: "subagent_tool", label: "Read a.ts" },
+      ],
+      [
+        { type: "subagent_usage", id: "c1", promptTokens: 9, completionTokens: 2 },
+        {
+          type: "tool_progress",
+          toolCallId: "c1",
+          kind: "subagent_usage",
+          promptTokens: 9,
+          completionTokens: 2,
+        },
+      ],
+      [
+        { type: "subagent_end", id: "c1", toolUses: 3, stopReason: "end_turn" },
+        {
+          type: "tool_progress",
+          toolCallId: "c1",
+          kind: "subagent_end",
+          toolUses: 3,
+          stopReason: "end_turn",
+        },
+      ],
+    ];
+    for (const [event, update] of events) {
+      expect(eventToUpdate(event)).toEqual(update);
+    }
+  });
+});
+
 describe("toUpdateParams (the session/update frame)", () => {
   const samples: SessionUpdate[] = [
     { type: "agent_message_chunk", content: { type: "text", text: "a" } },
@@ -206,6 +250,7 @@ describe("toUpdateParams (the session/update frame)", () => {
     { type: "agent_usage", promptTokens: 1, completionTokens: 2 },
     { type: "background_exit", jobId: "j", command: "c", status: "exited", exitCode: null },
     { type: "steer", text: "s" },
+    { type: "tool_progress", toolCallId: "t", kind: "subagent_tool", label: "Read a.ts" },
     { type: "turn_start", turnId: "t", prompt: "p" },
     { type: "turn_end", turnId: "t", stopReason: "end_turn" },
     { type: "history_replaced", reason: "compact" },

@@ -1562,6 +1562,7 @@
           "steer": "#/$defs/Steer",
           "tool_call": "#/$defs/ToolCall",
           "tool_call_update": "#/$defs/ToolCallUpdate",
+          "tool_progress": "#/$defs/ToolProgress",
           "turn_end": "#/$defs/TurnEndUpdate",
           "turn_start": "#/$defs/TurnStart"
         },
@@ -1594,6 +1595,9 @@
         },
         {
           "$ref": "#/$defs/ContextNote"
+        },
+        {
+          "$ref": "#/$defs/ToolProgress"
         },
         {
           "$ref": "#/$defs/TurnStart"
@@ -1867,6 +1871,50 @@
         }
       },
       "required": ["status", "toolCallId", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
+    "ToolProgress": {
+      "additionalProperties": true,
+      "properties": {
+        "agentType": {
+          "type": "string"
+        },
+        "completionTokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "type": "string"
+        },
+        "kind": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "promptTokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stopReason": {
+          "type": "string"
+        },
+        "toolCallId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "toolUses": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "tool_progress",
+          "type": "string"
+        }
+      },
+      "required": ["kind", "toolCallId", "type"],
       "type": "object",
       "x-event-class": "display"
     },

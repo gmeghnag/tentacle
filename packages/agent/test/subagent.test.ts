@@ -290,13 +290,46 @@ describe("createSubagentRunner", () => {
             events.push(`start:${e.agentType}`);
           } else if (e.kind === "subagent_tool") {
             events.push(`tool:${e.label}`);
-          } else {
+          } else if (e.kind === "subagent_end") {
             events.push(`end:${e.toolUses}`);
           }
         },
       },
     );
     expect(events).toEqual(["start:general-purpose", "tool:Read a.ts", "end:1"]);
+  });
+
+  test("forwards each child usage event as subagent_usage (its own tokens, per model call)", async () => {
+    const { env } = recordingEnv();
+    const usages: [number, number][] = [];
+    const { run } = createSubagentRunner({
+      model: new ScriptedProvider([
+        [
+          toolCall("fs_read", { path: "a.ts" }),
+          { type: "done", usage: { promptTokens: 100, completionTokens: 7 } },
+        ],
+        [
+          { type: "text", delta: "done" },
+          { type: "done", usage: { promptTokens: 150, completionTokens: 3 } },
+        ],
+      ]),
+      env,
+      tools: fullRegistry(),
+    });
+    await run(
+      { description: "look", prompt: "read a.ts", type: "general-purpose" },
+      {
+        onEvent: (e) => {
+          if (e.kind === "subagent_usage") {
+            usages.push([e.promptTokens, e.completionTokens]);
+          }
+        },
+      },
+    );
+    expect(usages).toEqual([
+      [100, 7],
+      [150, 3],
+    ]);
   });
 
   test("the inherited permission requester can block a child's shell command", async () => {

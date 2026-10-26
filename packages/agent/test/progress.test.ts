@@ -38,6 +38,7 @@ const probeTool: Tool = {
   async execute(_input, ctx) {
     ctx.emitProgress?.({ kind: "subagent_start", agentType: "explore", description: "probing" });
     ctx.emitProgress?.({ kind: "subagent_tool", label: "Read a.ts" });
+    ctx.emitProgress?.({ kind: "subagent_usage", promptTokens: 40, completionTokens: 2 });
     ctx.emitProgress?.({ kind: "subagent_end", toolUses: 1, stopReason: "end_turn" });
     return { content: "probe done" };
   },
@@ -63,6 +64,7 @@ describe("agent interleaves tool progress into its event stream", () => {
       if (
         event.type === "subagent_start" ||
         event.type === "subagent_tool" ||
+        event.type === "subagent_usage" ||
         event.type === "subagent_end"
       ) {
         expect((event as Extract<AgentEvent, { id: string }>).id).toBe("p1");
@@ -74,7 +76,7 @@ describe("agent interleaves tool progress into its event stream", () => {
     expect(start).toBeGreaterThanOrEqual(0);
     expect(result).toBeGreaterThan(start);
     // All three nested events land strictly between tool_start and tool_result.
-    for (const nested of ["subagent_start", "subagent_tool", "subagent_end"]) {
+    for (const nested of ["subagent_start", "subagent_tool", "subagent_usage", "subagent_end"]) {
       const at = types.indexOf(nested);
       expect(at).toBeGreaterThan(start);
       expect(at).toBeLessThan(result);

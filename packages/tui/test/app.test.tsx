@@ -1957,4 +1957,55 @@ describe("idle warm of the other Ctrl+O view", () => {
       }
     });
   });
+
+  test("a running sub-agent row shows its own tokens (bare, session-total formatter); the status bar total is untouched", async () => {
+    // docs/feat/subagent-progress-wire.md (owner 2026-10-26). Mutation: drop the
+    // `subagent_usage` reducer case → no "12k" on the row.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const agentTask = {
+      ...shellTool,
+      name: "agent_task",
+      permission: "none" as const,
+      async execute(_input: unknown, ctx: { emitProgress?: (e: never) => void }) {
+        const emit = ctx.emitProgress as (e: unknown) => void;
+        emit({ kind: "subagent_start", agentType: "explore", description: "find it" });
+        emit({ kind: "subagent_tool", label: "Read a.ts" });
+        emit({ kind: "subagent_usage", promptTokens: 11_000, completionTokens: 345 });
+        await gate;
+        return { content: "report" };
+      },
+    };
+    const model = new ScriptedProvider([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "p1", name: "agent_task", arguments: '{"command":"x"}' },
+        },
+        { type: "done", usage: { promptTokens: 7, completionTokens: 3 } },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(agentTask as never),
+      env: noopEnv,
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("go");
+    await delay(30);
+    stdin.write("\r");
+    await delay(200);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("explore · 1 tool use · 11k");
+    expect(frame).toContain("↑7 ↓3"); // the parent's own usage only
+    release();
+    await delay(100);
+    unmount();
+  });
 });

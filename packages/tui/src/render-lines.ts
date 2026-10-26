@@ -12,7 +12,7 @@ import { type ToolResultDetail, type ToolResultSpill, toolLabel } from "@tentacl
 import chalk from "chalk";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
-import { formatDurationMs } from "./format.ts";
+import { formatDurationMs, formatTokens } from "./format.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
@@ -254,7 +254,9 @@ function subAgentLines(tool: ToolItem): string[] {
     return [];
   }
   const uses = `${sub.toolUses} tool ${sub.toolUses === 1 ? "use" : "uses"}`;
-  const head = theme.subtle(`${theme.accent("◆")} ${sub.agentType} · ${uses}`);
+  // Its own tokens, a bare number like the session total's (owner 2026-10-26).
+  const tokens = sub.tokens > 0 ? ` · ${formatTokens(sub.tokens)}` : "";
+  const head = theme.subtle(`${theme.accent("◆")} ${sub.agentType} · ${uses}${tokens}`);
   const rows = sub.activities.map((label, i) => {
     const last = i === sub.activities.length - 1 && sub.done;
     return theme.subtle(`${last ? "└─" : "├─"} ${label}`);

@@ -22,6 +22,29 @@ describe("session/update payloads", () => {
     { type: "plan", entries: [{ content: "step 1", status: "in_progress" }] },
     { type: "background_exit", jobId: "j1", command: "ls", status: "exited", exitCode: 0 },
     { type: "steer", text: "also do X" },
+    {
+      type: "tool_progress",
+      toolCallId: "t1",
+      kind: "subagent_start",
+      agentType: "explore",
+      description: "d",
+    },
+    { type: "tool_progress", toolCallId: "t1", kind: "subagent_tool", label: "Read a.ts" },
+    {
+      type: "tool_progress",
+      toolCallId: "t1",
+      kind: "subagent_usage",
+      promptTokens: 1,
+      completionTokens: 2,
+    },
+    {
+      type: "tool_progress",
+      toolCallId: "t1",
+      kind: "subagent_end",
+      toolUses: 1,
+      stopReason: "end_turn",
+    },
+    { type: "tool_progress", toolCallId: "t1", kind: "some_future_kind" },
     { type: "turn_start", turnId: "t1", prompt: "go" },
     { type: "turn_end", turnId: "t1", stopReason: "end_turn" },
     { type: "turn_end", turnId: "t1", stopReason: "error", error: { message: "boom" } },
@@ -188,5 +211,30 @@ describe("history_replaced reason 'context_reset' (docs/feat/context-reset-barri
     expect(SessionUpdateSchema.safeParse({ ...barrier, reason: "other" }).success).toBe(false);
     expect(UPDATE_CLASS.history_replaced).toBe("mandatory");
     expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(12);
+  });
+});
+
+describe("tool_progress (docs/feat/subagent-progress-wire.md)", () => {
+  test("is a display update: an older client skips it", () => {
+    expect(UPDATE_CLASS.tool_progress).toBe("display");
+  });
+
+  test("kind is a free string, unknown fields are stripped, a counter must be a non-negative int", () => {
+    const ok = SessionUpdateSchema.safeParse({
+      type: "tool_progress",
+      toolCallId: "t1",
+      kind: "from_the_future",
+      extra: 1,
+    });
+    expect(ok.success).toBe(true);
+    expect(ok.success && "extra" in ok.data).toBe(false);
+    const bad = SessionUpdateSchema.safeParse({
+      type: "tool_progress",
+      toolCallId: "t1",
+      kind: "subagent_usage",
+      promptTokens: -1,
+      completionTokens: 0,
+    });
+    expect(bad.success).toBe(false);
   });
 });
