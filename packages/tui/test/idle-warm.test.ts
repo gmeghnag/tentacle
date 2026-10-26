@@ -55,8 +55,7 @@ const mkTool = (id: string): ToolItem => ({
   name: "shell",
   args: '{"command":"ls"}',
   status: "ok",
-  startedAt: 0,
-  endedAt: 500,
+  durationMs: 500,
   resultText: body,
 });
 const mkItems = (n: number, prefix: string): DisplayItem[] =>

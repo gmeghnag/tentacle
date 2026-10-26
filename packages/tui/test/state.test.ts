@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentEvent } from "@tentacle/agent";
+import { itemLines, stripAnsi } from "../src/render-lines.ts";
 import {
   type DisplayState,
   type NoticeItem,
@@ -85,7 +86,62 @@ describe("display state reducer", () => {
     expect(tool).toMatchObject({ kind: "tool", status: "ok", name: "fs_write" });
     if (tool?.kind === "tool") {
       expect(tool.detail?.kind).toBe("diff");
-      expect(tool.endedAt).toBeDefined();
+      // The event carried no durationMs: the row shows no time (docs/fix/tool-duration.md).
+      expect("durationMs" in tool).toBe(false);
+    }
+  });
+
+  test("a live tool row shows the daemon's durationMs, not the client's receipt timing (docs/fix/tool-duration.md)", () => {
+    // Mutation (red, verified): stamp the receipt delta (`durationMs: now - 1000`) in the reducer → 2000.
+    let s = applyEvent(
+      initialState,
+      { type: "tool_start", id: "c1", name: "shell", arguments: '{"command":"sleep 2"}' },
+      1000,
+    );
+    s = applyEvent(
+      s,
+      {
+        type: "tool_result",
+        id: "c1",
+        name: "shell",
+        result: { content: "ok", isError: false },
+        durationMs: 450,
+      },
+      3000,
+    );
+    const tool = s.items.find((i) => i.kind === "tool");
+    expect(tool?.kind).toBe("tool");
+    if (tool?.kind === "tool") {
+      expect(tool.durationMs).toBe(450);
+      expect(stripAnsi(itemLines(tool, { width: 80, expandAll: false })[0] ?? "")).toBe(
+        "⏺ Bash sleep 2 0.5s",
+      );
+    }
+  });
+
+  test("a live tool result without durationMs (an unmeasured, synthetic result) shows no time", () => {
+    let s = applyEvent(
+      initialState,
+      { type: "tool_start", id: "c1", name: "shell", arguments: '{"command":"sleep 2"}' },
+      1000,
+    );
+    s = applyEvent(
+      s,
+      {
+        type: "tool_result",
+        id: "c1",
+        name: "shell",
+        result: { content: "denied", isError: true },
+      },
+      3000,
+    );
+    const tool = s.items.find((i) => i.kind === "tool");
+    expect(tool?.kind).toBe("tool");
+    if (tool?.kind === "tool") {
+      expect("durationMs" in tool).toBe(false);
+      expect(stripAnsi(itemLines(tool, { width: 80, expandAll: false })[0] ?? "")).toBe(
+        "⏺ Bash sleep 2",
+      );
     }
   });
 
@@ -216,7 +272,7 @@ describe("reconnect events (docs/feat/client-reattach.md)", () => {
     expect(s.items).toEqual([
       { kind: "user", text: "hi" },
       { kind: "assistant", text: "let me look" },
-      { kind: "tool", id: "c1", name: "shell", args: "{}", status: "running", startedAt: 0 },
+      { kind: "tool", id: "c1", name: "shell", args: "{}", status: "running" },
     ]);
     // Idle (no turn running): historical calls stay as `messagesToItems` shows them.
     expect(resetHistory(initialState, history).items.at(-1)).toMatchObject({ status: "ok" });

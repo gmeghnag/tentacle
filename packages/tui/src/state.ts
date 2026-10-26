@@ -61,8 +61,8 @@ export interface ToolItem {
   readonly hook?: ToolResult["hook"];
   /** The result was spilled: shown as a short note, not the model's banner (docs/feat/tui-spill-note.md). */
   readonly spill?: ToolResultSpill;
-  readonly startedAt: number;
-  readonly endedAt?: number;
+  /** The daemon-measured run time; absent when the tool never ran or the record predates it (docs/fix/tool-duration.md). */
+  readonly durationMs?: number;
   /** Set when this tool call is a sub-agent (`agent_task`) with nested progress. */
   readonly sub?: SubAgentProgress;
 }
@@ -263,7 +263,6 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
         name: event.name,
         args: event.arguments,
         status: "running",
-        startedAt: now,
       };
       return { ...state, items: append(state.items, tool), reasoning: false };
     }
@@ -279,13 +278,13 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
               name: event.name,
               args: "",
               status: "running",
-              startedAt: now,
             };
       const finished: ToolItem = {
         ...base,
         status: event.result.isError ? "error" : "ok",
         resultText: event.result.content,
-        endedAt: now,
+        // The daemon's value only, never this client's receipt time (docs/fix/tool-duration.md).
+        ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
         ...(event.result.details ? { detail: event.result.details } : {}),
         ...(event.result.hook ? { hook: event.result.hook } : {}),
         ...(event.result.spill ? { spill: event.result.spill } : {}),

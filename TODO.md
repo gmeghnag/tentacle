@@ -1025,6 +1025,10 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 > latency). A row whose duration is unknown (older records) shows NO time,
 > never a fake `0.0s`. Plan must settle: record/store versioning for the new
 > field (strict laptop parser), and sub-agent tool rows.
+> **Status (2026-10-26):** plan approved and executed on `fix/tool-duration`
+> — task doc `docs/fix/tool-duration.md`; `DAEMON_RECORD_VERSION` is now 6
+> (context-awareness / permission-reply / parallel-tools renumber to 7+);
+> awaiting the fresh-context Review.
 
 - [x] **Local daemon on a worker thread** (the "TUI always over RPC" lever —
       moves model streaming + tool execution off the render thread, so the UI

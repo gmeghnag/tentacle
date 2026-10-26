@@ -210,7 +210,9 @@ function processAlive(pid: number): boolean {
 const ROLES = new Set(["system", "user", "assistant", "tool"]);
 // Mirrors the strict wire `ChatMessageSchema` (`@tentacle/protocol`, session.ts):
 // a record that passes here can always seed `session/open`. Pinned by a cli test.
-const MESSAGE_KEYS = new Set(["role", "content", "toolCalls", "toolCallId", "spill"]);
+// `durationMs` (docs/fix/tool-duration.md) followed `spill`'s path: an older
+// build refuses a record holding one (`unknown key "durationMs"`), loudly.
+const MESSAGE_KEYS = new Set(["role", "content", "toolCalls", "toolCallId", "spill", "durationMs"]);
 const TOOL_CALL_KEYS = ["id", "name", "arguments"];
 // `spill` (docs/feat/tui-spill-note.md): an older build refuses a record that
 // holds one (`unknown key "spill"`), loudly — never half-loaded.
@@ -274,6 +276,9 @@ function messageProblem(value: unknown): string | null {
   }
   if (value.spill !== undefined && !isSpill(value.spill)) {
     return "has a malformed spill";
+  }
+  if (value.durationMs !== undefined && !isCount(value.durationMs)) {
+    return "has a malformed durationMs";
   }
   return null;
 }

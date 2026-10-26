@@ -485,8 +485,7 @@ function toolSubtitle(
 
 function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const width = Math.max(20, (opts.width ?? DEFAULT_WIDTH) - INDENT.length - 1);
-  const elapsed =
-    tool.endedAt !== undefined ? ` ${formatDurationMs(tool.endedAt - tool.startedAt)}` : "";
+  const elapsed = tool.durationMs !== undefined ? ` ${formatDurationMs(tool.durationMs)}` : "";
   const { label, subtitle } = toolTitle(tool);
   const sub = subtitle ? ` ${theme.subtle(truncate(subtitle, 72))}` : "";
   const header = `${bullet(tool)} ${chalk.bold(label)}${sub}${theme.subtle(elapsed)}`;

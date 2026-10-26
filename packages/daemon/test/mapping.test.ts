@@ -99,6 +99,32 @@ describe("eventToUpdate", () => {
     expect(plain !== null && "spill" in plain).toBe(false);
   });
 
+  // docs/fix/tool-duration.md: the daemon-measured duration rides the update as data.
+  test("tool_result with a durationMs → tool_call_update.durationMs (0 included); without one, no key", () => {
+    // Mutation (red, verified): drop the durationMs spread in mapping.ts → fails.
+    const timed = eventToUpdate({
+      type: "tool_result",
+      id: "c1",
+      name: "shell",
+      result: { content: "ok" },
+      durationMs: 0,
+    });
+    expect(timed).toEqual({
+      type: "tool_call_update",
+      toolCallId: "c1",
+      status: "completed",
+      content: [{ type: "text", text: "ok" }],
+      durationMs: 0,
+    });
+    const plain = eventToUpdate({
+      type: "tool_result",
+      id: "c2",
+      name: "shell",
+      result: { content: "denied", isError: true },
+    });
+    expect(plain !== null && "durationMs" in plain).toBe(false);
+  });
+
   test("usage → agent_usage", () => {
     expect(
       eventToUpdate({ type: "usage", usage: { promptTokens: 10, completionTokens: 3 } }),

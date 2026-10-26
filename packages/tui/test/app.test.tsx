@@ -1799,6 +1799,10 @@ describe("idle warm of the other Ctrl+O view", () => {
         role: "tool",
         content: Array.from({ length: 20 }, (_, n) => `out ${i}.${n}`).join("\n"),
         toolCallId: `c${i}`,
+        // Measured, so each header lays out a time: the `formatDurationMs` probe
+        // below counts layouts (a replayed row without one shows no time,
+        // docs/fix/tool-duration.md).
+        durationMs: 100 * i,
       },
     );
   }

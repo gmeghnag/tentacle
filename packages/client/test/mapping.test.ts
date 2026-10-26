@@ -125,6 +125,23 @@ describe("updateToEvent", () => {
     expect(older?.type === "tool_result" && "spill" in older.result).toBe(false);
   });
 
+  // docs/fix/tool-duration.md: the daemon's duration rides beside the result, never inside it.
+  test("a durationMs on tool_call_update becomes the event's durationMs; none → no key", () => {
+    // Mutation (red, verified): drop the durationMs spread in mapping.ts → the first assertion fails.
+    const update = (extra: object): SessionUpdate => ({
+      type: "tool_call_update",
+      toolCallId: "c4",
+      status: "completed",
+      content: [{ type: "text", text: "ok" }],
+      ...extra,
+    });
+    const timed = updateToEvent(update({ durationMs: 0 }), names);
+    expect(timed?.type === "tool_result" ? timed.durationMs : undefined).toBe(0);
+    expect(timed?.type === "tool_result" && "durationMs" in timed.result).toBe(false);
+    const plain = updateToEvent(update({}), names);
+    expect(plain?.type === "tool_result" && "durationMs" in plain).toBe(false);
+  });
+
   test("agent_usage → usage; plan is ignored", () => {
     expect(
       updateToEvent({ type: "agent_usage", promptTokens: 4, completionTokens: 1 }, names),
