@@ -113,6 +113,13 @@
         "zod": "3.23.8",
       },
     },
+    "packages/docker": {
+      "name": "@tentacle/docker",
+      "version": "0.1.0",
+      "dependencies": {
+        "@tentacle/transport": "workspace:*",
+      },
+    },
     "packages/exec": {
       "name": "@tentacle/exec",
       "version": "0.1.0",
@@ -502,6 +509,8 @@
     "@tentacle/core": ["@tentacle/core@workspace:packages/core"],
 
     "@tentacle/daemon": ["@tentacle/daemon@workspace:packages/daemon"],
+
+    "@tentacle/docker": ["@tentacle/docker@workspace:packages/docker"],
 
     "@tentacle/exec": ["@tentacle/exec@workspace:packages/exec"],
 
