@@ -86,4 +86,48 @@ describe("ToolRegistry", () => {
     const reg = new ToolRegistry().register(echo);
     expect(() => reg.register(echo)).toThrow(/already registered/);
   });
+
+  describe("replace", () => {
+    const named = (name: string, content: string): Tool<Record<string, never>> => ({
+      name,
+      description: content,
+      inputSchema: z.object({}),
+      permission: "none",
+      async execute() {
+        return { content };
+      },
+    });
+
+    test("swaps one entry in place: the others and their order are kept", async () => {
+      const reg = new ToolRegistry()
+        .register(named("a", "a1"))
+        .register(named("b", "b1"))
+        .register(named("c", "c1"));
+      reg.replace("b", named("b", "b2"));
+      expect(reg.list().map((t) => t.name)).toEqual(["a", "b", "c"]);
+      expect((await reg.execute("b", "{}", ctx())).content).toBe("b2");
+      expect((await reg.execute("a", "{}", ctx())).content).toBe("a1");
+    });
+
+    test("removes the entry with undefined (and tolerates an absent one)", () => {
+      const reg = new ToolRegistry().register(named("a", "a1")).register(named("b", "b1"));
+      reg.replace("a", undefined);
+      reg.replace("zzz", undefined);
+      expect(reg.list().map((t) => t.name)).toEqual(["b"]);
+      expect(reg.get("a")).toBeUndefined();
+    });
+
+    test("registers a name that was not there, at the end", () => {
+      const reg = new ToolRegistry().register(named("a", "a1"));
+      reg.replace("n", named("n", "n1"));
+      expect(reg.list().map((t) => t.name)).toEqual(["a", "n"]);
+    });
+
+    test("throws on a name mismatch and changes nothing", () => {
+      const reg = new ToolRegistry().register(named("a", "a1"));
+      expect(() => reg.replace("a", named("other", "x"))).toThrow(/name mismatch/);
+      expect(reg.get("a")?.description).toBe("a1");
+      expect(reg.get("other")).toBeUndefined();
+    });
+  });
 });

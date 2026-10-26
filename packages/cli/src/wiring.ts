@@ -14,6 +14,7 @@ import {
   BUILTIN_AGENT_TYPES,
   HookRunner,
   type ResultTransform,
+  type SessionSkills,
   collapseRepeatedLines,
   createSubagentRunner,
   exemptTools,
@@ -27,6 +28,7 @@ import {
   tabulateJson,
 } from "@tentacle/agent";
 import {
+  type SkillInfo,
   type TentacleConfig,
   offeredSkills,
   slashSkills,
@@ -135,6 +137,41 @@ export function loadUserAgentTypes(
   return { types, diagnostics };
 }
 
+/**
+ * Read a skill's body at activation through the session env (in a pod: the
+ * pod's filesystem, where discovery ran).
+ */
+export const readSkillBody: SkillBodyReader = async (skill, ctx) => {
+  const { body, bodyLine } = splitFrontmatter(await ctx.env.readFile(skill.location));
+  return { body, bodyLine };
+};
+
+/**
+ * A session's skill set from a discovery. The tool offers exactly the cataloged
+ * skills (one rule, `offeredSkills`); none → no tool. The activator behind every
+ * activation (the user's `/name` round, the `/compact` re-read) knows the
+ * offered skills plus the user's `slashSkills` (hidden-from-the-model ones
+ * included, eval decision 5). Used at start (`buildAgent`) and, on a fresh
+ * discovery, by a context reset.
+ */
+export function buildSessionSkills(
+  skills: readonly SkillInfo[],
+  readBody: SkillBodyReader,
+): SessionSkills {
+  const offered = offeredSkills(skills);
+  const userNames = new Set(slashSkills(skills).map((s) => s.name));
+  const offeredNames = new Set(offered.map((s) => s.name));
+  return {
+    tool: createSkillTool(offered, readBody),
+    activator: createSkillActivator(
+      skills
+        .filter((s) => offeredNames.has(s.name) || userNames.has(s.name))
+        .map((s) => ({ ...s, userInvocable: userNames.has(s.name) })),
+      readBody,
+    ),
+  };
+}
+
 export interface WiredAgent {
   readonly agent: Agent;
   /** Headless by default (approves all); the TUI attaches an interactive requester. */
@@ -235,29 +272,12 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     shaping(largeOutput),
   ];
 
-  // Skills: the tool offers exactly the cataloged skills (one rule,
-  // `offeredSkills`); none → no tool. The body is read at activation through
-  // the session env (in a pod: the pod's filesystem, where discovery ran).
-  const readSkillBody: SkillBodyReader = async (skill, ctx) => {
-    const { body, bodyLine } = splitFrontmatter(await ctx.env.readFile(skill.location));
-    return { body, bodyLine };
-  };
-  const offered = offeredSkills(config.skills);
-  const skillTool = createSkillTool(offered, readSkillBody);
-  if (skillTool) {
-    tools.register(skillTool);
+  // Skills: the `skill` tool and the activator, from the one builder a context
+  // reset also uses (so start and reset can never disagree).
+  const sessionSkills = buildSessionSkills(config.skills, readSkillBody);
+  if (sessionSkills.tool) {
+    tools.register(sessionSkills.tool);
   }
-  // The activator behind every activation (the user's `/name` round, the
-  // `/compact` re-read): the offered skills plus the user's `slashSkills`
-  // (hidden-from-the-model ones included, eval decision 5).
-  const userNames = new Set(slashSkills(config.skills).map((s) => s.name));
-  const offeredNames = new Set(offered.map((s) => s.name));
-  const skills = createSkillActivator(
-    config.skills
-      .filter((s) => offeredNames.has(s.name) || userNames.has(s.name))
-      .map((s) => ({ ...s, userInvocable: userNames.has(s.name) })),
-    readSkillBody,
-  );
 
   // The model is told how full its context is (docs/feat/context-awareness.md),
   // on `model.contextWindow` (a pod daemon's is the laptop's: `--context-window`).
@@ -300,7 +320,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     systemPrompt: config.systemPrompt,
     maxIterations: config.maxIterations,
     requestPermission: (req) => permissions.request(req),
-    skills,
+    ...(sessionSkills.activator ? { skills: sessionSkills.activator } : {}),
     ...(hooks ? { hooks } : {}),
     ...(options.askHooksTrust ? { askHooksTrust: options.askHooksTrust } : {}),
     ...(contextAwareness ? { contextAwareness } : {}),

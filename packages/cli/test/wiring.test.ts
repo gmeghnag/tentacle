@@ -9,8 +9,10 @@ import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { daemonErrorLogPath } from "../src/daemon-log.ts";
 import {
   buildAgent,
+  buildSessionSkills,
   inProcessAgents,
   loadUserAgentTypes,
+  readSkillBody,
   skillCatalog,
   skillListing,
 } from "../src/wiring.ts";
@@ -677,5 +679,78 @@ describe("buildAgent context awareness", () => {
     for (const r of model.requests) {
       expect(r.messages.some((m) => m.content.includes("[context: "))).toBe(false);
     }
+  });
+});
+
+describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
+  // The refactor behind a context reset (composeSystemPrompt, discoverSkills,
+  // buildSessionSkills) must not change a byte of what a session starts with.
+  // The literals were captured from the code BEFORE the refactor.
+  async function pinnedConfig(): Promise<TentacleConfig> {
+    const home = join(dir, `pin-${Math.random().toString(36).slice(2)}`);
+    const cfgDir = join(home, "cfg");
+    await mkdir(cfgDir, { recursive: true });
+    await writeFile(join(cfgDir, "PROMPT.md"), "IDENTITY\n");
+    await writeFile(join(home, "AGENTS.md"), "RULES\n");
+    for (const [name, description, extra] of [
+      ["alpha", "first skill", ""],
+      ["beta", "second skill", ""],
+      ["hidden", "not for the model", "disable-model-invocation: true\n"],
+    ] as const) {
+      await mkdir(join(home, ".agents", "skills", name), { recursive: true });
+      await writeFile(
+        join(home, ".agents", "skills", name, "SKILL.md"),
+        `---\nname: ${name}\ndescription: ${description}\n${extra}---\n${name} body\n`,
+      );
+    }
+    return loadConfig({ env: { HOME: home }, configDir: cfgDir, cwd: home });
+  }
+
+  test("the system prompt and the tool list (names, order, the skill tool's schema) are byte-identical", async () => {
+    const cfg = await pinnedConfig();
+    const { agent, tools } = buildAgent({ ...cfg, subagentsEnabled: true });
+    expect(agent.startConversation()).toEqual([
+      {
+        role: "system",
+        content:
+          "IDENTITY\n\n# Project rules (AGENTS.md)\n\nRULES\n\n# Skills\n\nSkills are packaged instructions for specific tasks. When a task matches a skill's description, call the `skill` tool with its name to load the full instructions BEFORE doing the task, then follow them.\n\n<available_skills>\n<skill>\n<name>alpha</name>\n<description>first skill</description>\n</skill>\n<skill>\n<name>beta</name>\n<description>second skill</description>\n</skill>\n</available_skills>\n",
+      },
+    ]);
+    const defs = tools.definitions();
+    expect(defs.map((d) => d.name)).toEqual([
+      "fs_read",
+      "fs_write",
+      "fs_edit",
+      "fs_multi_edit",
+      "shell",
+      "shell_output",
+      "shell_kill",
+      "skill",
+      "agent_task",
+    ]);
+    expect(JSON.stringify(defs.find((d) => d.name === "skill"))).toBe(
+      '{"name":"skill","description":"Load a skill: packaged instructions for a specific kind of task. When the task matches a skill listed under \\"# Skills\\" in the system prompt, call this FIRST with the skill\'s name, then follow the instructions it returns. A skill already loaded in this conversation does not need loading again.","parameters":{"type":"object","properties":{"name":{"type":"string","enum":["alpha","beta"],"description":"The skill to load, from the Skills list"}},"required":["name"],"additionalProperties":false}}',
+    );
+  });
+
+  test("buildSessionSkills: the tool is the model's enum, the activator knows the hidden skill too", async () => {
+    const cfg = await pinnedConfig();
+    const set = buildSessionSkills(cfg.skills, readSkillBody);
+    expect(cfg.skills.map((s) => s.name).sort()).toEqual(["alpha", "beta", "hidden"]);
+    expect(set.tool?.name).toBe("skill");
+    expect(JSON.stringify(set.tool?.jsonSchema ?? set.tool?.inputSchema)).not.toContain("hidden");
+    expect(["alpha", "beta", "hidden", "nope"].map((n) => set.activator?.has(n))).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+    expect(set.activator?.userInvocable("hidden")).toBe(true);
+  });
+
+  test("buildSessionSkills: none discovered → no tool, an activator that knows nothing", () => {
+    const set = buildSessionSkills([], readSkillBody);
+    expect(set.tool).toBeUndefined();
+    expect(set.activator?.has("anything")).toBe(false);
   });
 });

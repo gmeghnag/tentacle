@@ -27,6 +27,8 @@ import {
   type ApiKeySource,
   type Env,
   type ResolvedConfig,
+  agentsMdEnabled,
+  composeSystemPrompt,
   resolveConfig,
   skillsEnabled,
 } from "./resolve.ts";
@@ -68,6 +70,8 @@ export interface TentacleConfig {
   readonly contextWindow: number;
   /** Tell the model how full its context is (on a pod: the pod's own config). */
   readonly contextAwareness: ResolvedConfig["contextAwareness"];
+  /** The model's `context_reset` tool and its cap (on a pod: the pod's own config). */
+  readonly contextReset: ResolvedConfig["contextReset"];
   readonly maxTokens?: number;
   readonly systemPrompt: string;
   readonly subagentsEnabled: boolean;
@@ -94,12 +98,18 @@ export interface TentacleConfig {
   readonly configDir: string;
   readonly configPath: string;
   readonly promptPath: string;
+  /** Whether `systemPromptFile` named `promptPath`: then a missing file is an error, not the default. */
+  readonly promptFileRequired: boolean;
+  /** Whether a per-repo AGENTS.md is folded into the prompt (the start-up decision, kept for a refresh). */
+  readonly agentsMdEnabled: boolean;
+  /** Whether skills are discovered (the start-up decision, kept for a refresh). */
+  readonly skillsEnabled: boolean;
   /** Resolved path of the auto-loaded AGENTS.md, if one was folded into the prompt. */
   readonly agentsPath?: string;
   /**
    * Discovered Agent Skills, after precedence (empty when disabled), including
    * the ones hidden from the model (`disable-model-invocation`). Built once:
-   * a new skill needs a restart.
+   * a new skill needs a restart (or a context reset: `refreshSessionContext`).
    */
   readonly skills: readonly SkillInfo[];
   /** Skill discovery problems (skipped, shadowed, ignored fields) for the user. */
@@ -165,6 +175,132 @@ async function findAgentsFile(startDir: string): Promise<string | undefined> {
     dir = parent;
   }
   return undefined;
+}
+
+/**
+ * Read the identity prompt file. A missing file is `undefined` (the default
+ * prompt applies) unless `required` — an explicit `systemPromptFile` — then it
+ * is a `ConfigError`.
+ */
+async function readPromptFile(promptPath: string, required: boolean): Promise<string | undefined> {
+  if (await pathExists(promptPath)) {
+    return readFile(promptPath, "utf8");
+  }
+  if (required) {
+    throw new ConfigError(`systemPromptFile not found: ${promptPath}`);
+  }
+  return undefined;
+}
+
+/**
+ * The nearest AGENTS.md from `startDir` and its text. Best-effort: an
+ * unreadable file is no content (it must never fail a start-up or a reset).
+ */
+async function readAgentsMd(
+  startDir: string,
+): Promise<{ file: string | undefined; content: string | undefined }> {
+  const file = await findAgentsFile(startDir);
+  if (!file) {
+    return { file, content: undefined };
+  }
+  try {
+    return { file, content: await readFile(file, "utf8") };
+  } catch {
+    return { file, content: undefined };
+  }
+}
+
+export interface DiscoverSkillsInput {
+  readonly launchCwd: string;
+  readonly home: string;
+  readonly configDir: string;
+  /** Package `skills/` dirs (user scope), after every root the user owns. */
+  readonly packageSkillRoots: readonly string[];
+  /** Disabled → no I/O at all. */
+  readonly enabled: boolean;
+}
+
+/**
+ * Discover Agent Skills from the launch folder (the same root as AGENTS.md) and
+ * the user scopes. Best-effort like AGENTS.md: problems are diagnostics, never
+ * a failure. The one scan shared by start-up (`loadConfig`) and a context reset
+ * (`refreshSessionContext`).
+ */
+export async function discoverSkills(
+  input: DiscoverSkillsInput,
+): Promise<{ skills: SkillInfo[]; diagnostics: string[] }> {
+  if (!input.enabled) {
+    return { skills: [], diagnostics: [] };
+  }
+  const scan = await scanSkills(
+    await skillRoots(input.launchCwd, input.home, input.configDir, input.packageSkillRoots),
+  );
+  const merged = mergeSkills(scan.candidates);
+  const diagnostics = [...scan.diagnostics, ...merged.diagnostics];
+  for (const capped of [catalogCapDiagnostic(merged.skills), slashCapDiagnostic(merged.skills)]) {
+    if (capped) {
+      diagnostics.push(capped);
+    }
+  }
+  return { skills: merged.skills, diagnostics };
+}
+
+/** The part of a session's context that comes from files, read again. */
+export interface RefreshedSessionContext {
+  /** The composed system prompt: identity, AGENTS.md, skills catalog. */
+  readonly systemPrompt: string;
+  readonly skills: readonly SkillInfo[];
+  readonly skillDiagnostics: readonly string[];
+}
+
+/**
+ * Re-read the FILES that make a session's system prompt and skill set —
+ * `PROMPT.md` (or env `TENTACLE_SYSTEM_PROMPT`), the nearest `AGENTS.md`, every
+ * skill folder (package `skills/` dirs included, even one created since the
+ * start) — applying the start-up's SETTINGS (`systemPromptFile`, `loadAgentsMd`,
+ * `loadSkills`, the installed-package list) as kept in `config`: `config.jsonc`
+ * is not re-read. Same composition as `loadConfig` (`composeSystemPrompt`,
+ * `discoverSkills`), so on an unchanged disk it returns exactly
+ * `config.systemPrompt` and `config.skills`. Throws `ConfigError` when a
+ * required prompt file is gone.
+ */
+export async function refreshSessionContext(
+  config: Pick<
+    TentacleConfig,
+    | "cwd"
+    | "configDir"
+    | "promptPath"
+    | "promptFileRequired"
+    | "agentsMdEnabled"
+    | "skillsEnabled"
+    | "packages"
+  >,
+  env: Env = process.env,
+): Promise<RefreshedSessionContext> {
+  const fromFile = await readPromptFile(config.promptPath, config.promptFileRequired);
+  // Same precedence as `resolveConfig`: env > the prompt file > the default.
+  const identity = env.TENTACLE_SYSTEM_PROMPT ?? fromFile ?? DEFAULT_SYSTEM_PROMPT;
+  const discovered = await discoverSkills({
+    launchCwd: config.cwd,
+    home: env.HOME ?? homedir(),
+    configDir: config.configDir,
+    // Derived from each package's dir, not the start-up `skillsDir` (which
+    // exists only if the folder existed then).
+    packageSkillRoots: config.packages.map((p) => join(p.dir, "skills")),
+    enabled: config.skillsEnabled,
+  });
+  const agents = config.agentsMdEnabled ? await readAgentsMd(config.cwd) : undefined;
+  const composed = composeSystemPrompt({
+    identity,
+    agentsMd: agents?.content,
+    agentsEnabled: config.agentsMdEnabled,
+    skills: discovered.skills,
+  });
+  return {
+    systemPrompt: composed.systemPrompt,
+    skills: discovered.skills,
+    skillDiagnostics: discovered.diagnostics,
+  };
 }
 
 /**
@@ -269,25 +405,13 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
   } else {
     promptPath = defaultPromptPath;
   }
-  let promptFromFile: string | undefined;
-  if (await pathExists(promptPath)) {
-    promptFromFile = await readFile(promptPath, "utf8");
-  } else if (fileConfig.systemPromptFile) {
-    throw new ConfigError(`systemPromptFile not found: ${promptPath}`);
-  }
+  const promptFileRequired = fileConfig.systemPromptFile !== undefined;
+  const promptFromFile = await readPromptFile(promptPath, promptFileRequired);
 
   // Auto-load a per-repo AGENTS.md from the launch workspace (best-effort: an
   // unreadable file must never crash startup over an optional convenience). The
   // compose/enable decision is pure and lives in resolveConfig.
-  const agentsFile = await findAgentsFile(launchCwd);
-  let agentsMd: string | undefined;
-  if (agentsFile) {
-    try {
-      agentsMd = await readFile(agentsFile, "utf8");
-    } catch {
-      agentsMd = undefined;
-    }
-  }
+  const { file: agentsFile, content: agentsMd } = await readAgentsMd(launchCwd);
 
   // Installed packages (user scope: installing is the trust decision, D11).
   // Best-effort: a broken package is a diagnostic, skipped whole.
@@ -297,20 +421,16 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
   // Discover skills from the launch folder (the same root as AGENTS.md) and the
   // user scopes. Best-effort like AGENTS.md: problems are diagnostics, never
   // a failed startup. Disabled → no I/O at all.
-  let skills: SkillInfo[] = [];
-  const skillDiagnostics: string[] = [];
-  if (skillsEnabled(fileConfig, env)) {
-    const packageSkillRoots = scanned.packages.flatMap((p) => (p.skillsDir ? [p.skillsDir] : []));
-    const scan = await scanSkills(await skillRoots(launchCwd, home, configDir, packageSkillRoots));
-    const merged = mergeSkills(scan.candidates);
-    skills = merged.skills;
-    skillDiagnostics.push(...scan.diagnostics, ...merged.diagnostics);
-    for (const capped of [catalogCapDiagnostic(skills), slashCapDiagnostic(skills)]) {
-      if (capped) {
-        skillDiagnostics.push(capped);
-      }
-    }
-  }
+  const skillsOn = skillsEnabled(fileConfig, env);
+  const discovered = await discoverSkills({
+    launchCwd,
+    home,
+    configDir,
+    packageSkillRoots: scanned.packages.flatMap((p) => (p.skillsDir ? [p.skillsDir] : [])),
+    enabled: skillsOn,
+  });
+  const skills = discovered.skills;
+  const skillDiagnostics = discovered.diagnostics;
 
   // Project hooks (`.agents/hooks.json`, same walk as skills): best-effort,
   // a broken file is a diagnostic. Loaded here; trusted per session later.
@@ -355,6 +475,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     maxIterations: resolved.maxIterations,
     contextWindow: resolved.contextWindow,
     contextAwareness: resolved.contextAwareness,
+    contextReset: resolved.contextReset,
     ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
     systemPrompt: resolved.systemPrompt,
     subagentsEnabled: resolved.subagentsEnabled,
@@ -375,6 +496,9 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     configDir,
     configPath,
     promptPath,
+    promptFileRequired,
+    agentsMdEnabled: agentsMdEnabled(fileConfig, env),
+    skillsEnabled: skillsOn,
     ...(resolved.agentsMdLoaded && agentsFile ? { agentsPath: agentsFile } : {}),
     skills: resolved.skills,
     skillDiagnostics,

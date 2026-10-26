@@ -10,8 +10,9 @@ import {
   DEFAULT_SUBAGENT_MAX_ITERATIONS,
   DEFAULT_SYSTEM_PROMPT,
 } from "../src/defaults.ts";
-import { type ResolveContext, resolveConfig } from "../src/resolve.ts";
+import { type ResolveContext, composeSystemPrompt, resolveConfig } from "../src/resolve.ts";
 import { FileConfigSchema } from "../src/schema.ts";
+import { type SkillInfo, renderSkillsCatalog } from "../src/skills.ts";
 
 function ctx(overrides: Partial<ResolveContext> = {}): ResolveContext {
   return {
@@ -324,5 +325,101 @@ describe("resolveConfig AGENTS.md composition", () => {
     expect(c.systemPrompt).toBe("ENV_ID\n\n# Project rules (AGENTS.md)\n\nRULES\n");
     expect(c.sources.systemPrompt).toBe("env");
     expect(c.agentsMdLoaded).toBe(true);
+  });
+});
+
+describe("composeSystemPrompt", () => {
+  const skill = {
+    name: "alpha",
+    description: "first",
+    location: "/s/alpha/SKILL.md",
+    dir: "/s/alpha",
+    scope: "user",
+    modelInvocable: true,
+    userInvocable: true,
+    files: [],
+    filesTruncated: false,
+  } as unknown as SkillInfo;
+
+  test("identity only: returned verbatim, AGENTS.md not loaded", () => {
+    expect(composeSystemPrompt({ identity: "ID", agentsEnabled: true, skills: [] })).toEqual({
+      systemPrompt: "ID",
+      agentsMdLoaded: false,
+    });
+  });
+
+  test("identity, then AGENTS.md under its header, then the catalog last", () => {
+    const c = composeSystemPrompt({
+      identity: "ID\n",
+      agentsMd: "RULES\n\n",
+      agentsEnabled: true,
+      skills: [skill],
+    });
+    expect(c.agentsMdLoaded).toBe(true);
+    expect(c.systemPrompt).toStartWith("ID\n\n# Project rules (AGENTS.md)\n\nRULES\n\n# Skills");
+    expect(c.systemPrompt).toBe(
+      `ID\n\n# Project rules (AGENTS.md)\n\nRULES\n\n${renderSkillsCatalog([skill])}\n`,
+    );
+  });
+
+  test("disabled or blank AGENTS.md is not folded in", () => {
+    expect(
+      composeSystemPrompt({ identity: "ID", agentsMd: "R", agentsEnabled: false, skills: [] })
+        .agentsMdLoaded,
+    ).toBe(false);
+    expect(
+      composeSystemPrompt({ identity: "ID", agentsMd: " \n", agentsEnabled: true, skills: [] })
+        .systemPrompt,
+    ).toBe("ID");
+  });
+
+  test("resolveConfig output is the composition's (start-up and reset share it)", () => {
+    const c = resolveConfig(ctx({ promptFromFile: "ID", agentsMd: "RULES", skills: [skill] }));
+    expect(c.systemPrompt).toBe(
+      composeSystemPrompt({
+        identity: "ID",
+        agentsMd: "RULES",
+        agentsEnabled: true,
+        skills: [skill],
+      }).systemPrompt,
+    );
+  });
+});
+
+describe("contextReset settings", () => {
+  test("defaults: enabled, unlimited per message", () => {
+    const c = resolveConfig(ctx());
+    expect(c.contextReset).toEqual({ enabled: true, maxPerMessage: -1 });
+    expect(c.sources.contextResetEnabled).toBe("default");
+    expect(c.sources.contextResetMaxPerMessage).toBe("default");
+  });
+
+  test("file sets them; env beats the file", () => {
+    const fileConfig = { contextReset: { enabled: false, maxPerMessage: 2 } };
+    const file = resolveConfig(ctx({ fileConfig }));
+    expect(file.contextReset).toEqual({ enabled: false, maxPerMessage: 2 });
+    expect(file.sources.contextResetEnabled).toBe("file");
+    const env = resolveConfig(
+      ctx({ fileConfig, env: { TENTACLE_CONTEXT_RESET: "1", TENTACLE_CONTEXT_RESET_MAX: "-1" } }),
+    );
+    expect(env.contextReset).toEqual({ enabled: true, maxPerMessage: -1 });
+    expect(env.sources.contextResetMaxPerMessage).toBe("env");
+  });
+
+  test("an invalid env value falls through; the schema accepts only >0 or -1", () => {
+    const c = resolveConfig(
+      ctx({
+        fileConfig: { contextReset: { maxPerMessage: 4 } },
+        env: { TENTACLE_CONTEXT_RESET_MAX: "0", TENTACLE_CONTEXT_RESET: "maybe" },
+      }),
+    );
+    expect(c.contextReset).toEqual({ enabled: true, maxPerMessage: 4 });
+    for (const n of [0, -2, 1.5]) {
+      expect(FileConfigSchema.safeParse({ contextReset: { maxPerMessage: n } }).success).toBe(
+        false,
+      );
+    }
+    expect(FileConfigSchema.safeParse({ contextReset: { maxPerMessage: -1 } }).success).toBe(true);
+    expect(FileConfigSchema.safeParse({ contextReset: { nope: true } }).success).toBe(false);
   });
 });

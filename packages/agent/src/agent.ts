@@ -25,6 +25,7 @@ import {
   type ModelProvider,
   type PermissionRequester,
   type TokenCounter,
+  type Tool,
   type ToolCall,
   type ToolContext,
   type ToolProgressEvent,
@@ -33,6 +34,7 @@ import {
   allowAll,
 } from "@tentacle/core";
 import {
+  SKILL_TOOL_NAME,
   type SkillActivator,
   type ToolRegistry,
   skillActivations,
@@ -303,9 +305,25 @@ function unlessAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Pr
   });
 }
 
+/**
+ * A session's skill set, built once from a discovery (`buildSessionSkills`):
+ * the model's `skill` tool and the activator behind every activation. Absent
+ * `tool` = none offered to the model (no `skill` tool); absent `activator` =
+ * no skills at all.
+ */
+export interface SessionSkills {
+  readonly tool?: Tool | undefined;
+  readonly activator?: SkillActivator | undefined;
+}
+
 export class Agent {
   private readonly config: AgentConfig;
   private readonly gate: PermissionGate;
+  /**
+   * The activator behind every skill activation: `config.skills` at the start,
+   * then whatever `installSkills` last put in.
+   */
+  private activator: SkillActivator | undefined;
   /** Background jobs that finished since the last turn, awaiting surfacing. */
   private readonly pendingExits: BackgroundJob[] = [];
   /**
@@ -317,6 +335,7 @@ export class Agent {
 
   constructor(config: AgentConfig) {
     this.config = config;
+    this.activator = config.skills;
     this.gate = new PermissionGate(config.requestPermission ?? allowAll, config.hooks);
     // Collect background-job exits as they happen; they are flushed into the
     // conversation (and event stream) at the top of the next turn.
@@ -325,7 +344,18 @@ export class Agent {
 
   /** Whether the user may activate `name` (`/name`) in this agent. */
   canActivateForUser(name: string): boolean {
-    return this.config.skills?.userInvocable(name) ?? false;
+    return this.activator?.userInvocable(name) ?? false;
+  }
+
+  /**
+   * Swap the session's skill set: the registry's `skill` tool (set, or removed
+   * when none is offered) and the activator. Synchronous, so a caller can do it
+   * in the same stretch as a history replacement; takes effect from the next
+   * model round (the tool list is read per round) and the next activation.
+   */
+  installSkills(skills: SessionSkills): void {
+    this.config.tools.replace(SKILL_TOOL_NAME, skills.tool);
+    this.activator = skills.activator;
   }
 
   /** Seed message list for a new conversation (the system prompt, if configured). */
@@ -353,13 +383,18 @@ export class Agent {
    * the result transforms, with an empty history so it is not deduplicated.
    * When the activator no longer knows it (`unavailable`: removed, skills
    * disabled) or the read does not yield it (`unreadable`), the content from
-   * the history is used instead. Emits no events: not a turn.
+   * the history is used instead. Emits no events: not a turn. `activator`
+   * reads through another skill set than the installed one (the NEW set of a
+   * context reset, before it is installed); omitted (`undefined`) → the
+   * installed one, `null` → none (every skill is `unavailable`).
    */
   async reloadSkills(
     sessionId: string,
     messages: readonly ChatMessage[],
     signal?: AbortSignal,
+    through?: SkillActivator | null,
   ): Promise<CarriedSkill[]> {
+    const activator = through === undefined ? this.activator : (through ?? undefined);
     const ctx: ToolContext = {
       sessionId,
       signal: signal ?? new AbortController().signal,
@@ -367,7 +402,6 @@ export class Agent {
       history: [],
     };
     const skills: CarriedSkill[] = [];
-    const activator = this.config.skills;
     for (const { name, call, content, resultIndex } of skillActivations(messages)) {
       const stored = { name, call, content, resultIndex };
       // No longer activatable (removed, skills disabled): nothing to read.
@@ -924,7 +958,7 @@ export class Agent {
     yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
     const cancelled: ToolResult = { content: CANCELLED_TOOL_NOTE, isError: true };
     let run: ToolRun;
-    const activator = this.config.skills;
+    const activator = this.activator;
     if (signal?.aborted) {
       run = { result: cancelled };
     } else if (!activator) {

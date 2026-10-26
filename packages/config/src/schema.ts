@@ -210,6 +210,20 @@ const settingsShape = {
     })
     .strict()
     .optional(),
+  /** Context reset: the model renews its own context (docs/feat/context-reset-refresh.md). */
+  contextReset: z
+    .object({
+      /** Default: enabled. */
+      enabled: z.boolean().optional(),
+      /** Resets allowed per user message; a positive integer, or -1 (unlimited, default). */
+      maxPerMessage: z
+        .number()
+        .int()
+        .refine((n) => n > 0 || n === -1, "must be a positive integer or -1 (unlimited)")
+        .optional(),
+    })
+    .strict()
+    .optional(),
   /**
    * Auto-wake: when a background job exits while the agent is idle, start a
    * continuation turn so it reacts without a user prompt. Default: enabled.

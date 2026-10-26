@@ -133,6 +133,18 @@ describe("profile schema", () => {
     ).toBe(true);
   });
 
+  test("contextReset merges per key, like subagents (mutation: drop the merge → the base `enabled` is lost)", () => {
+    const file = FileConfigSchema.parse({
+      contextReset: { enabled: false, maxPerMessage: 3 },
+      profiles: { p: { contextReset: { maxPerMessage: -1 } } },
+    });
+    const applied = applyProfile(file, "p");
+    expect(applied.ok && applied.config.contextReset).toEqual({
+      enabled: false,
+      maxPerMessage: -1,
+    });
+  });
+
   test("no nested profiles, no unknown keys in a profile", () => {
     expect(FileConfigSchema.safeParse({ profiles: { p: { profiles: {} } } }).success).toBe(false);
     expect(FileConfigSchema.safeParse({ profiles: { p: { modle: "x" } } }).success).toBe(false);
