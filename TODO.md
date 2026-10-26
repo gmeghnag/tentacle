@@ -998,7 +998,7 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 ## Roadmap (ordered)
 
 > **Owner queue (2026-10-25), next code tasks in this order:**
-> 1. task 7 `connect-sessions` (mobile app; executing);
+> 1. ~~task 7 `connect-sessions`~~ DONE, merged `6319beb` (2026-10-26; `docs/feat/connect-sessions.md`);
 > 2. `context-awareness` (`docs/eval/context-awareness.md`);
 > 3. `context-reset` (`docs/eval/context-reset.md`; plan to revise for
 >    decisions 11 and 13, then 3 branches);

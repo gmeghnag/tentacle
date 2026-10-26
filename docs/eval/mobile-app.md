@@ -534,6 +534,10 @@ the "a new target adds only a transport" shape, AGENTS §7).
     telefono e TUI per una stessa sessione"); **QN2** returned rows of mine
     after quit/switch not recognised → task 13 debt, plus a notice "N queued
     messages stay on the daemon".
+    **Task 7 DONE 2026-10-26** (`docs/feat/connect-sessions.md`, merged
+    `6319beb`; Opus executed as ONE branch, four fresh Opus review rounds →
+    MERGE, gate 2755 pass / 2 skip / 0 fail). Owner: R2-5 confirm wording
+    adopted, R2-2 / R2-3 left as today.
   - *Task 7 `connect-sessions`* — re-sized **L** (5 packages) → 7a / 7b, each
     M · cross-module [yes]. Quit = just close the socket (proved: the session
     stays live and re-attachable, the turn finishes daemon-side). New method
