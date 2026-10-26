@@ -9,6 +9,7 @@ import type { z } from "zod";
 import type { ExecutionEnvironment } from "./execution.ts";
 import type { JobController } from "./jobs.ts";
 import type { ChatMessage } from "./model.ts";
+import type { PathLocks } from "./path-locks.ts";
 
 /** Whether a tool call needs user approval before running. */
 export type PermissionLevel = "none" | "ask" | "deny";
@@ -86,6 +87,12 @@ export interface ToolContext {
    * not load a skill twice. Absent outside the agent loop.
    */
   readonly history?: readonly ChatMessage[];
+  /**
+   * Per-path locks the read-modify-write file tools hold across read→write.
+   * Absent → the env's shared instance (`pathLocksFor(env)`), so a parent and
+   * its sub-agents (one env) exclude each other without any wiring.
+   */
+  readonly pathLocks?: PathLocks;
 }
 
 export interface Tool<Input = unknown> {
