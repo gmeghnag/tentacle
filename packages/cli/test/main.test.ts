@@ -165,3 +165,31 @@ describe("cli main: skill diagnostics", () => {
     }
   });
 });
+
+describe("cli main: agent definition diagnostics (fix/agent-defs-warn)", () => {
+  test("a dropped model/contextWindow warns to stderr, never stdout; not for run/attach", async () => {
+    const agents = join(dir, "config", "agents");
+    await mkdir(agents, { recursive: true });
+    await writeFile(
+      join(agents, "reviewer.md"),
+      "---\nname: reviewer\nmodel: [oops]\ncontextWindow: abc\n---\nYou review.\n",
+    );
+    try {
+      const out: string[] = [];
+      const err: string[] = [];
+      const io = { write: (t: string) => out.push(t), writeErr: (t: string) => err.push(t) };
+      expect(await main(["bun", "cli"], io)).toBe(1); // help path: config loaded locally
+      expect(err).toEqual([
+        `[agents] agent "reviewer" (${join(agents, "reviewer.md")}): model [oops] ignored — expected a non-empty string\n`,
+        `[agents] agent "reviewer" (${join(agents, "reviewer.md")}): contextWindow "abc" ignored — expected a positive whole number of tokens\n`,
+      ]);
+      expect(out.join("")).not.toContain("[agents]"); // never on stdout
+
+      err.length = 0;
+      expect(await main(["bun", "cli", "run"], io)).toBe(1); // no --image: fails after config
+      expect(err).toEqual([]); // a pod session uses the pod's agent defs
+    } finally {
+      await rm(agents, { recursive: true, force: true });
+    }
+  });
+});

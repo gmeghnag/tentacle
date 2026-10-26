@@ -21,7 +21,7 @@ describe("parseFrontmatter", () => {
 
 describe("parseAgentDefinition", () => {
   test("builds a typed agent with tools + model override", () => {
-    const type = parseAgentDefinition(
+    const { type } = parseAgentDefinition(
       "---\nname: reviewer\ndescription: Review a diff.\ntools: [fs_read]\nmodel: big-model\n---\nYou review code.",
       "fallback",
     );
@@ -35,7 +35,7 @@ describe("parseAgentDefinition", () => {
   });
 
   test("falls back to the filename for name and 'all' tools", () => {
-    const type = parseAgentDefinition("Do the thing.", "my-agent");
+    const { type } = parseAgentDefinition("Do the thing.", "my-agent");
     expect(type.name).toBe("my-agent");
     expect(type.tools).toBe("all");
     expect(type.model).toBeUndefined();
@@ -49,7 +49,7 @@ describe("parseAgentDefinition", () => {
       parseAgentDefinition(
         `---\nname: small\nmodel: small-model\ncontextWindow: ${value}\n---\nGo.`,
         "f",
-      );
+      ).type;
     expect(def("32000")).toEqual({
       name: "small",
       description: "",
@@ -61,6 +61,43 @@ describe("parseAgentDefinition", () => {
     for (const bad of ["0", "-1", "1.5", "32k", "", "[1]"]) {
       expect({ bad, window: def(bad).contextWindow }).toEqual({ bad, window: undefined });
     }
+  });
+
+  // fix/agent-defs-warn: a present-but-invalid field is still ignored, but the
+  // parser names it in `warnings` (the wiring layer adds the path).
+  test("an invalid model and contextWindow each yield a warning; both are still dropped", () => {
+    const { type, warnings } = parseAgentDefinition(
+      "---\nname: reviewer\nmodel: [oops]\ncontextWindow: abc\n---\nYou review.",
+      "f",
+    );
+    expect(warnings).toEqual([
+      "model [oops] ignored — expected a non-empty string",
+      'contextWindow "abc" ignored — expected a positive whole number of tokens',
+    ]);
+    expect("model" in type).toBe(false);
+    expect("contextWindow" in type).toBe(false);
+  });
+
+  // fix/agent-defs-warn (Review nit 2): a 10-digit value IS a positive whole
+  // number, so the warning must name the 9-digit cap, not "expected a whole number".
+  test("the 9-digit cap: 999999999 is kept, 9999999999 warns about the cap (not 'whole number')", () => {
+    const at = parseAgentDefinition("---\nname: at\ncontextWindow: 999999999\n---\nGo.", "f");
+    expect(at.warnings).toEqual([]);
+    expect(at.type.contextWindow).toBe(999999999);
+    const over = parseAgentDefinition("---\nname: over\ncontextWindow: 9999999999\n---\nGo.", "f");
+    expect(over.warnings).toEqual([
+      'contextWindow "9999999999" ignored — exceeds the 9-digit cap (max 999999999 tokens)',
+    ]);
+    expect("contextWindow" in over.type).toBe(false); // still dropped
+  });
+
+  test("valid or absent fields yield no warnings (no false positive)", () => {
+    const ok = parseAgentDefinition(
+      "---\nname: ok\nmodel: big\ncontextWindow: 32000\n---\nGo.",
+      "f",
+    );
+    expect(ok.warnings).toEqual([]);
+    expect(parseAgentDefinition("just a prompt", "f").warnings).toEqual([]);
   });
 });
 
