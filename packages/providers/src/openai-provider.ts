@@ -41,12 +41,32 @@ export class ModelRequestError extends Error {
     readonly body: string,
     /** An actionable next step (e.g. which config key to set), appended to the message. */
     readonly hint?: string,
+    /** The server's `retry-after` (ms), when it sent a usable one. */
+    readonly retryAfterMs?: number,
   ) {
     super(
       `model request failed with status ${status}: ${body.slice(0, 200)}${hint ? ` — ${hint}` : ""}`,
     );
     this.name = "ModelRequestError";
   }
+}
+
+/** A `retry-after` header (delta-seconds or HTTP-date) in ms; `undefined` if absent or unusable. */
+export function parseRetryAfter(
+  headers: { get(name: string): string | null },
+  now: number = Date.now(),
+): number | undefined {
+  const raw = headers.get("retry-after")?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  // An HTTP-date always names a weekday/month; this keeps "-3" from parsing as a year.
+  const ms = /^\d+(\.\d+)?$/.test(raw)
+    ? Number(raw) * 1000
+    : /[a-z]/i.test(raw)
+      ? Date.parse(raw) - now
+      : Number.NaN;
+  return Number.isFinite(ms) && ms >= 0 ? Math.round(ms) : undefined;
 }
 
 interface WireToolCallDelta {
@@ -130,7 +150,12 @@ export class OpenAIProvider implements ModelProvider {
 
     const res = await this.doFetch(`${this.config.baseURL}/chat/completions`, init);
     if (!res.ok || !res.body) {
-      throw new ModelRequestError(res.status, await safeText(res));
+      throw new ModelRequestError(
+        res.status,
+        await safeText(res),
+        undefined,
+        parseRetryAfter(res.headers),
+      );
     }
 
     const tools = new ToolCallAssembler();

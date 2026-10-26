@@ -8,13 +8,16 @@
  * one. Bun's error does not tell the phase (a reset before the response and one
  * mid-body are identical), so the phase is tracked here, by emission.
  *
- * Only transient connection errors (a string `code` on the allowlist) are
- * retried. HTTP statuses (`ModelRequestError`), a cancel (`AbortError`, whose
- * `code` is numeric) and anything else pass through untouched. A drop after
- * output has started is never retried (it would duplicate what was shown): it
- * surfaces as a `ModelConnectionError` that names the phase.
+ * Only transient connection errors (a string `code` on the allowlist) and HTTP
+ * 429/529 answers (rate limited / overloaded, waiting at least the server's
+ * `retry-after`) are retried. Other statuses (`ModelRequestError`), a cancel
+ * (`AbortError`, whose `code` is numeric) and anything else pass through
+ * untouched. A drop after output has started is never retried (it would
+ * duplicate what was shown): it surfaces as a `ModelConnectionError` that names
+ * the phase. An exhausted 429/529 surfaces as its own `ModelRequestError`.
  */
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
+import { ModelRequestError } from "./openai-provider.ts";
 
 /** Connection-level failure codes worth another attempt. */
 const TRANSIENT_CODES: ReadonlySet<string> = new Set([
@@ -91,6 +94,11 @@ export interface RetryPolicy {
   readonly baseDelayMs?: number;
   /** Default 4 s. */
   readonly capDelayMs?: number;
+  /**
+   * Longest server `retry-after` (429/529) worth waiting for; a longer one
+   * surfaces the error at once. Default 30 s.
+   */
+  readonly maxRetryAfterMs?: number;
   /** Best-effort: a throw is ignored and the retry goes on. */
   readonly onRetry?: (info: RetryInfo) => void;
   /** Injectable for tests. Must reject at once when `signal` aborts. */
@@ -102,6 +110,17 @@ export interface RetryPolicy {
 export const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_BASE_DELAY_MS = 500;
 const DEFAULT_CAP_DELAY_MS = 4000;
+const DEFAULT_MAX_RETRY_AFTER_MS = 30_000;
+
+/** HTTP statuses that mean "try again shortly": rate limited, overloaded. */
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([429, 529]);
+
+/** The error when it is a retryable rate-limit/overload HTTP answer, else `undefined`. */
+function retryableStatus(error: unknown): ModelRequestError | undefined {
+  return error instanceof ModelRequestError && RETRYABLE_STATUSES.has(error.status)
+    ? error
+    : undefined;
+}
 
 /**
  * "Equal jitter": half the exponential step guaranteed, half random, so there
@@ -151,6 +170,7 @@ export class RetryingModelProvider implements ModelProvider {
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     const maxAttempts = this.policy.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     const sleep = this.policy.sleep ?? abortableSleep;
+    const maxRetryAfterMs = this.policy.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
     for (let attempt = 1; ; attempt++) {
       let emitted = false;
       try {
@@ -161,25 +181,48 @@ export class RetryingModelProvider implements ModelProvider {
         return;
       } catch (error) {
         const code = transientConnectionCode(error);
+        const limited = retryableStatus(error);
         // A cancel wins over everything, and a non-transient error is not
         // ours to judge: both leave exactly as they came.
-        if (request.signal?.aborted || code === undefined) {
+        if (request.signal?.aborted || (code === undefined && limited === undefined)) {
           throw error;
         }
-        if (emitted) {
-          throw new ModelConnectionError(code, "mid-stream", attempt, maxAttempts, error);
+        let retryAfterMs: number | undefined;
+        if (limited !== undefined) {
+          // A rate-limit answer is not a lost connection: after output, on the
+          // last attempt, or when the server asks for a wait longer than we are
+          // willing to stall the turn, the HTTP error itself surfaces as is.
+          retryAfterMs = limited.retryAfterMs;
+          const tooLong = retryAfterMs !== undefined && retryAfterMs > maxRetryAfterMs;
+          if (emitted || attempt >= maxAttempts || tooLong) {
+            throw error;
+          }
+        } else if (code !== undefined) {
+          if (emitted) {
+            throw new ModelConnectionError(code, "mid-stream", attempt, maxAttempts, error);
+          }
+          if (attempt >= maxAttempts) {
+            throw new ModelConnectionError(code, "pre-stream", attempt, maxAttempts, error);
+          }
         }
-        if (attempt >= maxAttempts) {
-          throw new ModelConnectionError(code, "pre-stream", attempt, maxAttempts, error);
-        }
-        const delayMs = backoffDelay(
-          attempt,
-          this.policy.baseDelayMs ?? DEFAULT_BASE_DELAY_MS,
-          this.policy.capDelayMs ?? DEFAULT_CAP_DELAY_MS,
-          this.policy.random ?? Math.random,
+        const delayMs = Math.max(
+          backoffDelay(
+            attempt,
+            this.policy.baseDelayMs ?? DEFAULT_BASE_DELAY_MS,
+            this.policy.capDelayMs ?? DEFAULT_CAP_DELAY_MS,
+            this.policy.random ?? Math.random,
+          ),
+          retryAfterMs ?? 0,
         );
+        const reported = code ?? `HTTP ${limited?.status}`;
         try {
-          this.policy.onRetry?.({ attempt, maxAttempts, code, delayMs, providerId: this.id });
+          this.policy.onRetry?.({
+            attempt,
+            maxAttempts,
+            code: reported,
+            delayMs,
+            providerId: this.id,
+          });
         } catch {
           // A failing log sink must not cost the user the turn.
         }

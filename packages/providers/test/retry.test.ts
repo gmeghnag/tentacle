@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import {
+  AnthropicProvider,
   ModelConnectionError,
   ModelRequestError,
+  OpenAIProvider,
   type RetryInfo,
   RetryingModelProvider,
   abortableSleep,
   backoffDelay,
+  parseRetryAfter,
 } from "../src/index.ts";
 
 /** Bun's real connection error shape (see the task doc's Repro): no stack, string code. */
@@ -161,6 +164,153 @@ describe("RetryingModelProvider", () => {
       expect(error).toBe(original);
       expect(inner.calls).toBe(1);
     }
+  });
+
+  describe("HTTP 429 / 529 (pre-stream)", () => {
+    test("a 429 before any output is retried; the consumer sees only the success", async () => {
+      const inner = scripted([[{ throw: new ModelRequestError(429, "slow down") }], OK]);
+      const { waits, sleep } = fakeSleep();
+      const retries: RetryInfo[] = [];
+      const p = new RetryingModelProvider(inner, {
+        sleep,
+        random: () => 0,
+        onRetry: (info) => retries.push(info),
+      });
+
+      const { events, error } = await drain(p);
+
+      expect(error).toBeUndefined();
+      expect(events).toEqual([{ type: "text", delta: "hello" }, { type: "done" }]);
+      expect(inner.calls).toBe(2);
+      expect(waits).toEqual([250]);
+      expect(retries).toEqual([
+        { attempt: 1, maxAttempts: 3, code: "HTTP 429", delayMs: 250, providerId: "fake:m" },
+      ]);
+    });
+
+    test("a 529 (overloaded) is retried too", async () => {
+      const inner = scripted([[{ throw: new ModelRequestError(529, "overloaded") }], OK]);
+      const p = new RetryingModelProvider(inner, { sleep: fakeSleep().sleep });
+
+      const { error } = await drain(p);
+
+      expect(error).toBeUndefined();
+      expect(inner.calls).toBe(2);
+    });
+
+    test("retry-after longer than the backoff is honoured", async () => {
+      const limited = new ModelRequestError(429, "slow down", undefined, 2000);
+      const inner = scripted([[{ throw: limited }], OK]);
+      const { waits, sleep } = fakeSleep();
+      const p = new RetryingModelProvider(inner, { sleep, random: () => 0 });
+
+      await drain(p);
+
+      expect(waits).toEqual([2000]);
+    });
+
+    test("a retry-after shorter than the backoff does not shorten it", async () => {
+      const limited = new ModelRequestError(429, "slow down", undefined, 10);
+      const inner = scripted([[{ throw: limited }], OK]);
+      const { waits, sleep } = fakeSleep();
+      const p = new RetryingModelProvider(inner, { sleep, random: () => 0 });
+
+      await drain(p);
+
+      expect(waits).toEqual([250]);
+    });
+
+    test("a retry-after beyond maxRetryAfterMs is not waited for: the error surfaces at once", async () => {
+      const limited = new ModelRequestError(429, "daily quota", undefined, 3_600_000);
+      const inner = scripted([[{ throw: limited }], OK]);
+      const { waits, sleep } = fakeSleep();
+      const p = new RetryingModelProvider(inner, { sleep });
+
+      const { error } = await drain(p);
+
+      expect(error).toBe(limited);
+      expect(inner.calls).toBe(1);
+      expect(waits).toEqual([]);
+    });
+
+    test("exhausting the attempts rethrows the original ModelRequestError", async () => {
+      const limited = new ModelRequestError(429, "slow down");
+      const inner = scripted([[{ throw: limited }]]);
+      const p = new RetryingModelProvider(inner, { sleep: fakeSleep().sleep });
+
+      const { error } = await drain(p);
+
+      expect(error).toBe(limited);
+      expect(inner.calls).toBe(3);
+    });
+
+    test("a 429 after output started is never retried", async () => {
+      const limited = new ModelRequestError(429, "slow down");
+      const inner = scripted([[{ type: "text", delta: "par" }, { throw: limited }], OK]);
+      const p = new RetryingModelProvider(inner, { sleep: fakeSleep().sleep });
+
+      const { events, error } = await drain(p);
+
+      expect(inner.calls).toBe(1);
+      expect(events).toEqual([{ type: "text", delta: "par" }]);
+      expect(error).toBe(limited);
+    });
+
+    test("a cancel wins over a 429", async () => {
+      const controller = new AbortController();
+      const limited = new ModelRequestError(429, "slow down");
+      const inner = {
+        id: "fake:m",
+        calls: 0,
+        // biome-ignore lint/correctness/useYield: fails before any event
+        async *stream(): AsyncIterable<StreamEvent> {
+          inner.calls += 1;
+          controller.abort();
+          throw limited;
+        },
+      };
+      const p = new RetryingModelProvider(inner, { sleep: fakeSleep().sleep });
+
+      const { error } = await drain(p, { ...request, signal: controller.signal });
+
+      expect(error).toBe(limited);
+      expect(inner.calls).toBe(1);
+    });
+  });
+
+  test("both providers carry the response's retry-after on the 429 error", async () => {
+    const fake = (async () =>
+      new Response("slow down", {
+        status: 429,
+        headers: { "retry-after": "7" },
+      })) as unknown as typeof fetch;
+    const providers: ModelProvider[] = [
+      new OpenAIProvider({ baseURL: "http://x/v1", model: "m", fetch: fake }),
+      new AnthropicProvider({ baseURL: "http://x/v1", model: "m", fetch: fake }),
+    ];
+    for (const provider of providers) {
+      const { error } = await drain(provider);
+      expect(error).toBeInstanceOf(ModelRequestError);
+      expect(error instanceof ModelRequestError && error.retryAfterMs).toBe(7000);
+    }
+  });
+
+  describe("parseRetryAfter", () => {
+    const at = (value: string | null): number | undefined =>
+      parseRetryAfter(new Headers(value === null ? {} : { "retry-after": value }), 1_000_000);
+
+    test("seconds, fractional seconds and HTTP-dates become milliseconds", () => {
+      expect(at("3")).toBe(3000);
+      expect(at("1.5")).toBe(1500);
+      expect(at(new Date(1_000_000 + 5000).toUTCString())).toBe(5000);
+    });
+
+    test("absent, garbage, negative and past dates yield undefined", () => {
+      expect(at(null)).toBeUndefined();
+      expect(at("soon")).toBeUndefined();
+      expect(at("-3")).toBeUndefined();
+      expect(at(new Date(0).toUTCString())).toBeUndefined();
+    });
   });
 
   test("an AbortError (numeric code) is not mistaken for a connection error", async () => {
