@@ -1019,6 +1019,10 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 > 7. parallel tools and parallel sub-agents (`docs/eval/parallel-tools.md`,
 >    `docs/eval/parallel-agents.md`; evaluate first).
 >
+> **DONE 2026-10-26, merged `cf66a70`:** `fix/musl-image-detect` — musl /
+> loader-less / unsupported-arch images fail before the transfer with a clear
+> message (k8s now, Docker later; `docs/fix/musl-image-detect.md`).
+>
 > **Debt (found in context-awareness, 2026-10-26):** `parseAgentDefinition`
 > (`packages/agent/src/agent-defs.ts`) silently ignores an invalid `model` or
 > `contextWindow` in a sub-agent's frontmatter — surface it (a load warning),
