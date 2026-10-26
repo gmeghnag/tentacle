@@ -29,6 +29,10 @@ export const DEFAULT_CONTEXT_WINDOW = 128000;
 export const DEFAULT_CONTEXT_AWARENESS = true;
 /** …once per this many percent of the window. */
 export const DEFAULT_CONTEXT_STEP_PERCENT = 1;
+/** The model may renew its own context with `context_reset` (docs/feat/context-reset-refresh.md). */
+export const DEFAULT_CONTEXT_RESET_ENABLED = true;
+/** Resets allowed per user message; `-1` = unlimited. */
+export const DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE = -1;
 /** Max characters of a tool result kept inline before it is spilled to a file. */
 export const DEFAULT_MAX_INLINE_OUTPUT_CHARS = 16000;
 /** Secret redaction of tool output is on by default (security). */

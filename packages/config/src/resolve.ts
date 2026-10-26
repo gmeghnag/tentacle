@@ -13,6 +13,8 @@ import {
   DEFAULT_AUTO_WAKE,
   DEFAULT_BASE_URL,
   DEFAULT_CONTEXT_AWARENESS,
+  DEFAULT_CONTEXT_RESET_ENABLED,
+  DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE,
   DEFAULT_CONTEXT_STEP_PERCENT,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_DEDUP_OUTPUT,
@@ -41,6 +43,12 @@ export interface ContextAwarenessConfig {
   readonly stepPercent: number;
 }
 
+/** `contextReset`, resolved: the model may renew its context, `maxPerMessage` times per user message (-1 = unlimited). */
+export interface ContextResetConfig {
+  readonly enabled: boolean;
+  readonly maxPerMessage: number;
+}
+
 /** How the API key will be obtained. */
 export type ApiKeySource = "env" | "file" | "command" | "none";
 
@@ -57,6 +65,8 @@ export interface ResolvedConfig {
   readonly contextWindow: number;
   /** Tell the model how full its context is (file-only, docs/feat/context-awareness.md). */
   readonly contextAwareness: ContextAwarenessConfig;
+  /** The model's `context_reset` tool and its anti-loop cap (not consumed yet). */
+  readonly contextReset: ContextResetConfig;
   /** Max output tokens per response; unset → the provider's own default. */
   readonly maxTokens?: number;
   readonly systemPrompt: string;
@@ -99,6 +109,8 @@ export interface ResolvedConfig {
     readonly systemPrompt: Source;
     readonly subagentsEnabled: Source;
     readonly subagentMaxIterations: Source;
+    readonly contextResetEnabled: Source;
+    readonly contextResetMaxPerMessage: Source;
     readonly maxInlineOutputChars: Source;
     readonly redactSecrets: Source;
     readonly summarizeLargeOutput: Source;
@@ -197,6 +209,50 @@ export function skillsEnabled(fileConfig: FileConfig, env: Env): boolean {
   return noSkillsEnv !== undefined ? !noSkillsEnv : (fileConfig.loadSkills ?? true);
 }
 
+/**
+ * Whether a per-repo AGENTS.md is folded into the prompt: env
+ * `TENTACLE_NO_AGENTS_MD` (truthy disables, falsy enables; wins) > file
+ * `loadAgentsMd` > enabled. Exported for the same reason as `skillsEnabled`.
+ */
+export function agentsMdEnabled(fileConfig: FileConfig, env: Env): boolean {
+  const noAgentsEnv = parseBool(env.TENTACLE_NO_AGENTS_MD);
+  return noAgentsEnv !== undefined ? !noAgentsEnv : (fileConfig.loadAgentsMd ?? true);
+}
+
+export interface ComposeSystemPromptInput {
+  /** The identity prompt (env | PROMPT.md | default). */
+  readonly identity: string;
+  /** Contents of a per-repo AGENTS.md, if one was found and read. */
+  readonly agentsMd?: string | undefined;
+  readonly agentsEnabled: boolean;
+  /** Discovered skills; the offered ones are cataloged. */
+  readonly skills: readonly SkillInfo[];
+}
+
+/**
+ * The system prompt, composed: the identity, then (when enabled and non-blank)
+ * AGENTS.md as repo rules — additive, never replacing the identity — then the
+ * skills catalog LAST, only when one is offered (with none the prompt stays
+ * byte-identical). Pure: the one composition shared by start-up (`resolveConfig`)
+ * and a context reset (`refreshSessionContext`), so they can never disagree.
+ */
+export function composeSystemPrompt(input: ComposeSystemPromptInput): {
+  readonly systemPrompt: string;
+  /** Whether AGENTS.md was folded in. */
+  readonly agentsMdLoaded: boolean;
+} {
+  const { identity, agentsMd, agentsEnabled, skills } = input;
+  const agentsMdLoaded = agentsEnabled && agentsMd !== undefined && agentsMd.trim() !== "";
+  const withAgents = agentsMdLoaded
+    ? `${identity.trimEnd()}\n\n${AGENTS_PROMPT_HEADER}\n\n${(agentsMd ?? "").trimEnd()}\n`
+    : identity;
+  const catalog = renderSkillsCatalog(skills);
+  return {
+    systemPrompt: catalog === "" ? withAgents : `${withAgents.trimEnd()}\n\n${catalog}\n`,
+    agentsMdLoaded,
+  };
+}
+
 export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   const { fileConfig, env, defaultCwd, promptFromFile, agentsMd } = ctx;
   const model = fileConfig.model ?? {};
@@ -238,18 +294,15 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
   // `loadAgentsMd: false`. The `systemPrompt` source tracks the identity's
   // provenance; whether AGENTS.md was folded in is reported by `agentsMdLoaded`.
   const systemPrompt = pick(env.TENTACLE_SYSTEM_PROMPT, promptFromFile, DEFAULT_SYSTEM_PROMPT);
-  const noAgentsEnv = parseBool(env.TENTACLE_NO_AGENTS_MD);
-  const agentsEnabled =
-    noAgentsEnv !== undefined ? !noAgentsEnv : (fileConfig.loadAgentsMd ?? true);
-  const agentsMdLoaded = agentsEnabled && agentsMd !== undefined && agentsMd.trim() !== "";
-  const withAgents = agentsMdLoaded
-    ? `${systemPrompt.value.trimEnd()}\n\n${AGENTS_PROMPT_HEADER}\n\n${(agentsMd ?? "").trimEnd()}\n`
-    : systemPrompt.value;
-  // Skills: the catalog goes LAST (after the identity and AGENTS.md), and only
-  // when one is offered — with none the prompt stays byte-identical.
   const skills = skillsEnabled(fileConfig, env) ? (ctx.skills ?? []) : [];
-  const catalog = renderSkillsCatalog(skills);
-  const systemPromptValue = catalog === "" ? withAgents : `${withAgents.trimEnd()}\n\n${catalog}\n`;
+  const composed = composeSystemPrompt({
+    identity: systemPrompt.value,
+    agentsMd,
+    agentsEnabled: agentsMdEnabled(fileConfig, env),
+    skills,
+  });
+  const agentsMdLoaded = composed.agentsMdLoaded;
+  const systemPromptValue = composed.systemPrompt;
   const subagentsEnabled = pick(
     parseBool(env.TENTACLE_SUBAGENTS),
     fileConfig.subagents?.enabled,
@@ -259,6 +312,16 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     parseIterationLimit(env.TENTACLE_SUBAGENT_MAX_ITERATIONS),
     fileConfig.subagents?.maxIterations,
     DEFAULT_SUBAGENT_MAX_ITERATIONS,
+  );
+  const contextResetEnabled = pick(
+    parseBool(env.TENTACLE_CONTEXT_RESET),
+    fileConfig.contextReset?.enabled,
+    DEFAULT_CONTEXT_RESET_ENABLED,
+  );
+  const contextResetMaxPerMessage = pick(
+    parseIterationLimit(env.TENTACLE_CONTEXT_RESET_MAX),
+    fileConfig.contextReset?.maxPerMessage,
+    DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE,
   );
   const maxInlineOutputChars = pick(
     parseNonNegativeInt(env.TENTACLE_MAX_OUTPUT_CHARS),
@@ -316,6 +379,10 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       enabled: fileConfig.contextAwareness?.enabled ?? DEFAULT_CONTEXT_AWARENESS,
       stepPercent: fileConfig.contextAwareness?.stepPercent ?? DEFAULT_CONTEXT_STEP_PERCENT,
     },
+    contextReset: {
+      enabled: contextResetEnabled.value,
+      maxPerMessage: contextResetMaxPerMessage.value,
+    },
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     systemPrompt: systemPromptValue,
     agentsMdLoaded,
@@ -344,6 +411,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       systemPrompt: systemPrompt.source,
       subagentsEnabled: subagentsEnabled.source,
       subagentMaxIterations: subagentMaxIterations.source,
+      contextResetEnabled: contextResetEnabled.source,
+      contextResetMaxPerMessage: contextResetMaxPerMessage.source,
       maxInlineOutputChars: maxInlineOutputChars.source,
       redactSecrets: redactSecrets.source,
       summarizeLargeOutput: summarizeLargeOutput.source,

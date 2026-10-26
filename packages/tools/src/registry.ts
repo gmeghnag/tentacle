@@ -20,6 +20,23 @@ export class ToolRegistry {
     return this;
   }
 
+  /**
+   * Set (or, with `undefined`, remove) the entry called `name`: the swap seam
+   * for a tool that is rebuilt mid-session (the `skill` tool at a context
+   * reset). An existing entry keeps its position; a new one goes last.
+   */
+  replace<I>(name: string, tool: Tool<I> | undefined): this {
+    if (tool === undefined) {
+      this.tools.delete(name);
+      return this;
+    }
+    if (tool.name !== name) {
+      throw new Error(`tool name mismatch: replacing "${name}" with "${tool.name}"`);
+    }
+    this.tools.set(name, tool as unknown as Tool);
+    return this;
+  }
+
   registerAll(tools: Iterable<Tool>): this {
     for (const tool of tools) {
       this.register(tool);
