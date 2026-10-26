@@ -997,22 +997,25 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 
 ## Roadmap (ordered)
 
-> **Owner queue (2026-10-25), next code tasks in this order:**
+> **Owner queue (2026-10-25, updated 2026-10-26), next code tasks in this order:**
 > 1. ~~task 7 `connect-sessions`~~ DONE, merged `6319beb` (2026-10-26; `docs/feat/connect-sessions.md`);
 > 2. `context-awareness` (`docs/eval/context-awareness.md`);
 > 3. `context-reset` (`docs/eval/context-reset.md`; plan to revise for
 >    decisions 11 and 13, then 3 branches);
-> 4. default `maxIterations` = `-1` (agent and sub-agents);
-> 5. `permission-reply` ("No, let's talk about it"; plan of 2026-10-24 to
+> 4. `docker-runtime` — `run`/`attach --docker` (`docs/eval/docker-runtime.md`,
+>    owner answers 2026-10-26; promote to `feat/` when picked; slices A
+>    `packages/docker`, B neutral `SandboxHost` seam, `ssh://` dial-stdio, C CLI/docs);
+> 5. default `maxIterations` = `-1` (agent and sub-agents);
+> 6. `permission-reply` ("No, let's talk about it"; plan of 2026-10-24 to
 >    refresh against today's main);
-> 6. parallel tools and parallel sub-agents (`docs/eval/parallel-tools.md`,
+> 7. parallel tools and parallel sub-agents (`docs/eval/parallel-tools.md`,
 >    `docs/eval/parallel-agents.md`; evaluate first).
 > Then the mobile app tasks resume (task 8 onward, `docs/eval/mobile-app.md`).
 >
 > **Eval open (owner, 2026-10-26):** `docker-runtime` — `run`/`attach` on a
 > local or remote Docker (Engine API `exec` over a hand-written HTTP/1.1
 > upgrade, same JSON-RPC over another byte stream; `docs/eval/docker-runtime.md`).
-> Owner questions pending.
+> Owner questions answered; slotted as queue item 4 (after context-reset).
 >
 > **Queued fix (owner, 2026-10-26), slot to confirm (proposed: right after
 > task 7):** `fix/tool-duration` — Type: fix · Size: M · Blast:
