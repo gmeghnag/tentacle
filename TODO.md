@@ -1023,7 +1023,8 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 > loader-less / unsupported-arch images fail before the transfer with a clear
 > message (k8s now, Docker later; `docs/fix/musl-image-detect.md`).
 >
-> **Debt (found in context-awareness, 2026-10-26):** `parseAgentDefinition`
+> **DONE 2026-10-26** (merged, `fix/agent-defs-warn`, by the local tentacle agent):
+> ~~**Debt (found in context-awareness, 2026-10-26):**~~ `parseAgentDefinition`
 > (`packages/agent/src/agent-defs.ts`) silently ignores an invalid `model` or
 > `contextWindow` in a sub-agent's frontmatter — surface it (a load warning),
 > never a silent drop. Type: fix · Size: S · Blast: contained.
