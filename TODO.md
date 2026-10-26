@@ -1017,8 +1017,7 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 > upgrade, same JSON-RPC over another byte stream; `docs/eval/docker-runtime.md`).
 > Owner questions answered; slotted as queue item 4 (after context-reset).
 >
-> **Queued fix (owner, 2026-10-26), slot to confirm (proposed: right after
-> task 7):** `fix/tool-duration` — Type: fix · Size: M · Blast:
+> **DONE 2026-10-26, merged `9511c0e`:** `fix/tool-duration` — Type: fix · Size: M · Blast:
 > load-bearing (additive wire field + persisted `ChatMessage` format) ·
 > Suited: Opus exec, fresh Opus review. A tool row rebuilt from history
 > (`--resume`, reconnect, session switch, compaction replace) shows a fake
@@ -1036,7 +1035,7 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 > **Status (2026-10-26):** plan approved and executed on `fix/tool-duration`
 > — task doc `docs/fix/tool-duration.md`; `DAEMON_RECORD_VERSION` is now 6
 > (context-awareness / permission-reply / parallel-tools renumber to 7+);
-> awaiting the fresh-context Review.
+> fresh-context Review MERGE (APPROVE-WITH-NITS), gate 2789 / 2 / 0.
 
 - [x] **Local daemon on a worker thread** (the "TUI always over RPC" lever —
       moves model streaming + tool execution off the render thread, so the UI
