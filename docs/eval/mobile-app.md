@@ -153,7 +153,7 @@ the "a new target adds only a transport" shape, AGENTS §7).
    - **Content end-to-end encrypted:** Apple and the relay carry an opaque
      blob; a Notification Service Extension decrypts it on the phone with the
      key exchanged at pairing (project, session, command / reply preview).
-   - **Actions:** Approve (always requires Face ID), Deny (no Face ID), Open.
+   - **Actions:** Approve (always requires Face ID), Deny (no Face ID), Reply… (iOS text-input action, no Face ID — a refusal with a message; owner 2026-10-26, built on the permission-reply seam), Open.
      If the background action cannot reach the daemon within iOS's few-second
      budget, the app opens on that request — never a silent loss.
 9. **Relay hosting: the tentacle.so server for now; the domain is never
