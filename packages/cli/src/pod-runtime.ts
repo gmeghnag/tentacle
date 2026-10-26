@@ -47,7 +47,7 @@ import {
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { configuredModelProvider } from "./model-provider.ts";
 import { PodBinaryError, checkPodBinaries, resolvePodBinary } from "./pod-binary-build.ts";
-import { injectAgentBinary, probePodArch } from "./pod-binary.ts";
+import { injectAgentBinary, probePod } from "./pod-binary.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
 import { readBinaryVersion } from "./version-marker.ts";
@@ -362,7 +362,7 @@ export async function startPodRuntime(
       podName: name,
       binPath,
       container: AGENT_CONTAINER,
-      podArch: () => probePodArch(deps.kube, name, AGENT_CONTAINER),
+      probe: () => probePod(deps.kube, name, AGENT_CONTAINER),
       resolveBinary: (target) =>
         resolvePodBinary(target, {
           configDir: config.configDir,
@@ -561,7 +561,7 @@ export async function startAttachRuntime(
           podName: name,
           binPath,
           container,
-          podArch: () => probePodArch(deps.kube, name, container),
+          probe: () => probePod(deps.kube, name, container),
           resolveBinary: (target) =>
             resolvePodBinary(target, {
               configDir: config.configDir,

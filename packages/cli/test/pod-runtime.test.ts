@@ -120,15 +120,19 @@ class FakeCluster implements PodCluster {
     return clientCh;
   }
   // One-shot execs (the binary-injection sequence): record them. `--version`
-  // succeeds; `uname -m` reports x64; the install command is treated as done.
+  // succeeds; the image probe reports glibc x64; the install command is treated as done.
   runExec(
     target: ExecTarget,
     _input?: Uint8Array,
     _options?: RunExecOptions,
   ): Promise<RunExecResult> {
     this.calls.push(`runexec:${target.pod}:${target.command.join(" ")}`);
-    if (target.command[0] === "uname") {
-      return Promise.resolve({ exitCode: 0, stdout: "x86_64\n", stderr: "" });
+    if (target.command[2]?.startsWith("echo tentacle-probe")) {
+      return Promise.resolve({
+        exitCode: 0,
+        stdout: "tentacle-probe\nx86_64\nglibc /lib64/ld-linux-x86-64.so.2\n",
+        stderr: "",
+      });
     }
     if (target.command.join(" ").includes("--version")) {
       return Promise.resolve({ exitCode: 0, stdout: "tentacle 1.2.3\n", stderr: "" });
@@ -296,7 +300,9 @@ describe("startPodRuntime", () => {
     expect(kube.calls[0]).toMatch(/^create:tentacle-/);
     expect(kube.calls[1]).toMatch(/^ready:tentacle-/);
     const podName = (kube.calls[0] as string).slice("create:".length);
-    const unameIdx = kube.calls.findIndex((c) => c === `runexec:${podName}:uname -m`);
+    const unameIdx = kube.calls.findIndex((c) =>
+      c.startsWith(`runexec:${podName}:sh -c echo tentacle-probe`),
+    );
     const installIdx = kube.calls.findIndex(
       (c) =>
         c ===
@@ -740,7 +746,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     // Preflight probe → the full injection (probe arch → install the 8 bytes
     // via head -c → verify) → the daemon exec.
     expect(kube.calls[1]).toBe("runexec:mypod:tentacle --version");
-    expect(kube.calls[2]).toBe("runexec:mypod:uname -m");
+    expect(kube.calls[2]?.startsWith("runexec:mypod:sh -c echo tentacle-probe")).toBe(true);
     const installIdx = kube.calls.findIndex((c) => c.includes("head -c 8"));
     expect(installIdx).toBe(3);
     expect(kube.calls.some((c) => c.includes("serve --stdio"))).toBe(true);
@@ -1062,7 +1068,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
   const readOnly = (kube: FakeCluster) => {
     const original = kube.runExec.bind(kube);
     kube.runExec = (target, input, options) =>
-      target.command[0] === "sh"
+      target.command[0] === "sh" && !target.command[2]?.startsWith("echo tentacle-probe")
         ? Promise.resolve({
             exitCode: 1,
             stdout: "",

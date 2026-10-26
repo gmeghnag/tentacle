@@ -4,11 +4,14 @@ import {
   POD_BIN_PATH,
   type PodBinaryDeps,
   type PodBinaryTarget,
+  type PodProbe,
   archToTarget,
+  classifyImage,
   injectAgentBinary,
   libcMismatchHint,
   mapUnameOutput,
-  probePodArch,
+  parseProbe,
+  probePod,
 } from "../src/pod-binary.ts";
 
 /** A recorded one-shot exec call. */
@@ -80,6 +83,7 @@ function depsFor(
     log?: (line: string) => void;
     onStatus?: (text: string) => void;
     binPath?: string;
+    probeStatus?: PodProbe["status"];
   } = {},
 ): PodBinaryDeps {
   return {
@@ -87,9 +91,9 @@ function depsFor(
     podName: "p1",
     container: "agent",
     ...(opts.binPath ? { binPath: opts.binPath } : {}),
-    // The arch probe is an injected seam: in production it is
-    // `probePodArch(kube, …)` (tested directly below); here it is scripted.
-    podArch: async () => opts.arch ?? "x64",
+    // The image probe is an injected seam: in production it is
+    // `probePod(kube, …)` (tested directly below); here it is scripted.
+    probe: async () => ({ arch: opts.arch ?? "x64", status: opts.probeStatus ?? "ok" }),
     resolveBinary: opts.resolveBinary ?? (async () => new Uint8Array([1, 2, 3])),
     log: opts.log ?? (() => {}),
     ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
@@ -142,27 +146,71 @@ describe("libcMismatchHint", () => {
   });
 });
 
-describe("probePodArch", () => {
-  test("reads uname -m stdout and maps it", async () => {
-    const kube = new FakeKube([ok("aarch64\n")]);
-    const arch = await probePodArch(kube, "p", "agent");
-    expect(arch).toBe("arm64");
-    expect(callAt(kube.calls, 0).command).toEqual(["uname", "-m"]);
+// What the probe script prints (sentinel, `uname -m`, then one line per loader found).
+const GLIBC_X64 = "tentacle-probe\nx86_64\nglibc /lib64/ld-linux-x86-64.so.2\n";
+const GLIBC_ARM64 = "tentacle-probe\naarch64\nglibc /lib/ld-linux-aarch64.so.1\n";
+const ALPINE_X64 = "tentacle-probe\nx86_64\nmusl /lib/ld-musl-x86_64.so.1\n";
+const NO_LOADER = "tentacle-probe\nx86_64\n";
+
+describe("parseProbe / classifyImage", () => {
+  test("a glibc image → ok, for both arches", () => {
+    expect(classifyImage(parseProbe(GLIBC_X64))).toEqual({ arch: "x64", status: "ok" });
+    expect(classifyImage(parseProbe(GLIBC_ARM64))).toEqual({ arch: "arm64", status: "ok" });
   });
-  test("a non-zero exit → x64 fallback", async () => {
-    const kube = new FakeKube([fail("/bin/sh: uname: not found")]);
-    const arch = await probePodArch(kube, "p", "agent");
-    expect(arch).toBe("x64");
+  test("an Alpine image (musl loader, no glibc interpreter) → musl", () => {
+    expect(classifyImage(parseProbe(ALPINE_X64))).toEqual({ arch: "x64", status: "musl" });
   });
-  test("an unknown uname output → x64 fallback", async () => {
-    const kube = new FakeKube([ok("riscv64\n")]);
-    const arch = await probePodArch(kube, "p", "agent");
-    expect(arch).toBe("x64");
+  test("musl compat installed beside glibc → ok (the glibc interpreter wins)", () => {
+    const raw = `${GLIBC_X64}musl /lib/ld-musl-x86_64.so.1\n`;
+    expect(classifyImage(parseProbe(raw)).status).toBe("ok");
   });
-  test("an exec throw (timeout / close) → x64 fallback, never aborts", async () => {
+  test("the shell ran but no loader at all (scratch + static busybox) → no-glibc", () => {
+    expect(classifyImage(parseProbe(NO_LOADER))).toEqual({ arch: "x64", status: "no-glibc" });
+  });
+  test("checks the loader of the arch we inject (x64 box with only the arm64 interpreter)", () => {
+    const raw = "tentacle-probe\nx86_64\nglibc /lib/ld-linux-aarch64.so.1\n";
+    expect(classifyImage(parseProbe(raw)).status).toBe("no-glibc");
+  });
+  test("review: an arch we do not build (ppc64le) → unsupported-arch with the machine name, not no-glibc", () => {
+    const raw = "tentacle-probe\nppc64le\nglibc /lib64/ld64.so.2\n";
+    expect(classifyImage(parseProbe(raw))).toEqual({
+      arch: "x64",
+      status: "unsupported-arch",
+      machine: "ppc64le",
+    });
+  });
+  test("review: the shell ran but printed no uname → unknown (never blocks), not no-glibc", () => {
+    expect(classifyImage(parseProbe("tentacle-probe\n\n")).status).toBe("unknown");
+  });
+  test("inconclusive output (empty / no sentinel) → unknown, x64, never a false positive", () => {
+    expect(classifyImage(parseProbe(""))).toEqual({ arch: "x64", status: "unknown" });
+    expect(classifyImage(parseProbe("x86_64\n"))).toEqual({ arch: "x64", status: "unknown" });
+    expect(classifyImage(parseProbe("garbage"))).toEqual({ arch: "x64", status: "unknown" });
+  });
+});
+
+describe("probePod", () => {
+  test("one sh -c exec: arch + loader facts (zero extra round-trip)", async () => {
+    const kube = new FakeKube([ok(GLIBC_ARM64)]);
+    const probe = await probePod(kube, "p", "agent");
+    expect(probe).toEqual({ arch: "arm64", status: "ok" });
+    expect(kube.calls).toHaveLength(1);
+    const call = callAt(kube.calls, 0);
+    expect(call.command.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(call.command[2]).toContain("uname -m");
+    expect(call.command[2]).toContain("/lib/ld-musl-");
+  });
+  test("an Alpine reply → musl", async () => {
+    const kube = new FakeKube([ok(ALPINE_X64)]);
+    expect((await probePod(kube, "p", "agent")).status).toBe("musl");
+  });
+  test("a non-zero exit → probe-failed, x64 fallback (never aborts)", async () => {
+    const kube = new FakeKube([fail("exec: sh: executable file not found in $PATH")]);
+    expect(await probePod(kube, "p", "agent")).toEqual({ arch: "x64", status: "probe-failed" });
+  });
+  test("an exec throw (timeout / close) → probe-failed, never rejects", async () => {
     const kube = { runExec: () => Promise.reject(new Error("exec timed out")) };
-    const arch = await probePodArch(kube, "p", "agent");
-    expect(arch).toBe("x64");
+    expect(await probePod(kube, "p", "agent")).toEqual({ arch: "x64", status: "probe-failed" });
   });
 });
 
@@ -270,6 +318,87 @@ describe("injectAgentBinary", () => {
     await expect(injectAgentBinary(depsFor(kube))).rejects.toThrow(
       /tentacle --version failed.*libdl\.so\.2.*appears to lack glibc.*UBI9, Debian, RHEL/,
     );
+  });
+
+  test("a musl image fails BEFORE resolving/transferring the binary", async () => {
+    const kube = new FakeKube([]);
+    let resolved = false;
+    const deps = depsFor(kube, {
+      probeStatus: "musl",
+      resolveBinary: async () => {
+        resolved = true;
+        return new Uint8Array([1]);
+      },
+    });
+    await expect(injectAgentBinary(deps)).rejects.toThrow(
+      /this image uses musl \(Alpine\): use a glibc-based image.*UBI9, Debian, RHEL/,
+    );
+    expect(resolved).toBe(false);
+    expect(kube.calls).toHaveLength(0);
+  });
+
+  test("review: the musl message gives the advice ONCE", async () => {
+    const deps = depsFor(new FakeKube([]), { probeStatus: "musl" });
+    const message = await injectAgentBinary(deps).then(
+      () => "",
+      (e: unknown) => String(e),
+    );
+    expect(message.match(/glibc-based image/g)?.length).toBe(1);
+  });
+
+  test("review: an unsupported arch fails BEFORE the transfer, naming it", async () => {
+    const kube = new FakeKube([]);
+    const deps: PodBinaryDeps = {
+      ...depsFor(kube),
+      probe: async () => ({ arch: "x64", status: "unsupported-arch", machine: "s390x" }),
+    };
+    await expect(injectAgentBinary(deps)).rejects.toThrow(
+      /unsupported architecture: s390x \(tentacle ships linux x64 and arm64 builds\)/,
+    );
+    expect(kube.calls).toHaveLength(0);
+  });
+
+  test("a shell image with no glibc loader gets its own message (names the interpreter)", async () => {
+    const kube = new FakeKube([]);
+    const deps = depsFor(kube, { probeStatus: "no-glibc", arch: "arm64" });
+    await expect(injectAgentBinary(deps)).rejects.toThrow(
+      /no glibc loader \(\/lib\/ld-linux-aarch64\.so\.1 not found\).*glibc-based image/,
+    );
+    expect(kube.calls).toHaveLength(0);
+  });
+
+  test("no shell (probe failed, then the sh -c install fails) → a clear no-shell error", async () => {
+    const kube = new FakeKube([
+      fail("", '{"status":"Failure","message":"sh: executable file not found"}'),
+    ]);
+    const deps = depsFor(kube, { probeStatus: "probe-failed" });
+    await expect(injectAgentBinary(deps)).rejects.toThrow(
+      /failed to inject tentacle.*no shell \(sh\).*distroless/s,
+    );
+    expect(kube.calls).toHaveLength(1);
+  });
+
+  test("an inconclusive probe (unknown) proceeds exactly as before", async () => {
+    const kube = new FakeKube([ok(), ok("tentacle 1.2.3\n")]);
+    const result = await injectAgentBinary(depsFor(kube, { probeStatus: "unknown" }));
+    expect(result).toBe("tentacle 1.2.3");
+    expect(kube.calls).toHaveLength(2);
+  });
+
+  test("a --version failure reported only on the status channel still gets the glibc hint", async () => {
+    // k8s delivers a runtime-level exec failure as a Status (stderr stays empty).
+    const status =
+      '{"status":"Failure","message":"exec: \\"/usr/local/bin/tentacle\\": no such file or directory"}';
+    const kube = new FakeKube([ok(), fail("", status)]);
+    await expect(injectAgentBinary(depsFor(kube))).rejects.toThrow(
+      /tentacle --version failed.*no such file or directory.*appears to lack glibc/s,
+    );
+  });
+
+  test("a --version 'Exec format error' (wrong arch) gets no glibc hint", async () => {
+    const kube = new FakeKube([ok(), fail("tentacle: Exec format error\n")]);
+    const err = await injectAgentBinary(depsFor(kube)).catch((e: Error) => e);
+    expect(err instanceof Error && err.message.includes("appears to lack glibc")).toBe(false);
   });
 
   test("the install call passes a size-scaled timeout", async () => {
