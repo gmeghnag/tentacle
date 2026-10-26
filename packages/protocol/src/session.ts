@@ -460,6 +460,24 @@ export type CloseParams = z.infer<typeof CloseParamsSchema>;
 export const CloseResultSchema = z.object({});
 export type CloseResult = z.infer<typeof CloseResultSchema>;
 
+// --- session/detach -----------------------------------------------------
+// Stop receiving this session's updates on this connection; the session keeps
+// running (turn, jobs, pending asks, queue) for any client, and counts as
+// detached for the idle TTL, the detached cap and `session/list.attached` once
+// no connection is attached. Idempotent: an id not open on this connection is
+// a no-op success. On a connection that serves the model (pod reverse-tunnel)
+// it also cancels the session's turn, exactly as closing that connection does.
+// No update is sent to anyone. Additive: an older daemon answers
+// `MethodNotFound`.
+
+export const DetachParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+});
+export type DetachParams = z.infer<typeof DetachParamsSchema>;
+
+export const DetachResultSchema = z.object({});
+export type DetachResult = z.infer<typeof DetachResultSchema>;
+
 // --- session/delete -----------------------------------------------------
 // Remove a session for good: a live one is ended first (its turn aborted, its
 // jobs stopped, `session_closed{deleted}` to every attached client), then its

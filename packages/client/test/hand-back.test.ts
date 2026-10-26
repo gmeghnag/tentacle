@@ -69,6 +69,38 @@ describe("handBack", () => {
   });
 });
 
+describe("stayingRows (QN2, docs/feat/connect-sessions.md)", () => {
+  test("my waiting rows and my returned rows not given back, each id once; others' and handed-back ones not", () => {
+    const n = H.stayingRows(
+      {
+        entries: [
+          { id: "w1", text: "x" },
+          { id: "theirs", text: "y" },
+          { id: "r1", text: "x" },
+        ],
+        returned: [
+          { id: "r1", text: "x", cause: "cancelled" },
+          { id: "r2", text: "x", cause: "failed" },
+          { id: "given", text: "x", cause: "failed" },
+          { id: "other", text: "x", cause: "failed" },
+        ],
+      },
+      new Map([
+        ["w1", "x"],
+        ["r1", "x"],
+        ["r2", "x"],
+        ["given", "x"],
+      ]),
+      new Set(["given"]),
+    );
+    expect(n).toBe(3); // w1, r1 (once), r2
+  });
+
+  test("nothing of mine → 0", () => {
+    expect(H.stayingRows(state([]), new Map(), new Set())).toBe(0);
+  });
+});
+
 describe("restoredByRefusal (what the caller restores: given back already)", () => {
   const messages = [{ id: "a" }, { id: "b" }];
   test("the daemon's held ids are not restored; the others are", () => {

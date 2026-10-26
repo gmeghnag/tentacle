@@ -177,6 +177,35 @@ describe("parseArgs: --continue (docs/feat/resume-picker.md)", () => {
   });
 });
 
+describe("parseArgs: connect --resume / --continue (docs/feat/connect-sessions.md)", () => {
+  test("bare, with a uid next, with = for any daemon id; --continue; the url anywhere", () => {
+    expect(ok(["ws://h:1", "--resume"], ARGS.connect)).toEqual({
+      flags: {},
+      bools: ["resume"],
+      positional: ["ws://h:1"],
+    });
+    expect(ok(["--resume", UID, "ws://h:1"], ARGS.connect)).toEqual({
+      flags: { resume: UID },
+      bools: [],
+      positional: ["ws://h:1"],
+    });
+    // A word that is not a uid is not taken: it is the url.
+    expect(ok(["--resume", "ws://h:1"], ARGS.connect)).toEqual({
+      flags: {},
+      bools: ["resume"],
+      positional: ["ws://h:1"],
+    });
+    expect(ok(["ws://h:1", "--resume=any-id"], ARGS.connect).flags).toEqual({ resume: "any-id" });
+    expect(ok(["ws://h:1", "--continue"], ARGS.connect).bools).toEqual(["continue"]);
+  });
+
+  test("--resume with --continue is an error", () => {
+    expect(error(["ws://h:1", "--resume", "--continue"], ARGS.connect)).toBe(
+      "--resume and --continue cannot be used together",
+    );
+  });
+});
+
 // End to end through `main`: the same fake k8s API server as the repro logs the
 // first pod request and refuses it, so nothing is created anywhere.
 describe("tentacle run/attach (end to end, fake API server)", () => {

@@ -75,10 +75,17 @@ export function historyAction(input: {
 
 export const FOREIGN_COMPACTED_NOTICE = "_the conversation was compacted on another device_";
 
-export function closedNotice(reason: "closed" | "deleted"): string {
+/**
+ * The session ended elsewhere: what happened, and that the next prompt starts
+ * a fresh session (the App swaps to one; docs/feat/connect-sessions.md). A
+ * closed one is archived, so `/sessions` (when the runtime lists) can reopen
+ * it; a deleted one cannot come back.
+ */
+export function closedNotice(reason: "closed" | "deleted", canList = false): string {
+  const next = "what you type next starts a new session";
   return reason === "deleted"
-    ? "_this session was deleted on another device_"
-    : "_this session was closed on another device_";
+    ? `_this session was deleted on another device — ${next}_`
+    : `_this session was closed on another device — ${next}${canList ? " (/sessions to reopen it)" : ""}_`;
 }
 
 /** An own prompt that lost the slot: its text is back in the input (decision 15). */

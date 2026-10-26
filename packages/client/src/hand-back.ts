@@ -51,6 +51,27 @@ export function handBack(
 }
 
 /**
+ * How many of MY rows stay on the daemon when this session stops following it
+ * (a detach, a quit): waiting in its queue, or returned and not yet given back
+ * — nobody here will reclaim them once it is gone (QN2,
+ * docs/feat/connect-sessions.md). Counted by id; each id once.
+ */
+export function stayingRows(
+  state: QueueState,
+  mine: ReadonlyMap<string, string>,
+  handedBack: ReadonlySet<string>,
+): number {
+  const ids = new Set<string>();
+  for (const row of state.entries) {
+    if (mine.has(row.id)) ids.add(row.id);
+  }
+  for (const row of state.returned) {
+    if (mine.has(row.id) && !handedBack.has(row.id)) ids.add(row.id);
+  }
+  return ids.size;
+}
+
+/**
  * The ids a refused `session/send_now` gives back to its caller — what the
  * TUI restores (its `planRefusal`), so this client never gives them twice:
  * none for `MethodNotFound` (an older daemon: the fallback sends them) or

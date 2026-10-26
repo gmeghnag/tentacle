@@ -129,6 +129,23 @@ describe("quitAction", () => {
     expect(quitAction("ctrl-c", true, false, true)).toBe("stop");
     expect(quitAction("ctrl-c", true, true, true)).toBe("exit");
   });
+
+  test("a runtime that detaches on quit (connect, docs/feat/connect-sessions.md): /exit mid-own-turn exits at once; Ctrl+C still stops", () => {
+    // Mutation: ignore `detaches` → "stop-then-exit".
+    expect(quitAction("command", true, false, false, true)).toBe("exit");
+    expect(quitAction("ctrl-c", true, false, false, true)).toBe("stop");
+    expect(quitAction("command", true, false, false, false)).toBe("stop-then-exit");
+  });
+});
+
+describe("/sessions and /close (docs/feat/connect-sessions.md)", () => {
+  test("both are built-ins; /close waits for an idle turn, /sessions (a read) does not", () => {
+    const names = SLASH_COMMANDS.map((c) => c.name);
+    expect(names).toContain("/sessions");
+    expect(names).toContain("/close");
+    expect(isSessionMutating("/close")).toBe(true);
+    expect(isSessionMutating("/sessions")).toBe(false);
+  });
 });
 
 describe("skills as /name (docs/feat/skills-slash.md)", () => {

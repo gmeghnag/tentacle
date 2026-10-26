@@ -436,6 +436,59 @@ describe("session/close", () => {
   });
 });
 
+describe("session/detach (docs/feat/connect-sessions.md)", () => {
+  test("only this connection stops listening: the session and its turn run on, attached drops", async () => {
+    // Mutation: drop the `hosted.detach` call → attached stays 2 and A keeps receiving.
+    const d = daemon(() => slowModel(30));
+    const a = await d.connect();
+    const b = await d.connect();
+    await a.open({ sessionId: "X", create: true });
+    await b.open({ sessionId: "X" });
+    await a.prompt("X", "t1");
+    await until(() => a.updates.length >= 3);
+    expect(await a.client.request("session/detach", { sessionId: "X" })).toEqual({});
+    const seenByA = a.updates.length;
+    expect(d.host.get("X")?.attachedCount).toBe(1);
+    expect(d.host.get("X")?.running).toBe(true);
+    expect(d.host.list({}).sessions[0]).toMatchObject({ running: true, attached: 1 });
+    await until(() => ended(b.updates));
+    expect(b.updates.at(-1)?.update).toMatchObject({ type: "turn_end", stopReason: "end_turn" });
+    expect(a.updates.length).toBe(seenByA); // nothing more reached A, not even a notice
+    expect(d.host.get("X")).toBeDefined();
+    // A's later prompt is refused (no longer open here); a re-open attaches again.
+    await expect(a.prompt("X", "t2")).rejects.toMatchObject({
+      code: DomainErrorCode.UnknownSession,
+    });
+    await a.open({ sessionId: "X" });
+    expect(d.host.get("X")?.attachedCount).toBe(2);
+  });
+
+  test("the last detach leaves the session live with attached 0; unknown and repeated ids are {}", async () => {
+    const d = daemon(() => slowModel(1));
+    const a = await d.connect();
+    await a.open({ sessionId: "X", create: true });
+    expect(await a.client.request("session/detach", { sessionId: "X" })).toEqual({});
+    expect(d.host.list({}).sessions[0]).toMatchObject({ sessionId: "X", attached: 0 });
+    expect(await a.client.request("session/detach", { sessionId: "X" })).toEqual({});
+    expect(await a.client.request("session/detach", { sessionId: "never" })).toEqual({});
+    expect(d.host.size).toBe(1);
+  });
+
+  test("on a model-serving connection a detach cancels the turn, as its close does", async () => {
+    // Mutation: drop the `servesModel` branch of `release` → the turn ends end_turn.
+    const d = daemon(() => slowModel(50));
+    const a = await d.connect({ servesModel: true });
+    const { epoch } = await a.open({ sessionId: "X", create: true });
+    await a.prompt("X", "t1");
+    await until(() => a.updates.length >= 3);
+    await a.client.request("session/detach", { sessionId: "X" });
+    await until(() => d.host.get("X")?.running === false);
+    const b = await d.connect();
+    await b.open({ sessionId: "X", since: { epoch, seq: 0 } });
+    expect(b.updates.at(-1)?.update).toMatchObject({ type: "turn_end", stopReason: "cancelled" });
+  });
+});
+
 describe("the model-serving connection (`--model-proxy`)", () => {
   test("its detach cancels the turn; the session stays, and a re-attach replays turn_end{cancelled}", async () => {
     // Mutation: ignore `servesModel` → the turn runs to end_turn.

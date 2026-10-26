@@ -4,6 +4,7 @@ import type { DisplayItem } from "../src/state.ts";
 import {
   type SessionActivity,
   WARM_THRESHOLD,
+  closedNotice,
   commitWarmed,
   historyAction,
   lostSlot,
@@ -92,5 +93,19 @@ describe("warm (C8)", () => {
     expect(commitWarmed([a], [a, n1], [h])).toEqual([h, n1]);
     expect(commitWarmed([a], [a], [h])).toEqual([h]);
     expect(commitWarmed([a], [n1], [h])).toEqual([h]);
+  });
+});
+
+describe("closedNotice (docs/feat/connect-sessions.md)", () => {
+  test("says the next prompt starts a new session; only a closed one (listable runtime) offers /sessions", () => {
+    expect(closedNotice("closed", true)).toBe(
+      "_this session was closed on another device — what you type next starts a new session (/sessions to reopen it)_",
+    );
+    expect(closedNotice("closed")).toBe(
+      "_this session was closed on another device — what you type next starts a new session_",
+    );
+    expect(closedNotice("deleted", true)).toBe(
+      "_this session was deleted on another device — what you type next starts a new session_",
+    );
   });
 });
