@@ -62,6 +62,7 @@ import {
   type SendNowMessage,
   type SendNowRefusal,
   type SendNowTarget,
+  type SessionSkillsResult,
   type SessionTitle,
   type SessionUpdate,
   type SnapshotResult,
@@ -76,6 +77,7 @@ import {
   eventToUpdate,
   frameFor,
   stopReasonToProtocol,
+  toSessionSkills,
   toUpdateParams,
   wireLine,
 } from "./mapping.ts";
@@ -904,6 +906,16 @@ export class HostedSession {
   }
 
   /**
+   * `session/skills` (docs/feat/skills-hot-reload.md): this session's skills
+   * read again from disk — its `/name` activator replaced, its model's set
+   * untouched — wire-safe. Idle or mid-turn alike; no lock (a concurrent ask
+   * shares the scan). Rejects when the scan does: nothing changes.
+   */
+  async skills(): Promise<SessionSkillsResult> {
+    return toSessionSkills(await this.session.refreshSkills());
+  }
+
+  /**
    * Accept a turn and ack at once; the turn itself runs in `drive` and ends
    * with a `turn_end` update. Synchronous up to the ack ON PURPOSE: two prompts
    * arriving together must see the first one's controller (an `await` before it
@@ -930,7 +942,7 @@ export class HostedSession {
     if (skill !== undefined && (text === "" || !this.session.canActivateSkill(skill))) {
       throw new RpcError(
         JsonRpcErrorCode.InvalidParams,
-        `unknown skill "${skill}": not invocable on this daemon`,
+        `unknown skill "${skill}": not invocable in this session`,
       );
     }
     this.assertIdle();

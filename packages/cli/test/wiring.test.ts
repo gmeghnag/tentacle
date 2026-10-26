@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AskHooksTrust, type HookRunner, Session } from "@tentacle/agent";
 import type { ChatRequest, ModelProvider, StreamEvent, ToolResult } from "@tentacle/core";
-import { SessionHost } from "@tentacle/daemon";
+import { SessionHost, toSessionSkills } from "@tentacle/daemon";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { daemonErrorLogPath } from "../src/daemon-log.ts";
 import {
@@ -13,8 +13,6 @@ import {
   inProcessAgents,
   loadUserAgentTypes,
   readSkillBody,
-  skillCatalog,
-  skillListing,
 } from "../src/wiring.ts";
 
 let dir: string;
@@ -223,9 +221,10 @@ describe("buildAgent skills (docs/feat/skills-core.md)", () => {
       { ...base, name: "Bad Name" },
     ];
     const c = { ...cfg, skills };
-    const catalog = skillCatalog(c);
-    expect(catalog.map((s) => s.name)).toEqual(["big", "hidden"]);
     const { agent, tools } = buildAgent(c);
+    // The session's `/name` list (`session/skills` `slash`) from its own listing.
+    const catalog = toSessionSkills(agent.skillListing()).slash;
+    expect(catalog.map((s) => s.name)).toEqual(["big", "hidden"]);
     for (const name of ["big", "hidden", "model-only", "Bad Name", "nope"]) {
       expect({ name, user: agent.canActivateForUser(name) }).toEqual({
         name,
@@ -255,12 +254,12 @@ describe("buildAgent skills (docs/feat/skills-core.md)", () => {
       skills,
       skillDiagnostics: ["skipped skill at /x/SKILL.md: no description"],
     };
-    const listing = skillListing(c);
+    const { agent, tools } = buildAgent(c);
+    const listing = agent.skillListing();
     expect(listing.problems).toEqual(["skipped skill at /x/SKILL.md: no description"]);
     expect(listing.skills.map((s) => [s.name, s.scope, s.location])).toEqual(
       skills.map((s) => [s.name, s.scope, s.location]),
     );
-    const { agent, tools } = buildAgent(c);
     const skillDef = JSON.stringify(tools.definitions().find((d) => d.name === "skill"));
     for (const s of listing.skills) {
       expect({ name: s.name, user: s.user, model: s.model }).toEqual({
@@ -826,7 +825,7 @@ describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
 
   test("buildSessionSkills: the tool is the model's enum, the activator knows the hidden skill too", async () => {
     const cfg = await pinnedConfig();
-    const set = buildSessionSkills(cfg.skills, readSkillBody);
+    const set = buildSessionSkills(cfg.skills, cfg.skillDiagnostics, readSkillBody);
     expect(cfg.skills.map((s) => s.name).sort()).toEqual(["alpha", "beta", "hidden"]);
     expect(set.tool?.name).toBe("skill");
     expect(JSON.stringify(set.tool?.jsonSchema ?? set.tool?.inputSchema)).not.toContain("hidden");
@@ -837,11 +836,18 @@ describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
       false,
     ]);
     expect(set.activator?.userInvocable("hidden")).toBe(true);
+    // The listing says the same, with the same rules.
+    expect(set.listing?.skills.map((s) => [s.name, s.user, s.model])).toEqual([
+      ["alpha", true, true],
+      ["beta", true, true],
+      ["hidden", true, false],
+    ]);
   });
 
   test("buildSessionSkills: none discovered → no tool, an activator that knows nothing", () => {
-    const set = buildSessionSkills([], readSkillBody);
+    const set = buildSessionSkills([], ["a problem"], readSkillBody);
     expect(set.tool).toBeUndefined();
     expect(set.activator?.has("anything")).toBe(false);
+    expect(set.listing).toEqual({ skills: [], problems: ["a problem"] });
   });
 });

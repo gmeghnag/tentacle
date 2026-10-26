@@ -12,9 +12,11 @@ import {
   type AgentType,
   type AskHooksTrust,
   BUILTIN_AGENT_TYPES,
+  EMPTY_SKILL_LISTING,
   HookRunner,
   type ResultTransform,
   type SessionSkills,
+  type SkillListing,
   collapseRepeatedLines,
   createSubagentRunner,
   exemptTools,
@@ -26,11 +28,13 @@ import {
   summarizeLargeOutput,
   summarizeText,
   tabulateJson,
+  userRescanListing,
 } from "@tentacle/agent";
 import {
   type SkillInfo,
   type TentacleConfig,
   offeredSkills,
+  rediscoverSkills,
   refreshSessionContext,
   slashSkills,
   splitFrontmatter,
@@ -38,7 +42,7 @@ import {
 import { type JobController, type ModelProvider, PermissionBroker } from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
-import { HooksTrustParamsSchema, type SkillListEntry } from "@tentacle/protocol";
+import { HooksTrustParamsSchema } from "@tentacle/protocol";
 import {
   SKILL_TOOL_NAME,
   type SkillBodyReader,
@@ -52,44 +56,6 @@ import {
 import { logDaemonError } from "./daemon-log.ts";
 import { createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
 import { configuredModelProvider } from "./model-provider.ts";
-
-/**
- * The daemon's `/name` catalog for `initialize` (`SessionHostOptions.skills`):
- * name + description of `slashSkills` — the same rule the agent's activator
- * uses for `userInvocable`, so the catalog and what `session/prompt{skill}`
- * accepts never disagree.
- */
-export function skillCatalog(
-  config: Pick<TentacleConfig, "skills">,
-): { name: string; description: string }[] {
-  return slashSkills(config.skills).map(({ name, description }) => ({ name, description }));
-}
-
-/**
- * Every discovered skill and who may invoke it, plus the discovery problems
- * (`skills/list`, the TUI's `/skills`; docs/feat/skills-panel.md). `user` and
- * `model` are the same rules the agent applies (`slashSkills`,
- * `offeredSkills`), so the panel can't disagree with what actually happens.
- * Raw: the daemon (`toSkillList`) makes it wire-safe.
- */
-export function skillListing(config: Pick<TentacleConfig, "skills" | "skillDiagnostics">): {
-  skills: SkillListEntry[];
-  problems: string[];
-} {
-  const user = new Set(slashSkills(config.skills).map((s) => s.name));
-  const model = new Set(offeredSkills(config.skills).map((s) => s.name));
-  return {
-    skills: config.skills.map((s) => ({
-      name: s.name,
-      description: s.description,
-      scope: s.scope,
-      user: user.has(s.name),
-      model: model.has(s.name),
-      location: s.location,
-    })),
-    problems: [...config.skillDiagnostics],
-  };
-}
 
 /**
  * Load user-defined agent types from `<configDir>/agents/*.md`, then from each
@@ -159,11 +125,15 @@ export const readSkillBody: SkillBodyReader = async (skill, ctx) => {
  * skills (one rule, `offeredSkills`); none → no tool. The activator behind every
  * activation (the user's `/name` round, the `/compact` re-read) knows the
  * offered skills plus the user's `slashSkills` (hidden-from-the-model ones
- * included, eval decision 5). Used at start (`buildAgent`) and, on a fresh
- * discovery, by a context reset.
+ * included, eval decision 5). The listing (`session/skills`, the TUI's `/` and
+ * `/skills`) says the same with the same rules, plus the discovery's problems,
+ * so a list can't disagree with what actually happens; raw: the daemon
+ * (`toSessionSkills`) makes it wire-safe. Used at start (`buildAgent`), by a
+ * context reset and by the user's rescan, each on its own discovery.
  */
 export function buildSessionSkills(
   skills: readonly SkillInfo[],
+  diagnostics: readonly string[],
   readBody: SkillBodyReader,
 ): SessionSkills {
   const offered = offeredSkills(skills);
@@ -177,6 +147,83 @@ export function buildSessionSkills(
         .map((s) => ({ ...s, userInvocable: userNames.has(s.name) })),
       readBody,
     ),
+    listing: {
+      skills: skills.map((s) => ({
+        name: s.name,
+        description: s.description,
+        scope: s.scope,
+        user: userNames.has(s.name),
+        model: offeredNames.has(s.name),
+        location: s.location,
+      })),
+      problems: [...diagnostics],
+    },
+  };
+}
+
+/** One discovery: the skills and their problems. */
+export interface SkillDiscovery {
+  readonly skills: readonly SkillInfo[];
+  readonly diagnostics: readonly string[];
+}
+
+/**
+ * The skill scan a daemon's sessions share (docs/feat/skills-hot-reload.md):
+ * every user rescan (any session's, or the `/name` list of a session not
+ * created yet) goes through it, and a session created later starts its `/name`
+ * activator from the `latest` one — so what the user was shown before the
+ * first prompt is what that prompt is checked against. The MODEL's set of a
+ * new session stays the start-up's (`config.skills`: its system prompt was
+ * composed from it). Re-reads files only, with the start-up's settings (CR-Q2).
+ *
+ * Debt: the scan reads the DAEMON's `config.cwd`, while a reset reads the
+ * session's `{...config, cwd}`. They are equal today (`SessionHost` builds
+ * every agent at `defaultCwd`; `serve` is one project per daemon); if a
+ * per-session cwd is ever honoured, rescans would read another project's skills.
+ */
+export interface SkillScan {
+  /** The latest scan (before any: the start-up's discovery). */
+  latest(): SkillDiscovery;
+  /** Read the skill folders again; the result becomes `latest`. May throw. */
+  scan(): Promise<SkillDiscovery>;
+  /** A fresh scan seen from a session created now: what `session/skills` with no session answers. */
+  newSession(): Promise<SkillListing>;
+}
+
+export function createSkillScan(
+  config: Pick<
+    TentacleConfig,
+    "cwd" | "configDir" | "skillsEnabled" | "packages" | "skills" | "skillDiagnostics"
+  >,
+  // Injectable so a test can gate overlapping scans.
+  rediscover: (c: typeof config) => Promise<SkillDiscovery> = rediscoverSkills,
+): SkillScan {
+  let latest: SkillDiscovery = { skills: config.skills, diagnostics: config.skillDiagnostics };
+  // Scans may overlap (two sessions): `latest` is the one that STARTED last
+  // among those that landed, never an older one landing late.
+  let started = 0;
+  let landed = 0;
+  const modelAtStart = offeredSkills(config.skills).map((s) => s.name);
+  const scan = async (): Promise<SkillDiscovery> => {
+    const n = ++started;
+    const fresh = await rediscover(config);
+    if (n > landed) {
+      landed = n;
+      latest = fresh;
+    }
+    return fresh;
+  };
+  return {
+    latest: () => latest,
+    scan,
+    newSession: async () => {
+      const fresh = await scan();
+      return userRescanListing(
+        buildSessionSkills(fresh.skills, fresh.diagnostics, readSkillBody).listing ??
+          EMPTY_SKILL_LISTING,
+        modelAtStart,
+      );
+    },
   };
 }
 
@@ -221,6 +268,12 @@ export interface BuildAgentOptions {
    * in-process TUI, which has no RPC). Absent → project hooks are declined.
    */
   readonly askHooksTrust?: AskHooksTrust;
+  /**
+   * The daemon's shared skill scan (`createSkillScan`): the session's `/name`
+   * set starts from its latest result and its rescans go through it. Absent
+   * (a one-shot) → the start-up's discovery, rescans read the folders directly.
+   */
+  readonly skillScan?: SkillScan;
 }
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
@@ -286,11 +339,28 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   ];
 
   // Skills: the `skill` tool and the activator, from the one builder a context
-  // reset also uses (so start and reset can never disagree).
-  const sessionSkills = buildSessionSkills(config.skills, readSkillBody);
-  if (sessionSkills.tool) {
-    tools.register(sessionSkills.tool);
+  // reset and the user's rescan also use (so they can never disagree). The
+  // model's set is the start-up's (its system prompt was composed from it);
+  // the user's `/name` set is the daemon's latest scan (docs/feat/skills-hot-reload.md).
+  const modelSkills = buildSessionSkills(config.skills, config.skillDiagnostics, readSkillBody);
+  if (modelSkills.tool) {
+    tools.register(modelSkills.tool);
   }
+  const start = options.skillScan?.latest();
+  const userSkills = start
+    ? buildSessionSkills(start.skills, start.diagnostics, readSkillBody)
+    : modelSkills;
+  const skillListing = userRescanListing(
+    userSkills.listing ?? EMPTY_SKILL_LISTING,
+    offeredSkills(config.skills).map((s) => s.name),
+  );
+  // The user's rescan reads the same folders as a reset, with no prompt file.
+  const rescanSkills = async (): Promise<SessionSkills> => {
+    const fresh = options.skillScan
+      ? await options.skillScan.scan()
+      : await rediscoverSkills(config);
+    return buildSessionSkills(fresh.skills, fresh.diagnostics, readSkillBody);
+  };
 
   // The model is told how full its context is (docs/feat/context-awareness.md),
   // on `model.contextWindow` (a pod daemon's is the laptop's: `--context-window`).
@@ -338,7 +408,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
           }
           return {
             systemPrompt: fresh.systemPrompt,
-            skills: buildSessionSkills(fresh.skills, readSkillBody),
+            skills: buildSessionSkills(fresh.skills, fresh.skillDiagnostics, readSkillBody),
           };
         },
       }
@@ -356,7 +426,9 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     systemPrompt: config.systemPrompt,
     maxIterations: config.maxIterations,
     requestPermission: (req) => permissions.request(req),
-    ...(sessionSkills.activator ? { skills: sessionSkills.activator } : {}),
+    ...(userSkills.activator ? { skills: userSkills.activator } : {}),
+    skillListing,
+    rescanSkills,
     ...(hooks ? { hooks } : {}),
     ...(options.askHooksTrust ? { askHooksTrust: options.askHooksTrust } : {}),
     ...(contextAwareness ? { contextAwareness } : {}),
@@ -412,9 +484,11 @@ export function inProcessAgents(config: TentacleConfig): {
   const log = (line: string): void => {
     logDaemonError(config.configDir, line);
   };
+  // One scan for every session, as a daemon's (docs/feat/skills-hot-reload.md).
+  const skillScan = createSkillScan(config);
   return {
     permissions,
-    build: () => buildAgent(config, { permissions, askHooksTrust, log }),
+    build: () => buildAgent(config, { permissions, askHooksTrust, log, skillScan }),
   };
 }
 

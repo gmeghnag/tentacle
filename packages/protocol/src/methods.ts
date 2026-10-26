@@ -45,7 +45,7 @@ import {
   SnapshotParamsSchema,
   SnapshotResultSchema,
 } from "./session.ts";
-import { SkillsListParamsSchema, SkillsListResultSchema } from "./skills.ts";
+import { SessionSkillsParamsSchema, SessionSkillsResultSchema } from "./skills.ts";
 import { SessionUpdateParamsSchema } from "./updates.ts";
 
 /** Request methods (expect a response). */
@@ -67,7 +67,8 @@ export const Method = {
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
   McpStatus: "mcp/status",
-  SkillsList: "skills/list",
+  /** A session's skills, read again from disk (docs/feat/skills-hot-reload.md). */
+  SessionSkills: "session/skills",
   SessionTtl: "daemon/session_ttl",
   /** Daemon → client: may this session run the project's hooks? */
   HooksTrust: "hooks/trust",
@@ -113,7 +114,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     result: ModelStreamChunkedResultSchema,
   },
   [Method.McpStatus]: { params: McpStatusParamsSchema, result: McpStatusResultSchema },
-  [Method.SkillsList]: { params: SkillsListParamsSchema, result: SkillsListResultSchema },
+  [Method.SessionSkills]: { params: SessionSkillsParamsSchema, result: SessionSkillsResultSchema },
   [Method.SessionTtl]: { params: SessionTtlParamsSchema, result: SessionTtlResultSchema },
   [Method.HooksTrust]: { params: HooksTrustParamsSchema, result: HooksTrustResultSchema },
 };

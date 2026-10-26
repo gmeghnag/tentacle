@@ -159,9 +159,7 @@ export async function connectTui(
         return track(session);
       },
       link: client,
-      skills: () => client.skills(),
       mcpStatus: () => client.mcpStatus(),
-      skillsList: () => client.skillsList(),
       detachOnQuit: true,
       sessions: {
         list: () =>

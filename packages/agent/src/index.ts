@@ -9,6 +9,7 @@ export * from "./session-store.ts";
 export * from "./compact.ts";
 export * from "./context-awareness.ts";
 export * from "./context-reset.ts";
+export * from "./session-skills.ts";
 export * from "./result-pipeline.ts";
 export * from "./redact.ts";
 export * from "./permission-gate.ts";

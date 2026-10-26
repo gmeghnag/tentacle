@@ -76,7 +76,6 @@ function rawDaemon(
             result: {
               protocolVersion: PROTOCOL_VERSION,
               agentCapabilities: { tools: true, permissions: true },
-              skills: [],
             },
           }
         : reply(frame.method, frame.params ?? {});
@@ -217,7 +216,6 @@ describe("client titles", () => {
             result: {
               protocolVersion: PROTOCOL_VERSION,
               agentCapabilities: { tools: true, permissions: true },
-              skills: [],
             },
           }),
         );

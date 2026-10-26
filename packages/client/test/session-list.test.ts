@@ -54,7 +54,6 @@ function rawDaemon(reply: (params: unknown) => Record<string, unknown>): DuplexC
             result: {
               protocolVersion: PROTOCOL_VERSION,
               agentCapabilities: { tools: true, permissions: true },
-              skills: [],
             },
           }
         : reply(frame.params);

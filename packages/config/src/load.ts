@@ -281,6 +281,33 @@ export async function refreshSessionContext(
   const fromFile = await readPromptFile(config.promptPath, config.promptFileRequired);
   // Same precedence as `resolveConfig`: env > the prompt file > the default.
   const identity = env.TENTACLE_SYSTEM_PROMPT ?? fromFile ?? DEFAULT_SYSTEM_PROMPT;
+  const discovered = await rediscoverSkills(config, env);
+  const agents = config.agentsMdEnabled ? await readAgentsMd(config.cwd) : undefined;
+  const composed = composeSystemPrompt({
+    identity,
+    agentsMd: agents?.content,
+    agentsEnabled: config.agentsMdEnabled,
+    skills: discovered.skills,
+  });
+  return {
+    systemPrompt: composed.systemPrompt,
+    skills: discovered.skills,
+    skillDiagnostics: discovered.diagnostics,
+  };
+}
+
+/**
+ * Re-read every skill folder (package `skills/` dirs included, even one
+ * created since the start) with the start-up's SETTINGS as kept in `config`
+ * (`loadSkills`, the installed-package list; `config.jsonc` is not re-read):
+ * the skills half of `refreshSessionContext`, shared by a context reset and
+ * the user's rescan (docs/feat/skills-hot-reload.md). On an unchanged disk it
+ * returns exactly `config.skills`.
+ */
+export async function rediscoverSkills(
+  config: Pick<TentacleConfig, "cwd" | "configDir" | "skillsEnabled" | "packages">,
+  env: Env = process.env,
+): Promise<{ skills: SkillInfo[]; diagnostics: string[] }> {
   // A package's tree is checked again as at start-up (`loadPackage`): one that
   // now holds a symlink out of it (or is gone) contributes no skill. Only
   // when skills are on: off = no I/O, as `discoverSkills`.
@@ -313,17 +340,9 @@ export async function refreshSessionContext(
     packageSkillRoots,
     enabled: config.skillsEnabled,
   });
-  const agents = config.agentsMdEnabled ? await readAgentsMd(config.cwd) : undefined;
-  const composed = composeSystemPrompt({
-    identity,
-    agentsMd: agents?.content,
-    agentsEnabled: config.agentsMdEnabled,
-    skills: discovered.skills,
-  });
   return {
-    systemPrompt: composed.systemPrompt,
     skills: discovered.skills,
-    skillDiagnostics: [...packageDiagnostics, ...discovered.diagnostics],
+    diagnostics: [...packageDiagnostics, ...discovered.diagnostics],
   };
 }
 

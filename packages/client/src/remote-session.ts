@@ -17,6 +17,7 @@ import {
   type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
+  type SessionSkillsResult,
   type SessionUpdate,
   type TurnEnd,
 } from "@tentacle/protocol";
@@ -455,6 +456,18 @@ export class RemoteSession implements SessionStreamListener {
     if (this.foreign) {
       this.closeWithoutOutcome(this.foreign);
     }
+  }
+
+  /**
+   * This session's skills, read again from disk by the daemon (`session/skills`,
+   * docs/feat/skills-hot-reload.md). Before the first send there is no
+   * daemon-side session: the skills a session created now would have — what
+   * that send's `/name` is checked against. While that send (or the eager
+   * attach) is still opening it, waits for the id.
+   */
+  async skills(): Promise<SessionSkillsResult> {
+    const id = this.id ?? (this.opening ? await this.opening : null);
+    return this.client.sessionSkills(id ?? undefined);
   }
 
   /** Compact the remote conversation (no-op if no session was opened yet). */

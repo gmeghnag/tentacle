@@ -110,7 +110,6 @@ describe("createLocalRuntime (local over RPC)", () => {
       onRequest: () => ({
         protocolVersion: 1,
         agentCapabilities: { tools: true, permissions: true },
-        skills: [],
       }),
     });
     const errors: string[] = [];

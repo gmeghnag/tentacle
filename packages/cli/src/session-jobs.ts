@@ -20,6 +20,7 @@ import {
   recordTitleState,
 } from "@tentacle/agent";
 import type { BackgroundJob, JobController, Tool } from "@tentacle/core";
+import { toSessionSkills } from "@tentacle/daemon";
 import type { ToolRegistry } from "@tentacle/tools";
 import type { SessionController } from "@tentacle/tui";
 
@@ -133,6 +134,9 @@ export function inProcessSessions(deps: InProcessDeps): {
     let closed = false;
     return {
       send: (prompt, signal, opts) => session.send(prompt, signal, opts),
+      // No daemon here: the same rescan and wire-safe view a `HostedSession`
+      // answers `session/skills` with (docs/feat/skills-hot-reload.md).
+      skills: async () => toSessionSkills(await session.refreshSkills()),
       compact: (signal) => session.compact(signal),
       enqueue: (text) => session.enqueue(text),
       close: () => {

@@ -4,6 +4,8 @@
 > **Branch:** `feat/skills-slash`
 > **Type:** feat · **Size:** M · **Blast:** load-bearing (protocol: `initialize` result + `session/prompt` params, `PROTOCOL_VERSION` 6 → 7; the agent loop gains a pre-model round; the compaction re-read path) · **Suited:** strong model executes; mandatory fresh-context Review (one adversarial pass, Opus 5.5 sub-agent — owner, 2026-10-21)
 
+> **Superseded in part by `docs/feat/skills-hot-reload.md` (protocol 13):** the `/name` catalog no longer rides `initialize` (static, daemon-wide); it is `session/skills` `slash` — per session, read again from disk at each ask. The record below is historical.
+
 Sub-task 3 of 4 of `docs/eval/agent-skills.md`. The eval's owner decisions are
 the spec: Q6 *"`/skill-name` is in scope"*; decision 5 *"skills with
 `disable-model-invocation: true` are hidden from the model's catalog and the

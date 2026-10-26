@@ -567,7 +567,6 @@ describe("permission events at the client (router + broker over a fake daemon)",
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         if (method === Method.ResolvePermission) {
@@ -682,7 +681,6 @@ describe("permission events at the client (router + broker over a fake daemon)",
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         if (method === Method.Open) {
@@ -793,7 +791,6 @@ describe("RemoteSession.enqueue (steering over RPC)", () => {
           return {
             protocolVersion: 1,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         if (method === Method.Open) {
@@ -900,7 +897,6 @@ describe("unknown / malformed session/update frames (event classes)", () => {
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         if (method === Method.Open)
@@ -1021,7 +1017,6 @@ describe("unknown / malformed session/update frames (event classes)", () => {
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         if (method === Method.Open)
@@ -1098,7 +1093,6 @@ describe("unknown / malformed session/update frames (event classes)", () => {
           : {
               protocolVersion: PROTOCOL_VERSION,
               agentCapabilities: { tools: true, permissions: true },
-              skills: [],
             },
     });
     const errors: Error[] = [];
@@ -1174,7 +1168,6 @@ describe("RemoteSession ends turns from the stream (turn_start/turn_end)", () =>
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         if (method === Method.Open)
@@ -1356,7 +1349,6 @@ describe("RemoteSession ends turns from the stream (turn_start/turn_end)", () =>
             return {
               protocolVersion: PROTOCOL_VERSION,
               agentCapabilities: { tools: true, permissions: true },
-              skills: [],
             };
           }
           if (method === Method.Open)
@@ -1485,7 +1477,6 @@ describe("RemoteSession steering bound to its turn (review fixes)", () => {
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         if (method === Method.Open)
@@ -1679,7 +1670,6 @@ describe("RemoteClient.snapshot (paged history at the cut)", () => {
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         return answer(params as { cursor?: string }, ++n);
@@ -1786,7 +1776,6 @@ describe("closing sessions (sessions outlive connections)", () => {
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         if (method === Method.Open) {
@@ -1924,7 +1913,6 @@ describe("hooks/trust (docs/feat/hooks-project-trust.md)", () => {
         reply(f.id, {
           protocolVersion: PROTOCOL_VERSION,
           agentCapabilities: { tools: true, permissions: true },
-          skills: [],
         });
       } else if (f.method === Method.Open) {
         reply(f.id, { sessionId: "s1", epoch: "e", created: true, resync: false });
@@ -2302,7 +2290,6 @@ describe("blocking updates are gated by the initialize list (docs/feat/protocol-
         return {
           protocolVersion: PROTOCOL_VERSION,
           agentCapabilities: { tools: true, permissions: true },
-          skills: [],
         };
       },
     });

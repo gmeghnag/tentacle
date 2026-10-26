@@ -1,16 +1,20 @@
 /**
- * `toSkillList` (docs/feat/skills-panel.md): whatever discovery produced, the
- * `skills/list` result is schema-valid — so one odd `SKILL.md` can never fail
- * the whole listing.
+ * `toSkillList` / `toSessionSkills` (docs/feat/skills-panel.md,
+ * skills-hot-reload.md): whatever discovery produced, the `session/skills`
+ * result is schema-valid — so one odd `SKILL.md` can never fail the whole
+ * listing.
  */
 import { describe, expect, test } from "bun:test";
 import {
   MAX_SKILL_LIST,
   MAX_SKILL_PROBLEMS,
+  SessionSkillsResultSchema,
   type SkillListEntry,
-  SkillsListResultSchema,
 } from "@tentacle/protocol";
-import { toSkillList } from "../src/mapping.ts";
+import { toSessionSkills, toSkillList } from "../src/mapping.ts";
+
+const valid = (out: ReturnType<typeof toSkillList>): boolean =>
+  SessionSkillsResultSchema.safeParse({ slash: [], ...out }).success;
 
 const entry = (over: Partial<SkillListEntry> = {}): SkillListEntry => ({
   name: "review",
@@ -26,7 +30,7 @@ describe("toSkillList (always schema-valid, whatever discovery said)", () => {
   test("a clean listing passes through unchanged", () => {
     const out = toSkillList({ skills: [entry()], problems: ["p"] });
     expect(out).toEqual({ skills: [entry()], problems: ["p"], moreProblems: 0 });
-    expect(SkillsListResultSchema.safeParse(out).success).toBe(true);
+    expect(valid(out)).toBe(true);
   });
 
   test("strings become one line, cut to the caps; an entry left empty is dropped", () => {
@@ -48,7 +52,7 @@ describe("toSkillList (always schema-valid, whatever discovery said)", () => {
     expect(out.skills[0]?.description.length).toBe(1024);
     expect(out.skills[0]?.location.length).toBe(4096);
     expect(out.problems).toEqual(["bad problem", "y".repeat(1000)]);
-    expect(SkillsListResultSchema.safeParse(out).success).toBe(true);
+    expect(valid(out)).toBe(true);
   });
 
   test("past the skill cap, one problem line says how many were left out", () => {
@@ -56,7 +60,7 @@ describe("toSkillList (always schema-valid, whatever discovery said)", () => {
     const out = toSkillList({ skills: many, problems: [] });
     expect(out.skills).toHaveLength(MAX_SKILL_LIST);
     expect(out.problems).toEqual([`3 more skills not listed (at most ${MAX_SKILL_LIST})`]);
-    expect(SkillsListResultSchema.safeParse(out).success).toBe(true);
+    expect(valid(out)).toBe(true);
   });
 
   test("past the problem cap, the rest are counted", () => {
@@ -64,6 +68,26 @@ describe("toSkillList (always schema-valid, whatever discovery said)", () => {
     const out = toSkillList({ skills: [], problems });
     expect(out.problems).toHaveLength(MAX_SKILL_PROBLEMS);
     expect(out.moreProblems).toBe(7);
-    expect(SkillsListResultSchema.safeParse(out).success).toBe(true);
+    expect(valid(out)).toBe(true);
+  });
+});
+
+describe("toSessionSkills (one listing → the /name list and the panel's)", () => {
+  test("slash = the user skills with a spec name; modelAfterReset rides the listing", () => {
+    const out = toSessionSkills({
+      skills: [
+        entry({ name: "a", user: true, model: false, modelAfterReset: true }),
+        entry({ name: "m", user: false, model: true }),
+        entry({ name: "Not Spec", user: true }),
+      ],
+      problems: [],
+    });
+    expect(out.slash).toEqual([{ name: "a", description: "review a diff" }]);
+    expect(out.skills.map((s) => [s.name, s.modelAfterReset])).toEqual([
+      ["a", true],
+      ["m", undefined],
+      ["Not Spec", undefined],
+    ]);
+    expect(SessionSkillsResultSchema.safeParse(out).success).toBe(true);
   });
 });

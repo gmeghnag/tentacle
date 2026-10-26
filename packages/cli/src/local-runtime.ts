@@ -36,7 +36,7 @@ import type {
   PermissionBroker,
 } from "@tentacle/core";
 import { applyGroupMessage } from "@tentacle/exec";
-import type { McpServerStatus, SessionTitle, SkillsListResult } from "@tentacle/protocol";
+import type { McpServerStatus, SessionTitle } from "@tentacle/protocol";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
 import { logDaemonError } from "./daemon-log.ts";
@@ -56,12 +56,8 @@ export interface LocalRuntime {
   readonly jobs: JobController;
   /** The link's status, for the TUI's StatusBar ("reconnecting…", "disconnected: …"). */
   readonly link: { onLinkStatus(listener: (status: LinkStatus) => void): () => void };
-  /** The daemon's `/name` skills as of the latest handshake (the TUI's palette). */
-  readonly skills: () => readonly { readonly name: string; readonly description: string }[];
   /** The daemon's MCP servers, probed live (`mcp/status`, the TUI's `/mcp`). */
   readonly mcpStatus: () => Promise<readonly McpServerStatus[]>;
-  /** Every skill the daemon discovered and its problems (`skills/list`, the TUI's `/skills`). */
-  readonly skillsList: () => Promise<SkillsListResult>;
   /**
    * Wait (bounded) for the pending post-turn saves, close the open sessions
    * daemon-side, then the transport. Await it before exiting.
@@ -209,6 +205,9 @@ export function persistingController(
     // its optimistic entry on a delivery failure.
     enqueue(text, id) {
       return inner.enqueue(text, id);
+    },
+    skills() {
+      return inner.skills();
     },
     rename(title) {
       return inner.rename(title);
@@ -373,9 +372,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     createSession,
     jobs: remoteJobsView(client),
     link: { onLinkStatus: (listener) => client.onLinkStatus(listener) },
-    skills: () => client.skills(),
     mcpStatus: () => client.mcpStatus(),
-    skillsList: () => client.skillsList(),
     dispose: async () => {
       // A quit right after a turn must not close the session under its save.
       await allFlushed();

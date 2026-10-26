@@ -6,7 +6,14 @@
  * confinement is a server-side concern, so a client-requested `cwd` is NOT
  * honoured in v1 — every session runs against the daemon's own `defaultCwd`.
  */
-import { type Agent, type RecordTitle, Session, recordTitleText } from "@tentacle/agent";
+import {
+  type Agent,
+  EMPTY_SKILL_LISTING,
+  type RecordTitle,
+  Session,
+  type SkillListing,
+  recordTitleText,
+} from "@tentacle/agent";
 import type { ChatMessage, JobController, ModelProvider, PermissionBroker } from "@tentacle/core";
 import {
   JsonRpcErrorCode,
@@ -14,12 +21,10 @@ import {
   type OpenParams,
   type SessionListParams,
   type SessionListResult,
+  type SessionSkillsResult,
   type SessionTitle,
   type SessionTtlParams,
   type SessionTtlResult,
-  type SkillListEntry,
-  type SkillSummary,
-  type SkillsListResult,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import {
@@ -28,7 +33,7 @@ import {
   type RestoredSessionState,
   type TurnErrorPolicy,
 } from "./hosted-session.ts";
-import { toSkillCatalog, toSkillList } from "./mapping.ts";
+import { toSessionSkills } from "./mapping.ts";
 import {
   type DaemonSessionRecord,
   reconcileOnReload,
@@ -94,23 +99,19 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    */
   readonly sessionTtl?: SessionTtlControl;
   /**
-   * The skills a user can activate with `/name` on this daemon (config's
-   * `slashSkills`), returned by `initialize` as its catalog. Absent → none.
+   * The skills a session created NOW would have, read again from disk
+   * (`session/skills` with no session id: a client opens its session lazily,
+   * at the first prompt; docs/feat/skills-hot-reload.md). The cli backs it
+   * with the same scan its `createAgent` builds a new session's activator
+   * from, so the list shown before the first prompt is what that prompt's
+   * `/name` is checked against. May throw. Absent → an empty listing.
    */
-  readonly skills?: readonly { readonly name: string; readonly description: string }[];
+  readonly newSessionSkills?: () => Promise<SkillListing>;
   /**
    * This daemon's MCP servers, probed live (`mcp/status`, the TUI's `/mcp`).
    * Absent → none (`serve` and pod daemons start no MCP servers today).
    */
   readonly mcpStatus?: () => Promise<readonly McpServerStatus[]>;
-  /**
-   * Every skill this daemon discovered and its discovery problems
-   * (`skills/list`, the TUI's `/skills`), as discovery produced them. Absent → none.
-   */
-  readonly skillList?: {
-    readonly skills: readonly SkillListEntry[];
-    readonly problems: readonly string[];
-  };
   /**
    * This daemon's tentacle version and kind, injected by the cli (the daemon
    * cannot import `APP_VERSION`): it words a `VersionMismatch`. Absent → the
@@ -197,18 +198,21 @@ export class SessionHost {
   /** Tombstones: ids removed by `delete` (with a persister, also on disk). Never live, never archived. */
   private readonly deleted = new Set<string>();
 
-  /** The `initialize` skill catalog (built once: skills are fixed at daemon start). */
-  readonly skillCatalog: readonly SkillSummary[];
-  /** The `skills/list` result, wire-safe (built once, like the catalog). */
-  readonly skillList: SkillsListResult;
   /** Who this daemon is (`SessionHostOptions.identity`). */
   readonly identity: DaemonIdentity | undefined;
 
   constructor(opts: SessionHostOptions) {
     this.opts = opts;
     this.identity = opts.identity;
-    this.skillCatalog = toSkillCatalog(opts.skills ?? []);
-    this.skillList = toSkillList(opts.skillList ?? { skills: [], problems: [] });
+  }
+
+  /**
+   * `session/skills` with no session: the skills a session created now would
+   * have, wire-safe (`SessionHostOptions.newSessionSkills`). Rejects when the
+   * scan does.
+   */
+  async newSessionSkills(): Promise<SessionSkillsResult> {
+    return toSessionSkills((await this.opts.newSessionSkills?.()) ?? EMPTY_SKILL_LISTING);
   }
 
   /**

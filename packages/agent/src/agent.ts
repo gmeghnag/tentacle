@@ -62,6 +62,7 @@ import { type AskHooksTrust, type HookRunner, hookNote } from "./hooks.ts";
 import { type GateOutcome, PermissionGate } from "./permission-gate.ts";
 import { type ResultTransform, applyResultTransforms } from "./result-pipeline.ts";
 import { suspendedCalls } from "./resume.ts";
+import { EMPTY_SKILL_LISTING, type SkillListing, userRescanListing } from "./session-skills.ts";
 
 export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations";
 
@@ -276,6 +277,15 @@ export interface AgentConfig {
    * same path with the narrower, model-offered enum.) Absent → no skills.
    */
   readonly skills?: SkillActivator;
+  /** The listing of the skill set at the start (`skills` and the `skill` tool's). Absent → empty. */
+  readonly skillListing?: SkillListing;
+  /**
+   * Re-read the skill folders into a full fresh set (docs/feat/skills-hot-reload.md):
+   * `refreshUserSkills` installs its activator and listing, never its tool.
+   * It may throw (nothing is installed). Absent → the installed set is
+   * answered as is, with no I/O.
+   */
+  readonly rescanSkills?: () => Promise<SessionSkills>;
   /**
    * The monotonic clock (ms) a tool run is timed on: read right before and
    * right after `execute`, so the permission prompt, the pre-hooks and the
@@ -342,13 +352,15 @@ function unlessAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Pr
 
 /**
  * A session's skill set, built once from a discovery (`buildSessionSkills`):
- * the model's `skill` tool and the activator behind every activation. Absent
- * `tool` = none offered to the model (no `skill` tool); absent `activator` =
- * no skills at all.
+ * the model's `skill` tool, the activator behind every activation and the
+ * listing (`session/skills`). Absent `tool` = none offered to the model (no
+ * `skill` tool); absent `activator` = no skills at all; absent `listing` =
+ * an empty one.
  */
 export interface SessionSkills {
   readonly tool?: Tool | undefined;
   readonly activator?: SkillActivator | undefined;
+  readonly listing?: SkillListing | undefined;
 }
 
 export class Agent {
@@ -359,6 +371,16 @@ export class Agent {
    * then whatever `installSkills` last put in.
    */
   private activator: SkillActivator | undefined;
+  /** The installed set's listing (`skillListing`), replaced with the activator. */
+  private listing: SkillListing;
+  /**
+   * Bumped by every install (a context reset's, a user rescan's): a rescan
+   * whose scan started before another install landed installs nothing — its
+   * disk snapshot may be older than that install's (F3).
+   */
+  private skillsGeneration = 0;
+  /** The user rescan in flight: concurrent askers share it (one scan). */
+  private rescan: Promise<SkillListing> | null = null;
   /** Background jobs that finished since the last turn, awaiting surfacing. */
   private readonly pendingExits: BackgroundJob[] = [];
   /**
@@ -378,6 +400,7 @@ export class Agent {
   constructor(config: AgentConfig) {
     this.config = config;
     this.activator = config.skills;
+    this.listing = config.skillListing ?? EMPTY_SKILL_LISTING;
     this.gate = new PermissionGate(config.requestPermission ?? allowAll, config.hooks);
     // Collect background-job exits as they happen; they are flushed into the
     // conversation (and event stream) at the top of the next turn.
@@ -398,6 +421,54 @@ export class Agent {
   installSkills(skills: SessionSkills): void {
     this.config.tools.replace(SKILL_TOOL_NAME, skills.tool);
     this.activator = skills.activator;
+    this.listing = skills.listing ?? EMPTY_SKILL_LISTING;
+    this.skillsGeneration++;
+  }
+
+  /** The installed skill set's listing: what `/name` may activate now, and who else may. */
+  skillListing(): SkillListing {
+    return this.listing;
+  }
+
+  /**
+   * The user's rescan (docs/feat/skills-hot-reload.md): read the skill folders
+   * again and install the fresh ACTIVATOR and listing — never the model's
+   * `skill` tool (its set changes only at a context reset), so `/name` follows
+   * the disk while the model's catalog stays as it is. Resolves with the
+   * INSTALLED listing: when a context reset installed meanwhile, the scan
+   * installs nothing (it may be older) and the reset's set is answered.
+   * Concurrent calls share one scan. Rejects when the scan throws (nothing
+   * installed). Allowed mid-turn: a user round captured its activator.
+   */
+  refreshUserSkills(): Promise<SkillListing> {
+    const rescanSkills = this.config.rescanSkills;
+    if (!rescanSkills) {
+      return Promise.resolve(this.listing);
+    }
+    if (this.rescan) {
+      return this.rescan;
+    }
+    const generation = this.skillsGeneration;
+    const rescan = rescanSkills()
+      .then((fresh) => {
+        // One synchronous stretch from the check to the install.
+        if (this.skillsGeneration === generation) {
+          this.activator = fresh.activator;
+          this.listing = userRescanListing(
+            fresh.listing ?? EMPTY_SKILL_LISTING,
+            offeredSkillNames(this.config.tools.definitions()),
+          );
+          this.skillsGeneration++;
+        }
+        return this.listing;
+      })
+      .finally(() => {
+        if (this.rescan === rescan) {
+          this.rescan = null;
+        }
+      });
+    this.rescan = rescan;
+    return rescan;
   }
 
   /** Seed message list for a new conversation (the system prompt, if configured). */

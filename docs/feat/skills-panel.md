@@ -4,6 +4,8 @@
 > **Branch:** `feat/skills-panel`
 > **Type:** feat · **Size:** L · **Blast:** load-bearing (a new wire method `skills/list`: protocol + daemon `Connection` + `RemoteClient`; the `/mcp` panel's logic is generalised) · **Suited:** strong model; fresh-context Review mandatory per AGENTS §10 — waived by the owner (budget), as for `feat/mcp-tools-panel`.
 
+> **Superseded in part by `docs/feat/skills-hot-reload.md` (protocol 13):** the listing is no longer static nor daemon-wide — `skills/list` is replaced by `session/skills` (per session, read again from disk at each ask). The record below is historical.
+
 ## Context
 
 *— claude-opus-5-5, 2026-10-21*

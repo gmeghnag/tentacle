@@ -6,7 +6,6 @@ const INIT_PARAMS = { protocolVersion: 1, clientCapabilities: { streaming: true 
 const INIT_RESULT = {
   protocolVersion: 1,
   agentCapabilities: { tools: true, permissions: true },
-  skills: [],
 };
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
 // A runtime MessagePort satisfies MessageEndpoint (addEventListener/start/close);

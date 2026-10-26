@@ -1,9 +1,9 @@
 /**
- * `/name` on the wire: the `initialize` skill catalog and `session/prompt{skill}`
- * (docs/feat/skills-slash.md).
+ * `/name` on the wire: a session's skills (`session/skills`) and
+ * `session/prompt{skill}` (docs/feat/skills-slash.md, skills-hot-reload.md).
  */
 import { describe, expect, test } from "bun:test";
-import { Agent } from "@tentacle/agent";
+import { Agent, type SessionSkills, type SkillListing } from "@tentacle/agent";
 import {
   type ChatRequest,
   type ExecutionEnvironment,
@@ -17,9 +17,10 @@ import {
   type KnownSessionUpdateParams,
   MAX_SKILL_CATALOG,
   PROTOCOL_VERSION,
+  type SessionSkillsResult,
 } from "@tentacle/protocol";
 import { ToolRegistry, createSkillActivator } from "@tentacle/tools";
-import { RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
+import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { Connection } from "../src/connection.ts";
 import { toSkillCatalog } from "../src/mapping.ts";
 import { SessionHost } from "../src/session-host.ts";
@@ -44,30 +45,64 @@ const env: ExecutionEnvironment = {
 const INIT = { protocolVersion: PROTOCOL_VERSION, clientCapabilities: { streaming: true } };
 const tick = (ms = 5): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** A daemon whose agent can activate `deploy-app` (user) and `model-only` (model only). */
-function harness(skills = [{ name: "deploy-app", description: "Deploy the app." }]) {
+const entry = (name: string, userInvocable: boolean) => ({
+  name,
+  location: `/s/${name}/SKILL.md`,
+  dir: `/s/${name}`,
+  files: [],
+  filesTruncated: false,
+  userInvocable,
+});
+const read = async (s: { name: string }) => ({ body: `STEPS for ${s.name}`, bodyLine: 5 });
+const listed = (name: string, user: boolean) => ({
+  name,
+  description: `the ${name} skill`,
+  scope: "user" as const,
+  user,
+  model: !user,
+  location: `/s/${name}/SKILL.md`,
+});
+
+/**
+ * A daemon whose agent can activate `deploy-app` (user) and `model-only`
+ * (model only); `disk` is what its rescan finds (absent → no rescan source).
+ */
+function harness(
+  opts: {
+    disk?: () => readonly string[];
+    newSession?: () => Promise<SkillListing>;
+  } = {},
+) {
   const model = new Scripted();
   const host = new SessionHost({
     defaultCwd: "/tmp/daemon-work",
-    skills,
+    ...(opts.newSession ? { newSessionSkills: opts.newSession } : {}),
     createAgent: () => {
       const permissions = new PermissionBroker();
-      const entry = (name: string, userInvocable: boolean) => ({
-        name,
-        location: `/s/${name}/SKILL.md`,
-        dir: `/s/${name}`,
-        files: [],
-        filesTruncated: false,
-        userInvocable,
-      });
+      const { disk } = opts;
       const agent = new Agent({
         model,
         tools: new ToolRegistry(),
         env,
-        skills: createSkillActivator(
-          [entry("deploy-app", true), entry("model-only", false)],
-          async (s) => ({ body: `STEPS for ${s.name}`, bodyLine: 5 }),
-        ),
+        skills: createSkillActivator([entry("deploy-app", true), entry("model-only", false)], read),
+        skillListing: {
+          skills: [listed("deploy-app", true), listed("model-only", false)],
+          problems: [],
+        },
+        ...(disk
+          ? {
+              rescanSkills: async (): Promise<SessionSkills> => {
+                const names = disk();
+                return {
+                  activator: createSkillActivator(
+                    names.map((n) => entry(n, true)),
+                    read,
+                  ),
+                  listing: { skills: names.map((n) => listed(n, true)), problems: [] },
+                };
+              },
+            }
+          : {}),
       });
       return { agent, permissions };
     },
@@ -117,17 +152,95 @@ describe("toSkillCatalog (always schema-valid, whatever the SKILL.md said)", () 
   });
 });
 
-describe("initialize carries the catalog", () => {
-  test("the client receives the daemon's /name skills (validated by its peer)", async () => {
+describe("session/skills (docs/feat/skills-hot-reload.md)", () => {
+  test("initialize carries no daemon-wide catalog any more", async () => {
     const { client } = harness();
     const result = (await client.request("initialize", INIT)) as InitializeResult;
-    expect(result.skills).toEqual([{ name: "deploy-app", description: "Deploy the app." }]);
+    expect("skills" in result).toBe(false);
   });
 
-  test("no skills → an empty catalog", async () => {
-    const { client } = harness([]);
-    const result = (await client.request("initialize", INIT)) as InitializeResult;
-    expect(result.skills).toEqual([]);
+  test("an opened session answers ITS listing; the /name list is its user skills", async () => {
+    const { client } = harness();
+    const sessionId = await openSession(client);
+    const result = (await client.request("session/skills", { sessionId })) as SessionSkillsResult;
+    expect(result.slash).toEqual([{ name: "deploy-app", description: "the deploy-app skill" }]);
+    expect(result.skills.map((s) => s.name)).toEqual(["deploy-app", "model-only"]);
+  });
+
+  test("a rescan makes a skill added on disk activatable by session/prompt{skill}", async () => {
+    let disk = ["deploy-app"];
+    const { client, updates } = harness({ disk: () => disk });
+    const sessionId = await openSession(client);
+    const prompt = (turnId: string, skill: string) =>
+      client.request("session/prompt", {
+        sessionId,
+        turnId,
+        content: [{ type: "text", text: `/${skill}` }],
+        skill,
+      });
+    await expect(prompt("t0", "beta")).rejects.toBeInstanceOf(RpcError);
+    disk = ["deploy-app", "beta"];
+    const result = (await client.request("session/skills", { sessionId })) as SessionSkillsResult;
+    expect(result.slash.map((s) => s.name)).toEqual(["deploy-app", "beta"]);
+    expect(await prompt("t1", "beta")).toEqual({ turnId: "t1" });
+    for (let i = 0; i < 200 && !updates.some((u) => u.update.type === "turn_end"); i++) {
+      await tick();
+    }
+    const end = updates.find((u) => u.update.type === "turn_end")?.update;
+    expect(end?.type === "turn_end" && end.stopReason).toBe("end_turn");
+  });
+
+  test("a session not opened on this connection → UnknownSession", async () => {
+    const { client } = harness();
+    await client.request("initialize", INIT);
+    const error = await client.request("session/skills", { sessionId: "nope" }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error instanceof RpcError && error.code).toBe(DomainErrorCode.UnknownSession);
+  });
+
+  test("no session id → the skills a session created now would have (empty without a source)", async () => {
+    const withSource = harness({
+      newSession: async () => ({ skills: [listed("fresh", true)], problems: ["p"] }),
+    });
+    await withSource.client.request("initialize", INIT);
+    expect(await withSource.client.request("session/skills", {})).toEqual({
+      slash: [{ name: "fresh", description: "the fresh skill" }],
+      skills: [listed("fresh", true)],
+      problems: ["p"],
+      moreProblems: 0,
+    });
+    const without = harness();
+    await without.client.request("initialize", INIT);
+    expect(await without.client.request("session/skills", {})).toEqual({
+      slash: [],
+      skills: [],
+      problems: [],
+      moreProblems: 0,
+    });
+  });
+
+  test("a scan that fails rejects the request; the session keeps its set (F1)", async () => {
+    let fail = false;
+    const { client } = harness({
+      disk: () => {
+        if (fail) {
+          throw new Error("EACCES: permission denied");
+        }
+        return ["deploy-app"];
+      },
+    });
+    const sessionId = await openSession(client);
+    fail = true;
+    await expect(client.request("session/skills", { sessionId })).rejects.toBeInstanceOf(RpcError);
+    const ack = await client.request("session/prompt", {
+      sessionId,
+      turnId: "t-ok",
+      content: [{ type: "text", text: "/deploy-app" }],
+      skill: "deploy-app",
+    });
+    expect(ack).toEqual({ turnId: "t-ok" });
   });
 });
 
