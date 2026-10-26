@@ -63,7 +63,7 @@ describe("the session's queue on the wire (docs/feat/queued-broadcast.md)", () =
     expect(parsed(schemas?.result, {})).toEqual({});
   });
 
-  test("QP5 additive: no PROTOCOL_VERSION bump (still 11)", () => {
-    expect(P.PROTOCOL_VERSION).toBe(11);
+  test("QP5 additive: no PROTOCOL_VERSION bump (11 when it landed)", () => {
+    expect(P.PROTOCOL_VERSION).toBeGreaterThanOrEqual(11);
   });
 });

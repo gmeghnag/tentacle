@@ -199,9 +199,11 @@ export function updateToEvent(
     case "context_note":
       return { type: "context_note", text: update.text, reason: update.reason };
     // The turn bracket is consumed by `RemoteSession` (it ends the turn by
-    // `turnId`); it is not an `AgentEvent` of its own. `history_replaced`
-    // cannot arrive inside a turn (a compaction is exclusive with one), and the
-    // client that compacted reads the new history back itself. `session_closed`
+    // `turnId`); it is not an `AgentEvent` of its own. `history_replaced` is
+    // the barrier the reducer resyncs on; `RemoteSession` turns the snapshot
+    // into the event: a compaction's (between turns) replaces what is shown, a
+    // `context_reset`'s (INSIDE a turn) becomes that turn's `context_reset`
+    // event (the screen is kept, the turn goes on). `session_closed`
     // is consumed by `RemoteClient`/`RemoteSession` (it ends the session). The
     // permission events are consumed by `RemoteClient`'s `PermissionRouter`;
     // `session_title` by its title listeners (it is not turn-scoped), and

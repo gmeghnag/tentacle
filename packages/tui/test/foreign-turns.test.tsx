@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { restartMessage } from "@tentacle/agent";
 import { DISMISSED, PermissionBroker, type PermissionResponse } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
@@ -420,13 +421,21 @@ describe("foreign turns in the TUI", () => {
     const s = sharedSession({ compact: async () => ({ before: 9, after: 2 }) });
     const app = await mount(s.ctrl);
     await type(app.stdin, "hello");
-    s.raise({ kind: "history", messages: [{ role: "user", content: "summary" }], compacted: true });
+    s.raise({
+      kind: "history",
+      messages: [{ role: "user", content: "summary" }],
+      reason: "compact",
+    });
     await delay(30);
     let frame = app.lastFrame() ?? "";
     expect(frame).toContain("› hello");
     expect(frame).toContain("compacted on another device");
     await type(app.stdin, "/compact");
-    s.raise({ kind: "history", messages: [{ role: "user", content: "summary" }], compacted: true });
+    s.raise({
+      kind: "history",
+      messages: [{ role: "user", content: "summary" }],
+      reason: "compact",
+    });
     await delay(30);
     frame = app.lastFrame() ?? "";
     expect(frame.split("compacted on another device").length - 1).toBe(1);
@@ -434,7 +443,7 @@ describe("foreign turns in the TUI", () => {
     s.raise({
       kind: "history",
       messages: [{ role: "user", content: "the daemon's" }],
-      compacted: false,
+      reason: null,
     });
     await delay(30);
     frame = app.lastFrame() ?? "";
@@ -460,7 +469,7 @@ describe("a large history (T-C8)", () => {
       role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
       content: i % 2 === 0 ? `question ${i}` : `answer ${i} with \`code\` and some **markdown**`,
     }));
-    s.raise({ kind: "history", messages, compacted: false });
+    s.raise({ kind: "history", messages, reason: null });
     await delay(20);
     expect(app.lastFrame() ?? "").toContain("loading history");
     app.stdin.write("typed");
@@ -475,4 +484,69 @@ describe("a large history (T-C8)", () => {
     expect(frame).not.toContain("loading history");
     app.unmount();
   }, 30_000);
+});
+
+// docs/feat/context-reset-barrier.md (slice 2), decision 9 of docs/eval/context-reset.md.
+describe("a context reset in the TUI", () => {
+  const fresh = [
+    { role: "system" as const, content: "FRESH SYSTEM" },
+    { role: "user" as const, content: restartMessage("continue with step 3") },
+  ];
+
+  /** `a` above `b` above … in the frame (each present). */
+  const inOrder = (frame: string, ...parts: string[]): boolean => {
+    const at = parts.map((p) => frame.indexOf(p));
+    return at.every((i, k) => i >= 0 && (k === 0 || i > (at[k - 1] ?? -1)));
+  };
+
+  test("mid-turn: the old transcript stays, then the separator, the restart prompt, the rest of the turn", async () => {
+    const s = sharedSession();
+    const app = await mount(s.ctrl);
+    const f = foreignTurn("F1", s.log.cancels);
+    s.raise(f.activity);
+    f.push({ type: "user_message", text: "theirs" }, { type: "text", delta: "before the reset" });
+    await delay(40);
+    f.push(
+      { type: "context_reset", messages: fresh },
+      { type: "text", delta: "after the reset" },
+      { type: "turn_end", reason: "end_turn" },
+    );
+    f.end();
+    await delay(60);
+    const frame = app.lastFrame() ?? "";
+    expect(
+      inOrder(
+        frame,
+        "› theirs",
+        "before the reset",
+        "── ↻ context reset by the model ──",
+        "restart prompt",
+        "continue with step 3",
+        "after the reset",
+      ),
+    ).toBe(true);
+    expect(frame).not.toContain("FRESH SYSTEM");
+    expect(frame).not.toContain("[context reset]");
+    app.unmount();
+  });
+
+  test("a reset whose turn ended behind the cut (a history activity): appended, never a replace", async () => {
+    const s = sharedSession();
+    const app = await mount(s.ctrl);
+    await type(app.stdin, "hello");
+    s.raise({ kind: "history", messages: fresh, reason: "context_reset" });
+    await delay(40);
+    const frame = app.lastFrame() ?? "";
+    expect(
+      inOrder(
+        frame,
+        "› hello",
+        "reply to hello",
+        "↻ context reset by the model",
+        "continue with step 3",
+      ),
+    ).toBe(true);
+    expect(frame).not.toContain("compacted on another device");
+    app.unmount();
+  });
 });

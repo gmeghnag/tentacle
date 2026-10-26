@@ -184,7 +184,9 @@ export function toolResultContent(result: ToolResult): ContentBlock[] {
  * Map one `AgentEvent` to a `SessionUpdate`, or `null` for events that are not
  * streamed as-is. `turn_end` is `null` here: `HostedSession` owns the turn
  * bracket (`turn_start`/`turn_end`, tagged with the client's `turnId`), and
- * consumes `history_commit` itself (the snapshot cut).
+ * consumes `history_commit` (the snapshot cut) and `context_reset` (the
+ * barrier: `history_replaced`, then the new history through the snapshot)
+ * itself.
  */
 export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
   switch (event.type) {
@@ -231,6 +233,7 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
     case "subagent_end":
     case "background_exit":
     case "history_commit":
+    case "context_reset":
     case "turn_end":
       return null;
   }

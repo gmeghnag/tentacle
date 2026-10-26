@@ -107,6 +107,7 @@ import {
   type DisplayState,
   type SessionEvent,
   appendBackgroundExit,
+  appendHistory,
   appendNotice,
   applySessionEvent,
   backgroundExitNotice,
@@ -1131,14 +1132,15 @@ export function App({
       }
       if (activity.kind === "history") {
         const own = ownCompactionsRef.current > 0;
-        const action = historyAction({ compacted: activity.compacted, ownCompaction: own });
-        if (activity.compacted && own) {
+        const action = historyAction({ reason: activity.reason, ownCompaction: own });
+        if (activity.reason === "compact" && own) {
           ownCompactionsRef.current -= 1;
         }
         if (action === "notice") {
           pushNotice(FOREIGN_COMPACTED_NOTICE);
-        } else if (action === "replace") {
-          void commitHistory((s) => resetHistory(s, activity.messages)).then(() => {
+        } else if (action === "replace" || action === "append") {
+          const apply = action === "append" ? appendHistory : resetHistory;
+          void commitHistory((s) => apply(s, activity.messages)).then(() => {
             setScrollOffset(0);
             flushNow();
             drainHeld();

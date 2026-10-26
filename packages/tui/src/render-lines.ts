@@ -508,6 +508,13 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   return [header, ...shown.map((l, i) => (i === 0 ? CONNECTOR : INDENT) + l)];
 }
 
+/** A full-width grey rule with `text` in it: `── text ─────…`. */
+function separatorLines(text: string, width: number): string[] {
+  const head = `── ${text} `;
+  const rest = Math.max(2, width - stringWidth(head));
+  return [theme.subtle(`${head}${"─".repeat(rest)}`)];
+}
+
 function noticeLines(text: string): string[] {
   const [first = "", ...rest] = text.split("\n");
   return [
@@ -519,14 +526,18 @@ function noticeLines(text: string): string[] {
 /** Logical (pre-wrap) lines for a single display item. */
 export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
   switch (item.kind) {
-    case "user":
-      return userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
+    case "user": {
+      const rows = userLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH));
+      return item.restart ? [theme.subtle("restart prompt"), ...rows] : rows;
+    }
     case "assistant":
       return assistantLines(item.text);
     case "tool":
       return toolLines(item, opts);
     case "notice":
-      return noticeLines(item.text);
+      return item.separator
+        ? separatorLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH))
+        : noticeLines(item.text);
   }
 }
 

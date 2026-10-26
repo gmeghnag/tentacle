@@ -136,13 +136,16 @@ export const TurnEndUpdateSchema = z.object({
 });
 
 /**
- * The history was replaced wholesale (a compaction): a barrier. Anything a
- * client holds from before it is stale — resync (`snapshot`) instead of
- * applying later updates on top of it. Starts a new epoch.
+ * The history was replaced wholesale: a barrier. Anything a client holds from
+ * before it is stale — resync (`snapshot`) instead of applying later updates
+ * on top of it. Starts a new epoch. `compact`: a compaction, between turns
+ * (the snapshot names no turn). `context_reset` (protocol 12): the model
+ * renewed its own context INSIDE a turn — the snapshot's `turn` names that
+ * turn, and its remaining updates follow the cut.
  */
 export const HistoryReplacedSchema = z.object({
   type: z.literal("history_replaced"),
-  reason: z.enum(["compact"]),
+  reason: z.enum(["compact", "context_reset"]),
 });
 
 /**

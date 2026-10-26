@@ -83,11 +83,16 @@ export type SessionActivity =
       /** Stop it (`session/cancel{turnId}`): whoever started it. */
       cancel(): void;
     }
-  /** The daemon's history replaced what is shown while no turn runs (eager open, a resync, a compaction). */
+  /**
+   * The daemon's history replaced what is shown while no turn runs (eager
+   * open, a resync, a compaction). `reason`: the barrier that caused it — a
+   * compaction, or a context reset whose turn this client no longer tracks
+   * (both keep what is shown) — null for any other history (it replaces it).
+   */
   | {
       readonly kind: "history";
       readonly messages: readonly ChatMessage[];
-      readonly compacted: boolean;
+      readonly reason: "compact" | "context_reset" | null;
     }
   /** The session ended daemon-side (another device's close / delete, the reaper). */
   | { readonly kind: "closed"; readonly reason: "closed" | "deleted" };
@@ -150,8 +155,15 @@ export class RemoteSession implements SessionStreamListener {
   private streaming: string | null = null;
   /** The foreign turn being streamed (at most one: the daemon has one slot). */
   private foreign: ActiveTurn | null = null;
-  /** A `history_replaced` was applied: the next reset is a compaction's (a daemon fact). */
-  private compactedPending = false;
+  /**
+   * A `history_replaced` was applied: the next reset is its snapshot (a daemon
+   * fact) — a compaction's, or a context reset's inside the turn the reducer
+   * stamped the barrier with.
+   */
+  private replaced: {
+    readonly reason: "compact" | "context_reset";
+    readonly turnId: string | null;
+  } | null = null;
   /** The session ended daemon-side (`session_closed`): a later send is refused clearly. */
   private remoteClosed = false;
   private watcher: ((activity: SessionActivity) => void) | null = null;
@@ -932,8 +944,13 @@ export class RemoteSession implements SessionStreamListener {
 
   /** A snapshot replaced the history: into the turn running at the cut, else a `history` activity. */
   private onReset(out: Extract<StreamOutput, { kind: "reset" }>): void {
-    const compacted = this.compactedPending;
-    this.compactedPending = false;
+    const replaced = this.replaced;
+    this.replaced = null;
+    if (replaced?.reason === "context_reset") {
+      this.onContextReset(out, replaced.turnId);
+      return;
+    }
+    const compacted = replaced !== null;
     const shown = this.foreign;
     if (shown && !shown.ended && shown.turnId !== out.turn) {
       this.closeWithoutOutcome(shown);
@@ -948,7 +965,7 @@ export class RemoteSession implements SessionStreamListener {
       turn = this.active; // an own prompt not started at the cut (today's reset)
     }
     if (!turn || turn.ended) {
-      this.raise({ kind: "history", messages: out.messages, compacted });
+      this.raise({ kind: "history", messages: out.messages, reason: compacted ? "compact" : null });
       return;
     }
     // Everything shown is replaced by the snapshot; tool calls it already
@@ -962,6 +979,64 @@ export class RemoteSession implements SessionStreamListener {
       for (const call of m.toolCalls ?? []) turn.toolNames.set(call.id, call.name);
     }
     turn.queue.push({ type: "history_reset", messages: out.messages });
+  }
+
+  /**
+   * A context reset's snapshot: the model renewed its context INSIDE the turn
+   * `resetIn` (the barrier's stamp). That turn's screen is KEPT — a
+   * `context_reset` event appends the new history — and its updates past the
+   * cut follow. A cut that no longer names it: it ended behind the cut (its
+   * `turn_end` never streams) — a foreign one closes with no outcome, an own
+   * one learns its REAL end by re-sending its prompt (same key: the daemon
+   * answers `ended` from its cache; never guessed). Untracked: a `history`
+   * activity that keeps the screen too. A newer turn running at the cut is
+   * tracked as at any reset.
+   */
+  private onContextReset(
+    out: Extract<StreamOutput, { kind: "reset" }>,
+    resetIn: string | null,
+  ): void {
+    const shown = this.foreign;
+    this.streaming = out.turn;
+    const turn = resetIn !== null ? this.turnFor(resetIn) : null;
+    if (turn && !turn.ended) {
+      // The calls it lists are shown by the event: a replayed `tool_call` is not shown again.
+      for (const m of out.messages) {
+        for (const call of m.toolCalls ?? []) {
+          turn.toolNames.set(call.id, call.name);
+          turn.shownTools.add(call.id);
+        }
+      }
+      turn.queue.push({ type: "context_reset", messages: out.messages });
+      if (out.turn !== turn.turnId) {
+        this.endedBehindCut(turn);
+      }
+    } else {
+      this.raise({ kind: "history", messages: out.messages, reason: "context_reset" });
+    }
+    if (shown && !shown.ended && shown.turnId !== out.turn) {
+      this.closeWithoutOutcome(shown);
+    }
+    if (out.turn !== null && out.turn !== resetIn) {
+      const running = this.turnFor(out.turn) ?? this.startForeign(out.turn, "");
+      running.started = true; // running at the cut: its prompt is in the snapshot
+    }
+  }
+
+  /** `turn` ended behind a cut: its outcome comes from the daemon, never a guess. */
+  private endedBehindCut(turn: ActiveTurn): void {
+    if (turn.foreign) {
+      this.closeWithoutOutcome(turn);
+      return;
+    }
+    // An ack still in flight carries `ended` itself.
+    const id = this.id;
+    if (
+      id &&
+      turnRecovery({ recreated: false, ended: turn.ended, acked: turn.acked }).resendPrompt
+    ) {
+      this.sendPrompt(id, turn);
+    }
   }
 
   /** One applied update: by its turn (`turnId`, the reducer's stamp), or session-level. */
@@ -990,8 +1065,8 @@ export class RemoteSession implements SessionStreamListener {
         this.onClosed(update.reason);
         return;
       case "history_replaced":
-        // The barrier: the next reset is a compaction's (a daemon fact, never a guess).
-        this.compactedPending = true;
+        // The barrier: the next reset is its snapshot (a daemon fact, never a guess).
+        this.replaced = { reason: update.reason, turnId };
         return;
       // Owned elsewhere: the permission router (the dialog), the job-exit, the
       // title and the queue listeners (they fire even while idle).

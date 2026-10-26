@@ -198,7 +198,7 @@ describe("/sessions", () => {
     expect(journal).toEqual(["A.unwatch", "A.detach", "dir.open:B:false", "B.watch", "B.open"]);
     b.raise({
       kind: "history",
-      compacted: false,
+      reason: null,
       messages: [
         { role: "user", content: "b question" },
         { role: "assistant", content: "b answer" },

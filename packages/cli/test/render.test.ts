@@ -59,6 +59,12 @@ describe("render", () => {
     ).toBe("[hook] fmt modified Bash input\n[result:ok] ok\n");
   });
 
+  test("a context reset prints the separator, not the new history", () => {
+    expect(
+      render({ type: "context_reset", messages: [{ role: "user", content: "restart" }] }),
+    ).toBe("\n↻ context reset by the model\n");
+  });
+
   test("turn_end reports non-normal stops", () => {
     expect(render({ type: "turn_end", reason: "end_turn" })).toBe("\n");
     expect(render({ type: "turn_end", reason: "max_iterations" })).toBe(

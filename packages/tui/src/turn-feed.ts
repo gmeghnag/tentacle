@@ -21,11 +21,15 @@ export type SessionActivity =
       /** Stop it, whoever started it. */
       cancel(): void;
     }
-  /** The daemon's history replaced what is shown while no turn runs. */
+  /**
+   * The daemon's history replaced what is shown while no turn runs. `reason`:
+   * a compaction's or a context reset's barrier (both keep the transcript),
+   * null for any other history (it replaces the transcript).
+   */
   | {
       readonly kind: "history";
       readonly messages: readonly ChatMessage[];
-      readonly compacted: boolean;
+      readonly reason: "compact" | "context_reset" | null;
     }
   /** The session ended daemon-side (another device's close / delete, the reaper). */
   | { readonly kind: "closed"; readonly reason: "closed" | "deleted" };
@@ -38,8 +42,9 @@ export type FeedStep = "consume" | "hold" | "history" | "closed";
  * buffer, nothing is lost) and consumed when that run settles: the only
  * overlaps are an own prompt that lost the slot (it will reject) and a
  * hand-off (the old end precedes the new turn's updates). A replacing history
- * waits the same way; a compaction's only adds a notice, so it never waits.
- * During my own `/compact` no run streams: a turn is consumed at once.
+ * waits the same way, and so does a context reset's (appended after the run
+ * it follows); a compaction's only adds a notice, so it never waits. During
+ * my own `/compact` no run streams: a turn is consumed at once.
  */
 export function nextStep(input: {
   readonly inFlight: boolean;
@@ -50,7 +55,7 @@ export function nextStep(input: {
     case "turn":
       return inFlight ? "hold" : "consume";
     case "history":
-      return inFlight && !activity.compacted ? "hold" : "history";
+      return inFlight && activity.reason !== "compact" ? "hold" : "history";
     case "closed":
       return "closed";
   }
@@ -59,16 +64,21 @@ export function nextStep(input: {
 /**
  * A `history` activity: a compaction keeps the transcript (owner QR1), with a
  * notice unless it was mine (`ownCompaction`: a `/compact` of this TUI whose
- * history has not arrived yet — it says "Context compacted" itself). Any other
- * history (eager open, a resync after a gap) replaces the transcript: the
- * daemon's history is the truth, and this TUI may have missed turns.
+ * history has not arrived yet — it says "Context compacted" itself). A context
+ * reset keeps it too and APPENDS the new history (its separator and restart
+ * prompt come with it: context-reset decision 9). Any other history (eager
+ * open, a resync after a gap) replaces the transcript: the daemon's history is
+ * the truth, and this TUI may have missed turns.
  */
 export function historyAction(input: {
-  readonly compacted: boolean;
+  readonly reason: "compact" | "context_reset" | null;
   readonly ownCompaction: boolean;
-}): "replace" | "notice" | "none" {
-  if (!input.compacted) {
+}): "replace" | "append" | "notice" | "none" {
+  if (input.reason === null) {
     return "replace";
+  }
+  if (input.reason === "context_reset") {
+    return "append";
   }
   return input.ownCompaction ? "none" : "notice";
 }

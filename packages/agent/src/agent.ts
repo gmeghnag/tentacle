@@ -212,6 +212,11 @@ export type AgentEvent =
   // snapshot + replay). Carries no data; frontends ignore it. Yielded only
   // where that holds — never between a push and the `pop` that may undo it.
   | { readonly type: "history_commit" }
+  // The history was REPLACED in place inside the turn (the model renewed its
+  // own context): `messages` is the new history, the turn goes on over it. A
+  // commit point too (the history reflects every event so far) — and, for the
+  // daemon, a barrier: a new epoch whose cut names the running turn.
+  | { readonly type: "context_reset"; readonly messages: readonly ChatMessage[] }
   | { readonly type: "turn_end"; readonly reason: AgentStopReason };
 
 /** Map a tool's neutral progress event onto a nested `AgentEvent` for a call. */

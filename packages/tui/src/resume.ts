@@ -3,9 +3,18 @@
  * display transcript, so `--resume` shows the prior turns, not a blank screen.
  * The agent history remains the source of truth; this is a presentation view.
  */
+import { restartPromptOf } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
 import type { DisplayItem, ToolItem } from "./state.ts";
 
+/** The separator before a context reset's restart prompt (decision 9, docs/eval/context-reset.md). */
+export const CONTEXT_RESET_SEPARATOR = "↻ context reset by the model";
+
+/**
+ * A restart message (a context reset's first user message) is shown as the
+ * separator, then the model's prompt alone — tentacle's appended notes
+ * (jobs, skills) are the model's, not the user's.
+ */
 export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[] {
   const items: DisplayItem[] = [];
   const toolAt = new Map<string, number>(); // toolCallId → index in `items`
@@ -15,7 +24,13 @@ export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[]
       continue; // the system prompt is not part of the visible transcript
     }
     if (m.role === "user") {
-      items.push({ kind: "user", text: m.content });
+      const restart = restartPromptOf(m.content);
+      if (restart !== null) {
+        items.push({ kind: "notice", text: CONTEXT_RESET_SEPARATOR, separator: true });
+        items.push({ kind: "user", text: restart, restart: true });
+      } else {
+        items.push({ kind: "user", text: m.content });
+      }
     } else if (m.role === "assistant") {
       if (m.content.trim() !== "") {
         items.push({ kind: "assistant", text: m.content });

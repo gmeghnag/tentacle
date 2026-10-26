@@ -45,6 +45,8 @@ export function render(event: AgentEvent): string {
       return `\n› ${event.text}\n`;
     case "history_commit":
       return "";
+    case "context_reset":
+      return "\n↻ context reset by the model\n";
     case "context_note":
       // A user hook's note is shown (R1); the loop's own notes are not.
       return event.reason === "hook" ? `\n${event.text}\n` : "";

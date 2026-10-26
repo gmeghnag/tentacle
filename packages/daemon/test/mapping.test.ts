@@ -134,6 +134,10 @@ describe("eventToUpdate", () => {
   test("turn_end has no streamed update", () => {
     expect(eventToUpdate({ type: "turn_end", reason: "end_turn" })).toBeNull();
   });
+
+  test("context_reset has none either: HostedSession streams the barrier itself", () => {
+    expect(eventToUpdate({ type: "context_reset", messages: [] })).toBeNull();
+  });
 });
 
 describe("toolResultContent", () => {

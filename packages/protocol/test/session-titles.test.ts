@@ -74,8 +74,8 @@ describe("session titles (docs/feat/session-titles.md)", () => {
     ).toBeUndefined();
   });
 
-  test("P1 additive: no PROTOCOL_VERSION bump (still 11)", () => {
-    expect(P.PROTOCOL_VERSION).toBe(11);
+  test("P1 additive: no PROTOCOL_VERSION bump (11 when it landed)", () => {
+    expect(P.PROTOCOL_VERSION).toBeGreaterThanOrEqual(11);
   });
 
   // Follow-up 1: the pod's title call is MARKED on the model tunnel, so the
