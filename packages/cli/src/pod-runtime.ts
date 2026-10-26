@@ -21,22 +21,8 @@
  * is a stateless sandbox and `--resume` works locally.
  */
 import type { SessionRecord } from "@tentacle/agent";
-import { ChannelError } from "@tentacle/client";
 import type { TentacleConfig } from "@tentacle/config";
 import type { ModelProvider, PermissionBroker } from "@tentacle/core";
-import {
-  AGENT_CONTAINER,
-  type ExecChannelOptions,
-  type ExecTarget,
-  KubeApiError,
-  type Pod,
-  type RunExecOptions,
-  type RunExecResult,
-  TERMINAL_PHASES,
-  type WaitForReadyOptions,
-  buildPodManifest,
-  podIsReady,
-} from "@tentacle/k8s";
 import type { DuplexChannel } from "@tentacle/transport";
 import {
   containerDecision,
@@ -44,6 +30,14 @@ import {
   parseVersionLine,
   replaceFailedWarning,
 } from "./container-version.ts";
+import type {
+  EngineExecChannelOptions,
+  EngineExecTarget,
+  EngineHost,
+  EngineRunExecResult,
+  WorkloadState,
+} from "./engine-host.ts";
+import { type PodCluster, kubeEngineHost } from "./engine-k8s.ts";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { configuredModelProvider } from "./model-provider.ts";
 import { PodBinaryError, checkPodBinaries, resolvePodBinary } from "./pod-binary-build.ts";
@@ -52,6 +46,9 @@ import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
 import { readBinaryVersion } from "./version-marker.ts";
 import { APP_VERSION } from "./version.ts";
+
+// The k8s host's pieces stay importable from here (the runtime's historical home).
+export { type PodCluster, podDialError } from "./engine-k8s.ts";
 
 /**
  * The pod daemon's command line (`run` and `attach`). `--auto-title` carries
@@ -136,19 +133,6 @@ export function createStderrSink(prefix: string, log: (line: string) => void): P
   };
 }
 
-/** The subset of `KubeClient` the pod runtime needs (injectable for tests). */
-export interface PodCluster {
-  createPod(pod: Pod, signal?: AbortSignal): Promise<Pod>;
-  /** Fetch a pod's current state (the `exec` attach preflight). */
-  getPod(name: string, signal?: AbortSignal): Promise<Pod>;
-  waitForReady(name: string, options?: WaitForReadyOptions): Promise<Pod>;
-  deletePod(name: string, signal?: AbortSignal): Promise<void>;
-  /** Best-effort, non-blocking delete that survives `process.exit` (Ctrl+C). */
-  deletePodBestEffort(name: string): void;
-  openExec(target: ExecTarget, options?: ExecChannelOptions): DuplexChannel;
-  runExec(target: ExecTarget, input?: Uint8Array, options?: RunExecOptions): Promise<RunExecResult>;
-}
-
 export interface PodRuntimeDeps {
   readonly kube: PodCluster;
   readonly namespace: string;
@@ -171,130 +155,46 @@ export interface PodRuntimeDeps {
 }
 
 /**
- * Translate a `createPod` failure into an actionable error. The kubeconfig
- * context's namespace is not guaranteed to exist; a pod create into a missing
- * namespace fails with a 404 (`namespaces "…" not found`) — the only other
- * way a pod create 404s is the same, so it is safe to attribute. Other
- * failures (RBAC 403, quota 403/422, …) keep their (already readable)
- * `KubeApiError` message untouched.
- */
-function podCreateError(error: unknown, namespace: string): Error {
-  // The 404 body is a k8s `Status` JSON, so the namespace name arrives with
-  // JSON-escaped quotes (`namespaces \"dev\" not found`) — strip backslashes.
-  const body = error instanceof KubeApiError ? error.body.replace(/\\/g, "") : "";
-  if (
-    error instanceof KubeApiError &&
-    error.status === 404 &&
-    /namespaces\s+["']?[^"'\s]+["']?\s+not found/.test(body)
-  ) {
-    return new Error(
-      `namespace "${namespace}" does not exist in this cluster — create it (e.g. kubectl create namespace ${namespace}) or pass --namespace <existing>`,
-    );
-  }
-  return error instanceof Error ? error : new Error(String(error));
-}
-
-/**
- * Translate a one-shot exec that dies with "closed before the command reported
- * a status" (the apiserver closing the exec WebSocket without a k8s status —
- * the classic symptom of a WRONG CONTAINER on a multi-container pod) into an
- * actionable error. Any other failure keeps its own message untouched.
- */
-function containerExecError(
-  error: unknown,
-  podName: string,
-  container: string | undefined,
-  namespace: string,
-): Error {
-  if (
-    error instanceof Error &&
-    /exec channel closed before the command reported a status/.test(error.message)
-  ) {
-    const where = container ? `container "${container}" of pod "${podName}"` : `pod "${podName}"`;
-    return new Error(
-      `cannot exec into ${where} — the exec closed before the command reported a status. The container may not exist (a multi-container pod): list them (kubectl describe pod ${podName} -n ${namespace}) and pass the right one with --container <c> (alias -c)`,
-    );
-  }
-  return error instanceof Error ? error : new Error(String(error));
-}
-
-/**
- * Can this pod (still) host the daemon? The reconnect preflight's verdict
- * (pure): a deleted or terminated pod is `gone` and bad cluster credentials
- * are `unauthorized` — both stop the reconnect for good; anything else (the
- * apiserver unreachable, a 5xx, a pod not yet running) is transient. `null`:
- * a running pod, dial it.
- */
-export function podDialError(
-  name: string,
-  outcome: { readonly pod: Pod } | { readonly error: unknown },
-): ChannelError | null {
-  if ("pod" in outcome) {
-    const phase = outcome.pod.status?.phase;
-    if (phase !== undefined && TERMINAL_PHASES.has(phase)) {
-      return new ChannelError("gone", `pod "${name}" is ${phase}`);
-    }
-    if (phase !== undefined && phase !== "Running") {
-      return new ChannelError("unreachable", `pod "${name}" is ${phase}`);
-    }
-    return null;
-  }
-  const { error } = outcome;
-  if (error instanceof KubeApiError && error.status === 404) {
-    return new ChannelError("gone", `pod "${name}" no longer exists`);
-  }
-  if (error instanceof KubeApiError && (error.status === 401 || error.status === 403)) {
-    return new ChannelError(
-      "unauthorized",
-      `the cluster refused the credentials (${error.status})`,
-    );
-  }
-  return new ChannelError(
-    "unreachable",
-    `cannot reach the cluster: ${error instanceof Error ? error.message : String(error)}`,
-  );
-}
-
-/**
- * The reconnect channel factory for a pod daemon (pod-attach Layer 2,
- * docs/feat/client-reattach-frontends.md §2): check the pod, then open the SAME
- * exec again. A new exec is a new `serve --stdio` (the old one ended with its
- * stdin), so the client finds its session unknown and recreates it from the
+ * The reconnect channel factory for an engine daemon (pod-attach Layer 2,
+ * docs/feat/client-reattach-frontends.md §2): check the workload, then open the
+ * SAME exec again. A new exec is a new `serve --stdio` (the old one ended with
+ * its stdin), so the client finds its session unknown and recreates it from the
  * laptop's history; a turn in flight is reported lost, never re-run.
  */
 export function execChannelFactory(
-  kube: PodCluster,
-  target: ExecTarget,
-  options: ExecChannelOptions,
+  host: EngineHost,
+  target: EngineExecTarget,
+  options: EngineExecChannelOptions,
 ): () => Promise<DuplexChannel> {
   return async () => {
-    let verdict: ChannelError | null;
-    try {
-      verdict = podDialError(target.pod, { pod: await kube.getPod(target.pod) });
-    } catch (error) {
-      verdict = podDialError(target.pod, { error });
-    }
+    const verdict = await host.dialVerdict(target.name);
     if (verdict) {
       throw verdict;
     }
-    return kube.openExec(target, options);
+    return host.openExec(target, options);
   };
 }
 
 /**
- * Register the process-level safety net that deletes the pod on exit.
+ * Register the process-level safety net that deletes the workload on exit.
  *
  * Closing the TUI with Ctrl+C makes the terminal code call `process.exit`
- * *before* the runtime's `dispose()` runs, so the normal `deletePod` never
- * fires and the pod is orphaned. The `exit` handler runs on **every** exit
- * path (SIGINT / SIGTERM / normal / crash), and `deletePodBestEffort` spawns a
+ * *before* the runtime's `dispose()` runs, so the normal `remove` never
+ * fires and the workload is orphaned. The `exit` handler runs on **every** exit
+ * path (SIGINT / SIGTERM / normal / crash), and `removeBestEffort` spawns a
  * detached, fire-and-forget child that issues the `DELETE` — so it never
- * blocks the exit and never throws. See `k8s/pod-cleanup.ts`.
+ * blocks the exit and never throws. See `k8s/pod-cleanup.ts` and
+ * `docker/container-cleanup.ts`.
  */
-function registerPodCleanup(kube: PodCluster, name: string): void {
+function registerExitCleanup(host: EngineHost, name: string): void {
   process.once("exit", () => {
-    kube.deletePodBestEffort(name);
+    host.removeBestEffort(name);
   });
+}
+
+/** `startEngineRuntime`'s deps: `run`'s, with the engine as a host. */
+export interface EngineRuntimeDeps extends Omit<PodRuntimeDeps, "kube" | "namespace"> {
+  readonly host: EngineHost;
 }
 
 /**
@@ -307,13 +207,30 @@ export async function startPodRuntime(
   config: TentacleConfig,
   deps: PodRuntimeDeps,
 ): Promise<LocalRuntime> {
+  const { kube, namespace, ...rest } = deps;
+  return startEngineRuntime(config, { ...rest, host: kubeEngineHost(kube, namespace) });
+}
+
+/**
+ * `run` on any engine: create an ephemeral workload (pod / container), connect
+ * the daemon over its exec channel, and build a persisting local runtime
+ * against it. The returned runtime's `dispose` closes the exec channel and
+ * removes the workload. Throws (after cleaning up any created workload) on
+ * failure — there is no in-process fallback.
+ */
+export async function startEngineRuntime(
+  config: TentacleConfig,
+  deps: EngineRuntimeDeps,
+): Promise<LocalRuntime> {
+  const { host } = deps;
   const name = deps.name ?? `tentacle-${crypto.randomUUID().slice(0, 8)}`;
   // Install path in the pod: a read-only rootfs (a hardened pod) needs a writable
   // dir via --bin-dir (e.g. /tmp); the daemon is then exec'd by this absolute path.
   const binPath = `${deps.binDir ?? "/usr/local/bin"}/tentacle`;
   // The pod daemon's stderr is buffered (not written live) so it never corrupts
   // the Ink TUI; flushed once on teardown / startup failure. See `createStderrSink`.
-  const stderr = createStderrSink(`[pod ${name}]`, deps.log);
+  const stderr = createStderrSink(`[${host.noun} ${name}]`, deps.log);
+  const container = host.defaultContainer;
   // Interactive (TTY) startup is ONE line: a spinner repainted per phase
   // (create → ready → inject, with the transfer bar as the bar phase's text),
   // cleared when the daemon starts. Piped (log/CI) logs one line per phase
@@ -332,37 +249,35 @@ export async function startPodRuntime(
   // needs deleting. Both arches: the pod's is unknown until it exists.
   await checkPodBinaries({ configDir: config.configDir, appVersion: deps.appVersion });
 
-  phase(`[pod] creating ${name} (image ${deps.image}) in namespace ${deps.namespace}…`);
+  phase(`[${host.noun}] creating ${name} (image ${deps.image}) in ${host.where}…`);
   try {
-    await deps.kube.createPod(
-      buildPodManifest({ name, namespace: deps.namespace, image: deps.image }),
-    );
+    // Errors arrive translated (e.g. a missing k8s namespace → actionable).
+    await host.create(name, deps.image);
   } catch (error) {
     status?.finish();
-    // A missing namespace surfaces as a 404 from the pod create (not a
-    // separate preflight) — translate it into something actionable.
-    throw podCreateError(error, deps.namespace);
+    throw error;
   }
 
   // Safety net: if the process exits before `dispose()` (Ctrl+C → process.exit
-  // in the terminal code, a crash, or a kill), the pod is still deleted by a
-  // detached child. Registered right after the pod exists, so it covers
+  // in the terminal code, a crash, or a kill), the workload is still deleted by
+  // a detached child. Registered right after it exists, so it covers
   // pre-ready failures too.
-  registerPodCleanup(deps.kube, name);
+  registerExitCleanup(host, name);
 
   try {
-    phase(`[pod] waiting for ${name} to become ready…`);
-    await deps.kube.waitForReady(name);
+    phase(`[${host.noun}] waiting for ${name} to become ready…`);
+    await host.waitForReady(name);
     // Inject the tool into the sandbox (F4.e): the image need not contain
-    // `tentacle`. Any failure here throws → the pod is deleted below.
+    // `tentacle`. Any failure here throws → the workload is deleted below.
     // In interactive mode the injection phases (probe → resolve → transfer →
     // verify) drive the SAME status line via `onStatus`.
     const version = await injectAgentBinary({
-      kube: deps.kube,
-      podName: name,
+      host,
+      name,
+      noun: host.noun,
       binPath,
-      container: AGENT_CONTAINER,
-      probe: () => probePod(deps.kube, name, AGENT_CONTAINER),
+      container,
+      probe: () => probePod(host, name, container),
       resolveBinary: (target) =>
         resolvePodBinary(target, {
           configDir: config.configDir,
@@ -380,17 +295,17 @@ export async function startPodRuntime(
     // Piped only: in interactive mode the TUI opening IS the confirmation, so
     // no final log line (the status line was already cleared by `finish()`).
     if (!status) {
-      deps.log(`[pod] ${version} ready in ${name}; starting the agent daemon\n`);
+      deps.log(`[${host.noun}] ${version} ready in ${name}; starting the agent daemon\n`);
     }
-    const target: ExecTarget = {
-      pod: name,
-      container: AGENT_CONTAINER,
+    const target: EngineExecTarget = {
+      name,
+      container,
       command: podDaemonCommand(binPath, config),
     };
-    const execOptions: ExecChannelOptions = { onStderr: stderr.onStderr };
+    const execOptions: EngineExecChannelOptions = { onStderr: stderr.onStderr };
     // The current exec; a reconnect replaces it (and teardown closes that one).
-    let channel = deps.kube.openExec(target, execOptions);
-    const redial = execChannelFactory(deps.kube, target, execOptions);
+    let channel = host.openExec(target, execOptions);
+    const redial = execChannelFactory(host, target, execOptions);
     return await createLocalRuntime({
       ...laptopModels(config),
       channel,
@@ -403,7 +318,7 @@ export async function startPodRuntime(
         // Safe here: `dispose()` runs after the TUI has unmounted (left the
         // alt-screen), so the buffered daemon stderr can go to stdout.
         stderr.flush();
-        void deps.kube.deletePod(name).catch(() => {});
+        void host.remove(name).catch(() => {});
       },
       permissions: deps.permissions,
       saver: deps.saver,
@@ -417,12 +332,12 @@ export async function startPodRuntime(
       ...(deps.notify ? { notify: deps.notify } : {}),
     });
   } catch (error) {
-    // The pod was created but never became usable — delete it before surfacing.
+    // The workload was created but never became usable — delete it before surfacing.
     status?.finish();
     // The TUI never mounted on this path, so flushing any daemon stderr (e.g. a
     // `serve` that failed to start) to stdout is safe and aids diagnosis.
     stderr.flush();
-    void deps.kube.deletePod(name).catch(() => {});
+    void host.remove(name).catch(() => {});
     throw error;
   }
 }
@@ -455,17 +370,36 @@ export interface PodAttachRuntimeDeps {
  * it); the pod stays `Running` for reuse (re-attach is a sub-second
  * version-probe) and for cleanup by the owner (`kubectl delete pod`).
  *
- * No `registerPodCleanup` safety net either: the whole point is that a TUI
+ * No `registerExitCleanup` safety net either: the whole point is that a TUI
  * exit (Ctrl+C → process.exit) must NOT delete the pod.
  */
 export async function startAttachRuntime(
   config: TentacleConfig,
   deps: PodAttachRuntimeDeps,
 ): Promise<LocalRuntime> {
+  const { kube, namespace, ...rest } = deps;
+  return attachEngineRuntime(config, { ...rest, host: kubeEngineHost(kube, namespace) });
+}
+
+/** `attachEngineRuntime`'s deps: `attach`'s, with the engine as a host. */
+export interface EngineAttachRuntimeDeps extends Omit<PodAttachRuntimeDeps, "kube" | "namespace"> {
+  readonly host: EngineHost;
+}
+
+/**
+ * `attach` on any engine: the EXISTING workload is user-owned, so this runtime
+ * never creates, starts, removes, or arms an exit net for it (see
+ * `startAttachRuntime`). It only reads its state, injects if needed, and execs.
+ */
+export async function attachEngineRuntime(
+  config: TentacleConfig,
+  deps: EngineAttachRuntimeDeps,
+): Promise<LocalRuntime> {
+  const { host } = deps;
   const name = deps.podName;
   // Buffer the pod daemon's stderr so it never corrupts the Ink TUI; flushed
   // once on teardown / startup failure. See `createStderrSink`.
-  const stderr = createStderrSink(`[pod ${name}]`, deps.log);
+  const stderr = createStderrSink(`[${host.noun} ${name}]`, deps.log);
   // No `?? AGENT_CONTAINER` default: when the caller does not name a container,
   // the exec API omits the `container` parameter and picks the only/default
   // one (single-container pods need no `-c`).
@@ -480,37 +414,29 @@ export async function startAttachRuntime(
     }
   };
 
-  phase(`[pod] attaching to ${name} in namespace ${deps.namespace}…`);
-  let pod: Pod;
+  phase(`[${host.noun}] attaching to ${name} in ${host.where}…`);
+  let state: WorkloadState;
   try {
-    pod = await deps.kube.getPod(name);
+    // A missing workload arrives as an actionable error (wrong name / namespace).
+    state = await host.inspect(name);
   } catch (error) {
     status?.finish();
-    // A 404 from `getPod` can only mean the pod does not exist (wrong name or
-    // wrong namespace — the kubeconfig context's namespace is not guaranteed
-    // to be the pod's). 403 keeps its RBAC message; it is the operator's to fix.
-    if (error instanceof KubeApiError && error.status === 404) {
-      throw new Error(
-        `pod "${name}" not found in namespace "${deps.namespace}" — check the name (kubectl get pods -n ${deps.namespace}) or pass --namespace <ns>; use \`run\` to create one`,
-      );
-    }
-    throw error instanceof Error ? error : new Error(String(error));
+    throw error;
   }
-  // A terminated pod can never host the daemon (and `waitForReady` would just
-  // time out) — say so up front.
-  const podPhase = pod.status?.phase;
-  if (podPhase !== undefined && TERMINAL_PHASES.has(podPhase)) {
+  // A terminated / not-runnable workload can never host the daemon (and
+  // `waitForReady` would just time out) — say so up front. Never started here.
+  if (state.kind === "stopped") {
     status?.finish();
-    throw new Error(`pod "${name}" is ${podPhase}; cannot attach to a terminated pod`);
+    throw new Error(state.detail);
   }
 
-  // The pod may still be pulling (the user ran it seconds ago): a BOUNDED wait
-  // — `exec` is an attach, not a create, so we do not sit for the full
+  // The workload may still be pulling (the user ran it seconds ago): a BOUNDED
+  // wait — `exec` is an attach, not a create, so we do not sit for the full
   // create-flow default.
-  if (!podIsReady(pod)) {
-    phase(`[pod] waiting for ${name} to become ready…`);
+  if (state.kind === "starting") {
+    phase(`[${host.noun}] waiting for ${name} to become ready…`);
     try {
-      pod = await deps.kube.waitForReady(name, { timeoutMs: 60_000 });
+      await host.waitForReady(name, { timeoutMs: 60_000 });
     } catch (error) {
       status?.finish();
       throw error;
@@ -529,17 +455,17 @@ export async function startAttachRuntime(
     // install path (supports a writable non-PATH dir like /tmp via --bin-dir).
     const binPath = `${deps.binDir ?? "/usr/local/bin"}/tentacle`;
     let serveBin = "tentacle";
-    let probe: RunExecResult;
+    let probe: EngineRunExecResult;
     try {
-      probe = await deps.kube.runExec(
-        { pod: name, container, command: ["tentacle", "--version"] },
+      probe = await host.runExec(
+        { name, container, command: ["tentacle", "--version"] },
         undefined,
         { timeoutMs: 15_000 },
       );
     } catch (error) {
       status?.finish();
       // A wrong container surfaces here (the first exec) — translate it.
-      throw containerExecError(error, name, container, deps.namespace);
+      throw host.execError(error, { name, container });
     }
     // Reused only when it is exactly what this laptop would inject (a
     // re-attach); any other version is replaced, so the daemon speaks this
@@ -557,11 +483,12 @@ export async function startAttachRuntime(
       serveBin = binPath; // injected to our dir → exec by absolute path
       try {
         version = await injectAgentBinary({
-          kube: deps.kube,
-          podName: name,
+          host,
+          name,
+          noun: host.noun,
           binPath,
           container,
-          probe: () => probePod(deps.kube, name, container),
+          probe: () => probePod(host, name, container),
           resolveBinary: (target) =>
             resolvePodBinary(target, {
               configDir: config.configDir,
@@ -582,8 +509,8 @@ export async function startAttachRuntime(
         // go on with the container's own tentacle, IF it still answers (the
         // failure may have come after the rename), and warn. `initialize` still
         // refuses a protocol skew with its full message.
-        const again = await deps.kube
-          .runExec({ pod: name, container, command: ["tentacle", "--version"] }, undefined, {
+        const again = await host
+          .runExec({ name, container, command: ["tentacle", "--version"] }, undefined, {
             timeoutMs: 15_000,
           })
           .catch(() => null);
@@ -617,18 +544,18 @@ export async function startAttachRuntime(
     // Piped only: the TUI opening IS the confirmation in interactive mode.
     if (!status) {
       deps.log(
-        `[pod] ${version} attached to ${name}; the agent daemon is starting (closing the TUI detaches — the pod stays up)\n`,
+        `[${host.noun}] ${version} attached to ${name}; the agent daemon is starting (closing the TUI detaches — the ${host.noun} stays up)\n`,
       );
     }
-    const target: ExecTarget = {
-      pod: name,
+    const target: EngineExecTarget = {
+      name,
       container,
       command: podDaemonCommand(serveBin, config),
     };
-    const execOptions: ExecChannelOptions = { onStderr: stderr.onStderr };
+    const execOptions: EngineExecChannelOptions = { onStderr: stderr.onStderr };
     // The current exec; a reconnect replaces it (and teardown closes that one).
-    let channel = deps.kube.openExec(target, execOptions);
-    const redial = execChannelFactory(deps.kube, target, execOptions);
+    let channel = host.openExec(target, execOptions);
+    const redial = execChannelFactory(host, target, execOptions);
     return await createLocalRuntime({
       ...laptopModels(config),
       channel,
@@ -658,8 +585,8 @@ export async function startAttachRuntime(
     status?.finish();
     // The TUI never mounted on this path, so flushing any daemon stderr is safe.
     stderr.flush();
-    // NO pod delete here: the pod is not ours. The injection's own messages
+    // NO delete here: the workload is not ours. The injection's own messages
     // (e.g. the glibc hint) surface untouched; a wrong container is translated.
-    throw containerExecError(error, name, container, deps.namespace);
+    throw host.execError(error, { name, container });
   }
 }

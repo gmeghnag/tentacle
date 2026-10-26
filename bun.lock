@@ -55,6 +55,7 @@
         "@tentacle/config": "workspace:*",
         "@tentacle/core": "workspace:*",
         "@tentacle/daemon": "workspace:*",
+        "@tentacle/docker": "workspace:*",
         "@tentacle/exec": "workspace:*",
         "@tentacle/k8s": "workspace:*",
         "@tentacle/mcp": "workspace:*",

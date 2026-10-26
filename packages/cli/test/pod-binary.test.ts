@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { ExecTarget, RunExecOptions, RunExecResult } from "@tentacle/k8s";
+import type { RunExecOptions, RunExecResult } from "@tentacle/k8s";
+import type { EngineExecTarget } from "../src/engine-host.ts";
 import {
   POD_BIN_PATH,
   type PodBinaryDeps,
@@ -42,7 +43,7 @@ class FakeKube {
     this.script = script;
   }
   runExec(
-    target: ExecTarget,
+    target: EngineExecTarget,
     input?: Uint8Array,
     options?: RunExecOptions,
   ): Promise<RunExecResult> {
@@ -87,8 +88,8 @@ function depsFor(
   } = {},
 ): PodBinaryDeps {
   return {
-    kube,
-    podName: "p1",
+    host: kube,
+    name: "p1",
     container: "agent",
     ...(opts.binPath ? { binPath: opts.binPath } : {}),
     // The image probe is an injected seam: in production it is
