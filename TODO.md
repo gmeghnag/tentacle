@@ -1010,7 +1010,7 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 >    `feat/context-reset-barrier`, then slice 3 `feat/context-reset`;
 > 3b. skills hot-reload for the USER (`/name` list + `/skills` panel follow a
 >    reset / new skill without restart) — owner CR-Q1, right after context-reset;
-> 4. `docker-runtime` (slice A `feat/docker-engine-client` EXECUTING in parallel, worktree) — `run`/`attach --docker` (`docs/eval/docker-runtime.md`,
+> 4. `docker-runtime` (slice A `feat/docker-engine-client` DONE, merged `116d45f`; next A2 `feat/docker-ssh-dialer`, then B, C) — `run`/`attach --docker` (`docs/eval/docker-runtime.md`,
 >    owner answers 2026-10-26; promote to `feat/` when picked; slices A
 >    `packages/docker`, B neutral `SandboxHost` seam, `ssh://` dial-stdio, C CLI/docs);
 > 5. default `maxIterations` = `-1` (agent and sub-agents);
