@@ -353,3 +353,29 @@ Left unverified items listed, not papered over. Cleanup: every probe
 container labelled `tentacle.eval=docker-runtime` and removed (`docker ps -a
 --filter label=tentacle.eval=docker-runtime` → empty); the `alpine:3` image
 pulled for the musl test is still present (its `docker rmi` needed approval).
+
+### Owner answers
+
+*— recorded by the orchestrator (claude-opus-5-5), 2026-10-26*
+
+1. **CLI shape:** `--docker` (+ `--context`, honouring `DOCKER_HOST` /
+   `DOCKER_CONTEXT`); k8s stays the default (owner: "si").
+2. **Local workspace:** bind-mount the cwd read-write at the same absolute
+   path on a local engine, `--no-mount` to opt out; never on a remote engine
+   (owner: "perfetto direi").
+3. **`ssh://` contexts: IN v1 — reverses the evaluator's recommendation.**
+   tentacle spawns `ssh <host> docker system dial-stdio` (what the docker CLI
+   does) and runs the same hand-written HTTP over its stdio; one transport
+   code path over a byte duplex. Needs `ssh` on the laptop and `docker` on
+   the server. Adds a small slice to the build (owner: "si").
+4. **Podman:** supported in v1; verified live in slice A (start the Podman
+   machine for the opt-in test, stop it after) (owner: "si").
+5. **musl / Alpine:** not supported now; tentacle DETECTS a musl image and
+   fails with a clear message ("this image uses musl (Alpine): use a
+   glibc-based image") on BOTH Docker and k8s, never a cryptic crash; fix the
+   stale comment at `pod-binary.ts:107` (owner: "perfetto").
+6. **Plaintext `tcp://`:** refused by default with a message pointing to TLS
+   (`:2376` + certs) or `ssh://`; explicit `--insecure-docker-tcp` to force
+   it (owner: "ottimo").
+
+Not yet decided: WHEN to build (promotion to `feat/`, queue position).
