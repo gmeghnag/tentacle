@@ -18,6 +18,7 @@ import { join } from "node:path";
  * in F4. Until then, point the CLI at a trusted model and workspace.
  */
 import { Session, recordFromSnapshot } from "@tentacle/agent";
+import { webSocketChannelFactory } from "@tentacle/client";
 import { type ChatMessage, PermissionBroker } from "@tentacle/core";
 import { toSkillList } from "@tentacle/daemon";
 import {
@@ -91,7 +92,9 @@ Usage:
   tentacle <prompt...>     run a single task and exit
   tentacle -- <prompt...>  the same, for a prompt that starts with '-'
   tentacle serve [opts]    host the remote-control daemon
-  tentacle connect <url>   drive a remote daemon with the TUI
+  tentacle connect <url> [--resume [id]|--continue]
+                           drive a remote daemon with the TUI; quitting
+                           detaches (the session keeps running there)
   tentacle hooks trust --list | --revoke <folder>
                            list / revoke stored project-hooks trust decisions
   tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]
@@ -117,6 +120,10 @@ Remote control:
                       [--max-detached-sessions 16] [--ws-idle-timeout 60s]
   tentacle connect ws(s)://host:port [--token T|--token-command CMD]
                       [--ca-cert FILE | --insecure-skip-tls-verify]
+                      [--resume [id] | --continue]
+  connect: quitting detaches — the session (and a running turn) stays on the
+  daemon; --resume picks one of its sessions (or names one), --continue takes
+  the newest; in the TUI /sessions switches, /close ends one, /clear = close + new.
   A non-loopback --host requires a token (remote code execution risk).
   Token env fallback: TENTACLE_REMOTE_TOKEN.
   TLS trust: --ca-cert is the CA (or the self-signed cert) that signed the
@@ -235,7 +242,32 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     try {
       const token = await resolveToken(flags);
       const tls = await resolveTls(url, flags, bools);
-      await connectTui({ url, ...(token ? { token } : {}), ...(tls ? { tls } : {}) }, write);
+      const id = flags.get("resume");
+      const resume =
+        id !== undefined || bools.has("resume") || bools.has("continue")
+          ? {
+              ...(id !== undefined ? { id } : {}),
+              resume: bools.has("resume"),
+              latest: bools.has("continue"),
+            }
+          : undefined;
+      await connectTui(
+        {
+          url,
+          ...(token ? { token } : {}),
+          ...(tls ? { tls } : {}),
+          ...(resume ? { resume } : {}),
+        },
+        write,
+        {
+          dial: webSocketChannelFactory,
+          startTui,
+          // The pre-mount picker, on a terminal only (as the local `--resume`).
+          ...(process.stdin.isTTY && process.stdout.isTTY
+            ? { pick: (choices: Parameters<typeof pickSession>[0]) => pickSession(choices) }
+            : {}),
+        },
+      );
       return 0;
     } catch (error) {
       write(

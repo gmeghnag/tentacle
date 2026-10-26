@@ -91,6 +91,8 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1close/result": [{}],
   "methods/session~1delete/params": [{ sessionId: "s" }],
   "methods/session~1delete/result": [{}],
+  "methods/session~1detach/params": [{ sessionId: "s" }],
+  "methods/session~1detach/result": [{}],
   "methods/session~1prompt/params": [
     {
       sessionId: "s",

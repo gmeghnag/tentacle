@@ -4,14 +4,39 @@
  * `components/SessionPicker.tsx` only renders what this computes.
  */
 
-/** One session the picker offers (mapped by the CLI from its `SessionRecord`). */
+/**
+ * One session the picker offers: mapped by the CLI from its `SessionRecord`
+ * (the local store: a message count), or from a daemon's `session/list` entry
+ * (`connect --resume`: what the daemon reports instead).
+ */
 export interface SessionChoice {
   readonly id: string;
   readonly title: string;
-  /** Last save, ms since the epoch. */
+  /** Last save (local) or last conversation change (the daemon's clock), ms since the epoch. */
   readonly updatedAt: number;
-  /** Messages in the visible transcript (the system prompt excluded). */
-  readonly messageCount: number;
+  /** Messages in the visible transcript (the system prompt excluded); local only. */
+  readonly messageCount?: number;
+  /** A daemon's entry: a turn or a compaction runs. */
+  readonly running?: boolean;
+  /** A daemon's entry: clients attached right now. */
+  readonly attached?: number;
+  /** A daemon's entry: ended and kept (choosing it reopens it). */
+  readonly archived?: boolean;
+}
+
+/** "N msgs" for the local store; for a daemon's entry what it reports: "running · on N devices", "archived", else "idle". */
+export function choiceMeta(c: SessionChoice): string {
+  if (c.messageCount !== undefined) {
+    return `${c.messageCount} ${c.messageCount === 1 ? "msg" : "msgs"}`;
+  }
+  const marks = [
+    ...(c.running === true ? ["running"] : []),
+    ...(c.attached !== undefined && c.attached > 0
+      ? [`on ${c.attached} ${c.attached === 1 ? "device" : "devices"}`]
+      : []),
+    ...(c.archived === true ? ["archived"] : []),
+  ];
+  return marks.length > 0 ? marks.join(" · ") : "idle";
 }
 
 /** The picker as the CLI uses it: the chosen id, or null when cancelled. */
@@ -84,7 +109,7 @@ export function pickerView(
       id: c.id,
       title: c.title,
       age: pickerAge(c.updatedAt, now),
-      meta: `${c.messageCount} ${c.messageCount === 1 ? "msg" : "msgs"}`,
+      meta: choiceMeta(c),
       selected: start + i === selected,
     })),
     above: start,

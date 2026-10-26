@@ -77,8 +77,17 @@ machine and drive it from another machine's TUI:
 
 ```sh
 tentacle serve --host 127.0.0.1 --port 4000 [--token T | --token-command CMD]
-tentacle connect ws://host:4000 [--token T]
+tentacle connect ws://host:4000 [--token T] [--resume [id] | --continue]
 ```
+
+Quitting `connect` detaches: the session, a running turn and its background
+jobs keep going on the daemon, and the exit line says how to come back
+(`--resume <id>`). `--resume` picks one of the daemon's sessions (or names
+one; an ended session is reopened), `--continue` takes the newest. In the TUI,
+`/sessions` lists the daemon's sessions to switch to or delete (`x` twice),
+`/close` ends the session for every device and quits, `/clear` ends it and
+starts a fresh one. `connect` keeps no laptop copy: the daemon's record is
+the truth.
 
 A non-loopback `--host` requires a token. TLS: `--tls-cert`/`--tls-key` on
 `serve`; `--ca-cert FILE` on `connect` for a private CA. Details:

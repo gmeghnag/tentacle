@@ -112,6 +112,12 @@ export interface SessionStreamListener {
   recovered(info: { readonly recreated: boolean }): void;
   /** The link is gone for good (no factory, a terminal failure, `close()`). */
   linkClosed(error: Error): void;
+  /**
+   * The daemon refused to re-attach after a drop because the session ended
+   * (`SessionArchived` → `closed`) or was deleted (`SessionDeleted` →
+   * `deleted`) while the link was down — told by error CODE, before its turns fail.
+   */
+  ended?(reason: "closed" | "deleted"): void;
 }
 
 /** A background-job exit surfaced by the daemon, outside any turn. */
@@ -324,6 +330,8 @@ export class RemoteClient {
   private readonly sessionDeletedListeners = new Set<(notice: SessionDeletedNotice) => void>();
   /** Conditions re-checked after every state change (session live, link stopped, …). */
   private readonly waiters = new Set<() => boolean>();
+  /** Closes / deletes / detaches in flight (settled, never rejecting): what `drain` awaits. */
+  private readonly ending = new Set<Promise<void>>();
   /** Which permission request is prompted / answered (pure; see its module). */
   private readonly router = new PermissionRouter();
   /** The on-screen prompt's abort handle, by `sessionId` + `requestId`. */
@@ -637,8 +645,20 @@ export class RemoteClient {
     return this.endSession(Method.SessionDelete, sessionId);
   }
 
+  /**
+   * Stop following a session on this connection (`session/detach`): it keeps
+   * running daemon-side (turn, jobs, pending asks) for any client. Forgotten
+   * here, and its open prompts withdrawn, once the daemon answers — or the
+   * link drops (the dropped socket detached it daemon-side already); while
+   * the link is down it resolves at once. Rejects only on `MethodNotFound`
+   * (an older daemon): nothing changed, the session stays followed.
+   */
+  detachSession(sessionId: string): Promise<void> {
+    return this.endSession(Method.Detach, sessionId);
+  }
+
   private endSession(
-    method: typeof Method.Close | typeof Method.SessionDelete,
+    method: typeof Method.Close | typeof Method.SessionDelete | typeof Method.Detach,
     sessionId: string,
   ): Promise<void> {
     const entry = this.sessions.get(sessionId);
@@ -649,6 +669,10 @@ export class RemoteClient {
         this.sessions.delete(sessionId);
         this.kick();
       }
+      // A detach gets no `session_closed`: its prompts are withdrawn here.
+      if (method === Method.Detach) {
+        this.runPermissionActions(this.router.sessionClosed(sessionId));
+      }
     };
     if (entry) {
       entry.closing = true;
@@ -658,7 +682,55 @@ export class RemoteClient {
       forget();
       return Promise.resolve();
     }
-    return this.call(this.peer, method, { sessionId }).then(forget, forget);
+    const ending = this.call(this.peer, method, { sessionId }).then(forget, (error: unknown) => {
+      if (
+        method === Method.Detach &&
+        error instanceof RpcError &&
+        error.code === JsonRpcErrorCode.MethodNotFound
+      ) {
+        // An older daemon: nothing changed — keep following the session.
+        if (entry && this.sessions.get(sessionId) === entry) {
+          entry.closing = false;
+        }
+        throw error;
+      }
+      forget();
+    });
+    const tracked = ending.then(
+      () => {},
+      () => {},
+    );
+    this.ending.add(tracked);
+    void tracked.then(() => this.ending.delete(tracked));
+    return ending;
+  }
+
+  /**
+   * Await every close / delete / detach still in flight — the exit path of a
+   * client whose sessions outlive it (`connect`): a `/clear` or `/close` just
+   * before quitting still reaches the daemon. AWAIT it before `close()` (the
+   * in-memory pair drops a frame written just before closing). Bounded by
+   * `timeoutMs`; never rejects.
+   */
+  async drain(timeoutMs: number = CLOSE_SESSIONS_TIMEOUT_MS): Promise<void> {
+    if (this.ending.size === 0) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all([...this.ending]),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+
+  /** Ids of the sessions this client followed live and has not closed, deleted or detached. */
+  liveSessionIds(): string[] {
+    return [...this.sessions.values()]
+      .filter((entry) => entry.everLive && !entry.closing)
+      .map((entry) => entry.id);
   }
 
   /**
@@ -1400,6 +1472,21 @@ export class RemoteClient {
     }
     const reason = error instanceof Error ? error.message : String(error);
     this.onError?.(new Error(`session ${entry.id}: recovery failed: ${reason}`));
+    // Ended or deleted while we were away — told by CODE, never by text: the
+    // session is gone for this client (nothing to follow, close or answer).
+    const ended =
+      error instanceof RpcError
+        ? error.code === DomainErrorCode.SessionArchived
+          ? "closed"
+          : error.code === DomainErrorCode.SessionDeleted
+            ? "deleted"
+            : null
+        : null;
+    if (ended !== null) {
+      this.sessions.delete(entry.id);
+      this.runPermissionActions(this.router.sessionClosed(entry.id));
+      entry.listener?.ended?.(ended);
+    }
     this.step(entry, { kind: "fail", reason: `could not resume the session: ${reason}` });
   }
 

@@ -55,7 +55,9 @@ const TOKEN = { token: {}, "token-command": {} } as const;
 export const ARGS = {
   connect: {
     values: { ...TOKEN, "ca-cert": {} },
-    bools: { "insecure-skip-tls-verify": {} },
+    bools: { "insecure-skip-tls-verify": {}, ...CONTINUE },
+    optional: RESUME,
+    conflicts: RESUME_CONFLICTS,
     positional: { min: 1, max: 1 },
   },
   serve: {
@@ -489,7 +491,7 @@ export function cliMode(args: readonly string[]): CliMode {
 /** The usage line printed with an argument error. */
 export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string>> = {
   connect:
-    "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify]",
+    "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify] [--resume [id]|--continue]",
   serve:
     "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [...] (see tentacle --help)",
   run: "tentacle run --image <ref> [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]",

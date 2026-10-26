@@ -277,6 +277,21 @@
       "properties": {},
       "type": "object"
     },
+    "DetachParams": {
+      "additionalProperties": true,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["sessionId"],
+      "type": "object"
+    },
+    "DetachResult": {
+      "additionalProperties": true,
+      "properties": {},
+      "type": "object"
+    },
     "EnqueueParams": {
       "additionalProperties": true,
       "properties": {
@@ -2246,6 +2261,14 @@
       },
       "result": {
         "$ref": "#/$defs/DeleteResult"
+      }
+    },
+    "session/detach": {
+      "params": {
+        "$ref": "#/$defs/DetachParams"
+      },
+      "result": {
+        "$ref": "#/$defs/DetachResult"
       }
     },
     "session/enqueue": {

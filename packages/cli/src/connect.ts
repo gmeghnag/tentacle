@@ -12,12 +12,23 @@ import {
   ChannelError,
   type ConnectOptions as ClientConnectOptions,
   RemoteClient,
+  type RemoteSession,
   type TlsOptions,
   webSocketChannelFactory,
 } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
+import { MAX_SESSION_LIST } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
-import { startTui } from "@tentacle/tui";
+import { type SessionPick, oneLine, startTui } from "@tentacle/tui";
+import {
+  type ConnectResumeRequest,
+  type ListOutcome,
+  needsList,
+  openError,
+  planConnectResume,
+  planPicked,
+  shortId,
+} from "./connect-resume.ts";
 import { createHooksTrustResolver } from "./hooks-trust.ts";
 import { CLIENT_INFO } from "./version.ts";
 
@@ -26,6 +37,8 @@ export interface ConnectOptions {
   readonly token?: string;
   /** Trust a daemon whose cert is not in the system store (see `TlsOptions`). */
   readonly tls?: TlsOptions;
+  /** `--resume [id]` / `--continue`: attach a daemon session instead of a new one. */
+  readonly resume?: Omit<ConnectResumeRequest, "tty">;
 }
 
 /**
@@ -78,6 +91,8 @@ export interface ConnectDeps {
   /** A channel factory for the daemon at `url` (rejects with a `ChannelError`). */
   readonly dial: (url: string, options: ClientConnectOptions) => () => Promise<DuplexChannel>;
   readonly startTui: typeof startTui;
+  /** The pre-mount `--resume` picker (a terminal only); absent → the newest resumes. */
+  readonly pick?: SessionPick;
 }
 
 export async function connectTui(
@@ -118,23 +133,131 @@ export async function connectTui(
     hooksTrust: createHooksTrustResolver({ broker: permissions, interactive: true }),
     clientInfo: CLIENT_INFO,
   });
+  // Every controller handed to the TUI, by id: what the exit line reports on.
+  const handed = new Map<string, RemoteSession>();
+  const track = (session: RemoteSession): RemoteSession => {
+    const id = session.sessionId;
+    if (id !== null) handed.set(id, session);
+    return session;
+  };
   try {
     await client.initialize();
+    // Before Ink mounts (AGENTS §7): the list, the picker, the eager attach.
+    const first = await resumeFirst(client, options, deps, write);
+    if (first === "cancelled") {
+      return;
+    }
+    let pending = first;
     await deps.startTui(null, {
       model: "remote",
       cwd: options.url,
       permissions,
-      createSession: () => client.newSession(undefined, crypto.randomUUID()),
+      // The resumed session first (already attached), then fresh lazy ones (a `/clear`).
+      createSession: () => {
+        const session = pending ?? client.newSession(undefined, crypto.randomUUID());
+        pending = null;
+        return track(session);
+      },
       link: client,
       skills: () => client.skills(),
       mcpStatus: () => client.mcpStatus(),
       skillsList: () => client.skillsList(),
+      detachOnQuit: true,
+      sessions: {
+        list: () =>
+          client.sessionList({ limit: MAX_SESSION_LIST }).then((result) => ({
+            sessions: result.sessions.map((s) => ({
+              id: s.sessionId,
+              title: s.title,
+              updatedAt: s.updatedAt,
+              running: s.running,
+              attached: s.attached,
+              archived: s.archived,
+            })),
+            more: result.cursor !== undefined,
+          })),
+        open: (id, reopen) =>
+          track(client.newSession(undefined, id, undefined, { attach: reopen ? { reopen } : {} })),
+        remove: (id) => client.deleteSession(id),
+      },
     });
   } finally {
-    // The daemon keeps sessions past a disconnect: quitting ends ours (turn +
-    // background jobs), acknowledged before the socket closes.
-    await client.closeSessions();
+    // Quitting DETACHES (docs/feat/connect-sessions.md): the socket closes
+    // with no `session/close`, so the session, a running turn (another
+    // device's too) and its jobs go on daemon-side. Only what the user ended
+    // (`/clear`, `/close`, a delete) is closed — awaited here, bounded, so a
+    // close issued right before quitting still reaches the daemon.
+    await client.drain();
+    const left = client.liveSessionIds().map((id) => ({
+      id,
+      staying: handed.get(id)?.stayingRows() ?? 0,
+    }));
     client.close();
     sink.flush(write);
+    // After Ink unmounted (AGENTS §7): what was left running, and how to come back.
+    for (const { id, staying } of left) {
+      write(
+        `[connect] left session ${shortId(id)} on the daemon — resume: tentacle connect ${oneLine(options.url)} --resume ${oneLine(id)}\n`,
+      );
+      if (staying > 0) {
+        write(
+          `[connect] ${staying} queued ${staying === 1 ? "message stays" : "messages stay"} on the daemon in session ${shortId(id)}\n`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * The session the first view shows (`--resume` / `--continue`), resolved and
+ * attached BEFORE Ink mounts: null → a fresh lazy session (no flag, or an
+ * empty daemon); "cancelled" → the picker was dismissed (don't start). A gone
+ * id fails here as a plain error — nothing is created (an attach never creates).
+ */
+async function resumeFirst(
+  client: RemoteClient,
+  options: ConnectOptions,
+  deps: ConnectDeps,
+  write: (line: string) => void,
+): Promise<RemoteSession | null | "cancelled"> {
+  if (!options.resume) {
+    return null;
+  }
+  const request: ConnectResumeRequest = { ...options.resume, tty: deps.pick !== undefined };
+  const list: ListOutcome | undefined = needsList(request)
+    ? await client.sessionList({ limit: MAX_SESSION_LIST }).then(
+        (result) => ({ ok: true, result }) as const,
+        (error: unknown) => ({ ok: false, error }) as const,
+      )
+    : undefined;
+  let plan = planConnectResume(request, list);
+  if (plan.kind === "pick") {
+    const id = deps.pick && list?.ok ? await deps.pick(plan.choices) : null;
+    if (id === null || !list?.ok) {
+      write("[resume] cancelled\n");
+      return "cancelled";
+    }
+    plan = planPicked(list.result, id);
+  }
+  switch (plan.kind) {
+    case "error":
+      throw new Error(plan.message);
+    case "pick":
+      throw new Error("internal: the picker answered with another picker");
+    case "new":
+      if (plan.line) write(`${plan.line}\n`);
+      return null;
+    case "open": {
+      const session = client.newSession(undefined, plan.id, undefined, {
+        attach: plan.reopen ? { reopen: true } : {},
+      });
+      try {
+        await session.open();
+      } catch (error) {
+        throw new Error(openError(plan.id, error));
+      }
+      if (plan.line) write(`${plan.line}\n`);
+      return session;
+    }
   }
 }

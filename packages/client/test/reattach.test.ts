@@ -17,7 +17,12 @@ import {
   parseDaemonRecord,
 } from "@tentacle/daemon";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
-import { DomainErrorCode, type DuplexChannel, createChannelPair } from "@tentacle/transport";
+import {
+  DomainErrorCode,
+  type DuplexChannel,
+  RpcError,
+  createChannelPair,
+} from "@tentacle/transport";
 import type { ReturnedRow } from "../src/hand-back.ts";
 import { ChannelError, LIVENESS_MS, type LinkStatus } from "../src/link-machine.ts";
 import type { SessionEvent } from "../src/mapping.ts";
@@ -1660,6 +1665,75 @@ describe("session archive across devices (docs/feat/session-archive.md)", () => 
     });
     expect(deleted).toEqual(["S", "S"]);
     expect(target.host.get("S")).toBeUndefined();
+    a.close();
+    b.close();
+  });
+});
+
+describe("a session refused on reconnect becomes `closed` (docs/feat/connect-sessions.md)", () => {
+  /** A attached to S (B made it); A's link drops and stays down while `meanwhile` runs. */
+  async function offlineWhile(meanwhile: (b: RemoteClient, target: Target) => Promise<void>) {
+    const store = new MemStore();
+    const target = new Target(makeHost(new GatedModel([]), { n: 0 }, persisterFor(store)));
+    const b = new RemoteClient(target.connect(), new PermissionBroker());
+    await b.initialize();
+    await b.openSession(undefined, undefined, "S");
+    const dial = dialer(target);
+    const aLink = target.connect();
+    const a = new RemoteClient(aLink, new PermissionBroker(), undefined, {
+      channelFactory: dial.factory,
+      random: () => 0,
+      onError: () => {},
+    });
+    await a.initialize();
+    const s = a.newSession(undefined, "S", undefined, { attach: {} });
+    const activities: string[] = [];
+    s.watch((act) => activities.push(act.kind === "closed" ? `closed:${act.reason}` : act.kind));
+    await s.open();
+    expect(a.liveSessionIds()).toEqual(["S"]);
+    dial.hold();
+    aLink.close();
+    await tick();
+    await meanwhile(b, target);
+    dial.release();
+    return { a, b, s, activities };
+  }
+
+  test("ended elsewhere (archived) → a `closed{closed}` activity; the id is no longer followed", async () => {
+    const { a, b, s, activities } = await offlineWhile((b) => b.closeSession("S"));
+    expect(await until(() => activities.includes("closed:closed"))).toBe(true);
+    expect(a.liveSessionIds()).toEqual([]);
+    // The next send is the clear refusal, not "could not resume the session".
+    const err = await drain(s.send("hi")).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ message: "this session was closed on another device" });
+    a.close();
+    b.close();
+  });
+
+  test("deleted elsewhere → a `closed{deleted}` activity", async () => {
+    const { a, b, activities } = await offlineWhile((b) => b.deleteSession("S"));
+    expect(await until(() => activities.includes("closed:deleted"))).toBe(true);
+    a.close();
+    b.close();
+  });
+
+  test("decided by the error CODE: the same refusal with another text is still `closed`", async () => {
+    // Mutation: map by message text (/archived/) instead of the code → red.
+    const { a, b, activities } = await offlineWhile(async (b, target) => {
+      await b.closeSession("S");
+      const open = target.host.open.bind(target.host);
+      target.host.open = (params, attachment, prepared) => {
+        try {
+          return open(params, attachment, prepared);
+        } catch (error) {
+          throw error instanceof RpcError ? new RpcError(error.code, "gone") : error;
+        }
+      };
+    });
+    expect(await until(() => activities.includes("closed:closed"))).toBe(true);
     a.close();
     b.close();
   });

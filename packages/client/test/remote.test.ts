@@ -893,6 +893,7 @@ describe("unknown / malformed session/update frames (event classes)", () => {
   function fakeDaemon(frames: readonly unknown[], end: boolean) {
     const [daemonCh, clientCh] = createChannelPair();
     const cancels: unknown[] = [];
+    const turns: string[] = [];
     const daemon: RpcPeer = new RpcPeer(daemonCh, {
       onRequest: async (method, params) => {
         if (method === Method.Initialize) {
@@ -910,6 +911,7 @@ describe("unknown / malformed session/update frames (event classes)", () => {
           // daemon, every turn update lies inside its turn_start/turn_end
           // (the client routes by it: docs/feat/tui-foreign-turns.md).
           const { turnId } = params as { turnId: string };
+          turns.push(turnId);
           daemon.notify(Notification.SessionUpdate, {
             sessionId: "s1",
             seq: 1,
@@ -937,11 +939,11 @@ describe("unknown / malformed session/update frames (event classes)", () => {
         if (method === Notification.Cancel) cancels.push(params);
       },
     });
-    return { clientCh, cancels };
+    return { clientCh, cancels, turns };
   }
 
   async function run(frames: readonly unknown[], end: boolean) {
-    const { clientCh, cancels } = fakeDaemon(frames, end);
+    const { clientCh, cancels, turns } = fakeDaemon(frames, end);
     const errors: Error[] = [];
     const client = new RemoteClient(clientCh, new PermissionBroker(), undefined, {
       onError: (e) => errors.push(e),
@@ -957,7 +959,7 @@ describe("unknown / malformed session/update frames (event classes)", () => {
     ]);
     await new Promise((r) => setTimeout(r, 10));
     client.close();
-    return { outcome, events, errors, cancels };
+    return { outcome, events, errors, cancels, turns };
   }
 
   const chunk = (seq: number, text: string) => ({
@@ -1073,7 +1075,8 @@ describe("unknown / malformed session/update frames (event classes)", () => {
     expect(r.outcome).toBeInstanceOf(Error);
     expect(String((r.outcome as Error).message)).toMatch(/newer than this client/);
     expect(r.errors.map((e) => e.message)).toEqual([(r.outcome as Error).message]);
-    expect(r.cancels).toEqual([{ sessionId: "s1" }]);
+    // The cancel names MY turn (F1, docs/feat/connect-sessions.md): never blind.
+    expect(r.cancels).toEqual([{ sessionId: "s1", turnId: r.turns[0] }]);
   });
 
   test("a malformed background_exit mid-turn fails that turn too (loud, documented)", async () => {
@@ -1083,7 +1086,7 @@ describe("unknown / malformed session/update frames (event classes)", () => {
     );
     expect(r.outcome).toBeInstanceOf(Error);
     expect(String((r.outcome as Error).message)).toMatch(/malformed background_exit/);
-    expect(r.cancels).toEqual([{ sessionId: "s1" }]);
+    expect(r.cancels).toEqual([{ sessionId: "s1", turnId: r.turns[0] }]);
   });
 
   test("with no turn in flight a stream error reaches onError only (never silent, nothing cancelled)", async () => {
@@ -1124,7 +1127,7 @@ describe("unknown / malformed session/update frames (event classes)", () => {
     );
     expect(r.outcome).toBeInstanceOf(Error);
     expect(String((r.outcome as Error).message)).toMatch(/malformed agent_message_chunk/);
-    expect(r.cancels).toEqual([{ sessionId: "s1" }]);
+    expect(r.cancels).toEqual([{ sessionId: "s1", turnId: r.turns[0] }]);
   });
 });
 
@@ -1295,8 +1298,12 @@ describe("RemoteSession ends turns from the stream (turn_start/turn_end)", () =>
   });
 
   test("an envelope-invalid turn_end (no seq) fails the turn loudly and cancels it daemon-side", async () => {
+    let own = "";
     const { daemon, clientCh, cancels } = scriptedDaemon(
-      (turnId) => ({ turnId }),
+      (turnId) => {
+        own = turnId;
+        return { turnId };
+      },
       (turnId) =>
         daemon.notify(Notification.SessionUpdate, {
           sessionId: "s1",
@@ -1311,7 +1318,7 @@ describe("RemoteSession ends turns from the stream (turn_start/turn_end)", () =>
       "invalid params for notification session/update",
     ]);
     await new Promise((res) => setTimeout(res, 5));
-    expect(cancels).toEqual([{ sessionId: "s1" }]);
+    expect(cancels).toEqual([{ sessionId: "s1", turnId: own }]);
     r.client.close();
   });
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { McpServerView } from "../src/mcp-panel.ts";
 import {
-  type OpenPanel,
+  type TreePanel as OpenPanel,
   applyPanel as apply,
   panelClick as click,
   mcpPanel,

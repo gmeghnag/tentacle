@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@tentacle/agent";
-import { ChannelError } from "@tentacle/client";
+import { ChannelError, RemoteClient } from "@tentacle/client";
 import { PermissionBroker } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
@@ -186,17 +186,32 @@ describe("connect: buffered peer-error sink (never a raw write while Ink owns th
   });
 });
 
-describe("connect: quitting ends the sessions it opened (they outlive the socket)", () => {
-  test("every session this TUI opened is closed daemon-side before the channel closes", async () => {
-    // Mutation: drop `await client.closeSessions()` in connectTui → the session stays live.
+// docs/feat/connect-sessions.md: quitting `connect` DETACHES (the socket closes,
+// no `session/close`); `--resume` / `--continue` attach a daemon session; the
+// exit line says what was left running. Each test names its mutation.
+describe("connect: quit detaches, resume attaches", () => {
+  /** A host whose model waits on `open()` after its first chunk ("x", then "y"). */
+  function gatedHost() {
+    let gates: (() => void)[] = [];
+    let waiting = 0;
     const host = new SessionHost({
       defaultCwd: "/tmp",
       createAgent: () => ({
         agent: new Agent({
           model: {
             id: "m",
-            async *stream() {
-              yield { type: "text", delta: "hi" };
+            async *stream(request) {
+              yield { type: "text", delta: "x" };
+              const last = request.messages.at(-1);
+              if (last?.role === "user" && String(last.content).startsWith("gate")) {
+                waiting += 1;
+                await new Promise<void>((r) => {
+                  gates.push(r);
+                  request.signal?.addEventListener("abort", () => r(), { once: true });
+                });
+                waiting -= 1;
+              }
+              yield { type: "text", delta: "y" };
               yield { type: "done" };
             },
           },
@@ -211,21 +226,246 @@ describe("connect: quitting ends the sessions it opened (they outlive the socket
         permissions: new PermissionBroker(),
       }),
     });
+    const open = (): void => {
+      const now = gates;
+      gates = [];
+      for (const r of now) r();
+    };
+    return { host, open, waiting: () => waiting };
+  }
+  const until = async (cond: () => boolean): Promise<void> => {
+    for (let i = 0; i < 300 && !cond(); i++) await new Promise((r) => setTimeout(r, 5));
+    if (!cond()) throw new Error(`timed out: ${String(cond)}`);
+  };
+  /** Drain a turn; resolves its event types (+ "turn_end:<reason>"), or "throw:<message>". */
+  const drain = async (
+    events:
+      | AsyncIterable<{ type: string; reason?: string }>
+      | Iterable<{ type: string; reason?: string }>,
+  ) => {
+    const seen: string[] = [];
+    try {
+      for await (const e of events)
+        seen.push(e.type === "turn_end" ? `turn_end:${e.reason}` : e.type);
+    } catch (e) {
+      seen.push(`throw:${(e as Error).message}`);
+    }
+    return seen;
+  };
+  /** Another device on the same daemon. */
+  async function device(host: SessionHost) {
+    const [d, c] = createChannelPair();
+    new Connection(d, host);
+    const client = new RemoteClient(c, new PermissionBroker());
+    await client.initialize();
+    return client;
+  }
+  /** A channel whose frames leave 10 ms after they are written (a real socket's latency). */
+  function slowLink(host: SessionHost) {
+    const [d, c] = createChannelPair();
+    new Connection(d, host);
+    return {
+      send: (data: string) => {
+        setTimeout(() => c.send(data), 10);
+      },
+      close: () => c.close(),
+      setOnMessage: (h: (data: string) => void) => c.setOnMessage(h),
+      setOnClose: (h: () => void) => c.setOnClose(h),
+    };
+  }
+
+  test("RED: quitting mid-turn detaches — the session stays live, its turn running, re-attachable", async () => {
+    // Mutation: put `closeSessions()` back on the exit path → host.size 0.
+    const g = gatedHost();
     const [daemonCh, clientCh] = createChannelPair();
-    new Connection(daemonCh, host);
-    let liveDuringTui = 0;
+    const conn = new Connection(daemonCh, g.host);
+    let turn: Promise<string[]> = Promise.resolve([]);
     await connectTui({ url: "ws://fake" }, () => {}, {
       dial: () => async () => clientCh,
       startTui: async (_agent, options) => {
-        const session = options.createSession?.();
-        for await (const _ of session?.send("hi") ?? []) {
-          // drain the turn
-        }
-        liveDuringTui = host.size;
+        turn = drain(options.createSession?.().send("gate") ?? []);
+        await until(() => g.waiting() === 1);
+        // `/exit` mid-turn: the TUI returns at once (quitAction "exit").
       },
     });
-    expect(liveDuringTui).toBe(1);
-    expect(host.size).toBe(0);
+    conn.close(); // what `ws-server` does when the socket closes
+    await turn; // failed locally by the closed link — nothing rendered any more
+    expect(g.host.size).toBe(1);
+    expect(g.host.list({}).sessions[0]).toMatchObject({ running: true, attached: 0 });
+    const id = g.host.list({}).sessions[0]?.sessionId ?? "";
+    const other = await device(g.host);
+    const kinds: string[] = [];
+    const s = other.newSession(undefined, id, undefined, { attach: {} });
+    s.watch((a) => kinds.push(a.kind));
+    await s.open();
+    // The history at the cut, then the running turn replayed as another device's (repro (2)).
+    expect(kinds).toEqual(["history", "turn"]);
+    g.open();
+    await until(() => g.host.list({}).sessions[0]?.running === false);
+    other.close();
+  });
+
+  test("RED (QR4): a phone's turn in the connect session survives the quit — it ends end_turn", async () => {
+    const g = gatedHost();
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, g.host);
+    let phoneTurn: Promise<string[]> = Promise.resolve([]);
+    let phone: RemoteClient | null = null;
+    await connectTui({ url: "ws://fake" }, () => {}, {
+      dial: () => async () => clientCh,
+      startTui: async (_agent, options) => {
+        expect(await drain(options.createSession?.().send("first") ?? [])).toContain(
+          "turn_end:end_turn",
+        );
+        const id = g.host.list({}).sessions[0]?.sessionId ?? "";
+        phone = await device(g.host);
+        const ps = phone.newSession(undefined, id, undefined, { attach: {} });
+        await ps.open();
+        phoneTurn = drain(ps.send("gate phone"));
+        await until(() => g.waiting() === 1);
+      },
+    });
+    g.open();
+    expect((await phoneTurn).at(-1)).toBe("turn_end:end_turn");
+    (phone as RemoteClient | null)?.close();
+  });
+
+  test("/close (or /clear) right before quitting still reaches the daemon (drain)", async () => {
+    // Mutation: drop `await client.drain()` → over a slow link the close is lost; the session stays.
+    const g = gatedHost();
+    await connectTui({ url: "ws://fake" }, () => {}, {
+      dial: () => async () => slowLink(g.host),
+      startTui: async (_agent, options) => {
+        const s = options.createSession?.();
+        await drain(s?.send("hi") ?? []);
+        s?.close?.(); // `/close`: fire-and-forget, then exit
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(g.host.size).toBe(0);
+  });
+
+  test("RED: --resume <id> attaches that session (its history reaches the first controller); never a create", async () => {
+    // Mutation: build the first session without `attach` → the unknown-id test creates one.
+    const g = gatedHost();
+    const other = await device(g.host);
+    const id = crypto.randomUUID();
+    await drain(other.newSession(undefined, id).send("earlier"));
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, g.host);
+    const kinds: string[] = [];
+    await connectTui({ url: "ws://fake", resume: { id, resume: false, latest: false } }, () => {}, {
+      dial: () => async () => clientCh,
+      startTui: async (_agent, options) => {
+        const first = options.createSession?.();
+        first?.watch?.((a) => kinds.push(a.kind));
+        expect(first?.sessionId).toBe(id);
+        // A later one (a /clear) is a fresh lazy session.
+        expect(options.createSession?.().sessionId).not.toBe(id);
+        expect(options.detachOnQuit).toBe(true);
+      },
+    });
+    expect(kinds).toEqual(["history"]);
+    expect(g.host.size).toBe(1);
+    other.close();
+  });
+
+  test("RED: --resume of an unknown id fails before the TUI mounts and creates nothing", async () => {
+    const g = gatedHost();
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, g.host);
+    let mounted = false;
+    const id = "0123456789abcdef";
+    await expect(
+      connectTui({ url: "ws://fake", resume: { id, resume: false, latest: false } }, () => {}, {
+        dial: () => async () => clientCh,
+        startTui: async () => {
+          mounted = true;
+        },
+      }),
+    ).rejects.toThrow("no session 01234567 on this daemon (ended, deleted, or never created)");
+    expect(mounted).toBe(false);
+    expect(g.host.size).toBe(0);
+  });
+
+  test("RED: --continue attaches the daemon's newest; on an empty daemon a new session, said before mount", async () => {
+    const g = gatedHost();
+    const lines: string[] = [];
+    let linesAtMount = -1;
+    const [d1, c1] = createChannelPair();
+    new Connection(d1, g.host);
+    await connectTui(
+      { url: "ws://fake", resume: { resume: false, latest: true } },
+      (l) => lines.push(l),
+      {
+        dial: () => async () => c1,
+        startTui: async () => {
+          linesAtMount = lines.length;
+        },
+      },
+    );
+    expect(lines[0]).toBe("[resume] no session on this daemon; starting a new one\n");
+    expect(linesAtMount).toBe(1);
+    const other = await device(g.host);
+    const older = crypto.randomUUID();
+    const newer = crypto.randomUUID();
+    await drain(other.newSession(undefined, older).send("a"));
+    await new Promise((r) => setTimeout(r, 5));
+    await drain(other.newSession(undefined, newer).send("b"));
+    const [d2, c2] = createChannelPair();
+    new Connection(d2, g.host);
+    let first: string | null | undefined;
+    await connectTui({ url: "ws://fake", resume: { resume: false, latest: true } }, () => {}, {
+      dial: () => async () => c2,
+      startTui: async (_agent, options) => {
+        first = options.createSession?.().sessionId;
+      },
+    });
+    expect(first).toBe(newer);
+    other.close();
+  });
+
+  test("RED: the exit line names each session left running, once, after the TUI exited; none for one never used", async () => {
+    // Mutation: write the line before `startTui` returns → it lands while Ink owns the terminal.
+    const g = gatedHost();
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, g.host);
+    const written: string[] = [];
+    let writtenDuringTui = -1;
+    let id = "";
+    await connectTui({ url: "ws://h:1" }, (l) => written.push(l), {
+      dial: () => async () => clientCh,
+      startTui: async (_agent, options) => {
+        const used = options.createSession?.();
+        await drain(used?.send("hi") ?? []);
+        id = used?.sessionId ?? "";
+        options.createSession?.(); // a fresh one, never sent to: nothing daemon-side
+        writtenDuringTui = written.length;
+      },
+    });
+    expect(writtenDuringTui).toBe(0);
+    expect(written).toEqual([
+      `[connect] left session ${id.slice(0, 8)} on the daemon — resume: tentacle connect ws://h:1 --resume ${id}\n`,
+    ]);
+  });
+
+  test("QN2: my rows still queued at the quit are said to stay on the daemon", async () => {
+    const g = gatedHost();
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, g.host);
+    const written: string[] = [];
+    await connectTui({ url: "ws://h:1" }, (l) => written.push(l), {
+      dial: () => async () => clientCh,
+      startTui: async (_agent, options) => {
+        const s = options.createSession?.();
+        void drain(s?.send("gate") ?? []);
+        await until(() => g.waiting() === 1);
+        await s?.enqueue?.("later", "row-1");
+        await until(() => (s as { stayingRows?: () => number } | undefined)?.stayingRows?.() === 1);
+      },
+    });
+    expect(written.some((l) => l.includes("1 queued message stays on the daemon"))).toBe(true);
+    g.open();
   });
 });
 

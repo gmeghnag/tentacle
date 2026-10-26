@@ -182,9 +182,11 @@ assume.
   session that ends (`session/close`, the idle TTL, the detached cap) is kept
   ARCHIVED (record stamped `archivedAt`, indexed by metadata only, reloaded
   only by an explicit `session/open{reopen}` — a reconnect never revives it)
-  until `session/delete`; nothing is ever purged automatically. Design:
+  until `session/delete`; nothing is ever purged automatically. `connect`
+  keeps no laptop copy — the `serve` daemon's record is the truth; `--resume`
+  and `/sessions` read `session/list`, and quitting only detaches. Design:
   `docs/feat/daemon-side-persistence.md`, `docs/feat/suspended-turn-resume.md`,
-  `docs/feat/session-archive.md`.
+  `docs/feat/session-archive.md`, `docs/feat/connect-sessions.md`.
 - **Model stays on the laptop (pod reverse-tunnel).** A pod reaches the model
   THROUGH us (`model/stream` over RPC, `ProxyModelProvider`): the daemon is given
   the LOCAL provider so the endpoint + API key never leave the laptop. Never put

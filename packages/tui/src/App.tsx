@@ -43,6 +43,7 @@ import {
   mcpPanel,
   panelClick,
   panelView,
+  sessionsPanel,
   skillsPanel,
 } from "./panel.ts";
 import { sanitizePasted, stepPaste } from "./paste.ts";
@@ -85,6 +86,21 @@ import {
   planTurnStart,
   withRestored,
 } from "./send-now.ts";
+import {
+  type SessionsView,
+  deleteFailedNotice,
+  openFailedNotice,
+  refreshedSessions,
+  sessionsAt,
+  sessionsChoose,
+  sessionsDelete,
+  sessionsKey,
+  sessionsListError,
+  sessionsRefreshApplies,
+  stayingNotice,
+  switchRefusedNotice,
+  switchingRefusal,
+} from "./sessions-panel.ts";
 import type { SkillsListView } from "./skills-panel.ts";
 import {
   type DisplayItem,
@@ -188,6 +204,27 @@ export interface SessionController {
   ownsTurn?(turnId: string): boolean;
   /** Subscribe to the daemon's queue (every writer's waiting rows); returns an unsubscribe. */
   onQueued?(listener: (state: DaemonQueue) => void): () => void;
+  /**
+   * Stop following the session WITHOUT ending it — it runs on for any device
+   * (`/sessions` switches away with it). Rejects when the daemon cannot (an
+   * older one): nothing changed. Optional: absent where nobody else can reach it.
+   */
+  detach?(): Promise<void>;
+  /** The session's id, an opaque key (the `/sessions` row it is, never parsed). */
+  readonly sessionId?: string | null;
+  /** How many of my queued rows stay on the daemon if this view leaves the session now. */
+  stayingRows?(): number;
+}
+
+/**
+ * The daemon's sessions, for `/sessions` (`connect` only,
+ * docs/feat/connect-sessions.md): one list page, a NEW attach-only controller
+ * for a chosen id (the App watches, then opens it), and delete.
+ */
+export interface SessionDirectory {
+  list(): Promise<SessionsView>;
+  open(id: string, reopen: boolean): SessionController;
+  remove(id: string): Promise<void>;
 }
 
 /**
@@ -242,6 +279,14 @@ export interface AppProps {
    * runtime the laptop started, never guessed (docs/feat/tui-spill-note.md).
    */
   readonly daemonInPod?: boolean;
+  /**
+   * Quitting only detaches (`connect`): the daemon keeps the session and any
+   * running turn, so `/exit` leaves at once even mid-turn. Default false (the
+   * worker and pods stop the turn first: their daemon dies with them).
+   */
+  readonly detachOnQuit?: boolean;
+  /** The daemon's sessions (`/sessions`). Absent → "isn't available on this runtime". */
+  readonly sessions?: SessionDirectory;
 }
 
 // Rows reserved below the transcript viewport: a blank spacer, the input/thinking
@@ -312,6 +357,8 @@ export function App({
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
   initialItems,
   daemonInPod = false,
+  detachOnQuit = false,
+  sessions,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -591,7 +638,9 @@ export function App({
   // +2 for its top/bottom borders.
   const inputContentLines = inputRowCount(field.value, field.cursor, columns, MAX_INPUT_ROWS);
   const inputBoxRows = inputContentLines + 2;
-  const listView = panel ? panelView(panel, columns, panelMaxBody(termRows)) : null;
+  const listView = panel
+    ? panelView(panel, columns, panelMaxBody(termRows), sessionRef.current?.sessionId ?? null)
+    : null;
   // Rows above the input/panel while a turn runs: the thinking line + the
   // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now
   // hint row under them + one blank row between the hint and the thinking line.
@@ -786,6 +835,18 @@ export function App({
   // The session-activity handler, through a ref: `streamTurn`'s settle drains
   // the held ones, and the handler starts streams (C2).
   const onActivityRef = useRef<((activity: SessionActivity) => void) | null>(null);
+  // `swapSession`, through a ref: the activity handler (closed elsewhere) is defined before it.
+  const swapRef = useRef<
+    | ((
+        next: SessionController,
+        opts?: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void },
+      ) => void)
+    | null
+  >(null);
+  // A `/sessions` switch is in flight (its detach, then the target's open):
+  // `switchingRefusal` / `sessionsChoose` refuse what would act on the old
+  // session until it settles (Review R1). Cleared on every outcome.
+  const switchingRef = useRef(false);
 
   /** Activities held while a run of mine streamed: handled in order once nothing is in flight. */
   const drainHeld = useCallback(() => {
@@ -1061,7 +1122,11 @@ export function App({
         return;
       }
       if (activity.kind === "closed") {
-        pushNotice(closedNotice(activity.reason));
+        // Ended on another device (live, or refused on reconnect): say so, and
+        // hand the next prompt to a fresh session — the transcript stays as
+        // scrollback (docs/feat/connect-sessions.md).
+        pushNotice(closedNotice(activity.reason, sessions !== undefined));
+        swapRef.current?.(makeSession(), { keepTranscript: true });
         return;
       }
       if (activity.kind === "history") {
@@ -1091,7 +1156,7 @@ export function App({
       flushNow();
       void streamTurn(() => activity.events, controller, { foreign: true });
     },
-    [commitHistory, drainHeld, flushNow, pushNotice, streamTurn],
+    [commitHistory, drainHeld, flushNow, makeSession, pushNotice, sessions, streamTurn],
   );
   onActivityRef.current = onActivity;
 
@@ -1102,20 +1167,27 @@ export function App({
    * what was held for it is dropped.
    */
   const watchSession = useCallback(
-    (session: SessionController | null) => {
+    (session: SessionController | null, onOpened?: (ok: boolean) => void) => {
       activitySubRef.current?.();
       queueSubRef.current?.();
       heldRef.current = [];
       setDaemonQueue(undefined);
       activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
       queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
-      session?.open?.().catch((error: unknown) => {
-        if (sessionRef.current === session) {
-          pushNotice(
-            `_could not open the session: ${error instanceof Error ? error.message : String(error)}_`,
-          );
-        }
-      });
+      const opening = session?.open?.();
+      if (!opening) {
+        onOpened?.(true); // nothing to open (a local session)
+        return;
+      }
+      opening.then(
+        () => onOpened?.(true),
+        (error: unknown) => {
+          if (sessionRef.current === session) {
+            pushNotice(openFailedNotice(error));
+          }
+          onOpened?.(false);
+        },
+      );
     },
     [pushNotice],
   );
@@ -1128,6 +1200,51 @@ export function App({
       queueSubRef.current = null;
     };
   }, [watchSession]);
+
+  /**
+   * The ONE way the view moves to another session (`/clear`, a `/sessions`
+   * switch, a session closed elsewhere; docs/feat/connect-sessions.md): follow
+   * `next` (returned rows, activities, then its eager open), drop the old
+   * session's per-session latches, put rows queued during a compaction back in
+   * the input. The transcript is reset unless `keepTranscript` (closed
+   * elsewhere: it stays as scrollback). What happens to the OLD session (close,
+   * detach, nothing) is the caller's.
+   */
+  const swapSession = useCallback(
+    (
+      next: SessionController,
+      opts: { readonly keepTranscript?: boolean; readonly onOpened?: (ok: boolean) => void } = {},
+    ): void => {
+      sessionRef.current = next;
+      // An open `/sessions` panel marks the live session as current (Review R2-1).
+      // An open `/sessions` panel re-renders: its "current" row is read live (Review R3-1).
+      setPanel((p) => (p?.kind === "sessions" ? { ...p } : p));
+      watchReturned(next);
+      watchSession(next, opts.onOpened);
+      ownCompactionsRef.current = 0;
+      // The send-now latches are per session: the new one asks (and says) afresh.
+      sendNowUnsupportedRef.current = false;
+      fallbackNoticedRef.current = false;
+      // A wake deferred during the old session's compaction is that
+      // session's: it must not fire in the new one.
+      wakePendingRef.current = false;
+      if (opts.keepTranscript !== true) {
+        stateRef.current = initialState;
+        setExpandAll(false);
+      }
+      setScrollOffset(0);
+      // Rows queued during the old session's compaction never reach the
+      // new one: back to the input field, visibly (never sent by itself).
+      setCompacting(false);
+      if (rowsRef.current.length > 0) {
+        restoreInput(takeAll(rowsRef.current).text, "_your queued messages are back in the input_");
+        setRows(() => []);
+      }
+      flushNow();
+    },
+    [flushNow, restoreInput, setCompacting, setRows, watchReturned, watchSession],
+  );
+  swapRef.current = swapSession;
 
   /** The fallback's notice, once per App (it does not repeat on later chords). */
   const noticeFallback = useCallback(
@@ -1306,10 +1423,22 @@ export function App({
           );
           return;
         }
+        const refusedSkill = switchingRefusal(switchingRef.current, { kind: "prompt" });
+        if (refusedSkill) {
+          restoreInput(raw, refusedSkill);
+          return;
+        }
         void run(resolved.text, { skill: resolved.name });
         return;
       }
       const cmd = raw.split(/\s+/)[0];
+      const refused = cmd
+        ? switchingRefusal(switchingRef.current, { kind: "command", name: cmd })
+        : null;
+      if (refused) {
+        pushNotice(refused);
+        return;
+      }
       // Guard turn-starting / session-swapping commands while a turn runs: they
       // would corrupt the session (concurrent send) or cancel-handle state.
       if (cmd && isSessionMutating(cmd) && stateRef.current.running) {
@@ -1320,14 +1449,15 @@ export function App({
         case "/exit":
         case "/quit":
           // Another device's turn is not mine to stop on the way out: exit at
-          // once, it goes on daemon-side (C4; `connect` still closes the
-          // session on exit until task 7).
+          // once, it goes on daemon-side (C4). On `connect` (`detachOnQuit`)
+          // quitting only detaches, so even my own turn runs on daemon-side.
           if (
             quitAction(
               "command",
               stateRef.current.running,
               exitPendingRef.current,
               foreignRef.current !== null,
+              detachOnQuit,
             ) === "exit"
           ) {
             exit();
@@ -1343,34 +1473,31 @@ export function App({
           pushNotice(helpText(skills()));
           return;
         case "/clear":
-          // The old session ends (with its jobs) on every runtime, before the
-          // fresh one starts (decision D3).
+          // The old session ends (with its jobs) on every runtime — `connect`
+          // too, for every device (owner QN1) — before the fresh one starts
+          // (decision D3).
           sessionRef.current?.close?.();
-          sessionRef.current = makeSession();
-          watchReturned(sessionRef.current);
-          watchSession(sessionRef.current);
-          ownCompactionsRef.current = 0;
-          // The send-now latches are per session: the new one asks (and says) afresh.
-          sendNowUnsupportedRef.current = false;
-          fallbackNoticedRef.current = false;
-          // A wake deferred during the old session's compaction is that
-          // session's: it must not fire in the new one.
-          wakePendingRef.current = false;
-          stateRef.current = initialState;
-          setExpandAll(false);
-          setScrollOffset(0);
-          // Rows queued during the old session's compaction never reach the
-          // new one: back to the input field, visibly (never sent by itself).
-          setCompacting(false);
-          if (rowsRef.current.length > 0) {
-            restoreInput(
-              takeAll(rowsRef.current).text,
-              "_your queued messages are back in the input_",
-            );
-            setRows(() => []);
-          }
-          flushNow();
+          swapSession(makeSession());
           return;
+        case "/close":
+          // End this session (every device sees it closed) and quit; the
+          // runtime's exit path delivers the close before the socket goes.
+          sessionRef.current?.close?.();
+          exit();
+          return;
+        case "/sessions": {
+          if (!sessions) {
+            pushNotice("_Sessions aren't available on this runtime._");
+            return;
+          }
+          // No "current" captured here: it is read live when rendered and used (R3-1).
+          openPanel(
+            sessionsPanel(Date.now()),
+            () => sessions.list().then((view) => sessionsPanel(Date.now(), view)),
+            sessionsListError,
+          );
+          return;
+        }
         case "/compact": {
           const session = sessionRef.current;
           if (!session?.compact) {
@@ -1521,14 +1648,14 @@ export function App({
     },
     [
       makeSession,
-      watchReturned,
-      watchSession,
+      swapSession,
       clipboard,
       openPanel,
       cwd,
+      detachOnQuit,
       exit,
-      flushNow,
       mcpStatus,
+      sessions,
       skillsList,
       model,
       pushNotice,
@@ -1540,6 +1667,60 @@ export function App({
       skills,
       wakeIfPending,
     ],
+  );
+
+  /**
+   * Switch the view to session `id` (a `/sessions` row; the panel already
+   * decided it may): stop following the current one — detach FIRST, then open
+   * (the other order would hold two attachments and route prompts twice) — and
+   * swap to a NEW attach-only controller. A detach the daemon refuses (an
+   * older one) changes nothing: the current session is followed again. A
+   * target that fails to open hands the view to a fresh session.
+   */
+  const switchTo = useCallback(
+    (id: string, reopen: boolean): void => {
+      const old = sessionRef.current;
+      if (!sessions || !old?.detach) {
+        pushNotice(switchRefusedNotice(id));
+        return;
+      }
+      const staying = stayingNotice(old.stayingRows?.() ?? 0);
+      // Latched until the switch settles, whatever the outcome (Review R1).
+      switchingRef.current = true;
+      // In the same step: the old session's activities stop reaching the view.
+      watchSession(null);
+      watchReturned(null);
+      old.detach().then(
+        () => {
+          let target: SessionController;
+          try {
+            target = sessions.open(id, reopen);
+          } catch (error) {
+            pushNotice(openFailedNotice(error));
+            swapSession(makeSession(), { keepTranscript: true });
+            switchingRef.current = false;
+            return;
+          }
+          swapSession(target, {
+            onOpened: (ok) => {
+              if (!ok && sessionRef.current === target) {
+                swapSession(makeSession(), { keepTranscript: true });
+              }
+              switchingRef.current = false;
+            },
+          });
+          // After the swap (it resets the transcript): said in the new view.
+          if (staying) pushNotice(staying);
+        },
+        () => {
+          watchReturned(old);
+          watchSession(old);
+          pushNotice(switchRefusedNotice(id));
+          switchingRef.current = false;
+        },
+      );
+    },
+    [makeSession, pushNotice, sessions, swapSession, watchReturned, watchSession],
   );
 
   const submit = useCallback(
@@ -1560,6 +1741,13 @@ export function App({
       historyRef.current = pushHistory(historyRef.current, text);
       histIndexRef.current = historyRef.current.length;
       draftRef.current = "";
+      // A switch in flight: the old session is detaching and the new one not
+      // yet followed — the text goes back to the input, never lost (Review R1).
+      const refusedPrompt = switchingRefusal(switchingRef.current, { kind: "prompt" });
+      if (refusedPrompt) {
+        restoreInput(text, refusedPrompt);
+        return;
+      }
       // Mid-turn: queue the task (steering) so it is handed to the agent before
       // its next round, instead of starting a new turn. Call through the session
       // (not a detached reference) so `this` is preserved.
@@ -1598,7 +1786,7 @@ export function App({
       }
       void run(text);
     },
-    [handleCommand, pushNotice, run, field.reset, setRows],
+    [handleCommand, pushNotice, restoreInput, run, field.reset, setRows],
   );
 
   // All line editing lives in `useLineEditor` (pure `editor.ts` ops), so no
@@ -1775,7 +1963,77 @@ export function App({
     // The list panel: its keys first (so Esc closes it rather than stopping
     // a running turn). Mouse reports fall through to the dispatch below; any
     // other key is swallowed there — no line editing behind the panel.
-    if (panel) {
+    const sessionsAction = panel?.kind === "sessions" ? sessionsKey(char, key) : "none";
+    if (panel?.kind === "sessions" && sessionsAction === "none" && panel.state.armed !== null) {
+      // Any other key disarms a pending delete (then falls through, like the tree panels).
+      setPanel((p) => (p?.kind === "sessions" ? { ...p, state: { ...p.state, armed: null } } : p));
+    }
+    if (panel?.kind === "sessions" && sessionsAction !== "none") {
+      // `/sessions`: every decision is `sessions-panel.ts`'s; this executes it.
+      const action = sessionsAction;
+      const entry = sessionsAt(panel.data, panel.state);
+      // The session being viewed, read NOW — the one source (Review R3-1).
+      const current = sessionRef.current?.sessionId ?? null;
+      if (action === "close") {
+        closePanel();
+      } else if (action === "up" || action === "down") {
+        setPanel((p) => (p ? applyPanel(p, action, columns) : p));
+      } else if (action === "choose" && entry) {
+        const busy = stateRef.current.running || compactingRef.current;
+        const choice = sessionsChoose(entry, current, busy, switchingRef.current);
+        if (choice.kind === "refused") {
+          pushNotice(choice.text);
+        } else {
+          closePanel();
+          if (choice.kind === "switch") {
+            switchTo(choice.id, choice.reopen);
+          }
+        }
+      } else if (action === "delete" && entry && sessions) {
+        const step = sessionsDelete(panel.state, entry, current);
+        setPanel((p) => (p?.kind === "sessions" ? { ...p, state: step.state } : p));
+        if (step.kind === "refused") {
+          pushNotice(step.text);
+        } else if (step.kind === "delete") {
+          // The refresh updates only THIS panel, if still open (never re-opens one).
+          const startedGen = panelGenRef.current;
+          const applies = (): boolean =>
+            sessionsRefreshApplies({
+              startedGen,
+              gen: panelGenRef.current,
+              open: panelRef.current?.kind === "sessions",
+              switching: switchingRef.current,
+            });
+          void sessions.remove(step.id).then(
+            () => {
+              if (!applies()) return;
+              void sessions.list().then(
+                (view) => {
+                  if (!applies()) return;
+                  setPanel((p) =>
+                    p?.kind === "sessions"
+                      ? {
+                          ...p,
+                          data: view,
+                          now: Date.now(),
+                          state: refreshedSessions(p.state, view),
+                        }
+                      : p,
+                  );
+                },
+                (e: unknown) => {
+                  // The panel closed meanwhile: its refresh no longer matters (R4-1).
+                  if (applies()) pushNotice(sessionsListError(e));
+                },
+              );
+            },
+            (e: unknown) => pushNotice(deleteFailedNotice(e)),
+          );
+        }
+      }
+      return;
+    }
+    if (panel && panel.kind !== "sessions") {
       const action = treeKey(char, key);
       if (action === "close") {
         closePanel();

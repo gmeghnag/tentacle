@@ -1,7 +1,7 @@
 import type { Agent } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import { render } from "ink";
-import { App, type NoticeFeed, type SessionController } from "./App.tsx";
+import { App, type NoticeFeed, type SessionController, type SessionDirectory } from "./App.tsx";
 import type { SlashSkill } from "./commands.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
@@ -39,6 +39,10 @@ export interface TuiOptions {
   readonly skillsList?: () => Promise<SkillsListView>;
   /** The daemon runs in a pod (`runPodTui` only): spilled output is "saved in the pod". */
   readonly daemonInPod?: boolean;
+  /** Quitting only detaches (`connect`): `/exit` leaves at once, even mid-turn. */
+  readonly detachOnQuit?: boolean;
+  /** The daemon's sessions for `/sessions` (`connect` only). */
+  readonly sessions?: SessionDirectory;
 }
 
 /**
@@ -88,6 +92,8 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       {...(options.mcpStatus ? { mcpStatus: options.mcpStatus } : {})}
       {...(options.skillsList ? { skillsList: options.skillsList } : {})}
       {...(options.daemonInPod ? { daemonInPod: true } : {})}
+      {...(options.detachOnQuit ? { detachOnQuit: true } : {})}
+      {...(options.sessions ? { sessions: options.sessions } : {})}
     />,
     { exitOnCtrlC: false },
   );

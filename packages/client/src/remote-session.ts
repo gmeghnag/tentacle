@@ -21,7 +21,7 @@ import {
   type TurnEnd,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
-import { type ReturnedRow, handBack, restoredByRefusal } from "./hand-back.ts";
+import { type ReturnedRow, handBack, restoredByRefusal, stayingRows } from "./hand-back.ts";
 import { turnRecovery } from "./link-machine.ts";
 import { type SessionEvent, stopReasonFromProtocol, updateToEvent } from "./mapping.ts";
 import { AsyncQueue } from "./queue.ts";
@@ -392,6 +392,59 @@ export class RemoteSession implements SessionStreamListener {
     }
   }
 
+  /**
+   * The session's id (the daemon's once opened, else the one it will open):
+   * an opaque key for the caller — shown, never parsed.
+   */
+  get sessionId(): string | null {
+    return this.id ?? this.desiredId ?? null;
+  }
+
+  /** How many of my queued rows stay on the daemon if this session stops being followed now (QN2). */
+  stayingRows(): number {
+    const state = this.queued;
+    return state ? stayingRows(state, this.mine, this.handedBack) : 0;
+  }
+
+  /**
+   * Stop following this session WITHOUT ending it (`session/detach`): it runs
+   * on daemon-side for any client (turn, jobs, asks, queue). Later sends are
+   * refused like after `close()`. Once the daemon answered, a foreign turn's
+   * stream ends with no outcome (never a guessed `turn_end`) and what was held
+   * for `watch` is dropped. While the first open is in flight, the detach
+   * follows it; before any open, nothing exists daemon-side. Rejects only
+   * `MethodNotFound` (an older daemon): nothing changed, sends work again.
+   */
+  async detach(): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    let id = this.id;
+    if (!id && this.opening) {
+      id = await this.opening.then(
+        (opened) => opened,
+        () => null,
+      );
+    }
+    if (id) {
+      try {
+        await this.client.detachSession(id);
+      } catch (error) {
+        this.closed = false;
+        throw error;
+      }
+    }
+    this.unsubscribeQueue?.();
+    this.unsubscribeQueue = null;
+    this.watcher = null;
+    this.unwatched = [];
+    this.streaming = null;
+    if (this.foreign) {
+      this.closeWithoutOutcome(this.foreign);
+    }
+  }
+
   /** Compact the remote conversation (no-op if no session was opened yet). */
   async compact(): Promise<{ before: number; after: number }> {
     if (!this.id) {
@@ -743,13 +796,22 @@ export class RemoteSession implements SessionStreamListener {
       case "update":
         this.route(out.update, out.turn);
         return;
-      case "error":
+      case "error": {
         // A frame this client cannot act on (unknown mandatory, malformed):
-        // fail the turn loudly, and cancel it so the daemon does not run it
-        // unobserved (the cancel also reaches a waiting send-now: fail it too).
+        // fail the turn loudly, and cancel MY turns by id so the daemon does
+        // not run them unobserved (my waiting send-now too). Another device's
+        // turn only fails HERE: it is not mine to stop (F1,
+        // docs/feat/connect-sessions.md). A settling turn is left to its prompt.
+        const mine = [this.active, this.next].flatMap((turn) =>
+          turn && !turn.ended ? [turn.turnId] : [],
+        );
         this.failAll(out.error);
-        if (this.id) this.client.cancel(this.id);
+        const id = this.id;
+        if (id) {
+          for (const turnId of mine) this.client.cancel(id, turnId);
+        }
         return;
+      }
       case "unsupported": {
         // The reducer reports an unknown type once: shown in the turn that
         // streams, or kept for the next turn while idle — never dropped
@@ -972,6 +1034,11 @@ export class RemoteSession implements SessionStreamListener {
         this.sendPrompt(id, turn);
       }
     }
+  }
+
+  /** Ended or deleted daemon-side while the link was down (the reconnect's refusal, by code). */
+  ended(reason: "closed" | "deleted"): void {
+    this.onClosed(reason);
   }
 
   /** The link is gone for good: the turn's outcome can never arrive. */

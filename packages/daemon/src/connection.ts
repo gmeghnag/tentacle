@@ -17,6 +17,8 @@ import {
   type CompactResult,
   type DeleteParams,
   type DeleteResult,
+  type DetachParams,
+  type DetachResult,
   type EnqueueParams,
   type EnqueueResult,
   type HooksTrustResult,
@@ -118,14 +120,19 @@ export class Connection {
    * cancels its sessions' turns, which cannot reach the model without it.
    */
   close(): void {
-    for (const { hosted, attachment } of this.attached.values()) {
-      if (this.servesModel) {
-        hosted.cancel();
-      }
-      hosted.detach(attachment);
+    for (const entry of this.attached.values()) {
+      this.release(entry);
     }
     this.attached.clear();
     this.peer.close();
+  }
+
+  /** Stop listening to one session (a close's or a `session/detach`'s per-session step). */
+  private release({ hosted, attachment }: Attached): void {
+    if (this.servesModel) {
+      hosted.cancel();
+    }
+    hosted.detach(attachment);
   }
 
   /**
@@ -175,6 +182,8 @@ export class Connection {
         return this.open(params as OpenParams);
       case Method.Close:
         return this.closeSession(params as CloseParams);
+      case Method.Detach:
+        return this.detachSession(params as DetachParams);
       case Method.SessionDelete:
         return this.deleteSession(params as DeleteParams);
       case Method.Prompt:
@@ -363,6 +372,19 @@ export class Connection {
   private closeSession(params: CloseParams): CloseResult {
     this.attached.delete(params.sessionId);
     this.host.close(params.sessionId);
+    return {};
+  }
+
+  // This connection only stops listening: the session runs on for any client.
+  // Synchronous, no lock (AGENTS §7). An id not open here is a no-op success;
+  // a stale entry (closed and recreated meanwhile) is released the same way —
+  // its attachment belongs to the old object, which is what we stop.
+  private detachSession(params: DetachParams): DetachResult {
+    const entry = this.attached.get(params.sessionId);
+    if (entry) {
+      this.release(entry);
+      this.attached.delete(params.sessionId);
+    }
     return {};
   }
 

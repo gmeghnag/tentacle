@@ -83,6 +83,23 @@ describe("pickerView", () => {
     expect(pickerView(choices(10), 9, NOW, 4)).toMatchObject({ above: 6, below: 0 });
   });
 
+  test("a daemon's entry (connect --resume): its markers instead of a message count", () => {
+    // docs/feat/connect-sessions.md. Mutation: always render "N msgs" → "undefined msgs".
+    const daemon = (o: Partial<SessionChoice>): SessionChoice => ({
+      id: "d",
+      title: "t",
+      updatedAt: NOW,
+      ...o,
+    });
+    const meta = (o: Partial<SessionChoice>) => pickerView([daemon(o)], 0, NOW, 5).rows[0]?.meta;
+    expect(meta({ running: true, attached: 2, archived: false })).toBe("running · on 2 devices");
+    expect(meta({ running: false, attached: 1, archived: false })).toBe("on 1 device");
+    expect(meta({ running: false, attached: 0, archived: true })).toBe("archived");
+    expect(meta({ running: false, attached: 0, archived: false })).toBe("idle");
+    // The local store's choices are unchanged.
+    expect(pickerView([choice(3)], 0, NOW, 5).rows[0]?.meta).toBe("3 msgs");
+  });
+
   test("a height below 1 still shows the selected row", () => {
     const view = pickerView(choices(5), 3, NOW, 0);
     expect(view.rows.map((r) => r.id)).toEqual(["id-3"]);

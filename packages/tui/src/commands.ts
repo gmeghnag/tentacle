@@ -28,6 +28,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "/clear", description: "clear the transcript and start a fresh session" },
   { name: "/compact", description: "summarise the conversation to free up context" },
   { name: "/rename", description: "rename this session (the title every device shows)" },
+  { name: "/sessions", description: "list this daemon's sessions and switch" },
+  { name: "/close", description: "end this session and quit" },
   { name: "/model", description: "show the active model" },
   { name: "/retry", description: "re-send the last prompt" },
   { name: "/copy", description: "copy the last assistant reply to the clipboard" },
@@ -154,7 +156,9 @@ export function paletteWindow(
 // the same session (both mutate its messages/steering) and clobber the abort
 // handle; `/clear` swaps the session under a live turn. The App rejects these
 // while a turn is running. (`/compact` guards itself with a tailored message.)
-const SESSION_MUTATING = new Set(["/retry", "/clear"]);
+// `/close` ends the session for every device; `/sessions` only opens a panel
+// (the switch itself is refused mid-turn by `sessionsChoose`).
+const SESSION_MUTATING = new Set(["/retry", "/clear", "/close"]);
 
 /** Whether `command` (the leading token, e.g. "/retry") must wait for an idle turn. */
 export function isSessionMutating(command: string): boolean {
@@ -193,18 +197,22 @@ export function renameFailedNotice(error: unknown): string {
  * the turn (it never quits on the first press) — whoever started it. `/exit`
  * during a `foreign` turn (another device's) exits at once: it is not ours to
  * stop on the way out, it goes on daemon-side (docs/feat/tui-foreign-turns.md C4).
+ * On a runtime whose quit only detaches (`detaches`: `connect`) `/exit` exits at
+ * once even mid-own-turn: the daemon keeps the turn running and saves it
+ * (docs/feat/connect-sessions.md).
  */
 export function quitAction(
   source: "command" | "ctrl-c",
   running: boolean,
   exitPending: boolean,
   foreign = false,
+  detaches = false,
 ): "exit" | "stop-then-exit" | "stop" {
   if (!running || exitPending) {
     return "exit";
   }
   if (source === "command") {
-    return foreign ? "exit" : "stop-then-exit";
+    return foreign || detaches ? "exit" : "stop-then-exit";
   }
   return "stop";
 }

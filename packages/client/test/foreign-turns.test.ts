@@ -164,6 +164,8 @@ function daemon(opts: { readonly ringBytes?: number; readonly persist?: boolean 
     o: {
       readonly reconnect?: boolean;
       readonly onSend?: (f: Frame, link: DuplexChannel) => void;
+      /** Rewrites each inbound frame before the client reads it. */
+      readonly rewrite?: (data: string) => string;
     } = {},
   ) => {
     const frames: Frame[] = [];
@@ -181,7 +183,10 @@ function daemon(opts: { readonly ringBytes?: number; readonly persist?: boolean 
           o.onSend?.(frame, wrapped);
         },
         close: () => c.close(),
-        setOnMessage: (h) => c.setOnMessage(h),
+        setOnMessage: (h) => {
+          const rewrite = o.rewrite;
+          c.setOnMessage(rewrite ? (data) => h(rewrite(data)) : h);
+        },
         setOnClose: (h) => c.setOnClose(h),
       };
       link = wrapped;
@@ -912,5 +917,239 @@ describe("eager open (attach only, never create) — T-B13", () => {
     expect(watched(sb).activities.map((x) => x.kind)).toEqual(["history"]);
     a.client.close();
     b.client.close();
+  });
+});
+
+// docs/feat/connect-sessions.md — F1 (task 6 Review carry-over) and `session/detach`.
+
+/** An inbound rewrite: once armed, the next `agent_message_chunk` arrives malformed (known type, no text). */
+function corrupter() {
+  let armed = false;
+  return {
+    arm: (): void => {
+      armed = true;
+    },
+    rewrite: (data: string): string => {
+      const f = JSON.parse(data) as { method?: string; params?: { update?: { type?: string } } };
+      if (
+        !armed ||
+        f.method !== Notification.SessionUpdate ||
+        f.params?.update?.type !== "agent_message_chunk"
+      ) {
+        return data;
+      }
+      armed = false;
+      return JSON.stringify({
+        ...f,
+        params: { ...f.params, update: { type: "agent_message_chunk" } },
+      });
+    },
+  };
+}
+
+const cancels = (frames: readonly Frame[]) =>
+  frames.filter((f) => f.method === Notification.Cancel).map((f) => f.params);
+
+/** A phone (A) made the session; the TUI (B, inbound frames rewritten by `rewrite`) attached it eagerly. */
+async function phoneAndTui(o: { readonly rewrite?: (data: string) => string } = {}) {
+  const d = daemon();
+  const a = d.dial();
+  const b = d.dial(new PermissionBroker(), o.rewrite ? { rewrite: o.rewrite } : {});
+  await a.client.initialize();
+  await b.client.initialize();
+  const sid = crypto.randomUUID();
+  const sa = a.client.newSession(undefined, sid);
+  expect(await drain(sa.send("warm"), [])).toBe("ended");
+  const sb = b.client.newSession(undefined, sid, undefined, { attach: {} });
+  const w = watched(sb);
+  await sb.open();
+  return { ...d, a, b, sid, sa, sb, w };
+}
+
+describe("F1 — an unreadable frame cancels only my own turn", () => {
+  test("RED: during ANOTHER device's turn it fails the stream here only — no cancel; the phone's turn ends end_turn", async () => {
+    // Mutation: restore the blind `cancel(this.id)` → one cancel frame, the phone's turn cancelled.
+    const bad = corrupter();
+    const r = await phoneAndTui({ rewrite: bad.rewrite });
+    const phone: SessionEvent[] = [];
+    const running = drain(r.sa.send("gate"), phone);
+    await until(() => r.model.waiting === 1 && r.w.turns().length === 1);
+    const [activity] = r.w.turns();
+    if (activity?.kind !== "turn") throw new Error("no turn activity");
+    const here = drain(activity.events, []);
+    bad.arm();
+    r.model.open();
+    expect(await here).toBeInstanceOf(Error);
+    expect(await running).toBe("ended");
+    expect(phone.at(-1)).toEqual({ type: "turn_end", reason: "end_turn" });
+    expect(cancels(r.b.frames)).toEqual([]);
+    r.a.client.close();
+    r.b.client.close();
+  });
+
+  test("RED: during my own turn the cancel names it", async () => {
+    const bad = corrupter();
+    const r = await phoneAndTui({ rewrite: bad.rewrite });
+    const mine = drain(r.sb.send("gate"), []);
+    await until(() => r.model.waiting === 1);
+    bad.arm();
+    r.model.open();
+    expect(await mine).toBeInstanceOf(Error);
+    const own = turnIdOf(r.b.frames, Method.Prompt);
+    expect(own).toBeDefined();
+    expect(cancels(r.b.frames)).toEqual([{ sessionId: r.sid, turnId: own }]);
+    r.a.client.close();
+    r.b.client.close();
+  });
+});
+
+describe("session/detach — the client side", () => {
+  test("detachSession withdraws that session's open prompt, not another session's; the asks wait daemon-side", async () => {
+    const d = daemon();
+    const held = approver(); // A never answers
+    const spy = approver(); // B never answers either: it only sees prompts come and go
+    const a = d.dial(held.broker);
+    const b = d.dial(spy.broker);
+    await a.client.initialize();
+    await b.client.initialize();
+    const s1 = crypto.randomUUID();
+    const s2 = crypto.randomUUID();
+    for (const sid of [s1, s2]) {
+      const sa = a.client.newSession(undefined, sid);
+      expect(await drain(sa.send("warm"), [])).toBe("ended");
+      await b.client.newSession(undefined, sid, undefined, { attach: {} }).open();
+      void drain(sa.send("ask"), [], 10_000);
+    }
+    // The broker shows one dialog at a time: S1's is up, S2's queued behind it.
+    await until(() => spy.prompts() === 1);
+    await sleep(30);
+    expect(d.host.get(s2)?.running).toBe(true);
+    await b.client.detachSession(s1);
+    expect(spy.aborts()).toBe(1); // S1's prompt withdrawn…
+    await until(() => spy.prompts() === 2); // …S2's comes up, and stays
+    await sleep(20);
+    expect(spy.aborts()).toBe(1);
+    expect(spy.pending()).toBe(1);
+    expect(b.client.liveSessionIds()).toEqual([s2]);
+    expect(d.host.get(s1)?.running).toBe(true); // A's ask still waits for an answer
+    expect(d.host.get(s1)?.attachedCount).toBe(1);
+    a.client.close();
+    b.client.close();
+  });
+
+  test("an older daemon (MethodNotFound): rejects, the session stays followed, a later closeSessions closes it", async () => {
+    let detachId: unknown;
+    const d = daemon();
+    const b = d.dial(new PermissionBroker(), {
+      onSend: (f) => {
+        if (f.method === Method.Detach) detachId = (f as { id?: unknown }).id;
+      },
+      rewrite: (data) => {
+        const f = JSON.parse(data) as { id?: unknown; result?: unknown };
+        return detachId !== undefined && f.id === detachId && "result" in f
+          ? JSON.stringify({
+              jsonrpc: "2.0",
+              id: f.id,
+              error: { code: JsonRpcErrorCode.MethodNotFound, message: "Method not found" },
+            })
+          : data;
+      },
+    });
+    await b.client.initialize();
+    const sid = crypto.randomUUID();
+    const sb = b.client.newSession(undefined, sid);
+    expect(await drain(sb.send("x"), [])).toBe("ended");
+    await expect(b.client.detachSession(sid)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.MethodNotFound,
+    });
+    expect(b.client.liveSessionIds()).toEqual([sid]);
+    await b.client.closeSessions();
+    expect(b.frames.filter((f) => f.method === Method.Close).map((f) => f.params)).toEqual([
+      { sessionId: sid },
+    ]);
+    b.client.close();
+  });
+
+  test("the link drops after the detach frame left: forgotten, and the reconnect never re-opens it", async () => {
+    // Mutation: leave `closing` unset → the reconnect's `recover` re-opens S1.
+    const d = daemon();
+    let cut = false;
+    const b = d.dial(new PermissionBroker(), {
+      reconnect: true,
+      onSend: (f, link) => {
+        if (f.method === Method.Detach && !cut) {
+          cut = true;
+          link.close(); // the detach left; its answer is lost
+        }
+      },
+    });
+    await b.client.initialize();
+    const s1 = crypto.randomUUID();
+    const s2 = crypto.randomUUID();
+    expect(await drain(b.client.newSession(undefined, s1).send("x"), [])).toBe("ended");
+    expect(await drain(b.client.newSession(undefined, s2).send("x"), [])).toBe("ended");
+    const before = b.frames.length;
+    await b.client.detachSession(s1);
+    // The reconnect re-opens S2 (still followed), never S1.
+    await until(() =>
+      b.frames.slice(before).some((f) => f.method === Method.Open && f.params?.sessionId === s2),
+    );
+    await sleep(20);
+    const reopened = b.frames
+      .slice(before)
+      .filter((f) => f.method === Method.Open)
+      .map((f) => f.params?.sessionId);
+    expect(reopened).toEqual([s2]);
+    expect(b.client.liveSessionIds()).toEqual([s2]);
+    b.client.close();
+  });
+
+  test("drain awaits a fire-and-forget close issued just before the exit (a slow uplink)", async () => {
+    // Mutation: `drain` returns at once → the close never reaches the daemon.
+    const d = daemon();
+    const [daemonEnd, clientEnd] = createChannelPair();
+    new Connection(daemonEnd, d.host);
+    // A slow uplink: each frame leaves 10 ms after it is written (a real socket's latency).
+    const slow: DuplexChannel = {
+      send: (data) => {
+        setTimeout(() => clientEnd.send(data), 10);
+      },
+      close: () => clientEnd.close(),
+      setOnMessage: (h) => clientEnd.setOnMessage(h),
+      setOnClose: (h) => clientEnd.setOnClose(h),
+    };
+    const client = new RemoteClient(slow, new PermissionBroker());
+    await client.initialize();
+    const sid = crypto.randomUUID();
+    const sb = client.newSession(undefined, sid);
+    expect(await drain(sb.send("x"), [])).toBe("ended");
+    sb.close(); // `/clear` / `/close`: fire-and-forget
+    await client.drain();
+    client.close();
+    await sleep(30);
+    expect(d.host.get(sid)).toBeUndefined();
+    expect(client.liveSessionIds()).toEqual([]);
+  });
+
+  test("RemoteSession.detach: a foreign stream ends with no turn_end; a later send is refused locally (no frame)", async () => {
+    const r = await phoneAndTui();
+    const running = drain(r.sa.send("gate"), []);
+    await until(() => r.model.waiting === 1 && r.w.turns().length === 1);
+    const [activity] = r.w.turns();
+    if (activity?.kind !== "turn") throw new Error("no turn activity");
+    const events: SessionEvent[] = [];
+    const here = drain(activity.events, events);
+    await r.sb.detach();
+    expect(await here).toBe("ended");
+    expect(events.some((e) => e.type === "turn_end")).toBe(false);
+    expect(r.host.get(r.sid)?.running).toBe(true);
+    const sent = r.b.frames.length;
+    expect(await drain(r.sb.send("again"), [])).toBeInstanceOf(Error);
+    expect(r.b.frames.length).toBe(sent);
+    expect(r.b.frames.filter((f) => f.method === Method.Detach).length).toBe(1);
+    r.model.open();
+    expect(await running).toBe("ended");
+    r.a.client.close();
+    r.b.client.close();
   });
 });
