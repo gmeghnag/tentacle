@@ -22,7 +22,8 @@
       "@tentacle/client": ["packages/client/src/index.ts"],
       "@tentacle/cli": ["packages/cli/src/index.ts"],
       "@tentacle/tui": ["packages/tui/src/index.ts"],
-      "@tentacle/k8s": ["packages/k8s/src/index.ts"]
+      "@tentacle/k8s": ["packages/k8s/src/index.ts"],
+      "@tentacle/docker": ["packages/docker/src/index.ts"]
     }
   },
   "include": [

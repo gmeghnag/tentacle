@@ -89,15 +89,15 @@ style suggestions.
 
 ## 6. Repo facts (verified)
 
-- Bun workspaces monorepo, **14 packages** (`agent`, `cli`, `client`, `config`,
-  `core`, `daemon`, `exec`, `k8s`, `mcp`, `protocol`, `providers`, `tools`,
+- Bun workspaces monorepo, **15 packages** (`agent`, `cli`, `client`, `config`,
+  `core`, `daemon`, `docker`, `exec`, `k8s`, `mcp`, `protocol`, `providers`, `tools`,
   `transport`, `tui`) + **1 app** (`apps/mobile`, Expo / React Native, React
   19 — the TUI stays on React 18; CI installs with
   `--filter '!@tentacle/mobile'`), TypeScript strict, Biome. **Bun ≥ 1.4.3 required**
   (`engines.bun`; the compiled-binary worker path needs it — see the TODO entry).
-  - `bun test` — full suite. **Baseline: all pass except the two opt-in
-    skips** — live-k8s (`TENTACLE_K8S_SERVER`) and the real-socket keepalive
-    test (`TENTACLE_SLOW_TESTS=1`, ~12 s); those skips are NOT failures. The total grows with every
+  - `bun test` — full suite. **Baseline: all pass except the three opt-in
+    skips** — live-k8s (`TENTACLE_K8S_SERVER`), live-docker (`TENTACLE_DOCKER_TESTS=1`)
+    and the real-socket keepalive test (`TENTACLE_SLOW_TESTS=1`, ~12 s); those skips are NOT failures. The total grows with every
     task, so no exact count is pinned here — it only goes stale; run it, and any
     *new* fail (or a non-opt-in skip) is yours.
   - `bun run typecheck` — `tsc --noEmit && tsc -p apps/mobile`.
