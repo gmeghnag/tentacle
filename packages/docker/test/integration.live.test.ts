@@ -28,6 +28,11 @@ import { afterAll, describe, expect, test } from "bun:test";
  *   TENTACLE_DOCKER_TESTS=1 TENTACLE_DOCKER_TCP_HOST=tcp://h:2376 DOCKER_TLS_VERIFY=1 \
  *     DOCKER_CERT_PATH=~/.docker/h bun test packages/docker/test/integration.live.test.ts
  *
+ *   # A remote engine over ssh (`ssh <host> docker system dial-stdio`): the
+ *   host must be reachable with key-based auth (batch mode) and have the docker CLI.
+ *   TENTACLE_DOCKER_TESTS=1 TENTACLE_DOCKER_SSH_HOST=user@host \
+ *     bun test packages/docker/test/integration.live.test.ts
+ *
  * Image: `TENTACLE_DOCKER_IMAGE` ?? `busybox:latest` (pulled through `pullImage`).
  */
 import { readFileSync } from "node:fs";
@@ -39,6 +44,7 @@ import {
   endpointLabel,
   resolveEngineEndpoint,
 } from "../src/engine-endpoint.ts";
+import { sshDialer } from "../src/ssh-dialer.ts";
 
 const ENABLED = process.env.TENTACLE_DOCKER_TESTS === "1";
 const IMAGE = process.env.TENTACLE_DOCKER_IMAGE ?? "busybox:latest";
@@ -71,6 +77,14 @@ function targets(): Target[] {
     out.push({
       name: tcp,
       endpoint: () => resolveEngineEndpoint({ env: { ...env, DOCKER_HOST: tcp }, readFile }),
+    });
+  }
+  const ssh = process.env.TENTACLE_DOCKER_SSH_HOST;
+  if (ssh) {
+    out.push({
+      name: `ssh://${ssh}`,
+      endpoint: () =>
+        resolveEngineEndpoint({ env: { ...env, DOCKER_HOST: `ssh://${ssh}` }, readFile }),
     });
   }
   return out;
@@ -112,12 +126,11 @@ for (const target of ENABLED
       "lifecycle + exec channel + runExec + read-only rootfs",
       async () => {
         const ep = target.endpoint();
-        if (ep.kind === "ssh") {
-          console.log(`[live] ${target.name}: ssh endpoints are slice A2 — skipped`);
-          return;
-        }
+        // unix/tcp over `Bun.connect`; ssh over `ssh … docker system dial-stdio`
+        // (the third `Dialer` of the same code path, slice A2).
+        const dial = ep.kind === "ssh" ? sshDialer(ep) : socketDialer(ep);
         const docker = new DockerClient({
-          dial: socketDialer(ep),
+          dial: dial,
           endpointLabel: `${ep.source} (${endpointLabel(ep)})`,
         });
         const ping = await docker.ping();

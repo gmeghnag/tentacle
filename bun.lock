@@ -117,6 +117,8 @@
       "name": "@tentacle/docker",
       "version": "0.1.0",
       "dependencies": {
+        "@tentacle/core": "workspace:*",
+        "@tentacle/exec": "workspace:*",
         "@tentacle/transport": "workspace:*",
       },
     },

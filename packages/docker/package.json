@@ -8,6 +8,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@tentacle/core": "workspace:*",
+    "@tentacle/exec": "workspace:*",
     "@tentacle/transport": "workspace:*"
   }
 }

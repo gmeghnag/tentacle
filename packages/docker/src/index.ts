@@ -11,6 +11,7 @@ export * from "./byte-duplex.ts";
 export * from "./http.ts";
 export * from "./http-conn.ts";
 export * from "./stdcopy.ts";
+export * from "./ssh-dialer.ts";
 export * from "./exec-channel.ts";
 export * from "./exec-run.ts";
 export * from "./client.ts";
