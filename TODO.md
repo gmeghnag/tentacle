@@ -408,8 +408,8 @@ Daily-driver work (done 2026-10-14):
       owner answered PE-Q1..Q6 on 2026-10-26: default = read-only parallel, R2,
       shared workspace, one "always" for the session tree, trust MCP
       `readOnlyHint` + override, cap sub-agents at llama.cpp slots). Order: 1
-      `feat/fs-path-locks` (S, running) · 2 `feat/subagent-progress-wire` (M) · 3
-      `feat/model-retry-429` (S, running) · 4 → 5 → 6 → 7 (load-bearing, strictly
+      `feat/fs-path-locks` (S, DONE `bfffdb4`) · 2 `feat/subagent-progress-wire` (M, running) · 3
+      `feat/model-retry-429` (S, DONE `bb43767`) · 4 → 5 → 6 → 7 (load-bearing, strictly
       ordered; 5 takes a record version, see permission-reply v8).
 - [ ] **Parallel tool calls** ([`docs/eval/parallel-tools.md`](docs/eval/parallel-tools.md);
       owner, 2026-10-25) — run a round's calls in parallel where safe; which
