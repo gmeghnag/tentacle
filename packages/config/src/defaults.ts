@@ -23,8 +23,12 @@ export const DEFAULT_SUBAGENT_MAX_ITERATIONS = 50;
 export const DEFAULT_AUTO_WAKE = true;
 /** Model-generated session titles are opt-in (docs/feat/session-titles.md). */
 export const DEFAULT_AUTO_TITLE = false;
-/** Token budget used for the TUI context-fill meter. */
+/** Token budget used for the TUI context-fill meter and the model's context line. */
 export const DEFAULT_CONTEXT_WINDOW = 128000;
+/** The model is told how full its context is (docs/feat/context-awareness.md). */
+export const DEFAULT_CONTEXT_AWARENESS = true;
+/** …once per this many percent of the window. */
+export const DEFAULT_CONTEXT_STEP_PERCENT = 1;
 /** Max characters of a tool result kept inline before it is spilled to a file. */
 export const DEFAULT_MAX_INLINE_OUTPUT_CHARS = 16000;
 /** Secret redaction of tool output is on by default (security). */
@@ -93,7 +97,8 @@ export const DEFAULT_CONFIG_JSONC = `{
     // Shell command whose stdout is the API key (trimmed). Runs at startup.
     // "apiKeyCommand": "cat ~/.cache/llama-api-key",
 
-    // Context-window size (tokens) used for the TUI context-fill meter.
+    // Context-window size (tokens) used for the TUI context-fill meter and the
+    // model's context line ("contextAwareness" below).
     // "contextWindow": ${DEFAULT_CONTEXT_WINDOW},
 
     // Max output tokens per model response. Unset: omitted for openai, 64000
@@ -109,6 +114,13 @@ export const DEFAULT_CONFIG_JSONC = `{
 
   // Sub-agents: the \`agent_task\` tool that delegates work to an isolated child agent.
   // "subagents": { "enabled": ${DEFAULT_SUBAGENTS_ENABLED}, "maxIterations": ${DEFAULT_SUBAGENT_MAX_ITERATIONS} }, // maxIterations: -1 = unlimited
+
+  // Context awareness: tell the model how full its context is — a short line
+  // ("[context: 82k / 128k tokens (64%)]") appended to the message that crosses
+  // each new step of "stepPercent" (default 1%), never to the system prompt.
+  // Counted from the provider's reported usage, an estimate when it reports none;
+  // the window is model.contextWindow.
+  // "contextAwareness": { "enabled": ${DEFAULT_CONTEXT_AWARENESS}, "stepPercent": ${DEFAULT_CONTEXT_STEP_PERCENT} },
 
   // Auto-wake: when a background job exits while idle, automatically start a
   // turn so the agent reacts to it (reads output, continues). On by default;
@@ -151,7 +163,7 @@ export const DEFAULT_CONFIG_JSONC = `{
   //  - "model" merges per key, but provider/baseURL/apiKey/apiKeyCommand move as
   //    one unit: set any of them and the others are NOT inherited (a key is never
   //    sent to an endpoint it was not configured for);
-  //  - "subagents"/"tools" merge per key; other settings replace;
+  //  - "subagents"/"tools"/"contextAwareness" merge per key; other settings replace;
   //  - "mcpServers" merge by name: a server is replaced whole, null removes it.
   // "profiles": {
   //   "anthropic": {

@@ -6,7 +6,13 @@ import { SessionHost } from "@tentacle/daemon";
 import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { DomainErrorCode } from "@tentacle/transport";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
-import { ARGS, parseArgs, parseDuration, parseServeLimits } from "../src/flags.ts";
+import {
+  ARGS,
+  parseArgs,
+  parseContextWindowFlag,
+  parseDuration,
+  parseServeLimits,
+} from "../src/flags.ts";
 import { startDaemon } from "../src/serve.ts";
 import { APP_VERSION } from "../src/version.ts";
 
@@ -573,6 +579,24 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
       b.ws.close();
     } finally {
       await server.stop();
+    }
+  });
+});
+
+// docs/feat/context-awareness.md: the pod daemon is told the LAPTOP's model window.
+describe("parseContextWindowFlag (serve --context-window)", () => {
+  const window = (args: string[]) => {
+    const parsed = parseArgs(args, ARGS.serve);
+    if (!parsed.ok) throw new Error(parsed.error);
+    return parseContextWindowFlag(parsed);
+  };
+  test("absent → undefined; a positive whole number → it", () => {
+    expect(window(["--stdio"])).toBeUndefined();
+    expect(window(["--stdio", "--context-window", "200000"])).toBe(200000);
+  });
+  test("anything else throws", () => {
+    for (const bad of ["0", "-1", "1.5", "abc", "1e6"]) {
+      expect(() => window(["--context-window", bad])).toThrow(/--context-window/);
     }
   });
 });

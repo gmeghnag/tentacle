@@ -239,7 +239,12 @@ describe("tentacle run/attach (end to end, fake API server)", () => {
       port: 0,
       async fetch(req) {
         const body = (await req.json()) as { messages: Array<{ content: unknown }> };
-        seen.push(`MODEL ${JSON.stringify(body.messages.at(-1)?.content)}`);
+        // The context line (docs/feat/context-awareness.md) is the only addition.
+        const content = String(body.messages.at(-1)?.content).replace(
+          /\n\n\[context: [^\]]+\]$/,
+          "",
+        );
+        seen.push(`MODEL ${JSON.stringify(content)}`);
         return new Response("no", { status: 500 });
       },
     });

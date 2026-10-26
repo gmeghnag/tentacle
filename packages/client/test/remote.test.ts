@@ -1613,6 +1613,37 @@ describe("a measured tool result over the real stack (docs/fix/tool-duration.md)
   });
 });
 
+describe("the model's context lines over the real stack (docs/feat/context-awareness.md)", () => {
+  test("a snapshot carries contextUsage (the laptop's copy keeps what the model was told)", async () => {
+    const model = new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const host = new SessionHost({
+      defaultCwd: "/tmp/remote-work",
+      createAgent: () => {
+        const permissions = new PermissionBroker();
+        const agent = new Agent({
+          model,
+          tools: new ToolRegistry(),
+          env: noopEnv,
+          contextAwareness: { window: 1000, stepPercent: 1 },
+          requestPermission: (req) => permissions.request(req),
+        });
+        return { agent, permissions };
+      },
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, host);
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    await collect(session.send("go"));
+    const history = await session.snapshot();
+    const user = history?.find((m) => m.role === "user");
+    expect(user?.content).toBe("go");
+    expect(user?.contextUsage?.window).toBe(1000);
+    client.close();
+  });
+});
+
 describe("RemoteClient.snapshot (paged history at the cut)", () => {
   test("joins the pages chronologically over a real Connection", async () => {
     const [daemonCh, clientCh] = createChannelPair();

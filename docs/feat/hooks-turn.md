@@ -207,6 +207,9 @@ yield (that path already ran the awaited hook above).
     runner keeps `Map<sessionId, number>` (last count). After a compaction
     shrinks the history, the count is reset (`count > messages.length` →
     send all).
+  - The messages are the request's own, as the model receives them: a
+    message carrying a context line has it rendered into `content`
+    (`[context: …]`, docs/feat/context-awareness.md).
 - R3: at most one in flight per session; a call arriving while one runs is
   dropped (log once per burst).
 

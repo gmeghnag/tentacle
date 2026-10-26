@@ -694,7 +694,10 @@ a `description` is required. `name` defaults to the directory name.
 
 **`agents/<type>.md`:** the normal agent-type format. The frontmatter has
 `name` (default: the file name), `description`, `tools` (a `[a, b]` list of
-tool **names**; default all) and `model`. The body is the prompt.
+tool **names**; default all), `model` and `contextWindow` (the window, in
+tokens, of that `model`: the sub-agent's context line counts against it; a
+positive whole number, anything else is ignored; default: the main
+`model.contextWindow`). The body is the prompt.
 
 **`mcp.json`:** `{ "<server>": <server def> }`. The server key matches the
 same regex as the package name. A server def is one of:

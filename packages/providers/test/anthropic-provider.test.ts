@@ -581,3 +581,48 @@ describe("anthropicErrorHint (actionable non-2xx errors)", () => {
     await expect(run()).rejects.toThrow("TENTACLE_MODEL");
   });
 });
+
+// docs/feat/context-awareness.md: with prompt caching active, `input_tokens` counts
+// only the uncached tail; the prompt's real size adds both cache counts.
+describe("prompt usage with prompt caching", () => {
+  const done = async (start: unknown): Promise<StreamEvent | undefined> => {
+    const events = [
+      { type: "message_start", message: { usage: start } },
+      { type: "content_block_start", index: 0, content_block: { type: "text" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 30 } },
+      { type: "message_stop" },
+    ];
+    const provider = new AnthropicProvider({
+      baseURL: "http://h/v1",
+      model: "m",
+      fetch: (async () =>
+        new Response(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""), {
+          headers: { "content-type": "text/event-stream" },
+        })) as unknown as typeof fetch,
+    });
+    let last: StreamEvent | undefined;
+    for await (const e of provider.stream({ messages: [{ role: "user", content: "hi" }] })) {
+      last = e;
+    }
+    return last;
+  };
+
+  test("promptTokens = input + cache creation + cache read", async () => {
+    expect(
+      await done({
+        input_tokens: 40,
+        cache_read_input_tokens: 11000,
+        cache_creation_input_tokens: 960,
+      }),
+    ).toEqual({ type: "done", usage: { promptTokens: 12000, completionTokens: 30 } });
+  });
+
+  test("absent cache counts add nothing", async () => {
+    expect(await done({ input_tokens: 40 })).toEqual({
+      type: "done",
+      usage: { promptTokens: 40, completionTokens: 30 },
+    });
+  });
+});

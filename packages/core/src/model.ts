@@ -44,6 +44,20 @@ export interface ChatMessage {
    * Display only, like `spill`: the model never sees it.
    */
   readonly durationMs?: number;
+  /**
+   * On a `user` or `tool` message that crossed a new step of context fill: how
+   * full the context was (docs/feat/context-awareness.md). NOT display-only,
+   * unlike `spill`/`durationMs`: the agent loop renders it into `content` as a
+   * `[context: …]` line on every request (`renderForModel`), so the model sees
+   * it while the stored `content` stays clean. The TUI ignores it.
+   */
+  readonly contextUsage?: ContextUsage;
+}
+
+/** How full the model's context was: `used` tokens of a `window` (both tokens). */
+export interface ContextUsage {
+  readonly used: number;
+  readonly window: number;
 }
 
 export interface Usage {

@@ -259,6 +259,13 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     readSkillBody,
   );
 
+  // The model is told how full its context is (docs/feat/context-awareness.md),
+  // on `model.contextWindow` (a pod daemon's is the laptop's: `--context-window`).
+  // Each sub-agent counts its own history on the same window.
+  const contextAwareness = config.contextAwareness.enabled
+    ? { window: config.contextWindow, stepPercent: config.contextAwareness.stepPercent }
+    : undefined;
+
   // Sub-agents: when enabled, register the `agent_task` delegation tool. Children
   // inherit the same confined env + permission requester; the runner filters
   // out `agent_task` itself so a sub-agent cannot spawn further sub-agents.
@@ -279,6 +286,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       types: agentTypes,
       resultTransforms,
       ...(hooks ? { hooks } : {}),
+      ...(contextAwareness ? { contextAwareness } : {}),
     });
     tools.register(createTaskTool((opts, controls) => run(opts, controls), types));
   }
@@ -295,6 +303,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     skills,
     ...(hooks ? { hooks } : {}),
     ...(options.askHooksTrust ? { askHooksTrust: options.askHooksTrust } : {}),
+    ...(contextAwareness ? { contextAwareness } : {}),
   });
   // Names the session after its first exchange (docs/feat/session-titles.md),
   // only with `model.autoTitle` (opt-in; off → no title model, no call):

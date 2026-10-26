@@ -18,10 +18,13 @@ import {
   type BackgroundJob,
   type ChatMessage,
   type ChatRequest,
+  type ContextUsage,
   type ExecutionEnvironment,
+  HeuristicTokenCounter,
   type JobController,
   type ModelProvider,
   type PermissionRequester,
+  type TokenCounter,
   type ToolCall,
   type ToolContext,
   type ToolProgressEvent,
@@ -37,6 +40,13 @@ import {
   userSkillCall,
 } from "@tentacle/tools";
 import { type CarriedSkill, summarizeConversation } from "./compact.ts";
+import {
+  type ContextAnchor,
+  estimateUsed,
+  lastEmitted,
+  renderForModel,
+  shouldEmit,
+} from "./context-awareness.ts";
 import { EventQueue } from "./event-queue.ts";
 import { type AskHooksTrust, type HookRunner, hookNote } from "./hooks.ts";
 import { PermissionGate } from "./permission-gate.ts";
@@ -91,8 +101,17 @@ export interface RunOptions {
    * `askHooksTrust`. Asked once per session, before a fresh turn's hooks.
    */
   readonly askHooksTrust?: AskHooksTrust;
+  /**
+   * The first history index this turn added (the caller's push of the user
+   * prompt): only a message at or past it may carry a context line — never one
+   * an earlier request already sent (docs/feat/context-awareness.md). Absent →
+   * the history's length at entry (nothing of the caller's is new).
+   */
+  readonly newFrom?: number;
 }
 
+/** The context-line estimate's counter when the config names none. */
+const DEFAULT_COUNTER = new HeuristicTokenCounter();
 /** Max consecutive empty-response auto-nudges before a stall ends the turn. */
 const MAX_EMPTY_CONTINUES = 2;
 /** Max `turn_end` hook continues per turn (R2, docs/feat/hooks-turn.md). */
@@ -243,6 +262,17 @@ export interface AgentConfig {
    * inject a fake one.
    */
   readonly now?: () => number;
+  /**
+   * Tell the model how full its context is (docs/feat/context-awareness.md): a
+   * `[context: …]` line on the message that crosses each new `stepPercent` of
+   * `window`. Absent → no new line (stored ones are still rendered). `counter`
+   * estimates what the provider has not measured; default the heuristic.
+   */
+  readonly contextAwareness?: {
+    readonly window: number;
+    readonly stepPercent: number;
+    readonly counter?: TokenCounter;
+  };
 }
 
 /**
@@ -278,6 +308,12 @@ export class Agent {
   private readonly gate: PermissionGate;
   /** Background jobs that finished since the last turn, awaiting surfacing. */
   private readonly pendingExits: BackgroundJob[] = [];
+  /**
+   * The provider's last measure of each history (keyed by the array a Session
+   * keeps for its life), so a turn's first request counts from real numbers.
+   * Memory only: a reload starts from the estimate.
+   */
+  private readonly anchors = new WeakMap<ChatMessage[], ContextAnchor>();
 
   constructor(config: AgentConfig) {
     this.config = config;
@@ -364,8 +400,9 @@ export class Agent {
     signal?: AbortSignal,
   ): AsyncGenerator<AgentEvent> {
     const messages = this.startConversation();
+    const newFrom = messages.length;
     messages.push(...userMessages);
-    yield* this.runMessages(messages, sessionId, signal);
+    yield* this.runMessages(messages, sessionId, signal, undefined, { newFrom });
   }
 
   /**
@@ -416,6 +453,9 @@ export class Agent {
 
     // The user's prompt for `turn_start` hooks, read before any note lands.
     const prompt = lastUserText(messages);
+    // From here on, the messages the model has not seen yet: the only ones a
+    // context line may ride on (moves past each request as it is sent).
+    let unseen = Math.min(opts.newFrom ?? messages.length, messages.length);
 
     // Project hooks run only once trusted: decided before a fresh turn runs
     // any hook or tool (never on a resumed turn, which already started).
@@ -493,12 +533,19 @@ export class Agent {
         yield { type: "steer", text };
       }
 
+      const tools = this.config.tools.definitions();
+      this.noteContextUsage(messages, unseen, tools);
+      // The model's copy: stored context lines rendered into `content`, always
+      // (enabled or not), so every request repeats the same bytes for a
+      // message an earlier one sent — the provider's prompt cache holds.
       const request: ChatRequest = {
-        messages,
-        tools: this.config.tools.definitions(),
+        messages: messages.map(renderForModel),
+        tools,
         ...(this.config.temperature !== undefined ? { temperature: this.config.temperature } : {}),
         ...(signal ? { signal } : {}),
       };
+      const sent = messages.length;
+      unseen = sent;
 
       let text = "";
       const toolCalls: ToolCall[] = [];
@@ -518,6 +565,7 @@ export class Agent {
               break;
             case "done":
               if (event.usage) {
+                this.anchorContext(messages, sent, event.usage);
                 yield { type: "usage", usage: event.usage };
               }
               break;
@@ -655,7 +703,7 @@ export class Agent {
       }
       try {
         const finalMessages: ChatMessage[] = [
-          ...messages,
+          ...messages.map(renderForModel),
           {
             role: "user",
             content:
@@ -716,6 +764,56 @@ export class Agent {
 
     this.notifyTurnEnd(sessionId, "max_iterations");
     yield { type: "turn_end", reason: "max_iterations" };
+  }
+
+  /**
+   * Before a request: when the context has crossed a new step since the last
+   * line, put the current count on the LAST user/tool message the model has
+   * not seen (index >= `unseen`) — a copy replacing it, its other fields kept.
+   * None such → no line now; the next one carries it. Synchronous.
+   */
+  private noteContextUsage(
+    messages: ChatMessage[],
+    unseen: number,
+    tools: NonNullable<ChatRequest["tools"]>,
+  ): void {
+    const awareness = this.config.contextAwareness;
+    if (!awareness) {
+      return;
+    }
+    let target = -1;
+    for (let i = messages.length - 1; i >= unseen; i--) {
+      const role = messages[i]?.role;
+      if (role === "user" || role === "tool") {
+        target = i;
+        break;
+      }
+    }
+    const message = messages[target];
+    if (message === undefined) {
+      return;
+    }
+    const current: ContextUsage = {
+      used: estimateUsed(
+        messages,
+        tools,
+        this.anchors.get(messages),
+        awareness.counter ?? DEFAULT_COUNTER,
+      ),
+      window: awareness.window,
+    };
+    if (shouldEmit(current, lastEmitted(messages), awareness.stepPercent)) {
+      messages[target] = { ...message, contextUsage: current };
+    }
+  }
+
+  /** The provider measured the request of `messages[0, sent)`: anchor the next estimate there. */
+  private anchorContext(messages: ChatMessage[], sent: number, usage: Usage): void {
+    const ref = messages[sent - 1];
+    // 0 = the provider did not report it (`?? 0`): keep estimating.
+    if (usage.promptTokens > 0 && ref !== undefined) {
+      this.anchors.set(messages, { promptTokens: usage.promptTokens, len: sent, ref });
+    }
   }
 
   /** `turn_end` notification hooks (cancelled / max_iterations): synchronous, never awaited. */

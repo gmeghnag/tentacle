@@ -29,10 +29,13 @@ export const DAEMON_RECORD_KIND = "tentacle.daemon-session";
  * 6: a tool message may carry `durationMs` (docs/fix/tool-duration.md): a v5
  * daemon refuses every v6 record instead of dropping durations at its next
  * write. A v1–v5 record reads as a v6 one with no durations.
+ * 7: a user/tool message may carry `contextUsage` (docs/feat/context-awareness.md):
+ * a v6 daemon refuses every v7 record instead of dropping the model's context
+ * lines at its next write. A v1–v6 record reads as a v7 one with no lines.
  */
-export const DAEMON_RECORD_VERSION = 6;
+export const DAEMON_RECORD_VERSION = 7;
 /** Every version `parseDaemonRecord` reads (each read as the current shape). */
-const READABLE_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, DAEMON_RECORD_VERSION];
+const READABLE_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6, DAEMON_RECORD_VERSION];
 /** The first version whose `title` may be a chosen one (`{ text, source }`). */
 const CHOSEN_TITLE_VERSION = 3;
 /** The first version with steer ids (`turn.steeringIds`) and `returned` rows. */

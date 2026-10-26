@@ -121,8 +121,14 @@ export class AnthropicProvider implements ModelProvider {
       switch (event.type) {
         case "message_start": {
           const start = event.message?.usage;
+          // With prompt caching `input_tokens` is only the uncached tail: the
+          // prompt's size adds what was written to and read from the cache
+          // (docs/feat/context-awareness.md; it feeds the context count).
           if (start?.input_tokens !== undefined) {
-            promptTokens = start.input_tokens;
+            promptTokens =
+              start.input_tokens +
+              (start.cache_creation_input_tokens ?? 0) +
+              (start.cache_read_input_tokens ?? 0);
           }
           break;
         }
@@ -252,7 +258,12 @@ interface AnthropicEvent {
   readonly type: string;
   readonly index?: number;
   readonly message?: {
-    readonly usage?: { readonly input_tokens?: number; readonly output_tokens?: number };
+    readonly usage?: {
+      readonly input_tokens?: number;
+      readonly output_tokens?: number;
+      readonly cache_creation_input_tokens?: number;
+      readonly cache_read_input_tokens?: number;
+    };
   };
   readonly content_block?: {
     readonly type?: string;

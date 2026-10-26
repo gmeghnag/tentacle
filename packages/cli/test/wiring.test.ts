@@ -123,7 +123,8 @@ describe("buildAgent skills (docs/feat/skills-core.md)", () => {
       expect(content).toContain(BODY.trimEnd());
       expect(model.requests.length).toBe(2); // no summarisation call
       const sent = model.requests[1]?.messages.find((m) => m.role === "tool");
-      expect(sent?.content).toBe(content);
+      // Verbatim; the only addition is the context line after it (docs/feat/context-awareness.md).
+      expect(sent?.content.replace(/\n\n\[context: [^\]]+\]$/, "")).toBe(content);
     }
   });
 
@@ -627,5 +628,54 @@ describe("project dir without project hooks (post-review)", () => {
       wired.agent as unknown as { config: { hooks?: { opts: { projectDir?: string } } } }
     ).config.hooks?.opts;
     expect(opts?.projectDir).toBe(repo);
+  });
+});
+
+// docs/feat/context-awareness.md: `contextAwareness` + `model.contextWindow` reach the
+// main agent AND each sub-agent; disabled → no line anywhere.
+describe("buildAgent context awareness", () => {
+  async function turn(cfg: TentacleConfig): Promise<ScriptedModel> {
+    const model = new ScriptedModel([
+      [
+        {
+          type: "tool_call",
+          toolCall: {
+            id: "t1",
+            name: "agent_task",
+            arguments: JSON.stringify({ description: "look", prompt: "sub task" }),
+          },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "child report" }, { type: "done" }],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const { agent } = buildAgent(cfg, { modelOverride: model });
+    for await (const _ of agent.run("s", [{ role: "user", content: "go" }])) {
+      // drain
+    }
+    return model;
+  }
+  const LINE = / \/ 200k tokens \(\d+%\)\]$/;
+
+  test("enabled: the main prompt and the sub-agent prompt carry the line, on the configured window", async () => {
+    const model = await turn({ ...config, subagentsEnabled: true, contextWindow: 200000 });
+    expect(model.requests.length).toBe(3);
+    expect(model.requests[0]?.messages.at(-1)?.content).toMatch(LINE);
+    // The child's own first request: its task prompt.
+    expect(model.requests[1]?.messages.at(-1)?.content).toMatch(/^sub task\n\n\[context: /);
+    expect(model.requests[1]?.messages.at(-1)?.content).toMatch(LINE);
+  });
+
+  test("disabled: no line in any request", async () => {
+    const model = await turn({
+      ...config,
+      subagentsEnabled: true,
+      contextWindow: 200000,
+      contextAwareness: { enabled: false, stepPercent: 1 },
+    });
+    for (const r of model.requests) {
+      expect(r.messages.some((m) => m.content.includes("[context: "))).toBe(false);
+    }
   });
 });

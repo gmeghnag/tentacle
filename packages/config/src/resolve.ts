@@ -12,6 +12,8 @@ import {
   DEFAULT_AUTO_TITLE,
   DEFAULT_AUTO_WAKE,
   DEFAULT_BASE_URL,
+  DEFAULT_CONTEXT_AWARENESS,
+  DEFAULT_CONTEXT_STEP_PERCENT,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_DEDUP_OUTPUT,
   DEFAULT_MAX_INLINE_OUTPUT_CHARS,
@@ -33,6 +35,12 @@ export type Env = Record<string, string | undefined>;
 /** Where a resolved value came from. */
 export type Source = "env" | "file" | "default";
 
+/** `contextAwareness`, resolved: a line per `stepPercent` of the window, when `enabled`. */
+export interface ContextAwarenessConfig {
+  readonly enabled: boolean;
+  readonly stepPercent: number;
+}
+
 /** How the API key will be obtained. */
 export type ApiKeySource = "env" | "file" | "command" | "none";
 
@@ -47,6 +55,8 @@ export interface ResolvedConfig {
   readonly cwd: string;
   readonly maxIterations: number;
   readonly contextWindow: number;
+  /** Tell the model how full its context is (file-only, docs/feat/context-awareness.md). */
+  readonly contextAwareness: ContextAwarenessConfig;
   /** Max output tokens per response; unset → the provider's own default. */
   readonly maxTokens?: number;
   readonly systemPrompt: string;
@@ -301,6 +311,11 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     cwd,
     maxIterations: maxIterations.value,
     contextWindow: contextWindow.value,
+    // File-only, like `autoTitle`: no env form.
+    contextAwareness: {
+      enabled: fileConfig.contextAwareness?.enabled ?? DEFAULT_CONTEXT_AWARENESS,
+      stepPercent: fileConfig.contextAwareness?.stepPercent ?? DEFAULT_CONTEXT_STEP_PERCENT,
+    },
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     systemPrompt: systemPromptValue,
     agentsMdLoaded,

@@ -45,6 +45,7 @@ import {
   cliMode,
   extractGlobalOptions,
   parseArgs,
+  parseContextWindowFlag,
   parseServeLimits,
   resolveTls,
   resolveToken,
@@ -377,10 +378,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     // channel here, so every log line must go to stderr.
     if (bools.has("stdio")) {
       try {
+        const contextWindow = parseContextWindowFlag(parsed);
         await startStdioDaemon(config, (line) => process.stderr.write(`[daemon] ${line}\n`), {
           modelProxy: bools.has("model-proxy"),
           // The laptop that launched us decides (`podDaemonCommand`).
           autoTitle: bools.has("auto-title"),
+          ...(contextWindow !== undefined ? { contextWindow } : {}),
         });
         return 0;
       } catch (error) {

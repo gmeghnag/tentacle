@@ -377,8 +377,12 @@ Daily-driver work (done 2026-10-14):
       owner, 2026-10-25, decided) — a line `context: 82k / 128k tokens (64%)`
       once per new percentage point, on the message that crosses it; provider
       usage when available; `"contextAwareness": { "enabled": true,
-      "stepPercent": 1 }`. BEFORE `context-reset`. Type: feat · Size: S–M ·
-      Blast: cross-module (to confirm).
+      "stepPercent": 1 }`. BEFORE `context-reset`. Type: feat · Size: M ·
+      Blast: load-bearing · Suited: Opus executes; mandatory fresh-context Review.
+      **Status (2026-10-26):** executed on `feat/context-awareness` — task doc
+      [`docs/feat/context-awareness.md`](docs/feat/context-awareness.md);
+      `DAEMON_RECORD_VERSION` 7; pod window = the laptop's (`--context-window`);
+      line hidden from the TUI. Awaiting Review.
 - [ ] **Model-initiated context reset (`context_reset({ prompt })`)**
       ([`docs/eval/context-reset.md`](docs/eval/context-reset.md); owner,
       2026-10-25, 9 decisions taken) — the model renews its own context when

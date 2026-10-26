@@ -212,7 +212,17 @@ const ROLES = new Set(["system", "user", "assistant", "tool"]);
 // a record that passes here can always seed `session/open`. Pinned by a cli test.
 // `durationMs` (docs/fix/tool-duration.md) followed `spill`'s path: an older
 // build refuses a record holding one (`unknown key "durationMs"`), loudly.
-const MESSAGE_KEYS = new Set(["role", "content", "toolCalls", "toolCallId", "spill", "durationMs"]);
+// So did `contextUsage` (docs/feat/context-awareness.md).
+const MESSAGE_KEYS = new Set([
+  "role",
+  "content",
+  "toolCalls",
+  "toolCallId",
+  "spill",
+  "durationMs",
+  "contextUsage",
+]);
+const CONTEXT_USAGE_KEYS = new Set(["used", "window"]);
 const TOOL_CALL_KEYS = ["id", "name", "arguments"];
 // `spill` (docs/feat/tui-spill-note.md): an older build refuses a record that
 // holds one (`unknown key "spill"`), loudly — never half-loaded.
@@ -236,6 +246,17 @@ function isSpill(value: unknown): boolean {
       (typeof value.path === "string" &&
         value.path.length > 0 &&
         value.path.length <= SPILL_PATH_MAX))
+  );
+}
+
+/** Exactly `used` (a count) and `window` (a positive count): the wire's bounds. */
+function isContextUsage(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    Object.keys(value).every((key) => CONTEXT_USAGE_KEYS.has(key)) &&
+    isCount(value.used) &&
+    isCount(value.window) &&
+    (value.window as number) > 0
   );
 }
 
@@ -279,6 +300,9 @@ function messageProblem(value: unknown): string | null {
   }
   if (value.durationMs !== undefined && !isCount(value.durationMs)) {
     return "has a malformed durationMs";
+  }
+  if (value.contextUsage !== undefined && !isContextUsage(value.contextUsage)) {
+    return "has a malformed contextUsage";
   }
   return null;
 }

@@ -38,6 +38,13 @@ export const ChatMessageSchema = z.object({
   spill: ToolResultSpillSchema.optional(),
   /** On a tool result that ran: its measured run time in ms (display only, docs/fix/tool-duration.md). */
   durationMs: z.number().int().nonnegative().optional(),
+  /**
+   * On a user/tool message: the context fill the model was told about (NOT
+   * display-only — rendered into the model's prompt; docs/feat/context-awareness.md).
+   */
+  contextUsage: z
+    .object({ used: z.number().int().nonnegative(), window: z.number().int().positive() })
+    .optional(),
 });
 export type WireChatMessage = z.infer<typeof ChatMessageSchema>;
 
