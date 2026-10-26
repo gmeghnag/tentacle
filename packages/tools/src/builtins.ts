@@ -8,7 +8,8 @@
  * so a rich frontend can render a git-style diff. Mutating tools default to
  * `permission: "ask"`.
  */
-import type { ExecOptions, Tool, ToolResultDetail } from "@tentacle/core";
+import type { ExecOptions, Tool, ToolContext, ToolResultDetail } from "@tentacle/core";
+import { pathLocksFor } from "@tentacle/core";
 import { createTwoFilesPatch } from "diff";
 import { z } from "zod";
 import { shellKillTool, shellOutputTool } from "./background.ts";
@@ -26,6 +27,11 @@ function makeDiff(path: string, before: string, after: string): ToolResultDetail
     }
   }
   return { kind: "diff", path, patch, added, removed };
+}
+
+/** Hold `path`'s lock across a read-modify-write (the ctx's, else the env's shared one). */
+function lockPath<T>(ctx: ToolContext, path: string, fn: () => Promise<T>): Promise<T> {
+  return (ctx.pathLocks ?? pathLocksFor(ctx.env)).withLock(path, fn);
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -108,19 +114,21 @@ export const fsWriteTool: Tool<z.infer<typeof fsWriteInput>> = {
   description: "Write (creating or overwriting) a UTF-8 text file.",
   inputSchema: fsWriteInput,
   permission: "ask",
-  async execute(input, ctx) {
-    let before = "";
-    try {
-      before = await ctx.env.readFile(input.path);
-    } catch {
-      before = "";
-    }
-    await ctx.env.writeFile(input.path, input.content);
-    const diff = makeDiff(input.path, before, input.content);
-    return {
-      content: `wrote ${input.content.length} bytes to ${input.path} (+${diff.added} -${diff.removed})`,
-      details: diff,
-    };
+  execute(input, ctx) {
+    return lockPath(ctx, input.path, async () => {
+      let before = "";
+      try {
+        before = await ctx.env.readFile(input.path);
+      } catch {
+        before = "";
+      }
+      await ctx.env.writeFile(input.path, input.content);
+      const diff = makeDiff(input.path, before, input.content);
+      return {
+        content: `wrote ${input.content.length} bytes to ${input.path} (+${diff.added} -${diff.removed})`,
+        details: diff,
+      };
+    });
   },
 };
 
@@ -179,15 +187,17 @@ export const fsEditTool: Tool<z.infer<typeof fsEditInput>> = {
     "Edit a file by replacing an exact string. Fails if the string is missing, or not unique unless replace_all is set.",
   inputSchema: fsEditInput,
   permission: "ask",
-  async execute(input, ctx) {
-    const before = await ctx.env.readFile(input.path);
-    const result = applyOneEdit(before, input);
-    if (!result.ok) {
-      return { content: `${result.reason} in ${input.path}`, isError: true };
-    }
-    await ctx.env.writeFile(input.path, result.content);
-    const diff = makeDiff(input.path, before, result.content);
-    return { content: `edited ${input.path} (+${diff.added} -${diff.removed})`, details: diff };
+  execute(input, ctx) {
+    return lockPath(ctx, input.path, async () => {
+      const before = await ctx.env.readFile(input.path);
+      const result = applyOneEdit(before, input);
+      if (!result.ok) {
+        return { content: `${result.reason} in ${input.path}`, isError: true };
+      }
+      await ctx.env.writeFile(input.path, result.content);
+      const diff = makeDiff(input.path, before, result.content);
+      return { content: `edited ${input.path} (+${diff.added} -${diff.removed})`, details: diff };
+    });
   },
 };
 
@@ -213,29 +223,31 @@ export const fsMultiEditTool: Tool<z.infer<typeof fsMultiEditInput>> = {
     "Apply several exact-string edits to one file in a single call, in order. Each edit sees the result of the previous one. Atomic: if any edit can't be applied, nothing is written. Prefer this over multiple fs_edit calls when changing the same file in several places.",
   inputSchema: fsMultiEditInput,
   permission: "ask",
-  async execute(input, ctx) {
-    const before = await ctx.env.readFile(input.path);
-    let current = before;
-    for (let i = 0; i < input.edits.length; i++) {
-      const edit = input.edits[i];
-      if (!edit) {
-        continue;
+  execute(input, ctx) {
+    return lockPath(ctx, input.path, async () => {
+      const before = await ctx.env.readFile(input.path);
+      let current = before;
+      for (let i = 0; i < input.edits.length; i++) {
+        const edit = input.edits[i];
+        if (!edit) {
+          continue;
+        }
+        const result = applyOneEdit(current, edit);
+        if (!result.ok) {
+          return {
+            content: `edit #${i + 1} of ${input.edits.length} failed: ${result.reason} in ${input.path} (no changes written)`,
+            isError: true,
+          };
+        }
+        current = result.content;
       }
-      const result = applyOneEdit(current, edit);
-      if (!result.ok) {
-        return {
-          content: `edit #${i + 1} of ${input.edits.length} failed: ${result.reason} in ${input.path} (no changes written)`,
-          isError: true,
-        };
-      }
-      current = result.content;
-    }
-    await ctx.env.writeFile(input.path, current);
-    const diff = makeDiff(input.path, before, current);
-    return {
-      content: `edited ${input.path} with ${input.edits.length} edits (+${diff.added} -${diff.removed})`,
-      details: diff,
-    };
+      await ctx.env.writeFile(input.path, current);
+      const diff = makeDiff(input.path, before, current);
+      return {
+        content: `edited ${input.path} with ${input.edits.length} edits (+${diff.added} -${diff.removed})`,
+        details: diff,
+      };
+    });
   },
 };
 
