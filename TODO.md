@@ -1005,10 +1005,12 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 > 1. ~~task 7 `connect-sessions`~~ DONE, merged `6319beb` (2026-10-26; `docs/feat/connect-sessions.md`);
 > 2. ~~`context-awareness`~~ DONE, merged `867a4d0` (2026-10-26; `docs/feat/context-awareness.md`; record v7);
 > 3. `context-reset` (`docs/eval/context-reset.md`; re-planned 2026-10-26,
->    3 branches; owner answered CR-Q1/CR-Q2; takes record v8 if it needs one);
+>    3 branches; owner answered CR-Q1/CR-Q2; takes record v8 if it needs one) —
+>    slice 1 `feat/context-reset-refresh` DONE, merged `e58d8bf`; next slice 2
+>    `feat/context-reset-barrier`, then slice 3 `feat/context-reset`;
 > 3b. skills hot-reload for the USER (`/name` list + `/skills` panel follow a
 >    reset / new skill without restart) — owner CR-Q1, right after context-reset;
-> 4. `docker-runtime` — `run`/`attach --docker` (`docs/eval/docker-runtime.md`,
+> 4. `docker-runtime` (slice A `feat/docker-engine-client` EXECUTING in parallel, worktree) — `run`/`attach --docker` (`docs/eval/docker-runtime.md`,
 >    owner answers 2026-10-26; promote to `feat/` when picked; slices A
 >    `packages/docker`, B neutral `SandboxHost` seam, `ssh://` dial-stdio, C CLI/docs);
 > 5. default `maxIterations` = `-1` (agent and sub-agents);
