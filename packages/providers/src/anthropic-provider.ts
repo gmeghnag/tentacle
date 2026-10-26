@@ -25,7 +25,7 @@ import type {
   ToolDefinition,
   Usage,
 } from "@tentacle/core";
-import { ModelRequestError } from "./openai-provider.ts";
+import { ModelRequestError, parseRetryAfter } from "./openai-provider.ts";
 import { parseSSE } from "./sse.ts";
 
 /** Default Messages API version header (overridable for gateways). */
@@ -98,7 +98,12 @@ export class AnthropicProvider implements ModelProvider {
     const res = await this.doFetch(`${this.config.baseURL}/messages`, init);
     if (!res.ok || !res.body) {
       const body = await safeText(res);
-      throw new ModelRequestError(res.status, body, anthropicErrorHint(res.status, body));
+      throw new ModelRequestError(
+        res.status,
+        body,
+        anthropicErrorHint(res.status, body),
+        parseRetryAfter(res.headers),
+      );
     }
 
     const blocks = new Map<number, OpenBlock>();
