@@ -379,3 +379,5 @@ pulled for the musl test is still present (its `docker rmi` needed approval).
    it (owner: "ottimo").
 
 Not yet decided: WHEN to build (promotion to `feat/`, queue position).
+
+> **Owner decision (2026-10-26, supersedes `--docker` above):** the CLI selects the engine with ONE flag, `--engine kubernetes|docker|podman` (on `run` and `attach`), not a `--docker` boolean. The DEFAULT engine is configurable (config key `engine:`, project/user config; the flag overrides it); with nothing configured it stays `kubernetes` (today's behaviour). `podman` uses the same Docker-API code path but auto-discovers podman's socket (rootless, podman machine on macOS) so the user needs no `DOCKER_HOST`. Rejected names: `--runtime` (clashes with tentacle's own "runtime" = worker/run/attach/connect), `--sandbox` (promises isolation `attach` does not give), `--backend`/`--on` (vague / unusual). Proposal for slice B, to confirm when planned: name the seam `EngineHost` instead of `SandboxHost`.
