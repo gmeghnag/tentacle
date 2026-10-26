@@ -18,7 +18,7 @@ import {
   type ToolProgressEvent,
   toolLabel,
 } from "@tentacle/core";
-import { ToolRegistry } from "@tentacle/tools";
+import { CONTEXT_RESET_TOOL_NAME, ToolRegistry } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
@@ -161,7 +161,8 @@ export function createSubagentRunner(deps: SubagentDeps): {
     // spawn tool so a sub-agent cannot spawn its own sub-agents.
     const childTools = new ToolRegistry();
     for (const tool of deps.tools.list()) {
-      if (tool.name === spawnToolName) {
+      // Nor its context reset: a child's context is its own, and short-lived.
+      if (tool.name === spawnToolName || tool.name === CONTEXT_RESET_TOOL_NAME) {
         continue;
       }
       if (type.tools === "all" || type.tools.includes(tool.name)) {

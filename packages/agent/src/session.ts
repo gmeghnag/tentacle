@@ -97,6 +97,7 @@ export class Session {
     try {
       yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
         newFrom,
+        userMessage: text !== "",
         ...(opts.skill !== undefined ? { skill: opts.skill } : {}),
         ...(opts.askHooksTrust !== undefined ? { askHooksTrust: opts.askHooksTrust } : {}),
       });
@@ -166,6 +167,7 @@ export class Session {
     const next = compactedHistory(this.messages, summary, skills);
     this.messages.length = 0;
     this.messages.push(...next);
+    this.agent.forgetModelRequestBaseline(this.id);
     onReplaced?.();
     this.persist();
     return { summary, before, after: this.messages.length };

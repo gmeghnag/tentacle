@@ -637,7 +637,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   if (mode === "plain") {
     // Ink is not mounted here: an ignored hook failure goes to stderr.
     return await startTerminal(
-      buildAgent(config, { log: (l) => process.stderr.write(`[hook] ${l}\n`) }).agent,
+      buildAgent(config, {
+        log: (l) => process.stderr.write(`[hook] ${l}\n`),
+        notice: (l) => process.stderr.write(`[context] ${l}\n`),
+      }).agent,
     );
   }
 
@@ -750,6 +753,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // One-shot, no Ink: an ignored hook failure goes to stderr.
   const { agent, tools } = buildAgent(config, {
     log: (l) => process.stderr.write(`[hook] ${l}\n`),
+    notice: (l) => process.stderr.write(`[context] ${l}\n`),
   });
   const mcp = await connectConfiguredMcp(config, tools);
   for (const [name, message] of Object.entries(mcp.errors)) {

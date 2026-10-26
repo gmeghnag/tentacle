@@ -38,6 +38,14 @@ const probe: Tool = {
   execute: async () => ({ content: "reset done" }),
 };
 
+const plain: Tool = {
+  name: "plain",
+  description: "a tool that does not reset",
+  inputSchema: z.object({}).passthrough(),
+  permission: "none",
+  execute: async () => ({ content: "ok" }),
+};
+
 /** Fakes slice 3's commit: at the probe's commit, replace in place + `context_reset`, no await between. */
 class ResettingAgent extends Agent {
   override async *runMessages(
@@ -72,11 +80,13 @@ const probeCall: Step = {
  * waits at). `dial` connects a client whose `session/snapshot` requests can
  * be HELD (the turn then ends behind the snapshot's cut).
  */
-function daemon() {
-  const model = new GatedModel([
+function daemon(
+  rounds: readonly (readonly Step[])[] = [
     [{ kind: "gate" }, probeCall, done],
     [{ kind: "gate" }, t("after "), t("the reset"), done],
-  ]);
+  ],
+) {
+  const model = new GatedModel(rounds);
   const next = async (): Promise<void> => {
     await until(() => model.waiting);
     model.open();
@@ -87,7 +97,7 @@ function daemon() {
       const permissions = new PermissionBroker();
       const agent = new ResettingAgent({
         model,
-        tools: new ToolRegistry().register(probe),
+        tools: new ToolRegistry().register(probe).register(plain),
         env,
         requestPermission: (req) => permissions.request(req),
       });
@@ -195,6 +205,45 @@ describe("context_reset over the real daemon (the mid-turn barrier)", () => {
       "tool_start",
       "tool_result:reset_probe",
       "context_reset:system:FRESH SYSTEM|user:RESTART PROMPT|assistant:after the reset",
+      "turn_end:end_turn",
+    ]);
+    a.client.close();
+  });
+
+  test("F3: the reset's turn is running but untracked here (its consumer stopped reading): it is taken up as at any reset, the rest of the turn is not dropped", async () => {
+    const plainCall: Step = {
+      kind: "event",
+      event: { type: "tool_call", toolCall: { id: "p1", name: "plain", arguments: "{}" } },
+    };
+    const d = daemon([
+      [{ kind: "gate" }, plainCall, done],
+      [{ kind: "gate" }, probeCall, done],
+      [{ kind: "gate" }, t("after the reset"), done],
+    ]);
+    const a = d.dial();
+    await a.client.initialize();
+    const sid = crypto.randomUUID();
+    const session = a.client.newSession(undefined, sid);
+    const activities: SessionActivity[] = [];
+    session.watch((x) => activities.push(x));
+    // The own turn's consumer reads one event, then stops: the turn is no
+    // longer tracked here while the daemon still runs it.
+    const it = session.send("go")[Symbol.asyncIterator]();
+    const first = it.next();
+    await d.next();
+    expect((await first).value?.type).toBe("tool_start");
+    await it.return(undefined);
+    await d.next(); // round 2: the reset
+    await until(() => activities.some((x) => x.kind === "turn" || x.kind === "history"));
+    const taken = activities.find((x) => x.kind === "turn");
+    expect(activities.map((x) => x.kind)).toEqual(["turn"]);
+    if (taken?.kind !== "turn") throw new Error("the reset's turn was not taken up");
+    const rest = collect(taken.events);
+    await d.next(); // round 3
+    expect(await rest.ended).toBe("ended");
+    expect(shape(rest.into)).toEqual([
+      "context_reset:system:FRESH SYSTEM|user:RESTART PROMPT",
+      "text:after the reset",
       "turn_end:end_turn",
     ]);
     a.client.close();

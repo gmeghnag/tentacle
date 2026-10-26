@@ -34,14 +34,15 @@ import {
   allowAll,
 } from "@tentacle/core";
 import {
+  CONTEXT_RESET_TOOL_NAME,
   SKILL_TOOL_NAME,
   type SkillActivator,
-  type ToolRegistry,
+  ToolRegistry,
   skillActivations,
   skillContentName,
   userSkillCall,
 } from "@tentacle/tools";
-import { type CarriedSkill, summarizeConversation } from "./compact.ts";
+import { type CarriedSkill, carryOverSkills, summarizeConversation } from "./compact.ts";
 import {
   type ContextAnchor,
   estimateUsed,
@@ -49,9 +50,16 @@ import {
   renderForModel,
   shouldEmit,
 } from "./context-awareness.ts";
+import {
+  contextResetHistory,
+  offeredSkillNames,
+  resetPromptOf,
+  resetRefusal,
+  skillSetDelta,
+} from "./context-reset.ts";
 import { EventQueue } from "./event-queue.ts";
 import { type AskHooksTrust, type HookRunner, hookNote } from "./hooks.ts";
-import { PermissionGate } from "./permission-gate.ts";
+import { type GateOutcome, PermissionGate } from "./permission-gate.ts";
 import { type ResultTransform, applyResultTransforms } from "./result-pipeline.ts";
 import { suspendedCalls } from "./resume.ts";
 
@@ -110,6 +118,12 @@ export interface RunOptions {
    * the history's length at entry (nothing of the caller's is new).
    */
   readonly newFrom?: number;
+  /**
+   * The turn starts with a new user message (a `send` with text): the
+   * per-message count of context resets restarts. Absent → a continuation or
+   * a resume, which keep it.
+   */
+  readonly userMessage?: boolean;
 }
 
 /** The context-line estimate's counter when the config names none. */
@@ -280,7 +294,23 @@ export interface AgentConfig {
     readonly stepPercent: number;
     readonly counter?: TokenCounter;
   };
+  /**
+   * The model may renew its own context (`context_reset`, registered in
+   * `tools`; docs/feat/context-reset.md): the loop runs it — refusals, the
+   * approval, then the history and the skill set replaced between rounds.
+   * `maxPerMessage`: resets per user message, -1 = unlimited. `refresh`
+   * re-reads the files the session's context is built from (the system prompt
+   * and the skill set); it may throw (the reset is then refused). Absent → a
+   * `context_reset` call is not intercepted.
+   */
+  readonly contextReset?: {
+    readonly maxPerMessage: number;
+    refresh(): Promise<{ readonly systemPrompt: string; readonly skills: SessionSkills }>;
+  };
 }
+
+/** What `runToolCalls` reports to the loop: an accepted context reset ran. */
+type RoundOutcome = "context_reset" | undefined;
 
 /**
  * `work`'s outcome, unless `signal` aborts first: then reject with its reason
@@ -337,6 +367,13 @@ export class Agent {
    * Memory only: a reload starts from the estimate.
    */
   private readonly anchors = new WeakMap<ChatMessage[], ContextAnchor>();
+  /**
+   * The context-reset guard (one agent per session): accepted resets since
+   * the last user message, and whether the model made another tool call since
+   * the last one. Memory only: a reload starts permissive.
+   */
+  private resetsThisMessage = 0;
+  private otherCallSinceReset = true;
 
   constructor(config: AgentConfig) {
     this.config = config;
@@ -379,6 +416,14 @@ export class Agent {
     keep: readonly CarriedSkill[] = [],
   ): Promise<string> {
     return summarizeConversation(this.config.model, messages, signal, keep);
+  }
+
+  /**
+   * The session's history was replaced (`/compact`): the next `model_request`
+   * hook reports the whole history as new.
+   */
+  forgetModelRequestBaseline(sessionId: string): void {
+    this.config.hooks?.forgetModelRequestBaseline(sessionId);
   }
 
   /**
@@ -441,7 +486,10 @@ export class Agent {
     const messages = this.startConversation();
     const newFrom = messages.length;
     messages.push(...userMessages);
-    yield* this.runMessages(messages, sessionId, signal, undefined, { newFrom });
+    yield* this.runMessages(messages, sessionId, signal, undefined, {
+      newFrom,
+      userMessage: true,
+    });
   }
 
   /**
@@ -476,6 +524,18 @@ export class Agent {
     // cancel / error); otherwise cap the number of model/tool rounds.
     const configured = this.config.maxIterations ?? 16;
     const maxIterations = configured < 0 ? Number.POSITIVE_INFINITY : configured;
+    // A user message — the turn's own, or a steer drained into it — restarts
+    // the per-message count of context resets.
+    if (opts.userMessage === true) {
+      this.resetsThisMessage = 0;
+    }
+    const drain = (): readonly string[] => {
+      const texts = drainSteering?.() ?? [];
+      if (texts.length > 0) {
+        this.resetsThisMessage = 0;
+      }
+      return texts;
+    };
     // How many times in a row we auto-nudge a stalled model (an empty round:
     // no text, no tool calls) to continue before giving up, so a stall after a
     // tool result doesn't silently end the turn (the user had to type "go on").
@@ -511,7 +571,11 @@ export class Agent {
     // uninterrupted run would still have run, each asked again — so the round's
     // results follow its assistant message with nothing in between.
     if (resumed) {
-      yield* this.runToolCalls(resumed, messages, toolContext, signal);
+      // A reset in it: the fresh history is all unseen (the loop below starts
+      // at round 0 anyway).
+      if ((yield* this.runToolCalls(resumed, messages, toolContext, signal)) === "context_reset") {
+        unseen = 0;
+      }
     }
 
     // The user's `/name`: its `skill` round goes right after their message and
@@ -550,7 +614,7 @@ export class Agent {
         // and the steer must not reach the model without passing `turn_start`
         // (the user's next message starts a turn that runs it). Same no-await
         // invariant as the late-steer drain: nothing awaits from here to `turn_end`.
-        for (const steer of drainSteering?.() ?? []) {
+        for (const steer of drain()) {
           messages.push({ role: "user", content: steer });
           yield { type: "steer", text: steer };
         }
@@ -559,7 +623,11 @@ export class Agent {
       }
     }
 
-    for (let iteration = 0; iteration < maxIterations; iteration++) {
+    // The round the budget counts from: an accepted context reset restarts it
+    // ("fresh context, fresh rounds"). `iteration` stays the turn's round
+    // index (the `model_request` hook's).
+    let budgetFrom = 0;
+    for (let iteration = 0; iteration - budgetFrom < maxIterations; iteration++) {
       if (signal?.aborted) {
         this.notifyTurnEnd(sessionId, "cancelled");
         yield { type: "turn_end", reason: "cancelled" };
@@ -567,7 +635,7 @@ export class Agent {
       }
 
       // Inject any user messages queued since the last boundary (steering).
-      for (const text of drainSteering?.() ?? []) {
+      for (const text of drain()) {
         messages.push({ role: "user", content: text });
         yield { type: "steer", text };
       }
@@ -689,7 +757,7 @@ export class Agent {
         // Pinned by the daemon test "no macrotask fits between the last
         // steering drain and the turn's end"; the `max_iterations` path below
         // keeps the same invariant.
-        const late = drainSteering?.() ?? [];
+        const late = drain();
         if (late.length > 0) {
           for (const text of late) {
             messages.push({ role: "user", content: text });
@@ -715,7 +783,14 @@ export class Agent {
         return;
       }
 
-      yield* this.runToolCalls(toolCalls, messages, toolContext, signal);
+      if (
+        (yield* this.runToolCalls(toolCalls, messages, toolContext, signal)) === "context_reset"
+      ) {
+        budgetFrom = iteration + 1;
+        // The model has seen nothing of the fresh history: its context line
+        // may ride on any of it (the next request's).
+        unseen = 0;
+      }
     }
 
     // The cap was hit. If the user cancelled while the last tool ran (after the
@@ -736,7 +811,7 @@ export class Agent {
     if (!signal?.aborted) {
       // Anything queued during the last allowed round is injected first, so the
       // final report can address it (no round is left to run it otherwise).
-      for (const text of drainSteering?.() ?? []) {
+      for (const text of drain()) {
         messages.push({ role: "user", content: text });
         yield { type: "steer", text };
       }
@@ -795,7 +870,7 @@ export class Agent {
       // accepted and then dropped by the next send's reset. Same no-await
       // invariant as the late-steer drain above: nothing awaits from here to
       // `turn_end`.
-      for (const text of drainSteering?.() ?? []) {
+      for (const text of drain()) {
         messages.push({ role: "user", content: text });
         yield { type: "steer", text };
       }
@@ -888,8 +963,21 @@ export class Agent {
     messages: ChatMessage[],
     toolContext: ToolContext,
     signal: AbortSignal | undefined,
-  ): AsyncGenerator<AgentEvent> {
+  ): AsyncGenerator<AgentEvent, RoundOutcome> {
     for (const call of calls) {
+      const resetConfig = this.config.contextReset;
+      if (
+        call.name === CONTEXT_RESET_TOOL_NAME &&
+        resetConfig !== undefined &&
+        this.config.tools.get(CONTEXT_RESET_TOOL_NAME) !== undefined
+      ) {
+        if (yield* this.runContextReset(call, resetConfig, messages, toolContext, signal)) {
+          // The only call of its message (checked): the round is over.
+          return "context_reset";
+        }
+        continue;
+      }
+      this.otherCallSinceReset = true;
       if (signal?.aborted) {
         // The user cancelled while the previous tool ran (or before this one
         // could start). It must not start — and must not prompt for
@@ -939,6 +1027,149 @@ export class Agent {
       // After the push, not before: the `tool_result` above precedes it.
       yield { type: "history_commit" };
     }
+    return undefined;
+  }
+
+  /**
+   * A `context_reset` call (docs/feat/context-reset.md). Refused — before the
+   * gate, so nothing is asked for a call that cannot run — or denied: an error
+   * result like any call's. Accepted: PREPARE (all I/O: the fresh system
+   * prompt and skill set, the active skills re-read through the NEW
+   * activator), then COMMIT in one synchronous stretch — the history replaced
+   * in place, the skill set installed, the guard updated — up to the
+   * `context_reset` event, the daemon's barrier. Only where a `history_commit`
+   * may be yielded (between calls: no push is pending its `pop`). Returns
+   * whether the context was reset. A cancel or a failure before the commit
+   * leaves the history, the skill set and the counters untouched.
+   */
+  private async *runContextReset(
+    call: ToolCall,
+    config: NonNullable<AgentConfig["contextReset"]>,
+    messages: ChatMessage[],
+    toolContext: ToolContext,
+    signal: AbortSignal | undefined,
+  ): AsyncGenerator<AgentEvent, boolean> {
+    const answer = function* (result: ToolResult): Generator<AgentEvent> {
+      yield { type: "tool_result", id: call.id, name: call.name, result };
+      messages.push(toolMessage(call.id, result));
+      yield { type: "history_commit" };
+    };
+    const cancelled: ToolResult = { content: CANCELLED_TOOL_NOTE, isError: true };
+    if (signal?.aborted) {
+      // As any call reached after a cancel: answered, never asked.
+      yield* answer(cancelled);
+      return false;
+    }
+    yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
+    const input = parseArguments(call.arguments);
+    // Its own assistant message (the last one naming it, a resumed round too).
+    const own = messages.findLast((m) => m.toolCalls?.some((c) => c.id === call.id));
+    const refusal = resetRefusal({
+      calls: own?.toolCalls?.length ?? 0,
+      prompt: (input as { prompt?: unknown }).prompt,
+      otherCallSinceReset: this.otherCallSinceReset,
+      resetsThisMessage: this.resetsThisMessage,
+      maxPerMessage: config.maxPerMessage,
+    });
+    if (refusal !== null) {
+      yield* answer({ content: refusal, isError: true });
+      return false;
+    }
+    const tool = this.config.tools.get(CONTEXT_RESET_TOOL_NAME);
+    if (!tool) {
+      return false; // unreachable: the caller checked it
+    }
+    const outcome = await this.gate.authorize(tool, input, {
+      sessionId: toolContext.sessionId,
+      toolCallId: call.id,
+      signal: toolContext.signal,
+    });
+    if (signal?.aborted) {
+      yield* answer(cancelled);
+      return false;
+    }
+    if (!outcome.allowed) {
+      yield* answer(gateRefusal(call, outcome));
+      return false;
+    }
+    // A `tool_call` hook may have rewritten the input: checked again.
+    const prompt = resetPromptOf(outcome.input);
+    if (prompt === null) {
+      yield* answer({
+        content: resetRefusal({
+          calls: 1,
+          prompt: undefined,
+          otherCallSinceReset: true,
+          resetsThisMessage: 0,
+          maxPerMessage: -1,
+        }) as string,
+        isError: true,
+      });
+      return false;
+    }
+
+    // PREPARE — every read, no effect: a cancel or a failure leaves all as is.
+    let fresh: Awaited<ReturnType<typeof config.refresh>>;
+    let carried: ReturnType<typeof carryOverSkills>;
+    try {
+      fresh = await unlessAborted(config.refresh(), signal);
+      carried = carryOverSkills(
+        await this.reloadSkills(
+          toolContext.sessionId,
+          messages,
+          signal,
+          fresh.skills.activator ?? null,
+        ),
+      );
+    } catch (error) {
+      if (signal?.aborted) {
+        yield* answer(cancelled);
+        return false;
+      }
+      yield* answer({
+        content: `context_reset failed: could not rebuild the context: ${error instanceof Error ? error.message : String(error)}; the context was NOT reset.`,
+        isError: true,
+      });
+      return false;
+    }
+    if (signal?.aborted) {
+      yield* answer(cancelled);
+      return false;
+    }
+    const before = offeredSkillNames(this.config.tools.definitions());
+    const after = fresh.skills.tool
+      ? offeredSkillNames(new ToolRegistry().register(fresh.skills.tool).definitions())
+      : [];
+    const next = contextResetHistory({
+      systemPrompt: fresh.systemPrompt,
+      prompt,
+      jobs: (this.config.jobs?.list() ?? [])
+        .filter((j) => j.status === "running")
+        .map((j) => ({ id: j.id, command: j.command })),
+      skills: carried,
+    });
+    const delta = skillSetDelta(before, after);
+    // Display only, NOT pushed: the call is discarded with the old history.
+    yield {
+      type: "tool_result",
+      id: call.id,
+      name: call.name,
+      result: {
+        content: `Context reset — continuing from the restart prompt.${delta === "" ? "" : `\n${delta}`}`,
+      },
+    };
+
+    // COMMIT (a cancel from here on lands on the fresh history: the loop's
+    // top ends the turn there) — one synchronous stretch, no `await`, up to the event.
+    messages.length = 0;
+    messages.push(...next);
+    this.installSkills(fresh.skills);
+    this.anchors.delete(messages);
+    this.config.hooks?.forgetModelRequestBaseline(toolContext.sessionId);
+    this.resetsThisMessage++;
+    this.otherCallSinceReset = false;
+    yield { type: "context_reset", messages: [...messages] };
+    return true;
   }
 
   /**
@@ -1108,37 +1339,7 @@ export class Agent {
       return { result: { content: CANCELLED_TOOL_NOTE, isError: true }, input: outcome.input };
     }
     if (!outcome.allowed) {
-      if (outcome.by === "hook") {
-        const name = outcome.hookName ?? "hook";
-        return {
-          result: {
-            content: `Blocked by a hook: \`${call.name}\` was not run. Reason: ${outcome.reason ?? ""}`,
-            isError: true,
-            hook: {
-              action: "blocked",
-              name,
-              ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
-            },
-          },
-          input: outcome.input,
-        };
-      }
-      if (outcome.by === "unavailable") {
-        return {
-          result: {
-            content: `Permission could not be requested: ${outcome.reason ?? "no client to ask"}. \`${call.name}\` was not run.`,
-            isError: true,
-          },
-          input: outcome.input,
-        };
-      }
-      return {
-        result: {
-          content: `Permission denied by the user: \`${call.name}\` was not run.`,
-          isError: true,
-        },
-        input: outcome.input,
-      };
+      return { result: gateRefusal(call, outcome), input: outcome.input };
     }
     if (!outcome.modified) {
       // Unchanged: the raw argument string, byte-identical to a hook-less run.
@@ -1161,6 +1362,35 @@ export class Agent {
       input: outcome.input,
     };
   }
+}
+
+/** The result of a call the gate refused: blocked by a hook, nobody to ask, or denied. */
+function gateRefusal(
+  call: ToolCall,
+  outcome: Extract<GateOutcome, { allowed: false }>,
+): ToolResult {
+  if (outcome.by === "hook") {
+    const name = outcome.hookName ?? "hook";
+    return {
+      content: `Blocked by a hook: \`${call.name}\` was not run. Reason: ${outcome.reason ?? ""}`,
+      isError: true,
+      hook: {
+        action: "blocked",
+        name,
+        ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
+      },
+    };
+  }
+  if (outcome.by === "unavailable") {
+    return {
+      content: `Permission could not be requested: ${outcome.reason ?? "no client to ask"}. \`${call.name}\` was not run.`,
+      isError: true,
+    };
+  }
+  return {
+    content: `Permission denied by the user: \`${call.name}\` was not run.`,
+    isError: true,
+  };
 }
 
 /** A call's parsed arguments; `{}` when empty or malformed (the registry reports those). */

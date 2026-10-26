@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENTS_FILENAME, CONFIG_FILENAME, DEFAULT_SYSTEM_PROMPT } from "../src/defaults.ts";
@@ -10,6 +10,7 @@ import {
   loadConfig,
   refreshSessionContext,
 } from "../src/load.ts";
+import { escapingSymlink } from "../src/packages.ts";
 
 let dir: string;
 let configDir: string;
@@ -100,6 +101,32 @@ describe("refreshSessionContext (docs/feat/context-reset-refresh.md)", () => {
     const fresh = await refreshSessionContext(cfg, env());
     expect(fresh.skills.map((s) => [s.name, s.scope])).toEqual([["from-pkg", "user"]]);
     expect(fresh.systemPrompt).toContain("<name>from-pkg</name>");
+  });
+
+  test("a package whose tree gained a symlink out of it since the start: its skills are skipped, as at start-up", async () => {
+    const pkg = join(configDir, "packages", "demo");
+    await mkdir(pkg, { recursive: true });
+    await writeFile(
+      join(pkg, "tentacle-package.json"),
+      JSON.stringify({ name: "demo", version: "1.0.0", description: "demo" }),
+    );
+    await writeSkill(join(pkg, "skills"), "inside", "packaged");
+    const cfg = await load();
+    expect(cfg.skills.map((s) => s.name)).toEqual(["inside"]);
+
+    // After the start: a skill dir that is a symlink to a folder outside the package.
+    const outside = join(dir, "outside");
+    await writeSkill(outside, "escaped", "from outside");
+    await symlink(join(outside, "escaped"), join(pkg, "skills", "escaped"));
+    // Start-up would refuse the whole package (`loadPackage`):
+    expect(await escapingSymlink(pkg)).toBe("skills/escaped");
+
+    const fresh = await refreshSessionContext(cfg, env());
+    expect(fresh.skills.map((s) => s.name)).toEqual([]);
+    expect(fresh.systemPrompt).not.toContain("escaped");
+    expect(fresh.skillDiagnostics).toContain(
+      "package demo: skills skipped (skills/escaped points outside the package)",
+    );
   });
 
   test("settings stay as at the start: disabled AGENTS.md / skills stay off", async () => {

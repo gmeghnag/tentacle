@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
-import { ToolRegistry, fsReadTool, shellTool } from "@tentacle/tools";
+import {
+  CONTEXT_RESET_TOOL_NAME,
+  ToolRegistry,
+  createContextResetTool,
+  fsReadTool,
+  shellTool,
+} from "@tentacle/tools";
 import { HookRunner } from "../src/hooks.ts";
 import { BUILTIN_AGENT_TYPES, childToolLabel, createSubagentRunner } from "../src/subagent.ts";
 
@@ -214,6 +220,27 @@ describe("createSubagentRunner", () => {
     // The child attempted to call the spawn tool; it must be rejected as
     // unknown (not in the child's registry) and therefore never executed.
     expect(spawned).toEqual([]);
+  });
+
+  test("a child is never offered context_reset (its context is its own)", async () => {
+    const { env } = recordingEnv();
+    const offered: string[][] = [];
+    const model: ModelProvider = {
+      id: "rec",
+      async *stream(request) {
+        offered.push((request.tools ?? []).map((t) => t.name));
+        yield { type: "text", delta: "report" };
+        yield { type: "done" };
+      },
+    };
+    const { run } = createSubagentRunner({
+      model,
+      env,
+      tools: fullRegistry().register(createContextResetTool()),
+    });
+    await run({ description: "d", prompt: "go", type: "general-purpose" });
+    expect(offered[0]?.length).toBeGreaterThan(0);
+    expect(offered[0]).not.toContain(CONTEXT_RESET_TOOL_NAME);
   });
 
   test("a type's model override routes to the provider from modelFor", async () => {

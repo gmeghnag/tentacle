@@ -805,10 +805,23 @@ describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
       "shell_kill",
       "skill",
       "agent_task",
+      // Slice 3 (docs/feat/context-reset.md): the one intended change, on by default.
+      "context_reset",
     ]);
     expect(JSON.stringify(defs.find((d) => d.name === "skill"))).toBe(
       '{"name":"skill","description":"Load a skill: packaged instructions for a specific kind of task. When the task matches a skill listed under \\"# Skills\\" in the system prompt, call this FIRST with the skill\'s name, then follow the instructions it returns. A skill already loaded in this conversation does not need loading again.","parameters":{"type":"object","properties":{"name":{"type":"string","enum":["alpha","beta"],"description":"The skill to load, from the Skills list"}},"required":["name"],"additionalProperties":false}}',
     );
+  });
+
+  test("contextReset.enabled false: the model is not offered context_reset", async () => {
+    const cfg = await pinnedConfig();
+    const { tools } = buildAgent({
+      ...cfg,
+      subagentsEnabled: true,
+      contextReset: { enabled: false, maxPerMessage: -1 },
+    });
+    expect(tools.get("context_reset")).toBeUndefined();
+    expect(tools.definitions().map((d) => d.name)).not.toContain("context_reset");
   });
 
   test("buildSessionSkills: the tool is the model's enum, the activator knows the hidden skill too", async () => {

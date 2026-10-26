@@ -28,7 +28,8 @@ This task delivers the first usable slice, per the eval's owner decisions:
 - `disable-model-invocation: true` hides a skill from catalog and enum
   (decision 5); `allowed-tools` ignored with a warning (Q5);
 - off switch `loadSkills: false` / `TENTACLE_NO_SKILLS` (Q8); the catalog is
-  built at start, a new skill needs a restart (decision 3); pods and `connect`
+  built at start, a new skill needs a restart (decision 3) — or, for the model,
+  a context reset (`docs/feat/context-reset.md`); pods and `connect`
   see the daemon host's skills (Q4, decision 2) — this falls out of discovery
   running inside `loadConfig` of the process that builds the agent.
 
@@ -288,7 +289,8 @@ Known limits (deliberate, not bugs):
 - Tests that call `loadConfig` with the real `HOME` (`cli/test/wiring.test.ts`
   first case) now also scan `~/.agents/skills`; no assertion depends on it.
 - A skill edit is read at activation (and, since `feat/skills-compaction`, again
-  at `/compact`); a new or renamed skill needs a restart (decision 3).
+  at `/compact`); a new or renamed skill needs a restart (decision 3), or a
+  context reset for the model (`docs/feat/context-reset.md`).
 
 Behaviour of the implementing model: found the spill/summary hazard while
 verifying the plan (before any code) and designed it in. The test fixes in

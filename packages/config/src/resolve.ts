@@ -65,7 +65,7 @@ export interface ResolvedConfig {
   readonly contextWindow: number;
   /** Tell the model how full its context is (file-only, docs/feat/context-awareness.md). */
   readonly contextAwareness: ContextAwarenessConfig;
-  /** The model's `context_reset` tool and its anti-loop cap (not consumed yet). */
+  /** The model's `context_reset` tool and its anti-loop cap (docs/feat/context-reset.md). */
   readonly contextReset: ContextResetConfig;
   /** Max output tokens per response; unset → the provider's own default. */
   readonly maxTokens?: number;

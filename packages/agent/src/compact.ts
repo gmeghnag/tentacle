@@ -187,13 +187,19 @@ export function carryOverSkills(
   };
 }
 
-/** The note closing the summary when skills are carried over (or dropped). */
-function skillsNote({ kept, dropped }: SkillCarryOver): string {
+/**
+ * The note closing the summary (or a context reset's restart message) when
+ * skills are carried over (or dropped); `before` names the replacement.
+ */
+export function skillsNote(
+  { kept, dropped }: SkillCarryOver,
+  before: "compaction" | "the context reset" = "compaction",
+): string {
   const list = (names: readonly string[]): string => names.map((n) => `"${n}"`).join(", ");
   const lines: string[] = [];
   if (kept.length > 0) {
     lines.push(
-      `The skills active before compaction are loaded again below; their instructions still apply: ${list(kept.map((k) => k.name))}.`,
+      `The skills active before ${before} are loaded again below; their instructions still apply: ${list(kept.map((k) => k.name))}.`,
     );
     const from = (source: CarriedSkillSource): string[] =>
       kept.filter((k) => k.source === source).map((k) => k.name);

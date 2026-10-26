@@ -16,7 +16,8 @@ import {
 import { Agent, type SessionSkills } from "../src/agent.ts";
 
 // Agent.installSkills + reloadSkills(…, through) — the swap seam of a context
-// reset (docs/feat/context-reset-refresh.md). Nothing calls them yet.
+// reset (docs/feat/context-reset-refresh.md); the loop's use of them is pinned
+// in context-reset-loop.test.ts.
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";

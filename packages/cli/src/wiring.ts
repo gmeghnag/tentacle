@@ -31,6 +31,7 @@ import {
   type SkillInfo,
   type TentacleConfig,
   offeredSkills,
+  refreshSessionContext,
   slashSkills,
   splitFrontmatter,
 } from "@tentacle/config";
@@ -43,6 +44,7 @@ import {
   type SkillBodyReader,
   ToolRegistry,
   builtinTools,
+  createContextResetTool,
   createSkillActivator,
   createSkillTool,
   createTaskTool,
@@ -210,6 +212,11 @@ export interface BuildAgentOptions {
    */
   readonly log?: (line: string) => void;
   /**
+   * Daemon-side notices that are not failures (a context reset's scan
+   * diagnostics). Same rule as `log`: never the terminal while Ink owns it.
+   */
+  readonly notice?: (line: string) => void;
+  /**
    * Asks whether to run the project's hooks when a turn brings no asker (the
    * in-process TUI, which has no RPC). Absent → project hooks are declined.
    */
@@ -317,6 +324,29 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     tools.register(createTaskTool((opts, controls) => run(opts, controls), types));
   }
 
+  // Context reset (docs/feat/context-reset.md): the model renews its own
+  // context; the loop runs it. A reset re-reads THIS process's files — the
+  // ones its system prompt and skill set were built from at start (in a pod:
+  // the pod's). Scan problems go to the daemon log, never the terminal.
+  const contextReset = config.contextReset.enabled
+    ? {
+        maxPerMessage: config.contextReset.maxPerMessage,
+        refresh: async () => {
+          const fresh = await refreshSessionContext(config);
+          for (const line of fresh.skillDiagnostics) {
+            options.notice?.(`context reset: ${line}`);
+          }
+          return {
+            systemPrompt: fresh.systemPrompt,
+            skills: buildSessionSkills(fresh.skills, readSkillBody),
+          };
+        },
+      }
+    : undefined;
+  if (contextReset) {
+    tools.register(createContextResetTool());
+  }
+
   const agent = new Agent({
     model,
     tools,
@@ -330,6 +360,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     ...(hooks ? { hooks } : {}),
     ...(options.askHooksTrust ? { askHooksTrust: options.askHooksTrust } : {}),
     ...(contextAwareness ? { contextAwareness } : {}),
+    ...(contextReset ? { contextReset } : {}),
   });
   // Names the session after its first exchange (docs/feat/session-titles.md),
   // only with `model.autoTitle` (opt-in; off → no title model, no call):
