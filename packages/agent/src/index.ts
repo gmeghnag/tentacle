@@ -7,6 +7,7 @@ export * from "./session.ts";
 export * from "./resume.ts";
 export * from "./session-store.ts";
 export * from "./compact.ts";
+export * from "./context-awareness.ts";
 export * from "./result-pipeline.ts";
 export * from "./redact.ts";
 export * from "./permission-gate.ts";

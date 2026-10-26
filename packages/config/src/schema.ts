@@ -198,6 +198,19 @@ const settingsShape = {
     .strict()
     .optional(),
   /**
+   * Context awareness (docs/feat/context-awareness.md): tell the model how full
+   * its context is, a short line on the message that crosses each new step.
+   */
+  contextAwareness: z
+    .object({
+      /** Default: enabled. */
+      enabled: z.boolean().optional(),
+      /** A line per this many percent of the window; 1..100, default 1. */
+      stepPercent: z.number().int().min(1).max(100).optional(),
+    })
+    .strict()
+    .optional(),
+  /**
    * Auto-wake: when a background job exits while the agent is idle, start a
    * continuation turn so it reacts without a user prompt. Default: enabled.
    */

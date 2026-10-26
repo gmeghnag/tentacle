@@ -265,3 +265,58 @@ describe("the pod daemon's agent (serve --stdio --model-proxy): the LAPTOP's aut
     expect(title).toBe("please fix the login bug");
   });
 });
+
+// docs/feat/context-awareness.md: over the tunnel the model sees the rendered line (no
+// proxy change), on the LAPTOP's window; whether lines are on is the POD's config.
+describe("the pod daemon's agent: context lines on the laptop's window", () => {
+  let dir: string;
+  let config: TentacleConfig;
+  const saved = process.env.TENTACLE_CONFIG_DIR;
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "model-proxy-context-"));
+    process.env.TENTACLE_CONFIG_DIR = join(dir, "config");
+    config = await loadConfig({ cwd: dir });
+  });
+  afterAll(async () => {
+    if (saved === undefined) Reflect.deleteProperty(process.env, "TENTACLE_CONFIG_DIR");
+    else process.env.TENTACLE_CONFIG_DIR = saved;
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function firstPrompt(podConfig: TentacleConfig, contextWindow?: number): Promise<string> {
+    const [daemonCh, clientCh] = createChannelPair();
+    let connection: Connection | null = null;
+    const host = new SessionHost({
+      defaultCwd: dir,
+      createAgent: (cwd) =>
+        serve.tunnelledAgent({ ...podConfig, cwd }, () => connection, {
+          autoTitle: false,
+          ...(contextWindow !== undefined ? { contextWindow } : {}),
+        }),
+    });
+    connection = new Connection(daemonCh, host);
+    const laptop = new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const client = new RemoteClient(clientCh, new PermissionBroker(), laptop);
+    await client.initialize();
+    const session = client.newSession(undefined, "C");
+    for await (const _event of session.send("hello")) {
+      // drain
+    }
+    connection.close();
+    client.close();
+    return laptop.seen[0]?.messages.at(-1)?.content ?? "";
+  }
+
+  test("the laptop's window (--context-window) wins over the pod's own", async () => {
+    const sent = await firstPrompt({ ...config, contextWindow: 128000 }, 200000);
+    expect(sent).toMatch(/^hello\n\n\[context: [\d.]+[kM]? \/ 200k tokens \(\d+%\)\]$/);
+  });
+
+  test("the pod's config turns the lines off", async () => {
+    const sent = await firstPrompt(
+      { ...config, contextAwareness: { enabled: false, stepPercent: 1 } },
+      200000,
+    );
+    expect(sent).toBe("hello");
+  });
+});

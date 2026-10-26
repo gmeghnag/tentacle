@@ -30,7 +30,9 @@ beforeAll(async () => {
     port: 0,
     async fetch(req) {
       const body = (await req.json()) as { model: string; messages: Array<{ content: unknown }> };
-      requests.push({ model: body.model, last: body.messages.at(-1)?.content });
+      // The context line (docs/feat/context-awareness.md) is the only addition.
+      const last = String(body.messages.at(-1)?.content).replace(/\n\n\[context: [^\]]+\]$/, "");
+      requests.push({ model: body.model, last });
       return new Response(DONE, { headers: { "content-type": "text/event-stream" } });
     },
   });

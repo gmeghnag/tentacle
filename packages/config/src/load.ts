@@ -66,6 +66,8 @@ export interface TentacleConfig {
   readonly cwd: string;
   readonly maxIterations: number;
   readonly contextWindow: number;
+  /** Tell the model how full its context is (on a pod: the pod's own config). */
+  readonly contextAwareness: ResolvedConfig["contextAwareness"];
   readonly maxTokens?: number;
   readonly systemPrompt: string;
   readonly subagentsEnabled: boolean;
@@ -352,6 +354,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     cwd,
     maxIterations: resolved.maxIterations,
     contextWindow: resolved.contextWindow,
+    contextAwareness: resolved.contextAwareness,
     ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
     systemPrompt: resolved.systemPrompt,
     subagentsEnabled: resolved.subagentsEnabled,

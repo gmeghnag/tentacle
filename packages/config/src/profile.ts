@@ -3,8 +3,8 @@
  * the user's own config file over its base settings. No I/O; `load.ts` turns a
  * failure into a `ConfigError`.
  *
- * Rules: a top-level setting in the profile wins; `subagents`/`tools` merge per
- * key; `model` merges per key EXCEPT the connection group (provider, baseURL,
+ * Rules: a top-level setting in the profile wins; `subagents`/`tools`/
+ * `contextAwareness` merge per key; `model` merges per key EXCEPT the connection group (provider, baseURL,
  * apiKey, apiKeyCommand), which moves as a unit, so a key is never sent to an
  * endpoint it was not configured for; `mcpServers` merge by name (a definition
  * is replaced whole, `null` removes it). The result never carries `profiles`.
@@ -58,13 +58,16 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
       })`,
     };
   }
-  const { model, subagents, tools, mcpServers, ...scalars } = profile;
+  const { model, subagents, tools, contextAwareness, mcpServers, ...scalars } = profile;
   const config: FileConfig = { ...base, ...scalars };
   if (model) {
     config.model = mergeModel(base.model, model);
   }
   if (subagents) {
     config.subagents = { ...base.subagents, ...subagents };
+  }
+  if (contextAwareness) {
+    config.contextAwareness = { ...base.contextAwareness, ...contextAwareness };
   }
   if (tools) {
     config.tools = { ...base.tools, ...tools };

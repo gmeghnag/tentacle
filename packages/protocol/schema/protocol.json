@@ -127,6 +127,21 @@
         "content": {
           "type": "string"
         },
+        "contextUsage": {
+          "additionalProperties": true,
+          "properties": {
+            "used": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "window": {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["used", "window"],
+          "type": "object"
+        },
         "durationMs": {
           "minimum": 0,
           "type": "integer"

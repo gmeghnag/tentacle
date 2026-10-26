@@ -358,11 +358,18 @@ export type ModelLink = Pick<Connection, "requestModelStream" | "requestModelStr
  * `model.autoTitle` is overridden), the title call rides a second tunnel that
  * marks it `purpose: "title"`, so the laptop serves it with ITS
  * `model.titleModel`; the pod never names a model (docs/feat/session-titles.md).
+ * `contextWindow` (the LAPTOP's, `--context-window`) replaces the pod's own:
+ * the model's context lines count against the window of the model the laptop
+ * serves (docs/feat/context-awareness.md); whether they are on stays the pod's.
  */
 export function tunnelledAgent(
   config: TentacleConfig,
   link: () => ModelLink | null,
-  options: { readonly autoTitle: boolean; readonly log?: (line: string) => void },
+  options: {
+    readonly autoTitle: boolean;
+    readonly contextWindow?: number;
+    readonly log?: (line: string) => void;
+  },
 ): WiredAgent {
   const ready = (): ModelLink => {
     const connection = link();
@@ -377,7 +384,11 @@ export function tunnelledAgent(
       (request, handlers) => ready().requestModelStreamChunked(request, handlers, purpose),
     );
   return buildAgent(
-    { ...config, autoTitle: options.autoTitle },
+    {
+      ...config,
+      autoTitle: options.autoTitle,
+      ...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {}),
+    },
     {
       ...(options.log ? { log: options.log } : {}),
       modelOverride: tunnelFor(),
@@ -398,7 +409,7 @@ export function tunnelledAgent(
 export function startStdioDaemon(
   config: TentacleConfig,
   log?: (line: string) => void,
-  options: { modelProxy?: boolean; autoTitle?: boolean } = {},
+  options: { modelProxy?: boolean; autoTitle?: boolean; contextWindow?: number } = {},
 ): Promise<void> {
   // With `--model-proxy`, the agent's model calls are tunnelled back to the
   // client over this same channel (the pod reverse-tunnel): the link is set
@@ -422,6 +433,10 @@ export function startStdioDaemon(
             // `--auto-title`: the LAPTOP's `model.autoTitle` (it launched us);
             // the pod's own config never turns titles on.
             autoTitle: options.autoTitle === true,
+            // `--context-window`: the LAPTOP's `model.contextWindow`.
+            ...(options.contextWindow !== undefined
+              ? { contextWindow: options.contextWindow }
+              : {}),
             ...(log ? { log } : {}),
           })
         : buildAgent({ ...config, cwd }, log ? { log } : {}),

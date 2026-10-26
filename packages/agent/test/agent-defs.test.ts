@@ -39,7 +39,28 @@ describe("parseAgentDefinition", () => {
     expect(type.name).toBe("my-agent");
     expect(type.tools).toBe("all");
     expect(type.model).toBeUndefined();
+    expect(type.contextWindow).toBeUndefined();
     expect(type.prompt).toBe("Do the thing.");
+  });
+
+  // docs/feat/context-awareness.md (Review F1): the window of the type's own model.
+  test("contextWindow: a positive whole number is kept; anything else is ignored, like a bad model", () => {
+    const def = (value: string) =>
+      parseAgentDefinition(
+        `---\nname: small\nmodel: small-model\ncontextWindow: ${value}\n---\nGo.`,
+        "f",
+      );
+    expect(def("32000")).toEqual({
+      name: "small",
+      description: "",
+      prompt: "Go.",
+      tools: "all",
+      model: "small-model",
+      contextWindow: 32000,
+    });
+    for (const bad of ["0", "-1", "1.5", "32k", "", "[1]"]) {
+      expect({ bad, window: def(bad).contextWindow }).toEqual({ bad, window: undefined });
+    }
   });
 });
 

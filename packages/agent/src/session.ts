@@ -89,11 +89,14 @@ export class Session {
     // A fresh turn starts with its seed only (abort may have left undrained
     // items from a previous turn; a caller that keeps them passes them).
     this.steering = [...(opts.steering ?? [])];
+    // What this turn adds starts here (its context line may ride on it).
+    const newFrom = this.messages.length;
     if (text !== "") {
       this.messages.push({ role: "user", content: text });
     }
     try {
       yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
+        newFrom,
         ...(opts.skill !== undefined ? { skill: opts.skill } : {}),
         ...(opts.askHooksTrust !== undefined ? { askHooksTrust: opts.askHooksTrust } : {}),
       });

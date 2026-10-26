@@ -1,7 +1,10 @@
 /**
  * Parse a user-defined sub-agent definition: a Markdown file with optional
- * YAML-ish frontmatter (`name`, `description`, `tools`, `model`) whose body is
- * the agent's system prompt. Pure — directory loading lives in the wiring layer.
+ * YAML-ish frontmatter (`name`, `description`, `tools`, `model`,
+ * `contextWindow`) whose body is the agent's system prompt. `contextWindow` is
+ * the window (tokens) of the type's `model`, for the child's context line
+ * (docs/feat/context-awareness.md); absent → the parent's `model.contextWindow`.
+ * Pure — directory loading lives in the wiring layer.
  *
  * Example:
  *   ---
@@ -9,6 +12,7 @@
  *   description: Review a diff for bugs. Use after writing code.
  *   tools: [fs_read, shell]
  *   model: my-big-model
+ *   contextWindow: 200000
  *   ---
  *   You are a meticulous reviewer. Report only real bugs…
  */
@@ -66,8 +70,21 @@ export function parseAgentDefinition(markdown: string, fallbackName: string): Ag
   const description = typeof data.description === "string" ? data.description : "";
   const tools = Array.isArray(data.tools) ? data.tools : "all";
   const model = typeof data.model === "string" && data.model.length > 0 ? data.model : undefined;
+  // A positive whole number of tokens; anything else is ignored, like a bad `model`.
+  const window = data.contextWindow;
+  const contextWindow =
+    typeof window === "string" && /^[0-9]{1,9}$/.test(window) && Number(window) > 0
+      ? Number(window)
+      : undefined;
   const prompt = body.length > 0 ? body : `You are the "${name}" sub-agent.`;
-  return { name, description, prompt, tools, ...(model ? { model } : {}) };
+  return {
+    name,
+    description,
+    prompt,
+    tools,
+    ...(model ? { model } : {}),
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+  };
 }
 
 /**

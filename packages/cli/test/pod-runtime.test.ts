@@ -221,7 +221,7 @@ class SpyFakeCluster extends FakeCluster {
 
 function baseConfig(cwd: string): TentacleConfig {
   // Only the fields the pod runtime reads (cwd, model) matter here.
-  return { cwd, model: "qwen3" } as unknown as TentacleConfig;
+  return { cwd, model: "qwen3", contextWindow: 128000 } as unknown as TentacleConfig;
 }
 
 let dir: string;
@@ -603,15 +603,33 @@ describe("pod titles: the laptop's model.autoTitle decides", () => {
   test("autoTitle on → the daemon is launched with --auto-title; off → without", async () => {
     const on = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
     const a = await startAttachRuntime(failing("/pod/work", { autoTitle: true }), deps(on, "t-on"));
-    expect(on.calls[2]).toBe("exec:mypod:-:tentacle serve --stdio --model-proxy --auto-title");
+    expect(on.calls[2]).toBe(
+      "exec:mypod:-:tentacle serve --stdio --model-proxy --context-window 128000 --auto-title",
+    );
     a.dispose();
     const off = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
     const b = await startAttachRuntime(
       failing("/pod/work", { autoTitle: false }),
       deps(off, "t-off"),
     );
-    expect(off.calls[2]).toBe("exec:mypod:-:tentacle serve --stdio --model-proxy");
+    expect(off.calls[2]).toBe(
+      "exec:mypod:-:tentacle serve --stdio --model-proxy --context-window 128000",
+    );
     b.dispose();
+  });
+
+  // docs/feat/context-awareness.md: the window is a property of the model, which
+  // lives on the laptop — the pod's own config never decides it.
+  test("the daemon is launched with the LAPTOP's --context-window", async () => {
+    const c = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const a = await startAttachRuntime(
+      failing("/pod/work", { contextWindow: 200000 }),
+      deps(c, "t-window"),
+    );
+    expect(c.calls[2]).toBe(
+      "exec:mypod:-:tentacle serve --stdio --model-proxy --context-window 200000",
+    );
+    a.dispose();
   });
 
   test("the laptop's gate: off → a pod's title call is refused even unasked-for; on → the laptop serves it", async () => {
@@ -667,7 +685,9 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     // only/default one — a single-container pod needs no `-c`.
     expect(kube.calls[0]).toBe("get:mypod");
     expect(kube.calls[1]).toBe("runexec:mypod:tentacle --version");
-    expect(kube.calls[2]).toBe("exec:mypod:-:tentacle serve --stdio --model-proxy");
+    expect(kube.calls[2]).toBe(
+      "exec:mypod:-:tentacle serve --stdio --model-proxy --context-window 128000",
+    );
     expect(kube.calls.some((c) => c.includes("uname"))).toBe(false);
     expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
 
@@ -790,7 +810,9 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     // records only the command, so the exec target is the assertion point.
     expect(kube.calls[0]).toBe("get:mypod");
     expect(kube.calls[1]).toBe("runexec:mypod:tentacle --version");
-    expect(kube.calls[2]).toBe("exec:mypod:dns:tentacle serve --stdio --model-proxy");
+    expect(kube.calls[2]).toBe(
+      "exec:mypod:dns:tentacle serve --stdio --model-proxy --context-window 128000",
+    );
     runtime.dispose();
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
   });
@@ -969,7 +991,9 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         podName: "mypod",
         notify: (text) => notices.push(text),
       });
-      expect(kube.calls).toContain("exec:mypod:-:tentacle serve --stdio --model-proxy");
+      expect(kube.calls).toContain(
+        "exec:mypod:-:tentacle serve --stdio --model-proxy --context-window 128000",
+      );
       expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
       expect(notices).toEqual([]);
       runtime.dispose();
@@ -1000,7 +1024,9 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
           expect(kube.calls.some((c) => c.includes(`head -c ${size} > ${POD_BIN_PATH}.new`))).toBe(
             true,
           );
-          expect(kube.calls).toContain(`exec:mypod:-:${POD_BIN_PATH} serve --stdio --model-proxy`);
+          expect(kube.calls).toContain(
+            `exec:mypod:-:${POD_BIN_PATH} serve --stdio --model-proxy --context-window 128000`,
+          );
           const line = `the container had tentacle ${had}; replaced with 0.3.0 (this laptop's)`;
           expect(notices).toEqual([line]);
           expect(logs).toContain(`${line}\n`); // piped: the same line on the log
@@ -1068,7 +1094,9 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
       expect(notices).toEqual([warning]);
       expect(logs).toContain(`${warning}\n`);
       // The container's own tentacle, from PATH (never the half-written path).
-      expect(kube.calls).toContain("exec:mypod:-:tentacle serve --stdio --model-proxy");
+      expect(kube.calls).toContain(
+        "exec:mypod:-:tentacle serve --stdio --model-proxy --context-window 128000",
+      );
       expect(kube.calls.some((c) => c.startsWith("delete:") || c.startsWith("besteffort:"))).toBe(
         false,
       );
@@ -1125,7 +1153,9 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         /^⚠ the container has tentacle 0\.1\.0, this laptop 0\.3\.0; replacing it failed: .*x64 is at version 0\.2\.0.* — continuing with the container's tentacle 0\.1\.0 \(a protocol mismatch is still refused\)\. To replace it: run "tentacle update" on this laptop, then "tentacle attach" again$/,
       );
       expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
-      expect(kube.calls).toContain("exec:mypod:-:tentacle serve --stdio --model-proxy");
+      expect(kube.calls).toContain(
+        "exec:mypod:-:tentacle serve --stdio --model-proxy --context-window 128000",
+      );
       runtime.dispose();
     });
   });
@@ -1523,8 +1553,8 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
     await drain(session.send("again"));
     await runtime.dispose();
     expect(kube.execs()).toEqual([
-      "exec:mypod:-:tentacle serve --stdio --model-proxy",
-      "exec:mypod:-:tentacle serve --stdio --model-proxy",
+      "exec:mypod:-:tentacle serve --stdio --model-proxy --context-window 128000",
+      "exec:mypod:-:tentacle serve --stdio --model-proxy --context-window 128000",
     ]);
     // The reconnect checked the pod first (preflight), and nothing deleted it.
     expect(kube.calls.filter((c) => c === "get:mypod").length).toBeGreaterThanOrEqual(2);

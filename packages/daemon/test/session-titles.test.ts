@@ -530,14 +530,14 @@ describe("seed, persistence, archive", () => {
     expect(hosted.summary(CWD).title).toBe("Seeded");
   });
 
-  test("D6 a chosen title survives a restart; the record is current (v6 since tool-duration); v1/v2 read as auto; a newer one is refused", async () => {
+  test("D6 a chosen title survives a restart; the record is current (v7 since context-awareness); v1/v2 read as auto; a newer one is refused", async () => {
     const store = new MemStore();
     const r = rig(new TitleModel([{ text: "Fix login" }]), { store });
     const hosted = await firstExchange(r, sink());
     await until(() => hosted.summary(CWD).title === "Fix login");
     await until(() => typeof store.durable.get("s1")?.title === "object");
     const record = store.durable.get("s1");
-    expect(record?.schemaVersion as number).toBe(6);
+    expect(record?.schemaVersion as number).toBe(7);
     expect(record?.title).toEqual({ text: "Fix login", source: "model" });
     const same = (c: string) => c === CWD;
     const parsed = parseDaemonRecord(JSON.parse(JSON.stringify(record)), same);
@@ -555,14 +555,14 @@ describe("seed, persistence, archive", () => {
       };
       const read = parseDaemonRecord(old, same);
       expect(read.ok).toBe(true);
-      if (read.ok) expect(read.record.schemaVersion as number).toBe(6);
+      if (read.ok) expect(read.record.schemaVersion as number).toBe(7);
       // An object title in a version that never wrote one is not ours.
       expect(parseDaemonRecord({ ...old, title: { text: "x", source: "user" } }, same).ok).toBe(
         false,
       );
     }
     const newer = parseDaemonRecord(
-      { ...JSON.parse(JSON.stringify(record)), schemaVersion: 7 },
+      { ...JSON.parse(JSON.stringify(record)), schemaVersion: 8 },
       same,
     );
     expect(newer.ok).toBe(false);

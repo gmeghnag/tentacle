@@ -19,7 +19,7 @@ import {
   toolLabel,
 } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
-import { Agent, type AgentStopReason } from "./agent.ts";
+import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
 
@@ -33,6 +33,11 @@ export interface AgentType {
   readonly tools: "all" | readonly string[];
   /** Optional model id override; resolved via `SubagentDeps.modelFor`. */
   readonly model?: string;
+  /**
+   * That model's context window (tokens), for the child's context line
+   * (docs/feat/context-awareness.md). Absent → the parent's window.
+   */
+  readonly contextWindow?: number;
 }
 
 const GENERAL_PROMPT = `You are an autonomous sub-agent working on a focused task delegated by a
@@ -132,6 +137,8 @@ export interface SubagentDeps {
   readonly resultTransforms?: readonly ResultTransform[];
   /** The parent's hook runner; each child gets one tagged with its identity (H2). */
   readonly hooks?: HookRunner;
+  /** Each child's own context lines over its own history (the parent's window). */
+  readonly contextAwareness?: AgentConfig["contextAwareness"];
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
@@ -163,6 +170,11 @@ export function createSubagentRunner(deps: SubagentDeps): {
     }
 
     const model = type.model && deps.modelFor ? deps.modelFor(type.model) : deps.model;
+    // The child counts against its own model's window when the type names one.
+    const contextAwareness =
+      deps.contextAwareness && type.contextWindow !== undefined
+        ? { ...deps.contextAwareness, window: type.contextWindow }
+        : deps.contextAwareness;
     const child = new Agent({
       model,
       tools: childTools,
@@ -171,6 +183,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
       ...(deps.requestPermission ? { requestPermission: deps.requestPermission } : {}),
       ...(deps.resultTransforms ? { resultTransforms: deps.resultTransforms } : {}),
+      ...(contextAwareness ? { contextAwareness } : {}),
       ...(deps.hooks
         ? {
             hooks: deps.hooks.forAgent(

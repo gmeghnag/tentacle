@@ -72,6 +72,8 @@ export const ARGS = {
       "max-sessions": {},
       "max-detached-sessions": {},
       "ws-idle-timeout": {},
+      // (with `--model-proxy`): the laptop's `model.contextWindow`.
+      "context-window": {},
     },
     // `--auto-title` (with `--model-proxy`): the laptop's `model.autoTitle`.
     bools: { stdio: {}, "model-proxy": {}, "auto-title": {} },
@@ -278,6 +280,27 @@ export function parseServeLimits(parsed: Pick<ParsedFlags, "flags" | "bools">): 
   return Object.fromEntries(
     Object.entries(limits).filter(([, v]) => v !== undefined),
   ) as ServeLimits;
+}
+
+/**
+ * `serve --context-window <n>`: the window of the model the LAPTOP serves (a
+ * pod daemon's context lines, docs/feat/context-awareness.md). Absent →
+ * undefined; anything but a positive whole number throws.
+ */
+export function parseContextWindowFlag(
+  parsed: Pick<ParsedFlags, "flags" | "bools">,
+): number | undefined {
+  if (parsed.bools.has("context-window")) {
+    throw new Error("--context-window needs a value");
+  }
+  const raw = parsed.flags.get("context-window");
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!/^[0-9]{1,9}$/.test(raw) || Number(raw) <= 0) {
+    throw new Error(`--context-window must be a positive whole number, got "${raw}"`);
+  }
+  return Number(raw);
 }
 
 /** One PEM certificate block (a `--ca-cert` file may be a bundle of several). */

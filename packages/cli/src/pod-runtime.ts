@@ -56,10 +56,23 @@ import { APP_VERSION } from "./version.ts";
 /**
  * The pod daemon's command line (`run` and `attach`). `--auto-title` carries
  * the LAPTOP's `model.autoTitle` (docs/feat/session-titles.md): the pod's own
- * config never turns model titles on. Not a secret, so argv is fine.
+ * config never turns model titles on. `--context-window` carries the LAPTOP's
+ * `model.contextWindow`: the window is the model's, and the model lives here
+ * (docs/feat/context-awareness.md). Neither is a secret, so argv is fine.
  */
-export function podDaemonCommand(bin: string, config: Pick<TentacleConfig, "autoTitle">): string[] {
-  return [bin, "serve", "--stdio", "--model-proxy", ...(config.autoTitle ? ["--auto-title"] : [])];
+export function podDaemonCommand(
+  bin: string,
+  config: Pick<TentacleConfig, "autoTitle" | "contextWindow">,
+): string[] {
+  return [
+    bin,
+    "serve",
+    "--stdio",
+    "--model-proxy",
+    "--context-window",
+    String(config.contextWindow),
+    ...(config.autoTitle ? ["--auto-title"] : []),
+  ];
 }
 
 /**

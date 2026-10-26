@@ -254,6 +254,16 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
     { role: "tool", content: "b", toolCallId: "1", durationMs: -1 },
     { role: "tool", content: "b", toolCallId: "1", durationMs: 1.5 },
     { role: "tool", content: "b", toolCallId: "1", durationMs: "x" },
+    // The context fill the model was told (docs/feat/context-awareness.md), valid and malformed.
+    { role: "user", content: "a", contextUsage: { used: 82000, window: 128000 } },
+    { role: "tool", content: "b", toolCallId: "1", contextUsage: { used: 0, window: 1 } },
+    { role: "user", content: "a", contextUsage: { used: -1, window: 10 } },
+    { role: "user", content: "a", contextUsage: { used: 1.5, window: 10 } },
+    { role: "user", content: "a", contextUsage: { used: 1, window: 0 } },
+    { role: "user", content: "a", contextUsage: { used: "1", window: 10 } },
+    { role: "user", content: "a", contextUsage: { used: 1 } },
+    { role: "user", content: "a", contextUsage: null },
+    { role: "user", content: "a", contextUsage: [1, 2] },
     "not an object",
     null,
   ];
@@ -276,6 +286,7 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
       toolCallId: "1",
       spill: { chars: 9, head: "h", tail: "", omitted: 0, x: 1 },
     },
+    { role: "user", content: "a", contextUsage: { used: 1, window: 2, x: 1 } },
   ]) {
     test(`an unknown key: the store rejects, the wire strips — ${JSON.stringify(message)}`, () => {
       expect(ChatMessageSchema.safeParse(message).success).toBe(true);
@@ -285,7 +296,30 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
   // Tripwire: a new wire key must be added to the store's mirror (session-store.ts).
   test("the set of allowed message keys is the schema's", () => {
     const keys = Object.keys(ChatMessageSchema.shape).sort();
-    expect(keys).toEqual(["content", "durationMs", "role", "spill", "toolCallId", "toolCalls"]);
+    expect(keys).toEqual([
+      "content",
+      "contextUsage",
+      "durationMs",
+      "role",
+      "spill",
+      "toolCallId",
+      "toolCalls",
+    ]);
+  });
+  test("a message's contextUsage round-trips; a malformed one is refused loudly (docs/feat/context-awareness.md)", () => {
+    const usage = { used: 82000, window: 128000 };
+    const kept = parseSessionRecord(
+      { ...rec("m", 1), messages: [{ role: "user", content: "a", contextUsage: usage }] },
+      "m",
+    );
+    expect(kept.ok ? kept.record.messages[0]?.contextUsage : kept.reason).toEqual(usage);
+    for (const bad of [{ used: -1, window: 1 }, { used: 1, window: 0 }, "x"]) {
+      const refused = parseSessionRecord(
+        { ...rec("m", 1), messages: [{ role: "user", content: "a", contextUsage: bad }] },
+        "m",
+      );
+      expect(refused.ok ? "loaded" : refused.reason).toBe("message 0 has a malformed contextUsage");
+    }
   });
   test("a tool message's durationMs round-trips; a malformed one is refused loudly (docs/fix/tool-duration.md)", () => {
     // Mutation (red, verified): drop "durationMs" from MESSAGE_KEYS → `unknown key "durationMs"`.
