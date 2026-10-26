@@ -3,7 +3,9 @@
  * does NOT already contain the tool (the pod-binary-injection flow, F4.e).
  *
  * The sequence (after the pod is Ready, before the long-lived daemon exec):
- *   1. probe the pod's arch with `uname -m` (any failure → x64 fallback, never aborts)
+ *   1. probe the pod's arch + libc with one `sh -c` exec (`probePod`): a musl
+ *     (Alpine) or loader-less image fails here with a clear error, before the
+ *     transfer; any probe failure → x64 fallback, never aborts
  *   2. resolve the matching Linux binary's bytes (build or cache, on the laptop)
  *   3. stream them to the pod's stdin via a one-shot exec:
  *        `sh -c "mkdir -p /usr/local/bin && head -c <N> > …/tentacle && chmod 755 …"`
@@ -53,26 +55,100 @@ export function archToTarget(arch: PodArch): PodBinaryTarget {
   return arch === "arm64" ? "bun-linux-arm64" : "bun-linux-x64";
 }
 
+/** The ELF interpreter the injected (glibc) binary asks for, per arch (read from PT_INTERP). */
+const GLIBC_INTERPRETER: Record<PodArch, string> = {
+  x64: "/lib64/ld-linux-x86-64.so.2",
+  arm64: "/lib/ld-linux-aarch64.so.1",
+};
+
+/** The one exec that probes the image: a sentinel, the arch, then one line per loader found. */
+const PROBE_SCRIPT =
+  "echo tentacle-probe; uname -m; " +
+  'for f in /lib/ld-musl-*; do [ -e "$f" ] && echo "musl $f"; done; ' +
+  'for f in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-aarch64.so.1; do [ -e "$f" ] && echo "glibc $f"; done; ' +
+  "true";
+
+/** The raw facts the probe printed. `ran` is false when the sentinel is missing (inconclusive). */
+export interface ParsedProbe {
+  readonly ran: boolean;
+  readonly arch: PodArch;
+  /** The raw `uname -m` line ("" when the probe printed none). */
+  readonly machine: string;
+  readonly musl: boolean;
+  readonly glibcLoaders: readonly string[];
+}
+
+/** Parse the probe output (pure). Unknown lines are ignored. */
+export function parseProbe(raw: string): ParsedProbe {
+  const lines = raw.split("\n").map((l) => l.trim());
+  const ran = lines[0] === "tentacle-probe";
+  const machine = ran ? (lines[1] ?? "") : "";
+  return {
+    ran,
+    arch: mapUnameOutput(machine),
+    machine,
+    musl: lines.some((l) => l.startsWith("musl ")),
+    glibcLoaders: lines.filter((l) => l.startsWith("glibc ")).map((l) => l.slice(6)),
+  };
+}
+
 /**
- * Probe the pod's architecture with `uname -m`. On ANY failure (missing `uname`,
- * non-zero exit, unknown output) → `x64` fallback. This never throws: a wrong
- * arch is caught, loudly, by the `--version` probe that follows the injection.
+ * What the probe found about the image:
+ *  - `ok`           — the glibc interpreter our binary needs is present.
+ *  - `musl`         — a musl loader and no glibc interpreter (Alpine).
+ *  - `no-glibc`     — the shell ran but neither loader exists (scratch + static busybox).
+ *  - `unsupported-arch` — `uname -m` names an arch we build no binary for (`machine`).
+ *  - `unknown`      — the probe printed nothing usable (never a false positive).
+ *  - `probe-failed` — the probe exec failed or threw (e.g. no `sh`).
  */
-export async function probePodArch(
+export interface PodProbe {
+  readonly arch: PodArch;
+  readonly status: "ok" | "musl" | "no-glibc" | "unsupported-arch" | "unknown" | "probe-failed";
+  /** The `uname -m` text, set for `unsupported-arch`. */
+  readonly machine?: string;
+}
+
+/** `uname -m` values we build a binary for (the rest are unsupported, never guessed as x64). */
+const KNOWN_MACHINES = new Set(["x86_64", "amd64", "aarch64", "arm64"]);
+
+/** Classify a parsed probe (pure): only a POSITIVE reading is anything but ok/unknown. */
+export function classifyImage(p: ParsedProbe): PodProbe {
+  if (!p.ran || p.machine === "") {
+    // Nothing usable (no sentinel, or no `uname`): never block on a guess.
+    return { arch: p.arch, status: "unknown" };
+  }
+  if (!KNOWN_MACHINES.has(p.machine.toLowerCase())) {
+    return { arch: p.arch, status: "unsupported-arch", machine: p.machine };
+  }
+  if (p.glibcLoaders.includes(GLIBC_INTERPRETER[p.arch])) {
+    return { arch: p.arch, status: "ok" };
+  }
+  return { arch: p.arch, status: p.musl ? "musl" : "no-glibc" };
+}
+
+/**
+ * Probe the pod's architecture AND libc with ONE `sh -c` exec (it replaces the
+ * old `uname -m`, so no extra round-trip). Never throws: a failed exec →
+ * `probe-failed` (x64 fallback; a wrong arch is still caught by `--version`).
+ */
+export async function probePod(
   kube: Pick<PodCluster, "runExec">,
   podName: string,
   container?: string,
-): Promise<PodArch> {
-  let raw = "";
+): Promise<PodProbe> {
   try {
-    const res = await kube.runExec({ pod: podName, container, command: ["uname", "-m"] });
+    const res = await kube.runExec({
+      pod: podName,
+      container,
+      command: ["sh", "-c", PROBE_SCRIPT],
+    });
     if (res.exitCode === 0) {
-      raw = res.stdout;
+      return classifyImage(parseProbe(res.stdout));
     }
   } catch {
-    // probe failed (no uname, exec error, timeout) → fall through to fallback.
+    // probe failed (no sh, exec error, timeout) → fall through.
   }
-  return mapUnameOutput(raw);
+  return { arch: "x64", status: "probe-failed" };
 }
 
 export interface PodBinaryDeps {
@@ -80,8 +156,8 @@ export interface PodBinaryDeps {
   readonly podName: string;
   /** Container to inject into; undefined → the API picks the only/default one. */
   readonly container?: string;
-  /** Resolve the pod's arch (the `uname -m` probe with fallback). */
-  readonly podArch: () => Promise<PodArch>;
+  /** Probe the pod's arch + libc (`probePod`, one exec, never throws). */
+  readonly probe: () => Promise<PodProbe>;
   /** Resolve the binary's bytes for a target (build or cache, on the laptop). */
   readonly resolveBinary: (target: PodBinaryTarget) => Promise<Uint8Array>;
   /**
@@ -104,16 +180,44 @@ export interface PodBinaryDeps {
 /**
  * A hint for when the `--version` probe fails because the pod's libc cannot
  * satisfy the (glibc) binary's shared-library needs — the classic
- * Alpine/busybox (musl) case. Bun has no static or musl build, so the injected
- * binary is always glibc-linked; this turns the bare loader error
- * ("error while loading shared libraries: libdl.so.2 …") into something
- * actionable. Returns `undefined` for any other failure so the raw exec/loader
- * error stays the primary signal.
+ * Alpine/busybox (musl) case. A `bun-linux-*-musl` target exists, but its binary
+ * needs `libstdc++`/`libgcc` (absent in `alpine:3`), so the injected binary is
+ * always glibc-linked and musl images stay unsupported; this turns the bare
+ * loader error ("error while loading shared libraries: libdl.so.2 …") into
+ * something actionable. Returns `undefined` for any other failure so the raw
+ * exec/loader error stays the primary signal. The positive probe (`probePod`)
+ * catches the common case before the transfer; this is the safety net.
  */
 export function libcMismatchHint(stderr: string): string | undefined {
   return /error while loading shared libraries|cannot open shared object file/i.test(stderr)
-    ? " — this image appears to lack glibc (Alpine/busybox use musl); tentacle is a glibc binary, use a glibc-based image (e.g. UBI9, Debian, RHEL)"
+    ? LIBC_HINT
     : undefined;
+}
+
+const GLIBC_ADVICE =
+  "tentacle is a glibc binary, use a glibc-based image (e.g. UBI9, Debian, RHEL)";
+
+/** The suffix for a loader failure seen after the transfer (the safety net). */
+const LIBC_HINT = ` — this image appears to lack glibc (Alpine/busybox use musl); ${GLIBC_ADVICE}`;
+
+/** The clear error for a probe that positively found an unsupported image, else undefined. */
+function unsupportedImageError(podName: string, probe: PodProbe): Error | undefined {
+  if (probe.status === "musl") {
+    return new Error(
+      `[pod ${podName}] this image uses musl (Alpine): use a glibc-based image (e.g. UBI9, Debian, RHEL)`,
+    );
+  }
+  if (probe.status === "no-glibc") {
+    return new Error(
+      `[pod ${podName}] this image has no glibc loader (${GLIBC_INTERPRETER[probe.arch]} not found): use a glibc-based image (e.g. UBI9, Debian, RHEL)`,
+    );
+  }
+  if (probe.status === "unsupported-arch") {
+    return new Error(
+      `[pod ${podName}] unsupported architecture: ${probe.machine ?? "unknown"} (tentacle ships linux x64 and arm64 builds)`,
+    );
+  }
+  return undefined;
 }
 
 /** A generous, size-scaled budget for the one-shot binary transfer. */
@@ -135,10 +239,15 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   const onStatus = deps.onStatus;
   const emit: (line: string) => void = onStatus ?? ((line) => deps.log(`${line}\n`));
 
-  // The arch probe is invisible: its result is folded into the resolve phase
-  // (the target encodes the arch), so probe + resolve read as one line.
-  const arch = await deps.podArch();
-  const target = archToTarget(arch);
+  // The probe is invisible: its result is folded into the resolve phase (the
+  // target encodes the arch), so probe + resolve read as one line. A musl /
+  // loader-less image fails HERE, before the 60-90 MB transfer.
+  const probe = await deps.probe();
+  const unsupported = unsupportedImageError(deps.podName, probe);
+  if (unsupported) {
+    throw unsupported;
+  }
+  const target = archToTarget(probe.arch);
   emit(`[${deps.podName}] resolving ${target} binary…`);
   const bytes = await deps.resolveBinary(target);
   const n = bytes.length;
@@ -188,10 +297,15 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   });
   pipedProgress?.finish();
   if (install.exitCode !== 0) {
+    // The probe AND the install are `sh -c` execs: both failing means no `sh`.
+    const noShell =
+      probe.status === "probe-failed"
+        ? " — the image may have no shell (sh): distroless/scratch images are unsupported; use an image with sh and head"
+        : "";
     throw new Error(
       `[pod ${deps.podName}] failed to inject tentacle (exit ${install.exitCode}): ${
         install.stderr.trim() || install.status || "no output"
-      }`,
+      }${noShell}`,
     );
   }
 
@@ -204,9 +318,15 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   );
   if (version.exitCode !== 0) {
     const detail = version.stderr.trim() || version.status || "no output";
+    // The binary was written one step earlier, so a bare "no such file or
+    // directory" here can only be a missing ELF interpreter (the real
+    // Alpine/Docker text); on k8s a runtime failure arrives in `status`, not stderr.
+    const hint =
+      libcMismatchHint(detail) ??
+      (/no such file or directory/i.test(detail) ? LIBC_HINT : undefined);
     throw new Error(
       `[pod ${deps.podName}] tentacle --version failed (exit ${version.exitCode}): ${detail}${
-        libcMismatchHint(version.stderr) ?? ""
+        hint ?? ""
       }`,
     );
   }
