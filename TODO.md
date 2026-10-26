@@ -1016,7 +1016,7 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 >    record bump (permission-reply's v8). Unverified: a real reset under pod
 >    `run`/`attach` and across a `serve` restart.
 > 3b. skills hot-reload for the USER (`/name` list + `/skills` panel follow a
->    reset / new skill without restart) — owner CR-Q1, right after context-reset;
+>    reset / new skill without restart) — DONE, merged `067cd49` (protocol v13; D1 owner-accepted; small debt in `docs/feat/skills-hot-reload.md`);
 > 4. `docker-runtime` (slice A `feat/docker-engine-client` DONE, merged `116d45f`; next A2 `feat/docker-ssh-dialer`, then B, C) — `run`/`attach --engine kubernetes|docker|podman`, default configurable (owner 2026-10-26) (`docs/eval/docker-runtime.md`,
 >    owner answers 2026-10-26; promote to `feat/` when picked; slices A
 >    `packages/docker`, B neutral `SandboxHost` seam, `ssh://` dial-stdio, C CLI/docs);
