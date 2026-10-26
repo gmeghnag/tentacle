@@ -176,6 +176,8 @@ export function updateToEvent(
           // The field only, never derived from the banner text (docs/feat/tui-spill-note.md).
           ...(update.spill ? { spill: update.spill } : {}),
         },
+        // Beside the result, never inside it: a tool cannot set it (docs/fix/tool-duration.md).
+        ...(update.durationMs !== undefined ? { durationMs: update.durationMs } : {}),
       };
     case "agent_usage":
       return {

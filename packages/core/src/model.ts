@@ -38,6 +38,12 @@ export interface ChatMessage {
    * never sees it; `content` is what it sees).
    */
   readonly spill?: ToolResultSpill;
+  /**
+   * On a `role: "tool"` message whose tool actually ran: how long the run took
+   * (ms, measured agent-side on a monotonic clock; docs/fix/tool-duration.md).
+   * Display only, like `spill`: the model never sees it.
+   */
+  readonly durationMs?: number;
 }
 
 export interface Usage {

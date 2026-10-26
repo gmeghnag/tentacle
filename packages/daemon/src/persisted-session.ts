@@ -26,10 +26,13 @@ export const DAEMON_RECORD_KIND = "tentacle.daemon-session";
  * 5: a tool message may carry `spill` (docs/feat/tui-spill-note.md): a v4
  * daemon refuses every v5 record instead of dropping a spill at its next
  * write. A v1–v4 record reads as a v5 one with no spills.
+ * 6: a tool message may carry `durationMs` (docs/fix/tool-duration.md): a v5
+ * daemon refuses every v6 record instead of dropping durations at its next
+ * write. A v1–v5 record reads as a v6 one with no durations.
  */
-export const DAEMON_RECORD_VERSION = 5;
+export const DAEMON_RECORD_VERSION = 6;
 /** Every version `parseDaemonRecord` reads (each read as the current shape). */
-const READABLE_VERSIONS: readonly number[] = [1, 2, 3, 4, DAEMON_RECORD_VERSION];
+const READABLE_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, DAEMON_RECORD_VERSION];
 /** The first version whose `title` may be a chosen one (`{ text, source }`). */
 const CHOSEN_TITLE_VERSION = 3;
 /** The first version with steer ids (`turn.steeringIds`) and `returned` rows. */

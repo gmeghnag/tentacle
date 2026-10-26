@@ -46,8 +46,7 @@ describe("itemLines", () => {
       name: "fs_write",
       args: '{"path":"a.txt"}',
       status: "ok",
-      startedAt: 0,
-      endedAt: 500,
+      durationMs: 500,
       detail: {
         kind: "diff",
         path: "a.txt",
@@ -80,8 +79,7 @@ describe("itemLines", () => {
       name: "fs_edit",
       args: '{"path":"m.ts"}',
       status: "ok",
-      startedAt: 0,
-      endedAt: 10,
+      durationMs: 10,
       detail: {
         kind: "diff",
         path: "m.ts",
@@ -121,8 +119,7 @@ describe("itemLines", () => {
       name: "agent_task",
       args: '{"description":"find bug"}',
       status: "ok",
-      startedAt: 0,
-      endedAt: 5,
+      durationMs: 5,
       resultText: "The bug is in auth.ts",
       sub: {
         agentType: "explore",
@@ -141,7 +138,7 @@ describe("itemLines", () => {
   });
 
   test("tool header shows a friendly action label per tool", () => {
-    const base = { kind: "tool" as const, status: "ok" as const, startedAt: 0, endedAt: 1 };
+    const base = { kind: "tool" as const, status: "ok" as const, durationMs: 1 };
     const read = itemLines({ ...base, id: "r", name: "fs_read", args: '{"path":"x.ts"}' }, opts)[0];
     const bash = itemLines(
       { ...base, id: "b", name: "shell", args: '{"command":"ls -la"}' },
@@ -159,8 +156,7 @@ describe("tool-body collapse", () => {
     name: "shell",
     args: "{}",
     status: "ok",
-    startedAt: 0,
-    endedAt: 100,
+    durationMs: 100,
     resultText: Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n"),
   };
 
@@ -283,8 +279,7 @@ describe("transcriptRows", () => {
     name: "fs_read",
     args: '{"path":"src/App.tsx"}',
     status: "ok",
-    startedAt: 0,
-    endedAt: 500,
+    durationMs: 500,
     resultText: "line one\nline two",
   };
   const items: DisplayItem[] = [
@@ -359,8 +354,7 @@ describe("windowed layout (layoutTranscript + sliceLaid)", () => {
     name: "shell",
     args: "{}",
     status: "ok",
-    startedAt: 0,
-    endedAt: 1,
+    durationMs: 1,
     resultText: Array.from({ length: 12 }, (_, i) => `out ${i + 1}`).join("\n"),
   };
   const items: DisplayItem[] = [
@@ -412,8 +406,7 @@ describe("two layout slots per item (Ctrl+O both ways)", () => {
     name: "shell",
     args: '{"command":"ls"}',
     status: "ok",
-    startedAt: 0,
-    endedAt: 500,
+    durationMs: 500,
     resultText: body,
   });
   // `toolLines` calls formatDurationMs once per (re)layout of a finished tool.
@@ -509,7 +502,6 @@ describe("toolTitle labels", () => {
     name,
     args,
     status: "ok",
-    startedAt: 0,
   });
 
   test("fs_multi_edit shows MultiEdit + path + edit count", () => {
@@ -562,8 +554,7 @@ describe("hook annotation (H1)", () => {
     args: JSON.stringify({ command: "rm -rf build" }),
     status: "error",
     resultText: `Blocked by a hook: \`shell\` was not run. Reason: ${reason ?? ""}`,
-    startedAt: 0,
-    endedAt: 1,
+    durationMs: 1,
     hook: { action: "blocked", name: "no-rm", ...(reason !== undefined ? { reason } : {}) },
   });
 
@@ -600,8 +591,7 @@ describe("hook annotation (H1)", () => {
         added: 1,
         removed: 1,
       },
-      startedAt: 0,
-      endedAt: 1,
+      durationMs: 1,
       hook: { action: "modified", name: "fmt" },
     };
     const lines = itemLines(tool, opts).map(strip);
@@ -629,8 +619,7 @@ describe("a spilled tool result", () => {
     name: "fs_read",
     args: JSON.stringify({ path: "src/a.ts" }),
     status: "ok",
-    startedAt: 0,
-    endedAt: 1,
+    durationMs: 1,
     resultText: `${banner}\n${head}\n…[39600 characters omitted]…\n${tail}`,
     spill: { chars: 40_800, path: PATH, head, tail, omitted: 39_600 },
     ...over,
@@ -735,8 +724,7 @@ describe("display cells: a tab or a wide char never makes a row overflow", () =>
     name,
     args: "{}",
     status: "ok",
-    startedAt: 0,
-    endedAt: 1,
+    durationMs: 1,
     ...extra,
   });
   const rowsOf = (item: DisplayItem, width = WIDTH): string[] =>

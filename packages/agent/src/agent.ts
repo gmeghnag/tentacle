@@ -106,15 +106,23 @@ const CANCELLED_TOOL_NOTE = "Cancelled by the user before this tool ran.";
 /**
  * A finished call's history message. A spill rides with it, so a resume or a
  * snapshot shows the same note as the live row (docs/feat/tui-spill-note.md);
- * the model never sees it (providers copy field by field).
+ * the model never sees it (providers copy field by field). So does the run's
+ * measured duration, when the tool actually ran (docs/fix/tool-duration.md).
  */
-function toolMessage(callId: string, result: ToolResult): ChatMessage {
+function toolMessage(callId: string, result: ToolResult, durationMs?: number): ChatMessage {
   return {
     role: "tool",
     content: result.content,
     toolCallId: callId,
     ...(result.spill ? { spill: result.spill } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
   };
+}
+
+/** A tool run's outcome: `durationMs` is set iff the tool (or the skill read) actually ran. */
+interface ToolRun {
+  readonly result: ToolResult;
+  readonly durationMs?: number;
 }
 
 /** The last user message's text, for `turn_start` hooks ("" if none). */
@@ -142,6 +150,8 @@ export type AgentEvent =
       readonly id: string;
       readonly name: string;
       readonly result: ToolResult;
+      /** The tool's own run time (ms); absent when it never ran (denied, blocked, cancelled). */
+      readonly durationMs?: number;
     }
   | { readonly type: "usage"; readonly usage: Usage }
   // Nested sub-agent progress (the `agent_task` tool), keyed by the parent tool-call id.
@@ -226,6 +236,13 @@ export interface AgentConfig {
    * same path with the narrower, model-offered enum.) Absent → no skills.
    */
   readonly skills?: SkillActivator;
+  /**
+   * The monotonic clock (ms) a tool run is timed on: read right before and
+   * right after `execute`, so the permission prompt, the pre-hooks and the
+   * result transforms are never counted. Default `performance.now`; tests
+   * inject a fake one.
+   */
+  readonly now?: () => number;
 }
 
 /**
@@ -768,13 +785,20 @@ export class Agent {
       for await (const event of progress.drain()) {
         yield event;
       }
-      const { result: raw, input } = await resultPromise;
+      const { result: raw, input, durationMs } = await resultPromise;
+      // After the duration was taken: a transform is harness time, not the tool's.
       const result = await this.transformResult(call, raw, signal, {
         sessionId: toolContext.sessionId,
         input,
       });
-      yield { type: "tool_result", id: call.id, name: call.name, result };
-      messages.push(toolMessage(call.id, result));
+      yield {
+        type: "tool_result",
+        id: call.id,
+        name: call.name,
+        result,
+        ...(durationMs !== undefined ? { durationMs } : {}),
+      };
+      messages.push(toolMessage(call.id, result, durationMs));
       // After the push, not before: the `tool_result` above precedes it.
       yield { type: "history_commit" };
     }
@@ -801,33 +825,47 @@ export class Agent {
     yield { type: "history_commit" };
     yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
     const cancelled: ToolResult = { content: CANCELLED_TOOL_NOTE, isError: true };
-    let result: ToolResult;
+    let run: ToolRun;
     const activator = this.config.skills;
     if (signal?.aborted) {
-      result = cancelled;
+      run = { result: cancelled };
     } else if (!activator) {
-      result = { content: `Unknown skill "${name}".`, isError: true };
+      run = { result: { content: `Unknown skill "${name}".`, isError: true } };
     } else {
       // Like the compaction re-read: a read can hang and takes no signal, so
-      // a cancel must not wait for it.
-      result = await unlessAborted(
-        (async () =>
-          this.transformResult(call, await activator.activate(name, toolContext), signal, {
-            sessionId: toolContext.sessionId,
-          }))(),
+      // a cancel must not wait for it. Only the read is timed, not the transforms.
+      run = await unlessAborted(
+        (async (): Promise<ToolRun> => {
+          const timed = await this.timed(() => activator.activate(name, toolContext));
+          return {
+            result: await this.transformResult(call, timed.result, signal, {
+              sessionId: toolContext.sessionId,
+            }),
+            ...(timed.durationMs !== undefined ? { durationMs: timed.durationMs } : {}),
+          };
+        })(),
         signal,
       ).catch(
-        (error: unknown): ToolResult =>
+        (error: unknown): ToolRun =>
           signal?.aborted
-            ? cancelled
+            ? { result: cancelled }
             : {
-                content: `Could not load skill "${name}": ${error instanceof Error ? error.message : String(error)}`,
-                isError: true,
+                result: {
+                  content: `Could not load skill "${name}": ${error instanceof Error ? error.message : String(error)}`,
+                  isError: true,
+                },
               },
       );
     }
-    yield { type: "tool_result", id: call.id, name: call.name, result };
-    messages.push(toolMessage(call.id, result));
+    const { result, durationMs } = run;
+    yield {
+      type: "tool_result",
+      id: call.id,
+      name: call.name,
+      result,
+      ...(durationMs !== undefined ? { durationMs } : {}),
+    };
+    messages.push(toolMessage(call.id, result, durationMs));
     yield { type: "history_commit" };
   }
 
@@ -896,18 +934,29 @@ export class Agent {
   }
 
   /**
+   * Run `work` (a tool's `execute`, a skill read) timed on the monotonic
+   * clock: its integer ms ≥ 0 rides as `durationMs` (docs/fix/tool-duration.md).
+   */
+  private async timed(work: () => Promise<ToolResult>): Promise<ToolRun> {
+    const now = this.config.now ?? (() => performance.now());
+    const start = now();
+    const result = await work();
+    return { result, durationMs: Math.max(0, Math.round(now() - start)) };
+  }
+
+  /**
    * Authorize (if the tool needs it) and then run a single tool call. Returns
    * the result and the input it ran with (a `tool_call` hook may rewrite it),
-   * for the `tool_result` hooks.
+   * for the `tool_result` hooks, and the run's `durationMs` iff `execute` ran:
+   * the clock is read only around `execute`, after `authorize` — the prompt
+   * wait and the pre-hooks are never tool time.
    */
-  private async runTool(
-    call: ToolCall,
-    ctx: ToolContext,
-  ): Promise<{ result: ToolResult; input: unknown }> {
+  private async runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRun & { input: unknown }> {
     const tool = this.config.tools.get(call.name);
     const input = parseArguments(call.arguments);
     if (!tool) {
-      return { result: await this.config.tools.execute(call.name, call.arguments, ctx), input };
+      const run = await this.timed(() => this.config.tools.execute(call.name, call.arguments, ctx));
+      return { ...run, input };
     }
     const outcome = await this.gate.authorize(tool, input, {
       sessionId: ctx.sessionId,
@@ -956,10 +1005,13 @@ export class Agent {
     }
     if (!outcome.modified) {
       // Unchanged: the raw argument string, byte-identical to a hook-less run.
-      return { result: await this.config.tools.execute(call.name, call.arguments, ctx), input };
+      const run = await this.timed(() => this.config.tools.execute(call.name, call.arguments, ctx));
+      return { ...run, input };
     }
     const name = outcome.hookName ?? "hook";
-    const result = await this.config.tools.execute(call.name, JSON.stringify(outcome.input), ctx);
+    const { result, durationMs } = await this.timed(() =>
+      this.config.tools.execute(call.name, JSON.stringify(outcome.input), ctx),
+    );
     // H4: the history keeps the model's original arguments, so say what ran.
     const ran = clipText(JSON.stringify(outcome.input), 500);
     return {
@@ -968,6 +1020,7 @@ export class Agent {
         content: `[hook] input modified by hook ${name}; ran with: ${ran}\n${result.content}`,
         hook: { action: "modified", name },
       },
+      ...(durationMs !== undefined ? { durationMs } : {}),
       input: outcome.input,
     };
   }

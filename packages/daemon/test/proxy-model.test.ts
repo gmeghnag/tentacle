@@ -15,6 +15,44 @@ function methodNotFound(): Error {
   });
 }
 
+describe("ProxyModelProvider — display-only message fields never reach the model", () => {
+  test("a tool message's durationMs (and spill) is not on the wire request (docs/fix/tool-duration.md)", async () => {
+    // Mutation (red, verified): copy `durationMs` in toWireRequest → fails.
+    const sent: unknown[] = [];
+    const provider = new ProxyModelProvider(
+      () => Promise.reject(new Error("batch path must not be used")),
+      async (req) => {
+        sent.push(req);
+        return { chunks: 0 };
+      },
+    );
+    const request: ChatRequest = {
+      messages: [
+        { role: "user", content: "go" },
+        { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "t", arguments: "{}" }] },
+        {
+          role: "tool",
+          content: "ok",
+          toolCallId: "c1",
+          durationMs: 1234,
+          spill: { chars: 9, head: "h", tail: "t", omitted: 7 },
+        },
+      ],
+    };
+    for await (const _ of provider.stream(request)) {
+      // drain
+    }
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({
+      messages: [
+        { role: "user", content: "go" },
+        { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "t", arguments: "{}" }] },
+        { role: "tool", content: "ok", toolCallId: "c1" },
+      ],
+    });
+  });
+});
+
 describe("ProxyModelProvider — chunked (streaming) cut", () => {
   test("the deciding test: the first event is observed out of stream() BEFORE the sender resolves (red on the old batch path)", async () => {
     let senderResolved = false;

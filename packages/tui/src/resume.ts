@@ -28,7 +28,6 @@ export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[]
           name: call.name,
           args: call.arguments,
           status: "ok", // historical: the call already ran
-          startedAt: 0,
         });
       }
     } else if (m.role === "tool") {
@@ -39,9 +38,10 @@ export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[]
           ...tool,
           resultText: m.content,
           status: "ok",
-          endedAt: 0,
           // A spilled result shows the same note as live (docs/feat/tui-spill-note.md).
           ...(m.spill ? { spill: m.spill } : {}),
+          // The stored measurement, or none: never a fake 0.0s (docs/fix/tool-duration.md).
+          ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
         };
       } else {
         // A tool result with no matching call (truncated history): show it plainly.

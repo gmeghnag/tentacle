@@ -54,6 +54,8 @@ export const ToolCallUpdateSchema = z.object({
   content: z.array(ContentBlockSchema).optional(),
   /** Set when the result was spilled: `content` is the model's banner (docs/feat/tui-spill-note.md). */
   spill: ToolResultSpillSchema.optional(),
+  /** Set when the tool actually ran: its daemon-measured run time in ms (display only, docs/fix/tool-duration.md). */
+  durationMs: z.number().int().nonnegative().optional(),
 });
 
 export const PlanEntryStatusSchema = z.enum(["pending", "in_progress", "completed"]);

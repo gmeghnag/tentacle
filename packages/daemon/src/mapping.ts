@@ -207,6 +207,7 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
         status: event.result.isError ? "failed" : "completed",
         content: toolResultContent(event.result),
         ...(event.result.spill ? { spill: event.result.spill } : {}),
+        ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
       };
     case "usage":
       return {

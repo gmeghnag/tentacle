@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage } from "@tentacle/core";
+import { itemLines, stripAnsi } from "../src/render-lines.ts";
 import { messagesToItems } from "../src/resume.ts";
 import type { ToolItem } from "../src/state.ts";
 
@@ -65,6 +66,40 @@ describe("messagesToItems", () => {
     ]);
     expect((items[0] as ToolItem).spill).toEqual(spill);
     expect("spill" in (items[1] as ToolItem)).toBe(false);
+  });
+
+  test("a replayed tool row with no stored duration shows no time, never a fake 0.0s (docs/fix/tool-duration.md)", () => {
+    // Mutation (red, verified): fall back to `durationMs: m.durationMs ?? 0` in resume.ts → `0.0s` again.
+    const items = messagesToItems([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "c1", name: "shell", arguments: '{"command":"sleep 2"}' }],
+      },
+      { role: "tool", content: "ok", toolCallId: "c1" },
+    ]);
+    const header = stripAnsi(
+      itemLines(items[0] as ToolItem, { width: 80, expandAll: false })[0] ?? "",
+    );
+    expect(header).toBe("⏺ Bash sleep 2");
+    expect("durationMs" in (items[0] as ToolItem)).toBe(false);
+  });
+
+  test("a replayed tool row shows the daemon-measured duration it was stored with", () => {
+    // Mutation (red, verified): drop the `durationMs` copy in resume.ts → no time shown.
+    const items = messagesToItems([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "c1", name: "shell", arguments: '{"command":"sleep 2"}' }],
+      },
+      { role: "tool", content: "ok", toolCallId: "c1", durationMs: 2000 },
+    ]);
+    expect((items[0] as ToolItem).durationMs).toBe(2000);
+    const header = stripAnsi(
+      itemLines(items[0] as ToolItem, { width: 80, expandAll: false })[0] ?? "",
+    );
+    expect(header).toBe("⏺ Bash sleep 2 2.0s");
   });
 
   test("an orphan tool result (truncated history) shows as a notice", () => {

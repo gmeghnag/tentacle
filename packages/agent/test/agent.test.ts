@@ -84,7 +84,7 @@ describe("Agent.run", () => {
       ],
       [{ type: "text", delta: "done!" }, { type: "done" }],
     ]);
-    const agent = new Agent({ model, tools: registryWithEcho(), env: noopEnv });
+    const agent = new Agent({ model, tools: registryWithEcho(), env: noopEnv, now: () => 0 });
 
     const events = await collect(agent.run("s1", [{ role: "user", content: "use echo" }]));
 
@@ -99,12 +99,15 @@ describe("Agent.run", () => {
     const toolResult = events.find((e) => e.type === "tool_result");
     expect(toolResult).toMatchObject({ name: "echo", result: { content: "hi" } });
 
-    // The second model call must see the tool result as a `tool` message.
+    // The second model call must see the tool result as a `tool` message (its
+    // display-only `durationMs` is dropped by the provider mappers,
+    // providers/test/tool-duration.test.ts).
     const secondTurn = model.requests[1];
     expect(secondTurn?.messages).toContainEqual({
       role: "tool",
       content: "hi",
       toolCallId: "c1",
+      durationMs: 0,
     });
   });
 
@@ -548,10 +551,12 @@ describe("history_commit (the snapshot cut)", () => {
         commits++;
         for (const e of events) {
           if (e.type === "tool_result") {
+            // The message carries the event's measured duration, if any (docs/fix/tool-duration.md).
             expect(messages).toContainEqual({
               role: "tool",
               content: e.result.content,
               toolCallId: e.id,
+              ...(e.durationMs !== undefined ? { durationMs: e.durationMs } : {}),
             });
           } else if (e.type === "steer") {
             expect(messages.some((m) => m.role === "user" && m.content === e.text)).toBe(true);
@@ -717,12 +722,22 @@ describe("ToolContext.history", () => {
       ],
       [{ type: "done" }],
     ]);
-    const agent = new Agent({ model, tools: new ToolRegistry().register(spy), env: noopEnv });
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(spy),
+      env: noopEnv,
+      now: () => 0,
+    });
     await collect(agent.run("s1", [{ role: "user", content: "go" }]));
 
     expect(seen.length).toBe(2);
     expect(seen[0]?.map((m) => m.role)).toEqual(["user", "assistant"]);
     // The second call of the round sees the first call's result.
-    expect(seen[1]?.at(-1)).toEqual({ role: "tool", content: "r-1", toolCallId: "c1" });
+    expect(seen[1]?.at(-1)).toEqual({
+      role: "tool",
+      content: "r-1",
+      toolCallId: "c1",
+      durationMs: 0,
+    });
   });
 });

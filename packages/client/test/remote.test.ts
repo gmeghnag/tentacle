@@ -1563,6 +1563,56 @@ describe("a spilled tool result over the real stack (docs/feat/tui-spill-note.md
   });
 });
 
+describe("a measured tool result over the real stack (docs/fix/tool-duration.md)", () => {
+  test("the live tool_result and a later snapshot both carry the daemon's durationMs", async () => {
+    // Mutation (red, verified): drop the copy in daemon/src/mapping.ts → the live
+    // assertion fails; drop the field from ChatMessageSchema → the snapshot one does.
+    let t = 1000;
+    const timed = {
+      name: "timed",
+      description: "takes 1234 ms on the fake clock",
+      inputSchema: z.object({}),
+      permission: "none" as const,
+      execute: async () => {
+        t += 1234;
+        return { content: "done" };
+      },
+    };
+    const model = new ScriptedProvider([
+      [
+        { type: "tool_call", toolCall: { id: "c1", name: "timed", arguments: "{}" } },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const host = new SessionHost({
+      defaultCwd: "/tmp/remote-work",
+      createAgent: () => {
+        const permissions = new PermissionBroker();
+        const agent = new Agent({
+          model,
+          tools: new ToolRegistry().register(timed),
+          env: noopEnv,
+          now: () => t,
+          requestPermission: (req) => permissions.request(req),
+        });
+        return { agent, permissions };
+      },
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, host);
+    const client = new RemoteClient(clientCh, new PermissionBroker());
+    await client.initialize();
+    const session = client.newSession();
+    const events = await collect(session.send("go"));
+    const live = events.find((e) => e.type === "tool_result");
+    expect(live?.type === "tool_result" ? live.durationMs : undefined).toBe(1234);
+    const history = await session.snapshot();
+    expect(history?.find((m) => m.role === "tool")?.durationMs).toBe(1234);
+    client.close();
+  });
+});
+
 describe("RemoteClient.snapshot (paged history at the cut)", () => {
   test("joins the pages chronologically over a real Connection", async () => {
     const [daemonCh, clientCh] = createChannelPair();

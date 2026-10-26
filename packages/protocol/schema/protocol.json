@@ -127,6 +127,10 @@
         "content": {
           "type": "string"
         },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
           "type": "string"
@@ -1820,6 +1824,10 @@
             "$ref": "#/$defs/ContentBlock"
           },
           "type": "array"
+        },
+        "durationMs": {
+          "minimum": 0,
+          "type": "integer"
         },
         "spill": {
           "$ref": "#/$defs/ToolResultSpill"

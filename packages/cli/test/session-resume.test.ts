@@ -248,6 +248,12 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
     },
     { role: "tool", content: "b", toolCallId: "1", spill: { chars: 9, tail: "t", omitted: 7 } },
     { role: "tool", content: "b", toolCallId: "1", spill: "x" },
+    // A measured tool result (docs/fix/tool-duration.md), valid and malformed.
+    { role: "tool", content: "b", toolCallId: "1", durationMs: 1234 },
+    { role: "tool", content: "b", toolCallId: "1", durationMs: 0 },
+    { role: "tool", content: "b", toolCallId: "1", durationMs: -1 },
+    { role: "tool", content: "b", toolCallId: "1", durationMs: 1.5 },
+    { role: "tool", content: "b", toolCallId: "1", durationMs: "x" },
     "not an object",
     null,
   ];
@@ -279,6 +285,31 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
   // Tripwire: a new wire key must be added to the store's mirror (session-store.ts).
   test("the set of allowed message keys is the schema's", () => {
     const keys = Object.keys(ChatMessageSchema.shape).sort();
-    expect(keys).toEqual(["content", "role", "spill", "toolCallId", "toolCalls"]);
+    expect(keys).toEqual(["content", "durationMs", "role", "spill", "toolCallId", "toolCalls"]);
+  });
+  test("a tool message's durationMs round-trips; a malformed one is refused loudly (docs/fix/tool-duration.md)", () => {
+    // Mutation (red, verified): drop "durationMs" from MESSAGE_KEYS → `unknown key "durationMs"`.
+    const kept = parseSessionRecord(
+      {
+        ...rec("m", 1),
+        messages: [{ role: "tool", content: "b", toolCallId: "1", durationMs: 1234 }],
+      },
+      "m",
+    );
+    expect(kept.ok ? kept.record.messages[0]?.durationMs : kept.reason).toBe(1234);
+    for (const bad of [-1, 1.5, "x"]) {
+      const refused = parseSessionRecord(
+        { ...rec("m", 1), messages: [{ role: "tool", content: "b", durationMs: bad }] },
+        "m",
+      );
+      expect(refused.ok ? "loaded" : refused.reason).toBe("message 0 has a malformed durationMs");
+    }
+    // A record from before the field still loads.
+    expect(
+      parseSessionRecord(
+        { ...rec("m", 1), messages: [{ role: "tool", content: "b", toolCallId: "1" }] },
+        "m",
+      ).ok,
+    ).toBe(true);
   });
 });

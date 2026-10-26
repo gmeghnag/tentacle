@@ -36,6 +36,8 @@ export const ChatMessageSchema = z.object({
   toolCallId: z.string().optional(),
   /** On a spilled tool result: the spill as data (display only, docs/feat/tui-spill-note.md). */
   spill: ToolResultSpillSchema.optional(),
+  /** On a tool result that ran: its measured run time in ms (display only, docs/fix/tool-duration.md). */
+  durationMs: z.number().int().nonnegative().optional(),
 });
 export type WireChatMessage = z.infer<typeof ChatMessageSchema>;
 
