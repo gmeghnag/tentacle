@@ -22,19 +22,21 @@ const turn: SessionActivity = {
   },
   cancel: () => {},
 };
-const history = (compacted: boolean): SessionActivity => ({
+const history = (reason: "compact" | "context_reset" | null): SessionActivity => ({
   kind: "history",
   messages: [],
-  compacted,
+  reason,
 });
 
 describe("nextStep (C2)", () => {
   test.each([
     [false, turn, "consume"],
     [true, turn, "hold"],
-    [false, history(false), "history"],
-    [true, history(false), "hold"],
-    [true, history(true), "history"], // a compaction only adds a notice: never waits
+    [false, history(null), "history"],
+    [true, history(null), "hold"],
+    [true, history("compact"), "history"], // a compaction only adds a notice: never waits
+    [true, history("context_reset"), "hold"], // appended after the run it follows
+    [false, history("context_reset"), "history"],
     [false, { kind: "closed", reason: "closed" } as SessionActivity, "closed"],
     [true, { kind: "closed", reason: "deleted" } as SessionActivity, "closed"],
   ] as const)("inFlight=%p %o → %s", (inFlight, activity, step) => {
@@ -44,10 +46,15 @@ describe("nextStep (C2)", () => {
 
 describe("historyAction (C6, owner QR1)", () => {
   test("a compaction keeps the transcript: a notice unless mine; any other history replaces it", () => {
-    expect(historyAction({ compacted: true, ownCompaction: false })).toBe("notice");
-    expect(historyAction({ compacted: true, ownCompaction: true })).toBe("none");
-    expect(historyAction({ compacted: false, ownCompaction: false })).toBe("replace");
-    expect(historyAction({ compacted: false, ownCompaction: true })).toBe("replace");
+    expect(historyAction({ reason: "compact", ownCompaction: false })).toBe("notice");
+    expect(historyAction({ reason: "compact", ownCompaction: true })).toBe("none");
+    expect(historyAction({ reason: null, ownCompaction: false })).toBe("replace");
+    expect(historyAction({ reason: null, ownCompaction: true })).toBe("replace");
+  });
+
+  test("a context reset keeps the transcript and APPENDS the new history (context-reset decision 9)", () => {
+    expect(historyAction({ reason: "context_reset", ownCompaction: false })).toBe("append");
+    expect(historyAction({ reason: "context_reset", ownCompaction: true })).toBe("append");
   });
 });
 

@@ -425,7 +425,7 @@ describe("foreign turns over the real daemon", () => {
     r.b.client.close();
   });
 
-  test("T-B5b + T-B14b: the foreign turn ended behind the cut → its stream closes with no turn_end (never guessed), once; then an idle history (compacted: false)", async () => {
+  test("T-B5b + T-B14b: the foreign turn ended behind the cut → its stream closes with no turn_end (never guessed), once; then an idle history (reason: null)", async () => {
     const r = await twoDevices({ ringBytes: 1000, bReconnect: true });
     const w = watched(r.sb);
     const running = drain(r.sa.send("slow"), []);
@@ -444,7 +444,7 @@ describe("foreign turns over the real daemon", () => {
     expect(events.some((e) => e.type === "turn_end")).toBe(false);
     await until(() => w.activities.some((a) => a.kind === "history"));
     expect(w.activities.map((a) => a.kind)).toEqual(["turn", "history"]);
-    expect(w.activities[1]).toMatchObject({ kind: "history", compacted: false });
+    expect(w.activities[1]).toMatchObject({ kind: "history", reason: null });
     r.a.client.close();
     r.b.client.close();
   });
@@ -579,13 +579,13 @@ describe("foreign turns over the real daemon", () => {
     r.b.client.close();
   });
 
-  test("T-B14: an idle compaction → history{compacted: true}", async () => {
+  test("T-B14: an idle compaction → history{reason: compact}", async () => {
     const r = await twoDevices();
     const w = watched(r.sb);
     await r.sa.compact();
     await until(() => w.activities.some((a) => a.kind === "history"));
     expect(w.activities.map((a) => a.kind)).toEqual(["history"]);
-    expect(w.activities[0]).toMatchObject({ kind: "history", compacted: true });
+    expect(w.activities[0]).toMatchObject({ kind: "history", reason: "compact" });
     r.a.client.close();
     r.b.client.close();
   });
@@ -826,7 +826,7 @@ describe("eager open (attach only, never create) — T-B13", () => {
     await sb.open();
     const w = watched(sb);
     expect(w.activities.map((x) => x.kind)).toEqual(["history"]);
-    expect(w.activities[0]).toMatchObject({ kind: "history", compacted: false });
+    expect(w.activities[0]).toMatchObject({ kind: "history", reason: null });
     const [history] = w.activities;
     expect(history?.kind === "history" && history.messages.length).toBe(450);
     expect(b.frames.filter((f) => f.method === Method.Snapshot)).toHaveLength(3);

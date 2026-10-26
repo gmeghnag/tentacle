@@ -43,7 +43,7 @@ describe("contextUsage on the wire", () => {
     }
   });
 
-  test("an additive optional field: no protocol bump", () => {
-    expect(PROTOCOL_VERSION).toBe(11);
+  test("an additive optional field: no protocol bump (11 when it landed)", () => {
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(11);
   });
 });

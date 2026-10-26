@@ -358,7 +358,7 @@
       "additionalProperties": true,
       "properties": {
         "reason": {
-          "enum": ["compact"],
+          "enum": ["compact", "context_reset"],
           "type": "string"
         },
         "type": {
@@ -2398,5 +2398,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 11
+  "x-protocol-version": 12
 }

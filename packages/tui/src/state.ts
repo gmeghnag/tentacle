@@ -17,6 +17,8 @@ export type ToolStatus = "running" | "ok" | "error";
 export interface UserItem {
   readonly kind: "user";
   readonly text: string;
+  /** The model's restart prompt after a context reset (labelled "restart prompt"). */
+  readonly restart?: true;
 }
 
 export interface AssistantItem {
@@ -37,6 +39,8 @@ export interface NoticeItem {
   readonly text: string;
   /** Identifies a background-job notice so the live + event paths dedupe. */
   readonly jobId?: string;
+  /** Drawn as a full-width rule around `text` (the context-reset separator). */
+  readonly separator?: true;
 }
 
 /** Live progress of a sub-agent spawned by an `agent_task` tool call. */
@@ -366,6 +370,11 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     case "history_commit":
       return state;
 
+    // The model renewed its context mid-turn: the transcript stays, the new
+    // history follows it (its restart message renders the separator).
+    case "context_reset":
+      return appendHistory(state, event.messages);
+
     case "turn_end":
       return {
         ...state,
@@ -402,12 +411,24 @@ export function unsupportedNotice(kind: string): string {
  * for approval), not done — `messagesToItems` marks every historical call `ok`.
  */
 export function resetHistory(state: DisplayState, messages: readonly ChatMessage[]): DisplayState {
-  const items = messagesToItems(messages).map((item) =>
+  return { ...state, items: historyItems(state, messages) };
+}
+
+/**
+ * Append `messages` after the transcript (a context reset: the old transcript
+ * stays on screen, decision 9 of docs/eval/context-reset.md), the turn's state
+ * kept — the same item rules as `resetHistory`.
+ */
+export function appendHistory(state: DisplayState, messages: readonly ChatMessage[]): DisplayState {
+  return { ...state, items: [...state.items, ...historyItems(state, messages)] };
+}
+
+function historyItems(state: DisplayState, messages: readonly ChatMessage[]): DisplayItem[] {
+  return messagesToItems(messages).map((item) =>
     state.running && item.kind === "tool" && item.resultText === undefined
       ? { ...item, status: "running" as const }
       : item,
   );
-  return { ...state, items };
 }
 
 /** Fold one session event: the two reconnect events here, everything else in `applyEvent`. */

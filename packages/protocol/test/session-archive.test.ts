@@ -44,8 +44,8 @@ describe("session archive (docs/feat/session-archive.md)", () => {
     expect(new Set(Object.values(codes)).size).toBe(Object.values(codes).length);
   });
 
-  test("P1 close / open change meaning: PROTOCOL_VERSION is 11", () => {
-    expect(P.PROTOCOL_VERSION as number).toBe(11);
+  test("P1 close / open change meaning: PROTOCOL_VERSION is at least 11", () => {
+    expect(P.PROTOCOL_VERSION as number).toBeGreaterThanOrEqual(11);
   });
 
   test("P1 initialize params stay readable by every daemon (version-mismatch-notice)", () => {

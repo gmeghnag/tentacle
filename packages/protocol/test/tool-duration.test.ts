@@ -59,6 +59,7 @@ describe("tool durationMs on the wire", () => {
     expect(m.success && !("durationMs" in m.data)).toBe(true);
     // No new update kind and the carrier stays `display`.
     expect(UPDATE_CLASS.tool_call_update).toBe("display");
-    expect(PROTOCOL_VERSION).toBe(11);
+    // 11 when it landed; a later breaking change bumped it for its own reason.
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(11);
   });
 });

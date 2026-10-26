@@ -180,3 +180,13 @@ describe("context_note reason 'hook' (docs/feat/hooks-turn.md)", () => {
     expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(9);
   });
 });
+
+describe("history_replaced reason 'context_reset' (docs/feat/context-reset-barrier.md)", () => {
+  test("parses, stays mandatory, and bumps the version (an older client's enum rejects it)", () => {
+    const barrier = { type: "history_replaced", reason: "context_reset" };
+    expect(SessionUpdateSchema.safeParse(barrier).success).toBe(true);
+    expect(SessionUpdateSchema.safeParse({ ...barrier, reason: "other" }).success).toBe(false);
+    expect(UPDATE_CLASS.history_replaced).toBe("mandatory");
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(12);
+  });
+});

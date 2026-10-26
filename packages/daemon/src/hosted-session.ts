@@ -31,11 +31,13 @@
  * Recovery is snapshot + replay at a consistent CUT `{epoch, seq, length}`:
  * `history[0, length)` reflects every update with `seq <= cut.seq`, and the
  * ring replays the rest. The cut moves only where that holds — at the agent's
- * `history_commit` markers, at turn end, and at a compaction (new epoch) — and
- * the snapshot is SLICED to `length`, so a cut that lags behind the history is
- * still exact: what was pushed after it is replayed, never doubled or lost.
- * Sound because the history is append-only past any cut within an epoch (the
- * agent's one `pop` is never behind a marker; compaction starts a new epoch).
+ * `history_commit` markers, at turn end, and at a history replacement (new
+ * epoch): a compaction, or a context reset inside a turn, whose cut names that
+ * turn — and the snapshot is SLICED to `length`, so a cut that lags behind the
+ * history is still exact: what was pushed after it is replayed, never doubled
+ * or lost. Sound because the history is append-only past any cut within an
+ * epoch (the agent's one `pop` is never behind a marker; a replacement starts
+ * a new epoch).
  */
 import type { AgentEvent, AskHooksTrust, Session } from "@tentacle/agent";
 import type {
@@ -1207,6 +1209,16 @@ export class HostedSession {
           this.persist();
           continue;
         }
+        // The model renewed its context: the history was replaced in place,
+        // in this same stretch (no `await` between the agent's replacement
+        // and here). The barrier, mid-turn — then the record holds the fresh
+        // history at once, with the turn in flight.
+        if (event.type === "context_reset") {
+          this.pending = undefined;
+          this.historyReplaced("context_reset");
+          this.persist();
+          continue;
+        }
         if (event.type === "tool_start") {
           this.currentToolCallId = event.id;
           this.currentToolName = event.name;
@@ -1493,7 +1505,7 @@ export class HostedSession {
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const { before, after } = await this.session.compact(controller.signal, () =>
-        this.historyReplaced(),
+        this.historyReplaced("compact"),
       );
       // Only a compaction that replaced the history is a conversation change:
       // a failed or cancelled one left it as it was (the `finally` writes it).
@@ -1521,28 +1533,34 @@ export class HostedSession {
   }
 
   /**
-   * The barrier, run synchronously inside `Session.compact` right after the
-   * history was replaced: a new epoch, `history_replaced`, the cut. Must not
-   * throw (the replacement already happened): a sink error is reported.
+   * The barrier, run synchronously right after the history was replaced —
+   * inside `Session.compact` (between turns), or on the agent's
+   * `context_reset` (INSIDE a turn): a new epoch, `history_replaced`, the cut.
+   * Must not throw (the replacement already happened): a sink error is reported.
    */
-  private historyReplaced(): void {
+  private historyReplaced(reason: "compact" | "context_reset"): void {
     // The cut is final BEFORE the emit — it names the barrier's own seq (the
     // next one) — so even a sink that reads the snapshot re-entrantly sees a
     // consistent new epoch, never the new epoch with the old history length.
-    // `compactedHistory` builds `[system?, summary, (skill call, result)*]`:
-    // its first user message is the summary.
+    // `compactedHistory` builds `[system?, summary, (skill call, result)*]`, a
+    // reset `[system, restart message, (skill call, result)*]`: their first
+    // user message is the head this session installed.
     this.compactionSummary = this.session.messages.find((m) => m.role === "user");
     this.epochStart = this.seq + 1;
     this.cut = {
       epoch: crypto.randomUUID(),
       seq: this.epochStart,
       length: this.session.messages.length,
-      turnId: null,
-      // A compaction holds no turn (no queue); the returned rows stay.
+      // A reset runs inside its turn: the cut names it, so a client that
+      // resyncs on the barrier keeps the rest of the turn (a compaction holds
+      // no turn).
+      turnId: this.compacting ? null : this.activeTurnId,
+      // As of the last `queued` emitted (a compaction's: no turn, no queue;
+      // the returned rows stay).
       queued: this.lastQueued,
     };
     try {
-      this.emit({ type: "history_replaced", reason: "compact" });
+      this.emit({ type: "history_replaced", reason });
     } catch (error) {
       this.reportTurnError(error);
     }

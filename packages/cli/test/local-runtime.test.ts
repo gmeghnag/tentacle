@@ -445,7 +445,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     if (turn?.events) await drain(turn.events);
     await ctl.flushed();
     expect(snapshots).toBe(1);
-    raise({ kind: "history", messages: [], compacted: false });
+    raise({ kind: "history", messages: [], reason: null });
     await ctl.flushed();
     expect(snapshots).toBe(2);
     expect(saved).toEqual([["theirs"], ["theirs"]]);
