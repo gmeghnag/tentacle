@@ -63,27 +63,65 @@ export function parseFrontmatter(text: string): Frontmatter {
   return { data, body: (match[2] ?? "").trim() };
 }
 
-/** Parse one agent definition; `fallbackName` is used when no `name` is given. */
-export function parseAgentDefinition(markdown: string, fallbackName: string): AgentType {
+/**
+ * A frontmatter value as the user wrote it, for a warning message: an array
+ * back to `[a, b]` (its items' quotes were stripped by `parseFrontmatter`), a
+ * scalar in quotes. (A warned value is present, so never `undefined`.)
+ */
+function rawValue(value: string | string[]): string {
+  return Array.isArray(value) ? `[${value.join(", ")}]` : JSON.stringify(value);
+}
+
+/**
+ * Parse one agent definition; `fallbackName` is used when no `name` is given.
+ * A present-but-invalid `model` (non-string / empty) or `contextWindow` (not a
+ * positive whole number of tokens) is still IGNORED (the agent loads as if the
+ * field were absent) but names the field + raw value in `warnings`, which the
+ * wiring layer prefixes with the file path and reports (fix/agent-defs-warn).
+ */
+export function parseAgentDefinition(
+  markdown: string,
+  fallbackName: string,
+): { type: AgentType; warnings: string[] } {
   const { data, body } = parseFrontmatter(markdown);
   const name = typeof data.name === "string" && data.name.length > 0 ? data.name : fallbackName;
   const description = typeof data.description === "string" ? data.description : "";
   const tools = Array.isArray(data.tools) ? data.tools : "all";
-  const model = typeof data.model === "string" && data.model.length > 0 ? data.model : undefined;
-  // A positive whole number of tokens; anything else is ignored, like a bad `model`.
+  const warnings: string[] = [];
+  const modelValue = data.model;
+  const model = typeof modelValue === "string" && modelValue.length > 0 ? modelValue : undefined;
+  // Present-but-invalid (an empty string, or a non-string) → warn; absent → silent.
+  if (model === undefined && modelValue !== undefined) {
+    warnings.push(`model ${rawValue(modelValue)} ignored — expected a non-empty string`);
+  }
+  // A positive whole number of tokens (≤ 9 digits); anything else is ignored,
+  // like a bad `model`.
   const window = data.contextWindow;
   const contextWindow =
     typeof window === "string" && /^[0-9]{1,9}$/.test(window) && Number(window) > 0
       ? Number(window)
       : undefined;
+  // Present-but-invalid → warn; absent → silent. A 10+ digit value IS a positive
+  // whole number, so name the 9-digit cap rather than "whole number" (Review nit 2).
+  if (contextWindow === undefined && window !== undefined) {
+    const overCap = typeof window === "string" && /^[0-9]{10,}$/.test(window);
+    warnings.push(
+      overCap
+        ? `contextWindow ${rawValue(window)} ignored — exceeds the 9-digit cap (max 999999999 tokens)`
+        : `contextWindow ${rawValue(window)} ignored — expected a positive whole number of tokens`,
+    );
+  }
   const prompt = body.length > 0 ? body : `You are the "${name}" sub-agent.`;
   return {
-    name,
-    description,
-    prompt,
-    tools,
-    ...(model ? { model } : {}),
-    ...(contextWindow !== undefined ? { contextWindow } : {}),
+    type: {
+      name,
+      description,
+      prompt,
+      tools,
+      ...(model ? { model } : {}),
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
+    },
+    warnings,
   };
 }
 

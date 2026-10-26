@@ -524,6 +524,84 @@ describe("loadUserAgentTypes: built-in shadowing (post-review)", () => {
   });
 });
 
+describe("loadUserAgentTypes: dropped-field warnings (fix/agent-defs-warn)", () => {
+  test("an invalid model/contextWindow warns with the agent name + path; the agent still loads", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agent-warn-"));
+    const cfg = join(root, "cfg");
+    const agents = join(cfg, "agents");
+    await mkdir(agents, { recursive: true });
+    await writeFile(
+      join(agents, "reviewer.md"),
+      "---\nname: reviewer\nmodel: [oops]\ncontextWindow: abc\n---\nYou review.",
+    );
+    const { types, diagnostics } = loadUserAgentTypes(cfg);
+    expect(diagnostics).toEqual([
+      `agent "reviewer" (${join(agents, "reviewer.md")}): model [oops] ignored — expected a non-empty string`,
+      `agent "reviewer" (${join(agents, "reviewer.md")}): contextWindow "abc" ignored — expected a positive whole number of tokens`,
+    ]);
+    expect(types).toHaveLength(1);
+    expect(types[0]?.name).toBe("reviewer");
+    expect("model" in (types[0] ?? {})).toBe(false);
+    expect("contextWindow" in (types[0] ?? {})).toBe(false);
+  });
+
+  test("valid or absent fields produce no diagnostics", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agent-nowarn-"));
+    const cfg = join(root, "cfg");
+    const agents = join(cfg, "agents");
+    await mkdir(agents, { recursive: true });
+    await writeFile(
+      join(agents, "ok.md"),
+      "---\nname: ok\nmodel: big\ncontextWindow: 32000\n---\nGo.",
+    );
+    const { types, diagnostics } = loadUserAgentTypes(cfg);
+    expect(diagnostics).toEqual([]);
+    expect(types.map((t) => t.name)).toEqual(["ok"]);
+  });
+
+  // Review nit 3: pin the field-warning-before-clash ordering the Failure modes
+  // chose — a *package* file that both clashes and has a bad field emits its
+  // field warning FIRST, then the clash line. Both lines are true.
+  test("a clashing package file warns its bad field BEFORE the clash line", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agent-clash-"));
+    const cfg = join(root, "cfg");
+    const agents = join(cfg, "agents");
+    const pkg = join(root, "pkg", "agents");
+    await mkdir(agents, { recursive: true });
+    await mkdir(pkg, { recursive: true });
+    // configDir/agents is scanned first (index 0) and wins the name.
+    await writeFile(join(agents, "reviewer.md"), "---\nname: reviewer\n---\nYou review.");
+    // The package file (index 1) clashes AND has a dropped field.
+    const pkgFile = join(pkg, "reviewer.md");
+    await writeFile(pkgFile, "---\nname: reviewer\nmodel: [oops]\n---\nYou review.");
+    const { types, diagnostics } = loadUserAgentTypes(cfg, [pkg]);
+    expect(diagnostics).toEqual([
+      `agent "reviewer" (${pkgFile}): model [oops] ignored — expected a non-empty string`,
+      `agent type "reviewer" in ${pkgFile} ignored (already defined by ${join(agents, "reviewer.md")})`,
+    ]);
+    expect(types.map((t) => t.name)).toEqual(["reviewer"]);
+    // The kept (configDir) definition has no dropped field.
+    expect("model" in (types[0] ?? {})).toBe(false);
+  });
+
+  // Review nit 3: a warning must also carry a *package* dir path, not just
+  // <configDir>/agents (the only path exercised by the tests above).
+  test("a dropped field in a package dir warns with the package path", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agent-pkgwarn-"));
+    const cfg = join(root, "cfg"); // intentionally not created: no config agents
+    const pkg = join(root, "pkg", "agents");
+    await mkdir(pkg, { recursive: true });
+    const pkgFile = join(pkg, "big.md");
+    await writeFile(pkgFile, "---\nname: big\nmodel: big\ncontextWindow: abc\n---\nGo.");
+    const { types, diagnostics } = loadUserAgentTypes(cfg, [pkg]);
+    expect(diagnostics).toEqual([
+      `agent "big" (${pkgFile}): contextWindow "abc" ignored — expected a positive whole number of tokens`,
+    ]);
+    expect(types.map((t) => t.name)).toEqual(["big"]);
+    expect("contextWindow" in (types[0] ?? {})).toBe(false);
+  });
+});
+
 describe("hook env dirs wiring (docs/feat/hook-env-dirs.md)", () => {
   const runnerOpts = (wired: ReturnType<typeof buildAgent>) =>
     (

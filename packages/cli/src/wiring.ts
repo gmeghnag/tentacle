@@ -113,7 +113,13 @@ export function loadUserAgentTypes(
       const path = join(dir, file);
       let type: AgentType;
       try {
-        type = parseAgentDefinition(readFileSync(path, "utf8"), file.replace(/\.md$/, ""));
+        const parsed = parseAgentDefinition(readFileSync(path, "utf8"), file.replace(/\.md$/, ""));
+        type = parsed.type;
+        // A dropped field (fix/agent-defs-warn): name the agent + path; the
+        // field-scoped wording comes from the parser.
+        for (const warning of parsed.warnings) {
+          diagnostics.push(`agent "${type.name}" (${path}): ${warning}`);
+        }
       } catch (error) {
         if (index > 0) {
           diagnostics.push(`${path}: skipped (${error instanceof Error ? error.message : error})`);
