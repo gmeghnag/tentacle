@@ -1006,8 +1006,14 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 > 2. ~~`context-awareness`~~ DONE, merged `867a4d0` (2026-10-26; `docs/feat/context-awareness.md`; record v7);
 > 3. `context-reset` (`docs/eval/context-reset.md`; re-planned 2026-10-26,
 >    3 branches; owner answered CR-Q1/CR-Q2; takes record v8 if it needs one) —
->    slice 1 `feat/context-reset-refresh` DONE, merged `e58d8bf`; next slice 2
->    `feat/context-reset-barrier`, then slice 3 `feat/context-reset`;
+>    slice 1 `feat/context-reset-refresh` DONE, merged `e58d8bf`; slice 2
+>    `feat/context-reset-barrier` DONE (protocol v12), merged `031cb52`; next
+>    slice 3 `feat/context-reset` (constraint from slice-2 review: emit
+>    `context_reset` only where a `history_commit` is legal, never between a
+>    push and its pop). DEBT (slice-2 review F1, owner 2026-10-26): after a
+>    `serve` crash right after the barrier, a reloaded send-now answers the
+>    restart prompt while in memory it is refused — mark the reset head in
+>    the record at the NEXT record bump (permission-reply's v8);
 > 3b. skills hot-reload for the USER (`/name` list + `/skills` panel follow a
 >    reset / new skill without restart) — owner CR-Q1, right after context-reset;
 > 4. `docker-runtime` (slice A `feat/docker-engine-client` DONE, merged `116d45f`; next A2 `feat/docker-ssh-dialer`, then B, C) — `run`/`attach --docker` (`docs/eval/docker-runtime.md`,
