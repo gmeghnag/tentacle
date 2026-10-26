@@ -243,7 +243,6 @@ describe("createLocalRuntime wiring (hooks/trust)", () => {
         return {
           protocolVersion: PROTOCOL_VERSION,
           agentCapabilities: { tools: true, permissions: true },
-          skills: [],
         };
       },
     });

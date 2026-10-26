@@ -11,16 +11,26 @@
 import { oneLine } from "./commands.ts";
 import { type TreeGroup, wrapText } from "./tree-panel.ts";
 
-/** One skill as `skills/list` reports it. */
+/** One skill as `session/skills` reports it. */
 export interface SkillView {
   readonly name: string;
   readonly description: string;
   readonly scope: "project" | "user";
   /** Offered to the user as `/name`. */
   readonly user: boolean;
-  /** Offered to the model. */
+  /** Offered to the model in this session now. */
   readonly model: boolean;
+  /** Not offered to the model yet: it is at the session's next context reset. */
+  readonly modelAfterReset?: boolean;
   readonly location: string;
+}
+
+/** What the panel says about the model (docs/feat/skills-hot-reload.md). */
+function modelNote(s: SkillView): string {
+  if (s.model) {
+    return "offered to the model";
+  }
+  return s.modelAfterReset === true ? "model: after a context reset" : "not offered to the model";
 }
 
 export interface SkillsListView {
@@ -63,7 +73,7 @@ export function skillGroups(list: SkillsListView, width: number): TreeGroup[] {
       head: `${name.padEnd(nameWidth)}  ${who(s).padEnd(11)}  ${description}`,
       children: [
         ...wrapText(description, width - CHILD_PREFIX, DESCRIPTION_LINES),
-        `${s.user ? `/${name}` : "no /command"} · ${s.model ? "offered to the model" : "not offered to the model"}`,
+        `${s.user ? `/${name}` : "no /command"} · ${modelNote(s)}`,
         `${s.scope} · ${oneLine(s.location)}`,
       ],
     };

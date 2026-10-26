@@ -5,7 +5,6 @@ import { type ReactElement, useCallback, useEffect, useRef, useState } from "rea
 import { idleChord, stepChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import {
-  type SlashSkill,
   helpText,
   isSessionMutating,
   lastAssistantText,
@@ -101,7 +100,7 @@ import {
   switchRefusedNotice,
   switchingRefusal,
 } from "./sessions-panel.ts";
-import type { SkillsListView } from "./skills-panel.ts";
+import { type SessionSkillsView, SkillsSync } from "./skills-sync.ts";
 import {
   type DisplayItem,
   type DisplayState,
@@ -171,6 +170,13 @@ export interface SessionController {
   ): Promise<AsyncIterable<SessionEvent>>;
   /** End the session (its background jobs included) — `/clear` replaces it; optional. */
   close?(): void;
+  /**
+   * The session's skills read again from disk (docs/feat/skills-hot-reload.md):
+   * the `/name` list and the `/skills` listing, as the daemon will judge a
+   * `/name` now. Every runtime implements it; absent (a bare test session) →
+   * no skills.
+   */
+  skills?(): Promise<SessionSkillsView>;
   /**
    * Rename the session daemon-side (`/rename`); resolves with the title the
    * daemon stored. Optional: absent where no daemon owns the session.
@@ -257,16 +263,8 @@ export interface AppProps {
   readonly notices?: NoticeFeed;
   /** The runtime's link status, shown in the StatusBar while it is not up. */
   readonly link?: LinkFeed;
-  /**
-   * The skills the user can activate as `/name` (the daemon's catalog). A
-   * getter, read at each render and submit: a reconnect's refreshed catalog
-   * applies from the next keystroke.
-   */
-  readonly skills?: () => readonly SlashSkill[];
   /** The daemon's MCP servers, probed live (`/mcp`). Absent → `/mcp` says it's unavailable. */
   readonly mcpStatus?: () => Promise<readonly McpServerView[]>;
-  /** Every skill the daemon discovered and its problems (`/skills`). Absent → unavailable. */
-  readonly skillsList?: () => Promise<SkillsListView>;
   /** Injectable for tests (defaults to the OS clipboard + Bun.write). */
   readonly clipboard?: (text: string) => Promise<void>;
   /** Injectable for tests (defaults to the OS clipboard read). */
@@ -350,9 +348,7 @@ export function App({
   autoWakeOnJobExit = true,
   notices,
   link,
-  skills = () => [],
   mcpStatus,
-  skillsList,
   clipboard = copyToClipboard,
   paste = readClipboard,
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
@@ -507,6 +503,23 @@ export function App({
   if (sessionRef.current === null) {
     sessionRef.current = makeSession();
   }
+  // The current session's skills and when to ask again (`skills-sync.ts`); a
+  // changed `/name` list re-renders the popup.
+  const [, setSkillsVersion] = useState(0);
+  const skillsSyncRef = useRef<SkillsSync | null>(null);
+  if (skillsSyncRef.current === null) {
+    skillsSyncRef.current = new SkillsSync(() => setSkillsVersion((n) => n + 1));
+  }
+  const skillsSync = skillsSyncRef.current;
+  const skills = useCallback(() => skillsSync.slash(), [skillsSync]);
+  // The latest `handleCommand`: an unknown `/word` resolves again through it.
+  const handleCommandRef = useRef<((raw: string, again?: boolean) => void) | null>(null);
+  // Typing the `/` that opens the popup asks for a fresh list (not every key).
+  const prevInputRef = useRef("");
+  useEffect(() => {
+    skillsSync.input(prevInputRef.current, field.value);
+    prevInputRef.current = field.value;
+  }, [field.value, skillsSync]);
 
   // --- throttled rendering -------------------------------------------------
   const { scheduleFlush, flushNow } = usePaintScheduler(FRAME_MS);
@@ -957,10 +970,15 @@ export function App({
       let handedOff = !opts.successor;
       // Anything but an `unsupported` notice streamed: the daemon ran this turn.
       let streamed = false;
+      // The model renewed its context: its skill set changed with it.
+      let reset = false;
       try {
         for await (const event of open()) {
           if (event.type !== "unsupported") {
             streamed = true;
+          }
+          if (event.type === "context_reset") {
+            reset = true;
           }
           if (!handedOff && event.type !== "unsupported") {
             handedOff = true;
@@ -1016,6 +1034,9 @@ export function App({
           stateRef.current = failTurn(stateRef.current, String(error), Date.now());
         }
       } finally {
+        if (reset) {
+          void skillsSync.settle(); // the `model` marks flip (docs/feat/skills-hot-reload.md)
+        }
         if (streamCtrlRef.current === controller) {
           streamCtrlRef.current = null;
         }
@@ -1056,6 +1077,7 @@ export function App({
       wakeIfPending,
       commitHistory,
       drainHeld,
+      skillsSync,
     ],
   );
   streamTurnRef.current = streamTurn;
@@ -1174,6 +1196,8 @@ export function App({
       queueSubRef.current?.();
       heldRef.current = [];
       setDaemonQueue(undefined);
+      // Its own skills (a remote session waits for its eager open first).
+      skillsSync.use(session);
       activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
       queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
       const opening = session?.open?.();
@@ -1191,7 +1215,7 @@ export function App({
         },
       );
     },
-    [pushNotice],
+    [pushNotice, skillsSync],
   );
   useEffect(() => {
     watchSession(sessionRef.current);
@@ -1411,7 +1435,7 @@ export function App({
   ]);
 
   const handleCommand = useCallback(
-    (raw: string): void => {
+    (raw: string, again = false): void => {
       const resolved = resolveSlash(raw, skills());
       if (resolved.kind === "skill") {
         // A skill activation is a prompt (it starts a turn): recallable with
@@ -1472,7 +1496,8 @@ export function App({
           abortRef.current?.abort();
           return;
         case "/help":
-          pushNotice(helpText(skills()));
+          // The skills part is asked fresh (docs/feat/skills-hot-reload.md).
+          void skillsSync.settle().then(() => pushNotice(helpText(skills())));
           return;
         case "/clear":
           // The old session ends (with its jobs) on every runtime — `connect`
@@ -1589,13 +1614,10 @@ export function App({
           return;
         }
         case "/skills": {
-          if (!skillsList) {
-            pushNotice("_The skill list isn't available on this runtime._");
-            return;
-          }
+          // The session's skills read again (docs/feat/skills-hot-reload.md).
           openPanel(
             skillsPanel(),
-            () => skillsList().then((list) => skillsPanel(list)),
+            () => skillsSync.refresh().then((list) => skillsPanel(list)),
             skillsListError,
           );
           return;
@@ -1645,6 +1667,16 @@ export function App({
           return;
         }
         default:
+          // Maybe a skill made since the list was last asked: ask once more,
+          // then resolve the text AGAIN, once (docs/feat/skills-hot-reload.md).
+          if (!again && skillsSync.stale()) {
+            void skillsSync.settle().then((same) => {
+              if (same) {
+                handleCommandRef.current?.(raw, true); // not on a session switched meanwhile
+              }
+            });
+            return;
+          }
           pushNotice(`_Unknown command: ${cmd}. Try /help._`);
       }
     },
@@ -1658,7 +1690,7 @@ export function App({
       exit,
       mcpStatus,
       sessions,
-      skillsList,
+      skillsSync,
       model,
       pushNotice,
       restoreInput,
@@ -1670,6 +1702,7 @@ export function App({
       wakeIfPending,
     ],
   );
+  handleCommandRef.current = handleCommand;
 
   /**
    * Switch the view to session `id` (a `/sessions` row; the panel already

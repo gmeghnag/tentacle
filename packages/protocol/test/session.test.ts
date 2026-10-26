@@ -8,6 +8,7 @@ import {
   PROTOCOL_VERSION,
   PromptParamsSchema,
   PromptResultSchema,
+  SessionSkillsResultSchema,
   StopReasonSchema,
   VersionMismatchDataSchema,
   isMethodName,
@@ -142,48 +143,40 @@ describe("session lifecycle schemas", () => {
   });
 });
 
-describe("skills on the wire (docs/feat/skills-slash.md)", () => {
-  const result = (skills: unknown) => ({
-    protocolVersion: PROTOCOL_VERSION,
-    agentCapabilities: { tools: true, permissions: true },
-    skills,
+describe("skills on the wire (docs/feat/skills-slash.md, skills-hot-reload.md)", () => {
+  const result = (slash: unknown) => ({ slash, skills: [], problems: [], moreProblems: 0 });
+
+  test("the version is bumped for the breaking change (13: session/skills)", () => {
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(13);
   });
 
-  test("the version is bumped for the breaking change", () => {
-    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(7);
+  test("initialize no longer carries a daemon-wide catalog", () => {
+    const base = {
+      protocolVersion: PROTOCOL_VERSION,
+      agentCapabilities: { tools: true, permissions: true },
+    };
+    expect(InitializeResultSchema.safeParse(base).success).toBe(true);
+    const parsed = InitializeResultSchema.safeParse({ ...base, skills: [] });
+    expect(parsed.success && "skills" in parsed.data).toBe(false);
   });
 
-  test("initialize result requires the catalog (empty is fine)", () => {
-    expect(InitializeResultSchema.safeParse(result([])).success).toBe(true);
-    const { skills: _omit, ...without } = result([]);
-    expect(InitializeResultSchema.safeParse(without).success).toBe(false);
-    expect(
-      InitializeResultSchema.safeParse(result([{ name: "deploy-app", description: "Deploy." }]))
-        .success,
-    ).toBe(true);
-  });
-
-  test("a hostile catalog is rejected: bad names, control characters, too many", () => {
+  test("a hostile /name list is rejected: bad names, control characters, too many", () => {
+    const parse = (v: unknown) => SessionSkillsResultSchema.safeParse(v);
+    expect(parse(result([{ name: "deploy-app", description: "Deploy." }])).success).toBe(true);
     for (const name of ["Deploy", "a b", "/tmp/x", "-a", "a--b", "x".repeat(65), ""]) {
-      expect(InitializeResultSchema.safeParse(result([{ name, description: "d" }])).success).toBe(
-        false,
-      );
+      expect(parse(result([{ name, description: "d" }])).success).toBe(false);
     }
     for (const description of ["\u001b[2Jwipe", "two\nlines", "bell\u0007", "c1\u009b31m", ""]) {
-      expect(InitializeResultSchema.safeParse(result([{ name: "a", description }])).success).toBe(
-        false,
-      );
+      expect(parse(result([{ name: "a", description }])).success).toBe(false);
     }
     const many = Array.from({ length: MAX_SKILL_CATALOG + 1 }, (_, i) => ({
       name: `s${i}`,
       description: "d",
     }));
-    expect(InitializeResultSchema.safeParse(result(many)).success).toBe(false);
-    expect(InitializeResultSchema.safeParse(result(many.slice(1))).success).toBe(true);
-    const extra = InitializeResultSchema.safeParse(
-      result([{ name: "a", description: "d", extra: 1 }]),
-    );
-    expect(extra.success && extra.data.skills[0]).toEqual({ name: "a", description: "d" });
+    expect(parse(result(many)).success).toBe(false);
+    expect(parse(result(many.slice(1))).success).toBe(true);
+    const extra = parse(result([{ name: "a", description: "d", extra: 1 }]));
+    expect(extra.success && extra.data.slash[0]).toEqual({ name: "a", description: "d" });
   });
 
   test("session/prompt carries an optional, spec-named skill", () => {

@@ -2,11 +2,9 @@ import type { Agent } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import { render } from "ink";
 import { App, type NoticeFeed, type SessionController, type SessionDirectory } from "./App.tsx";
-import type { SlashSkill } from "./commands.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { messagesToItems } from "./resume.ts";
-import type { SkillsListView } from "./skills-panel.ts";
 import {
   ENTER_FULLSCREEN,
   LEAVE_FULLSCREEN,
@@ -31,12 +29,8 @@ export interface TuiOptions {
   readonly notices?: NoticeFeed;
   /** The runtime's link status, shown in the StatusBar while it is not up. */
   readonly link?: LinkFeed;
-  /** The skills the user can activate as `/name` (the daemon's catalog, a getter). */
-  readonly skills?: () => readonly SlashSkill[];
   /** The daemon's MCP servers, probed live (`/mcp`). */
   readonly mcpStatus?: () => Promise<readonly McpServerView[]>;
-  /** Every skill the daemon discovered and its problems (`/skills`). */
-  readonly skillsList?: () => Promise<SkillsListView>;
   /** The daemon runs in a pod (`runPodTui` only): spilled output is "saved in the pod". */
   readonly daemonInPod?: boolean;
   /** Quitting only detaches (`connect`): `/exit` leaves at once, even mid-turn. */
@@ -88,9 +82,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       {...(initialItems ? { initialItems } : {})}
       {...(options.notices ? { notices: options.notices } : {})}
       {...(options.link ? { link: options.link } : {})}
-      {...(options.skills ? { skills: options.skills } : {})}
       {...(options.mcpStatus ? { mcpStatus: options.mcpStatus } : {})}
-      {...(options.skillsList ? { skillsList: options.skillsList } : {})}
       {...(options.daemonInPod ? { daemonInPod: true } : {})}
       {...(options.detachOnQuit ? { detachOnQuit: true } : {})}
       {...(options.sessions ? { sessions: options.sessions } : {})}

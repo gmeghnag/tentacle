@@ -304,7 +304,6 @@ describe("RemoteSession / RemoteClient: the queue (docs/feat/queued-broadcast.md
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         if (method === Method.Open)

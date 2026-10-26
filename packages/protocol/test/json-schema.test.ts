@@ -64,12 +64,8 @@ const FIXTURES: Record<string, Json[]> = {
     { protocolVersion: 1, clientCapabilities: {} },
   ],
   "methods/initialize/result": [
-    { protocolVersion: 1, agentCapabilities: { tools: true, permissions: false }, skills: [] },
-    {
-      protocolVersion: 1,
-      agentCapabilities: { tools: true, permissions: true },
-      skills: [{ name: "deploy-app", description: "Deploy the app (staging; prod)." }],
-    },
+    { protocolVersion: 1, agentCapabilities: { tools: true, permissions: false } },
+    { protocolVersion: 1, agentCapabilities: { tools: true, permissions: true } },
   ],
   "methods/session~1open/params": [
     {
@@ -206,17 +202,19 @@ const FIXTURES: Record<string, Json[]> = {
     { idleTtlMs: "never", persisted: false },
     { idleTtlMs: 86400000, persisted: false },
   ],
-  "methods/skills~1list/params": [{}],
-  "methods/skills~1list/result": [
-    { skills: [], problems: [], moreProblems: 0 },
+  "methods/session~1skills/params": [{}, { sessionId: "s" }],
+  "methods/session~1skills/result": [
+    { slash: [], skills: [], problems: [], moreProblems: 0 },
     {
+      slash: [{ name: "review", description: "review a diff" }],
       skills: [
         {
           name: "review",
           description: "review a diff",
           scope: "project",
           user: true,
-          model: true,
+          model: false,
+          modelAfterReset: true,
           location: "/w/.agents/skills/review/SKILL.md",
         },
       ],

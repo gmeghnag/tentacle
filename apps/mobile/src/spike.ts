@@ -82,7 +82,7 @@ export async function runSpike(deps: SpikeDeps): Promise<void> {
   try {
     const init = await client.initialize();
     log(
-      `initialized: daemon protocol v${init.protocolVersion}, capabilities=${JSON.stringify(init.agentCapabilities)}, skills=${init.skills.length}`,
+      `initialized: daemon protocol v${init.protocolVersion}, capabilities=${JSON.stringify(init.agentCapabilities)}`,
     );
     const session = client.newSession(undefined, crypto.randomUUID());
     log(`prompt: ${JSON.stringify(deps.prompt)}`);

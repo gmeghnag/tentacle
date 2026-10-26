@@ -118,10 +118,10 @@ export const VersionMismatchDataSchema = z.object({
 export type VersionMismatchData = z.infer<typeof VersionMismatchDataSchema>;
 
 // --- skills (the `/name` catalog) -----------------------------------------
-// The skills the user can activate on this daemon, so a client can offer
-// `/name` with autocomplete (docs/feat/skills-slash.md). Per daemon (built at
-// its start), so it rides `initialize`, refreshed on every reconnect. The
-// daemon may be a pod (not trusted, AGENTS §7): the client's result
+// The skills the user can activate in a session, so a client can offer
+// `/name` with autocomplete (docs/feat/skills-slash.md). Per SESSION and read
+// again from disk on each ask (`session/skills`, docs/feat/skills-hot-reload.md).
+// The daemon may be a pod (not trusted, AGENTS §7): the client's result
 // validation pins names to the spec pattern and keeps control characters (a
 // terminal escape) out of descriptions before anything reaches the UI.
 
@@ -132,7 +132,7 @@ export const SkillNameSchema = z
   .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/);
 export type SkillName = z.infer<typeof SkillNameSchema>;
 
-/** At most this many entries in the `initialize` skill catalog. */
+/** At most this many entries in a session's `/name` list (`session/skills` `slash`). */
 export const MAX_SKILL_CATALOG = 200;
 /** Max length of a catalog description (the spec's limit). */
 export const MAX_SKILL_DESCRIPTION = 1024;
@@ -152,8 +152,6 @@ export type SkillSummary = z.infer<typeof SkillSummarySchema>;
 export const InitializeResultSchema = z.object({
   protocolVersion: z.number().int(),
   agentCapabilities: AgentCapabilitiesSchema,
-  /** The skills a user can activate with `/name` (`session/prompt{skill}`); may be empty. */
-  skills: z.array(SkillSummarySchema).max(MAX_SKILL_CATALOG),
 });
 export type InitializeResult = z.infer<typeof InitializeResultSchema>;
 
@@ -172,7 +170,7 @@ export const PromptParamsSchema = z.object({
   turnId: TurnIdSchema,
   content: z.array(ContentBlockSchema).min(1),
   /**
-   * The user activates this skill (`/name`, from the `initialize` catalog):
+   * The user activates this skill (`/name`, from the session's `session/skills`):
    * the daemon loads it as a `skill` tool round right after the prompt,
    * before the model's first round. Structured on purpose — the daemon never
    * parses the text. One the daemon cannot activate → `InvalidParams`.

@@ -20,7 +20,6 @@ import { join } from "node:path";
 import { Session, recordFromSnapshot } from "@tentacle/agent";
 import { webSocketChannelFactory } from "@tentacle/client";
 import { type ChatMessage, PermissionBroker } from "@tentacle/core";
-import { toSkillList } from "@tentacle/daemon";
 import {
   KubeClient,
   type KubeClientOptions,
@@ -62,14 +61,7 @@ import { type TuiSessions, openTuiSessions, runSessionTui } from "./tui-sessions
 import { untrustedText } from "./untrusted-text.ts";
 import { runUpdate, spawnVersion } from "./update.ts";
 import { APP_VERSION } from "./version.ts";
-import {
-  buildAgent,
-  connectConfiguredMcp,
-  inProcessAgents,
-  loadUserAgentTypes,
-  skillCatalog,
-  skillListing,
-} from "./wiring.ts";
+import { buildAgent, connectConfiguredMcp, inProcessAgents, loadUserAgentTypes } from "./wiring.ts";
 
 const HELP = `tentacle — run an agent task
 
@@ -515,9 +507,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           autoWakeOnJobExit: config.autoWake,
           createSession: runtime.createSession,
           link: runtime.link,
-          skills: runtime.skills,
           mcpStatus: runtime.mcpStatus,
-          skillsList: runtime.skillsList,
           // A fact of the runtime this laptop started, never guessed: a
           // spilled result's file lives in the pod (docs/feat/tui-spill-note.md).
           daemonInPod: true,
@@ -678,9 +668,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               autoWakeOnJobExit: config.autoWake,
               createSession: runtime.createSession,
               link: runtime.link,
-              skills: runtime.skills,
               mcpStatus: runtime.mcpStatus,
-              skillsList: runtime.skillsList,
               ...sessionOptions,
             }),
           teardown: () => runtime.dispose(),
@@ -719,9 +707,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ),
     });
 
-    const catalog = skillCatalog(config);
-    // No daemon here: the same wire-safe listing a `SessionHost` would serve.
-    const listing = toSkillList(skillListing(config));
     await runSessionTui(sessions, {
       start: (sessionOptions) =>
         startTui(null, {
@@ -732,9 +717,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           jobs,
           autoWakeOnJobExit: config.autoWake,
           createSession,
-          skills: () => catalog,
           mcpStatus: () => mcpTracker.probe(),
-          skillsList: () => Promise.resolve(listing),
           ...sessionOptions,
         }),
       teardown: () => mcp.dispose(),

@@ -43,6 +43,8 @@ import {
   type ResolvePermissionResult,
   type SendNowParams,
   type SessionListParams,
+  type SessionSkillsParams,
+  type SessionSkillsResult,
   type SessionTtlParams,
   type SnapshotParams,
   type SnapshotResult,
@@ -202,8 +204,8 @@ export class Connection {
         return this.resolvePermission(params as ResolvePermissionParams);
       case Method.McpStatus:
         return this.mcpStatus();
-      case Method.SkillsList:
-        return this.host.skillList;
+      case Method.SessionSkills:
+        return this.sessionSkills(params as SessionSkillsParams);
       // A read of the registry: does not attach this connection to anything.
       case Method.SessionList:
         return this.host.list(params as SessionListParams);
@@ -224,6 +226,17 @@ export class Connection {
   // like all handlers here (AGENTS §7) — never awaited under a lock.
   private async mcpStatus(): Promise<McpStatusResult> {
     return { servers: [...(await this.host.mcpStatus())] };
+  }
+
+  // A disk scan: concurrent with every other request (AGENTS §7), never under
+  // a lock. A session id must be one this connection opened (like every
+  // command); none → the skills a session created now would have (a client
+  // opens its session lazily, at the first prompt).
+  private sessionSkills(params: SessionSkillsParams): Promise<SessionSkillsResult> {
+    if (params.sessionId === undefined) {
+      return this.host.newSessionSkills();
+    }
+    return this.lookup(params.sessionId).skills();
   }
 
   private snapshot(params: SnapshotParams): SnapshotResult {
@@ -308,7 +321,6 @@ export class Connection {
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: { tools: true, permissions: true },
-      skills: [...this.host.skillCatalog],
     };
   }
 

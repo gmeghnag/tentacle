@@ -658,7 +658,6 @@ describe("routing by the reducer's turn stamp (scripted frames)", () => {
           return {
             protocolVersion: PROTOCOL_VERSION,
             agentCapabilities: { tools: true, permissions: true },
-            skills: [],
           };
         }
         if (method === Method.Open) {

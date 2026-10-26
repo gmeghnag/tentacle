@@ -53,11 +53,10 @@ import {
   type SendNowTarget,
   type SessionListParams,
   type SessionListResult,
+  type SessionSkillsResult,
   type SessionTitle,
   type SessionTtlResult,
   type SessionUpdateParams,
-  type SkillSummary,
-  type SkillsListResult,
   type SnapshotResult,
   type WireStreamEvent,
   text,
@@ -324,8 +323,6 @@ export class RemoteClient {
   /** Session-independent listeners for queue changes (idle or mid-turn). */
   private readonly queueListeners = new Set<(notice: SessionQueueNotice) => void>();
   private readonly statusListeners = new Set<(status: LinkStatus) => void>();
-  /** The daemon's `/name` skills, from the latest handshake (a reconnect refreshes it). */
-  private skillCatalog: readonly SkillSummary[] = [];
   private readonly historyLostListeners = new Set<(notice: HistoryLostNotice) => void>();
   private readonly sessionDeletedListeners = new Set<(notice: SessionDeletedNotice) => void>();
   /** Conditions re-checked after every state change (session live, link stopped, …). */
@@ -388,15 +385,6 @@ export class RemoteClient {
   }
 
   /**
-   * The skills the user can activate on the daemon (`/name`), as of the latest
-   * handshake: empty before the first one; refreshed by every reconnect (a
-   * restarted daemon may have other skills). Schema-validated by the peer.
-   */
-  skills(): readonly SkillSummary[] {
-    return this.skillCatalog;
-  }
-
-  /**
    * The daemon's MCP servers and whether each is reachable now (`/mcp`). Not
    * re-sent after a drop: it is a fresh probe, the user just asks again. An
    * older daemon rejects with `MethodNotFound`. Schema-validated by the peer.
@@ -411,16 +399,22 @@ export class RemoteClient {
   }
 
   /**
-   * Every skill the daemon discovered and its discovery problems (`/skills`).
-   * Static on the daemon, but asked each time (cheap; never stale after a
-   * redial to a restarted daemon). An older daemon rejects with
-   * `MethodNotFound`. Schema-validated by the peer.
+   * A session's skills, read again from disk by the daemon (`session/skills`,
+   * docs/feat/skills-hot-reload.md): its `/name` list, every skill found and
+   * the discovery problems. `sessionId` absent → the skills a session the
+   * daemon creates now would have (a session is opened at its first prompt).
+   * Not re-sent after a drop: the user just asks again. Schema-validated by
+   * the peer (a hostile pod's list is rejected whole).
    */
-  skillsList(): Promise<SkillsListResult> {
+  sessionSkills(sessionId?: string): Promise<SessionSkillsResult> {
     if (!this.up && this.channelFactory) {
       return Promise.reject(new Error("not connected to the daemon"));
     }
-    return this.call(this.peer, Method.SkillsList, {}).then((result) => result as SkillsListResult);
+    return this.call(
+      this.peer,
+      Method.SessionSkills,
+      sessionId !== undefined ? { sessionId } : {},
+    ).then((result) => result as SessionSkillsResult);
   }
 
   /**
@@ -1005,17 +999,7 @@ export class RemoteClient {
       clientCapabilities: { streaming: true, updates: [...KNOWN_UPDATE_TYPES] },
       ...(this.clientInfo ? { clientInfo: this.clientInfo } : {}),
     }).then(
-      (raw) => {
-        const result = raw as InitializeResult;
-        // Only the current link's answer: a superseded handshake must not
-        // overwrite the catalog of the daemon we are now talking to. Defensive:
-        // a peer is replaced only after it closed, and closing rejects its
-        // pending requests (transport/peer.ts), so this should never trigger.
-        if (peer === this.peer) {
-          this.skillCatalog = result.skills;
-        }
-        return result;
-      },
+      (raw) => raw as InitializeResult,
       // A version skew says who must update — at start and on every reconnect.
       (error: unknown) => {
         throw explainVersionMismatch(error, this.daemonKind) ?? error;

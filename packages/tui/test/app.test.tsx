@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Agent } from "@tentacle/agent";
+import { Agent, Session } from "@tentacle/agent";
 import {
   type ChatMessage,
   type ChatRequest,
@@ -1603,12 +1603,23 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     skillsList?: () => Promise<typeof LIST>,
     mcpStatus?: () => Promise<never[]>,
   ): Promise<ReturnType<typeof render>> {
+    // The session's own skills (docs/feat/skills-hot-reload.md); without
+    // `skills()` the plain local session of `agent`.
     const r = render(
       <App
-        agent={agent}
+        {...(skillsList
+          ? {
+              createSession: () => {
+                const session = new Session(agent);
+                return {
+                  send: (prompt: string, signal?: AbortSignal) => session.send(prompt, signal),
+                  skills: () => skillsList().then((list) => ({ slash: [], ...list })),
+                };
+              },
+            }
+          : { agent })}
         model="qwen3"
         cwd="/tmp/work"
-        skillsList={skillsList}
         mcpStatus={mcpStatus}
       />,
     );
@@ -1622,15 +1633,18 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
 
   test("opens with a loading placeholder, then lists every skill, who may invoke it, and the problems", async () => {
     let asked = 0;
+    // The session start's ask is still in flight when the panel opens: the
+    // panel shares it; typing `/` while it flies adds ONE re-ask when it
+    // lands, so the popup is not a scan behind (docs/feat/skills-hot-reload.md).
     const { lastFrame, unmount } = await openSkills(async () => {
       asked += 1;
-      await delay(80);
+      await delay(200);
       return LIST;
     });
     expect(lastFrame() ?? "").toContain("Skills · loading…");
-    await delay(120);
+    await delay(250);
     const frame = lastFrame() ?? "";
-    expect(asked).toBe(1);
+    expect(asked).toBe(2);
     expect(frame).toContain("Skills · 2 found · 1 problem");
     expect(frame).toContain("❯ ▸ review    you + model  review a diff");
     expect(frame).toContain("  ▸ lint-fix  model only   fix lint");
@@ -1701,11 +1715,11 @@ describe("/skills panel (docs/feat/skills-panel.md)", () => {
     unmount();
   });
 
-  test("without a provider it says so instead of 'Unknown command'", async () => {
+  test("a session without skills(): no skills (never 'Unknown command')", async () => {
     const { lastFrame, unmount } = await openSkills();
     await delay(50);
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("The skill list isn't available on this runtime.");
+    expect(frame).toContain("No skills on this daemon.");
     expect(frame).not.toContain("Unknown command");
     unmount();
   });

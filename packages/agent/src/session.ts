@@ -9,6 +9,7 @@ import type { ChatMessage } from "@tentacle/core";
 import { type Agent, type AgentEvent, UnknownSkillError } from "./agent.ts";
 import { type CompactResult, carryOverSkills, compactedHistory } from "./compact.ts";
 import type { AskHooksTrust } from "./hooks.ts";
+import type { SkillListing } from "./session-skills.ts";
 
 /** A serialisable view of a session's durable state (for persistence/resume). */
 export interface SessionSnapshot {
@@ -111,6 +112,15 @@ export class Session {
   /** Whether the user may activate `name` (`/name`) in this session — synchronous, for a pre-ack check. */
   canActivateSkill(name: string): boolean {
     return this.agent.canActivateForUser(name);
+  }
+
+  /**
+   * This session's skills read again from disk (`session/skills`,
+   * docs/feat/skills-hot-reload.md): what `/name` may activate now and who
+   * else may. Rejects when the scan fails (nothing changes).
+   */
+  refreshSkills(): Promise<SkillListing> {
+    return this.agent.refreshUserSkills();
   }
 
   /**

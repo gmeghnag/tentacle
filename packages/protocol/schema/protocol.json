@@ -493,16 +493,9 @@
         },
         "protocolVersion": {
           "type": "integer"
-        },
-        "skills": {
-          "items": {
-            "$ref": "#/$defs/SkillSummary"
-          },
-          "maxItems": 200,
-          "type": "array"
         }
       },
-      "required": ["agentCapabilities", "protocolVersion", "skills"],
+      "required": ["agentCapabilities", "protocolVersion"],
       "type": "object"
     },
     "JsonRpcError": {
@@ -1426,6 +1419,50 @@
       "required": ["sessions"],
       "type": "object"
     },
+    "SessionSkillsParams": {
+      "additionalProperties": true,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "type": "object"
+    },
+    "SessionSkillsResult": {
+      "additionalProperties": true,
+      "properties": {
+        "moreProblems": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "problems": {
+          "items": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/SkillListEntry"
+          },
+          "maxItems": 512,
+          "type": "array"
+        },
+        "slash": {
+          "items": {
+            "$ref": "#/$defs/SkillSummary"
+          },
+          "maxItems": 200,
+          "type": "array"
+        }
+      },
+      "required": ["moreProblems", "problems", "skills", "slash"],
+      "type": "object"
+    },
     "SessionTitle": {
       "additionalProperties": true,
       "properties": {
@@ -1634,6 +1671,9 @@
         "model": {
           "type": "boolean"
         },
+        "modelAfterReset": {
+          "type": "boolean"
+        },
         "name": {
           "maxLength": 256,
           "minLength": 1,
@@ -1670,39 +1710,6 @@
         }
       },
       "required": ["description", "name"],
-      "type": "object"
-    },
-    "SkillsListParams": {
-      "additionalProperties": true,
-      "properties": {},
-      "type": "object"
-    },
-    "SkillsListResult": {
-      "additionalProperties": true,
-      "properties": {
-        "moreProblems": {
-          "minimum": 0,
-          "type": "integer"
-        },
-        "problems": {
-          "items": {
-            "maxLength": 1000,
-            "minLength": 1,
-            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
-            "type": "string"
-          },
-          "maxItems": 100,
-          "type": "array"
-        },
-        "skills": {
-          "items": {
-            "$ref": "#/$defs/SkillListEntry"
-          },
-          "maxItems": 512,
-          "type": "array"
-        }
-      },
-      "required": ["moreProblems", "problems", "skills"],
       "type": "object"
     },
     "SnapshotParams": {
@@ -2358,20 +2365,20 @@
         "$ref": "#/$defs/PromptResult"
       }
     },
+    "session/skills": {
+      "params": {
+        "$ref": "#/$defs/SessionSkillsParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SessionSkillsResult"
+      }
+    },
     "session/snapshot": {
       "params": {
         "$ref": "#/$defs/SnapshotParams"
       },
       "result": {
         "$ref": "#/$defs/SnapshotResult"
-      }
-    },
-    "skills/list": {
-      "params": {
-        "$ref": "#/$defs/SkillsListParams"
-      },
-      "result": {
-        "$ref": "#/$defs/SkillsListResult"
       }
     }
   },
@@ -2398,5 +2405,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 12
+  "x-protocol-version": 13
 }

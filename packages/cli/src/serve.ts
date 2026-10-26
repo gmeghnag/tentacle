@@ -28,7 +28,7 @@ import type { ModelPurpose } from "@tentacle/protocol";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
 import type { ServeLimits } from "./flags.ts";
 import { APP_VERSION } from "./version.ts";
-import { type WiredAgent, buildAgent, skillCatalog, skillListing } from "./wiring.ts";
+import { type SkillScan, type WiredAgent, buildAgent, createSkillScan } from "./wiring.ts";
 
 /**
  * The host takes its `SessionTtlControl` at construction, before `listen`
@@ -155,6 +155,9 @@ async function reloadedHost(
   sameProject: (cwd: string) => boolean,
   tombstones: TombstoneFile,
 ): Promise<SessionHost> {
+  // One skill scan for every session and for a session not created yet
+  // (docs/feat/skills-hot-reload.md).
+  const skillScan = createSkillScan(config);
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
     maxSessions: options.maxSessions ?? DEFAULT_MAX_SESSIONS,
@@ -169,10 +172,10 @@ async function reloadedHost(
           ...(options.onError ? { log: (line) => options.onError?.(new Error(line)) } : {}),
           // Not failures: the startup-facts sink, not the error one.
           ...(options.onNotice ? { notice: options.onNotice } : {}),
+          skillScan,
         },
       ),
-    skills: skillCatalog(config),
-    skillList: skillListing(config),
+    newSessionSkills: () => skillScan.newSession(),
     // A remote client gets an opaque turn error; the real one is logged here.
     ...(options.onError ? { onTurnError: options.onError } : {}),
     persister,
@@ -373,6 +376,8 @@ export function tunnelledAgent(
     readonly autoTitle: boolean;
     readonly contextWindow?: number;
     readonly log?: (line: string) => void;
+    /** The pod daemon's shared skill scan (docs/feat/skills-hot-reload.md). */
+    readonly skillScan?: SkillScan;
   },
 ): WiredAgent {
   const ready = (): ModelLink => {
@@ -395,6 +400,7 @@ export function tunnelledAgent(
     },
     {
       ...(options.log ? { log: options.log, notice: options.log } : {}),
+      ...(options.skillScan ? { skillScan: options.skillScan } : {}),
       modelOverride: tunnelFor(),
       ...(options.autoTitle ? { titleModelOverride: tunnelFor("title") } : {}),
     },
@@ -420,13 +426,14 @@ export function startStdioDaemon(
   // after the Connection exists, but a session (hence the agent) is only built
   // on `session/open`, which arrives later, so the binding is always ready.
   let tunnel: Connection | null = null;
+  // The pod's own skills (Q4): its config, its filesystem — one scan for every
+  // session and for a session not created yet (docs/feat/skills-hot-reload.md).
+  const skillScan = createSkillScan(config);
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
     // `run`/`attach`'s daemon: a skew is fixed by attaching again (it replaces it).
     identity: { tentacle: APP_VERSION, kind: "container" },
-    // The pod's own skills (Q4): its config, its filesystem.
-    skills: skillCatalog(config),
-    skillList: skillListing(config),
+    newSessionSkills: () => skillScan.newSession(),
     // The laptop gets an opaque turn error (the pod is not trusted with more
     // than it needs, and stays symmetric with `serve`); the real one goes to
     // the daemon's stderr log (piped + routed by the laptop, never inherited).
@@ -442,8 +449,9 @@ export function startStdioDaemon(
               ? { contextWindow: options.contextWindow }
               : {}),
             ...(log ? { log } : {}),
+            skillScan,
           })
-        : buildAgent({ ...config, cwd }, log ? { log, notice: log } : {}),
+        : buildAgent({ ...config, cwd }, { ...(log ? { log, notice: log } : {}), skillScan }),
   });
   const channel = streamChannel(
     process.stdin as unknown as NodeReadableLike,

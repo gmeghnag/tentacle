@@ -975,14 +975,14 @@ describe("D3c follow-up 1 — no turn of ours during our compaction; a stale set
 
   test("T-D10b: a /skill during a compaction → refused here, the row survives", async () => {
     const { ctrl, log, c } = refusingWhileCompacting();
-    const app = render(
-      <App
-        createSession={() => ctrl}
-        model="m"
-        cwd="/tmp/work"
-        skills={() => [{ name: "review", description: "review it" }]}
-      />,
-    );
+    // The session's `/name` list (docs/feat/skills-hot-reload.md).
+    ctrl.skills = async () => ({
+      slash: [{ name: "review", description: "review it" }],
+      skills: [],
+      problems: [],
+      moreProblems: 0,
+    });
+    const app = render(<App createSession={() => ctrl} model="m" cwd="/tmp/work" />);
     await delay(30);
     await typeLines(app.stdin, ["first", "/compact", "A", "/review now"]);
     expect(log.sends).toEqual(["first"]);

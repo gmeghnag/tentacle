@@ -44,7 +44,7 @@ function fakeDaemon(answer: () => unknown) {
   return { seen, connect };
 }
 
-const OK = { protocolVersion: PROTOCOL_VERSION, agentCapabilities: {}, skills: [] };
+const OK = { protocolVersion: PROTOCOL_VERSION, agentCapabilities: {} };
 const OLD_DAEMON_LINE = `protocol version mismatch: client ${PROTOCOL_VERSION}, daemon ${PROTOCOL_VERSION - 1}`;
 
 describe("explainVersionMismatch", () => {

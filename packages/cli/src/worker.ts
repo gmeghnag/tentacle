@@ -23,7 +23,7 @@ import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { ToolRegistry } from "@tentacle/tools";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
-import { buildAgent, skillCatalog, skillListing } from "./wiring.ts";
+import { buildAgent, createSkillScan } from "./wiring.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 
 // `globalThis` in a worker exposes postMessage/addEventListener at runtime; the
@@ -92,12 +92,14 @@ port.addEventListener("message", (event: { data: unknown }) => {
       postObject({ type: "mcp-errors", errors: { "*": String(error) } });
     });
 
+  // One skill scan for every session and for the `/name` list of a session
+  // not created yet (docs/feat/skills-hot-reload.md).
+  const skillScan = createSkillScan(config);
   const host = new SessionHost({
     defaultCwd: config.cwd,
     // The client's own build: no skew possible, named for completeness.
     identity: { tentacle: version, kind: "worker" },
-    skills: skillCatalog(config),
-    skillList: skillListing(config),
+    newSessionSkills: () => skillScan.newSession(),
     mcpStatus: () => mcpTracker.probe(),
     // A failed turn now ends in the stream (`turn_end.error`), not as a handler
     // throw: same policy as below — the real message to this LOCAL client, the
@@ -110,7 +112,7 @@ port.addEventListener("message", (event: { data: unknown }) => {
       const wired = buildAgent(
         { ...config, cwd },
         // Hook failures go to the daemon error log, never the terminal Ink owns.
-        { log: (line) => logDaemonError(config.configDir, line) },
+        { log: (line) => logDaemonError(config.configDir, line), skillScan },
       );
       register(wired.tools);
       // If MCP hasn't resolved yet, register into this registry once it does.

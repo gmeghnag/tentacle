@@ -122,9 +122,9 @@ describe("Connection refuses initialize with the worded message and its data", (
     });
   }
 
-  test("10 ↔ current (session-archive's bump, then context-reset's): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
+  test("10 ↔ current (session-archive's bump, context-reset's, then skills-hot-reload's): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
     // What a tentacle 0.1.0 sends (protocol 10, clientInfo since version-mismatch-notice).
-    expect(PROTOCOL_VERSION as number).toBe(12);
+    expect(PROTOCOL_VERSION as number).toBe(13);
     const error = await refuse(
       {
         protocolVersion: 10,
@@ -135,11 +135,11 @@ describe("Connection refuses initialize with the worded message and its data", (
     );
     expect(error.code).toBe(DomainErrorCode.VersionMismatch);
     expect(error.message).toBe(
-      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 12 (tentacle 0.2.0) — update this client: "tentacle update"',
+      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 13 (tentacle 0.2.0) — update this client: "tentacle update"',
     );
     expect(error.data).toEqual({
       client: { protocol: 10, tentacle: "0.1.0" },
-      daemon: { protocol: 12, tentacle: "0.2.0" },
+      daemon: { protocol: 13, tentacle: "0.2.0" },
       update: "client",
     });
   });

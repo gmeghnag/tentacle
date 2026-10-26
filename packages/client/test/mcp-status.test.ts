@@ -43,7 +43,6 @@ function rawDaemon(reply: () => Record<string, unknown>): DuplexChannel {
             result: {
               protocolVersion: PROTOCOL_VERSION,
               agentCapabilities: { tools: true, permissions: true },
-              skills: [],
             },
           }
         : reply();

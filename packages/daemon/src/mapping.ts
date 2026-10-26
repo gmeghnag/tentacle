@@ -3,7 +3,7 @@
  * `SessionUpdate` vocabulary (and the turn's `StopReason`). Kept pure and
  * table-ish so it can be unit-tested without sockets or an agent.
  */
-import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
+import type { AgentEvent, AgentStopReason, SkillListing } from "@tentacle/agent";
 import type { ToolResult } from "@tentacle/core";
 import {
   BLOCKING_UPDATE_TYPES,
@@ -14,11 +14,11 @@ import {
   MAX_SKILL_DESCRIPTION,
   MAX_SKILL_LIST,
   MAX_SKILL_PROBLEMS,
+  type SessionSkillsResult,
   type SessionUpdate,
   type SkillListEntry,
   SkillNameSchema,
   type SkillSummary,
-  type SkillsListResult,
   type StopReason,
   UPDATE_CLASS,
   type UpdateClass,
@@ -37,8 +37,8 @@ export const HOOK_MIME = "application/x-tentacle-hook";
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]+/g;
 
 /**
- * The `initialize` skill catalog from the daemon's `/name` skills: always
- * valid for `SkillSummarySchema` (the client rejects the whole handshake
+ * The `/name` list (`session/skills` `slash`) from a session's `/name` skills:
+ * always valid for `SkillSummarySchema` (the client rejects the whole result
  * otherwise) — a non-spec name is dropped, a description becomes one line
  * (control characters → a space, whitespace collapsed), cut to the limit;
  * an empty one drops the skill; at most `MAX_SKILL_CATALOG`, in order.
@@ -66,23 +66,28 @@ export function wireLine(text: string, max: number): string {
 }
 
 /**
- * The `skills/list` result from the daemon's discovery (docs/feat/skills-panel.md):
- * always valid for `SkillsListResultSchema` (the client rejects the whole
- * result otherwise) — every string one line cut to its cap, an entry left
- * with an empty one dropped; past `MAX_SKILL_LIST` skills one problem says how
- * many were left out; past `MAX_SKILL_PROBLEMS` problems the rest are counted.
+ * The listing half of `session/skills` (docs/feat/skills-panel.md): always
+ * valid for `SessionSkillsResultSchema` (the client rejects the whole result
+ * otherwise) — every string one line cut to its cap, an entry left with an
+ * empty one dropped; past `MAX_SKILL_LIST` skills one problem says how many
+ * were left out; past `MAX_SKILL_PROBLEMS` problems the rest are counted.
  */
-export function toSkillList(listing: {
-  readonly skills: readonly SkillListEntry[];
-  readonly problems: readonly string[];
-}): SkillsListResult {
+export function toSkillList(listing: SkillListing): Omit<SessionSkillsResult, "slash"> {
   const skills: SkillListEntry[] = [];
   for (const s of listing.skills.slice(0, MAX_SKILL_LIST)) {
     const name = wireLine(s.name, 256);
     const description = wireLine(s.description, MAX_SKILL_DESCRIPTION);
     const location = wireLine(s.location, 4096);
     if (name !== "" && description !== "" && location !== "") {
-      skills.push({ name, description, scope: s.scope, user: s.user, model: s.model, location });
+      skills.push({
+        name,
+        description,
+        scope: s.scope,
+        user: s.user,
+        model: s.model,
+        ...(s.modelAfterReset === true ? { modelAfterReset: true } : {}),
+        location,
+      });
     }
   }
   const left = listing.skills.length - MAX_SKILL_LIST;
@@ -92,6 +97,19 @@ export function toSkillList(listing: {
   ];
   const problems = all.slice(0, MAX_SKILL_PROBLEMS);
   return { skills, problems, moreProblems: all.length - problems.length };
+}
+
+/**
+ * A session's skills as `session/skills` answers them (docs/feat/skills-hot-reload.md):
+ * the `/name` list (its `user` skills, `toSkillCatalog`) and the listing
+ * (`toSkillList`), both from the ONE listing the session's activator was
+ * built with — so the list and what `session/prompt{skill}` accepts agree.
+ */
+export function toSessionSkills(listing: SkillListing): SessionSkillsResult {
+  return {
+    slash: toSkillCatalog(listing.skills.filter((s) => s.user)),
+    ...toSkillList(listing),
+  };
 }
 
 /** Flatten a prompt's content blocks to the plain-text the agent loop consumes. */
