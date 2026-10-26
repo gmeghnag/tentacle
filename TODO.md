@@ -1009,6 +1009,11 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 >    `docs/eval/parallel-agents.md`; evaluate first).
 > Then the mobile app tasks resume (task 8 onward, `docs/eval/mobile-app.md`).
 >
+> **Eval open (owner, 2026-10-26):** `docker-runtime` — `run`/`attach` on a
+> local or remote Docker (Engine API `exec` over a hand-written HTTP/1.1
+> upgrade, same JSON-RPC over another byte stream; `docs/eval/docker-runtime.md`).
+> Owner questions pending.
+>
 > **Queued fix (owner, 2026-10-26), slot to confirm (proposed: right after
 > task 7):** `fix/tool-duration` — Type: fix · Size: M · Blast:
 > load-bearing (additive wire field + persisted `ChatMessage` format) ·
