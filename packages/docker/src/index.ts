@@ -15,3 +15,5 @@ export * from "./ssh-dialer.ts";
 export * from "./exec-channel.ts";
 export * from "./exec-run.ts";
 export * from "./client.ts";
+export * from "./engine-dialer.ts";
+export * from "./container-cleanup.ts";

@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { Session, recordFromSnapshot } from "@tentacle/agent";
 import { webSocketChannelFactory } from "@tentacle/client";
 import { type ChatMessage, PermissionBroker } from "@tentacle/core";
+import { deleteContainerFromEnv } from "@tentacle/docker";
 import {
   KubeClient,
   type KubeClientOptions,
@@ -198,6 +199,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // single best-effort DELETE, then exits — no config, no TTY, no model setup.
   if (args[0] === "__delete-pod") {
     await deletePodFromEnv();
+    return 0;
+  }
+  // Its Docker/Podman twin: TENTACLE_CONTAINER_DELETE_ID + TENTACLE_DOCKER_ENDPOINT
+  // (env only) → one bounded, owner-label-guarded remove, then exit.
+  if (args[0] === "__delete-container") {
+    await deleteContainerFromEnv();
     return 0;
   }
 

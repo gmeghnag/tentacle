@@ -25,8 +25,7 @@
  * transfer bar as the bar phase's text), else through `deps.log` (one line per
  * phase + a discrete progress line per ~10%, the piped/log/CI mode).
  */
-import type { ExecTarget } from "@tentacle/k8s";
-import type { PodCluster } from "./pod-runtime.ts";
+import type { EngineExecTarget, EngineHost } from "./engine-host.ts";
 import { TransferProgress, renderBar } from "./transfer-progress.ts";
 
 /** Where the binary is installed in the pod (conventional, first in most PATHs). */
@@ -132,13 +131,13 @@ export function classifyImage(p: ParsedProbe): PodProbe {
  * `probe-failed` (x64 fallback; a wrong arch is still caught by `--version`).
  */
 export async function probePod(
-  kube: Pick<PodCluster, "runExec">,
-  podName: string,
+  host: Pick<EngineHost, "runExec">,
+  name: string,
   container?: string,
 ): Promise<PodProbe> {
   try {
-    const res = await kube.runExec({
-      pod: podName,
+    const res = await host.runExec({
+      name,
       container,
       command: ["sh", "-c", PROBE_SCRIPT],
     });
@@ -152,8 +151,11 @@ export async function probePod(
 }
 
 export interface PodBinaryDeps {
-  readonly kube: Pick<PodCluster, "runExec">;
-  readonly podName: string;
+  readonly host: Pick<EngineHost, "runExec">;
+  /** The workload (pod / container) to inject into. */
+  readonly name: string;
+  /** Message vocabulary for the `[pod X]` prefixes (default `"pod"`). */
+  readonly noun?: "pod" | "container";
   /** Container to inject into; undefined → the API picks the only/default one. */
   readonly container?: string;
   /** Probe the pod's arch + libc (`probePod`, one exec, never throws). */
@@ -201,20 +203,20 @@ const GLIBC_ADVICE =
 const LIBC_HINT = ` — this image appears to lack glibc (Alpine/busybox use musl); ${GLIBC_ADVICE}`;
 
 /** The clear error for a probe that positively found an unsupported image, else undefined. */
-function unsupportedImageError(podName: string, probe: PodProbe): Error | undefined {
+function unsupportedImageError(prefix: string, probe: PodProbe): Error | undefined {
   if (probe.status === "musl") {
     return new Error(
-      `[pod ${podName}] this image uses musl (Alpine): use a glibc-based image (e.g. UBI9, Debian, RHEL)`,
+      `${prefix} this image uses musl (Alpine): use a glibc-based image (e.g. UBI9, Debian, RHEL)`,
     );
   }
   if (probe.status === "no-glibc") {
     return new Error(
-      `[pod ${podName}] this image has no glibc loader (${GLIBC_INTERPRETER[probe.arch]} not found): use a glibc-based image (e.g. UBI9, Debian, RHEL)`,
+      `${prefix} this image has no glibc loader (${GLIBC_INTERPRETER[probe.arch]} not found): use a glibc-based image (e.g. UBI9, Debian, RHEL)`,
     );
   }
   if (probe.status === "unsupported-arch") {
     return new Error(
-      `[pod ${podName}] unsupported architecture: ${probe.machine ?? "unknown"} (tentacle ships linux x64 and arm64 builds)`,
+      `${prefix} unsupported architecture: ${probe.machine ?? "unknown"} (tentacle ships linux x64 and arm64 builds)`,
     );
   }
   return undefined;
@@ -238,21 +240,23 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   // status line (`onStatus`); piped mode logs one line per phase.
   const onStatus = deps.onStatus;
   const emit: (line: string) => void = onStatus ?? ((line) => deps.log(`${line}\n`));
+  // `[pod X]` / `[container X]` on errors; the phase lines carry just `[X]`.
+  const prefix = `[${deps.noun ?? "pod"} ${deps.name}]`;
 
   // The probe is invisible: its result is folded into the resolve phase (the
   // target encodes the arch), so probe + resolve read as one line. A musl /
   // loader-less image fails HERE, before the 60-90 MB transfer.
   const probe = await deps.probe();
-  const unsupported = unsupportedImageError(deps.podName, probe);
+  const unsupported = unsupportedImageError(prefix, probe);
   if (unsupported) {
     throw unsupported;
   }
   const target = archToTarget(probe.arch);
-  emit(`[${deps.podName}] resolving ${target} binary…`);
+  emit(`[${deps.name}] resolving ${target} binary…`);
   const bytes = await deps.resolveBinary(target);
   const n = bytes.length;
   if (!onStatus) {
-    deps.log(`[${deps.podName}] injecting tentacle (${(n / 1048576).toFixed(1)} MB)\n`);
+    deps.log(`[${deps.name}] injecting tentacle (${(n / 1048576).toFixed(1)} MB)\n`);
   }
 
   // 1) Stream the raw binary. `head -c N` reads exactly N bytes and exits, so
@@ -265,7 +269,7 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
     : new TransferProgress({
         total: n,
         write: deps.log,
-        prefix: `[${deps.podName}] transfer `,
+        prefix: `[${deps.name}] transfer `,
       });
 
   // `mkdir -p` first: minimal images (busybox, scratch-based) have no
@@ -276,8 +280,8 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   const binPath = deps.binPath ?? POD_BIN_PATH;
   const binDir = binPath.slice(0, binPath.lastIndexOf("/"));
   const tmpPath = `${binPath}.new`;
-  const installTarget: ExecTarget = {
-    pod: deps.podName,
+  const installTarget: EngineExecTarget = {
+    name: deps.name,
     container: deps.container,
     command: [
       "sh",
@@ -285,11 +289,11 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
       `mkdir -p ${binDir} && head -c ${n} > ${tmpPath} && chmod 755 ${tmpPath} && mv -f ${tmpPath} ${binPath}`,
     ],
   };
-  const install = await deps.kube.runExec(installTarget, bytes, {
+  const install = await deps.host.runExec(installTarget, bytes, {
     timeoutMs: transferTimeoutMs(n),
     onProgress: (written) => {
       if (onStatus) {
-        emit(`[${deps.podName}] injecting tentacle ${renderBar(written, n)}`);
+        emit(`[${deps.name}] injecting tentacle ${renderBar(written, n)}`);
       } else {
         pipedProgress?.update(written);
       }
@@ -303,16 +307,16 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
         ? " — the image may have no shell (sh): distroless/scratch images are unsupported; use an image with sh and head"
         : "";
     throw new Error(
-      `[pod ${deps.podName}] failed to inject tentacle (exit ${install.exitCode}): ${
+      `${prefix} failed to inject tentacle (exit ${install.exitCode}): ${
         install.stderr.trim() || install.status || "no output"
       }${noShell}`,
     );
   }
 
   // 2) Verify it actually runs (wrong arch / bad libc / missing deps surface here).
-  emit(`[${deps.podName}] verifying…`);
-  const version = await deps.kube.runExec(
-    { pod: deps.podName, container: deps.container, command: [binPath, "--version"] },
+  emit(`[${deps.name}] verifying…`);
+  const version = await deps.host.runExec(
+    { name: deps.name, container: deps.container, command: [binPath, "--version"] },
     undefined,
     { timeoutMs: 15_000 },
   );
@@ -325,9 +329,7 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
       libcMismatchHint(detail) ??
       (/no such file or directory/i.test(detail) ? LIBC_HINT : undefined);
     throw new Error(
-      `[pod ${deps.podName}] tentacle --version failed (exit ${version.exitCode}): ${detail}${
-        hint ?? ""
-      }`,
+      `${prefix} tentacle --version failed (exit ${version.exitCode}): ${detail}${hint ?? ""}`,
     );
   }
   // The version label is returned, not logged: the caller's final line
