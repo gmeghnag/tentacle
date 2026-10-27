@@ -85,6 +85,31 @@ export interface SubagentRunControls {
   readonly signal?: AbortSignal;
   /** Live progress sink (start, each child tool call, end). */
   readonly onEvent?: (event: ToolProgressEvent) => void;
+  /** The parent's `agent_task` call id: the child's permission asks are attributed to it. */
+  readonly toolCallId?: string;
+}
+
+/**
+ * A child's requester: the parent's, with each ask attributed to the parent's
+ * `agent_task` call (`parentCallId`) and tagged with the asking sub-agent.
+ * These fields WIN over the child gate's own: the child's call ids are unknown
+ * to the parent history, so one must never escape — without a parent id the
+ * ask carries no `toolCallId` at all.
+ */
+export function subagentRequester(
+  requester: PermissionRequester,
+  parentCallId: string | undefined,
+  agent: { readonly type: string; readonly description: string },
+): PermissionRequester {
+  return (req, options) => {
+    const { toolCallId: _childCallId, ...rest } = options ?? {};
+    return requester(req, {
+      ...rest,
+      ...(parentCallId !== undefined ? { toolCallId: parentCallId } : {}),
+      origin: "subagent",
+      agent,
+    });
+  };
 }
 
 export type SubagentRunner = (
@@ -182,7 +207,14 @@ export function createSubagentRunner(deps: SubagentDeps): {
       env: deps.env,
       systemPrompt: type.prompt,
       ...(deps.maxIterations !== undefined ? { maxIterations: deps.maxIterations } : {}),
-      ...(deps.requestPermission ? { requestPermission: deps.requestPermission } : {}),
+      ...(deps.requestPermission
+        ? {
+            requestPermission: subagentRequester(deps.requestPermission, controls?.toolCallId, {
+              type: type.name,
+              description: opts.description,
+            }),
+          }
+        : {}),
       ...(deps.resultTransforms ? { resultTransforms: deps.resultTransforms } : {}),
       ...(contextAwareness ? { contextAwareness } : {}),
       ...(deps.hooks

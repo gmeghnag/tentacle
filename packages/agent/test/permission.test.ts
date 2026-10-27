@@ -61,6 +61,54 @@ async function collect(agent: Agent): Promise<AgentEvent[]> {
 }
 
 describe("permission gate in the agent loop", () => {
+  test("the requester is told which call asks: { toolCallId, origin: call }", async () => {
+    // docs/feat/permission-call-attribution.md T1: the daemon attributes the
+    // ask from these options, not from the last `tool_start` it saw.
+    const { env } = makeEnv();
+    const seen: unknown[] = [];
+    const agent = new Agent({
+      model: new ScriptedProvider([toolCallTurn("make deploy")]),
+      tools: new ToolRegistry().register(shellTool),
+      env,
+      requestPermission: async (_req, options) => {
+        seen.push(options);
+        return { allowed: false };
+      },
+    });
+    await collect(agent);
+    expect(seen).toEqual([{ toolCallId: "c1", origin: "call" }]);
+  });
+
+  test("a tool runs with its own call id in the context", async () => {
+    const { env } = makeEnv();
+    const ids: (string | undefined)[] = [];
+    const probe: Tool = {
+      name: "probe",
+      description: "",
+      inputSchema: shellTool.inputSchema,
+      permission: "none",
+      async execute(_input, ctx) {
+        ids.push(ctx.toolCallId);
+        return { content: "" };
+      },
+    };
+    const agent = new Agent({
+      model: new ScriptedProvider([
+        [
+          {
+            type: "tool_call",
+            toolCall: { id: "p7", name: "probe", arguments: JSON.stringify({ command: "x" }) },
+          },
+          { type: "done" },
+        ],
+      ]),
+      tools: new ToolRegistry().register(probe),
+      env,
+    });
+    await collect(agent);
+    expect(ids).toEqual(["p7"]);
+  });
+
   test("denies a shell call: the tool never runs and the result is an error", async () => {
     const { env, execCalls } = makeEnv();
     const agent = new Agent({

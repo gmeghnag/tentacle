@@ -149,7 +149,7 @@ function rig(script: readonly (readonly StreamEvent[] | typeof PARK)[], opts: Ri
         model,
         tools,
         env: hookEnv,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
         ...(opts.maxIterations !== undefined ? { maxIterations: opts.maxIterations } : {}),
         ...(opts.systemPrompt !== undefined ? { systemPrompt: opts.systemPrompt } : {}),
         ...(opts.hooks

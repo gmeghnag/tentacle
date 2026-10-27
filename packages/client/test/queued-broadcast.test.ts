@@ -79,7 +79,7 @@ function daemon(env: ExecutionEnvironment, ringBytes?: number) {
         model,
         tools: new ToolRegistry().register(shellTool),
         env,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
       });
       return { agent, permissions };
     },

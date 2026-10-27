@@ -3,7 +3,13 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AskHooksTrust, type HookRunner, Session } from "@tentacle/agent";
-import type { ChatRequest, ModelProvider, StreamEvent, ToolResult } from "@tentacle/core";
+import {
+  type ChatRequest,
+  type ModelProvider,
+  PermissionBroker,
+  type StreamEvent,
+  type ToolResult,
+} from "@tentacle/core";
 import { SessionHost, toSessionSkills } from "@tentacle/daemon";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { daemonErrorLogPath } from "../src/daemon-log.ts";
@@ -59,6 +65,53 @@ describe("inProcessAgents (single-broker invariant, AGENTS §7)", () => {
       expect(answer.allowed).toBe(false);
     }
     expect(asked).toEqual(["run ls", "run ls"]);
+  });
+
+  test("the main agent and its sub-agents forward the ask's call attribution to the broker", async () => {
+    // docs/feat/permission-call-attribution.md T10. Mutation: put back
+    // `(req) => permissions.request(req)` in either factory → red.
+    const shell = (id: string): StreamEvent => ({
+      type: "tool_call",
+      toolCall: { id, name: "shell", arguments: JSON.stringify({ command: "make deploy" }) },
+    });
+    const model = new ScriptedModel([
+      [shell("c1"), { type: "done" }],
+      [
+        {
+          type: "tool_call",
+          toolCall: {
+            id: "t1",
+            name: "agent_task",
+            arguments: JSON.stringify({ description: "look", prompt: "sub task" }),
+          },
+        },
+        { type: "done" },
+      ],
+      [shell("k1"), { type: "done" }], // the child's own call id: must not escape
+      [{ type: "text", delta: "child report" }, { type: "done" }],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const permissions = new PermissionBroker();
+    const seen: unknown[] = [];
+    permissions.setRequester(async (_req, options) => {
+      seen.push(options);
+      return { allowed: false };
+    });
+    const { agent } = buildAgent(
+      { ...config, subagentsEnabled: true },
+      { modelOverride: model, permissions },
+    );
+    for await (const _ of agent.run("s", [{ role: "user", content: "go" }])) {
+      // drain
+    }
+    expect(seen).toEqual([
+      { toolCallId: "c1", origin: "call" },
+      {
+        toolCallId: "t1",
+        origin: "subagent",
+        agent: { type: "general-purpose", description: "look" },
+      },
+    ]);
   });
 });
 

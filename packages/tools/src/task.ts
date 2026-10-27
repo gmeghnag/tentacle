@@ -18,6 +18,8 @@ export interface TaskRunResult {
 export interface TaskRunControls {
   readonly signal?: AbortSignal;
   readonly onEvent?: (event: ToolProgressEvent) => void;
+  /** This `agent_task` call's id: the sub-agent's permission asks are attributed to it. */
+  readonly toolCallId?: string;
 }
 
 export type TaskRunner = (
@@ -56,7 +58,11 @@ export function createTaskTool(run: TaskRunner, types: readonly TaskAgentType[])
       const type = names.includes(requested) ? requested : defaultType;
       const result = await run(
         { description: args.description, prompt: args.prompt, type },
-        { signal: ctx.signal, ...(ctx.emitProgress ? { onEvent: ctx.emitProgress } : {}) },
+        {
+          signal: ctx.signal,
+          ...(ctx.emitProgress ? { onEvent: ctx.emitProgress } : {}),
+          ...(ctx.toolCallId !== undefined ? { toolCallId: ctx.toolCallId } : {}),
+        },
       );
       const note =
         result.stopReason === "cancelled"

@@ -92,7 +92,7 @@ function rig(script: readonly (readonly StreamEvent[])[]) {
         model,
         tools,
         env,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
       });
       return { agent, permissions };
     },
@@ -221,7 +221,7 @@ describe("the queue is broadcast (docs/feat/queued-broadcast.md)", () => {
           model: failing,
           tools: new ToolRegistry(),
           env,
-          requestPermission: (req) => permissions.request(req),
+          requestPermission: (req, options) => permissions.request(req, options),
         });
         return { agent, permissions };
       },

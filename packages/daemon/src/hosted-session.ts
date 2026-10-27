@@ -46,6 +46,7 @@ import type {
   ModelProvider,
   PermissionBroker,
   PermissionRequest,
+  PermissionRequestOptions,
   PermissionResponse,
 } from "@tentacle/core";
 import {
@@ -88,6 +89,7 @@ import {
   type PersistedTurnKey,
   type ResumedTurn,
   classifyPending,
+  pendingForRecord,
 } from "./persisted-session.ts";
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
@@ -123,6 +125,8 @@ export interface Attachment {
 /** A permission request waiting for its first answer (keyed by its nonce). */
 interface PendingAsk {
   readonly offered: ReadonlySet<string>;
+  /** What the record says of it while it is unanswered (`pendingForRecord`). */
+  readonly record: PendingPermission;
   /** Streamed to the clients yet (only once its record is durable). */
   shown: boolean;
   /**
@@ -298,11 +302,17 @@ export class HostedSession {
    */
   private compactionSummary: ChatMessage | undefined;
   private readonly errorPolicy: TurnErrorPolicy;
-  private currentToolCallId = "";
-  private currentToolName = "";
-  /** The permission request the turn is suspended on (persisted with the turn). */
-  private pending: PendingPermission | undefined;
-  /** Every unanswered ask, by `requestId` (one at a time today: calls run in order). */
+  /**
+   * A resumed turn's pending entry from the record, until its call is asked
+   * again (an ask for the same call replaces it) or answered without a re-ask
+   * (cleared at the next commit, a context reset, the turn's end).
+   */
+  private carried: PendingPermission | undefined;
+  /**
+   * Every unanswered ask, by `requestId`, in request order — with `carried`,
+   * the one truth of what is pending (persisted with the turn,
+   * `pendingList`). One at a time today: calls run in order.
+   */
   private readonly asks = new Map<string, PendingAsk>();
   private readonly persister: SessionPersister | null;
   private readonly createdAt: number;
@@ -406,7 +416,7 @@ export class HostedSession {
     // The agent's permission gate asks here (the factory's broker, replaced
     // synchronously before any turn can run): the turn suspends until a client
     // answers or the turn is aborted. See the module comment.
-    permissions.setRequester((req) => this.awaitDecision(req));
+    permissions.setRequester((req, options) => this.awaitDecision(req, options));
     // A background job can exit while the session is idle (between turns), so we
     // stream the exit the moment it happens — not only at the next turn, where
     // the agent injects a note for the model. The client renders it like a local
@@ -436,7 +446,7 @@ export class HostedSession {
       this.controller = new AbortController();
       this.activeTurnId = resume.turnId;
       this.turns.set(resume.turnId, {});
-      this.pending = resume.pending;
+      this.carried = resume.pending;
     }
     // The state at the cut (seq 0): a resumed turn's steers, the reloaded
     // returned rows. Nothing is streamed for it — the snapshot carries it.
@@ -463,8 +473,17 @@ export class HostedSession {
    * request a person saw survives a restart (the reload asks it again) — and
    * cleared durably once it settles, BEFORE the gate may run the tool — so
    * "pending" on disk always means "never started" (never run twice).
+   *
+   * The call it is for comes from the requester's `options` (the gate's own
+   * call, or a sub-agent's parent `agent_task` call) — never from the last
+   * `tool_start`, which names the wrong call once calls overlap
+   * (docs/feat/permission-call-attribution.md). Absent: `"pending"` on the
+   * wire, never resumable.
    */
-  private awaitDecision(req: PermissionRequest): Promise<PermissionResponse> {
+  private awaitDecision(
+    req: PermissionRequest,
+    options?: PermissionRequestOptions,
+  ): Promise<PermissionResponse> {
     const signal = this.compacting ? undefined : this.controller?.signal;
     if (!signal || signal.aborted) {
       // No live turn to ask for: a cancel landed between `tool_start` and the
@@ -481,22 +500,24 @@ export class HostedSession {
       return Promise.resolve({ allowed: false, reason: unsupported });
     }
     const requestId = crypto.randomUUID();
-    const update = toPermissionRequestUpdate(requestId, this.currentToolCallId || "pending", req);
+    const toolCallId = options?.toolCallId || undefined;
+    const update = toPermissionRequestUpdate(
+      requestId,
+      toolCallId ?? "pending",
+      req,
+      options?.agent,
+    );
     const record: PendingPermission = {
-      toolCallId: this.currentToolCallId,
+      toolCallId: toolCallId ?? "",
       tool: req.tool,
-      resumable: classifyPending(
-        this.session.messages,
-        this.currentToolCallId,
-        this.currentToolName,
-        req.tool,
-      ),
+      resumable: classifyPending(this.session.messages, toolCallId, options?.origin, req.tool),
       requestedAt: this.now(),
     };
     const decided = new Promise<{ outcome: PermissionOutcome; reason?: string }>((resolve) => {
       const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
       this.asks.set(requestId, {
         offered: new Set(update.options.map((o) => o.optionId)),
+        record,
         shown: false,
         settle: (outcome, reason) => {
           signal.removeEventListener("abort", onAbort);
@@ -505,7 +526,10 @@ export class HostedSession {
       });
       signal.addEventListener("abort", onAbort, { once: true });
     });
-    this.pending = record;
+    // The resumed call asked again: its live ask replaces the record's entry.
+    if (toolCallId !== undefined && this.carried?.toolCallId === toolCallId) {
+      this.carried = undefined;
+    }
     this.persist();
     // Shown once on disk (`persisted` never rejects: a failed write is logged
     // and the request is shown anyway — the daemon decides nothing itself). An
@@ -523,15 +547,13 @@ export class HostedSession {
       }
     });
     return decided.then(async ({ outcome, reason }) => {
-      if (this.pending === record) {
-        this.pending = undefined;
-        this.persist();
-        // The turn's abort ends this wait: a hung disk must never trap a cancel
-        // (docs/fix/cancel-hung-disk.md). Safe: the agent checks the abort
-        // before the answer (agent.ts `runTool`), so an aborted turn never runs
-        // the tool and "pending on disk ⇒ never started" still holds.
-        await untilAborted(this.persisted(), signal);
-      }
+      // `settle` already took this ask out of `asks`: write the record without it.
+      this.persist();
+      // The turn's abort ends this wait: a hung disk must never trap a cancel
+      // (docs/fix/cancel-hung-disk.md). Safe: the agent checks the abort
+      // before the answer (agent.ts `runTool`), so an aborted turn never runs
+      // the tool and "pending on disk ⇒ never started" still holds.
+      await untilAborted(this.persisted(), signal);
       return reason !== undefined ? { allowed: false, reason } : outcomeToResponse(outcome);
     });
   }
@@ -624,6 +646,12 @@ export class HostedSession {
     return this.persister ? this.persister.flush(this.id) : Promise.resolve();
   }
 
+  /** What is pending now, in request order: the resumed turn's carried entry, then each live ask. */
+  private pendingList(): PendingPermission[] {
+    const live = [...this.asks.values()].map((ask) => ask.record);
+    return this.carried ? [this.carried, ...live] : live;
+  }
+
   /** The state a record captures, copied now (the arrays are live). */
   private persistedState(): DaemonSessionState {
     const turns: PersistedTurnKey[] = [];
@@ -631,6 +659,7 @@ export class HostedSession {
       turns.push(entry.end ? { turnId, end: entry.end } : { turnId });
     }
     const turnId = this.compacting ? null : this.activeTurnId;
+    const pending = pendingForRecord(this.pendingList());
     return {
       id: this.id,
       createdAt: this.createdAt,
@@ -649,7 +678,7 @@ export class HostedSession {
               turnId,
               steering: this.queue.map((r) => r.text),
               steeringIds: this.queue.map((r) => r.id),
-              ...(this.pending ? { pending: this.pending } : {}),
+              ...(pending ? { pending } : {}),
             },
           }
         : {}),
@@ -1213,10 +1242,11 @@ export class HostedSession {
         }
         // The history reflects every update so far: the snapshot cut moves here.
         if (event.type === "history_commit") {
-          // No ask can be pending at a commit (the agent commits only between
-          // calls): one still set is a resumed turn's, whose call was answered
-          // without being asked again (cancelled) — never write it as pending.
-          this.pending = undefined;
+          // A resumed turn's carried entry still set here is for a call that
+          // was answered without being asked again (cancelled) — never write
+          // it as pending. Live asks stay: each is cleared by its own settle
+          // (a sibling call's commit must not drop it, once calls overlap).
+          this.carried = undefined;
           this.recordCut(turnId);
           this.persist();
           continue;
@@ -1226,14 +1256,10 @@ export class HostedSession {
         // and here). The barrier, mid-turn — then the record holds the fresh
         // history at once, with the turn in flight.
         if (event.type === "context_reset") {
-          this.pending = undefined;
+          this.carried = undefined;
           this.historyReplaced("context_reset");
           this.persist();
           continue;
-        }
-        if (event.type === "tool_start") {
-          this.currentToolCallId = event.id;
-          this.currentToolName = event.name;
         }
         let named: AgentEvent = event;
         if (event.type === "steer") {
@@ -1318,7 +1344,7 @@ export class HostedSession {
       this.recordCut(this.activeTurnId);
       // Inside the steering window, and safe there: this method cannot await,
       // and `persist` only captures — the I/O starts after the window.
-      this.pending = undefined;
+      this.carried = undefined;
       this.persist();
       // Last, in the same stretch: a reserved send-now takes the slot now.
       this.settleSuccessor();

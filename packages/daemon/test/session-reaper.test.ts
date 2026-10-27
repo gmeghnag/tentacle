@@ -122,7 +122,7 @@ function daemon(
         tools: new ToolRegistry(),
         env: noopEnv,
         jobs: j,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
       });
       return { agent, permissions, jobs: j };
     },

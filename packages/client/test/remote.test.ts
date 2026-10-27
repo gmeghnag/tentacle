@@ -57,7 +57,7 @@ function makeHost(model: ModelProvider, env: ExecutionEnvironment): SessionHost 
         model,
         tools: new ToolRegistry().register(shellTool),
         env,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
       });
       return { agent, permissions };
     },
@@ -1527,7 +1527,7 @@ describe("a spilled tool result over the real stack (docs/feat/tui-spill-note.md
           model,
           tools: new ToolRegistry().register(noisy),
           env: noopEnv,
-          requestPermission: (req) => permissions.request(req),
+          requestPermission: (req, options) => permissions.request(req, options),
           resultTransforms: [spillLargeOutput({ maxInlineChars: 100, previewChars: 20 })],
         });
         return { agent, permissions };
@@ -1585,7 +1585,7 @@ describe("a measured tool result over the real stack (docs/fix/tool-duration.md)
           tools: new ToolRegistry().register(timed),
           env: noopEnv,
           now: () => t,
-          requestPermission: (req) => permissions.request(req),
+          requestPermission: (req, options) => permissions.request(req, options),
         });
         return { agent, permissions };
       },
@@ -1616,7 +1616,7 @@ describe("the model's context lines over the real stack (docs/feat/context-aware
           tools: new ToolRegistry(),
           env: noopEnv,
           contextAwareness: { window: 1000, stepPercent: 1 },
-          requestPermission: (req) => permissions.request(req),
+          requestPermission: (req, options) => permissions.request(req, options),
         });
         return { agent, permissions };
       },

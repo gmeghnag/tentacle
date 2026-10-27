@@ -307,20 +307,37 @@ function withoutIds(turn: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * Whether a permission request raised while call `currentToolCallId` runs is
- * that call's own (resumable after a restart) rather than a sub-agent's inside
- * it. True iff the tool matches the current call AND the history is exactly
- * suspended before this call (`suspendedCalls` — the same definition the
- * reload and the agent's resume use). A sub-agent's request fails the first
- * check — the parent's current call is `agent_task`, which never asks itself (P7).
+ * Whether a permission request attributed to call `toolCallId` is resumable
+ * after a restart: the call asked for ITSELF (`origin: "call"`, never a
+ * sub-agent inside it, D4), the history is exactly suspended before that call
+ * (`suspendedCalls` — the same definition the reload and the agent's resume
+ * use), and that call is the asked tool. Explicit, from the requester's
+ * options (docs/feat/permission-call-attribution.md); no attribution → false.
  */
 export function classifyPending(
   messages: readonly ChatMessage[],
-  currentToolCallId: string,
-  currentToolName: string,
+  toolCallId: string | undefined,
+  origin: "call" | "subagent" | undefined,
   requestTool: string,
 ): boolean {
-  return requestTool === currentToolName && suspendedCalls(messages, currentToolCallId) !== null;
+  return (
+    origin === "call" &&
+    toolCallId !== undefined &&
+    suspendedCalls(messages, toolCallId)?.[0]?.name === requestTool
+  );
+}
+
+/**
+ * The record's `turn.pending` for the live asks (in request order). The record
+ * holds ONE entry (v7): 0 → none; 1 → it, as is; more → none, so a reload
+ * closes the turn honestly — never resumed, never re-run. Several live asks
+ * only happen with concurrent calls (docs/feat/permission-call-attribution.md
+ * §6; the list goes on disk with the next record version).
+ */
+export function pendingForRecord(
+  list: readonly PendingPermission[],
+): PendingPermission | undefined {
+  return list.length === 1 ? list[0] : undefined;
 }
 
 /** The last assistant message's tool calls and which of them have an answer after it. */

@@ -149,7 +149,7 @@ function daemon(opts: { readonly ringBytes?: number; readonly persist?: boolean 
         model,
         tools: new ToolRegistry().register(tool("ask", "ask")).register(tool("noop", "none")),
         env,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
       });
       return { agent, permissions };
     },
@@ -692,6 +692,70 @@ describe("routing by the reducer's turn stamp (scripted frames)", () => {
       { type: "text", delta: "Y-chunk" },
       { type: "turn_end", reason: "end_turn" },
     ]);
+    client.close();
+  });
+});
+
+// docs/feat/permission-call-attribution.md T9: the asking sub-agent rides to
+// the laptop requester's options, next to the turn (display only, untrusted).
+describe("permission attribution at the laptop requester", () => {
+  test("a sub-agent's request reaches the ONE broker with its agent and its turnId", async () => {
+    // Mutation: drop `agent` from the router's prompt action → red.
+    const [daemonCh, clientCh] = createChannelPair();
+    let seq = 0;
+    const notify = (update: unknown): void =>
+      daemon.notify(Notification.SessionUpdate, {
+        sessionId: "s1",
+        seq: ++seq,
+        mandatory: true,
+        update,
+      });
+    const daemon: RpcPeer = new RpcPeer(daemonCh, {
+      onRequest: async (method) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        if (method === Method.Open) {
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
+        }
+        if (method === Method.Prompt) {
+          notify({ type: "turn_start", turnId: "T", prompt: "go" });
+          notify({
+            type: "permission_request",
+            requestId: "r1",
+            toolCallId: "t1",
+            tool: "shell",
+            title: "Run a shell command",
+            options: [{ optionId: "allow_once", name: "Allow once", kind: "allow_once" }],
+            agent: { type: "explore", description: "find callers", extra: "stripped" },
+          });
+          return new Promise(() => {}); // the turn stays open
+        }
+        if (method === Method.ResolvePermission) {
+          return {};
+        }
+        throw new RpcError(JsonRpcErrorCode.MethodNotFound, method);
+      },
+    });
+    const seen: PermissionRequestOptions[] = [];
+    const broker = new PermissionBroker(async (_req, options) => {
+      if (options) seen.push(options);
+      return { allowed: true, scope: "once" };
+    });
+    const client = new RemoteClient(clientCh, broker);
+    await client.initialize();
+    const session = client.newSession(undefined, "s1");
+    void drain(session.send("go"), []);
+    await until(() => seen.length === 1);
+    expect(seen[0]?.turnId).toBe("T");
+    expect(seen[0]?.agent).toEqual({ type: "explore", description: "find callers" });
+    expect(seen[0]?.signal).toBeInstanceOf(AbortSignal);
+    // Laptop-internal attribution never comes from the wire.
+    expect(seen[0]?.toolCallId).toBeUndefined();
+    expect(seen[0]?.origin).toBeUndefined();
     client.close();
   });
 });

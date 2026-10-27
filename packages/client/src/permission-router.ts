@@ -27,6 +27,12 @@ export type RouterAction =
       readonly request: PermissionRequest;
       /** The turn it was raised in (`request`'s `turnId`); absent when none. */
       readonly turnId?: string;
+      /**
+       * The sub-agent that asked (the update's `agent`); absent: the call
+       * itself. Display only, from a daemon that may be a pod: nothing here
+       * decides on it.
+       */
+      readonly agent?: { readonly type: string; readonly description: string };
     }
   | { readonly kind: "abort"; readonly sessionId: string; readonly requestId: string }
   | {
@@ -216,6 +222,14 @@ export class PermissionRouter {
         requestId: entry.update.requestId,
         request: toPermissionRequest(entry.update),
         ...(entry.turnId !== null ? { turnId: entry.turnId } : {}),
+        ...(entry.update.agent
+          ? {
+              agent: {
+                type: entry.update.agent.type,
+                description: entry.update.agent.description,
+              },
+            }
+          : {}),
       },
     ];
   }

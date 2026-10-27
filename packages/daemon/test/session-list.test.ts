@@ -276,7 +276,7 @@ function daemon(opts: { persist?: boolean } = {}) {
         model,
         tools: new ToolRegistry(),
         env,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
       });
       return { agent, permissions };
     },
