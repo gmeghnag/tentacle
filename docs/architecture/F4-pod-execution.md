@@ -207,6 +207,11 @@ and leaves the pod `Running` for reuse; the owner deletes it. See
 init step (or an image that already contains the repo); results leave via git /
 PR, not file-sync. PVC mount and local→pod sync are later options. The pod's
 `cwd` = the cloned workspace = what `HostExecution` confines tools to.
+**Docker/Podman on a local engine** (slice D, `docs/feat/docker-workspace-mount.md`):
+the laptop cwd is bind-mounted read-write at the same path and the daemon exec's
+working dir is that path, so the session is confined to it with no runtime
+change; `~/.ssh` and the config dir are masked when inside it. A remote engine
+mounts nothing (the image's filesystem, as on k8s).
 
 ---
 

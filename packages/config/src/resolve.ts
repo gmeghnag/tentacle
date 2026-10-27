@@ -29,7 +29,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_TABULATE_JSON,
 } from "./defaults.ts";
-import type { FileConfig, HookSpecConfig, McpServerConfig } from "./schema.ts";
+import type { FileConfig, HookSpecConfig, McpServerConfig, MountConfig } from "./schema.ts";
 import { type SkillInfo, renderSkillsCatalog } from "./skills.ts";
 
 export type Env = Record<string, string | undefined>;
@@ -97,6 +97,8 @@ export interface ResolvedConfig {
   readonly engine?: "kubernetes" | "docker" | "podman";
   /** The configured `run` keep-on-exit default (file or profile); absent = the CLI default (true). */
   readonly keep?: boolean;
+  /** The configured workspace-mount hide list (file or profile); absent = the CLI default list. */
+  readonly mount?: MountConfig;
   /** User hooks (file-only, no env form); empty when unset. */
   readonly hooks: readonly HookSpecConfig[];
   /** MCP servers to connect to (from the config file), keyed by name. */
@@ -405,6 +407,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     autoWake: autoWake.value,
     ...(fileConfig.engine !== undefined ? { engine: fileConfig.engine } : {}),
     ...(fileConfig.keep !== undefined ? { keep: fileConfig.keep } : {}),
+    ...(fileConfig.mount !== undefined ? { mount: fileConfig.mount } : {}),
     hooks: fileConfig.hooks ?? [],
     // MCP servers are file-only (no env form); empty when unset.
     mcpServers: fileConfig.mcpServers ?? {},

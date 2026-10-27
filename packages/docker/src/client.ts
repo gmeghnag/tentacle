@@ -73,6 +73,15 @@ export interface EngineVersion {
   readonly [key: string]: unknown;
 }
 
+/** `GET /info` — the fields we read. */
+export interface EngineInfo {
+  /** e.g. `"Docker Desktop"`, `"Ubuntu 24.04 LTS"`. */
+  readonly OperatingSystem?: string;
+  /** e.g. `["name=seccomp,profile=builtin", "name=rootless", "name=selinux"]`. */
+  readonly SecurityOptions?: readonly string[] | null;
+  readonly [key: string]: unknown;
+}
+
 /** `"1.52"` → `[1, 52]`; `undefined` when it is not `major.minor`. */
 function parseApi(v: string): [number, number] | undefined {
   const m = /^(\d+)\.(\d+)$/.exec(v.trim());
@@ -193,6 +202,16 @@ export class DockerClient {
     const v = await this.apiPath();
     const res = await this.call({ method: "GET", path: `${v}/version` }, signal ? { signal } : {});
     return json<EngineVersion>(this.expect(res, [200]));
+  }
+
+  /**
+   * `GET /info` — the engine facts the workspace mount reads (rootless,
+   * SELinux, Docker Desktop). Podman's compat API reports the same fields.
+   */
+  async info(signal?: AbortSignal): Promise<EngineInfo> {
+    const v = await this.apiPath();
+    const res = await this.call({ method: "GET", path: `${v}/info` }, signal ? { signal } : {});
+    return json<EngineInfo>(this.expect(res, [200]));
   }
 
   /** Pull `ref`; resolves when the pull finished, rejects on an `{"error":…}` progress line. */

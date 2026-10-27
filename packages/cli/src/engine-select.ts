@@ -8,8 +8,20 @@
  * unknown value — flag or env — is a usage error, never a silent fallback to
  * another engine.
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import {
+  constants,
+  closeSync,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   DockerClient,
   type EngineEndpoint,
@@ -22,6 +34,17 @@ import { KubeClient, type KubeClientOptions, loadKubeClientOptions } from "@tent
 import { type DockerClientLike, dockerEngineHost } from "./engine-docker.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { type PodCluster, kubeEngineHost } from "./engine-k8s.ts";
+import {
+  type CaseFs,
+  type HideEntry,
+  type HideFileFs,
+  type HideFs,
+  type HidePath,
+  type WorkspaceInput,
+  caseAliasedFiles,
+  loadHideFile,
+  resolveHideFile,
+} from "./workspace-mount.ts";
 
 export const ENGINES: readonly EngineKind[] = ["kubernetes", "docker", "podman"];
 
@@ -69,6 +92,8 @@ export function engineFlagProblem(
     readonly container?: boolean;
     readonly context?: boolean;
     readonly insecureTcp?: boolean;
+    readonly noMount?: boolean;
+    readonly confirmMount?: boolean;
   },
 ): string | null {
   if (kind === "kubernetes") {
@@ -77,6 +102,12 @@ export function engineFlagProblem(
     }
     if (flags.insecureTcp) {
       return "--insecure-docker-tcp is for --engine docker or podman";
+    }
+    if (flags.noMount) {
+      return "--no-mount is for --engine docker or podman (a pod never mounts a laptop folder)";
+    }
+    if (flags.confirmMount) {
+      return "--confirm-mount is for --engine docker or podman (a pod never mounts a laptop folder)";
     }
     return null;
   }
@@ -193,6 +224,186 @@ export interface BuiltEngineHost {
   readonly host: EngineHost;
   /** kubernetes: the resolved namespace (for the `--keep` attach hint). */
   readonly namespace?: string;
+  /** docker/podman: the endpoint (its locality decides the workspace mount). */
+  readonly endpoint?: EngineEndpoint;
+}
+
+/**
+ * The laptop facts `planWorkspace` needs, resolved here (IO): every path the
+ * masks and the danger check compare is a realpath, so a symlink cannot
+ * bypass them. `~/.ssh` is passed only when it exists.
+ */
+export function laptopWorkspaceInput(input: {
+  readonly kind: EngineKind;
+  readonly endpoint?: EngineEndpoint | undefined;
+  readonly noMount: boolean;
+  readonly cwd: string;
+  readonly configDir: string;
+  readonly binDir: string;
+  /** `hideList(config.mount, config.apiKeyCommand)` — resolved here. */
+  readonly hide: readonly HideEntry[];
+  /** `apiKeyFileUnknown(config.apiKeyCommand)`: passed through to the plan's warning. */
+  readonly keyFileUnknown?: boolean;
+  readonly homeDir?: string;
+}): WorkspaceInput {
+  const real = (path: string): string => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  };
+  const logicalHome = input.homeDir ?? homedir();
+  const home = real(logicalHome);
+  const ssh = join(logicalHome, ".ssh");
+  // `~/x` → home; absolute as is; relative (the key file of `cat key`) → the cwd,
+  // where `apiKeyCommand` runs. A missing entry is skipped (nothing to hide).
+  const hide: HidePath[] = [];
+  let statProblem: string | undefined;
+  for (const entry of input.hide) {
+    const path = entry.path.startsWith("~/")
+      ? join(logicalHome, entry.path.slice(2))
+      : resolve(input.cwd, entry.path);
+    let file: boolean;
+    try {
+      file = !statSync(path).isDirectory();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      // Not "absent": we cannot tell, so fail closed rather than drop the mask.
+      statProblem ??= `cannot check ${entry.label} (${path}) to hide it from the container: ${
+        error instanceof Error ? error.message : String(error)
+      } — fix its permissions, or remove it from the hide list`;
+      continue;
+    }
+    hide.push({
+      label: entry.label,
+      path: real(path),
+      file,
+      ...(entry.always ? { always: true } : {}),
+    });
+  }
+  // `<cwd>/.tentacle/hide` (owner 2026-10-27): per-project patterns that ADD to
+  // the list, resolved now to existing paths. Read only when a mount will happen.
+  let hideProblem: string | undefined;
+  let hideWarnings: readonly string[] = [];
+  let caseAliased: string[] = [];
+  if (!input.noMount && input.kind !== "kubernetes" && input.endpoint?.local === true) {
+    const source = real(input.cwd);
+    const loaded = loadHideFile(source, nodeHideFileFs());
+    hideProblem = loaded.problem;
+    if (loaded.text !== undefined) {
+      const resolved = resolveHideFile(loaded.text, source, nodeHideFs());
+      hideProblem = resolved.problem;
+      hideWarnings = resolved.warnings;
+      hide.push(...resolved.paths);
+    }
+    // Every hidden FILE inside the mount: can another spelling reach it?
+    caseAliased = caseAliasedFiles(
+      hide.filter((h) => h.file && h.path.startsWith(`${source}/`)).map((h) => h.path),
+      nodeCaseFs(),
+    );
+  }
+  const problem = statProblem ?? hideProblem;
+  let entries: readonly string[] = [];
+  try {
+    entries = readdirSync(input.cwd);
+  } catch {
+    // unreadable: the probe just checks the dir itself
+  }
+  return {
+    engine: input.kind,
+    endpointLocal: input.endpoint?.local ?? false,
+    ...(input.endpoint ? { endpointLabel: endpointLabel(input.endpoint) } : {}),
+    noMount: input.noMount,
+    cwd: input.cwd,
+    realCwd: real(input.cwd),
+    home,
+    configDir: real(input.configDir),
+    ...(existsSync(ssh) ? { sshDir: real(ssh) } : {}),
+    hide,
+    ...(problem !== undefined ? { hideProblem: problem } : {}),
+    ...(hideWarnings.length > 0 ? { hideWarnings } : {}),
+    ...(input.keyFileUnknown ? { keyFileUnknown: true } : {}),
+    ...(caseAliased.length > 0 ? { caseAliased } : {}),
+    binDir: input.binDir,
+    entries,
+  };
+}
+
+/** The real directory walk for `.tentacle/hide` (the pure resolver takes it injected). */
+function nodeHideFs(): HideFs {
+  return {
+    list: (dir) => {
+      try {
+        return readdirSync(dir, { withFileTypes: true }).map((e) => ({
+          name: e.name,
+          dir: e.isDirectory(),
+          link: e.isSymbolicLink(),
+        }));
+      } catch {
+        return undefined; // warned by the resolver
+      }
+    },
+    link: (path) => {
+      try {
+        const real = realpathSync(path);
+        return { real, dir: statSync(real).isDirectory() };
+      } catch {
+        return undefined;
+      }
+    },
+  };
+}
+
+/** The real `.tentacle/hide` reads: ENOENT/ENOTDIR = absent; a FIFO is never opened blocking. */
+function nodeHideFileFs(): HideFileFs {
+  return {
+    lstat: (path) => {
+      let stat: ReturnType<typeof lstatSync>;
+      try {
+        stat = lstatSync(path);
+      } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (code === "ENOENT" || code === "ENOTDIR") {
+          return undefined;
+        }
+        throw error;
+      }
+      return {
+        kind: stat.isFile() ? "file" : stat.isSymbolicLink() ? "link" : "other",
+        size: stat.size,
+      };
+    },
+    realpath: (path) => realpathSync(path),
+    read: (path, max) => {
+      // Re-checked on the open fd: the path may have been swapped since `lstat`.
+      const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+      try {
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || stat.size > max) {
+          throw new Error("changed while being read");
+        }
+        return readFileSync(fd, "utf8");
+      } finally {
+        closeSync(fd);
+      }
+    },
+  };
+}
+
+/** `lstat` identity for the case check (`caseAliasedFiles`). */
+function nodeCaseFs(): CaseFs {
+  return {
+    id: (path) => {
+      try {
+        const stat = lstatSync(path, { bigint: true });
+        return `${stat.dev}:${stat.ino}`;
+      } catch {
+        return undefined;
+      }
+    },
+  };
 }
 
 /**
@@ -243,5 +454,8 @@ export function buildEngineHost(
           listDir: io.listDir,
           ...shared,
         });
-  return { host: dockerEngineHost({ client: io.dockerClient(endpoint), endpoint, kind }) };
+  return {
+    host: dockerEngineHost({ client: io.dockerClient(endpoint), endpoint, kind }),
+    endpoint,
+  };
 }
