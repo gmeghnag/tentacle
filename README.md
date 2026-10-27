@@ -65,6 +65,40 @@ tentacle run --engine docker --image <ref> [--context <ctx>] [<name>]     # Dock
 tentacle run --engine podman --image <ref> [<name>]                       # Podman
 ```
 
+**Your folder, in the container (Docker/Podman).** On a local engine `run`
+bind-mounts the current folder read-write at the same path, and the agent works
+in it: your real files, with the container's own processes, packages and
+network. `--no-mount` opts out. Only the cwd is mounted (never a parent or the
+git root). Secrets inside the folder are hidden behind an empty read-only
+overlay (checked after start): by default `~/.ssh`, `~/.aws`, `~/.kube`,
+`~/.config/gcloud`, `~/.docker/config.json`, `~/.netrc` — `"mount": {"hide": […]}`
+in `config.jsonc` (or a profile) replaces that list, `"hideExtra"` adds to it;
+tentacle's config dir and the `apiKeyCommand` key file (`cat <file>`, also
+`cat "$HOME/…"`) are always hidden; for any other command the file cannot be
+named, and the run warns that it is NOT hidden. On a case-insensitive disk
+(macOS, exFAT/NTFS, ext4 casefold — checked on the disk, not by OS) a hidden
+FILE is still readable under another spelling (`KEY` for `Key`), so the run
+refuses: hide the folder that contains it (a directory mask holds), or move
+the file. `--confirm-mount` overrides this for your own entries (and warns,
+naming them) — never for the key file. A project can add its own with `.tentacle/hide` in the folder
+(gitignore-style: `#` comments, globs and `**`, a trailing `/` for directories;
+`!` only un-hides what that same file hid — never the lists above). It only
+ADDS, and the patterns are resolved to the paths that exist when the container
+starts: a file created later is NOT hidden. More than 200 matches stops the run
+(narrow the patterns); a pattern or symlink pointing outside the folder is
+ignored with a warning. A `.tentacle/hide` that is unreadable, not a regular
+file (a FIFO…), a link out of the folder or over 64 KiB stops the run. The startup line says `Hidden from the container: N
+paths from .tentacle/hide, M defaults`. Mounting `/`, `/usr`, `/usr/local[/bin]`, `~/.ssh` or the config
+dir (or a folder inside them) is refused. Your home, its parents, a system dir
+or a folder on the hide list asks first (y/N); without a terminal it is
+refused unless `--confirm-mount`. A remote engine
+(`tcp://`, `ssh://`) mounts nothing and says so. On rootful Docker on Linux the
+agent runs as your uid:gid (files stay yours); Docker Desktop and rootless
+Podman need nothing; SELinux hosts get `label=disable` for the container. The
+image's code can write your folder (`.git/hooks`, `package.json` scripts…):
+run only images you trust there, or use `--no-mount`. A kept container keeps its
+mount; `attach` from another folder warns.
+
 **`attach`: in a pod or container that already exists.** Same as `run`, but
 tentacle never creates, starts or deletes it: closing the TUI detaches and it
 stays up.

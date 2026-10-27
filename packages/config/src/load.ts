@@ -87,6 +87,13 @@ export interface TentacleConfig {
   readonly engine?: ResolvedConfig["engine"];
   /** The configured `run --keep` default (file/profile); absent = the CLI default (true). */
   readonly keep?: ResolvedConfig["keep"];
+  /** The configured workspace-mount hide list (file/profile); absent = the CLI default list. */
+  readonly mount?: ResolvedConfig["mount"];
+  /**
+   * The configured `apiKeyCommand` (the command, never its output): the CLI
+   * hides the key FILE it reads from a workspace mount.
+   */
+  readonly apiKeyCommand?: string;
   /** The user's hooks, then the enabled packages' (tagged with `source`). */
   readonly hooks: readonly (ResolvedConfig["hooks"][number] | PackageHook)[];
   /** The user's servers plus the packages' (`<pkg>-<server>`; the user's win a clash). */
@@ -535,6 +542,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     autoWake: resolved.autoWake,
     ...(resolved.engine !== undefined ? { engine: resolved.engine } : {}),
     ...(resolved.keep !== undefined ? { keep: resolved.keep } : {}),
+    ...(resolved.mount !== undefined ? { mount: resolved.mount } : {}),
+    ...(resolved.apiKeyCommand !== undefined ? { apiKeyCommand: resolved.apiKeyCommand } : {}),
     hooks: contributed.hooks,
     mcpServers: contributed.mcpServers,
     packages: scanned.packages,

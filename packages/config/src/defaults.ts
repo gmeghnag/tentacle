@@ -145,6 +145,13 @@ export const DEFAULT_CONFIG_JSONC = `{
   // re-attach). Default true; --keep=false deletes it. The flag wins, then a profile.
   // "keep": true,
 
+  // \`tentacle run --engine docker|podman\` mounts the current folder into the
+  // container; these paths (dirs or files, "~/…" or absolute) are hidden when
+  // inside it. "hide" REPLACES the default list (~/.ssh, ~/.aws, ~/.kube,
+  // ~/.config/gcloud, ~/.docker/config.json, ~/.netrc), "hideExtra" ADDS to it.
+  // tentacle's config dir and the apiKeyCommand key file are always hidden.
+  // "mount": { "hideExtra": ["~/.pgpass"] },
+
   // Hooks: shell commands run on agent events, with a JSON input on stdin
   // (contract: docs/feat/hooks-core.md). "tool_call" can allow / ask / deny /
   // rewrite a call (exit 2 = deny, stderr = reason); "tool_result" can replace

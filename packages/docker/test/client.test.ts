@@ -76,6 +76,37 @@ describe("API version negotiation", () => {
   });
 });
 
+describe("engine facts", () => {
+  test("info: GET /info → the security options and OS the workspace mount reads", async () => {
+    const { engine, docker } = client("1.52");
+    const facts = docker.info();
+    const { duplex, req } = await engine.next();
+    expect(req.method).toBe("GET");
+    expect(req.path).toBe("/v1.52/info");
+    duplex.receive(
+      response(
+        200,
+        JSON.stringify({
+          OperatingSystem: "Docker Desktop",
+          SecurityOptions: ["name=seccomp,profile=builtin", "name=rootless"],
+          Containers: 3,
+        }),
+      ),
+    );
+    const info = await facts;
+    expect(info.OperatingSystem).toBe("Docker Desktop");
+    expect(info.SecurityOptions).toEqual(["name=seccomp,profile=builtin", "name=rootless"]);
+  });
+
+  test("info: an engine error rejects (the caller treats the facts as unknown)", async () => {
+    const { engine, docker } = client("1.52");
+    const facts = docker.info();
+    const { duplex } = await engine.next();
+    duplex.receive(response(500, '{"message":"boom"}'));
+    await expect(facts).rejects.toBeInstanceOf(DockerApiError);
+  });
+});
+
 describe("container verbs", () => {
   test("create: the tentacle ownership label is always set (merged with the caller's)", async () => {
     const { engine, docker } = client("1.52");

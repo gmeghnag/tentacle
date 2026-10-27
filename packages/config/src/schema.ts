@@ -150,6 +150,19 @@ export const HookSpecSchema = z
 
 export type HookSpecConfig = z.infer<typeof HookSpecSchema>;
 
+/** A `mount.hide` entry: `~/…` or an absolute path (a relative one has no anchor). */
+const HidePathSchema = z
+  .string()
+  .min(1)
+  .refine((path) => path.startsWith("~/") || path.startsWith("/"), {
+    message: 'a hide path must start with "~/" or "/"',
+  });
+
+export type MountConfig = {
+  readonly hide?: readonly string[];
+  readonly hideExtra?: readonly string[];
+};
+
 /** The settings a config file — and each of its profiles — can hold. */
 const settingsShape = {
   model: ModelConfigSchema.optional(),
@@ -239,6 +252,21 @@ const settingsShape = {
    * `--keep[=true|false]` wins. Unset: true (the CLI default).
    */
   keep: z.boolean().optional(),
+  /**
+   * What a docker/podman workspace mount hides from the container
+   * (docs/feat/docker-workspace-mount.md): `hide` REPLACES the default list
+   * (`~/.ssh`, `~/.aws`, `~/.kube`, `~/.config/gcloud`, `~/.docker/config.json`,
+   * `~/.netrc`), `hideExtra` ADDS to it. Paths are `~/…` or absolute, dirs or
+   * files. The tentacle config dir and the `apiKeyCommand` key file are always
+   * hidden, whatever this says.
+   */
+  mount: z
+    .object({
+      hide: z.array(HidePathSchema).optional(),
+      hideExtra: z.array(HidePathSchema).optional(),
+    })
+    .strict()
+    .optional(),
   /** MCP servers to connect to, keyed by name; their tools are added to the agent. */
   mcpServers: z.record(McpServerSchema).optional(),
   /**

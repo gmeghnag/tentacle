@@ -132,9 +132,21 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
     noun: "pod",
     where: `namespace ${namespace}`,
     defaultContainer: AGENT_CONTAINER,
-    async create(name, image) {
+    async create(name, image, options) {
+      // Backstop: a pod has no access to laptop files; the planner never asks.
+      if (options?.workspace) {
+        throw new Error("a Kubernetes pod cannot mount a laptop folder");
+      }
+      const labels = options?.labels;
       try {
-        await kube.createPod(buildPodManifest({ name, namespace, image }));
+        await kube.createPod(
+          buildPodManifest({
+            name,
+            namespace,
+            image,
+            ...(labels ? { labels: { ...labels } } : {}),
+          }),
+        );
       } catch (error) {
         // A missing namespace surfaces as a 404 from the pod create (not a
         // separate preflight) — translate it into something actionable.

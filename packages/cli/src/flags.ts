@@ -86,7 +86,8 @@ export const ARGS = {
   },
   run: {
     values: { ...ENGINE, namespace: { short: "n" }, image: {}, "bin-dir": {} },
-    bools: { ...CONTINUE, ...ENGINE_BOOLS },
+    // docker/podman: the cwd mount (docs/feat/docker-workspace-mount.md); `run` only.
+    bools: { ...CONTINUE, ...ENGINE_BOOLS, "no-mount": {}, "confirm-mount": {} },
     optional: { ...RESUME, ...KEEP },
     conflicts: RESUME_CONFLICTS,
     positional: { min: 0, max: 1 },
@@ -522,7 +523,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
     "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify] [--resume [id]|--continue]",
   serve:
     "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [...] (see tentacle --help)",
-  run: "tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]",
+  run: "tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]",
   attach:
     "tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--context <ctx>] [--insecure-docker-tcp] [--bin-dir <dir>] [--resume [uid]|--continue]",
   plain: "tentacle --plain",

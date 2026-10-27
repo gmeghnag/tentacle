@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DELETE_CONTAINER_SUBCOMMAND } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND } from "@tentacle/k8s";
@@ -429,6 +430,265 @@ describe("cli main: --engine", () => {
       const r = await keepHintFor([...base, "--bin-dir", "/tmp"]);
       expect(r.hint).toBe("tentacle attach --engine docker --bin-dir /tmp c1");
     });
+  });
+
+  // Slice D (docs/feat/docker-workspace-mount.md): main plans the mount and
+  // gates a dangerous source BEFORE the runtime (and Ink) starts.
+  describe("workspace mount wiring", () => {
+    const seenWith = async (
+      args: string[],
+      options: { cwd?: string; ask?: (prompt: string) => Promise<string> } = {},
+      env: Record<string, string | undefined> = unreachable,
+    ) => {
+      let seen:
+        | { workspace?: { source: string; target: string; masks: readonly unknown[] } }
+        | undefined;
+      const out: string[] = [];
+      const prompts: string[] = [];
+      const before = process.cwd();
+      if (options.cwd) {
+        process.chdir(options.cwd);
+      }
+      try {
+        await withEnv(env, async () => {
+          await main(["bun", "cli", ...args], {
+            write: (t) => out.push(t),
+            ...(options.ask
+              ? {
+                  ask: (p: string) => {
+                    prompts.push(p);
+                    return (options.ask as (p: string) => Promise<string>)(p);
+                  },
+                }
+              : {}),
+            startEngineRuntime: async (_config, deps) => {
+              seen = deps;
+              throw new Error("stop");
+            },
+          });
+        });
+      } finally {
+        process.chdir(before);
+      }
+      return {
+        reached: seen !== undefined,
+        workspace: seen?.workspace,
+        text: out.join(""),
+        prompts,
+      };
+    };
+    const base = ["run", "--engine", "docker", "--image", "x"];
+
+    /** No env key: the config's `apiKeyCommand` is the key source. */
+    const keyFromConfig = { ...unreachable, TENTACLE_MODEL_API_KEY: undefined };
+
+    /** Run with `config` as the user config (restored after). */
+    const withConfig = async <T>(config: Record<string, unknown>, body: () => Promise<T>) => {
+      const path = join(dir, "config", "config.jsonc");
+      const before = (await Bun.file(path).exists()) ? await readFile(path, "utf8") : undefined;
+      await writeFile(path, JSON.stringify(config));
+      try {
+        return await body();
+      } finally {
+        if (before === undefined) await rm(path, { force: true });
+        else await writeFile(path, before);
+      }
+    };
+
+    test("a local engine mounts the cwd: source = its realpath, target = the cwd", async () => {
+      const r = await seenWith(base);
+      expect(r.workspace?.target).toBe(process.cwd());
+      expect(r.workspace?.source).toBe(realpathSync(process.cwd()));
+    });
+
+    test("--no-mount → no workspace", async () => {
+      const r = await seenWith([...base, "--no-mount"]);
+      expect(r.reached).toBe(true);
+      expect(r.workspace).toBeUndefined();
+    });
+
+    test("a remote engine → no workspace + the warning, before the runtime", async () => {
+      const r = await seenWith(
+        [...base, "--insecure-docker-tcp"],
+        {},
+        {
+          ...unreachable,
+          DOCKER_HOST: "tcp://127.0.0.1:9",
+        },
+      );
+      expect(r.reached).toBe(true);
+      expect(r.workspace).toBeUndefined();
+      expect(r.text).toContain("[container] warning: remote engine tcp://127.0.0.1:9");
+    });
+
+    test("--no-mount / --confirm-mount on kubernetes, or on attach, are usage errors", async () => {
+      for (const flag of ["--no-mount", "--confirm-mount"]) {
+        const k = await seenWith(["run", "--engine", "kubernetes", "--image", "x", flag]);
+        expect(k.reached).toBe(false);
+        expect(k.text).toContain(`[error] ${flag} is for --engine docker or podman`);
+        const a = await seenWith(["attach", "--engine", "docker", flag, "box"]);
+        expect(a.text).toContain("[error]");
+        expect(a.text).toContain(flag);
+      }
+    });
+
+    test("the config dir as the cwd is REFUSED (D-1): never asked, --confirm-mount does not override", async () => {
+      const cfg = join(dir, "config");
+      for (const extra of [[], ["--confirm-mount"]]) {
+        const r = await seenWith([...base, ...extra], { cwd: cfg, ask: async () => "y" });
+        expect(r.reached).toBe(false);
+        expect(r.prompts).toEqual([]);
+        expect(r.text).toContain(
+          `Refusing to mount ${realpathSync(cfg)}: it is tentacle's config directory`,
+        );
+      }
+    });
+
+    describe("a dangerous source ($HOME) — M5", () => {
+      const home = () => homedir();
+      // Only DIR masks (`~/.ssh`): the real home's default FILE masks
+      // (`~/.docker/config.json`…) would hit the case check on a
+      // case-insensitive disk, which refuses before this prompt.
+      const seenAtHome = (args: string[], ask?: (prompt: string) => Promise<string>) =>
+        withConfig({ mount: { hide: ["~/.ssh"] } }, () =>
+          seenWith(args, { cwd: home(), ...(ask ? { ask } : {}) }),
+        );
+
+      test("no TTY → refused with the exact message, nothing started", async () => {
+        const r = await seenAtHome(base);
+        expect(r.reached).toBe(false);
+        expect(r.text).toContain(
+          `Refusing to mount ${realpathSync(home())} (your home directory) without confirmation.\nRun from your project directory, or pass --confirm-mount to proceed.`,
+        );
+      });
+
+      test("TTY: asked once BEFORE the runtime; anything but y → not started", async () => {
+        const r = await seenAtHome(base, async () => "\n");
+        expect(r.prompts).toHaveLength(1);
+        expect(r.prompts[0]).toContain("⚠ You are about to mount");
+        expect(r.prompts[0]).toContain("Continue? [y/N] ");
+        expect(r.reached).toBe(false);
+      });
+
+      test("TTY: y → started with the mount", async () => {
+        const r = await seenAtHome(base, async () => "y");
+        expect(r.reached).toBe(true);
+        expect(r.workspace?.source).toBe(realpathSync(home()));
+      });
+
+      test("--confirm-mount → started without asking", async () => {
+        const r = await seenAtHome([...base, "--confirm-mount"], async () => "n");
+        expect(r.prompts).toEqual([]);
+        expect(r.reached).toBe(true);
+      });
+    });
+
+    test(".tentacle/hide: patterns add masks; an escaping pattern warns; over 200 refuses", async () => {
+      const proj = join(dir, "hide-proj");
+      await mkdir(join(proj, ".tentacle"), { recursive: true });
+      await writeFile(join(proj, "k.pem"), "s");
+      await writeFile(join(proj, ".tentacle", "hide"), "*.pem\n../escape\n");
+      // --confirm-mount: on a case-insensitive disk a FILE mask needs it (R2-3, tested below).
+      const ok = await seenWith([...base, "--confirm-mount"], { cwd: proj });
+      const real = realpathSync(proj);
+      expect(ok.reached).toBe(true);
+      expect(ok.workspace?.masks).toEqual([
+        { path: join(real, "k.pem"), file: true, label: ".tentacle/hide", fromFile: true },
+      ]);
+      expect(ok.text).toContain('[container] warning: ".tentacle/hide": "../escape" ignored');
+
+      await writeFile(join(proj, ".tentacle", "hide"), "*.pem\n");
+      for (let i = 0; i < 201; i++) {
+        await writeFile(join(proj, `n${i}.pem`), "s");
+      }
+      const over = await seenWith(base, { cwd: proj });
+      expect(over.reached).toBe(false);
+      expect(over.text).toContain("more than 200 paths");
+      expect(over.text).toContain("narrow the patterns");
+    });
+
+    test("the config dir and a `mount.hideExtra` FILE inside the cwd are masked", async () => {
+      const path = join(dir, "config", "config.jsonc");
+      const before = (await Bun.file(path).exists()) ? await readFile(path, "utf8") : undefined;
+      const secret = join(dir, "secret.txt");
+      await writeFile(secret, "s");
+      await writeFile(path, JSON.stringify({ mount: { hide: [], hideExtra: [secret] } }));
+      try {
+        const r = await seenWith([...base, "--confirm-mount"], { cwd: dir }); // (see R2-3 below)
+        // (`process.cwd()` after a chdir is already physical, so target = realpath here.)
+        const real = realpathSync(dir);
+        expect(r.workspace?.masks).toEqual([
+          { path: join(real, "secret.txt"), file: true, label: secret },
+          { path: join(real, "config"), file: false, label: "tentacle's config" },
+        ]);
+      } finally {
+        if (before === undefined) await rm(path, { force: true });
+        else await writeFile(path, before);
+        await rm(secret, { force: true });
+      }
+    });
+
+    test("an apiKeyCommand whose key file cannot be named → a warning BEFORE the runtime (R2-1)", async () => {
+      const r = await withConfig({ model: { apiKeyCommand: "echo sk-test | tr -d x" } }, () =>
+        seenWith(base, {}, keyFromConfig),
+      );
+      expect(r.reached).toBe(true);
+      expect(r.text).toContain(
+        "[container] warning: apiKeyCommand: the API key file could not be determined from the command, so it is NOT hidden",
+      );
+    });
+
+    // R2-3 (owner 2026-10-27): only meaningful where the temp dir IS case-insensitive (macOS APFS).
+    const caseInsensitive = (() => {
+      const probe = join(tmpdir(), `tentacle-CaseProbe-${process.pid}`);
+      writeFileSync(probe, "");
+      try {
+        return existsSync(probe.toLowerCase());
+      } finally {
+        rmSync(probe, { force: true });
+      }
+    })();
+
+    test.if(caseInsensitive)(
+      "case-insensitive fs: a user-hidden FILE refuses; --confirm-mount starts and warns",
+      async () => {
+        const proj = join(dir, "case-proj");
+        await mkdir(join(proj, ".tentacle"), { recursive: true });
+        await writeFile(join(proj, "Token"), "s");
+        await writeFile(join(proj, ".tentacle", "hide"), "Token\n");
+        const real = realpathSync(proj);
+        const refused = await seenWith(base, { cwd: proj, ask: async () => "y" });
+        expect(refused.reached).toBe(false);
+        expect(refused.prompts).toEqual([]);
+        expect(refused.text).toContain(
+          `Refusing to mount ${real}: its filesystem is case-insensitive`,
+        );
+        expect(refused.text).toContain(`  ${join(real, "Token")} (.tentacle/hide)`);
+        const confirmed = await seenWith([...base, "--confirm-mount"], { cwd: proj });
+        expect(confirmed.reached).toBe(true);
+        expect(confirmed.text).toContain(
+          `[container] warning: --confirm-mount: these hidden files stay READABLE in the container under another spelling of their name (case-insensitive filesystem): ${join(real, "Token")} (.tentacle/hide)`,
+        );
+      },
+    );
+
+    test.if(caseInsensitive)(
+      "case-insensitive fs: the apiKeyCommand key file inside the cwd refuses — even with --confirm-mount",
+      async () => {
+        const proj = join(dir, "case-key");
+        await mkdir(proj, { recursive: true });
+        await writeFile(join(proj, "Key"), "sk-test");
+        const real = realpathSync(proj);
+        for (const extra of [[], ["--confirm-mount"]]) {
+          const r = await withConfig({ model: { apiKeyCommand: `cat ${join(real, "Key")}` } }, () =>
+            seenWith([...base, ...extra], { cwd: proj }, keyFromConfig),
+          );
+          expect(r.reached).toBe(false);
+          expect(r.text).toContain(`${join(real, "Key")} (the API key file)`);
+          expect(r.text).not.toContain("Or pass --confirm-mount");
+        }
+      },
+    );
   });
 
   test("help and usage document --engine and --keep", async () => {

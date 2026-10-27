@@ -12,6 +12,7 @@
  */
 import type { ChannelError } from "@tentacle/client";
 import type { DuplexChannel } from "@tentacle/transport";
+import type { WorkspaceMount } from "./workspace-mount.ts";
 
 export type EngineKind = "kubernetes" | "docker" | "podman";
 
@@ -45,11 +46,30 @@ export interface EngineExecChannelOptions {
   readonly onStderr?: (text: string) => void;
 }
 
+/** `EngineHost.create`'s options (docs/feat/docker-workspace-mount.md). */
+export interface EngineCreateOptions {
+  /** docker/podman: the laptop folder to mount (k8s: refused — never mounts). */
+  readonly workspace?: WorkspaceMount;
+  /** Extra workload labels (slice E: `ps`); the host's own labels win a clash. */
+  readonly labels?: Readonly<Record<string, string>>;
+}
+
+/**
+ * A startup failure after which the host ALREADY removed the workload — or
+ * tried to, and said so in the message (a workspace probe that failed or
+ * could not run, e.g. a visible mask): the runtime must not keep it or report
+ * it kept, whatever `--keep` says.
+ */
+export class WorkloadRemovedError extends Error {
+  override readonly name = "WorkloadRemovedError";
+}
+
 /** The `attach` preflight's view of an existing workload. */
 export type WorkloadState =
-  | { readonly kind: "ready" }
+  /** `workspace`: the laptop folder a tentacle-made container mounts (its label). */
+  | { readonly kind: "ready"; readonly workspace?: string }
   /** Pulling / restarting: worth a bounded wait. */
-  | { readonly kind: "starting"; readonly detail: string }
+  | { readonly kind: "starting"; readonly detail: string; readonly workspace?: string }
   /** Terminal / not runnable: refuse with `detail` (attach never starts it). */
   | { readonly kind: "stopped"; readonly detail: string };
 
@@ -62,7 +82,7 @@ export interface EngineHost {
   /** The container `run` targets inside its workload (k8s: the agent container; docker: none). */
   readonly defaultContainer?: string;
   /** Create the workload (errors already translated into actionable ones). */
-  create(name: string, image: string): Promise<void>;
+  create(name: string, image: string, options?: EngineCreateOptions): Promise<void>;
   /** Wait until the workload can host an exec (docker: start it first). */
   waitForReady(name: string, options?: { readonly timeoutMs?: number }): Promise<void>;
   /** The `attach` preflight (a missing workload throws an actionable error). */

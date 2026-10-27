@@ -32,12 +32,13 @@ import {
   parseVersionLine,
   replaceFailedWarning,
 } from "./container-version.ts";
-import type {
-  EngineExecChannelOptions,
-  EngineExecTarget,
-  EngineHost,
-  EngineRunExecResult,
-  WorkloadState,
+import {
+  type EngineExecChannelOptions,
+  type EngineExecTarget,
+  type EngineHost,
+  type EngineRunExecResult,
+  WorkloadRemovedError,
+  type WorkloadState,
 } from "./engine-host.ts";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { configuredModelProvider } from "./model-provider.ts";
@@ -45,8 +46,10 @@ import { PodBinaryError, checkPodBinaries, resolvePodBinary } from "./pod-binary
 import { injectAgentBinary, probePod } from "./pod-binary.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
+import { untrustedText } from "./untrusted-text.ts";
 import { readBinaryVersion } from "./version-marker.ts";
 import { APP_VERSION } from "./version.ts";
+import { type WorkspaceMount, attachCwdWarning, hiddenSummary } from "./workspace-mount.ts";
 
 /**
  * The pod daemon's command line (`run` and `attach`). `--auto-title` carries
@@ -149,6 +152,13 @@ export interface EngineRuntimeDeps {
    * logged. Returns the re-attach command for `name`.
    */
   readonly keepHint?: (name: string) => string;
+  /**
+   * docker/podman: the laptop folder to mount (slice D, planned and confirmed
+   * by the caller BEFORE this runtime starts — `workspace-mount.ts`).
+   */
+  readonly workspace?: WorkspaceMount;
+  /** Extra workload labels (slice E). */
+  readonly labels?: Readonly<Record<string, string>>;
   readonly permissions: PermissionBroker;
   readonly saver: SessionSaver;
   readonly resume: SessionRecord | null;
@@ -235,10 +245,18 @@ export async function startEngineRuntime(
   // needs deleting. Both arches: the pod's is unknown until it exists.
   await checkPodBinaries({ configDir: config.configDir, appVersion: deps.appVersion });
 
-  phase(`[${host.noun}] creating ${name} (image ${deps.image}) in ${host.where}…`);
+  const { workspace } = deps;
+  const hidden = workspace ? hiddenSummary(workspace) : undefined;
+  const mounted = workspace
+    ? ` — workspace ${workspace.target} (rw)${hidden ? `. ${hidden}` : ""}`
+    : "";
+  phase(`[${host.noun}] creating ${name} (image ${deps.image}) in ${host.where}${mounted}…`);
   try {
     // Errors arrive translated (e.g. a missing k8s namespace → actionable).
-    await host.create(name, deps.image);
+    await host.create(name, deps.image, {
+      ...(workspace ? { workspace } : {}),
+      ...(deps.labels ? { labels: deps.labels } : {}),
+    });
   } catch (error) {
     status?.finish();
     throw error;
@@ -247,9 +265,12 @@ export async function startEngineRuntime(
   // `run --keep`: tentacle never removes this workload (owner, 2026-10-27).
   const { keepHint } = deps;
   const keptLine = keepHint
-    ? `[${host.noun}] kept ${name} — resume with: ${keepHint(name)}\n`
+    ? `[${host.noun}] kept ${name} — resume with: ${keepHint(name)}${workspace ? `  # workspace ${workspace.target}` : ""}\n`
     : undefined;
-  const removeUnlessKept = (): void => {
+  const removeUnlessKept = (error?: unknown): void => {
+    if (error instanceof WorkloadRemovedError) {
+      return; // the host already removed it (a failed workspace probe): never "kept".
+    }
     if (keptLine) {
       deps.log(keptLine);
     } else {
@@ -344,7 +365,7 @@ export async function startEngineRuntime(
     // The TUI never mounted on this path, so flushing any daemon stderr (e.g. a
     // `serve` that failed to start) to stdout is safe and aids diagnosis.
     stderr.flush();
-    removeUnlessKept();
+    removeUnlessKept(error);
     throw error;
   }
 }
@@ -417,6 +438,20 @@ export async function attachEngineRuntime(
   if (state.kind === "stopped") {
     status?.finish();
     throw new Error(state.detail);
+  }
+  // M7 (owner 2026-10-27): the container's mount is fixed — attaching from
+  // another folder is warned about, never refused.
+  // The label is container metadata anyone can forge (`tentacle.managed` too):
+  // sanitised before it reaches the terminal (Review F3).
+  const moved = attachCwdWarning(
+    state.workspace === undefined ? undefined : untrustedText(state.workspace),
+    config.cwd,
+  );
+  if (moved) {
+    deps.notify?.(moved);
+    if (!status) {
+      deps.log(`[${host.noun}] ${moved}\n`);
+    }
   }
 
   // The workload may still be pulling (the user ran it seconds ago): a BOUNDED

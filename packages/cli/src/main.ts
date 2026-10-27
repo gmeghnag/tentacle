@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 /**
  * CLI entry point (F1).
  *
@@ -40,6 +41,7 @@ import {
   chooseEngine,
   engineFlagProblem,
   engineNoun,
+  laptopWorkspaceInput,
   resolveKeep,
   setupFailureLine,
 } from "./engine-select.ts";
@@ -68,6 +70,14 @@ import { untrustedText } from "./untrusted-text.ts";
 import { runUpdate, spawnVersion } from "./update.ts";
 import { APP_VERSION } from "./version.ts";
 import { buildAgent, connectConfiguredMcp, inProcessAgents, loadUserAgentTypes } from "./wiring.ts";
+import {
+  type WorkspacePlan,
+  apiKeyFileUnknown,
+  hideList,
+  isYes,
+  mountGate,
+  planWorkspace,
+} from "./workspace-mount.ts";
 
 const HELP = `tentacle — run an agent task
 
@@ -78,7 +88,7 @@ Usage:
   tentacle --resume [uid]  resume a saved session of this folder (pick one if no uid)
   tentacle --continue      resume this folder's most recent session
   tentacle -i --in-process run the agent on the render thread (opt out of the worker)
-  tentacle run --image <ref> [--engine kubernetes|docker|podman] [--keep[=true|false]] [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]
+  tentacle run --image <ref> [--engine kubernetes|docker|podman] [--keep[=true|false]] [--no-mount] [--confirm-mount] [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]
                                 run the agent inside a new Kubernetes pod or Docker/Podman
                                 container (sandbox), local TUI (<name> is its name; random
                                 when omitted; sessions persist on the laptop, so --resume
@@ -170,8 +180,18 @@ Engines (tentacle run / attach --engine kubernetes|docker|podman):
                           Ctrl+C; tentacle prints the "tentacle attach --engine …" to
                           resume. --keep=false deletes it. Config: "keep:" (user config
                           or profile); flag > profile > user config > true
-  -n/--namespace and -c/--container are kubernetes-only; --context and
-  --insecure-docker-tcp are docker/podman-only (anything else is an error).
+  Workspace (docker/podman run): a local engine bind-mounts the cwd read-write
+  at the same path (the agent works in it); secrets inside it are hidden
+  (config "mount.hide"/"mount.hideExtra"; tentacle's config dir and the
+  apiKeyCommand key file always). /, /usr, /usr/local[/bin], ~/.ssh and the
+  config dir are never mounted. A remote engine mounts nothing (a warning says so).
+  --no-mount              do not mount the cwd (the workspace is the image's)
+  --confirm-mount         mount a dangerous folder (your home, a system dir, a
+                          hidden one) without the y/N question (required with
+                          no terminal)
+  -n/--namespace and -c/--container are kubernetes-only; --context,
+  --insecure-docker-tcp, --no-mount and --confirm-mount are docker/podman-only
+  (anything else is an error).
 
 Pod execution (tentacle run --image <ref> [-n|--namespace <ns>] [<name>]):
   the image must be a Linux glibc image with sh+head (tentacle is injected
@@ -206,6 +226,35 @@ export interface CliIO {
   writeErr?: (text: string) => void;
   /** Test seam: replaces the `run` engine runtime (pins the flag/config → `keepHint` wiring). */
   startEngineRuntime?: typeof startEngineRuntime;
+  /**
+   * Test seam: the pre-Ink y/N question (a dangerous mount source); present =
+   * interactive. Default: a readline prompt, on a terminal only.
+   */
+  ask?: (prompt: string) => Promise<string>;
+}
+
+/**
+ * One line from the terminal, BEFORE Ink mounts (the mount confirmation).
+ * Ctrl+C or EOF answers "" — the default No.
+ */
+function askLine(prompt: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    let done = false;
+    const finish = (answer: string): void => {
+      if (!done) {
+        done = true;
+        rl.close();
+        resolve(answer);
+      }
+    };
+    rl.on("SIGINT", () => {
+      process.stdout.write("\n");
+      finish("");
+    });
+    rl.on("close", () => finish(""));
+    rl.question(prompt, finish);
+  });
 }
 
 export async function main(argv: readonly string[], io: CliIO = {}): Promise<number> {
@@ -499,6 +548,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           container: flags.has("container"),
           context: flags.has("context"),
           insecureTcp: bools.has("insecure-docker-tcp"),
+          noMount: bools.has("no-mount"),
+          confirmMount: bools.has("confirm-mount"),
         })
       : choice.error;
     if (!choice.ok || problem) {
@@ -622,6 +673,55 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       write(`[${noun}] ${kept.error}\n`);
       return 1;
     }
+    // docker/podman (slice D, docs/feat/docker-workspace-mount.md): plan the cwd
+    // mount and gate a dangerous source HERE — before anything is created and
+    // before Ink owns the terminal (the y/N prompt is a plain line).
+    const wsPlan: WorkspacePlan =
+      engine === "kubernetes"
+        ? { kind: "none" } // a pod never mounts a laptop folder
+        : planWorkspace(
+            laptopWorkspaceInput({
+              kind: engine,
+              endpoint: built.endpoint,
+              noMount: runBools.has("no-mount"),
+              cwd: config.cwd,
+              configDir: config.configDir,
+              binDir: binDir ?? "/usr/local/bin",
+              hide: hideList(config.mount, config.apiKeyCommand),
+              keyFileUnknown: apiKeyFileUnknown(config.apiKeyCommand),
+            }),
+          );
+    if (wsPlan.kind === "refuse") {
+      write(`[${noun}] failed: ${wsPlan.message}\n`);
+      return 1;
+    }
+    if (wsPlan.kind === "none" && wsPlan.warning) {
+      write(`[${noun}] warning: ${wsPlan.warning}\n`);
+    }
+    if (wsPlan.kind === "mount") {
+      for (const warning of wsPlan.warnings ?? []) {
+        // Pattern text comes from a project file: sanitised like any untrusted text.
+        write(`[${noun}] warning: ${untrustedText(warning)}\n`);
+      }
+    }
+    const ask = io.ask ?? (process.stdin.isTTY && process.stdout.isTTY ? askLine : undefined);
+    const gate = mountGate(wsPlan, {
+      interactive: ask !== undefined,
+      confirmed: runBools.has("confirm-mount"),
+    });
+    if (gate.action === "refuse") {
+      write(`[${noun}] ${gate.message}\n`);
+      return 1;
+    }
+    if (gate.action === "ask" && !(ask && isYes(await ask(gate.prompt)))) {
+      write(`[${noun}] not confirmed — nothing was created\n`);
+      return 1;
+    }
+    if (gate.action === "proceed") {
+      for (const warning of gate.warnings ?? []) {
+        write(`[${noun}] warning: ${warning}\n`);
+      }
+    }
     // ONE broker shared by the engine runtime and the TUI (see `runEngineTui`).
     const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
     let runtime: Awaited<ReturnType<typeof startEngineRuntime>>;
@@ -631,6 +731,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         image,
         ...(binDir ? { binDir } : {}),
         ...(name ? { name } : {}),
+        ...(wsPlan.kind === "mount" ? { workspace: wsPlan.mount } : {}),
         ...(kept.keep
           ? {
               keepHint: (name: string) =>
