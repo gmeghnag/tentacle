@@ -8,6 +8,85 @@ those.
 
 ## [Unreleased]
 
+This release adds Docker and Podman as places to run, and moves the protocol
+from 10 to 13. **Upgrade the CLI and every daemon or pod together:** a CLI and
+an older pod or daemon refuse each other at connect with a version error.
+`tentacle update` fetches the matching pod binaries.
+
+### Added
+
+- **Docker and Podman engines.** `tentacle run` and `attach` take
+  `--engine kubernetes|docker|podman`; `engine:` in the config sets the
+  default (Kubernetes if unset). Podman's socket is found automatically.
+- **Remote Docker over `ssh://`.** `DOCKER_HOST=ssh://user@host` works with no
+  local `docker` binary.
+- **Workspace mount.** With a local Docker or Podman engine, `run` mounts your
+  current folder read-write at the same path; `--no-mount` opts out. A remote
+  engine never gets the mount.
+- **Hidden secrets in the mount.** `~/.ssh`, tentacle's config and common
+  credential files are masked inside the container. Add your own paths in
+  `.tentacle/hide`, or set `mount.hide` / `mount.hideExtra` in the config.
+- **Risky mounts ask first.** Mounting your home folder or a hidden path asks
+  for confirmation (`--confirm-mount` without a terminal); `/`, `/usr`,
+  `/usr/local`, `~/.ssh` and tentacle's config are refused. On a
+  case-insensitive disk (macOS) a hidden *file* inside the mount refuses the
+  run: hide its folder instead.
+- **`tentacle ps` and `tentacle rm <name>`.** List the pods and containers you
+  kept, and remove one. `attach <name>` finds the engine and location itself.
+- **`--keep`.** Choose whether `run` keeps its pod or container (`keep:` in the
+  config); a kept one prints its re-attach command.
+- **Context.** The model sees how full its context is, and can renew it with
+  the `context_reset` tool (asks for approval like other tools). A reset
+  re-reads `AGENTS.md` and the skills from disk.
+- **Skills hot-reload.** A skill you add or edit is picked up without a
+  restart.
+- **Send now.** `Ctrl+X Ctrl+S` cancels the running turn (or a `/compact`) and
+  sends your queued messages at once.
+- **Sessions on `connect`.** A `/sessions` panel to list, switch, resume and
+  delete a daemon's sessions; `--resume` works on `connect`.
+- **Archived sessions.** A session that ends is archived, not lost; reopen it
+  explicitly, or delete it for good.
+- **Session titles.** Automatic titles (model-written ones are opt-in) and
+  `/rename`.
+- **Daemon sessions.** `serve --session-ttl never`, and the TTL of a running
+  daemon can be changed.
+- **Several clients on one session.** Queued messages show on every attached
+  client, and each client renders turns started by another.
+- **Syntax colours** in file reads, chosen by file extension.
+- **Version mismatch notice** says which side is older and what to do.
+- **Sub-agents.** Their progress is shown over the wire, and a permission
+  prompt says which call it is for.
+
+### Changed
+
+- **`--keep` defaults to true.** `run` keeps its pod or container; use
+  `--keep=false` (or `keep: false`) for the old create-and-delete behaviour.
+- **Breaking: protocol 13.** Clients and daemons from 0.1.0 (protocol 10) must
+  be upgraded together with the CLI.
+- **License:** Apache-2.0 (was MIT).
+- Sent messages sit on a full-width background; queued ones look sent, in
+  grey, above the thinking line.
+- A large tool result shows a short note instead of the model's banner.
+
+### Fixed
+
+- **`tentacle ps`:** no footer, a 3-space column gap, and `--keep true|false`
+  is accepted with a space.
+- A model rate limit (HTTP 429 or 529) is retried, honouring `retry-after`.
+- Two edits to one file at the same time no longer lose an update.
+- Images on musl, loader-less or unsupported-architecture bases are detected
+  before the transfer, with a clear error.
+- Tool rows show the real duration, never a fake `0.0s`.
+- Ctrl+O expand is instant on long sessions; a tab no longer breaks diff bars;
+  the input cursor follows soft-wrapped text.
+- A single version marker in the compiled binary.
+- A warning when a sub-agent's `model` or `contextWindow` is ignored.
+
+### Security
+
+- The pod stays untrusted: the laptop decides what is mounted, and model keys
+  and credentials never enter the container.
+
 ## [0.1.0] - 2026-10-22
 
 The first public release, 0.1.0. Everything below is new compared with no
