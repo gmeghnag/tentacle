@@ -31,7 +31,7 @@ export interface TuiOptions {
   readonly link?: LinkFeed;
   /** The daemon's MCP servers, probed live (`/mcp`). */
   readonly mcpStatus?: () => Promise<readonly McpServerView[]>;
-  /** The daemon runs in a pod (`runPodTui` only): spilled output is "saved in the pod". */
+  /** The daemon runs in a pod (`runEngineTui` only): spilled output is "saved in the pod". */
   readonly daemonInPod?: boolean;
   /** Quitting only detaches (`connect`): `/exit` leaves at once, even mid-turn. */
   readonly detachOnQuit?: boolean;

@@ -89,6 +89,14 @@ export interface ResolvedConfig {
   readonly tabulateJson: boolean;
   /** Whether a background-job exit auto-starts a continuation turn while idle. */
   readonly autoWake: boolean;
+  /**
+   * The configured default engine of `run`/`attach` (file or profile); absent
+   * when unset. Its env form (`TENTACLE_ENGINE`) and the flag are layered by
+   * the CLI, which refuses an unknown value instead of falling through.
+   */
+  readonly engine?: "kubernetes" | "docker" | "podman";
+  /** The configured `run` keep-on-exit default (file or profile); absent = the CLI default (true). */
+  readonly keep?: boolean;
   /** User hooks (file-only, no env form); empty when unset. */
   readonly hooks: readonly HookSpecConfig[];
   /** MCP servers to connect to (from the config file), keyed by name. */
@@ -395,6 +403,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     dedupOutput: dedupOutput.value,
     tabulateJson: tabulateJson.value,
     autoWake: autoWake.value,
+    ...(fileConfig.engine !== undefined ? { engine: fileConfig.engine } : {}),
+    ...(fileConfig.keep !== undefined ? { keep: fileConfig.keep } : {}),
     hooks: fileConfig.hooks ?? [],
     // MCP servers are file-only (no env form); empty when unset.
     mcpServers: fileConfig.mcpServers ?? {},

@@ -1,13 +1,15 @@
 /**
- * The pod-execution runtime (F4.c, the `run` command): run the agent daemon
- * inside a Kubernetes pod, driven from the local TUI, reusing the SAME
- * `RemoteClient` ↔ `Connection` stack as the worker and remote-control paths.
- * The only new parts are the transport (the exec WebSocket, F4.b) and the pod
- * lifecycle here:
+ * The engine runtime (F4.c, the `run` / `attach` commands): run the agent
+ * daemon inside a workload — a Kubernetes pod or a Docker/Podman container,
+ * behind one `EngineHost` (`engine-host.ts`) — driven from the local TUI,
+ * reusing the SAME `RemoteClient` ↔ `Connection` stack as the worker and
+ * remote-control paths. The only engine-specific parts are the host's transport
+ * and lifecycle:
  *
- *   createPod → waitForReady → injectAgentBinary (F4.e: probe arch, stream the
+ *   create → waitForReady → injectAgentBinary (F4.e: probe arch, stream the
  *   binary, verify with --version) → openExec(`tentacle serve --stdio`) →
- *   createLocalRuntime(handshake + persisting sessions) → …use… → deletePod.
+ *   createLocalRuntime(handshake + persisting sessions) → …use… → remove
+ *   (unless `run --keep`).
  *
  * The injection (F4.e) means the image no longer needs to contain the tool —
  * any Linux **glibc** image with `sh` + `head` works; see `pod-binary.ts`.
@@ -37,7 +39,6 @@ import type {
   EngineRunExecResult,
   WorkloadState,
 } from "./engine-host.ts";
-import { type PodCluster, kubeEngineHost } from "./engine-k8s.ts";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { configuredModelProvider } from "./model-provider.ts";
 import { PodBinaryError, checkPodBinaries, resolvePodBinary } from "./pod-binary-build.ts";
@@ -46,9 +47,6 @@ import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
 import { readBinaryVersion } from "./version-marker.ts";
 import { APP_VERSION } from "./version.ts";
-
-// The k8s host's pieces stay importable from here (the runtime's historical home).
-export { type PodCluster, podDialError } from "./engine-k8s.ts";
 
 /**
  * The pod daemon's command line (`run` and `attach`). `--auto-title` carries
@@ -133,17 +131,24 @@ export function createStderrSink(prefix: string, log: (line: string) => void): P
   };
 }
 
-export interface PodRuntimeDeps {
-  readonly kube: PodCluster;
-  readonly namespace: string;
+/** `startEngineRuntime`'s deps (`run`). */
+export interface EngineRuntimeDeps {
+  readonly host: EngineHost;
   readonly image: string;
   /**
    * Install dir for the injected binary in the pod. Default `/usr/local/bin`;
    * override (`--bin-dir`) for a read-only rootfs, e.g. `/tmp` on a hardened pod.
    */
   readonly binDir?: string;
-  /** Pod name (optional; a random one is generated when omitted). */
+  /** Workload name (optional; a random one is generated when omitted). */
   readonly name?: string;
+  /**
+   * `run --keep` (owner, 2026-10-27): present → the workload is NEVER removed
+   * by this runtime (no exit net, no remove on dispose or on a startup
+   * failure), and `[<noun>] kept <name> — resume with: <keepHint(name)>` is
+   * logged. Returns the re-attach command for `name`.
+   */
+  readonly keepHint?: (name: string) => string;
   readonly permissions: PermissionBroker;
   readonly saver: SessionSaver;
   readonly resume: SessionRecord | null;
@@ -192,31 +197,12 @@ function registerExitCleanup(host: EngineHost, name: string): void {
   });
 }
 
-/** `startEngineRuntime`'s deps: `run`'s, with the engine as a host. */
-export interface EngineRuntimeDeps extends Omit<PodRuntimeDeps, "kube" | "namespace"> {
-  readonly host: EngineHost;
-}
-
-/**
- * Create an ephemeral pod, connect the daemon over its exec channel, and build a
- * persisting local runtime against it. The returned runtime's `dispose` closes
- * the exec channel and deletes the pod. Throws (after cleaning up any created
- * pod) on failure — there is no in-process fallback.
- */
-export async function startPodRuntime(
-  config: TentacleConfig,
-  deps: PodRuntimeDeps,
-): Promise<LocalRuntime> {
-  const { kube, namespace, ...rest } = deps;
-  return startEngineRuntime(config, { ...rest, host: kubeEngineHost(kube, namespace) });
-}
-
 /**
  * `run` on any engine: create an ephemeral workload (pod / container), connect
  * the daemon over its exec channel, and build a persisting local runtime
  * against it. The returned runtime's `dispose` closes the exec channel and
- * removes the workload. Throws (after cleaning up any created workload) on
- * failure — there is no in-process fallback.
+ * removes the workload (kept with `keepHint`). Throws (after cleaning up any
+ * created workload, unless kept) on failure — there is no in-process fallback.
  */
 export async function startEngineRuntime(
   config: TentacleConfig,
@@ -258,11 +244,26 @@ export async function startEngineRuntime(
     throw error;
   }
 
+  // `run --keep`: tentacle never removes this workload (owner, 2026-10-27).
+  const { keepHint } = deps;
+  const keptLine = keepHint
+    ? `[${host.noun}] kept ${name} — resume with: ${keepHint(name)}\n`
+    : undefined;
+  const removeUnlessKept = (): void => {
+    if (keptLine) {
+      deps.log(keptLine);
+    } else {
+      void host.remove(name).catch(() => {});
+    }
+  };
+
   // Safety net: if the process exits before `dispose()` (Ctrl+C → process.exit
   // in the terminal code, a crash, or a kill), the workload is still deleted by
   // a detached child. Registered right after it exists, so it covers
-  // pre-ready failures too.
-  registerExitCleanup(host, name);
+  // pre-ready failures too. Not armed with `--keep`: Ctrl+C keeps it too.
+  if (!keptLine) {
+    registerExitCleanup(host, name);
+  }
 
   try {
     phase(`[${host.noun}] waiting for ${name} to become ready…`);
@@ -297,6 +298,11 @@ export async function startEngineRuntime(
     if (!status) {
       deps.log(`[${host.noun}] ${version} ready in ${name}; starting the agent daemon\n`);
     }
+    // Kept: say so BEFORE the TUI mounts too — this line stays on the main
+    // screen, so a Ctrl+C exit (no `dispose`) still shows how to resume.
+    if (keptLine) {
+      deps.log(keptLine);
+    }
     const target: EngineExecTarget = {
       name,
       container,
@@ -318,7 +324,7 @@ export async function startEngineRuntime(
         // Safe here: `dispose()` runs after the TUI has unmounted (left the
         // alt-screen), so the buffered daemon stderr can go to stdout.
         stderr.flush();
-        void host.remove(name).catch(() => {});
+        removeUnlessKept();
       },
       permissions: deps.permissions,
       saver: deps.saver,
@@ -332,21 +338,22 @@ export async function startEngineRuntime(
       ...(deps.notify ? { notify: deps.notify } : {}),
     });
   } catch (error) {
-    // The workload was created but never became usable — delete it before surfacing.
+    // The workload was created but never became usable — delete it before
+    // surfacing (kept with `--keep`: left to inspect).
     status?.finish();
     // The TUI never mounted on this path, so flushing any daemon stderr (e.g. a
     // `serve` that failed to start) to stdout is safe and aids diagnosis.
     stderr.flush();
-    void host.remove(name).catch(() => {});
+    removeUnlessKept();
     throw error;
   }
 }
 
-export interface PodAttachRuntimeDeps {
-  readonly kube: PodCluster;
-  readonly namespace: string;
-  /** The EXISTING pod's name (no create, no delete — see `startAttachRuntime`). */
-  readonly podName: string;
+/** `attachEngineRuntime`'s deps (`attach`). */
+export interface EngineAttachRuntimeDeps {
+  readonly host: EngineHost;
+  /** The EXISTING workload's name (no create, no delete — see `attachEngineRuntime`). */
+  readonly name: string;
   /** Container to exec into; undefined → the API picks the only/default one. */
   readonly container?: string;
   /** Install dir for the injected binary (default `/usr/local/bin`; `--bin-dir` for a read-only rootfs). */
@@ -362,41 +369,23 @@ export interface PodAttachRuntimeDeps {
 }
 
 /**
- * Attach to an EXISTING pod (the `exec` command): inject the agent binary if
- * the pod does not already have it, open the daemon exec, and build the same
- * persisting local runtime as `startPodRuntime` — with one deliberate
- * difference: the pod is USER-OWNED, so this runtime neither creates nor
- * deletes it. `dispose` closes the exec channel (the pod-side daemon dies with
- * it); the pod stays `Running` for reuse (re-attach is a sub-second
- * version-probe) and for cleanup by the owner (`kubectl delete pod`).
+ * `attach` on any engine: attach to an EXISTING workload — inject the agent
+ * binary if it does not already have it, open the daemon exec, and build the
+ * same persisting local runtime as `startEngineRuntime` — with one deliberate
+ * difference: the workload is USER-OWNED, so this runtime never creates,
+ * starts, removes, or arms an exit net for it. `dispose` closes the exec
+ * channel (the daemon dies with it); the workload stays running for reuse
+ * (re-attach is a sub-second version-probe) and for cleanup by its owner.
  *
- * No `registerExitCleanup` safety net either: the whole point is that a TUI
- * exit (Ctrl+C → process.exit) must NOT delete the pod.
- */
-export async function startAttachRuntime(
-  config: TentacleConfig,
-  deps: PodAttachRuntimeDeps,
-): Promise<LocalRuntime> {
-  const { kube, namespace, ...rest } = deps;
-  return attachEngineRuntime(config, { ...rest, host: kubeEngineHost(kube, namespace) });
-}
-
-/** `attachEngineRuntime`'s deps: `attach`'s, with the engine as a host. */
-export interface EngineAttachRuntimeDeps extends Omit<PodAttachRuntimeDeps, "kube" | "namespace"> {
-  readonly host: EngineHost;
-}
-
-/**
- * `attach` on any engine: the EXISTING workload is user-owned, so this runtime
- * never creates, starts, removes, or arms an exit net for it (see
- * `startAttachRuntime`). It only reads its state, injects if needed, and execs.
+ * No `registerExitCleanup` safety net: the whole point is that a TUI exit
+ * (Ctrl+C → process.exit) must NOT delete it.
  */
 export async function attachEngineRuntime(
   config: TentacleConfig,
   deps: EngineAttachRuntimeDeps,
 ): Promise<LocalRuntime> {
   const { host } = deps;
-  const name = deps.podName;
+  const { name } = deps;
   // Buffer the pod daemon's stderr so it never corrupts the Ink TUI; flushed
   // once on teardown / startup failure. See `createStderrSink`.
   const stderr = createStderrSink(`[${host.noun} ${name}]`, deps.log);

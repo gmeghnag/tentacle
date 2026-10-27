@@ -9,6 +9,15 @@ as-built in `docs/feat/pod-exec-attach.md`. It builds on F3
 unchanged** — F4 is a new *transport + lifecycle + reverse-tunnel*, not new
 protocol design above the wire vocabulary.
 
+> **Engines (2026-10-27).** `run`/`attach` now also target a Docker or Podman
+> container through the SAME runtime (`packages/cli/src/engine-runtime.ts`,
+> formerly `pod-runtime.ts`) behind one `EngineHost` seam
+> (`docs/feat/docker-engine-seam.md`): only the transport (Engine API exec
+> over a hand-written HTTP/1.1 upgrade, `packages/docker`) and the lifecycle
+> differ. Selection (`--engine kubernetes|docker|podman`, config `engine:`,
+> `TENTACLE_ENGINE`), podman socket discovery and `run --keep[=bool]` (default true):
+> `docs/feat/docker-engine-cli.md`. Everything below is the Kubernetes engine.
+
 ---
 
 ## 1. Goal & scope

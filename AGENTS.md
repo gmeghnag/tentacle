@@ -100,6 +100,11 @@ style suggestions.
     and the real-socket keepalive test (`TENTACLE_SLOW_TESTS=1`, ~12 s); those skips are NOT failures. The total grows with every
     task, so no exact count is pinned here — it only goes stale; run it, and any
     *new* fail (or a non-opt-in skip) is yours.
+  - **Test env guard:** `bunfig.toml` preloads `scripts/test-preload.ts`
+    (`scripts/test-env-guard.ts`), which strips `TENTACLE_*`, points
+    `KUBECONFIG`/`DOCKER_HOST`/`CONTAINER_HOST` at nonexistent paths and `HOME` at a
+    temp dir, so no test reaches real infra; opt-ins `TENTACLE_K8S_SERVER`,
+    `TENTACLE_DOCKER_TESTS=1`, `TENTACLE_SLOW_TESTS=1` are kept when set explicitly.
   - `bun run typecheck` — `tsc --noEmit && tsc -p apps/mobile`.
   - `bun run lint` — `biome check .` (checks TS/JS/JSON; not Markdown).
   - `bun run check` — typecheck **then** lint **then** test, in order (a
@@ -161,7 +166,7 @@ assume.
 - **Single-broker invariant.** Exactly ONE `PermissionBroker` instance is shared
   between the runtime (`RemoteClient`) and `startTui`. Two instances **silently**
   decouple: the daemon-side default `allowAll` auto-approves everything and the
-  interactive prompt is never reached. See the invariant comment on `runPodTui`
+  interactive prompt is never reached. See the invariant comment on `runEngineTui`
   (`cli/main.ts`) and its regression test (a *separate* daemon-side broker spy).
 - **Persistence lives on the laptop/main thread — and, where the daemon is
   trusted (`serve` on the user's own host), the daemon also persists.** The
@@ -254,11 +259,16 @@ assume.
   (`createStderrSink`) and flushed only after unmount or on the pre-mount failure
   path; MCP server stderr is piped+routed, never `inherit`. A stray
   `process.stdout.write` mid-session corrupts the render.
-- **Pod lifecycle.** `run` creates AND deletes its pod; the delete-on-exit net
-  (`deletePodBestEffort`) survives `process.exit`/Ctrl+C via a detached child
-  (`exit` handlers still fire; SIGINT routes through it). `attach` is user-owned:
-  never create or delete, no exit net. Pass secrets to the child via **env, never
-  argv** (argv is visible in `ps`).
+- **Pod/container lifecycle** (every engine: `EngineHost`). `run` creates AND
+  KEEPS its pod/container by default (`--keep`, `keep:` config; `--keep=false` =
+  create+delete); when deleting, the delete-on-exit net (`removeBestEffort`) survives
+  `process.exit`/Ctrl+C via a detached child (`exit` handlers still fire; SIGINT
+  routes through it). With keep (the default): no net, no delete, and the
+  re-attach command is printed. `attach` is
+  user-owned: never create, start or delete, no exit net. Pass secrets to the
+  child via **env, never argv** (argv is visible in `ps`). The child's hidden
+  subcommand is ONE shared constant (`DELETE_POD_SUBCOMMAND` /
+  `DELETE_CONTAINER_SUBCOMMAND`), pinned by a `main` dispatch test.
 - **Bun TLS + k8s specifics.** Bun honours per-call `tls:{ca,cert,key}` on
   `fetch` AND `WebSocket` (and `NODE_EXTRA_CA_CERTS`) — that's how cluster auth
   works with no `kubectl`. Use the `v4.channel.k8s.io` exec subprotocol; stdin

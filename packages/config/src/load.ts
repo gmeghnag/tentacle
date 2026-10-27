@@ -83,6 +83,10 @@ export interface TentacleConfig {
   readonly dedupOutput: boolean;
   readonly tabulateJson: boolean;
   readonly autoWake: boolean;
+  /** The configured default engine of `run`/`attach` (file/profile); absent = unset. */
+  readonly engine?: ResolvedConfig["engine"];
+  /** The configured `run --keep` default (file/profile); absent = the CLI default (true). */
+  readonly keep?: ResolvedConfig["keep"];
   /** The user's hooks, then the enabled packages' (tagged with `source`). */
   readonly hooks: readonly (ResolvedConfig["hooks"][number] | PackageHook)[];
   /** The user's servers plus the packages' (`<pkg>-<server>`; the user's win a clash). */
@@ -529,6 +533,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     dedupOutput: resolved.dedupOutput,
     tabulateJson: resolved.tabulateJson,
     autoWake: resolved.autoWake,
+    ...(resolved.engine !== undefined ? { engine: resolved.engine } : {}),
+    ...(resolved.keep !== undefined ? { keep: resolved.keep } : {}),
     hooks: contributed.hooks,
     mcpServers: contributed.mcpServers,
     packages: scanned.packages,

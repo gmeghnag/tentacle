@@ -1788,7 +1788,7 @@ describe("a spilled tool result in the App (the --resume path)", () => {
     unmount();
   });
 
-  test("with the daemon in a pod (runPodTui): ctrl+o says `saved in the pod to <path>`", async () => {
+  test("with the daemon in a pod (runEngineTui): ctrl+o says `saved in the pod to <path>`", async () => {
     // Mutation (red, verified): drop `spillInPod` from the App's render options → fails.
     const { stdin, lastFrame, unmount } = mount(true);
     await delay(30);

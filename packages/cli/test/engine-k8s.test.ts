@@ -17,13 +17,13 @@ import {
 import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 import type { TentacleConfig } from "../src/config.ts";
 import { type PodCluster, kubeEngineHost } from "../src/engine-k8s.ts";
-import { startAttachRuntime, startPodRuntime } from "../src/pod-runtime.ts";
+import { attachEngineRuntime, startEngineRuntime } from "../src/engine-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 
 /**
  * Pins the k8s host (docs/feat/docker-engine-seam.md B.1): the byte-exact log
  * lines and messages the pre-seam runtime printed, and the adapter's mapping
- * onto `PodCluster`. `pod-runtime.test.ts` (unchanged) is the behavioural
+ * onto `PodCluster`. `engine-runtime.test.ts` is the behavioural
  * oracle; these cover what it does not assert (the phase log lines).
  */
 class StubCluster implements PodCluster {
@@ -103,9 +103,8 @@ describe("k8s host: byte-identical messages", () => {
     kube.createError = new KubeApiError(404, '{"message":"namespaces \\"dev\\" not found"}');
     const logs: string[] = [];
     await expect(
-      startPodRuntime(config, {
-        kube,
-        namespace: "dev",
+      startEngineRuntime(config, {
+        host: kubeEngineHost(kube, "dev"),
         image: "img:1",
         name: "p1",
         ...commonDeps((l) => logs.push(l)),
@@ -121,10 +120,9 @@ describe("k8s host: byte-identical messages", () => {
     kube.pod = { metadata: { name: "p" }, status: { phase: "Failed" } };
     const logs: string[] = [];
     await expect(
-      startAttachRuntime(config, {
-        kube,
-        namespace: "dev",
-        podName: "p",
+      attachEngineRuntime(config, {
+        host: kubeEngineHost(kube, "dev"),
+        name: "p",
         ...commonDeps((l) => logs.push(l)),
       }),
     ).rejects.toThrow(/^pod "p" is Failed; cannot attach to a terminated pod$/);
@@ -140,10 +138,9 @@ describe("k8s host: byte-identical messages", () => {
     // The wait resolves; the first exec then fails → the runtime surfaces it.
     kube.runExec = () => Promise.reject(new Error("boom"));
     await expect(
-      startAttachRuntime(config, {
-        kube,
-        namespace: "dev",
-        podName: "p",
+      attachEngineRuntime(config, {
+        host: kubeEngineHost(kube, "dev"),
+        name: "p",
         ...commonDeps((l) => logs.push(l)),
       }),
     ).rejects.toThrow(/^boom$/);

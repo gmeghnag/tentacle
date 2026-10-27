@@ -67,7 +67,7 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       queued writes settle" timed out at 5 s once in 12 full runs (2026-10-20).
       Unknown whether test-only or a real `drain()` defect — investigate before
       assuming the former (session persistence path).
-- [ ] 🔵 **Test residue:** a `HostedSession` from `cli/test/pod-runtime.test.ts`
+- [ ] 🔵 **Test residue:** a `HostedSession` from `cli/test/engine-runtime.test.ts` (was `pod-runtime.test.ts`)
       stays reachable from a root closure through its `SpyFakeCluster` fake after
       the file ends (heap snapshot, 2026-10-20). Test-scoped; tidy when touched.
 - [ ] 🔵 **The replay ring is unbounded during a long permission suspension**
@@ -1029,7 +1029,7 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 >    - TUI: `/detach` — leaves the session running in the background relay and exits the TUI cleanly (pod/container kept).
 >    - Re-attach: `tentacle attach <name>` (slice E resolves engine/location) reconnects the TUI to the relay; `tentacle ps` shows a DETACHED/ATTACHED state + last activity.
 >    - To decide: relay lifetime (until the turn ends? until `rm`?), where its logs go (never the terminal), notifications on finish (mobile app task 17 later), what `--keep=false` means for a detached run (delete when the relay ends).
-> 4. `docker-runtime` (slice A `feat/docker-engine-client` DONE, merged `116d45f`; A2 `feat/docker-ssh-dialer` DONE, merged `1168217`; B `feat/docker-engine-seam` DONE (EngineHost); next C `feat/docker-engine-cli` (executing: `--engine`, `engine:` user config/profiles/`TENTACLE_ENGINE`, podman socket, `--keep[=true|false]` + `keep:` config, DEFAULT TRUE (owner 2026-10-27)), then D `feat/docker-workspace-mount` (cwd bind-mount, today), then E `tentacle ps` / `tentacle rm <name>` for kept containers/pods (owner 2026-10-27)) — `run`/`attach --engine kubernetes|docker|podman`, default configurable (owner 2026-10-26) (`docs/eval/docker-runtime.md`,
+> 4. `docker-runtime` (slice A `feat/docker-engine-client` DONE, merged `116d45f`; A2 `feat/docker-ssh-dialer` DONE, merged `1168217`; B `feat/docker-engine-seam` DONE (EngineHost); C `feat/docker-engine-cli` DONE (merged today: `--engine`, `engine:` user config/profiles/`TENTACLE_ENGINE`, podman socket, `--keep[=true|false]` + `keep:` config, DEFAULT TRUE (owner 2026-10-27)), then D `feat/docker-workspace-mount` (cwd bind-mount, today), then E `tentacle ps` / `tentacle rm <name>` for kept containers/pods (owner 2026-10-27)) — `run`/`attach --engine kubernetes|docker|podman`, default configurable (owner 2026-10-26) (`docs/eval/docker-runtime.md`,
 >    owner answers 2026-10-26; promote to `feat/` when picked; slices A
 >    `packages/docker`, B neutral `SandboxHost` seam, `ssh://` dial-stdio, C CLI/docs);
 > 5. default `maxIterations` = `-1` (agent and sub-agents);

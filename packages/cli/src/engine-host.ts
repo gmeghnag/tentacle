@@ -2,7 +2,7 @@
  * The backend-neutral seam the `run`/`attach` runtime and the binary injector
  * are written against (docker-runtime slice B, docs/feat/docker-engine-seam.md).
  * One implementation per engine — Kubernetes (`engine-k8s.ts`) and
- * Docker/Podman (`engine-docker.ts`) — and ONE runtime (`pod-runtime.ts`): a new
+ * Docker/Podman (`engine-docker.ts`) — and ONE runtime (`engine-runtime.ts`): a new
  * engine adds a host (lifecycle + a `DuplexChannel` transport), never a second
  * session path.
  *
