@@ -48,8 +48,11 @@ const SESSION_UID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const RESUME = { resume: { accepts: (word: string) => SESSION_UID.test(word) } } as const;
 /** `--continue` resumes the newest session; `--resume` picks one (docs/feat/resume-picker.md). */
 const CONTINUE = { continue: {} } as const;
-/** `run --keep[=true|false]`: never swallows the next word (`run --keep name` keeps `name` positional). */
-const KEEP = { keep: { accepts: () => false } } as const;
+/**
+ * `run --keep[=true|false]`: the next word is its value only when exactly `true`/`false`
+ * (`run --keep true`); any other word stays positional (`run --keep name` keeps `name`).
+ */
+const KEEP = { keep: { accepts: (word: string) => word === "true" || word === "false" } } as const;
 const RESUME_CONFLICTS = [["resume", "continue"]] as const;
 const TOKEN = { token: {}, "token-command": {} } as const;
 /** `run`/`attach`: the engine and its docker/podman endpoint options (docs/feat/docker-engine-cli.md). */

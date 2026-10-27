@@ -250,14 +250,10 @@ export function renderTable(rows: readonly KeptRow[], nowMs: number, home: strin
   const widths = HEADER.map((_, i) => Math.max(...all.map((line) => (line[i] ?? "").length)));
   return all.map((line) =>
     line
-      .map((cell, i) => (i === line.length - 1 ? cell : cell.padEnd((widths[i] ?? 0) + 2)))
+      .map((cell, i) => (i === line.length - 1 ? cell : cell.padEnd((widths[i] ?? 0) + 3)))
       .join("")
       .trimEnd(),
   );
-}
-
-export function summaryLine(count: number): string {
-  return `${count} kept · resume: tentacle attach <name> · remove: tentacle rm <name>`;
 }
 
 export const EMPTY_LINE = "No kept containers or pods.";

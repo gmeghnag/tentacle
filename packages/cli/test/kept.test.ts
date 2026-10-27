@@ -15,7 +15,6 @@ import {
   renderVerbose,
   resolveByName,
   sortKept,
-  summaryLine,
   whereOf,
 } from "../src/kept.ts";
 
@@ -171,17 +170,15 @@ describe("renderTable (the owner-approved UX)", () => {
     },
   ];
 
-  test("golden: columns, oldest at the bottom, summary", () => {
+  test("golden: columns (3-space gap), oldest at the bottom, no footer", () => {
     const lines = renderTable(sortKept(rows), NOW, HOME);
-    expect([...lines, "", summaryLine(rows.length)].join("\n")).toBe(
+    expect(lines.join("\n")).toBe(
       [
-        "NAME             ENGINE      WHERE            MOUNT            MODEL            AGE  STATUS",
-        "tentacle-ab12cd  docker      local            ~/code/tentacle  claude-opus-5-5  2h   running",
-        "tentacle-9f3e01  podman      local            ~/code/site      gpt-x            3d   exited",
-        "tentacle-5e6f70  docker      ssh://build-box  —                gpt-x            4d   gone",
-        "tentacle-77c0aa  kubernetes  dev/agents       —                gpt-x            5d   running",
-        "",
-        "4 kept · resume: tentacle attach <name> · remove: tentacle rm <name>",
+        "NAME              ENGINE       WHERE             MOUNT             MODEL             AGE   STATUS",
+        "tentacle-ab12cd   docker       local             ~/code/tentacle   claude-opus-5-5   2h    running",
+        "tentacle-9f3e01   podman       local             ~/code/site       gpt-x             3d    exited",
+        "tentacle-5e6f70   docker       ssh://build-box   —                 gpt-x             4d    gone",
+        "tentacle-77c0aa   kubernetes   dev/agents        —                 gpt-x             5d    running",
       ].join("\n"),
     );
     expect(EMPTY_LINE).toBe("No kept containers or pods.");

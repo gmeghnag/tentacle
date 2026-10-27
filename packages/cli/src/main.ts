@@ -191,7 +191,7 @@ Engines (tentacle run / attach --engine kubernetes|docker|podman):
   --keep[=true|false] (run only)
                           DEFAULT true: the pod/container is NOT deleted on exit or
                           Ctrl+C; tentacle prints the "tentacle attach --engine …" to
-                          resume. --keep=false deletes it. Config: "keep:" (user config
+                          resume. --keep=false (or --keep false) deletes it. Config: "keep:" (user config
                           or profile); flag > profile > user config > true
   Workspace (docker/podman run): a local engine bind-mounts the cwd read-write
   at the same path (the agent works in it); secrets inside it are hidden
