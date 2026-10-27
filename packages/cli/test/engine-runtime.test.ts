@@ -459,6 +459,37 @@ describe("startPodRuntime", () => {
     runtime.dispose();
   });
 
+  test("a refusal with a reply crosses the real seam: the daemon-side model's next round sees it (docs/feat/permission-reply.md)", async () => {
+    // Mutation (a): the client drops `message` from resolve_permission → the
+    // model sees a plain denial → red. (d): the daemon offers no `reply` → the
+    // client never sends it → red.
+    const seen: ChatRequest[] = [];
+    class RecordingAskModel extends AskModel {
+      override stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+        seen.push(request);
+        return super.stream(request);
+      }
+    }
+    const spy = new SpyBroker(async () => ({ allowed: false, message: "try bun run build" }));
+    const kube = new SpyFakeCluster(
+      new RecordingAskModel("fs_write", '{"path":"/tmp/x.txt","content":"hi"}'),
+    );
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), {
+      kube,
+      namespace: "dev",
+      image: "repo/img:tag",
+      permissions: spy,
+      saver: new SessionSaver(new JsonSessionStore(join(dir, "perm-reply")), () => {}),
+      resume: null,
+      log: () => {},
+    });
+    await drain(runtime.createSession().send("write a file"));
+    expect(spy.requests[0]?.reply).toEqual({ maxChars: 2000 });
+    const tool = seen[1]?.messages.find((m) => m.role === "tool");
+    expect(tool?.content).toContain("The user replied:\ntry bun run build\n");
+    runtime.dispose();
+  });
+
   test("deletes the pod and rethrows when the --version probe fails (e.g. wrong arch)", async () => {
     const model = new ScriptedProvider([[{ type: "done" }]]);
     const kube = new FakeCluster(model);

@@ -18,6 +18,7 @@
  * exactly as before.
  */
 import {
+  type AnswerLostCause,
   type ChatMessage,
   type ChatRequest,
   DISMISSED,
@@ -75,8 +76,10 @@ import {
   liveness,
   stopped,
 } from "./link-machine.ts";
+import { answerLostCause, normalizePermissionReply } from "./permission-map.ts";
 import { PermissionRouter, type RouterAction } from "./permission-router.ts";
 import { RemoteSession } from "./remote-session.ts";
+import { SessionLostError } from "./session-lost.ts";
 import {
   type StreamEffect,
   type StreamInput,
@@ -289,16 +292,6 @@ export interface SessionDeletedNotice {
 class VanishedError extends RpcError {
   constructor() {
     super(DomainErrorCode.SessionArchived, "the session ended while the link was down");
-  }
-}
-
-/** A command that must not cross a session recreate (its turn/request is gone). */
-class SessionLostError extends RpcError {
-  constructor() {
-    super(
-      DomainErrorCode.UnknownSession,
-      "the daemon lost the session (it was recreated): not re-sent",
-    );
   }
 }
 
@@ -2006,8 +1999,17 @@ export class RemoteClient {
    * handle (its answer comes back to the router), an abort withdraws it, a
    * send answers the daemon. A losing answer (`PermissionNotPending`) is
    * expected and silent — the winner arrives as `permission_resolved`.
+   *
+   * A person's reply (docs/feat/permission-reply.md) is never lost silently:
+   * an answer carrying one that is not sent (withdrawn meanwhile, a request
+   * that offered no reply) or not delivered (lost to another answer, the
+   * session lost, a failure) calls the answer's `onAnswerLost` once, so the
+   * frontend hands the words back. `onLost`: that callback, for the `send`.
    */
-  private runPermissionActions(actions: readonly RouterAction[]): void {
+  private runPermissionActions(
+    actions: readonly RouterAction[],
+    onLost?: (cause: AnswerLostCause) => void,
+  ): void {
     for (const action of actions) {
       const { sessionId, requestId } = action;
       const key = `${sessionId}\u0000${requestId}`;
@@ -2018,7 +2020,22 @@ export class RemoteClient {
           if (this.prompts.get(key) === controller) {
             this.prompts.delete(key);
           }
-          this.runPermissionActions(this.router.answered(sessionId, requestId, response));
+          const next = this.router.answered(sessionId, requestId, response);
+          const lost = response.onAnswerLost;
+          const replied =
+            !response.allowed &&
+            response.message !== undefined &&
+            normalizePermissionReply(response.message, Number.POSITIVE_INFINITY) !== null;
+          const sent = next.some(
+            (a) => a.kind === "send" && a.requestId === requestId && a.message !== undefined,
+          );
+          if (replied && !sent) {
+            const unreplyable = next.some(
+              (a) => a.kind === "unreplyable" && a.requestId === requestId,
+            );
+            lost?.(unreplyable ? "unreplyable" : "settled");
+          }
+          this.runPermissionActions(next, replied && sent ? lost : undefined);
         };
         this.permissions
           .request(action.request, {
@@ -2036,21 +2053,36 @@ export class RemoteClient {
             `permission answer "${action.optionId}" was not offered by the daemon for request ${requestId}: not sent`,
           ),
         );
+      } else if (action.kind === "unreplyable") {
+        this.onError?.(
+          new Error(
+            `permission request ${requestId} does not take a reply (an older daemon): your reply was not sent`,
+          ),
+        );
       } else if (action.kind === "abort") {
         this.prompts.get(key)?.abort();
         this.prompts.delete(key);
       } else {
         // Keyed by `requestId`: an answer given while the link is down waits for
         // the session to be live again. A request answered elsewhere, or gone
-        // with a recreated session, is not an error.
+        // with a recreated session, is not an error. The daemon takes a re-send
+        // of the answer that already settled it (after a drop) as a success.
+        const lost = action.message !== undefined ? onLost : undefined;
         this.sessionCall(
           sessionId,
           Method.ResolvePermission,
-          { sessionId, requestId, optionId: action.optionId },
+          {
+            sessionId,
+            requestId,
+            optionId: action.optionId,
+            ...(action.message !== undefined ? { message: action.message } : {}),
+          },
           "keyed",
         )
           .then(() => undefined)
           .catch((error: unknown) => {
+            // The decision stays silent; only the person's words come back.
+            lost?.(answerLostCause(error));
             if (
               (error instanceof RpcError && error.code === DomainErrorCode.PermissionNotPending) ||
               error instanceof SessionLostError

@@ -32,14 +32,24 @@ export const DAEMON_RECORD_KIND = "tentacle.daemon-session";
  * 7: a user/tool message may carry `contextUsage` (docs/feat/context-awareness.md):
  * a v6 daemon refuses every v7 record instead of dropping the model's context
  * lines at its next write. A v1–v6 record reads as a v7 one with no lines.
+ * 8 (docs/feat/permission-reply.md): a tool message may carry `denialReply`,
+ * and `head` marks the user message this session installed as its head (a
+ * compaction's summary, a context reset's restart message — context-reset
+ * slice-2 F1), so a reload knows it even in a record cut short mid-turn. A v7
+ * daemon refuses every v8 record instead of dropping either. A v1–v7 record
+ * reads as a v8 one with no replies and its head by the reload rule
+ * (`legacyHead`, which also covers a v8 record that marks none). One version shared with docs/feat/round-groups-persistence.md,
+ * which adds its turn fields under the same `V8` gate before either ships.
  */
-export const DAEMON_RECORD_VERSION = 7;
+export const DAEMON_RECORD_VERSION = 8;
 /** Every version `parseDaemonRecord` reads (each read as the current shape). */
-const READABLE_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6, DAEMON_RECORD_VERSION];
+const READABLE_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, DAEMON_RECORD_VERSION];
 /** The first version whose `title` may be a chosen one (`{ text, source }`). */
 const CHOSEN_TITLE_VERSION = 3;
 /** The first version with steer ids (`turn.steeringIds`) and `returned` rows. */
 const STEER_IDS_VERSION = 4;
+/** The first version that marks the installed head (`head`) — and the version of every v8 field. */
+const V8 = 8;
 
 /** The permission request a turn was suspended on at the write. */
 export interface PendingPermission {
@@ -83,6 +93,8 @@ export interface DaemonSessionState {
   readonly title?: TitleState;
   /** Rows back with their writer until reclaimed (oldest first; absent = none). */
   readonly returned?: readonly ReturnedEntry[];
+  /** The installed head's index in `messages` (absent = none in the history now). */
+  readonly head?: number;
 }
 
 export interface DaemonSessionRecord extends SessionRecord {
@@ -99,6 +111,13 @@ export interface DaemonSessionRecord extends SessionRecord {
    * archived, reloaded by an explicit reopen. Absent → restored live at start.
    */
   readonly archivedAt?: number;
+  /**
+   * v8: the index in `messages` of the user message the session installed as
+   * its head (a compaction's summary, a context reset's restart message),
+   * while it is still there. A reload treats it as the summary (a send-now
+   * there has nothing to answer), cut short or not. Absent: none.
+   */
+  readonly head?: number;
 }
 
 /** A live session's state as a record (`title` in the client store's form: `encodeTitle`). */
@@ -123,6 +142,7 @@ export function toDaemonRecord(
     returned: state.returned ?? [],
     ...(state.turn ? { turn: state.turn } : {}),
     ...(state.archivedAt !== undefined ? { archivedAt: state.archivedAt } : {}),
+    ...(state.head !== undefined ? { head: state.head } : {}),
   };
 }
 
@@ -260,10 +280,25 @@ export function parseDaemonRecord(
     isObject(value.turn) && value.schemaVersion < STEER_IDS_VERSION
       ? withoutIds(value.turn)
       : value.turn;
+  // The marked head (v8), else the old rule — which stays for every version:
+  // its idle `[system?, user]` reading is a decision of its own (no unasked
+  // turn after a reload), not only a stand-in for the missing mark.
+  if (
+    value.schemaVersion >= V8 &&
+    value.head !== undefined &&
+    !isUserIndex(record.messages, value.head)
+  ) {
+    return { ok: false, reason: '"head" is malformed' };
+  }
+  const marked = value.schemaVersion >= V8 ? (value.head as number | undefined) : undefined;
+  const head = marked ?? legacyHead(record.messages, value.turn !== undefined);
+  // Only a v8+ `head` is read: an older record's is derived, never taken.
+  const { head: _raw, ...fields } = value;
   const current: Record<string, unknown> = {
-    ...value,
+    ...fields,
     ...(turn !== undefined ? { turn } : {}),
     returned,
+    ...(head !== undefined ? { head } : {}),
     schemaVersion: DAEMON_RECORD_VERSION,
   };
   if (value.schemaVersion === 1) {
@@ -299,6 +334,25 @@ function returnedRows(value: unknown): ReturnedEntry[] | null {
     rows.push({ id: row.id, text: row.text, cause: row.cause as ReturnedEntry["cause"] });
   }
   return rows;
+}
+
+/** `index` is an integer naming a user message of `messages`. */
+function isUserIndex(messages: readonly ChatMessage[], index: unknown): boolean {
+  return Number.isInteger(index) && messages[index as number]?.role === "user";
+}
+
+/**
+ * The head a record does not mark (any v1–v7 record; a v8 one with no
+ * `head`): the reload rule. An IDLE history that is a lone user message after
+ * the system prompt may be a just-compacted one (or a first turn that ended
+ * with no reply): read it as the summary, so a send-now there is
+ * `NoTurnRunning`, never an unasked turn that may run tools. A record cut
+ * short mid-turn has none by this rule (a reset's restart message there is
+ * what v8's mark adds: context-reset slice-2 F1).
+ */
+function legacyHead(messages: readonly ChatMessage[], cutShort: boolean): number | undefined {
+  const at = messages[0]?.role === "system" ? 1 : 0;
+  return !cutShort && messages.length === at + 1 && messages[at]?.role === "user" ? at : undefined;
 }
 
 function withoutIds(turn: Record<string, unknown>): Record<string, unknown> {

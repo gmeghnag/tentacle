@@ -11,7 +11,17 @@
  * has mounted (restoring the default on unmount). On the RPC path the broker is
  * built with `holdUntilSet`, so "no requester yet" queues instead of approving.
  */
+import { PermissionReplyTextSchema } from "@tentacle/protocol";
 import type { PermissionLevel } from "./tool.ts";
+
+/**
+ * A valid reply text (docs/feat/permission-reply.md), by the wire's own
+ * `PermissionReplyTextSchema` — the one source of its bounds, so a store that
+ * mirrors the wire (the laptop's session store) never restates them.
+ */
+export function isPermissionReplyText(value: unknown): value is string {
+  return PermissionReplyTextSchema.safeParse(value).success;
+}
 
 export interface PermissionRequest {
   /**
@@ -34,6 +44,12 @@ export interface PermissionRequest {
    * (e.g. `git commit`) — only matching future commands auto-run.
    */
   readonly suggestion?: PermissionSuggestion;
+  /**
+   * The asker takes a reply with a refusal, up to `maxChars` (a daemon's
+   * `permission_request.reply`, docs/feat/permission-reply.md). Absent: a
+   * refusal carries no `message` — a frontend does not offer one.
+   */
+  readonly reply?: { readonly maxChars: number };
 }
 
 export interface PermissionSuggestion {
@@ -59,7 +75,31 @@ export interface PermissionResponse {
    * the user made (docs/feat/protocol-v10-forward-compat.md).
    */
   readonly reason?: string;
+  /**
+   * The person's reply with a refusal (only with `allowed: false`, only for a
+   * request with `reply`): the model gets it with the denial
+   * (docs/feat/permission-reply.md). Ignored on an approval.
+   */
+  readonly message?: string;
+  /**
+   * Set by a requester whose answer carries `message` (process-internal,
+   * never on the wire): the runtime calls it once if that answer did NOT
+   * reach the asker (settled elsewhere first, the session lost, a failed
+   * send) — so the person's words are handed back, never lost silently.
+   * `cause` says why, so the person is told the truth (`AnswerLostCause`).
+   */
+  readonly onAnswerLost?: (cause: AnswerLostCause) => void;
 }
+
+/**
+ * Why an answer with a reply did not reach the asker:
+ * - `settled`: the request was no longer pending (answered elsewhere, or
+ *   withdrawn) — the agent got another answer, not this one;
+ * - `unreplyable`: the asker takes no reply (an older daemon) — nothing sent;
+ * - `session-lost`: the session was lost mid-send — it MAY have arrived;
+ * - `failed`: the send failed — not delivered.
+ */
+export type AnswerLostCause = "settled" | "unreplyable" | "session-lost" | "failed";
 
 export interface PermissionRequestOptions {
   /** Aborted when the request is withdrawn (answered elsewhere, its turn cancelled). */

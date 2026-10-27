@@ -121,8 +121,13 @@ function daemon(script: readonly (readonly StreamEvent[])[]) {
         turnId,
         content: [{ type: "text", text: "go" }],
       });
-    const resolve = (sessionId: string, requestId: string, optionId: string) =>
-      client.request("session/resolve_permission", { sessionId, requestId, optionId });
+    const resolve = (sessionId: string, requestId: string, optionId: string, message?: string) =>
+      client.request("session/resolve_permission", {
+        sessionId,
+        requestId,
+        optionId,
+        ...(message !== undefined ? { message } : {}),
+      });
     const of = <T extends SessionUpdate["type"]>(type: T) =>
       updates
         .map((u) => u.update)
@@ -513,5 +518,171 @@ describe("a suspended turn is a running turn", () => {
     d.clock.t += 25 * H;
     expect(d.host.reapExpired({ idleTtlMs: 24 * H })).toEqual([]);
     expect(d.host.get("S")?.running).toBe(true);
+  });
+});
+
+describe("a refusal with a reply (docs/feat/permission-reply.md)", () => {
+  test("R1 every tool ask offers a reply up to MAX_PERMISSION_REPLY_CHARS", async () => {
+    // Mutation (d): the daemon omits `reply` → red.
+    const d = daemon(ask);
+    const a = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    await a.prompt("S", "t1");
+    await flush();
+    expect(onlyRequest(a.of("permission_request")).reply).toEqual({ maxChars: 2000 });
+  });
+
+  test("R2 reject_once + message: resolved without the text; the model and the row get it; the turn goes on", async () => {
+    const d = daemon(ask);
+    const a = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    await a.prompt("S", "t1");
+    await flush();
+    const req = onlyRequest(a.of("permission_request"));
+    expect(await a.resolve("S", req.requestId, "reject_once", "try bun run build")).toEqual({});
+    await flush();
+    expect(d.execs).toEqual([]);
+    expect(a.of("permission_resolved")).toEqual([
+      {
+        type: "permission_resolved",
+        requestId: req.requestId,
+        outcome: { outcome: "selected", optionId: "reject_once" },
+      },
+    ]);
+    expect(d.brokers[0]?.log).toEqual([
+      'rm -rf build -> {"allowed":false,"message":"try bun run build"}',
+    ]);
+    const update = a.of("tool_call_update").find((u) => u.status === "failed");
+    expect(update?.denialReply).toBe("try bun run build");
+    const tool = d.host
+      .get("S")
+      ?.snapshotPage()
+      .messages.find((m) => m.role === "tool");
+    expect(tool?.content).toContain("The user replied:\ntry bun run build\n");
+    expect(tool?.denialReply).toBe("try bun run build");
+    expect(a.of("turn_end")).toMatchObject([{ stopReason: "end_turn" }]);
+  });
+
+  test("R3 a message with an allow option is InvalidParams; the request stays pending and a later answer wins", async () => {
+    // Mutation (b): skip the reject-kind check in `resolvePermission` → red.
+    const d = daemon(ask);
+    const a = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    await a.prompt("S", "t1");
+    await flush();
+    const req = onlyRequest(a.of("permission_request"));
+    for (const optionId of ["allow_once", "allow_always"]) {
+      await expect(a.resolve("S", req.requestId, optionId, "go ahead")).rejects.toMatchObject({
+        code: JsonRpcErrorCode.InvalidParams,
+      });
+    }
+    await flush();
+    expect(a.of("permission_resolved")).toEqual([]);
+    expect(d.execs).toEqual([]);
+    expect(d.host.get("S")?.running).toBe(true);
+    await a.resolve("S", req.requestId, "reject_once", "no");
+    await flush();
+    expect(d.brokers[0]?.log).toEqual(['rm -rf build -> {"allowed":false,"message":"no"}']);
+  });
+
+  test("R4 a malformed message is refused by the schema; the request stays pending", async () => {
+    const d = daemon(ask);
+    const a = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    await a.prompt("S", "t1");
+    await flush();
+    const req = onlyRequest(a.of("permission_request"));
+    for (const message of ["x".repeat(2001), "   ", "a\u001b[2Jb"]) {
+      await expect(a.resolve("S", req.requestId, "reject_once", message)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.InvalidParams,
+      });
+    }
+    await flush();
+    expect(a.of("permission_resolved")).toEqual([]);
+    expect(d.host.get("S")?.running).toBe(true);
+  });
+
+  test("R5 two answers in the same tick: exactly one wins, the loser is PermissionNotPending", async () => {
+    const d = daemon(ask);
+    const a = await d.connect();
+    const b = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    await b.open({ sessionId: "S" });
+    await a.prompt("S", "t1");
+    await flush();
+    const req = onlyRequest(a.of("permission_request"));
+    const results = await Promise.allSettled([
+      a.resolve("S", req.requestId, "reject_once", "phone says no"),
+      b.resolve("S", req.requestId, "allow_once"),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "rejected"]);
+    const lost = results[1];
+    expect(lost?.status === "rejected" ? lost.reason : undefined).toMatchObject({
+      code: DomainErrorCode.PermissionNotPending,
+    });
+    await flush();
+    expect(d.execs).toEqual([]);
+    expect(a.of("permission_resolved")).toHaveLength(1);
+  });
+
+  test("R6 the same answer again (a keyed re-send after a link drop) succeeds, and the model gets it once", async () => {
+    // Mutation: drop the repeat check in `resolvePermission` → red.
+    const d = daemon(ask);
+    const a = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    await a.prompt("S", "t1");
+    await flush();
+    const req = onlyRequest(a.of("permission_request"));
+    expect(await a.resolve("S", req.requestId, "reject_once", "try bun run build")).toEqual({});
+    await flush();
+    // The re-send, after the turn already went on with the first copy.
+    expect(await a.resolve("S", req.requestId, "reject_once", "try bun run build")).toEqual({});
+    await flush();
+    expect(d.brokers[0]?.log).toEqual([
+      'rm -rf build -> {"allowed":false,"message":"try bun run build"}',
+    ]);
+    expect(a.of("permission_resolved")).toHaveLength(1);
+    const replies = d.host
+      .get("S")
+      ?.snapshotPage()
+      .messages.filter((m) => m.role === "tool" && m.denialReply !== undefined);
+    expect(replies).toHaveLength(1);
+  });
+
+  test("R7 a DIFFERENT answer to a settled request is still PermissionNotPending", async () => {
+    const d = daemon(ask);
+    const a = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    await a.prompt("S", "t1");
+    await flush();
+    const req = onlyRequest(a.of("permission_request"));
+    await a.resolve("S", req.requestId, "reject_once", "try bun run build");
+    await flush();
+    for (const [optionId, message] of [
+      ["reject_once", "something else"],
+      ["reject_once", undefined],
+      ["allow_once", undefined],
+    ] as const) {
+      await expect(a.resolve("S", req.requestId, optionId, message)).rejects.toMatchObject({
+        code: DomainErrorCode.PermissionNotPending,
+      });
+    }
+    await flush();
+    expect(d.execs).toEqual([]);
+  });
+
+  test("R8 an answer to a request the turn's cancel settled is PermissionNotPending (only answers are remembered)", async () => {
+    const d = daemon(ask);
+    const a = await d.connect();
+    await a.open({ sessionId: "S", create: true });
+    await a.prompt("S", "t1");
+    await flush();
+    const req = onlyRequest(a.of("permission_request"));
+    a.client.notify("session/cancel", { sessionId: "S" });
+    await flush();
+    expect(a.of("permission_resolved")).toMatchObject([{ outcome: { outcome: "cancelled" } }]);
+    await expect(a.resolve("S", req.requestId, "reject_once", "late")).rejects.toMatchObject({
+      code: DomainErrorCode.PermissionNotPending,
+    });
   });
 });

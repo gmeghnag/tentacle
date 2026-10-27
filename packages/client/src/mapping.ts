@@ -233,6 +233,8 @@ export function updateToEvent(
           ...toolResultFromContent(update.content, update.status === "failed"),
           // The field only, never derived from the banner text (docs/feat/tui-spill-note.md).
           ...(update.spill ? { spill: update.spill } : {}),
+          // Likewise: the field only, never parsed from the denial text (docs/feat/permission-reply.md).
+          ...(update.denialReply !== undefined ? { denialReply: update.denialReply } : {}),
         },
         // Beside the result, never inside it: a tool cannot set it (docs/fix/tool-duration.md).
         ...(update.durationMs !== undefined ? { durationMs: update.durationMs } : {}),

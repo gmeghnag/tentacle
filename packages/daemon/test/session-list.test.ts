@@ -428,7 +428,7 @@ describe("SessionHost.list over the wire", () => {
       title: "t",
       messages: [{ role: "user", content: "an old question" }],
       kind: "tentacle.daemon-session",
-      schemaVersion: 7,
+      schemaVersion: 8,
       lastActiveAt: 9,
       turns: [],
       enqueueIds: [],

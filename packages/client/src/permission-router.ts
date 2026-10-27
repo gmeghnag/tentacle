@@ -17,7 +17,7 @@
  */
 import type { PermissionRequest, PermissionResponse } from "@tentacle/core";
 import type { PermissionRequestUpdate } from "@tentacle/protocol";
-import { responseToOutcome } from "./permission-map.ts";
+import { normalizePermissionReply, responseToOutcome } from "./permission-map.ts";
 
 export type RouterAction =
   | {
@@ -40,6 +40,8 @@ export type RouterAction =
       readonly sessionId: string;
       readonly requestId: string;
       readonly optionId: string;
+      /** The person's reply with a refusal, normalized (only if the request offered `reply`). */
+      readonly message?: string;
     }
   /** The user's answer maps to an option the request did not offer: not sent (report it). */
   | {
@@ -47,7 +49,13 @@ export type RouterAction =
       readonly sessionId: string;
       readonly requestId: string;
       readonly optionId: string;
-    };
+    }
+  /**
+   * A refusal with a reply for a request that did not offer one (an older
+   * daemon would strip it silently): not sent — never a bare No in its place.
+   * Report it and hand the words back.
+   */
+  | { readonly kind: "unreplyable"; readonly sessionId: string; readonly requestId: string };
 
 interface Entry {
   readonly sessionId: string;
@@ -67,6 +75,7 @@ export function toPermissionRequest(update: PermissionRequestUpdate): Permission
     ...(update.explanation ? { detail: update.explanation } : {}),
     input: {},
     ...(update.suggestion ? { suggestion: { prefix: update.suggestion.prefix } } : {}),
+    ...(update.reply ? { reply: { maxChars: update.reply.maxChars } } : {}),
   };
 }
 
@@ -141,13 +150,33 @@ export class PermissionRouter {
         ...this.next(),
       ];
     }
+    // A reply goes only with a refusal (an approval's is ignored), and only
+    // where the daemon said it takes one.
+    const reply = entry.update.reply;
+    // Blank once normalized: a plain No (owner Q2).
+    const message =
+      !response.allowed && response.message !== undefined
+        ? normalizePermissionReply(response.message, reply?.maxChars ?? Number.POSITIVE_INFINITY)
+        : null;
+    if (message !== null && !reply) {
+      return [{ kind: "unreplyable", sessionId, requestId }, ...this.next()];
+    }
     let answered = this.answeredIds.get(sessionId);
     if (!answered) {
       answered = new Set();
       this.answeredIds.set(sessionId, answered);
     }
     answered.add(requestId);
-    return [{ kind: "send", sessionId, requestId, optionId: outcome.optionId }, ...this.next()];
+    return [
+      {
+        kind: "send",
+        sessionId,
+        requestId,
+        optionId: outcome.optionId,
+        ...(message !== null ? { message } : {}),
+      },
+      ...this.next(),
+    ];
   }
 
   /**

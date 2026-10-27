@@ -412,6 +412,48 @@ describe("re-attach: commands across a drop", () => {
     client.close();
   });
 
+  test("a refusal with a reply whose ack is lost is re-sent: the daemon takes the repeat, nothing comes back, the model has it once", async () => {
+    // docs/feat/permission-reply.md fix round 1 F1. Mutation: drop the
+    // daemon's repeat check → the re-send is PermissionNotPending → the words
+    // come back (`lost` non-empty) although the model has them.
+    const runs = { n: 0 };
+    const model = new GatedModel([
+      [t("a"), shell("c1"), done],
+      [t("b"), done],
+    ]);
+    const target = new Target(makeHost(model, runs));
+    const link = cutLink(1); // the resolve_permission is delivered, its ack is lost
+    new Connection(link.daemon, target.host);
+    const lost: string[] = [];
+    const broker = new PermissionBroker(async () => {
+      link.arm();
+      return {
+        allowed: false,
+        message: "try bun run build",
+        onAnswerLost: (cause) => lost.push(cause),
+      };
+    });
+    const errors: Error[] = [];
+    const client = new RemoteClient(link.client, broker, undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+      onError: (e) => errors.push(e),
+    });
+    await client.initialize();
+    await drain(client.newSession(undefined, "S").send("go"));
+    expect(link.cut()).toBe(true);
+    // The keyed re-send went out on the new link.
+    expect(methods(target.frames[0] ?? [])).toContain("session/resolve_permission");
+    // Its answer lands after the turn ended: let it settle before asserting.
+    await new Promise((r) => setTimeout(r, 30));
+    expect(lost).toHaveLength(0);
+    expect(errors).toHaveLength(0);
+    expect(runs.n).toBe(0);
+    const history = await client.snapshot("S");
+    expect(history.filter((m) => m.role === "tool" && m.denialReply !== undefined)).toHaveLength(1);
+    client.close();
+  });
+
   test("compact is not re-sent after a drop (no key): it rejects; the session stays usable", async () => {
     const runs = { n: 0 };
     const model = new GatedModel([

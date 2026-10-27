@@ -21,8 +21,16 @@
  *   records or pre-approves anything (a pod daemon is not trusted).
  *
  * The `*_always` kinds ask the daemon to remember a session-scoped rule.
+ *
+ * A reply with a refusal (docs/feat/permission-reply.md): a request carrying
+ * `reply` accepts a `message` with a `reject_*` answer; the daemon hands it to
+ * the model with the denial. A message on any other answer, or for a request
+ * that did not offer `reply`, is `InvalidParams` (the request stays pending).
+ * A client sends one only when the request offered it — an older daemon would
+ * strip it silently. `permission_resolved` never carries the text.
  */
 import { z } from "zod";
+import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { SessionIdSchema } from "./session.ts";
 
 export const PermissionOptionKindSchema = z.enum([
@@ -69,6 +77,12 @@ export const PermissionRequestUpdateSchema = z.object({
    * laptop bounds it when it renders it.
    */
   agent: z.object({ type: z.string(), description: z.string() }).optional(),
+  /**
+   * The daemon accepts a reply with a refusal, up to `maxChars` (a client
+   * clamps it to `MAX_PERMISSION_REPLY_CHARS`: a pod may advertise anything).
+   * Absent: no reply (an older daemon) — the client does not offer one.
+   */
+  reply: z.object({ maxChars: z.number().int().min(1) }).optional(),
 });
 export type PermissionRequestUpdate = z.infer<typeof PermissionRequestUpdateSchema>;
 
@@ -88,6 +102,8 @@ export const ResolvePermissionParamsSchema = z.object({
   sessionId: SessionIdSchema,
   requestId: PermissionRequestIdSchema,
   optionId: z.string().min(1),
+  /** The person's reply with a `reject_*` answer (only if the request offered `reply`). */
+  message: PermissionReplyTextSchema.optional(),
 });
 export type ResolvePermissionParams = z.infer<typeof ResolvePermissionParamsSchema>;
 

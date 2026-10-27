@@ -9,10 +9,11 @@ import type {
   PermissionRequestOptions,
   PermissionResponse,
 } from "@tentacle/core";
-import type {
-  PermissionOption,
-  PermissionOutcome,
-  PermissionRequestUpdate,
+import {
+  MAX_PERMISSION_REPLY_CHARS,
+  type PermissionOption,
+  type PermissionOutcome,
+  type PermissionRequestUpdate,
 } from "@tentacle/protocol";
 
 /** The options the daemon offers for an approval; the "always" label reflects
@@ -48,6 +49,8 @@ export function toPermissionRequestUpdate(
     ...(req.suggestion ? { suggestion: { prefix: req.suggestion.prefix } } : {}),
     options: permissionOptions(req),
     ...(agent ? { agent: { type: agent.type, description: agent.description } } : {}),
+    // This daemon carries a reply with a refusal to the model (docs/feat/permission-reply.md).
+    reply: { maxChars: MAX_PERMISSION_REPLY_CHARS },
   };
 }
 

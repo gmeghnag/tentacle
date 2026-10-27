@@ -299,6 +299,7 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
     expect(keys).toEqual([
       "content",
       "contextUsage",
+      "denialReply",
       "durationMs",
       "role",
       "spill",
@@ -345,5 +346,38 @@ describe("parseSessionRecord mirrors the wire ChatMessageSchema", () => {
         "m",
       ).ok,
     ).toBe(true);
+  });
+  test("a tool message's denialReply round-trips; the store refuses exactly what the wire refuses (docs/feat/permission-reply.md)", () => {
+    const tool = (denialReply: unknown) => ({
+      role: "tool",
+      content: "b",
+      toolCallId: "1",
+      denialReply,
+    });
+    const kept = parseSessionRecord(
+      { ...rec("m", 1), messages: [tool("why?\n\ttry bun run build")] },
+      "m",
+    );
+    expect(kept.ok ? kept.record.messages[0]?.denialReply : kept.reason).toBe(
+      "why?\n\ttry bun run build",
+    );
+    for (const value of [
+      "ok",
+      "x".repeat(2000),
+      "x".repeat(2001),
+      "",
+      " \n ",
+      "a\u001bb",
+      "a\rb",
+      "a\u0085b",
+      3,
+    ]) {
+      const wire = ChatMessageSchema.safeParse(tool(value)).success;
+      const store = parseSessionRecord({ ...rec("m", 1), messages: [tool(value)] }, "m");
+      expect(store.ok).toBe(wire);
+      if (!store.ok) {
+        expect(store.reason).toBe("message 0 has a malformed denialReply");
+      }
+    }
   });
 });

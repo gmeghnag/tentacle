@@ -78,6 +78,8 @@ export interface ToolItem {
   readonly spill?: ToolResultSpill;
   /** The daemon-measured run time; absent when the tool never ran or the record predates it (docs/fix/tool-duration.md). */
   readonly durationMs?: number;
+  /** Refused with the person's reply: shown as `✗ Denied · <text>`, not the model's text (docs/feat/permission-reply.md). */
+  readonly denialReply?: string;
   /** Set when this tool call is a sub-agent (`agent_task`) with nested progress. */
   readonly sub?: SubAgentProgress;
 }
@@ -311,6 +313,9 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
         ...(event.result.details ? { detail: event.result.details } : {}),
         ...(event.result.hook ? { hook: event.result.hook } : {}),
         ...(event.result.spill ? { spill: event.result.spill } : {}),
+        ...(event.result.denialReply !== undefined
+          ? { denialReply: event.result.denialReply }
+          : {}),
       };
       const items = state.items.slice();
       if (idx >= 0) {

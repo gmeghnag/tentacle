@@ -89,6 +89,8 @@ export type GateOutcome =
       readonly reason?: string;
       /** The hook that refused (`by: "hook"`). */
       readonly hookName?: string;
+      /** The person's reply with the refusal (`by: "user"`, docs/feat/permission-reply.md). */
+      readonly message?: string;
     };
 
 export interface GateCall {
@@ -171,9 +173,16 @@ export class PermissionGate {
     if (response.allowed) {
       return run;
     }
-    return response.reason !== undefined
-      ? { allowed: false, input: effective, by: "unavailable", reason: response.reason }
-      : { allowed: false, input: effective, by: "user" };
+    if (response.reason !== undefined) {
+      return { allowed: false, input: effective, by: "unavailable", reason: response.reason };
+    }
+    // A refusal never creates a rule; its reply (if any) only goes to the model.
+    return {
+      allowed: false,
+      input: effective,
+      by: "user",
+      ...(response.message !== undefined ? { message: response.message } : {}),
+    };
   }
 
   /** Whether an existing session rule already covers this call. */

@@ -17,6 +17,7 @@ import { formatDurationMs, formatTokens } from "./format.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
+import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
@@ -423,6 +424,14 @@ function plainToolBody(
   // Spilled: the structured fact, never the model's banner (docs/feat/tui-spill-note.md).
   if (tool.spill) {
     return spillBody(tool, tool.spill, expanded, inPod);
+  }
+  // Refused with a reply: the same, `✗ Denied · <text>` (docs/feat/permission-reply.md).
+  if (tool.denialReply !== undefined) {
+    return denialReplyLines(tool.denialReply).map((line, i) =>
+      i === 0
+        ? `${theme.error(DENIED_LABEL)}${theme.subtle(line.slice(DENIED_LABEL.length))}`
+        : theme.subtle(line),
+    );
   }
   if (tool.resultText && tool.resultText.length > 0) {
     if (tool.name === "fs_read" && tool.status !== "error") {

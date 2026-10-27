@@ -110,6 +110,7 @@ import {
   titleRequest,
   titleText,
 } from "./session-title.ts";
+import { SettledAnswers } from "./settled-answers.ts";
 
 /** Receives each streamed `session/update` (one per emitted update). Synchronous; never awaited. */
 export type UpdateSink = (params: KnownSessionUpdateParams) => void;
@@ -132,15 +133,21 @@ export interface Attachment {
 /** A permission request waiting for its first answer (keyed by its nonce). */
 interface PendingAsk {
   readonly offered: ReadonlySet<string>;
+  /**
+   * The options a reply may come with (the `reject_*` kinds), when the ask
+   * offered `reply`; empty otherwise (docs/feat/permission-reply.md).
+   */
+  readonly replyable: ReadonlySet<string>;
   /** What the record says of it while it is unanswered (`pendingForRecord`). */
   readonly record: PendingPermission;
   /** Streamed to the clients yet (only once its record is durable). */
   shown: boolean;
   /**
    * Resolve the gate's wait with this outcome (detaches the abort listener);
-   * `reason`: nobody could answer (the gate tells the model why).
+   * `reason`: nobody could answer (the gate tells the model why); `message`:
+   * the person's reply with a refusal.
    */
-  readonly settle: (outcome: PermissionOutcome, reason?: string) => void;
+  readonly settle: (outcome: PermissionOutcome, reason?: string, message?: string) => void;
 }
 
 /**
@@ -190,8 +197,11 @@ export interface RestoredSessionState {
   readonly enqueueIds: readonly string[];
   /** A turn suspended on a permission at the restart: it runs again (re-asked). */
   readonly resume?: ResumedTurn;
-  /** The record had a turn in flight (cut short, or resumed): its history is not a summary. */
-  readonly cutShort: boolean;
+  /**
+   * The record's installed head (`DaemonSessionRecord.head`: its index in the
+   * reloaded history): the summary again, cut short or not. Absent: none.
+   */
+  readonly head?: number;
   /** The record's title (absent = `auto`). */
   readonly title?: TitleState;
   /** The rows the record kept for their writer (absent = none). */
@@ -321,6 +331,8 @@ export class HostedSession {
    * `pendingList`). One at a time today: calls run in order.
    */
   private readonly asks = new Map<string, PendingAsk>();
+  /** The answers that settled recent asks: an identical re-send is a success. */
+  private readonly answered = new SettledAnswers();
   private readonly persister: SessionPersister | null;
   private readonly createdAt: number;
   private seq = 0;
@@ -384,16 +396,14 @@ export class HostedSession {
       this.enqueued.add(enqueueId);
       this.restoredIds.add(enqueueId);
     }
-    // A reload lost the summary's identity. An IDLE record whose history is a
-    // lone user message after the system prompt may be a just-compacted one
-    // (or a first turn that ended with no reply): read it as the summary, so a
-    // send-now there is `NoTurnRunning`, never an unasked turn that may run
-    // tools. A record cut short mid-turn is never a summary (it continues).
-    if (restored && !restored.cutShort) {
-      const history = session.messages;
-      const at = history[0]?.role === "system" ? 1 : 0;
-      if (history.length === at + 1 && history[at]?.role === "user") {
-        this.compactionSummary = history[at];
+    // A reload lost the summary's identity: the record names it (v8 `head`;
+    // an older record's by the old rule, `parseDaemonRecord`) — so a send-now
+    // there is `NoTurnRunning`, never an unasked turn that may run tools, even
+    // after a crash at a context reset's barrier.
+    if (restored?.head !== undefined) {
+      const head = session.messages[restored.head];
+      if (head?.role === "user") {
+        this.compactionSummary = head;
       }
     }
     this.session = session;
@@ -520,19 +530,30 @@ export class HostedSession {
       resumable: classifyPending(this.session.messages, toolCallId, options?.origin, req.tool),
       requestedAt: this.now(),
     };
-    const decided = new Promise<{ outcome: PermissionOutcome; reason?: string }>((resolve) => {
-      const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
-      this.asks.set(requestId, {
-        offered: new Set(update.options.map((o) => o.optionId)),
-        record,
-        shown: false,
-        settle: (outcome, reason) => {
-          signal.removeEventListener("abort", onAbort);
-          resolve(reason !== undefined ? { outcome, reason } : { outcome });
-        },
-      });
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
+    const decided = new Promise<{ outcome: PermissionOutcome; reason?: string; message?: string }>(
+      (resolve) => {
+        const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
+        this.asks.set(requestId, {
+          offered: new Set(update.options.map((o) => o.optionId)),
+          replyable: new Set(
+            update.reply
+              ? update.options.filter((o) => o.kind.startsWith("reject_")).map((o) => o.optionId)
+              : [],
+          ),
+          record,
+          shown: false,
+          settle: (outcome, reason, message) => {
+            signal.removeEventListener("abort", onAbort);
+            resolve({
+              outcome,
+              ...(reason !== undefined ? { reason } : {}),
+              ...(message !== undefined ? { message } : {}),
+            });
+          },
+        });
+        signal.addEventListener("abort", onAbort, { once: true });
+      },
+    );
     // The resumed call asked again: its live ask replaces the record's entry.
     if (toolCallId !== undefined && this.carried?.toolCallId === toolCallId) {
       this.carried = undefined;
@@ -553,7 +574,7 @@ export class HostedSession {
         this.reportTurnError(error);
       }
     });
-    return decided.then(async ({ outcome, reason }) => {
+    return decided.then(async ({ outcome, reason, message }) => {
       // `settle` already took this ask out of `asks`: write the record without it.
       this.persist();
       // The turn's abort ends this wait: a hung disk must never trap a cancel
@@ -561,7 +582,12 @@ export class HostedSession {
       // before the answer (agent.ts `runTool`), so an aborted turn never runs
       // the tool and "pending on disk ⇒ never started" still holds.
       await untilAborted(this.persisted(), signal);
-      return reason !== undefined ? { allowed: false, reason } : outcomeToResponse(outcome);
+      if (reason !== undefined) {
+        return { allowed: false, reason };
+      }
+      // A message only ever comes with a reject (`resolvePermission` checked it).
+      const response = outcomeToResponse(outcome);
+      return message !== undefined ? { ...response, message } : response;
     });
   }
 
@@ -603,17 +629,31 @@ export class HostedSession {
    * two answers — in any order, in the same tick or not — exactly one wins.
    * Not pending → `PermissionNotPending` (no effect). An option that was not
    * offered → `InvalidParams`, and the request STAYS pending: a malformed
-   * answer is never a denial.
+   * answer is never a denial. So is a `message` (the person's reply,
+   * docs/feat/permission-reply.md) with an option that is not a `reject_*`
+   * one, or for an ask that did not offer `reply`. The SAME answer as the one
+   * that settled it (a `keyed` re-send after a link drop) is a success with no
+   * effect (`SettledAnswers`); a different one is `PermissionNotPending`.
    */
-  resolvePermission(requestId: string, optionId: string): void {
+  resolvePermission(requestId: string, optionId: string, message?: string): void {
     const ask = this.asks.get(requestId);
     if (!ask) {
+      if (this.answered.isRepeat(requestId, { optionId, message })) {
+        return;
+      }
       throw new RpcError(DomainErrorCode.PermissionNotPending, "permission request not pending");
     }
     if (!ask.offered.has(optionId)) {
       throw new RpcError(JsonRpcErrorCode.InvalidParams, "option not offered for this request");
     }
-    this.settle(requestId, { outcome: "selected", optionId });
+    if (message !== undefined && !ask.replyable.has(optionId)) {
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidParams,
+        "a reply comes only with a refusal of a request that offered one",
+      );
+    }
+    this.answered.remember(requestId, { optionId, message });
+    this.settle(requestId, { outcome: "selected", optionId }, undefined, message);
   }
 
   /**
@@ -621,7 +661,12 @@ export class HostedSession {
    * `permission_resolved` goes out BEFORE the gate is woken, so its seq
    * precedes everything the tool's execution streams.
    */
-  private settle(requestId: string, outcome: PermissionOutcome, reason?: string): void {
+  private settle(
+    requestId: string,
+    outcome: PermissionOutcome,
+    reason?: string,
+    message?: string,
+  ): void {
     const ask = this.asks.get(requestId);
     if (!ask) {
       return;
@@ -633,7 +678,8 @@ export class HostedSession {
         this.emit({ type: "permission_resolved", requestId, outcome });
       }
     } finally {
-      ask.settle(outcome, reason);
+      // The text never rides `permission_resolved`: only the gate gets it.
+      ask.settle(outcome, reason, message);
     }
   }
 
@@ -667,6 +713,11 @@ export class HostedSession {
     }
     const turnId = this.compacting ? null : this.activeTurnId;
     const pending = pendingForRecord(this.pendingList());
+    // By identity, like `awaitsAnswer`: gone from the history → not marked.
+    const head =
+      this.compactionSummary === undefined
+        ? -1
+        : this.session.messages.indexOf(this.compactionSummary);
     return {
       id: this.id,
       createdAt: this.createdAt,
@@ -677,6 +728,7 @@ export class HostedSession {
       enqueueIds: [...this.enqueued],
       title: this.title,
       returned: this.returned.map((r) => ({ ...r })),
+      ...(head >= 0 ? { head } : {}),
       // From the mirror (= the agent's queue in every stretch, the module's
       // load-bearing assumption), so texts and ids never disagree.
       ...(turnId !== null

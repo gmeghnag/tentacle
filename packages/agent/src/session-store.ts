@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { mkdir, open, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import type { ChatMessage } from "@tentacle/core";
+import { type ChatMessage, isPermissionReplyText } from "@tentacle/core";
 import type { SessionSnapshot } from "./session.ts";
 
 export interface SessionRecord {
@@ -214,7 +214,8 @@ const ROLES = new Set(["system", "user", "assistant", "tool"]);
 // a record that passes here can always seed `session/open`. Pinned by a cli test.
 // `durationMs` (docs/fix/tool-duration.md) followed `spill`'s path: an older
 // build refuses a record holding one (`unknown key "durationMs"`), loudly.
-// So did `contextUsage` (docs/feat/context-awareness.md).
+// So did `contextUsage` (docs/feat/context-awareness.md) and `denialReply`
+// (docs/feat/permission-reply.md).
 const MESSAGE_KEYS = new Set([
   "role",
   "content",
@@ -223,6 +224,7 @@ const MESSAGE_KEYS = new Set([
   "spill",
   "durationMs",
   "contextUsage",
+  "denialReply",
 ]);
 const CONTEXT_USAGE_KEYS = new Set(["used", "window"]);
 const TOOL_CALL_KEYS = ["id", "name", "arguments"];
@@ -305,6 +307,9 @@ function messageProblem(value: unknown): string | null {
   }
   if (value.contextUsage !== undefined && !isContextUsage(value.contextUsage)) {
     return "has a malformed contextUsage";
+  }
+  if (value.denialReply !== undefined && !isPermissionReplyText(value.denialReply)) {
+    return "has a malformed denialReply";
   }
   return null;
 }

@@ -3,6 +3,13 @@
 > **Status:** DONE — merged to `main` 2026-10-20 (one fresh-context Review: REQUEST-CHANGES, findings 1–5 fixed; no second Review by owner's choice). Scope: slice 7a only; 7b lives in `docs/feat/suspended-turn-resume.md` (owner decision D)
 > **Branch:** `feat/permission-events`
 > **Type:** feat · **Size:** L (7a: many small edits across 8 packages) · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review (single-broker + pod-trust invariants, AGENTS §7)
+>
+> **Later (docs/feat/permission-reply.md, 2026-10-27):** a tool ask carries
+> `reply: { maxChars }`; `session/resolve_permission` may carry `message` (the
+> person's reply) with a `reject_*` option of such an ask only — otherwise
+> `InvalidParams`, the request stays pending. `permission_resolved` is
+> unchanged and never carries the text. The refused call's result carries it
+> to the model and, as `denialReply`, to the row.
 
 ## Context
 

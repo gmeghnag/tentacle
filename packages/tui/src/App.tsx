@@ -59,8 +59,10 @@ import {
   skillsPanel,
 } from "./panel.ts";
 import { sanitizePasted, stepPaste } from "./paste.ts";
+import { insertReply, orphanNotice, replyView, stepPermissionKey } from "./permission-reply.ts";
 import {
   type AutoAcceptFeed,
+  type DraftBack,
   permissionDetailLines,
   permissionShowsCwd,
   usePermissionBroker,
@@ -462,6 +464,9 @@ export function App({
   // Interactive tool-approval dialog + auto-accept (Shift+Tab), all self-contained.
   // Auto-accept answers only my own turns' requests: the current session decides.
   // A detached run's TUI: auto-accept is its session's, shared (`autoAccept`, B3).
+  // A reply draft that was not sent goes back to the input (wired below, once
+  // `restoreInput` exists; docs/feat/permission-reply.md).
+  const draftBackRef = useRef<DraftBack | null>(null);
   const permission = usePermissionBroker(
     permissions,
     () => {
@@ -471,6 +476,7 @@ export function App({
         : undefined;
     },
     autoAccept,
+    (text, cause) => draftBackRef.current?.(text, cause),
   );
   // The open list panel (`/mcp`, `/skills`; docs/feat/skills-panel.md) or null.
   // Each open and close bumps the generation, so a request answering after its
@@ -749,6 +755,27 @@ export function App({
   // Rows the bottom area occupies: the permission dialog; or the running rows,
   // then the list panel or the input box (plus any open palette rows, which
   // only open while idle).
+  // The reply field's view while it is open (its rows feed the viewport maths).
+  const replyMax = permission.pending?.reply?.maxChars ?? 0;
+  const replyShown =
+    permission.pending && permission.mode.mode === "reply"
+      ? replyView(permission.mode, columns, replyMax)
+      : undefined;
+  const replyMaxRef = useRef(0);
+  replyMaxRef.current = replyMax;
+  const { readMode: readReplyMode, setMode: setReplyMode } = permission;
+  /** Text from outside the key path (a paste, Ctrl+V) into the open reply field; false if none is open. */
+  const insertIntoReply = useCallback(
+    (text: string): boolean => {
+      const mode = readReplyMode();
+      if (mode.mode !== "reply") {
+        return false;
+      }
+      setReplyMode(insertReply(mode, text, replyMaxRef.current));
+      return true;
+    },
+    [readReplyMode, setReplyMode],
+  );
   const activeRows =
     quitConfirm !== null
       ? QUIT_CONFIRM_ROWS
@@ -757,6 +784,7 @@ export function App({
             permission.choices.length,
             permissionDetailLines(permission.pending).length,
             permissionShowsCwd(permission.pending),
+            replyShown?.rows.length,
           )
         : runningRows + (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length);
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
@@ -887,6 +915,7 @@ export function App({
     },
     [field.update, pushNotice],
   );
+  draftBackRef.current = (text, cause) => restoreInput(text, orphanNotice(cause));
 
   /**
    * Watch `session` for my rows coming back (docs/feat/queued-broadcast.md):
@@ -2056,12 +2085,13 @@ export function App({
       pasteBufRef.current = null;
       if (buf) {
         const clean = sanitizePasted(buf);
-        if (clean && !panelRef.current) {
+        // An open reply field takes it, never the hidden main field.
+        if (clean && !insertIntoReply(clean) && !panelRef.current) {
           field.insert(clean);
         }
       }
     }, PASTE_TIMEOUT_MS);
-  }, [clearPasteTimeout, field.insert]);
+  }, [clearPasteTimeout, field.insert, insertIntoReply]);
   useEffect(() => {
     return () => clearPasteTimeout();
   }, [clearPasteTimeout]);
@@ -2095,35 +2125,72 @@ export function App({
       sendNow();
       return;
     }
-    // While the permission dialog is up, keys drive it (nothing else). Arrows
-    // move the selection, enter confirms it; y/a/n are direct shortcuts.
+    // While the permission dialog is up, keys drive it (nothing else). Every
+    // decision is `stepPermissionKey`'s (docs/feat/permission-reply.md); this
+    // executes it.
     if (permission.pending) {
-      const choices = permission.choices;
-      const n = choices.length;
-      if (key.ctrl && char === "c") {
-        // "Stop everything", not "I refuse this command": no deny goes out
-        // (over RPC it would race the cancel and show a false "denied" on every
-        // device); the turn's cancel settles the request — whoever started the
-        // turn (a foreign one too, owner Q2). With no turn shown here to cancel
-        // the dialog stays: dismissing it would orphan the request (suspended,
-        // unseen) until the TUI quits.
-        if (abortRef.current) {
-          permission.answer(DISMISSED);
-          stoppedHereRef.current = true;
-          abortRef.current.abort();
+      const mode = permission.readMode();
+      // The open reply field takes a bracketed paste (sanitized, clipped) —
+      // never the hidden main field, never read as y/n keys.
+      if (mode.mode === "reply") {
+        const pasteStep = stepPaste(pasteBufRef.current, char);
+        if (pasteStep.consumed) {
+          pasteBufRef.current = pasteStep.buffer;
+          if (pasteStep.buffer !== null) {
+            armPasteTimeout();
+          } else {
+            clearPasteTimeout();
+          }
+          if (pasteStep.text !== undefined) {
+            const clean = sanitizePasted(pasteStep.text);
+            if (clean) {
+              insertIntoReply(clean);
+            }
+          }
+          return;
         }
-      } else if (key.upArrow) {
-        permission.setSelected((s) => (s - 1 + n) % n);
-      } else if (key.downArrow) {
-        permission.setSelected((s) => (s + 1) % n);
-      } else if (key.return) {
-        permission.answer(choices[permission.selected]?.response ?? { allowed: false });
-      } else if (char === "y") {
-        permission.answer({ allowed: true, scope: "once" });
-      } else if (char === "a") {
-        permission.answer(choices[1]?.response ?? { allowed: true, scope: "session" });
-      } else if (char === "n" || key.escape) {
-        permission.answer({ allowed: false });
+      }
+      const { state, action } = stepPermissionKey(mode, char, key, {
+        choices: permission.choices,
+        selected: permission.selected,
+        maxChars: replyMax,
+      });
+      if (state !== mode) {
+        permission.setMode(state);
+      }
+      switch (action.kind) {
+        case "stop":
+          // "Stop everything", not "I refuse this command": no deny goes out
+          // (over RPC it would race the cancel and show a false "denied" on every
+          // device); the turn's cancel settles the request — whoever started the
+          // turn (a foreign one too, owner Q2). With no turn shown here to cancel
+          // the dialog stays: dismissing it would orphan the request (suspended,
+          // unseen) until the TUI quits. A reply draft goes back to the input.
+          if (abortRef.current) {
+            permission.answer(DISMISSED);
+            stoppedHereRef.current = true;
+            abortRef.current.abort();
+          }
+          break;
+        case "select":
+          permission.setSelected(action.index);
+          break;
+        case "answer":
+          permission.answer(action.response);
+          break;
+        case "pasteClipboard":
+          void paste().then(
+            (text) => {
+              const clean = sanitizePasted(text);
+              if (clean) {
+                insertIntoReply(clean);
+              }
+            },
+            () => pushNotice("_Clipboard unavailable._"),
+          );
+          break;
+        default:
+          break;
       }
       return;
     }
@@ -2529,6 +2596,8 @@ export function App({
             selected={permission.selected}
             cwd={cwd}
             columns={columns}
+            {...(replyShown ? { reply: replyShown } : {})}
+            replyable={permission.choices.some((c) => c.reply === true)}
           />
         ) : (
           <Box flexDirection="column" width={columns}>
