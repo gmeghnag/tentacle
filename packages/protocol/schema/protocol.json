@@ -874,6 +874,19 @@
     "PermissionRequestUpdate": {
       "additionalProperties": true,
       "properties": {
+        "agent": {
+          "additionalProperties": true,
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string"
+            }
+          },
+          "required": ["description", "type"],
+          "type": "object"
+        },
         "explanation": {
           "type": "string"
         },

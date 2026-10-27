@@ -201,3 +201,18 @@ describe("PermissionRouter — the turn a request belongs to", () => {
     expect(prompt?.kind === "prompt" && "turnId" in prompt).toBe(false);
   });
 });
+
+// docs/feat/permission-call-attribution.md T9: which sub-agent asked rides to
+// the laptop requester (display only — no decision here reads it).
+describe("PermissionRouter — the sub-agent a request comes from", () => {
+  test("the prompt carries the update's agent; a request queued behind another keeps its own", () => {
+    const r = new PermissionRouter();
+    const agent = { type: "explore", description: "find callers" };
+    const [first] = r.request("S", req("r1", { agent }), "X");
+    expect(first?.kind === "prompt" && first.agent).toEqual(agent);
+    r.request("S", req("r2"), "X");
+    const prompt = r.answered("S", "r1", { allowed: true }).find((a) => a.kind === "prompt");
+    expect(prompt?.kind === "prompt" && prompt.requestId).toBe("r2");
+    expect(prompt?.kind === "prompt" && "agent" in prompt).toBe(false);
+  });
+});

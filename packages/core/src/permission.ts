@@ -71,6 +71,16 @@ export interface PermissionRequestOptions {
    * own: docs/feat/tui-foreign-turns.md). Absent: a local request.
    */
   readonly turnId?: string;
+  /**
+   * The call the ask is for: the asking call itself, or the parent
+   * `agent_task` call of a sub-agent (process-internal, like `signal`; the
+   * daemon projects it onto the wire's `toolCallId`).
+   */
+  readonly toolCallId?: string;
+  /** `call`: the call asked for itself. `subagent`: a sub-agent inside call `toolCallId` asked. */
+  readonly origin?: "call" | "subagent";
+  /** Which sub-agent asked (display only; set with `origin: "subagent"`). */
+  readonly agent?: { readonly type: string; readonly description: string };
 }
 
 export type PermissionRequester = (

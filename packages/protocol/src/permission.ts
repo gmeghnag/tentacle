@@ -62,6 +62,13 @@ export const PermissionRequestUpdateSchema = z.object({
   /** The narrower rule an `allow_always` creates (a shell command prefix). */
   suggestion: z.object({ prefix: z.string() }).optional(),
   options: z.array(PermissionOptionSchema).min(1),
+  /**
+   * The sub-agent that asked, inside call `toolCallId` (absent: the call asked
+   * for itself). Display only, from a daemon that may be a pod: no `.max()`, so
+   * an over-long value never makes this blocking update unparseable — the
+   * laptop bounds it when it renders it.
+   */
+  agent: z.object({ type: z.string(), description: z.string() }).optional(),
 });
 export type PermissionRequestUpdate = z.infer<typeof PermissionRequestUpdateSchema>;
 

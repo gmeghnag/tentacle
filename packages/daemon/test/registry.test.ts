@@ -117,7 +117,7 @@ function daemon(model: () => ModelProvider, env: ExecutionEnvironment = noopEnv)
         tools: new ToolRegistry().register(shellTool),
         env,
         jobs: j,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
       });
       return { agent, permissions, jobs: j };
     },

@@ -99,6 +99,11 @@ export interface ToolContext {
    * its sub-agents (one env) exclude each other without any wiring.
    */
   readonly pathLocks?: PathLocks;
+  /**
+   * The call being executed — `agent_task` hands it to its sub-agent, whose
+   * permission asks are attributed to it. Absent outside the agent loop.
+   */
+  readonly toolCallId?: string;
 }
 
 export interface Tool<Input = unknown> {

@@ -1089,6 +1089,7 @@ export class Agent {
       const ctx: ToolContext = {
         ...toolContext,
         emitProgress: (event: ToolProgressEvent) => progress.push(progressToEvent(call.id, event)),
+        toolCallId: call.id,
       };
       const resultPromise = this.runTool(call, ctx).finally(() => progress.close());
       for await (const event of progress.drain()) {

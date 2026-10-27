@@ -6,6 +6,7 @@ import {
   type ModelProvider,
   PermissionBroker,
   type PermissionRequest,
+  type PermissionRequestOptions,
   type PermissionResponse,
   type StreamEvent,
 } from "@tentacle/core";
@@ -57,8 +58,11 @@ class ScriptedProvider implements ModelProvider {
 /** The daemon-side broker, logging what its GATE receives back from the requester. */
 class DaemonBrokerSpy extends PermissionBroker {
   readonly log: string[] = [];
-  override async request(req: PermissionRequest): Promise<PermissionResponse> {
-    const r = await super.request(req);
+  override async request(
+    req: PermissionRequest,
+    options?: PermissionRequestOptions,
+  ): Promise<PermissionResponse> {
+    const r = await super.request(req, options);
     this.log.push(`${req.detail} -> ${JSON.stringify(r)}`);
     return r;
   }
@@ -89,7 +93,7 @@ function daemon(script: readonly (readonly StreamEvent[])[]) {
         model: new ScriptedProvider(script),
         tools: new ToolRegistry().register(shellTool),
         env,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
       });
       return { agent, permissions };
     },

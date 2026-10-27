@@ -4,11 +4,18 @@ import {
   CONTEXT_RESET_TOOL_NAME,
   ToolRegistry,
   createContextResetTool,
+  createTaskTool,
   fsReadTool,
   shellTool,
 } from "@tentacle/tools";
+import { Agent } from "../src/agent.ts";
 import { HookRunner } from "../src/hooks.ts";
-import { BUILTIN_AGENT_TYPES, childToolLabel, createSubagentRunner } from "../src/subagent.ts";
+import {
+  BUILTIN_AGENT_TYPES,
+  childToolLabel,
+  createSubagentRunner,
+  subagentRequester,
+} from "../src/subagent.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -345,6 +352,124 @@ describe("createSubagentRunner", () => {
     });
     await run({ description: "d", prompt: "run ls", type: "general-purpose" });
     expect(execCalls).toEqual([]); // denied by the inherited requester
+  });
+
+  // docs/feat/permission-call-attribution.md T2: a child's ask is attributed
+  // to the PARENT's `agent_task` call — its own call id ("c1" here) is unknown
+  // to the parent history and must never escape.
+  test("a child's ask carries the parent's call id, origin subagent and the agent", async () => {
+    const { env } = recordingEnv();
+    const seen: unknown[] = [];
+    const { run } = createSubagentRunner({
+      model: new ScriptedProvider([[toolCall("shell", { command: "ls" }), { type: "done" }]]),
+      env,
+      tools: fullRegistry(),
+      requestPermission: async (_req, options) => {
+        seen.push(options);
+        return { allowed: false };
+      },
+    });
+    await run(
+      { description: "scan repo", prompt: "run ls", type: "general-purpose" },
+      { toolCallId: "parent-9" },
+    );
+    expect(seen).toEqual([
+      {
+        toolCallId: "parent-9",
+        origin: "subagent",
+        agent: { type: "general-purpose", description: "scan repo" },
+      },
+    ]);
+  });
+
+  test("without a parent call id, a child's ask carries no toolCallId (never its own)", async () => {
+    const { env } = recordingEnv();
+    const seen: unknown[] = [];
+    const { run } = createSubagentRunner({
+      model: new ScriptedProvider([[toolCall("shell", { command: "ls" }), { type: "done" }]]),
+      env,
+      tools: fullRegistry(),
+      requestPermission: async (_req, options) => {
+        seen.push(options);
+        return { allowed: false };
+      },
+    });
+    await run({ description: "d", prompt: "run ls", type: "general-purpose" });
+    expect(seen).toEqual([
+      { origin: "subagent", agent: { type: "general-purpose", description: "d" } },
+    ]);
+  });
+
+  test("the wrapper keeps the other options and overrides origin/agent", async () => {
+    const seen: unknown[] = [];
+    const signal = new AbortController().signal;
+    const wrapped = subagentRequester(
+      async (_req, options) => {
+        seen.push(options);
+        return { allowed: true };
+      },
+      "parent-1",
+      { type: "explore", description: "find" },
+    );
+    await wrapped(
+      { tool: "shell", level: "ask", title: "t", input: {} },
+      { signal, turnId: "t1", toolCallId: "child-3", origin: "call" },
+    );
+    expect(seen).toEqual([
+      {
+        signal,
+        turnId: "t1",
+        toolCallId: "parent-1",
+        origin: "subagent",
+        agent: { type: "explore", description: "find" },
+      },
+    ]);
+  });
+
+  test("through agent_task: the ask names the parent's agent_task call", async () => {
+    const { env } = recordingEnv();
+    const seen: unknown[] = [];
+    const requestPermission = async (_req: unknown, options: unknown) => {
+      seen.push(options);
+      return { allowed: false };
+    };
+    const childModel = new ScriptedProvider([
+      [toolCall("shell", { command: "ls" }), { type: "done" }],
+    ]);
+    const { run, types } = createSubagentRunner({
+      model: childModel,
+      env,
+      tools: fullRegistry(),
+      requestPermission,
+    });
+    const parent = new Agent({
+      model: new ScriptedProvider([
+        [
+          {
+            type: "tool_call",
+            toolCall: {
+              id: "task-42",
+              name: "agent_task",
+              arguments: JSON.stringify({ description: "look", prompt: "run ls" }),
+            },
+          },
+          { type: "done" },
+        ],
+      ]),
+      tools: new ToolRegistry().register(createTaskTool(run, types)),
+      env,
+      requestPermission,
+    });
+    for await (const _ of parent.run("s", [{ role: "user", content: "go" }])) {
+      // drain
+    }
+    expect(seen).toEqual([
+      {
+        toolCallId: "task-42",
+        origin: "subagent",
+        agent: { type: "general-purpose", description: "look" },
+      },
+    ]);
   });
 });
 

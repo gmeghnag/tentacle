@@ -9,6 +9,7 @@ import {
   type LoadResult,
   Session,
   parseSessionRecord,
+  subagentRequester,
 } from "@tentacle/agent";
 import {
   type ChatMessage,
@@ -42,6 +43,7 @@ import {
   SUBAGENT_INTERRUPTED_NOTE,
   classifyPending,
   parseDaemonRecord,
+  pendingForRecord,
   reconcileOnReload,
   restoredActivity,
   toDaemonRecord,
@@ -192,7 +194,7 @@ function rig(
         model,
         tools: registry,
         env,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
         ...agentConfig,
       });
       return { agent, permissions };
@@ -380,6 +382,32 @@ describe("daemon persistence: what is written, when", () => {
     expect(restored.prompt("T1", go)).toEqual({ turnId: "T1", ended: { stopReason: "end_turn" } });
     await restored.persisted();
     expect(r2.store.durable.get(restored.id)?.turn).toBeUndefined();
+  });
+
+  test("B1b the re-ask REPLACES the record carried from disk: a second restart while it is open asks again", async () => {
+    // Mutation: `if (false)` at the `this.carried = undefined` branch in `awaitDecision` →
+    // `carried` + the live ask = 2 entries, no `pending` written, the 2nd reload closes the turn.
+    const runs: string[] = [];
+    const tools = () => [tool("look", "none", runs), tool("run", "ask", runs)];
+    const { record } = await suspendedOnC2(runs, tools);
+
+    const r2 = rig([text("all done")], tools);
+    const restored = r2.host.restore(record);
+    const c = client();
+    restored.attach(c.attachment);
+    await until(() => c.asks.length === 1);
+    await restored.persisted();
+    const second = reread(r2.store.durable.get(restored.id));
+    expect(second.turn?.pending).toMatchObject({ toolCallId: "c2", tool: "run", resumable: true });
+
+    const r3 = rig([text("all done")], tools);
+    const again = r3.host.restore(second);
+    expect(again.running).toBe(true);
+    const c3 = client();
+    again.attach(c3.attachment);
+    await until(() => c3.asks.length === 1);
+    expect(c3.asks[0]?.requestId).not.toBe(c.asks[0]?.requestId);
+    expect(runs).toEqual(["look:{}"]);
   });
 
   test("B2 the restored session's FIRST write still says 'suspended on c2' (the restore window)", async () => {
@@ -597,7 +625,7 @@ describe("daemon persistence: what is written, when", () => {
       model: new Scripted([]),
       tools: registry,
       env,
-      requestPermission: (req) => permissions.request(req),
+      requestPermission: (req, options) => permissions.request(req, options),
     });
     const persister = new SessionPersister({
       store: new SpyStore(),
@@ -745,14 +773,21 @@ describe("daemon persistence: what is written, when", () => {
   });
 
   test("A5 a sub-agent's pending request reloads as 'sub-agent interrupted' (D4)", async () => {
-    // Mutation: drop the tool-name check in classifyPending → the agent_task reads "Not run".
+    // Mutation: drop BOTH the origin and the tool-name checks in classifyPending
+    // → the agent_task reads "Not run" (each alone still refuses it).
     const runs: string[] = [];
     const tools = (broker: PermissionBroker) => [
       {
         ...tool("agent_task", "none", runs),
-        async execute() {
-          // A sub-agent shares the parent's broker: its request goes through the same requester.
-          await broker.request({ tool: "run", level: "ask", title: "run", input: {} });
+        async execute(_input, ctx) {
+          // A sub-agent shares the parent's broker: its request goes through the
+          // same requester, wrapped as the runner wraps it (attributed to this call).
+          const child = subagentRequester(
+            (req, options) => broker.request(req, options),
+            ctx.toolCallId,
+            { type: "explore", description: "d" },
+          );
+          await child({ tool: "run", level: "ask", title: "run", input: {} });
           return { content: "report" };
         },
       } satisfies Tool,
@@ -1321,7 +1356,8 @@ describe("persisted-session (pure)", () => {
     expect(reason({ ...base(), turn: { turnId: "x", steering: [1] } })).toMatch(/"turn"/);
   });
 
-  test("classifyPending: true only for the current call's own, next-in-line request (A14)", () => {
+  test("classifyPending: true only for a call's own, next-in-line request (A14, T4)", () => {
+    // Mutation: drop the `origin` check → the sub-agent shape reads resumable.
     const messages: ChatMessage[] = [
       { role: "user", content: "go" },
       {
@@ -1334,10 +1370,23 @@ describe("persisted-session (pure)", () => {
       },
       { role: "tool", content: "ok", toolCallId: "c1" },
     ];
-    expect(classifyPending(messages, "c2", "run", "run")).toBe(true);
-    expect(classifyPending(messages, "c2", "agent_task", "run")).toBe(false); // sub-agent shape
-    expect(classifyPending(messages, "c1", "look", "look")).toBe(false); // already answered
-    expect(classifyPending(messages.slice(0, 2), "c2", "run", "run")).toBe(false); // c1 unanswered
+    expect(classifyPending(messages, "c2", "call", "run")).toBe(true);
+    // A sub-agent inside c2 asking for c2's own tool: still not resumable.
+    expect(classifyPending(messages, "c2", "subagent", "run")).toBe(false);
+    expect(classifyPending(messages, "c2", "call", "look")).toBe(false); // another tool than the call
+    expect(classifyPending(messages, "c1", "call", "look")).toBe(false); // already answered
+    expect(classifyPending(messages.slice(0, 2), "c2", "call", "run")).toBe(false); // c1 unanswered
+    expect(classifyPending(messages, undefined, "call", "run")).toBe(false); // no attribution
+    expect(classifyPending(messages, "c2", undefined, "run")).toBe(false); // no origin
+  });
+
+  test("pendingForRecord: 0 → none, 1 → that entry as is, more → none (T6)", () => {
+    // Mutation: `list[0]` for any length → two live asks write the first as pending.
+    const a = { toolCallId: "a", tool: "run", resumable: true, requestedAt: 1 };
+    const b = { toolCallId: "b", tool: "run", resumable: true, requestedAt: 2 };
+    expect(pendingForRecord([])).toBeUndefined();
+    expect(pendingForRecord([a])).toBe(a);
+    expect(pendingForRecord([a, b])).toBeUndefined();
   });
 
   test("P7 pinned: agent_task never asks for permission itself", () => {
@@ -2657,5 +2706,192 @@ describe("the v7 record: a message may carry its contextUsage (docs/feat/context
     const user = restored.snapshotPage().messages.find((m) => m.role === "user");
     expect(user?.content).toBe("go");
     expect(user?.contextUsage).toEqual(line ?? { used: -1, window: 1 });
+  });
+});
+
+// docs/feat/permission-call-attribution.md: the daemon attributes an ask from
+// the requester's options, never from the last `tool_start`, and holds several
+// live asks at once. Asks are raised straight through the broker's requester
+// (what a parallel call or sub-agent will do in tasks 6/7).
+describe("permission call attribution", () => {
+  const ask = (tool: string) => ({ tool, level: "ask" as const, title: tool, input: {} });
+
+  test("T3 the ask names the call from its options, not the last tool_start", async () => {
+    // Mutation: attribute from the last `tool_start` (main) → "c2" on the wire and on disk.
+    const tools = (broker: PermissionBroker): Tool[] => [
+      {
+        ...tool("asker", "none", []),
+        async execute() {
+          await broker.request(ask("run"), { toolCallId: "c1", origin: "call" });
+          return { content: "ok" };
+        },
+      },
+    ];
+    const r = rig([[call("c2", "asker"), { type: "done" }]], tools);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 1);
+    expect(c.asks[0]?.toolCallId).toBe("c1");
+    await hosted.persisted();
+    expect(reread(r.store.durable.get(hosted.id)).turn?.pending).toMatchObject({
+      toolCallId: "c1",
+      tool: "run",
+    });
+    c.allow(hosted);
+    await until(() => c.ended("T1"));
+  });
+
+  test("T8 a sub-agent ask streams its agent; an ask without options falls back to 'pending'", async () => {
+    const tools = (broker: PermissionBroker): Tool[] => [
+      {
+        ...tool("agent_task", "none", []),
+        async execute() {
+          await broker.request(ask("run"), {
+            toolCallId: "t1",
+            origin: "subagent",
+            agent: { type: "explore", description: "find callers" },
+          });
+          await broker.request(ask("run"));
+          return { content: "ok" };
+        },
+      },
+    ];
+    const r = rig([[call("t1", "agent_task"), { type: "done" }]], tools);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 1);
+    expect(c.asks[0]).toMatchObject({
+      toolCallId: "t1",
+      agent: { type: "explore", description: "find callers" },
+    });
+    await hosted.persisted();
+    expect(reread(r.store.durable.get(hosted.id)).turn?.pending).toMatchObject({
+      toolCallId: "t1",
+      resumable: false,
+    });
+    c.allow(hosted);
+    await until(() => c.asks.length === 1 && c.asks[0]?.toolCallId === "pending");
+    expect(c.asks[0]?.agent).toBeUndefined();
+    await hosted.persisted();
+    // No attribution: never resumable, never the wrong call.
+    expect(reread(r.store.durable.get(hosted.id)).turn?.pending).toMatchObject({
+      toolCallId: "",
+      resumable: false,
+    });
+    c.allow(hosted);
+    await until(() => c.ended("T1"));
+  });
+
+  /** One call `f1` that raises two asks at once (x1, x2) and reports both answers. */
+  function fanRig(answers: boolean[]) {
+    const tools = (broker: PermissionBroker): Tool[] => [
+      {
+        ...tool("fan", "none", []),
+        async execute() {
+          const both = await Promise.all([
+            broker.request(ask("run"), { toolCallId: "x1", origin: "call" }),
+            broker.request(ask("run"), { toolCallId: "x2", origin: "call" }),
+          ]);
+          answers.push(...both.map((a) => a.allowed));
+          return { content: "ok" };
+        },
+      },
+    ];
+    return rig([[call("f1", "fan"), { type: "done" }]], tools);
+  }
+
+  test("T5/T6 two live asks: each its own request; answered one by one; disk holds only a single one", async () => {
+    // Mutation: one `pending` slot overwritten by each ask (main) → the record
+    // names x2 while two are live; or `pendingForRecord` keeps the first of
+    // two → the record says "x1 pending" while x2 is too.
+    const answers: boolean[] = [];
+    const r = fanRig(answers);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 2);
+    const [first, second] = c.asks;
+    expect(first?.requestId).not.toBe(second?.requestId);
+    expect(c.asks.map((a) => a.toolCallId)).toEqual(["x1", "x2"]);
+    await hosted.persisted();
+    const both = reread(r.store.durable.get(hosted.id));
+    expect(both.turn).toBeDefined();
+    expect(both.turn?.pending).toBeUndefined();
+    // A record written with two live asks reloads CLOSED: never resumed, never re-run.
+    const reloaded = rig([], () => []).host.restore(both);
+    expect(shape(reloaded.snapshotPage().messages).at(-1)).toBe(`tool(f1):${INTERRUPTED_NOTE}`);
+    expect(reconcileOnReload(both).resume).toBeUndefined();
+    expect(reconcileOnReload(both).turns).toContainEqual({ turnId: "T1", end: RESTART_TURN_END });
+
+    hosted.resolvePermission(first?.requestId ?? "", "allow_once");
+    expect(c.asks.map((a) => a.toolCallId)).toEqual(["x2"]);
+    await tick(); // the settled ask's write is scheduled after the answer returns
+    await hosted.persisted();
+    expect(reread(r.store.durable.get(hosted.id)).turn?.pending).toMatchObject({
+      toolCallId: "x2",
+    });
+    // A stale answer to the first never binds to the second.
+    expect(() => hosted.resolvePermission(first?.requestId ?? "", "reject_once")).toThrow(
+      expect.objectContaining({ code: DomainErrorCode.PermissionNotPending }),
+    );
+    hosted.resolvePermission(second?.requestId ?? "", "reject_once");
+    await until(() => c.ended("T1"));
+    expect(answers).toEqual([true, false]);
+  });
+
+  test("T5 a cancel settles every live ask", async () => {
+    const answers: boolean[] = [];
+    const r = fanRig(answers);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 2);
+    hosted.cancel();
+    await until(() => c.ended("T1"));
+    expect(c.asks).toEqual([]);
+    const cancelled = c.updates.flatMap((u) =>
+      u.update.type === "permission_resolved" ? [u.update.outcome] : [],
+    );
+    expect(cancelled).toEqual([{ outcome: "cancelled" }, { outcome: "cancelled" }]);
+    expect(answers).toEqual([false, false]);
+  });
+
+  test("T7 a history_commit does not drop another call's live ask from the record", async () => {
+    // Mutation: clear every pending ask at a commit (main's single slot) → red.
+    let unpark: () => void = () => {};
+    const parked = new Promise<void>((resolve) => {
+      unpark = resolve;
+    });
+    let parkedRunning = false;
+    let answered: Promise<unknown> = Promise.resolve();
+    const tools = (broker: PermissionBroker): Tool[] => [
+      {
+        ...tool("fire", "none", []),
+        async execute() {
+          // Left live past this call's own commit (as a parallel sibling's would be).
+          answered = broker.request(ask("run"), { toolCallId: "c1", origin: "call" });
+          return { content: "ok" };
+        },
+      },
+      tool("park", "none", [], async () => {
+        parkedRunning = true;
+        await parked;
+      }),
+    ];
+    const r = rig([[call("c1", "fire"), call("c2", "park"), { type: "done" }]], tools);
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => parkedRunning && c.asks.length === 1);
+    await hosted.persisted();
+    expect(reread(r.store.durable.get(hosted.id)).turn?.pending).toMatchObject({
+      toolCallId: "c1",
+    });
+    c.allow(hosted);
+    await answered;
+    unpark();
+    await until(() => c.ended("T1"));
   });
 });

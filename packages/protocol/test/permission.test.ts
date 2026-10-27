@@ -49,6 +49,18 @@ describe("permission_request update", () => {
     expect(SessionUpdateSchema.safeParse(request).success).toBe(true);
     expect(UPDATE_CLASS.permission_request).toBe("blocking");
   });
+
+  test("agent (the asking sub-agent) is optional, kept, its unknown fields stripped, never length-capped", () => {
+    // docs/feat/permission-call-attribution.md T8. Mutation: drop `agent` from
+    // the schema → stripped from a parsed request → red.
+    const agent = { type: "explore", description: "x".repeat(10_000) };
+    const parsed = SessionUpdateSchema.parse({ ...request, agent: { ...agent, extra: 1 } });
+    expect(parsed).toEqual({ ...request, agent } as typeof parsed);
+    expect(SessionUpdateSchema.parse(request)).toEqual(request as typeof parsed);
+    expect(
+      PermissionRequestUpdateSchema.safeParse({ ...request, agent: { type: "explore" } }).success,
+    ).toBe(false);
+  });
 });
 
 describe("permission_resolved update", () => {

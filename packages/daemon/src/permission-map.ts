@@ -4,7 +4,11 @@
  * (`PermissionOption`/`PermissionOutcome`). The daemon offers the options; the
  * client's selection maps back to a gate decision. Pure and table-driven.
  */
-import type { PermissionRequest, PermissionResponse } from "@tentacle/core";
+import type {
+  PermissionRequest,
+  PermissionRequestOptions,
+  PermissionResponse,
+} from "@tentacle/core";
 import type {
   PermissionOption,
   PermissionOutcome,
@@ -24,11 +28,15 @@ export function permissionOptions(req: PermissionRequest): PermissionOption[] {
   ];
 }
 
-/** The stream event for one ask; `requestId` is its nonce (fresh per ask). */
+/**
+ * The stream event for one ask; `requestId` is its nonce (fresh per ask).
+ * `agent`: the sub-agent that asked (the requester's `options.agent`).
+ */
 export function toPermissionRequestUpdate(
   requestId: string,
   toolCallId: string,
   req: PermissionRequest,
+  agent?: PermissionRequestOptions["agent"],
 ): PermissionRequestUpdate {
   return {
     type: "permission_request",
@@ -39,6 +47,7 @@ export function toPermissionRequestUpdate(
     ...(req.detail ? { explanation: req.detail } : {}),
     ...(req.suggestion ? { suggestion: { prefix: req.suggestion.prefix } } : {}),
     options: permissionOptions(req),
+    ...(agent ? { agent: { type: agent.type, description: agent.description } } : {}),
   };
 }
 

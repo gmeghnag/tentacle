@@ -159,7 +159,12 @@ export class PermissionGate {
       return run;
     }
     const request = describeToolCall(tool, effective);
-    const response = await this.requester(request);
+    // Explicit attribution: the daemon must not guess the call from its stream
+    // (docs/feat/permission-call-attribution.md).
+    const response = await this.requester(request, {
+      toolCallId: call.toolCallId,
+      origin: "call",
+    });
     if (response.allowed && response.scope === "session") {
       this.remember(tool, request);
     }

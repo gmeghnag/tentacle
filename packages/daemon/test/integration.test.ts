@@ -69,7 +69,7 @@ function harness(
         model,
         tools: new ToolRegistry().register(shellTool),
         env,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
       });
       return { agent, permissions };
     },
@@ -601,7 +601,7 @@ describe("connection close", () => {
           model: new ScriptedProvider([]),
           tools: new ToolRegistry(),
           env: noopEnv,
-          requestPermission: (req) => permissions.request(req),
+          requestPermission: (req, options) => permissions.request(req, options),
         });
         return { agent, permissions, jobs };
       },
@@ -694,7 +694,7 @@ describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
           model,
           tools: new ToolRegistry().register(shellTool),
           env: opts.env ?? noopEnv,
-          requestPermission: (req) => permissions.request(req),
+          requestPermission: (req, options) => permissions.request(req, options),
           ...(opts.maxIterations !== undefined ? { maxIterations: opts.maxIterations } : {}),
         });
         return { agent, permissions };

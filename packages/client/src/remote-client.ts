@@ -1866,6 +1866,7 @@ export class RemoteClient {
           .request(action.request, {
             signal: controller.signal,
             ...(action.turnId !== undefined ? { turnId: action.turnId } : {}),
+            ...(action.agent !== undefined ? { agent: action.agent } : {}),
           })
           .then(answered, (error: unknown) => {
             this.onError?.(error instanceof Error ? error : new Error(String(error)));

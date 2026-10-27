@@ -63,7 +63,7 @@ function realDaemon(model: ModelProvider, env: ExecutionEnvironment) {
         model,
         tools: new ToolRegistry().register(shellTool),
         env,
-        requestPermission: (req) => permissions.request(req),
+        requestPermission: (req, options) => permissions.request(req, options),
       });
       return { agent, permissions };
     },
