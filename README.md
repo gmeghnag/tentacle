@@ -56,8 +56,7 @@ a `PROMPT.md`. Point it at your model:
   "model": {
     "baseURL": "http://localhost:8080/v1",
     "model": "my-model",
-    // Prefer apiKeyCommand so the secret is never written to disk:
-    "apiKeyCommand": "cat ~/.cache/my-api-key"
+    "apiKey": "your-api-key"
   }
 }
 ```
