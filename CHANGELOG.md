@@ -8,6 +8,8 @@ those.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-27
+
 This release adds Docker and Podman as places to run, and moves the protocol
 from 10 to 13. **Upgrade the CLI and every daemon or pod together:** a CLI and
 an older pod or daemon refuse each other at connect with a version error.
