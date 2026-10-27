@@ -112,6 +112,14 @@ export const ARGS = {
     conflicts: [["list", "revoke"]],
     positional: { min: 1, max: 1 },
   },
+  // Kept workloads (docs/feat/engine-ps-rm.md).
+  ps: {
+    values: { engine: {} },
+    bools: { quiet: { short: "q" }, verbose: { short: "v" } },
+    conflicts: [["quiet", "verbose"]],
+    positional: { min: 0, max: 0 },
+  },
+  rm: { values: { engine: {} }, bools: { force: { short: "f" } }, positional: { min: 1, max: 1 } },
   package: { positional: { min: 1, max: 2 } },
   update: { values: { version: {} }, bools: { check: {} }, positional: { min: 0, max: 0 } },
 } as const satisfies Record<string, ArgSpec>;
@@ -405,6 +413,8 @@ const COMMANDS = new Set([
   "serve",
   "run",
   "attach",
+  "ps",
+  "rm",
   "connect",
   "hooks",
   "package",
@@ -479,6 +489,8 @@ export type CliMode =
   | "serve"
   | "run"
   | "attach"
+  | "ps"
+  | "rm"
   | "hooks"
   | "package"
   | "update"
@@ -502,6 +514,8 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "serve" ||
     first === "run" ||
     first === "attach" ||
+    first === "ps" ||
+    first === "rm" ||
     first === "hooks" ||
     first === "package" ||
     first === "update"
@@ -526,6 +540,8 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   run: "tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]",
   attach:
     "tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--context <ctx>] [--insecure-docker-tcp] [--bin-dir <dir>] [--resume [uid]|--continue]",
+  ps: "tentacle ps [--engine kubernetes|docker|podman] [-q|--quiet] [-v|--verbose]",
+  rm: "tentacle rm [--engine kubernetes|docker|podman] [-f|--force] <name>",
   plain: "tentacle --plain",
   hooks: "tentacle hooks trust --list | --revoke <folder>",
   package: "tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]",

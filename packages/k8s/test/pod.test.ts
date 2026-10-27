@@ -53,4 +53,23 @@ describe("buildPodManifest", () => {
     expect(pod.metadata?.labels?.team).toBe("core");
     expect(pod.metadata?.labels?.["app.kubernetes.io/managed-by"]).toBe("tentacle");
   });
+
+  test("annotations ride metadata.annotations (free text: a path or ctx/ns is no label value)", () => {
+    const pod = buildPodManifest({
+      name: "p",
+      image: "i",
+      annotations: { "tentacle.model": "openai/gpt-x" },
+    });
+    expect(pod.metadata?.annotations).toEqual({ "tentacle.model": "openai/gpt-x" });
+    expect(buildPodManifest({ name: "p", image: "i" }).metadata?.annotations).toBeUndefined();
+  });
+
+  test("a caller label can never take over the managed-by marker", () => {
+    const pod = buildPodManifest({
+      name: "p",
+      image: "i",
+      labels: { "app.kubernetes.io/managed-by": "someone-else" },
+    });
+    expect(pod.metadata?.labels?.["app.kubernetes.io/managed-by"]).toBe("tentacle");
+  });
 });

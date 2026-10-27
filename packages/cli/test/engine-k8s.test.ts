@@ -31,8 +31,10 @@ class StubCluster implements PodCluster {
   pod: Pod = { metadata: { name: "p" }, status: { phase: "Running" } };
   createError: unknown = null;
   getError: unknown = null;
+  readonly pods: Pod[] = [];
   createPod(pod: Pod): Promise<Pod> {
     this.calls.push(`create:${pod.metadata?.name}:${pod.metadata?.namespace}`);
+    this.pods.push(pod);
     return this.createError ? Promise.reject(this.createError) : Promise.resolve(pod);
   }
   getPod(name: string): Promise<Pod> {
@@ -211,6 +213,45 @@ describe("kubeEngineHost", () => {
       "delete:p",
       "besteffort:p",
     ]);
+  });
+
+  test("describe (slice E): phase → status, labels + annotations; 404 → null; 403 throws", async () => {
+    const kube = new StubCluster();
+    const host = kubeEngineHost(kube, "dev");
+    const metadata = {
+      name: "p",
+      labels: { "app.kubernetes.io/managed-by": "tentacle", "tentacle.kept": "true" },
+      annotations: { "tentacle.model": "m" },
+    };
+    kube.pod = { metadata, status: { phase: "Running" } };
+    expect(await host.describe("p")).toEqual({
+      status: "running",
+      labels: metadata.labels,
+      annotations: metadata.annotations,
+    });
+    kube.pod = { metadata: { name: "p" }, status: { phase: "Succeeded" } };
+    expect(await host.describe("p")).toEqual({ status: "exited", labels: {} });
+    kube.pod = { metadata: { name: "p" }, status: { phase: "Failed" } };
+    expect((await host.describe("p"))?.status).toBe("exited");
+    kube.pod = { metadata: { name: "p" }, status: { phase: "Pending" } };
+    expect((await host.describe("p"))?.status).toBe("pending");
+    kube.getError = new KubeApiError(404, "");
+    expect(await host.describe("p")).toBeNull();
+    kube.getError = new KubeApiError(403, "forbidden");
+    await expect(host.describe("p")).rejects.toThrow("forbidden");
+  });
+
+  test("create: kept label is a LABEL, the rest annotations; managed-by stays", async () => {
+    const kube = new StubCluster();
+    await kubeEngineHost(kube, "dev").create("p", "img", {
+      labels: { "tentacle.kept": "true" },
+      annotations: { "tentacle.model": "openai/gpt-x" },
+    });
+    expect(kube.pods[0]?.metadata?.labels).toEqual({
+      "tentacle.kept": "true",
+      "app.kubernetes.io/managed-by": "tentacle",
+    });
+    expect(kube.pods[0]?.metadata?.annotations).toEqual({ "tentacle.model": "openai/gpt-x" });
   });
 
   test("execError: the closed-before-status exec names the container and namespace", () => {

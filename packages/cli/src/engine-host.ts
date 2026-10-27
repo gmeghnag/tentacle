@@ -52,6 +52,17 @@ export interface EngineCreateOptions {
   readonly workspace?: WorkspaceMount;
   /** Extra workload labels (slice E: `ps`); the host's own labels win a clash. */
   readonly labels?: Readonly<Record<string, string>>;
+  /** Free-text metadata (slice E): k8s annotations; docker/podman add them as labels. */
+  readonly annotations?: Readonly<Record<string, string>>;
+}
+
+/** `describe`: what the engine says about a workload — its state and metadata (untrusted text). */
+export interface WorkloadFacts {
+  /** `running` | `exited` | `pending` | the engine's own word (`created`, `paused`…). */
+  readonly status: string;
+  readonly labels: Readonly<Record<string, string>>;
+  /** k8s only. */
+  readonly annotations?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -87,6 +98,11 @@ export interface EngineHost {
   waitForReady(name: string, options?: { readonly timeoutMs?: number }): Promise<void>;
   /** The `attach` preflight (a missing workload throws an actionable error). */
   inspect(name: string): Promise<WorkloadState>;
+  /**
+   * `ps` / `rm` (slice E): the workload's state and labels — `null` when the
+   * engine says it does not exist (404); any other failure throws.
+   */
+  describe(name: string): Promise<WorkloadFacts | null>;
   /** The reconnect preflight: `null` → dial it; else why not (gone / unauthorized / transient). */
   dialVerdict(name: string): Promise<ChannelError | null>;
   remove(name: string): Promise<void>;

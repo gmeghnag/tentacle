@@ -1,5 +1,21 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { currentKubeContext } from "../src/kube-auth.ts";
 import { parseKubeconfig, resolveContext } from "../src/kubeconfig.ts";
+
+describe("currentKubeContext", () => {
+  test("names the kubeconfig's current-context; missing file / none → undefined", () => {
+    const dir = mkdtempSync(join(tmpdir(), "kctx-"));
+    const path = join(dir, "config");
+    writeFileSync(path, "apiVersion: v1\ncurrent-context: dev-cluster\ncontexts: []\n");
+    expect(currentKubeContext(path)).toBe("dev-cluster");
+    writeFileSync(path, "apiVersion: v1\ncontexts: []\n");
+    expect(currentKubeContext(path)).toBeUndefined();
+    expect(currentKubeContext(join(dir, "nope"))).toBeUndefined();
+  });
+});
 
 const b64 = (s: string): string => Buffer.from(s).toString("base64");
 

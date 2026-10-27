@@ -28,12 +28,19 @@ import {
   dialerFor,
   endpointLabel,
   resolveEngineEndpoint,
+  resolveHostEndpoint,
   resolvePodmanEndpoint,
 } from "@tentacle/docker";
-import { KubeClient, type KubeClientOptions, loadKubeClientOptions } from "@tentacle/k8s";
+import {
+  KubeClient,
+  type KubeClientOptions,
+  currentKubeContext,
+  loadKubeClientOptions,
+} from "@tentacle/k8s";
 import { type DockerClientLike, dockerEngineHost } from "./engine-docker.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { type PodCluster, kubeEngineHost } from "./engine-k8s.ts";
+import type { KeptEntry } from "./kept.ts";
 import {
   type CaseFs,
   type HideEntry,
@@ -175,6 +182,12 @@ export interface EngineHostOptions {
   readonly context?: string | undefined;
   /** docker/podman: `--insecure-docker-tcp`. */
   readonly allowInsecureTcp?: boolean;
+  /** docker/podman, a kept entry (slice E): this engine URL, instead of discovery / `DOCKER_HOST`. */
+  readonly host?: string | undefined;
+  /** kubernetes, a kept entry: this kubeconfig context instead of the current one. */
+  readonly kubeContext?: string | undefined;
+  /** kubernetes, a kept entry: this API server (the `TENTACLE_K8S_SERVER` it was made with). */
+  readonly server?: string | undefined;
 }
 
 /** The host's surroundings, injectable for tests. */
@@ -226,6 +239,72 @@ export interface BuiltEngineHost {
   readonly namespace?: string;
   /** docker/podman: the endpoint (its locality decides the workspace mount). */
   readonly endpoint?: EngineEndpoint;
+  /** kubernetes: the kubeconfig context used (absent with a `server` override). */
+  readonly kubeContext?: string;
+  /** kubernetes: the `TENTACLE_K8S_SERVER` (or kept-entry) server used. */
+  readonly server?: string;
+}
+
+/** An endpoint as a URL `resolveHostEndpoint` takes back (no TLS material, no secret). */
+export function endpointUrl(endpoint: EngineEndpoint): string {
+  switch (endpoint.kind) {
+    case "unix":
+      return `unix://${endpoint.path}`;
+    case "tcp":
+      return `tcp://${endpoint.host}:${endpoint.port}`;
+    case "ssh":
+      return `ssh://${endpoint.user ? `${endpoint.user}@` : ""}${endpoint.host}${endpoint.port ? `:${endpoint.port}` : ""}`;
+  }
+}
+
+/** Where a kept workload lives, for its index entry (slice E): locators only. */
+export type KeptLocation = Pick<
+  KeptEntry,
+  "endpoint" | "context" | "server" | "namespace" | "insecureTcp"
+>;
+
+/** The locator of a workload created on `built` (`run`). */
+export function keptLocation(
+  kind: EngineKind,
+  built: BuiltEngineHost,
+  flags: { readonly context?: string | undefined; readonly insecureTcp?: boolean },
+): KeptLocation {
+  if (kind === "kubernetes") {
+    return {
+      namespace: built.namespace ?? "default",
+      ...(built.server !== undefined
+        ? { server: built.server }
+        : built.kubeContext !== undefined
+          ? { context: built.kubeContext }
+          : {}),
+    };
+  }
+  return {
+    ...(built.endpoint ? { endpoint: endpointUrl(built.endpoint) } : {}),
+    ...(flags.context !== undefined ? { context: flags.context } : {}),
+    ...(flags.insecureTcp ? { insecureTcp: true } : {}),
+  };
+}
+
+/** A kept entry → the `buildEngineHost` options that dial the SAME place again. */
+export function hostOptionsFor(entry: Pick<KeptEntry, "engine"> & KeptLocation): EngineHostOptions {
+  if (entry.engine === "kubernetes") {
+    return {
+      namespace: entry.namespace,
+      ...(entry.server !== undefined ? { server: entry.server } : {}),
+      ...(entry.server === undefined && entry.context !== undefined
+        ? { kubeContext: entry.context }
+        : {}),
+    };
+  }
+  return {
+    ...(entry.context !== undefined
+      ? { context: entry.context }
+      : entry.endpoint !== undefined
+        ? { host: entry.endpoint }
+        : {}),
+    ...(entry.insecureTcp ? { allowInsecureTcp: true } : {}),
+  };
 }
 
 /**
@@ -418,22 +497,30 @@ export function buildEngineHost(
   io: EngineHostIO = defaultEngineHostIO(),
 ): BuiltEngineHost {
   if (kind === "kubernetes") {
-    const { namespace } = options;
-    const envServer = io.env.TENTACLE_K8S_SERVER;
+    const { namespace, kubeContext } = options;
+    // A kept entry's server wins over today's env: it re-dials where it was made.
+    const server =
+      options.server ?? (kubeContext === undefined ? io.env.TENTACLE_K8S_SERVER : undefined);
     let auth: KubeClientOptions;
-    if (envServer) {
+    if (server) {
       const token = io.env.TENTACLE_K8S_TOKEN;
       auth = {
-        server: envServer,
+        server,
         namespace: namespace ?? "default",
         ...(token ? { token } : {}),
       } as KubeClientOptions;
     } else {
-      auth = loadKubeClientOptions({ ...(namespace ? { namespace } : {}) });
+      auth = loadKubeClientOptions({
+        ...(namespace ? { namespace } : {}),
+        ...(kubeContext ? { context: kubeContext } : {}),
+      });
     }
+    const context = server ? undefined : (kubeContext ?? currentKubeContext());
     return {
       host: kubeEngineHost(io.kubeClient(auth), auth.namespace),
       namespace: auth.namespace,
+      ...(server ? { server } : {}),
+      ...(context !== undefined ? { kubeContext: context } : {}),
     };
   }
   const shared = {
@@ -441,8 +528,11 @@ export function buildEngineHost(
     ...(options.allowInsecureTcp ? { allowInsecureTcp: true } : {}),
     readFile: io.readFile,
   };
-  const endpoint =
-    kind === "docker"
+  const endpoint = options.host
+    ? resolveHostEndpoint(options.host, "the kept workload's engine", {
+        ...(options.allowInsecureTcp ? { allowInsecureTcp: true } : {}),
+      })
+    : kind === "docker"
       ? resolveEngineEndpoint({ env: io.env, homeDir: io.homeDir, ...shared })
       : resolvePodmanEndpoint({
           env: io.env,

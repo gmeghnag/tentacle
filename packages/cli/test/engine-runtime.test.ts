@@ -35,6 +35,7 @@ import {
   createChannelPair,
 } from "@tentacle/transport";
 import type { TentacleConfig } from "../src/config.ts";
+import { WorkloadRemovedError } from "../src/engine-host.ts";
 import { type PodCluster, kubeEngineHost, podDialError } from "../src/engine-k8s.ts";
 import {
   type EngineAttachRuntimeDeps,
@@ -646,6 +647,87 @@ describe("startPodRuntime", () => {
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
     expect(logs).toContain(
       "[pod] kept broken — resume with: tentacle attach --engine kubernetes -n dev broken\n",
+    );
+  });
+
+  // Slice E (docs/feat/engine-ps-rm.md): a kept workload carries its metadata
+  // and is recorded in the laptop index right after it exists.
+  test("--keep: labels + annotations reach the create; recorded once, after the create", async () => {
+    const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const pods: Pod[] = [];
+    const create = kube.createPod.bind(kube);
+    kube.createPod = (pod) => {
+      pods.push(pod);
+      return create(pod);
+    };
+    const recorded: string[] = [];
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), {
+      kube,
+      namespace: "dev",
+      image: "img",
+      name: "keeper",
+      keepHint: (name) => `tentacle attach ${name}`,
+      labels: { "tentacle.kept": "true" },
+      annotations: { "tentacle.model": "m" },
+      recordKept: (name) => {
+        recorded.push(`${name}:${kube.calls.filter((c) => c.startsWith("create:")).length}`);
+        return () => recorded.push(`forgot:${name}`);
+      },
+      permissions: new PermissionBroker(),
+      saver: new SessionSaver(new JsonSessionStore(join(dir, "keep-rec")), () => {}),
+      resume: null,
+      log: () => {},
+    });
+    runtime.dispose();
+    expect(recorded).toEqual(["keeper:1"]);
+    expect(pods[0]?.metadata?.labels?.["tentacle.kept"]).toBe("true");
+    expect(pods[0]?.metadata?.annotations).toEqual({ "tentacle.model": "m" });
+  });
+
+  test("--keep: the entry is forgotten when the host already removed the workload", async () => {
+    const kube = new FakeCluster(new ScriptedProvider([]));
+    kube.waitForReady = () => Promise.reject(new WorkloadRemovedError("mask visible. removed."));
+    const recorded: string[] = [];
+    await expect(
+      startPodRuntime(baseConfig("/pod/work"), {
+        kube,
+        namespace: "dev",
+        image: "img",
+        name: "gone1",
+        keepHint: (name) => `tentacle attach ${name}`,
+        recordKept: (name) => {
+          recorded.push(name);
+          return () => recorded.push(`forgot:${name}`);
+        },
+        permissions: new PermissionBroker(),
+        saver: new SessionSaver(new JsonSessionStore(join(dir, "keep-rm")), () => {}),
+        resume: null,
+        log: () => {},
+      }),
+    ).rejects.toThrow("mask visible");
+    expect(recorded).toEqual(["gone1", "forgot:gone1"]);
+  });
+
+  test("--keep: an index write failure is SAID (with the manual cleanup), never swallowed", async () => {
+    const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const logs: string[] = [];
+    const runtime = await startPodRuntime(baseConfig("/pod/work"), {
+      kube,
+      namespace: "dev",
+      image: "img",
+      name: "k2",
+      keepHint: (name) => `tentacle attach ${name}`,
+      recordKept: () => {
+        throw new Error("EACCES");
+      },
+      permissions: new PermissionBroker(),
+      saver: new SessionSaver(new JsonSessionStore(join(dir, "keep-err")), () => {}),
+      resume: null,
+      log: (line) => logs.push(line),
+    });
+    runtime.dispose();
+    expect(logs).toContain(
+      "[pod] warning: k2 is not in `tentacle ps` (could not record it: EACCES) — remove it yourself when done\n",
     );
   });
 

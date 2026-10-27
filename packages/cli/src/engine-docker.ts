@@ -171,7 +171,9 @@ export function dockerEngineHost(options: DockerEngineHostOptions): EngineHost {
       const body = containerBody(image, {
         ...(workspace ? { workspace } : {}),
         ...engineOptions,
-        ...(createOptions?.labels ? { labels: createOptions.labels } : {}),
+        ...(createOptions?.labels || createOptions?.annotations
+          ? { labels: { ...createOptions.annotations, ...createOptions.labels } }
+          : {}),
       });
       // The client's 404 branch (no such image) is the only plain-`Error` reject
       // that starts with this prefix; API errors are `DockerApiError`s.
@@ -295,6 +297,17 @@ export function dockerEngineHost(options: DockerEngineHostOptions): EngineHost {
         kind: "stopped",
         detail: `container "${name}" is ${status ?? "not running"} — start it yourself (\`${cli} start ${name}\`) and attach again; attach never starts a container`,
       };
+    },
+    async describe(name) {
+      try {
+        const info = await client.inspectContainer(name);
+        return { status: info.State?.Status ?? "unknown", labels: { ...info.Config?.Labels } };
+      } catch (error) {
+        if (is404(error)) {
+          return null;
+        }
+        throw toError(error);
+      }
     },
     async dialVerdict(name) {
       try {

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 /**
@@ -41,6 +42,8 @@ import {
   chooseEngine,
   engineFlagProblem,
   engineNoun,
+  hostOptionsFor,
+  keptLocation,
   laptopWorkspaceInput,
   resolveKeep,
   setupFailureLine,
@@ -59,6 +62,9 @@ import {
   resolveToken,
 } from "./flags.ts";
 import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
+import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
+import { forgetKept, keptDir, recordKept } from "./kept-index.ts";
+import { KEPT_SCHEMA_VERSION, ambiguousMessage, keptMetadata, whereOf } from "./kept.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { render } from "./render.ts";
@@ -98,7 +104,14 @@ Usage:
                                 injected if it is not there yet); --container is the
                                 pod's container to exec into (default: its only one);
                                 it is NOT deleted on exit — closing the TUI
-                                detaches, it stays up
+                                detaches, it stays up. A kept one (see ps) needs
+                                no --engine: its engine and location are looked up
+  tentacle ps [--engine <e>] [-q] [-v]
+                                list the pods/containers run kept, checked against
+                                their engine (-q names only, -v details)
+  tentacle rm [--engine <e>] [-f] <name>
+                                remove a kept pod/container (only one tentacle kept;
+                                a running one asks y/N, -f skips the question)
   tentacle <prompt...>     run a single task and exit
   tentacle -- <prompt...>  the same, for a prompt that starts with '-'
   tentacle serve [opts]    host the remote-control daemon
@@ -418,6 +431,39 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     );
   }
 
+  // `tentacle ps` / `rm <name>` (docs/feat/engine-ps-rm.md): the laptop's kept
+  // index, verified against each engine. No TUI, plain output, no model.
+  if (mode === "ps" || mode === "rm") {
+    const engineFlag = parsed.flags.get("engine");
+    let engine: EngineKind | undefined;
+    if (engineFlag !== undefined) {
+      const choice = chooseEngine({ flag: engineFlag });
+      if (!choice.ok) {
+        write(`\n[error] ${choice.error}\nusage: ${USAGE[mode]}\n`);
+        return 1;
+      }
+      engine = choice.kind;
+    }
+    const colour = (process.stdout.isTTY ?? false) && !process.env.NO_COLOR;
+    const ask = io.ask ?? (process.stdin.isTTY && process.stdout.isTTY ? askLine : undefined);
+    const deps: KeptDeps = {
+      dir: keptDir(config.configDir),
+      hostFor: (entry) => buildEngineHost(entry.engine, hostOptionsFor(entry)).host,
+      write,
+      writeErr,
+      now: Date.now,
+      home: homedir(),
+      dim: (text) => (colour ? `\x1b[2m${text}\x1b[22m` : text),
+      ...(ask ? { ask } : {}),
+    };
+    return mode === "ps"
+      ? psCommand(
+          { engine, quiet: parsed.bools.has("quiet"), verbose: parsed.bools.has("verbose") },
+          deps,
+        )
+      : rmCommand(parsed.positional[0] ?? "", { engine, force: parsed.bools.has("force") }, deps);
+  }
+
   // Skill discovery problems, once, before any Ink mount (AGENTS §7: no raw
   // write while Ink owns the terminal). Only where THIS config builds the
   // agent: `run`/`attach` sessions use the pod's own skills, discovered (and
@@ -722,6 +768,24 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         write(`[${noun}] warning: ${warning}\n`);
       }
     }
+    // Slice E: a kept workload carries its metadata and goes in the laptop
+    // index (`tentacle ps`) at the location it was really created on.
+    const created = new Date().toISOString();
+    const keptMeta = kept.keep ? keptMetadata({ engine, model: config.model, created }) : undefined;
+    const insecureTcp = runBools.has("insecure-docker-tcp");
+    const recordKeptEntry = (keptName: string): (() => void) => {
+      const file = recordKept(keptDir(config.configDir), {
+        schemaVersion: KEPT_SCHEMA_VERSION,
+        name: keptName,
+        engine,
+        ...keptLocation(engine, built, { context, insecureTcp }),
+        ...(binDir ? { binDir } : {}),
+        ...(wsPlan.kind === "mount" ? { mount: wsPlan.mount.target } : {}),
+        model: config.model,
+        created,
+      });
+      return () => forgetKept(file);
+    };
     // ONE broker shared by the engine runtime and the TUI (see `runEngineTui`).
     const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
     let runtime: Awaited<ReturnType<typeof startEngineRuntime>>;
@@ -738,9 +802,16 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
                 attachCommand(engine, name, {
                   namespace: built.namespace,
                   context,
-                  insecureTcp: runBools.has("insecure-docker-tcp"),
+                  insecureTcp,
                   binDir,
                 }),
+            }
+          : {}),
+        ...(keptMeta
+          ? {
+              labels: keptMeta.labels,
+              annotations: keptMeta.annotations,
+              recordKept: recordKeptEntry,
             }
           : {}),
         permissions,
@@ -767,19 +838,54 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // `attachEngineRuntime` and `docs/feat/pod-exec-attach.md`.
   if (mode === "attach") {
     const { flags: attachFlags, bools: attachBools, positional: attachPos } = parsed;
-    const engine = selectEngine("attach", attachFlags, attachBools);
+    const name = attachPos[0] ?? "";
+    // Slice E: with no engine/location flag, a KEPT workload's engine and
+    // location come from the laptop index (never from a label). It only picks
+    // the host: the attach stays user-owned (no create, no delete). Explicit
+    // flags win, so a user's own pod/container still attaches as before.
+    const explicit = ["engine", "namespace", "context", "container"].some((f) =>
+      attachFlags.has(f),
+    );
+    const lookup = explicit ? undefined : resolveKeptAttach(name, keptDir(config.configDir));
+    for (const problem of lookup?.problems ?? []) {
+      writeErr(`kept index: ${untrustedText(problem)} — left untouched\n`);
+    }
+    if (lookup?.resolved.kind === "ambiguous") {
+      write(
+        `\n[error] ${ambiguousMessage(
+          name,
+          lookup.resolved.candidates.map((c) => c.entry),
+        )}\nusage: ${USAGE.attach}\n`,
+      );
+      return 1;
+    }
+    const keptEntry = lookup?.resolved.kind === "one" ? lookup.resolved.match.entry : undefined;
+    const engine = keptEntry ? keptEntry.engine : selectEngine("attach", attachFlags, attachBools);
     if (engine === null) {
       return 1;
     }
     const noun = engineNoun(engine);
-    const name = attachPos[0] ?? "";
     const container = attachFlags.get("container");
-    const binDir = attachFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR;
+    const binDir =
+      attachFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR ?? keptEntry?.binDir;
     const sessions = await openSessions(attachFlags, attachBools);
     if ("exit" in sessions) {
       return sessions.exit;
     }
-    const built = engineHost(engine, attachFlags, attachBools);
+    let built: ReturnType<typeof engineHost>;
+    if (keptEntry) {
+      write(
+        `[${noun}] resolved ${untrustedText(name)} → ${engine}, ${untrustedText(whereOf(keptEntry))}\n`,
+      );
+      try {
+        built = buildEngineHost(engine, hostOptionsFor(keptEntry));
+      } catch (error) {
+        write(setupFailureLine(engine, error));
+        built = null;
+      }
+    } else {
+      built = engineHost(engine, attachFlags, attachBools);
+    }
     if (built === null) {
       return 1;
     }

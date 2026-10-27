@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -357,7 +357,14 @@ describe("cli main: --engine", () => {
       const before = (await Bun.file(path).exists()) ? await readFile(path, "utf8") : undefined;
       await mkdir(join(dir, "config"), { recursive: true });
       await writeFile(path, JSON.stringify(config ?? {}));
-      let seen: { keepHint?: (name: string) => string } | undefined;
+      let seen:
+        | {
+            keepHint?: (name: string) => string;
+            labels?: Readonly<Record<string, string>>;
+            annotations?: Readonly<Record<string, string>>;
+            recordKept?: (name: string) => () => void;
+          }
+        | undefined;
       const out: string[] = [];
       try {
         await withEnv(env, async () => {
@@ -373,7 +380,12 @@ describe("cli main: --engine", () => {
         if (before === undefined) await rm(path, { force: true });
         else await writeFile(path, before);
       }
-      return { reached: seen !== undefined, hint: seen?.keepHint?.("c1"), text: out.join("") };
+      return {
+        reached: seen !== undefined,
+        hint: seen?.keepHint?.("c1"),
+        deps: seen,
+        text: out.join(""),
+      };
     };
     const base = ["run", "--engine", "docker", "--image", "x"];
 
@@ -429,6 +441,113 @@ describe("cli main: --engine", () => {
     test("the hint repeats --bin-dir so a read-only rootfs re-attach finds the binary", async () => {
       const r = await keepHintFor([...base, "--bin-dir", "/tmp"]);
       expect(r.hint).toBe("tentacle attach --engine docker --bin-dir /tmp c1");
+    });
+
+    // Slice E (docs/feat/engine-ps-rm.md): a kept run is labelled and indexed;
+    // a not-kept one is byte-identical to before (no label, no record).
+    test("kept → kept label + metadata + an index record at the REAL endpoint; --keep=false → none", async () => {
+      const kept = await keepHintFor([...base, "--bin-dir", "/tmp"]);
+      expect(kept.deps?.labels).toEqual({ "tentacle.kept": "true" });
+      expect(kept.deps?.annotations).toMatchObject({
+        "tentacle.engine": "docker",
+        "tentacle.model": "test",
+      });
+      const forget = kept.deps?.recordKept?.("c1");
+      const keptDir = join(dir, "config", "kept");
+      const files = readdirSync(keptDir);
+      expect(files).toHaveLength(1);
+      const record = JSON.parse(await readFile(join(keptDir, files[0] ?? ""), "utf8"));
+      expect(record).toMatchObject({
+        schemaVersion: 1,
+        name: "c1",
+        engine: "docker",
+        endpoint: "unix:///nonexistent/tentacle-test.sock",
+        binDir: "/tmp",
+        model: "test",
+      });
+      expect(record.created).toBe(kept.deps?.annotations?.["tentacle.created"]);
+      forget?.();
+      expect(readdirSync(keptDir)).toEqual([]);
+
+      const off = await keepHintFor([...base, "--keep=false"]);
+      expect(off.reached).toBe(true);
+      expect(off.deps?.labels).toBeUndefined();
+      expect(off.deps?.annotations).toBeUndefined();
+      expect(off.deps?.recordKept).toBeUndefined();
+    });
+  });
+
+  describe("ps / rm / attach <name> (slice E)", () => {
+    const keptDir = () => join(dir, "config", "kept");
+    const record = async (entry: Record<string, unknown>) => {
+      await mkdir(keptDir(), { recursive: true });
+      await writeFile(join(keptDir(), `${String(entry.name)}.json`), JSON.stringify(entry));
+    };
+    const clear = () => rmSync(keptDir(), { recursive: true, force: true });
+
+    test("ps / rm are commands, never a prompt; strict args", async () => {
+      clear();
+      await withEnv(unreachable, async () => {
+        const ps = await run(["ps"]);
+        expect(ps).toEqual({ code: 0, text: "No kept containers or pods.\n" });
+        const bad = await run(["ps", "--bogus"]);
+        expect(bad.code).toBe(1);
+        expect(bad.text).toContain("usage: tentacle ps");
+        const noName = await run(["rm"]);
+        expect(noName.code).toBe(1);
+        expect(noName.text).toContain("usage: tentacle rm");
+        const badEngine = await run(["ps", "--engine", "lxc"]);
+        expect(badEngine.code).toBe(1);
+        expect(badEngine.text).toContain('unknown engine "lxc"');
+        const none = await run(["rm", "nope"]);
+        expect(none.code).toBe(1);
+        expect(none.text).toContain('[error] no kept container or pod named "nope"');
+      });
+    });
+
+    test("ps lists an indexed entry; its unreachable engine is a dim skip, exit 0", async () => {
+      clear();
+      await record({
+        schemaVersion: 1,
+        name: "box",
+        engine: "docker",
+        endpoint: "unix:///nonexistent/kept.sock",
+        model: "m",
+        created: new Date().toISOString(),
+      });
+      await withEnv(unreachable, async () => {
+        const ps = await run(["ps"]);
+        expect(ps.code).toBe(0);
+        expect(ps.text).toMatch(/box +docker +local .* unreachable/);
+        expect(ps.text).toContain("docker local: not reachable (skipped)");
+      });
+      clear();
+    });
+
+    test("attach <name> resolves engine + location from the index; an explicit --engine does not", async () => {
+      clear();
+      await record({
+        schemaVersion: 1,
+        name: "box",
+        engine: "docker",
+        endpoint: "unix:///nonexistent/kept.sock",
+        model: "m",
+        created: new Date().toISOString(),
+      });
+      await withEnv(unreachable, async () => {
+        const resolved = await run(["attach", "box"]);
+        expect(resolved.code).toBe(1);
+        expect(resolved.text).toContain("[container] resolved box → docker, local");
+        expect(resolved.text).toContain(
+          "[container] attaching to box in unix:///nonexistent/kept.sock",
+        );
+        const explicit = await run(["attach", "--engine", "docker", "box"]);
+        expect(explicit.text).not.toContain("resolved");
+        expect(explicit.text).toContain(
+          "[container] attaching to box in unix:///nonexistent/tentacle-test.sock",
+        );
+      });
+      clear();
     });
   });
 

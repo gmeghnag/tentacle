@@ -138,6 +138,7 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
         throw new Error("a Kubernetes pod cannot mount a laptop folder");
       }
       const labels = options?.labels;
+      const annotations = options?.annotations;
       try {
         await kube.createPod(
           buildPodManifest({
@@ -145,6 +146,7 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
             namespace,
             image,
             ...(labels ? { labels: { ...labels } } : {}),
+            ...(annotations ? { annotations: { ...annotations } } : {}),
           }),
         );
       } catch (error) {
@@ -183,6 +185,30 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
       return podIsReady(pod)
         ? { kind: "ready" }
         : { kind: "starting", detail: `pod "${name}" is ${phase ?? "pending"}` };
+    },
+    async describe(name) {
+      let pod: Pod;
+      try {
+        pod = await kube.getPod(name);
+      } catch (error) {
+        if (error instanceof KubeApiError && error.status === 404) {
+          return null;
+        }
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+      const phase = pod.status?.phase;
+      const status =
+        phase === undefined
+          ? "unknown"
+          : TERMINAL_PHASES.has(phase)
+            ? "exited"
+            : phase.toLowerCase();
+      const annotations = pod.metadata?.annotations;
+      return {
+        status,
+        labels: { ...pod.metadata?.labels },
+        ...(annotations ? { annotations: { ...annotations } } : {}),
+      };
     },
     async dialVerdict(name) {
       try {

@@ -108,6 +108,24 @@ tentacle attach <pod> [-n <namespace>] [-c <container>]
 tentacle attach --engine docker|podman <container>
 ```
 
+**Kept pods and containers: `ps` → `attach <name>` → `rm`.** Every kept `run`
+is recorded on your machine (`<configDir>/kept/`, where it was created — no
+credentials). `tentacle ps` lists them, checked against their engine (NAME
+ENGINE WHERE MOUNT MODEL AGE STATUS; one removed outside tentacle shows `gone`;
+an engine that does not answer within 3 s is a dim `not reachable (skipped)`
+line, never an error); `--engine` filters, `-q` prints names, `-v` details.
+`tentacle attach <name>` needs no `--engine`: the engine and location are looked
+up (an explicit `--engine`/`-n`/`--context`/`-c` skips the lookup).
+`tentacle rm <name>` removes it — only a workload that still carries tentacle's
+managed and kept labels, re-checked right before the delete; a running one asks
+`[y/N]` (`-f` skips; without a terminal, `-f` is required). A name that now
+belongs to something else is left alone and its stale entry dropped.
+
+```sh
+tentacle ps [--engine <e>] [-q|-v]
+tentacle rm [--engine <e>] [-f] <name>
+```
+
 **Engines.** `--engine kubernetes|docker|podman` picks where it runs; the
 default is `kubernetes`, or set `"engine"` in `config.jsonc` (or a profile), or
 `TENTACLE_ENGINE` (precedence: flag › env › profile › config file). Kubernetes

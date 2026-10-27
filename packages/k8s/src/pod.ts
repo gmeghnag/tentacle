@@ -23,8 +23,10 @@ export interface PodManifestOptions {
   readonly image: string;
   /** Keepalive command for the container. Default `["sleep", "infinity"]`. */
   readonly command?: readonly string[];
-  /** Extra labels (merged with the managed-by marker). */
+  /** Extra labels (merged under the managed-by marker, which always wins). */
   readonly labels?: Record<string, string>;
+  /** Annotations (free text, unlike label values: paths, `ctx/ns`, model ids). */
+  readonly annotations?: Record<string, string>;
   /** Resource requests/limits (same value used for both). */
   readonly resources?: { readonly cpu?: string; readonly memory?: string };
   /** Service account to run as. */
@@ -70,7 +72,8 @@ export function buildPodManifest(options: PodManifestOptions): Pod {
     metadata: {
       name: options.name,
       ...(options.namespace ? { namespace: options.namespace } : {}),
-      labels: { "app.kubernetes.io/managed-by": "tentacle", ...options.labels },
+      labels: { ...options.labels, "app.kubernetes.io/managed-by": "tentacle" },
+      ...(options.annotations ? { annotations: { ...options.annotations } } : {}),
     },
     spec,
   };

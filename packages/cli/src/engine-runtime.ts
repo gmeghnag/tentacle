@@ -157,8 +157,16 @@ export interface EngineRuntimeDeps {
    * by the caller BEFORE this runtime starts — `workspace-mount.ts`).
    */
   readonly workspace?: WorkspaceMount;
-  /** Extra workload labels (slice E). */
+  /** Extra workload labels (slice E: `tentacle.kept`). */
   readonly labels?: Readonly<Record<string, string>>;
+  /** Workload annotations (slice E: engine, model, created; docker writes them as labels). */
+  readonly annotations?: Readonly<Record<string, string>>;
+  /**
+   * With `keepHint` (slice E): record `name` in the laptop's kept index right
+   * after the create; returns the undo, run if the host removed it anyway.
+   * A throw is reported (the workload is then not in `tentacle ps`).
+   */
+  readonly recordKept?: (name: string) => () => void;
   readonly permissions: PermissionBroker;
   readonly saver: SessionSaver;
   readonly resume: SessionRecord | null;
@@ -256,6 +264,7 @@ export async function startEngineRuntime(
     await host.create(name, deps.image, {
       ...(workspace ? { workspace } : {}),
       ...(deps.labels ? { labels: deps.labels } : {}),
+      ...(deps.annotations ? { annotations: deps.annotations } : {}),
     });
   } catch (error) {
     status?.finish();
@@ -264,15 +273,40 @@ export async function startEngineRuntime(
 
   // `run --keep`: tentacle never removes this workload (owner, 2026-10-27).
   const { keepHint } = deps;
+  // Slice E: a kept workload goes in the laptop index (`tentacle ps`) as soon as
+  // it exists. A failed write is said with the kept line — never swallowed.
+  let forgetKept: (() => void) | undefined;
+  let notRecorded = "";
+  if (keepHint && deps.recordKept) {
+    try {
+      forgetKept = deps.recordKept(name);
+    } catch (error) {
+      notRecorded = `[${host.noun}] warning: ${name} is not in \`tentacle ps\` (could not record it: ${
+        error instanceof Error ? error.message : String(error)
+      }) — remove it yourself when done\n`;
+    }
+  }
   const keptLine = keepHint
     ? `[${host.noun}] kept ${name} — resume with: ${keepHint(name)}${workspace ? `  # workspace ${workspace.target}` : ""}\n`
     : undefined;
+  const logKept = (line: string): void => {
+    deps.log(line);
+    if (notRecorded) {
+      deps.log(notRecorded);
+    }
+  };
   const removeUnlessKept = (error?: unknown): void => {
     if (error instanceof WorkloadRemovedError) {
-      return; // the host already removed it (a failed workspace probe): never "kept".
+      // the host already removed it (a failed workspace probe): never "kept".
+      try {
+        forgetKept?.();
+      } catch {
+        // a stale entry shows as `gone` in `tentacle ps`; `rm` drops it
+      }
+      return;
     }
     if (keptLine) {
-      deps.log(keptLine);
+      logKept(keptLine);
     } else {
       void host.remove(name).catch(() => {});
     }
@@ -322,7 +356,7 @@ export async function startEngineRuntime(
     // Kept: say so BEFORE the TUI mounts too — this line stays on the main
     // screen, so a Ctrl+C exit (no `dispose`) still shows how to resume.
     if (keptLine) {
-      deps.log(keptLine);
+      logKept(keptLine);
     }
     const target: EngineExecTarget = {
       name,
