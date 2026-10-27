@@ -2,6 +2,13 @@
   <img src="art/tentacle-lockup.svg" alt="tentacle" height="220">
 </p>
 
+<p align="left">
+  <a href="https://github.com/gmeghnag/tentacle/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/gmeghnag/tentacle?color=06b6d4"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+  <img alt="platforms" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux%20%7C%20x64%20%C2%B7%20arm64-555">
+  <img alt="engines" src="https://img.shields.io/badge/engines-Kubernetes%20%C2%B7%20Docker%20%C2%B7%20Podman-555">
+</p>
+
 A coding agent that runs next to your code and keeps your identity on your machine.
 
 - **Private by design:** the model key, your permission decisions and your session history stay on your laptop, even when the agent runs in a container or pod
