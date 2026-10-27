@@ -143,12 +143,10 @@ describe("tentacle ps", () => {
     expect(await psCommand({}, s.deps())).toBe(0);
     expect(s.text()).toBe(
       [
-        "NAME  ENGINE      WHERE       MOUNT     MODEL  AGE  STATUS",
-        "a     docker      local       ~/code/x  m      1h   running",
-        "b     docker      local       —         m      2h   gone",
-        "p     kubernetes  dev/agents  —         m      3h   exited",
-        "",
-        "3 kept · resume: tentacle attach <name> · remove: tentacle rm <name>",
+        "NAME   ENGINE       WHERE        MOUNT      MODEL   AGE   STATUS",
+        "a      docker       local        ~/code/x   m       1h    running",
+        "b      docker       local        —          m       2h    gone",
+        "p      kubernetes   dev/agents   —          m       3h    exited",
         "",
       ].join("\n"),
     );

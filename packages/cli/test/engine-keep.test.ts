@@ -47,8 +47,24 @@ describe("resolveKeep: flag > profile > user config > true", () => {
   });
 });
 
-describe("parseArgs: run --keep takes an optional =value, never the next word", () => {
+describe("parseArgs: run --keep takes an optional value (=v or the next word true/false)", () => {
   const parse = (...args: string[]) => parseArgs(args, ARGS.run);
+  test("--keep true / --keep false (space form) is the value, not the name", () => {
+    const on = parse("--image", "x", "--keep", "true");
+    expect(on.ok && on.flags.get("keep")).toBe("true");
+    expect(on.ok && on.positional).toEqual([]);
+    const off = parse("--keep", "false", "--image", "x", "myname");
+    expect(off.ok && off.flags.get("keep")).toBe("false");
+    expect(off.ok && off.positional).toEqual(["myname"]);
+  });
+  test("any other next word stays positional: --keep myname, myname --keep", () => {
+    const a = parse("--image", "x", "--keep", "myname");
+    expect(a.ok && a.bools.has("keep")).toBe(true);
+    expect(a.ok && a.positional).toEqual(["myname"]);
+    const b = parse("--image", "x", "myname", "--keep");
+    expect(b.ok && b.bools.has("keep")).toBe(true);
+    expect(b.ok && b.positional).toEqual(["myname"]);
+  });
   test("bare, =true, =false; the following word stays positional", () => {
     const bare = parse("--image", "x", "--keep", "box");
     expect(bare.ok && bare.bools.has("keep")).toBe(true);

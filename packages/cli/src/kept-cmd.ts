@@ -25,7 +25,6 @@ import {
   renderVerbose,
   resolveByName,
   sortKept,
-  summaryLine,
   whereOf,
 } from "./kept.ts";
 import { untrustedText } from "./untrusted-text.ts";
@@ -133,12 +132,11 @@ export async function psCommand(
   const now = deps.now();
   const lines = options.verbose
     ? renderVerbose(rows, now, deps.home)
-    : [...renderTable(rows, now, deps.home), ""];
+    : renderTable(rows, now, deps.home);
   deps.write(`${lines.join("\n")}\n`);
   for (const [where, reason] of down) {
     deps.write(`${deps.dim(`${where}: not reachable (skipped) — ${reason}`)}\n`);
   }
-  deps.write(`${summaryLine(rows.length)}\n`);
   return 0;
 }
 
