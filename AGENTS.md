@@ -265,7 +265,11 @@ assume.
   `process.exit`/Ctrl+C via a detached child (`exit` handlers still fire; SIGINT
   routes through it). With keep (the default): no net, no delete, and the
   re-attach command is printed. `attach` is
-  user-owned: never create, start or delete, no exit net. Pass secrets to the
+  user-owned: never create, start or delete, no exit net (`attach <name>`'s
+  kept-index lookup only picks the engine/location). `rm <name>` removes only a
+  workload the engine says carries tentacle's managed + `tentacle.kept` labels,
+  re-read right before the delete, on the user's explicit command; WHERE to dial
+  comes from the laptop index, never from a label. Pass secrets to the
   child via **env, never argv** (argv is visible in `ps`). The child's hidden
   subcommand is ONE shared constant (`DELETE_POD_SUBCOMMAND` /
   `DELETE_CONTAINER_SUBCOMMAND`), pinned by a `main` dispatch test.

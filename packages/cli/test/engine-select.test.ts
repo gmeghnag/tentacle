@@ -9,6 +9,8 @@ import {
   buildEngineHost,
   chooseEngine,
   engineFlagProblem,
+  hostOptionsFor,
+  keptLocation,
   setupFailureLine,
 } from "../src/engine-select.ts";
 
@@ -116,6 +118,55 @@ describe("buildEngineHost", () => {
       { server: "https://k:6443", namespace: "dev", token: "t" } as KubeClientOptions,
     ]);
     expect(dockerCalls).toEqual([]);
+  });
+
+  // Slice E: a kept entry's locator re-dials WHERE it was created, whatever
+  // DOCKER_HOST / TENTACLE_K8S_SERVER say now.
+  test("kept locator: recorded from the built host, re-dialled to the SAME place", () => {
+    const run = io({ DOCKER_HOST: "ssh://me@box:2222" });
+    const built = buildEngineHost("docker", {}, run.value);
+    const where = keptLocation("docker", built, {});
+    expect(where).toEqual({ endpoint: "ssh://me@box:2222" });
+    // later, from a shell with another DOCKER_HOST:
+    const later = io({ DOCKER_HOST: "unix:///other.sock" });
+    buildEngineHost("docker", hostOptionsFor({ engine: "docker", ...where }), later.value);
+    expect(later.dockerCalls[0]).toMatchObject({
+      kind: "ssh",
+      host: "box",
+      user: "me",
+      port: 2222,
+    });
+
+    const plain = buildEngineHost(
+      "docker",
+      { allowInsecureTcp: true },
+      io({ DOCKER_HOST: "tcp://h:2375" }).value,
+    );
+    const tcp = keptLocation("docker", plain, { insecureTcp: true });
+    expect(tcp).toEqual({ endpoint: "tcp://h:2375", insecureTcp: true });
+    expect(hostOptionsFor({ engine: "docker", ...tcp })).toEqual({
+      host: "tcp://h:2375",
+      allowInsecureTcp: true,
+    });
+    expect(hostOptionsFor({ engine: "podman", endpoint: "unix:///p.sock", context: "c" })).toEqual({
+      context: "c",
+    });
+  });
+
+  test("kept locator (k8s): the server override is recorded and wins over today's env", () => {
+    const run = io({ TENTACLE_K8S_SERVER: "https://k:6443", TENTACLE_K8S_TOKEN: "t" });
+    const built = buildEngineHost("kubernetes", { namespace: "dev" }, run.value);
+    const where = keptLocation("kubernetes", built, {});
+    expect(where).toEqual({ namespace: "dev", server: "https://k:6443" });
+    const later = io({ TENTACLE_K8S_SERVER: "https://elsewhere:1", TENTACLE_K8S_TOKEN: "t2" });
+    buildEngineHost("kubernetes", hostOptionsFor({ engine: "kubernetes", ...where }), later.value);
+    expect(later.kubeCalls).toEqual([
+      { server: "https://k:6443", namespace: "dev", token: "t2" } as KubeClientOptions,
+    ]);
+    expect(hostOptionsFor({ engine: "kubernetes", namespace: "ns", context: "prod" })).toEqual({
+      namespace: "ns",
+      kubeContext: "prod",
+    });
   });
 
   test("docker: DOCKER_HOST honoured; the client is built for that endpoint", () => {

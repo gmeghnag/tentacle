@@ -213,6 +213,19 @@ working dir is that path, so the session is confined to it with no runtime
 change; `~/.ssh` and the config dir are masked when inside it. A remote engine
 mounts nothing (the image's filesystem, as on k8s).
 
+**Kept workloads: `ps` / `rm` / `attach <name>`** (slice E,
+`docs/feat/engine-ps-rm.md`). A kept `run` labels its workload
+`tentacle.kept=true` (a label on both engines) plus `tentacle.engine` /
+`tentacle.model` / `tentacle.created` (docker labels, k8s annotations), and
+writes `<configDir>/kept/<id>.json` on the laptop — one file per workload
+(atomic temp + rename; `schemaVersion` 1, an unknown one refused and left
+untouched) with its locator: the docker/podman endpoint URL or `--context`, or
+the kube context / `TENTACLE_K8S_SERVER` + namespace. `ps` reads the index and
+asks each engine (`EngineHost.describe`, 3 s bound): `gone` on a 404, never
+pruned silently. `rm` deletes only when the engine says managed marker +
+`tentacle.kept=true`, re-read right before the delete (the k8s `deletePod` has
+no label guard of its own). Labels only verify; the index says where to dial.
+
 ---
 
 ## 7. Config shape

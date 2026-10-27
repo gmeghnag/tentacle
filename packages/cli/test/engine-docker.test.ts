@@ -636,6 +636,36 @@ describe("dockerEngineHost", () => {
     expect(client.calls.every((c) => c.startsWith("inspect:"))).toBe(true);
   });
 
+  test("describe (slice E): state + labels; 404 → null (gone); anything else throws", async () => {
+    const client = new FakeDockerClient(new ScriptedProvider([]));
+    const host = hostFor(client);
+    client.labels = { "tentacle.managed": "true", "tentacle.kept": "true" };
+    expect(await host.describe("c")).toEqual({
+      status: "running",
+      labels: { "tentacle.managed": "true", "tentacle.kept": "true" },
+    });
+    client.state = { Status: "exited", Running: false };
+    client.labels = undefined;
+    expect(await host.describe("c")).toEqual({ status: "exited", labels: {} });
+    client.inspectError = notFound("c");
+    expect(await host.describe("c")).toBeNull();
+    client.inspectError = new Error("Docker engine socket not found at /x");
+    await expect(host.describe("c")).rejects.toThrow("socket not found");
+    expect(client.calls.every((c) => c.startsWith("inspect:"))).toBe(true);
+  });
+
+  test("create: kept annotations become container labels (docker has no annotations)", async () => {
+    const client = new FakeDockerClient(new ScriptedProvider([]));
+    await hostFor(client).create("c", "img", {
+      labels: { "tentacle.kept": "true" },
+      annotations: { "tentacle.model": "m" },
+    });
+    expect(client.bodies[0]?.Labels).toMatchObject({
+      "tentacle.kept": "true",
+      "tentacle.model": "m",
+    });
+  });
+
   test("vocabulary: container noun, no default container, endpoint + source as `where`", () => {
     const host = hostFor(new FakeDockerClient(new ScriptedProvider([])));
     expect(host.kind).toBe("docker");

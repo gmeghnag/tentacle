@@ -83,6 +83,19 @@ function defaultKubeconfigPath(): string {
 }
 
 /**
+ * The kubeconfig's `current-context` name (`tentacle ps` records WHICH context a
+ * kept pod was created through); `undefined` when there is none or the file
+ * cannot be read or parsed.
+ */
+export function currentKubeContext(path: string = defaultKubeconfigPath()): string | undefined {
+  try {
+    return parseKubeconfig(readFileSync(path, "utf8"))["current-context"] || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Resolve `KubeClientOptions` from a kubeconfig. Supports CA trust, bearer
  * tokens (inline/file), client-cert mTLS, and exec credential plugins. Throws a
  * clear error for anything missing or unreadable.
