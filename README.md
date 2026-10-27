@@ -2,12 +2,33 @@
   <img src="art/tentacle-lockup.svg" alt="tentacle" height="220">
 </p>
 
-A coding agent for the terminal: plug in any LLM, run it locally, in a
-Kubernetes pod, or on a remote host, and drive it from a rich TUI.
+A coding agent that runs next to your code and keeps your identity on your machine.
 
-- **Models:** any OpenAI-compatible endpoint (local or cloud), or the Anthropic Messages API
-- **Runs:** locally · in a Kubernetes pod (`run` / `attach`) · as a remote daemon (`serve` / `connect`)
+- **Private by design:** the model key, your permission decisions and your session history stay on your laptop, even when the agent runs in a container or pod
+- **Any engine:** local · Docker · Podman · Kubernetes · a remote daemon (`serve` / `connect`), with the same commands and the same session
+- **Any model:** local models (any OpenAI-compatible endpoint) are first-class; the Anthropic Messages API works too
 - **Safe by default:** writes confined to the workspace; shell commands go through a permission prompt
+
+## Why tentacle
+
+**Privacy first: execution elsewhere, identity on your laptop.**
+The model API key, your permission decisions and your session history stay on
+the laptop. A pod or container reaches the model through the laptop (a reverse
+tunnel), so the key never enters it. The remote side is not trusted: what it
+asks of your machine (a tool permission, project hooks, a model call) is decided
+on the laptop. Local models work the same way as cloud ones.
+
+**One agent, any engine.**
+Run it locally, in Docker (also on a remote host over `ssh://`), in Podman, in
+Kubernetes, or as a remote daemon you reach with `connect`. The commands and the
+session are the same. In a container, your folder is mounted with secrets hidden
+(`~/.ssh`, tentacle's config, and anything in `.tentacle/hide`).
+`tentacle ps` and `tentacle rm` manage the workloads you kept.
+
+**The TUI is decoupled from execution.**
+The agent loop and the tools run in a daemon; the TUI is an RPC client on the
+same protocol for every runtime. You can quit and come back, attach several
+clients to one session, and reopen archived sessions.
 
 ## Install
 
