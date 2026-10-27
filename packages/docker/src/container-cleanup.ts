@@ -21,6 +21,12 @@ import { DockerClient } from "./client.ts";
 import { dialerFor } from "./engine-dialer.ts";
 import { type EngineEndpoint, endpointLabel } from "./engine-endpoint.ts";
 
+/**
+ * The hidden subcommand a compiled binary's exit-net child runs. ONE constant
+ * for both ends (this command builder and `main.ts`'s dispatch), so a rename
+ * cannot silently orphan containers (docs/feat/docker-engine-cli.md).
+ */
+export const DELETE_CONTAINER_SUBCOMMAND = "__delete-container";
 export const CONTAINER_DELETE_ID_ENV = "TENTACLE_CONTAINER_DELETE_ID";
 export const DOCKER_ENDPOINT_ENV = "TENTACLE_DOCKER_ENDPOINT";
 /** The child's whole budget (kill + delete, connects included). */
@@ -66,7 +72,7 @@ export function containerDeleteCommand(
         "-e",
         `const { deleteContainerFromEnv } = await import(${JSON.stringify(modulePath)}); await deleteContainerFromEnv(); process.exit(0);`,
       ]
-    : [execPath, "__delete-container"];
+    : [execPath, DELETE_CONTAINER_SUBCOMMAND];
 }
 
 /**

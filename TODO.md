@@ -67,7 +67,7 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       queued writes settle" timed out at 5 s once in 12 full runs (2026-10-20).
       Unknown whether test-only or a real `drain()` defect — investigate before
       assuming the former (session persistence path).
-- [ ] 🔵 **Test residue:** a `HostedSession` from `cli/test/pod-runtime.test.ts`
+- [ ] 🔵 **Test residue:** a `HostedSession` from `cli/test/engine-runtime.test.ts` (was `pod-runtime.test.ts`)
       stays reachable from a root closure through its `SpyFakeCluster` fake after
       the file ends (heap snapshot, 2026-10-20). Test-scoped; tidy when touched.
 - [ ] 🔵 **The replay ring is unbounded during a long permission suspension**
@@ -1024,7 +1024,7 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 >    `run`/`attach` and across a `serve` restart.
 > 3b. skills hot-reload for the USER (`/name` list + `/skills` panel follow a
 >    reset / new skill without restart) — DONE, merged `067cd49` (protocol v13; D1 owner-accepted; small debt in `docs/feat/skills-hot-reload.md`);
-> 4. `docker-runtime` (slice A `feat/docker-engine-client` DONE, merged `116d45f`; A2 `feat/docker-ssh-dialer` DONE, merged `1168217`; B `feat/docker-engine-seam` DONE (EngineHost); next C `feat/docker-engine-cli` (plan written, 2 owner questions)) — `run`/`attach --engine kubernetes|docker|podman`, default configurable (owner 2026-10-26) (`docs/eval/docker-runtime.md`,
+> 4. `docker-runtime` (slice A `feat/docker-engine-client` DONE, merged `116d45f`; A2 `feat/docker-ssh-dialer` DONE, merged `1168217`; B `feat/docker-engine-seam` DONE (EngineHost); C `feat/docker-engine-cli` (executed 2026-10-27, awaiting fresh-context Review; Type: feat · Size: L · Blast: load-bearing; `docs/feat/docker-engine-cli.md`); next `feat/docker-workspace-mount` (owner C-Q2)) — `run`/`attach --engine kubernetes|docker|podman`, default configurable (owner 2026-10-26) (`docs/eval/docker-runtime.md`,
 >    owner answers 2026-10-26; promote to `feat/` when picked; slices A
 >    `packages/docker`, B neutral `SandboxHost` seam, `ssh://` dial-stdio, C CLI/docs);
 > 5. default `maxIterations` = `-1` (agent and sub-agents);

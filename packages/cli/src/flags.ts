@@ -48,8 +48,13 @@ const SESSION_UID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const RESUME = { resume: { accepts: (word: string) => SESSION_UID.test(word) } } as const;
 /** `--continue` resumes the newest session; `--resume` picks one (docs/feat/resume-picker.md). */
 const CONTINUE = { continue: {} } as const;
+/** `run --keep[=true|false]`: never swallows the next word (`run --keep name` keeps `name` positional). */
+const KEEP = { keep: { accepts: () => false } } as const;
 const RESUME_CONFLICTS = [["resume", "continue"]] as const;
 const TOKEN = { token: {}, "token-command": {} } as const;
+/** `run`/`attach`: the engine and its docker/podman endpoint options (docs/feat/docker-engine-cli.md). */
+const ENGINE = { engine: {}, context: {} } as const;
+const ENGINE_BOOLS = { "insecure-docker-tcp": {} } as const;
 
 /** Every command's arguments: the ONE list of what each accepts. */
 export const ARGS = {
@@ -80,15 +85,15 @@ export const ARGS = {
     positional: { min: 0, max: 0 },
   },
   run: {
-    values: { namespace: { short: "n" }, image: {}, "bin-dir": {} },
-    bools: CONTINUE,
-    optional: RESUME,
+    values: { ...ENGINE, namespace: { short: "n" }, image: {}, "bin-dir": {} },
+    bools: { ...CONTINUE, ...ENGINE_BOOLS },
+    optional: { ...RESUME, ...KEEP },
     conflicts: RESUME_CONFLICTS,
     positional: { min: 0, max: 1 },
   },
   attach: {
-    values: { namespace: { short: "n" }, container: { short: "c" }, "bin-dir": {} },
-    bools: CONTINUE,
+    values: { ...ENGINE, namespace: { short: "n" }, container: { short: "c" }, "bin-dir": {} },
+    bools: { ...CONTINUE, ...ENGINE_BOOLS },
     optional: RESUME,
     conflicts: RESUME_CONFLICTS,
     positional: { min: 1, max: 1 },
@@ -517,9 +522,9 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
     "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify] [--resume [id]|--continue]",
   serve:
     "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [...] (see tentacle --help)",
-  run: "tentacle run --image <ref> [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]",
+  run: "tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]",
   attach:
-    "tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]|--continue]",
+    "tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--context <ctx>] [--insecure-docker-tcp] [--bin-dir <dir>] [--resume [uid]|--continue]",
   plain: "tentacle --plain",
   hooks: "tentacle hooks trust --list | --revoke <folder>",
   package: "tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]",

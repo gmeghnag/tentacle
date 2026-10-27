@@ -32,8 +32,8 @@ import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 import type { TentacleConfig } from "../src/config.ts";
 import { type DockerClientLike, containerBody, dockerEngineHost } from "../src/engine-docker.ts";
 import type { EngineHost } from "../src/engine-host.ts";
+import { attachEngineRuntime, startEngineRuntime } from "../src/engine-runtime.ts";
 import { POD_BIN_PATH } from "../src/pod-binary.ts";
-import { attachEngineRuntime, startEngineRuntime } from "../src/pod-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 
 class ScriptedProvider implements ModelProvider {
@@ -152,7 +152,9 @@ class FakeDockerClient implements DockerClientLike {
           model: this.model,
           tools: this.askTool ? new ToolRegistry().register(fsWriteTool) : new ToolRegistry(),
           env: noopEnv,
-          ...(this.askTool ? { requestPermission: (req) => daemonBroker.request(req) } : {}),
+          ...(this.askTool
+            ? { requestPermission: (req, options) => daemonBroker.request(req, options) }
+            : {}),
         }),
         permissions: daemonBroker,
       }),
@@ -313,6 +315,33 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
     expect(client.calls.at(-1)).toBe("remove:c1");
   });
 
+  test("--keep: no exit net, never removed (dispose), the resume hint names the engine", async () => {
+    const client = new FakeDockerClient(new ScriptedProvider([[{ type: "done" }]]));
+    const net: string[] = [];
+    const logs: string[] = [];
+    const { deps } = common("run-keep", logs);
+    const { listeners, result: runtime } = await captureExitListeners(() =>
+      startEngineRuntime(config, {
+        host: hostFor(client, net),
+        image: "img",
+        name: "kept1",
+        keepHint: (name) => `tentacle attach --engine docker ${name}`,
+        ...deps,
+      }),
+    );
+    if (!runtime) {
+      throw new Error("runtime did not start");
+    }
+    expect(listeners).toEqual([]);
+    runtime.dispose();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(client.calls.filter((c) => c.startsWith("remove:"))).toEqual([]);
+    expect(net).toEqual([]);
+    expect(logs).toContain(
+      "[container] kept kept1 — resume with: tentacle attach --engine docker kept1\n",
+    );
+  });
+
   test("an ask tool's permission lands on the shared broker (single-broker invariant)", async () => {
     const spy = new SpyBroker();
     const client = new FakeDockerClient(new AskModel(), true);
@@ -436,7 +465,7 @@ describe("attach on a Docker engine (attachEngineRuntime + dockerEngineHost)", (
     const run = captureExitListeners(() =>
       attachEngineRuntime(config, {
         host: hostFor(client, net),
-        podName: "users-box",
+        name: "users-box",
         ...extra,
         ...common(slug, logs).deps,
       }),

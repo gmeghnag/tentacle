@@ -22,7 +22,7 @@ function at(list: readonly string[], index: number): string {
 
 /**
  * Capture `process.once`/`process.off` exit handlers without firing the real
- * `exit` event (same monkey-patch pattern as `pod-runtime.test.ts`).
+ * `exit` event (same monkey-patch pattern as `engine-runtime.test.ts`).
  */
 function captureExitHandlers() {
   const captured: Array<(() => void) | string> = [];

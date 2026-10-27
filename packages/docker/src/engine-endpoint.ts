@@ -95,6 +95,26 @@ export function resolveEngineEndpoint(input: ResolveEndpointInput): EngineEndpoi
   return defaultContext(input, configDir);
 }
 
+/**
+ * One host URL (`unix://`, `tcp://`, `ssh://`) → an endpoint, with the same
+ * rules as `DOCKER_HOST` but no TLS material: podman's `CONTAINER_HOST`
+ * (`podman-endpoint.ts`). `source` names it in errors.
+ */
+export function resolveHostEndpoint(
+  host: string,
+  source: string,
+  options: { readonly allowInsecureTcp?: boolean } = {},
+): EngineEndpoint {
+  const input: ResolveEndpointInput = {
+    env: {},
+    readFile: () => undefined,
+    ...(options.allowInsecureTcp !== undefined
+      ? { allowInsecureTcp: options.allowInsecureTcp }
+      : {}),
+  };
+  return hostEndpoint(input, host, source, { tls: undefined, skipVerify: false });
+}
+
 function nonEmpty(value: string | undefined): string | undefined {
   return value === undefined || value === "" ? undefined : value;
 }

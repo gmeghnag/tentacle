@@ -135,6 +135,13 @@ export async function deletePodFromEnv(fetchImpl: typeof fetch = fetch): Promise
 }
 
 /**
+ * The hidden subcommand a compiled binary's exit-net child runs. ONE constant
+ * for both ends (`podDeleteCommand` and `main.ts`'s dispatch), so a rename
+ * cannot silently orphan pods (docs/feat/docker-engine-cli.md).
+ */
+export const DELETE_POD_SUBCOMMAND = "__delete-pod";
+
+/**
  * The command the detached deleter child runs, chosen by how THIS process is
  * running. From a compiled binary (`execPath` is not `bun`) → re-exec the same
  * binary with the hidden `__delete-pod` subcommand, so no external `bun` is
@@ -143,7 +150,7 @@ export async function deletePodFromEnv(fetchImpl: typeof fetch = fetch): Promise
 export function podDeleteCommand(execPath: string): string[] {
   const base = execPath.replace(/\\/g, "/").split("/").pop() ?? "";
   const isBun = base === "bun" || base.startsWith("bun-");
-  return isBun ? ["bun", "-e", buildPodDeleteScript()] : [execPath, "__delete-pod"];
+  return isBun ? ["bun", "-e", buildPodDeleteScript()] : [execPath, DELETE_POD_SUBCOMMAND];
 }
 
 /**

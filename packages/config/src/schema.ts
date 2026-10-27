@@ -229,6 +229,16 @@ const settingsShape = {
    * continuation turn so it reacts without a user prompt. Default: enabled.
    */
   autoWake: z.boolean().optional(),
+  /**
+   * Default engine of `run`/`attach` (docs/feat/docker-engine-cli.md); the
+   * `--engine` flag and `TENTACLE_ENGINE` win. Unset: `kubernetes`.
+   */
+  engine: z.enum(["kubernetes", "docker", "podman"]).optional(),
+  /**
+   * Whether `run` leaves its pod/container up on exit (docs/feat/docker-engine-cli.md);
+   * `--keep[=true|false]` wins. Unset: true (the CLI default).
+   */
+  keep: z.boolean().optional(),
   /** MCP servers to connect to, keyed by name; their tools are added to the agent. */
   mcpServers: z.record(McpServerSchema).optional(),
   /**

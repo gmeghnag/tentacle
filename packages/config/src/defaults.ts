@@ -137,6 +137,14 @@ export const DEFAULT_CONFIG_JSONC = `{
   // set false to require a manual prompt instead.
   // "autoWake": ${DEFAULT_AUTO_WAKE},
 
+  // Default engine of \`tentacle run\` / \`tentacle attach\`: "kubernetes" (a pod),
+  // "docker" or "podman" (a container). --engine and TENTACLE_ENGINE win.
+  // "engine": "kubernetes",
+
+  // Whether \`tentacle run\` leaves its pod/container up on exit (and prints how to
+  // re-attach). Default true; --keep=false deletes it. The flag wins, then a profile.
+  // "keep": true,
+
   // Hooks: shell commands run on agent events, with a JSON input on stdin
   // (contract: docs/feat/hooks-core.md). "tool_call" can allow / ask / deny /
   // rewrite a call (exit 2 = deny, stderr = reason); "tool_result" can replace

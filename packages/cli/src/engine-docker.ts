@@ -1,7 +1,7 @@
 /**
  * The Docker/Podman `EngineHost` (docs/feat/docker-engine-seam.md §4): a
  * container is the workload (no sub-containers), driven over `@tentacle/docker`'s
- * `DockerClient` (no `docker` CLI). The SAME runtime (`pod-runtime.ts`) drives
+ * `DockerClient` (no `docker` CLI). The SAME runtime (`engine-runtime.ts`) drives
  * it; only lifecycle + transport live here.
  *
  * Trust (AGENTS §7 "a pod is not trusted"): the container gets nothing from the

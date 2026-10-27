@@ -52,25 +52,42 @@ tentacle --plain                                  # line REPL (pipes / no TTY)
 tentacle --resume                                 # resume a saved session of this folder
 ```
 
-**`run`: in a new Kubernetes pod.** tentacle creates the pod, copies itself in
-(the pod binaries from [Install](#install)), and deletes the pod on exit. The
-model key and the approvals stay on your machine; sessions are saved locally, so
-`--resume` works.
+**`run`: in a new Kubernetes pod or Docker/Podman container.** tentacle
+creates it, copies itself in (the pod binaries from [Install](#install)), and
+by default leaves it up on exit (also on Ctrl+C), printing the `tentacle attach …`
+to come back. `--keep=false` (or `keep: false` in the config or a profile)
+deletes it on exit instead; flag > profile > user config > true. The model key and the approvals
+stay on your machine; sessions are saved locally, so `--resume` works.
 
 ```sh
-tentacle run --image <ref> [-n <namespace>] [<pod-name>]
+tentacle run --image <ref> [-n <namespace>] [--keep=false] [<name>]           # Kubernetes (default)
+tentacle run --engine docker --image <ref> [--context <ctx>] [<name>]     # Docker
+tentacle run --engine podman --image <ref> [<name>]                       # Podman
 ```
 
-**`attach`: in a pod that already exists.** Same as `run`, but tentacle never
-creates or deletes the pod: closing the TUI detaches and the pod stays up.
+**`attach`: in a pod or container that already exists.** Same as `run`, but
+tentacle never creates, starts or deletes it: closing the TUI detaches and it
+stays up.
 
 ```sh
 tentacle attach <pod> [-n <namespace>] [-c <container>]
+tentacle attach --engine docker|podman <container>
 ```
 
-Both use your kubeconfig (current context, or `$KUBECONFIG`); no `kubectl`
-needed. Read-only root filesystem? Add `--bin-dir /tmp`. Details:
-[`docs/architecture/F4-pod-execution.md`](./docs/architecture/F4-pod-execution.md).
+**Engines.** `--engine kubernetes|docker|podman` picks where it runs; the
+default is `kubernetes`, or set `"engine"` in `config.jsonc` (or a profile), or
+`TENTACLE_ENGINE` (precedence: flag › env › profile › config file). Kubernetes
+uses your kubeconfig (current context, or `$KUBECONFIG`); no `kubectl` needed.
+Docker uses the engine the docker CLI would (`--context` › `DOCKER_HOST` ›
+`DOCKER_CONTEXT` › current context; unix socket, `tcp://` with TLS, or
+`ssh://`); no `docker` CLI needed. A plaintext `tcp://` engine is refused
+unless `--insecure-docker-tcp`. Podman's socket is found automatically
+(`podman machine` on macOS, rootless/rootful on Linux; `CONTAINER_HOST`
+overrides it) — no `DOCKER_HOST` needed. `-n`/`-c` are Kubernetes-only;
+`--context`/`--insecure-docker-tcp` are Docker/Podman-only. Read-only root
+filesystem? Add `--bin-dir /tmp`. Details:
+[`docs/architecture/F4-pod-execution.md`](./docs/architecture/F4-pod-execution.md),
+[`docs/feat/docker-engine-cli.md`](./docs/feat/docker-engine-cli.md).
 
 **`serve` + `connect`: on a remote host.** Run the agent as a daemon on one
 machine and drive it from another machine's TUI:
@@ -114,6 +131,7 @@ Precedence: **environment variables › `config.jsonc` › built-in defaults**.
 | `contextReset.enabled` | `TENTACLE_CONTEXT_RESET` | The model's `context_reset` tool: it renews its own context from a restart prompt it writes, asked like any tool (default on) |
 | `contextReset.maxPerMessage` | `TENTACLE_CONTEXT_RESET_MAX` | Context resets per user message (default `-1` = unlimited) |
 | `loadSkills` | `TENTACLE_NO_SKILLS` (truthy disables) | Agent Skills discovery (default on) |
+| `engine` | `TENTACLE_ENGINE` | Default engine of `run`/`attach`: `kubernetes` (default), `docker` or `podman`; `--engine` wins. An unknown value is an error |
 
 Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyCommand`.
 `TENTACLE_CONFIG_DIR` (or `XDG_CONFIG_HOME`) moves the config directory.

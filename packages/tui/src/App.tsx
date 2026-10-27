@@ -273,7 +273,7 @@ export interface AppProps {
   /** Transcript to seed on start (a resumed session); replaces the welcome line. */
   readonly initialItems?: readonly DisplayItem[];
   /**
-   * The daemon runs in a pod (`run`/`attach`, set only by `runPodTui`): a
+   * The daemon runs in a pod (`run`/`attach`, set only by `runEngineTui`): a
    * spilled result's file is "saved in the pod to" its path. A fact of the
    * runtime the laptop started, never guessed (docs/feat/tui-spill-note.md).
    */

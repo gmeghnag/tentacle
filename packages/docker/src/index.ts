@@ -7,6 +7,7 @@
  */
 export * from "./types.ts";
 export * from "./engine-endpoint.ts";
+export * from "./podman-endpoint.ts";
 export * from "./byte-duplex.ts";
 export * from "./http.ts";
 export * from "./http-conn.ts";

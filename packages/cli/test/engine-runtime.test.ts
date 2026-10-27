@@ -35,16 +35,46 @@ import {
   createChannelPair,
 } from "@tentacle/transport";
 import type { TentacleConfig } from "../src/config.ts";
-import { POD_BIN_PATH } from "../src/pod-binary.ts";
+import { type PodCluster, kubeEngineHost, podDialError } from "../src/engine-k8s.ts";
 import {
-  type PodCluster,
+  type EngineAttachRuntimeDeps,
+  type EngineRuntimeDeps,
+  attachEngineRuntime,
   createStderrSink,
-  podDialError,
-  startAttachRuntime,
-  startPodRuntime,
-} from "../src/pod-runtime.ts";
+  startEngineRuntime,
+} from "../src/engine-runtime.ts";
+import { POD_BIN_PATH } from "../src/pod-binary.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import { formatVersionMarker } from "../src/version.ts";
+
+/**
+ * The k8s `run` / `attach` as this oracle was written against them (the former
+ * `startPodRuntime` / `startAttachRuntime` wrappers, renamed away in
+ * docs/feat/docker-engine-cli.md): the engine entry points over
+ * `kubeEngineHost`, exactly what `main.ts` builds for `--engine kubernetes`.
+ */
+function startPodRuntime(
+  config: TentacleConfig,
+  deps: Omit<EngineRuntimeDeps, "host"> & { kube: PodCluster; namespace: string },
+) {
+  const { kube, namespace, ...rest } = deps;
+  return startEngineRuntime(config, { ...rest, host: kubeEngineHost(kube, namespace) });
+}
+function startAttachRuntime(
+  config: TentacleConfig,
+  deps: Omit<EngineAttachRuntimeDeps, "host" | "name"> & {
+    kube: PodCluster;
+    namespace: string;
+    podName: string;
+  },
+) {
+  const { kube, namespace, podName, ...rest } = deps;
+  return attachEngineRuntime(config, {
+    ...rest,
+    name: podName,
+    host: kubeEngineHost(kube, namespace),
+  });
+}
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -189,9 +219,10 @@ class SpyBroker extends PermissionBroker {
 /**
  * A `FakeCluster` whose daemon-side agent wires an `ask` tool (`fs_write`) and
  * routes its permission gate through the daemon's OWN broker — mirroring the
- * production wiring (`wiring.ts`: `requestPermission: (req) =>
- * permissions.request(req)`, with `HostedSession` streaming that broker's
- * asks over the wire). The daemon broker is deliberately a DIFFERENT object
+ * production wiring (`wiring.ts`: `requestPermission: (req, options) =>
+ * permissions.request(req, options)`, so the ask carries its `toolCallId` /
+ * `origin` — docs/feat/permission-call-attribution.md — with `HostedSession`
+ * streaming that broker's asks over the wire). The daemon broker is deliberately a DIFFERENT object
  * from the client's `deps.permissions`: in production the pod/worker owns the
  * agent's broker while the laptop owns the one the TUI prompts on, and the two
  * meet only across the exec channel. Reusing one object here would make the
@@ -200,12 +231,20 @@ class SpyBroker extends PermissionBroker {
  * `deps.permissions` into the `RemoteClient`.
  */
 class SpyFakeCluster extends FakeCluster {
+  /** The options of each daemon-side ask (its call attribution), as production passes them. */
+  readonly daemonAsks: (PermissionRequestOptions | undefined)[] = [];
   override openExec(target: ExecTarget, _options?: ExecChannelOptions): DuplexChannel {
     this.calls.push(`exec:${target.pod}:${target.container ?? "-"}:${target.command.join(" ")}`);
     const [daemonCh, clientCh] = createChannelPair();
     // A SEPARATE broker the daemon's agent gate uses (the pod/worker side);
     // the client side is the spied `deps.permissions` in the test.
-    const daemonBroker = new PermissionBroker();
+    const asks = this.daemonAsks;
+    const daemonBroker = new (class extends PermissionBroker {
+      override request(req: PermissionRequest, options?: PermissionRequestOptions) {
+        asks.push(options);
+        return super.request(req, options);
+      }
+    })();
     const host = new SessionHost({
       defaultCwd: "/pod/work",
       createAgent: () => ({
@@ -213,7 +252,7 @@ class SpyFakeCluster extends FakeCluster {
           model: this.model,
           tools: new ToolRegistry().register(fsWriteTool),
           env: noopEnv,
-          requestPermission: (req) => daemonBroker.request(req),
+          requestPermission: (req, options) => daemonBroker.request(req, options),
         }),
         permissions: daemonBroker,
       }),
@@ -360,6 +399,10 @@ describe("startPodRuntime", () => {
     expect(req.level).toBe("ask");
     expect(req.title).toBe("Write a file");
     expect(req.detail).toBe("/tmp/x.txt");
+    // The rig forwards the call attribution like production (`wiring.ts`), so
+    // the ask streams the real call, not "pending".
+    expect(kube.daemonAsks).toHaveLength(1);
+    expect(kube.daemonAsks[0]).toMatchObject({ toolCallId: "tc1", origin: "call" });
     runtime.dispose();
   });
 
@@ -534,6 +577,76 @@ describe("startPodRuntime", () => {
       throw new Error("expected the pod to have been created");
     }
     expect(kube.calls).toContain(`besteffort:${podName}`);
+  });
+
+  // `run --keep` (owner, 2026-10-27): the workload is never removed — no exit
+  // net (Ctrl+C), no delete on dispose — and the resume command is printed.
+  test("--keep: no exit net, no delete on dispose, the resume hint is printed", async () => {
+    const model = new ScriptedProvider([[{ type: "done" }]]);
+    const kube = new FakeCluster(model);
+    const logs: string[] = [];
+    const exitListeners: unknown[] = [];
+    const originalOnce = process.once.bind(process);
+    process.once = ((event: string, listener: (...args: unknown[]) => void): unknown => {
+      if (event === "exit") {
+        exitListeners.push(listener);
+        return process;
+      }
+      return originalOnce(event, listener);
+    }) as typeof process.once;
+    try {
+      const runtime = await startPodRuntime(baseConfig("/pod/work"), {
+        kube,
+        namespace: "dev",
+        image: "img",
+        name: "keeper",
+        keepHint: (name) => `tentacle attach --engine kubernetes -n dev ${name}`,
+        permissions: new PermissionBroker(),
+        saver: new SessionSaver(new JsonSessionStore(join(dir, "keep")), () => {}),
+        resume: null,
+        log: (line) => logs.push(line),
+      });
+      runtime.dispose();
+      await new Promise((r) => setTimeout(r, 10));
+    } finally {
+      process.once = originalOnce as typeof process.once;
+    }
+    expect(exitListeners).toEqual([]);
+    expect(
+      kube.calls.filter((c) => c.startsWith("delete:") || c.startsWith("besteffort:")),
+    ).toEqual([]);
+    const kept =
+      "[pod] kept keeper — resume with: tentacle attach --engine kubernetes -n dev keeper\n";
+    // Once before the TUI (survives a Ctrl+C exit), once after dispose.
+    expect(logs.filter((l) => l === kept)).toHaveLength(2);
+  });
+
+  test("--keep: a startup failure leaves the pod up (to inspect) and says how to reach it", async () => {
+    const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const original = kube.runExec.bind(kube);
+    kube.runExec = (target, input, options) =>
+      target.command.join(" ").includes("--version")
+        ? Promise.resolve({ exitCode: 1, stdout: "", stderr: "Exec format error\n" })
+        : original(target, input, options);
+    const logs: string[] = [];
+    await expect(
+      startPodRuntime(baseConfig("/pod/work"), {
+        kube,
+        namespace: "dev",
+        image: "img",
+        name: "broken",
+        keepHint: (name) => `tentacle attach --engine kubernetes -n dev ${name}`,
+        permissions: new PermissionBroker(),
+        saver: new SessionSaver(new JsonSessionStore(join(dir, "keep-fail")), () => {}),
+        resume: null,
+        log: (line) => logs.push(line),
+      }),
+    ).rejects.toThrow(/Exec format error/);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
+    expect(logs).toContain(
+      "[pod] kept broken — resume with: tentacle attach --engine kubernetes -n dev broken\n",
+    );
   });
 
   test("deletes the pod and rethrows if it never becomes ready", async () => {

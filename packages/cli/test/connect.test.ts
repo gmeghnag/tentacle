@@ -644,7 +644,7 @@ describe("connect: TLS trust passthrough + insecure warning (docs/feat/client-tl
   });
 
   test("a `serve` daemon is the user's own host: the TUI is never told it is in a pod", async () => {
-    // docs/feat/tui-spill-note.md: only `runPodTui` sets `daemonInPod` (spills read "saved to").
+    // docs/feat/tui-spill-note.md: only `runEngineTui` sets `daemonInPod` (spills read "saved to").
     const { dial } = capturingDial();
     let inPod: unknown = "not called";
     await connectTui({ url: "wss://fake" }, () => {}, {
