@@ -103,6 +103,15 @@ export const SLOT_LOST_NOTICE =
   "_another device started a turn — your message is back in the input (Enter now queues it)_";
 
 /**
+ * A background warm's chunk threw (a resize re-layout or the idle warm, neither
+ * of which a turn awaits). Surfaced as a visible system line, so the failure is
+ * not only an unhandled rejection (docs/feat/tui-run-chunked.md, Review R1).
+ */
+export function warmFailureNotice(error: unknown): string {
+  return `_a background layout failed: ${String(error)}_`;
+}
+
+/**
  * An own prompt's turn failed: did it lose the slot to another device's turn
  * (refused `TurnInProgress` before it streamed anything)? Then it is
  * withdrawn, not failed. Decided by the error CODE, never its text.

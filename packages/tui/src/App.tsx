@@ -65,6 +65,7 @@ import {
   takeForSendNow,
 } from "./queued.ts";
 import { layoutTranscript, sliceLaid, stripAnsi, warmRowsChunk } from "./render-lines.ts";
+import { runChunked } from "./run-chunked.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import { type Selection, extractSelection, isNonEmpty, rowSelectionRange } from "./selection.ts";
 import {
@@ -131,6 +132,7 @@ import {
   lostSlot,
   needsWarm,
   nextStep,
+  warmFailureNotice,
 } from "./turn-feed.ts";
 
 /**
@@ -481,6 +483,11 @@ export function App({
   const warmGenRef = useRef(0);
   // Cancels the idle warm of the other Ctrl+O view (idle-warm.ts).
   const idleWarmCancelRef = useRef<() => void>(() => {});
+  // Where the two background warms (a resize re-layout, the idle warm) surface a
+  // throwing chunk. Neither awaits `done`, so without this the throw would be an
+  // unhandled rejection (docs/feat/tui-run-chunked.md, Review R1). Set where
+  // `pushNotice` is defined, below — the effects only call it later.
+  const warmErrorRef = useRef<(error: unknown) => void>(() => {});
   // Autonomous wake on a background-job exit: a job that finishes while a turn
   // is running sets this, so the wake fires once the current turn settles (the
   // running turn won't see the exit — the agent flushes exits at turn START).
@@ -608,19 +615,11 @@ export function App({
       const gen = warmGenRef.current;
       const items = stateRef.current.items;
       const opts = { expandAll, width: next.columns, spillInPod: daemonInPod };
-      let idx = 0;
-      const step = (): void => {
-        if (warmGenRef.current !== gen) {
-          return; // superseded by a newer resize, or unmounted
-        }
-        idx = warmRowsChunk(items, opts, idx, 6);
-        if (idx >= items.length) {
-          setSize(next);
-          return;
-        }
-        setTimeout(step, 0);
-      };
-      step();
+      runChunked(items.length, (from, budgetMs) => warmRowsChunk(items, opts, from, budgetMs), {
+        isStale: () => warmGenRef.current !== gen,
+        onDone: () => setSize(next),
+        onError: (error) => warmErrorRef.current(error),
+      });
     };
     stdout.on("resize", onResize);
     return () => {
@@ -697,12 +696,15 @@ export function App({
   const idleRunning = st.running || permission.pending !== null;
   const idleBusy = loading !== null || warmingRef.current;
   useEffect(() => {
-    idleWarmCancelRef.current = startIdleWarm({
-      items: idleItems,
-      opts: { expandAll, width: columns, spillInPod: daemonInPod },
-      running: idleRunning,
-      busy: idleBusy,
-    });
+    idleWarmCancelRef.current = startIdleWarm(
+      {
+        items: idleItems,
+        opts: { expandAll, width: columns, spillInPod: daemonInPod },
+        running: idleRunning,
+        busy: idleBusy,
+      },
+      { onError: (error) => warmErrorRef.current(error) },
+    );
     return idleWarmCancelRef.current;
   }, [idleItems, idleRunning, idleBusy, expandAll, columns, daemonInPod]);
   const total = layout.total;
@@ -733,6 +735,7 @@ export function App({
     },
     [flushNow],
   );
+  warmErrorRef.current = (error: unknown) => pushNotice(warmFailureNotice(error));
 
   const closePanel = useCallback(() => {
     panelGenRef.current += 1;
@@ -888,17 +891,26 @@ export function App({
       if (needsWarm(next.items.length)) {
         warmingRef.current = true;
         const total = next.items.length;
-        let done = 0;
         let shownAt = 0;
-        setLoading({ done, total });
-        while (done < total) {
-          done = warmRowsChunk(next.items, layoutOptsRef.current, done, 6);
-          if (Date.now() - shownAt > 50) {
-            shownAt = Date.now();
-            setLoading({ done, total });
-          }
-          await new Promise((r) => setTimeout(r, 0));
-        }
+        setLoading({ done: 0, total });
+        // `main` yielded once after the last chunk too, so the commit always landed
+        // one macrotask later — a queued input/timer ran first. Keep that hop
+        // (docs/feat/tui-run-chunked.md, Review F2). `done` only settles `true`
+        // here: a throw leaves this function at the `await` (Review R3).
+        await runChunked(
+          total,
+          (from, budgetMs) => warmRowsChunk(next.items, layoutOptsRef.current, from, budgetMs),
+          {
+            onProgress: (done) => {
+              const now = Date.now();
+              if (now - shownAt > 50) {
+                shownAt = now;
+                setLoading({ done, total });
+              }
+            },
+          },
+        ).done;
+        await new Promise((r) => setTimeout(r, 0));
         setLoading(null);
         warmingRef.current = false;
       }

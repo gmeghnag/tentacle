@@ -12,6 +12,7 @@
  * cancellation and the "when" decision are unit-tested without wall-clock waits.
  */
 import { type RenderOptions, warmRowsChunk } from "./render-lines.ts";
+import { CHUNK_BUDGET_MS, type ChunkTimers, runChunked } from "./run-chunked.ts";
 import type { DisplayItem } from "./state.ts";
 
 /**
@@ -23,7 +24,7 @@ import type { DisplayItem } from "./state.ts";
  */
 export const IDLE_WARM_DELAY_MS = 400;
 /** Work per chunk; the chunks yield with `setTimeout(0)` so input never waits long. */
-export const IDLE_WARM_CHUNK_MS = 6;
+export const IDLE_WARM_CHUNK_MS = CHUNK_BUDGET_MS;
 
 export interface IdleWarmState {
   readonly items: readonly DisplayItem[];
@@ -47,15 +48,7 @@ export function otherViewOpts(state: IdleWarmState): RenderOptions | null {
   return { ...state.opts, expandAll: !state.opts.expandAll };
 }
 
-export interface WarmTimers {
-  readonly set: (fn: () => void, ms: number) => unknown;
-  readonly clear: (handle: unknown) => void;
-}
-
-const realTimers: WarmTimers = {
-  set: (fn, ms) => setTimeout(fn, ms),
-  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
+export type WarmTimers = ChunkTimers;
 
 export interface IdleWarmHooks {
   readonly timers?: WarmTimers;
@@ -63,6 +56,8 @@ export interface IdleWarmHooks {
   readonly chunkMs?: number;
   /** Called once the whole transcript is warm (not when cancelled). */
   readonly onDone?: (chunks: number) => void;
+  /** A chunk threw: the site surfaces it (nothing awaits this run's `done`). */
+  readonly onError?: (error: unknown) => void;
 }
 
 /**
@@ -76,28 +71,21 @@ export function startIdleWarm(state: IdleWarmState, hooks: IdleWarmHooks = {}): 
   if (other === null) {
     return () => {};
   }
-  const timers = hooks.timers ?? realTimers;
-  const chunkMs = hooks.chunkMs ?? IDLE_WARM_CHUNK_MS;
   const items = state.items;
-  let cancelled = false;
-  let handle: unknown;
-  let idx = 0;
   let chunks = 0;
-  const step = (): void => {
-    if (cancelled) {
-      return;
-    }
-    idx = warmRowsChunk(items, other, idx, chunkMs);
-    chunks += 1;
-    if (idx >= items.length) {
-      hooks.onDone?.(chunks);
-      return;
-    }
-    handle = timers.set(step, 0);
-  };
-  handle = timers.set(step, hooks.delayMs ?? IDLE_WARM_DELAY_MS);
-  return () => {
-    cancelled = true;
-    timers.clear(handle);
-  };
+  const run = runChunked(
+    items.length,
+    (from, budgetMs) => warmRowsChunk(items, other, from, budgetMs),
+    {
+      budgetMs: hooks.chunkMs ?? IDLE_WARM_CHUNK_MS,
+      delayMs: hooks.delayMs ?? IDLE_WARM_DELAY_MS,
+      timers: hooks.timers,
+      onProgress: () => {
+        chunks += 1;
+      },
+      onDone: () => hooks.onDone?.(chunks),
+      ...(hooks.onError ? { onError: hooks.onError } : {}),
+    },
+  );
+  return run.cancel;
 }
