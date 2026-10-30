@@ -12,6 +12,7 @@ import { type ToolResultDetail, type ToolResultSpill, toolLabel } from "@tentacl
 import chalk from "chalk";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
+import { BLANK, BULLET, blinkOn } from "./blink.ts";
 import { formatDurationMs, formatTokens } from "./format.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
@@ -20,6 +21,7 @@ import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 import { dashedRule, theme } from "./theme.ts";
+import { fitSubtitle, isExpanded } from "./tool-expand.ts";
 import { type WordOp, changeRatio, diffWords } from "./word-diff.ts";
 
 export interface RenderOptions {
@@ -32,11 +34,24 @@ export interface RenderOptions {
   /** Lines shown in a collapsed preview (default 6). */
   readonly previewLines?: number;
   /**
+   * The shared blink phase (ms) of running tool calls: `blink.ts` decides the
+   * glyph from it. One value for the whole transcript, so every running call
+   * blinks in sync (docs/feat/tui-tool-blink.md). 0 renders the ON phase.
+   */
+  readonly blinkPhase?: number;
+  /**
    * The daemon runs in a pod (`run`/`attach`): a spilled result's file is
    * "saved in the pod to" its path. Constant for an App's lifetime (the
    * runtime the laptop started), so it is not part of the row-cache key.
    */
   readonly spillInPod?: boolean;
+  /**
+   * The tool calls whose full command is shown wrapped under the header (a
+   * left click on one call; docs/feat/tui-tool-expand.md). Keyed by the call's
+   * stable id, sorted, so per-item cache keys stay cheap. Ctrl+O (`expandAll`)
+   * shows every call's command, which subsumes this set.
+   */
+  readonly expandedIds?: readonly string[];
 }
 
 const DEFAULT_THRESHOLD = 8;
@@ -47,6 +62,9 @@ const DEFAULT_WIDTH = 80;
 // bodies stay aligned whichever is used.
 const INDENT = "  ";
 const CONNECTOR = `${theme.subtle("⎿")} `;
+// An expanded call's command, on the rows under its header (owner mockup):
+// 4 display columns, so the command never wraps under the bullet.
+const COMMAND_PREFIX = "  │ ";
 // Below this fraction of changed characters, a removed/added line pair is shown
 // with word-level highlighting; above it, the whole line is tinted instead.
 const WORD_DIFF_MAX_RATIO = 0.4;
@@ -57,10 +75,6 @@ const ANSI_RE = /\x1b\[[0-9;]*m/g;
 /** Strip ANSI SGR colour codes, leaving the plain display text. */
 export function stripAnsi(text: string): string {
   return text.replace(ANSI_RE, "");
-}
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
 // Already wrapped to the width and padded, so `wrapLines` leaves the rows alone.
@@ -430,9 +444,9 @@ function plainToolBody(
 /** A status-coloured bullet that opens a tool call. */
 function bullet(tool: ToolItem): string {
   if (tool.status === "running") {
-    return theme.accent("⏺");
+    return theme.accent(BULLET);
   }
-  return tool.status === "ok" ? theme.success("⏺") : theme.error("⏺");
+  return tool.status === "ok" ? theme.success(BULLET) : theme.error(BULLET);
 }
 
 /** A friendly action label + primary target for a tool call. */
@@ -485,12 +499,41 @@ function toolSubtitle(
   }
 }
 
+/**
+ * The full command of an expanded call, wrapped to the terminal width and
+ * prefixed `  │ ` on every row (owner mockup, docs/feat/tui-tool-expand.md).
+ * Each command LINE is kept (a multi-line command stays multi-line); only its
+ * wrapping is width-derived. Rows are folded here, not by the transcript's
+ * `wrapLines`, because the prefix must repeat on each of them.
+ */
+function commandRows(subtitle: string, cols: number): string[] {
+  const room = Math.max(1, cols - stringWidth(COMMAND_PREFIX));
+  const rows: string[] = [];
+  for (const line of expandTabs(subtitle).split(/\r?\n/)) {
+    const trimmed = line.replace(/\s+$/, "");
+    const wrapped = trimmed === "" ? [""] : wrapLines([trimmed], room);
+    for (const row of wrapped) {
+      rows.push(theme.subtle(COMMAND_PREFIX) + row);
+    }
+  }
+  return rows;
+}
+
 function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
-  const width = Math.max(20, (opts.width ?? DEFAULT_WIDTH) - INDENT.length - 1);
+  const cols = Math.max(1, Math.floor(opts.width ?? DEFAULT_WIDTH));
+  const width = Math.max(20, cols - INDENT.length - 1);
   const elapsed = tool.durationMs !== undefined ? ` ${formatDurationMs(tool.durationMs)}` : "";
   const { label, subtitle } = toolTitle(tool);
-  const sub = subtitle ? ` ${theme.subtle(truncate(subtitle, 72))}` : "";
-  const header = `${bullet(tool)} ${chalk.bold(label)}${sub}${theme.subtle(elapsed)}`;
+  // Collapsed: the subtitle is cut to whatever the header has ROOM for on one
+  // row at this terminal width (bullet + label + elapsed accounted for), not to
+  // a fixed 72. Expanded (this call clicked, or Ctrl+O): the header drops the
+  // subtitle and the whole command follows on `  │ ` rows under it.
+  const head = `${bullet(tool)} ${chalk.bold(label)}`;
+  const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
+  const budget = cols - (stringWidth(BULLET) + 1 + stringWidth(label)) - stringWidth(elapsed) - 1;
+  const fitted = expanded || subtitle === "" ? "" : fitSubtitle(subtitle, budget);
+  const header = `${head}${fitted === "" ? "" : ` ${theme.subtle(fitted)}`}${theme.subtle(elapsed)}`;
+  const command = expanded && subtitle !== "" ? commandRows(subtitle, cols) : [];
 
   const threshold = opts.collapseThreshold ?? DEFAULT_THRESHOLD;
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
@@ -507,7 +550,7 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
     shown = [...body.slice(0, preview), theme.subtle(`… +${hidden} more lines · ctrl+o to expand`)];
   }
   // The first body line carries the corner connector; the rest align under it.
-  return [header, ...shown.map((l, i) => (i === 0 ? CONNECTOR : INDENT) + l)];
+  return [header, ...command, ...shown.map((l, i) => (i === 0 ? CONNECTOR : INDENT) + l)];
 }
 
 /** A full-width grey rule with `text` in it: `── text ─────…`. */
@@ -637,17 +680,53 @@ export function carryColor(rows: readonly string[]): string[] {
 // Width / expand / collapse options are part of the key: a resize or Ctrl+O
 // legitimately re-lays-out everything (once), which is unavoidable.
 //
-// Two slots per item, collapsed and expanded, so a Ctrl+O flip in either
-// direction finds the other view already laid out. A width / threshold /
-// preview change invalidates both (a fresh entry holds only the view just built).
+// Two slots per item — collapsed and expanded — plus a third for a call whose
+// command alone is expanded (a left click, docs/feat/tui-tool-expand.md): that
+// view differs from BOTH (the command block is there, the body is still the
+// collapsed preview). Ctrl+O (`expandAll`) wins over the per-call set and uses
+// the `expanded` slot, so a call clicked before Ctrl+O comes straight back from
+// `command` when Ctrl+O is turned off again. A width / threshold / preview
+// change invalidates all three (a fresh entry holds only the view just built).
+//
+// The blink glyph is NOT part of the cache: a row is always wrapped with the ON
+// glyph `⏺` (2 columns) and the OFF glyph is the same 2 columns (`BLANK`), so a
+// phase tick swaps one equal-width glyph in row 0 of an already-cached layout
+// and re-wraps nothing at all (docs/feat/tui-tool-blink.md, finding 1). Swapping
+// before/inside the wrap was the round-1 bug: the OFF glyph was 1 column, so the
+// row wrapped differently and the transcript jumped a row at 1 Hz.
+// The same property is what lets a CLICKED call keep blinking
+// (docs/feat/tui-tool-expand.md point 7): the command block is below row 0, so
+// it is untouched by the swap.
 interface RowCacheEntry {
   readonly width: number;
   readonly threshold: number;
   readonly preview: number;
   collapsed?: readonly string[];
   expanded?: readonly string[];
+  command?: readonly string[];
 }
 const rowCache = new WeakMap<DisplayItem, RowCacheEntry>();
+/**
+ * The OFF-phase variant of an already-wrapped row array, memoised on that array
+ * (which is itself cached per item + width + slot). A tick therefore allocates
+ * nothing after its first visit and the ON layout is never thrown away.
+ */
+const offPhaseCache = new WeakMap<readonly string[], readonly string[]>();
+
+/** The same rows with the leading bullet swapped for the equal-width OFF glyph. */
+function offPhaseRows(rows: readonly string[]): readonly string[] {
+  const hit = offPhaseCache.get(rows);
+  if (hit) {
+    return hit;
+  }
+  const [first = "", ...rest] = rows;
+  // The FIRST `⏺` of row 0 is the bullet: `toolLines` opens the header with it.
+  // Replacing only that one keeps the SGR codes around it and the rest of the
+  // row (label, subtitle, duration) byte-identical.
+  const swapped = [first.replace(BULLET, BLANK), ...rest];
+  offPhaseCache.set(rows, swapped);
+  return swapped;
+}
 
 /** This item's final wrapped rows, memoised on its identity + layout options. */
 function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
@@ -656,11 +735,18 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   const threshold = opts.collapseThreshold ?? DEFAULT_THRESHOLD;
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
   // Only `tool` items collapse, so only their layout depends on
-  // expand/threshold/preview; every other kind is a function of width alone
-  // (always the `collapsed` slot). Keying those options for non-tool items too
-  // made a Ctrl+O (expandAll) flip needlessly invalidate the whole transcript.
+  // expand/threshold/preview/expandedIds; every other kind is a function of
+  // width alone (always the `collapsed` slot). Keying those options for
+  // non-tool items too made a Ctrl+O (expandAll) flip needlessly invalidate the
+  // whole transcript.
   const expandMatters = item.kind === "tool";
-  const slot = expandMatters && expand ? "expanded" : "collapsed";
+  const slot: "collapsed" | "expanded" | "command" = !expandMatters
+    ? "collapsed"
+    : expand
+      ? "expanded"
+      : item.kind === "tool" && isExpanded(opts.expandedIds ?? [], item.id)
+        ? "command"
+        : "collapsed";
   let entry = rowCache.get(item);
   if (
     entry &&
@@ -669,7 +755,7 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   ) {
     const hit = entry[slot];
     if (hit) {
-      return hit;
+      return withPhase(item, hit, opts);
     }
   } else {
     entry = { width, threshold, preview };
@@ -677,13 +763,37 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
   }
   const rows = wrapLines(itemLines(item, opts), width);
   entry[slot] = rows;
-  return rows;
+  return withPhase(item, rows, opts);
+}
+
+/**
+ * The cached ON layout, or its equal-width OFF twin while a running call is in
+ * the OFF half of the shared cycle. Only a RUNNING tool is ever affected: a
+ * settled call's `toolBullet` is `⏺` at every phase, so its rows are returned
+ * as the very same array (the cache-hit identity the tests pin).
+ */
+function withPhase(
+  item: DisplayItem,
+  rows: readonly string[],
+  opts: RenderOptions,
+): readonly string[] {
+  if (item.kind !== "tool" || item.status !== "running") {
+    return rows;
+  }
+  return blinkOn(opts.blinkPhase ?? 0) ? rows : offPhaseRows(rows);
 }
 
 /** One laid-out item: its final wrapped rows and the global index of its first row. */
 export interface LaidItem {
   readonly rows: readonly string[];
   readonly start: number;
+  /**
+   * The `DisplayItem.id` this item was laid out for (`""` for the kinds that
+   * have none). It carries the tool-call id into the hit-test, so "which call is
+   * under this row" needs no second index that a cache hit could leave stale
+   * (`tool-hit.ts: toolCallAt`).
+   */
+  readonly id: string;
 }
 
 /**
@@ -717,7 +827,7 @@ export function layoutTranscript(
     if (laid.length > 0) {
       cursor += 1; // blank separator row between items (matches transcriptLines)
     }
-    laid.push({ rows, start: cursor });
+    laid.push({ rows, start: cursor, id: item.kind === "tool" ? item.id : "" });
     cursor += rows.length;
   }
   return { laid, total: cursor };

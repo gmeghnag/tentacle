@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, jest, spyOn, test } from "bun:test";
 import { Agent, Session } from "@tentacle/agent";
 import {
   type ChatMessage,
@@ -11,7 +11,9 @@ import {
 } from "@tentacle/core";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { render } from "ink-testing-library";
+import stringWidth from "string-width";
 import { App } from "../src/App.tsx";
+import { BLINK_HALF_MS } from "../src/blink.ts";
 import * as format from "../src/format.ts";
 import * as idleWarm from "../src/idle-warm.ts";
 import { IDLE_WARM_DELAY_MS, type IdleWarmState } from "../src/idle-warm.ts";
@@ -19,6 +21,20 @@ import type { LinkStatusView } from "../src/link-status.ts";
 import * as renderLines from "../src/render-lines.ts";
 import { messagesToItems } from "../src/resume.ts";
 import * as turnFeed from "../src/turn-feed.ts";
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+/**
+ * Bun's fake timers. The pinned `bun-types` predates their typings, so the API
+ * is declared here (it exists at runtime — verified: `advanceTimersByTime(600)`
+ * moves `Date.now` by 600 ms).
+ */
+const clock = jest as unknown as {
+  useFakeTimers(): void;
+  useRealTimers(): void;
+  advanceTimersByTime(ms: number): void;
+  /** Armed timers right now: the tool that pins "a timer exists / does not". */
+  getTimerCount(): number;
+};
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -2283,5 +2299,949 @@ describe("idle warm of the other Ctrl+O view", () => {
     release();
     await delay(100);
     unmount();
+  });
+});
+
+describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", () => {
+  /** A session whose single turn runs one `shell` call for `holdMs`. */
+  function slowToolSession(holdMs: number) {
+    return () => ({
+      async *send() {
+        yield {
+          type: "tool_start" as const,
+          id: "c1",
+          name: "shell",
+          arguments: JSON.stringify({ command: "cp a b" }),
+        };
+        await delay(holdMs);
+        yield {
+          type: "tool_result" as const,
+          id: "c1",
+          name: "shell",
+          result: { content: "done", isError: false },
+          durationMs: holdMs,
+        };
+        yield { type: "turn_end" as const, reason: "end_turn" as const };
+      },
+    });
+  }
+  const toolRows = (frame: string): string[] =>
+    frame.split("\n").filter((l) => l.includes("Bash") || l.includes("running…"));
+
+  test("the bullet alternates while the call runs, and the label never moves column", async () => {
+    // Mutation (red, verified): a static running bullet → one distinct row; an
+    // OFF glyph narrower than `⏺` → `positions` gets 2 entries and the row count
+    // changes at 1 Hz (round-1 finding 1).
+    //
+    // The whole test runs on fake timers: a timer armed under real timers would
+    // not be reachable by `advanceTimersByTime` (AGENTS §9: drive async
+    // deterministically). Ink's own stdin plumbing is macrotask-based, so each
+    // step flushes with a real `setImmediate`.
+    clock.useFakeTimers();
+    try {
+      const app = render(<App createSession={slowToolSession(5000)} model="m" cwd="/tmp/work" />);
+      const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+      await settle();
+      app.stdin.write("go");
+      await settle();
+      app.stdin.write("\r");
+      await settle();
+      const rowNow = (): string =>
+        toolRows(app.lastFrame() ?? "").find((l) => l.includes("Bash")) ?? "";
+      expect(rowNow()).toContain("Bash");
+      const seen = new Set<string>();
+      const positions = new Set<number>();
+      for (let i = 0; i < 6; i++) {
+        const row = rowNow();
+        seen.add(row.startsWith("⏺") ? "on" : "off");
+        // The DISPLAY COLUMN of the label, not the string index: `⏺` is 2 wide
+        // in one phase and the raw index would differ by one even when the
+        // visible row has not moved (the round-1 test's weak correlate).
+        positions.add(stringWidth(stripAnsi(row).slice(0, stripAnsi(row).indexOf("Bash"))));
+        clock.advanceTimersByTime(BLINK_HALF_MS);
+        await settle();
+      }
+      expect([...seen].sort()).toEqual(["off", "on"]); // it really blinks
+      expect(positions.size).toBe(1); // the label never moves column
+      // The call ends: the bullet is the ok one again, at whatever phase.
+      clock.advanceTimersByTime(6000);
+      await settle();
+      expect(rowNow()).toMatch(/^⏺ Bash cp a b 5\.0s/);
+      app.unmount();
+    } finally {
+      clock.useRealTimers();
+    }
+  });
+
+  test("a call joining mid-cycle blinks in step with the one already running (one clock)", async () => {
+    // The exact property of ONE shared clock: the second call starts 750 ms in
+    // (mid-OFF-phase) and must still show the SAME glyph as the first. With a
+    // per-row clock (each row counting from its own start) the two disagree —
+    // mutation D, verified red.
+    const createSession = () => ({
+      async *send() {
+        yield {
+          type: "tool_start" as const,
+          id: "c1",
+          name: "shell",
+          arguments: JSON.stringify({ command: "cp a b" }),
+        };
+        await delay(750); // 1.5 half-periods: the shared clock is mid-OFF
+        yield {
+          type: "tool_start" as const,
+          id: "c2",
+          name: "shell",
+          arguments: JSON.stringify({ command: "cp c d" }),
+        };
+        await delay(5000);
+        for (const id of ["c1", "c2"]) {
+          yield {
+            type: "tool_result" as const,
+            id,
+            name: "shell",
+            result: { content: "done", isError: false },
+            durationMs: 5000,
+          };
+        }
+        yield { type: "turn_end" as const, reason: "end_turn" as const };
+      },
+    });
+    clock.useFakeTimers();
+    try {
+      const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+      const app = render(<App createSession={createSession} model="m" cwd="/tmp/work" />);
+      await settle();
+      app.stdin.write("go");
+      await settle();
+      app.stdin.write("\r");
+      await settle();
+      // Let the mid-cycle join happen.
+      clock.advanceTimersByTime(750);
+      await settle();
+      const phases: string[] = [];
+      for (let i = 0; i < 6; i++) {
+        const rows = toolRows(app.lastFrame() ?? "").filter((l) => l.includes("Bash"));
+        expect(rows).toHaveLength(2);
+        const glyphs = rows.map((r) => (r.startsWith("⏺") ? "on" : "off"));
+        // Same phase for both rows: one clock, not one per row.
+        expect(new Set(glyphs).size).toBe(1);
+        phases.push(glyphs[0] ?? "?");
+        clock.advanceTimersByTime(BLINK_HALF_MS);
+        await settle();
+      }
+      // Non-vacuous: the pair did go through both phases, together.
+      expect(new Set(phases)).toEqual(new Set(["on", "off"]));
+      app.unmount();
+    } finally {
+      clock.useRealTimers();
+    }
+  });
+
+  test("a dead call left by a failed turn does not blink, and no timer is left (finding 2)", async () => {
+    // The HIGH finding: the reducer leaves the `running` tool item behind when a
+    // stream throws (`failTurn`, state.ts:170) or a turn ends `cancelled` with no
+    // result, so a status-only gate blinked forever with the turn over. The gate
+    // is now the TURN running too (`blink.ts: blinkState`).
+    // Mutation (red, verified): drop `turnRunning &&` from `blinkState` → the
+    // row keeps alternating and `getTimerCount()` stays > 0.
+    const createSession = () => ({
+      async *send() {
+        yield {
+          type: "tool_start" as const,
+          id: "c1",
+          name: "shell",
+          arguments: JSON.stringify({ command: "cp a b" }),
+        };
+        await delay(5000);
+        throw new Error("link lost");
+      },
+    });
+    clock.useFakeTimers();
+    try {
+      const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+      const app = render(<App createSession={createSession} model="m" cwd="/tmp/work" />);
+      await settle();
+      app.stdin.write("go");
+      await settle();
+      app.stdin.write("\r");
+      await settle();
+      const rowNow = (): string =>
+        toolRows(app.lastFrame() ?? "").find((l) => l.includes("Bash")) ?? "";
+      // The call is alive: it blinks, and the timer exists.
+      expect(rowNow().startsWith("⏺ Bash")).toBe(true);
+      const live = clock.getTimerCount();
+      clock.advanceTimersByTime(BLINK_HALF_MS);
+      await settle();
+      expect(rowNow().startsWith("⏺ Bash")).toBe(false); // OFF: it was blinking
+      // The stream throws: the turn is over, the running item stays (stale row).
+      clock.advanceTimersByTime(6000);
+      await settle();
+      expect(app.lastFrame() ?? "").toContain("link lost");
+      // The stale row is still there — that is the separate reducer task — but it
+      // is SOLID now, and nothing re-arms it.
+      const solid = rowNow();
+      expect(solid.startsWith("⏺ Bash")).toBe(true);
+      for (let i = 0; i < 4; i++) {
+        clock.advanceTimersByTime(BLINK_HALF_MS);
+        await settle();
+        expect(rowNow()).toBe(solid);
+      }
+      expect(clock.getTimerCount()).toBeLessThan(live); // the interval is gone
+      app.unmount();
+    } finally {
+      clock.useRealTimers();
+    }
+  });
+
+  test("a call joining an OFF-phase cycle starts ON: the clock restarts (owner decision 1)", async () => {
+    // Finding 3: with a clock that only counted half-periods, a short call
+    // joining at t=600 ms was blank for its whole life. The clock now restarts ON
+    // when a NEW call starts (`advanceBlink`/`blinkPhase` keyed on the call
+    // count). Mutation (red, verified): drop the call-count key from
+    // `blinkPhase` → the second call is `off` in its first frames.
+    const createSession = () => ({
+      async *send() {
+        yield {
+          type: "tool_start" as const,
+          id: "c1",
+          name: "shell",
+          arguments: JSON.stringify({ command: "cp a b" }),
+        };
+        await delay(550); // the shared clock is in its OFF half (500–999 ms)
+        yield {
+          type: "tool_start" as const,
+          id: "c2",
+          name: "shell",
+          arguments: JSON.stringify({ command: "cp c d" }),
+        };
+        await delay(200); // the short call: shorter than one half-period
+        yield {
+          type: "tool_result" as const,
+          id: "c2",
+          name: "shell",
+          result: { content: "done", isError: false },
+          durationMs: 200,
+        };
+        yield {
+          type: "tool_result" as const,
+          id: "c1",
+          name: "shell",
+          result: { content: "done", isError: false },
+          durationMs: 800,
+        };
+        yield { type: "turn_end" as const, reason: "end_turn" as const };
+      },
+    });
+    clock.useFakeTimers();
+    try {
+      const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+      const app = render(<App createSession={createSession} model="m" cwd="/tmp/work" />);
+      await settle();
+      app.stdin.write("go");
+      await settle();
+      app.stdin.write("\r");
+      await settle();
+      const rows = (): string[] =>
+        (app.lastFrame() ?? "").split("\n").filter((l) => l.includes("Bash"));
+      // The first call is in its OFF half (500–999 ms)...
+      clock.advanceTimersByTime(BLINK_HALF_MS);
+      await settle();
+      expect(rows()).toHaveLength(1);
+      expect(rows()[0]?.startsWith("⏺ Bash")).toBe(false);
+      // ...and the second call joins at 550 ms, mid-OFF.
+      clock.advanceTimersByTime(50);
+      await settle();
+      // ...and the second call joining then is ON at once, and stays ON for its
+      // whole 200 ms life (never blank), in step with the first (one clock).
+      for (let i = 0; i < 4; i++) {
+        const pair = rows();
+        expect(pair).toHaveLength(2);
+        for (const row of pair) {
+          expect(row.startsWith("⏺ Bash")).toBe(true);
+        }
+        clock.advanceTimersByTime(50);
+        await settle();
+      }
+      app.unmount();
+    } finally {
+      clock.useRealTimers();
+    }
+  });
+
+  test("at 79 columns no row moves between phases: the frame does not jump (finding 1)", async () => {
+    // The HIGH width finding, at FRAME level: `⏺` is 2 columns, the old OFF
+    // glyph was 1, so at 79 columns a long command's row re-wrapped and every
+    // row below it moved one line at 1 Hz. The review's captured symptom was
+    // `bashRow=14 replyRow=10` ↔ `bashRow=15 replyRow=11`.
+    // The command below is 85 columns, so at 79 columns the fitted header is CUT
+    // (71 columns of room) and the ellipsis makes it fill the row EXACTLY: the
+    // wrap sits on the boundary, and any phase whose glyph is not 2 columns
+    // either overflows (a wider OFF glyph) or leaves a column unused (a narrower
+    // one) — both are caught by the width assertion below.
+    // Mutation (red, verified, on the STACKED tree): swap the OFF glyph for
+    // `"   "` (3 columns) → 80, or for `" "` (1 column) → 78; `BLANK` itself is
+    // 2 columns and is pinned by `blink.test.ts`.
+    const createSession = () => ({
+      async *send() {
+        yield { type: "text" as const, delta: "Running the loop now." };
+        yield {
+          type: "tool_start" as const,
+          id: "c1",
+          name: "shell",
+          arguments: JSON.stringify({
+            command:
+              "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo item-$i; done > out.txt && echo finished",
+          }),
+        };
+        // A row BELOW the tool: it is what moves when the header re-wraps.
+        yield { type: "text" as const, delta: "AFTER-TOOL marker line." };
+        await delay(5000);
+        yield {
+          type: "tool_result" as const,
+          id: "c1",
+          name: "shell",
+          result: { content: "done", isError: false },
+          durationMs: 5000,
+        };
+        yield { type: "turn_end" as const, reason: "end_turn" as const };
+      },
+    });
+    clock.useFakeTimers();
+    try {
+      const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+      const app = render(<App createSession={createSession} model="m" cwd="/tmp/work" />);
+      // 79 columns: the width the review found the re-wrap at.
+      Object.defineProperty(app.stdout, "columns", { value: 79, configurable: true });
+      app.stdout.emit("resize");
+      await settle();
+      app.stdin.write("go");
+      await settle();
+      app.stdin.write("\r");
+      await settle();
+      const frame = (): string[] => (app.lastFrame() ?? "").split("\n").map(stripAnsi);
+      const bashRow = (rows: string[]): number =>
+        rows.findIndex((r) => r.includes("Bash") && r.includes("for i in"));
+      const replyRow = (rows: string[]): number =>
+        rows.findIndex((r) => r.includes("AFTER-TOOL marker"));
+      const views: { phase: string; rows: number; bash: number; reply: number; width: number }[] =
+        [];
+      for (let i = 0; i < 4; i++) {
+        const rows = frame();
+        const bash = bashRow(rows);
+        expect(bash).toBeGreaterThanOrEqual(0);
+        views.push({
+          phase: rows[bash]?.startsWith("⏺") ? "on" : "off",
+          rows: rows.length,
+          bash,
+          reply: replyRow(rows),
+          // The header's DISPLAY width: 79 = exactly full, so neither phase has
+          // a column to spare or to overflow.
+          width: stringWidth((rows[bash] ?? "").trimEnd()),
+        });
+        clock.advanceTimersByTime(BLINK_HALF_MS);
+        await settle();
+      }
+      // Both phases really were shown (non-vacuity)…
+      expect(new Set(views.map((v) => v.phase))).toEqual(new Set(["on", "off"]));
+      // …and NOTHING ELSE moved: same total rows, same tool row, same reply row.
+      expect(new Set(views.map((v) => v.rows)).size).toBe(1);
+      expect(new Set(views.map((v) => v.bash)).size).toBe(1);
+      expect(new Set(views.map((v) => v.reply)).size).toBe(1);
+      // Every phase's header fills the row exactly: a differently-widthed OFF
+      // glyph re-wraps it (the round-1 jump) and shows up here as 78 or 80.
+      expect(new Set(views.map((v) => v.width))).toEqual(new Set([79]));
+      // The labelled property, at the width the review named.
+      const first = views[0] as { rows: number; bash: number; reply: number };
+      for (const v of views) {
+        expect(v.rows).toBe(first.rows);
+        expect(v.bash).toBe(first.bash);
+        expect(v.reply).toBe(first.reply);
+      }
+      app.unmount();
+    } finally {
+      clock.useRealTimers();
+    }
+  });
+
+  test("the interval exists only while a call runs, and is cleared (F, G)", async () => {
+    // Findings 4/E/F/G: no owner-facing clock property was pinned. These are
+    // measured against `getTimerCount()` on the App's OWN timers, with an idle
+    // App mounted alongside as the baseline (Ink and the loading bar arm timers
+    // of their own, so an absolute count would be a lie).
+    // Mutations (red, verified): drop the `!blinkRuns` early return (F: an idle
+    // App arms an interval and keeps ticking) → the idle assertion fails; drop
+    // the `clearInterval` cleanup (G) → the count after the turn does not fall.
+    clock.useFakeTimers();
+    try {
+      const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+      const idle = render(
+        <App model="m" cwd="/tmp/work" createSession={() => ({ async *send() {} })} />,
+      );
+      await settle();
+      expect(clock.getTimerCount()).toBe(0); // nothing running: no timer at all
+      const app = render(<App createSession={slowToolSession(300)} model="m" cwd="/tmp/work" />);
+      await settle();
+      app.stdin.write("go");
+      await settle();
+      app.stdin.write("\r");
+      await settle();
+      // The call is running: exactly ONE interval belongs to the blink clock
+      // (the others are Ink's spinner and the loading bar, present without it).
+      const running = clock.getTimerCount();
+      // End the call: the interval is cleared, and the App is back to the idle
+      // baseline (0 timers) once the turn's own spinner/loading timers finish.
+      clock.advanceTimersByTime(400);
+      await settle();
+      clock.advanceTimersByTime(1000);
+      await settle();
+      expect(clock.getTimerCount()).toBe(0); // G: a leaked interval pads this to 1
+      const row = toolRows(app.lastFrame() ?? "").find((l) => l.includes("Bash")) ?? "";
+      expect(row).toMatch(/^⏺ Bash cp a b 0\.3s/);
+      for (let i = 0; i < 3; i++) {
+        clock.advanceTimersByTime(BLINK_HALF_MS);
+        await settle();
+        expect(toolRows(app.lastFrame() ?? "").find((l) => l.includes("Bash"))).toBe(row);
+      }
+      // Unmounting mid-call leaves no interval behind either.
+      app.unmount();
+      idle.unmount();
+    } finally {
+      clock.useRealTimers();
+    }
+  });
+
+  test("a short call (200 ms) shows a steady bullet: never an off flash", async () => {
+    // The owner's decision: the clock starts ON when the call starts, so a call
+    // shorter than one half-period is stock-solid. Mutation: start the phase at
+    // the OFF half (or seed it from a wall clock) → the row blanks here.
+    clock.useFakeTimers();
+    try {
+      const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+      const app = render(<App createSession={slowToolSession(200)} model="m" cwd="/tmp/work" />);
+      await settle();
+      app.stdin.write("go");
+      await settle();
+      app.stdin.write("\r");
+      await settle();
+      const rowNow = (): string =>
+        toolRows(app.lastFrame() ?? "").find((l) => l.includes("Bash")) ?? "";
+      // Sample inside the call's 200 ms: never off.
+      for (let i = 0; i < 4; i++) {
+        expect(rowNow().startsWith("⏺ Bash")).toBe(true);
+        clock.advanceTimersByTime(50);
+        await settle();
+      }
+      // It ends well inside the first half-period: solid ok bullet, no blink.
+      clock.advanceTimersByTime(100);
+      await settle();
+      expect(rowNow()).toMatch(/^⏺ Bash cp a b 0\.2s/);
+      app.unmount();
+    } finally {
+      clock.useRealTimers();
+    }
+  });
+});
+
+describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md)", () => {
+  const COMMAND =
+    "cd . && go test ./internal/ui -run TestZZWebGapDeadBranches -count=1 -v -timeout 120s 2>&1 | tail -50";
+  /** A session that runs ONE long-command `shell` call (ok, 1.7 s) and settles. */
+  const longCallSession = () => ({
+    async *send() {
+      yield {
+        type: "tool_start" as const,
+        id: "c1",
+        name: "shell",
+        arguments: JSON.stringify({ command: COMMAND }),
+      };
+      await delay(10);
+      yield {
+        type: "tool_result" as const,
+        id: "c1",
+        name: "shell",
+        result: { content: "ok", isError: false },
+        durationMs: 1700,
+      };
+      yield { type: "turn_end" as const, reason: "end_turn" as const };
+    },
+  });
+  const twoCallSession = () => ({
+    async *send() {
+      // A long reply first, so at 40 columns the transcript is taller than the
+      // viewport and a scroll-up leaves BOTH calls visible at a known row.
+      yield {
+        type: "text" as const,
+        delta: Array.from({ length: 30 }, (_, i) => `pad ${i}`).join("\n"),
+      };
+      // `cmdA` / `cmdB` lead the command, so the header row (which keeps the
+      // command's START, cut to the width) distinguishes the two calls at any
+      // width.
+      for (const [id, tag] of [
+        ["c1", "cmdA"],
+        ["c2", "cmdB"],
+      ] as const) {
+        yield {
+          type: "tool_start" as const,
+          id,
+          name: "shell",
+          arguments: JSON.stringify({ command: `${tag} ${COMMAND}` }),
+        };
+        yield {
+          type: "tool_result" as const,
+          id,
+          name: "shell",
+          result: { content: "ok", isError: false },
+          durationMs: 100,
+        };
+      }
+      yield { type: "turn_end" as const, reason: "end_turn" as const };
+    },
+  });
+  /**
+   * Review finding 1's setup: 40 pad lines and 12 settled calls with long
+   * commands, so at 100 columns the transcript is much taller than the viewport
+   * and its last rows are dense with tool headers. One wheel notch scrolls up 3
+   * rows, which puts several headers BELOW the window's end.
+   */
+  const manyCallsSession = () => ({
+    async *send() {
+      yield {
+        type: "text" as const,
+        delta: Array.from({ length: 40 }, (_, i) => `pad ${i}`).join("\n"),
+      };
+      for (let i = 1; i <= 12; i++) {
+        const id = `c${String(i).padStart(2, "0")}`;
+        yield {
+          type: "tool_start" as const,
+          id,
+          name: "shell",
+          arguments: JSON.stringify({ command: `cmd${i} ${COMMAND}` }),
+        };
+        yield {
+          type: "tool_result" as const,
+          id,
+          name: "shell",
+          result: { content: "ok", isError: false },
+          durationMs: 100,
+        };
+      }
+      yield { type: "turn_end" as const, reason: "end_turn" as const };
+    },
+  });
+  const rowsOf = (frame: string): string[] => frame.split("\n").map(stripAnsi);
+  const headerRowOf = (frame: string, tail = ""): number =>
+    rowsOf(frame).findIndex((r) => r.includes("Bash") && r.includes(tail)) + 1;
+  const cont = (frame: string): string[] => rowsOf(frame).filter((r) => r.startsWith("  │ "));
+
+  async function runLong(): Promise<{
+    app: ReturnType<typeof render>;
+    frame: () => string;
+    y: number;
+  }> {
+    const app = render(<App createSession={longCallSession} model="m" cwd="/tmp/work" />);
+    // Commit the width AFTER the App's effects subscribed to `resize`.
+    await delay(40);
+    Object.defineProperty(app.stdout, "columns", { value: 160, configurable: true });
+    app.stdout.emit("resize");
+    await delay(60);
+    app.stdin.write("go");
+    await delay(20);
+    app.stdin.write("\r");
+    await delay(200);
+    const frame = (): string => app.lastFrame() ?? "";
+    return { app, frame, y: headerRowOf(frame()) };
+  }
+
+  test("the whole command is on the header row at 160 columns (was cut at 72)", async () => {
+    const { app, frame } = await runLong();
+    const header = rowsOf(frame())[headerRowOf(frame()) - 1] ?? "";
+    expect(header).toContain(COMMAND);
+    expect(header).toContain("1.7s");
+    expect(stringWidth(header.trimEnd())).toBeLessThanOrEqual(160);
+    app.unmount();
+  });
+
+  test("a click on the header row expands that call; a second click collapses it", async () => {
+    // RED before the change: `click changed the frame? false` (the Context
+    // repro) — a click did nothing at all.
+    const { app, frame } = await runLong();
+    const y = headerRowOf(frame());
+    expect(y).toBeGreaterThan(0);
+    expect(cont(frame())).toHaveLength(0); // nothing expanded yet
+    app.stdin.write(press(3, y));
+    app.stdin.write(release(3, y));
+    await delay(80);
+    const expanded = frame();
+    // 160 columns: the whole command fits one `  │ ` row (the width-derived
+    // wrap is the render-lines tests' job). It is the FULL command, not the
+    // 72-char cut.
+    expect(cont(expanded)).toHaveLength(1);
+    expect(cont(expanded).join(" ")).toContain(COMMAND);
+    // The header keeps bullet + label + elapsed.
+    const header = rowsOf(expanded)[headerRowOf(expanded) - 1] ?? "";
+    expect(header.startsWith("⏺ Bash")).toBe(true);
+    expect(header).toContain("1.7s");
+    // A second click collapses it again.
+    app.stdin.write(press(3, y));
+    app.stdin.write(release(3, y));
+    await delay(80);
+    expect(cont(frame())).toHaveLength(0);
+    app.unmount();
+  });
+
+  test("a click only toggles ONE call, and its expansion survives new messages", async () => {
+    const app = render(<App createSession={twoCallSession} model="m" cwd="/tmp/work" />);
+    // Commit the width AFTER the App's effects subscribed to `resize`.
+    await delay(40);
+    Object.defineProperty(app.stdout, "columns", { value: 160, configurable: true });
+    app.stdout.emit("resize");
+    await delay(60);
+    app.stdin.write("go");
+    await delay(20);
+    app.stdin.write("\r");
+    await delay(200);
+    const frame = (): string => app.lastFrame() ?? "";
+    // Only the SECOND call's command is expanded.
+    const y = headerRowOf(frame(), "cmdB");
+    expect(y).toBeGreaterThan(0);
+    app.stdin.write(press(3, y));
+    app.stdin.write(release(3, y));
+    await delay(80);
+    expect(cont(frame()).join(" ")).toContain("cmdB");
+    expect(cont(frame()).join(" ")).not.toContain("cmdA");
+    // A new prompt re-renders the transcript: the call stays expanded (keyed by
+    // its stable id) and the NEW call is collapsed.
+    app.stdin.write("again");
+    await delay(20);
+    app.stdin.write("\r");
+    await delay(200);
+    expect(cont(frame()).join(" ")).toContain("cmdB");
+    app.unmount();
+  });
+
+  test("a coalesced press+release in ONE chunk is still a click", async () => {
+    const { app, frame } = await runLong();
+    const y = headerRowOf(frame());
+    app.stdin.write(`\u001B[<0;3;${y}M\u001B[<0;3;${y}m`);
+    await delay(80);
+    expect(cont(frame()).length).toBeGreaterThan(0);
+    app.unmount();
+  });
+
+  test("a drag from a tool row still selects text and does NOT toggle", async () => {
+    const copied: string[] = [];
+    const app = render(
+      <App
+        createSession={longCallSession}
+        model="m"
+        cwd="/tmp/work"
+        clipboard={async (t) => {
+          copied.push(t);
+        }}
+      />,
+    );
+    // Commit the width AFTER the App's effects subscribed to `resize`.
+    await delay(40);
+    Object.defineProperty(app.stdout, "columns", { value: 160, configurable: true });
+    app.stdout.emit("resize");
+    await delay(60);
+    app.stdin.write("go");
+    await delay(20);
+    app.stdin.write("\r");
+    await delay(200);
+    const frame = (): string => app.lastFrame() ?? "";
+    const y = headerRowOf(frame());
+    app.stdin.write(press(3, y));
+    await delay(20);
+    app.stdin.write(drag(20, y)); // motion: this is a selection, not a click
+    await delay(20);
+    app.stdin.write(release(20, y));
+    await delay(80);
+    expect(cont(frame())).toHaveLength(0); // nothing expanded
+    expect(copied).toHaveLength(1); // the drag selected
+    expect(copied[0]?.length).toBeGreaterThan(0);
+    app.unmount();
+  });
+
+  test("a press on a tool row released on ANOTHER row does not toggle", async () => {
+    const { app, frame } = await runLong();
+    const y = headerRowOf(frame());
+    app.stdin.write(press(3, y));
+    app.stdin.write(release(3, y + 3)); // same button, different cell
+    await delay(80);
+    expect(cont(frame())).toHaveLength(0);
+    app.unmount();
+  });
+
+  test("a click on a wrapped continuation row does not collapse the call", async () => {
+    const { app, frame } = await runLong();
+    const y = headerRowOf(frame());
+    app.stdin.write(press(3, y));
+    app.stdin.write(release(3, y));
+    await delay(80);
+    const first = cont(frame())[0] ?? "";
+    expect(first).not.toBe("");
+    const contY = rowsOf(frame()).findIndex((r) => r.startsWith("  │ ")) + 1;
+    app.stdin.write(press(6, contY)); // a cell INSIDE the command text
+    app.stdin.write(release(6, contY));
+    await delay(80);
+    expect(cont(frame()).length).toBeGreaterThan(0); // still expanded
+    app.unmount();
+  });
+
+  test("a click while scrolled up toggles the call under the CURSOR, not the tail", async () => {
+    // The hit-test takes the ABSOLUTE row (`win.start + r.y - 1`), so a click at
+    // a given screen row after scrolling reaches the call that is THERE.
+    // Mutation (red, verified): hit-test on `r.y - 1` alone (ignoring the window
+    // start) resolves a pad row → nothing expands.
+    const app = render(<App createSession={twoCallSession} model="m" cwd="/tmp/work" />);
+    // Commit the width AFTER the App's effects subscribed to `resize`.
+    await delay(40);
+    Object.defineProperty(app.stdout, "columns", { value: 40, configurable: true }); // wraps
+    app.stdout.emit("resize");
+    await delay(60);
+    app.stdin.write("go");
+    await delay(20);
+    app.stdin.write("\r");
+    await delay(200);
+    const frame = (): string => app.lastFrame() ?? "";
+    // The tail: the calls are at the BOTTOM of the screenshot.
+    const tailRow = headerRowOf(frame(), "cmdA");
+    expect(tailRow).toBeGreaterThan(0);
+    // Scroll up one notch (3 rows): the transcript shifts down, so the call is
+    // now at a LOWER screen row and `win.start` is no longer the tail's.
+    app.stdin.write(WHEEL_UP);
+    await delay(100);
+    const y = headerRowOf(frame(), "cmdA");
+    expect(y).toBeGreaterThan(tailRow); // it really moved down
+    const before = cont(frame()).length;
+    app.stdin.write(press(3, y));
+    app.stdin.write(release(3, y));
+    await delay(100);
+    const text = cont(frame()).join(" ");
+    expect(cont(frame()).length).toBeGreaterThan(before);
+    expect(text).toContain("cmdA"); // the call at the cursor
+    expect(text).not.toContain("cmdB");
+    app.unmount();
+  });
+
+  test("a click BELOW the viewport, scrolled up, toggles nothing (review finding 1)", async () => {
+    // The review's scenario: scrolled up, the rows below the transcript viewport
+    // — the two prompt rules, the input box, the status bar — map to
+    // `win.start + y - 1`, which are real transcript rows the user cannot see
+    // (tool headers, at the tail). A click there used to toggle a HIDDEN call.
+    // Mutation (red, verified): drop the viewport bound
+    // (`toolCallAtViewport` → `toolCallAt(laid, win.start + y - 1)`) → the click
+    // on row 20 / row 23 expands `cmd12`, as the review's repro shows.
+    const app = render(<App createSession={manyCallsSession} model="m" cwd="/tmp/work" />);
+    await delay(60);
+    app.stdin.write("go");
+    await delay(20);
+    app.stdin.write("\r");
+    await delay(300);
+    const frame = (): string => app.lastFrame() ?? "";
+    // Where the bottom area starts: the first rule row (`───`) is the viewport's
+    // last transcript row + 1 — everything from it down is NOT transcript.
+    const ruleRow = (): number => rowsOf(frame()).findIndex((r) => /^─+$/.test(r)) + 1;
+    expect(ruleRow()).toBeGreaterThan(1);
+    for (const notches of [1, 2, 3]) {
+      // Scroll up one notch at a time; the transcript's last visible row is
+      // still the row above the rule.
+      app.stdin.write(WHEEL_UP);
+      await delay(100);
+      const top = ruleRow();
+      expect(cont(frame())).toHaveLength(0); // nothing expanded yet
+      // Click EVERY row of the bottom area: the rule, the input, the rule, the
+      // status bar.
+      for (let y = top; y <= rowsOf(frame()).length; y++) {
+        app.stdin.write(press(3, y));
+        app.stdin.write(release(3, y));
+        await delay(20);
+      }
+      await delay(60);
+      // Scroll back to the tail: none of those clicks may have expanded a call.
+      for (let i = 0; i < 80; i++) app.stdin.write(WHEEL_DOWN);
+      await delay(250);
+      expect({ notches, conts: cont(frame()).length }).toEqual({ notches, conts: 0 });
+      for (let i = 0; i < 80; i++) app.stdin.write(WHEEL_UP); // back up for the next round
+      await delay(150);
+      for (let i = 0; i < 80; i++) app.stdin.write(WHEEL_DOWN);
+      await delay(150);
+    }
+    // Non-vacuity: a click on a VISIBLE header still expands, at the same width
+    // and after the same scrolling — so the assertions above are about the
+    // viewport bound, not about clicks having stopped working.
+    app.stdin.write(WHEEL_UP);
+    await delay(100);
+    const visibleY = rowsOf(frame()).findIndex((r) => r.includes("Bash")) + 1;
+    expect(visibleY).toBeGreaterThan(0);
+    expect(visibleY).toBeLessThan(ruleRow());
+    app.stdin.write(press(3, visibleY));
+    app.stdin.write(release(3, visibleY));
+    await delay(100);
+    expect(cont(frame()).length).toBeGreaterThan(0);
+    app.unmount();
+  });
+
+  test("a click while Ctrl+O is on changes no hidden per-call state (review finding 3)", async () => {
+    // With `expandAll` every call's command already shows, so a header click has
+    // nothing to reveal. It must not silently toggle `expandedIds`: turning
+    // Ctrl+O off would then show a call — or hide one — the user never clicked a
+    // visible change for.
+    const { app, frame } = await runLong();
+    const y = headerRowOf(frame());
+    expect(cont(frame())).toHaveLength(0);
+    app.stdin.write("\u000F"); // Ctrl+O: every command shows
+    await delay(80);
+    expect(cont(frame()).join(" ")).toContain(COMMAND);
+    // Click the header of the (now expanded-looking) call, then Ctrl+O off.
+    app.stdin.write(press(3, y));
+    app.stdin.write(release(3, y));
+    await delay(80);
+    app.stdin.write("\u000F"); // Ctrl+O off
+    await delay(80);
+    // It is still COLLAPSED: the click under Ctrl+O recorded nothing.
+    expect(cont(frame())).toHaveLength(0);
+    // Non-vacuity: with Ctrl+O off, a real click does expand it.
+    app.stdin.write(press(3, y));
+    app.stdin.write(release(3, y));
+    await delay(80);
+    expect(cont(frame()).join(" ")).toContain(COMMAND);
+    app.unmount();
+  });
+
+  test("the resize warm lays the clicked call out ONCE: the commit render is a cache hit (review finding 2)", async () => {
+    // Drift 7's whole point: the warm must fill the slot the COMMITTING render
+    // will ask for — a clicked call's `command` slot, not the collapsed one.
+    // Without `expandedIds` in the App's `onResize` options literal the warm
+    // fills `collapsed`, and the committing render then re-lays-out the call on
+    // the render thread — the freeze the warm exists to avoid.
+    // Measured on `formatDurationMs`, which `toolLines` calls on every layout of
+    // a tool item, so the count IS the number of layouts of this one call.
+    // Mutation (red, verified): drop `expandedIds` from the literal
+    // (`App.tsx:644`) → 2 instead of 1.
+    const { app, frame } = await runLong();
+    const y = headerRowOf(frame());
+    app.stdin.write(press(3, y));
+    app.stdin.write(release(3, y));
+    await delay(80);
+    expect(cont(frame())).toHaveLength(1); // the call is clicked
+    const spy = spyOn(format, "formatDurationMs");
+    try {
+      Object.defineProperty(app.stdout, "columns", { value: 60, configurable: true });
+      app.stdout.emit("resize");
+      await delay(150); // the warm's chunks, then the commit render
+      // Non-vacuity: the width really changed and the command re-wrapped.
+      expect(cont(frame()).length).toBeGreaterThan(1);
+      // ONE layout: the warm's, for the slot the commit asks for. The mutation
+      // makes it 2 (the warm's collapsed view, then the commit's command view).
+      expect(spy.mock.calls.length).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+    app.unmount();
+  });
+
+  test("a terminal RESIZE while expanded keeps the call expanded at the new width", async () => {
+    // The failure mode the plan names: a width change drops every item's cached
+    // slots and re-wraps. The expansion is keyed by id, so it must survive, and
+    // the resize warm must warm THAT view (App includes `expandedIds` in both).
+    const { app, frame } = await runLong();
+    const y = headerRowOf(frame());
+    app.stdin.write(press(3, y));
+    app.stdin.write(release(3, y));
+    await delay(80);
+    expect(cont(frame())).toHaveLength(1); // 160 columns: one row
+    expect(cont(frame()).join(" ")).toContain(COMMAND);
+    // Narrow to 60 columns: the command must re-wrap onto more `  │ ` rows, and
+    // the call must still be expanded (its id never changed).
+    Object.defineProperty(app.stdout, "columns", { value: 60, configurable: true });
+    app.stdout.emit("resize");
+    await delay(120);
+    const narrow = cont(frame());
+    expect(narrow.length).toBeGreaterThan(1);
+    const joined = narrow
+      .map((r) => r.slice("  │ ".length))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    expect(joined).toBe(COMMAND);
+    for (const row of narrow) {
+      expect(stringWidth(row)).toBeLessThanOrEqual(60);
+    }
+    app.unmount();
+  });
+
+  test("Ctrl+O shows the full command too", async () => {
+    const { app, frame } = await runLong();
+    expect(cont(frame())).toHaveLength(0);
+    app.stdin.write("\u000F"); // Ctrl+O
+    await delay(80);
+    expect(cont(frame()).length).toBeGreaterThan(0);
+    expect(cont(frame()).join(" ")).toContain(COMMAND);
+    app.unmount();
+  });
+
+  test("an expanded RUNNING call still blinks, and no row moves", async () => {
+    const createSession = () => ({
+      async *send() {
+        yield {
+          type: "tool_start" as const,
+          id: "c1",
+          name: "shell",
+          arguments: JSON.stringify({ command: COMMAND }),
+        };
+        await delay(5000);
+        yield {
+          type: "tool_result" as const,
+          id: "c1",
+          name: "shell",
+          result: { content: "done", isError: false },
+          durationMs: 5000,
+        };
+        yield { type: "turn_end" as const, reason: "end_turn" as const };
+      },
+    });
+    clock.useFakeTimers();
+    try {
+      const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+      const app = render(<App createSession={createSession} model="m" cwd="/tmp/work" />);
+      await settle(); // the App's resize subscription is an effect: run it first
+      Object.defineProperty(app.stdout, "columns", { value: 40, configurable: true });
+      app.stdout.emit("resize");
+      await settle();
+      app.stdin.write("go");
+      await settle();
+      app.stdin.write("\r");
+      await settle();
+      const rows = (): string[] => rowsOf(app.lastFrame() ?? "");
+      const y = rows().findIndex((r) => r.includes("Bash")) + 1;
+      app.stdin.write(press(3, y));
+      app.stdin.write(release(3, y));
+      await settle();
+      const expanded = rows();
+      expect(expanded.filter((r) => r.startsWith("  │ ")).length).toBeGreaterThan(1);
+      const views: { phase: string; count: number; conts: string[] }[] = [];
+      for (let i = 0; i < 4; i++) {
+        const r = rows();
+        const head = r.findIndex((row) => row.includes("Bash"));
+        views.push({
+          phase: r[head]?.startsWith("⏺") ? "on" : "off",
+          count: r.length,
+          conts: r.filter((row) => row.startsWith("  │ ")),
+        });
+        clock.advanceTimersByTime(BLINK_HALF_MS);
+        await settle();
+      }
+      expect(new Set(views.map((v) => v.phase))).toEqual(new Set(["on", "off"])); // it blinks
+      expect(new Set(views.map((v) => v.count)).size).toBe(1); // no row appears/disappears
+      const conts = views[0]?.conts ?? [];
+      for (const v of views) {
+        expect(v.conts).toEqual(conts); // the expanded block never moves
+      }
+      app.unmount();
+    } finally {
+      clock.useRealTimers();
+    }
   });
 });

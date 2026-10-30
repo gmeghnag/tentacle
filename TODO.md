@@ -1531,6 +1531,29 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
       operator docs remain.
 - [ ] Add `.tentacle/` to the workspace `.gitignore` guidance (spilled output).
 
+## TUI polish
+
+- [x] **Blinking bullet on a running tool call** — DONE (branch
+      `feat/tui-tool-blink`, 2026-10-30): a running call's `⏺` blinks 500 ms
+      on / 500 ms off from ONE shared clock, and turns into today's ok/error
+      bullet when the call ends. **Doc:** `docs/feat/tui-tool-blink.md`
+      (round-1 review by a different model found two HIGH defects — the OFF
+      phase re-wrapped the row at 1 Hz, and a dead call blinked forever — both
+      fixed and pinned in fix round 1). Type: feat · Size: S–M · Blast:
+      contained · Suited: DeepSeek executes, Opus reviews.
+- [x] **Click a tool call to expand its command** — DONE (branch
+      `feat/tui-tool-expand`, 2026-10-30, stacked on `feat/tui-tool-blink`): a
+      left click (press + release on the same cell, no drag) on a tool call's
+      header row toggles THAT call — the header keeps bullet + label + elapsed
+      and the full command follows, wrapped, on `  │ ` rows under it; a second
+      click collapses it. Ctrl+O shows every call's command too, and the
+      collapsed subtitle is now cut to the header's real room at the current
+      width (`string-width`) instead of a fixed 72. **Doc:**
+      `docs/feat/tui-tool-expand.md`. Type: feat · Size: M · Blast: contained ·
+      Suited: DeepSeek executes, Opus reviews (stacked on tui-tool-blink).
+      The dead-call follow-up is `main`'s existing entry ("close a turn's
+      still-running tool calls when the turn fails"), not a second one here.
+
 ## Branding
 
 - [x] **Mascot "Tentacle"** — DONE (merged to main 2026-10-19): tonal primary

@@ -288,10 +288,18 @@ describe("a spilled fs_read", () => {
   });
   const headLines = head.split("\n");
   const tailLines = tail.split("\n");
+  // Row 0 is the header; with Ctrl+O (expandAll) it is followed by the call's
+  // full command — the `  │ ` block (docs/feat/tui-tool-expand.md) — and only
+  // then the body. These tests are about the BODY's colouring, so skip both.
+  const bodyRows = (tool: ToolItem): string[] =>
+    itemLines(tool, { expandAll: true })
+      .slice(1)
+      // The prefix is grey, i.e. SGR-wrapped, so `strip` before testing it.
+      .filter((l) => !strip(l).startsWith("  │ "));
 
   test("of a .ts file: head and tail are syntax-coloured, each on its own; the text is the data", () => {
     // [note, saved to …, …head, omitted, …tail]
-    const rows = itemLines(spilled(), { expandAll: true }).slice(1);
+    const rows = bodyRows(spilled());
     const headRows = rows.slice(2, 2 + headLines.length);
     const tailRows = rows.slice(-tailLines.length);
     expect(headRows).toEqual((highlightRead(head, "src/a.ts") ?? []).map((l) => `  ${l}`));
@@ -302,7 +310,7 @@ describe("a spilled fs_read", () => {
   });
 
   test("an error result: the parts in the error colour, never syntax-coloured", () => {
-    const rows = itemLines(spilled({ status: "error" }), { expandAll: true }).slice(1);
+    const rows = bodyRows(spilled({ status: "error" }));
     expect(rows.slice(2, 2 + headLines.length)).toEqual(
       headLines.map((l) => `  ${theme.error(l)}`),
     );
