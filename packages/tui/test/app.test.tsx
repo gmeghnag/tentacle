@@ -10,6 +10,7 @@ import {
   type StreamEvent,
 } from "@tentacle/core";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
+import chalk from "chalk";
 import { render } from "ink-testing-library";
 import stringWidth from "string-width";
 import { App } from "../src/App.tsx";
@@ -23,6 +24,14 @@ import { messagesToItems } from "../src/resume.ts";
 import * as turnFeed from "../src/turn-feed.ts";
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+/**
+ * The OFF half of the blink is the ON glyph wrapped in the SGR conceal attribute
+ * (`ESC[8m … ESC[28m`, `fix/tui-blink-off-width`). It is detected from the
+ * CONCEAL code, not from "the bullet is missing": with the same character in
+ * both phases the plain text of the two rows is identical by design, and with
+ * colour off the OFF row is an ordinary `⏺`.
+ */
+const concealed = (row: string): boolean => row.includes("\x1b[8m");
 /**
  * Bun's fake timers. The pinned `bun-types` predates their typings, so the API
  * is declared here (it exists at runtime — verified: `advanceTimersByTime(600)`
@@ -2338,6 +2347,8 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
     // deterministically). Ink's own stdin plumbing is macrotask-based, so each
     // step flushes with a real `setImmediate`.
     clock.useFakeTimers();
+    const level = chalk.level;
+    chalk.level = 3; // the conceal code IS the phase (see `concealed`).
     try {
       const app = render(<App createSession={slowToolSession(5000)} model="m" cwd="/tmp/work" />);
       const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
@@ -2351,9 +2362,21 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       expect(rowNow()).toContain("Bash");
       const seen = new Set<string>();
       const positions = new Set<number>();
+      let rawOn = "";
+      let rawOff = "";
       for (let i = 0; i < 6; i++) {
         const row = rowNow();
-        seen.add(row.startsWith("⏺") ? "on" : "off");
+        if (concealed(row)) {
+          seen.add("off");
+          if (rawOff === "") {
+            rawOff = row;
+          }
+        } else {
+          seen.add("on");
+          if (rawOn === "") {
+            rawOn = row;
+          }
+        }
         // The DISPLAY COLUMN of the label, not the string index: `⏺` is 2 wide
         // in one phase and the raw index would differ by one even when the
         // visible row has not moved (the round-1 test's weak correlate).
@@ -2363,12 +2386,77 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       }
       expect([...seen].sort()).toEqual(["off", "on"]); // it really blinks
       expect(positions.size).toBe(1); // the label never moves column
+      const plainOn = stripAnsi(rawOn).trimEnd();
+      const plainOff = stripAnsi(rawOff).trimEnd();
+      // THE property that kills the bug (fix/tui-blink-off-width): strip the
+      // SGR off both phases and the rows are IDENTICAL — the same glyph in the
+      // same cells — so the owner's terminal cannot draw them one column apart
+      // whichever width IT assigns to `⏺`. `seen`/`positions` above are the
+      // weaker correlates; this is the exact one.
+      expect(plainOff).toBe(plainOn);
+      expect(plainOff).toContain("⏺ Bash");
+      // The conceal code survives Ink's output pipeline into the FRAME — the
+      // load-bearing assumption, at the boundary the user actually sees — and it
+      // is closed before the label, so nothing after the bullet is hidden.
+      expect(rawOff.indexOf("\x1b[8m⏺")).toBeGreaterThanOrEqual(0);
+      const close = rawOff.indexOf("\x1b[28m");
+      expect(close).toBeGreaterThan(rawOff.indexOf("⏺"));
+      expect(close).toBeLessThan(rawOff.indexOf("Bash"));
       // The call ends: the bullet is the ok one again, at whatever phase.
       clock.advanceTimersByTime(6000);
       await settle();
-      expect(rowNow()).toMatch(/^⏺ Bash cp a b 5\.0s/);
+      // Asserted on the SGR-stripped row: the test forces truecolour, so `⏺`
+      // carries an SGR code and a raw `toMatch` would never match.
+      expect(stripAnsi(rowNow())).toMatch(/^⏺ Bash cp a b 5\.0s/);
+      expect(concealed(rowNow())).toBe(false); // a settled row is never hidden
       app.unmount();
     } finally {
+      chalk.level = level;
+      clock.useRealTimers();
+    }
+  });
+
+  test("the conceal codes survive into the Ink FRAME with colours forced (load-bearing)", async () => {
+    // The one assumption the fix stands on: Ink's ANSI pipeline (its tokenizer,
+    // its width slicing and the output grid's `trimEnd`) PRESERVES `ESC[8m …
+    // ESC[28m` around the glyph. Proven in `.tentacle/tmp/tui-blink-off-width/`
+    // and pinned here at FRAME level, because a fix that only holds in
+    // `toolLines` arrives at the terminal as a solid bullet or a literal `[8m`.
+    // Mutation (red, verified): make the OFF glyph `"  "` → no `\x1b[8m` in the
+    // frame; drop the `\x1b[28m` close → the index ordering fails.
+    clock.useFakeTimers();
+    const level = chalk.level;
+    chalk.level = 3;
+    try {
+      const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
+      const app = render(<App createSession={slowToolSession(5000)} model="m" cwd="/tmp/work" />);
+      await settle();
+      app.stdin.write("go");
+      await settle();
+      app.stdin.write("\r");
+      await settle();
+      const rowNow = (): string =>
+        toolRows(app.lastFrame() ?? "").find((l) => l.includes("Bash")) ?? "";
+      // Find the OFF half of the cycle in the real frame.
+      let raw = "";
+      for (let i = 0; i < 6 && raw === ""; i++) {
+        clock.advanceTimersByTime(BLINK_HALF_MS);
+        await settle();
+        if (concealed(rowNow())) {
+          raw = rowNow();
+        }
+      }
+      expect(raw).not.toBe(""); // non-vacuity: we really captured an OFF frame
+      // The conceal pair, in the frame, hugging the glyph…
+      expect(raw).toContain("\x1b[8m⏺");
+      expect(raw).toContain("\x1b[28m");
+      // …closed before the label, so only the bullet is hidden…
+      expect(raw.indexOf("\x1b[28m")).toBeLessThan(raw.indexOf("Bash"));
+      // …and the plain row is the visible ON row byte for byte.
+      expect(stripAnsi(raw).trimEnd()).toBe("⏺ Bash cp a b");
+      app.unmount();
+    } finally {
+      chalk.level = level;
       clock.useRealTimers();
     }
   });
@@ -2407,6 +2495,10 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       },
     });
     clock.useFakeTimers();
+    // The OFF half is now a VISIBILITY effect (the same glyph concealed), so the
+    // phase is only observable with colour on (`concealed`).
+    const level = chalk.level;
+    chalk.level = 3;
     try {
       const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
       const app = render(<App createSession={createSession} model="m" cwd="/tmp/work" />);
@@ -2422,7 +2514,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       for (let i = 0; i < 6; i++) {
         const rows = toolRows(app.lastFrame() ?? "").filter((l) => l.includes("Bash"));
         expect(rows).toHaveLength(2);
-        const glyphs = rows.map((r) => (r.startsWith("⏺") ? "on" : "off"));
+        const glyphs = rows.map((r) => (concealed(r) ? "off" : "on"));
         // Same phase for both rows: one clock, not one per row.
         expect(new Set(glyphs).size).toBe(1);
         phases.push(glyphs[0] ?? "?");
@@ -2433,6 +2525,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       expect(new Set(phases)).toEqual(new Set(["on", "off"]));
       app.unmount();
     } finally {
+      chalk.level = level;
       clock.useRealTimers();
     }
   });
@@ -2457,6 +2550,10 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       },
     });
     clock.useFakeTimers();
+    // The OFF half is a visibility effect: assert the VISIBLE row, which needs
+    // colour on (colour-off degrades to a steady bullet, by design).
+    const level = chalk.level;
+    chalk.level = 3;
     try {
       const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
       const app = render(<App createSession={createSession} model="m" cwd="/tmp/work" />);
@@ -2467,12 +2564,14 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       await settle();
       const rowNow = (): string =>
         toolRows(app.lastFrame() ?? "").find((l) => l.includes("Bash")) ?? "";
-      // The call is alive: it blinks, and the timer exists.
-      expect(rowNow().startsWith("⏺ Bash")).toBe(true);
+      /** The row as the user SEES it: SGR stripped (the glyph is always there now). */
+      const shown = (): string => stripAnsi(rowNow());
+      // The call is alive, ON: the bullet is visible, and the timer exists.
+      expect(shown().startsWith("⏺ Bash")).toBe(true);
       const live = clock.getTimerCount();
       clock.advanceTimersByTime(BLINK_HALF_MS);
       await settle();
-      expect(rowNow().startsWith("⏺ Bash")).toBe(false); // OFF: it was blinking
+      expect(concealed(rowNow())).toBe(true); // OFF: it was blinking
       // The stream throws: the turn is over, the running item stays (stale row).
       clock.advanceTimersByTime(6000);
       await settle();
@@ -2480,7 +2579,9 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       // The stale row is still there — that is the separate reducer task — but it
       // is SOLID now, and nothing re-arms it.
       const solid = rowNow();
-      expect(solid.startsWith("⏺ Bash")).toBe(true);
+      // Solid AND visible: the stale row is no longer concealed either.
+      expect(shown().startsWith("⏺ Bash")).toBe(true);
+      expect(concealed(solid)).toBe(false);
       for (let i = 0; i < 4; i++) {
         clock.advanceTimersByTime(BLINK_HALF_MS);
         await settle();
@@ -2489,6 +2590,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       expect(clock.getTimerCount()).toBeLessThan(live); // the interval is gone
       app.unmount();
     } finally {
+      chalk.level = level;
       clock.useRealTimers();
     }
   });
@@ -2533,6 +2635,10 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       },
     });
     clock.useFakeTimers();
+    // Every assertion here is on the VISIBLE row, so the conceal must be real:
+    // colour on (colour-off degrades to a steady bullet, by design).
+    const level = chalk.level;
+    chalk.level = 3;
     try {
       const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
       const app = render(<App createSession={createSession} model="m" cwd="/tmp/work" />);
@@ -2547,7 +2653,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       clock.advanceTimersByTime(BLINK_HALF_MS);
       await settle();
       expect(rows()).toHaveLength(1);
-      expect(rows()[0]?.startsWith("⏺ Bash")).toBe(false);
+      expect(concealed(rows()[0] ?? "")).toBe(true);
       // ...and the second call joins at 550 ms, mid-OFF.
       clock.advanceTimersByTime(50);
       await settle();
@@ -2557,13 +2663,14 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
         const pair = rows();
         expect(pair).toHaveLength(2);
         for (const row of pair) {
-          expect(row.startsWith("⏺ Bash")).toBe(true);
+          expect(stripAnsi(row).startsWith("⏺ Bash")).toBe(true);
         }
         clock.advanceTimersByTime(50);
         await settle();
       }
       app.unmount();
     } finally {
+      chalk.level = level;
       clock.useRealTimers();
     }
   });
@@ -2579,8 +2686,9 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
     // either overflows (a wider OFF glyph) or leaves a column unused (a narrower
     // one) — both are caught by the width assertion below.
     // Mutation (red, verified, on the STACKED tree): swap the OFF glyph for
-    // `"   "` (3 columns) → 80, or for `" "` (1 column) → 78; `BLANK` itself is
-    // 2 columns and is pinned by `blink.test.ts`.
+    // `"   "` (3 columns) → 80, or for `" "` (1 column) → 78. The OFF phase now
+    // emits the SAME glyph, concealed (`fix/tui-blink-off-width`), so no count of
+    // spaces — and no terminal's opinion about U+23FA's width — is involved.
     const createSession = () => ({
       async *send() {
         yield { type: "text" as const, delta: "Running the loop now." };
@@ -2607,6 +2715,10 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       },
     });
     clock.useFakeTimers();
+    // The phase signal is the CONCEAL code on the same glyph, so colour must be
+    // on for the phase to be observable at all (`concealed`).
+    const level = chalk.level;
+    chalk.level = 3;
     try {
       const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
       const app = render(<App createSession={createSession} model="m" cwd="/tmp/work" />);
@@ -2619,6 +2731,8 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       app.stdin.write("\r");
       await settle();
       const frame = (): string[] => (app.lastFrame() ?? "").split("\n").map(stripAnsi);
+      /** The same rows WITH their SGR codes: the OFF phase lives in them. */
+      const rawFrame = (): string[] => (app.lastFrame() ?? "").split("\n");
       const bashRow = (rows: string[]): number =>
         rows.findIndex((r) => r.includes("Bash") && r.includes("for i in"));
       const replyRow = (rows: string[]): number =>
@@ -2630,7 +2744,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
         const bash = bashRow(rows);
         expect(bash).toBeGreaterThanOrEqual(0);
         views.push({
-          phase: rows[bash]?.startsWith("⏺") ? "on" : "off",
+          phase: concealed(rawFrame()[bash] ?? "") ? "off" : "on",
           rows: rows.length,
           bash,
           reply: replyRow(rows),
@@ -2659,6 +2773,7 @@ describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", ()
       }
       app.unmount();
     } finally {
+      chalk.level = level;
       clock.useRealTimers();
     }
   });
@@ -3203,6 +3318,10 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
       },
     });
     clock.useFakeTimers();
+    // The phase signal is the CONCEAL code on the same glyph, so colour must be
+    // on for the blink to be observable at all (`concealed`).
+    const level = chalk.level;
+    chalk.level = 3;
     try {
       const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
       const app = render(<App createSession={createSession} model="m" cwd="/tmp/work" />);
@@ -3221,12 +3340,14 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
       await settle();
       const expanded = rows();
       expect(expanded.filter((r) => r.startsWith("  │ ")).length).toBeGreaterThan(1);
+      /** The same rows WITH their SGR codes: the OFF phase lives in them. */
+      const rawRows = (): string[] => (app.lastFrame() ?? "").split("\n");
       const views: { phase: string; count: number; conts: string[] }[] = [];
       for (let i = 0; i < 4; i++) {
         const r = rows();
         const head = r.findIndex((row) => row.includes("Bash"));
         views.push({
-          phase: r[head]?.startsWith("⏺") ? "on" : "off",
+          phase: concealed(rawRows()[head] ?? "") ? "off" : "on",
           count: r.length,
           conts: r.filter((row) => row.startsWith("  │ ")),
         });
@@ -3241,6 +3362,7 @@ describe("clicking a tool call expands its command (docs/feat/tui-tool-expand.md
       }
       app.unmount();
     } finally {
+      chalk.level = level;
       clock.useRealTimers();
     }
   });

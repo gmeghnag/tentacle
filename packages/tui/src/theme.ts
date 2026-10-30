@@ -73,6 +73,13 @@ export const theme = {
   accent: chalk.hex(accentHex),
   /** De-emphasised grey for metadata, context, hints. */
   subtle: chalk.rgb(140, 140, 140),
+  /**
+   * SGR conceal ("hidden"): draws the characters in the background colour, so
+   * the cells are still OCCUPIED. The OFF half of a running call's blink is the
+   * very same glyph under this styler — same character, same cells in every
+   * terminal, only invisible (`fix/tui-blink-off-width`).
+   */
+  hidden: chalk.hidden,
   success: chalk.rgb(78, 201, 116),
   error: chalk.rgb(237, 84, 84),
   warn: chalk.rgb(224, 175, 74),

@@ -1541,6 +1541,16 @@ wired in order: redact → dedup → tabulate → (summarize | spill).
       phase re-wrapped the row at 1 Hz, and a dead call blinked forever — both
       fixed and pinned in fix round 1). Type: feat · Size: S–M · Blast:
       contained · Suited: DeepSeek executes, Opus reviews.
+- [x] **Blink OFF phase: hide the glyph instead of drawing blanks** — DONE
+      (branch `fix/tui-blink-off-width`, 2026-10-30): on the owner's terminal
+      the row shifted ONE column during the OFF half, because `string-width`
+      calls `⏺` 2 columns and that terminal draws it 1 — no fixed count of
+      spaces is right everywhere. The OFF phase now emits the SAME `⏺` under
+      `chalk.hidden` (`ESC[8m … ESC[28m`), so the cells are identical to ON in
+      every terminal and only visibility changes; colour-off/SGR-8-unaware
+      degrades to a steady bullet. **Doc:** `docs/fix/tui-blink-off-width.md`.
+      Type: fix · Size: S · Blast: contained · Suited: DeepSeek executes,
+      orchestrator checks.
 - [x] **Click a tool call to expand its command** — DONE (branch
       `feat/tui-tool-expand`, 2026-10-30, stacked on `feat/tui-tool-blink`): a
       left click (press + release on the same cell, no drag) on a tool call's
