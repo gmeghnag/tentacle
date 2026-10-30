@@ -502,6 +502,18 @@ Daily-driver work (done 2026-10-14):
       `docs/fix/session-store-durability.md` — atomic temp+fsync+rename, per-uid
       latest-wins queue, validated loud `load`/`list`, save failures → TUI notice.
       Type: fix · Size: M · Blast: load-bearing.
+- [ ] 🔵 **Detach S2: report the resident's REAL version** (Review of
+      `feat/detached-runs` S1 fix round 4, F2 + F3, 2026-10-30; owner: defer to
+      S2) — `--resident-status` does not say which version the running
+      resident is. So (F2, `engine-runtime.ts:639`) the "stray resident"
+      warning fires only on `inject` (once): a later `attach` that takes
+      `reuse`, or the `replace` path, joins a resident of another BUILD inside
+      the same protocol version silently (`initialize` still refuses a
+      protocol skew); and (F3, `pod-resident.ts:733`) a refusal names the
+      ASKING binary's version, not the resident's, so it can suggest the wrong
+      version. Fail-closed today (nothing stopped or installed). Fix: add the
+      resident's version to `--resident-status` and use it in both places.
+      Type: fix · Size: S · Blast: load-bearing (detach) · Suited: Opus, fresh review.
 - [ ] 🔵 **k8s: recover the real exit code of a failed exec** (Review of
       `feat/detached-runs` S1 fix round 2, finding 3, 2026-10-30; owner: not in
       S1) — `packages/k8s` `exec-run.ts:99-102` maps every `Failure` status to
