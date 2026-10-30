@@ -67,6 +67,7 @@ import { forgetKept, keptDir, recordKept } from "./kept-index.ts";
 import { KEPT_SCHEMA_VERSION, ambiguousMessage, keptMetadata, whereOf } from "./kept.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
+import { POD_DAEMON_MODES, runResidentMode } from "./pod-resident.ts";
 import { render } from "./render.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
@@ -388,13 +389,14 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   }
 
   // Everything below needs configuration; load it once (scaffolds on first run).
-  // EXCEPT the pod daemon (`serve --stdio`): it runs in a possibly read-only
+  // EXCEPT the pod daemon (`serve --stdio`, and the resident modes
+  // `--bridge`/`--resident`/`--resident-status`/`--resident-stop`): it runs in a possibly read-only
   // container with no writable HOME and needs NOTHING from the config dir (the
   // model is proxied over the wire, persistence is on the laptop). Scaffolding
   // there does `mkdir ~/.config` → EROFS → the daemon dies and the client sees
   // "connection closed". So the stdio daemon never scaffolds; missing config
   // files fall back to defaults.
-  const isStdioDaemon = mode === "serve" && parsed.bools.has("stdio");
+  const isStdioDaemon = mode === "serve" && POD_DAEMON_MODES.some((flag) => parsed.bools.has(flag));
   let config: TentacleConfig;
   try {
     config = await loadConfig({
@@ -499,6 +501,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     // `--stdio`: run the daemon over stdin/stdout instead of a WebSocket (used
     // inside a pod, driven over the k8s exec channel — F4). stdout IS the RPC
     // channel here, so every log line must go to stderr.
+    if (POD_DAEMON_MODES.some((flag) => flag !== "stdio" && bools.has(flag))) {
+      return runResidentMode(config, parsed);
+    }
     if (bools.has("stdio")) {
       try {
         const contextWindow = parseContextWindowFlag(parsed);

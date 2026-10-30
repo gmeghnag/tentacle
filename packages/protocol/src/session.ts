@@ -458,9 +458,14 @@ export type OpenResult = z.infer<typeof OpenResultSchema>;
 // (`session/open{reopen}`), removed only by `session/delete`. Elsewhere (a pod
 // daemon, the in-process worker) it is gone. Idempotent: an unknown, archived
 // or already-closed id is a no-op success. Needs no prior `open`.
+// `ifLast` (a client's quit): close only when no OTHER connection is attached
+// to the session; else this connection just detaches (exactly `session/detach`)
+// and the session runs on for the others. Additive: an older daemon drops the
+// field and closes.
 
 export const CloseParamsSchema = z.object({
   sessionId: SessionIdSchema,
+  ifLast: z.boolean().optional(),
 });
 export type CloseParams = z.infer<typeof CloseParamsSchema>;
 
@@ -473,9 +478,12 @@ export type CloseResult = z.infer<typeof CloseResultSchema>;
 // detached for the idle TTL, the detached cap and `session/list.attached` once
 // no connection is attached. Idempotent: an id not open on this connection is
 // a no-op success. On a connection that serves the model (pod reverse-tunnel)
-// it also cancels the session's turn, exactly as closing that connection does.
-// No update is sent to anyone. Additive: an older daemon answers
-// `MethodNotFound`.
+// it also cancels the session's turn — exactly as closing that connection does
+// — but only when no OTHER model-serving connection is still attached to the
+// session (protocol 14: several may be, e.g. a resident pod daemon handed from
+// one laptop process to another; the most recently attached one serves the
+// next model call). No update is sent to anyone. Additive: an older daemon
+// answers `MethodNotFound`.
 
 export const DetachParamsSchema = z.object({
   sessionId: SessionIdSchema,

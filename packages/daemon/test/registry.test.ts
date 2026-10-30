@@ -19,7 +19,7 @@ import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { DomainErrorCode, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { Connection, type ConnectionOptions } from "../src/connection.ts";
 import { type Attachment, HostedSession, type UpdateSink } from "../src/hosted-session.ts";
-import { SessionHost } from "../src/session-host.ts";
+import { type AgentContext, SessionHost } from "../src/session-host.ts";
 
 // Session ownership moved from `Connection` to `SessionHost` (the registry):
 // detach on disconnect, `session/open` (attach + replay, or create),
@@ -104,16 +104,19 @@ class FakeJobs implements JobController {
 }
 
 /** A daemon (one `SessionHost`, a spy factory) that any number of clients connect to. */
-function daemon(model: () => ModelProvider, env: ExecutionEnvironment = noopEnv) {
+function daemon(
+  model: (context?: AgentContext) => ModelProvider,
+  env: ExecutionEnvironment = noopEnv,
+) {
   const jobs: FakeJobs[] = [];
   const host = new SessionHost({
     defaultCwd: "/tmp/registry",
-    createAgent: () => {
+    createAgent: (_cwd, context) => {
       const permissions = new PermissionBroker();
       const j = new FakeJobs();
       jobs.push(j);
       const agent = new Agent({
-        model: model(),
+        model: model(context),
         tools: new ToolRegistry().register(shellTool),
         env,
         jobs: j,
@@ -518,5 +521,158 @@ describe("the model-serving connection (`--model-proxy`)", () => {
     await b.open({ sessionId: "X", since: { epoch, seq: 0 } });
     expect(types(b.updates)).toContain("turn_end");
     expect(b.updates.at(-1)?.update).toMatchObject({ stopReason: "end_turn" });
+  });
+});
+
+/**
+ * Several model-serving connections on one session (the resident pod daemon,
+ * docs/feat/detached-runs.md S1): each model call goes to the most recently
+ * attached one, and a leaving one cancels the turn only when it was the LAST.
+ */
+describe("per-session model link (protocol 14)", () => {
+  /** `slowModel(n)` that records, per call, the link the session resolved for it. */
+  function linkedDaemon(n: number) {
+    const links: unknown[] = [];
+    const d = daemon((context) => {
+      const inner = slowModel(n);
+      return {
+        id: "linked",
+        stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+          links.push(context?.modelLink() ?? null);
+          return inner.stream(request);
+        },
+      };
+    });
+    return { ...d, links };
+  }
+
+  test("protocol 14: a model-serving detach changed meaning", () => {
+    expect(PROTOCOL_VERSION).toBe(14);
+  });
+
+  test("T1: the newest of two serving connections leaves mid-turn — no cancel; the next call goes to the other", async () => {
+    // Mutation: restore `if (servesModel) cancel()` in `release` → turn_end cancelled.
+    const d = linkedDaemon(30);
+    const a = await d.connect({ servesModel: true });
+    const b = await d.connect({ servesModel: true });
+    await a.open({ sessionId: "X", create: true });
+    await b.open({ sessionId: "X" });
+    await a.prompt("X", "t1");
+    await until(() => a.updates.length >= 3);
+    // Identity, not toEqual: a Connection's structural diff is unreadable.
+    expect(d.links.length).toBe(1);
+    expect(d.links[0] === b.connection).toBe(true); // the newest serves the running call
+    b.connection.close();
+    await until(() => ended(a.updates));
+    expect(a.updates.at(-1)?.update).toMatchObject({ type: "turn_end", stopReason: "end_turn" });
+    await a.prompt("X", "t2");
+    await until(() => a.updates.filter((u) => u.update.type === "turn_end").length === 2);
+    expect(d.links.length).toBe(2);
+    expect(d.links[1] === a.connection).toBe(true);
+  });
+
+  test("T2: the last serving connection leaving still cancels the turn", async () => {
+    // Mutation: drop the cancel from `release` → the turn runs to end_turn.
+    const d = linkedDaemon(60);
+    const a = await d.connect({ servesModel: true });
+    const b = await d.connect({ servesModel: true });
+    const { epoch } = await a.open({ sessionId: "X", create: true });
+    await b.open({ sessionId: "X" });
+    await a.prompt("X", "t1");
+    await until(() => a.updates.length >= 3);
+    a.connection.close();
+    expect(d.host.get("X")?.running).toBe(true);
+    b.connection.close();
+    await until(() => d.host.get("X")?.running === false);
+    const c = await d.connect();
+    await c.open({ sessionId: "X", since: { epoch, seq: 0 } });
+    expect(c.updates.at(-1)?.update).toMatchObject({ type: "turn_end", stopReason: "cancelled" });
+  });
+
+  test("T2b: a plain connection still attached does not keep the turn alive", async () => {
+    // Mutation: `modelLink()` returns any attachment → the turn runs on with no model.
+    const d = linkedDaemon(60);
+    const a = await d.connect({ servesModel: true });
+    const plain = await d.connect();
+    await a.open({ sessionId: "X", create: true });
+    await plain.open({ sessionId: "X" });
+    await a.prompt("X", "t1");
+    await until(() => plain.updates.length >= 3);
+    a.connection.close();
+    await until(() => ended(plain.updates));
+    expect(plain.updates.at(-1)?.update).toMatchObject({
+      type: "turn_end",
+      stopReason: "cancelled",
+    });
+  });
+
+  test("T3: the link is the most recently attached serving connection; plain ones never are", async () => {
+    // Mutation: `modelLink()` returns the FIRST serving attachment → a, not b.
+    const d = linkedDaemon(1);
+    const a = await d.connect({ servesModel: true });
+    const b = await d.connect({ servesModel: true });
+    const plain = await d.connect();
+    const link = () => d.host.get("X")?.modelLink();
+    await a.open({ sessionId: "X", create: true });
+    expect(link() === a.connection).toBe(true);
+    await b.open({ sessionId: "X" });
+    await plain.open({ sessionId: "X" });
+    expect(link() === b.connection).toBe(true);
+    await a.open({ sessionId: "X" }); // a re-open moves a to "most recent"
+    expect(link() === a.connection).toBe(true);
+    a.connection.close();
+    b.connection.close();
+    expect(link()).toBeNull();
+  });
+
+  test("T4 (P9): open{sessionId, messages} of a LIVE id attaches to it — never recreated from the seed", async () => {
+    // Mutation: `SessionHost.open` checks `seeded` before `live` → created: true, seed history.
+    const d = linkedDaemon(1);
+    const a = await d.connect({ servesModel: true });
+    await a.open({ sessionId: "X", create: true });
+    await a.prompt("X", "t1");
+    await until(() => ended(a.updates));
+    const live = d.host.get("X");
+    const b = await d.connect({ servesModel: true });
+    const seed = [{ role: "user", content: "laptop copy" }];
+    expect(await b.open({ sessionId: "X", messages: seed })).toMatchObject({ created: false });
+    expect(d.host.get("X") === live).toBe(true);
+    const snap = (await b.client.request("session/snapshot", { sessionId: "X" })) as {
+      messages: readonly unknown[];
+    };
+    expect(snap.messages[0]).toMatchObject({ role: "user", content: "go" });
+  });
+
+  test("T5 (Review S1 F1): a quit's close{ifLast} with another client attached only detaches; the link moves back", async () => {
+    // Mutation: ignore `ifLast` in `Connection.closeSession` → X closed under a.
+    const d = linkedDaemon(1);
+    const a = await d.connect({ servesModel: true });
+    const b = await d.connect({ servesModel: true });
+    await a.open({ sessionId: "X", create: true });
+    await b.open({ sessionId: "X" });
+    const live = d.host.get("X");
+    expect(live?.modelLink() === b.connection).toBe(true);
+    await b.client.request("session/close", { sessionId: "X", ifLast: true });
+    expect(d.host.get("X") === live).toBe(true);
+    expect(a.updates.some((u) => u.update.type === "session_closed")).toBe(false);
+    expect(live?.attachedCount).toBe(1);
+    expect(live?.modelLink() === a.connection).toBe(true);
+    await a.prompt("X", "t2");
+    await until(() => ended(a.updates));
+    expect(d.links.at(-1) === a.connection).toBe(true);
+    // The last one out closes it.
+    await a.client.request("session/close", { sessionId: "X", ifLast: true });
+    expect(d.host.get("X")).toBeUndefined();
+  });
+
+  test("T6: a plain close (no ifLast — /clear, /close) still ends the session for every client", async () => {
+    const d = linkedDaemon(1);
+    const a = await d.connect({ servesModel: true });
+    const b = await d.connect({ servesModel: true });
+    await a.open({ sessionId: "X", create: true });
+    await b.open({ sessionId: "X" });
+    await b.client.request("session/close", { sessionId: "X" });
+    expect(d.host.get("X")).toBeUndefined();
+    await until(() => a.updates.some((u) => u.update.type === "session_closed"));
   });
 });

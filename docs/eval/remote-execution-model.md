@@ -37,6 +37,14 @@ The trust boundary also has to be stated plainly. The daemon *runs in the pod*,
 so whoever controls the pod controls the daemon and can write raw JSON-RPC
 frames to the laptop. A daemon-side gate is UX, not security.
 
+Consequence made concrete by the resident pod daemon (`docs/feat/detached-runs.md`
+S1, owner-accepted 2026-10-27): ANY process in the pod with the same uid — e.g.
+one shell command the agent was allowed to run — can dial the resident's socket
+and take over the POD session: become its model link (feed the agent fake model
+output) and answer its POD-side permission asks. That is inside "the pod is not
+trusted" (a token would not stop it: `/proc/*/environ` is readable). What it
+can never do is an effect on the laptop: those stay gated on the laptop.
+
 ### Measured baseline
 
 *2026-10-17, OCP cluster, ns `tentacle`, pod `ubi9-sleep` (UBI9). Scripts and

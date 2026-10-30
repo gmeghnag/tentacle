@@ -70,6 +70,21 @@ export function replaceFailedWarning(options: {
 }
 
 /**
+ * What a done replace says. `installedAt`: the old binary is on PATH and ours
+ * went to the install path, so the two differ from now on — named, never silent.
+ */
+export function replacedNotice(options: {
+  readonly had: string | undefined;
+  readonly expected: string | undefined;
+  readonly installedAt?: string;
+}): string {
+  const had = options.had ?? "of an unknown version";
+  return options.installedAt
+    ? `the container's tentacle ${had} on PATH stays; installed ${options.expected} (this laptop's) at ${options.installedAt}, which this session runs`
+    : `the container had tentacle ${had}; replaced with ${options.expected} (this laptop's)`;
+}
+
+/**
  * Exact string equality, not semver: the laptop injects only its own exact
  * build, so "differs" — older or newer — means "not what I would run".
  */

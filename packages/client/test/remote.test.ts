@@ -1768,6 +1768,22 @@ describe("closing sessions (sessions outlive connections)", () => {
     client.close();
   });
 
+  test("closeSessions() (a quit) leaves a session another client is attached to running for it", async () => {
+    // Mutation: `closeSessions` sends a plain close → X closed under `other`.
+    const host = makeHost(slow(1), noopEnv);
+    const other = await connected(host);
+    const x = await other.openSession(undefined, undefined, "X");
+    const client = await connected(host);
+    await client.openSession(x, undefined, "X");
+    expect(host.get(x)?.attachedCount).toBe(2);
+    await client.closeSessions();
+    expect(host.get(x)?.attachedCount).toBe(1);
+    await other.closeSessions(); // the last one out closes it
+    expect(host.size).toBe(0);
+    client.close();
+    other.close();
+  });
+
   test("closeSessions() is bounded: a daemon that never answers does not block the exit", async () => {
     const [daemonCh, clientCh] = createChannelPair();
     new RpcPeer(daemonCh, {

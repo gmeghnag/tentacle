@@ -386,6 +386,13 @@ describe("injectAgentBinary", () => {
     expect(kube.calls).toHaveLength(2);
   });
 
+  test("the returned version is pod stdout: control characters never reach the log line", async () => {
+    // Mutation: return the raw stdout → the ESC is in the label.
+    const kube = new FakeKube([ok(), ok("tentacle 1.2.3\u001b[2J\n")]);
+    const result = await injectAgentBinary(depsFor(kube));
+    expect(result).toBe("tentacle 1.2.3 [2J");
+  });
+
   test("a --version failure reported only on the status channel still gets the glibc hint", async () => {
     // k8s delivers a runtime-level exec failure as a Status (stderr stays empty).
     const status =

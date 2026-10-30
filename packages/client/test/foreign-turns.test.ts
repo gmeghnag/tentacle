@@ -1128,7 +1128,7 @@ describe("session/detach — the client side", () => {
     expect(b.client.liveSessionIds()).toEqual([sid]);
     await b.client.closeSessions();
     expect(b.frames.filter((f) => f.method === Method.Close).map((f) => f.params)).toEqual([
-      { sessionId: sid },
+      { sessionId: sid, ifLast: true }, // a quit: never ends it under another client
     ]);
     b.client.close();
   });

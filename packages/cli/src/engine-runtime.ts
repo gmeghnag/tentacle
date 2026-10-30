@@ -7,7 +7,8 @@
  * and lifecycle:
  *
  *   create → waitForReady → injectAgentBinary (F4.e: probe arch, stream the
- *   binary, verify with --version) → openExec(`tentacle serve --stdio`) →
+ *   binary, verify with --version) → openExec(`tentacle serve --bridge`, a pipe
+ *   to the pod's resident daemon — `pod-resident.ts`) →
  *   createLocalRuntime(handshake + persisting sessions) → …use… → remove
  *   (unless `run --keep`).
  *
@@ -31,6 +32,7 @@ import {
   expectedContainerVersion,
   parseVersionLine,
   replaceFailedWarning,
+  replacedNotice,
 } from "./container-version.ts";
 import {
   type EngineExecChannelOptions,
@@ -44,6 +46,13 @@ import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { configuredModelProvider } from "./model-provider.ts";
 import { PodBinaryError, checkPodBinaries, resolvePodBinary } from "./pod-binary-build.ts";
 import { injectAgentBinary, probePod } from "./pod-binary.ts";
+import {
+  residentGuard,
+  residentStatusCommand,
+  residentStopCommand,
+  residentStopVerdict,
+  strayResidentWarning,
+} from "./pod-resident.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
 import { untrustedText } from "./untrusted-text.ts";
@@ -52,11 +61,14 @@ import { APP_VERSION } from "./version.ts";
 import { type WorkspaceMount, attachCwdWarning, hiddenSummary } from "./workspace-mount.ts";
 
 /**
- * The pod daemon's command line (`run` and `attach`). `--auto-title` carries
+ * The pod daemon's command line (`run` and `attach`): the BRIDGE to the pod's
+ * resident daemon, started by the first exec and outliving it
+ * (`pod-resident.ts`, docs/feat/detached-runs.md S1). `--auto-title` carries
  * the LAPTOP's `model.autoTitle` (docs/feat/session-titles.md): the pod's own
  * config never turns model titles on. `--context-window` carries the LAPTOP's
  * `model.contextWindow`: the window is the model's, and the model lives here
- * (docs/feat/context-awareness.md). Neither is a secret, so argv is fine.
+ * (docs/feat/context-awareness.md). Neither is a secret, so argv is fine. A
+ * resident already running keeps the flags of the exec that started it.
  */
 export function podDaemonCommand(
   bin: string,
@@ -65,7 +77,7 @@ export function podDaemonCommand(
   return [
     bin,
     "serve",
-    "--stdio",
+    "--bridge",
     "--model-proxy",
     "--context-window",
     String(config.contextWindow),
@@ -180,9 +192,12 @@ export interface EngineRuntimeDeps {
 /**
  * The reconnect channel factory for an engine daemon (pod-attach Layer 2,
  * docs/feat/client-reattach-frontends.md §2): check the workload, then open the
- * SAME exec again. A new exec is a new `serve --stdio` (the old one ended with
- * its stdin), so the client finds its session unknown and recreates it from the
- * laptop's history; a turn in flight is reported lost, never re-run.
+ * SAME exec again. A new exec is a new bridge to the SAME resident daemon, so
+ * the client's reopen finds its session live (the turn the dropped link was
+ * serving was cancelled when its last model link left; the session is intact).
+ * Only a resident that died with it (a pod restart) makes the session unknown:
+ * then it is recreated from the laptop's history and a turn in flight is
+ * reported lost, never re-run.
  */
 export function execChannelFactory(
   host: EngineHost,
@@ -428,8 +443,9 @@ export interface EngineAttachRuntimeDeps {
  * binary if it does not already have it, open the daemon exec, and build the
  * same persisting local runtime as `startEngineRuntime` — with one deliberate
  * difference: the workload is USER-OWNED, so this runtime never creates,
- * starts, removes, or arms an exit net for it. `dispose` closes the exec
- * channel (the daemon dies with it); the workload stays running for reuse
+ * starts, removes, or arms an exit net for it. `dispose` closes the session and
+ * the exec channel (its bridge ends; the pod's resident daemon stays, idle,
+ * until its idle exit); the workload stays running for reuse
  * (re-attach is a sub-second version-probe) and for cleanup by its owner.
  *
  * No `registerExitCleanup` safety net: the whole point is that a TUI exit
@@ -508,18 +524,28 @@ export async function attachEngineRuntime(
     // bad libc) falls through to the injection, which re-verifies anyway.
     // One-shot execs do not go through the status line (same as in `run`):
     // `injectAgentBinary` owns its phases via `onStatus`.
-    // Default exec path: the on-PATH `tentacle` when the pod already has it
-    // (preflight passes). When we inject, the daemon is exec'd by the absolute
-    // install path (supports a writable non-PATH dir like /tmp via --bin-dir).
+    // Our install path (`/usr/local/bin`, or --bin-dir) is always asked first, so
+    // a re-attach finds what we installed and keeps its resident, even off PATH
+    // or behind another `tentacle` earlier on it; a binary on PATH is the
+    // fallback, because any binary reaches the one resident (its socket does not
+    // depend on the install dir). When we inject, the daemon is exec'd by the
+    // absolute install path.
     const binPath = `${deps.binDir ?? "/usr/local/bin"}/tentacle`;
-    let serveBin = "tentacle";
+    const versionOf = (bin: string): Promise<EngineRunExecResult> =>
+      host.runExec({ name, container, command: [bin, "--version"] }, undefined, {
+        timeoutMs: 15_000,
+      });
+    // The answer is pod stdout, and it reaches the log.
+    const versionLabel = (run: EngineRunExecResult): string =>
+      untrustedText(run.stdout.trim()) || "tentacle";
+    let serveBin = binPath;
     let probe: EngineRunExecResult;
     try {
-      probe = await host.runExec(
-        { name, container, command: ["tentacle", "--version"] },
-        undefined,
-        { timeoutMs: 15_000 },
-      );
+      probe = await versionOf(serveBin);
+      if (probe.exitCode !== 0) {
+        serveBin = "tentacle";
+        probe = await versionOf(serveBin);
+      }
     } catch (error) {
       status?.finish();
       // A wrong container surfaces here (the first exec) — translate it.
@@ -534,11 +560,36 @@ export async function attachEngineRuntime(
       readMarker: (path) => readBinaryVersion(path),
     });
     const decision = containerDecision(probe, expected);
+    const found = serveBin;
     let version: string;
     if (decision.kind === "reuse") {
-      version = probe.stdout.trim() || "tentacle";
+      version = versionLabel(probe);
     } else {
+      // Never replace a binary a running resident still uses (detached-runs
+      // S1): ask the OLD one (the one that answered, else our install path).
+      const oldBin = decision.kind === "replace" ? found : binPath;
+      const statusRun = await host
+        .runExec({ name, container, command: residentStatusCommand(oldBin) }, undefined, {
+          timeoutMs: 15_000,
+        })
+        .catch(() => null);
+      const verdict = residentGuard(statusRun, name);
+      if (verdict.kind === "refuse") {
+        throw new Error(verdict.message);
+      }
+      if (verdict.kind === "stop") {
+        const stopRun = await host
+          .runExec({ name, container, command: residentStopCommand(oldBin) }, undefined, {
+            timeoutMs: 15_000,
+          })
+          .catch(() => null);
+        const stopped = residentStopVerdict(stopRun, name);
+        if (stopped.kind === "refuse") {
+          throw new Error(stopped.message);
+        }
+      }
       serveBin = binPath; // injected to our dir → exec by absolute path
+      let replaced = decision.kind === "replace";
       try {
         version = await injectAgentBinary({
           host,
@@ -567,16 +618,13 @@ export async function attachEngineRuntime(
         // go on with the container's own tentacle, IF it still answers (the
         // failure may have come after the rename), and warn. `initialize` still
         // refuses a protocol skew with its full message.
-        const again = await host
-          .runExec({ name, container, command: ["tentacle", "--version"] }, undefined, {
-            timeoutMs: 15_000,
-          })
-          .catch(() => null);
+        const again = await versionOf(found).catch(() => null);
         if (again?.exitCode !== 0) {
           throw error;
         }
-        serveBin = "tentacle";
-        version = again.stdout.trim() || "tentacle";
+        serveBin = found;
+        replaced = false;
+        version = versionLabel(again);
         const line = replaceFailedWarning({
           had: decision.had,
           expected,
@@ -590,8 +638,30 @@ export async function attachEngineRuntime(
           deps.log(`${line}\n`);
         }
       }
-      if (decision.kind === "replace" && serveBin === binPath) {
-        const line = `the container had tentacle ${decision.had ?? "of an unknown version"}; replaced with ${expected} (this laptop's)`;
+      // A resident alive with nothing found: `run` installed in a dir this attach
+      // does not know. It is not ours to stop; the bridge joins it, and we say so.
+      const stray =
+        decision.kind === "inject"
+          ? strayResidentWarning(
+              await host
+                .runExec({ name, container, command: residentStatusCommand(binPath) }, undefined, {
+                  timeoutMs: 15_000,
+                })
+                .catch(() => null),
+              name,
+              binPath,
+            )
+          : undefined;
+      const line =
+        stray ??
+        (decision.kind === "replace" && replaced
+          ? replacedNotice({
+              had: decision.had,
+              expected,
+              ...(found === "tentacle" ? { installedAt: binPath } : {}),
+            })
+          : undefined);
+      if (line !== undefined) {
         deps.notify?.(line);
         if (!status) {
           deps.log(`${line}\n`);

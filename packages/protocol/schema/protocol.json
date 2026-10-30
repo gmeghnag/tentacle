@@ -204,6 +204,9 @@
     "CloseParams": {
       "additionalProperties": true,
       "properties": {
+        "ifLast": {
+          "type": "boolean"
+        },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
         }
@@ -2466,5 +2469,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 13
+  "x-protocol-version": 14
 }
