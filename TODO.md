@@ -514,6 +514,23 @@ Daily-driver work (done 2026-10-14):
       version. Fail-closed today (nothing stopped or installed). Fix: add the
       resident's version to `--resident-status` and use it in both places.
       Type: fix · Size: S · Blast: load-bearing (detach) · Suited: Opus, fresh review.
+- [ ] 🔵 **Detach S2: do not stop an idle resident before an install that cannot land**
+      (Review of `feat/detached-runs` S1 fix round 5, F3, 2026-10-30; owner: defer
+      to S2) — `engine-runtime.ts` stops the idle resident (`:580`) BEFORE the
+      install (`:594`). With an unwritable install path and a different version
+      (non-root image, no `--bin-dir`) every `attach` stops the idle resident,
+      fails the install and goes on with the old binary: it never converges, and
+      an idle resident may hold a finished session. Loud today (the warning names
+      `--bin-dir`). Fix: check the install path is writable (or install to a temp
+      name) before stopping. Type: fix · Size: S · Blast: load-bearing (detach) ·
+      Suited: Opus, fresh review.
+- [ ] 🔵 **TUI: close a turn's still-running tool calls when the turn fails**
+      (Review of `feat/tui-tool-blink`, 2026-10-30; owner: separate task) — after
+      a failed turn a tool call stays `running` in the session state (seen as a
+      bullet blinking forever, `App.tsx` ~:701); `feat/tui-tool-blink` only gates
+      the blink on the turn running. Close them in the reducer (as cancelled /
+      failed) when the turn ends without their result. Type: fix · Size: S ·
+      Blast: cross-module · Suited: Sonnet executes, Opus reviews.
 - [ ] 🔵 **k8s: recover the real exit code of a failed exec** (Review of
       `feat/detached-runs` S1 fix round 2, finding 3, 2026-10-30; owner: not in
       S1) — `packages/k8s` `exec-run.ts:99-102` maps every `Failure` status to
