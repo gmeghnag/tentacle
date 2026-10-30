@@ -502,6 +502,14 @@ Daily-driver work (done 2026-10-14):
       `docs/fix/session-store-durability.md` — atomic temp+fsync+rename, per-uid
       latest-wins queue, validated loud `load`/`list`, save failures → TUI notice.
       Type: fix · Size: M · Blast: load-bearing.
+- [ ] 🔵 **k8s: recover the real exit code of a failed exec** (Review of
+      `feat/detached-runs` S1 fix round 2, finding 3, 2026-10-30; owner: not in
+      S1) — `packages/k8s` `exec-run.ts:99-102` maps every `Failure` status to
+      exit 1 but keeps `details.causes[0].message`, which on `NonZeroExitCode`
+      is likely the numeric code (unverified: no fake pins it, no cluster
+      here). If so, a killed `residentGuard` probe (137) on k8s could refuse
+      like docker instead of landing on `none`. Verify on kind first. Type: fix
+      · Size: S · Blast: contained · Suited: Sonnet executes, Opus reviews.
 - [ ] 🟡 **Worker death after handshake hangs the TUI forever** (Bun fires
       `close`; nobody listens). CONFIRMED. **Eval:** `docs/eval/worker-crash-hang.md`.
       Type: eval · Size: S · Blast: contained.
