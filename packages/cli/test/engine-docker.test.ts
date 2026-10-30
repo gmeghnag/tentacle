@@ -93,7 +93,7 @@ const notFound = (what: string) => new DockerApiError(404, `No such container: $
 /**
  * A fake engine: lifecycle verbs are recorded; `openExec` returns one end of an
  * in-memory channel whose other end is a real daemon `Connection` (the exec
- * "runs" `serve --stdio` with a scripted model), exactly like `FakeCluster`.
+ * "runs" `serve --bridge` with a scripted model), exactly like `FakeCluster`.
  */
 class FakeDockerClient implements DockerClientLike {
   readonly calls: string[] = [];
@@ -214,6 +214,10 @@ class FakeDockerClient implements DockerClientLike {
     if (cmd.includes("--version")) {
       return Promise.resolve({ exitCode: 0, stdout: "tentacle 1.2.3\n", stderr: "" });
     }
+    // What a resident-capable binary answers with no resident (the guard fails closed on "").
+    if (cmd.endsWith("--resident-status")) {
+      return Promise.resolve({ exitCode: 0, stdout: '{"resident":false}\n', stderr: "" });
+    }
     return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
   }
 }
@@ -323,7 +327,7 @@ async function captureExitListeners<T>(fn: () => Promise<T>): Promise<{
 }
 
 describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () => {
-  test("create → net armed → start → running → inject → serve --stdio → a turn → dispose removes", async () => {
+  test("create → net armed → start → running → inject → serve --bridge → a turn → dispose removes", async () => {
     const client = new FakeDockerClient(
       new ScriptedProvider([[{ type: "text", delta: "hi from docker" }, { type: "done" }]]),
     );
@@ -349,7 +353,7 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
       // The install command is VERBATIM the k8s one (head -c N survives a half-close).
       `runexec:c1:sh -c mkdir -p /usr/local/bin && head -c 8 > ${POD_BIN_PATH}.new && chmod 755 ${POD_BIN_PATH}.new && mv -f ${POD_BIN_PATH}.new ${POD_BIN_PATH}`,
       `runexec:c1:${POD_BIN_PATH} --version`,
-      `exec:c1:${POD_BIN_PATH} serve --stdio --model-proxy --context-window 128000`,
+      `exec:c1:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
     ]);
     expect(logs[0]).toBe(
       '[container] creating c1 (image ubuntu:24.04) in unix:///var/run/docker.sock (context "default")…\n',
@@ -508,7 +512,7 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
     // The real exit code (126) is shown; the decision only tests `!== 0`.
     expect(String(error)).toMatch(/\[container c1\] tentacle --version failed \(exit 126\)/);
     expect(client.calls.at(-1)).toBe("remove:c1");
-    expect(client.calls.some((c) => c.includes("serve --stdio"))).toBe(false);
+    expect(client.calls.some((c) => c.includes("serve --bridge"))).toBe(false);
   });
 });
 
@@ -540,8 +544,8 @@ describe("attach on a Docker engine (attachEngineRuntime + dockerEngineHost)", (
     }
     expect(client.calls).toEqual([
       "inspect:users-box",
-      "runexec:users-box:tentacle --version",
-      "exec:users-box:tentacle serve --stdio --model-proxy --context-window 128000",
+      `runexec:users-box:${POD_BIN_PATH} --version`,
+      `exec:users-box:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
     ]);
     expect(logs[0]).toBe(
       '[container] attaching to users-box in unix:///var/run/docker.sock (context "default")…\n',
@@ -840,7 +844,7 @@ describe("the workspace mount on a Docker engine (slice D)", () => {
     expect(error).toBeInstanceOf(WorkloadRemovedError);
     expect(String(error)).toContain("mask /work/.ssh is not empty");
     expect(client.calls.filter((c) => c === "remove:w1")).toEqual(["remove:w1"]);
-    expect(client.calls.some((c) => c.includes("head -c") || c.includes("serve --stdio"))).toBe(
+    expect(client.calls.some((c) => c.includes("head -c") || c.includes("serve --bridge"))).toBe(
       false,
     );
     expect(logs.some((l) => l.includes("kept w1"))).toBe(false);
@@ -861,7 +865,7 @@ describe("the workspace mount on a Docker engine (slice D)", () => {
     expect(String(error)).toContain("The container was removed.");
     expect(client.calls.filter((c) => c === "remove:w1")).toEqual(["remove:w1"]);
     expect(logs.some((l) => l.includes("kept w1"))).toBe(false);
-    expect(client.calls.some((c) => c.includes("serve --stdio"))).toBe(false);
+    expect(client.calls.some((c) => c.includes("serve --bridge"))).toBe(false);
   });
 
   test("F2: a failed removal is said honestly, with the command to finish it", async () => {

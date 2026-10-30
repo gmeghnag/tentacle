@@ -122,9 +122,27 @@ describe("Connection refuses initialize with the worded message and its data", (
     });
   }
 
-  test("10 ↔ current (session-archive's bump, context-reset's, then skills-hot-reload's): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
+  test("13 ↔ 14 (detached-runs' bump): a resident pod daemon of the old build is refused cleanly at initialize", async () => {
+    // A laptop on protocol 13 bridged to a 14 resident (or the reverse) must
+    // fail here, not mid-session on a changed `session/detach` meaning.
+    const error = await refuse(
+      {
+        protocolVersion: 13,
+        clientCapabilities: { streaming: true },
+        clientInfo: { name: "tentacle", version: "0.3.0" },
+      },
+      { tentacle: "0.4.0", kind: "container" },
+    );
+    expect(error.code).toBe(DomainErrorCode.VersionMismatch);
+    expect(error.data).toMatchObject({
+      client: { protocol: 13, tentacle: "0.3.0" },
+      daemon: { protocol: 14, tentacle: "0.4.0" },
+    });
+  });
+
+  test("10 ↔ current (session-archive's bump, context-reset's, skills-hot-reload's, then detached-runs'): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
     // What a tentacle 0.1.0 sends (protocol 10, clientInfo since version-mismatch-notice).
-    expect(PROTOCOL_VERSION as number).toBe(13);
+    expect(PROTOCOL_VERSION as number).toBe(14);
     const error = await refuse(
       {
         protocolVersion: 10,
@@ -135,11 +153,11 @@ describe("Connection refuses initialize with the worded message and its data", (
     );
     expect(error.code).toBe(DomainErrorCode.VersionMismatch);
     expect(error.message).toBe(
-      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 13 (tentacle 0.2.0) — update this client: "tentacle update"',
+      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 14 (tentacle 0.2.0) — update this client: "tentacle update"',
     );
     expect(error.data).toEqual({
       client: { protocol: 10, tentacle: "0.1.0" },
-      daemon: { protocol: 13, tentacle: "0.2.0" },
+      daemon: { protocol: 14, tentacle: "0.2.0" },
       update: "client",
     });
   });

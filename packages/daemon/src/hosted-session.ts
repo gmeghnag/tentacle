@@ -72,6 +72,7 @@ import {
   clientSupportsUpdate,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import type { ModelLink } from "./connection.ts";
 import {
   assertTextOnly,
   contentToText,
@@ -120,6 +121,11 @@ export interface Attachment {
    * absent = the v10 base set. Gates BLOCKING types (`BLOCKING_UPDATE_TYPES`).
    */
   readonly updates?: readonly string[];
+  /**
+   * Its connection, when that connection serves the model (the pod
+   * reverse-tunnel): the session's model calls may go through it (`modelLink`).
+   */
+  readonly model?: ModelLink;
 }
 
 /** A permission request waiting for its first answer (keyed by its nonce). */
@@ -820,6 +826,22 @@ export class HostedSession {
     this.attachments.add(attachment);
     this.recheckAsks();
     return { resync: covered === undefined || !("replay" in covered), epoch: this.cut.epoch };
+  }
+
+  /**
+   * Where this session's next model call goes: the most recently attached
+   * client that serves the model (a re-attach moves a client to "most recent",
+   * so the newest owner takes new calls — the hand-over), or `null` when none
+   * is attached. Looked up per call, never cached.
+   */
+  modelLink(): ModelLink | null {
+    let link: ModelLink | null = null;
+    for (const attachment of this.attachments) {
+      if (attachment.model) {
+        link = attachment.model;
+      }
+    }
+    return link;
   }
 
   /** Stop delivering to `attachment` (its connection went away). The session lives on. */

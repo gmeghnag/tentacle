@@ -27,6 +27,7 @@ import {
   type SessionTtlResult,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
+import type { ModelLink } from "./connection.ts";
 import {
   type Attachment,
   HostedSession,
@@ -49,7 +50,20 @@ import type { DaemonIdentity } from "./version-mismatch.ts";
 export const DEFAULT_MAX_SESSIONS = 64;
 export const DEFAULT_MAX_DETACHED_SESSIONS = 16;
 
-export type AgentFactory = (cwd: string) => {
+/** What the host gives the agent it builds for one session. */
+export interface AgentContext {
+  /**
+   * The session's current model link (`HostedSession.modelLink`): the most
+   * recently attached model-serving connection, or `null`. Call it per model
+   * call — it changes as clients attach and leave.
+   */
+  readonly modelLink: () => ModelLink | null;
+}
+
+export type AgentFactory = (
+  cwd: string,
+  context: AgentContext,
+) => {
   agent: Agent;
   permissions: PermissionBroker;
   /** Optional: when present, the hosted session streams its job exits live. */
@@ -751,11 +765,16 @@ export class SessionHost {
     restored?: RestoredSessionState,
     seed?: TitleState,
   ): HostedSession {
-    const { agent, permissions, jobs, titleModel } = this.opts.createAgent(this.opts.defaultCwd);
+    // The agent exists before its session (P4): its link is bound late, and a
+    // session is only reachable (hence prompted) once built.
+    const bound: { hosted?: HostedSession } = {};
+    const { agent, permissions, jobs, titleModel } = this.opts.createAgent(this.opts.defaultCwd, {
+      modelLink: () => bound.hosted?.modelLink() ?? null,
+    });
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
     const { exposeTurnErrors, onTurnError } = this.opts;
-    return new HostedSession(
+    const hosted = new HostedSession(
       id,
       session,
       permissions,
@@ -776,5 +795,7 @@ export class SessionHost {
         ...(this.opts.titleTimeoutMs !== undefined ? { timeoutMs: this.opts.titleTimeoutMs } : {}),
       },
     );
+    bound.hosted = hosted;
+    return hosted;
   }
 }

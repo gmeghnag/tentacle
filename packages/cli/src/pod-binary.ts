@@ -27,6 +27,7 @@
  */
 import type { EngineExecTarget, EngineHost } from "./engine-host.ts";
 import { TransferProgress, renderBar } from "./transfer-progress.ts";
+import { untrustedText } from "./untrusted-text.ts";
 
 /** Where the binary is installed in the pod (conventional, first in most PATHs). */
 export const POD_BIN_PATH = "/usr/local/bin/tentacle";
@@ -334,5 +335,6 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   }
   // The version label is returned, not logged: the caller's final line
   // (piped mode) folds it in, so the pod's `--version` is not printed twice.
-  return version.stdout.trim() || "tentacle";
+  // It is pod stdout, and it reaches the log.
+  return untrustedText(version.stdout.trim()) || "tentacle";
 }

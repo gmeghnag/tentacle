@@ -201,8 +201,11 @@ assume.
   that act on the workspace) and the laptop is the *identity* (model key,
   account tokens, permission decisions, session history). The two bullets
   above are special cases. The daemon runs IN the pod, so whoever controls the
-  pod controls the daemon and can write raw RPC frames to the laptop.
-  Therefore every effect on the laptop that the pod requests is gated **on the
+  pod controls the daemon and can write raw RPC frames to the laptop. With the
+  resident pod daemon, any same-uid pod process (one approved shell command
+  suffices) can dial its socket and take over the POD session — become its
+  model link, answer its pod-side asks; accepted, it is inside "not trusted"
+  (`docs/feat/detached-runs.md`). Therefore every effect on the laptop that the pod requests is gated **on the
   laptop**: an allowlist of what the laptop itself published, and a prompt
   through the single broker. A daemon-side check is UX, never security. Never
   let a pod-originated prompt create a lasting approval for pod-supplied input.

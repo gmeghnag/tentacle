@@ -82,9 +82,21 @@ export const ARGS = {
       "ws-idle-timeout": {},
       // (with `--model-proxy`): the laptop's `model.contextWindow`.
       "context-window": {},
+      // The pod's resident daemon socket (docs/feat/detached-runs.md S1); default in TMPDIR.
+      socket: {},
     },
     // `--auto-title` (with `--model-proxy`): the laptop's `model.autoTitle`.
-    bools: { stdio: {}, "model-proxy": {}, "auto-title": {} },
+    // `--bridge` / `--resident` / `--resident-status` / `--resident-stop`: the
+    // pod's resident daemon (`pod-resident.ts`), run by `run`/`attach` execs.
+    bools: {
+      stdio: {},
+      "model-proxy": {},
+      "auto-title": {},
+      bridge: {},
+      resident: {},
+      "resident-status": {},
+      "resident-stop": {},
+    },
     positional: { min: 0, max: 0 },
   },
   run: {

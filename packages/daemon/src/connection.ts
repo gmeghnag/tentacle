@@ -76,12 +76,17 @@ export interface ConnectionOptions {
    */
   readonly exposeInternalErrors?: boolean;
   /**
-   * This connection serves the model (`--model-proxy`): when it goes away, the
-   * turns of the sessions it is attached to are cancelled (their next model
-   * call would fail obscurely) — the sessions themselves stay for re-attach.
+   * This connection serves the model (`--model-proxy`): the sessions it opens
+   * may send their model calls through it (`HostedSession.modelLink`, the most
+   * recently attached serving connection wins). When the LAST serving
+   * connection of a session goes away, its turn is cancelled (its next model
+   * call would fail obscurely) — the session itself stays for re-attach.
    */
   readonly servesModel?: boolean;
 }
+
+/** The two tunnel requests of a model-serving connection (the pod reverse-tunnel). */
+export type ModelLink = Pick<Connection, "requestModelStream" | "requestModelStreamChunked">;
 
 /** One session this connection opened. */
 interface Attached {
@@ -118,8 +123,9 @@ export class Connection {
   /**
    * The connection went away: DETACH from every session — they keep running
    * (and keep their jobs) for a client to re-attach; only `session/close` (or
-   * the process ending) stops them. Exception: a model-serving connection
-   * cancels its sessions' turns, which cannot reach the model without it.
+   * the process ending) stops them. Exception: the last model-serving
+   * connection of a session cancels its turn, which cannot reach the model
+   * without one.
    */
   close(): void {
     for (const entry of this.attached.values()) {
@@ -131,10 +137,12 @@ export class Connection {
 
   /** Stop listening to one session (a close's or a `session/detach`'s per-session step). */
   private release({ hosted, attachment }: Attached): void {
-    if (this.servesModel) {
+    hosted.detach(attachment);
+    // Another serving connection still attached takes the next model call
+    // (protocol 14); with none left, the turn could not reach the model.
+    if (this.servesModel && hosted.modelLink() === null) {
       hosted.cancel();
     }
-    hosted.detach(attachment);
   }
 
   /**
@@ -363,6 +371,7 @@ export class Connection {
     const attachment: Attachment = {
       send: (update) => this.peer.notify(Notification.SessionUpdate, update),
       ...(this.updateTypes ? { updates: this.updateTypes } : {}),
+      ...(this.servesModel ? { model: this } : {}),
     };
     const { hosted, created, resync, epoch } = this.host.open(params, attachment, prepared);
     this.attached.set(hosted.id, { hosted, attachment });
@@ -380,8 +389,17 @@ export class Connection {
   }
 
   // Needs no `open` (an exit path closes what it may never have re-opened);
-  // an unknown id is a no-op success.
+  // an unknown id is a no-op success. `ifLast` (a quit): with another client
+  // still attached, only detach — the session (and its model link) stays theirs.
   private closeSession(params: CloseParams): CloseResult {
+    if (params.ifLast === true) {
+      const live = this.host.get(params.sessionId);
+      const mine = this.attached.get(params.sessionId);
+      const own = mine !== undefined && mine.hosted === live ? 1 : 0;
+      if (live !== undefined && live.attachedCount > own) {
+        return this.detachSession(params);
+      }
+    }
     this.attached.delete(params.sessionId);
     this.host.close(params.sessionId);
     return {};

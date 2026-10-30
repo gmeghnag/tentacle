@@ -11,6 +11,7 @@ import {
   DEFAULT_MAX_DETACHED_SESSIONS,
   DEFAULT_MAX_SESSIONS,
   DEFAULT_SESSION_TTL_MS,
+  type ModelLink,
   ProxyModelProvider,
   type ReapPolicy,
   type Reapable,
@@ -354,9 +355,6 @@ function listen(
   };
 }
 
-/** The two tunnel requests of a pod daemon's connection to the laptop. */
-export type ModelLink = Pick<Connection, "requestModelStream" | "requestModelStreamChunked">;
-
 /**
  * A pod daemon's agent (`serve --stdio --model-proxy`): every model call
  * travels back to the laptop over `link` — the chunked (streaming) path, and
@@ -407,29 +405,29 @@ export function tunnelledAgent(
   );
 }
 
+/** A pod daemon's flags, set by the laptop that launched it (`podDaemonCommand`). */
+export interface PodDaemonOptions {
+  readonly modelProxy?: boolean;
+  readonly autoTitle?: boolean;
+  readonly contextWindow?: number;
+}
+
 /**
- * Host the daemon over **stdio** — one `Connection` bound to a newline-delimited
- * `streamChannel` over `process.stdin`/`process.stdout`. This is how the daemon
- * runs inside a pod, driven over the Kubernetes `exec` channel (F4): the laptop
- * pipes RPC frames to stdin and reads them off stdout.
- *
- * Because stdout is the RPC channel, the caller MUST route logs to stderr.
- * Resolves when stdin closes (the client/exec disconnected).
+ * The `SessionHost` of a pod daemon (`serve --stdio` and `serve --resident`).
+ * With `--model-proxy`, each session's model calls are tunnelled back to the
+ * laptop through ITS model link — the most recently attached model-serving
+ * connection, looked up per call (`AgentContext.modelLink`), so a session
+ * survives one laptop connection leaving while another is attached.
  */
-export function startStdioDaemon(
+export function podSessionHost(
   config: TentacleConfig,
   log?: (line: string) => void,
-  options: { modelProxy?: boolean; autoTitle?: boolean; contextWindow?: number } = {},
-): Promise<void> {
-  // With `--model-proxy`, the agent's model calls are tunnelled back to the
-  // client over this same channel (the pod reverse-tunnel): the link is set
-  // after the Connection exists, but a session (hence the agent) is only built
-  // on `session/open`, which arrives later, so the binding is always ready.
-  let tunnel: Connection | null = null;
+  options: PodDaemonOptions = {},
+): SessionHost {
   // The pod's own skills (Q4): its config, its filesystem — one scan for every
   // session and for a session not created yet (docs/feat/skills-hot-reload.md).
   const skillScan = createSkillScan(config);
-  const sessionHost = new SessionHost({
+  return new SessionHost({
     defaultCwd: config.cwd,
     // `run`/`attach`'s daemon: a skew is fixed by attaching again (it replaces it).
     identity: { tentacle: APP_VERSION, kind: "container" },
@@ -438,9 +436,9 @@ export function startStdioDaemon(
     // than it needs, and stays symmetric with `serve`); the real one goes to
     // the daemon's stderr log (piped + routed by the laptop, never inherited).
     ...(log ? { onTurnError: (error: Error) => log(`error: ${error.message}`) } : {}),
-    createAgent: (cwd) =>
+    createAgent: (cwd, { modelLink }) =>
       options.modelProxy
-        ? tunnelledAgent({ ...config, cwd }, () => tunnel, {
+        ? tunnelledAgent({ ...config, cwd }, modelLink, {
             // `--auto-title`: the LAPTOP's `model.autoTitle` (it launched us);
             // the pod's own config never turns titles on.
             autoTitle: options.autoTitle === true,
@@ -453,6 +451,24 @@ export function startStdioDaemon(
           })
         : buildAgent({ ...config, cwd }, { ...(log ? { log, notice: log } : {}), skillScan }),
   });
+}
+
+/**
+ * Host the daemon over **stdio** — one `Connection` bound to a newline-delimited
+ * `streamChannel` over `process.stdin`/`process.stdout`. The pod daemon of a
+ * laptop older than the resident one (`serve --resident`/`--bridge`), and the
+ * plain `serve --stdio` transport: the laptop pipes RPC frames to stdin and
+ * reads them off stdout.
+ *
+ * Because stdout is the RPC channel, the caller MUST route logs to stderr.
+ * Resolves when stdin closes (the client/exec disconnected).
+ */
+export function startStdioDaemon(
+  config: TentacleConfig,
+  log?: (line: string) => void,
+  options: PodDaemonOptions = {},
+): Promise<void> {
+  const sessionHost = podSessionHost(config, log, options);
   const channel = streamChannel(
     process.stdin as unknown as NodeReadableLike,
     process.stdout as unknown as NodeWritableLike,
@@ -465,9 +481,6 @@ export function startStdioDaemon(
     // them cleanly on detach instead of failing mid-round (sessions stay).
     { servesModel: options.modelProxy === true },
   );
-  if (options.modelProxy) {
-    tunnel = connection;
-  }
   return new Promise<void>((resolve) => {
     let done = false;
     const finish = (): void => {

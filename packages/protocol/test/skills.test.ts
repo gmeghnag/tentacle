@@ -22,12 +22,12 @@ const ok = { slash: [], skills: [skill], problems: ["p"], moreProblems: 0 };
 const parse = (v: unknown) => SessionSkillsResultSchema.safeParse(v).success;
 
 describe("session/skills (docs/feat/skills-hot-reload.md)", () => {
-  test("is registered with its schemas; skills/list is gone; protocol 13", () => {
+  test("is registered with its schemas; skills/list is gone; since protocol 13", () => {
     expect(Method.SessionSkills).toBe("session/skills");
     expect(RequestSchemas[Method.SessionSkills].params).toBe(SessionSkillsParamsSchema);
     expect(RequestSchemas[Method.SessionSkills].result).toBe(SessionSkillsResultSchema);
     expect(isMethodName("skills/list")).toBe(false);
-    expect(PROTOCOL_VERSION).toBe(13);
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(13);
   });
 
   test("params: a session id, or none (a session not created yet)", () => {

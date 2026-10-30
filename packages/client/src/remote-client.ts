@@ -654,6 +654,7 @@ export class RemoteClient {
   private endSession(
     method: typeof Method.Close | typeof Method.SessionDelete | typeof Method.Detach,
     sessionId: string,
+    ifLast = false,
   ): Promise<void> {
     const entry = this.sessions.get(sessionId);
     // Routed until the daemon answers: the turn it cancels ends in the stream
@@ -663,8 +664,9 @@ export class RemoteClient {
         this.sessions.delete(sessionId);
         this.kick();
       }
-      // A detach gets no `session_closed`: its prompts are withdrawn here.
-      if (method === Method.Detach) {
+      // A detach gets no `session_closed`: its prompts are withdrawn here (an
+      // `ifLast` close may have been one).
+      if (method === Method.Detach || ifLast) {
         this.runPermissionActions(this.router.sessionClosed(sessionId));
       }
     };
@@ -676,7 +678,8 @@ export class RemoteClient {
       forget();
       return Promise.resolve();
     }
-    const ending = this.call(this.peer, method, { sessionId }).then(forget, (error: unknown) => {
+    const params = ifLast ? { sessionId, ifLast } : { sessionId };
+    const ending = this.call(this.peer, method, params).then(forget, (error: unknown) => {
       if (
         method === Method.Detach &&
         error instanceof RpcError &&
@@ -729,7 +732,8 @@ export class RemoteClient {
 
   /**
    * Close every session this client opened and has not closed yet — the exit
-   * path. AWAIT it before `close()`: a frame written just before closing is not
+   * path. `session/close{ifLast}`: a session another client is still attached
+   * to is only detached, so a quit never ends it under them. AWAIT it before `close()`: a frame written just before closing is not
    * guaranteed to be delivered on every transport (the in-memory pair drops
    * it). Bounded by `timeoutMs` so a hung daemon never blocks the exit; never
    * rejects.
@@ -737,7 +741,7 @@ export class RemoteClient {
   async closeSessions(timeoutMs: number = CLOSE_SESSIONS_TIMEOUT_MS): Promise<void> {
     const pending = [...this.sessions.values()]
       .filter((entry) => !entry.closing)
-      .map((entry) => this.closeSession(entry.id));
+      .map((entry) => this.endSession(Method.Close, entry.id, true));
     if (pending.length === 0) {
       return;
     }
