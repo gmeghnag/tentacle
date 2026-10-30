@@ -355,8 +355,11 @@ Daily-driver work (done 2026-10-14):
       reviews.
 
 - [ ] 🔵 **TUI: one helper for time-budgeted background work** (owner,
-      2026-10-25) — the "slice into ≤ 6 ms chunks, yield with `setTimeout`,
-      cancel by a generation token" loop is hand-written in `App.tsx` for the
+      2026-10-25) — in progress: `feat/tui-run-chunked`
+      (`docs/feat/tui-run-chunked.md`) has the three callers moved onto
+      `runChunked`; left open for the "measure other candidates" follow-up.
+      The "slice into ≤ 6 ms chunks, yield with `setTimeout`,
+      cancel by a generation token" loop was hand-written in `App.tsx` for the
       resize re-layout (~:535) and the long-history open (~:789,
       `WARM_THRESHOLD`), and `fix/tui-expand-latency` adds a third (idle warm
       of the other Ctrl+O layout). Extract one pure, tested helper (e.g.

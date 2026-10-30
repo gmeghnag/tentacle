@@ -18,6 +18,7 @@ import { IDLE_WARM_DELAY_MS, type IdleWarmState } from "../src/idle-warm.ts";
 import type { LinkStatusView } from "../src/link-status.ts";
 import * as renderLines from "../src/render-lines.ts";
 import { messagesToItems } from "../src/resume.ts";
+import * as turnFeed from "../src/turn-feed.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -1953,6 +1954,281 @@ describe("idle warm of the other Ctrl+O view", () => {
         expect(cancels.count).toBe(before + 1);
       } finally {
         spy.mockRestore();
+        app.unmount();
+      }
+    });
+  });
+
+  // docs/feat/tui-run-chunked.md, Review F1/F3: the two call sites driven through
+  // a real App, so the schedule (not just the helper) is pinned.
+  describe("the warmed call sites in the App", () => {
+    const history: ChatMessage[] = [{ role: "user", content: "list it" }];
+    for (let i = 0; i < 5; i++) {
+      history.push({ role: "assistant", content: `answer ${i}` });
+    }
+    /** Longer than the 50-item warm threshold, so a history open warms in chunks. */
+    const manyMessages = (): ChatMessage[] =>
+      Array.from({ length: 60 }, (_, i) => ({
+        role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        content: `message ${i}`,
+      }));
+    /** The frame's widest line: the input box's border is exactly `columns` wide. */
+    const longestLine = (frame: string): number =>
+      Math.max(0, ...frame.split("\n").map((line) => line.trimEnd().length));
+
+    /**
+     * The frame's widest line once it reaches `width` (the warm's 0 ms hops and the
+     * commit need a turn or two on a loaded machine), or whatever it still shows
+     * after 1 s — so the caller's assertion reports the real value, never a timeout.
+     */
+    const waitForLineWidth = async (
+      app: { lastFrame: () => string | undefined },
+      width: number,
+    ) => {
+      const start = Date.now();
+      let widest = longestLine(app.lastFrame() ?? "");
+      while (widest !== width && Date.now() - start < 1000) {
+        await delay(10);
+        widest = longestLine(app.lastFrame() ?? "");
+      }
+      return widest;
+    };
+
+    /** `warmRowsChunk` that advances exactly one item per chunk and records the width. */
+    function spyOneItemChunks() {
+      const widths: number[] = [];
+      const spy = spyOn(renderLines, "warmRowsChunk").mockImplementation((_items, opts, from) => {
+        widths.push(opts.width ?? 0);
+        return from + 1;
+      });
+      return { widths, spy };
+    }
+
+    test("a stale resize does not go on warming the old width (M4)", async () => {
+      // Mutation: `isStale: () => false` at App.tsx:613 → red.
+      const { widths, spy } = spyOneItemChunks();
+      const app = render(
+        <App
+          agent={
+            new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+          }
+          model="qwen3"
+          cwd="/tmp/work"
+          initialItems={messagesToItems(history)}
+        />,
+      );
+      try {
+        await delay(30); // the mount's effects (incl. the resize listener) ran
+        Object.defineProperty(app.stdout, "columns", { value: 120, configurable: true });
+        app.stdout.emit("resize"); // one chunk of the 120 warm runs synchronously
+        Object.defineProperty(app.stdout, "columns", { value: 130, configurable: true });
+        app.stdout.emit("resize");
+        // The 130 warm lays its 6 items out in 0 ms hops; wait for them (a loaded
+        // machine needs more than one turn) — the assertion then reads the order.
+        const start = Date.now();
+        while (widths.length < 7 && Date.now() - start < 1000) {
+          await delay(10);
+        }
+        // 6 items: the 120 warm stops after its first chunk once superseded; the
+        // 130 warm lays all 6 out. Without the stale check the 120 warm ran on.
+        expect(widths.slice(0, 7)).toEqual([120, 130, 130, 130, 130, 130, 130]);
+      } finally {
+        spy.mockRestore();
+        app.unmount();
+      }
+    });
+
+    test("a resize commits the new width (M5)", async () => {
+      // Mutation: `onDone: () => {}` at App.tsx:614 → red (the frame stays 100 wide).
+      const { spy } = spyOneItemChunks();
+      const app = render(
+        <App
+          agent={
+            new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+          }
+          model="qwen3"
+          cwd="/tmp/work"
+          initialItems={messagesToItems(history)}
+        />,
+      );
+      try {
+        await delay(40);
+        expect(longestLine(app.lastFrame() ?? "")).toBe(100); // the committing render, 100 wide
+        Object.defineProperty(app.stdout, "columns", { value: 120, configurable: true });
+        app.stdout.emit("resize");
+        // The commit is `setSize`: the whole frame re-lays out at 120 columns, so
+        // the widest line becomes the 120-column input box's border. Give the
+        // warm's 0 ms hops room on a loaded machine, then assert the value.
+        expect(await waitForLineWidth(app, 120)).toBe(120);
+      } finally {
+        spy.mockRestore();
+        app.unmount();
+      }
+    });
+
+    test("an unmount cancels an in-flight resize warm (R2)", async () => {
+      // The resize effect's cleanup bumps the generation token, on top of the
+      // new-resize bump — so a warm still in flight at unmount does no further
+      // work. Mutation: drop `warmGenRef.current += 1` from that cleanup
+      // (App.tsx, the resize effect's return) → red (all 6 items are laid out).
+      const { widths, spy } = spyOneItemChunks();
+      const app = render(
+        <App
+          agent={
+            new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+          }
+          model="qwen3"
+          cwd="/tmp/work"
+          initialItems={messagesToItems(history)}
+        />,
+      );
+      try {
+        await delay(30); // the mount's effects (incl. the resize listener) ran
+        Object.defineProperty(app.stdout, "columns", { value: 120, configurable: true });
+        app.stdout.emit("resize"); // one chunk of the 120 warm runs synchronously
+        app.unmount();
+        await delay(40); // its queued 0 ms hops: the bump stops it at the first
+        expect(widths).toEqual([120]); // nothing laid out after the unmount
+      } finally {
+        spy.mockRestore();
+        app.unmount();
+      }
+    });
+
+    test("a chunk that throws in the resize warm surfaces a notice, not an unhandled rejection (R1)", async () => {
+      // Nobody awaits the resize warm's `done`, so the chunk-2 throw used to be
+      // an UNHANDLED rejection (and `bun test` reports one as an error, failing
+      // the file). The site now hands it to `onError` → a visible notice.
+      // Mutation: drop `onError` from the resize call site in App.tsx → red: no
+      // notice, plus the unhandled-rejection report below.
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown): void => {
+        unhandled.push(reason);
+      };
+      process.on("unhandledRejection", onUnhandled);
+      let calls = 0;
+      const chunk = spyOn(renderLines, "warmRowsChunk").mockImplementation((_items, opts, from) => {
+        if (opts.width === 120) {
+          calls += 1;
+          if (calls === 2) {
+            throw new Error("boom-resize-chunk-2");
+          }
+        }
+        return from + 1; // one item per chunk: the throw lands in a timer
+      });
+      const app = render(
+        <App
+          agent={
+            new Agent({ model: new ScriptedProvider([]), tools: new ToolRegistry(), env: noopEnv })
+          }
+          model="qwen3"
+          cwd="/tmp/work"
+          initialItems={messagesToItems(history)}
+        />,
+      );
+      try {
+        await delay(30);
+        Object.defineProperty(app.stdout, "columns", { value: 120, configurable: true });
+        app.stdout.emit("resize"); // chunk 1 here; chunk 2 (the throw) in a timer
+        const frame = () => app.lastFrame() ?? "";
+        const start = Date.now();
+        while (!frame().includes("a background layout failed") && Date.now() - start < 1000) {
+          await delay(10); // the throw, the notice and a frame, one or two ticks later
+        }
+        expect(frame()).toContain("a background layout failed");
+        expect(frame()).toContain("boom-resize-chunk-2"); // the real error, not a generic one
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+        chunk.mockRestore();
+        app.unmount();
+      }
+    });
+
+    test("the long-history commit still waits one macrotask after its last chunk (F2)", async () => {
+      // `main` awaited `setTimeout(0)` after every chunk, the last one included;
+      // the commit therefore always landed one macrotask after the last chunk, so
+      // a pending input/timer ran first. Pins that hop (Review F2).
+      const order: string[] = [];
+      const real = renderLines.warmRowsChunk;
+      let warmed = false;
+      const chunk = spyOn(renderLines, "warmRowsChunk").mockImplementation(
+        (items, opts, from, b) => {
+          if (!warmed) {
+            warmed = true;
+            order.push("chunk"); // the only chunk: it warms the whole history
+            setTimeout(() => order.push("timer"), 0); // a hop already queued when it ended
+            return items.length;
+          }
+          return real(items, opts, from, b); // the REAL one, not the spy (Review R4)
+        },
+      );
+      const realCommit = turnFeed.commitWarmed;
+      const commit = spyOn(turnFeed, "commitWarmed").mockImplementation((...args) => {
+        if (order.at(-1) !== "commit") {
+          order.push("commit");
+        }
+        return realCommit(...args);
+      });
+      const messages = manyMessages();
+      const createSession = () => ({
+        async *send() {
+          yield { type: "history_reset" as const, messages };
+          yield { type: "turn_end" as const, reason: "end_turn" as const };
+        },
+      });
+      const app = render(<App createSession={createSession} model="qwen3" cwd="/tmp/work" />);
+      try {
+        await delay(30);
+        app.stdin.write("hi");
+        await delay(20);
+        app.stdin.write("\r");
+        await delay(120);
+        expect(order.slice(0, 3)).toEqual(["chunk", "timer", "commit"]);
+      } finally {
+        commit.mockRestore();
+        chunk.mockRestore();
+        app.unmount();
+      }
+    });
+
+    test("a chunk that throws mid-warm fails the turn instead of hanging it (F1)", async () => {
+      // Mutation: no `catch` in `runChunked`'s `step` → red (the throw escapes the
+      // timer, `App.tsx`'s catch at `:1014` never runs, so no ⚠ row).
+      // No wall-clock gate: the FIRST call runs synchronously in `commitHistory`'s
+      // own stack and the second is one `setTimeout(0)` later, so throwing on the
+      // second call IS "a throw in a timer" by construction (Review R4: the old
+      // 40 ms gate fired before `\r` at ≥50 ms, so it never acted).
+      const boom = "boom-chunk-2";
+      let calls = 0;
+      const chunk = spyOn(renderLines, "warmRowsChunk").mockImplementation(
+        (_items, _opts, from) => {
+          calls += 1;
+          if (calls === 2) {
+            throw new Error(boom);
+          }
+          return from + 1; // one item per chunk: the throw lands in a *timer*, not the turn
+        },
+      );
+      const messages = manyMessages();
+      const createSession = () => ({
+        async *send() {
+          yield { type: "history_reset" as const, messages };
+          yield { type: "turn_end" as const, reason: "end_turn" as const };
+        },
+      });
+      const app = render(<App createSession={createSession} model="qwen3" cwd="/tmp/work" />);
+      try {
+        await delay(30);
+        app.stdin.write("hi");
+        await delay(20);
+        app.stdin.write("\r");
+        await delay(150);
+        // `streamTurn`'s catch (App.tsx:1014, `main:1012`) failed the turn, as on `main`
+        // and with `main`'s exact text (`String(error)` of an Error).
+        expect(app.lastFrame() ?? "").toContain(`⚠ Error: ${boom}`);
+      } finally {
+        chunk.mockRestore();
         app.unmount();
       }
     });
