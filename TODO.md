@@ -1032,6 +1032,27 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       to the main input with a notice, never lost); a request withdrawn while
       typing (send-now, cancel, another device) → the draft moves to the main
       input with a notice.
+- [ ] **The model cannot ask the user a structured question** (owner, 2026-10-30):
+      today it can only ask in plain text, which ends the turn. Proposal: an
+      `ask_user` tool — one call carries 1–4 questions (short header, 2–4
+      options with a description each, recommended first, single or multi
+      choice, always a free-text "Other"); the TUI shows a form (one tab per
+      question, ←/→ between questions, ↑/↓ choose, space toggles a multi choice,
+      Enter confirm, Esc cancel, summary before send); the answers return as
+      the tool result and the turn goes on. The tool description + system
+      prompt teach when to use it (blocking decisions only; in planning, bundle
+      independent questions into one form; always recommend; never ask what the
+      model can verify itself). No one to answer (detached run, one-shot, a
+      client that did not declare it) → immediate fallback result "no user:
+      proceed with the recommended options and state your assumptions"
+      (AGENTS §7 *blocking* update: declared + fallback). **Disableable, like
+      every other tool, default enabled** — there is no per-tool disable today
+      (`config/src/schema.ts` `tools` holds only output options), so the eval
+      also decides a generic one (e.g. `tools.disabled: [names]`, per profile).
+      Split: (1) tool + protocol + fallback + disable switch, (2) TUI form,
+      (3) mobile app. Ties in with detach (a detached run takes the fallback).
+      **Eval:** to write (`docs/eval/ask-user-tool.md`), after detach.
+      Type: eval → feat · Size: L → split · Blast: load-bearing.
 
 ### Block 9 — open legacy plans (moved out of `docs/` root, 2026-10-17)
 
