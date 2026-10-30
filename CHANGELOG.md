@@ -8,6 +8,12 @@ those.
 
 ## [Unreleased]
 
+### Changed
+
+- A model endpoint answering HTTP 500, 502 or 503 before any output is now
+  retried like a rate limit (up to 3 attempts, honouring `retry-after`). A 504
+  and other errors still surface at once.
+
 ## [0.2.0] - 2026-10-27
 
 This release adds Docker and Podman as places to run, and moves the protocol

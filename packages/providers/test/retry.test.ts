@@ -154,7 +154,9 @@ describe("RetryingModelProvider", () => {
 
   test("non-transient errors pass through untouched, after one attempt", async () => {
     for (const original of [
-      new ModelRequestError(503, "loading model"),
+      new ModelRequestError(400, "bad request"),
+      new ModelRequestError(401, "bad key"),
+      new ModelRequestError(504, "gateway timeout"),
       new TypeError("no code at all"),
       Object.assign(new Error("odd"), { code: "EACCES" }),
     ]) {
@@ -166,7 +168,7 @@ describe("RetryingModelProvider", () => {
     }
   });
 
-  describe("HTTP 429 / 529 (pre-stream)", () => {
+  describe("HTTP 429 / 529 / 500 / 502 / 503 (pre-stream)", () => {
     test("a 429 before any output is retried; the consumer sees only the success", async () => {
       const inner = scripted([[{ throw: new ModelRequestError(429, "slow down") }], OK]);
       const { waits, sleep } = fakeSleep();
@@ -196,6 +198,59 @@ describe("RetryingModelProvider", () => {
 
       expect(error).toBeUndefined();
       expect(inner.calls).toBe(2);
+    });
+
+    test("a 500, 502 or 503 before any output is retried, reported as its status", async () => {
+      for (const status of [500, 502, 503]) {
+        const inner = scripted([[{ throw: new ModelRequestError(status, "server error") }], OK]);
+        const retries: RetryInfo[] = [];
+        const p = new RetryingModelProvider(inner, {
+          sleep: fakeSleep().sleep,
+          random: () => 0,
+          onRetry: (info) => retries.push(info),
+        });
+
+        const { events, error } = await drain(p);
+
+        expect(error).toBeUndefined();
+        expect(events).toEqual([{ type: "text", delta: "hello" }, { type: "done" }]);
+        expect(inner.calls).toBe(2);
+        expect(retries.map((r) => r.code)).toEqual([`HTTP ${status}`]);
+      }
+    });
+
+    test("a 503's retry-after is honoured", async () => {
+      const unavailable = new ModelRequestError(503, "loading model", undefined, 3000);
+      const inner = scripted([[{ throw: unavailable }], OK]);
+      const { waits, sleep } = fakeSleep();
+      const p = new RetryingModelProvider(inner, { sleep, random: () => 0 });
+
+      await drain(p);
+
+      expect(waits).toEqual([3000]);
+    });
+
+    test("an exhausted 5xx rethrows the original error after maxAttempts", async () => {
+      const failing = new ModelRequestError(500, "internal error");
+      const inner = scripted([[{ throw: failing }]]);
+      const p = new RetryingModelProvider(inner, { sleep: fakeSleep().sleep });
+
+      const { error } = await drain(p);
+
+      expect(error).toBe(failing);
+      expect(inner.calls).toBe(3);
+    });
+
+    test("a 5xx after output started is never retried", async () => {
+      const failing = new ModelRequestError(502, "bad gateway");
+      const inner = scripted([[{ type: "text", delta: "par" }, { throw: failing }], OK]);
+      const p = new RetryingModelProvider(inner, { sleep: fakeSleep().sleep });
+
+      const { events, error } = await drain(p);
+
+      expect(inner.calls).toBe(1);
+      expect(events).toEqual([{ type: "text", delta: "par" }]);
+      expect(error).toBe(failing);
     });
 
     test("retry-after longer than the backoff is honoured", async () => {
