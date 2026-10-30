@@ -1,4 +1,5 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import chalk from "chalk";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import * as wrapAnsiModule from "wrap-ansi";
@@ -22,6 +23,16 @@ import type { DisplayItem, ToolItem } from "../src/state.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+// The harness has no TTY, so chalk is off; the conceal bytes of the OFF phase
+// are the property under test (same seam as `read-highlight.test.ts`).
+const level = chalk.level;
+beforeAll(() => {
+  chalk.level = 3;
+});
+afterAll(() => {
+  chalk.level = level;
+});
 
 const opts = { expandAll: false };
 
@@ -508,16 +519,24 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
     const onRow = strip(on.find((r) => r.includes("cp a b")) ?? "");
     const offRow = strip(off.find((r) => r.includes("cp a b")) ?? "");
     expect(onRow.startsWith("⏺ Bash")).toBe(true);
-    expect(offRow.startsWith("   Bash")).toBe(true); // the 2-column blank, then the space
-    // The label sits at the same DISPLAY COLUMN, which is the property the row
-    // depends on (`⏺` is 2 columns, so the blank must be 2 too) — a raw string
-    // index would differ by one and prove nothing.
+    // THE property that kills the bug (fix/tui-blink-off-width): with the SGR
+    // stripped, the OFF row is BYTE-IDENTICAL to the ON row — the same glyph in
+    // the same cells, so the label cannot sit one column off in any terminal.
+    expect(offRow).toBe(onRow);
+    // The label sits at the same DISPLAY COLUMN either way.
     expect(stringWidth(onRow.slice(0, onRow.indexOf("Bash")))).toBe(
       stringWidth(offRow.slice(0, offRow.indexOf("Bash"))),
     );
     expect(stringWidth(onRow)).toBe(stringWidth(offRow));
-    // Only the glyph differs: the label onwards is identical.
-    expect(onRow.slice(onRow.indexOf("Bash"))).toBe(offRow.slice(offRow.indexOf("Bash")));
+    // Non-vacuity: the RAW OFF row is not the ON row — the bullet really is
+    // concealed there (a steady bullet would pass every assertion above).
+    const rawOff = off.find((r) => r.includes("cp a b")) ?? "";
+    const rawOn = on.find((r) => r.includes("cp a b")) ?? "";
+    expect(rawOff).not.toBe(rawOn);
+    expect(rawOff).toContain("\x1b[8m"); // the conceal opens…
+    // …and closes BEFORE the label, so the label and elapsed stay visible.
+    expect(rawOff.indexOf("\x1b[28m")).toBeLessThan(rawOff.indexOf("Bash"));
+    expect(rawOff.indexOf(`\x1b[8m${blink.BULLET}`)).toBeGreaterThanOrEqual(0);
     // Nothing else in the transcript changed between the phases.
     expect(on.filter((r) => !r.includes("cp a b"))).toEqual(
       off.filter((r) => !r.includes("cp a b")),
@@ -554,12 +573,13 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
   });
 
   test("at width 79 a long command's rows do not move between phases (finding 1)", () => {
-    // The HIGH finding: `⏺` measures 2 columns and the old OFF glyph `" "` one,
-    // so the row wrapped differently ON vs OFF and the transcript jumped a row
-    // at 1 Hz. The OFF glyph must have the SAME display width as the ON one —
-    // proved with the width function Ink's own layout uses (`string-width`).
+    // The HIGH finding: the old OFF glyph `" "` was 1 column, so the row wrapped
+    // differently ON vs OFF and the transcript jumped a row at 1 Hz. The OFF
+    // phase now emits the SAME character, hidden, so no width function and no
+    // terminal can disagree about it.
     expect(stringWidth(blink.toolBullet("running", 0))).toBe(2);
     expect(stringWidth(blink.toolBullet("running", 500))).toBe(2);
+    expect(strip(blink.toolBullet("running", 500))).toBe(blink.BULLET);
     const long = {
       ...running,
       args: JSON.stringify({
@@ -568,15 +588,13 @@ describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => 
       }),
     };
     // Every width in the App's range, not just 79: the property is width-free.
-    const OFF_GLYPH = blink.toolBullet("running", 500);
-    const swap = (row: string): string => strip(row).replace("⏺", OFF_GLYPH);
+    // Row 0 differs by the glyph only; every other row is byte-identical.
     for (const width of [22, 44, 45, 79, 80]) {
       const on = transcriptRows([{ ...long }], { expandAll: false, width, blinkPhase: 0 });
       const off = transcriptRows([{ ...long }], { expandAll: false, width, blinkPhase: 500 });
       expect([width, on.length]).toEqual([width, off.length]); // same row count
       expect(strip(on[0] ?? "").startsWith("⏺ Bash")).toBe(true);
-      // Row 0 differs by the glyph only; every other row is byte-identical.
-      expect(off.map(strip)).toEqual(on.map((r, i) => (i === 0 ? swap(r) : strip(r))));
+      expect(off.map(strip)).toEqual(on.map(strip));
     }
     // Non-vacuity: the ON row really IS a wrapped row (the command's tail is
     // not on row 0), so the rows compared above could have differed. Before
@@ -1198,7 +1216,8 @@ describe("a tool call's command: width-derived cut, and per-call expansion", () 
     expect(on).toHaveLength(off.length); // the continuation block does not re-flow
     expect(on.length).toBeGreaterThan(2); // it really is expanded + wrapped
     expect(strip(on[0] ?? "").startsWith("⏺ Bash")).toBe(true);
-    expect(strip(off[0] ?? "").startsWith("   Bash")).toBe(true);
+    expect(strip(off[0] ?? "")).toBe(strip(on[0] ?? "")); // same glyph, same cells
+    expect(off[0] ?? "").toContain("\x1b[8m"); // and really concealed
     // Only the glyph differs; every continuation and body row is identical.
     expect(off.slice(1).map(strip)).toEqual(on.slice(1).map(strip));
     // The label sits at the same display column in both phases.

@@ -2,10 +2,13 @@
  * The blinking bullet of a running tool call (docs/feat/tui-tool-blink.md).
  *
  * A call that is still running is marked `⏺` for the ON half of a one-second
- * cycle and two spaces for the OFF half, so a long call looks alive. `⏺` is 2
- * columns wide (`string-width`, the width function Ink's own layout uses), so
- * the OFF glyph is 2 columns too and the row is laid out with `⏺` and the glyph
- * swapped afterwards (`render-lines.ts`) — no row ever moves between phases.
+ * cycle and the SAME `⏺` wrapped in the SGR conceal attribute for the OFF half
+ * (`theme.hidden` → `ESC[8m ⏺ ESC[28m`), so a long call looks alive and the row
+ * keeps the exact cells it has in the ON half — in every terminal. Counting
+ * spaces instead was the round-1 bug (`fix/tui-blink-off-width`): `⏺` (U+23FA)
+ * is 2 columns by `string-width` (what Ink's layout uses) but the owner's
+ * terminal DRAWS it 1 column wide, so no fixed count of spaces is right
+ * everywhere. The same character cannot disagree with itself.
  *
  * Every running call is drawn from ONE phase value, so they blink in sync:
  * there is no per-row timer. And the whole clock RULE lives here too — when the
@@ -15,6 +18,7 @@
  * Pure and framework-free: items + a tick counter in, a glyph and a phase out.
  */
 import type { DisplayItem, ToolStatus } from "./state.ts";
+import { theme } from "./theme.ts";
 
 /** ON for this long, then OFF for as long: a one-second cycle. */
 export const BLINK_HALF_MS = 500;
@@ -22,8 +26,25 @@ export const BLINK_HALF_MS = 500;
 /** The bullet every tool call carries: running (blinking), ok, or error. */
 export const BULLET = "⏺";
 
-/** The OFF glyph: exactly as wide as `BULLET` (2 columns), so no row moves. */
-export const BLANK = "  ";
+/**
+ * The OFF glyph: the ON `⏺` under the conceal attribute — the same character, so
+ * the same cells, hidden. Two spaces were the round-1 bug
+ * (`fix/tui-blink-off-width`): `string-width` calls `⏺` 2 columns but the
+ * owner's terminal DRAWS it 1, so a fixed count of spaces shifts the row
+ * wherever a terminal disagrees. The same character cannot disagree with itself.
+ *
+ * Read at CALL time, not at import: a module-load constant would freeze
+ * whatever chalk level happened to be set then (the harness runs colour-off) and
+ * would never see a later `chalk.level` change.
+ *
+ * With colour off (no TTY, `NO_COLOR`) or an SGR-8-unaware terminal, `hidden` is
+ * the identity or ignored: the OFF glyph is a plain `⏺` and the bullet simply
+ * stays steady instead of blinking. The honest degradation — a steady bullet is
+ * right, a mis-aligned row is not.
+ */
+export function hiddenBullet(): string {
+  return theme.hidden(BULLET);
+}
 
 /**
  * The shared clock's state: WHICH call set it was armed for and how many
@@ -124,11 +145,11 @@ export function blinkOn(phase: number): boolean {
 /**
  * The glyph that opens a tool call's row: `⏺` for a finished call (ok or
  * error — the caller colours it) and for a running one during the ON phase,
- * `BLANK` during the OFF phase (same width: the rest of the row never moves).
+ * `hiddenBullet()` (the same glyph, concealed) during the OFF phase.
  */
 export function toolBullet(status: ToolStatus, phase: number): string {
   if (status !== "running") {
     return BULLET;
   }
-  return blinkOn(phase) ? BULLET : BLANK;
+  return blinkOn(phase) ? BULLET : hiddenBullet();
 }

@@ -12,7 +12,7 @@ import { type ToolResultDetail, type ToolResultSpill, toolLabel } from "@tentacl
 import chalk from "chalk";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
-import { BLANK, BULLET, blinkOn } from "./blink.ts";
+import { BULLET, blinkOn, hiddenBullet } from "./blink.ts";
 import { formatDurationMs, formatTokens } from "./format.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
@@ -689,11 +689,14 @@ export function carryColor(rows: readonly string[]): string[] {
 // change invalidates all three (a fresh entry holds only the view just built).
 //
 // The blink glyph is NOT part of the cache: a row is always wrapped with the ON
-// glyph `⏺` (2 columns) and the OFF glyph is the same 2 columns (`BLANK`), so a
-// phase tick swaps one equal-width glyph in row 0 of an already-cached layout
-// and re-wraps nothing at all (docs/feat/tui-tool-blink.md, finding 1). Swapping
-// before/inside the wrap was the round-1 bug: the OFF glyph was 1 column, so the
-// row wrapped differently and the transcript jumped a row at 1 Hz.
+// glyph `⏺` and the OFF phase swaps in the SAME character under the SGR conceal
+// attribute (`fix/tui-blink-off-width`), so a phase tick changes one equal-width
+// glyph in row 0 of an already-cached layout and re-wraps nothing at all
+// (docs/feat/tui-tool-blink.md, finding 1). Swapping before/inside the wrap was
+// the round-1 bug: the OFF glyph was 1 column, so the row wrapped differently
+// and the transcript jumped a row at 1 Hz. Counting spaces is wrong wherever a
+// terminal draws `⏺` narrower than `string-width` says — the same character is
+// width-identical by construction, so the row cannot move in ANY terminal.
 // The same property is what lets a CLICKED call keep blinking
 // (docs/feat/tui-tool-expand.md point 7): the command block is below row 0, so
 // it is untouched by the swap.
@@ -713,7 +716,7 @@ const rowCache = new WeakMap<DisplayItem, RowCacheEntry>();
  */
 const offPhaseCache = new WeakMap<readonly string[], readonly string[]>();
 
-/** The same rows with the leading bullet swapped for the equal-width OFF glyph. */
+/** The same rows with the leading bullet concealed for the OFF phase. */
 function offPhaseRows(rows: readonly string[]): readonly string[] {
   const hit = offPhaseCache.get(rows);
   if (hit) {
@@ -722,8 +725,9 @@ function offPhaseRows(rows: readonly string[]): readonly string[] {
   const [first = "", ...rest] = rows;
   // The FIRST `⏺` of row 0 is the bullet: `toolLines` opens the header with it.
   // Replacing only that one keeps the SGR codes around it and the rest of the
-  // row (label, subtitle, duration) byte-identical.
-  const swapped = [first.replace(BULLET, BLANK), ...rest];
+  // row (label, subtitle, duration) byte-identical — the conceal closes at
+  // `ESC[28m` immediately after the glyph, so nothing else on the row is hidden.
+  const swapped = [first.replace(BULLET, hiddenBullet()), ...rest];
   offPhaseCache.set(rows, swapped);
   return swapped;
 }
@@ -767,7 +771,7 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
 }
 
 /**
- * The cached ON layout, or its equal-width OFF twin while a running call is in
+ * The cached ON layout, or its concealed OFF twin while a running call is in
  * the OFF half of the shared cycle. Only a RUNNING tool is ever affected: a
  * settled call's `toolBullet` is `⏺` at every phase, so its rows are returned
  * as the very same array (the cache-hit identity the tests pin).

@@ -1,7 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import chalk from "chalk";
 import stringWidth from "string-width";
 import {
-  BLANK,
   BLINK_HALF_MS,
   BLINK_IDLE,
   BULLET,
@@ -10,14 +10,28 @@ import {
   blinkOn,
   blinkPhase,
   blinkState,
+  hiddenBullet,
   syncBlink,
   toolBullet,
 } from "../src/blink.ts";
 import type { DisplayItem } from "../src/state.ts";
 
+// The harness has no TTY, so chalk is off; the conceal bytes are the property
+// under test (same seam as `read-highlight.test.ts`).
+const level = chalk.level;
+beforeAll(() => {
+  chalk.level = 3;
+});
+afterAll(() => {
+  chalk.level = level;
+});
+
 // `string-width` is the width function Ink's own layout uses (render-lines.ts
 // imports it too); the blink tests measure with it rather than counting code
 // points.
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
+const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 
 const running = (id: string): DisplayItem => ({
   kind: "tool",
@@ -58,22 +72,35 @@ describe("blinkOn", () => {
 });
 
 describe("toolBullet", () => {
-  test("a running call blinks: the bullet on the ON half, the blank on the OFF half", () => {
+  test("a running call blinks: the bullet on the ON half, the HIDDEN bullet on the OFF half", () => {
     expect(toolBullet("running", 0)).toBe(BULLET);
     expect(toolBullet("running", 499)).toBe(BULLET);
-    expect(toolBullet("running", 500)).toBe(BLANK);
-    expect(toolBullet("running", 999)).toBe(BLANK);
+    expect(toolBullet("running", 500)).toBe(hiddenBullet());
+    expect(toolBullet("running", 999)).toBe(hiddenBullet());
     expect(toolBullet("running", 1000)).toBe(BULLET);
   });
 
-  test("the OFF glyph measures exactly the same width as the ON glyph (finding 1)", () => {
-    // The exact property the row depends on. Measured with `string-width` — the
-    // width function Ink's own layout uses — NOT `[...glyph].length`, which
-    // counts code points and called the two phases equal while `⏺` was 2 columns
-    // and `" "` was 1 (the round-1 width bug: the row re-wrapped at 1 Hz).
-    expect(stringWidth(BULLET)).toBe(2); // the premise, measured, not assumed
-    expect(stringWidth(toolBullet("running", 500))).toBe(stringWidth(BULLET));
-    expect(stringWidth(toolBullet("running", 0))).toBe(stringWidth(BULLET));
+  test("the OFF glyph is the SAME character, only concealed: the two phases cannot differ in width", () => {
+    // THE property (fix/tui-blink-off-width): the ON and OFF rows must occupy the
+    // same cells in EVERY terminal. `"  "` failed this on the owner's terminal,
+    // where `⏺` draws 1 column: a fixed count of spaces is right only where the
+    // glyph happens to be 2 wide. The same character cannot disagree with
+    // itself.
+    const off = toolBullet("running", 500);
+    expect(strip(off)).toBe(BULLET); // the glyph itself, not a blank
+    expect(stringWidth(off)).toBe(stringWidth(BULLET)); // same measured width
+    // Non-vacuous: it really is hidden, so OFF is not simply equal to ON.
+    expect(off).not.toBe(BULLET);
+    expect(off).toContain("\x1b[8m");
+  });
+
+  test("the conceal codes wrap the glyph only: ESC[8m right before it, ESC[28m right after", () => {
+    // The codes must hug the glyph: an open left dangling at the end of the
+    // styler, or a close that arrives later, would hide the label too.
+    const off = hiddenBullet();
+    expect(off).toContain(`\x1b[8m${BULLET}`);
+    expect(off.slice(off.indexOf(BULLET) + BULLET.length)).toContain("\x1b[28m");
+    expect(strip(off)).toBe(BULLET);
   });
 
   test("a finished call never blanks, at any phase (ok and error)", () => {
