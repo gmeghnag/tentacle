@@ -2,6 +2,15 @@ import { type Agent, Session } from "@tentacle/agent";
 import { DISMISSED, type JobController, type PermissionBroker } from "@tentacle/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
+import {
+  BLINK_HALF_MS,
+  BLINK_IDLE,
+  type BlinkClock,
+  advanceBlink,
+  blinkPhase,
+  blinkState,
+  syncBlink,
+} from "./blink.ts";
 import { idleChord, stepChord } from "./chord.ts";
 import { copyToClipboard, readClipboard } from "./clipboard.ts";
 import {
@@ -64,7 +73,13 @@ import {
   takeAll,
   takeForSendNow,
 } from "./queued.ts";
-import { layoutTranscript, sliceLaid, stripAnsi, warmRowsChunk } from "./render-lines.ts";
+import {
+  type RenderOptions,
+  layoutTranscript,
+  sliceLaid,
+  stripAnsi,
+  warmRowsChunk,
+} from "./render-lines.ts";
 import { applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
 import { type Selection, extractSelection, isNonEmpty, rowSelectionRange } from "./selection.ts";
 import {
@@ -119,6 +134,8 @@ import {
   startTurn,
   withdrawUserTurn,
 } from "./state.ts";
+import { CLICK_IDLE, type ClickState, nextClick, toggleExpanded } from "./tool-expand.ts";
+import { toolCallAtViewport } from "./tool-hit.ts";
 import { panelHeight, panelMaxBody, treeKey } from "./tree-panel.ts";
 import {
   FOREIGN_COMPACTED_NOTICE,
@@ -366,6 +383,17 @@ export function App({
   }));
   const [scrollOffset, setScrollOffset] = useState(0);
   const [expandAll, setExpandAll] = useState(false);
+  // The tool calls whose full command is shown wrapped under the header (a left
+  // click on ONE call; docs/feat/tui-tool-expand.md). Keyed by the call's stable
+  // daemon id, so it survives re-renders and new messages; sorted, so it is a
+  // cheap layout cache key. The click recogniser's state rides beside it.
+  const [expandedIds, setExpandedIds] = useState<readonly string[]>([]);
+  const clickRef = useRef<ClickState>(CLICK_IDLE);
+  // The ONE blink clock of running tool calls (docs/feat/tui-tool-blink.md).
+  // `blink.ts` owns the whole rule — when the clock runs, when it restarts ON,
+  // what a tick renders; the App only relays a timer into `advanceBlink` and
+  // passes the resulting phase to the layout (AGENTS §7).
+  const [blinkClock, setBlinkClock] = useState<BlinkClock>(BLINK_IDLE);
   const field = useLineEditor();
   const [commandIndex, setCommandIndex] = useState(0);
   // Messages the user queued while a turn is running (steering), shown above
@@ -473,7 +501,11 @@ export function App({
   const [loading, setLoading] = useState<{ done: number; total: number } | null>(null);
   // The daemon's queue (every writer's waiting rows), as last reported (C7).
   const [daemonQueue, setDaemonQueue] = useState<DaemonQueue | undefined>(undefined);
-  const layoutOptsRef = useRef({ expandAll: false, width: 80, spillInPod: daemonInPod });
+  const layoutOptsRef = useRef<RenderOptions>({
+    expandAll: false,
+    width: 80,
+    spillInPod: daemonInPod,
+  });
   const lastUserRef = useRef<string | null>(null);
   const prevRowsRef = useRef(0);
   // Generation token for the background resize re-layout warm: a newer resize
@@ -607,7 +639,9 @@ export function App({
       idleWarmCancelRef.current();
       const gen = warmGenRef.current;
       const items = stateRef.current.items;
-      const opts = { expandAll, width: next.columns, spillInPod: daemonInPod };
+      // Including `expandedIds`: the warm must fill the slot the committing
+      // render will ask for, a clicked call's expanded command too.
+      const opts = { expandAll, width: next.columns, spillInPod: daemonInPod, expandedIds };
       let idx = 0;
       const step = (): void => {
         if (warmGenRef.current !== gen) {
@@ -627,7 +661,7 @@ export function App({
       stdout.off?.("resize", onResize);
       warmGenRef.current += 1; // cancel any in-flight warm on unmount/resubscribe
     };
-  }, [stdout, size.columns, expandAll, daemonInPod]);
+  }, [stdout, size.columns, expandAll, daemonInPod, expandedIds]);
 
   // Reset the palette selection whenever the typed text changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on field.value
@@ -682,13 +716,35 @@ export function App({
   // row `total` for scroll maths and materialise just the visible window. The
   // whole transcript is assembled on demand (sliceLaid 0..total) only where a
   // full buffer is genuinely needed — a text selection on mouse-release.
+  const blink = blinkState(st.items, st.running);
   const layout = layoutTranscript(st.items, {
     expandAll,
     width: columns,
     spillInPod: daemonInPod,
+    blinkPhase: blinkPhase(blinkClock, blink),
+    expandedIds,
   });
+  // ARM the ONE blink clock: `blink.running` is the whole gate (the turn runs AND
+  // a call is unanswered), so an idle transcript has no timer at all and a dead
+  // call left in the transcript by a failed turn cannot blink forever. A new call
+  // re-arms it, which restarts the shared phase ON (owner decisions 1 and 2).
+  const blinkRuns = blink.running;
+  const blinkCalls = blink.calls;
+  useEffect(() => {
+    if (!blinkRuns) {
+      return;
+    }
+    const id = setInterval(() => setBlinkClock((c) => advanceBlink(c, blinkCalls)), BLINK_HALF_MS);
+    return () => clearInterval(id);
+  }, [blinkRuns, blinkCalls]);
+  // Nothing running → the clock goes back to idle, so the next call starts ON
+  // and a finished row is never left on an OFF half. `syncBlink` returns the
+  // SAME object when nothing changes, so this cannot loop.
+  useEffect(() => {
+    setBlinkClock((c) => syncBlink(c, { calls: blinkCalls, running: blinkRuns }));
+  }, [blinkRuns, blinkCalls]);
   // The layout options a history warm uses (read off the render thread).
-  layoutOptsRef.current = { expandAll, width: columns, spillInPod: daemonInPod };
+  layoutOptsRef.current = { expandAll, width: columns, spillInPod: daemonInPod, expandedIds };
   // Once the transcript is quiet, fill the cache for the OTHER Ctrl+O view in
   // small chunks (idle-warm.ts) so the first toggle is a hit. Any change to the
   // deps (new items, a turn starting, a resize commit, Ctrl+O) cleans up and
@@ -699,12 +755,12 @@ export function App({
   useEffect(() => {
     idleWarmCancelRef.current = startIdleWarm({
       items: idleItems,
-      opts: { expandAll, width: columns, spillInPod: daemonInPod },
+      opts: { expandAll, width: columns, spillInPod: daemonInPod, expandedIds },
       running: idleRunning,
       busy: idleBusy,
     });
     return idleWarmCancelRef.current;
-  }, [idleItems, idleRunning, idleBusy, expandAll, columns, daemonInPod]);
+  }, [idleItems, idleRunning, idleBusy, expandAll, columns, daemonInPod, expandedIds]);
   const total = layout.total;
   const win = windowFor(total, viewport, scrollOffset);
   const visible = sliceLaid(layout.laid, win.start, win.end);
@@ -1257,6 +1313,7 @@ export function App({
       if (opts.keepTranscript !== true) {
         stateRef.current = initialState;
         setExpandAll(false);
+        setExpandedIds([]);
       }
       setScrollOffset(0);
       // Rows queued during the old session's compaction never reach the
@@ -2144,7 +2201,29 @@ export function App({
         }
         return;
       }
-      // Left button: release copies the selection, press/drag starts/extends it.
+      // Left button, part 1: classify the report as click / drag / neither.
+      // The whole rule is `tool-expand.ts`'s (`nextClick`); here we only feed it
+      // and act on a completed click. A click is a press and a release on the
+      // SAME cell with no motion in between, and a coalesced chunk (both reports
+      // in one write) is seen as press then release, in order.
+      const step = nextClick(clickRef.current, r);
+      clickRef.current = step.state;
+      if (step.click) {
+        // The call under the cursor's SCREEN row, or null when the row is
+        // outside the transcript viewport (the prompt rule, the input box, the
+        // status bar) — `tool-hit.ts` owns the whole rule, window included.
+        // Under Ctrl+O every call's command already shows, so a click has
+        // nothing to reveal and must not toggle the hidden per-call state.
+        const id = expandAll ? null : toolCallAtViewport(layout.laid, win, step.click.y);
+        // Only a tool call's HEADER row is a control; anywhere else the click
+        // stays what it is today (a zero-length selection, i.e. nothing).
+        if (id !== null) {
+          setSelection(null);
+          setExpandedIds((ids) => toggleExpanded(ids, id));
+          return;
+        }
+      }
+      // Left button, part 2: release copies the selection, press/drag starts/extends it.
       if (!r.press) {
         // Selection can span rows scrolled out of view, so assemble the whole
         // buffer here — only on release, never on the per-frame render path.

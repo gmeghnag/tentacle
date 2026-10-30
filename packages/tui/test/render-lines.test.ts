@@ -2,10 +2,12 @@ import { describe, expect, spyOn, test } from "bun:test";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import * as wrapAnsiModule from "wrap-ansi";
+import * as blink from "../src/blink.ts";
 import * as format from "../src/format.ts";
 import { expandTabs } from "../src/input-view.ts";
 import * as markdown from "../src/markdown.ts";
 import {
+  type LaidItem,
   carryColor,
   itemLines,
   layoutTranscript,
@@ -131,7 +133,10 @@ describe("itemLines", () => {
       },
     };
     const text = itemLines(tool, { expandAll: true }).map(strip).join("\n");
-    expect(text).toContain("Agent find bug"); // header
+    // The header keeps only label + elapsed when expanded: the primary target
+    // (the description) is the first `  │ ` row under it (the command block,
+    // docs/feat/tui-tool-expand.md) — NOT `Agent find bug` on one row any more.
+    expect(text).toContain("  │ find bug");
     // Own tokens: a bare number, the session total's formatter (12345 → "12k").
     expect(text).toContain("explore · 2 tool uses · 12k"); // tree head
     expect(text).toContain("Read auth.ts");
@@ -463,6 +468,152 @@ describe("two layout slots per item (Ctrl+O both ways)", () => {
   });
 });
 
+describe("the running tool bullet's blink (docs/feat/tui-tool-blink.md)", () => {
+  // A long transcript of settled items plus ONE running call: tick the shared
+  // blink phase and only that call's row may change — and only it may be laid
+  // out again. `settled` objects keep their identity across the two passes, as
+  // `state.ts` does (it rebuilds only the item that changed).
+  const running: ToolItem = {
+    kind: "tool",
+    id: "r",
+    name: "shell",
+    args: '{"command":"cp a b"}',
+    status: "running",
+  };
+  const settledTools: DisplayItem[] = Array.from({ length: 6 }, (_, i) => ({
+    kind: "tool" as const,
+    id: `t${i}`,
+    name: "shell",
+    args: JSON.stringify({ command: `echo ${i}` }),
+    status: "ok" as const,
+    durationMs: 100,
+    resultText: "out",
+  }));
+  const replies: DisplayItem[] = Array.from({ length: 6 }, (_, i) => ({
+    kind: "assistant" as const,
+    text: `reply ${i} with **enough** words to wrap at a narrow width right here`,
+  }));
+  const items: DisplayItem[] = [...replies, ...settledTools, running];
+
+  const header = (laid: readonly LaidItem[]): string =>
+    laid.find((l) => l.rows[0]?.includes("cp a b"))?.rows[0] ?? "";
+
+  test("a running call blinks with the phase, and the rest of the row never moves", () => {
+    // Mutation (red, verified): drop the phase swap entirely (`withPhase`
+    // returns `rows`) → this test fails. A narrower OFF glyph alone does NOT
+    // red it (the swap is after the wrap): that is the width-79 test's job.
+    const on = transcriptRows(items, { expandAll: false, width: 24, blinkPhase: 0 });
+    const off = transcriptRows(items, { expandAll: false, width: 24, blinkPhase: 500 });
+    expect(on).toHaveLength(off.length); // same row count: nothing re-flows
+    const onRow = strip(on.find((r) => r.includes("cp a b")) ?? "");
+    const offRow = strip(off.find((r) => r.includes("cp a b")) ?? "");
+    expect(onRow.startsWith("⏺ Bash")).toBe(true);
+    expect(offRow.startsWith("   Bash")).toBe(true); // the 2-column blank, then the space
+    // The label sits at the same DISPLAY COLUMN, which is the property the row
+    // depends on (`⏺` is 2 columns, so the blank must be 2 too) — a raw string
+    // index would differ by one and prove nothing.
+    expect(stringWidth(onRow.slice(0, onRow.indexOf("Bash")))).toBe(
+      stringWidth(offRow.slice(0, offRow.indexOf("Bash"))),
+    );
+    expect(stringWidth(onRow)).toBe(stringWidth(offRow));
+    // Only the glyph differs: the label onwards is identical.
+    expect(onRow.slice(onRow.indexOf("Bash"))).toBe(offRow.slice(offRow.indexOf("Bash")));
+    // Nothing else in the transcript changed between the phases.
+    expect(on.filter((r) => !r.includes("cp a b"))).toEqual(
+      off.filter((r) => !r.includes("cp a b")),
+    );
+  });
+
+  test("settled rows are not re-laid-out per tick: the cache still serves them", () => {
+    // The exact property that keeps a long session cheap (AGENTS §2): a phase
+    // tick must not re-wrap the settled/non-tool items.
+    const o = { expandAll: false, width: 24, blinkPhase: 0 };
+    const { laid: first } = layoutTranscript(items, o);
+    const settledRows = first
+      .filter((l) => !l.rows[0]?.includes("cp a b"))
+      .map((l) => l.rows as readonly string[]);
+    const spy = spyOn(markdown, "renderMarkdown");
+    try {
+      const { laid: second } = layoutTranscript(items, { ...o, blinkPhase: 500 });
+      // Zero markdown renders: every reply came from the cache.
+      expect(spy.mock.calls.length).toBe(0);
+      // The same array objects: settled items were not re-laid-out at all.
+      const settledAgain = second
+        .filter((l) => !l.rows[0]?.includes("cp a b"))
+        .map((l) => l.rows as readonly string[]);
+      expect(settledAgain).toHaveLength(settledRows.length);
+      for (const [i, rows] of settledAgain.entries()) {
+        // Object identity, not equality: a re-layout would produce a new array.
+        expect(rows).toBe(settledRows[i] as readonly string[]);
+      }
+      // And the running row DID change, so the test is not vacuous.
+      expect(header(first)).not.toBe(header(second));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("at width 79 a long command's rows do not move between phases (finding 1)", () => {
+    // The HIGH finding: `⏺` measures 2 columns and the old OFF glyph `" "` one,
+    // so the row wrapped differently ON vs OFF and the transcript jumped a row
+    // at 1 Hz. The OFF glyph must have the SAME display width as the ON one —
+    // proved with the width function Ink's own layout uses (`string-width`).
+    expect(stringWidth(blink.toolBullet("running", 0))).toBe(2);
+    expect(stringWidth(blink.toolBullet("running", 500))).toBe(2);
+    const long = {
+      ...running,
+      args: JSON.stringify({
+        command:
+          "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo item-$i-done-and-a-few-more-words; done > out.txt",
+      }),
+    };
+    // Every width in the App's range, not just 79: the property is width-free.
+    const OFF_GLYPH = blink.toolBullet("running", 500);
+    const swap = (row: string): string => strip(row).replace("⏺", OFF_GLYPH);
+    for (const width of [22, 44, 45, 79, 80]) {
+      const on = transcriptRows([{ ...long }], { expandAll: false, width, blinkPhase: 0 });
+      const off = transcriptRows([{ ...long }], { expandAll: false, width, blinkPhase: 500 });
+      expect([width, on.length]).toEqual([width, off.length]); // same row count
+      expect(strip(on[0] ?? "").startsWith("⏺ Bash")).toBe(true);
+      // Row 0 differs by the glyph only; every other row is byte-identical.
+      expect(off.map(strip)).toEqual(on.map((r, i) => (i === 0 ? swap(r) : strip(r))));
+    }
+    // Non-vacuity: the ON row really IS a wrapped row (the command's tail is
+    // not on row 0), so the rows compared above could have differed. Before
+    // the width-derived cut (docs/feat/tui-tool-expand.md) this test measured
+    // the ROW COUNT instead; a long command now legitimately uses more of a
+    // wide row (the last body bit can move up into a freed row), so the
+    // property pinned here is the one that matters: the command is wrapped,
+    // and no row moved between the phases.
+    const wide = strip(
+      transcriptRows([{ ...long }], { expandAll: false, width: 79, blinkPhase: 0 })[0] ?? "",
+    );
+    expect(wide).not.toContain("out.txt");
+    expect(stringWidth(wide)).toBeLessThanOrEqual(79);
+    const narrow = strip(
+      transcriptRows([{ ...long }], { expandAll: false, width: 22, blinkPhase: 0 })[0] ?? "",
+    );
+    expect(narrow).not.toContain("out.txt");
+  });
+
+  test("a finished call is solid at every phase", () => {
+    const done: DisplayItem[] = [
+      { ...running, status: "ok", durationMs: 2000 },
+      { ...running, status: "error", resultText: "boom" },
+    ];
+    for (const phase of [0, 500, 1000]) {
+      // Fresh identities per phase: a settled item's rows are cached across
+      // phases by design, so a phase value alone never reaches it. Cold items
+      // prove the ASSERTION (the glyph is status-only), not the cache.
+      const cold = done.map((i) => ({ ...i }) as DisplayItem);
+      const rows = transcriptRows(cold, { expandAll: false, width: 24, blinkPhase: phase });
+      for (const row of rows.filter((r) => r.includes("Bash"))) {
+        expect(strip(row).startsWith("⏺ Bash")).toBe(true);
+      }
+    }
+  });
+});
+
 describe("warmRowsChunk (non-blocking resize warm)", () => {
   // Fresh item identities → cache is cold regardless of width.
   const items: DisplayItem[] = Array.from({ length: 6 }, (_, i) => ({
@@ -627,8 +778,13 @@ describe("a spilled tool result", () => {
     ...over,
   });
   const NOTE = "40.8k chars · too large, the model reads it in parts";
+  // The body's rows: the header (row 0) and any `  │ ` command row of an
+  // expanded call (docs/feat/tui-tool-expand.md) are not body rows, so skip
+  // them both — with `expandAll` the command is shown, and these tests are
+  // about the spelling of the body itself.
   const body = (tool: ToolItem, o: Parameters<typeof itemLines>[1]) =>
     itemLines(tool, o)
+      .filter((l) => !strip(l).startsWith("  │ ") && strip(l) !== "  │")
       .slice(1)
       .map((l) => strip(l).replace(/^(⎿ | {2})/, ""));
 
@@ -819,5 +975,266 @@ describe("display cells: a tab or a wide char never makes a row overflow", () =>
       "a    b",
       "\x1b[31mx    y\x1b[39m",
     ]);
+  });
+});
+
+describe("a tool call's command: width-derived cut, and per-call expansion", () => {
+  // Owner 2026-10-30 (docs/feat/tui-tool-expand.md). The observable: the header
+  // row is the whole command when it fits, never a fixed 72-char cut.
+  const COMMAND =
+    "cd . && go test ./internal/ui -run TestZZWebGapDeadBranches -count=1 -v -timeout 120s 2>&1 | tail -50";
+  const longTool: ToolItem = {
+    kind: "tool",
+    id: "t1",
+    name: "shell",
+    args: JSON.stringify({ command: COMMAND }),
+    status: "ok",
+    durationMs: 1700,
+    resultText: "ok",
+  };
+  /** The mockup's continuation prefix: 4 display columns. */
+  const CONT = "  │ ";
+
+  test("at 160 columns the whole command sits on the header row (no fixed 72 cut)", () => {
+    // RED before the change: `truncate(subtitle, 72)` cut it to "… 1.7s" at a
+    // 84-column header on a 160-column terminal (the Context repro).
+    const rows = transcriptRows([longTool], { expandAll: false, width: 160 }).map(strip);
+    expect(rows[0]).toContain(COMMAND);
+    expect(rows[0]).toContain("1.7s");
+    expect(rows).toHaveLength(2); // header + the "⎿ ok" body row, nothing else
+    expect(stringWidth(rows[0] ?? "")).toBeLessThanOrEqual(160);
+  });
+
+  test("a narrow terminal still cuts it, with an ellipsis, and one row", () => {
+    const rows = transcriptRows([longTool], { expandAll: false, width: 40 }).map(strip);
+    expect(rows[0]).toContain("…");
+    expect(rows[0]).not.toContain("tail -50");
+    expect(stringWidth(rows[0] ?? "")).toBeLessThanOrEqual(40);
+    // Exactly one header row: the cut never wraps the header.
+    expect(rows.filter((r) => r.includes("Bash"))).toHaveLength(1);
+  });
+
+  test("a multi-line command collapses to ONE header row", () => {
+    const multi: ToolItem = {
+      ...longTool,
+      args: JSON.stringify({ command: "make build\nmake test\nmake deploy" }),
+    };
+    const rows = transcriptRows([multi], { expandAll: false, width: 60 }).map(strip);
+    expect(rows.filter((r) => r.includes("make"))).toHaveLength(1);
+    expect(rows[0]).toContain("make build");
+  });
+
+  test("expanding ONE call shows its command wrapped under the header (mockup)", () => {
+    const rows = transcriptRows([longTool], {
+      expandAll: false,
+      width: 40,
+      expandedIds: ["t1"],
+    }).map(strip);
+    // The header keeps the bullet, the label and the elapsed time — no comment.
+    expect(rows[0]).toContain("Bash");
+    expect(rows[0]).toContain("1.7s");
+    expect(rows[0]).not.toContain("TestZZ");
+    // Then the full command as `  │ ` continuation rows, wrapped to the width.
+    const cont = rows.slice(1).filter((r) => r.startsWith(CONT));
+    expect(cont.length).toBeGreaterThan(1);
+    const joined = cont
+      .map((r) => r.slice(CONT.length))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    expect(joined).toBe(COMMAND);
+    for (const row of rows) {
+      expect(stringWidth(row)).toBeLessThanOrEqual(40);
+    }
+    // The body is untouched by the toggle (still the collapsed preview).
+    expect(rows.at(-1)).toBe("⎿ ok");
+  });
+
+  test("expanding one call does not touch its BODY, Ctrl+O does both", () => {
+    const big: ToolItem = {
+      ...longTool,
+      resultText: Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n"),
+    };
+    const one = transcriptRows([big], { expandAll: false, width: 60, expandedIds: ["t1"] }).map(
+      strip,
+    );
+    expect(one.some((r) => r.includes("ctrl+o to expand"))).toBe(true); // body still collapsed
+    const all = transcriptRows([big], { expandAll: true, width: 60 }).map(strip);
+    expect(all.some((r) => r.includes("ctrl+o to expand"))).toBe(false); // body expanded
+    expect(all.some((r) => r.includes("line 20"))).toBe(true);
+  });
+
+  test("Ctrl+O (expandAll) shows the full command of every call too (point 3)", () => {
+    const second: ToolItem = {
+      ...longTool,
+      id: "t2",
+      args: JSON.stringify({ command: `${COMMAND} | tail-second` }),
+    };
+    const rows = transcriptRows([longTool, second], { expandAll: true, width: 40 }).map(strip);
+    // Both calls contribute continuation rows: two `⏺ Bash` headers, each
+    // followed by at least one `  │ ` row, and both tails are visible.
+    expect(rows.filter((r) => r.includes("Bash"))).toHaveLength(2);
+    expect(rows.filter((r) => r.startsWith(CONT)).length).toBeGreaterThan(3);
+    expect(rows.join("\n")).toContain("tail -50");
+    expect(rows.join("\n")).toContain("tail-second");
+  });
+
+  test("an expanded call's multiline command keeps every line, indented", () => {
+    const multi: ToolItem = {
+      ...longTool,
+      args: JSON.stringify({ command: "make build\nmake test\nmake deploy" }),
+    };
+    const rows = transcriptRows([multi], {
+      expandAll: false,
+      width: 60,
+      expandedIds: ["t1"],
+    }).map(strip);
+    const cont = rows.filter((r) => r.startsWith(CONT)).map((r) => r.slice(CONT.length));
+    expect(cont).toEqual(["make build", "make test", "make deploy"]);
+  });
+
+  test("a call with empty args has no continuation rows when expanded", () => {
+    const empty: ToolItem = { ...longTool, name: "shell", args: "{}" };
+    const rows = transcriptRows([empty], { expandAll: false, width: 60, expandedIds: ["t1"] }).map(
+      strip,
+    );
+    expect(rows.some((r) => r.startsWith(CONT))).toBe(false);
+    expect(rows[0]).toContain("Bash");
+  });
+
+  test("toggling one call re-lays-out only that item (point 6)", () => {
+    const a: ToolItem = { ...longTool, id: "a" };
+    const b: ToolItem = { ...longTool, id: "b", args: JSON.stringify({ command: `${COMMAND} b` }) };
+    const reply: DisplayItem = { kind: "assistant", text: "some **reply** text that wraps here" };
+    const items: DisplayItem[] = [reply, a, b];
+    const o = { expandAll: false, width: 40 };
+    layoutTranscript(items, o); // cold: the collapsed slot for every item
+    const spy = spyOn(format, "formatDurationMs");
+    try {
+      const cold = layoutTranscript(items, { ...o, expandedIds: [] });
+      expect(spy.mock.calls.length).toBe(0); // an empty set is the plain view
+      const toggled = layoutTranscript(items, { ...o, expandedIds: ["b"] });
+      // Exactly ONE re-layout: the toggled call. Its rows really changed…
+      expect(spy.mock.calls.length).toBe(1);
+      expect(toggled.total).toBeGreaterThan(cold.total);
+      // …and every other item kept the very same row array (identity, not
+      // equality: a re-layout would allocate a new one).
+      const rowsAt = (l: LaidItem | undefined): readonly string[] => l?.rows ?? [];
+      expect(rowsAt(toggled.laid[0])).toBe(rowsAt(cold.laid[0])); // the reply
+      expect(rowsAt(toggled.laid[1])).toBe(rowsAt(cold.laid[1])); // call a
+      expect(rowsAt(toggled.laid[2])).not.toBe(rowsAt(cold.laid[2])); // call b
+      // Toggling back is a cache hit again, in both directions.
+      const back = layoutTranscript(items, { ...o, expandedIds: [] });
+      expect(spy.mock.calls.length).toBe(1);
+      expect(rowsAt(back.laid[2])).toBe(rowsAt(cold.laid[2]));
+      const again = layoutTranscript(items, { ...o, expandedIds: ["b"] });
+      expect(spy.mock.calls.length).toBe(1);
+      expect(rowsAt(again.laid[2])).toBe(rowsAt(toggled.laid[2]));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("Ctrl+O and a per-call expansion are different slots of the same item", () => {
+    // expandAll shows every command, so it subsumes the per-call set: flipping
+    // expandAll off again must bring the single call's view straight back from
+    // the cache, with no re-layout.
+    const items: DisplayItem[] = [longTool];
+    const o = { width: 40 };
+    const rowsAt = (l: LaidItem | undefined): readonly string[] => l?.rows ?? [];
+    const one = layoutTranscript(items, { ...o, expandAll: false, expandedIds: ["t1"] });
+    layoutTranscript(items, { ...o, expandAll: true, expandedIds: ["t1"] }); // the all slot
+    const spy = spyOn(format, "formatDurationMs");
+    try {
+      layoutTranscript(items, { ...o, expandAll: false, expandedIds: ["t1"] });
+      expect(spy.mock.calls.length).toBe(0);
+      const back = layoutTranscript(items, { ...o, expandAll: false, expandedIds: ["t1"] });
+      expect(rowsAt(back.laid[0])).toBe(rowsAt(one.laid[0]));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("the idle/resize WARM must warm the expanded-command view too", () => {
+    // A width change warms the next render's slot. The warm's options must
+    // therefore carry `expandedIds`: warming only the collapsed view leaves the
+    // clicked call cold, and the COMMITTING render pays its re-layout (the
+    // freeze the warm exists to avoid) — App passes it to both warms.
+    const warmThenLayout = (warmOpts: Parameters<typeof layoutTranscript>[1]) => {
+      const item: DisplayItem = { ...longTool }; // a fresh identity: cold cache
+      const items: DisplayItem[] = [item];
+      let idx = 0;
+      while (idx < items.length) {
+        idx = warmRowsChunk(items, warmOpts, idx, 0);
+      }
+      const spy = spyOn(format, "formatDurationMs");
+      try {
+        layoutTranscript(items, { expandAll: false, width: 40, expandedIds: ["t1"] });
+        return spy.mock.calls.length;
+      } finally {
+        spy.mockRestore();
+      }
+    };
+    // The warm that carries the set: the committing render is all hits.
+    expect(warmThenLayout({ expandAll: false, width: 40, expandedIds: ["t1"] })).toBe(0);
+    // Non-vacuity: WITHOUT it the same render re-lays-out the call.
+    expect(warmThenLayout({ expandAll: false, width: 40 })).toBe(1);
+  });
+
+  test("an expanded RUNNING call still blinks and no row moves (point 7)", () => {
+    const running: ToolItem = { ...longTool, status: "running", resultText: undefined };
+    const on = transcriptRows([running], {
+      expandAll: false,
+      width: 40,
+      blinkPhase: 0,
+      expandedIds: ["t1"],
+    });
+    const off = transcriptRows([{ ...running }], {
+      expandAll: false,
+      width: 40,
+      blinkPhase: 500,
+      expandedIds: ["t1"],
+    });
+    expect(on).toHaveLength(off.length); // the continuation block does not re-flow
+    expect(on.length).toBeGreaterThan(2); // it really is expanded + wrapped
+    expect(strip(on[0] ?? "").startsWith("⏺ Bash")).toBe(true);
+    expect(strip(off[0] ?? "").startsWith("   Bash")).toBe(true);
+    // Only the glyph differs; every continuation and body row is identical.
+    expect(off.slice(1).map(strip)).toEqual(on.slice(1).map(strip));
+    // The label sits at the same display column in both phases.
+    const col = (row: string): number => {
+      const plain = strip(row);
+      return stringWidth(plain.slice(0, plain.indexOf("Bash")));
+    };
+    expect(col(off[0] ?? "")).toBe(col(on[0] ?? ""));
+  });
+
+  test("a width change re-wraps an expanded call at the new width", () => {
+    const at40 = transcriptRows([longTool], {
+      expandAll: false,
+      width: 40,
+      expandedIds: ["t1"],
+    }).map(strip);
+    const at80 = transcriptRows([longTool], {
+      expandAll: false,
+      width: 80,
+      expandedIds: ["t1"],
+    }).map(strip);
+    expect(at40.filter((r) => r.startsWith(CONT)).length).toBeGreaterThan(
+      at80.filter((r) => r.startsWith(CONT)).length,
+    );
+    for (const row of at80) {
+      expect(stringWidth(row)).toBeLessThanOrEqual(80);
+    }
+    // Both still show the whole command.
+    const text = (rows: string[]): string =>
+      rows
+        .filter((r) => r.startsWith(CONT))
+        .map((r) => r.slice(CONT.length))
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    expect(text(at40)).toBe(COMMAND);
+    expect(text(at80)).toBe(COMMAND);
   });
 });
