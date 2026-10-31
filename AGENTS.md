@@ -267,14 +267,25 @@ assume.
   create+delete); when deleting, the delete-on-exit net (`removeBestEffort`) survives
   `process.exit`/Ctrl+C via a detached child (`exit` handlers still fire; SIGINT
   routes through it). With keep (the default): no net, no delete, and the
-  re-attach command is printed. A `run --detach --keep=false` is the one other
+  re-attach command is printed. A `run --detach --keep=false` is another
   owner of that net and of a delete: its launcher never arms or deletes, its
   relay arms the net under its lock, and removes it only through `exitPlan` (a
   stop, or a clean idle that one fresh read shows nobody else uses) +
   `removeVerifiedKept`, the net staying ARMED until that delete is done — so a
   crash mid-delete still converges. `attach` is
   user-owned: never create, start or delete, no exit net (`attach <name>`'s
-  kept-index lookup only picks the engine/location). `rm <name>` removes only a
+  kept-index lookup only picks the engine/location) — with ONE exception, a TUI
+  attached to a detached run of `keep=false`: it inherits the relay's ownership,
+  at the hand-over of a live relay (the relay disarms at `prepare`, and after
+  `commit` removes nothing) or, with no relay left (an ended or stale run, Q5),
+  at the attach itself. A run's record counts only for the workload its
+  `created` matches and, under explicit flags, at the place they name. Every TUI
+  of that run arms the net, which fires only if no other TUI of the run is
+  alive; only the LAST client's quit removes the workload, through `quitPlan`
+  (the last save confirmed, read back and written; the daemon confirmed the
+  close; nobody else uses the resident) + `removeVerifiedKept`, under the run's
+  lock, the net
+  staying ARMED until that delete is done. `rm <name>` removes only a
   workload the engine says carries tentacle's managed + `tentacle.kept` labels,
   re-read right before the delete, on the user's explicit command; WHERE to dial
   comes from the laptop index, never from a label. Pass secrets to the

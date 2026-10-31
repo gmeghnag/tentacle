@@ -795,37 +795,340 @@ describe("cli main: --engine", () => {
         state: "waiting-permission",
         lastActivityAt: 1,
         autoAccept: false,
+        created: entry.created,
       });
     };
     const live = () => `${process.pid} ${laptopProc(process.pid)?.start}`;
 
-    test("a live holder: exit 1, nothing dialled, the way out said", async () => {
-      // Mutation: drop the guard → `attaching to box`.
+    test("a live holder with no hand-over possible: exit 1, nothing dialled, the way out said", async () => {
+      // Mutation: drop the guard → `attaching to box`. Since detached-handover a
+      // live relay is handed over (below); S2's refusal stays for another session
+      // of it, and no terminal is refused before anything.
       setup(live());
       await withEnv(unreachable, async () => {
-        for (const args of [
-          ["attach", "box"],
-          ["attach", "--engine", "docker", "box"],
-          ["attach", "box", "--resume", "44444444-4444-4444-8444-444444444444"],
-        ]) {
-          const r = await run(args);
-          expect(r.code).toBe(1);
-          expect(r.text).toContain("a detached run owns it");
-          expect(r.text).toContain(`kill ${process.pid}`);
-          expect(r.text).toContain("--resume 44444444-4444-4444-8444-444444444444");
-          expect(r.text).not.toContain("attaching to");
-        }
+        // No location flag: the same place, so `kill` is the honest way out.
+        const out: string[] = [];
+        const code = await main(
+          ["bun", "cli", "attach", "box", "--resume", "99999999-9999-4999-8999-999999999999"],
+          { write: (t) => out.push(t), tty: true },
+        );
+        const r = { code, text: out.join("") };
+        expect(r.code).toBe(1);
+        expect(r.text).toContain("a detached run owns it");
+        expect(r.text).toContain(`kill ${process.pid}`);
+        expect(r.text).toContain("--resume 44444444-4444-4444-8444-444444444444");
+        expect(r.text).not.toContain("attaching to");
+        // An explicit engine flag names ANOTHER place (DOCKER_HOST, not the
+        // entry's socket): R1's refusal, which never offers that `kill`.
+        const other: string[] = [];
+        const code2 = await main(
+          [
+            "bun",
+            "cli",
+            "attach",
+            "--engine",
+            "docker",
+            "box",
+            "--resume",
+            "99999999-9999-4999-8999-999999999999",
+          ],
+          { write: (t) => other.push(t), tty: true },
+        );
+        expect(code2).toBe(1);
+        expect(other.join("")).toContain("unix:///nonexistent/kept.sock");
+        expect(other.join("")).toContain("unix:///nonexistent/tentacle-test.sock");
+        expect(other.join("")).not.toContain("kill");
+        expect(other.join("")).not.toContain("attaching to");
+        const piped = await run(["attach", "box"]);
+        expect(piped.code).toBe(1);
+        expect(piped.text).toContain("needs a terminal");
+        expect(piped.text).not.toContain("attaching to box in");
       });
       rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
     });
 
     test("a stale holder, or another engine's workload of that name, proceeds", async () => {
+      // A terminal: a detached run's attach needs one (detached-handover H19).
       setup(`${2 ** 30} 1`);
       await withEnv(unreachable, async () => {
-        expect((await run(["attach", "box"])).text).toContain("attaching to box");
+        const out: string[] = [];
+        await main(["bun", "cli", "attach", "box"], { write: (t) => out.push(t), tty: true });
+        expect(out.join("")).toContain("attaching to box");
         setup(live());
         const other = await run(["attach", "--engine", "podman", "box"]);
         expect(other.text).not.toContain("a detached run owns it");
+      });
+      rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+    });
+
+    /** `attach` with the engine runtime and the TUI replaced; records what each got. */
+    const attached = async (args: string[], tty = true) => {
+      const out: string[] = [];
+      const seen: {
+        runtimeBroker?: unknown;
+        tuiBroker?: unknown;
+        sessionId?: string;
+        shared?: boolean;
+        attachTo?: string;
+        quit: number;
+      } = { quit: 0 };
+      const runtime = {
+        createSession: () => ({}),
+        jobs: {},
+        link: { onLinkStatus: () => () => {} },
+        mcpStatus: async () => [],
+        attachTo: async (id: string) => {
+          seen.attachTo = id;
+          return true;
+        },
+        quit: async () => {
+          seen.quit += 1;
+          return { sessionsKept: 0, saved: true };
+        },
+        release: async () => {},
+        residentUse: async () => null,
+      };
+      const code = await main(["bun", "cli", ...args], {
+        write: (t) => out.push(t),
+        tty,
+        attachEngineRuntime: (async (
+          _config: unknown,
+          deps: { permissions: unknown; sessionId?: string; shared?: true },
+        ) => {
+          seen.runtimeBroker = deps.permissions;
+          seen.sessionId = deps.sessionId;
+          seen.shared = deps.shared === true;
+          return runtime;
+        }) as never,
+        startTui: (async (_session: unknown, options: { permissions: unknown }) => {
+          seen.tuiBroker = options.permissions;
+        }) as never,
+      });
+      return { code, text: out.join(""), seen };
+    };
+
+    test("H17 a detached run's attach: the broker the runtime gets IS the TUI's (single broker)", async () => {
+      // Mutation: a second broker for the TUI → the runtime's asks never reach the prompt.
+      setup(`${2 ** 30} 1`);
+      await withEnv(unreachable, async () => {
+        const r = await attached(["attach", "box"]);
+        expect(r.code).toBe(0);
+        expect(r.seen.runtimeBroker).toBeDefined();
+        expect(r.seen.runtimeBroker === r.seen.tuiBroker).toBe(true);
+        expect(r.seen.shared).toBe(true);
+        expect(r.seen.quit).toBe(1); // the quit is `finish`, not `dispose`
+      });
+      rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+    });
+
+    test("H19 a dead relay: `attach box` opens the run's session; bare --resume and --continue too, no picker; no terminal: refused", async () => {
+      // Mutation: ignore `owner.sessionId` → a fresh id.
+      const uid = "44444444-4444-4444-8444-444444444444";
+      await withEnv(unreachable, async () => {
+        for (const args of [
+          ["attach", "box"],
+          ["attach", "box", "--resume"],
+          ["attach", "box", "--continue"],
+          ["attach", "box", "--resume", uid],
+        ]) {
+          setup(`${2 ** 30} 1`);
+          const r = await attached(args);
+          expect(r.code).toBe(0);
+          expect(r.seen.sessionId).toBe(uid);
+          expect(r.seen.attachTo).toBe(uid);
+        }
+        setup(`${2 ** 30} 1`);
+        const piped = await attached(["attach", "box"], false);
+        expect(piped.code).toBe(1);
+        expect(piped.text).toContain("box: attaching to a detached run needs a terminal");
+        expect(piped.seen.runtimeBroker).toBeUndefined();
+        // Another session of the same resident: today's attach, not a client of the run.
+        setup(`${2 ** 30} 1`);
+        const other = await attached([
+          "attach",
+          "box",
+          "--resume",
+          "99999999-9999-4999-8999-999999999999",
+        ]);
+        expect(other.seen.runtimeBroker).toBeUndefined();
+        expect(other.text).toContain("attaching to box");
+      });
+      rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+    });
+
+    test("a live relay on a terminal goes to the hand-over: no socket within its wait → S2's refusal, the TUI never mounted", async () => {
+      // Mutation: refuse `plan.handover` up front (Phase A) → no runtime is built.
+      setup(live());
+      await withEnv(unreachable, async () => {
+        const r = await attached(["attach", "box"]);
+        expect(r.code).toBe(1);
+        expect(r.seen.runtimeBroker).toBeDefined();
+        expect(r.seen.tuiBroker).toBeUndefined();
+        expect(r.text).toContain("a detached run owns it");
+      });
+      rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+    }, 15_000);
+
+    /** A dead run of `at`, keep=false: the delete a redirect would inherit. */
+    const deadRun = (at: KeptEntry, sessionId: string): void => {
+      const config = join(dir, "config");
+      recordKept(keptIndexDir(config), at);
+      writeOwner(ensureRunDir(runDirFor(config, at)), {
+        schemaVersion: 1,
+        kind: "relay",
+        pid: 2 ** 30,
+        appVersion: "1",
+        sessionId,
+        state: "failed",
+        lastActivityAt: 1,
+        autoAccept: false,
+        keep: false,
+        created: at.created,
+      });
+    };
+    const clean = () => rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+
+    test("H35 explicit flags are compared: --namespace B never lands on namespace A's run; A's own flags still reach it", async () => {
+      // Mutation: skip the comparison → `resolved box → kubernetes`, and a quit that deletes A's pod.
+      clean();
+      const uid = "55555555-5555-4555-8555-555555555555";
+      deadRun(
+        {
+          schemaVersion: 1,
+          name: "box",
+          engine: "kubernetes",
+          namespace: "team-a",
+          server: unreachable.TENTACLE_K8S_SERVER,
+          model: "m",
+          created: entry.created,
+        },
+        uid,
+      );
+      await withEnv(unreachable, async () => {
+        const base = ["attach", "--engine", "kubernetes", "box"];
+        const other = await attached([...base, "--namespace", "team-b"]);
+        expect(other.seen.runtimeBroker).toBeUndefined();
+        expect(other.text).not.toContain("resolved box");
+        const same = await attached([...base, "--namespace", "team-a"]);
+        expect(same.seen.sessionId).toBe(uid);
+      });
+      clean();
+    });
+
+    test("R1 flags naming ANOTHER place than a LIVE run's: both places named, never a `kill` (it would stop another place's workload)", async () => {
+      // Mutation: reuse S2's refusal → "…or `kill <pid>`", which deletes team-a's pod.
+      clean();
+      const at: KeptEntry = {
+        schemaVersion: 1,
+        name: "box",
+        engine: "kubernetes",
+        namespace: "team-a",
+        server: unreachable.TENTACLE_K8S_SERVER,
+        model: "m",
+        created: entry.created,
+      };
+      recordKept(keptIndexDir(join(dir, "config")), at);
+      const runDir = ensureRunDir(runDirFor(join(dir, "config"), at));
+      writeFileSync(join(runDir, ".lock.1"), live());
+      writeOwner(runDir, {
+        schemaVersion: 1,
+        kind: "relay",
+        pid: process.pid,
+        appVersion: "1",
+        sessionId: "55555555-5555-4555-8555-555555555556",
+        state: "waiting-permission",
+        lastActivityAt: 1,
+        autoAccept: false,
+        keep: false,
+        created: at.created,
+      });
+      await withEnv(unreachable, async () => {
+        const r = await attached([
+          "attach",
+          "--engine",
+          "kubernetes",
+          "box",
+          "--namespace",
+          "team-b",
+        ]);
+        expect(r.code).toBe(1);
+        expect(r.seen.runtimeBroker).toBeUndefined();
+        // Where the run IS (the entry), and the place the flags name.
+        expect(r.text).toContain("127.0.0.1/team-a");
+        expect(r.text).toContain("127.0.0.1/team-b");
+        // A `kill` here would stop and remove team-a's pod: never suggested.
+        expect(r.text).not.toContain("kill");
+        expect(r.text).not.toContain("stopping it removes");
+        // The safe next step: the index resolves the run where it is.
+        expect(r.text).toContain("tentacle attach box");
+      });
+      clean();
+    });
+
+    test("H35 two entries of one name: an explicit engine reaches the run of ITS endpoint only; an endpoint with no run, its own attach; no flag: `ambiguous`", async () => {
+      // Mutation: the first entry with a record wins.
+      clean();
+      const uids = [
+        "55555555-5555-4555-8555-555555555551",
+        "55555555-5555-4555-8555-555555555552",
+      ] as const;
+      const socks = ["unix:///nonexistent/one.sock", "unix:///nonexistent/two.sock"] as const;
+      socks.forEach((endpoint, i) => deadRun({ ...entry, endpoint }, uids[i] ?? ""));
+      const explicit = ["attach", "--engine", "docker", "box"];
+      for (const [i, endpoint] of socks.entries()) {
+        await withEnv({ ...unreachable, DOCKER_HOST: endpoint }, async () => {
+          const r = await attached(explicit);
+          expect(r.seen.sessionId).toBe(uids[i] ?? "");
+          expect(r.text).toContain("resolved box → docker");
+        });
+      }
+      await withEnv({ ...unreachable, DOCKER_HOST: "unix:///nonexistent/three.sock" }, async () => {
+        const r = await attached(explicit);
+        expect(r.seen.runtimeBroker).toBeUndefined();
+        expect(r.text).toContain("attaching to box in unix:///nonexistent/three.sock");
+        const bare = await attached(["attach", "box"]);
+        expect(bare.code).toBe(1);
+        expect(bare.seen.runtimeBroker).toBeUndefined();
+        expect(bare.text).not.toContain("attaching to box");
+      });
+      clean();
+    });
+
+    test("H35 a record of an earlier workload of that name: today's attach, not the run", async () => {
+      // Mutation: `main` does not pass the entry's `created` → the old uid and keep=false.
+      clean();
+      deadRun(
+        { ...entry, created: "2026-10-30T10:00:00.000Z" },
+        "55555555-5555-4555-8555-555555555553",
+      );
+      recordKept(keptIndexDir(join(dir, "config")), entry); // the name reused: a new `created`
+      await withEnv(unreachable, async () => {
+        const r = await attached(["attach", "box"]);
+        expect(r.seen.runtimeBroker).toBeUndefined();
+        expect(r.text).toContain("attaching to box");
+      });
+      clean();
+    });
+
+    test("a run of another folder: refused, naming it, nothing dialled", async () => {
+      setup(`${2 ** 30} 1`);
+      writeOwner(runDirFor(join(dir, "config"), entry), {
+        schemaVersion: 1,
+        kind: "relay",
+        pid: 1,
+        appVersion: "1",
+        sessionId: "44444444-4444-4444-8444-444444444444",
+        state: "idle",
+        lastActivityAt: 1,
+        autoAccept: false,
+        cwd: "/elsewhere-project",
+        created: entry.created,
+      });
+      await withEnv(unreachable, async () => {
+        const r = await attached(["attach", "box"]);
+        expect(r.code).toBe(1);
+        expect(r.text).toContain("this detached run belongs to /elsewhere-project");
+        expect(r.seen.runtimeBroker).toBeUndefined();
       });
       rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
     });

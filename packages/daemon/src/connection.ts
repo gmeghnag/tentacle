@@ -392,18 +392,19 @@ export class Connection {
   // Needs no `open` (an exit path closes what it may never have re-opened);
   // an unknown id is a no-op success. `ifLast` (a quit): with another client
   // still attached, only detach — the session (and its model link) stays theirs.
+  // `closed`: did THIS request end a live session (a quit's delete hangs on it).
   private closeSession(params: CloseParams): CloseResult {
     if (params.ifLast === true) {
       const live = this.host.get(params.sessionId);
       const mine = this.attached.get(params.sessionId);
       const own = mine !== undefined && mine.hosted === live ? 1 : 0;
       if (live !== undefined && live.attachedCount > own) {
-        return this.detachSession(params);
+        this.detachSession(params);
+        return { closed: false };
       }
     }
     this.attached.delete(params.sessionId);
-    this.host.close(params.sessionId);
-    return {};
+    return { closed: this.host.close(params.sessionId) };
   }
 
   // This connection only stops listening: the session runs on for any client.

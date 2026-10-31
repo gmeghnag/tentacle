@@ -342,11 +342,11 @@ Iterate per file, per phase, then `bun run check` (AGENTS §4).
 
 ### Live test checklist (owner, by hand, ONCE, after S3 merges)
 
-A real terminal, Docker Desktop, compiled `dist/tentacle`, Linux pod binary, isolated `TENTACLE_CONFIG_DIR` with a working model. Kubernetes runs only if a context authenticates. S3 changes how `attach` behaves on a LIVE relay: items below that attach wait for the relay's exit, so they stay valid.
+A real terminal, Docker Desktop, compiled `dist/tentacle`, Linux pod binary, isolated `TENTACLE_CONFIG_DIR` with a working model. Kubernetes runs only if a context authenticates. Since S3 (`docs/feat/detached-handover.md`) `attach` on a LIVE relay takes the run over and a quit ends the run: items 27–49 cover that.
 
 From S2 (`docs/feat/detached-relay.md`):
 1. **S2-3.** Start a detached run, close that terminal window while the relay lives: `ps -o pid,ppid,pgid,tty -p <pid>` from another window shows it alive, and the turn finishes.
-2. **S2-8.** After the relay leaves, `attach <name> --resume <uid>` from the same folder shows the history in the same live session. Quit: the session is still live.
+2. **S2-8.** After the relay leaves, `attach <name> --resume <uid>` from the same folder shows the history in the same live session. Quit: the session is closed, the record is on the laptop, `attach <name>` reopens it from the record (S3 Q1).
 3. **S2-17.** With a relay alive, start a second by hand on the same run (`TENTACLE_RELAY_SPEC=<spec> tentacle __relay`): exit 1, the first `owner.json` byte-identical.
 
 DR-5:
@@ -383,6 +383,40 @@ Version:
 24. `rm` with Docker stopped: nothing stopped, the relay lives.
 25. Future-version `owner.json`: `ps` shows `unknown owner`, `rm` leaves the file and names it.
 26. keep=false, an image with no glibc (a failed provisioning): `stays up: the run never started`, no "removed when", container up, in `ps`, `rm` clears it.
+
+S3 hand-over and N terminals (`docs/feat/detached-handover.md`):
+
+27. Held ask, no auto-accept: `attach <name>` from another terminal, no `--resume`: TUI opens the session, the prompt appears, "allow": the tool runs once, the turn ends, the relay is gone, the record is on the laptop.
+28. Mid model stream (a long answer): `attach`: the text keeps streaming, no error. `relay.log` shows the drain and `relay exit`.
+29. `--auto-accept`, a turn with several tools: `attach` mid-turn: a notice, and the next ask prompts.
+30. `kill -9` the `attach` before the TUI appears: the relay goes on and finishes. (A window of moments: script the `kill -9`.)
+31. `attach` from two terminals at once on a live relay: one takes over, the other joins. Both show the session. (Same: "at once" needs a script.)
+32. Two TUIs, an ask: on both screens. Answer on one: gone from the other, tool once. Answer both quickly: one decision.
+33. Two TUIs: `ps`: `attached (2)`, `-v` with both pids. Quit one: `attached`, the other goes on.
+34. Two TUIs: the newest quits during a long answer: the other's turn ends clean.
+35. Two TUIs: `/clear` on one: the other's session goes on.
+36. keep, last quit: `ps`: `idle`, container up. `attach <name>`: the same session from the record.
+37. keep=false, two TUIs: quit one: container up. Quit the other: container gone, entry gone, run dir gone, record on the laptop.
+38. keep=false, `kill -9` the only TUI: container up, `ps` `tui lost`, `rm` clears it.
+39. keep=false, two TUIs, `kill -9` one, quit the other: deleted.
+40. keep=false, `attach` during the 60 s grace: no removal, or a clean "gone" if it lost the race.
+41. Quit mid-turn after a hand-over, keep: the turn stops, what it did is on the laptop, `attach` reopens it.
+42. Quit mid-turn after a hand-over, keep=false: deleted (Q6 (a)); the attach-time notice said so. With the last save unconfirmed: see item 56.
+43. `attach < /dev/null`: refused, the run unharmed.
+44. First turn, `kill -9` the relay: `attach` shows the transcript from the pod.
+45. `kill -9` the last TUI: `ps`: `tui lost`; `attach`: same session, up to the last save.
+46. `docker rm -f`, then `attach`: the DR-8 line, with the uid; exit 1.
+47. `rm` on an attached run: the prompt; "y" removes; the TUIs show the link stopped; their quit prints no "not removed" and no "another terminal".
+48. A very long `TENTACLE_CONFIG_DIR`: the socket falls back, hand-over works.
+49. A second build with another version: `attach` on a live relay is refused before the relay notices: its `relay.log` has no `prepare`.
+50. A kept keep=false run `box` in namespace A (ended), your own `box` in namespace B: `attach --engine kubernetes --namespace B box` opens B's, with no "resolved box" line; its quit leaves A's alone. Under a LIVE relay in A the same command is S2's refusal. `--namespace A` reaches the run.
+51. A second terminal during a long answer, after a first took over: `attach` joins at once, no "closing" line, both show the session; `relay.log` shows the drain and `relay exit` later.
+52. A run started in another folder: `attach` from elsewhere is refused, naming the folder.
+53. `attach <name> --resume <other uid>` under a live relay: S2's refusal, the relay unharmed.
+54. SIGTERM on the last TUI on keep=false: the net fires and the workload goes (unlike item 38's `kill -9`).
+55. A keep=false run ended `failed`; `docker rm -f box`; plain `tentacle run --name box` (keep); `attach box`: today's attach, a fresh session, no "quitting removes" notice; its quit leaves the new `box` up. (`ps` still shows the old run's status on that row until the name is run detached or removed.)
+56. keep=false, a pod that stops answering (`docker pause`) or a full laptop disk, quit: `not removed: the last save was not confirmed — tentacle rm <name>`, the workload up; with the pod back, `attach <name>` reopens the session, which was detached, not closed.
+57. keep=false, the only TUI `/clear`s, then quits: a leftover, `not removed: could not tell whether it is in use`; `rm` clears it.
 
 ### Open questions for the owner
 

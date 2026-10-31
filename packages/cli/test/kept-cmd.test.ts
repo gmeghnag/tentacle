@@ -31,6 +31,7 @@ import {
   relayLogPath,
   runDirIn,
   writeOwner,
+  writePresence,
 } from "../src/run-state.ts";
 
 const NOW = Date.parse("2026-10-27T12:00:00Z");
@@ -138,7 +139,7 @@ const running = (labels: Record<string, string> = DOCKER_KEPT): WorkloadFacts =>
   status: "running",
   labels,
 });
-const ownerOf = (state: OwnerRecord["state"]): OwnerRecord => ({
+const ownerOf = (state: OwnerRecord["state"], created = entry("a").created): OwnerRecord => ({
   schemaVersion: 1,
   kind: "relay",
   pid: 9,
@@ -147,6 +148,7 @@ const ownerOf = (state: OwnerRecord["state"]): OwnerRecord => ({
   state,
   lastActivityAt: NOW,
   autoAccept: false,
+  created,
 });
 
 describe("tentacle ps", () => {
@@ -325,6 +327,43 @@ describe("tentacle ps: detached runs (docs/feat/detached-relay-lifecycle.md L28)
     expect(text).toContain("  removal   when the run ends");
   });
 
+  test("R4 a record of an EARLIER workload of a reused name: no session, no removal shown (as `attach` does)", async () => {
+    // Mutation: show `owner.sessionId` regardless → `ps` promises a session and a
+    // delete that `attach`/the quit will not do (review R4).
+    const text = await rows((dir) => {
+      writeFileSync(join(dir, ".lock.1"), String(process.pid));
+      writeOwner(dir, {
+        ...ownerOf("running", new Date(NOW - 9 * H).toISOString()),
+        keep: false,
+        sessionId: "stale-session",
+      });
+    }, true);
+    expect(text).not.toContain("stale-session");
+    expect(text).not.toContain("  removal   when the run ends");
+  });
+
+  test("H21 TUIs on the run: `attached (2)`, `-v` their pids; with none, `tui lost` (docs/feat/detached-handover.md)", async () => {
+    // Mutation: read only the relay's lock → a TUI-run reads `relay lost` / nothing.
+    const tui: OwnerRecord = { ...ownerOf("attached"), kind: "tui" };
+    const two = await rows((dir) => {
+      writeOwner(dir, tui);
+      writePresence(dir, process.pid, procOf);
+      writePresence(dir, process.ppid, procOf);
+    }, true);
+    expect(two).toContain("attached (2)");
+    expect(two).toContain(
+      `  attached  pid ${Math.min(process.pid, process.ppid)}, pid ${Math.max(process.pid, process.ppid)}`,
+    );
+    const one = await rows((dir) => {
+      writeOwner(dir, tui);
+      writePresence(dir, process.pid, procOf);
+    });
+    expect(one).toContain("running · attached");
+    expect(one).not.toContain("attached (");
+    const lost = await rows((dir) => writeOwner(dir, tui));
+    expect(lost).toContain("running · tui lost");
+  });
+
   test("no run dir: no field, and no process is looked at", async () => {
     // Mutation: probe every entry → a `ps` subprocess per kept workload.
     const docker = new FakeEngine();
@@ -403,6 +442,55 @@ describe("tentacle rm", () => {
       expect(s.text()).toContain("left it alone; dropped its stale entry");
       expect(readKept(s.dir).entries).toEqual([]);
     }
+  });
+
+  test("R3 a KEPT workload re-created here outside this index: its own `created` wins — ZERO removes, the stale entry dropped", async () => {
+    // Mutation: tie on labels only → a stranger's workload (another laptop, same
+    // place and name) is deleted by this stale entry (review R3).
+    const mine = entry("a");
+    const stranger = { ...mine, created: new Date(NOW - 9 * H).toISOString() };
+    const docker = new FakeEngine();
+    docker.set("a", {
+      status: "exited",
+      labels: { ...DOCKER_KEPT, "tentacle.created": stranger.created },
+    });
+    const s = setup([mine], { [key]: docker });
+    expect(await rmCommand("a", { force: true }, s.deps())).toBe(1);
+    expect(docker.calls.filter((c) => c.startsWith("remove:"))).toEqual([]);
+    expect(s.text()).toContain("now names another tentacle workload");
+    expect(s.text()).toContain("left it alone; dropped its stale entry");
+    expect(readKept(s.dir).entries).toEqual([]);
+  });
+
+  test("R3 k8s: the pod's own `created` ANNOTATION is the tie (labels alone are not enough)", async () => {
+    const mine = entry("p", { engine: "kubernetes", namespace: "n" });
+    const k8s = new FakeEngine();
+    k8s.set("p", {
+      status: "running",
+      labels: K8S_KEPT,
+      annotations: { "tentacle.created": new Date(NOW - 9 * H).toISOString() },
+    });
+    const s = setup([mine], { "k8s:n": k8s });
+    expect(await rmCommand("p", { force: true }, s.deps())).toBe(1);
+    expect(k8s.calls).not.toContain("remove:p");
+    // Matching `created` (the same workload): the delete goes through.
+    k8s.set("p", {
+      status: "running",
+      labels: K8S_KEPT,
+      annotations: { "tentacle.created": mine.created },
+    });
+    recordKept(s.dir, mine);
+    expect(await rmCommand("p", { force: true }, s.deps())).toBe(0);
+    expect(k8s.calls.at(-1)).toBe("remove:p");
+  });
+
+  test("R3 a workload that declares no `created` at all: the labels alone decide, as before", async () => {
+    // An older build's workload has no annotation: not dating it is not evidence.
+    const docker = new FakeEngine();
+    docker.set("a", { status: "exited", labels: DOCKER_KEPT });
+    const s = setup([entry("a")], { [key]: docker });
+    expect(await rmCommand("a", { force: true }, s.deps())).toBe(0);
+    expect(docker.calls).toContain("remove:a");
   });
 
   test("k8s: the pod's labels are checked before the delete (deletePod has no guard)", async () => {

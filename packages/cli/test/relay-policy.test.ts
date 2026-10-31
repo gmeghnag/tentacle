@@ -72,6 +72,51 @@ describe("relay policy (docs/feat/detached-relay.md R1-R3)", () => {
     controller.abort();
   });
 
+  test("H22 frozen (a hand-over is prepared): auto-accept holds; `thaw` answers it once; hooks trust and a foreign turn stay held", async () => {
+    // Mutation: `freeze` a no-op → answered under the attaching TUI's prompt (D5).
+    const { policy, events, lines } = rig(true);
+    policy.bindOwnsTurn((turnId) => turnId === "mine");
+    policy.freeze();
+    const answers: unknown[] = [];
+    const controller = new AbortController();
+    const own = policy.requester(ask, { signal: controller.signal, turnId: "mine" });
+    void own.then((r) => answers.push(r));
+    void policy.requester(
+      { ...ask, kind: "hooks_trust" },
+      { signal: controller.signal, turnId: "mine" },
+    );
+    void policy.requester(ask, { signal: controller.signal, turnId: "theirs" });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(answers).toEqual([]);
+    expect(lines).toEqual([]);
+    expect(events.filter((e) => e.type === "ask_raised")).toHaveLength(3);
+    policy.thaw();
+    expect(await own).toEqual({ allowed: true, scope: "once" });
+    policy.thaw(); // once: a second thaw decides nothing again
+    await new Promise((r) => setTimeout(r, 5));
+    expect(answers).toHaveLength(1);
+    expect(lines).toHaveLength(1);
+    expect(events.filter((e) => e.type === "ask_gone")).toHaveLength(1);
+    // After the thaw, a new own ask is auto-accepted at once again.
+    expect(await policy.requester(ask, { turnId: "mine" })).toEqual({
+      allowed: true,
+      scope: "once",
+    });
+    controller.abort();
+  });
+
+  test("H22 a frozen ask withdrawn before the thaw is never answered", async () => {
+    const { policy, events } = rig(true);
+    policy.bindOwnsTurn(() => true);
+    policy.freeze();
+    const controller = new AbortController();
+    const answer = policy.requester(ask, { signal: controller.signal, turnId: "t" });
+    controller.abort();
+    expect(await answer).toBe(DISMISSED);
+    policy.thaw();
+    expect(events).toEqual([{ type: "ask_raised", tool: "shell" }, { type: "ask_gone" }]);
+  });
+
   test("R3 auto-accept never answers a foreign turn, or a turn before the session is bound", async () => {
     const { policy, events } = rig(true);
     const controller = new AbortController();

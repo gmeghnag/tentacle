@@ -329,6 +329,9 @@ export class RemoteClient {
   private readonly waiters = new Set<() => boolean>();
   /** Closes / deletes / detaches in flight (settled, never rejecting): what `drain` awaits. */
   private readonly ending = new Set<Promise<void>>();
+  /** Served model calls in flight (`modelIdle`). */
+  private modelCalls = 0;
+  private readonly modelIdleWaiters = new Set<() => void>();
   /** Which permission request is prompted / answered (pure; see its module). */
   private readonly router = new PermissionRouter();
   /** The on-screen prompt's abort handle, by `sessionId` + `requestId`. */
@@ -477,15 +480,23 @@ export class RemoteClient {
   /**
    * A controller the Ink App drives exactly like a local `Session`. `seedTitle`:
    * the chosen title of the record it resumes (sent with the open that
-   * recreates it; a daemon that has it keeps its own).
+   * recreates it; a daemon that has it keeps its own). `closeIfLast`: its
+   * `close()` is `session/close{ifLast}` (a session other clients share).
    */
   newSession(
     seedMessages?: readonly ChatMessage[],
     sessionId?: string,
     seedTitle?: SeedTitle,
-    opts: { readonly attach?: { readonly reopen?: boolean } } = {},
+    opts: { readonly attach?: { readonly reopen?: boolean }; readonly closeIfLast?: boolean } = {},
   ): RemoteSession {
-    return new RemoteSession(this, seedMessages, sessionId, seedTitle, opts.attach);
+    return new RemoteSession(
+      this,
+      seedMessages,
+      sessionId,
+      seedTitle,
+      opts.attach,
+      opts.closeIfLast === true,
+    );
   }
 
   /**
@@ -625,8 +636,8 @@ export class RemoteClient {
    * (peer closed: moot); never rejects. While the link is down it resolves at
    * once (the daemon reaps a detached idle session).
    */
-  closeSession(sessionId: string): Promise<void> {
-    return this.endSession(Method.Close, sessionId);
+  closeSession(sessionId: string, opts: { readonly ifLast?: boolean } = {}): Promise<void> {
+    return this.endSession(Method.Close, sessionId, opts.ifLast === true).then(() => undefined);
   }
 
   /**
@@ -636,7 +647,7 @@ export class RemoteClient {
    * clean). Same guarantees as `closeSession`; needs no `open`.
    */
   deleteSession(sessionId: string): Promise<void> {
-    return this.endSession(Method.SessionDelete, sessionId);
+    return this.endSession(Method.SessionDelete, sessionId).then(() => undefined);
   }
 
   /**
@@ -648,14 +659,15 @@ export class RemoteClient {
    * (an older daemon): nothing changed, the session stays followed.
    */
   detachSession(sessionId: string): Promise<void> {
-    return this.endSession(Method.Detach, sessionId);
+    return this.endSession(Method.Detach, sessionId).then(() => undefined);
   }
 
+  /** Resolves true only when the daemon answered `closed: true` (a close it ended). */
   private endSession(
     method: typeof Method.Close | typeof Method.SessionDelete | typeof Method.Detach,
     sessionId: string,
     ifLast = false,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const entry = this.sessions.get(sessionId);
     // Routed until the daemon answers: the turn it cancels ends in the stream
     // (`turn_end`, `session_closed`), and those frames precede the response.
@@ -676,23 +688,30 @@ export class RemoteClient {
     }
     if (!this.up && this.channelFactory) {
       forget();
-      return Promise.resolve();
+      return Promise.resolve(false);
     }
     const params = ifLast ? { sessionId, ifLast } : { sessionId };
-    const ending = this.call(this.peer, method, params).then(forget, (error: unknown) => {
-      if (
-        method === Method.Detach &&
-        error instanceof RpcError &&
-        error.code === JsonRpcErrorCode.MethodNotFound
-      ) {
-        // An older daemon: nothing changed — keep following the session.
-        if (entry && this.sessions.get(sessionId) === entry) {
-          entry.closing = false;
+    const ending = this.call(this.peer, method, params).then(
+      (result) => {
+        forget();
+        return (result as { closed?: unknown } | undefined)?.closed === true;
+      },
+      (error: unknown) => {
+        if (
+          method === Method.Detach &&
+          error instanceof RpcError &&
+          error.code === JsonRpcErrorCode.MethodNotFound
+        ) {
+          // An older daemon: nothing changed — keep following the session.
+          if (entry && this.sessions.get(sessionId) === entry) {
+            entry.closing = false;
+          }
+          throw error;
         }
-        throw error;
-      }
-      forget();
-    });
+        forget();
+        return false;
+      },
+    );
     const tracked = ending.then(
       () => {},
       () => {},
@@ -736,14 +755,21 @@ export class RemoteClient {
    * to is only detached, so a quit never ends it under them. AWAIT it before `close()`: a frame written just before closing is not
    * guaranteed to be delivered on every transport (the in-memory pair drops
    * it). Bounded by `timeoutMs` so a hung daemon never blocks the exit; never
-   * rejects.
+   * rejects. Resolves with how many of them the daemon did NOT confirm it
+   * closed (`closed: true`): a detach, a timeout, a dropped link and an older
+   * daemon all count — the side a quit deciding a delete must take.
    */
-  async closeSessions(timeoutMs: number = CLOSE_SESSIONS_TIMEOUT_MS): Promise<void> {
+  async closeSessions(timeoutMs: number = CLOSE_SESSIONS_TIMEOUT_MS): Promise<number> {
+    let confirmed = 0;
     const pending = [...this.sessions.values()]
       .filter((entry) => !entry.closing)
-      .map((entry) => this.endSession(Method.Close, entry.id, true));
+      .map((entry) =>
+        this.endSession(Method.Close, entry.id, true).then((closed) => {
+          if (closed) confirmed += 1;
+        }),
+      );
     if (pending.length === 0) {
-      return;
+      return 0;
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
@@ -753,6 +779,54 @@ export class RemoteClient {
       }),
     ]);
     clearTimeout(timer);
+    // Read now: a confirmation landing after the bound does not count.
+    return pending.length - confirmed;
+  }
+
+  /**
+   * Resolve once no `model/stream` / `model/streamChunked` (titles included)
+   * this client serves is in flight, or after `timeoutMs`; never rejects. A
+   * client leaving a session someone else goes on with drains first: its
+   * in-flight call would otherwise reject and fail THEIR turn
+   * (docs/feat/detached-handover.md, probes C and I).
+   */
+  async modelIdle(timeoutMs: number): Promise<void> {
+    if (this.modelCalls === 0) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        this.modelIdleWaiters.delete(done);
+        resolve();
+      };
+      this.modelIdleWaiters.add(done);
+      timer = setTimeout(done, timeoutMs);
+    });
+    clearTimeout(timer);
+  }
+
+  /** Count a served model call until it settles (`modelIdle`). */
+  private servingCall<T>(call: () => Promise<T>): Promise<T> {
+    this.modelCalls += 1;
+    const settled = (): void => {
+      // A macrotask later: the peer writes the call's response only after this
+      // handler's promise settles, and a `close()` before that write drops it.
+      setTimeout(() => {
+        this.modelCalls -= 1;
+        if (this.modelCalls === 0) {
+          for (const waiter of [...this.modelIdleWaiters]) waiter();
+        }
+      }, 0);
+    };
+    let running: Promise<T>;
+    try {
+      running = call();
+    } catch (error) {
+      settled();
+      throw error;
+    }
+    return running.finally(settled);
   }
 
   /**
@@ -951,13 +1025,15 @@ export class RemoteClient {
       },
       onRequest: async (method, params, context) => {
         if (method === Method.ModelStream) {
-          return this.onModelStream(params as ModelStreamParams);
+          return this.servingCall(() => this.onModelStream(params as ModelStreamParams));
         }
         if (method === Method.ModelStreamChunked) {
-          return this.onModelStreamChunked(
-            peer,
-            params as ModelStreamChunkedParams,
-            context as RequestContext,
+          return this.servingCall(() =>
+            this.onModelStreamChunked(
+              peer,
+              params as ModelStreamChunkedParams,
+              context as RequestContext,
+            ),
           );
         }
         if (method === Method.HooksTrust) {

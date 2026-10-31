@@ -33,6 +33,12 @@ export interface ResumeRequest {
   readonly uid?: string | undefined;
   /** `--continue`: the newest session, never the picker. */
   readonly latest?: boolean;
+  /**
+   * `uid` is a LIVE session (a detached run's, docs/feat/detached-handover.md):
+   * no record is no news — its history comes from the workload — so nothing
+   * says "starting fresh".
+   */
+  readonly live?: true;
 }
 
 /**
@@ -95,7 +101,8 @@ export async function openTuiSessions(
     );
     return { exit: 1 };
   }
-  for (const line of resolved.lines) {
+  const quiet = resume.live === true && resolved.record === null && !resolved.fatal;
+  for (const line of quiet ? [] : resolved.lines) {
     write(line);
   }
   if (resolved.cancelled) {

@@ -464,6 +464,10 @@ export type OpenResult = z.infer<typeof OpenResultSchema>;
 // to the session; else this connection just detaches (exactly `session/detach`)
 // and the session runs on for the others. Additive: an older daemon drops the
 // field and closes.
+// `closed` (result): true only when THIS request ended a live session; false on
+// an `ifLast` detach and on an unknown, archived or already-closed id. Absent
+// (an older daemon) reads as not closed: the side a caller deciding a delete
+// must take (docs/feat/detached-handover.md).
 
 export const CloseParamsSchema = z.object({
   sessionId: SessionIdSchema,
@@ -471,7 +475,7 @@ export const CloseParamsSchema = z.object({
 });
 export type CloseParams = z.infer<typeof CloseParamsSchema>;
 
-export const CloseResultSchema = z.object({});
+export const CloseResultSchema = z.object({ closed: z.boolean().optional() });
 export type CloseResult = z.infer<typeof CloseResultSchema>;
 
 // --- session/detach -----------------------------------------------------

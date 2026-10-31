@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { forgetKept, keptFileName, readKept, recordKept } from "../src/kept-index.ts";
+import { forgetKept, keptFileName, locationKey, readKept, recordKept } from "../src/kept-index.ts";
 import type { KeptEntry } from "../src/kept.ts";
 
 const fresh = (): string => join(mkdtempSync(join(tmpdir(), "kept-")), "kept");
@@ -39,6 +40,28 @@ describe("kept index", () => {
     expect(entries).toHaveLength(2);
     expect(entries.map((e) => e.entry.model).sort()).toEqual(["m", "m2"]);
     expect(keptFileName(entry("a"))).not.toBe(keptFileName(entry("a", { engine: "podman" })));
+  });
+
+  test("a file's name does not depend on how it is computed: existing entries and run dirs stay found", () => {
+    const key = "docker\0unix:///var/run/docker.sock\0\0\0\0a";
+    const hash = createHash("sha256").update(key).digest("hex").slice(0, 16);
+    expect(keptFileName(entry("a"))).toBe(`${hash}.json`);
+  });
+
+  test("locationKey: the place, whatever the name, the model or `created`", () => {
+    const here = locationKey(entry("a"));
+    expect(locationKey(entry("b", { model: "m2", created: "2026-10-30T10:00:00.000Z" }))).toBe(
+      here,
+    );
+    for (const over of [
+      { engine: "podman" as const },
+      { endpoint: "ssh://box" },
+      { context: "c" },
+      { server: "https://s" },
+      { namespace: "n" },
+    ]) {
+      expect(locationKey(entry("a", over))).not.toBe(here);
+    }
   });
 
   test("two writers at once never lose an entry (no shared read-modify-write)", async () => {

@@ -360,7 +360,7 @@ describe("session/close", () => {
     if (!jobs) throw new Error("no jobs");
 
     const listening = jobs.listenerCount; // the session's, plus the agent's own
-    expect(await a.client.request("session/close", { sessionId: "X" })).toEqual({});
+    expect(await a.client.request("session/close", { sessionId: "X" })).toEqual({ closed: true });
     await tick();
     expect(b.updates.at(-1)?.update).toEqual({ type: "session_closed", reason: "closed" });
     expect(b.updates.at(-1)?.mandatory).toBe(true);
@@ -373,8 +373,10 @@ describe("session/close", () => {
     expect(d.host.get("X")).toBeUndefined();
 
     // Idempotent, needs no open, unknown ids are fine.
-    expect(await a.client.request("session/close", { sessionId: "X" })).toEqual({});
-    expect(await b.client.request("session/close", { sessionId: "never" })).toEqual({});
+    expect(await a.client.request("session/close", { sessionId: "X" })).toEqual({ closed: false });
+    expect(await b.client.request("session/close", { sessionId: "never" })).toEqual({
+      closed: false,
+    });
     expect(jobs.disposed).toBe(1);
 
     await expect(b.prompt("X", "t1")).rejects.toMatchObject({
@@ -663,6 +665,33 @@ describe("per-session model link (protocol 14)", () => {
     // The last one out closes it.
     await a.client.request("session/close", { sessionId: "X", ifLast: true });
     expect(d.host.get("X")).toBeUndefined();
+  });
+
+  test("H5 (detached-handover): `closed` is true only for the request that ended a live session", async () => {
+    // Mutation: `closeSession` always answers `closed: true` → b's detach and the unknown id lie.
+    const d = linkedDaemon(1);
+    const a = await d.connect({ servesModel: true });
+    const b = await d.connect({ servesModel: true });
+    await a.open({ sessionId: "X", create: true });
+    await b.open({ sessionId: "X" });
+    expect(await b.client.request("session/close", { sessionId: "X", ifLast: true })).toEqual({
+      closed: false,
+    });
+    expect(await a.client.request("session/close", { sessionId: "X", ifLast: true })).toEqual({
+      closed: true,
+    });
+    expect(await a.client.request("session/close", { sessionId: "X" })).toEqual({
+      closed: false,
+    });
+    // Two quits in one tick: one closes, the other only detached.
+    await a.open({ sessionId: "Y", create: true });
+    await b.open({ sessionId: "Y" });
+    const both = await Promise.all([
+      a.client.request("session/close", { sessionId: "Y", ifLast: true }),
+      b.client.request("session/close", { sessionId: "Y", ifLast: true }),
+    ]);
+    expect(both.filter((r) => (r as { closed?: boolean }).closed === true)).toHaveLength(1);
+    expect(d.host.get("Y")).toBeUndefined();
   });
 
   test("T6: a plain close (no ifLast — /clear, /close) still ends the session for every client", async () => {

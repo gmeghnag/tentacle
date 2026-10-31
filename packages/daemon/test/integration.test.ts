@@ -659,7 +659,7 @@ describe("connection close", () => {
       new Connection(d2, host);
       const other = new RpcPeer(c2, {});
       await other.request("initialize", INIT);
-      expect(await other.request("session/close", { sessionId })).toEqual({});
+      expect(await other.request("session/close", { sessionId })).toEqual({ closed: true });
       expect(host.get(sessionId)).toBeUndefined();
 
       const until = Date.now() + 2000;

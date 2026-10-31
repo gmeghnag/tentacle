@@ -10,7 +10,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { KeptFile } from "../src/kept-index.ts";
 import { keptDir, keptFileName, readKept, recordKept } from "../src/kept-index.ts";
 import type { KeptEntry } from "../src/kept.ts";
 import { type ProcOf, acquireResidentLock, lockHolder } from "../src/pod-resident.ts";
@@ -18,6 +17,7 @@ import {
   type OwnerRecord,
   RELAY_LOG_CAP_BYTES,
   type RelaySpec,
+  attachers,
   createRelayLog,
   ensureRunDir,
   laptopProc,
@@ -27,12 +27,13 @@ import {
   parsePsStat,
   readOwner,
   readSpec,
-  relayBlocking,
   relayBlockingMessage,
   relayLogPath,
+  removePresence,
   runDirFor,
   statusOf,
   writeOwner,
+  writePresence,
   writeSpec,
 } from "../src/run-state.ts";
 
@@ -199,6 +200,75 @@ describe("L27 statusOf (DR-6)", () => {
   });
 });
 
+describe("H12 TUIs on a run (docs/feat/detached-handover.md)", () => {
+  const NOW = 10_000_000;
+  const tui = (over: Partial<OwnerRecord> = {}): OwnerRecord => ({
+    ...owner,
+    kind: "tui",
+    state: "attached",
+    tool: undefined,
+    cwd: "/work",
+    ...over,
+  });
+
+  test("a TUI record round-trips, `attached` and `cwd`/`control` included", () => {
+    const dir = fresh();
+    const { tool: _tool, ...rest } = tui();
+    const record = { ...rest, control: "/x/control.sock" };
+    writeOwner(dir, record);
+    expect(readOwner(dir)).toEqual({ kind: "owner", owner: record });
+  });
+
+  test("presence: listed while alive; a dead one and a reused pid (another start) are swept", () => {
+    // Mutation: skip the start-time test → the reused pid counts as attached.
+    const dir = fresh();
+    const live = running("100");
+    const [a, b] = [process.pid, process.ppid];
+    const mine = writePresence(dir, a, live);
+    expect(statSync(mine).mode & 0o777).toBe(0o600);
+    writePresence(dir, b, live);
+    expect(
+      attachers(dir, live)
+        .map((x) => x.pid)
+        .sort(),
+    ).toEqual([a, b].sort());
+    // Same pids, another start time: another process.
+    expect(attachers(dir, running("200"))).toEqual([]);
+    expect(readdirSync(join(dir, "attach"))).toEqual([]);
+    writePresence(dir, 2 ** 30, live); // no such process
+    expect(attachers(dir, live)).toEqual([]);
+    expect(readdirSync(join(dir, "attach"))).toEqual([]);
+    // The real start time reads back as its own.
+    writePresence(dir, a, laptopProc);
+    expect(attachers(dir, laptopProc).map((x) => x.pid)).toEqual([a]);
+    const gone = writePresence(dir, a, live);
+    removePresence(gone);
+    removePresence(gone); // idempotent
+    expect(attachers(dir, live)).toEqual([]);
+    expect(attachers(fresh(), live)).toEqual([]); // no attach dir at all
+  });
+
+  test("statusOf with presences: `attached`, `attached (N)`; with none, a TUI record says `tui lost` or `idle`", () => {
+    const owned = (o: OwnerRecord) => ({ kind: "owner" as const, owner: o });
+    expect(statusOf(owned(tui()), false, NOW, 1)).toBe("attached");
+    expect(statusOf(owned(tui()), false, NOW, 3)).toBe("attached (3)");
+    expect(statusOf(owned(tui()), false, NOW, 0)).toBe("tui lost");
+    expect(statusOf(owned(tui({ state: "idle" })), false, NOW, 0)).toBe("idle");
+    const left = "not removed: engine down — tentacle rm box";
+    expect(statusOf(owned(tui({ state: "idle", detail: left })), false, NOW, 0)).toBe(
+      `idle (${left})`,
+    );
+    // Presence wins over a stale state, whoever wrote last.
+    expect(statusOf(owned(tui({ state: "idle" })), false, NOW, 2)).toBe("attached (2)");
+    expect(statusOf(owned({ ...owner, state: "idle" }), false, NOW, 1)).toBe("attached");
+    // A live relay's row is its own (the hand-over has not happened).
+    const relaying = { ...owner, state: "running" as const, tool: undefined, lastActivityAt: NOW };
+    expect(statusOf(owned(relaying), true, NOW, 1)).toBe("detached · running 0m");
+    const esc = statusOf(owned(tui({ state: "idle", detail: "x\u001b[2J" })), false, NOW, 0);
+    expect(esc).not.toContain("\u001b");
+  });
+});
+
 describe("spec.json", () => {
   test("round trip, 0600; the relay's read is strict", () => {
     const dir = fresh();
@@ -296,24 +366,7 @@ describe("the relay's lock (R5)", () => {
   });
 });
 
-describe("relayBlocking (R13)", () => {
-  const file = (e: KeptEntry): KeptFile => ({ file: `/k/${e.name}.json`, entry: e });
-
-  test("a live holder of a same-named entry blocks; others do not", () => {
-    const entries = [file(entry("a")), file(entry("b"))];
-    const holderOf = (e: KeptEntry) => (e.name === "a" ? { pid: 7 } : null);
-    expect(relayBlocking("a", entries, holderOf, undefined)?.pid).toBe(7);
-    expect(relayBlocking("b", entries, holderOf, undefined)).toBeNull();
-    expect(relayBlocking("c", entries, holderOf, undefined)).toBeNull();
-  });
-
-  test("--engine filters the entries", () => {
-    const entries = [file(entry("a", { engine: "podman" }))];
-    const holderOf = () => ({ pid: 7 });
-    expect(relayBlocking("a", entries, holderOf, "docker")).toBeNull();
-    expect(relayBlocking("a", entries, holderOf, "podman")?.pid).toBe(7);
-  });
-
+describe("relayBlockingMessage (R13)", () => {
   test("the message says who, how to stop it, and how to get the session back", () => {
     const text = relayBlockingMessage("box", {
       pid: 7,

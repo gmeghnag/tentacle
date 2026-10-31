@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, JsonSessionStore } from "@tentacle/agent";
+import { Agent, JsonSessionStore, type SessionRecord } from "@tentacle/agent";
 import type { RemoteSession } from "@tentacle/client";
 import type {
   BackgroundJob,
@@ -10,11 +10,12 @@ import type {
   ExecutionEnvironment,
   JobController,
   ModelProvider,
+  PermissionRequester,
   StreamEvent,
   ToolContext,
 } from "@tentacle/core";
-import { PermissionBroker } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import { DISMISSED, PermissionBroker } from "@tentacle/core";
+import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
@@ -804,5 +805,389 @@ describe("createLocalRuntime (local over RPC)", () => {
     await ctl.flushed();
     expect(reads).toEqual([]);
     expect(errors).toEqual([]);
+  });
+});
+
+/**
+ * docs/feat/detached-handover.md: N laptop clients of ONE resident session.
+ * A real `SessionHost` + `Connection{servesModel}` + the proxy model through
+ * the newest link + an `ask` shell tool; each client is its own runtime with
+ * its own broker, as each laptop process is.
+ */
+describe("N clients of one session (detached-handover)", () => {
+  const UID = "55555555-5555-4555-8555-555555555555";
+  /** A model whose call `n` (0-based) holds until `open(n)`; `started` counts calls. */
+  class Held implements ModelProvider {
+    readonly id = "held";
+    started = 0;
+    private readonly gates = new Map<number, () => void>();
+    private readonly waits = new Map<number, Promise<void>>();
+    constructor(
+      private readonly script: readonly (readonly StreamEvent[])[],
+      held: readonly number[] = [],
+    ) {
+      for (const n of held) {
+        this.waits.set(
+          n,
+          new Promise<void>((r) => {
+            this.gates.set(n, r);
+          }),
+        );
+      }
+    }
+    open(n: number): void {
+      this.gates.get(n)?.();
+    }
+    async *stream(): AsyncIterable<StreamEvent> {
+      const n = this.started++;
+      await this.waits.get(n);
+      for (const event of this.script[n] ?? [{ type: "done" }]) {
+        yield event;
+      }
+    }
+  }
+  const SHELL: readonly StreamEvent[] = [
+    { type: "tool_call", toolCall: { id: "c1", name: "shell", arguments: '{"command":"x"}' } },
+    { type: "done" },
+  ];
+  const until = async (pred: () => boolean, ms = 2000): Promise<void> => {
+    const start = Date.now();
+    while (!pred()) {
+      if (Date.now() - start > ms) throw new Error("timed out");
+      await new Promise((r) => setTimeout(r, 2));
+    }
+  };
+  function shared() {
+    const execs: string[] = [];
+    const env: ExecutionEnvironment = {
+      id: "noop",
+      exec: (command) => {
+        execs.push(command);
+        return Promise.resolve({ stdout: "ok", stderr: "", exitCode: 0 });
+      },
+      readFile: () => Promise.resolve(""),
+      writeFile: () => Promise.resolve(),
+    };
+    const tools = new ToolRegistry().register(shellTool);
+    const host = new SessionHost({
+      defaultCwd: "/tmp/work",
+      createAgent: (_cwd, { modelLink }) => {
+        const permissions = new PermissionBroker();
+        const link = () => {
+          const l = modelLink();
+          if (!l) throw new Error("no model link");
+          return l;
+        };
+        const agent = new Agent({
+          model: new ProxyModelProvider(
+            (request) => link().requestModelStream(request),
+            (request, handlers) => link().requestModelStreamChunked(request, handlers),
+          ),
+          tools,
+          env,
+          requestPermission: (req, opts) => permissions.request(req, opts),
+        });
+        return { agent, permissions };
+      },
+    });
+    const connect = async (
+      opts: {
+        model?: ModelProvider;
+        broker?: PermissionBroker;
+        sessionId?: string;
+        shared?: boolean;
+        resume?: SessionRecord | null;
+        errors?: string[];
+        /** A frame that never reaches the daemon (a pod that stopped answering). */
+        lose?: (frame: string) => boolean;
+        /** Every write of the laptop copy fails (a full disk). */
+        fullDisk?: boolean;
+      } = {},
+    ) => {
+      const [daemonCh, clientCh] = createChannelPair();
+      const connection = new Connection(daemonCh, host, () => {}, { servesModel: true });
+      const frames: string[] = [];
+      const store = new JsonSessionStore(join(dir, `shared-${crypto.randomUUID()}`));
+      const saver = new SessionSaver(
+        opts.fullDisk
+          ? {
+              save: () => Promise.reject(new Error("ENOSPC")),
+              remove: () => Promise.resolve(),
+            }
+          : store,
+        () => {},
+      );
+      const runtime = await createLocalRuntime({
+        channel: {
+          ...clientCh,
+          send: (frame) => {
+            frames.push(frame);
+            if (!opts.lose?.(frame)) {
+              clientCh.send(frame);
+            }
+          },
+        },
+        disposeTransport: () => connection.close(),
+        permissions: opts.broker ?? new PermissionBroker(),
+        saver,
+        cwd: "/tmp/work",
+        model: "m",
+        resume: opts.resume ?? null,
+        modelProvider: opts.model ?? new ScriptedProvider([]),
+        ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
+        ...(opts.shared ? { shared: true as const } : {}),
+        ...(opts.errors ? { onPeerError: (e: Error) => opts.errors?.push(e.message) } : {}),
+      });
+      return { runtime, frames, saver, store, connection };
+    };
+    return { host, connect, execs };
+  }
+  /** A requester that holds every ask and logs it, and its withdrawal. */
+  const holding = (name: string, log: string[]) => {
+    const answers: ((r: { allowed: boolean }) => void)[] = [];
+    const requester: PermissionRequester = (req, options) => {
+      log.push(`${name}:asked:${req.tool}`);
+      return new Promise((resolve) => {
+        answers.push(resolve);
+        options?.signal?.addEventListener(
+          "abort",
+          () => {
+            log.push(`${name}:withdrawn`);
+            resolve(DISMISSED);
+          },
+          { once: true },
+        );
+      });
+    };
+    return {
+      broker: new PermissionBroker(requester),
+      answer: (allowed: boolean) => answers.at(-1)?.({ allowed }),
+    };
+  };
+  const methods = (frames: readonly string[]): string[] =>
+    frames.map((f) => (JSON.parse(f) as { method?: string }).method ?? "").filter((m) => m !== "");
+
+  test("H2 attachTo opens the live session with no create and no messages; the next createSession is it, a later one fresh", async () => {
+    // Mutation: `attachTo` opens with `create: true`.
+    const pod = shared();
+    const relay = await pod.connect({ sessionId: UID });
+    await drain(relay.runtime.createSession().send("one"));
+    const tui = await pod.connect({ shared: true });
+    expect(await tui.runtime.attachTo(UID, null)).toBe(true);
+    const open = tui.frames
+      .map((f) => JSON.parse(f) as { method?: string; params?: Record<string, unknown> })
+      .find((f) => f.method === "session/open");
+    expect(open?.params).toEqual({ sessionId: UID });
+    expect(pod.host.get(UID)?.attachedCount).toBe(2);
+    expect(tui.runtime.createSession().sessionId).toBe(UID);
+    expect(tui.runtime.createSession().sessionId).not.toBe(UID);
+    expect(pod.host.size).toBe(1);
+  });
+
+  test("H3 attachTo an unknown id: false, nothing created, the seeded path still works; a deleted one rejects", async () => {
+    // Mutation: `attachTo` swallows every error → the deleted id resolves false.
+    const pod = shared();
+    const record: SessionRecord = {
+      id: UID,
+      cwd: "/tmp/work",
+      model: "m",
+      createdAt: 1,
+      updatedAt: 1,
+      title: "kept",
+      messages: [{ role: "user", content: "from the laptop" }],
+    };
+    const tui = await pod.connect({
+      shared: true,
+      resume: record,
+      sessionId: UID,
+      model: new ScriptedProvider([[{ type: "done" }]]),
+    });
+    expect(await tui.runtime.attachTo(UID, record)).toBe(false);
+    expect(pod.host.size).toBe(0);
+    const seeded = tui.runtime.createSession();
+    expect(seeded.sessionId).toBe(UID);
+    await drain(seeded.send("again"));
+    const snap = pod.host.get(UID)?.snapshotPage().messages ?? [];
+    expect(snap[0]).toMatchObject({ role: "user", content: "from the laptop" });
+
+    pod.host.delete(UID);
+    const late = await pod.connect({ shared: true });
+    await expect(late.runtime.attachTo(UID, null)).rejects.toBeDefined();
+  });
+
+  test("H4 quit: a last read-back, then close{ifLast}; mid a foreign first turn the transcript reaches the saver", async () => {
+    // Mutations: drop the last read-back from `quit` (nothing saved); `quit = dispose`.
+    // The relay holds its first turn's ask (the S2 "first turn" case): the
+    // committed history is the prompt and the call, and no turn end saved it.
+    const pod = shared();
+    const log: string[] = [];
+    const held = holding("R", log);
+    const relay = await pod.connect({
+      sessionId: UID,
+      model: new Held([SHELL]),
+      broker: held.broker,
+    });
+    const turn = drain(relay.runtime.createSession().send("first turn"));
+    await until(() => log.includes("R:asked:shell"));
+    const tui = await pod.connect({ shared: true, broker: holding("T", log).broker });
+    expect(await tui.runtime.attachTo(UID, null)).toBe(true);
+    const { sessionsKept, saved: confirmed } = await tui.runtime.quit();
+    expect(sessionsKept).toBe(1); // the relay is still attached: only a detach
+    expect(confirmed).toBe(true);
+    const sent = methods(tui.frames);
+    const read = sent.indexOf("session/snapshot");
+    const close = sent.indexOf("session/close");
+    expect(read).toBeGreaterThan(-1);
+    expect(close).toBeGreaterThan(read);
+    expect(tui.frames.find((f) => f.includes('"session/close"'))).toContain('"ifLast":true');
+    expect(await tui.saver.drain()).toEqual([]);
+    const saved = (await tui.store.list()).records;
+    expect(saved.map((r) => r.id)).toEqual([UID]);
+    expect(saved[0]?.messages[0]).toMatchObject({ role: "user", content: "first turn" });
+    held.answer(false);
+    await turn;
+    expect(pod.host.get(UID)).toBeDefined();
+  });
+
+  describe("H35 a last save not confirmed: `saved` false, and the session is left in the pod, never closed", () => {
+    /** Alone on a live session with a transcript: a close would end its only copy. */
+    const alone = async (opts: Parameters<ReturnType<typeof shared>["connect"]>[0]) => {
+      const pod = shared();
+      const first = await pod.connect({
+        sessionId: UID,
+        model: new ScriptedProvider([[{ type: "text", delta: "hi" }, { type: "done" }]]),
+      });
+      await drain(first.runtime.createSession().send("first turn"));
+      await first.runtime.release();
+      const tui = await pod.connect({ shared: true, ...opts });
+      expect(await tui.runtime.attachTo(UID, null)).toBe(true);
+      return { pod, tui };
+    };
+
+    test("a read-back that fails", async () => {
+      // Mutation: `saved` always true → the delete goes ahead on a lost transcript.
+      const { pod, tui } = await alone({});
+      const session = pod.host.get(UID);
+      if (!session) throw new Error("no session");
+      session.snapshotPage = () => {
+        throw new Error("the pod's disk is gone");
+      };
+      expect(await tui.runtime.quit()).toEqual({ sessionsKept: 1, saved: false });
+      expect(methods(tui.frames)).not.toContain("session/close");
+      expect(methods(tui.frames)).toContain("session/detach");
+      expect(pod.host.get(UID)).toBeDefined();
+    });
+
+    test("a read-back that never answers (bounded)", async () => {
+      // Mutation: the bound resolves `saved` true.
+      let stopped = false;
+      const { pod, tui } = await alone({
+        lose: (f) => stopped && f.includes('"session/snapshot"'),
+      });
+      stopped = true;
+      expect(await tui.runtime.quit()).toEqual({ sessionsKept: 1, saved: false });
+      expect(methods(tui.frames)).not.toContain("session/close");
+      expect(pod.host.get(UID)).toBeDefined();
+    }, 8000);
+
+    test("a read-back that worked, but the laptop copy could not be written", async () => {
+      // Mutation: no saver drain in `quit` → the session is closed before the failure shows.
+      const { pod, tui } = await alone({ fullDisk: true });
+      expect(await tui.runtime.quit()).toEqual({ sessionsKept: 1, saved: false });
+      expect(methods(tui.frames)).not.toContain("session/close");
+      expect(pod.host.get(UID)).toBeDefined();
+    });
+
+    test("confirmed: closed, as ever", async () => {
+      const { pod, tui } = await alone({});
+      expect(await tui.runtime.quit()).toEqual({ sessionsKept: 0, saved: true });
+      expect(pod.host.get(UID)).toBeUndefined();
+    });
+  });
+
+  test("H7 shared: a controller's close() (/clear) with another client attached leaves the session live for it", async () => {
+    // Mutation: drop `closeIfLast` → the relay's session is closed under it.
+    const pod = shared();
+    const relay = await pod.connect({ sessionId: UID });
+    await drain(relay.runtime.createSession().send("one"));
+    const tui = await pod.connect({ shared: true });
+    await tui.runtime.attachTo(UID, null);
+    tui.runtime.createSession().close?.();
+    await until(() => pod.host.get(UID)?.attachedCount !== 2);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(pod.host.get(UID)?.attachedCount).toBe(1);
+  });
+
+  test("H8 the newest client quits during its model call: the other's turn ends clean", async () => {
+    // Mutation: drop `modelIdle` from `quit` → the call dies with B, A's turn errors.
+    const pod = shared();
+    const aModel = new Held([SHELL]);
+    const bModel = new Held([[{ type: "text", delta: "from b" }, { type: "done" }]], [0]);
+    const log: string[] = [];
+    const A = holding("A", log);
+    const a = await pod.connect({ sessionId: UID, model: aModel, broker: A.broker });
+    const session = a.runtime.createSession();
+    const events: string[] = [];
+    let failed: unknown = null;
+    const turn = (async () => {
+      for await (const e of session.send("go")) events.push(e.type);
+    })().catch((error: unknown) => {
+      failed = error;
+    });
+    await until(() => log.includes("A:asked:shell"));
+    const b = await pod.connect({ shared: true, model: bModel, broker: holding("B", log).broker });
+    await b.runtime.attachTo(UID, null);
+    // A's call ran before B joined; A allows the tool; the next call is B's (newest).
+    A.answer(true);
+    await until(() => bModel.started === 1);
+    const quitting = b.runtime.quit();
+    await new Promise((r) => setTimeout(r, 20));
+    bModel.open(0);
+    await quitting;
+    await turn;
+    expect(failed).toBeNull();
+    expect(events.at(-1)).toBe("turn_end");
+    expect(pod.host.get(UID)?.snapshotPage().messages.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "from b",
+    });
+  });
+
+  test("H9 three clients, one ask: asked on all, one answer, the others withdrawn, the tool once; two answers in a tick: one decision, no error", async () => {
+    // A pin of the load-bearing assumption (green on main). Mutation, daemon:
+    // `settle` skips `permission_resolved` → the losers are never withdrawn.
+    for (const race of [false, true]) {
+      const pod = shared();
+      const log: string[] = [];
+      const errors: string[] = [];
+      const A = holding("A", log);
+      const B = holding("B", log);
+      const D = holding("D", log);
+      const a = await pod.connect({
+        sessionId: UID,
+        broker: A.broker,
+        model: new Held([SHELL, [{ type: "done" }]]),
+        errors,
+      });
+      const turn = drain(a.runtime.createSession().send("go"));
+      await until(() => log.includes("A:asked:shell"));
+      const b = await pod.connect({ shared: true, broker: B.broker, errors });
+      await b.runtime.attachTo(UID, null);
+      const d = await pod.connect({ shared: true, broker: D.broker, errors });
+      await d.runtime.attachTo(UID, null);
+      await until(() => log.includes("B:asked:shell") && log.includes("D:asked:shell"));
+      if (race) {
+        D.answer(false);
+        B.answer(true);
+      } else {
+        B.answer(true);
+      }
+      await turn;
+      // The one that did not answer is always withdrawn; without a race, both losers are.
+      await until(() => log.includes("A:withdrawn") && (race || log.includes("D:withdrawn")));
+      // The first answer to reach the daemon decides: D's deny in the race.
+      expect(pod.execs).toHaveLength(race ? 0 : 1);
+      expect(errors).toEqual([]);
+    }
   });
 });

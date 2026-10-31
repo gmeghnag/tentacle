@@ -96,9 +96,14 @@ tentacle run --engine podman --image <ref> [<name>]                       # Podm
 creates the workload, then a background process on your machine runs the turn,
 serves the model and saves the session, and leaves after 60 s of idle. It waits
 at the first permission unless `--auto-accept` (pod tool asks only, allow once,
-logged in `<configDir>/kept/runs/<id>/relay.log`). `attach` is refused while that
-process lives: wait, or `kill <pid>`, then run the `tentacle attach … --resume <uid>`
-it printed, from the same folder.
+logged in `<configDir>/kept/runs/<id>/relay.log`). `tentacle attach <name>`, from
+a terminal in the same folder, takes the run over at any moment, mid-turn or at a
+held permission (which then prompts in your TUI; auto-accept ends there), and it
+opens the run's session after the process left too. More terminals can attach:
+they share the session, an ask shows on each and the first answer wins. Quitting
+ends the run once no other terminal is attached; with `--keep=false` that last
+quit removes the workload, a running turn included. A workload deleted outside
+tentacle is said as such, naming the session uid.
 
 With `--keep=false` (or `keep: false`) the workload is listed in `ps` while the
 run lives and removed when it goes idle or is stopped, a held permission keeping
@@ -161,7 +166,9 @@ ENGINE WHERE MOUNT MODEL AGE STATUS; one removed outside tentacle shows `gone`;
 an engine that does not answer within 3 s is a dim `not reachable (skipped)`
 line, never an error); `--engine` filters, `-q` prints names, `-v` details. A
 detached run shows its state: `detached · running 3m`, `detached · waiting:
-permission (shell)`, ` · auto` with `--auto-accept`, `running · relay lost` if its
+permission (shell)`, ` · auto` with `--auto-accept`, `attached (2)` with two
+terminals on it (`-v` lists their pids), `tui lost` when the last one died without
+quitting, `running · relay lost` if its
 process died; `-v` adds its pid, session and log.
 `tentacle attach <name>` needs no `--engine`: the engine and location are looked
 up (an explicit `--engine`/`-n`/`--context`/`-c` skips the lookup).

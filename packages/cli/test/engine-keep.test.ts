@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { EngineHost } from "../src/engine-host.ts";
-import { armExitNet } from "../src/engine-runtime.ts";
+import { armExitNet, armSharedExitNet } from "../src/engine-runtime.ts";
 import { attachCommand, resolveKeep } from "../src/engine-select.ts";
 import { ARGS, parseArgs } from "../src/flags.ts";
+import { attachers, laptopProc, writePresence } from "../src/run-state.ts";
 
 describe("L22 armExitNet (docs/feat/detached-relay-lifecycle.md)", () => {
   const armed = (before: readonly unknown[]) =>
@@ -29,6 +34,38 @@ describe("L22 armExitNet (docs/feat/detached-relay-lifecycle.md)", () => {
     armExitNet(hostOf(removed), "box")();
     expect(armed(before)).toEqual([]);
     expect(removed).toEqual([]);
+  });
+});
+
+describe("H16 armSharedExitNet (docs/feat/detached-handover.md)", () => {
+  const armed = (before: readonly unknown[]) =>
+    process.listeners("exit").filter((l) => !before.includes(l));
+  const hostOf = (removed: string[]) =>
+    ({ removeBestEffort: (name: string) => removed.push(name) }) as unknown as EngineHost;
+
+  test("fires only with no other TUI of the run alive (a real child as the other); disarm works", async () => {
+    // Mutation: fire unconditionally → one TUI's crash deletes the workload under another.
+    const dir = mkdtempSync(join(tmpdir(), "shared-net-"));
+    const child = spawn("sleep", ["30"], { stdio: "ignore" });
+    const pid = child.pid ?? 0;
+    // Its start time as `laptopProc` reads it, once `ps` sees it.
+    while (laptopProc(pid) === undefined) await new Promise((r) => setTimeout(r, 5));
+    writePresence(dir, pid, laptopProc);
+    const others = () => attachers(dir, laptopProc).some((a) => a.pid !== process.pid);
+    const before = process.listeners("exit");
+    const removed: string[] = [];
+    const disarm = armSharedExitNet(hostOf(removed), "box", others);
+    const [listener, ...rest] = armed(before);
+    expect(rest).toEqual([]);
+    listener?.(0);
+    expect(removed).toEqual([]); // the other TUI lives
+    const exited = new Promise((r) => child.once("exit", r));
+    child.kill("SIGKILL");
+    await exited;
+    listener?.(0);
+    expect(removed).toEqual(["box"]); // the last one: as a plain `run`
+    disarm();
+    expect(armed(before)).toEqual([]);
   });
 });
 

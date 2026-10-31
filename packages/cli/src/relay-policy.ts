@@ -15,6 +15,14 @@ export interface RelayPolicy {
   readonly requester: PermissionRequester;
   /** The session's own-vs-foreign test; until it is bound, no request is own. */
   bindOwnsTurn(owns: (turnId: string) => boolean): void;
+  /**
+   * A hand-over is prepared (docs/feat/detached-handover.md): every ask is
+   * held, auto-accept included, so the relay never decides under the
+   * attaching TUI's prompt.
+   */
+  freeze(): void;
+  /** The hand-over aborted: the asks the freeze held go back through the same decision, once. */
+  thaw(): void;
 }
 
 export function relayPolicy(options: {
@@ -23,31 +31,59 @@ export function relayPolicy(options: {
   readonly log: (line: string) => void;
 }): RelayPolicy {
   let owns: (turnId: string) => boolean = () => false;
+  let frozen = false;
+  /** The asks held by the freeze, each with its one re-decision. */
+  const held = new Set<() => void>();
   return {
     bindOwnsTurn(test) {
       owns = test;
+    },
+    freeze() {
+      frozen = true;
+    },
+    thaw() {
+      frozen = false;
+      for (const decide of [...held]) {
+        held.delete(decide);
+        decide();
+      }
     },
     requester(req, request) {
       const signal = request?.signal;
       if (signal?.aborted) {
         return Promise.resolve(DISMISSED);
       }
-      if (options.autoAccept && autoApproves(req, ownRequest(request?.turnId, owns))) {
+      const auto = (): boolean =>
+        options.autoAccept && autoApproves(req, ownRequest(request?.turnId, owns));
+      const accept = (): PermissionResponse => {
         options.log(
           `auto-accepted (once): ${untrustedText(`${req.tool}: ${req.title} ${req.detail ?? ""}`)}\n`,
         );
-        return Promise.resolve({ allowed: true, scope: "once" });
+        return { allowed: true, scope: "once" };
+      };
+      if (!frozen && auto()) {
+        return Promise.resolve(accept());
       }
       options.emit({ type: "ask_raised", tool: untrustedText(req.tool) });
       return new Promise<PermissionResponse>((resolve) => {
-        signal?.addEventListener(
-          "abort",
-          () => {
+        let done = false;
+        const finish = (response: PermissionResponse): void => {
+          if (!done) {
+            done = true;
+            held.delete(decide);
             options.emit({ type: "ask_gone" });
-            resolve(DISMISSED);
-          },
-          { once: true },
-        );
+            resolve(response);
+          }
+        };
+        const decide = (): void => {
+          if (auto()) {
+            finish(accept());
+          }
+        };
+        if (frozen) {
+          held.add(decide);
+        }
+        signal?.addEventListener("abort", () => finish(DISMISSED), { once: true });
       });
     },
   };

@@ -20,6 +20,7 @@ import {
   type KeptStatus,
   type Resolved,
   ambiguousMessage,
+  createdVerdict,
   isKeptWorkload,
   relayRemoveConfirmation,
   removeConfirmation,
@@ -32,6 +33,7 @@ import {
 } from "./kept.ts";
 import { type ProcOf, lockHolder, residentStop } from "./pod-resident.ts";
 import {
+  attachers,
   laptopProc,
   ownerKeeps,
   ownerPath,
@@ -98,7 +100,15 @@ async function verify(
     if (!isKeptWorkload(entry.engine, facts.labels)) {
       return { status: { kind: "foreign" }, host };
     }
-    return { status: { kind: "state", state: facts.status, labels: facts.labels }, host };
+    return {
+      status: {
+        kind: "state",
+        state: facts.status,
+        labels: facts.labels,
+        ...(facts.annotations ? { annotations: facts.annotations } : {}),
+      },
+      host,
+    };
   } catch (error) {
     return { status: { kind: "unreachable", reason: message(error) }, host };
   }
@@ -167,17 +177,27 @@ function relayRow(entry: KeptEntry, deps: KeptDeps, now: number): KeptRelay | un
   const dir = runDirIn(deps.dir, entry);
   const holder = lockHolder(dir, deps.procOf ?? laptopProc);
   const read = readOwner(dir);
-  const text = statusOf(read, holder !== null, now);
+  // The TUIs on it (docs/feat/detached-handover.md): their presence files.
+  const tuis = attachers(dir, deps.procOf ?? laptopProc)
+    .map((a) => a.pid)
+    .sort((a, b) => a - b);
+  const text = statusOf(read, holder !== null, now, tuis.length);
   if (text === null) {
     return undefined;
   }
   const owner = read.kind === "owner" ? read.owner : undefined;
+  // R4: the same tie `planAttach` makes. A record that does not carry THIS
+  // entry's `created` belongs to an earlier workload of a reused name: it gives
+  // that name no session and no deletion, so `ps` must not show them either.
+  const tied = owner !== undefined && owner.created === entry.created;
+  const known = tied ? owner : undefined;
   return {
     text,
+    ...(tuis.length > 0 ? { attached: tuis } : {}),
     ...(holder ? { pid: holder.pid } : {}),
-    ...(owner ? { sessionId: owner.sessionId } : {}),
+    ...(known ? { sessionId: known.sessionId } : {}),
     log: relayLogPath(dir),
-    keep: owner ? ownerKeeps(owner) : true,
+    keep: known ? ownerKeeps(known) : true,
   };
 }
 
@@ -192,6 +212,8 @@ export type KeptRemoval =
   | { readonly kind: "removed"; readonly forgetError?: string }
   | { readonly kind: "gone"; readonly forgetError?: string }
   | { readonly kind: "foreign"; readonly forgetError?: string }
+  /** Kept, but its own `created` is another workload's: a reuse OUTSIDE this index. */
+  | { readonly kind: "other"; readonly forgetError?: string }
   | { readonly kind: "unreachable"; readonly reason: string }
   | { readonly kind: "failed"; readonly reason: string };
 
@@ -200,7 +222,7 @@ export type KeptRemoval =
  * `forgetError` is a fact about the INDEX, never about this (`foreign` was not
  * removed, and saying so would report a delete that never happened).
  */
-export function removalFate(kind: "removed" | "gone" | "foreign"): string {
+export function removalFate(kind: "removed" | "gone" | "foreign" | "other"): string {
   switch (kind) {
     case "removed":
       return "removed";
@@ -208,6 +230,8 @@ export function removalFate(kind: "removed" | "gone" | "foreign"): string {
       return "already gone";
     case "foreign":
       return "left alone (not tentacle's)";
+    case "other":
+      return "left alone (another workload now owns that name)";
   }
 }
 
@@ -241,6 +265,14 @@ export async function removeVerifiedKept(
   }
   if (status.kind === "gone" || status.kind === "foreign") {
     return { kind: status.kind, ...forget(file) };
+  }
+  // R3: the labels say tentacle AND kept — but WHICH workload? Its own `created`
+  // is the answer: a kept workload re-created at this place outside this index
+  // (`run --keep --name box` on another laptop or config dir) carries the same
+  // labels, and its entry lives elsewhere. Deleting it would be a stranger's
+  // workload; the stale entry here is dropped instead (nothing is deleted).
+  if (createdVerdict(entry, status) === "other") {
+    return { kind: "other", ...forget(file) };
   }
   try {
     await host.remove(entry.name);
@@ -383,6 +415,17 @@ export async function rmCommand(
       entryLeft(removal.forgetError);
       dropRunDir(runDir, deps.write);
       return 0;
+    case "other":
+      // R3: the name now holds a KEPT workload that is not this entry's (its own
+      // `created` is another's). Nothing was deleted; the stale entry is dropped.
+      deps.write(
+        `[error] ${label} now names another tentacle workload (its creation time is not this entry's) — left it alone${
+          removal.forgetError === undefined ? "; dropped its stale entry" : ""
+        }\n`,
+      );
+      entryLeft(removal.forgetError);
+      dropRunDir(runDir, deps.write);
+      return 1;
     case "removed":
       deps.write(`${removedLine(entry, deps.home)}\n`);
       entryLeft(removal.forgetError);

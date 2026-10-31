@@ -318,3 +318,52 @@ describe("wantsAwake (DR-9, L24)", () => {
     expect(wantsAwake(run([{ type: "stop" }], running))).toBe(false);
   });
 });
+
+describe("H23 the hand-over (docs/feat/detached-handover.md)", () => {
+  const free: ResidentUse = { jobs: 0, running: false, others: 0 };
+  const prepared: RelayEvent = { type: "handover_prepared" };
+
+  test("exitPlan: handed over leaves, before keep=false or a stop removes anything", () => {
+    // Mutation: drop the `done` row → the relay deletes the workload under the TUI (the repro).
+    const done = run([prepared, { type: "handed_over" }], over);
+    expect(exitPlan(done, false, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(run([{ type: "stop" }], done), false, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(done, true, free)).toEqual({ kind: "leave" });
+  });
+
+  test("exitPlan: prepared holds a due exit; a stop, or a stopped link, still exits", () => {
+    // Mutation: drop the `prepared` row → a `prepare` landing during the use read meets a removal.
+    const ready = run([prepared], over);
+    expect(exitPlan(ready, false, free)).toEqual({ kind: "hold" });
+    expect(exitPlan(ready, true, free)).toEqual({ kind: "hold" });
+    expect(exitPlan(run([{ type: "stop" }], ready), false, free)).toEqual({ kind: "remove" });
+    const lost = run([{ type: "link", status: { state: "stopped", reason: "gone" } }], ready);
+    expect(exitPlan(lost, false, free)).toEqual({ kind: "leave" });
+    // Aborted: back to the plain rows.
+    expect(exitPlan(run([{ type: "handover_aborted" }], ready), false, free)).toEqual({
+      kind: "remove",
+    });
+  });
+
+  test("prepared clears the idle deadline; aborted lets the grace start again", () => {
+    const idle = run([{ type: "tick", now: 1000 }], over);
+    expect(idle.exitAt).toBe(1000 + RELAY_IDLE_GRACE_MS);
+    const ready = run([prepared, { type: "tick", now: 2000 }], idle);
+    expect(ready.exitAt).toBeUndefined();
+    expect(relayExits(ready, Number.MAX_SAFE_INTEGER)).toBe(false);
+    const back = run([{ type: "handover_aborted" }, { type: "tick", now: 3000 }], ready);
+    expect(back.exitAt).toBe(3000 + RELAY_IDLE_GRACE_MS);
+    // A stop while prepared still runs its bound.
+    const stopping = run([{ type: "stop" }, { type: "tick", now: 4000 }], run([prepared]));
+    expect(relayExits(stopping, 4000)).toBe(true);
+  });
+
+  test("handed over: only the drain ends it; keep-awake is off", () => {
+    const running = run([{ type: "turn_started" }]);
+    expect(wantsAwake(running)).toBe(true);
+    const done = run([prepared, { type: "handed_over" }], running);
+    expect(wantsAwake(done)).toBe(false);
+    expect(relayExits(run([{ type: "tick", now: 1 }], done), Number.MAX_SAFE_INTEGER)).toBe(false);
+    expect(relayExits(run([{ type: "drained" }], done), 1)).toBe(true);
+  });
+});

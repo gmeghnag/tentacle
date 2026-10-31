@@ -12,11 +12,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, JsonSessionStore, projectKey } from "@tentacle/agent";
 import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
-import { PermissionBroker } from "@tentacle/core";
+import { DISMISSED, PermissionBroker } from "@tentacle/core";
 import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
+import { planAttach } from "../src/attach-plan.ts";
+import { joinRun } from "../src/attach-run.ts";
 import type { TentacleConfig } from "../src/config.ts";
+import { dialControl } from "../src/control-socket.ts";
 import type { EngineHost } from "../src/engine-host.ts";
 import type { attachEngineRuntime } from "../src/engine-runtime.ts";
 import { keptDir, keptFileName, readKept, recordKept } from "../src/kept-index.ts";
@@ -37,6 +40,8 @@ import {
   runDirFor,
   writeOwner,
 } from "../src/run-state.ts";
+import { SessionSaver } from "../src/session-saver.ts";
+import { openTuiSessions } from "../src/tui-sessions.ts";
 
 const UID = "33333333-3333-4333-8333-333333333333";
 const entry: KeptEntry = {
@@ -147,6 +152,7 @@ function resident(model: ModelProvider, options: { fail?: string; secondBroker?:
       modelProvider: model,
       ...(deps.interactive !== undefined ? { interactive: deps.interactive } : {}),
       ...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
+      ...(deps.shared ? { shared: true as const } : {}),
     });
     return {
       ...runtime,
@@ -959,6 +965,436 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
     await waitFor(() => owner(off.dir)?.state === "idle", "idle");
     await afterGrace(done);
     expect(spawned).toBe(1);
+  });
+});
+
+describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase B)", () => {
+  /** A model whose call `n` holds until `open(n)`; `started` counts the calls. */
+  class Gated implements ModelProvider {
+    readonly id = "gated";
+    started = 0;
+    private readonly gates = new Map<number, () => void>();
+    private readonly waits = new Map<number, Promise<void>>();
+    constructor(
+      private readonly script: readonly (readonly StreamEvent[])[],
+      held: readonly number[] = [],
+    ) {
+      for (const n of held) {
+        this.waits.set(
+          n,
+          new Promise<void>((r) => {
+            this.gates.set(n, r);
+          }),
+        );
+      }
+    }
+    open(n: number): void {
+      this.gates.get(n)?.();
+    }
+    async *stream(): AsyncIterable<StreamEvent> {
+      const n = this.started++;
+      await this.waits.get(n);
+      for (const event of this.script[n] ?? [{ type: "done" }]) {
+        yield event;
+      }
+    }
+  }
+  const END: StreamEvent = { type: "done" };
+  const DONE: readonly StreamEvent[] = [{ type: "text", delta: "done" }, END];
+  const short = () => join(mkdtempSync(join(tmpdir(), "ctl-")), "c.sock");
+  /** A TUI: another laptop client of the same resident, its own broker and store. */
+  async function tuiOf(
+    pod: ReturnType<typeof resident>,
+    model: ModelProvider,
+    broker: PermissionBroker = new PermissionBroker(),
+  ) {
+    const [daemonCh, clientCh] = createChannelPair();
+    const connection = new Connection(daemonCh, pod.host, () => {}, { servesModel: true });
+    const store = new JsonSessionStore(mkdtempSync(join(tmpdir(), "tui-store-")));
+    const saver = new SessionSaver(store, () => {});
+    const runtime = await createLocalRuntime({
+      channel: clientCh,
+      disposeTransport: () => connection.close(),
+      permissions: broker,
+      saver,
+      cwd: "/work",
+      model: "m",
+      resume: null,
+      modelProvider: model,
+      sessionId: UID,
+      shared: true,
+    });
+    return { runtime, store, saver };
+  }
+  /** Dial the relay's socket once it listens, and prepare. */
+  async function prepare(path: string) {
+    let conn: Awaited<ReturnType<typeof dialControl>> = null;
+    await waitFor(() => existsSync(path), "the control socket");
+    conn = await dialControl(path);
+    if (!conn) throw new Error("no control socket");
+    const reply = await conn.send({ op: "prepare", sessionId: UID });
+    return { conn, reply };
+  }
+  const holdingBroker = (log: string[]) => {
+    const answers: ((r: { allowed: boolean }) => void)[] = [];
+    const broker = new PermissionBroker((req, options) => {
+      log.push(`asked:${req.tool}`);
+      return new Promise((resolve) => {
+        answers.push(resolve);
+        options?.signal?.addEventListener("abort", () => resolve(DISMISSED), { once: true });
+      });
+    });
+    return { broker, answer: (allowed: boolean) => answers.at(-1)?.({ allowed }) };
+  };
+
+  test("H25 mid model stream: the call finishes on the relay, the next on the TUI; the relay leaves with a detach, never a close", async () => {
+    // Mutation: skip the drain → the relay leaves mid-call and the turn errors (probe C).
+    const relayModel = new Gated([SHELL_CALL], [0]);
+    const pod = resident(relayModel);
+    const path = short();
+    const r = rig({}, { controlPath: () => path });
+    const exit = r.start(pod.attach);
+    await waitFor(() => relayModel.started === 1, "the relay's model call");
+    const { conn, reply } = await prepare(path);
+    expect(reply).toMatchObject({ ok: true, autoAccept: false });
+    const tuiModel = new Scripted([[{ type: "text", delta: "from the tui" }, { type: "done" }]]);
+    const tui = await tuiOf(pod, tuiModel);
+    expect(await tui.runtime.attachTo(UID, null)).toBe(true);
+    expect(await conn.send({ op: "commit" })).toEqual({ ok: true });
+    // The relay drains: it stays while its call runs (without the drain it
+    // would leave now, and that call die with it).
+    let left = false;
+    void exit.finally(() => {
+      left = true;
+    });
+    await tick(60);
+    expect(left).toBe(false);
+    relayModel.open(0);
+    expect(await exit).toBe(0);
+    await waitFor(() => pod.host.get(UID)?.running === false, "the turn's end");
+    expect(relayModel.started).toBe(1);
+    expect(tuiModel.calls).toBe(1);
+    expect(pod.execs).toEqual(["x"]); // the TUI's default broker allowed it, once
+    const last = pod.host.get(UID)?.snapshotPage().messages.at(-1);
+    expect(last).toMatchObject({ role: "assistant", content: "from the tui" });
+    expect(pod.frames.some((f) => f.includes('"session/detach"'))).toBe(true);
+    expect(pod.frames.some((f) => f.includes('"session/close"'))).toBe(false);
+    expect(readFileSync(relayLogPath(r.dir), "utf8")).toContain("handed over");
+    conn.close();
+  });
+
+  test("H34 a held ask under an auto-accept relay: nothing answers it between `prepare` and the TUI's answer; the tool runs once", async () => {
+    // Mutation: freeze at `commit` instead of `prepare` (D5) → the relay auto-accepts under the TUI's prompt.
+    const relayModel = new Gated([SHELL_CALL, DONE], [0]);
+    const pod = resident(relayModel);
+    const path = short();
+    const r = rig({ autoAccept: true }, { controlPath: () => path });
+    const exit = r.start(pod.attach);
+    await waitFor(() => relayModel.started === 1, "the relay's model call");
+    const { conn } = await prepare(path);
+    const log: string[] = [];
+    const tuiBroker = holdingBroker(log);
+    const tui = await tuiOf(pod, new Scripted([DONE]), tuiBroker.broker);
+    await tui.runtime.attachTo(UID, null);
+    relayModel.open(0); // the ask is raised now, mid hand-over
+    await waitFor(() => log.includes("asked:shell"), "the TUI's prompt");
+    await tick(20);
+    expect(pod.execs).toEqual([]);
+    expect(await conn.send({ op: "commit" })).toEqual({ ok: true });
+    tuiBroker.answer(true);
+    await waitFor(() => pod.execs.length === 1, "the tool");
+    await exit;
+    await waitFor(() => pod.host.get(UID)?.running === false, "the turn's end");
+    expect(pod.execs).toEqual(["x"]);
+    conn.close();
+  });
+
+  test("H28 aborted (socket closed before `commit`, or the lease ran out): auto-accept resumes, the turn unharmed, the relay saves and stays", async () => {
+    // Mutation: no `thaw` → the frozen ask is never answered.
+    for (const how of ["close", "lease"] as const) {
+      const relayModel = new Gated([SHELL_CALL, [{ type: "text", delta: "ok" }, END]], [0]);
+      const pod = resident(relayModel);
+      const path = short();
+      const r = rig(
+        { autoAccept: true },
+        { controlPath: () => path, ...(how === "lease" ? { leaseMs: 40 } : {}) },
+      );
+      const exit = r.start(pod.attach);
+      await waitFor(() => relayModel.started === 1, "the relay's model call");
+      const { conn } = await prepare(path);
+      relayModel.open(0);
+      await waitFor(() => owner(r.dir)?.state === "waiting-permission", "the frozen ask");
+      expect(pod.execs).toEqual([]);
+      if (how === "close") conn.close();
+      await waitFor(() => pod.execs.length === 1, "the thawed auto-accept");
+      await waitFor(() => owner(r.dir)?.state === "idle", "the turn's end, recorded");
+      let last: unknown;
+      for (let i = 0; i < 200 && last === undefined; i++) {
+        last = (await r.store.list()).records[0]?.messages.at(-1);
+        if (last === undefined) await tick(5);
+      }
+      expect(last).toMatchObject({ role: "assistant", content: "ok" });
+      expect(pod.frames.some((f) => f.includes('"session/detach"'))).toBe(false); // no release
+      expect(await afterGrace(exit)).toBe(0);
+      conn.close();
+    }
+  });
+
+  test("H29 saves: the relay's last precedes the ack, none after it", async () => {
+    // Mutation: drop `stopSaving` → the relay writes a record after it handed over.
+    const relayModel = new Gated([SHELL_CALL], [0]);
+    const pod = resident(relayModel);
+    const path = short();
+    const r = rig({}, { controlPath: () => path });
+    const exit = r.start(pod.attach);
+    await waitFor(() => relayModel.started === 1, "the relay's model call");
+    const { conn } = await prepare(path);
+    const tui = await tuiOf(pod, new Scripted([[{ type: "text", delta: "after the ack" }, END]]));
+    await tui.runtime.attachTo(UID, null);
+    await conn.send({ op: "commit" });
+    const atAck = (await r.store.list()).records.map((x) => JSON.stringify(x.messages));
+    relayModel.open(0);
+    await exit;
+    await waitFor(() => pod.host.get(UID)?.running === false, "the turn's end");
+    await tick(30);
+    expect((await r.store.list()).records.map((x) => JSON.stringify(x.messages))).toEqual(atAck);
+    conn.close();
+  });
+
+  test("H30 after `commit`: owner.json byte-identical through the exit; a stop neither cancels the turn nor writes", async () => {
+    // Mutations: `record` not gated; the stop aborts `send` (cancels the TUI's turn).
+    const relayModel = new Gated([SHELL_CALL], [0]);
+    const pod = resident(relayModel);
+    const path = short();
+    const r = rig({}, { controlPath: () => path });
+    const exit = r.start(pod.attach);
+    await waitFor(() => relayModel.started === 1, "the relay's model call");
+    const { conn } = await prepare(path);
+    const tuiModel = new Gated([[{ type: "text", delta: "tui" }, END]], [0]);
+    const tui = await tuiOf(pod, tuiModel);
+    await tui.runtime.attachTo(UID, null);
+    await conn.send({ op: "commit" });
+    const bytes = readFileSync(ownerPath(r.dir), "utf8");
+    r.stopRef.stop?.();
+    relayModel.open(0);
+    await exit;
+    expect(readFileSync(ownerPath(r.dir), "utf8")).toBe(bytes);
+    // The TUI's turn goes on: its call is served, the turn ends clean.
+    await waitFor(() => tuiModel.started === 1, "the TUI's model call");
+    tuiModel.open(0);
+    await waitFor(() => pod.host.get(UID)?.running === false, "the turn's end");
+    expect(pod.host.get(UID)?.snapshotPage().messages.at(-1)).toMatchObject({ content: "tui" });
+    conn.close();
+  });
+
+  test("H26 keep=false, handed over at idle: no remove, the net disarmed, the run dir and the entry stay", async () => {
+    // Mutation: drop `exitPlan`'s `done` row (the repro's line).
+    const pod = resident(new Scripted([DONE]));
+    const path = short();
+    const r = removing({ controlPath: () => path });
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    const { conn } = await prepare(path);
+    const tui = await tuiOf(pod, new Scripted([]));
+    await tui.runtime.attachTo(UID, null);
+    expect(await conn.send({ op: "commit" })).toEqual({ ok: true });
+    expect(await exit).toBe(0);
+    expect(r.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
+    expect(r.net.armed).toBe(1);
+    expect(r.net.disarmed).toBeGreaterThanOrEqual(1);
+    expect(existsSync(r.dir)).toBe(true);
+    expect(r.entries()).toHaveLength(1);
+    conn.close();
+  });
+
+  test("H26 a `prepare` landing during the use read: held, never a removal", async () => {
+    // Mutation: drop `exitPlan`'s `prepared` row → removed under the attacher.
+    const pod = resident(new Scripted([DONE]));
+    const path = short();
+    let conn: Awaited<ReturnType<typeof dialControl>> = null;
+    const r = removing({ controlPath: () => path });
+    const exit = r.start(
+      reading(pod, async () => {
+        if (!conn) {
+          conn = (await prepare(path)).conn;
+        }
+        return { jobs: 0, running: false, others: 0 };
+      }),
+    );
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    clock.t += 120_000;
+    await waitFor(() => conn !== null, "the prepare in the read");
+    await tick(20);
+    expect(r.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
+    const tui = await tuiOf(pod, new Scripted([]));
+    await tui.runtime.attachTo(UID, null);
+    await (conn as unknown as { send: (x: unknown) => Promise<unknown> }).send({ op: "commit" });
+    await exit;
+    expect(r.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
+  });
+
+  test("H27 the relay's net: disarmed at `prepare`, re-armed on abort, never armed after `commit`", async () => {
+    // Mutation: disarm at `commit` instead → a crash between prepare and commit deletes under the TUI.
+    const pod = resident(new Scripted([DONE]));
+    const path = short();
+    const r = removing({ controlPath: () => path });
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    const first = await prepare(path);
+    expect(r.net).toMatchObject({ armed: 1, disarmed: 1 });
+    first.conn.close();
+    await waitFor(() => r.net.armed === 2, "the re-arm on abort");
+    const second = await prepare(path);
+    expect(r.net).toMatchObject({ armed: 2, disarmed: 2 });
+    const tui = await tuiOf(pod, new Scripted([]));
+    await tui.runtime.attachTo(UID, null);
+    await second.conn.send({ op: "commit" });
+    await exit;
+    expect(r.net.armed).toBe(2);
+    second.conn.close();
+  });
+
+  test("H38 a link that stops while prepared: the relay leaves, and the closing socket never re-arms the net", async () => {
+    // Mutation: `leave` keeps `preparer` → a net armed with the lock released (armed 2).
+    const pod = resident(new Scripted([DONE]));
+    const path = short();
+    const r = removing({ controlPath: () => path });
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    const { conn } = await prepare(path);
+    expect(r.net).toMatchObject({ armed: 1, disarmed: 1 });
+    for (const status of pod.statuses) {
+      status({ state: "stopped", reason: "the pod went away" });
+    }
+    await exit;
+    await tick(50);
+    expect(r.net).toMatchObject({ armed: 1, disarmed: 1 });
+    conn.close();
+  });
+
+  test("H39 `planAttach` + `joinRun` over the relay's REAL socket, keep=false mid model call: A takes over, B joins during the drain, the relay removes nothing, the LAST quit does", async () => {
+    // Mutation: `joinRun` without the drain probe → B exits "still closing".
+    const model = new Gated([DONE], [0]);
+    const pod = resident(model);
+    const path = short();
+    const r = removing({ controlPath: () => path });
+    const exit = r.start(pod.attach);
+    await waitFor(() => model.started === 1, "the relay's model call");
+    await waitFor(() => existsSync(path), "the control socket");
+    const nets = { armed: 0, disarmed: 0 };
+    const join_ = async (pid: number) => {
+      const read = readOwner(r.dir);
+      const plan = planAttach({
+        owner: read,
+        relayAlive: lockHolder(r.dir, procOf) !== null,
+        entryCreated: entry.created,
+        cwd: "/work",
+        tty: true,
+      });
+      if (plan.kind !== "run" || read.kind !== "owner") throw new Error(plan.kind);
+      expect(plan).toMatchObject({ sessionId: UID, handover: true, keep: false });
+      const joined = await joinRun({
+        name: "box",
+        noun: "container",
+        entry,
+        keptFile: join(keptDir(r.configDir), keptFileName(entry)),
+        dir: r.dir,
+        plan,
+        owner: read.owner,
+        cwd: "/work",
+        write: () => {},
+        procOf,
+        pid,
+        closingWaitMs: 20,
+        openSessions: () =>
+          openTuiSessions(
+            { root: join(r.configDir, "sessions"), cwd: "/work" },
+            { wanted: true, uid: UID, live: true },
+            () => {},
+          ),
+        host: () => r.host,
+        attach: (_host, sessions, permissions) =>
+          pod.attach(
+            { cwd: "/work", model: "m" } as unknown as TentacleConfig,
+            {
+              host: r.host,
+              name: "box",
+              permissions,
+              saver: sessions.saver,
+              resume: sessions.resume,
+              sessionId: UID,
+              shared: true,
+            } as Parameters<typeof attachEngineRuntime>[1],
+          ),
+        armNet: () => {
+          nets.armed += 1;
+          return () => {
+            nets.disarmed += 1;
+          };
+        },
+      });
+      if (joined.kind !== "joined") throw new Error(`not joined: ${JSON.stringify(joined)}`);
+      return joined;
+    };
+    const a = await join_(process.pid);
+    expect(owner(r.dir)).toMatchObject({ kind: "tui", state: "attached" });
+    expect(lockHolder(r.dir, procOf)).not.toBeNull(); // the relay drains its call
+    const b = await join_(process.ppid);
+    model.open(0);
+    expect(await exit).toBe(0);
+    expect(r.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
+    await a.finish(true);
+    expect(r.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
+    expect(existsSync(r.dir)).toBe(true);
+    await b.finish(true);
+    expect(r.calls.filter((c) => c.startsWith("remove"))).toEqual(["remove:box"]);
+    expect(nets).toEqual({ armed: 2, disarmed: 2 });
+    expect(existsSync(r.dir)).toBe(false);
+    expect(r.entries()).toEqual([]);
+  });
+
+  test("H31 a `prepare` once the exit plan is final: `leaving`, and the removal completes", async () => {
+    // Mutation: set `leaving` after `release` → a prepare during the release is accepted.
+    const pod = resident(new Scripted([DONE]));
+    const path = short();
+    const replies: unknown[] = [];
+    const r = removing({ controlPath: () => path });
+    const exit = r.start(async (config, deps) => {
+      const runtime = await pod.attach(config, deps);
+      return {
+        ...runtime,
+        release: async () => {
+          replies.push((await prepare(path)).reply);
+          return runtime.release();
+        },
+      };
+    });
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(replies).toEqual([{ ok: false, reason: "leaving" }]);
+    expect(r.calls).toContain("remove:box");
+  });
+
+  test("a second `prepare` while one is held: `busy`; another session: `session`", async () => {
+    const relayModel = new Gated([SHELL_CALL], [0]);
+    const pod = resident(relayModel);
+    const path = short();
+    const r = rig({}, { controlPath: () => path });
+    const exit = r.start(pod.attach);
+    await waitFor(() => relayModel.started === 1, "the relay's model call");
+    const first = await prepare(path);
+    const second = await prepare(path);
+    expect(second.reply).toEqual({ ok: false, reason: "busy" });
+    first.conn.close();
+    const other = await dialControl(path);
+    expect(
+      await other?.send({ op: "prepare", sessionId: "99999999-9999-4999-8999-999999999999" }),
+    ).toEqual({ ok: false, reason: "session" });
+    r.stopRef.stop?.();
+    await exit;
+    second.conn.close();
+    other?.close();
+    expect(existsSync(path)).toBe(false); // the socket goes with `leave`
   });
 });
 

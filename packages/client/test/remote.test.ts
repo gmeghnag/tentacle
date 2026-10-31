@@ -230,6 +230,76 @@ function rawDaemon(model: ModelProvider, onError?: (e: Error) => void) {
   return { daemon, daemonCh, client };
 }
 
+describe("modelIdle (docs/feat/detached-handover.md H1)", () => {
+  /** A model whose call `n` holds until `open(n)` (`open()`: all); `started` counts the calls. */
+  const gated = () => {
+    const releases: (() => void)[] = [];
+    const gates = [0, 1].map(
+      (n) =>
+        new Promise<void>((r) => {
+          releases[n] = r;
+        }),
+    );
+    let started = 0;
+    const model: ModelProvider = {
+      id: "gated",
+      async *stream(): AsyncIterable<StreamEvent> {
+        const n = started++;
+        await gates[n];
+        yield { type: "done" };
+      },
+    };
+    const open = (n?: number): void => {
+      for (const [i, release] of releases.entries()) if (n === undefined || n === i) release();
+    };
+    return { model, open, started: () => started };
+  };
+  const settledWithin = async (p: Promise<void>, ms: number): Promise<boolean> =>
+    Promise.race([p.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
+
+  test("resolves only once an open model/streamChunked AND model/stream ended; at once with none", async () => {
+    // Mutation: count only the chunked call → idle while `model/stream` still runs.
+    const none = rawDaemon(gated().model);
+    expect(await settledWithin(none.client.modelIdle(1000), 50)).toBe(true);
+    none.daemon.close();
+    none.client.close();
+    for (const order of [
+      [Method.ModelStreamChunked, Method.ModelStream],
+      [Method.ModelStream, Method.ModelStreamChunked],
+    ] as const) {
+      const g = gated();
+      const { daemon, client } = rawDaemon(g.model);
+      const first = daemon.request(order[0], { request: WIRE_REQ });
+      expect(await waitFor(() => g.started() === 1)).toBe(true);
+      const second = daemon.request(order[1], { request: WIRE_REQ });
+      expect(await waitFor(() => g.started() === 2)).toBe(true);
+      const idle = client.modelIdle(5000);
+      expect(await settledWithin(idle, 30)).toBe(false);
+      g.open(0); // the first ends; the other still runs
+      await first;
+      expect(await settledWithin(idle, 50)).toBe(false);
+      g.open(1);
+      await second;
+      expect(await settledWithin(idle, 200)).toBe(true);
+      daemon.close();
+      client.close();
+    }
+  });
+
+  test("a hung call: resolves at the bound, never rejects", async () => {
+    const g = gated();
+    const { daemon, client } = rawDaemon(g.model);
+    void daemon.request(Method.ModelStreamChunked, { request: WIRE_REQ }).catch(() => {});
+    expect(await waitFor(() => g.started() === 1)).toBe(true);
+    const started = Date.now();
+    await client.modelIdle(40);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(35);
+    g.open();
+    daemon.close();
+    client.close();
+  });
+});
+
 describe("model/streamChunked — laptop side", () => {
   test("coalesces for real: a burst becomes few frames (first event alone, at once), seq counts frames, nothing lost, all before the result", async () => {
     const script: StreamEvent[] = [
@@ -1807,6 +1877,53 @@ describe("closing sessions (sessions outlive connections)", () => {
     await client.closeSessions(50);
     expect(Date.now() - started).toBeLessThan(1000);
     client.close();
+  });
+
+  test("H6 closeSessions() resolves with the sessions NOT confirmed closed", async () => {
+    // Mutation: count only an explicit `closed: false` → the timeout, the drop and the absent field read as closed.
+    const host = makeHost(slow(1), noopEnv);
+    const alone = await connected(host);
+    await alone.openSession(undefined, undefined, "A");
+    expect(await alone.closeSessions()).toBe(0);
+    alone.close();
+
+    const other = await connected(host);
+    await other.openSession(undefined, undefined, "X");
+    const joined = await connected(host);
+    await joined.openSession(undefined, undefined, "X");
+    expect(await joined.closeSessions()).toBe(1); // only a detach: X runs on for `other`
+    expect(await other.closeSessions()).toBe(0);
+    joined.close();
+    other.close();
+
+    const dropped = await connected(host);
+    await dropped.openSession(undefined, undefined, "D");
+    dropped.close();
+    expect(await dropped.closeSessions()).toBe(1);
+
+    // An older daemon (no `closed`), and one that never answers.
+    for (const answer of [() => ({}), () => new Promise(() => {})]) {
+      const [daemonCh, clientCh] = createChannelPair();
+      new RpcPeer(daemonCh, {
+        onRequest: (method) => {
+          if (method === Method.Initialize) {
+            return {
+              protocolVersion: PROTOCOL_VERSION,
+              agentCapabilities: { tools: true, permissions: true },
+            };
+          }
+          if (method === Method.Open) {
+            return { sessionId: "s1", epoch: "e", created: true, resync: false };
+          }
+          return answer();
+        },
+      });
+      const client = new RemoteClient(clientCh, new PermissionBroker());
+      await client.initialize();
+      await client.openSession();
+      expect(await client.closeSessions(50)).toBe(1);
+      client.close();
+    }
   });
 
   test("closeSessions() on a closed peer never rejects (no unhandled rejection)", async () => {

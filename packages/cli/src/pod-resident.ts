@@ -182,7 +182,10 @@ function parseLockHolder(
  * container keeps `/tmp` (and its lock) but not the process, and a low pid is
  * soon reused by another one.
  */
-function holderAlive(holder: { pid: number; start: string | undefined }, procOf: ProcOf): boolean {
+export function holderAlive(
+  holder: { readonly pid: number; readonly start: string | undefined },
+  procOf: ProcOf,
+): boolean {
   if (!alive(holder.pid, procOf)) {
     return false;
   }

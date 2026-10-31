@@ -26,6 +26,8 @@ import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/d
 import { DELETE_POD_SUBCOMMAND, deletePodFromEnv } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import { type SessionController, pickSession, startTui } from "@tentacle/tui";
+import { type AttachPlan, planAttach } from "./attach-plan.ts";
+import { joinRun } from "./attach-run.ts";
 import {
   type TentacleConfig,
   configDirFromEnv,
@@ -35,7 +37,12 @@ import {
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import type { EngineKind } from "./engine-host.ts";
-import { attachEngineRuntime, provisionWorkload, startEngineRuntime } from "./engine-runtime.ts";
+import {
+  armSharedExitNet,
+  attachEngineRuntime,
+  provisionWorkload,
+  startEngineRuntime,
+} from "./engine-runtime.ts";
 import {
   attachCommand,
   buildEngineHost,
@@ -65,12 +72,20 @@ import {
 import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
 import { keepsAwake } from "./keep-awake.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
-import { forgetKept, keptDir, readKept, recordKept } from "./kept-index.ts";
+import {
+  forgetKept,
+  keptDir,
+  keptFileName,
+  locationKey,
+  readKept,
+  recordKept,
+} from "./kept-index.ts";
 import {
   KEPT_SCHEMA_VERSION,
   type KeptEntry,
   ambiguousMessage,
   keptMetadata,
+  placeText,
   whereOf,
 } from "./kept.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
@@ -81,9 +96,9 @@ import { render } from "./render.ts";
 import {
   RELAY_SUBCOMMAND,
   RUN_STATE_VERSION,
+  elsewhereMessage,
   laptopProc,
   readOwner,
-  relayBlocking,
   relayBlockingMessage,
   runDirFor,
   runStem,
@@ -124,7 +139,7 @@ Usage:
                                 turn, serves the model and saves it, then leaves once the
                                 session is idle. It waits at the first permission unless
                                 --auto-accept (pod tool asks only, allow once, logged).
-                                kill <pid> stops it; attach is refused until it is gone.
+                                kill <pid> stops it; attach <name> takes it over, mid-turn.
                                 --keep=false removes the workload when the run goes idle
                                 or is stopped (a failed or interrupted run keeps it). On
                                 macOS it stays awake during a turn (detach.keepAwake)
@@ -134,7 +149,12 @@ Usage:
                                 pod's container to exec into (default: its only one);
                                 it is NOT deleted on exit — closing the TUI
                                 detaches, it stays up. A kept one (see ps) needs
-                                no --engine: its engine and location are looked up
+                                no --engine: its engine and location are looked up.
+                                On a detached run it opens the run's session (from a
+                                terminal, in the folder it ran in); more terminals
+                                join it. Quitting ends the run once no other terminal
+                                is attached; with --keep=false that last quit
+                                removes the workload, a running turn included
   tentacle ps [--engine <e>] [-q] [-v]
                                 list the pods/containers run kept, checked against
                                 their engine, with a detached run's state (-q names
@@ -270,6 +290,12 @@ export interface CliIO {
   writeErr?: (text: string) => void;
   /** Test seam: replaces the `run` engine runtime (pins the flag/config → `keepHint` wiring). */
   startEngineRuntime?: typeof startEngineRuntime;
+  /** Test seam: `attach <name>` of a detached run's engine runtime (docs/feat/detached-handover.md). */
+  attachEngineRuntime?: typeof attachEngineRuntime;
+  /** Test seam: the TUI of an `attach` to a detached run (pins the single broker). */
+  startTui?: typeof startTui;
+  /** Test seam: stdin and stdout are a terminal. Default: both `isTTY`. */
+  tty?: boolean;
   /** Test seam: `run --detach`'s workload creation (pins that no daemon starts in the foreground). */
   provisionWorkload?: typeof provisionWorkload;
   /** Test seam: `run --detach`'s relay process. */
@@ -692,14 +718,18 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // decouple the two — a second broker's default `allowAll` approves everything
   // and the TUI prompt is never reached. Built with `holdUntilSet`, so a request
   // that arrives before the TUI mounts waits for its prompt instead.
+  // `finish`: a detached run's quit (`attach-run.ts`) instead of `dispose`;
+  // told whether Ink ran (a TUI that never mounted quit nothing).
   const runEngineTui = async (
     runtime: Awaited<ReturnType<typeof startEngineRuntime>>,
     permissions: PermissionBroker,
     sessions: TuiSessions,
+    finish?: (inkRan: boolean) => Promise<void>,
   ): Promise<number> => {
+    let inkRan = false;
     await runSessionTui(sessions, {
-      start: (sessionOptions) =>
-        startTui(null, {
+      start: async (sessionOptions) => {
+        await (io.startTui ?? startTui)(null, {
           model: config.model,
           cwd: config.cwd,
           contextWindow: config.contextWindow,
@@ -713,8 +743,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           // spilled result's file lives in the pod (docs/feat/tui-spill-note.md).
           daemonInPod: true,
           ...sessionOptions,
-        }),
-      teardown: () => runtime.dispose(),
+        });
+        inkRan = true;
+      },
+      teardown: () => (finish ? finish(inkRan) : runtime.dispose()),
       write,
     });
     return 0;
@@ -948,6 +980,63 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     return await runEngineTui(runtime, permissions, sessions);
   }
 
+  /**
+   * The kept entry named `name` that is a detached run: its run dir has a record
+   * or a live lock. `at`: the place explicit flags name, compared with the
+   * entry's, because a run's quit may delete its workload: another place's run
+   * is never this attach's. Only what `at` cannot rule out comes back as
+   * `elsewhere`: a live relay of that name, S2's refusal (nothing is dialled, so
+   * one workload reached by two addresses cannot be told from two workloads).
+   */
+  const detachedRunOf = (
+    name: string,
+    engine: EngineKind | undefined,
+    at?: () => string | null,
+  ) => {
+    type Run = {
+      entry: KeptEntry;
+      dir: string;
+      holder: ReturnType<typeof lockHolder>;
+      owner: ReturnType<typeof readOwner>;
+    };
+    let elsewhere: Run | null = null;
+    for (const { entry } of readKept(keptDir(config.configDir)).entries) {
+      if (entry.name !== name || (engine !== undefined && entry.engine !== engine)) {
+        continue;
+      }
+      const dir = runDirFor(config.configDir, entry);
+      const holder = lockHolder(dir, laptopProc);
+      const owner = readOwner(dir);
+      if (holder === null && owner.kind === "none") {
+        continue;
+      }
+      if (at === undefined || at() === locationKey(entry)) {
+        return { entry, dir, holder, owner, elsewhere: false };
+      }
+      if (holder !== null) {
+        elsewhere ??= { entry, dir, holder, owner };
+      }
+    }
+    return elsewhere === null ? null : { ...(elsewhere as Run), elsewhere: true };
+  };
+  /** Why `attach` stops on a detached run (`planAttach`'s refusals). */
+  const attachRefusal = (
+    name: string,
+    plan: AttachPlan,
+    run: NonNullable<ReturnType<typeof detachedRunOf>>,
+    noun: string,
+  ): string => {
+    const shown = untrustedText(name);
+    if (plan.kind === "refuse" && plan.why === "cwd") {
+      return `${shown}: this detached run belongs to ${untrustedText(plan.cwd)}: run \`tentacle attach ${shown}\` from there`;
+    }
+    if (plan.kind === "refuse" && plan.why === "tty") {
+      return `${shown}: attaching to a detached run needs a terminal (its quit ends the run)`;
+    }
+    // A live relay owns the session, and no hand-over can happen.
+    return relayBlockingMessage(name, { pid: run.holder?.pid ?? 0, owner: run.owner, noun });
+  };
+
   // `attach`: attach the local TUI to an EXISTING pod or container (F4, the
   // `run` flow minus the lifecycle): it is user-owned, so nothing is created —
   // and NOTHING is deleted on exit (closing the TUI detaches; it stays up for
@@ -961,10 +1050,41 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     // Slice E: with no engine/location flag, a KEPT workload's engine and
     // location come from the laptop index (never from a label). It only picks
     // the host: the attach stays user-owned (no create, no delete). Explicit
-    // flags win, so a user's own pod/container still attaches as before.
+    // flags win, so a user's own pod/container still attaches as before; a
+    // detached run is reached through them only at the place they name.
     const explicit = ["engine", "namespace", "context", "container"].some((f) =>
       attachFlags.has(f),
     );
+    const asked = explicit ? selectEngine("attach", attachFlags, attachBools) : undefined;
+    if (asked === null) {
+      return 1;
+    }
+    let askedBuilt: ReturnType<typeof engineHost> | undefined;
+    const askedHost = (kind: EngineKind): ReturnType<typeof engineHost> => {
+      if (askedBuilt === undefined) {
+        askedBuilt = engineHost(kind, attachFlags, attachBools);
+      }
+      return askedBuilt;
+    };
+    /** Where the flags point (nothing is dialled); `null`: they do not resolve, said once. */
+    const askedWhere = (
+      kind: EngineKind,
+    ): Pick<KeptEntry, "engine" | "endpoint" | "context" | "server" | "namespace"> | null => {
+      const built = askedHost(kind);
+      return (
+        built && {
+          engine: kind,
+          ...keptLocation(kind, built, {
+            context: attachFlags.get("context"),
+            insecureTcp: attachBools.has("insecure-docker-tcp"),
+          }),
+        }
+      );
+    };
+    const askedAt = (kind: EngineKind): string | null => {
+      const at = askedWhere(kind);
+      return at === null ? null : locationKey(at);
+    };
     const lookup = explicit ? undefined : resolveKeptAttach(name, keptDir(config.configDir));
     for (const problem of lookup?.problems ?? []) {
       writeErr(`kept index: ${untrustedText(problem)} — left untouched\n`);
@@ -978,24 +1098,114 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       );
       return 1;
     }
-    // A detached run's relay is that session's writer and model link: a second
-    // client would steal the link (docs/feat/detached-relay.md, D3). Nothing is dialled.
-    const relay = relayBlocking(
-      name,
-      readKept(keptDir(config.configDir)).entries,
-      (entry) => lockHolder(runDirFor(config.configDir, entry), laptopProc),
-      attachFlags.get("engine"),
-    );
-    if (relay) {
-      const owner = readOwner(runDirFor(config.configDir, relay.entry));
-      const relayNoun = engineNoun(relay.entry.engine);
-      write(
-        `\n[error] ${relayBlockingMessage(name, { pid: relay.pid, owner, noun: relayNoun })}\n`,
-      );
-      return 1;
+    // A detached run (docs/feat/detached-handover.md): `attach` opens ITS
+    // session as one more client, a stale owner, an ended run and a join alike;
+    // its quit ends the run when it is the last client. With no `owner.json`
+    // (a user's own pod, Q4) it is today's attach. Nothing is dialled first.
+    for (let attempt = 0; ; attempt++) {
+      const run = detachedRunOf(name, asked, asked ? () => askedAt(asked) : undefined);
+      if (run === null) {
+        break;
+      }
+      if (run.elsewhere) {
+        // R1: NOT S2's text. `kill` would stop the run and, on keep=false,
+        // remove a workload in ANOTHER place than the flags name. The run is
+        // elsewhere by definition here, so `askedWhere` is not null.
+        const at = askedWhere(run.entry.engine);
+        const places = { run: placeText(run.entry), asked: at === null ? null : placeText(at) };
+        const pid = run.holder?.pid ?? 0;
+        write(`\n[error] ${elsewhereMessage(name, { pid, owner: run.owner }, places)}\n`);
+        return 1;
+      }
+      const plan = planAttach({
+        owner: run.owner,
+        relayAlive: run.holder !== null,
+        entryCreated: run.entry.created,
+        ...(attachFlags.has("resume") ? { resumeUid: attachFlags.get("resume") } : {}),
+        cwd: config.cwd,
+        tty: io.tty ?? (process.stdin.isTTY === true && process.stdout.isTTY === true),
+      });
+      const runNoun = engineNoun(run.entry.engine);
+      if (plan.kind === "plain") {
+        break;
+      }
+      if (plan.kind === "refuse") {
+        write(`\n[error] ${attachRefusal(name, plan, run, runNoun)}\n`);
+        return 1;
+      }
+      if (run.owner.kind !== "owner") {
+        break; // `planAttach` gives `run` only on a record
+      }
+      const joined = await joinRun({
+        name,
+        noun: runNoun,
+        entry: run.entry,
+        keptFile: join(keptDir(config.configDir), keptFileName(run.entry)),
+        dir: run.dir,
+        plan,
+        owner: run.owner.owner,
+        cwd: config.cwd,
+        write,
+        procOf: laptopProc,
+        openSessions: () =>
+          openTuiSessions(
+            { root: join(config.configDir, "sessions"), cwd: config.cwd },
+            { wanted: true, uid: plan.sessionId, live: true },
+            write,
+            undefined,
+            [titleConfigNotice(config)].filter((text): text is string => text !== null),
+          ),
+        host: () => {
+          write(
+            `[${runNoun}] resolved ${untrustedText(name)} → ${run.entry.engine}, ${untrustedText(whereOf(run.entry))}\n`,
+          );
+          try {
+            return buildEngineHost(run.entry.engine, hostOptionsFor(run.entry)).host;
+          } catch (error) {
+            write(setupFailureLine(run.entry.engine, error));
+            return null;
+          }
+        },
+        attach: (host, sessions, permissions) => {
+          const container = attachFlags.get("container");
+          const binDir =
+            attachFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR ?? run.entry.binDir;
+          return (io.attachEngineRuntime ?? attachEngineRuntime)(config, {
+            host,
+            name,
+            ...(container ? { container } : {}),
+            ...(binDir ? { binDir } : {}),
+            permissions,
+            saver: sessions.saver,
+            resume: sessions.resume,
+            sessionId: plan.sessionId,
+            shared: true,
+            log: write,
+            notify: (text) => sessions.notices.notify(text),
+          });
+        },
+        armNet: (host, othersAlive) => armSharedExitNet(host, name, othersAlive),
+        // No hand-over can happen (no socket, skew, another session): S2's refusal.
+        relayRefusal: () => attachRefusal(name, { kind: "refuse", why: "relay" }, run, runNoun),
+      });
+      if (joined.kind === "exit") {
+        return joined.code;
+      }
+      if (joined.kind === "closing") {
+        if (attempt === 0) {
+          continue; // planned again, once: keep=false now meets the ordinary "gone"
+        }
+        write(`\n[error] ${untrustedText(name)}: the run is still closing; retry in a moment\n`);
+        return 1;
+      }
+      // The session's `history` activity draws an attached screen, not the record.
+      const sessions = joined.attached ? { ...joined.sessions, resume: null } : joined.sessions;
+      return await runEngineTui(joined.runtime, joined.permissions, sessions, joined.finish);
     }
     const keptEntry = lookup?.resolved.kind === "one" ? lookup.resolved.match.entry : undefined;
-    const engine = keptEntry ? keptEntry.engine : selectEngine("attach", attachFlags, attachBools);
+    const engine = keptEntry
+      ? keptEntry.engine
+      : (asked ?? selectEngine("attach", attachFlags, attachBools));
     if (engine === null) {
       return 1;
     }
@@ -1019,7 +1229,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         built = null;
       }
     } else {
-      built = engineHost(engine, attachFlags, attachBools);
+      built = askedHost(engine);
     }
     if (built === null) {
       return 1;
