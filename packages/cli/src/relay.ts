@@ -18,9 +18,18 @@
  */
 import { spawn } from "node:child_process";
 import { closeSync, openSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "@tentacle/config";
 import { PermissionBroker } from "@tentacle/core";
+import {
+  type ControlPeer,
+  type ControlReply,
+  type ControlRequest,
+  type ControlServer,
+  controlSocketPath,
+  serveControl,
+} from "./control-socket.ts";
 import type { EngineHost } from "./engine-host.ts";
 import { armExitNet, attachEngineRuntime } from "./engine-runtime.ts";
 import { buildEngineHost, hostOptionsFor } from "./engine-select.ts";
@@ -77,6 +86,12 @@ const LAUNCH_TIMEOUT_MS = 60_000;
 const USE_READ_TIMEOUT_MS = 5000;
 /** How long the removal itself may take. */
 const REMOVE_TIMEOUT_MS = 30_000;
+/** A prepared hand-over aborts if no `commit` came by then (docs/feat/detached-handover.md). */
+const HANDOVER_LEASE_MS = 30_000;
+/** The relay's last save before the `commit` ack. */
+const HANDOVER_SAVE_MS = 10_000;
+/** After the ack, how long the model calls the relay serves may still run. */
+const HANDOVER_DRAIN_MS = 5 * 60_000;
 
 /** SIGTERM/SIGINT stop the relay; a second one exits at once. */
 function stopOnSignals(stop: () => void): () => void {
@@ -117,6 +132,12 @@ export interface RelayDeps {
   readonly removeTimeoutMs?: number;
   /** Default this process's platform and a real `caffeinate`. */
   readonly keepAwake?: Partial<Pick<KeepAwakeOptions, "platform" | "spawn">>;
+  /** Where the control socket goes; default `controlSocketPath` (`null`: no socket). */
+  readonly controlPath?: (dir: string, stem: string) => string | null;
+  /** How long a prepared hand-over may wait for its `commit`. */
+  readonly leaseMs?: number;
+  /** How long the relay drains the model calls it serves after a hand-over. */
+  readonly drainMs?: number;
 }
 
 /** Run one detached session to its end; the exit code. Only a run dir it cannot make throws. */
@@ -152,9 +173,20 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     ...(deps.keepAwake?.spawn ? { spawn: deps.keepAwake.spawn } : {}),
     log,
   });
+  // The hand-over's socket (docs/feat/detached-handover.md); off its usual
+  // path it is recorded, so an `attach` finds it.
+  const controlAt = (
+    deps.controlPath ??
+    ((d: string, stem: string) =>
+      controlSocketPath(d, stem, { tmp: tmpdir(), uid: process.getuid?.() ?? 0 }))
+  )(dir, spec.stem);
   let model = initialRelay;
   let written = "";
   const record = (view: RelayView): void => {
+    // Handed over: the run's record is the TUIs' now (never two writers).
+    if (model.handover === "done") {
+      return;
+    }
     const key = JSON.stringify(view);
     if (key === written) {
       return;
@@ -171,6 +203,11 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
         lastActivityAt: now(),
         autoAccept: spec.autoAccept,
         keep: spec.keep,
+        cwd: spec.cwd,
+        created: entry.created,
+        ...(controlAt !== null && controlAt !== join(dir, "control.sock")
+          ? { control: controlAt }
+          : {}),
         ...view,
       });
     } catch (error) {
@@ -184,14 +221,39 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   };
   record(relayView(model));
 
+  // The hand-over (docs/feat/detached-handover.md): who prepared it, its lease,
+  // whether its commit began (irrevocable from there), and whether the exit
+  // plan is final (`leaving`: a `prepare` after it is refused).
+  let preparer: ControlPeer | null = null;
+  let lease: ReturnType<typeof setTimeout> | undefined;
+  let committing = false;
+  let stopAfterCommit = false;
+  let leaving = false;
+  let control: ControlServer | null = null;
+  /** Back to the relay: its net, its policy, its idle exit. Set once `runRelay` can. */
+  let abortHandover = (_why: string): void => {};
+
   const stopSignal = new AbortController();
   const offStop = (deps.onStop ?? stopOnSignals)(() => {
+    if (committing || model.handover === "done") {
+      // Handed over: the turn is the TUIs' (P2: aborting `send` would cancel
+      // it); only the drain is cut short.
+      stopAfterCommit = true;
+      if (model.handover === "done") {
+        emit({ type: "drained" });
+      }
+      return;
+    }
+    abortHandover("the relay was stopped");
     emit({ type: "stop" });
     stopSignal.abort();
   });
   let disarmNet = (): void => {};
   /** `purge` (Q4): the workload is gone, so its run dir goes, the lock with it. */
   const leave = (purge = false): number => {
+    preparer = null; // the plan is final: a socket closing now aborts nothing, re-arms nothing
+    control?.close();
+    clearTimeout(lease);
     disarmNet();
     offStop();
     awake.stop();
@@ -292,6 +354,91 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     void drive();
   }
 
+  abortHandover = (why) => {
+    if (preparer === null || committing || model.handover !== "prepared") {
+      return;
+    }
+    const peer = preparer;
+    preparer = null;
+    clearTimeout(lease);
+    peer.close(); // a late `commit` finds the socket closed
+    if (!spec.keep) {
+      disarmNet = (deps.armNet ?? armExitNet)(host, entry.name);
+    }
+    policy.thaw();
+    emit({ type: "handover_aborted" });
+    log(`hand-over aborted: ${why}`);
+  };
+  const onControl = async (request: ControlRequest, peer: ControlPeer): Promise<ControlReply> => {
+    if (request.op === "prepare") {
+      if (model.stopping) {
+        return { ok: false, reason: "stopped" };
+      }
+      if (committing || model.handover === "done") {
+        return { ok: false, reason: "handed_over" };
+      }
+      if (leaving) {
+        return { ok: false, reason: "leaving" };
+      }
+      if (preparer !== null) {
+        return { ok: false, reason: "busy" };
+      }
+      if (request.sessionId !== spec.sessionId) {
+        return { ok: false, reason: "session" };
+      }
+      // BEFORE the attacher opens (D5): from here the relay decides nothing.
+      preparer = peer;
+      disarmNet();
+      disarmNet = () => {};
+      policy.freeze();
+      emit({ type: "handover_prepared" });
+      lease = setTimeout(
+        () => abortHandover("no commit within the lease"),
+        deps.leaseMs ?? HANDOVER_LEASE_MS,
+      );
+      log("hand-over prepared");
+      return { ok: true, appVersion: APP_VERSION, autoAccept: spec.autoAccept };
+    }
+    if (peer !== preparer || committing || model.handover !== "prepared") {
+      return { ok: false, reason: "invalid" };
+    }
+    // Irrevocable from here: the relay's last save is on disk before the ack,
+    // and none follows it (the TUIs save from their mount on).
+    committing = true;
+    clearTimeout(lease);
+    await bounded(runtime.flushed(), HANDOVER_SAVE_MS / 2).catch(() => {});
+    runtime.stopSaving();
+    for (const line of await bounded(saver.drain(), HANDOVER_SAVE_MS / 2).catch(() => [])) {
+      log(line);
+    }
+    emit({ type: "handed_over" });
+    log("handed over");
+    void runtime.modelIdle(deps.drainMs ?? HANDOVER_DRAIN_MS).then(() => {
+      log("drained");
+      emit({ type: "drained" });
+    });
+    if (stopAfterCommit) {
+      emit({ type: "drained" });
+    }
+    return { ok: true };
+  };
+  if (controlAt !== null && !stopSignal.signal.aborted) {
+    try {
+      control = await serveControl(controlAt, {
+        onRequest: onControl,
+        onClose: (peer) => {
+          if (peer === preparer) {
+            abortHandover("the attacher went away");
+          }
+        },
+      });
+    } catch (error) {
+      log(`no control socket: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else if (controlAt === null) {
+    log("no control socket: no private place for it (the run cannot be handed over)");
+  }
+
   let nextPoll = 0;
   let polling = false;
   const pollJobs = (): void => {
@@ -320,14 +467,18 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       }
       await new Promise((resolve) => setTimeout(resolve, tickMs));
     }
-    const use = needsUse(model, spec.keep) ? await readUse() : null;
-    // On the state after the read: a stop may have landed during it.
+    const use = model.handover === "none" && needsUse(model, spec.keep) ? await readUse() : null;
+    // On the state after the read: a stop, or a `prepare`, may have landed during it.
     plan = exitPlan(model, spec.keep, use);
     if (plan.kind !== "hold") {
+      // In the same tick as the final plan: a `prepare` from here is `leaving`.
+      leaving = true;
       break;
     }
-    log("still in use: not removed yet");
-    emit({ type: "jobs", n: use?.jobs ?? 0 });
+    if (model.handover === "none") {
+      log("still in use: not removed yet");
+      emit({ type: "jobs", n: use?.jobs ?? 0 });
+    }
     emit({ type: "busy" });
   }
   if (plan.kind === "leave" && plan.why !== undefined) {
@@ -370,6 +521,11 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       detail: `${removalFate(removal.kind)}, but its entry in the kept index stayed: ${removal.forgetError} — tentacle rm ${entry.name}`,
     });
     return leave();
+  }
+  if (removal.kind === "foreign" || removal.kind === "other") {
+    // Nothing was deleted: the name holds a workload this run no longer stands
+    // for (R3). Said, never silent.
+    emit({ type: "note", detail: removalFate(removal.kind) });
   }
   return leave(true);
 }

@@ -19,15 +19,16 @@ import {
   appendFileSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { type KeptFile, keptDir, keptFileName } from "./kept-index.ts";
+import { keptDir, keptFileName } from "./kept-index.ts";
 import type { KeptEntry } from "./kept.ts";
-import { type ProcStat, procStat } from "./pod-resident.ts";
+import { type ProcOf, type ProcStat, holderAlive, procStat } from "./pod-resident.ts";
 import { untrustedText } from "./untrusted-text.ts";
 
 /** The relay's hidden subcommand: ONE constant, pinned by a `main` dispatch test. */
@@ -44,7 +45,9 @@ export type OwnerState =
   | "waiting-permission"
   | "idle"
   | "interrupted"
-  | "failed";
+  | "failed"
+  /** A TUI's record (docs/feat/detached-handover.md): who is attached is the presence files'. */
+  | "attached";
 const OWNER_STATES: readonly string[] = [
   "starting",
   "running",
@@ -52,11 +55,17 @@ const OWNER_STATES: readonly string[] = [
   "idle",
   "interrupted",
   "failed",
+  "attached",
 ] satisfies readonly OwnerState[];
 
 export interface OwnerRecord {
   readonly schemaVersion: typeof RUN_STATE_VERSION;
-  readonly kind: "relay";
+  /**
+   * `tui`: the run was handed over to (or joined by) TUIs; the record then says
+   * what the run IS (`sessionId`, `keep`, `cwd`), not who is here: that is
+   * `attachers`. An older build refuses it as `unknown` and leaves it.
+   */
+  readonly kind: "relay" | "tui";
   readonly pid: number;
   readonly appVersion: string;
   readonly sessionId: string;
@@ -70,6 +79,12 @@ export interface OwnerRecord {
   readonly autoAccept: boolean;
   /** False: the relay removes the workload when the run ends. See `ownerKeeps`. */
   readonly keep?: boolean;
+  /** The folder the run belongs to: its session's laptop copy is filed under it. */
+  readonly cwd?: string;
+  /** The relay's control socket (`control-socket.ts`), when it is not `<runDir>/control.sock`. */
+  readonly control?: string;
+  /** The kept entry's `created`: ties the record to THAT workload (a run dir outlives a reused name). */
+  readonly created?: string;
 }
 
 export type OwnerRead =
@@ -160,7 +175,7 @@ export function readOwner(dir: string): OwnerRead {
   if (
     r === null ||
     r.schemaVersion !== RUN_STATE_VERSION ||
-    r.kind !== "relay" ||
+    (r.kind !== "relay" && r.kind !== "tui") ||
     !time(r.pid) ||
     !str(r.appVersion) ||
     !str(r.sessionId) ||
@@ -175,7 +190,7 @@ export function readOwner(dir: string): OwnerRead {
     kind: "owner",
     owner: {
       schemaVersion: RUN_STATE_VERSION,
-      kind: "relay",
+      kind: r.kind,
       pid: r.pid,
       appVersion: r.appVersion,
       sessionId: r.sessionId,
@@ -185,8 +200,72 @@ export function readOwner(dir: string): OwnerRead {
       lastActivityAt: r.lastActivityAt,
       autoAccept: r.autoAccept,
       ...(typeof r.keep === "boolean" ? { keep: r.keep } : {}),
+      ...(str(r.cwd) ? { cwd: r.cwd } : {}),
+      ...(str(r.control) ? { control: r.control } : {}),
+      ...(str(r.created) ? { created: r.created } : {}),
     },
   };
+}
+
+/** `<runDir>/attach`: one presence file per TUI on the run. */
+export const attachDirOf = (dir: string): string => join(dir, "attach");
+
+/** `<pid>-<start>`, or `<pid>` where the start time is unknown. */
+function presenceName(pid: number, start: string | undefined): string {
+  return start !== undefined ? `${pid}-${start}` : String(pid);
+}
+
+/**
+ * Say "this TUI is on the run": an empty 0600 file named after the process
+ * (pid + start time, the lock's own identity). Not exclusive: N TUIs join one
+ * run. Returns its path, for `removePresence`. Throws when it cannot be written:
+ * without it the exit net and the last quit would lie.
+ */
+export function writePresence(dir: string, pid: number, procOf: ProcOf): string {
+  const attach = attachDirOf(dir);
+  mkdirSync(attach, { recursive: true, mode: 0o700 });
+  const path = join(attach, presenceName(pid, procOf(pid)?.start));
+  writeFileSync(path, "", { mode: 0o600 });
+  return path;
+}
+
+/** Idempotent. */
+export function removePresence(path: string): void {
+  rmSync(path, { force: true });
+}
+
+/**
+ * The TUIs on the run now, by their presence files, with the lock's liveness
+ * test (`holderAlive`): a dead process and a reused pid (another start time)
+ * are swept. No dir: none.
+ */
+export function attachers(
+  dir: string,
+  procOf: ProcOf,
+): readonly { readonly pid: number; readonly path: string }[] {
+  let names: string[];
+  try {
+    names = readdirSync(attachDirOf(dir));
+  } catch {
+    return [];
+  }
+  const live: { pid: number; path: string }[] = [];
+  for (const name of names) {
+    const match = /^(\d+)(?:-(\d+))?$/.exec(name);
+    const path = join(attachDirOf(dir), name);
+    const pid = Number(match?.[1]);
+    if (
+      match &&
+      Number.isSafeInteger(pid) &&
+      pid > 0 &&
+      holderAlive({ pid, start: match[2] }, procOf)
+    ) {
+      live.push({ pid, path });
+      continue;
+    }
+    rmSync(path, { force: true });
+  }
+  return live;
 }
 
 export function writeSpec(dir: string, spec: RelaySpec): string {
@@ -293,14 +372,32 @@ function ownerText(owner: OwnerRecord, alive: boolean, now: number): string {
       return detail !== undefined ? `${owner.state} (${detail})` : owner.state;
     case "interrupted":
       return owner.state;
+    case "attached":
+      // No presence is alive (`statusOf` checked): the last TUI went without a quit.
+      return "tui lost";
   }
 }
 
 /**
- * STATUS of a detached run (DR-6): `owner.json` and whether its relay lives.
- * `null`: no relay ever. Sanitised: the text comes from a file.
+ * STATUS of a detached run (DR-6): `owner.json`, whether its lock's holder
+ * lives, and `attached`, the TUIs on it (`attachers`). Presence wins over any
+ * record (a lost write cannot lie), except a live relay's own row. A TUI
+ * record's lock holder is the last TUI closing the run. `null`: no relay ever.
+ * Sanitised: the text comes from a file.
  */
-export function statusOf(read: OwnerRead, alive: boolean, now: number): string | null {
+export function statusOf(
+  read: OwnerRead,
+  alive: boolean,
+  now: number,
+  attached = 0,
+): string | null {
+  const tui = read.kind === "owner" && read.owner.kind === "tui";
+  if (!(alive && !tui) && attached > 0) {
+    return attached === 1 ? "attached" : `attached (${attached})`;
+  }
+  if (tui && read.kind === "owner") {
+    return alive ? "closing" : ownerText(read.owner, false, now);
+  }
   const live = (text: string): string => (alive ? `detached · ${text}` : text);
   switch (read.kind) {
     case "none":
@@ -320,26 +417,26 @@ export interface RelayHolder {
 }
 
 /**
- * The live relay on the kept entry named `name` (`--engine` narrows it), if
- * any. A name scan: the workload's real location needs a host, and nothing is
- * dialled before this answers.
+ * `attach`'s refusal when the user's OWN location flags name a place other than
+ * a live detached run's (S2's comparison). It must not offer `kill <pid>`: that
+ * stops the run and, on keep=false, REMOVES the workload — of another place than
+ * the one asked for. So it names both places and the safe next step: the index
+ * alone (no location flag) resolves the run where it actually is.
  */
-export function relayBlocking(
+export function elsewhereMessage(
   name: string,
-  entries: readonly KeptFile[],
-  holderOf: (entry: KeptEntry) => RelayHolder | null,
-  engine: string | undefined,
-): (RelayHolder & { readonly entry: KeptEntry }) | null {
-  for (const { entry } of entries) {
-    if (entry.name !== name || (engine !== undefined && entry.engine !== engine)) {
-      continue;
-    }
-    const holder = holderOf(entry);
-    if (holder) {
-      return { pid: holder.pid, entry };
-    }
-  }
-  return null;
+  run: { readonly pid: number; readonly owner: OwnerRead },
+  places: { readonly run: string; readonly asked: string | null },
+): string {
+  const shown = untrustedText(name);
+  const owner = run.owner.kind === "owner" ? run.owner.owner : null;
+  const where = `a detached run owns it in ${untrustedText(places.run)} (pid ${run.pid}, ${owner?.state ?? "unknown owner"})`;
+  const mismatch =
+    places.asked === null
+      ? "your location flags do not resolve to a place"
+      : `not in ${untrustedText(places.asked)}, the place your flags name`;
+  const session = owner === null ? "" : ` Its session is ${untrustedText(owner.sessionId)}.`;
+  return `${shown}: ${where}, ${mismatch}. Nothing was dialled, and nothing was stopped: drop the location flags (\`tentacle attach ${shown}\`) to reach the run where it is.${session}`;
 }
 
 /** `attach`'s refusal: who owns the workload and how to get the session back. */

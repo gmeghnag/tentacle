@@ -84,6 +84,37 @@ export function isKeptWorkload(
   return owned && labels?.[KEPT_LABEL] === "true";
 }
 
+/** The workload's own `created` (k8s: an annotation; docker/podman: a label), if it declares one. */
+export function workloadCreated(facts: {
+  readonly labels: Readonly<Record<string, string>>;
+  readonly annotations?: Readonly<Record<string, string>> | undefined;
+}): string | undefined {
+  const created = facts.annotations?.[KEPT_KEYS.created] ?? facts.labels[KEPT_KEYS.created];
+  return str(created) ? created : undefined;
+}
+
+/**
+ * Is the workload at that name the one THIS entry was made for? The laptop
+ * index says where, the workload says which: a kept workload re-created at the
+ * same place OUTSIDE this index (`run --keep --name box` on another laptop or
+ * config dir) carries the kept labels too, and its `created` differs. `unknown`:
+ * it declares none (an older build) — the labels alone decide, as before, so a
+ * workload this build cannot date stays removable.
+ */
+export function createdVerdict(
+  entry: Pick<KeptEntry, "created">,
+  facts: {
+    readonly labels: Readonly<Record<string, string>>;
+    readonly annotations?: Readonly<Record<string, string>> | undefined;
+  },
+): "match" | "other" | "unknown" {
+  const created = workloadCreated(facts);
+  if (created === undefined) {
+    return "unknown";
+  }
+  return created === entry.created ? "match" : "other";
+}
+
 /** A parsed index file, or why it was refused (never half-loaded). */
 export type ParsedEntry =
   | { readonly ok: true; readonly entry: KeptEntry }
@@ -142,7 +173,9 @@ export function parseKeptEntry(text: string): ParsedEntry {
 }
 
 /** WHERE: `local` | `ssh://host` | `tcp://host:port` | `context/namespace`. */
-export function whereOf(entry: KeptEntry): string {
+export function whereOf(
+  entry: Pick<KeptEntry, "engine" | "endpoint" | "context" | "server" | "namespace">,
+): string {
   if (entry.engine === "kubernetes") {
     const cluster = entry.context ?? (entry.server ? hostOf(entry.server) : "?");
     return `${cluster}/${entry.namespace ?? "?"}`;
@@ -155,6 +188,19 @@ export function whereOf(entry: KeptEntry): string {
     return `ssh://${hostOf(endpoint)}`;
   }
   return endpoint !== "" ? endpoint : `context ${entry.context ?? "?"}`;
+}
+
+/**
+ * A place, named for a refusal that must TELL TWO PLACES APART: `whereOf` plus
+ * the docker/podman endpoint, because two local sockets both read `local`.
+ */
+export function placeText(
+  at: Pick<KeptEntry, "engine" | "endpoint" | "context" | "server" | "namespace">,
+): string {
+  const where = whereOf(at);
+  return at.engine === "kubernetes" || at.endpoint === undefined
+    ? where
+    : `${where} (${at.endpoint})`;
 }
 
 /** `ssh://user@box:22` → `box`; `https://api.c:6443` → `api.c`. */
@@ -199,6 +245,8 @@ export type KeptStatus =
       readonly kind: "state";
       readonly state: string;
       readonly labels: Readonly<Record<string, string>>;
+      /** k8s only (docker/podman carry them as labels): needed for the `created` tie. */
+      readonly annotations?: Readonly<Record<string, string>>;
     }
   /** 404: removed outside tentacle. `rm <name>` drops the entry. */
   | { readonly kind: "gone" }
@@ -211,6 +259,8 @@ export interface KeptRelay {
   readonly text: string;
   /** Present while the relay lives. */
   readonly pid?: number;
+  /** The pids of the TUIs on the run (docs/feat/detached-handover.md). */
+  readonly attached?: readonly number[];
   readonly sessionId?: string;
   readonly log: string;
   /** False: this relay removes the workload when the run ends. */
@@ -314,6 +364,9 @@ export function renderVerbose(rows: readonly KeptRow[], nowMs: number, home: str
       `  created   ${untrustedText(entry.created)} (${formatAge(nowMs, entry.created)} ago)`,
       `  status    ${statusCell(row)}${status.kind === "unreachable" ? ` — ${untrustedText(status.reason)}` : ""}`,
       ...(relay?.pid !== undefined ? [`  relay     pid ${relay.pid}`] : []),
+      ...(relay?.attached !== undefined
+        ? [`  attached  ${relay.attached.map((pid) => `pid ${pid}`).join(", ")}`]
+        : []),
       ...(relay?.sessionId !== undefined ? [`  session   ${untrustedText(relay.sessionId)}`] : []),
       ...(relay ? [`  log       ${untrustedText(relay.log)}`] : []),
       // A dead relay removes nothing: the workload stays until `rm`.

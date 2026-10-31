@@ -36,7 +36,7 @@ import type {
   PermissionBroker,
 } from "@tentacle/core";
 import { applyGroupMessage } from "@tentacle/exec";
-import type { McpServerStatus, SessionTitle } from "@tentacle/protocol";
+import { DomainErrorCode, type McpServerStatus, type SessionTitle } from "@tentacle/protocol";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
 import { logDaemonError } from "./daemon-log.ts";
@@ -70,6 +70,36 @@ export interface LocalRuntime {
    * sessions are DETACHED, never closed — alone on a session, `dispose` ends it.
    */
   release(): Promise<void>;
+  /**
+   * Attach to the LIVE session `id` (`session/open` with no `create`, no
+   * messages: docs/feat/detached-handover.md) and make it the next
+   * `createSession`'s. `record` (its laptop copy, if any) gives only the saved
+   * `createdAt` and title. Resolves false when the daemon does not know `id`
+   * (`UnknownSession`): nothing was created and the runtime's seed is intact,
+   * so the next `createSession` takes the seeded path. Any other error rejects.
+   */
+  attachTo(id: string, record: SessionRecord | null): Promise<boolean>;
+  /**
+   * The quit of a client of a shared session: one last read-back of every open
+   * session (a foreign turn is saved only at its end), the pending saves, then
+   * `session/close{ifLast}`, a drain of the model calls this client serves
+   * (bounded: another client's turn would fail with them), then the transport.
+   * `saved`: that read-back answered and its write reached the laptop copy;
+   * false: the sessions are DETACHED instead, a close would end what may be
+   * their only copy. `sessionsKept`: the sessions the daemon did not confirm it
+   * closed.
+   */
+  quit(): Promise<{ readonly sessionsKept: number; readonly saved: boolean }>;
+  /**
+   * The relay handing its session over (docs/feat/detached-handover.md): from
+   * now on nothing is saved (the TUIs save it), so its last write precedes the
+   * ack and none follows it.
+   */
+  stopSaving(): void;
+  /** Every pending post-turn save done (bounded, never rejects). */
+  flushed(): Promise<void>;
+  /** `RemoteClient.modelIdle`: the model calls this runtime serves are over, or `ms` passed. */
+  modelIdle(ms: number): Promise<void>;
   /** `id`'s running background jobs, `null` if they cannot be read. */
   sessionJobs(id: string): Promise<number | null>;
   /** Who uses the daemon besides `id`, and how `id` stands, `null` if it cannot be told. */
@@ -101,6 +131,8 @@ function remoteJobsView(client: RemoteClient): JobController {
 
 /** How long `dispose` waits for the pending post-turn saves before closing the sessions. */
 export const FLUSH_ON_EXIT_TIMEOUT_MS = 3000;
+/** How long `quit` lets a model call it serves finish for the clients that stay (probe I). */
+export const QUIT_MODEL_DRAIN_MS = 10_000;
 
 /** A `SessionController` whose post-turn saves can be awaited. */
 export interface PersistingController extends SessionController {
@@ -112,6 +144,10 @@ export interface PersistingController extends SessionController {
   rename(title: string): Promise<string>;
   /** Resolves once no save is pending (never rejects). */
   flushed(): Promise<void>;
+  /** Read the history back and save it now (a no-op once closed); resolves as `flushed`. */
+  saveNow(): Promise<void>;
+  /** `RemoteSession.sessionId`. */
+  readonly sessionId: string | null;
   /** `RemoteSession.watch`; a foreign turn is saved at its end, a `history` at once. */
   watch: RemoteSession["watch"];
   /** `RemoteSession.open` (the eager attach of an `attach` session; else a no-op). */
@@ -152,6 +188,7 @@ export function persistingController(
 ): PersistingController {
   let running: Promise<void> | null = null;
   let again = false;
+  let closed = false;
   let lastTitle = initialTitle;
   const run = async (): Promise<void> => {
     do {
@@ -251,10 +288,20 @@ export function persistingController(
       return inner.onQueued(listener);
     },
     close() {
+      closed = true;
       unsubscribeTitle();
       void flushed().then(() => inner.close());
     },
     flushed,
+    saveNow() {
+      if (!closed) {
+        flush();
+      }
+      return flushed();
+    },
+    get sessionId() {
+      return inner.sessionId;
+    },
   };
 }
 
@@ -305,6 +352,12 @@ export interface LocalRuntimeDeps {
   readonly interactive?: boolean;
   /** The first session's uid (a detached run's, minted by its launcher); else a fresh one. */
   readonly sessionId?: string;
+  /**
+   * The sessions may be shared with other laptop clients (a TUI of a detached
+   * run, docs/feat/detached-handover.md): every close of them, `/clear`
+   * included, is `session/close{ifLast}`, so it never ends one under the others.
+   */
+  readonly shared?: true;
 }
 
 /** Handshake the daemon and return a session factory that persists each turn. */
@@ -346,23 +399,34 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
 
   let seed = deps.resume;
   let firstId = deps.sessionId;
-  const createSession = (): PersistingController => {
-    const record = seed;
-    seed = null; // only the first session resumes; /clear starts fresh
-    const uid = record?.id ?? firstId ?? crypto.randomUUID();
-    firstId = undefined;
+  /** The session `attachTo` opened: the next `createSession` hands it out. */
+  let attached: PersistingController | null = null;
+  const closeIfLast = deps.shared === true;
+  let saving = true;
+  const build = (
+    uid: string,
+    record: SessionRecord | null,
+    attach: boolean,
+  ): PersistingController => {
     const createdAt = record?.createdAt;
     // A resumed record's chosen title seeds the open that recreates it (pod,
     // worker: they keep nothing), so it is never regenerated over a rename.
     const title = record ? recordTitleState(record) : ({ source: "auto" } as const);
-    const session = client.newSession(
-      record?.messages,
-      uid,
-      title.source === "auto" ? undefined : { text: title.text, source: title.source },
-    );
+    // An attach seeds nothing: the session is live, its history the daemon's.
+    const session = attach
+      ? client.newSession(undefined, uid, undefined, { attach: {}, closeIfLast })
+      : client.newSession(
+          record?.messages,
+          uid,
+          title.source === "auto" ? undefined : { text: title.text, source: title.source },
+          { closeIfLast },
+        );
     const controller = persistingController(
       session,
       (messages, latest) => {
+        if (!saving) {
+          return; // handed over: the TUIs save it now
+        }
         deps.saver.save(
           recordFromSnapshot(
             { id: uid, messages },
@@ -381,10 +445,34 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     controllers.add(controller);
     return controller;
   };
+  const createSession = (): PersistingController => {
+    if (attached) {
+      const controller = attached;
+      attached = null;
+      return controller;
+    }
+    const record = seed;
+    seed = null; // only the first session resumes; /clear starts fresh
+    const uid = record?.id ?? firstId ?? crypto.randomUUID();
+    firstId = undefined;
+    return build(uid, record, false);
+  };
   const controllers = new Set<PersistingController>();
   const allFlushed = (): Promise<void> =>
     bounded(
       Promise.all([...controllers].map((c) => c.flushed())).then(() => undefined),
+      FLUSH_ON_EXIT_TIMEOUT_MS,
+    );
+  /** Leave every open session to the daemon (bounded). */
+  const detachAll = (): Promise<void> =>
+    bounded(
+      Promise.all(
+        client.liveSessionIds().map((id) =>
+          client.detachSession(id).catch((error: unknown) => {
+            deps.onPeerError?.(error instanceof Error ? error : new Error(String(error)));
+          }),
+        ),
+      ).then(() => undefined),
       FLUSH_ON_EXIT_TIMEOUT_MS,
     );
 
@@ -402,18 +490,60 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     },
     release: async () => {
       await allFlushed();
-      const detached = client.liveSessionIds().map((id) =>
-        client.detachSession(id).catch((error: unknown) => {
-          deps.onPeerError?.(error instanceof Error ? error : new Error(String(error)));
-        }),
-      );
-      await bounded(
-        Promise.all(detached).then(() => undefined),
-        FLUSH_ON_EXIT_TIMEOUT_MS,
-      );
+      await detachAll();
       client.close();
       deps.disposeTransport();
     },
+    attachTo: async (id, record) => {
+      const controller = build(id, record, true);
+      try {
+        await controller.open();
+      } catch (error) {
+        controllers.delete(controller);
+        controller.close?.();
+        // By the CODE, never the text.
+        if ((error as { code?: unknown } | null)?.code === DomainErrorCode.UnknownSession) {
+          return false;
+        }
+        throw error;
+      }
+      // The run's session is this one: the seed and the first uid are spent.
+      seed = null;
+      firstId = undefined;
+      attached = controller;
+      return true;
+    },
+    quit: async () => {
+      // A foreign turn is saved only at its end: the last read-back is what
+      // puts a running first turn's transcript on the laptop.
+      const answered = await withTimeout(
+        Promise.all([...controllers].map((c) => c.saveNow())),
+        FLUSH_ON_EXIT_TIMEOUT_MS,
+        "the last read-back",
+      ).then(
+        () => true,
+        () => false,
+      );
+      // On disk, before a close ends the daemon's copy (a pod keeps none). The
+      // drain lists a read-back that failed too (`saver.failed`).
+      const saved = answered && (await deps.saver.drain()).length === 0;
+      let sessionsKept: number;
+      if (saved) {
+        sessionsKept = await client.closeSessions();
+      } else {
+        sessionsKept = client.liveSessionIds().length;
+        await detachAll();
+      }
+      await client.modelIdle(QUIT_MODEL_DRAIN_MS);
+      client.close();
+      deps.disposeTransport();
+      return { sessionsKept, saved };
+    },
+    stopSaving: () => {
+      saving = false;
+    },
+    flushed: () => allFlushed(),
+    modelIdle: (ms) => client.modelIdle(ms),
     sessionJobs: async (id) => {
       try {
         const { sessions } = await client.sessionList();

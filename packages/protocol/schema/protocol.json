@@ -216,7 +216,11 @@
     },
     "CloseResult": {
       "additionalProperties": true,
-      "properties": {},
+      "properties": {
+        "closed": {
+          "type": "boolean"
+        }
+      },
       "type": "object"
     },
     "CompactParams": {

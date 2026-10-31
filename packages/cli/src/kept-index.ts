@@ -15,16 +15,18 @@ import { type KeptEntry, parseKeptEntry } from "./kept.ts";
 
 export const keptDir = (configDir: string): string => join(configDir, "kept");
 
+/** Where a workload lives, as one value: two equal keys are the same place. */
+export function locationKey(
+  at: Pick<KeptEntry, "engine" | "endpoint" | "context" | "server" | "namespace">,
+): string {
+  return [at.engine, at.endpoint ?? "", at.context ?? "", at.server ?? "", at.namespace ?? ""].join(
+    "\0",
+  );
+}
+
 /** The entry's file: one per (engine, location, name) — a re-record replaces it. */
 export function keptFileName(entry: KeptEntry): string {
-  const key = [
-    entry.engine,
-    entry.endpoint ?? "",
-    entry.context ?? "",
-    entry.server ?? "",
-    entry.namespace ?? "",
-    entry.name,
-  ].join("\0");
+  const key = `${locationKey(entry)}\0${entry.name}`;
   return `${createHash("sha256").update(key).digest("hex").slice(0, 16)}.json`;
 }
 

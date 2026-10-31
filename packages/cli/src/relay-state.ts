@@ -27,7 +27,15 @@ export type RelayEvent =
   | { readonly type: "busy" }
   /** Why the workload stays: `detail` of the state left behind. */
   | { readonly type: "note"; readonly detail: string }
-  | { readonly type: "tick"; readonly now: number };
+  | { readonly type: "tick"; readonly now: number }
+  /** A TUI prepared a hand-over (docs/feat/detached-handover.md): no idle exit. */
+  | { readonly type: "handover_prepared" }
+  /** It aborted (its socket closed, the lease ran out, a stop): the relay owns it again. */
+  | { readonly type: "handover_aborted" }
+  /** Committed: the TUIs own the session; the relay drains and leaves, removing nothing. */
+  | { readonly type: "handed_over" }
+  /** The model calls the relay served are over (or past their bound): leave. */
+  | { readonly type: "drained" };
 
 export interface RelayModel {
   readonly turn: "none" | "running" | "over";
@@ -45,6 +53,8 @@ export interface RelayModel {
   readonly exitNow: boolean;
   /** When the exit is due; absent while something holds it back. */
   readonly exitAt?: number;
+  /** The hand-over to a TUI: `prepared` holds any idle exit, `done` leaves through the drain. */
+  readonly handover: "none" | "prepared" | "done";
 }
 
 export interface RelayView {
@@ -61,6 +71,7 @@ export const initialRelay: RelayModel = {
   linkStopped: false,
   rest: "idle",
   exitNow: false,
+  handover: "none",
 };
 
 /** `model` with an optional field gone. */
@@ -127,9 +138,21 @@ export function relayStep(model: RelayModel, event: RelayEvent): RelayModel {
       return without(model, "exitAt");
     case "note":
       return { ...model, detail: untrustedText(event.detail) };
+    case "handover_prepared":
+      return without({ ...model, handover: "prepared" }, "exitAt");
+    case "handover_aborted":
+      return model.handover === "prepared" ? { ...model, handover: "none" } : model;
+    case "handed_over":
+      return without({ ...model, handover: "done" }, "exitAt");
+    case "drained":
+      return { ...model, exitNow: true };
     case "tick": {
       if (model.stopping) {
         return { ...model, exitAt: model.exitAt ?? event.now + RELAY_STOP_BOUND_MS };
+      }
+      if (model.handover !== "none") {
+        // Prepared: the attacher decides; done: only the drain ends it.
+        return without(model, "exitAt");
       }
       const idle = model.turn === "over" && model.asks === 0 && model.jobs === 0;
       return idle
@@ -165,7 +188,10 @@ export function relayView(model: RelayModel): RelayView {
 
 /** Caffeinate (DR-9): a held ask, a background job or a stop lets the Mac sleep. */
 export function wantsAwake(model: RelayModel): boolean {
-  return model.turn === "running" && model.asks === 0 && !model.stopping;
+  // Handed over: keep-awake is the relay's only (DR-9), and it is leaving.
+  return (
+    model.turn === "running" && model.asks === 0 && !model.stopping && model.handover !== "done"
+  );
 }
 
 /** Who uses the resident, read fresh right before a removal. `others`: sessions in use. */
@@ -219,6 +245,14 @@ export function needsUse(model: RelayModel, keep: boolean): boolean {
  * only the removal of that same workload.
  */
 export function exitPlan(model: RelayModel, keep: boolean, use: ResidentUse | null): ExitPlan {
+  // Handed over (docs/feat/detached-handover.md): the TUIs own the workload now.
+  if (model.handover === "done") {
+    return { kind: "leave" };
+  }
+  // A hand-over in flight never meets a removal; a stop or a stopped link still exits.
+  if (model.handover === "prepared" && !model.stopping && !model.linkStopped) {
+    return { kind: "hold" };
+  }
   if (keep || model.linkStopped) {
     return { kind: "leave" };
   }

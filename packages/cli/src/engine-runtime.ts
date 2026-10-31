@@ -240,6 +240,35 @@ export function armExitNet(host: EngineHost, name: string): () => void {
   };
 }
 
+/**
+ * `armExitNet` for a TUI of a keep=false detached run (docs/feat/detached-handover.md):
+ * every TUI of the run arms it, since any may be the last; it fires only when
+ * `othersAlive()` (asked synchronously, at exit: the presence files) says no
+ * other TUI of the run lives. So the last one's crash deletes, as a plain
+ * `run` does, and another one's never deletes under the rest. Returns the disarm.
+ */
+export function armSharedExitNet(
+  host: EngineHost,
+  name: string,
+  othersAlive: () => boolean,
+): () => void {
+  const fire = (): void => {
+    let others = true;
+    try {
+      others = othersAlive();
+    } catch {
+      // Cannot tell: the workload stays (a leftover is one `rm` away).
+    }
+    if (!others) {
+      host.removeBestEffort(name);
+    }
+  };
+  process.once("exit", fire);
+  return () => {
+    process.off("exit", fire);
+  };
+}
+
 /** A workload `provisionWorkload` made ready: its binary installed, no daemon started. */
 export interface ProvisionedWorkload {
   readonly name: string;
@@ -488,6 +517,8 @@ export interface EngineAttachRuntimeDeps {
   readonly interactive?: boolean;
   /** `createLocalRuntime`'s: the first session's uid. */
   readonly sessionId?: string;
+  /** `createLocalRuntime`'s: a TUI of a detached run, whose sessions others share. */
+  readonly shared?: true;
 }
 
 /**
@@ -773,6 +804,7 @@ export async function attachEngineRuntime(
       ...(deps.notify ? { notify: deps.notify } : {}),
       ...(deps.interactive !== undefined ? { interactive: deps.interactive } : {}),
       ...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
+      ...(deps.shared ? { shared: true as const } : {}),
     });
   } catch (error) {
     status?.finish();

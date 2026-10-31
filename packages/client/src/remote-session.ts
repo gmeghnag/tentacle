@@ -149,6 +149,11 @@ export class RemoteSession implements SessionStreamListener {
   /** The memoized eager attach (`open`). */
   private attaching: Promise<void> | null = null;
   /**
+   * A session other clients may share (a detached run's TUIs): `close()` (the
+   * `/clear`) is `session/close{ifLast}`, so it never ends it under them.
+   */
+  private readonly closeIfLast: boolean;
+  /**
    * The turn the daemon's stream says runs (own or foreign): set by a
    * `turn_start` or a reset that names one, cleared by its `turn_end`. What
    * steering, send-now and the activity cancel bind to.
@@ -177,12 +182,14 @@ export class RemoteSession implements SessionStreamListener {
     desiredId?: string,
     seedTitle?: SeedTitle,
     attach?: { readonly reopen?: boolean },
+    closeIfLast = false,
   ) {
     this.client = client;
     this.seedMessages = seedMessages;
     this.desiredId = desiredId;
     this.seedTitle = seedTitle;
     this.attach = attach;
+    this.closeIfLast = closeIfLast;
   }
 
   /**
@@ -387,6 +394,7 @@ export class RemoteSession implements SessionStreamListener {
    * End the remote session daemon-side (its turn, its background jobs): the
    * TUI's `/clear`. Idempotent; fire-and-forget. While the first `send` is
    * still opening it, the close follows the open. A no-op before any send.
+   * Built with `closeIfLast`: only detached while another client is attached.
    */
   close(): void {
     if (this.closed) {
@@ -395,11 +403,12 @@ export class RemoteSession implements SessionStreamListener {
     this.closed = true;
     this.unsubscribeQueue?.();
     this.unsubscribeQueue = null;
+    const opts = this.closeIfLast ? { ifLast: true } : {};
     if (this.id) {
-      void this.client.closeSession(this.id);
+      void this.client.closeSession(this.id, opts);
     } else if (this.opening) {
       this.opening.then(
-        (id) => this.client.closeSession(id),
+        (id) => this.client.closeSession(id, opts),
         () => {},
       );
     }

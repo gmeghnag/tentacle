@@ -57,6 +57,34 @@ describe("openTuiSessions", () => {
     expect(out).toEqual([]);
   });
 
+  test("`live` (a detached run's session): a uid with no record says nothing; its record still loads", async () => {
+    // docs/feat/detached-handover.md. Mutation: ignore `live` → "starting fresh" for a live session.
+    const uid = "77777777-7777-4777-8777-777777777777";
+    const out: string[] = [];
+    const root = join(dir, "live");
+    const none = opened(
+      await openTuiSessions({ root, cwd: "/w" }, { wanted: true, uid, live: true }, (l) =>
+        out.push(l),
+      ),
+    );
+    expect(none.resume).toBeNull();
+    expect(out).toEqual([]);
+    await new JsonSessionStore(join(root, projectKey("/w"))).save(rec(uid, 5));
+    const some = opened(
+      await openTuiSessions({ root, cwd: "/w" }, { wanted: true, uid, live: true }, (l) =>
+        out.push(l),
+      ),
+    );
+    expect(some.resume?.id).toBe(uid);
+    // Without `live`, the absent line stands.
+    await openTuiSessions(
+      { root, cwd: "/w" },
+      { wanted: true, uid: "88888888-8888-4888-8888-888888888888" },
+      (l) => out.push(l),
+    );
+    expect(out.join("")).toContain("starting fresh");
+  });
+
   test("a startup notice (model.titleModel without autoTitle) reaches the TUI once, never a raw write", async () => {
     // docs/feat/session-titles.md follow-up 1. Mutation: drop the queueing → the TUI gets nothing.
     const out: string[] = [];

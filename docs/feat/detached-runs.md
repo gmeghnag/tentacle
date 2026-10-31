@@ -1,6 +1,6 @@
 # feat/detached-runs — leave a `run` working with no TUI, re-attach later
 
-> **Status:** execution — S1 `pod-daemon-resident` DONE (merged 2026-10-30, no tag; fix rounds 1–6 reviewed, live-tested); S2 `detached-relay` DONE (merged 2026-10-31); S2b + S4 `detached-relay-lifecycle` built, awaiting Review; next S3 (release with protocol 14 after S3)
+> **Status:** execution — S1 `pod-daemon-resident` DONE (merged 2026-10-30, no tag; fix rounds 1–6 reviewed, live-tested); S2 `detached-relay` DONE (merged 2026-10-31); S2b + S4 `detached-relay-lifecycle` DONE (merged `4f0fc2f` 2026-10-31); S3 `detached-handover` implemented 2026-10-31, awaiting fresh-context Review (as-built and the DR notes it amends: `docs/feat/detached-handover.md` — DR-1 amended by Q3, DR-5 by Q1, DR-8 quit replaced by Q1; control socket = `prepare`/`commit` only, `<runDir>/control.sock`); next S5 (release with protocol 14 after S3)
 > **Branch:** `feat/detached-runs` (promoted from `docs/eval/`; the slices below are one branch each, sequential — see "Slices")
 > **Type:** feat · **Size:** L overall = 5 slices (S1 L, S2 M, S3 M, S4 S, S5 M; no slice is XL) · **Blast:** load-bearing (S1, S2, S3, S5; S4 contained) · **Suited:** owner assigns; per AGENTS §10 every load-bearing slice gets a strong model + a mandatory fresh-context Review, S4 a standard Review
 
