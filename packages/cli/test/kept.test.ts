@@ -15,6 +15,7 @@ import {
   renderVerbose,
   resolveByName,
   sortKept,
+  statusCell,
   whereOf,
 } from "../src/kept.ts";
 
@@ -123,6 +124,71 @@ describe("formatting", () => {
     expect(formatMount("/Users/me", HOME)).toBe("~");
     expect(formatMount("/Users/meow/x", HOME)).toBe("/Users/meow/x");
     expect(formatMount(undefined, HOME)).toBe("—");
+  });
+});
+
+describe("the detached cell (docs/feat/detached-relay-lifecycle.md L28)", () => {
+  const e = entry({ name: "box", engine: "docker", endpoint: "unix:///var/run/docker.sock" });
+  const state = { kind: "state", state: "running", labels: {} } as const;
+  const alive = {
+    text: "detached · waiting: permission (shell)",
+    pid: 7,
+    sessionId: "u1",
+    log: "/k/relay.log",
+    keep: false,
+  };
+  const dead = { text: "relay lost", log: "/k/relay.log", keep: false };
+
+  test("relay alive: its text; dead: the engine state, then its text", () => {
+    expect(statusCell({ entry: e, status: state, relay: alive })).toBe(alive.text);
+    expect(statusCell({ entry: e, status: state, relay: dead })).toBe("running · relay lost");
+    expect(statusCell({ entry: e, status: state })).toBe("running");
+  });
+
+  test("the engine's word wins for gone, foreign and unreachable", () => {
+    // Mutation: the relay text over `gone`.
+    expect(statusCell({ entry: e, status: { kind: "gone" }, relay: alive })).toBe("gone");
+    expect(statusCell({ entry: e, status: { kind: "foreign" }, relay: alive })).toBe(
+      "not-tentacle",
+    );
+    expect(
+      statusCell({ entry: e, status: { kind: "unreachable", reason: "x" }, relay: alive }),
+    ).toBe("unreachable");
+  });
+
+  test("the table and -v show it; -v adds relay, session, log, removal", () => {
+    const row = { entry: e, status: state, relay: alive };
+    expect(renderTable([row], NOW, HOME).at(-1)).toEndWith(alive.text);
+    const text = renderVerbose([row], NOW, HOME).join("\n");
+    expect(text).toContain(`  status    ${alive.text}`);
+    expect(text).toContain("  relay     pid 7");
+    expect(text).toContain("  session   u1");
+    expect(text).toContain("  log       /k/relay.log");
+    expect(text).toContain("  removal   when the run ends");
+  });
+
+  test("-v: a kept run has no removal line; a dead relay no pid, and nothing will remove it", () => {
+    const kept = renderVerbose(
+      [{ entry: e, status: state, relay: { ...alive, keep: true } }],
+      NOW,
+      HOME,
+    ).join("\n");
+    expect(kept).not.toContain("removal");
+    const lost = renderVerbose([{ entry: e, status: state, relay: dead }], NOW, HOME).join("\n");
+    expect(lost).toContain("  log       /k/relay.log");
+    expect(lost).not.toContain("  relay ");
+    expect(lost).not.toContain("removal");
+    const plain = renderVerbose([{ entry: e, status: state }], NOW, HOME).join("\n");
+    expect(plain).not.toContain("  log ");
+  });
+
+  test("-v: the session id and the log path are sanitised", () => {
+    const text = renderVerbose(
+      [{ entry: e, status: state, relay: { ...alive, sessionId: "u\u001b[2J" } }],
+      NOW,
+      HOME,
+    ).join("\n");
+    expect(text).not.toContain("\u001b");
   });
 });
 

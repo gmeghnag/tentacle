@@ -152,6 +152,8 @@ export type SkillSummary = z.infer<typeof SkillSummarySchema>;
 export const InitializeResultSchema = z.object({
   protocolVersion: z.number().int(),
   agentCapabilities: AgentCapabilitiesSchema,
+  /** Who answers: the daemon's own build, for `--resident-status`. Absent from an older one. */
+  agentInfo: z.object({ version: z.string() }).optional(),
 });
 export type InitializeResult = z.infer<typeof InitializeResultSchema>;
 

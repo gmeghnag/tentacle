@@ -85,6 +85,7 @@ function depsFor(
     onStatus?: (text: string) => void;
     binPath?: string;
     probeStatus?: PodProbe["status"];
+    beforeCommit?: () => Promise<void>;
   } = {},
 ): PodBinaryDeps {
   return {
@@ -98,6 +99,7 @@ function depsFor(
     resolveBinary: opts.resolveBinary ?? (async () => new Uint8Array([1, 2, 3])),
     log: opts.log ?? (() => {}),
     ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
+    ...(opts.beforeCommit ? { beforeCommit: opts.beforeCommit } : {}),
   };
 }
 
@@ -255,6 +257,67 @@ describe("injectAgentBinary", () => {
     expect(logs.some((l) => l.includes("x64"))).toBe(true);
     expect(logs.some((l) => l.includes("injecting tentacle"))).toBe(true);
     expect(result).toBe("tentacle 1.2.3");
+  });
+
+  test("L9 a hook: stage, the hook, then the rename as its own exec, then the verify", async () => {
+    // Mutation: run the hook after the rename → the old binary it needs is gone.
+    const bytes = new Uint8Array([1, 2, 3]);
+    const seen: string[] = [];
+    const kube = new FakeKube([ok(), ok(), ok("tentacle 1.2.3\n")]);
+    await injectAgentBinary(
+      depsFor(kube, {
+        resolveBinary: async () => bytes,
+        beforeCommit: async () => {
+          seen.push(`hook after ${kube.calls.length} exec`);
+        },
+      }),
+    );
+    expect(seen).toEqual(["hook after 1 exec"]);
+    expect(callAt(kube.calls, 0).command[2]).toBe(
+      `mkdir -p /usr/local/bin && head -c 3 > ${POD_BIN_PATH}.new && chmod 755 ${POD_BIN_PATH}.new`,
+    );
+    expect(callAt(kube.calls, 0).input).toEqual(bytes);
+    expect(callAt(kube.calls, 1).command).toEqual([
+      "sh",
+      "-c",
+      `mv -f ${POD_BIN_PATH}.new ${POD_BIN_PATH}`,
+    ]);
+    expect(callAt(kube.calls, 2).command).toEqual([POD_BIN_PATH, "--version"]);
+  });
+
+  test("L9 a hook that throws: `.new` is removed, no rename, the error rethrown as is", async () => {
+    const refused = new Error("a client attached");
+    const kube = new FakeKube([ok(), ok()]);
+    const error = await injectAgentBinary(
+      depsFor(kube, {
+        beforeCommit: () => Promise.reject(refused),
+      }),
+    ).catch((e: unknown) => e);
+    expect(error).toBe(refused);
+    expect(kube.calls).toHaveLength(2);
+    expect(callAt(kube.calls, 1).command).toEqual(["sh", "-c", `rm -f ${POD_BIN_PATH}.new`]);
+  });
+
+  test("L9 a stage that fails never reaches the hook", async () => {
+    let hooked = false;
+    const kube = new FakeKube([fail("Read-only file system")]);
+    await expect(
+      injectAgentBinary(
+        depsFor(kube, {
+          beforeCommit: async () => {
+            hooked = true;
+          },
+        }),
+      ),
+    ).rejects.toThrow("failed to inject tentacle (exit 1): Read-only file system");
+    expect(hooked).toBe(false);
+  });
+
+  test("L9 a rename that fails is an injection failure", async () => {
+    const kube = new FakeKube([ok(), fail("mv: Operation not permitted")]);
+    await expect(
+      injectAgentBinary(depsFor(kube, { beforeCommit: async () => {} })),
+    ).rejects.toThrow("failed to inject tentacle (exit 1): mv: Operation not permitted");
   });
 
   test("--bin-dir: installs to and verifies the custom absolute path (read-only rootfs)", async () => {

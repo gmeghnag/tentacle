@@ -29,6 +29,7 @@ import {
   parseProcStat,
   residentCommand,
   residentGuard,
+  residentSkewWarning,
   residentSocketPath,
   residentStateDir,
   residentStatus,
@@ -38,6 +39,7 @@ import {
   selfCommand,
   serveResident,
 } from "../src/pod-resident.ts";
+import { APP_VERSION } from "../src/version.ts";
 
 // The resident pod daemon + its bridge (docs/feat/detached-runs.md S1), on
 // REAL unix sockets in a temp dir. Each test names its mutation (AGENTS §9).
@@ -72,9 +74,10 @@ function slowModel(n: number): ModelProvider {
   };
 }
 
-function podHost(n = 40): SessionHost {
+function podHost(n = 40, version?: string): SessionHost {
   return new SessionHost({
     defaultCwd: "/pod/work",
+    ...(version !== undefined ? { identity: { tentacle: version, kind: "container" } } : {}),
     createAgent: () => ({
       agent: new Agent({ model: slowModel(n), tools: new ToolRegistry(), env: noopEnv }),
       permissions: new PermissionBroker(),
@@ -501,7 +504,7 @@ describe("the resident (`serve --resident`)", () => {
     /** Until a resident answers on `socket` (the one that won may still be binding). */
     async function serving(socket: string): Promise<void> {
       const deadline = Date.now() + 10_000;
-      while (!(await residentStatus(socket, "v").catch(() => ({ resident: false }))).resident) {
+      while (!(await residentStatus(socket).catch(() => ({ resident: false }))).resident) {
         if (Date.now() > deadline) throw new Error(`no resident on ${socket}`);
         await tick(20);
       }
@@ -665,19 +668,47 @@ describe("the resident (`serve --resident`)", () => {
 
   test("--resident-status: counts sessions, running turns and attached clients; nobody listening → resident:false", async () => {
     const dir = stateDir();
-    expect(await residentStatus(sockIn(dir), "9.9.9")).toEqual({ resident: false });
+    expect(await residentStatus(sockIn(dir))).toEqual({ resident: false });
     const host = podHost(200);
     const handle = await resident(host, dir);
     const a = await socketClient(handle.socketPath);
     await a.open({ sessionId: "X", create: true });
     await a.prompt("X", "t1");
     await until(() => a.updates.length >= 2);
-    expect(await residentStatus(handle.socketPath, "9.9.9")).toEqual({
+    expect(await residentStatus(handle.socketPath)).toEqual({
       resident: true,
-      version: "9.9.9",
       sessions: 1,
       running: 1,
       attached: 1,
+    });
+    a.socket.destroy();
+  });
+
+  test("L2 --resident-status: the version is the RESIDENT's, never the asker's; an old resident says none", async () => {
+    // Mutation: read `APP_VERSION` → this process's version, the bug of the TODO.
+    const dir = stateDir();
+    const handle = await resident(podHost(200, "0.2.0"), dir);
+    const status = await residentStatus(handle.socketPath);
+    expect(status.version).toBe("0.2.0");
+    expect(status.version).not.toBe(APP_VERSION);
+
+    const old = await resident(podHost(200), stateDir());
+    const silent = await residentStatus(old.socketPath);
+    expect(silent.resident).toBe(true);
+    expect("version" in silent).toBe(false);
+  });
+
+  test("L3 busy: the guard's refusal names the RESIDENT's version, from the real report", async () => {
+    // Mutation: name the asker's version in `residentStatusReport`.
+    const dir = stateDir();
+    const handle = await resident(podHost(200, "0.2.0"), dir);
+    const a = await socketClient(handle.socketPath);
+    await a.open({ sessionId: "X", create: true });
+    const report = await residentStatusReport(handle.socketPath);
+    expect(residentGuard({ exitCode: report.exitCode, stdout: report.line }, "w")).toEqual({
+      kind: "refuse",
+      message:
+        "a detached run is using tentacle 0.2.0 in w — wait for it, `tentacle rm w`, or attach with tentacle 0.2.0",
     });
     a.socket.destroy();
   });
@@ -721,13 +752,13 @@ describe("pure helpers", () => {
     const server: Server = createServer((socket) => socket.destroy());
     await new Promise<void>((resolve) => server.listen(sockIn(dir), resolve));
     try {
-      const report = await residentStatusReport(sockIn(dir), "9.9.9");
+      const report = await residentStatusReport(sockIn(dir));
       expect(report.exitCode).toBe(1);
       expect(JSON.parse(report.line)).toMatchObject({ resident: null });
       expect(residentGuard({ exitCode: report.exitCode, stdout: report.line }, "w").kind).toBe(
         "refuse",
       );
-      expect(await residentStatusReport(join(dir, "none.sock"), "9.9.9")).toEqual({
+      expect(await residentStatusReport(join(dir, "none.sock"))).toEqual({
         line: JSON.stringify({ resident: false }),
         exitCode: 0,
       });
@@ -766,6 +797,33 @@ describe("pure helpers", () => {
           "a detached run is using tentacle 0.2.0 in w — wait for it, `tentacle rm w`, or attach with tentacle 0.2.0",
       });
     }
+  });
+
+  test("residentSkewWarning: a resident of another or unknown build warns, sanitised; the same build and a failed probe are silent", () => {
+    // Mutation: skip `untrustedText` → the pod's ESC reaches the terminal.
+    const say = (status: object | null, expected: string | undefined) =>
+      residentSkewWarning(
+        status === null ? null : { stdout: `${JSON.stringify(status)}\n` },
+        "w",
+        "/usr/local/bin/tentacle",
+        expected,
+      );
+    expect(say({ resident: true, version: "0.3.0" }, "0.3.0")).toBeUndefined();
+    expect(say({ resident: false }, "0.3.0")).toBeUndefined();
+    expect(say({ resident: null, error: "boom" }, "0.3.0")).toBeUndefined();
+    expect(say(null, "0.3.0")).toBeUndefined();
+    expect(residentSkewWarning({ stdout: "not json" }, "w", "/b", "0.3.0")).toBeUndefined();
+
+    expect(say({ resident: true, version: "0.2.0" }, "0.3.0")).toContain(
+      "w already runs a tentacle resident 0.2.0, this laptop 0.3.0",
+    );
+    expect(say({ resident: true }, "0.3.0")).toContain("resident of an unknown version");
+    expect(say({ resident: true, version: 7 }, "0.3.0")).toContain("of an unknown version");
+    const hostile = say({ resident: true, version: "0.2\u001b[2J" }, "0.3.0");
+    expect(hostile).toContain("0.2 [2J");
+    expect(hostile).not.toContain("\u001b");
+    // From source there is no fixed answer: a resident up is still said.
+    expect(say({ resident: true, version: "dev" }, undefined)).toContain("resident dev:");
   });
 
   test("residentCommand / selfCommand: the resident inherits the bridge's model flags; from source it is `bun <script>`", () => {

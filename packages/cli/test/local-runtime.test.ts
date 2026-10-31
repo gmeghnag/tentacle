@@ -216,8 +216,15 @@ describe("createLocalRuntime (local over RPC)", () => {
     await drain(runtime.createSession().send("one"));
     expect(await runtime.sessionJobs("11111111-1111-4111-8111-111111111111")).toBe(1);
     expect(await runtime.sessionJobs("no-such-session")).toBeNull();
+    expect(await runtime.residentUse("11111111-1111-4111-8111-111111111111")).toEqual({
+      jobs: 1,
+      running: false,
+      others: 0,
+    });
+    expect(await runtime.residentUse("no-such-session")).toBeNull();
     await runtime.dispose();
     expect(await runtime.sessionJobs("11111111-1111-4111-8111-111111111111")).toBeNull();
+    expect(await runtime.residentUse("11111111-1111-4111-8111-111111111111")).toBeNull();
   });
 
   test("R8 sessionId: the first session's record carries it, a second one gets a fresh id", async () => {

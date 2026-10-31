@@ -8,7 +8,7 @@ import { DELETE_POD_SUBCOMMAND } from "@tentacle/k8s";
 import type { EngineHost } from "../src/engine-host.ts";
 import { provisionWorkload } from "../src/engine-runtime.ts";
 import { main } from "../src/index.ts";
-import { keptDir as keptIndexDir, recordKept } from "../src/kept-index.ts";
+import { keptDir as keptIndexDir, readKept, recordKept } from "../src/kept-index.ts";
 import type { KeptEntry } from "../src/kept.ts";
 import {
   type OwnerRecord,
@@ -535,6 +535,7 @@ describe("cli main: --engine", () => {
       const calls = { provision: 0, spawn: 0, runtime: 0 };
       let spec: RelaySpec | undefined;
       let hint: string | undefined;
+      let removedAtEnd: boolean | undefined;
       const path = join(dir, "config", "config.jsonc");
       await mkdir(join(dir, "config"), { recursive: true });
       await writeFile(path, JSON.stringify(over.keep === undefined ? {} : { keep: over.keep }));
@@ -548,6 +549,7 @@ describe("cli main: --engine", () => {
         provisionWorkload: async (_config, deps) => {
           calls.provision += 1;
           hint = deps.keepHint?.("c1");
+          removedAtEnd = deps.removedAtEnd;
           // The real gate: no `keepHint`, no index entry (and the exit net armed).
           if (over.record !== false && deps.keepHint) {
             deps.recordKept?.("c1");
@@ -562,7 +564,7 @@ describe("cli main: --engine", () => {
         },
       });
       await rm(path, { force: true });
-      return { code, text: out.join(""), calls, spec, hint };
+      return { code, text: out.join(""), calls, spec, hint, removedAtEnd };
     };
     const refused = { provision: 0, spawn: 0, runtime: 0 };
 
@@ -584,11 +586,6 @@ describe("cli main: --engine", () => {
         [...base, "--detach", "--prompt", "hi", "--continue"],
         "--detach cannot resume",
       ],
-      [
-        "--detach --keep=false",
-        [...base, "--detach", "--prompt", "hi", "--keep=false"],
-        "--detach keeps its workload",
-      ],
     ] as const) {
       test(`${why}: a usage error, nothing created`, async () => {
         await withEnv(unreachable, async () => {
@@ -601,12 +598,92 @@ describe("cli main: --engine", () => {
       });
     }
 
-    test("`keep: false` in the config refuses too, naming it", async () => {
+    test("L12 --keep=false, or `keep: false` in the config: the spec says so, and the launch line", async () => {
       await withEnv(unreachable, async () => {
-        const r = await detached([...base, "--detach", "--prompt", "hi"], { keep: false });
-        expect(r.code).toBe(1);
-        expect(r.text).toContain("--detach keeps its workload");
-        expect(r.calls).toEqual(refused);
+        for (const r of [
+          await detached([...base, "--detach", "--prompt", "hi", "--keep=false"]),
+          await detached([...base, "--detach", "--prompt", "hi"], { keep: false }),
+        ]) {
+          expect(r.code).toBe(0);
+          expect(r.calls).toEqual({ provision: 1, spawn: 1, runtime: 0 });
+          expect(r.spec?.keep).toBe(false);
+          expect(r.text).toContain("removed when the run goes idle");
+          expect(r.text).toContain(`tentacle --resume ${r.spec?.sessionId}`);
+          expect(r.text).not.toContain("Re-attach once it is done");
+          expect(r.text).not.toContain("undefined");
+          expect(r.removedAtEnd).toBe(true);
+        }
+        const kept = await detached([...base, "--detach", "--prompt", "hi"]);
+        expect(kept.spec?.keep).toBe(true);
+        expect(kept.removedAtEnd).toBeUndefined();
+        expect(kept.text).not.toContain("removed when the run goes idle");
+      });
+      rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
+    });
+
+    test("L12 --keep=false through the REAL provisionWorkload: labelled, recorded, no net, the line", async () => {
+      // Mutation: drop `kept.keep || detach` → no labels, no entry, the F8 `undefined --resume`.
+      // Mutation: no hint for this run → the REAL `provisionWorkload` arms the exit net.
+      await withEnv(unreachable, async () => {
+        const fake = {
+          noun: "container",
+          where: "docker",
+          defaultContainer: undefined,
+          create: async (
+            _name: string,
+            _image: string,
+            options: { labels?: Record<string, string> },
+          ) => {
+            labels.push(options.labels ?? {});
+          },
+          waitForReady: async () => {
+            throw new Error("not ready");
+          },
+          remove: async (name: string) => void removed.push(`remove:${name}`),
+          removeBestEffort: (name: string) => void removed.push(`besteffort:${name}`),
+        } as unknown as EngineHost;
+        const labels: Record<string, string>[] = [];
+        const removed: string[] = [];
+        const before = process.listeners("exit");
+        const out: string[] = [];
+        const code = await main(
+          ["bun", "cli", ...base, "--detach", "--prompt", "hi", "--keep=false", "box"],
+          {
+            write: (t) => out.push(t),
+            provisionWorkload: (config, deps) =>
+              provisionWorkload(config, { ...deps, host: fake, appVersion: "dev" }),
+          },
+        );
+        const armed = process.listeners("exit").filter((l) => !before.includes(l));
+        for (const listener of armed) {
+          process.off("exit", listener);
+        }
+        expect(code).toBe(1);
+        expect(armed).toEqual([]);
+        expect(removed).toEqual([]);
+        expect(labels[0]).toMatchObject({ "tentacle.kept": "true" });
+        const text = out.join("");
+        expect(text).toContain("box stays up: the run never started — tentacle attach");
+        expect(text).not.toContain("kept box");
+        expect(text).not.toContain("undefined");
+        expect(readKept(join(dir, "config", "kept")).entries.map((e) => e.entry.name)).toEqual([
+          "box",
+        ]);
+      });
+      rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
+    });
+
+    test("--keep=false with no --detach is unchanged: no labels, no index, the net", async () => {
+      await withEnv(unreachable, async () => {
+        const hints: (string | undefined)[] = [];
+        await main(["bun", "cli", ...base, "--keep=false"], {
+          write: () => {},
+          startEngineRuntime: async (_config, deps) => {
+            hints.push(deps.keepHint?.("c1"), deps.labels?.["tentacle.kept"]);
+            throw new Error("stop here");
+          },
+        });
+        expect(hints).toEqual([undefined, undefined]);
       });
     });
 
@@ -640,7 +717,7 @@ describe("cli main: --engine", () => {
 
     test("the launcher never arms the exit net: its own exit must not delete the workload", async () => {
       // Mutation: `keepHint: undefined` in the detach call → the REAL
-      // `provisionWorkload` registers `registerExitCleanup` and removes on failure.
+      // `provisionWorkload` arms `armExitNet` and removes on failure.
       await withEnv(unreachable, async () => {
         const removed: string[] = [];
         const fake = {

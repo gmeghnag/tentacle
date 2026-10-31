@@ -267,7 +267,12 @@ assume.
   create+delete); when deleting, the delete-on-exit net (`removeBestEffort`) survives
   `process.exit`/Ctrl+C via a detached child (`exit` handlers still fire; SIGINT
   routes through it). With keep (the default): no net, no delete, and the
-  re-attach command is printed. `attach` is
+  re-attach command is printed. A `run --detach --keep=false` is the one other
+  owner of that net and of a delete: its launcher never arms or deletes, its
+  relay arms the net under its lock, and removes it only through `exitPlan` (a
+  stop, or a clean idle that one fresh read shows nobody else uses) +
+  `removeVerifiedKept`, the net staying ARMED until that delete is done — so a
+  crash mid-delete still converges. `attach` is
   user-owned: never create, start or delete, no exit net (`attach <name>`'s
   kept-index lookup only picks the engine/location). `rm <name>` removes only a
   workload the engine says carries tentacle's managed + `tentacle.kept` labels,

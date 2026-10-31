@@ -34,3 +34,33 @@ describe("keep", () => {
     expect(DEFAULT_CONFIG_JSONC).toContain('// "keep": true,');
   });
 });
+
+// `detach.keepAwake` (docs/feat/detached-relay-lifecycle.md DR-9): read by the
+// relay itself, so it needs no spec field. Default on (absent here; the relay applies it).
+describe("L26 detach.keepAwake", () => {
+  test("a boolean in the file and in a profile; anything else is an error", () => {
+    expect(FileConfigSchema.safeParse({ detach: { keepAwake: false } }).success).toBe(true);
+    expect(
+      FileConfigSchema.safeParse({ profiles: { p: { detach: { keepAwake: true } } } }).success,
+    ).toBe(true);
+    expect(FileConfigSchema.safeParse({ detach: { keepAwake: "no" } }).success).toBe(false);
+  });
+
+  test("resolved from the file; absent when unset; a profile's wins", () => {
+    const file = FileConfigSchema.parse({
+      detach: { keepAwake: true },
+      profiles: { p: { detach: { keepAwake: false } } },
+    });
+    expect(resolveConfig({ fileConfig: file, env: {}, defaultCwd: "/w" }).detach).toEqual({
+      keepAwake: true,
+    });
+    const plain = resolveConfig({ fileConfig: {}, env: {}, defaultCwd: "/w" });
+    expect("detach" in plain).toBe(false);
+    const applied = applyProfile(file, "p");
+    expect(applied.ok && applied.config.detach).toEqual({ keepAwake: false });
+  });
+
+  test("the config template documents the key", () => {
+    expect(DEFAULT_CONFIG_JSONC).toContain('// "detach": { "keepAwake": true },');
+  });
+});

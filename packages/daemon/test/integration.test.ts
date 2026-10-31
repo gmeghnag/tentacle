@@ -134,6 +134,32 @@ async function runTurn(
 }
 
 describe("daemon ↔ client (in-memory)", () => {
+  test("L1 initialize: agentInfo.version comes from the daemon's identity, absent with none", async () => {
+    // Mutation: hard-code the version.
+    const initialized = async (identity?: { tentacle: string; kind: "container" }) => {
+      const host = new SessionHost({
+        defaultCwd: "/tmp/daemon-work",
+        createAgent: () => {
+          throw new Error("unused");
+        },
+        ...(identity ? { identity } : {}),
+      });
+      const [daemonCh, clientCh] = createChannelPair();
+      new Connection(daemonCh, host);
+      return (await new RpcPeer(clientCh, {}).request("initialize", INIT)) as Record<
+        string,
+        unknown
+      >;
+    };
+    expect((await initialized({ tentacle: "1.2.3", kind: "container" })).agentInfo).toEqual({
+      version: "1.2.3",
+    });
+    expect((await initialized({ tentacle: "4.5.6", kind: "container" })).agentInfo).toEqual({
+      version: "4.5.6",
+    });
+    expect("agentInfo" in (await initialized())).toBe(false);
+  });
+
   test("handshake → open → prompt streams updates and resolves the stop reason", async () => {
     const model = new ScriptedProvider([
       [

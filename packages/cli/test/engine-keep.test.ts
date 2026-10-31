@@ -1,6 +1,36 @@
 import { describe, expect, test } from "bun:test";
+import type { EngineHost } from "../src/engine-host.ts";
+import { armExitNet } from "../src/engine-runtime.ts";
 import { attachCommand, resolveKeep } from "../src/engine-select.ts";
 import { ARGS, parseArgs } from "../src/flags.ts";
+
+describe("L22 armExitNet (docs/feat/detached-relay-lifecycle.md)", () => {
+  const armed = (before: readonly unknown[]) =>
+    process.listeners("exit").filter((l) => !before.includes(l));
+  const hostOf = (removed: string[]) =>
+    ({ removeBestEffort: (name: string) => removed.push(name) }) as unknown as EngineHost;
+
+  test("an exit fires `removeBestEffort` once", () => {
+    const before = process.listeners("exit");
+    const removed: string[] = [];
+    const disarm = armExitNet(hostOf(removed), "box");
+    const [listener, ...rest] = armed(before);
+    expect(rest).toEqual([]);
+    listener?.(0);
+    expect(removed).toEqual(["box"]);
+    disarm();
+    expect(armed(before)).toEqual([]);
+  });
+
+  test("disarm removes the listener: a normal exit deletes nothing", () => {
+    // Mutation: a no-op disarm → the relay's own exit fires a second, unverified delete.
+    const before = process.listeners("exit");
+    const removed: string[] = [];
+    armExitNet(hostOf(removed), "box")();
+    expect(armed(before)).toEqual([]);
+    expect(removed).toEqual([]);
+  });
+});
 
 // `run --keep[=bool]` (docs/feat/docker-engine-cli.md, owner 2026-10-27).
 describe("attachCommand carries every flag needed to reconnect", () => {

@@ -63,6 +63,7 @@ import {
   resolveToken,
 } from "./flags.ts";
 import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
+import { keepsAwake } from "./keep-awake.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
 import { forgetKept, keptDir, readKept, recordKept } from "./kept-index.ts";
 import {
@@ -123,7 +124,10 @@ Usage:
                                 turn, serves the model and saves it, then leaves once the
                                 session is idle. It waits at the first permission unless
                                 --auto-accept (pod tool asks only, allow once, logged).
-                                kill <pid> stops it; attach is refused until it is gone
+                                kill <pid> stops it; attach is refused until it is gone.
+                                --keep=false removes the workload when the run goes idle
+                                or is stopped (a failed or interrupted run keeps it). On
+                                macOS it stays awake during a turn (detach.keepAwake)
   tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]|--continue]
                                 attach the TUI to an EXISTING pod or container (tentacle is
                                 injected if it is not there yet); --container is the
@@ -133,10 +137,12 @@ Usage:
                                 no --engine: its engine and location are looked up
   tentacle ps [--engine <e>] [-q] [-v]
                                 list the pods/containers run kept, checked against
-                                their engine (-q names only, -v details)
+                                their engine, with a detached run's state (-q names
+                                only, -v details: pid, session, log)
   tentacle rm [--engine <e>] [-f] <name>
                                 remove a kept pod/container (only one tentacle kept;
-                                a running one asks y/N, -f skips the question)
+                                a running one asks y/N, -f skips the question). A
+                                detached run is stopped first
   tentacle <prompt...>     run a single task and exit
   tentacle -- <prompt...>  the same, for a prompt that starts with '-'
   tentacle serve [opts]    host the remote-control daemon
@@ -755,7 +761,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       prompt,
       autoAccept: runBools.has("auto-accept") || runFlags.has("auto-accept"),
       resume: runBools.has("resume") || runFlags.has("resume") || runBools.has("continue"),
-      keep: kept.keep,
     });
     if (detachProblem) {
       write(`\n[error] ${detachProblem}\nusage: ${USAGE.run}\n`);
@@ -829,9 +834,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       }
     }
     // Slice E: a kept workload carries its metadata and goes in the laptop
-    // index (`tentacle ps`) at the location it was really created on.
+    // index (`tentacle ps`) at the location it was really created on. So does a
+    // detached run, whatever `keep` says: `ps`, `rm` and `attach` reach it while
+    // it lives, and with keep=false its relay removes it, under those labels.
     const created = new Date().toISOString();
-    const keptMeta = kept.keep ? keptMetadata({ engine, model: config.model, created }) : undefined;
+    const listed = kept.keep || detach;
+    const keptMeta = listed ? keptMetadata({ engine, model: config.model, created }) : undefined;
     const insecureTcp = runBools.has("insecure-docker-tcp");
     const keptEntryFor = (keptName: string): KeptEntry => ({
       schemaVersion: KEPT_SCHEMA_VERSION,
@@ -853,7 +861,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       ...(binDir ? { binDir } : {}),
       ...(name ? { name } : {}),
       ...(wsPlan.kind === "mount" ? { workspace: wsPlan.mount } : {}),
-      ...(kept.keep
+      ...(listed
         ? {
             keepHint: (name: string) =>
               attachCommand(engine, name, {
@@ -878,6 +886,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           ...workloadDeps,
           // A plain `attach` would open a fresh session (D5).
           keepHint: (keptName) => `${workloadDeps.keepHint?.(keptName)} --resume ${sessionId}`,
+          ...(kept.keep ? {} : { removedAtEnd: true }),
           recordKept: (keptName) => {
             const undo = recordKeptEntry(keptName);
             recorded = keptEntryFor(keptName);
@@ -903,6 +912,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           sessionId,
           prompt,
           autoAccept: runBools.has("auto-accept") || runFlags.get("auto-accept") === "true",
+          keep: kept.keep,
           cwd: config.cwd,
           ...(globals.profile !== undefined ? { profile: globals.profile } : {}),
         },
@@ -911,6 +921,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           noun,
           name: workload.name,
           attachHint: workloadDeps.keepHint?.(workload.name) ?? "",
+          mounted: wsPlan.kind === "mount",
+          keepsAwake: keepsAwake(process.platform, config.detach?.keepAwake ?? true),
           ...(io.spawnRelay ? { spawnRelay: io.spawnRelay } : {}),
         },
       );
@@ -976,7 +988,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     );
     if (relay) {
       const owner = readOwner(runDirFor(config.configDir, relay.entry));
-      write(`\n[error] ${relayBlockingMessage(name, { pid: relay.pid, owner })}\n`);
+      const relayNoun = engineNoun(relay.entry.engine);
+      write(
+        `\n[error] ${relayBlockingMessage(name, { pid: relay.pid, owner, noun: relayNoun })}\n`,
+      );
       return 1;
     }
     const keptEntry = lookup?.resolved.kind === "one" ? lookup.resolved.match.entry : undefined;

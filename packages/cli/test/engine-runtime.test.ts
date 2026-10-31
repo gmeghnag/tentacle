@@ -702,6 +702,39 @@ describe("startPodRuntime", () => {
     );
   });
 
+  test("L12 removedAtEnd: its own line once ready; a failed start says it stays, never `removed`", async () => {
+    // Mutation: the one line for both → a promise no relay exists to keep.
+    const provision = (kube: FakeCluster, logs: string[], name: string) =>
+      provisionWorkload(baseConfig("/pod/work"), {
+        host: kubeEngineHost(kube, "dev"),
+        image: "img",
+        name,
+        keepHint: (n) => `tentacle attach ${n}`,
+        removedAtEnd: true,
+        log: (line) => logs.push(line),
+      });
+    const logs: string[] = [];
+    await provision(new FakeCluster(new ScriptedProvider([])), logs, "ok");
+    expect(logs).toContain(
+      "[pod] ok — removed when the run ends; until then: tentacle attach ok\n",
+    );
+    expect(logs.join("")).not.toContain("kept ok");
+
+    const broken = new FakeCluster(new ScriptedProvider([]));
+    const original = broken.runExec.bind(broken);
+    broken.runExec = (target, input, options) =>
+      target.command.join(" ").includes("--version")
+        ? Promise.resolve({ exitCode: 1, stdout: "", stderr: "Exec format error\n" })
+        : original(target, input, options);
+    const failed: string[] = [];
+    await expect(provision(broken, failed, "bad")).rejects.toThrow(/Exec format error/);
+    expect(failed).toContain(
+      "[pod] bad stays up: the run never started — tentacle attach bad, or `tentacle rm bad`\n",
+    );
+    expect(failed.join("")).not.toContain("removed when");
+    expect(broken.calls.some((c) => c.startsWith("delete:"))).toBe(false);
+  });
+
   // Slice E (docs/feat/engine-ps-rm.md): a kept workload carries its metadata
   // and is recorded in the laptop index right after it exists.
   test("--keep: labels + annotations reach the create; recorded once, after the create", async () => {
@@ -1351,7 +1384,8 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
     });
   });
 
-  test("T10: an IDLE resident of the old binary is stopped BEFORE the replace", async () => {
+  test("L6 an IDLE resident: status, stage, status, stop through the OLD path, rename", async () => {
+    // Mutation: the sketch's order (stop after `mv`) → the old binary is gone by then.
     // Mutation: skip the stop → the new bridge would reach the old resident (VersionMismatch).
     await release("guard-idle", BINS, async (config) => {
       const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
@@ -1364,10 +1398,143 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         ...runDeps(kube, "guard-idle"),
         podName: "mypod",
       });
-      const stopIdx = kube.calls.indexOf(`runexec:mypod:${POD_BIN_PATH} serve --resident-stop`);
-      const installIdx = kube.calls.findIndex((c) => c.includes("head -c"));
-      expect(stopIdx).toBeGreaterThan(-1);
-      expect(installIdx).toBeGreaterThan(stopIdx);
+      const steps = kube.calls.flatMap((c) => {
+        if (c.includes("head -c")) {
+          return ["stage"];
+        }
+        if (c.includes(`sh -c mv -f ${POD_BIN_PATH}.new ${POD_BIN_PATH}`)) {
+          return ["rename"];
+        }
+        return c.startsWith("runexec:") && c.includes("--resident-")
+          ? [c.replace(`runexec:mypod:${POD_BIN_PATH} serve --resident-`, "")]
+          : [];
+      });
+      // The last status is the skew check, by the new binary.
+      expect(steps).toEqual(["status", "stage", "status", "stop", "rename", "status"]);
+      runtime.dispose();
+    });
+  });
+
+  test("L7 a stage that fails stops nothing: the idle resident lives, the warning stands", async () => {
+    // Mutation: stop before the stage (today's order) → a read-only image loses
+    // its idle resident on every attach, for an install that cannot land.
+    await release("guard-readonly", BINS, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      containerHas(kube, "tentacle 0.2.0\n");
+      residentSays(
+        kube,
+        `${JSON.stringify({ resident: true, version: "0.2.0", sessions: 1, running: 0, attached: 0 })}\n`,
+      );
+      const original = kube.runExec.bind(kube);
+      kube.runExec = (target, input, options) =>
+        target.command[2]?.includes("head -c")
+          ? Promise.resolve({ exitCode: 1, stdout: "", stderr: "Read-only file system" })
+          : original(target, input, options);
+      const notices: string[] = [];
+      const runtime = await startAttachRuntime(config, {
+        ...runDeps(kube, "guard-readonly"),
+        podName: "mypod",
+        notify: (text) => notices.push(text),
+      });
+      expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
+      expect(notices[0]).toContain("replacing it failed");
+      expect(kube.calls).toContain(
+        `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
+      );
+      runtime.dispose();
+    });
+  });
+
+  test("L8 a client attached during the transfer: refused, `.new` removed, no stop, no rename, never the go-on warning", async () => {
+    // Mutation: drop `ResidentStopRefused`'s rethrow → attached to a resident that a
+    // "replacing failed" warning misdescribes.
+    await release("guard-race", BINS, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      containerHas(kube, "tentacle 0.2.0\n");
+      residentSays(kube, "");
+      const answer = kube.runExec.bind(kube);
+      let probes = 0;
+      kube.runExec = (target, input, options) => {
+        if (!target.command.join(" ").endsWith("--resident-status")) {
+          return answer(target, input, options);
+        }
+        probes += 1;
+        kube.calls.push(`runexec:${target.pod}:${target.command.join(" ")}`);
+        const attached = probes === 1 ? 0 : 1;
+        return Promise.resolve({
+          exitCode: 0,
+          stdout: `${JSON.stringify({ resident: true, version: "0.2.0", running: 0, attached })}\n`,
+          stderr: "",
+        });
+      };
+      const notices: string[] = [];
+      await expect(
+        startAttachRuntime(config, {
+          ...runDeps(kube, "guard-race"),
+          podName: "mypod",
+          notify: (text) => notices.push(text),
+        }),
+      ).rejects.toThrow("a detached run is using tentacle 0.2.0 in mypod");
+      expect(kube.calls.some((c) => c.includes(`rm -f ${POD_BIN_PATH}.new`))).toBe(true);
+      expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
+      expect(kube.calls.some((c) => c.includes("mv -f"))).toBe(false);
+      expect(kube.calls.some((c) => c.startsWith("exec:"))).toBe(false);
+      expect(notices).toEqual([]);
+    });
+  });
+
+  test("L4 reuse: a resident of another build → a notice; same build → silent; a probe that throws → silent, the attach goes on", async () => {
+    // Mutation: drop the probe on `reuse` → the other build is never said.
+    const notices = async (label: string, stub: (kube: FakeCluster) => void) => {
+      const said: string[] = [];
+      await release(label, {}, async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerHas(kube, "tentacle 0.3.0\n");
+        stub(kube);
+        const runtime = await startAttachRuntime(config, {
+          ...runDeps(kube, label),
+          podName: "mypod",
+          notify: (text) => said.push(text),
+        });
+        expect(kube.calls.some((c) => c.startsWith("exec:"))).toBe(true);
+        expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
+        runtime.dispose();
+      });
+      return said;
+    };
+    const other = await notices("skew-other", (kube) =>
+      residentSays(kube, `${JSON.stringify({ resident: true, version: "0.2.0" })}\n`),
+    );
+    expect(other).toHaveLength(1);
+    expect(other[0]).toContain("mypod already runs a tentacle resident 0.2.0, this laptop 0.3.0");
+    expect(
+      await notices("skew-same", (kube) =>
+        residentSays(kube, `${JSON.stringify({ resident: true, version: "0.3.0" })}\n`),
+      ),
+    ).toEqual([]);
+    expect(
+      await notices("skew-throws", (kube) => {
+        const original = kube.runExec.bind(kube);
+        kube.runExec = (target, input, options) =>
+          target.command.join(" ").endsWith("--resident-status")
+            ? Promise.reject(new Error("exec timed out"))
+            : original(target, input, options);
+      }),
+    ).toEqual([]);
+  });
+
+  test("L5 from source (`expected` undefined): reuse adds no exec", async () => {
+    // Mutation: always probe.
+    await release("skew-dev", {}, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      containerHas(kube, "tentacle 0.2.0\n");
+      residentSays(kube, `${JSON.stringify({ resident: true, version: "0.2.0" })}\n`);
+      const runtime = await startAttachRuntime(config, {
+        ...runDeps(kube, "skew-dev"),
+        appVersion: "dev",
+        podName: "mypod",
+      });
+      expect(kube.calls.some((c) => c.includes("--resident-"))).toBe(false);
       runtime.dispose();
     });
   });
@@ -1394,7 +1561,8 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         await expect(
           startAttachRuntime(config, { ...runDeps(kube, `guard-stop-${i}`), podName: "mypod" }),
         ).rejects.toThrow("could not stop the idle tentacle resident in mypod");
-        expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
+        expect(kube.calls.some((c) => c.includes("mv -f"))).toBe(false);
+        expect(kube.calls.some((c) => c.includes(`rm -f ${POD_BIN_PATH}.new`))).toBe(true);
       });
     }
   });
@@ -1454,7 +1622,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
       expect(kube.calls).toContain(
         "exec:mypod:-:/tmp/tentacle serve --bridge --model-proxy --context-window 128000",
       );
-      expect(kube.calls.some((c) => c.includes("--resident-"))).toBe(false);
+      expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
       expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
       expect(notices).toEqual([]);
       runtime.dispose();
@@ -1478,9 +1646,10 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         expect(kube.calls).toContain(
           `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
         );
-        expect(kube.calls.some((c) => c.includes("--resident-"))).toBe(false);
+        expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
         expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
-        expect(notices).toEqual([]);
+        // The busy resident's 0.2.0 is not this laptop's: said, and joined.
+        expect(notices).toHaveLength(i);
         runtime.dispose();
       });
     }
@@ -1539,7 +1708,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
       expect(kube.calls).toContain(
         "exec:mypod:-:tentacle serve --bridge --model-proxy --context-window 128000",
       );
-      expect(kube.calls.some((c) => c.includes("--resident-"))).toBe(false);
+      expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
       expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
       runtime.dispose();
     });
@@ -1611,7 +1780,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
       });
       expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
       expect(notices).toEqual([
-        `⚠ mypod already runs a tentacle resident from a binary outside ${POD_BIN_PATH} (another --bin-dir at \`run\`?): this attach joins it, its version may differ from this laptop's (a protocol mismatch is still refused). To use one binary: attach with that --bin-dir`,
+        `⚠ mypod already runs a tentacle resident 0.2.0, this laptop 0.3.0: this attach joins it (a protocol mismatch is still refused). If it runs from a binary outside ${POD_BIN_PATH} (another --bin-dir at \`run\`?), attach with that --bin-dir`,
       ]);
       runtime.dispose();
     });

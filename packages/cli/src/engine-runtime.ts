@@ -48,10 +48,10 @@ import { PodBinaryError, checkPodBinaries, resolvePodBinary } from "./pod-binary
 import { injectAgentBinary, probePod } from "./pod-binary.ts";
 import {
   residentGuard,
+  residentSkewWarning,
   residentStatusCommand,
   residentStopCommand,
   residentStopVerdict,
-  strayResidentWarning,
 } from "./pod-resident.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
@@ -165,6 +165,11 @@ export interface EngineRuntimeDeps {
    */
   readonly keepHint?: (name: string) => string;
   /**
+   * `run --detach --keep=false`, with `keepHint`: this runtime still never
+   * removes it, the relay does when the run ends. Changes only the kept line.
+   */
+  readonly removedAtEnd?: boolean;
+  /**
    * docker/podman: the laptop folder to mount (slice D, planned and confirmed
    * by the caller BEFORE this runtime starts — `workspace-mount.ts`).
    */
@@ -222,12 +227,17 @@ export function execChannelFactory(
  * path (SIGINT / SIGTERM / normal / crash), and `removeBestEffort` spawns a
  * detached, fire-and-forget child that issues the `DELETE` — so it never
  * blocks the exit and never throws. See `k8s/pod-cleanup.ts` and
- * `docker/container-cleanup.ts`.
+ * `docker/container-cleanup.ts`. Returns the disarm: the relay's own normal exit
+ * passes here too (docs/feat/detached-relay-lifecycle.md).
  */
-function registerExitCleanup(host: EngineHost, name: string): void {
-  process.once("exit", () => {
+export function armExitNet(host: EngineHost, name: string): () => void {
+  const fire = (): void => {
     host.removeBestEffort(name);
-  });
+  };
+  process.once("exit", fire);
+  return () => {
+    process.off("exit", fire);
+  };
 }
 
 /** A workload `provisionWorkload` made ready: its binary installed, no daemon started. */
@@ -306,8 +316,9 @@ export async function provisionWorkload(
       }) — remove it yourself when done\n`;
     }
   }
+  const lifetime = deps.removedAtEnd ? "removed when the run ends; until then:" : "resume with:";
   const keptLine = keepHint
-    ? `[${host.noun}] kept ${name} — resume with: ${keepHint(name)}${workspace ? `  # workspace ${workspace.target}` : ""}\n`
+    ? `[${host.noun}] ${deps.removedAtEnd ? "" : "kept "}${name} — ${lifetime} ${keepHint(name)}${workspace ? `  # workspace ${workspace.target}` : ""}\n`
     : undefined;
   const logKept = (line: string): void => {
     deps.log(line);
@@ -326,7 +337,12 @@ export async function provisionWorkload(
       return;
     }
     if (keptLine) {
-      logKept(keptLine);
+      // No relay will ever run to remove it: a leftover, listed in `ps` (Q2).
+      logKept(
+        deps.removedAtEnd && error !== undefined
+          ? `[${host.noun}] ${name} stays up: the run never started — ${keepHint?.(name)}, or \`tentacle rm ${name}\`\n`
+          : keptLine,
+      );
     } else {
       void host.remove(name).catch(() => {});
     }
@@ -337,7 +353,7 @@ export async function provisionWorkload(
   // a detached child. Registered right after it exists, so it covers
   // pre-ready failures too. Not armed with `--keep`: Ctrl+C keeps it too.
   if (!keptLine) {
-    registerExitCleanup(host, name);
+    armExitNet(host, name);
   }
 
   try {
@@ -448,6 +464,9 @@ export async function startEngineRuntime(
   }
 }
 
+/** The resident could not be stopped before the rename: the attach is refused. */
+class ResidentStopRefused extends Error {}
+
 /** `attachEngineRuntime`'s deps (`attach`). */
 export interface EngineAttachRuntimeDeps {
   readonly host: EngineHost;
@@ -481,7 +500,7 @@ export interface EngineAttachRuntimeDeps {
  * until its idle exit); the workload stays running for reuse
  * (re-attach is a sub-second version-probe) and for cleanup by its owner.
  *
- * No `registerExitCleanup` safety net: the whole point is that a TUI exit
+ * No `armExitNet` safety net: the whole point is that a TUI exit
  * (Ctrl+C → process.exit) must NOT delete it.
  */
 export async function attachEngineRuntime(
@@ -594,6 +613,12 @@ export async function attachEngineRuntime(
     });
     const decision = containerDecision(probe, expected);
     const found = serveBin;
+    const residentStatusOf = (bin: string): Promise<EngineRunExecResult | null> =>
+      host
+        .runExec({ name, container, command: residentStatusCommand(bin) }, undefined, {
+          timeoutMs: 15_000,
+        })
+        .catch(() => null);
     let version: string;
     if (decision.kind === "reuse") {
       version = versionLabel(probe);
@@ -601,16 +626,21 @@ export async function attachEngineRuntime(
       // Never replace a binary a running resident still uses (detached-runs
       // S1): ask the OLD one (the one that answered, else our install path).
       const oldBin = decision.kind === "replace" ? found : binPath;
-      const statusRun = await host
-        .runExec({ name, container, command: residentStatusCommand(oldBin) }, undefined, {
-          timeoutMs: 15_000,
-        })
-        .catch(() => null);
-      const verdict = residentGuard(statusRun, name);
+      const verdict = residentGuard(await residentStatusOf(oldBin), name);
       if (verdict.kind === "refuse") {
         throw new Error(verdict.message);
       }
-      if (verdict.kind === "stop") {
+      // Once the bytes are staged, so an install that cannot land stops nothing,
+      // and before the rename, so `oldBin` still exists. The transfer gave a
+      // client time to attach: asked again.
+      const stopResident = async (): Promise<void> => {
+        const again = residentGuard(await residentStatusOf(oldBin), name);
+        if (again.kind === "refuse") {
+          throw new ResidentStopRefused(again.message);
+        }
+        if (again.kind === "none") {
+          return;
+        }
         const stopRun = await host
           .runExec({ name, container, command: residentStopCommand(oldBin) }, undefined, {
             timeoutMs: 15_000,
@@ -618,9 +648,9 @@ export async function attachEngineRuntime(
           .catch(() => null);
         const stopped = residentStopVerdict(stopRun, name);
         if (stopped.kind === "refuse") {
-          throw new Error(stopped.message);
+          throw new ResidentStopRefused(stopped.message);
         }
-      }
+      };
       serveBin = binPath; // injected to our dir → exec by absolute path
       let replaced = decision.kind === "replace";
       try {
@@ -641,10 +671,12 @@ export async function attachEngineRuntime(
             }),
           log: deps.log,
           onStatus: status ? (text) => status.set(text) : undefined,
+          ...(verdict.kind === "stop" ? { beforeCommit: stopResident } : {}),
         });
       } catch (error) {
-        // A plain injection failure: unchanged (nothing else to run).
-        if (decision.kind !== "replace") {
+        // A plain injection failure: unchanged (nothing else to run). A refused
+        // stop is an answer, not a failed replace: never "go on with the old one".
+        if (decision.kind !== "replace" || error instanceof ResidentStopRefused) {
           throw error;
         }
         // Replacing failed (orchestrator decision, follow-up 1): do not abort —
@@ -671,34 +703,32 @@ export async function attachEngineRuntime(
           deps.log(`${line}\n`);
         }
       }
-      // A resident alive with nothing found: `run` installed in a dir this attach
-      // does not know. It is not ours to stop; the bridge joins it, and we say so.
-      const stray =
-        decision.kind === "inject"
-          ? strayResidentWarning(
-              await host
-                .runExec({ name, container, command: residentStatusCommand(binPath) }, undefined, {
-                  timeoutMs: 15_000,
-                })
-                .catch(() => null),
-              name,
-              binPath,
-            )
-          : undefined;
       const line =
-        stray ??
-        (decision.kind === "replace" && replaced
+        decision.kind === "replace" && replaced
           ? replacedNotice({
               had: decision.had,
               expected,
               ...(found === "tentacle" ? { installedAt: binPath } : {}),
             })
-          : undefined);
+          : undefined;
       if (line !== undefined) {
         deps.notify?.(line);
         if (!status) {
           deps.log(`${line}\n`);
         }
+      }
+    }
+    // A resident this attach will join but did not start: `run` used a dir it
+    // does not know, or another build left it. Not ours to stop: said, and joined.
+    // From source, a reuse has no build to compare (its flow stays one exec).
+    const skew =
+      expected !== undefined || decision.kind === "inject"
+        ? residentSkewWarning(await residentStatusOf(serveBin), name, binPath, expected)
+        : undefined;
+    if (skew !== undefined) {
+      deps.notify?.(skew);
+      if (!status) {
+        deps.log(`${skew}\n`);
       }
     }
     status?.finish();

@@ -97,6 +97,8 @@ export interface ResolvedConfig {
   readonly engine?: "kubernetes" | "docker" | "podman";
   /** The configured `run` keep-on-exit default (file or profile); absent = the CLI default (true). */
   readonly keep?: boolean;
+  /** `run --detach`'s settings (file or profile); absent = the relay's defaults. */
+  readonly detach?: { readonly keepAwake?: boolean | undefined };
   /** The configured workspace-mount hide list (file or profile); absent = the CLI default list. */
   readonly mount?: MountConfig;
   /** User hooks (file-only, no env form); empty when unset. */
@@ -407,6 +409,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     autoWake: autoWake.value,
     ...(fileConfig.engine !== undefined ? { engine: fileConfig.engine } : {}),
     ...(fileConfig.keep !== undefined ? { keep: fileConfig.keep } : {}),
+    ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
     ...(fileConfig.mount !== undefined ? { mount: fileConfig.mount } : {}),
     hooks: fileConfig.hooks ?? [],
     // MCP servers are file-only (no env form); empty when unset.

@@ -253,6 +253,11 @@ const settingsShape = {
    */
   keep: z.boolean().optional(),
   /**
+   * `run --detach` (docs/feat/detached-relay-lifecycle.md): `keepAwake` holds a
+   * macOS sleep assertion while a turn runs. Unset: true.
+   */
+  detach: z.object({ keepAwake: z.boolean().optional() }).strict().optional(),
+  /**
    * What a docker/podman workspace mount hides from the container
    * (docs/feat/docker-workspace-mount.md): `hide` REPLACES the default list
    * (`~/.ssh`, `~/.aws`, `~/.kube`, `~/.config/gcloud`, `~/.docker/config.json`,

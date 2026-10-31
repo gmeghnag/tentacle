@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, JsonSessionStore, projectKey } from "@tentacle/agent";
@@ -11,12 +19,12 @@ import { createChannelPair } from "@tentacle/transport";
 import type { TentacleConfig } from "../src/config.ts";
 import type { EngineHost } from "../src/engine-host.ts";
 import type { attachEngineRuntime } from "../src/engine-runtime.ts";
-import { recordKept } from "../src/kept-index.ts";
-import { keptDir } from "../src/kept-index.ts";
+import { keptDir, keptFileName, readKept, recordKept } from "../src/kept-index.ts";
 import type { KeptEntry } from "../src/kept.ts";
-import { createLocalRuntime } from "../src/local-runtime.ts";
-import type { ProcOf } from "../src/pod-resident.ts";
-import { launchRelay, relayMain, runRelay } from "../src/relay.ts";
+import { type LocalRuntime, createLocalRuntime } from "../src/local-runtime.ts";
+import { type ProcOf, lockHolder } from "../src/pod-resident.ts";
+import type { ResidentUse } from "../src/relay-state.ts";
+import { type RelayDeps, launchRelay, relayMain, runRelay } from "../src/relay.ts";
 import {
   type OwnerRecord,
   RELAY_SPEC_ENV,
@@ -46,6 +54,7 @@ const spec = (over: Partial<RelaySpec> = {}): RelaySpec => ({
   sessionId: UID,
   prompt: "go",
   autoAccept: false,
+  keep: true,
   cwd: "/work",
   ...over,
 });
@@ -152,12 +161,17 @@ function resident(model: ModelProvider, options: { fail?: string; secondBroker?:
   return { host, frames, attach, execs, statuses };
 }
 
-function rig(over: Partial<RelaySpec> = {}) {
+function rig(
+  over: Partial<RelaySpec> = {},
+  more: Partial<RelayDeps> = {},
+  settings: Partial<TentacleConfig> = {},
+) {
   const configDir = mkdtempSync(join(tmpdir(), "relay-"));
   const config = {
     configDir,
     cwd: "/work",
     model: "m",
+    ...settings,
   } as unknown as TentacleConfig;
   const stopRef: { stop?: () => void } = {};
   const dir = runDirFor(configDir, entry);
@@ -177,9 +191,69 @@ function rig(over: Partial<RelaySpec> = {}) {
         return () => {};
       },
       now: clock.now,
+      ...more,
     });
-  return { dir, store, start, stopRef };
+  return { configDir, dir, store, start, stopRef };
 }
+
+const KEPT_LABELS = { "tentacle.managed": "true", "tentacle.kept": "true" };
+
+/** A keep=false relay: its entry in the index, an engine that records, a net that counts. */
+function removing(more: Partial<RelayDeps> = {}) {
+  const calls: string[] = [];
+  const net = { armed: 0, disarmed: 0, lockedAtArm: false };
+  const engine = {
+    facts: { status: "running", labels: KEPT_LABELS } as {
+      status: string;
+      labels: Record<string, string>;
+    } | null,
+    removeError: null as Error | null,
+    onRemove: () => {},
+  };
+  const host = {
+    describe: async (name: string) => {
+      calls.push(`describe:${name}`);
+      return engine.facts;
+    },
+    remove: async (name: string) => {
+      calls.push(`remove:${name}`);
+      engine.onRemove();
+      if (engine.removeError) {
+        throw engine.removeError;
+      }
+    },
+  } as unknown as EngineHost;
+  const box = rig(
+    { keep: false },
+    {
+      hostFor: () => host,
+      armNet: () => {
+        net.armed += 1;
+        net.lockedAtArm = lockHolder(box.dir, procOf) !== null;
+        return () => {
+          net.disarmed += 1;
+        };
+      },
+      ...more,
+    },
+  );
+  const index = keptDir(box.configDir);
+  recordKept(index, entry);
+  const entries = () => readKept(index).entries;
+  return { ...box, calls, net, engine, entries, host };
+}
+/** `attach` with the runtime's reads of the resident replaced. */
+const reading =
+  (
+    pod: ReturnType<typeof resident>,
+    read: () => Promise<ResidentUse | null>,
+    poll?: () => Promise<number | null>,
+  ): typeof attachEngineRuntime =>
+  async (config, deps) => ({
+    ...(await pod.attach(config, deps)),
+    residentUse: read,
+    ...(poll ? { sessionJobs: poll } : {}),
+  });
 
 /** A clock the test moves: the grace is 60 s. */
 const clock = {
@@ -412,6 +486,482 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
   });
 });
 
+describe("keep=false: the relay removes the workload (docs/feat/detached-relay-lifecycle.md)", () => {
+  const DONE: readonly StreamEvent[] = [{ type: "text", delta: "done" }, { type: "done" }];
+
+  test("L13 at idle: detached, saved, removed under the lock; then the entry and the run dir are gone", async () => {
+    // Mutation: delete before `release` → no `session/detach` at the delete.
+    // Mutation: release the lock before the delete → an `attach` slips in.
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    const at: Record<string, unknown> = {};
+    r.engine.onRemove = () => {
+      at.detached = pod.frames.some((f) => f.includes('"session/detach"'));
+      at.locked = lockHolder(r.dir, procOf) !== null;
+      at.saved = readdirSync(join(r.configDir, "sessions", projectKey("/work"))).length > 0;
+    };
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    expect(r.calls).toEqual([]);
+    expect(await afterGrace(exit)).toBe(0);
+    expect(r.calls).toEqual(["describe:box", "remove:box"]);
+    expect(at).toEqual({ detached: true, locked: true, saved: true });
+    expect(r.entries()).toEqual([]);
+    const { records } = await r.store.list();
+    expect(records[0]?.messages.map((m) => m.content)).toEqual(["go", "done"]);
+    // Q4 (b): the run dir goes, its lock with it.
+    expect(existsSync(r.dir)).toBe(false);
+    expect(lockHolder(r.dir, procOf)).toBeNull();
+    expect(pod.frames.some((f) => f.includes('"session/close"'))).toBe(false);
+  });
+
+  test("keep=true: no read, no delete, the run dir stays", async () => {
+    // Mutation: drop the `keep` row of `exitPlan`.
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    let reads = 0;
+    const kept = rig({ keep: true }, { hostFor: () => r.host });
+    const exit = kept.start(
+      reading(pod, async () => {
+        reads += 1;
+        return null;
+      }),
+    );
+    await waitFor(() => owner(kept.dir)?.state === "idle", "idle");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(reads).toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(existsSync(kept.dir)).toBe(true);
+    expect(owner(kept.dir)?.detail).toBeUndefined();
+  });
+
+  test("keep=true: a stop removes nothing either", async () => {
+    // Mutation: drop the `keep` row of `exitPlan` → `kill <pid>` deletes a kept workload.
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    const kept = rig({ keep: true }, { hostFor: () => r.host });
+    const exit = kept.start(pod.attach);
+    await waitFor(() => owner(kept.dir)?.state === "idle", "idle");
+    kept.stopRef.stop?.();
+    expect(await exit).toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(existsSync(kept.dir)).toBe(true);
+  });
+
+  test("L14 a held ask, past several graces: no remove", async () => {
+    // Mutation: drop `asks` from idle.
+    const pod = resident(new Scripted([SHELL_CALL]));
+    const r = removing();
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "waiting-permission", "the ask");
+    for (let i = 0; i < 3; i++) {
+      clock.t += 120_000;
+      await tick(20);
+    }
+    expect(r.calls).toEqual([]);
+    expect(owner(r.dir)?.state).toBe("waiting-permission");
+    expect(pod.execs).toEqual([]);
+    r.stopRef.stop?.();
+    await exit;
+  });
+
+  test("L15 the fresh read sees a job the poll missed: a new grace, removed once it ended", async () => {
+    // Mutation: trust the polled value → deleted with a job running.
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    const reads: number[] = [];
+    let jobs = 1;
+    const exit = r.start(
+      reading(
+        pod,
+        async () => {
+          reads.push(jobs);
+          return { jobs, running: false, others: 0 };
+        },
+        // Unreadable for the whole grace: the relay's own value stays a stale 0.
+        async () => (jobs === 0 ? 0 : null),
+      ),
+    );
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    while (reads.length === 0) {
+      clock.t += 120_000;
+      await tick(3);
+    }
+    await waitFor(() => owner(r.dir)?.detail === "1 background job(s) running", "the job");
+    expect(r.calls).toEqual([]);
+    jobs = 0;
+    clock.t += 1000;
+    await waitFor(() => owner(r.dir)?.state === "idle", "the poll sees it end");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(reads).toEqual([1, 0]);
+    expect(r.calls).toContain("remove:box");
+    expect(existsSync(r.dir)).toBe(false);
+  });
+
+  test("L16 another client: exit, no remove, the run dir stays, `detail` says why", async () => {
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    const exit = r.start(reading(pod, async () => ({ jobs: 0, running: false, others: 1 })));
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(owner(r.dir)).toMatchObject({ state: "idle", detail: "another client is using it" });
+    expect(r.entries()).toHaveLength(1);
+    expect(logTail(r.dir).join("\n")).toContain("another client is using it");
+  });
+
+  test("L17 unreadable use, an unanswered read: no remove, exit normal, the run dir stays", async () => {
+    // Mutation: drop the bound → the relay hangs on a pod that stopped answering.
+    for (const read of [
+      () => Promise.resolve(null),
+      () => new Promise<null>(() => {}),
+      () => Promise.reject(new Error("boom")),
+    ]) {
+      const pod = resident(new Scripted([DONE]));
+      const r = removing({ useTimeoutMs: 5 });
+      const exit = r.start(reading(pod, read));
+      await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+      expect(await afterGrace(exit)).toBe(0);
+      expect(r.calls).toEqual([]);
+      expect(owner(r.dir)?.detail).toBe("could not tell whether it is in use");
+      expect(existsSync(r.dir)).toBe(true);
+    }
+  });
+
+  test("L17 `failed`, `interrupted`, a stopped link: no remove, the run dir stays (Q2)", async () => {
+    // Mutation: remove on any `relayExits`.
+    const broken: ModelProvider = {
+      id: "broken",
+      // biome-ignore lint/correctness/useYield: fails before its first event
+      async *stream() {
+        throw new Error("401");
+      },
+    };
+    const failed = removing();
+    const failing = failed.start(resident(broken).attach);
+    await waitFor(() => owner(failed.dir)?.state === "failed", "failed");
+    expect(await afterGrace(failing)).toBe(1);
+    expect(failed.calls).toEqual([]);
+    expect(existsSync(failed.dir)).toBe(true);
+    // Its own cause stands: no read was made, so none can cover it.
+    expect(owner(failed.dir)?.detail).toBe("internal error");
+
+    const pod = resident(new Scripted([]));
+    const cut = removing();
+    const cutting = cut.start(async (config, deps) => {
+      const runtime = await pod.attach(config, deps);
+      return {
+        ...runtime,
+        createSession: () => ({
+          ...runtime.createSession(),
+          async *send() {
+            yield { type: "turn_end", reason: "cancelled" } as const;
+          },
+        }),
+      } as LocalRuntime;
+    });
+    await waitFor(() => owner(cut.dir)?.state === "interrupted", "interrupted");
+    expect(await afterGrace(cutting)).toBe(0);
+    expect(cut.calls).toEqual([]);
+    expect(existsSync(cut.dir)).toBe(true);
+    expect(owner(cut.dir)?.detail).toContain("the link to the workload dropped");
+
+    const linked = resident(new Scripted([SHELL_CALL]));
+    const lost = removing();
+    const losing = lost.start(linked.attach);
+    await waitFor(() => owner(lost.dir)?.state === "waiting-permission", "the ask");
+    for (const listener of linked.statuses) {
+      listener({ state: "stopped", reason: "the container is gone" });
+    }
+    expect(await losing).toBe(1);
+    expect(lost.calls).toEqual([]);
+    expect(existsSync(lost.dir)).toBe(true);
+    expect(lost.entries()).toHaveLength(1);
+  });
+
+  test("a failed attach, keep=false: nothing removed, the net disarmed, the run dir stays", async () => {
+    const r = removing();
+    expect(await r.start(resident(new Scripted([]), { fail: "no daemon" }).attach)).toBe(1);
+    expect(r.calls).toEqual([]);
+    expect(r.net).toMatchObject({ armed: 1, disarmed: 1 });
+    expect(existsSync(r.dir)).toBe(true);
+  });
+
+  test("L18 a stop removes with no read; with a held ask too", async () => {
+    // Mutation: read on a stop too → a stop on a dead link would keep the workload.
+    const idle = resident(new Scripted([DONE]));
+    const r = removing();
+    let reads = 0;
+    const exit = r.start(
+      reading(idle, async () => {
+        reads += 1;
+        return null;
+      }),
+    );
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    r.stopRef.stop?.();
+    expect(await exit).toBe(0);
+    expect(reads).toBe(0);
+    expect(r.calls).toContain("remove:box");
+    expect(existsSync(r.dir)).toBe(false);
+
+    const asked = resident(new Scripted([SHELL_CALL]));
+    const h = removing();
+    const holding = h.start(asked.attach);
+    await waitFor(() => owner(h.dir)?.state === "waiting-permission", "the ask");
+    h.stopRef.stop?.();
+    expect(await holding).toBe(0);
+    expect(asked.execs).toEqual([]);
+    expect(h.calls).toContain("remove:box");
+    const { records } = await h.store.list();
+    expect(records[0]?.messages.map((m) => m.role)).toContain("user");
+  });
+
+  test("L19 foreign labels: left alone; describe null: forgotten. Both drop the entry and the run dir", async () => {
+    // Mutation: skip `isKeptWorkload` → a foreign workload of that name is deleted.
+    for (const facts of [{ status: "running", labels: {} }, null]) {
+      const pod = resident(new Scripted([DONE]));
+      const r = removing();
+      r.engine.facts = facts;
+      const exit = r.start(pod.attach);
+      await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+      expect(await afterGrace(exit)).toBe(0);
+      expect(r.calls).toEqual(["describe:box"]);
+      expect(r.entries()).toEqual([]);
+      expect(existsSync(r.dir)).toBe(false);
+    }
+  });
+
+  test("L20 a failing delete: `detail` says so, the entry and the run dir stay, exit clean", async () => {
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    r.engine.removeError = new Error("engine \u001b[31mdown");
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(owner(r.dir)?.detail).toBe("not removed: engine [31mdown — tentacle rm box");
+    expect(r.entries()).toHaveLength(1);
+    expect(existsSync(r.dir)).toBe(true);
+    expect(r.net.disarmed).toBe(1);
+    // The lock is free: `rm` and `attach` go on.
+    expect(lockHolder(r.dir, procOf)).toBeNull();
+  });
+
+  test("L22 a failed forget after the delete: the note says REMOVED, the run dir stays", async () => {
+    // Mutation M3 (Review fix round 1, C): never take the `forgetError` branch ->
+    // `leave(true)` purges the run dir and the note is lost.
+    const pod = resident(new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]));
+    const r = removing();
+    const file = join(keptDir(r.configDir), keptFileName(entry));
+    // A directory where the entry file was: `rmSync` fails (EISDIR) while the
+    // workload itself is gone.
+    rmSync(file, { force: true });
+    mkdirSync(file);
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(r.calls).toContain("remove:box");
+    // The note is the only witness that the workload went: it must say so.
+    expect(owner(r.dir)?.detail).toContain("removed, but its entry in the kept index stayed");
+    expect(existsSync(r.dir)).toBe(true);
+    expect(existsSync(file)).toBe(true);
+  });
+
+  test("L22b a FOREIGN workload whose entry will not drop: the note says left alone", async () => {
+    // Finding A: on `foreign` nothing was removed, so a note saying "removed"
+    // reports a delete that never happened.
+    const pod = resident(new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]));
+    const r = removing();
+    const file = join(keptDir(r.configDir), keptFileName(entry));
+    rmSync(file, { force: true });
+    mkdirSync(file);
+    r.engine.facts = { status: "running", labels: {} };
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(r.calls).toEqual(["describe:box"]);
+    const detail = owner(r.dir)?.detail ?? "";
+    expect(detail).toContain("left alone (not tentacle's), but its entry in the kept index stayed");
+    expect(detail).not.toContain("removed");
+    expect(existsSync(r.dir)).toBe(true);
+  });
+
+  test("a delete that never answers is bounded: not removed, exit clean", async () => {
+    const pod = resident(new Scripted([DONE]));
+    const hung = {
+      describe: async () => ({ status: "running", labels: KEPT_LABELS }),
+      remove: () => new Promise(() => {}),
+    } as unknown as EngineHost;
+    const b = rig(
+      { keep: false },
+      { hostFor: () => hung, removeTimeoutMs: 5, armNet: () => () => {} },
+    );
+    recordKept(keptDir(b.configDir), entry);
+    const exit = b.start(pod.attach);
+    await waitFor(() => owner(b.dir)?.state === "idle", "idle");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(owner(b.dir)?.detail).toContain("not removed: no answer within");
+  });
+
+  test("L21 the net: armed once, under the lock, disarmed by the exit", async () => {
+    // Mutation: arm before the lock → `lockedAtArm` false.
+    // Mutation: no disarm → the relay's own normal exit fires a second delete.
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    expect(r.net).toEqual({ armed: 1, disarmed: 0, lockedAtArm: true });
+    expect(await afterGrace(exit)).toBe(0);
+    expect(r.net.disarmed).toBe(1);
+  });
+
+  test("L21 keep=true never arms it", async () => {
+    const pod = resident(new Scripted([DONE]));
+    let armed = 0;
+    const { dir, start } = rig(
+      {},
+      {
+        armNet: () => {
+          armed += 1;
+          return () => {};
+        },
+      },
+    );
+    const exit = start(pod.attach);
+    await waitFor(() => owner(dir)?.state === "idle", "idle");
+    await afterGrace(exit);
+    expect(armed).toBe(0);
+  });
+
+  test("L21 a relay refused by the lock, or by an unknown owner.json, never arms it", async () => {
+    // Mutation: arm before the lock → a second relay's exit deletes the first's workload.
+    const r = removing();
+    ensureRunDir(r.dir);
+    writeFileSync(join(r.dir, ".lock.1"), `${process.pid} 1`);
+    expect(await r.start(async () => Promise.reject(new Error("never")))).toBe(1);
+    expect(r.net.armed).toBe(0);
+
+    const u = removing();
+    ensureRunDir(u.dir);
+    writeFileSync(ownerPath(u.dir), '{"schemaVersion":99}');
+    expect(await u.start(async () => Promise.reject(new Error("never")))).toBe(1);
+    expect(u.net.armed).toBe(0);
+  });
+
+  test("L21 a relay that throws stays armed: that is what the net is for", async () => {
+    // Mutation: disarm in a `finally` → a real crash orphans the workload.
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    const code = r.start(async (config, deps) => ({
+      ...(await pod.attach(config, deps)),
+      createSession: () => {
+        throw new Error("crash");
+      },
+    }));
+    await expect(code).rejects.toThrow("crash");
+    expect(r.net).toMatchObject({ armed: 1, disarmed: 0 });
+  });
+
+  test("L25 keep-awake: on during the turn, off at a held ask and at the exit", async () => {
+    // Mutation: never call `set` from `emit`.
+    const events: string[] = [];
+    const pod = resident(new Scripted([SHELL_CALL]));
+    const r = rig(
+      {},
+      {
+        keepAwake: {
+          platform: "darwin",
+          spawn: (command, args) => {
+            events.push(`spawn ${command} ${args.join(" ")}`);
+            return {
+              kill: () => events.push("kill"),
+              unref: () => {},
+              once: () => {},
+            };
+          },
+        },
+      },
+    );
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "waiting-permission", "the ask");
+    expect(events).toEqual([`spawn caffeinate -i -w ${process.pid}`, "kill"]);
+    r.stopRef.stop?.();
+    await exit;
+    expect(events).toHaveLength(2);
+  });
+
+  test("L25 a turn still running at the exit: keep-awake is stopped by `leave`", async () => {
+    const events: string[] = [];
+    const never: ModelProvider = {
+      id: "hung",
+      async *stream() {
+        yield { type: "text", delta: "x" };
+        await new Promise(() => {});
+      },
+    };
+    const pod = resident(never);
+    const r = rig(
+      {},
+      {
+        keepAwake: {
+          platform: "darwin",
+          spawn: () => {
+            events.push("spawn");
+            return { kill: () => events.push("kill"), unref: () => {}, once: () => {} };
+          },
+        },
+      },
+    );
+    const exit = r.start(pod.attach);
+    await waitFor(() => events.length === 1, "the turn");
+    for (const listener of pod.statuses) {
+      listener({ state: "stopped", reason: "gone" });
+    }
+    await exit;
+    expect(events).toEqual(["spawn", "kill"]);
+  });
+
+  test("`detach.keepAwake: false` spawns nothing", async () => {
+    const pod = resident(new Scripted([DONE]));
+    let spawned = 0;
+    const r = rig(
+      {},
+      {
+        keepAwake: {
+          platform: "darwin",
+          spawn: () => {
+            spawned += 1;
+            throw new Error("never");
+          },
+        },
+      },
+    );
+    const exit = r.start(async (config, deps) => pod.attach(config, deps));
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    await afterGrace(exit);
+    expect(spawned).toBe(1); // the rig's config has no `detach`: on by default
+
+    const off = rig(
+      {},
+      {
+        keepAwake: {
+          platform: "darwin",
+          spawn: () => {
+            spawned += 1;
+            throw new Error("never");
+          },
+        },
+      },
+      { detach: { keepAwake: false } },
+    );
+    const quiet = resident(new Scripted([DONE]));
+    const done = off.start(quiet.attach);
+    await waitFor(() => owner(off.dir)?.state === "idle", "idle");
+    await afterGrace(done);
+    expect(spawned).toBe(1);
+  });
+});
+
 describe("relayMain", () => {
   test("no spec in the env: exit 1, said on stderr", async () => {
     const err: string[] = [];
@@ -619,6 +1169,56 @@ describe("launchRelay", () => {
       expect(said).toContain(`delete ${ownerPath(dir)} to run under this name`);
       expect(said).not.toContain("tentacle rm");
     }
+  });
+
+  test("keep=false: the removal, what goes with it, the transcript; never `Re-attach`", async () => {
+    const dir = fresh();
+    const out: string[] = [];
+    const code = await launchRelay(dir, spec({ keep: false }), {
+      write: (t) => out.push(t),
+      noun: "container",
+      name: "box",
+      attachHint: "tentacle attach box",
+      spawnRelay: () => {
+        writeOwner(dir, running);
+        return { exited: () => false };
+      },
+      pollMs: 1,
+      timeoutMs: 2000,
+      mounted: true,
+      keepsAwake: true,
+    });
+    expect(code).toBe(0);
+    const text = out.join("");
+    expect(text).toContain("removed when the run goes idle");
+    expect(text).toContain("files not in the mount go with it, and so does its log");
+    expect(text).toContain("the laptop folder is not touched");
+    expect(text).toContain(`the transcript stays in \`tentacle --resume ${UID}\``);
+    expect(text).toContain(
+      "The Mac stays awake while a turn runs; closing the lid still sleeps it",
+    );
+    expect(text).not.toContain("Re-attach");
+  });
+
+  test("keep=false, no mount: nothing about a laptop folder; no keep-awake: no line", async () => {
+    const dir = fresh();
+    const out: string[] = [];
+    await launchRelay(dir, spec({ keep: false }), {
+      write: (t) => out.push(t),
+      noun: "pod",
+      name: "box",
+      attachHint: "tentacle attach box",
+      spawnRelay: () => {
+        writeOwner(dir, running);
+        return { exited: () => false };
+      },
+      pollMs: 1,
+      timeoutMs: 2000,
+    });
+    const text = out.join("");
+    expect(text).toContain("the pod's files go with it, and so does its log");
+    expect(text).not.toContain("laptop folder");
+    expect(text).not.toContain("The Mac stays awake");
   });
 
   test("still starting past the wait: said, exit 0, the log named", async () => {

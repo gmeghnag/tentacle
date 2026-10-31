@@ -145,15 +145,13 @@ export const ARGS = {
 
 /**
  * `run --detach`'s flags together (docs/feat/detached-relay.md): the usage
- * error, if any. `prompt`: `--prompt`'s value. `keep`: the effective `--keep`:
- * a detached run keeps its workload until DR-5 lands.
+ * error, if any. `prompt`: `--prompt`'s value.
  */
 export function detachFlagProblem(input: {
   readonly detach: boolean;
   readonly prompt: string | undefined;
   readonly autoAccept: boolean;
   readonly resume: boolean;
-  readonly keep: boolean;
 }): string | null {
   if (!input.detach) {
     if (input.prompt !== undefined) {
@@ -164,10 +162,9 @@ export function detachFlagProblem(input: {
   if (input.prompt === undefined || input.prompt.trim() === "") {
     return "--detach needs --prompt <text> (or --prompt - for stdin)";
   }
-  if (input.resume) {
-    return "--detach cannot resume a session: run it, then `tentacle attach <name> --resume <uid>`";
-  }
-  return input.keep ? null : "--detach keeps its workload: --keep=false is not supported with it";
+  return input.resume
+    ? "--detach cannot resume a session: run it, then `tentacle attach <name> --resume <uid>`"
+    : null;
 }
 
 /**
