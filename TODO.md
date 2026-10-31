@@ -505,16 +505,16 @@ Daily-driver work (done 2026-10-14):
       `docs/fix/session-store-durability.md` — atomic temp+fsync+rename, per-uid
       latest-wins queue, validated loud `load`/`list`, save failures → TUI notice.
       Type: fix · Size: M · Blast: load-bearing.
-- [ ] 🔵 **Detach S2b + S4 `feat/detached-relay-lifecycle`**
+- [x] ✅ **Detach S2b + S4 `feat/detached-relay-lifecycle`**
       ([task doc](docs/feat/detached-relay-lifecycle.md); split out of S2, owner
-      Q1, 2026-10-30; S4 folded in, owner 2026-10-31) — BUILT on its branch,
-      awaiting the fresh-context Review. DR-5 `--keep=false` with `--detach`, DR-9
+      Q1, 2026-10-30; S4 folded in, owner 2026-10-31) — **DONE, merged `4f0fc2f` 2026-10-31**
+      (fresh Opus Review + 2 DeepSeek fix rounds). DR-5 `--keep=false` with `--detach`, DR-9
       keep-awake, the two `Detach S2` items below, `ps` STATUS through `statusOf`,
       `rm` stops the owner. S2 live-test items 3, 8, 17 moved to its checklist,
       run by hand after S3 merges; before S3, same release.
       Type: feat · Size: L · Blast: load-bearing · Suited: Opus, fresh review.
-- [ ] 🔵 **Detach S2: report the resident's REAL version** (built in
-      `feat/detached-relay-lifecycle`, Phase A, awaiting Review; Review of
+- [x] ✅ **Detach S2: report the resident's REAL version** (DONE in
+      `4f0fc2f`, Phase A; Review of
       `feat/detached-runs` S1 fix round 4, F2 + F3, 2026-10-30; owner: defer to
       S2) — `--resident-status` does not say which version the running
       resident is. So (F2, `engine-runtime.ts:639`) the "stray resident"
@@ -526,8 +526,8 @@ Daily-driver work (done 2026-10-14):
       version. Fail-closed today (nothing stopped or installed). Fix: add the
       resident's version to `--resident-status` and use it in both places.
       Type: fix · Size: S · Blast: load-bearing (detach) · Suited: Opus, fresh review.
-- [ ] 🔵 **Detach S2: do not stop an idle resident before an install that cannot land**
-      (built in `feat/detached-relay-lifecycle`, Phase A, awaiting Review; Review of
+- [x] ✅ **Detach S2: do not stop an idle resident before an install that cannot land**
+      (DONE in `4f0fc2f`, Phase A; Review of
       `feat/detached-runs` S1 fix round 5, F3, 2026-10-30; owner: defer
       to S2) — `engine-runtime.ts` stops the idle resident (`:580`) BEFORE the
       install (`:594`). With an unwritable install path and a different version
@@ -1095,7 +1095,7 @@ Pre-§10 docs with no TODO entry until now; not sized yet (size them when picked
 >    `run`/`attach` and across a `serve` restart.
 > 3b. skills hot-reload for the USER (`/name` list + `/skills` panel follow a
 >    reset / new skill without restart) — DONE, merged `067cd49` (protocol v13; D1 owner-accepted; small debt in `docs/feat/skills-hot-reload.md`);
-> 4b. **Detached runs** (**S1 `pod-daemon-resident` DONE, merged `9f17376` 2026-10-30, no tag**; **S2 `detached-relay` DONE, merged `e7620d7` 2026-10-31** (live 17/20, items 3, 8, 17 carried to S2b); S2b + S4 `detached-relay-lifecycle` built, awaiting Review; then S3; release with protocol 14 after S3 — task doc [`docs/feat/detached-runs.md`](docs/feat/detached-runs.md)) (owner 2026-10-27, draft — eval [`docs/eval/detached-runs.md`](docs/eval/detached-runs.md) written, DR-1…DR-9 DECIDED by the owner 2026-10-27; still to verify: k8s exec survival; AFTER docker E). Leave a `run` working with no TUI and re-attach later. The model stays on the laptop (AGENTS §7), so a detached run needs a LAPTOP-SIDE background relay (keeps the `model/stream` proxy + the single permission broker + session persistence alive without Ink); it stops if the Mac sleeps/powers off.
+> 4b. **Detached runs** (**S1 `pod-daemon-resident` DONE, merged `9f17376` 2026-10-30, no tag**; **S2 `detached-relay` DONE, merged `e7620d7` 2026-10-31** (live 17/20, items 3, 8, 17 carried to S2b); **S2b + S4 `detached-relay-lifecycle` DONE, merged `4f0fc2f` 2026-10-31**; next S3 `detached-handover` (then the owner's one hand-run live checklist);  release with protocol 14 after S3 — task doc [`docs/feat/detached-runs.md`](docs/feat/detached-runs.md)) (owner 2026-10-27, draft — eval [`docs/eval/detached-runs.md`](docs/eval/detached-runs.md) written, DR-1…DR-9 DECIDED by the owner 2026-10-27; still to verify: k8s exec survival; AFTER docker E). Leave a `run` working with no TUI and re-attach later. The model stays on the laptop (AGENTS §7), so a detached run needs a LAPTOP-SIDE background relay (keeps the `model/stream` proxy + the single permission broker + session persistence alive without Ink); it stops if the Mac sleeps/powers off.
 >    - CLI: `tentacle run --detach` — open question: only in one-shot mode (prompt given on the command line) or also as "start interactive, detach later"? + `--auto-accept[=true|false]` to launch detached with auto-accept on (explicit opt-in; a detached run with auto-accept off would stall on the first permission — say so in the message).
 >    - TUI: `/detach` — leaves the session running in the background relay and exits the TUI cleanly (pod/container kept).
 >    - Re-attach: `tentacle attach <name>` (slice E resolves engine/location) reconnects the TUI to the relay; `tentacle ps` shows a DETACHED/ATTACHED state + last activity.
