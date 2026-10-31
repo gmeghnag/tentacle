@@ -35,7 +35,7 @@ import {
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import type { EngineKind } from "./engine-host.ts";
-import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
+import { attachEngineRuntime, provisionWorkload, startEngineRuntime } from "./engine-runtime.ts";
 import {
   attachCommand,
   buildEngineHost,
@@ -54,6 +54,7 @@ import {
   type ServeLimits,
   USAGE,
   cliMode,
+  detachFlagProblem,
   extractGlobalOptions,
   parseArgs,
   parseContextWindowFlag,
@@ -63,12 +64,29 @@ import {
 } from "./flags.ts";
 import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
-import { forgetKept, keptDir, recordKept } from "./kept-index.ts";
-import { KEPT_SCHEMA_VERSION, ambiguousMessage, keptMetadata, whereOf } from "./kept.ts";
+import { forgetKept, keptDir, readKept, recordKept } from "./kept-index.ts";
+import {
+  KEPT_SCHEMA_VERSION,
+  type KeptEntry,
+  ambiguousMessage,
+  keptMetadata,
+  whereOf,
+} from "./kept.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
-import { POD_DAEMON_MODES, runResidentMode } from "./pod-resident.ts";
+import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
+import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
 import { render } from "./render.ts";
+import {
+  RELAY_SUBCOMMAND,
+  RUN_STATE_VERSION,
+  laptopProc,
+  readOwner,
+  relayBlocking,
+  relayBlockingMessage,
+  runDirFor,
+  runStem,
+} from "./run-state.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { startTerminal } from "./terminal.ts";
@@ -100,6 +118,12 @@ Usage:
                                 container (sandbox), local TUI (<name> is its name; random
                                 when omitted; sessions persist on the laptop, so --resume
                                 works); kept on exit by default (--keep=false deletes)
+  tentacle run --detach --prompt <text|-> [--auto-accept[=true|false]] --image <ref> [...] [<name>]
+                                the same with no TUI: a background laptop process runs the
+                                turn, serves the model and saves it, then leaves once the
+                                session is idle. It waits at the first permission unless
+                                --auto-accept (pod tool asks only, allow once, logged).
+                                kill <pid> stops it; attach is refused until it is gone
   tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]|--continue]
                                 attach the TUI to an EXISTING pod or container (tentacle is
                                 injected if it is not there yet); --container is the
@@ -240,6 +264,12 @@ export interface CliIO {
   writeErr?: (text: string) => void;
   /** Test seam: replaces the `run` engine runtime (pins the flag/config → `keepHint` wiring). */
   startEngineRuntime?: typeof startEngineRuntime;
+  /** Test seam: `run --detach`'s workload creation (pins that no daemon starts in the foreground). */
+  provisionWorkload?: typeof provisionWorkload;
+  /** Test seam: `run --detach`'s relay process. */
+  spawnRelay?: typeof spawnRelayProcess;
+  /** Test seam: `--prompt -`'s stdin. Default: all of it. */
+  readStdin?: () => Promise<string>;
   /**
    * Test seam: the pre-Ink y/N question (a dangerous mount source); present =
    * interactive. Default: a readline prompt, on a terminal only.
@@ -298,6 +328,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   if (args[0] === DELETE_CONTAINER_SUBCOMMAND) {
     await deleteContainerFromEnv();
     return 0;
+  }
+  // The relay of a detached run (`relay.ts`): its spec comes through the env.
+  if (args[0] === RELAY_SUBCOMMAND) {
+    return relayMain(process.env, writeErr);
   }
 
   if (args[0] === "--help" || args[0] === "-h") {
@@ -697,6 +731,36 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return 1;
     }
     const noun = engineNoun(engine);
+    const kept = resolveKeep({
+      bare: runBools.has("keep"),
+      value: runFlags.get("keep"),
+      configured: config.keep,
+    });
+    if (!kept.ok) {
+      write(`[${noun}] ${kept.error}\n`);
+      return 1;
+    }
+    // `run --detach --prompt` (docs/feat/detached-relay.md): no TUI, its session
+    // in a relay. Refused here, before anything exists; `-` is stdin, read once.
+    const detach = runBools.has("detach");
+    const promptFlag = runFlags.get("prompt");
+    const fromStdin = detach && promptFlag === "-";
+    if (fromStdin && !io.readStdin && process.stdin.isTTY) {
+      write(`\n[error] --prompt -: stdin is a terminal\nusage: ${USAGE.run}\n`);
+      return 1;
+    }
+    const prompt = fromStdin ? await (io.readStdin ?? (() => Bun.stdin.text()))() : promptFlag;
+    const detachProblem = detachFlagProblem({
+      detach,
+      prompt,
+      autoAccept: runBools.has("auto-accept") || runFlags.has("auto-accept"),
+      resume: runBools.has("resume") || runFlags.has("resume") || runBools.has("continue"),
+      keep: kept.keep,
+    });
+    if (detachProblem) {
+      write(`\n[error] ${detachProblem}\nusage: ${USAGE.run}\n`);
+      return 1;
+    }
     const image = runFlags.get("image") ?? process.env.TENTACLE_POD_IMAGE;
     const binDir = runFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR;
     if (!image) {
@@ -715,15 +779,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return 1;
     }
     const context = runFlags.get("context");
-    const kept = resolveKeep({
-      bare: runBools.has("keep"),
-      value: runFlags.get("keep"),
-      configured: config.keep,
-    });
-    if (!kept.ok) {
-      write(`[${noun}] ${kept.error}\n`);
-      return 1;
-    }
     // docker/podman (slice D, docs/feat/docker-workspace-mount.md): plan the cwd
     // mount and gate a dangerous source HERE — before anything is created and
     // before Ink owns the terminal (the y/N prompt is a plain line).
@@ -778,51 +833,98 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const created = new Date().toISOString();
     const keptMeta = kept.keep ? keptMetadata({ engine, model: config.model, created }) : undefined;
     const insecureTcp = runBools.has("insecure-docker-tcp");
+    const keptEntryFor = (keptName: string): KeptEntry => ({
+      schemaVersion: KEPT_SCHEMA_VERSION,
+      name: keptName,
+      engine,
+      ...keptLocation(engine, built, { context, insecureTcp }),
+      ...(binDir ? { binDir } : {}),
+      ...(wsPlan.kind === "mount" ? { mount: wsPlan.mount.target } : {}),
+      model: config.model,
+      created,
+    });
     const recordKeptEntry = (keptName: string): (() => void) => {
-      const file = recordKept(keptDir(config.configDir), {
-        schemaVersion: KEPT_SCHEMA_VERSION,
-        name: keptName,
-        engine,
-        ...keptLocation(engine, built, { context, insecureTcp }),
-        ...(binDir ? { binDir } : {}),
-        ...(wsPlan.kind === "mount" ? { mount: wsPlan.mount.target } : {}),
-        model: config.model,
-        created,
-      });
+      const file = recordKept(keptDir(config.configDir), keptEntryFor(keptName));
       return () => forgetKept(file);
     };
+    const workloadDeps = {
+      host: built.host,
+      image,
+      ...(binDir ? { binDir } : {}),
+      ...(name ? { name } : {}),
+      ...(wsPlan.kind === "mount" ? { workspace: wsPlan.mount } : {}),
+      ...(kept.keep
+        ? {
+            keepHint: (name: string) =>
+              attachCommand(engine, name, {
+                namespace: built.namespace,
+                context,
+                insecureTcp,
+                binDir,
+              }),
+          }
+        : {}),
+      ...(keptMeta ? { labels: keptMeta.labels, annotations: keptMeta.annotations } : {}),
+      log: write,
+    };
+    // The relay redials from the kept entry, so a detached run needs one: a
+    // failed write, only a warning for `run`, stops it here.
+    if (detach && prompt !== undefined) {
+      const sessionId = crypto.randomUUID();
+      let recorded = null as KeptEntry | null;
+      let workload: Awaited<ReturnType<typeof provisionWorkload>>;
+      try {
+        workload = await (io.provisionWorkload ?? provisionWorkload)(config, {
+          ...workloadDeps,
+          // A plain `attach` would open a fresh session (D5).
+          keepHint: (keptName) => `${workloadDeps.keepHint?.(keptName)} --resume ${sessionId}`,
+          recordKept: (keptName) => {
+            const undo = recordKeptEntry(keptName);
+            recorded = keptEntryFor(keptName);
+            return undo;
+          },
+        });
+      } catch (error) {
+        write(
+          `[${noun}] failed: ${untrustedText(error instanceof Error ? error.message : String(error))}\n`,
+        );
+        return 1;
+      }
+      if (recorded === null) {
+        write(`[${noun}] failed: a detached run needs its kept index entry; nothing started\n`);
+        return 1;
+      }
+      return launchRelay(
+        runDirFor(config.configDir, recorded),
+        {
+          schemaVersion: RUN_STATE_VERSION,
+          mode: "start",
+          stem: runStem(recorded),
+          sessionId,
+          prompt,
+          autoAccept: runBools.has("auto-accept") || runFlags.get("auto-accept") === "true",
+          cwd: config.cwd,
+          ...(globals.profile !== undefined ? { profile: globals.profile } : {}),
+        },
+        {
+          write,
+          noun,
+          name: workload.name,
+          attachHint: workloadDeps.keepHint?.(workload.name) ?? "",
+          ...(io.spawnRelay ? { spawnRelay: io.spawnRelay } : {}),
+        },
+      );
+    }
     // ONE broker shared by the engine runtime and the TUI (see `runEngineTui`).
     const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
     let runtime: Awaited<ReturnType<typeof startEngineRuntime>>;
     try {
       runtime = await (io.startEngineRuntime ?? startEngineRuntime)(config, {
-        host: built.host,
-        image,
-        ...(binDir ? { binDir } : {}),
-        ...(name ? { name } : {}),
-        ...(wsPlan.kind === "mount" ? { workspace: wsPlan.mount } : {}),
-        ...(kept.keep
-          ? {
-              keepHint: (name: string) =>
-                attachCommand(engine, name, {
-                  namespace: built.namespace,
-                  context,
-                  insecureTcp,
-                  binDir,
-                }),
-            }
-          : {}),
-        ...(keptMeta
-          ? {
-              labels: keptMeta.labels,
-              annotations: keptMeta.annotations,
-              recordKept: recordKeptEntry,
-            }
-          : {}),
+        ...workloadDeps,
+        ...(keptMeta ? { recordKept: recordKeptEntry } : {}),
         permissions,
         saver: sessions.saver,
         resume: sessions.resume,
-        log: write,
         notify: (text) => sessions.notices.notify(text),
       });
     } catch (error) {
@@ -862,6 +964,19 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           lookup.resolved.candidates.map((c) => c.entry),
         )}\nusage: ${USAGE.attach}\n`,
       );
+      return 1;
+    }
+    // A detached run's relay is that session's writer and model link: a second
+    // client would steal the link (docs/feat/detached-relay.md, D3). Nothing is dialled.
+    const relay = relayBlocking(
+      name,
+      readKept(keptDir(config.configDir)).entries,
+      (entry) => lockHolder(runDirFor(config.configDir, entry), laptopProc),
+      attachFlags.get("engine"),
+    );
+    if (relay) {
+      const owner = readOwner(runDirFor(config.configDir, relay.entry));
+      write(`\n[error] ${relayBlockingMessage(name, { pid: relay.pid, owner })}\n`);
       return 1;
     }
     const keptEntry = lookup?.resolved.kind === "one" ? lookup.resolved.match.entry : undefined;

@@ -46,7 +46,7 @@ import { APP_VERSION, CLIENT_INFO } from "./version.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 
 export interface LocalRuntime {
-  readonly createSession: () => SessionController;
+  readonly createSession: () => PersistingController;
   /**
    * A read-only `JobController` view: only `onExit` is live (backed by the
    * daemon's background-exit stream), so the TUI surfaces job exits in the
@@ -63,6 +63,14 @@ export interface LocalRuntime {
    * daemon-side, then the transport. Await it before exiting.
    */
   dispose(): Promise<void>;
+  /**
+   * `dispose` for a client that leaves a session for a later one (the relay,
+   * docs/feat/detached-relay.md): the same saves and teardown, but the open
+   * sessions are DETACHED, never closed — alone on a session, `dispose` ends it.
+   */
+  release(): Promise<void>;
+  /** `id`'s running background jobs, `null` if they cannot be read. */
+  sessionJobs(id: string): Promise<number | null>;
 }
 
 /** A client-side `JobController` whose only live capability is `onExit`. */
@@ -287,6 +295,13 @@ export interface LocalRuntimeDeps {
    * sink — never a raw terminal write while Ink owns it (AGENTS §7).
    */
   readonly onPeerError?: (error: Error) => void;
+  /**
+   * Is someone there to answer the broker? Default true (a TUI). False (the
+   * relay): a project-hooks trust ask is declined with a notice, never asked.
+   */
+  readonly interactive?: boolean;
+  /** The first session's uid (a detached run's, minted by its launcher); else a fresh one. */
+  readonly sessionId?: string;
 }
 
 /** Handshake the daemon and return a session factory that persists each turn. */
@@ -296,8 +311,8 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
   // the caller passed: a pod-originated prompt never creates a lasting approval.
   const hooksTrust = createHooksTrustResolver({
     broker: deps.permissions,
-    // Every RPC runtime drives the TUI, whose prompt answers the broker.
-    interactive: true,
+    // A TUI's prompt answers the broker; a relay has no one to ask.
+    interactive: deps.interactive ?? true,
     ...(deps.hooksTrustStore && !deps.modelProvider ? { store: deps.hooksTrustStore } : {}),
     ...(deps.notify ? { notify: deps.notify } : {}),
   });
@@ -327,10 +342,12 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
   });
 
   let seed = deps.resume;
-  const createSession = (): SessionController => {
+  let firstId = deps.sessionId;
+  const createSession = (): PersistingController => {
     const record = seed;
     seed = null; // only the first session resumes; /clear starts fresh
-    const uid = record?.id ?? crypto.randomUUID();
+    const uid = record?.id ?? firstId ?? crypto.randomUUID();
+    firstId = undefined;
     const createdAt = record?.createdAt;
     // A resumed record's chosen title seeds the open that recreates it (pod,
     // worker: they keep nothing), so it is never regenerated over a rename.
@@ -379,6 +396,29 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       await client.closeSessions();
       client.close();
       deps.disposeTransport();
+    },
+    release: async () => {
+      await allFlushed();
+      const detached = client.liveSessionIds().map((id) =>
+        client.detachSession(id).catch((error: unknown) => {
+          deps.onPeerError?.(error instanceof Error ? error : new Error(String(error)));
+        }),
+      );
+      await bounded(
+        Promise.all(detached).then(() => undefined),
+        FLUSH_ON_EXIT_TIMEOUT_MS,
+      );
+      client.close();
+      deps.disposeTransport();
+    },
+    sessionJobs: async (id) => {
+      try {
+        const { sessions } = await client.sessionList();
+        const entry = sessions.find((session) => session.sessionId === id);
+        return entry ? (entry.jobs ?? 0) : null;
+      } catch {
+        return null;
+      }
     },
   };
 }

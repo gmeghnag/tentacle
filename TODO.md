@@ -502,6 +502,13 @@ Daily-driver work (done 2026-10-14):
       `docs/fix/session-store-durability.md` — atomic temp+fsync+rename, per-uid
       latest-wins queue, validated loud `load`/`list`, save failures → TUI notice.
       Type: fix · Size: M · Blast: load-bearing.
+- [ ] 🔵 **Detach S2b `feat/detached-relay-lifecycle`** (split out of S2, owner
+      Q1, 2026-10-30; sketch in `docs/feat/detached-relay.md`) — DR-5
+      `--keep=false` with `--detach`, DR-9 keep-awake, and the two `Detach S2`
+      items below, plus S2 live-test items 3, 8, 17 (real TTY: close the
+      launcher terminal; `attach --resume` then quit; a second hand-started
+      relay is refused); before S3, same release.
+      Type: feat · Size: S–M · Blast: load-bearing · Suited: Opus.
 - [ ] 🔵 **Detach S2: report the resident's REAL version** (Review of
       `feat/detached-runs` S1 fix round 4, F2 + F3, 2026-10-30; owner: defer to
       S2) — `--resident-status` does not say which version the running

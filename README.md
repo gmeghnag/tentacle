@@ -92,6 +92,14 @@ tentacle run --engine docker --image <ref> [--context <ctx>] [<name>]     # Dock
 tentacle run --engine podman --image <ref> [<name>]                       # Podman
 ```
 
+**With no TUI.** `tentacle run --detach --prompt <text|-> --image <ref> [<name>]`
+creates the workload, then a background process on your machine runs the turn,
+serves the model and saves the session, and leaves after 60 s of idle. It waits
+at the first permission unless `--auto-accept` (pod tool asks only, allow once,
+logged in `<configDir>/kept/runs/<id>/relay.log`). `attach` is refused while that
+process lives: wait, or `kill <pid>`, then run the `tentacle attach … --resume <uid>`
+it printed, from the same folder. `--keep=false` is not supported with `--detach` yet.
+
 **Your folder, in the container (Docker/Podman).** On a local engine `run`
 bind-mounts the current folder read-write at the same path, and the agent works
 in it: your real files, with the container's own processes, packages and

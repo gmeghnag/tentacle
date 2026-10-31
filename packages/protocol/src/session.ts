@@ -688,6 +688,8 @@ export const SessionListEntrySchema = z.object({
   attached: z.number().int().nonnegative(),
   /** Ended and kept, not loaded (`running: false`, `attached: 0`): `session/open{reopen}` reloads it. */
   archived: z.boolean(),
+  /** The session's background jobs running now. Absent: an archived session, or an older daemon. */
+  jobs: z.number().int().nonnegative().optional(),
 });
 export type SessionListEntry = z.infer<typeof SessionListEntrySchema>;
 

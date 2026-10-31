@@ -5,7 +5,21 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DELETE_CONTAINER_SUBCOMMAND } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND } from "@tentacle/k8s";
+import type { EngineHost } from "../src/engine-host.ts";
+import { provisionWorkload } from "../src/engine-runtime.ts";
 import { main } from "../src/index.ts";
+import { keptDir as keptIndexDir, recordKept } from "../src/kept-index.ts";
+import type { KeptEntry } from "../src/kept.ts";
+import {
+  type OwnerRecord,
+  RELAY_SUBCOMMAND,
+  type RelaySpec,
+  ensureRunDir,
+  laptopProc,
+  readSpec,
+  runDirFor,
+  writeOwner,
+} from "../src/run-state.ts";
 
 // End-to-end: a fake OpenAI-compatible server scripts a two-turn conversation —
 // turn 1 calls the `fs_write` tool, turn 2 replies with text — exercising the
@@ -225,6 +239,29 @@ describe("cli main: hidden exit-net subcommands (docs/feat/docker-engine-cli.md)
       }
     });
   }
+});
+
+describe("cli main: the relay's hidden subcommand (docs/feat/detached-relay.md R12)", () => {
+  test("dispatched before config: no spec → exit 1 on stderr, nothing scaffolded", async () => {
+    // Mutation: drop the dispatch → the word becomes a one-shot prompt.
+    const freshConfigDir = join(dir, "config-relay");
+    const saved = process.env.TENTACLE_CONFIG_DIR;
+    process.env.TENTACLE_CONFIG_DIR = freshConfigDir;
+    const launch = process.cwd();
+    process.chdir(dir);
+    try {
+      const out: string[] = [];
+      const err: string[] = [];
+      const io = { write: (t: string) => out.push(t), writeErr: (t: string) => err.push(t) };
+      expect(await main(["bun", "cli", RELAY_SUBCOMMAND], io)).toBe(1);
+      expect(out).toEqual([]);
+      expect(err.join("")).toContain("TENTACLE_RELAY_SPEC");
+      expect(await Bun.file(join(freshConfigDir, "config.jsonc")).exists()).toBe(false);
+    } finally {
+      process.chdir(launch);
+      process.env.TENTACLE_CONFIG_DIR = saved;
+    }
+  });
 });
 
 // `--engine` end to end through `main` (docs/feat/docker-engine-cli.md): no
@@ -474,6 +511,246 @@ describe("cli main: --engine", () => {
       expect(off.deps?.labels).toBeUndefined();
       expect(off.deps?.annotations).toBeUndefined();
       expect(off.deps?.recordKept).toBeUndefined();
+    });
+  });
+
+  describe("run --detach (docs/feat/detached-relay.md R12)", () => {
+    const base = ["run", "--engine", "docker", "--no-mount", "--image", "x"];
+    const owned = (sessionId: string): OwnerRecord => ({
+      schemaVersion: 1,
+      kind: "relay",
+      pid: 9,
+      appVersion: "1",
+      sessionId,
+      state: "running",
+      lastActivityAt: 1,
+      autoAccept: false,
+    });
+    /** `main` with the workload's creation and the relay's spawn as seams. */
+    const detached = async (
+      args: string[],
+      over: { stdin?: string; record?: boolean; keep?: boolean } = {},
+    ) => {
+      const out: string[] = [];
+      const calls = { provision: 0, spawn: 0, runtime: 0 };
+      let spec: RelaySpec | undefined;
+      let hint: string | undefined;
+      const path = join(dir, "config", "config.jsonc");
+      await mkdir(join(dir, "config"), { recursive: true });
+      await writeFile(path, JSON.stringify(over.keep === undefined ? {} : { keep: over.keep }));
+      const code = await main(["bun", "cli", ...args], {
+        write: (t) => out.push(t),
+        ...(over.stdin !== undefined ? { readStdin: async () => over.stdin ?? "" } : {}),
+        startEngineRuntime: async () => {
+          calls.runtime += 1;
+          throw new Error("no runtime for a detached run");
+        },
+        provisionWorkload: async (_config, deps) => {
+          calls.provision += 1;
+          hint = deps.keepHint?.("c1");
+          // The real gate: no `keepHint`, no index entry (and the exit net armed).
+          if (over.record !== false && deps.keepHint) {
+            deps.recordKept?.("c1");
+          }
+          return { name: "c1", binPath: "/usr/local/bin/tentacle", removeUnlessKept: () => {} };
+        },
+        spawnRelay: (file, _cwd, runDir) => {
+          calls.spawn += 1;
+          spec = readSpec(file);
+          writeOwner(runDir, owned(spec.sessionId));
+          return { exited: () => false };
+        },
+      });
+      await rm(path, { force: true });
+      return { code, text: out.join(""), calls, spec, hint };
+    };
+    const refused = { provision: 0, spawn: 0, runtime: 0 };
+
+    for (const [why, args, needle] of [
+      ["--prompt with no --detach", [...base, "--prompt", "hi"], "--prompt needs --detach"],
+      ["--detach with no prompt", [...base, "--detach"], "--detach needs --prompt"],
+      [
+        "--auto-accept with no --detach",
+        [...base, "--auto-accept"],
+        "--auto-accept needs --detach",
+      ],
+      [
+        "--detach --resume",
+        [...base, "--detach", "--prompt", "hi", "--resume"],
+        "--detach cannot resume",
+      ],
+      [
+        "--detach --continue",
+        [...base, "--detach", "--prompt", "hi", "--continue"],
+        "--detach cannot resume",
+      ],
+      [
+        "--detach --keep=false",
+        [...base, "--detach", "--prompt", "hi", "--keep=false"],
+        "--detach keeps its workload",
+      ],
+    ] as const) {
+      test(`${why}: a usage error, nothing created`, async () => {
+        await withEnv(unreachable, async () => {
+          const r = await detached([...args]);
+          expect(r.code).toBe(1);
+          expect(r.text).toContain(needle);
+          expect(r.text).toContain("usage: tentacle run");
+          expect(r.calls).toEqual(refused);
+        });
+      });
+    }
+
+    test("`keep: false` in the config refuses too, naming it", async () => {
+      await withEnv(unreachable, async () => {
+        const r = await detached([...base, "--detach", "--prompt", "hi"], { keep: false });
+        expect(r.code).toBe(1);
+        expect(r.text).toContain("--detach keeps its workload");
+        expect(r.calls).toEqual(refused);
+      });
+    });
+
+    test("an empty prompt on stdin, or a blank --prompt: a usage error, nothing created", async () => {
+      await withEnv(unreachable, async () => {
+        const stdin = await detached([...base, "--detach", "--prompt", "-"], { stdin: "  \n" });
+        expect(stdin.code).toBe(1);
+        expect(stdin.text).toContain("--detach needs --prompt");
+        expect(stdin.calls).toEqual(refused);
+        const blank = await detached([...base, "--detach", "--prompt=   "]);
+        expect(blank.code).toBe(1);
+        expect(blank.calls).toEqual(refused);
+      });
+    });
+
+    test("started: no TUI runtime, the spec names the session, the line the way back", async () => {
+      await withEnv(unreachable, async () => {
+        const r = await detached([...base, "--detach", "--prompt", "hello", "--auto-accept"]);
+        expect(r.code).toBe(0);
+        expect(r.calls).toEqual({ provision: 1, spawn: 1, runtime: 0 });
+        expect(r.spec).toMatchObject({ prompt: "hello", autoAccept: true, mode: "start" });
+        expect(r.text).toContain(
+          `tentacle attach --engine docker c1 --resume ${r.spec?.sessionId}`,
+        );
+        expect(r.text).toContain("auto-accepting pod tool asks");
+        // The `kept` line must not send the user to a fresh session (D5).
+        expect(r.hint).toBe(`tentacle attach --engine docker c1 --resume ${r.spec?.sessionId}`);
+      });
+      rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
+    });
+
+    test("the launcher never arms the exit net: its own exit must not delete the workload", async () => {
+      // Mutation: `keepHint: undefined` in the detach call → the REAL
+      // `provisionWorkload` registers `registerExitCleanup` and removes on failure.
+      await withEnv(unreachable, async () => {
+        const removed: string[] = [];
+        const fake = {
+          noun: "container",
+          where: "docker",
+          create: async () => {},
+          waitForReady: async () => {
+            throw new Error("not ready");
+          },
+          remove: async (name: string) => void removed.push(`remove:${name}`),
+          removeBestEffort: (name: string) => void removed.push(`besteffort:${name}`),
+        } as unknown as EngineHost;
+        const before = process.listeners("exit");
+        const out: string[] = [];
+        const code = await main(["bun", "cli", ...base, "--detach", "--prompt", "hi", "box"], {
+          write: (t) => out.push(t),
+          provisionWorkload: (config, deps) =>
+            provisionWorkload(config, { ...deps, host: fake, appVersion: "dev" }),
+        });
+        const armed = process.listeners("exit").filter((l) => !before.includes(l));
+        for (const listener of armed) {
+          process.off("exit", listener);
+          listener(0);
+        }
+        expect(code).toBe(1);
+        expect(removed).toEqual([]);
+        expect(armed).toEqual([]);
+        expect(out.join("")).toContain("kept box");
+      });
+      rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
+    });
+
+    test("--prompt - reads stdin; --auto-accept=false stays off", async () => {
+      await withEnv(unreachable, async () => {
+        const r = await detached([...base, "--detach", "--prompt", "-", "--auto-accept=false"], {
+          stdin: "from a pipe\n",
+        });
+        expect(r.code).toBe(0);
+        expect(r.spec).toMatchObject({ prompt: "from a pipe\n", autoAccept: false });
+      });
+      rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
+    });
+
+    test("not in the kept index: fatal, no relay (it needs the entry)", async () => {
+      await withEnv(unreachable, async () => {
+        const r = await detached([...base, "--detach", "--prompt", "hi"], { record: false });
+        expect(r.code).toBe(1);
+        expect(r.text).toContain("kept index");
+        expect(r.calls).toEqual({ provision: 1, spawn: 0, runtime: 0 });
+      });
+    });
+  });
+
+  describe("attach while a relay owns the workload (docs/feat/detached-relay.md R13)", () => {
+    const entry: KeptEntry = {
+      schemaVersion: 1,
+      name: "box",
+      engine: "docker",
+      endpoint: "unix:///nonexistent/kept.sock",
+      model: "m",
+      created: "2026-10-27T10:00:00.000Z",
+    };
+    const setup = (holder: string): void => {
+      const config = join(dir, "config");
+      rmSync(keptIndexDir(config), { recursive: true, force: true });
+      recordKept(keptIndexDir(config), entry);
+      const runDir = ensureRunDir(runDirFor(config, entry));
+      writeFileSync(join(runDir, ".lock.1"), holder);
+      writeOwner(runDir, {
+        schemaVersion: 1,
+        kind: "relay",
+        pid: process.pid,
+        appVersion: "1",
+        sessionId: "44444444-4444-4444-8444-444444444444",
+        state: "waiting-permission",
+        lastActivityAt: 1,
+        autoAccept: false,
+      });
+    };
+    const live = () => `${process.pid} ${laptopProc(process.pid)?.start}`;
+
+    test("a live holder: exit 1, nothing dialled, the way out said", async () => {
+      // Mutation: drop the guard → `attaching to box`.
+      setup(live());
+      await withEnv(unreachable, async () => {
+        for (const args of [
+          ["attach", "box"],
+          ["attach", "--engine", "docker", "box"],
+          ["attach", "box", "--resume", "44444444-4444-4444-8444-444444444444"],
+        ]) {
+          const r = await run(args);
+          expect(r.code).toBe(1);
+          expect(r.text).toContain("a detached run owns it");
+          expect(r.text).toContain(`kill ${process.pid}`);
+          expect(r.text).toContain("--resume 44444444-4444-4444-8444-444444444444");
+          expect(r.text).not.toContain("attaching to");
+        }
+      });
+      rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+    });
+
+    test("a stale holder, or another engine's workload of that name, proceeds", async () => {
+      setup(`${2 ** 30} 1`);
+      await withEnv(unreachable, async () => {
+        expect((await run(["attach", "box"])).text).toContain("attaching to box");
+        setup(live());
+        const other = await run(["attach", "--engine", "podman", "box"]);
+        expect(other.text).not.toContain("a detached run owns it");
+      });
+      rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
     });
   });
 

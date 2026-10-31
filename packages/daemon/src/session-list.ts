@@ -34,6 +34,8 @@ export interface SessionSummary {
   readonly cwd: string;
   /** Ended and kept, not loaded (`running: false`, `attached: 0`). */
   readonly archived: boolean;
+  /** Background jobs running now; absent for an archived entry. */
+  readonly jobs?: number;
 }
 
 /** A position in the order: the sort key of one entry. */
@@ -86,6 +88,7 @@ export function toSessionList(
       running: s.running,
       attached: s.attached,
       archived: s.archived,
+      ...(s.jobs !== undefined ? { jobs: s.jobs } : {}),
     };
     if (after === undefined || compare(entry, after) > 0) {
       entries.push(entry);

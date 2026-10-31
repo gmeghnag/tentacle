@@ -164,6 +164,91 @@ describe("createLocalRuntime (local over RPC)", () => {
     expect(transportClosed).toBe(true);
   });
 
+  test("R6 release: the session stays live with nobody attached; session/detach, never session/close", async () => {
+    // Mutation: `release = dispose` → the session is closed.
+    const model = new ScriptedProvider([[{ type: "text", delta: "a" }, { type: "done" }]]);
+    const { channel, dispose, host } = daemon(model);
+    const frames: string[] = [];
+    let transportClosed = false;
+    const runtime = await createLocalRuntime({
+      channel: {
+        ...channel,
+        send: (frame) => {
+          frames.push(frame);
+          channel.send(frame);
+        },
+      },
+      disposeTransport: () => {
+        transportClosed = true;
+        dispose();
+      },
+      permissions: new PermissionBroker(),
+      saver: new SessionSaver(new JsonSessionStore(join(dir, "release")), () => {}),
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: null,
+    });
+    const session = runtime.createSession();
+    await drain(session.send("one"));
+    await runtime.release();
+    expect(host.size).toBe(1);
+    expect(host.list({}).sessions[0]?.attached).toBe(0);
+    expect(frames.some((frame) => frame.includes('"session/detach"'))).toBe(true);
+    expect(frames.some((frame) => frame.includes('"session/close"'))).toBe(false);
+    expect(transportClosed).toBe(true);
+  });
+
+  test("R6 sessionJobs: the session's running jobs; null when it is unknown or the list fails", async () => {
+    const model = new ScriptedProvider([[{ type: "done" }]]);
+    const jobs = new FakeJobs();
+    jobs.list = () => [{ id: "j", command: "c", status: "running", exitCode: null, startedAt: 1 }];
+    const { channel, dispose } = daemon(model, jobs);
+    const runtime = await createLocalRuntime({
+      channel,
+      disposeTransport: dispose,
+      permissions: new PermissionBroker(),
+      saver: new SessionSaver(new JsonSessionStore(join(dir, "jobs")), () => {}),
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: null,
+      sessionId: "11111111-1111-4111-8111-111111111111",
+    });
+    await drain(runtime.createSession().send("one"));
+    expect(await runtime.sessionJobs("11111111-1111-4111-8111-111111111111")).toBe(1);
+    expect(await runtime.sessionJobs("no-such-session")).toBeNull();
+    await runtime.dispose();
+    expect(await runtime.sessionJobs("11111111-1111-4111-8111-111111111111")).toBeNull();
+  });
+
+  test("R8 sessionId: the first session's record carries it, a second one gets a fresh id", async () => {
+    // Mutation: ignore `sessionId` → the record has a random id.
+    const id = "22222222-2222-4222-8222-222222222222";
+    const model = new ScriptedProvider([
+      [{ type: "text", delta: "a" }, { type: "done" }],
+      [{ type: "text", delta: "b" }, { type: "done" }],
+    ]);
+    const { channel, dispose } = daemon(model);
+    const store = new JsonSessionStore(join(dir, "session-id"));
+    const saver = new SessionSaver(store, () => {});
+    const runtime = await createLocalRuntime({
+      channel,
+      disposeTransport: dispose,
+      permissions: new PermissionBroker(),
+      saver,
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: null,
+      sessionId: id,
+    });
+    await drain(runtime.createSession().send("one"));
+    await drain(runtime.createSession().send("two"));
+    await runtime.dispose();
+    await saver.drain();
+    const ids = (await store.list()).records.map((s) => s.id);
+    expect(ids).toHaveLength(2);
+    expect(ids).toContain(id);
+  });
+
   test("persists the session after a turn, under a stable uid", async () => {
     const model = new ScriptedProvider([[{ type: "text", delta: "hi back" }, { type: "done" }]]);
     const { channel, dispose } = daemon(model);

@@ -227,7 +227,11 @@ describe("createLocalRuntime wiring (hooks/trust)", () => {
     },
   };
 
-  async function rig(modelProvider: ModelProvider | undefined, answer: PermissionResponse) {
+  async function rig(
+    modelProvider: ModelProvider | undefined,
+    answer: PermissionResponse,
+    headless?: { readonly notify: (text: string) => void },
+  ) {
     const [daemonCh, clientCh] = createChannelPair();
     let opened: string | undefined;
     const daemon = new RpcPeer(daemonCh, {
@@ -259,6 +263,7 @@ describe("createLocalRuntime wiring (hooks/trust)", () => {
       resume: null,
       hooksTrustStore: store,
       ...(modelProvider ? { modelProvider } : {}),
+      ...(headless ? { interactive: false, notify: headless.notify } : {}),
     });
     // The laptop answers `hooks/trust` only for a session it opened: open one.
     const iterator = runtime.createSession().send("hi")[Symbol.asyncIterator]();
@@ -288,6 +293,19 @@ describe("createLocalRuntime wiring (hooks/trust)", () => {
       expect(writes).toEqual([]);
       runtime.dispose();
     }
+  });
+
+  test("R7 headless (the relay): declined with a notice, the broker is never called", async () => {
+    // Mutation: hard-code `interactive: true` → the broker is asked.
+    const notices: string[] = [];
+    const { daemon, runtime, writes, seen, params } = await rig(unusedModel, ALWAYS, {
+      notify: (text) => notices.push(text),
+    });
+    expect(await daemon.request(Method.HooksTrust, params)).toEqual({ trusted: false });
+    expect(seen).toEqual([]);
+    expect(writes).toEqual([]);
+    expect(notices.join("")).toContain("no one to ask");
+    runtime.dispose();
   });
 });
 

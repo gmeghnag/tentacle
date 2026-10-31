@@ -769,6 +769,7 @@ export class HostedSession {
       title: titleText(this.title, this.session.messages),
       cwd,
       archived: false,
+      jobs: this.jobs?.list().filter((job) => job.status === "running").length ?? 0,
     };
   }
 
