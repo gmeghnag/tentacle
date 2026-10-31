@@ -9,6 +9,12 @@
  * detached and waits for it to start. The relay leaves when the session is idle
  * (`relay-state.ts`), on SIGTERM/SIGINT (the turn is cancelled and saved) or when
  * the link stops. It only ever DETACHES: a `dispose` would close the session.
+ *
+ * `--keep=false` (docs/feat/detached-relay-lifecycle.md): on a normal exit the
+ * relay removes the workload, `exitPlan` alone deciding. The order is the safety
+ * argument: the lock is taken before the net is armed (a relay refused by the
+ * lock must never delete anything), the session is detached and saved before the
+ * delete, and the lock outlives it, so no `attach` slips in.
  */
 import { spawn } from "node:child_process";
 import { closeSync, openSync, rmSync } from "node:fs";
@@ -16,21 +22,28 @@ import { join } from "node:path";
 import { loadConfig } from "@tentacle/config";
 import { PermissionBroker } from "@tentacle/core";
 import type { EngineHost } from "./engine-host.ts";
-import { attachEngineRuntime } from "./engine-runtime.ts";
+import { armExitNet, attachEngineRuntime } from "./engine-runtime.ts";
 import { buildEngineHost, hostOptionsFor } from "./engine-select.ts";
-import { keptDir, readKept } from "./kept-index.ts";
+import { type KeepAwakeOptions, createKeepAwake } from "./keep-awake.ts";
+import { type KeptRemoval, bounded, removalFate, removeVerifiedKept } from "./kept-cmd.ts";
+import { keptDir, keptFileName, readKept } from "./kept-index.ts";
 import type { KeptEntry } from "./kept.ts";
 import type { LocalRuntime } from "./local-runtime.ts";
 import { type ProcOf, acquireResidentLock, selfCommand } from "./pod-resident.ts";
 import { relayPolicy } from "./relay-policy.ts";
 import {
+  type ExitPlan,
   type RelayEvent,
   type RelayView,
+  type ResidentUse,
+  exitPlan,
   finalView,
   initialRelay,
+  needsUse,
   relayExits,
   relayStep,
   relayView,
+  wantsAwake,
 } from "./relay-state.ts";
 import {
   RELAY_SPEC_ENV,
@@ -60,6 +73,10 @@ const RELAY_TICK_MS = 1000;
 const RELAY_JOBS_POLL_MS = 30_000;
 /** How long the launcher waits for the relay to start. */
 const LAUNCH_TIMEOUT_MS = 60_000;
+/** How long the read before a removal may take: unanswered, the workload stays. */
+const USE_READ_TIMEOUT_MS = 5000;
+/** How long the removal itself may take. */
+const REMOVE_TIMEOUT_MS = 30_000;
 
 /** SIGTERM/SIGINT stop the relay; a second one exits at once. */
 function stopOnSignals(stop: () => void): () => void {
@@ -94,6 +111,12 @@ export interface RelayDeps {
   readonly jobsPollMs?: number;
   /** Default SIGTERM/SIGINT; returns the undo. */
   readonly onStop?: (stop: () => void) => () => void;
+  /** Default `armExitNet`; returns the disarm. */
+  readonly armNet?: typeof armExitNet;
+  readonly useTimeoutMs?: number;
+  readonly removeTimeoutMs?: number;
+  /** Default this process's platform and a real `caffeinate`. */
+  readonly keepAwake?: Partial<Pick<KeepAwakeOptions, "platform" | "spawn">>;
 }
 
 /** Run one detached session to its end; the exit code. Only a run dir it cannot make throws. */
@@ -122,6 +145,13 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     return 1;
   }
 
+  const awake = createKeepAwake({
+    platform: deps.keepAwake?.platform ?? process.platform,
+    enabled: config.detach?.keepAwake ?? true,
+    pid: process.pid,
+    ...(deps.keepAwake?.spawn ? { spawn: deps.keepAwake.spawn } : {}),
+    log,
+  });
   let model = initialRelay;
   let written = "";
   const record = (view: RelayView): void => {
@@ -140,6 +170,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
         sessionId: spec.sessionId,
         lastActivityAt: now(),
         autoAccept: spec.autoAccept,
+        keep: spec.keep,
         ...view,
       });
     } catch (error) {
@@ -149,6 +180,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   const emit = (event: RelayEvent): void => {
     model = relayStep(model, event);
     record(relayView(model));
+    awake.set(wantsAwake(model));
   };
   record(relayView(model));
 
@@ -157,13 +189,41 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     emit({ type: "stop" });
     stopSignal.abort();
   });
-  const leave = (): number => {
+  let disarmNet = (): void => {};
+  /** `purge` (Q4): the workload is gone, so its run dir goes, the lock with it. */
+  const leave = (purge = false): number => {
+    disarmNet();
     offStop();
+    awake.stop();
     record(finalView(model));
     log("relay exit");
+    if (purge) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch (error) {
+        log(`run dir not deleted: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     lock.release();
     return finalView(model).state === "failed" ? 1 : 0;
   };
+
+  let host: EngineHost;
+  try {
+    host = (deps.hostFor ?? ((e) => buildEngineHost(e.engine, hostOptionsFor(e)).host))(entry);
+  } catch (error) {
+    emit({
+      type: "turn_failed",
+      message: untrustedText(error instanceof Error ? error.message : String(error)),
+    });
+    return leave();
+  }
+  // Under the lock: a relay refused by it must never delete a workload that
+  // another relay is using. Covers a crash; a SIGKILL or a power loss leaves the
+  // workload, listed in `ps`.
+  if (!spec.keep) {
+    disarmNet = (deps.armNet ?? armExitNet)(host, entry.name);
+  }
 
   const policy = relayPolicy({ autoAccept: spec.autoAccept, emit, log });
   // THE broker (AGENTS §7): the runtime's `RemoteClient` asks here, and nobody
@@ -184,7 +244,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   let runtime: LocalRuntime;
   try {
     runtime = await (deps.attach ?? attachEngineRuntime)(config, {
-      host: (deps.hostFor ?? ((e) => buildEngineHost(e.engine, hostOptionsFor(e)).host))(entry),
+      host,
       name: entry.name,
       ...(entry.binDir ? { binDir: entry.binDir } : {}),
       permissions,
@@ -244,14 +304,35 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       }
     });
   };
-  // Never awaits the daemon here: a pod that stops answering cannot pin the loop.
-  while (!relayExits(model, now())) {
-    emit({ type: "tick", now: now() });
-    if (model.turn === "over" && !polling && now() >= nextPoll) {
-      nextPoll = now() + jobsPollMs;
-      pollJobs();
+  /** One fresh read; unanswered is unreadable: the polled `jobs` may be stale. */
+  const readUse = (): Promise<ResidentUse | null> =>
+    bounded(runtime.residentUse(spec.sessionId), deps.useTimeoutMs ?? USE_READ_TIMEOUT_MS).catch(
+      () => null,
+    );
+  let plan: ExitPlan;
+  for (;;) {
+    // Never awaits the daemon here: a pod that stops answering cannot pin the loop.
+    while (!relayExits(model, now())) {
+      emit({ type: "tick", now: now() });
+      if (model.turn === "over" && !polling && now() >= nextPoll) {
+        nextPoll = now() + jobsPollMs;
+        pollJobs();
+      }
+      await new Promise((resolve) => setTimeout(resolve, tickMs));
     }
-    await new Promise((resolve) => setTimeout(resolve, tickMs));
+    const use = needsUse(model, spec.keep) ? await readUse() : null;
+    // On the state after the read: a stop may have landed during it.
+    plan = exitPlan(model, spec.keep, use);
+    if (plan.kind !== "hold") {
+      break;
+    }
+    log("still in use: not removed yet");
+    emit({ type: "jobs", n: use?.jobs ?? 0 });
+    emit({ type: "busy" });
+  }
+  if (plan.kind === "leave" && plan.why !== undefined) {
+    log(`workload kept: ${plan.why}`);
+    emit({ type: "note", detail: plan.why });
   }
 
   offLink();
@@ -259,7 +340,38 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   for (const line of await saver.drain()) {
     log(line);
   }
-  return leave();
+  if (plan.kind !== "remove") {
+    return leave();
+  }
+  const removal = await bounded(
+    removeVerifiedKept(entry, join(keptDir(config.configDir), keptFileName(entry)), {
+      hostFor: () => host,
+    }),
+    deps.removeTimeoutMs ?? REMOVE_TIMEOUT_MS,
+  ).catch(
+    (error: unknown): KeptRemoval => ({
+      kind: "failed",
+      reason: untrustedText(error instanceof Error ? error.message : String(error)),
+    }),
+  );
+  log(`removal: ${removal.kind}`);
+  if (removal.kind === "unreachable" || removal.kind === "failed") {
+    emit({ type: "note", detail: `not removed: ${removal.reason} — tentacle rm ${entry.name}` });
+    return leave();
+  }
+  // The workload's fate is not "not removed"; only its index entry may have
+  // survived, and that is NOT the same fact. Its own note, worded by what
+  // actually happened (a `foreign` workload was never removed), and the run dir
+  // stays (with the log) so `ps -v` shows it. It converges: `rm` sees `gone`
+  // and clears both.
+  if (removal.forgetError !== undefined) {
+    emit({
+      type: "note",
+      detail: `${removalFate(removal.kind)}, but its entry in the kept index stayed: ${removal.forgetError} — tentacle rm ${entry.name}`,
+    });
+    return leave();
+  }
+  return leave(true);
 }
 
 /** The relay subcommand: its spec from the env, then `runRelay`. */
@@ -337,6 +449,24 @@ export interface LaunchDeps {
   readonly now?: () => number;
   readonly pollMs?: number;
   readonly timeoutMs?: number;
+  /** keep=false: a laptop folder is mounted, and stays. */
+  readonly mounted?: boolean;
+  /** The relay holds a sleep assertion during a turn (said once: the lid still sleeps it). */
+  readonly keepsAwake?: boolean;
+}
+
+/** What the started line says about the workload's end. */
+function endingOf(spec: RelaySpec, deps: LaunchDeps): string {
+  const awake = deps.keepsAwake
+    ? " The Mac stays awake while a turn runs; closing the lid still sleeps it."
+    : "";
+  if (spec.keep) {
+    return ` Re-attach once it is done: ${deps.attachHint} --resume ${spec.sessionId}.${awake}`;
+  }
+  const files = deps.mounted
+    ? "files not in the mount go with it, and so does its log; the laptop folder is not touched"
+    : `the ${deps.noun}'s files go with it, and so does its log`;
+  return ` The ${deps.noun} is removed when the run goes idle: ${files}; the transcript stays in \`tentacle --resume ${spec.sessionId}\`.${awake}`;
 }
 
 /**
@@ -384,7 +514,7 @@ export async function launchRelay(dir: string, spec: RelaySpec, deps: LaunchDeps
         ? `auto-accepting pod tool asks (allow once; logged in ${logPath})`
         : "it waits at the first permission";
       write(
-        `[${noun}] ${name}: detached run started (pid ${owner.pid}), ${policy}. Re-attach once it is done: ${deps.attachHint} --resume ${spec.sessionId}\n`,
+        `[${noun}] ${name}: detached run started (pid ${owner.pid}), ${policy}.${endingOf(spec, deps)}\n`,
       );
       return 0;
     }

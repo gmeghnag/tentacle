@@ -178,6 +178,13 @@ export interface PodBinaryDeps {
    * phase is a normal `log` line (the piped/log/CI mode).
    */
   readonly onStatus?: (text: string) => void;
+  /**
+   * Present: the bytes are staged in `<binPath>.new`, this runs, and only then
+   * the rename, as its own exec: `attach` stops an idle resident here, with the
+   * old binary still in place and an install that can land. A throw removes the
+   * staged file and is rethrown as is.
+   */
+  readonly beforeCommit?: () => Promise<void>;
 }
 
 /**
@@ -281,15 +288,15 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
   const binPath = deps.binPath ?? POD_BIN_PATH;
   const binDir = binPath.slice(0, binPath.lastIndexOf("/"));
   const tmpPath = `${binPath}.new`;
-  const installTarget: EngineExecTarget = {
+  const shell = (script: string): EngineExecTarget => ({
     name: deps.name,
     container: deps.container,
-    command: [
-      "sh",
-      "-c",
-      `mkdir -p ${binDir} && head -c ${n} > ${tmpPath} && chmod 755 ${tmpPath} && mv -f ${tmpPath} ${binPath}`,
-    ],
-  };
+    command: ["sh", "-c", script],
+  });
+  const stage = `mkdir -p ${binDir} && head -c ${n} > ${tmpPath} && chmod 755 ${tmpPath}`;
+  const commit = `mv -f ${tmpPath} ${binPath}`;
+  const { beforeCommit } = deps;
+  const installTarget = shell(beforeCommit ? stage : `${stage} && ${commit}`);
   const install = await deps.host.runExec(installTarget, bytes, {
     timeoutMs: transferTimeoutMs(n),
     onProgress: (written) => {
@@ -301,17 +308,34 @@ export async function injectAgentBinary(deps: PodBinaryDeps): Promise<string> {
     },
   });
   pipedProgress?.finish();
-  if (install.exitCode !== 0) {
+  const installFailed = (run: typeof install): Error => {
     // The probe AND the install are `sh -c` execs: both failing means no `sh`.
     const noShell =
       probe.status === "probe-failed"
         ? " — the image may have no shell (sh): distroless/scratch images are unsupported; use an image with sh and head"
         : "";
-    throw new Error(
-      `${prefix} failed to inject tentacle (exit ${install.exitCode}): ${
-        install.stderr.trim() || install.status || "no output"
+    return new Error(
+      `${prefix} failed to inject tentacle (exit ${run.exitCode}): ${
+        run.stderr.trim() || run.status || "no output"
       }${noShell}`,
     );
+  };
+  if (install.exitCode !== 0) {
+    throw installFailed(install);
+  }
+  if (beforeCommit) {
+    try {
+      await beforeCommit();
+    } catch (error) {
+      await deps.host
+        .runExec(shell(`rm -f ${tmpPath}`), undefined, { timeoutMs: 15_000 })
+        .catch(() => {});
+      throw error;
+    }
+    const renamed = await deps.host.runExec(shell(commit), undefined, { timeoutMs: 15_000 });
+    if (renamed.exitCode !== 0) {
+      throw installFailed(renamed);
+    }
   }
 
   // 2) Verify it actually runs (wrong arch / bad libc / missing deps surface here).

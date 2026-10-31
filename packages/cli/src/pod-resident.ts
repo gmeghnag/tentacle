@@ -39,7 +39,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TentacleConfig } from "@tentacle/config";
 import { Connection, type SessionHost, startReaper, sweepIntervalFor } from "@tentacle/daemon";
-import { PROTOCOL_VERSION, type SessionListResult } from "@tentacle/protocol";
+import {
+  type InitializeResult,
+  PROTOCOL_VERSION,
+  type SessionListResult,
+} from "@tentacle/protocol";
 import {
   type NodeReadableLike,
   type NodeWritableLike,
@@ -49,7 +53,6 @@ import {
 import { type ParsedFlags, parseContextWindowFlag } from "./flags.ts";
 import { type PodDaemonOptions, podSessionHost } from "./serve.ts";
 import { untrustedText } from "./untrusted-text.ts";
-import { APP_VERSION } from "./version.ts";
 
 /** No session and no connection for this long → the resident exits. */
 export const RESIDENT_IDLE_EXIT_MS = 30 * 60 * 1000;
@@ -533,7 +536,7 @@ export interface ResidentStatus {
  * then `session/list` — it attaches to nothing) how busy it is. Nobody
  * listening → `{resident: false}`.
  */
-export async function residentStatus(socketPath: string, version: string): Promise<ResidentStatus> {
+export async function residentStatus(socketPath: string): Promise<ResidentStatus> {
   let socket: Socket;
   try {
     socket = await dialSocket(socketPath);
@@ -551,14 +554,15 @@ export async function residentStatus(socketPath: string, version: string): Promi
     {},
   );
   try {
-    await peer.request("initialize", {
+    const { agentInfo } = (await peer.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: { streaming: true },
-    });
+    })) as InitializeResult;
     const { sessions } = (await peer.request("session/list", {})) as SessionListResult;
     return {
       resident: true,
-      version,
+      // The resident's own build; absent from one too old to say.
+      ...(agentInfo ? { version: agentInfo.version } : {}),
       sessions: sessions.length,
       running: sessions.filter((s) => s.running).length,
       attached: sessions.reduce((sum, s) => sum + s.attached, 0),
@@ -576,10 +580,9 @@ export async function residentStatus(socketPath: string, version: string): Promi
  */
 export async function residentStatusReport(
   socketPath: string,
-  version: string,
 ): Promise<{ readonly line: string; readonly exitCode: number }> {
   try {
-    return { line: JSON.stringify(await residentStatus(socketPath, version)), exitCode: 0 };
+    return { line: JSON.stringify(await residentStatus(socketPath)), exitCode: 0 };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { line: JSON.stringify({ resident: null, error: message }), exitCode: 1 };
@@ -708,25 +711,31 @@ export function residentStopVerdict(
 }
 
 /**
- * After a fresh install, what the NEW binary's `--resident-status` (`probe`)
- * says about a resident none of `attach`'s probes could see: `run` used a bin
- * dir this attach does not know. Its version is unknown (the status reports the
- * asking binary's), so it is told, never stopped. Any other answer → nothing.
+ * What `--resident-status` (`probe`, by the binary this attach will run) says
+ * about the resident it is about to join: one up that is not `expected`
+ * (another build, or too old to say) is told, never stopped. `expected`
+ * undefined (from source): any resident is told. Same build, no resident, a
+ * failed probe → nothing: this never blocks an attach.
  */
-export function strayResidentWarning(
+export function residentSkewWarning(
   probe: { readonly stdout: string } | null,
   name: string,
   binPath: string,
+  expected: string | undefined,
 ): string | undefined {
-  let status: { readonly resident?: unknown } | null;
+  let status: { readonly resident?: unknown; readonly version?: unknown } | null;
   try {
     status = JSON.parse(probe?.stdout.trim().split("\n").at(-1) ?? "");
   } catch {
     return undefined;
   }
-  return status?.resident === true
-    ? `⚠ ${name} already runs a tentacle resident from a binary outside ${binPath} (another --bin-dir at \`run\`?): this attach joins it, its version may differ from this laptop's (a protocol mismatch is still refused). To use one binary: attach with that --bin-dir`
-    : undefined;
+  if (status?.resident !== true || (expected !== undefined && status.version === expected)) {
+    return undefined;
+  }
+  const version =
+    typeof status.version === "string" ? untrustedText(status.version) : "of an unknown version";
+  const laptop = expected !== undefined ? `, this laptop ${expected}` : "";
+  return `⚠ ${name} already runs a tentacle resident ${version}${laptop}: this attach joins it (a protocol mismatch is still refused). If it runs from a binary outside ${binPath} (another --bin-dir at \`run\`?), attach with that --bin-dir`;
 }
 
 function busyVerdict(status: ResidentStatus, name: string): ResidentVerdict {
@@ -769,7 +778,7 @@ export async function runResidentMode(
     const socket = flags.get("socket");
     const socketPath = socket ?? residentSocketPath(stateDir);
     if (bools.has("resident-status")) {
-      const report = await residentStatusReport(socketPath, APP_VERSION);
+      const report = await residentStatusReport(socketPath);
       process.stdout.write(`${report.line}\n`);
       return report.exitCode;
     }

@@ -206,9 +206,21 @@ export type KeptStatus =
   | { readonly kind: "foreign" }
   | { readonly kind: "unreachable"; readonly reason: string };
 
+/** A detached run's state on the laptop (`statusOf`); absent: no run dir, no relay ever. */
+export interface KeptRelay {
+  readonly text: string;
+  /** Present while the relay lives. */
+  readonly pid?: number;
+  readonly sessionId?: string;
+  readonly log: string;
+  /** False: this relay removes the workload when the run ends. */
+  readonly keep: boolean;
+}
+
 export interface KeptRow {
   readonly entry: KeptEntry;
   readonly status: KeptStatus;
+  readonly relay?: KeptRelay;
 }
 
 export function statusText(status: KeptStatus): string {
@@ -233,6 +245,18 @@ export function sortKept<T extends { readonly entry: KeptEntry }>(rows: readonly
   );
 }
 
+/**
+ * STATUS: the engine's word wins for `gone`, `foreign` and `unreachable`; on a
+ * workload that is there, a live relay's state, or a dead one's over the engine's.
+ */
+export function statusCell(row: KeptRow): string {
+  const engine = statusText(row.status);
+  if (!row.relay || row.status.kind !== "state") {
+    return engine;
+  }
+  return row.relay.pid !== undefined ? row.relay.text : `${engine} · ${row.relay.text}`;
+}
+
 const HEADER = ["NAME", "ENGINE", "WHERE", "MOUNT", "MODEL", "AGE", "STATUS"] as const;
 
 /** The table (header + one line per row, already sorted by the caller). */
@@ -244,7 +268,7 @@ export function renderTable(rows: readonly KeptRow[], nowMs: number, home: strin
     untrustedText(formatMount(row.entry.mount, home)),
     untrustedText(row.entry.model),
     formatAge(nowMs, row.entry.created),
-    statusText(row.status),
+    statusCell(row),
   ]);
   const all = [[...HEADER], ...cells];
   const widths = HEADER.map((_, i) => Math.max(...all.map((line) => (line[i] ?? "").length)));
@@ -261,7 +285,8 @@ export const EMPTY_LINE = "No kept containers or pods.";
 /** `ps -v`: one block per workload. */
 export function renderVerbose(rows: readonly KeptRow[], nowMs: number, home: string): string[] {
   const out: string[] = [];
-  for (const { entry, status } of rows) {
+  for (const row of rows) {
+    const { entry, status, relay } = row;
     const labels = status.kind === "state" ? status.labels : undefined;
     let hidden = "—";
     const masked = labels?.[WORKSPACE_LABELS.masked];
@@ -287,7 +312,12 @@ export function renderVerbose(rows: readonly KeptRow[], nowMs: number, home: str
       `  hidden    ${hidden}`,
       `  model     ${untrustedText(entry.model)} (the session's model at start)`,
       `  created   ${untrustedText(entry.created)} (${formatAge(nowMs, entry.created)} ago)`,
-      `  status    ${statusText(status)}${status.kind === "unreachable" ? ` — ${untrustedText(status.reason)}` : ""}`,
+      `  status    ${statusCell(row)}${status.kind === "unreachable" ? ` — ${untrustedText(status.reason)}` : ""}`,
+      ...(relay?.pid !== undefined ? [`  relay     pid ${relay.pid}`] : []),
+      ...(relay?.sessionId !== undefined ? [`  session   ${untrustedText(relay.sessionId)}`] : []),
+      ...(relay ? [`  log       ${untrustedText(relay.log)}`] : []),
+      // A dead relay removes nothing: the workload stays until `rm`.
+      ...(relay?.pid !== undefined && !relay.keep ? ["  removal   when the run ends"] : []),
       "",
     );
   }
@@ -329,6 +359,11 @@ export function ambiguousMessage(name: string, entries: readonly KeptEntry[]): s
 /** `rm`'s confirmation for a running workload (a session may be attached). */
 export function removeConfirmation(entry: KeptEntry): string {
   return `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry))}) is running — a session may be attached. Remove it? [y/N] `;
+}
+
+/** `rm`'s confirmation with a live relay: `state` is `statusOf`'s, already sanitised. */
+export function relayRemoveConfirmation(entry: KeptEntry, pid: number, state: string): string {
+  return `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry))}) is owned by a detached run (pid ${pid}, ${state}): stop it and remove it? [y/N] `;
 }
 
 /** `Removed tentacle-1b2c3d (docker, ~/code/tentacle).` — the mount, else WHERE. */

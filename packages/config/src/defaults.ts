@@ -145,6 +145,10 @@ export const DEFAULT_CONFIG_JSONC = `{
   // re-attach). Default true; --keep=false deletes it. The flag wins, then a profile.
   // "keep": true,
 
+  // \`tentacle run --detach\`: on macOS, hold a sleep assertion (caffeinate) while a
+  // turn runs, so the Mac does not idle-sleep under it. Closing the lid still sleeps it.
+  // "detach": { "keepAwake": true },
+
   // \`tentacle run --engine docker|podman\` mounts the current folder into the
   // container; these paths (dirs or files, "~/…" or absolute) are hidden when
   // inside it. "hide" REPLACES the default list (~/.ssh, ~/.aws, ~/.kube,

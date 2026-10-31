@@ -1,6 +1,6 @@
 # feat/detached-runs — leave a `run` working with no TUI, re-attach later
 
-> **Status:** execution — S1 `pod-daemon-resident` DONE (merged 2026-10-30, no tag; fix rounds 1–6 reviewed, live-tested); next S2 `detached-relay`, then S3 (release with protocol 14 after S3)
+> **Status:** execution — S1 `pod-daemon-resident` DONE (merged 2026-10-30, no tag; fix rounds 1–6 reviewed, live-tested); S2 `detached-relay` DONE (merged 2026-10-31); S2b + S4 `detached-relay-lifecycle` built, awaiting Review; next S3 (release with protocol 14 after S3)
 > **Branch:** `feat/detached-runs` (promoted from `docs/eval/`; the slices below are one branch each, sequential — see "Slices")
 > **Type:** feat · **Size:** L overall = 5 slices (S1 L, S2 M, S3 M, S4 S, S5 M; no slice is XL) · **Blast:** load-bearing (S1, S2, S3, S5; S4 contained) · **Suited:** owner assigns; per AGENTS §10 every load-bearing slice gets a strong model + a mandatory fresh-context Review, S4 a standard Review
 

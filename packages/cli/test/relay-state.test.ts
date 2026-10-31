@@ -1,14 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import type { SessionListEntry } from "@tentacle/protocol";
 import {
   RELAY_IDLE_GRACE_MS,
   RELAY_STOP_BOUND_MS,
   type RelayEvent,
   type RelayModel,
+  type ResidentUse,
+  exitPlan,
   finalView,
   initialRelay,
+  needsUse,
   relayExits,
   relayStep,
   relayView,
+  residentUseOf,
+  wantsAwake,
 } from "../src/relay-state.ts";
 
 const run = (events: readonly RelayEvent[], from: RelayModel = initialRelay): RelayModel =>
@@ -155,5 +161,160 @@ describe("relay state (docs/feat/detached-relay.md R4)", () => {
     expect(finalView(run([{ type: "stop" }])).state).toBe("interrupted");
     const failed = run([{ type: "link", status: { state: "stopped", reason: "gone" } }]);
     expect(finalView(failed)).toMatchObject({ state: "failed", detail: "gone" });
+  });
+});
+
+describe("exitPlan: the only place removal is decided (docs/feat/detached-relay-lifecycle.md L10)", () => {
+  const free: ResidentUse = { jobs: 0, running: false, others: 0 };
+  const lost: RelayEvent = { type: "link", status: { state: "stopped", reason: "gone" } };
+  const cut = run([{ type: "turn_started" }, { type: "turn_ended", reason: "cancelled" }]);
+  const failed = run([{ type: "turn_started" }, { type: "turn_failed", message: "down" }]);
+
+  test("keep wins over everything", () => {
+    for (const model of [over, cut, failed, run([{ type: "stop" }], over), run([lost], over)]) {
+      expect(exitPlan(model, true, free)).toEqual({ kind: "leave" });
+    }
+  });
+
+  test("a stopped link leaves, before a stop: the name may no longer be ours", () => {
+    expect(exitPlan(run([lost], over), false, free).kind).toBe("leave");
+    expect(exitPlan(run([lost, { type: "stop" }], over), false, free).kind).toBe("leave");
+    expect(exitPlan(run([{ type: "stop" }, lost], over), false, free).kind).toBe("leave");
+  });
+
+  test("a stop removes with no read, whatever the rest and the use", () => {
+    const stop: RelayEvent = { type: "stop" };
+    expect(exitPlan(run([stop], over), false, null)).toEqual({ kind: "remove" });
+    expect(exitPlan(run([stop], cut), false, null).kind).toBe("remove");
+    expect(exitPlan(run([stop], failed), false, null).kind).toBe("remove");
+    // A turn that failed BECAUSE of the stop is not a stopped link.
+    const stopped = run(
+      [{ type: "turn_started" }, stop, { type: "turn_failed", message: "aborted" }],
+      initialRelay,
+    );
+    expect(exitPlan(stopped, false, null).kind).toBe("remove");
+    const busy: ResidentUse = { jobs: 3, running: true, others: 2 };
+    expect(exitPlan(run([{ type: "ask_raised", tool: "x" }, stop], over), false, busy).kind).toBe(
+      "remove",
+    );
+  });
+
+  test("`failed` and `interrupted` keep the workload (Q2), the read says nothing", () => {
+    // Mutation: remove on any `relayExits`.
+    expect(exitPlan(cut, false, free).kind).toBe("leave");
+    expect(exitPlan(failed, false, free).kind).toBe("leave");
+    expect(exitPlan(cut, false, null).kind).toBe("leave");
+  });
+
+  test("an unreadable use leaves, saying so", () => {
+    // Mutation: drop the `use === null` row → a job running is deleted on a stale 0.
+    expect(exitPlan(over, false, null)).toEqual({
+      kind: "leave",
+      why: "could not tell whether it is in use",
+    });
+  });
+
+  test("its own job or turn holds", () => {
+    expect(exitPlan(over, false, { ...free, jobs: 1 })).toEqual({ kind: "hold" });
+    expect(exitPlan(over, false, { ...free, running: true })).toEqual({ kind: "hold" });
+    expect(exitPlan(over, false, { jobs: 1, running: false, others: 1 }).kind).toBe("hold");
+  });
+
+  test("another client leaves, saying so; nobody removes", () => {
+    expect(exitPlan(over, false, { ...free, others: 1 })).toEqual({
+      kind: "leave",
+      why: "another client is using it",
+    });
+    expect(exitPlan(over, false, free)).toEqual({ kind: "remove" });
+  });
+
+  test("needsUse: the read happens only where its answer can change the plan", () => {
+    expect(needsUse(over, false)).toBe(true);
+    expect(needsUse(over, true)).toBe(false);
+    expect(needsUse(cut, false)).toBe(false);
+    expect(needsUse(failed, false)).toBe(false);
+    expect(needsUse(run([{ type: "stop" }], over), false)).toBe(false);
+    expect(needsUse(run([lost], over), false)).toBe(false);
+  });
+});
+
+describe("residentUseOf: `session/list`, as `exitPlan` needs it (L10)", () => {
+  const ME = "11111111-1111-4111-8111-111111111111";
+  const row = (sessionId: string, over: Partial<SessionListEntry> = {}): SessionListEntry => ({
+    sessionId,
+    title: "t",
+    cwd: "/w",
+    createdAt: 1,
+    updatedAt: 1,
+    running: false,
+    attached: 0,
+    archived: false,
+    ...over,
+  });
+
+  test("its own session, and the others in use", () => {
+    expect(residentUseOf({ sessions: [row(ME, { attached: 1 })] }, ME)).toEqual({
+      jobs: 0,
+      running: false,
+      others: 0,
+    });
+    expect(
+      residentUseOf(
+        {
+          sessions: [
+            row(ME, { attached: 1, running: true, jobs: 2 }),
+            row("a", { attached: 1 }),
+            row("b", { running: true }),
+            row("c", { jobs: 1 }),
+          ],
+        },
+        ME,
+      ),
+    ).toEqual({ jobs: 2, running: true, others: 3 });
+  });
+
+  test("a session whose client left is nobody (probe A3)", () => {
+    // Mutation: count every other session → any earlier `attach` pins the workload.
+    expect(residentUseOf({ sessions: [row(ME), row("gone")] }, ME)?.others).toBe(0);
+  });
+
+  test("a list that cannot be trusted whole is no answer: a cursor, or no own session", () => {
+    expect(residentUseOf({ sessions: [row(ME)], cursor: "next" }, ME)).toBeNull();
+    expect(residentUseOf({ sessions: [row("other")] }, ME)).toBeNull();
+    expect(residentUseOf({ sessions: [] }, ME)).toBeNull();
+  });
+});
+
+describe("`busy` (L11): `hold` costs another grace, never a spin", () => {
+  test("clears the deadline; the next tick counts a full 60 s", () => {
+    // Mutation: ignore `busy` → `relayExits` stays true and the loop spins on the read.
+    const due = run([{ type: "tick", now: 0 }], over);
+    expect(relayExits(due, RELAY_IDLE_GRACE_MS)).toBe(true);
+    const held = relayStep(due, { type: "busy" });
+    expect(relayExits(held, Number.MAX_SAFE_INTEGER)).toBe(false);
+    const again = relayStep(held, { type: "tick", now: RELAY_IDLE_GRACE_MS });
+    expect(relayExits(again, 2 * RELAY_IDLE_GRACE_MS - 1)).toBe(false);
+    expect(relayExits(again, 2 * RELAY_IDLE_GRACE_MS)).toBe(true);
+  });
+});
+
+describe("`note`: why a workload stayed", () => {
+  test("is the detail of the state left behind, sanitised", () => {
+    const noted = relayStep(over, { type: "note", detail: "kept \u001b[2Jit" });
+    expect(finalView(noted)).toEqual({ state: "idle", detail: "kept [2Jit" });
+  });
+});
+
+describe("wantsAwake (DR-9, L24)", () => {
+  test("only while a turn runs with no ask held", () => {
+    // Mutation: drop `asks` → the Mac stays awake through a held ask, for hours.
+    expect(wantsAwake(initialRelay)).toBe(false);
+    const running = run([{ type: "turn_started" }]);
+    expect(wantsAwake(running)).toBe(true);
+    expect(wantsAwake(run([{ type: "ask_raised", tool: "x" }], running))).toBe(false);
+    expect(wantsAwake(run([{ type: "jobs", n: 1 }], over))).toBe(false);
+    expect(wantsAwake(over)).toBe(false);
+    // A stop settles within its bound: the ask it cancels must not restart it.
+    expect(wantsAwake(run([{ type: "stop" }], running))).toBe(false);
   });
 });

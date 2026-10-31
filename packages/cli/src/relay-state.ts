@@ -5,6 +5,7 @@
  * for the turn to settle, bounded.
  */
 import type { LinkStatus } from "@tentacle/client";
+import type { SessionListResult } from "@tentacle/protocol";
 import type { OwnerState } from "./run-state.ts";
 import { untrustedText } from "./untrusted-text.ts";
 
@@ -22,6 +23,10 @@ export type RelayEvent =
   | { readonly type: "jobs"; readonly n: number }
   | { readonly type: "link"; readonly status: LinkStatus }
   | { readonly type: "stop" }
+  /** A due exit was held back (`exitPlan`): the grace starts over. */
+  | { readonly type: "busy" }
+  /** Why the workload stays: `detail` of the state left behind. */
+  | { readonly type: "note"; readonly detail: string }
   | { readonly type: "tick"; readonly now: number };
 
 export interface RelayModel {
@@ -31,6 +36,8 @@ export interface RelayModel {
   readonly tool?: string;
   readonly jobs: number;
   readonly stopping: boolean;
+  /** The link gave up: the name may no longer be ours. */
+  readonly linkStopped: boolean;
   /** The state once nothing is running. */
   readonly rest: "idle" | "interrupted" | "failed";
   readonly detail?: string;
@@ -51,6 +58,7 @@ export const initialRelay: RelayModel = {
   asks: 0,
   jobs: 0,
   stopping: false,
+  linkStopped: false,
   rest: "idle",
   exitNow: false,
 };
@@ -63,7 +71,7 @@ function without(model: RelayModel, key: "tool" | "exitAt"): RelayModel {
 
 export function relayStep(model: RelayModel, event: RelayEvent): RelayModel {
   // The link stopped: what the turn does afterwards is only that, said already.
-  const linkLost = model.rest === "failed" && model.exitNow;
+  const linkLost = model.linkStopped;
   switch (event.type) {
     case "turn_started":
       return { ...model, turn: "running" };
@@ -101,7 +109,13 @@ export function relayStep(model: RelayModel, event: RelayEvent): RelayModel {
       return { ...model, jobs: event.n };
     case "link":
       return event.status.state === "stopped"
-        ? { ...model, rest: "failed", detail: untrustedText(event.status.reason), exitNow: true }
+        ? {
+            ...model,
+            linkStopped: true,
+            rest: "failed",
+            detail: untrustedText(event.status.reason),
+            exitNow: true,
+          }
         : model;
     case "stop":
       return {
@@ -109,6 +123,10 @@ export function relayStep(model: RelayModel, event: RelayEvent): RelayModel {
         stopping: true,
         exitNow: model.exitNow || model.turn !== "running",
       };
+    case "busy":
+      return without(model, "exitAt");
+    case "note":
+      return { ...model, detail: untrustedText(event.detail) };
     case "tick": {
       if (model.stopping) {
         return { ...model, exitAt: model.exitAt ?? event.now + RELAY_STOP_BOUND_MS };
@@ -143,6 +161,80 @@ export function relayView(model: RelayModel): RelayView {
     return { state: "running", detail: `${model.jobs} background job(s) running` };
   }
   return { state: model.rest, ...detail };
+}
+
+/** Caffeinate (DR-9): a held ask, a background job or a stop lets the Mac sleep. */
+export function wantsAwake(model: RelayModel): boolean {
+  return model.turn === "running" && model.asks === 0 && !model.stopping;
+}
+
+/** Who uses the resident, read fresh right before a removal. `others`: sessions in use. */
+export interface ResidentUse {
+  readonly jobs: number;
+  readonly running: boolean;
+  readonly others: number;
+}
+
+/**
+ * `session/list` read for `exitPlan`; `null` when it is not the whole truth (a
+ * further page, or its own session missing). A session whose client left is
+ * listed with `attached: 0`: it uses nothing, so it does not count.
+ */
+export function residentUseOf(
+  list: Pick<SessionListResult, "sessions" | "cursor">,
+  id: string,
+): ResidentUse | null {
+  const own = list.sessions.find((session) => session.sessionId === id);
+  if (!own || list.cursor !== undefined) {
+    return null;
+  }
+  return {
+    jobs: own.jobs ?? 0,
+    running: own.running,
+    others: list.sessions.filter(
+      (session) =>
+        session.sessionId !== id &&
+        (session.attached > 0 || session.running || (session.jobs ?? 0) > 0),
+    ).length,
+  };
+}
+
+export type ExitPlan =
+  | { readonly kind: "leave"; readonly why?: string }
+  /** In use after all: back to the grace. */
+  | { readonly kind: "hold" }
+  | { readonly kind: "remove" };
+
+/** The rows of `exitPlan` a fresh read can change: only then is one made. */
+export function needsUse(model: RelayModel, keep: boolean): boolean {
+  return !keep && !model.linkStopped && !model.stopping && model.rest === "idle";
+}
+
+/**
+ * What the relay does with the workload on its way out: the ONLY place removal
+ * is decided (docs/feat/detached-relay-lifecycle.md). A stop removes (DR-5);
+ * otherwise a workload is removed only when a run ended cleanly and one fresh
+ * read says nobody uses it. Keeping it is the safe side of every unknown: a
+ * leftover is one `rm` away, deleted files are gone. Pod-supplied `use` steers
+ * only the removal of that same workload.
+ */
+export function exitPlan(model: RelayModel, keep: boolean, use: ResidentUse | null): ExitPlan {
+  if (keep || model.linkStopped) {
+    return { kind: "leave" };
+  }
+  if (model.stopping) {
+    return { kind: "remove" };
+  }
+  if (model.rest !== "idle") {
+    return { kind: "leave" };
+  }
+  if (use === null) {
+    return { kind: "leave", why: "could not tell whether it is in use" };
+  }
+  if (use.jobs > 0 || use.running) {
+    return { kind: "hold" };
+  }
+  return use.others > 0 ? { kind: "leave", why: "another client is using it" } : { kind: "remove" };
 }
 
 /** The state left behind at exit: nothing runs any more. */

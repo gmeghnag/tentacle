@@ -41,6 +41,7 @@ import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@t
 import type { SessionController } from "@tentacle/tui";
 import { logDaemonError } from "./daemon-log.ts";
 import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
+import { type ResidentUse, residentUseOf } from "./relay-state.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import { APP_VERSION, CLIENT_INFO } from "./version.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
@@ -71,6 +72,8 @@ export interface LocalRuntime {
   release(): Promise<void>;
   /** `id`'s running background jobs, `null` if they cannot be read. */
   sessionJobs(id: string): Promise<number | null>;
+  /** Who uses the daemon besides `id`, and how `id` stands, `null` if it cannot be told. */
+  residentUse(id: string): Promise<ResidentUse | null>;
 }
 
 /** A client-side `JobController` whose only live capability is `onExit`. */
@@ -416,6 +419,13 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
         const { sessions } = await client.sessionList();
         const entry = sessions.find((session) => session.sessionId === id);
         return entry ? (entry.jobs ?? 0) : null;
+      } catch {
+        return null;
+      }
+    },
+    residentUse: async (id) => {
+      try {
+        return residentUseOf(await client.sessionList(), id);
       } catch {
         return null;
       }

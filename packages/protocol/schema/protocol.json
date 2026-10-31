@@ -494,6 +494,16 @@
         "agentCapabilities": {
           "$ref": "#/$defs/AgentCapabilities"
         },
+        "agentInfo": {
+          "additionalProperties": true,
+          "properties": {
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": ["version"],
+          "type": "object"
+        },
         "protocolVersion": {
           "type": "integer"
         }

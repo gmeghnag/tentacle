@@ -329,6 +329,7 @@ export class Connection {
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: { tools: true, permissions: true },
+      ...(this.host.identity ? { agentInfo: { version: this.host.identity.tentacle } } : {}),
     };
   }
 

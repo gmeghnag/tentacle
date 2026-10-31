@@ -68,6 +68,8 @@ export interface OwnerRecord {
   /** ms since epoch: the last state change. */
   readonly lastActivityAt: number;
   readonly autoAccept: boolean;
+  /** False: the relay removes the workload when the run ends. See `ownerKeeps`. */
+  readonly keep?: boolean;
 }
 
 export type OwnerRead =
@@ -85,6 +87,8 @@ export interface RelaySpec {
   readonly sessionId: string;
   readonly prompt: string;
   readonly autoAccept: boolean;
+  /** False: remove the workload when the run ends (`exitPlan`). */
+  readonly keep: boolean;
   readonly cwd: string;
   /** The launcher's `--profile`. */
   readonly profile?: string;
@@ -95,9 +99,14 @@ export function runStem(entry: KeptEntry): string {
   return keptFileName(entry).replace(/\.json$/, "");
 }
 
+/** `<kept dir>/runs/<stem>` of a kept entry. */
+export function runDirIn(dir: string, entry: KeptEntry): string {
+  return join(dir, "runs", runStem(entry));
+}
+
 /** `<configDir>/kept/runs/<stem>` of a kept entry. */
 export function runDirFor(configDir: string, entry: KeptEntry): string {
-  return join(keptDir(configDir), "runs", runStem(entry));
+  return runDirIn(keptDir(configDir), entry);
 }
 
 export function ensureRunDir(dir: string): string {
@@ -175,6 +184,7 @@ export function readOwner(dir: string): OwnerRead {
       ...(str(r.detail) ? { detail: r.detail } : {}),
       lastActivityAt: r.lastActivityAt,
       autoAccept: r.autoAccept,
+      ...(typeof r.keep === "boolean" ? { keep: r.keep } : {}),
     },
   };
 }
@@ -203,6 +213,7 @@ export function readSpec(path: string): RelaySpec {
     !str(r.sessionId) ||
     !str(r.prompt) ||
     typeof r.autoAccept !== "boolean" ||
+    typeof r.keep !== "boolean" ||
     !str(r.cwd)
   ) {
     throw new Error(`${path}: not a relay spec`);
@@ -214,6 +225,7 @@ export function readSpec(path: string): RelaySpec {
     sessionId: r.sessionId,
     prompt: r.prompt,
     autoAccept: r.autoAccept,
+    keep: r.keep,
     cwd: r.cwd,
     ...(str(r.profile) ? { profile: r.profile } : {}),
   };
@@ -253,6 +265,55 @@ export function laptopProc(pid: number): ProcStat | undefined {
   return procStat(pid) ?? parsePsStat(psLine(pid));
 }
 
+/** Does this run keep its workload? Absent: a run from before `--detach --keep=false`. */
+export function ownerKeeps(owner: OwnerRecord): boolean {
+  return owner.keep !== false;
+}
+
+/** The sentence of one state; `alive` says whether a relay still acts on it. */
+function ownerText(owner: OwnerRecord, alive: boolean, now: number): string {
+  const detail = owner.detail !== undefined ? untrustedText(owner.detail) : undefined;
+  switch (owner.state) {
+    case "starting":
+    case "running": {
+      const minutes = Math.max(0, Math.floor((now - owner.lastActivityAt) / 60_000));
+      return alive
+        ? `running ${minutes}m${detail !== undefined ? ` (${detail})` : ""}`
+        : "relay lost";
+    }
+    case "waiting-permission": {
+      const tool = owner.tool !== undefined ? ` (${untrustedText(owner.tool)})` : "";
+      return alive ? `waiting: permission${tool}` : "relay lost";
+    }
+    case "failed":
+      return detail !== undefined ? `failed: ${detail}` : "failed";
+    case "idle":
+      // A keep=false run whose delete failed leaves `idle` and says WHY in
+      // `detail` (relay.ts `not removed: …`): `ps` must show it, not a plain `idle`.
+      return detail !== undefined ? `${owner.state} (${detail})` : owner.state;
+    case "interrupted":
+      return owner.state;
+  }
+}
+
+/**
+ * STATUS of a detached run (DR-6): `owner.json` and whether its relay lives.
+ * `null`: no relay ever. Sanitised: the text comes from a file.
+ */
+export function statusOf(read: OwnerRead, alive: boolean, now: number): string | null {
+  const live = (text: string): string => (alive ? `detached · ${text}` : text);
+  switch (read.kind) {
+    case "none":
+      return alive ? live("starting") : null;
+    case "unknown":
+      return live("unknown owner");
+    case "owner": {
+      const text = live(ownerText(read.owner, alive, now));
+      return alive && read.owner.autoAccept ? `${text} · auto` : text;
+    }
+  }
+}
+
 /** What `attach` needs to know of a live relay. */
 export interface RelayHolder {
   readonly pid: number;
@@ -284,11 +345,15 @@ export function relayBlocking(
 /** `attach`'s refusal: who owns the workload and how to get the session back. */
 export function relayBlockingMessage(
   name: string,
-  relay: { readonly pid: number; readonly owner: OwnerRead },
+  relay: { readonly pid: number; readonly owner: OwnerRead; readonly noun?: string },
 ): string {
   const shown = untrustedText(name);
   const { pid, owner } = relay;
   const state = owner.kind === "owner" ? owner.owner.state : "unknown owner";
+  if (owner.kind === "owner" && !ownerKeeps(owner.owner)) {
+    const session = untrustedText(owner.owner.sessionId);
+    return `${shown}: a detached run owns it (pid ${pid}, ${state}). Wait for it, or \`kill ${pid}\` to stop it: stopping it removes the ${relay.noun ?? "workload"}; the transcript stays in \`tentacle --resume ${session}\` from the folder it ran in`;
+  }
   const then =
     owner.kind === "owner"
       ? `, then \`tentacle attach ${shown} --resume ${untrustedText(owner.owner.sessionId)}\` from the folder it ran in`

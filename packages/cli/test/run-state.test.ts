@@ -22,6 +22,7 @@ import {
   ensureRunDir,
   laptopProc,
   logTail,
+  ownerKeeps,
   ownerPath,
   parsePsStat,
   readOwner,
@@ -30,6 +31,7 @@ import {
   relayBlockingMessage,
   relayLogPath,
   runDirFor,
+  statusOf,
   writeOwner,
   writeSpec,
 } from "../src/run-state.ts";
@@ -62,6 +64,7 @@ const spec: RelaySpec = {
   sessionId: "11111111-1111-4111-8111-111111111111",
   prompt: "hello",
   autoAccept: true,
+  keep: false,
   cwd: "/work",
 };
 /** `pid` runs, started at `start`. */
@@ -108,6 +111,92 @@ describe("owner.json (R5)", () => {
     writeFileSync(ownerPath(dir), JSON.stringify({ ...owner, state: "weird" }));
     expect(readOwner(dir)).toEqual({ kind: "unknown" });
   });
+
+  test("L23 `keep` round trip; absent reads as kept", () => {
+    // Mutation: `ownerKeeps` defaults to false → a pre-S2b run reads as one that removes.
+    const dir = fresh();
+    writeOwner(dir, { ...owner, keep: false });
+    const read = readOwner(dir);
+    expect(read).toEqual({ kind: "owner", owner: { ...owner, keep: false } });
+    expect(read.kind === "owner" && ownerKeeps(read.owner)).toBe(false);
+    expect(ownerKeeps(owner)).toBe(true);
+    expect(ownerKeeps({ ...owner, keep: true })).toBe(true);
+  });
+});
+
+describe("L27 statusOf (DR-6)", () => {
+  const NOW = 10_000_000;
+  const of = (over: Partial<OwnerRecord>, alive: boolean): string | null =>
+    statusOf(
+      {
+        kind: "owner",
+        owner: {
+          ...owner,
+          state: "running",
+          lastActivityAt: NOW,
+          tool: undefined,
+          ...over,
+        } as OwnerRecord,
+      },
+      alive,
+      NOW,
+    );
+
+  test("no owner.json, an unreadable one", () => {
+    expect(statusOf({ kind: "none" }, true, NOW)).toBe("detached · starting");
+    expect(statusOf({ kind: "none" }, false, NOW)).toBeNull();
+    expect(statusOf({ kind: "unknown" }, true, NOW)).toBe("detached · unknown owner");
+    expect(statusOf({ kind: "unknown" }, false, NOW)).toBe("unknown owner");
+  });
+
+  test("every state, relay alive and dead", () => {
+    expect(of({ state: "starting" }, true)).toBe("detached · running 0m");
+    expect(of({ state: "starting" }, false)).toBe("relay lost");
+    expect(of({ lastActivityAt: NOW - 3 * 60_000 - 1 }, true)).toBe("detached · running 3m");
+    expect(of({ detail: "2 background job(s) running" }, true)).toBe(
+      "detached · running 0m (2 background job(s) running)",
+    );
+    expect(of({}, false)).toBe("relay lost");
+    expect(of({ state: "waiting-permission", tool: "shell" }, true)).toBe(
+      "detached · waiting: permission (shell)",
+    );
+    expect(of({ state: "waiting-permission" }, true)).toBe("detached · waiting: permission");
+    expect(of({ state: "waiting-permission", tool: "shell" }, false)).toBe("relay lost");
+    expect(of({ state: "idle" }, true)).toBe("detached · idle");
+    expect(of({ state: "idle" }, false)).toBe("idle");
+    // A keep=false workload left behind carries why: `ps` must say it, not hide it.
+    const left = "not removed: engine down — tentacle rm box";
+    expect(of({ state: "idle", detail: left }, true)).toBe(`detached · idle (${left})`);
+    expect(of({ state: "idle", detail: left }, false)).toBe(`idle (${left})`);
+    expect(of({ state: "interrupted" }, true)).toBe("detached · interrupted");
+    expect(of({ state: "interrupted" }, false)).toBe("interrupted");
+    expect(of({ state: "failed", detail: "401" }, true)).toBe("detached · failed: 401");
+    expect(of({ state: "failed", detail: "401" }, false)).toBe("failed: 401");
+    expect(of({ state: "failed" }, false)).toBe("failed");
+  });
+
+  test("a clock that stepped back is 0m, never negative", () => {
+    expect(of({ lastActivityAt: NOW + 600_000 }, true)).toBe("detached · running 0m");
+  });
+
+  test("` · auto` only with a live relay", () => {
+    // Mutation (DR-3): drop it → an auto-accepting run looks like any other.
+    expect(of({ autoAccept: true }, true)).toBe("detached · running 0m · auto");
+    expect(of({ autoAccept: true, state: "idle" }, true)).toBe("detached · idle · auto");
+    expect(of({ autoAccept: true, state: "idle" }, false)).toBe("idle");
+  });
+
+  test("an ESC in `tool` or `detail` never survives", () => {
+    // Mutation: skip `untrustedText` → a hand-edited file reaches the terminal.
+    for (const text of [
+      of({ state: "waiting-permission", tool: "x\u001b[2J" }, true),
+      of({ state: "failed", detail: "x\u001b[2J" }, false),
+      of({ detail: "x\u001b[2J" }, true),
+    ]) {
+      expect(text).toContain("x [2J");
+      expect(text).not.toContain("\u001b");
+    }
+  });
 });
 
 describe("spec.json", () => {
@@ -116,6 +205,14 @@ describe("spec.json", () => {
     const path = writeSpec(dir, spec);
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(readSpec(path)).toEqual(spec);
+  });
+
+  test("L23 `keep` is required: a spec without it is refused", () => {
+    const dir = fresh();
+    const path = join(dir, "spec.json");
+    const { keep: _dropped, ...old } = spec;
+    writeFileSync(path, JSON.stringify(old));
+    expect(() => readSpec(path)).toThrow(/spec/);
   });
 
   test("a stem that is not one path component is refused", () => {
@@ -232,6 +329,19 @@ describe("relayBlocking (R13)", () => {
     const text = relayBlockingMessage("box", { pid: 7, owner: { kind: "unknown" } });
     expect(text).toContain("unknown owner");
     expect(text).not.toContain("--resume");
+  });
+
+  test("L23 keep=false: no `attach` promised, the removal said", () => {
+    // Mutation: the keep=true wording → an `attach` that finds nothing.
+    const text = relayBlockingMessage("box", {
+      pid: 7,
+      noun: "container",
+      owner: { kind: "owner", owner: { ...owner, keep: false } },
+    });
+    expect(text).toContain("kill 7");
+    expect(text).toContain("stopping it removes the container");
+    expect(text).toContain(`tentacle --resume ${owner.sessionId}`);
+    expect(text).not.toContain("tentacle attach");
   });
 });
 

@@ -98,7 +98,18 @@ serves the model and saves the session, and leaves after 60 s of idle. It waits
 at the first permission unless `--auto-accept` (pod tool asks only, allow once,
 logged in `<configDir>/kept/runs/<id>/relay.log`). `attach` is refused while that
 process lives: wait, or `kill <pid>`, then run the `tentacle attach … --resume <uid>`
-it printed, from the same folder. `--keep=false` is not supported with `--detach` yet.
+it printed, from the same folder.
+
+With `--keep=false` (or `keep: false`) the workload is listed in `ps` while the
+run lives and removed when it goes idle or is stopped, a held permission keeping
+it alive. `kill <pid>` counts as a stop, and so does a laptop shutdown that sends
+SIGTERM. Its files go with it, a mounted laptop folder excepted; the transcript
+stays in `tentacle --resume <uid>`, and its `relay.log` is deleted with it. A run
+that failed or was interrupted, or a workload another client is using, stays:
+`tentacle rm <name>` clears it. So does a crash the exit net could not catch (a
+`kill -9`, a power loss), shown as `relay lost`. On macOS the Mac stays awake
+while a turn runs (`detach: { keepAwake: false }` turns it off); closing the lid
+still sleeps it, and the run then ends `interrupted`.
 
 **Your folder, in the container (Docker/Podman).** On a local engine `run`
 bind-mounts the current folder read-write at the same path, and the agent works
@@ -148,13 +159,17 @@ is recorded on your machine (`<configDir>/kept/`, where it was created — no
 credentials). `tentacle ps` lists them, checked against their engine (NAME
 ENGINE WHERE MOUNT MODEL AGE STATUS; one removed outside tentacle shows `gone`;
 an engine that does not answer within 3 s is a dim `not reachable (skipped)`
-line, never an error); `--engine` filters, `-q` prints names, `-v` details.
+line, never an error); `--engine` filters, `-q` prints names, `-v` details. A
+detached run shows its state: `detached · running 3m`, `detached · waiting:
+permission (shell)`, ` · auto` with `--auto-accept`, `running · relay lost` if its
+process died; `-v` adds its pid, session and log.
 `tentacle attach <name>` needs no `--engine`: the engine and location are looked
 up (an explicit `--engine`/`-n`/`--context`/`-c` skips the lookup).
 `tentacle rm <name>` removes it — only a workload that still carries tentacle's
 managed and kept labels, re-checked right before the delete; a running one asks
-`[y/N]` (`-f` skips; without a terminal, `-f` is required). A name that now
-belongs to something else is left alone and its stale entry dropped.
+`[y/N]` (`-f` skips; without a terminal, `-f` is required). A live detached run
+is named in that question and stopped first (turn cancelled and saved). A name
+that now belongs to something else is left alone and its stale entry dropped.
 
 ```sh
 tentacle ps [--engine <e>] [-q|-v]

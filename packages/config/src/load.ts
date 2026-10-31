@@ -87,6 +87,8 @@ export interface TentacleConfig {
   readonly engine?: ResolvedConfig["engine"];
   /** The configured `run --keep` default (file/profile); absent = the CLI default (true). */
   readonly keep?: ResolvedConfig["keep"];
+  /** `run --detach`'s settings (file/profile); absent = the relay's defaults. */
+  readonly detach?: ResolvedConfig["detach"];
   /** The configured workspace-mount hide list (file/profile); absent = the CLI default list. */
   readonly mount?: ResolvedConfig["mount"];
   /**
@@ -542,6 +544,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     autoWake: resolved.autoWake,
     ...(resolved.engine !== undefined ? { engine: resolved.engine } : {}),
     ...(resolved.keep !== undefined ? { keep: resolved.keep } : {}),
+    ...(resolved.detach !== undefined ? { detach: resolved.detach } : {}),
     ...(resolved.mount !== undefined ? { mount: resolved.mount } : {}),
     ...(resolved.apiKeyCommand !== undefined ? { apiKeyCommand: resolved.apiKeyCommand } : {}),
     hooks: contributed.hooks,
