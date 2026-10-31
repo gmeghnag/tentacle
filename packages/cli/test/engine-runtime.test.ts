@@ -43,6 +43,7 @@ import {
   attachEngineRuntime,
   createStderrSink,
   podDaemonCommand,
+  provisionWorkload,
   startEngineRuntime,
 } from "../src/engine-runtime.ts";
 import { POD_BIN_PATH } from "../src/pod-binary.ts";
@@ -346,6 +347,27 @@ describe("startPodRuntime", () => {
     ).toBe(true);
     expect(kube.calls.some((c) => c.includes("/tmp/tentacle serve --bridge"))).toBe(true);
     runtime.dispose();
+  });
+
+  test("R10 provisionWorkload: create → ready → inject, the daemon never exec'd", async () => {
+    // Mutation: open the exec inside it → `serve --bridge` shows up here.
+    const kube = new FakeCluster(new ScriptedProvider([]));
+    const lines: string[] = [];
+    const provisioned = await provisionWorkload(baseConfig("/pod/work"), {
+      host: kubeEngineHost(kube, "dev"),
+      image: "repo/img:tag",
+      name: "box",
+      keepHint: (name) => `tentacle attach ${name}`,
+      log: (line) => lines.push(line),
+    });
+    expect(provisioned.name).toBe("box");
+    expect(provisioned.binPath).toBe(POD_BIN_PATH);
+    expect(kube.calls[0]).toBe("create:box");
+    expect(kube.calls[1]).toBe("ready:box");
+    expect(kube.calls.some((c) => c === `runexec:box:${POD_BIN_PATH} --version`)).toBe(true);
+    expect(kube.calls.some((c) => c.includes("serve --bridge"))).toBe(false);
+    expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
+    expect(lines.join("")).toContain("kept box — resume with: tentacle attach box");
   });
 
   test("creates + readies a pod, runs a turn over exec, deletes on dispose", async () => {

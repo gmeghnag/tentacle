@@ -15,6 +15,7 @@ export {
   type SessionController,
   type SessionDirectory,
 } from "./App.tsx";
+export { autoApproves, ownRequest } from "./permission-ui.ts";
 export type { SessionsEntry, SessionsView } from "./sessions-panel.ts";
 export { startTui, type TuiOptions } from "./run.tsx";
 export type { SessionChoice, SessionPick } from "./session-picker.ts";

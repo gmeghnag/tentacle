@@ -230,25 +230,30 @@ function registerExitCleanup(host: EngineHost, name: string): void {
   });
 }
 
+/** A workload `provisionWorkload` made ready: its binary installed, no daemon started. */
+export interface ProvisionedWorkload {
+  readonly name: string;
+  /** Where the binary was installed. */
+  readonly binPath: string;
+  /** Delete it, or (kept) say how to reach it; `error`: the failed start, if any. */
+  readonly removeUnlessKept: (error?: unknown) => void;
+}
+
 /**
- * `run` on any engine: create an ephemeral workload (pod / container), connect
- * the daemon over its exec channel, and build a persisting local runtime
- * against it. The returned runtime's `dispose` closes the exec channel and
- * removes the workload (kept with `keepHint`). Throws (after cleaning up any
- * created workload, unless kept) on failure — there is no in-process fallback.
+ * The lifecycle half of `run`: create the workload, wait for it, inject the
+ * binary (kept: record it and say so). Throws (after cleaning up, unless kept)
+ * on failure. `startEngineRuntime` goes on to the daemon; `run --detach` leaves
+ * that to its relay (docs/feat/detached-relay.md).
  */
-export async function startEngineRuntime(
+export async function provisionWorkload(
   config: TentacleConfig,
-  deps: EngineRuntimeDeps,
-): Promise<LocalRuntime> {
+  deps: Omit<EngineRuntimeDeps, "permissions" | "saver" | "resume" | "notify">,
+): Promise<ProvisionedWorkload> {
   const { host } = deps;
   const name = deps.name ?? `tentacle-${crypto.randomUUID().slice(0, 8)}`;
   // Install path in the pod: a read-only rootfs (a hardened pod) needs a writable
   // dir via --bin-dir (e.g. /tmp); the daemon is then exec'd by this absolute path.
   const binPath = `${deps.binDir ?? "/usr/local/bin"}/tentacle`;
-  // The pod daemon's stderr is buffered (not written live) so it never corrupts
-  // the Ink TUI; flushed once on teardown / startup failure. See `createStderrSink`.
-  const stderr = createStderrSink(`[${host.noun} ${name}]`, deps.log);
   const container = host.defaultContainer;
   // Interactive (TTY) startup is ONE line: a spinner repainted per phase
   // (create → ready → inject, with the transfer bar as the bar phase's text),
@@ -373,9 +378,36 @@ export async function startEngineRuntime(
     if (keptLine) {
       logKept(keptLine);
     }
+    return { name, binPath, removeUnlessKept };
+  } catch (error) {
+    // The workload was created but never became usable — delete it before
+    // surfacing (kept with `--keep`: left to inspect).
+    status?.finish();
+    removeUnlessKept(error);
+    throw error;
+  }
+}
+
+/**
+ * `run` on any engine: create an ephemeral workload (pod / container), connect
+ * the daemon over its exec channel, and build a persisting local runtime
+ * against it. The returned runtime's `dispose` closes the exec channel and
+ * removes the workload (kept with `keepHint`). Throws (after cleaning up any
+ * created workload, unless kept) on failure — there is no in-process fallback.
+ */
+export async function startEngineRuntime(
+  config: TentacleConfig,
+  deps: EngineRuntimeDeps,
+): Promise<LocalRuntime> {
+  const { host } = deps;
+  const { name, binPath, removeUnlessKept } = await provisionWorkload(config, deps);
+  // The pod daemon's stderr is buffered (not written live) so it never corrupts
+  // the Ink TUI; flushed once on teardown / startup failure. See `createStderrSink`.
+  const stderr = createStderrSink(`[${host.noun} ${name}]`, deps.log);
+  try {
     const target: EngineExecTarget = {
       name,
-      container,
+      container: host.defaultContainer,
       command: podDaemonCommand(binPath, config),
     };
     const execOptions: EngineExecChannelOptions = { onStderr: stderr.onStderr };
@@ -408,9 +440,6 @@ export async function startEngineRuntime(
       ...(deps.notify ? { notify: deps.notify } : {}),
     });
   } catch (error) {
-    // The workload was created but never became usable — delete it before
-    // surfacing (kept with `--keep`: left to inspect).
-    status?.finish();
     // The TUI never mounted on this path, so flushing any daemon stderr (e.g. a
     // `serve` that failed to start) to stdout is safe and aids diagnosis.
     stderr.flush();
@@ -436,6 +465,10 @@ export interface EngineAttachRuntimeDeps {
   readonly log: (line: string) => void;
   /** In-TUI notices (the session's `NoticeHub`), e.g. a reconnect that lost the last turn. */
   readonly notify?: (text: string) => void;
+  /** `createLocalRuntime`'s: false in the relay, no one to ask. */
+  readonly interactive?: boolean;
+  /** `createLocalRuntime`'s: the first session's uid. */
+  readonly sessionId?: string;
 }
 
 /**
@@ -708,6 +741,8 @@ export async function attachEngineRuntime(
       // sees opaque) join the buffered daemon stderr: flushed after unmount.
       onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),
       ...(deps.notify ? { notify: deps.notify } : {}),
+      ...(deps.interactive !== undefined ? { interactive: deps.interactive } : {}),
+      ...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
     });
   } catch (error) {
     status?.finish();

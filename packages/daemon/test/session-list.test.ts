@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { Agent } from "@tentacle/agent";
 import {
+  type BackgroundJob,
   type ChatRequest,
   type ExecutionEnvironment,
+  type JobController,
   type ModelProvider,
   PermissionBroker,
   type StreamEvent,
@@ -258,7 +260,7 @@ class NullStore implements RecordStore {
   }
 }
 
-function daemon(opts: { persist?: boolean } = {}) {
+function daemon(opts: { persist?: boolean; jobs?: JobController } = {}) {
   const clock = { t: 0 };
   const model = new Gated();
   const store = new NullStore();
@@ -278,7 +280,7 @@ function daemon(opts: { persist?: boolean } = {}) {
         env,
         requestPermission: (req, options) => permissions.request(req, options),
       });
-      return { agent, permissions };
+      return { agent, permissions, ...(opts.jobs ? { jobs: opts.jobs } : {}) };
     },
   });
   const connect = async (initialize = true) => {
@@ -319,6 +321,36 @@ async function idle(d: ReturnType<typeof daemon>, id: string): Promise<void> {
 const detached: Attachment = { send: () => {} };
 
 describe("SessionHost.list over the wire", () => {
+  test("R9 jobs: only running ones count; 0 with no job controller; an archived entry has none", async () => {
+    // Mutation: count every job → 3, not 1.
+    const job = (id: string, status: BackgroundJob["status"]): BackgroundJob => ({
+      id,
+      command: "c",
+      status,
+      exitCode: null,
+      startedAt: 1,
+    });
+    const jobs: JobController = {
+      start: () => job("x", "running"),
+      read: () => undefined,
+      kill: () => false,
+      list: () => [job("a", "running"), job("b", "exited"), job("c", "killed")],
+      dispose: () => {},
+      onExit: () => () => {},
+    };
+    const withJobs = daemon({ jobs });
+    withJobs.host.open({ sessionId: "s", create: true }, detached);
+    const a = await withJobs.connect();
+    expect((await a.list()).sessions[0]?.jobs).toBe(1);
+
+    const without = daemon();
+    without.host.open({ sessionId: "s", create: true }, detached);
+    const b = await without.connect();
+    expect((await b.list()).sessions[0]?.jobs).toBe(0);
+
+    expect(list([summary("arch", 1, { archived: true })]).sessions[0]).not.toHaveProperty("jobs");
+  });
+
   test("H1 running / attached / title / cwd, and a list attaches nothing", async () => {
     // Mutations M3' (running → now) and M11 (no stamp at the turn's start) → red:
     // a running session is keyed on its turn's start (25), not the clock (30)
@@ -346,6 +378,7 @@ describe("SessionHost.list over the wire", () => {
         running: true,
         attached: 1,
         archived: false,
+        jobs: 0,
       },
       {
         sessionId: "idle",
@@ -356,6 +389,7 @@ describe("SessionHost.list over the wire", () => {
         running: false,
         attached: 0,
         archived: false,
+        jobs: 0,
       },
     ]);
     // The lister attached to nothing.
@@ -422,6 +456,7 @@ describe("SessionHost.list over the wire", () => {
         running: false,
         attached: 0,
         archived: false,
+        jobs: 0,
       },
     ]);
   });

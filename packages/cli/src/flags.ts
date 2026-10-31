@@ -53,6 +53,10 @@ const CONTINUE = { continue: {} } as const;
  * (`run --keep true`); any other word stays positional (`run --keep name` keeps `name`).
  */
 const KEEP = { keep: { accepts: (word: string) => word === "true" || word === "false" } } as const;
+/** `run --detach --auto-accept[=true|false]`, parsed like `KEEP`. */
+const AUTO_ACCEPT = {
+  "auto-accept": { accepts: (word: string) => word === "true" || word === "false" },
+} as const;
 const RESUME_CONFLICTS = [["resume", "continue"]] as const;
 const TOKEN = { token: {}, "token-command": {} } as const;
 /** `run`/`attach`: the engine and its docker/podman endpoint options (docs/feat/docker-engine-cli.md). */
@@ -100,10 +104,10 @@ export const ARGS = {
     positional: { min: 0, max: 0 },
   },
   run: {
-    values: { ...ENGINE, namespace: { short: "n" }, image: {}, "bin-dir": {} },
+    values: { ...ENGINE, namespace: { short: "n" }, image: {}, "bin-dir": {}, prompt: {} },
     // docker/podman: the cwd mount (docs/feat/docker-workspace-mount.md); `run` only.
-    bools: { ...CONTINUE, ...ENGINE_BOOLS, "no-mount": {}, "confirm-mount": {} },
-    optional: { ...RESUME, ...KEEP },
+    bools: { ...CONTINUE, ...ENGINE_BOOLS, "no-mount": {}, "confirm-mount": {}, detach: {} },
+    optional: { ...RESUME, ...KEEP, ...AUTO_ACCEPT },
     conflicts: RESUME_CONFLICTS,
     positional: { min: 0, max: 1 },
   },
@@ -138,6 +142,33 @@ export const ARGS = {
   package: { positional: { min: 1, max: 2 } },
   update: { values: { version: {} }, bools: { check: {} }, positional: { min: 0, max: 0 } },
 } as const satisfies Record<string, ArgSpec>;
+
+/**
+ * `run --detach`'s flags together (docs/feat/detached-relay.md): the usage
+ * error, if any. `prompt`: `--prompt`'s value. `keep`: the effective `--keep`:
+ * a detached run keeps its workload until DR-5 lands.
+ */
+export function detachFlagProblem(input: {
+  readonly detach: boolean;
+  readonly prompt: string | undefined;
+  readonly autoAccept: boolean;
+  readonly resume: boolean;
+  readonly keep: boolean;
+}): string | null {
+  if (!input.detach) {
+    if (input.prompt !== undefined) {
+      return "--prompt needs --detach";
+    }
+    return input.autoAccept ? "--auto-accept needs --detach" : null;
+  }
+  if (input.prompt === undefined || input.prompt.trim() === "") {
+    return "--detach needs --prompt <text> (or --prompt - for stdin)";
+  }
+  if (input.resume) {
+    return "--detach cannot resume a session: run it, then `tentacle attach <name> --resume <uid>`";
+  }
+  return input.keep ? null : "--detach keeps its workload: --keep=false is not supported with it";
+}
 
 /**
  * Parse `args` against a closed `spec`: flags anywhere (before or after the
@@ -196,9 +227,10 @@ export function parseArgs(args: readonly string[], spec: ArgSpec): ParsedArgs {
       value = arg.slice(eq + 1);
     } else {
       const next = args[i + 1];
+      // A lone `-` is a word (`--prompt -`: stdin), as it is for a positional.
       const takes =
         next !== undefined &&
-        !next.startsWith("-") &&
+        (!next.startsWith("-") || next === "-") &&
         (type === "value" || spec.optional?.[name]?.accepts(next) === true);
       if (takes) {
         value = next;
@@ -552,7 +584,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
     "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify] [--resume [id]|--continue]",
   serve:
     "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [...] (see tentacle --help)",
-  run: "tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]",
+  run: "tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [--detach --prompt <text|-> [--auto-accept[=true|false]]] [<name>]",
   attach:
     "tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--context <ctx>] [--insecure-docker-tcp] [--bin-dir <dir>] [--resume [uid]|--continue]",
   ps: "tentacle ps [--engine kubernetes|docker|podman] [-q|--quiet] [-v|--verbose]",

@@ -601,6 +601,12 @@ function alive(pid: number, procOf: ProcOf): boolean {
   return procOf(pid)?.state !== "Z";
 }
 
+/** The process that holds `stateDir`'s lock now; `null` when none does (absent, stale, released). */
+export function lockHolder(stateDir: string, procOf: ProcOf): { readonly pid: number } | null {
+  const holder = parseLockHolder(readLock(lockPath(stateDir, currentGeneration(stateDir))));
+  return holder && holderAlive(holder, procOf) ? holder : null;
+}
+
 /**
  * Stop the resident that holds `stateDir`'s lock: SIGTERM (it detaches every
  * connection, unlinks its socket, releases the lock), SIGKILL past `graceMs`.
@@ -613,8 +619,8 @@ export async function residentStop(
   graceMs = 5000,
   procOf: ProcOf = procStat,
 ): Promise<boolean> {
-  const holder = parseLockHolder(readLock(lockPath(stateDir, currentGeneration(stateDir))));
-  if (!holder || holder.pid === process.pid || !holderAlive(holder, procOf)) {
+  const holder = lockHolder(stateDir, procOf);
+  if (!holder || holder.pid === process.pid) {
     return false;
   }
   const { pid } = holder;
