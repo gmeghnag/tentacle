@@ -342,6 +342,8 @@ the "a new target adds only a transport" shape, AGENTS §7).
 
 ### Owner decisions after the eval was committed
 
+- **UI direction: the mockups are approved** (owner, 2026-11-01): 10 phone screens on the Design canvas https://claude.ai/artifact/HadMMyb5x8dcyrGEwwXDaS (private to the owner) — computers → projects, pairing (QR + compare code), sessions, live transcript, diff, writing while a turn runs, permission sheet, offline outbox, Face ID lock, Live Activity / Dynamic Island. Native iOS 26 look (inset grouped lists, glass bars, SF Pro, monospace code), light/dark. Accent on light backgrounds is `#0E7490` (`#0891b2` fails 4.5:1 on white); `#06B6D4`/`#22D3EE` on dark. Tasks 11–14, 17 and 18 start from these screens. The sheet's "No, let's talk about it" depends on `permission-reply`.
+
 - **Bundle id: `so.tentacle.app`** (owner, 2026-10-23). Reverse-DNS of the
   owned `tentacle.so`; not tied to the relay's domain (a later `tntcl.so`
   changes nothing). Fixed before task 11; the spike keeps
