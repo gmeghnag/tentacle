@@ -475,6 +475,62 @@ describe("JsonSessionStore.remove", () => {
   });
 });
 
+describe("JsonSessionStore never silently replaces a longer history (docs/fix/detach-live.md Q6)", () => {
+  const full: ChatMessage[] = [
+    { role: "user", content: "one" },
+    { role: "assistant", content: "ok" },
+    { role: "user", content: "echo due" },
+    { role: "assistant", content: "due" },
+  ];
+  const record = (id: string, msgs: ChatMessage[]) =>
+    recordFromSnapshot({ id, messages: msgs }, { cwd: "/w", model: "m" });
+
+  test("a write that drops messages the file holds keeps the file, saves the copy aside, says so", async () => {
+    // Mutation: drop the prefix check in `writeAtomic` → the stale write replaces the file.
+    const asides: { id: string; file: string; kept: number; dropped: number }[] = [];
+    const where = join(dir, "q6-stale");
+    const store = new JsonSessionStore(where, undefined, (info) => asides.push(info));
+    await store.save(record("s", full));
+    await store.save(record("s", full.slice(0, 2)));
+    const loaded = await store.load("s");
+    expect(loaded.status === "ok" && loaded.record.messages.length).toBe(4);
+    expect(asides).toHaveLength(1);
+    expect(asides[0]).toMatchObject({ id: "s", kept: 4, dropped: 2 });
+    const names = await readdir(where);
+    const aside = names.filter((n) => n.startsWith("s.stale-"));
+    expect(aside).toHaveLength(1);
+    expect(asides[0]?.file).toBe(join(where, aside[0] ?? ""));
+    // Never a session: not loadable, not listed, not scanned.
+    expect((await store.list()).records.map((r) => r.id)).toEqual(["s"]);
+    expect((await store.list()).skipped).toEqual([]);
+    const kept = JSON.parse(await readFile(asides[0]?.file ?? "", "utf8")) as SessionRecord;
+    expect(kept.messages).toHaveLength(2);
+  });
+
+  test("not a drop: a longer history, an equal one, a rewritten one (a compaction) all write", async () => {
+    const asides: unknown[] = [];
+    const store = new JsonSessionStore(join(dir, "q6-ok"), undefined, (i) => asides.push(i));
+    await store.save(record("s", full.slice(0, 2)));
+    await store.save(record("s", full));
+    await store.save(record("s", full));
+    const compacted: ChatMessage[] = [{ role: "user", content: "summary" }, ...full.slice(3)];
+    await store.save(record("s", compacted));
+    const loaded = await store.load("s");
+    expect(loaded.status === "ok" && loaded.record.messages).toEqual(compacted);
+    expect(asides).toEqual([]);
+  });
+
+  test("an unreadable file is not a longer history: the write goes through", async () => {
+    const where = join(dir, "q6-bad");
+    const store = new JsonSessionStore(where);
+    await store.save(record("s", full));
+    await writeFile(join(where, "s.json"), "{ nope");
+    await store.save(record("s", full.slice(0, 2)));
+    const loaded = await store.load("s");
+    expect(loaded.status === "ok" && loaded.record.messages.length).toBe(2);
+  });
+});
+
 describe("projectKey", () => {
   test("<basename>-<12 hex>, stable, distinct for distinct paths, symlinks resolved", async () => {
     // Mutation: hash the unresolved path → the symlink gets another key.

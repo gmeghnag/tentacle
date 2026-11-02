@@ -10,6 +10,9 @@ import {
   mcpStatusError,
   paletteWindow,
   quitAction,
+  quitCommandStep,
+  quitConfirmKey,
+  quitConfirmText,
   resolveSlash,
   retryPlan,
   slashCatalog,
@@ -134,6 +137,55 @@ describe("quitAction", () => {
     expect(quitAction("command", true, false, false, true)).toBe("exit");
     expect(quitAction("ctrl-c", true, false, false, true)).toBe("stop");
     expect(quitAction("command", true, false, false, false)).toBe("stop-then-exit");
+  });
+});
+
+describe("D1 quitCommandStep (docs/fix/detach-live.md A1)", () => {
+  const base = {
+    running: false,
+    exitPending: false,
+    foreign: false,
+    detaches: false,
+    endsSession: false,
+    others: 0,
+    confirmed: false,
+  };
+  test("every row, first match wins", () => {
+    // Mutations: drop the `confirm` row; `endsSession` honours `foreign` (FAIL 39's path back).
+    // A second request: out at once, even with others and no confirmation.
+    expect(quitCommandStep({ ...base, exitPending: true, running: true, others: 2 })).toBe("exit");
+    // Others on the session, not confirmed: ask first, idle or running.
+    expect(quitCommandStep({ ...base, endsSession: true, others: 1 })).toBe("confirm");
+    expect(quitCommandStep({ ...base, endsSession: true, others: 2, running: true })).toBe(
+      "confirm",
+    );
+    // Confirmed, or alone: a running turn stops first, a FOREIGN one too.
+    expect(
+      quitCommandStep({ ...base, endsSession: true, others: 2, confirmed: true, running: true }),
+    ).toBe("stop-then-exit");
+    expect(quitCommandStep({ ...base, endsSession: true, running: true, foreign: true })).toBe(
+      "stop-then-exit",
+    );
+    expect(quitCommandStep({ ...base, endsSession: true })).toBe("exit");
+    // Otherwise `quitAction` as today: a foreign turn is left running; `connect` leaves at once.
+    expect(quitCommandStep({ ...base, running: true, foreign: true })).toBe("exit");
+    expect(quitCommandStep({ ...base, running: true, detaches: true })).toBe("exit");
+    expect(quitCommandStep({ ...base, running: true })).toBe("stop-then-exit");
+    expect(quitCommandStep(base)).toBe("exit");
+  });
+
+  test("the text, singular and plural; only y/Y confirms, Enter is No", () => {
+    expect(quitConfirmText(1)).toBe("1 other terminal attached — close the session for all? (y/N)");
+    expect(quitConfirmText(3)).toBe(
+      "3 other terminals attached — close the session for all? (y/N)",
+    );
+    expect(quitConfirmKey("y")).toBe("yes");
+    expect(quitConfirmKey("Y")).toBe("yes");
+    for (const char of ["", "\r", "n", "N", "\u001b", "q", "yes"]) {
+      expect(quitConfirmKey(char)).toBe("no");
+    }
+    // Ink reports Ctrl+Y as `y` with `ctrl`: not a yes.
+    expect(quitConfirmKey("y", true)).toBe("no");
   });
 });
 

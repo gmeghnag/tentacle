@@ -15,7 +15,15 @@ import type {
   ToolContext,
 } from "@tentacle/core";
 import { DISMISSED, PermissionBroker } from "@tentacle/core";
-import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
+import {
+  Connection,
+  ENDED_INTERRUPTED_NOTE,
+  ENDED_TURN_NOTE,
+  ProxyModelProvider,
+  SessionHost,
+  failedTurnNote,
+} from "@tentacle/daemon";
+import { DomainErrorCode } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
@@ -664,6 +672,69 @@ describe("createLocalRuntime (local over RPC)", () => {
     expect(saved).toEqual([["one"]]);
   });
 
+  test("R6 saveConfirmed: false mid-turn, while the read waits, after a failed read and after an attach; true once a read answered", async () => {
+    // The exit net's check (docs/fix/detach-live.md R6). Mutations: drop `turns`,
+    // drop `running`, or keep `confirmed` true after a failed read → one line fails.
+    const { inner, held } = heldInner();
+    const ctl = persistingController(
+      { ...inner, open: async () => {} } as unknown as RemoteSession,
+      () => {},
+    );
+    expect(ctl.saveConfirmed()).toBe(true); // nothing sent: nothing to lose
+    const it = ctl.send("one")[Symbol.asyncIterator]();
+    await it.next();
+    expect(ctl.saveConfirmed()).toBe(false); // the turn runs
+    // A save that lands mid-turn (a title change) does not confirm a running turn.
+    void ctl.saveNow();
+    held[0]?.resolve([{ role: "user", content: "one" }]);
+    await ctl.flushed();
+    expect(ctl.saveConfirmed()).toBe(false);
+    await it.next();
+    expect(ctl.saveConfirmed()).toBe(false); // over, its read pending
+    held[1]?.resolve([{ role: "user", content: "one" }]);
+    await ctl.flushed();
+    expect(ctl.saveConfirmed()).toBe(true);
+    await drain(ctl.send("two"));
+    held[2]?.reject(new Error("link down"));
+    await ctl.flushed();
+    expect(ctl.saveConfirmed()).toBe(false);
+    void ctl.saveNow();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(ctl.saveConfirmed()).toBe(false); // its read is pending
+    held[3]?.resolve([{ role: "user", content: "two" }]);
+    await ctl.flushed();
+    expect(ctl.saveConfirmed()).toBe(true);
+    await ctl.open();
+    expect(ctl.saveConfirmed()).toBe(false); // live: the daemon's history is newer
+  });
+
+  test("R6 SessionSaver.clean: false while a write is pending and after a failed one", async () => {
+    let fail = false;
+    let release = () => {};
+    const saver = new SessionSaver(
+      {
+        save: () =>
+          new Promise<void>((resolve, reject) => {
+            release = () => (fail ? reject(new Error("disk full")) : resolve());
+          }),
+        remove: async () => {},
+      } as unknown as ConstructorParameters<typeof SessionSaver>[0],
+      () => {},
+    );
+    expect(saver.clean()).toBe(true);
+    saver.save({ id: "s" } as unknown as Parameters<SessionSaver["save"]>[0]);
+    expect(saver.clean()).toBe(false);
+    fail = true;
+    release();
+    await saver.drain();
+    expect(saver.clean()).toBe(false);
+    fail = false;
+    saver.save({ id: "s" } as unknown as Parameters<SessionSaver["save"]>[0]);
+    release();
+    await saver.drain();
+    expect(saver.clean()).toBe(true);
+  });
+
   test("detached save: serialized and coalesced — one read at a time, at most one more, newest wins", async () => {
     const { inner, held } = heldInner();
     const saved: string[][] = [];
@@ -696,6 +767,39 @@ describe("createLocalRuntime (local over RPC)", () => {
     held[0]?.reject(new Error("connection closed"));
     await ctl.flushed();
     expect(errors).toEqual(["connection closed"]);
+  });
+
+  test("A3 seal: a read in flight that fails after it reports nothing; a later flush reads nothing; an ended session (UnknownSession) is no failure", async () => {
+    // Mutations: `seal` only stops `flush` (the in-flight failure still
+    // reports); `seal` a no-op; no ended-session rule.
+    const { inner, held } = heldInner();
+    const errors: string[] = [];
+    const ctl = persistingController(
+      inner,
+      () => {},
+      (e) => errors.push(e.message),
+    );
+    await drain(ctl.send("one"));
+    ctl.seal(); // the quit took its last save; the close is next
+    held[0]?.reject(new Error("connection closed"));
+    await ctl.flushed();
+    await drain(ctl.send("two")); // a turn ending under the close
+    expect(held).toHaveLength(1);
+    expect(errors).toEqual([]);
+
+    const other = heldInner();
+    const ended: string[] = [];
+    const open = persistingController(
+      other.inner,
+      () => {},
+      (e) => ended.push(e.message),
+    );
+    await drain(open.send("one"));
+    other.held[0]?.reject(
+      Object.assign(new Error("the session was closed"), { code: DomainErrorCode.UnknownSession }),
+    );
+    await open.flushed();
+    expect(ended).toEqual([]);
   });
 
   test("detached save: /clear closes the session only after its pending save", async () => {
@@ -857,13 +961,23 @@ describe("N clients of one session (detached-handover)", () => {
       await new Promise((r) => setTimeout(r, 2));
     }
   };
-  function shared() {
+  /** `hangExec`: a tool runs until its turn is cancelled (a long tool). */
+  function shared(hangExec = false) {
     const execs: string[] = [];
     const env: ExecutionEnvironment = {
       id: "noop",
-      exec: (command) => {
+      exec: (command, options) => {
         execs.push(command);
-        return Promise.resolve({ stdout: "ok", stderr: "", exitCode: 0 });
+        if (!hangExec) {
+          return Promise.resolve({ stdout: "ok", stderr: "", exitCode: 0 });
+        }
+        return new Promise((resolve) => {
+          (options as { signal?: AbortSignal } | undefined)?.signal?.addEventListener(
+            "abort",
+            () => resolve({ stdout: "", stderr: "killed", exitCode: 130 }),
+            { once: true },
+          );
+        });
       },
       readFile: () => Promise.resolve(""),
       writeFile: () => Promise.resolve(),
@@ -902,6 +1016,10 @@ describe("N clients of one session (detached-handover)", () => {
         lose?: (frame: string) => boolean;
         /** Every write of the laptop copy fails (a full disk). */
         fullDisk?: boolean;
+        /** Daemon frames arrive this many ms later, as over a real bridge. */
+        latency?: number;
+        /** A reconnecting client (a pod's), whose redial never completes. */
+        factory?: boolean;
       } = {},
     ) => {
       const [daemonCh, clientCh] = createChannelPair();
@@ -917,6 +1035,7 @@ describe("N clients of one session (detached-handover)", () => {
           : store,
         () => {},
       );
+      const { latency } = opts;
       const runtime = await createLocalRuntime({
         channel: {
           ...clientCh,
@@ -926,7 +1045,16 @@ describe("N clients of one session (detached-handover)", () => {
               clientCh.send(frame);
             }
           },
+          ...(latency
+            ? {
+                setOnMessage: (handler: (data: string) => void) =>
+                  clientCh.setOnMessage((data: string) => {
+                    setTimeout(() => handler(data), latency);
+                  }),
+              }
+            : {}),
         },
+        ...(opts.factory ? { channelFactory: () => new Promise<never>(() => {}) } : {}),
         disposeTransport: () => connection.close(),
         permissions: opts.broker ?? new PermissionBroker(),
         saver,
@@ -1013,6 +1141,153 @@ describe("N clients of one session (detached-handover)", () => {
     pod.host.delete(UID);
     const late = await pod.connect({ shared: true });
     await expect(late.runtime.attachTo(UID, null)).rejects.toBeDefined();
+  });
+
+  test("KO4 two TUIs on a session the pod no longer has (reopened after a close): ONE live session, A's turn reaches B and its record, A's close for all closes B, nothing re-seeded from a stale copy", async () => {
+    // docs/fix/detach-live.md fix round 6 (live re-run KO 4). Mutation: the
+    // seeded session stays lazy → B is on no session until its first send.
+    const pod = shared();
+    const record: SessionRecord = {
+      id: UID,
+      cwd: "/tmp/work",
+      model: "m",
+      createdAt: 1,
+      updatedAt: 1,
+      title: "kept",
+      messages: [{ role: "user", content: "from the laptop" }],
+    };
+    const model = new ScriptedProvider([[{ type: "done" }], [{ type: "done" }]]);
+    const join = async () => {
+      const c = await pod.connect({ shared: true, resume: record, sessionId: UID, model });
+      if (!(await c.runtime.attachTo(UID, record))) {
+        // What `joinRun` does on the seeded path (after the relay checks).
+        await (c.runtime as { openSeeded?: () => Promise<void> }).openSeeded?.();
+      }
+      const session = c.runtime.createSession();
+      const seen: string[] = [];
+      session.watch((activity) => {
+        seen.push(activity.kind);
+        if (activity.kind === "turn") void drain(activity.events);
+      });
+      return { ...c, session, seen };
+    };
+    const a = await join();
+    const b = await join();
+    expect(pod.host.size).toBe(1);
+    await drain(a.session.send("echo due"));
+    await until(() => b.seen.includes("turn"), 500).catch(() => {});
+    expect(b.seen).toContain("turn"); // B is on A's session: same view
+    await b.session.flushed();
+    await b.saver.drain();
+    const saved = (await b.store.list()).records.find((r) => r.id === UID);
+    expect(JSON.stringify(saved?.messages ?? [])).toContain("echo due");
+    await a.runtime.quit({ closeForAll: true });
+    await until(() => b.seen.includes("closed"), 500).catch(() => {});
+    expect(b.seen).toContain("closed"); // D1: B leaves too
+    // B's next send never re-creates the session from its stale seed.
+    await expect(drain(b.session.send("rispondi solo: ok"))).rejects.toBeDefined();
+    expect(pod.host.get(UID)).toBeUndefined();
+  });
+
+  test("R8 openSeeded(record) seeds the session from THAT record, not the runtime's startup one", async () => {
+    // docs/fix/detach-live.md fix round 7. Mutation: `openSeeded` ignores its
+    // argument → a TUI whose join was slow re-creates the session from a stale copy.
+    const pod = shared();
+    const stale: SessionRecord = {
+      id: UID,
+      cwd: "/tmp/work",
+      model: "m",
+      createdAt: 1,
+      updatedAt: 1,
+      title: "kept",
+      messages: [{ role: "user", content: "stale" }],
+    };
+    const fresh: SessionRecord = {
+      ...stale,
+      updatedAt: 2,
+      messages: [
+        { role: "user", content: "stale" },
+        { role: "user", content: "echo due" },
+      ],
+    };
+    const tui = await pod.connect({ shared: true, resume: stale, sessionId: UID });
+    expect(await tui.runtime.attachTo(UID, stale)).toBe(false);
+    await tui.runtime.openSeeded(fresh);
+    const snap = pod.host.get(UID)?.snapshotPage().messages ?? [];
+    expect(snap.map((m) => m.content)).toEqual(["stale", "echo due"]);
+  });
+
+  describe("Q4 attach / open saves the session's current state and waits for the read-back", () => {
+    /** A live session with one turn in the pod, left by its first client. */
+    const live = async () => {
+      const pod = shared();
+      const first = await pod.connect({
+        sessionId: UID,
+        model: new ScriptedProvider([[{ type: "text", delta: "hi" }, { type: "done" }]]),
+      });
+      await drain(first.runtime.createSession().send("first turn"));
+      await first.runtime.release();
+      return pod;
+    };
+
+    test("attachTo: the laptop copy is written and saveConfirmed holds with no turn since (an exit net deletes)", async () => {
+      // docs/fix/detach-live.md fix round 7 (owner Q4=a). Mutation: no save in
+      // `open` → `saveConfirmed` stays false until a turn runs.
+      const pod = await live();
+      const tui = await pod.connect({ shared: true });
+      expect(await tui.runtime.attachTo(UID, null)).toBe(true);
+      expect(tui.runtime.saveConfirmed()).toBe(true);
+      const saved = (await tui.store.list()).records.find((r) => r.id === UID);
+      expect(saved?.messages[0]).toMatchObject({ role: "user", content: "first turn" });
+    });
+
+    test("R9 attached MID-TURN: not confirmed while that turn runs (the net must not delete under it); confirmed only after a save made after its end", async () => {
+      // docs/fix/detach-live.md fix round 8. Mutation: `saveConfirmed` ignores
+      // the session's running turn → true right after the attach.
+      const pod = shared();
+      const log: string[] = [];
+      const held = holding("R", log);
+      const relay = await pod.connect({
+        sessionId: UID,
+        model: new Held([SHELL]),
+        broker: held.broker,
+      });
+      const turn = drain(relay.runtime.createSession().send("first turn"));
+      await until(() => log.includes("R:asked:shell"));
+      const tui = await pod.connect({ shared: true, broker: holding("T", log).broker });
+      expect(await tui.runtime.attachTo(UID, null)).toBe(true);
+      expect(tui.runtime.saveConfirmed()).toBe(false); // the turn runs
+      tui.runtime.createSession(); // no watcher, nobody iterates the turn
+      expect(tui.runtime.saveConfirmed()).toBe(false);
+      held.answer(true);
+      await turn;
+      await until(() => tui.runtime.saveConfirmed());
+      const saved = (await tui.store.list()).records.find((r) => r.id === UID);
+      expect(saved?.messages.map((m) => m.role)).toContain("tool"); // the end is on the laptop
+    });
+
+    test("openSeeded on a live session: the same", async () => {
+      const pod = await live();
+      const record: SessionRecord = {
+        id: UID,
+        cwd: "/tmp/work",
+        model: "m",
+        createdAt: 1,
+        updatedAt: 1,
+        title: "kept",
+        messages: [{ role: "user", content: "first turn" }],
+      };
+      const tui = await pod.connect({ shared: true, resume: record, sessionId: UID });
+      await tui.runtime.openSeeded(record);
+      expect(tui.runtime.saveConfirmed()).toBe(true);
+    });
+
+    test("the initial save fails (a full disk): attach still works, and it stays unconfirmed — as before", async () => {
+      const pod = await live();
+      const tui = await pod.connect({ shared: true, fullDisk: true });
+      expect(await tui.runtime.attachTo(UID, null)).toBe(true);
+      expect(tui.runtime.saveConfirmed()).toBe(false);
+    });
   });
 
   test("H4 quit: a last read-back, then close{ifLast}; mid a foreign first turn the transcript reaches the saver", async () => {
@@ -1190,4 +1465,327 @@ describe("N clients of one session (detached-handover)", () => {
       expect(errors).toEqual([]);
     }
   });
+
+  test("D21 the relay's turn id: `send` uses it, the ask carries it; `attachTo({ adoptTurn })` owns it, another id and a `/clear`ed session do not", async () => {
+    // Mutations: `send` ignores `turnId`; `adoptTurn` dropped.
+    const RUN = "77777777-7777-4777-8777-777777777777";
+    const pod = shared();
+    const asked: (string | undefined)[] = [];
+    const relayBroker = new PermissionBroker((_req, options) => {
+      asked.push(options?.turnId);
+      return new Promise(() => {});
+    });
+    const relay = await pod.connect({
+      sessionId: UID,
+      model: new Held([SHELL]),
+      broker: relayBroker,
+    });
+    void drain(relay.runtime.createSession().send("go", undefined, { turnId: RUN })).catch(
+      () => {},
+    );
+    await until(() => asked.length === 1);
+    expect(asked[0]).toBe(RUN);
+    const tui = await pod.connect({ shared: true });
+    expect(await tui.runtime.attachTo(UID, null, { adoptTurn: RUN })).toBe(true);
+    const ctl = tui.runtime.createSession();
+    expect(ctl.ownsTurn(RUN)).toBe(true);
+    expect(ctl.ownsTurn("88888888-8888-4888-8888-888888888888")).toBe(false);
+    expect(tui.runtime.createSession().ownsTurn(RUN)).toBe(false);
+  });
+
+  // docs/fix/detach-live.md A3: `/quit` closes the session for every client.
+  /** Streams one delta, then holds until its request is aborted (a long answer). */
+  class Slow implements ModelProvider {
+    readonly id = "slow";
+    started = 0;
+    async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+      this.started++;
+      yield { type: "text", delta: "partial " };
+      await new Promise<void>((resolve) => {
+        request.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      yield { type: "done" };
+    }
+  }
+  /** The App's foreign path: every activity logged, each turn's events consumed. */
+  const follow = (ctl: { watch: RemoteSession["watch"] }) => {
+    const log: string[] = [];
+    const cancels: (() => void)[] = [];
+    ctl.watch((activity) => {
+      log.push(activity.kind === "closed" ? `closed(${activity.reason})` : activity.kind);
+      if (activity.kind === "turn") {
+        cancels.push(() => activity.cancel());
+        void (async () => {
+          try {
+            for await (const e of activity.events) {
+              log.push(e.type === "turn_end" ? `turn_end(${e.reason})` : e.type);
+            }
+            log.push("stream-end");
+          } catch (error) {
+            log.push(`THREW:${String(error)}`);
+          }
+        })();
+      }
+    });
+    return { log, cancels };
+  };
+  const NOT_SAVED = /not saved/;
+
+  test("D4+D5 a confirmed /quit closes for all: O's own turn ends cancelled, nothing thrown, `closed`, Q serving the call; O's exit then reads nothing", async () => {
+    // Mutations: `closeForAll` ignored (ifLast: S3's behaviour, O's turn dies
+    // with Q's call); no ended-session rule (O's quit reports "not saved").
+    const pod = shared();
+    const log: string[] = [];
+    const O = holding("O", log);
+    const o = await pod.connect({ sessionId: UID, model: new Held([SHELL]), broker: O.broker });
+    const oc = o.runtime.createSession();
+    const oLog = follow(oc);
+    const own: string[] = [];
+    let threw: unknown = null;
+    const turn = (async () => {
+      for await (const e of oc.send("go")) {
+        own.push(e.type === "turn_end" ? `turn_end(${e.reason})` : e.type);
+      }
+    })().catch((error: unknown) => {
+      threw = error;
+    });
+    await until(() => log.includes("O:asked:shell"));
+    const slow = new Slow();
+    const q = await pod.connect({ shared: true, model: slow, broker: holding("Q", log).broker });
+    expect(await q.runtime.attachTo(UID, null)).toBe(true);
+    q.runtime.createSession();
+    O.answer(true); // the next call is Q's: the newest client serves it
+    await until(() => slow.started === 1);
+    expect(await q.runtime.quit({ closeForAll: true })).toEqual({ sessionsKept: 0, saved: true });
+    await turn;
+    expect(threw).toBeNull();
+    expect(own.at(-1)).toBe("turn_end(cancelled)");
+    await until(() => oLog.log.includes("closed(closed)"));
+    expect(pod.host.get(UID)).toBeUndefined();
+    // D5: O leaves after it; the session ended, the closer saved it.
+    expect(await o.runtime.quit()).toEqual({ sessionsKept: 0, saved: true });
+    expect(await o.saver.drain()).toEqual([]);
+  }, 15_000);
+
+  // Latency 2: the late read fails "the session was closed"; 0: "connection
+  // closed", after the client is gone (f39's two wordings).
+  for (const [what, latency] of [
+    ["tool", 2],
+    ["stream", 2],
+    ["tool", 0],
+    ["stream", 0],
+  ] as const) {
+    test(`D6 alone, the run's turn in a ${what} (latency ${latency}), the second /quit (no stop): no false "not saved", also a macrotask later`, async () => {
+      // Mutations: `seal` a no-op; `seal` only `flush` (the late read still reports).
+      const pod = shared(what === "tool");
+      const log: string[] = [];
+      const R = holding("R", log);
+      const relay = await pod.connect({
+        sessionId: UID,
+        model: new Held([SHELL]),
+        broker:
+          what === "tool"
+            ? new PermissionBroker(() => Promise.resolve({ allowed: true }))
+            : R.broker,
+        factory: true,
+      });
+      void drain(relay.runtime.createSession().send("first turn")).catch(() => {});
+      await until(() => (what === "tool" ? pod.execs.length === 1 : log.includes("R:asked:shell")));
+      const slow = new Slow();
+      const tui = await pod.connect({
+        shared: true,
+        broker: holding("T", log).broker,
+        factory: true,
+        latency,
+        model: slow,
+      });
+      expect(await tui.runtime.attachTo(UID, null)).toBe(true);
+      const tLog = follow(tui.runtime.createSession());
+      await new Promise((r) => setTimeout(r, 30));
+      if (what === "stream") {
+        R.answer(true);
+        await until(() => slow.started === 1);
+      }
+      relay.runtime.stopSaving();
+      await relay.runtime.release(); // handed over
+      await new Promise((r) => setTimeout(r, 30));
+      expect(await tui.runtime.quit()).toEqual({ sessionsKept: 0, saved: true });
+      expect(await tui.saver.drain()).toEqual([]);
+      await new Promise((r) => setTimeout(r, 50));
+      expect((await tui.saver.drain()).filter((line) => NOT_SAVED.test(line))).toEqual([]);
+      expect(pod.host.get(UID)).toBeUndefined();
+      expect(tLog.log).toContain("turn");
+    }, 15_000);
+  }
+
+  test("F4 O's real exit, `release`, with its stream behind the wire: no false `not saved`, also after the stream ended", async () => {
+    // Mutation: no seal in `release` → `could not read the history back: peer
+    // is closed` (the review's trace). Q closes with no stop (a second /quit),
+    // O's consumer lags: its stream ends after O released.
+    const pod = shared(true);
+    const relay = await pod.connect({
+      sessionId: UID,
+      model: new Held([SHELL]),
+      broker: new PermissionBroker(() => Promise.resolve({ allowed: true })),
+      factory: true,
+    });
+    void drain(relay.runtime.createSession().send("first turn")).catch(() => {});
+    await until(() => pod.execs.length === 1);
+    const o = await pod.connect({ shared: true, factory: true, latency: 2 });
+    await o.runtime.attachTo(UID, null);
+    const log: string[] = [];
+    let released = false;
+    o.runtime.createSession().watch((activity) => {
+      log.push(activity.kind);
+      if (activity.kind === "closed") {
+        void o.runtime.release().then(() => {
+          released = true;
+        });
+      }
+      if (activity.kind === "turn") {
+        void (async () => {
+          for await (const _ of activity.events) {
+            await new Promise((r) => setTimeout(r, 40));
+          }
+          log.push(released ? "stream-end-after-release" : "stream-end");
+        })().catch(() => {});
+      }
+    });
+    const q = await pod.connect({ shared: true, factory: true, latency: 2 });
+    await q.runtime.attachTo(UID, null);
+    q.runtime.createSession();
+    await new Promise((r) => setTimeout(r, 30));
+    relay.runtime.stopSaving();
+    await relay.runtime.release();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(await q.runtime.quit({ closeForAll: true })).toEqual({ sessionsKept: 0, saved: true });
+    await until(() => log.includes("stream-end-after-release"));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await o.saver.drain()).toEqual([]);
+  }, 15_000);
+
+  describe("Q2 a turn a /quit cuts is marked interrupted in the saved history (the daemon reload's marker)", () => {
+    /** The run's turn in a tool; a TUI attached; the relay handed over. */
+    const cutInTool = async () => {
+      const pod = shared(true);
+      const relay = await pod.connect({
+        sessionId: UID,
+        model: new Held([SHELL]),
+        broker: new PermissionBroker(() => Promise.resolve({ allowed: true })),
+        factory: true,
+      });
+      void drain(relay.runtime.createSession().send("first turn")).catch(() => {});
+      await until(() => pod.execs.length === 1);
+      const tui = await pod.connect({ shared: true, factory: true, latency: 2 });
+      await tui.runtime.attachTo(UID, null);
+      tui.runtime.createSession();
+      await new Promise((r) => setTimeout(r, 30));
+      return { pod, relay, tui };
+    };
+
+    test("/quit for all in a running tool, no stop first: the dangling call is answered `interrupted`", async () => {
+      // docs/fix/detach-live.md fix round 7 (owner Q2=a). Mutation: no `cutTurn`
+      // in `quit` → the record ends on an assistant call with no answer.
+      const { relay, tui } = await cutInTool();
+      relay.runtime.stopSaving();
+      await relay.runtime.release();
+      await new Promise((r) => setTimeout(r, 30));
+      await tui.runtime.quit({ closeForAll: true });
+      const stored = (await tui.store.list()).records;
+      const messages = stored[0]?.messages ?? [];
+      expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+      expect(messages[2]).toEqual({
+        role: "tool",
+        content: ENDED_INTERRUPTED_NOTE,
+        toolCallId: "c1",
+      });
+      expect(messages[3]?.content).toBe(ENDED_TURN_NOTE); // the model never answered the result
+    });
+
+    /** The run's turn while the model streams (its call held): the history is the prompt only. */
+    const cutInStream = async () => {
+      const pod = shared();
+      const model = new Held([SHELL], [0]);
+      const relay = await pod.connect({
+        sessionId: UID,
+        model,
+        broker: new PermissionBroker(() => Promise.resolve({ allowed: true })),
+        factory: true,
+      });
+      void drain(relay.runtime.createSession().send("first turn")).catch(() => {});
+      await until(() => model.started === 1);
+      const tui = await pod.connect({ shared: true, factory: true, latency: 2 });
+      await tui.runtime.attachTo(UID, null);
+      tui.runtime.createSession();
+      await new Promise((r) => setTimeout(r, 30));
+      relay.runtime.stopSaving();
+      await relay.runtime.release();
+      await new Promise((r) => setTimeout(r, 30));
+      return tui;
+    };
+
+    test("live item 6: /quit for all while the model streams — the saved history ends on an `interrupted` note, not the bare prompt", async () => {
+      // docs/fix/detach-live.md fix round 8. Mutation: no tail note → [user] only.
+      const tui = await cutInStream();
+      await tui.runtime.quit({ closeForAll: true });
+      const messages = (await tui.store.list()).records[0]?.messages ?? [];
+      expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+      // The relay (the model link) left mid-call first, so the turn FAILED
+      // before the close: the daemon's own note (round 10, owner B) says so.
+      // Had the close come first, the laptop's `ENDED_TURN_NOTE`. Either way an
+      // ending note, never the bare prompt.
+      const note = messages[1]?.content ?? "";
+      expect(note === ENDED_TURN_NOTE || note === failedTurnNote("connection closed")).toBe(true);
+    });
+
+    test("live item 6: a lone /quit (it ends the session, `ending`) is marked the same", async () => {
+      const tui = await cutInStream();
+      await tui.runtime.quit({ ending: true });
+      const messages = (await tui.store.list()).records[0]?.messages ?? [];
+      expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    });
+
+    test("a quit that leaves the turn to others (not for all) marks nothing: the turn goes on", async () => {
+      const { relay, tui } = await cutInTool();
+      await tui.runtime.quit();
+      const messages = (await tui.store.list()).records[0]?.messages ?? [];
+      expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+      void relay;
+    });
+  });
+
+  test("D7 the run's turn in a tool, stopped first, then the quit: the record holds the interrupted tool", async () => {
+    // A pin of the stop-first order (green before the fix too). Mutation, the
+    // test's: `quit` before the stream's end → the `tool` message is not stored.
+    const pod = shared(true);
+    const relay = await pod.connect({
+      sessionId: UID,
+      model: new Held([SHELL]),
+      broker: new PermissionBroker(() => Promise.resolve({ allowed: true })),
+      factory: true,
+    });
+    void drain(relay.runtime.createSession().send("first turn")).catch(() => {});
+    await until(() => pod.execs.length === 1);
+    const tui = await pod.connect({ shared: true, factory: true, latency: 2 });
+    await tui.runtime.attachTo(UID, null);
+    const tLog = follow(tui.runtime.createSession());
+    await new Promise((r) => setTimeout(r, 30));
+    relay.runtime.stopSaving();
+    await relay.runtime.release();
+    await new Promise((r) => setTimeout(r, 30));
+    tLog.cancels[0]?.();
+    await until(() => tLog.log.includes("stream-end"));
+    expect(await tui.runtime.quit({ closeForAll: true })).toEqual({
+      sessionsKept: 0,
+      saved: true,
+    });
+    expect(await tui.saver.drain()).toEqual([]);
+    const stored = (await tui.store.list()).records;
+    expect(stored[0]?.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant", // the cut turn's tail note (fix round 8)
+    ]);
+  }, 15_000);
 });

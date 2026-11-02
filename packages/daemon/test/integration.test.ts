@@ -1110,6 +1110,67 @@ describe("turn lifecycle in the stream (ack, bracket, idempotency)", () => {
   });
 });
 
+describe("a failed turn keeps what was said and says how it ended (docs/fix/detach-live.md round 10, owner B)", () => {
+  /** A hosted session whose model streams `deltas`, then throws `error`; its history after the turn. */
+  async function failedHistory(
+    deltas: readonly string[],
+    error: Error,
+    expose = false,
+  ): Promise<{ messages: readonly ChatMessage[]; streamed: KnownSessionUpdateParams[] }> {
+    const agent = new Agent({
+      model: {
+        id: "cut",
+        async *stream(): AsyncIterable<StreamEvent> {
+          for (const delta of deltas) yield { type: "text", delta };
+          throw error;
+        },
+      },
+      tools: new ToolRegistry(),
+      env: noopEnv,
+    });
+    const hosted = new HostedSession("s1", new Session(agent), new PermissionBroker(), undefined, {
+      exposeTurnErrors: expose,
+    });
+    const streamed: KnownSessionUpdateParams[] = [];
+    hosted.attach(sinkTo((p) => streamed.push(p)));
+    hosted.prompt("t1", [{ type: "text", text: "the moon, 5000 words" }]);
+    await tick();
+    expect(hosted.running).toBe(false);
+    return { messages: hosted.snapshotPage().messages as readonly ChatMessage[], streamed };
+  }
+
+  test("the partial reply streamed before a lost model connection stays in the history, with the cause", async () => {
+    const lost = new RpcError(
+      JsonRpcErrorCode.InternalError,
+      "model connection lost mid-stream (ECONNRESET)",
+    );
+    const { messages, streamed } = await failedHistory(["Chapter 1. ", "The moon"], lost);
+    expect(streamed.at(-1)?.update).toMatchObject({
+      type: "turn_end",
+      stopReason: "error",
+      error: { message: "model connection lost mid-stream (ECONNRESET)" },
+    });
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    const reply = String(messages.at(-1)?.content);
+    expect(reply.startsWith("Chapter 1. The moon")).toBe(true);
+    expect(reply).toContain("model connection lost mid-stream (ECONNRESET)");
+  });
+
+  test("a failure before any text: the history still ends on a note, never on the bare prompt", async () => {
+    const { messages } = await failedHistory([], new Error("boom"));
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(String(messages.at(-1)?.content)).toContain("internal error");
+  });
+
+  test("the note follows the wire's redaction: a provider message never enters the history", async () => {
+    const { messages } = await failedHistory(["a"], new Error("401 key=sk-SECRET"));
+    expect(JSON.stringify(messages)).not.toContain("sk-SECRET");
+    expect(String(messages.at(-1)?.content)).toContain("internal error");
+    const exposed = await failedHistory(["a"], new Error("model down"), true);
+    expect(String(exposed.messages.at(-1)?.content)).toContain("model down");
+  });
+});
+
 describe("compaction is exclusive with a turn", () => {
   /**
    * The rejection of `p`; fails if `p` resolves or is still pending after `ms`.

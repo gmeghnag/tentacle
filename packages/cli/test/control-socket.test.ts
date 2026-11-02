@@ -43,10 +43,10 @@ describe("H24 parseControl: newline JSON, 4 KiB, strict (docs/feat/detached-hand
     expect(parseControl(big)).toEqual({ ok: false, reason: "invalid" });
   });
 
-  test("replies: strict too", () => {
+  test("replies: strict too; D24 an `autoAccept` in a reply is dropped (the bit is owner.json's only, B1)", () => {
     expect(
       parseReply(JSON.stringify({ ...V, ok: true, appVersion: "1", autoAccept: true })),
-    ).toEqual({ ok: true, appVersion: "1", autoAccept: true });
+    ).toEqual({ ok: true, appVersion: "1" });
     expect(parseReply(JSON.stringify({ ...V, ok: false, reason: "busy" }))).toEqual({
       ok: false,
       reason: "busy",
@@ -97,7 +97,7 @@ describe("control socket, served and dialled", () => {
       onRequest: async (request) => {
         seen.push(request);
         return request.op === "prepare"
-          ? { ok: true, appVersion: "9", autoAccept: false }
+          ? { ok: true, appVersion: "9" }
           : { ok: false, reason: "busy" };
       },
       onClose: () => {
@@ -110,7 +110,6 @@ describe("control socket, served and dialled", () => {
     expect(await conn.send({ op: "prepare", sessionId: UID })).toEqual({
       ok: true,
       appVersion: "9",
-      autoAccept: false,
     });
     expect(await conn.send({ op: "commit" })).toEqual({ ok: false, reason: "busy" });
     conn.close();

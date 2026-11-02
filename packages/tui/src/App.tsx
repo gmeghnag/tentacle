@@ -23,6 +23,9 @@ import {
   paletteWindow,
   parseRename,
   quitAction,
+  quitCommandStep,
+  quitConfirmKey,
+  quitConfirmText,
   renameFailedNotice,
   renamedNotice,
   resolveSlash,
@@ -35,6 +38,7 @@ import { LineInput } from "./components/LineInput.tsx";
 import { ListPanel } from "./components/ListPanel.tsx";
 import { PermissionPrompt, permissionPromptRows } from "./components/PermissionPrompt.tsx";
 import { QueuedMessages } from "./components/QueuedMessages.tsx";
+import { QUIT_CONFIRM_ROWS, QuitConfirm } from "./components/QuitConfirm.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { Thinking } from "./components/Thinking.tsx";
 import { pushHistory, recall } from "./history.ts";
@@ -55,7 +59,14 @@ import {
   skillsPanel,
 } from "./panel.ts";
 import { sanitizePasted, stepPaste } from "./paste.ts";
-import { permissionDetailLines, permissionShowsCwd, usePermissionBroker } from "./permission-ui.ts";
+import {
+  type AutoAcceptFeed,
+  permissionDetailLines,
+  permissionShowsCwd,
+  usePermissionBroker,
+} from "./permission-ui.ts";
+
+export type { AutoAcceptFeed };
 import {
   type DaemonQueue,
   type QueuedMessage,
@@ -261,6 +272,20 @@ export interface NoticeFeed {
   onNotice(listener: (text: string) => void): () => void;
 }
 
+/**
+ * A detached run's TUI (docs/fix/detach-live.md A2): `/quit` closes the
+ * session for every TUI on it. The host counts the others and acts after Ink
+ * unmounted; the App only reports what the user chose and what happened.
+ */
+export interface RunQuit {
+  /** Other live TUIs on this same session (laptop presence). */
+  othersOnSession(): number;
+  /** The user confirmed: this TUI's quit closes the session for all. */
+  closeForAll(): void;
+  /** Another TUI closed the session: this one leaves, nothing to save or delete. */
+  closedElsewhere(reason: "closed" | "deleted" | "gone"): void;
+}
+
 export interface AppProps {
   /** A local agent; used to build sessions unless `createSession` is given. */
   readonly agent?: Agent;
@@ -305,6 +330,10 @@ export interface AppProps {
   readonly detachOnQuit?: boolean;
   /** The daemon's sessions (`/sessions`). Absent → "isn't available on this runtime". */
   readonly sessions?: SessionDirectory;
+  /** A detached run's TUI: `/quit` closes the session for all, `closed` leaves. */
+  readonly runQuit?: RunQuit;
+  /** A detached run's TUI: auto-accept is its session's, shared by its TUIs (B3). */
+  readonly autoAccept?: AutoAcceptFeed;
 }
 
 // Rows reserved below the transcript viewport: a blank spacer, the input/thinking
@@ -375,6 +404,8 @@ export function App({
   daemonInPod = false,
   detachOnQuit = false,
   sessions,
+  runQuit,
+  autoAccept,
 }: AppProps): ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -429,10 +460,17 @@ export function App({
   const compactionOwnedRef = useRef(false);
   // Interactive tool-approval dialog + auto-accept (Shift+Tab), all self-contained.
   // Auto-accept answers only my own turns' requests: the current session decides.
-  const permission = usePermissionBroker(permissions, () => {
-    const session = sessionRef.current;
-    return session?.ownsTurn ? (turnId: string) => session.ownsTurn?.(turnId) === true : undefined;
-  });
+  // A detached run's TUI: auto-accept is its session's, shared (`autoAccept`, B3).
+  const permission = usePermissionBroker(
+    permissions,
+    () => {
+      const session = sessionRef.current;
+      return session?.ownsTurn
+        ? (turnId: string) => session.ownsTurn?.(turnId) === true
+        : undefined;
+    },
+    autoAccept,
+  );
   // The open list panel (`/mcp`, `/skills`; docs/feat/skills-panel.md) or null.
   // Each open and close bumps the generation, so a request answering after its
   // panel closed (or another opened) is dropped instead of landing on screen.
@@ -487,6 +525,14 @@ export function App({
   const restoredRef = useRef(new Set<string>());
   // A quit asked for mid-turn: exit as soon as the turn settles (it is saved then).
   const exitPendingRef = useRef(false);
+  // `/quit`'s confirmation on a run TUI with others attached: their count, or
+  // null. The ref is the truth for the key handler; the state renders.
+  const [quitConfirm, setQuitConfirmState] = useState<number | null>(null);
+  const quitConfirmRef = useRef<number | null>(null);
+  const setQuitConfirm = useCallback((others: number | null) => {
+    quitConfirmRef.current = others;
+    setQuitConfirmState(others);
+  }, []);
   // The controller of the FOREIGN turn being streamed (another device's), or
   // null: `/exit` leaves it running (docs/feat/tui-foreign-turns.md C4).
   const foreignRef = useRef<AbortController | null>(null);
@@ -600,7 +646,8 @@ export function App({
       return;
     }
     return notices.onNotice((text) => {
-      stateRef.current = appendNotice(stateRef.current, text);
+      // `host`: an attach's notice outlives the history that follows it (A6).
+      stateRef.current = appendNotice(stateRef.current, text, { host: true });
       setScrollOffset(0);
       flushNow();
     });
@@ -700,13 +747,16 @@ export function App({
   // Rows the bottom area occupies: the permission dialog; or the running rows,
   // then the list panel or the input box (plus any open palette rows, which
   // only open while idle).
-  const activeRows = permission.pending
-    ? permissionPromptRows(
-        permission.choices.length,
-        permissionDetailLines(permission.pending).length,
-        permissionShowsCwd(permission.pending),
-      )
-    : runningRows + (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length);
+  const activeRows =
+    quitConfirm !== null
+      ? QUIT_CONFIRM_ROWS
+      : permission.pending
+        ? permissionPromptRows(
+            permission.choices.length,
+            permissionDetailLines(permission.pending).length,
+            permissionShowsCwd(permission.pending),
+          )
+        : runningRows + (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length);
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
   // Terminal row (1-based) of the panel's first body row: the transcript
   // viewport, the bottom area's marginTop row, the running rows, the title rule.
@@ -1212,6 +1262,14 @@ export function App({
         heldRef.current.push(activity);
         return;
       }
+      if (activity.kind === "closed" && runQuit) {
+        // A run's session closed by another TUI's `/quit` (A2): this one
+        // leaves; never a fresh session in a resident being removed.
+        runQuit.closedElsewhere(activity.reason);
+        setQuitConfirm(null);
+        exit();
+        return;
+      }
       if (activity.kind === "closed") {
         // Ended on another device (live, or refused on reconnect): say so, and
         // hand the next prompt to a fresh session — the transcript stays as
@@ -1248,7 +1306,18 @@ export function App({
       flushNow();
       void streamTurn(() => activity.events, controller, { foreign: true });
     },
-    [commitHistory, drainHeld, flushNow, makeSession, pushNotice, sessions, streamTurn],
+    [
+      commitHistory,
+      drainHeld,
+      exit,
+      flushNow,
+      makeSession,
+      pushNotice,
+      runQuit,
+      sessions,
+      setQuitConfirm,
+      streamTurn,
+    ],
   );
   onActivityRef.current = onActivity;
 
@@ -1503,6 +1572,40 @@ export function App({
     wakeIfPending,
   ]);
 
+  /**
+   * `/quit` and `/exit`: the decision is `quitCommandStep`'s (A1); `confirmed`
+   * is the `y` of its confirmation. Another device's turn is not mine to stop
+   * on the way out (C4), but a run TUI's quit ends the session, so it stops
+   * that one too. On `connect` (`detachOnQuit`) quitting only detaches.
+   */
+  const requestQuit = useCallback(
+    (confirmed: boolean): void => {
+      const step = quitCommandStep({
+        running: stateRef.current.running,
+        exitPending: exitPendingRef.current,
+        foreign: foreignRef.current !== null,
+        detaches: detachOnQuit,
+        endsSession: runQuit !== undefined,
+        others: confirmed ? 0 : (runQuit?.othersOnSession() ?? 0),
+        confirmed,
+      });
+      if (step === "confirm") {
+        setQuitConfirm(runQuit?.othersOnSession() ?? 0);
+        return;
+      }
+      if (step === "exit") {
+        exit();
+        return;
+      }
+      exitPendingRef.current = true;
+      pushNotice(
+        "_Stopping the turn so it is saved before exiting — /exit or Ctrl+C again to quit now._",
+      );
+      abortRef.current?.abort();
+    },
+    [detachOnQuit, exit, pushNotice, runQuit, setQuitConfirm],
+  );
+
   const handleCommand = useCallback(
     (raw: string, again = false): void => {
       const resolved = resolveSlash(raw, skills());
@@ -1543,26 +1646,7 @@ export function App({
       switch (cmd) {
         case "/exit":
         case "/quit":
-          // Another device's turn is not mine to stop on the way out: exit at
-          // once, it goes on daemon-side (C4). On `connect` (`detachOnQuit`)
-          // quitting only detaches, so even my own turn runs on daemon-side.
-          if (
-            quitAction(
-              "command",
-              stateRef.current.running,
-              exitPendingRef.current,
-              foreignRef.current !== null,
-              detachOnQuit,
-            ) === "exit"
-          ) {
-            exit();
-            return;
-          }
-          exitPendingRef.current = true;
-          pushNotice(
-            "_Stopping the turn so it is saved before exiting — /exit or Ctrl+C again to quit now._",
-          );
-          abortRef.current?.abort();
+          requestQuit(false);
           return;
         case "/help":
           // The skills part is asked fresh (docs/feat/skills-hot-reload.md).
@@ -1755,13 +1839,13 @@ export function App({
       clipboard,
       openPanel,
       cwd,
-      detachOnQuit,
       exit,
       mcpStatus,
       sessions,
       skillsSync,
       model,
       pushNotice,
+      requestQuit,
       restoreInput,
       run,
       saveFile,
@@ -1985,6 +2069,16 @@ export function App({
     // prompt showing). Checked first so it never reaches the palette's Tab.
     if (key.tab && key.shift) {
       permission.toggleAutoApprove();
+      return;
+    }
+    // `/quit`'s confirmation: every other key answers it, before the chord and
+    // the permission dialog, so its `y` never approves an ask opened meanwhile.
+    if (quitConfirmRef.current !== null) {
+      setQuitConfirm(null);
+      if (quitConfirmKey(char, key.ctrl || key.meta) === "yes") {
+        runQuit?.closeForAll();
+        requestQuit(true);
+      }
       return;
     }
     // The `Ctrl+X Ctrl+S` chord (send the queued messages now): before the
@@ -2424,7 +2518,9 @@ export function App({
       </Box>
 
       <Box marginTop={1}>
-        {permission.pending ? (
+        {quitConfirm !== null ? (
+          <QuitConfirm text={quitConfirmText(quitConfirm)} columns={columns} />
+        ) : permission.pending ? (
           <PermissionPrompt
             req={permission.pending}
             options={permission.choices.map((c) => c.label)}

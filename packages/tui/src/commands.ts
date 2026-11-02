@@ -217,6 +217,55 @@ export function quitAction(
   return "stop";
 }
 
+export interface QuitCommandInput {
+  readonly running: boolean;
+  /** A quit was asked already and is waiting for the turn to stop. */
+  readonly exitPending: boolean;
+  /** The turn shown is another terminal's (or the run's). */
+  readonly foreign: boolean;
+  /** `connect`: a quit only detaches. */
+  readonly detaches: boolean;
+  /** A detached run's TUI: `/quit` closes the session for every TUI on it (D1). */
+  readonly endsSession: boolean;
+  /** Other TUIs on this same session (laptop presence). */
+  readonly others: number;
+  /** The user said `y` to `quitConfirmText`. */
+  readonly confirmed: boolean;
+}
+
+/**
+ * What `/quit` (`/exit`) does (docs/fix/detach-live.md A1), first match wins:
+ * a second request leaves at once (a turn that will not stop never traps the
+ * user); with other terminals on the session it asks first; a run TUI's quit
+ * ends the session, so a running turn — a foreign one too — stops first;
+ * anything else is `quitAction`.
+ */
+export function quitCommandStep(input: QuitCommandInput): "exit" | "stop-then-exit" | "confirm" {
+  if (input.exitPending) {
+    return "exit";
+  }
+  if (input.others > 0 && !input.confirmed) {
+    return "confirm";
+  }
+  if (input.endsSession) {
+    return input.running ? "stop-then-exit" : "exit";
+  }
+  return quitAction("command", input.running, false, input.foreign, input.detaches) === "exit"
+    ? "exit"
+    : "stop-then-exit";
+}
+
+/** The confirmation `/quit` asks with others on the session. */
+export function quitConfirmText(others: number): string {
+  const who = others === 1 ? "1 other terminal" : `${others} other terminals`;
+  return `${who} attached — close the session for all? (y/N)`;
+}
+
+/** A key on that confirmation: only a plain `y`/`Y` closes; anything else (Enter, Ctrl+Y) is No. */
+export function quitConfirmKey(char: string, modified = false): "yes" | "no" {
+  return !modified && (char === "y" || char === "Y") ? "yes" : "no";
+}
+
 /**
  * Commands matching what the user is typing, for the autocomplete palette.
  * Active only while typing the command name itself: the input must start with

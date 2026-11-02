@@ -270,9 +270,19 @@ assume.
   re-attach command is printed. A `run --detach --keep=false` is another
   owner of that net and of a delete: its launcher never arms or deletes, its
   relay arms the net under its lock, and removes it only through `exitPlan` (a
-  stop, or a clean idle that one fresh read shows nobody else uses) +
-  `removeVerifiedKept`, the net staying ARMED until that delete is done — so a
-  crash mid-delete still converges. `attach` is
+  stop, or a clean idle that one fresh read shows nobody else uses), and only
+  when the last save landed (its turn ended and that save is on the laptop;
+  else it keeps the workload and its record says `not saved — workload kept:
+  tentacle rm <name>`) + `removeVerifiedKept`, the net staying ARMED until that
+  delete is done — so a crash mid-delete still converges. A detached run's net
+  (the relay's, and its TUIs') deletes only when its process confirms, at exit,
+  that the latest state is saved on the laptop (no turn running, no save
+  pending or failed: `saveConfirmed`); else, and on any crash it cannot tell,
+  the workload stays and the net writes `not saved — workload kept: tentacle
+  rm <name>` into the run's record; with no handler run (SIGKILL), `ps` shows a
+  keep=false run lost mid-run as `… lost · not saved`. Either stays until
+  `tentacle rm` (docs/fix/detach-live.md D4/R6). A plain `run --keep=false` is
+  in no index, so its net still deletes unconditionally. `attach` is
   user-owned: never create, start or delete, no exit net (`attach <name>`'s
   kept-index lookup only picks the engine/location) — with ONE exception, a TUI
   attached to a detached run of `keep=false`: it inherits the relay's ownership,
@@ -281,9 +291,15 @@ assume.
   at the attach itself. A run's record counts only for the workload its
   `created` matches and, under explicit flags, at the place they name. Every TUI
   of that run arms the net, which fires only if no other TUI of the run is
-  alive; only the LAST client's quit removes the workload, through `quitPlan`
+  alive and its save is confirmed (above). So closing the window, SIGHUP or a
+  crash of a TUI of a detached run ONLY DETACHES it with `keep=true` (no net is
+  armed: the workload and the session stay), and with `keep=false` it detaches
+  too unless it was the run's last TUI: that one deletes after a confirmed save,
+  else keeps and says `not saved` (docs/fix/detach-live.md D1/R6, Q7); the TUI whose quit closes the session (a confirmed /quit closes it for
+  every TUI on it) removes the workload, through `quitPlan`
   (the last save confirmed, read back and written; the daemon confirmed the
-  close; nobody else uses the resident) + `removeVerifiedKept`, under the run's
+  close; no other session is in use and no terminal is on another session) +
+  `removeVerifiedKept`, under the run's
   lock, the net
   staying ARMED until that delete is done. `rm <name>` removes only a
   workload the engine says carries tentacle's managed + `tentacle.kept` labels,

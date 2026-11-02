@@ -11,7 +11,9 @@ export * from "./link-status.ts";
 export {
   App,
   type AppProps,
+  type AutoAcceptFeed,
   type NoticeFeed,
+  type RunQuit,
   type SessionController,
   type SessionDirectory,
 } from "./App.tsx";

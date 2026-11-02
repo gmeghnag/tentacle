@@ -35,6 +35,12 @@ import type {
   ModelProvider,
   PermissionBroker,
 } from "@tentacle/core";
+import {
+  ENDED_INTERRUPTED_NOTE,
+  ENDED_NOT_RUN_NOTE,
+  ENDED_TURN_NOTE,
+  answerUnansweredCalls,
+} from "@tentacle/daemon";
 import { applyGroupMessage } from "@tentacle/exec";
 import { DomainErrorCode, type McpServerStatus, type SessionTitle } from "@tentacle/protocol";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
@@ -77,19 +83,49 @@ export interface LocalRuntime {
    * `createdAt` and title. Resolves false when the daemon does not know `id`
    * (`UnknownSession`): nothing was created and the runtime's seed is intact,
    * so the next `createSession` takes the seeded path. Any other error rejects.
+   * `adoptTurn`: the run's turn id (its relay minted it, owner.json carries it):
+   * that controller owns it too, so auto-accept may answer its asks
+   * (docs/fix/detach-live.md B2); no other session does.
    */
-  attachTo(id: string, record: SessionRecord | null): Promise<boolean>;
+  attachTo(
+    id: string,
+    record: SessionRecord | null,
+    opts?: { readonly adoptTurn?: string },
+  ): Promise<boolean>;
+  /**
+   * After `attachTo` resolved false: open the seeded session NOW
+   * (`openSeeded`: create-or-attach, atomic daemon-side) and make it the next
+   * `createSession`'s, so every TUI of a run reopened after a close is on ONE
+   * live session from the start (docs/fix/detach-live.md KO 4). Rejects as
+   * the open does; then nothing is kept and the next `createSession` is lazy.
+   * `record` (given, `null` included) replaces the runtime's startup seed: the
+   * laptop copy as read NOW, never one from before a slow dial (R8).
+   */
+  openSeeded(record?: SessionRecord | null): Promise<void>;
   /**
    * The quit of a client of a shared session: one last read-back of every open
    * session (a foreign turn is saved only at its end), the pending saves, then
-   * `session/close{ifLast}`, a drain of the model calls this client serves
-   * (bounded: another client's turn would fail with them), then the transport.
-   * `saved`: that read-back answered and its write reached the laptop copy;
-   * false: the sessions are DETACHED instead, a close would end what may be
-   * their only copy. `sessionsKept`: the sessions the daemon did not confirm it
-   * closed.
+   * the saves are sealed (a read in flight or a turn's end after this reports
+   * nothing: the close ends it, docs/fix/detach-live.md A3), then
+   * `session/close` — `ifLast` unless `closeForAll` (a confirmed `/quit`: it
+   * ends the session for every client) — a drain of the model calls this
+   * client serves (bounded: another client's turn would fail with them; a
+   * close aborts them at once), then the transport.
+   * `saved`: that read-back answered and its write reached the laptop copy (a
+   * session that already ended, closed by another client, is not a failed
+   * save: the closer saved it); false: the sessions are DETACHED instead, a
+   * close would end what may be their only copy. `sessionsKept`: the sessions
+   * the daemon did not confirm it closed.
    */
-  quit(): Promise<{ readonly sessionsKept: number; readonly saved: boolean }>;
+  quit(opts?: {
+    readonly closeForAll?: boolean;
+    /**
+     * This quit is the last client of its sessions (a lone `/quit`): the
+     * `ifLast` close ends them, so the saved history is closed like a
+     * `closeForAll`'s (docs/fix/detach-live.md Q2).
+     */
+    readonly ending?: boolean;
+  }): Promise<{ readonly sessionsKept: number; readonly saved: boolean }>;
   /**
    * The relay handing its session over (docs/feat/detached-handover.md): from
    * now on nothing is saved (the TUIs save it), so its last write precedes the
@@ -98,12 +134,24 @@ export interface LocalRuntime {
   stopSaving(): void;
   /** Every pending post-turn save done (bounded, never rejects). */
   flushed(): Promise<void>;
+  /**
+   * Synchronous, for an exit net (docs/fix/detach-live.md R6): every session's
+   * `saveConfirmed` and the saver `clean`, i.e. the laptop holds the latest
+   * state. False once saving stopped (a hand-over: the TUIs save it).
+   */
+  saveConfirmed(): boolean;
   /** `RemoteClient.modelIdle`: the model calls this runtime serves are over, or `ms` passed. */
   modelIdle(ms: number): Promise<void>;
   /** `id`'s running background jobs, `null` if they cannot be read. */
   sessionJobs(id: string): Promise<number | null>;
-  /** Who uses the daemon besides `id`, and how `id` stands, `null` if it cannot be told. */
-  residentUse(id: string): Promise<ResidentUse | null>;
+  /**
+   * Who uses the daemon besides `id`, and how `id` stands, `null` if it cannot
+   * be told; `ownMayBeAbsent`: `residentUseOf`'s (a TUI's quit).
+   */
+  residentUse(
+    id: string,
+    opts?: { readonly ownMayBeAbsent?: boolean },
+  ): Promise<ResidentUse | null>;
 }
 
 /** A client-side `JobController` whose only live capability is `onExit`. */
@@ -136,6 +184,12 @@ export const QUIT_MODEL_DRAIN_MS = 10_000;
 
 /** A `SessionController` whose post-turn saves can be awaited. */
 export interface PersistingController extends SessionController {
+  /** `RemoteSession.send`: `opts.turnId` mints the turn's id (a relay's run, B2). */
+  send(
+    prompt: string,
+    signal?: AbortSignal,
+    opts?: { readonly skill?: string; readonly turnId?: string },
+  ): AsyncIterable<SessionEvent>;
   /** `RemoteSession.enqueue`: `id` is the caller's key for the text (a `sendNow` cites it). */
   enqueue(text: string, id?: string): Promise<void>;
   /** `RemoteSession.sendNow`; the new turn is saved once it settles, like `send`'s. */
@@ -146,15 +200,56 @@ export interface PersistingController extends SessionController {
   flushed(): Promise<void>;
   /** Read the history back and save it now (a no-op once closed); resolves as `flushed`. */
   saveNow(): Promise<void>;
+  /**
+   * Synchronous, for an exit net (docs/fix/detach-live.md R6): no turn in flight,
+   * no read-back pending, and the last one answered since the last change. An
+   * attached session starts unconfirmed (its laptop copy may be older than the
+   * daemon's). Whether the write reached disk is the saver's (`clean`).
+   */
+  saveConfirmed(): boolean;
+  /**
+   * No save after this: a later `flush` does nothing, a read in flight that
+   * fails reports nothing (the quit took the last save; the close ends it).
+   */
+  seal(): void;
+  /**
+   * The session is about to end under its running turn (a `/quit` for all):
+   * every save from now on closes a history that stops on unanswered tool
+   * calls, as the daemon's reload does (docs/fix/detach-live.md Q2).
+   */
+  cutTurn(): void;
   /** `RemoteSession.sessionId`. */
   readonly sessionId: string | null;
   /** `RemoteSession.watch`; a foreign turn is saved at its end, a `history` at once. */
   watch: RemoteSession["watch"];
   /** `RemoteSession.open` (the eager attach of an `attach` session; else a no-op). */
   open: RemoteSession["open"];
+  /** `RemoteSession.openSeeded` (the eager create-or-attach of a seeded session). */
+  openSeeded: RemoteSession["openSeeded"];
   ownsTurn: RemoteSession["ownsTurn"];
   onQueued: RemoteSession["onQueued"];
 }
+
+/**
+ * `messages` as a session ended mid-turn keeps them: the daemon reload's rule
+ * for an ended session (`answerUnansweredCalls`), so the resumed history never
+ * stops on a call nobody answered.
+ */
+function cutHistory(messages: readonly ChatMessage[]): readonly ChatMessage[] {
+  const closed = [...messages];
+  answerUnansweredCalls(closed, ENDED_NOT_RUN_NOTE, () => ENDED_INTERRUPTED_NOTE);
+  // A cut before the model answered (live item 6): the tail is the prompt or a
+  // tool result. A finished turn ends on an assistant message.
+  const last = closed.at(-1)?.role;
+  if (last === "user" || last === "tool") {
+    closed.push({ role: "assistant", content: ENDED_TURN_NOTE });
+  }
+  return closed;
+}
+
+/** A read that failed because the session no longer exists daemon-side (by code). */
+const ended = (error: unknown): boolean =>
+  (error as { code?: unknown } | null)?.code === DomainErrorCode.UnknownSession;
 
 /** The daemon's wire title as the store's `TitleState`. */
 function titleState(title: SessionTitle): TitleState {
@@ -185,28 +280,47 @@ export function persistingController(
   persist: (messages: readonly ChatMessage[], title: TitleState) => void,
   onFlushError: (error: Error) => void = () => {},
   initialTitle: TitleState = { source: "auto" },
+  /** A turn this client did not mint but owns: a detached run's (B2). */
+  adoptedTurn?: string,
 ): PersistingController {
   let running: Promise<void> | null = null;
   let again = false;
   let closed = false;
+  let sealed = false;
+  /** The session is being ended under any turn it runs: the saved history is closed honestly (Q2). */
+  let cut = false;
   let lastTitle = initialTitle;
+  /** `saveConfirmed`'s two facts: turns in flight, and the last read-back answered since the last change. */
+  let turns = 0;
+  let confirmed = true;
   const run = async (): Promise<void> => {
     do {
       again = false;
+      confirmed = false;
       try {
         const back = await inner.readBack();
         if (back && back.messages.length > 0) {
           if (back.title) {
             lastTitle = titleState(back.title);
           }
-          persist(back.messages, lastTitle);
+          persist(cut ? cutHistory(back.messages) : back.messages, lastTitle);
         }
+        confirmed = !again;
       } catch (error) {
-        onFlushError(error instanceof Error ? error : new Error(String(error)));
+        // Sealed: the quit's last save is taken, the close ends what follows.
+        // A session that ENDED daemon-side (closed by any client, by the code,
+        // never the text) is no failed save: nothing is left to read.
+        if (!sealed && !ended(error)) {
+          onFlushError(error instanceof Error ? error : new Error(String(error)));
+        }
       }
     } while (again);
   };
   const flush = (): void => {
+    confirmed = false; // a change to save; sealed, it never will be
+    if (sealed) {
+      return;
+    }
     if (running) {
       again = true;
       return;
@@ -216,20 +330,42 @@ export function persistingController(
     });
   };
   const flushed = (): Promise<void> => running ?? Promise.resolve();
+  /**
+   * Q4: an opened session's state goes to the laptop now and the read-back is
+   * waited for (bounded), so a TUI with no turn since counts as saved. A read
+   * or write that fails (or is slow) leaves it unconfirmed, as before; the open
+   * itself never fails on it.
+   */
+  const saveOnOpen = async (): Promise<void> => {
+    flush();
+    await bounded(flushed(), FLUSH_ON_EXIT_TIMEOUT_MS);
+  };
   const unsubscribeTitle = inner.onTitle(() => flush());
+  // A turn that ends while nobody iterates it (an attach mid-turn, R9) still
+  // gets its end saved: only that save makes the session confirmed again.
+  // (A turn somebody iterates saves itself when its stream ends: `saved`.)
+  const unsubscribeIdle = inner.onIdle?.(() => {
+    // `?.`: unit-test fakes of a session
+    if (turns === 0) {
+      flush();
+    }
+  });
   // A turn that failed before its first event (the link is gone for good, the
   // session closed, a send-now cancelled before it started) changed nothing:
   // reading the history back would only fail and report a save failure for a
   // complete file.
   async function* saved(events: AsyncIterable<SessionEvent>): AsyncGenerator<SessionEvent> {
     let changed = false;
+    turns += 1;
     try {
       for await (const event of events) {
         changed = true;
+        confirmed = false;
         yield event;
       }
       changed = true;
     } finally {
+      turns -= 1;
       if (changed) {
         flush();
       }
@@ -278,11 +414,18 @@ export function persistingController(
         listener(activity);
       });
     },
-    open() {
-      return inner.open();
+    async open() {
+      confirmed = false; // live: the daemon's history, not yet on the laptop
+      await inner.open();
+      await saveOnOpen();
+    },
+    async openSeeded() {
+      confirmed = false; // it may attach a live one: the daemon's history, not yet on the laptop
+      await inner.openSeeded();
+      await saveOnOpen();
     },
     ownsTurn(turnId) {
-      return inner.ownsTurn(turnId);
+      return turnId === adoptedTurn || inner.ownsTurn(turnId);
     },
     onQueued(listener) {
       return inner.onQueued(listener);
@@ -290,6 +433,7 @@ export function persistingController(
     close() {
       closed = true;
       unsubscribeTitle();
+      unsubscribeIdle?.();
       void flushed().then(() => inner.close());
     },
     flushed,
@@ -298,6 +442,14 @@ export function persistingController(
         flush();
       }
       return flushed();
+    },
+    // A turn running on the daemon is never saved (R9), whoever iterates it.
+    saveConfirmed: () => turns === 0 && running === null && confirmed && !inner.busy,
+    seal() {
+      sealed = true;
+    },
+    cutTurn() {
+      cut = true;
     },
     get sessionId() {
       return inner.sessionId;
@@ -407,6 +559,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     uid: string,
     record: SessionRecord | null,
     attach: boolean,
+    adoptTurn?: string,
   ): PersistingController => {
     const createdAt = record?.createdAt;
     // A resumed record's chosen title seeds the open that recreates it (pod,
@@ -441,6 +594,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       },
       (error) => deps.saver.failed(uid, `could not read the history back: ${error.message}`),
       title,
+      adoptTurn,
     );
     controllers.add(controller);
     return controller;
@@ -463,6 +617,13 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       Promise.all([...controllers].map((c) => c.flushed())).then(() => undefined),
       FLUSH_ON_EXIT_TIMEOUT_MS,
     );
+  /**
+   * Q4: the open's own save has reached the laptop file (bounded), not just
+   * been read back: only then does `saveConfirmed` mean the file is current.
+   */
+  const written = async (): Promise<void> => {
+    await deps.saver.drain({ timeoutMs: FLUSH_ON_EXIT_TIMEOUT_MS });
+  };
   /** Leave every open session to the daemon (bounded). */
   const detachAll = (): Promise<void> =>
     bounded(
@@ -490,12 +651,17 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     },
     release: async () => {
       await allFlushed();
+      // This client leaves: a turn ending later cannot be read back, and that
+      // is no failed save (the session is the daemon's, or its closer saved it).
+      for (const controller of controllers) {
+        controller.seal();
+      }
       await detachAll();
       client.close();
       deps.disposeTransport();
     },
-    attachTo: async (id, record) => {
-      const controller = build(id, record, true);
+    attachTo: async (id, record, opts = {}) => {
+      const controller = build(id, record, true, opts.adoptTurn);
       try {
         await controller.open();
       } catch (error) {
@@ -511,9 +677,31 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       seed = null;
       firstId = undefined;
       attached = controller;
+      await written();
       return true;
     },
-    quit: async () => {
+    openSeeded: async (record) => {
+      if (record !== undefined) {
+        seed = record;
+      }
+      const controller = createSession();
+      try {
+        await controller.openSeeded();
+      } catch (error) {
+        controllers.delete(controller);
+        controller.close?.();
+        throw error;
+      }
+      attached = controller;
+      await written();
+    },
+    quit: async (opts = {}) => {
+      if (opts.closeForAll === true || opts.ending === true) {
+        // The close ends every turn: the copy saved now says so (Q2).
+        for (const controller of controllers) {
+          controller.cutTurn();
+        }
+      }
       // A foreign turn is saved only at its end: the last read-back is what
       // puts a running first turn's transcript on the laptop.
       const answered = await withTimeout(
@@ -527,9 +715,16 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       // On disk, before a close ends the daemon's copy (a pod keeps none). The
       // drain lists a read-back that failed too (`saver.failed`).
       const saved = answered && (await deps.saver.drain()).length === 0;
+      // The last save is taken: a turn ending under the close, or a read
+      // still in flight, must not report a false "not saved" (FAIL 39).
+      for (const controller of controllers) {
+        controller.seal();
+      }
       let sessionsKept: number;
       if (saved) {
-        sessionsKept = await client.closeSessions();
+        sessionsKept = await client.closeSessions(undefined, {
+          ifLast: opts.closeForAll !== true,
+        });
       } else {
         sessionsKept = client.liveSessionIds().length;
         await detachAll();
@@ -543,6 +738,8 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       saving = false;
     },
     flushed: () => allFlushed(),
+    saveConfirmed: () =>
+      saving && [...controllers].every((c) => c.saveConfirmed()) && deps.saver.clean(),
     modelIdle: (ms) => client.modelIdle(ms),
     sessionJobs: async (id) => {
       try {
@@ -553,9 +750,9 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
         return null;
       }
     },
-    residentUse: async (id) => {
+    residentUse: async (id, opts) => {
       try {
-        return residentUseOf(await client.sessionList(), id);
+        return residentUseOf(await client.sessionList(), id, opts);
       } catch {
         return null;
       }

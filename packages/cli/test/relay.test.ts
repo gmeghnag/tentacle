@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -16,8 +17,9 @@ import { DISMISSED, PermissionBroker } from "@tentacle/core";
 import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
+import { autoApproves, ownRequest } from "@tentacle/tui";
 import { planAttach } from "../src/attach-plan.ts";
-import { joinRun } from "../src/attach-run.ts";
+import { type JoinDeps, joinRun } from "../src/attach-run.ts";
 import type { TentacleConfig } from "../src/config.ts";
 import { dialControl } from "../src/control-socket.ts";
 import type { EngineHost } from "../src/engine-host.ts";
@@ -38,10 +40,12 @@ import {
   readOwner,
   relayLogPath,
   runDirFor,
+  statusOf,
   writeOwner,
 } from "../src/run-state.ts";
 import { SessionSaver } from "../src/session-saver.ts";
-import { openTuiSessions } from "../src/tui-sessions.ts";
+import { openTuiSessions, readSessionRecord } from "../src/tui-sessions.ts";
+import { APP_VERSION } from "../src/version.ts";
 
 const UID = "33333333-3333-4333-8333-333333333333";
 const entry: KeptEntry = {
@@ -92,12 +96,38 @@ const SHELL_CALL: readonly StreamEvent[] = [
  * model through the link + an `ask` shell tool, reached through `attach`, the
  * seam `attachEngineRuntime` fills in production. Frames are recorded.
  */
-function resident(model: ModelProvider, options: { fail?: string; secondBroker?: boolean } = {}) {
+function resident(
+  model: ModelProvider,
+  options: {
+    fail?: string;
+    secondBroker?: boolean;
+    /** A tool runs until its turn is cancelled (a long tool). */
+    hangExec?: boolean;
+    /** A tool that ignores its cancel: it never ends. */
+    stuckExec?: boolean;
+    /** Daemon frames reach each client this many ms later, as over a real bridge. */
+    latency?: number;
+    /** Each laptop peer's non-fatal errors. */
+    errors?: string[];
+  } = {},
+) {
   const execs: string[] = [];
   const env: ExecutionEnvironment = {
     id: "noop",
-    exec: (command) => {
+    exec: (command, execOptions) => {
       execs.push(command);
+      if (options.stuckExec) {
+        return new Promise(() => {});
+      }
+      if (options.hangExec) {
+        return new Promise((resolve) => {
+          (execOptions as { signal?: AbortSignal } | undefined)?.signal?.addEventListener(
+            "abort",
+            () => resolve({ stdout: "", stderr: "killed", exitCode: 130 }),
+            { once: true },
+          );
+        });
+      }
       return Promise.resolve({ stdout: "ok", stderr: "", exitCode: 0 });
     },
     readFile: () => Promise.resolve(""),
@@ -135,6 +165,7 @@ function resident(model: ModelProvider, options: { fail?: string; secondBroker?:
     }
     const [daemonCh, clientCh] = createChannelPair();
     const connection = new Connection(daemonCh, host, () => {}, { servesModel: true });
+    const { latency } = options;
     const runtime = await createLocalRuntime({
       channel: {
         ...clientCh,
@@ -142,6 +173,14 @@ function resident(model: ModelProvider, options: { fail?: string; secondBroker?:
           frames.push(frame);
           clientCh.send(frame);
         },
+        ...(latency
+          ? {
+              setOnMessage: (handler: (data: string) => void) =>
+                clientCh.setOnMessage((data: string) => {
+                  setTimeout(() => handler(data), latency);
+                }),
+            }
+          : {}),
       },
       disposeTransport: () => connection.close(),
       permissions: options.secondBroker ? new PermissionBroker() : deps.permissions,
@@ -150,6 +189,7 @@ function resident(model: ModelProvider, options: { fail?: string; secondBroker?:
       model: "m",
       resume: null,
       modelProvider: model,
+      ...(options.errors ? { onPeerError: (e: Error) => options.errors?.push(e.message) } : {}),
       ...(deps.interactive !== undefined ? { interactive: deps.interactive } : {}),
       ...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
       ...(deps.shared ? { shared: true as const } : {}),
@@ -205,9 +245,17 @@ function rig(
 const KEPT_LABELS = { "tentacle.managed": "true", "tentacle.kept": "true" };
 
 /** A keep=false relay: its entry in the index, an engine that records, a net that counts. */
-function removing(more: Partial<RelayDeps> = {}) {
+function removing(more: Partial<RelayDeps> = {}, over: Partial<RelaySpec> = {}) {
   const calls: string[] = [];
-  const net = { armed: 0, disarmed: 0, lockedAtArm: false };
+  const net: {
+    armed: number;
+    disarmed: number;
+    lockedAtArm: boolean;
+    /** The net's save check (R6): what a crash or a second SIGTERM would ask. */
+    saved?: () => boolean;
+    /** What the net calls when it keeps the workload. */
+    kept?: () => void;
+  } = { armed: 0, disarmed: 0, lockedAtArm: false };
   const engine = {
     facts: { status: "running", labels: KEPT_LABELS } as {
       status: string;
@@ -230,11 +278,13 @@ function removing(more: Partial<RelayDeps> = {}) {
     },
   } as unknown as EngineHost;
   const box = rig(
-    { keep: false },
+    { keep: false, ...over },
     {
       hostFor: () => host,
-      armNet: () => {
+      armNet: (_host, _name, saved?: () => boolean, kept?: () => void) => {
         net.armed += 1;
+        net.saved = saved;
+        net.kept = kept;
         net.lockedAtArm = lockHolder(box.dir, procOf) !== null;
         return () => {
           net.disarmed += 1;
@@ -723,6 +773,149 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
     expect(records[0]?.messages.map((m) => m.role)).toContain("user");
   });
 
+  test("R5 a stop whose turn outlives the bound: not saved, so NOT removed; the note says so", async () => {
+    // Owner decision (a), fix round 3. Mutation: drop the `saved` check → removed.
+    const pod = resident(new Scripted([SHELL_CALL, DONE]), { stuckExec: true });
+    const r = removing({}, { autoAccept: true });
+    const exit = r.start(pod.attach);
+    await waitFor(() => pod.execs.length === 1, "the tool");
+    r.stopRef.stop?.();
+    expect(await afterGrace(exit)).toBe(0);
+    expect(r.calls).toEqual([]);
+    expect(owner(r.dir)).toMatchObject({
+      state: "interrupted",
+      detail:
+        "the relay was stopped before the turn ended; not saved — workload kept: tentacle rm box",
+    });
+    expect(readFileSync(relayLogPath(r.dir), "utf8")).toContain("not saved — workload kept");
+    expect(r.entries()).toHaveLength(1);
+    expect(existsSync(r.dir)).toBe(true);
+    expect(r.net).toMatchObject({ armed: 1, disarmed: 1 });
+    expect(lockHolder(r.dir, procOf)).toBeNull();
+  });
+
+  test("Q3 keep=true, a stop whose turn outlives the bound: `ps` says `not saved` (informational — nothing is deleted either way)", async () => {
+    // docs/fix/detach-live.md fix round 7 (owner Q3=a). Mutation: no note for
+    // keep=true → the record says only `the relay was stopped…`.
+    const pod = resident(new Scripted([SHELL_CALL, DONE]), { stuckExec: true });
+    const r = rig({ keep: true, autoAccept: true });
+    const exit = r.start(pod.attach);
+    await waitFor(() => pod.execs.length === 1, "the tool");
+    r.stopRef.stop?.();
+    expect(await afterGrace(exit)).toBe(0);
+    const detail = owner(r.dir)?.detail ?? "";
+    expect(detail).toContain("the relay was stopped before the turn ended");
+    expect(detail).toContain("not saved");
+    expect(detail).not.toContain("tentacle rm"); // keep=true: nothing to remove
+    expect(statusOf(readOwner(r.dir), false, clock.now())).toContain("not saved");
+  });
+
+  test("Q3 keep=true, the turn ended and its save landed: no `not saved`", async () => {
+    const pod = resident(new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]));
+    const r = rig({ keep: true });
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    r.stopRef.stop?.();
+    expect(await afterGrace(exit)).toBe(0);
+    expect(owner(r.dir)?.detail ?? "").not.toContain("not saved");
+  });
+
+  test("R5 a stop whose turn ends within the bound: saved, then removed as before", async () => {
+    // The counterpart: the tool honours the cancel, the turn's save lands.
+    const pod = resident(new Scripted([SHELL_CALL, DONE]), { hangExec: true });
+    const r = removing({}, { autoAccept: true });
+    const exit = r.start(pod.attach);
+    await waitFor(() => pod.execs.length === 1, "the tool");
+    r.stopRef.stop?.();
+    expect(await afterGrace(exit)).toBe(0);
+    expect(r.calls).toEqual(["describe:box", "remove:box"]);
+    expect(existsSync(r.dir)).toBe(false);
+    const { records } = await r.store.list();
+    expect(records[0]?.messages.map((m) => m.role)).toContain("user");
+  });
+
+  // R6 (owner, 2026-11-02): the net deletes only what is confirmed saved. Absent
+  // check (`?? true`): the old unconditional net.
+  test("R6 a second stop during the stuck wait: the net's save check says no, so the forced exit keeps it", async () => {
+    // Mutation: the relay's check `() => true` → the second SIGTERM's exit deletes the only copy.
+    const pod = resident(new Scripted([SHELL_CALL, DONE]), { stuckExec: true });
+    const r = removing({}, { autoAccept: true });
+    const exit = r.start(pod.attach);
+    await waitFor(() => pod.execs.length === 1, "the tool");
+    expect(r.net.saved?.() ?? true).toBe(false); // a crash mid-turn
+    r.stopRef.stop?.();
+    await tick();
+    expect(r.net.saved?.() ?? true).toBe(false); // the second signal, inside the bound
+    // What the net writes then: `ps` reads the note, not a bare `relay lost`.
+    r.net.kept?.();
+    expect(statusOf(readOwner(r.dir), false, clock.now())).toBe(
+      "interrupted (the relay was stopped before the turn ended; not saved — workload kept: tentacle rm box)",
+    );
+    expect(await afterGrace(exit)).toBe(0);
+    expect(r.calls).toEqual([]);
+  });
+
+  test("R6 a crash at idle before the save is confirmed: `ps` says `idle (not saved …)`", async () => {
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    r.net.kept?.();
+    expect(statusOf(readOwner(r.dir), false, clock.now())).toBe(
+      "idle (not saved — workload kept: tentacle rm box)",
+    );
+    await afterGrace(exit);
+  });
+
+  test("R6 idle and its save confirmed: the net's check says yes (a crash deletes, as before)", async () => {
+    // Mutation: the check always false → a saved run's crash leaves a leftover.
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+    await waitFor(() => r.net.saved?.() ?? true, "the save confirmed");
+    const { records } = await r.store.list();
+    expect(records).toHaveLength(1);
+    expect(await afterGrace(exit)).toBe(0);
+    expect(r.calls).toEqual(["describe:box", "remove:box"]);
+  });
+
+  test("R6 a failed laptop save: the net's check says no", async () => {
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    const sessions = join(r.configDir, "sessions", projectKey("/work"));
+    mkdirSync(sessions, { recursive: true });
+    chmodSync(sessions, 0o500);
+    try {
+      const exit = r.start(pod.attach);
+      await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+      expect(await afterGrace(exit)).toBe(0);
+    } finally {
+      chmodSync(sessions, 0o700);
+    }
+    expect(r.net.saved?.() ?? true).toBe(false);
+  });
+
+  test("R5 a failed laptop save at idle: NOT removed; the note says so", async () => {
+    // Mutation: ignore the drain's lines → removed with no copy on the laptop.
+    const pod = resident(new Scripted([DONE]));
+    const r = removing();
+    const sessions = join(r.configDir, "sessions", projectKey("/work"));
+    mkdirSync(sessions, { recursive: true });
+    chmodSync(sessions, 0o500); // the store cannot be written to
+    try {
+      const exit = r.start(pod.attach);
+      await waitFor(() => owner(r.dir)?.state === "idle", "idle");
+      expect(await afterGrace(exit)).toBe(0);
+    } finally {
+      chmodSync(sessions, 0o700);
+    }
+    expect(r.calls).toEqual([]);
+    expect(owner(r.dir)?.detail).toBe("not saved — workload kept: tentacle rm box");
+    expect(r.entries()).toHaveLength(1);
+    expect(existsSync(r.dir)).toBe(true);
+  });
+
   test("L19 foreign labels: left alone; describe null: forgotten. Both drop the entry and the run dir", async () => {
     // Mutation: skip `isKeptWorkload` → a foreign workload of that name is deleted.
     for (const facts of [{ status: "running", labels: {} }, null]) {
@@ -816,7 +1009,7 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
     const r = removing();
     const exit = r.start(pod.attach);
     await waitFor(() => owner(r.dir)?.state === "idle", "idle");
-    expect(r.net).toEqual({ armed: 1, disarmed: 0, lockedAtArm: true });
+    expect(r.net).toMatchObject({ armed: 1, disarmed: 0, lockedAtArm: true });
     expect(await afterGrace(exit)).toBe(0);
     expect(r.net.disarmed).toBe(1);
   });
@@ -1056,7 +1249,8 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
     const exit = r.start(pod.attach);
     await waitFor(() => relayModel.started === 1, "the relay's model call");
     const { conn, reply } = await prepare(path);
-    expect(reply).toMatchObject({ ok: true, autoAccept: false });
+    // D24: no `autoAccept` on the wire: the bit is the laptop's owner.json (B1).
+    expect(reply).toEqual({ ok: true, appVersion: APP_VERSION });
     const tuiModel = new Scripted([[{ type: "text", delta: "from the tui" }, { type: "done" }]]);
     const tui = await tuiOf(pod, tuiModel);
     expect(await tui.runtime.attachTo(UID, null)).toBe(true);
@@ -1312,6 +1506,8 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
             { wanted: true, uid: UID, live: true },
             () => {},
           ),
+        readRecord: () =>
+          readSessionRecord({ root: join(r.configDir, "sessions"), cwd: "/work" }, UID),
         host: () => r.host,
         attach: (_host, sessions, permissions) =>
           pod.attach(
@@ -1351,6 +1547,326 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
     expect(nets).toEqual({ armed: 2, disarmed: 2 });
     expect(existsSync(r.dir)).toBe(false);
     expect(r.entries()).toEqual([]);
+  });
+
+  test("D21 the relay mints its turn's id: in owner.json from the first record, and the prompt's on the wire", async () => {
+    // Mutations: `send` without the id (the wire's is another); `record` drops it.
+    const model = new Gated([DONE], [0]);
+    const pod = resident(model);
+    const r = rig();
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir) !== undefined, "the first record");
+    const first = owner(r.dir)?.runTurnId ?? "none";
+    expect(first).toMatch(/^[0-9a-f-]{36}$/);
+    await waitFor(() => model.started === 1, "the relay's model call");
+    const prompt = pod.frames
+      .map((f) => JSON.parse(f) as { method?: string; params?: { turnId?: string } })
+      .find((f) => f.method === "session/prompt");
+    expect(prompt?.params?.turnId).toBe(first);
+    expect(owner(r.dir)?.runTurnId).toBe(first);
+    model.open(0);
+    await afterGrace(exit);
+  });
+
+  // docs/fix/detach-live.md D13/D14: the H39 rig, a run's turn in a long tool.
+  /** `planAttach` + `joinRun` over the relay's real socket, as `main` does (H39). */
+  const joinOf = async (
+    r: ReturnType<typeof removing>,
+    pod: ReturnType<typeof resident>,
+    pid: number,
+    out: string[],
+    more: Partial<JoinDeps> = {},
+  ) => {
+    const read = readOwner(r.dir);
+    const plan = planAttach({
+      owner: read,
+      relayAlive: lockHolder(r.dir, procOf) !== null,
+      entryCreated: entry.created,
+      cwd: "/work",
+      tty: true,
+    });
+    if (plan.kind !== "run" || read.kind !== "owner") throw new Error(plan.kind);
+    const joined = await joinRun({
+      name: "box",
+      noun: "container",
+      entry,
+      keptFile: join(keptDir(r.configDir), keptFileName(entry)),
+      dir: r.dir,
+      plan,
+      owner: read.owner,
+      cwd: "/work",
+      write: (t) => out.push(t),
+      procOf,
+      pid,
+      closingWaitMs: 20,
+      othersWaitMs: 2000,
+      openSessions: () =>
+        openTuiSessions(
+          { root: join(r.configDir, "sessions"), cwd: "/work" },
+          { wanted: true, uid: UID, live: true },
+          () => {},
+        ),
+      readRecord: () =>
+        readSessionRecord({ root: join(r.configDir, "sessions"), cwd: "/work" }, UID),
+      host: () => r.host,
+      attach: (_host, sessions, permissions) =>
+        pod.attach(
+          { cwd: "/work", model: "m" } as unknown as TentacleConfig,
+          {
+            host: r.host,
+            name: "box",
+            permissions,
+            saver: sessions.saver,
+            resume: sessions.resume,
+            sessionId: UID,
+            shared: true,
+          } as Parameters<typeof attachEngineRuntime>[1],
+        ),
+      armNet: () => {
+        r.calls.push(`arm:${pid}`);
+        return () => r.calls.push(`disarm:${pid}`);
+      },
+      ...more,
+    });
+    if (joined.kind !== "joined") throw new Error(`not joined: ${JSON.stringify(joined)}`);
+    return joined;
+  };
+  /**
+   * The App on `joined`: a foreign turn consumed; `closed` → `closedElsewhere`,
+   * then the quit. `quit()`: this App's own quit (unmounted: it sees no more).
+   */
+  const app = (joined: Awaited<ReturnType<typeof joinOf>>) => {
+    const log: string[] = [];
+    let quitting: Promise<void> | null = null;
+    const quit = (): Promise<void> => {
+      quitting ??= joined.finish(true);
+      return quitting;
+    };
+    joined.createSession().watch((activity) => {
+      if (quitting) {
+        return;
+      }
+      log.push(activity.kind);
+      if (activity.kind === "turn") {
+        void (async () => {
+          try {
+            for await (const e of activity.events) log.push(e.type);
+          } catch (error) {
+            log.push(`THREW:${String(error)}`);
+          }
+        })();
+      }
+      if (activity.kind === "closed") {
+        joined.runQuit.closedElsewhere("closed");
+        void quit();
+      }
+    });
+    return { log, quit, quitting: () => quitting };
+  };
+  /** A keep=false `--auto-accept` relay whose turn is in a long tool. */
+  const inTool = async () => {
+    const pod = resident(new Gated([SHELL_CALL, DONE]), { hangExec: true, latency: 2 });
+    const path = short();
+    const r = removing({ controlPath: () => path }, { autoAccept: true });
+    const exit = r.start(pod.attach);
+    await waitFor(() => pod.execs.length === 1, "the run's tool");
+    await waitFor(() => existsSync(path), "the control socket");
+    return { pod, r, exit };
+  };
+  const NOT_SAVED = /not saved|not confirmed|not removed/;
+
+  test("D13 FAIL 39: keep=false, one TUI, the run's turn in a tool, quit: removed, the run dir gone, the net last, the record on the laptop", async () => {
+    // Mutations: `seal` a no-op (the late read: "not confirmed", kept); `othersAttached` hard-coded 0 (below).
+    const { pod, r, exit } = await inTool();
+    const out: string[] = [];
+    const a = await joinOf(r, pod, process.pid, out);
+    expect(await exit).toBe(0); // handed over, the relay left
+    const view = app(a);
+    await tick(30);
+    await view.quit(); // the second `/quit`: the turn not stopped
+    await tick(50);
+    expect(out.join("")).not.toMatch(NOT_SAVED);
+    expect(await a.sessions.saver.drain()).toEqual([]);
+    expect(r.calls.filter((c) => c.startsWith("remove"))).toEqual(["remove:box"]);
+    expect(r.calls.indexOf(`disarm:${process.pid}`)).toBeGreaterThan(r.calls.indexOf("remove:box"));
+    expect(existsSync(r.dir)).toBe(false);
+    expect(r.entries()).toEqual([]);
+    const records = (await r.store.list()).records;
+    expect(records.map((x) => x.id)).toEqual([UID]);
+    expect(records[0]?.messages[0]).toMatchObject({ role: "user", content: "go" });
+    expect(view.log.some((l) => l.startsWith("THREW"))).toBe(false);
+  });
+
+  test("D13 two TUIs, `y`: the turn closed for both, the other leaves first with its line, one delete", async () => {
+    const { pod, r, exit } = await inTool();
+    const outO: string[] = [];
+    const outQ: string[] = [];
+    const o = await joinOf(r, pod, process.ppid, outO);
+    // Joined once the relay left: never mid its exit (that is `closing`, planned again by `main`).
+    expect(await exit).toBe(0);
+    const q = await joinOf(r, pod, process.pid, outQ);
+    const viewO = app(o);
+    const viewQ = app(q);
+    await tick(30);
+    expect(q.runQuit.othersOnSession()).toBe(1);
+    q.runQuit.closeForAll();
+    await viewQ.quit();
+    await viewO.quitting();
+    expect(outO.join("")).toBe("[container] box: session closed by another terminal\n");
+    await tick(50);
+    expect(await o.sessions.saver.drain()).toEqual([]); // no false "not saved" on O
+    expect(viewO.log).toContain("closed");
+    expect(viewO.log.some((l) => l.startsWith("THREW"))).toBe(false);
+    expect(outQ.join("")).not.toMatch(NOT_SAVED);
+    expect(r.calls.filter((c) => c.startsWith("remove"))).toEqual(["remove:box"]);
+    // O disarmed before Q's delete; Q's net last.
+    expect(r.calls.indexOf(`disarm:${process.ppid}`)).toBeLessThan(r.calls.indexOf("remove:box"));
+    expect(r.calls.at(-1)).toBe(`disarm:${process.pid}`);
+    expect(existsSync(r.dir)).toBe(false);
+  });
+
+  test("D13 one TUI on another session (`/clear`): the other's quit removes nothing; its own quit, alone, removes", async () => {
+    const { pod, r, exit } = await inTool();
+    const outA: string[] = [];
+    const outC: string[] = [];
+    const a = await joinOf(r, pod, process.pid, outA);
+    expect(await exit).toBe(0);
+    const c = await joinOf(r, pod, process.ppid, outC);
+    const viewA = app(a);
+    // C's `/clear`: the run's session closed `ifLast` (A is on it: a detach), a fresh one.
+    c.createSession().close?.();
+    const fresh = c.createSession();
+    expect(fresh.sessionId).not.toBe(UID);
+    await tick(30);
+    expect(a.runQuit.othersOnSession()).toBe(0); // no dialog for A
+    await viewA.quit();
+    expect(r.calls.filter((x) => x.startsWith("remove"))).toEqual([]);
+    expect(existsSync(r.dir)).toBe(true);
+    expect(outA.join("")).toContain("not removed: another terminal is on another session");
+    await c.finish(true);
+    expect(outC.join("")).not.toMatch(NOT_SAVED);
+    expect(r.calls.filter((x) => x.startsWith("remove"))).toEqual(["remove:box"]);
+    expect(existsSync(r.dir)).toBe(false);
+  });
+
+  test("D14 two `/quit`s for all in one tick, the lock winner not the closer: one delete", async () => {
+    // Mutation: `closeSessions` ignores a `session_closed` seen (D8) → the
+    // winner reads its close unconfirmed and keeps the workload.
+    const { pod, r, exit } = await inTool();
+    const outA: string[] = [];
+    const outB: string[] = [];
+    const a = await joinOf(r, pod, process.pid, outA);
+    expect(await exit).toBe(0);
+    const b = await joinOf(r, pod, process.ppid, outB);
+    const viewA = app(a);
+    const viewB = app(b);
+    await tick(30);
+    a.runQuit.closeForAll();
+    b.runQuit.closeForAll();
+    const started = Date.now();
+    await Promise.all([viewA.quit(), viewB.quit()]);
+    // Mutation: the lock loser waits for the others too → the two wait on
+    // each other until the bound (2 s here, 5 s live).
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(r.calls.filter((x) => x.startsWith("remove"))).toEqual(["remove:box"]);
+    expect(existsSync(r.dir)).toBe(false);
+    expect(`${outA.join("")}${outB.join("")}`).not.toMatch(/not saved|not confirmed/);
+  });
+
+  /**
+   * The TUI's mount, as the hook answers: auto-accept's feed + the session's
+   * own-vs-foreign test. An ask it may not answer stays on screen forever.
+   */
+  const mount = (joined: Awaited<ReturnType<typeof joinOf>>, log: string[]) => {
+    const session = joined.createSession();
+    session.watch((activity) => {
+      if (activity.kind === "turn") {
+        void (async () => {
+          for await (const _ of activity.events) {
+            // the App's stream
+          }
+        })().catch(() => {});
+      }
+    });
+    joined.permissions.setRequester((req, options) => {
+      const own = ownRequest(options?.turnId, (id) => session.ownsTurn(id));
+      if (joined.autoAccept.current() && autoApproves(req, own)) {
+        log.push("answered");
+        return Promise.resolve({ allowed: true, scope: "once" });
+      }
+      log.push("prompted");
+      return new Promise(() => {});
+    });
+  };
+
+  test("D22 an --auto-accept relay, an ask between `prepare` and the mount: nothing answers it before the commit; the TUI does, once", async () => {
+    // Mutation: `freeze` a no-op → the relay answers it under the hand-over.
+    const model = new Gated([SHELL_CALL, DONE], [0]);
+    const pod = resident(model);
+    const path = short();
+    const r = removing({ controlPath: () => path }, { autoAccept: true, keep: true });
+    const exit = r.start(pod.attach);
+    await waitFor(() => model.started === 1, "the relay's model call");
+    await waitFor(() => existsSync(path), "the control socket");
+    let execsAtCommit = -1;
+    const joined = await joinOf(r, pod, process.pid, [], {
+      dial: async (p) => {
+        const conn = await dialControl(p);
+        return (
+          conn && {
+            ...conn,
+            send: async (request, ms) => {
+              if (request.op === "commit") {
+                await tick(20);
+                execsAtCommit = pod.execs.length;
+              }
+              const reply = await conn.send(request, ms);
+              if (request.op === "prepare") {
+                model.open(0); // the ask is raised now, mid hand-over
+              }
+              return reply;
+            },
+          }
+        );
+      },
+    });
+    expect(execsAtCommit).toBe(0);
+    await tick(20);
+    expect(pod.execs).toEqual([]); // held until the mount: nobody answered
+    const log: string[] = [];
+    mount(joined, log);
+    await waitFor(() => pod.execs.length === 1, "the tool");
+    await waitFor(() => pod.host.get(UID)?.running === false, "the turn's end");
+    expect(await exit).toBe(0);
+    expect(log).toEqual(["answered"]);
+    expect(pod.execs).toEqual(["x"]);
+    joined.autoAccept.stop();
+  });
+
+  test("D22 two TUIs, ON: both answer one ask; the tool once, no error", async () => {
+    // Mutation: no `adoptTurn` → the run's turn is foreign to both, it prompts.
+    const errors: string[] = [];
+    const model = new Gated([SHELL_CALL, DONE], [0]);
+    const pod = resident(model, { errors });
+    const path = short();
+    const r = removing({ controlPath: () => path }, { autoAccept: true, keep: true });
+    const exit = r.start(pod.attach);
+    await waitFor(() => model.started === 1, "the relay's model call");
+    await waitFor(() => existsSync(path), "the control socket");
+    const a = await joinOf(r, pod, process.pid, []);
+    const b = await joinOf(r, pod, process.ppid, []); // during the relay's drain
+    const log: string[] = [];
+    mount(a, log);
+    mount(b, log);
+    model.open(0);
+    await waitFor(() => pod.execs.length === 1, "the tool");
+    await waitFor(() => pod.host.get(UID)?.running === false, "the turn's end");
+    expect(await exit).toBe(0);
+    expect(log).toEqual(["answered", "answered"]);
+    expect(pod.execs).toEqual(["x"]);
+    expect(errors).toEqual([]);
+    a.autoAccept.stop();
+    b.autoAccept.stop();
   });
 
   test("H31 a `prepare` once the exit plan is final: `leaving`, and the removal completes", async () => {
@@ -1486,9 +2002,37 @@ describe("launchRelay", () => {
     expect(code).toBe(0);
     const text = out.join("");
     expect(text).toContain("pid 9");
-    expect(text).toContain(`tentacle attach box --resume ${UID}`);
-    expect(text).toContain("it waits at the first permission");
+    // D17 (docs/fix/detach-live.md A7): `attach <name>` works at once, and
+    // `--resume` on a live relay is refused.
+    expect(text).toContain("Attach any time: tentacle attach box.");
+    expect(text).not.toContain("--resume");
+    expect(text).not.toContain("Re-attach once");
+    expect(text).toContain("a tool that needs permission waits for you");
+    expect(text).not.toContain("waits at the first permission");
     expect(JSON.parse(specText).prompt).toBe("go");
+  });
+
+  test("D17 keep=false: the attach sentence before the removal text, which keeps its `--resume`", async () => {
+    const dir = fresh();
+    const out: string[] = [];
+    await launchRelay(dir, spec({ keep: false }), {
+      write: (t) => out.push(t),
+      noun: "container",
+      name: "box",
+      attachHint: "tentacle attach box",
+      spawnRelay: () => {
+        writeOwner(dir, running);
+        return { exited: () => false };
+      },
+      pollMs: 1,
+      timeoutMs: 2000,
+    });
+    const text = out.join("");
+    const attach = text.indexOf("Attach any time: tentacle attach box.");
+    expect(attach).toBeGreaterThan(-1);
+    expect(attach).toBeLessThan(text.indexOf("removed when the run goes idle"));
+    expect(text).toContain(`tentacle --resume ${UID}`);
+    expect(text).not.toContain("Re-attach once");
   });
 
   test("--auto-accept is said, with the log", async () => {

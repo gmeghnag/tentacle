@@ -94,16 +94,20 @@ tentacle run --engine podman --image <ref> [<name>]                       # Podm
 
 **With no TUI.** `tentacle run --detach --prompt <text|-> --image <ref> [<name>]`
 creates the workload, then a background process on your machine runs the turn,
-serves the model and saves the session, and leaves after 60 s of idle. It waits
-at the first permission unless `--auto-accept` (pod tool asks only, allow once,
-logged in `<configDir>/kept/runs/<id>/relay.log`). `tentacle attach <name>`, from
-a terminal in the same folder, takes the run over at any moment, mid-turn or at a
-held permission (which then prompts in your TUI; auto-accept ends there), and it
-opens the run's session after the process left too. More terminals can attach:
-they share the session, an ask shows on each and the first answer wins. Quitting
-ends the run once no other terminal is attached; with `--keep=false` that last
-quit removes the workload, a running turn included. A workload deleted outside
-tentacle is said as such, naming the session uid.
+serves the model and saves the session, and leaves after 60 s of idle. A tool
+that needs permission waits for you unless `--auto-accept` (pod tool asks only,
+allow once, logged in `<configDir>/kept/runs/<id>/relay.log`). `tentacle attach
+<name>`, from a terminal in the same folder, takes the run over at any moment,
+mid-turn or at a held permission, and it opens the run's session after the
+process left too. More terminals can attach: they share the session, an ask shows
+on each and the first answer wins. An `--auto-accept` run stays auto-accept for
+the terminals that attach; Shift+Tab flips it for every terminal on that session,
+and a session turned off stays off. `/quit` closes the session for every terminal on it (asking `y/N`
+first when others are attached): a running turn stops, the last save is taken,
+and the others leave with `session closed by another terminal`. Ctrl+C at idle
+leaves only that terminal. With `--keep=false` the quit that closes the session
+removes the workload, if no other session in it is in use. A workload deleted
+outside tentacle is said as such, naming the session uid.
 
 With `--keep=false` (or `keep: false`) the workload is listed in `ps` while the
 run lives and removed when it goes idle or is stopped, a held permission keeping

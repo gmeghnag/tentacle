@@ -41,6 +41,12 @@ export interface NoticeItem {
   readonly jobId?: string;
   /** Drawn as a full-width rule around `text` (the context-reset separator). */
   readonly separator?: true;
+  /**
+   * From the host's `NoticeFeed` (an attach's notice is raised before its
+   * history arrives): a history that replaces the transcript keeps it, after
+   * the history (docs/fix/detach-live.md A6).
+   */
+  readonly host?: true;
 }
 
 /** Live progress of a sub-agent spawned by an `agent_task` tool call. */
@@ -122,8 +128,15 @@ export function backgroundExitNotice(
 }
 
 /** Append a standalone system notice (e.g. a failed session save). */
-export function appendNotice(state: DisplayState, text: string): DisplayState {
-  return { ...state, items: append(state.items, { kind: "notice", text }) };
+export function appendNotice(
+  state: DisplayState,
+  text: string,
+  opts: { readonly host?: true } = {},
+): DisplayState {
+  const item: NoticeItem = opts.host
+    ? { kind: "notice", text, host: true }
+    : { kind: "notice", text };
+  return { ...state, items: append(state.items, item) };
 }
 
 /**
@@ -425,9 +438,11 @@ export function unsupportedNotice(kind: string): string {
  * Replace the transcript with `messages` (a resync), keeping the turn's state.
  * A call with no result in a turn that is still running is running (or waiting
  * for approval), not done — `messagesToItems` marks every historical call `ok`.
+ * The host's notices are kept, after the history.
  */
 export function resetHistory(state: DisplayState, messages: readonly ChatMessage[]): DisplayState {
-  return { ...state, items: historyItems(state, messages) };
+  const hosted = state.items.filter((item) => item.kind === "notice" && item.host === true);
+  return { ...state, items: [...historyItems(state, messages), ...hosted] };
 }
 
 /**

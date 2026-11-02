@@ -377,6 +377,70 @@ export const ENDED_INTERRUPTED_NOTE =
 export const ENDED_SUBAGENT_INTERRUPTED_NOTE =
   "Interrupted: the session was ended while a sub-agent of this task was waiting for approval; its partial work is lost and may have had side effects. Check before retrying.";
 
+/**
+ * Close a history a turn was cut in (appends to `messages`): every unanswered
+ * call of the trailing assistant message gets a synthetic answer. Only the
+ * FIRST unanswered call can have started (calls run in order): `firstNote`
+ * says what it gets (by its call id); the rest get `notRun`. The reload's
+ * rule, shared with a laptop copy saved while the session was ended under a
+ * running turn (docs/fix/detach-live.md Q2).
+ */
+export function answerUnansweredCalls(
+  messages: ChatMessage[],
+  notRun: string,
+  firstNote: (callId: string) => string,
+): void {
+  const trailing = trailingCalls(messages);
+  if (!trailing) {
+    return;
+  }
+  let first = true;
+  for (const call of trailing.calls) {
+    if (trailing.answered.has(call.id)) {
+      continue;
+    }
+    messages.push({
+      role: "tool",
+      content: first ? firstNote(call.id) : notRun,
+      toolCallId: call.id,
+    });
+    first = false;
+  }
+}
+
+/**
+ * The tail of a history a turn was cut in before it answered (the model was
+ * still streaming, or its next call had not come back): the history would end
+ * on the user's prompt or a tool result, with no sign the turn was interrupted.
+ */
+export const ENDED_TURN_NOTE =
+  "Interrupted: the session was ended before this turn finished answering.";
+
+/** What a failed turn's history ends on: its cause as the wire carries it (`redactTurnError`). */
+export function failedTurnNote(cause: string): string {
+  return `Failed: ${cause}. The turn stopped here; the reply above, if any, is incomplete.`;
+}
+
+/**
+ * Close the history of a turn that failed (in place), so a client that
+ * attaches or resumes later sees how it ended (docs/fix/detach-live.md round
+ * 10, owner B): the partial reply the agent kept gets the note appended; a
+ * history ending on the prompt or a tool result gets the note as the
+ * assistant's answer. A trailing call nobody answered is left to the reload's
+ * rule (`answerUnansweredCalls`). One assistant message either way: the roles
+ * keep alternating.
+ */
+export function closeFailedTurn(messages: ChatMessage[], cause: string): void {
+  const note = failedTurnNote(cause);
+  const at = messages.length - 1;
+  const last = messages[at];
+  if (last?.role === "assistant" && (last.toolCalls?.length ?? 0) === 0) {
+    messages[at] = { ...last, content: last.content !== "" ? `${last.content}\n\n${note}` : note };
+  } else if (last?.role === "user" || last?.role === "tool") {
+    messages.push({ role: "assistant", content: note });
+  }
+}
+
 /** The end of a turn its session's close cut short: what the live close streamed. */
 export const ARCHIVED_TURN_END: TurnEnd = { stopReason: "cancelled" };
 
@@ -476,22 +540,10 @@ export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
         subagent: ENDED_SUBAGENT_INTERRUPTED_NOTE,
       }
     : { notRun: NOT_RUN_NOTE, interrupted: INTERRUPTED_NOTE, subagent: SUBAGENT_INTERRUPTED_NOTE };
-  const trailing = trailingCalls(messages);
-  if (trailing) {
-    let first = true;
-    for (const call of trailing.calls) {
-      if (trailing.answered.has(call.id)) {
-        continue;
-      }
-      let content = notes.notRun;
-      if (first) {
-        const pending = turn.pending?.toolCallId === call.id ? turn.pending : undefined;
-        content = !pending ? notes.interrupted : pending.resumable ? notes.notRun : notes.subagent;
-        first = false;
-      }
-      messages.push({ role: "tool", content, toolCallId: call.id });
-    }
-  }
+  answerUnansweredCalls(messages, notes.notRun, (callId) => {
+    const pending = turn.pending?.toolCallId === callId ? turn.pending : undefined;
+    return !pending ? notes.interrupted : pending.resumable ? notes.notRun : notes.subagent;
+  });
   const end = ended ? ARCHIVED_TURN_END : RESTART_TURN_END;
   const turns = record.turns.map((key) =>
     key.turnId === turn.turnId && !key.end ? { turnId: key.turnId, end } : key,

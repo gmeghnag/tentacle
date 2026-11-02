@@ -387,15 +387,45 @@ interface WriteSlot {
   running: Promise<void> | null;
 }
 
+/** A write the store did not make: the file held a longer history, this copy went aside. */
+export interface AsideInfo {
+  readonly id: string;
+  /** The separate file holding the copy that was not written. */
+  readonly file: string;
+  /** Messages the session file holds (and keeps). */
+  readonly kept: number;
+  /** Messages the copy set aside holds. */
+  readonly dropped: number;
+}
+
+/**
+ * Whether `incoming` is a strict prefix of `held`: a stale writer's shorter copy
+ * of the same history. A rewritten history (a compaction) is not one.
+ */
+function dropsHeld(held: readonly ChatMessage[], incoming: readonly ChatMessage[]): boolean {
+  return (
+    incoming.length < held.length &&
+    incoming.every((message, i) => JSON.stringify(message) === JSON.stringify(held[i]))
+  );
+}
+
 /** A directory of `<uid>.json` session files. */
 export class JsonSessionStore {
   private readonly slots = new Map<string, WriteSlot>();
   /** Crash leftovers are swept once per store, before its first write. */
   private swept = false;
 
+  /**
+   * `onAside` opts in to the stale-writer guard (docs/fix/detach-live.md Q6):
+   * a save never silently replaces a longer history the file already holds. The
+   * copy goes to `<uid>.stale-<time>.aside` next to it (a name no listing or
+   * load takes for a session) and `onAside` says so. Without it, a save
+   * replaces the file as ever (the daemon's own store).
+   */
   constructor(
     private readonly dir: string,
     private readonly io: SessionStoreIo = defaultIo,
+    private readonly onAside?: (info: AsideInfo) => void,
   ) {}
 
   private file(id: string): string {
@@ -464,8 +494,23 @@ export class JsonSessionStore {
         this.swept = true;
         await this.sweepTemps();
       }
+      // Q6: a stale writer's shorter copy never replaces the longer history on
+      // disk. An absent or unreadable file holds nothing to protect.
+      const held = this.onAside ? await this.load(record.id) : ({ status: "absent" } as const);
+      const stale = held.status === "ok" && dropsHeld(held.record.messages, record.messages);
+      const destination = stale
+        ? join(this.dir, `${record.id}.stale-${Date.now()}-${suffix}.aside`)
+        : target;
       await this.io.writeDurable(temp, `${JSON.stringify(record, null, 2)}\n`);
-      await rename(temp, target);
+      await rename(temp, destination);
+      if (stale && held.status === "ok") {
+        this.onAside?.({
+          id: record.id,
+          file: destination,
+          kept: held.record.messages.length,
+          dropped: record.messages.length,
+        });
+      }
     } catch (error) {
       await rm(temp, { force: true }).catch(() => {});
       // Name the file the user knows, not the hidden temp the error was raised on.

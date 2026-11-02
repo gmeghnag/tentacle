@@ -78,8 +78,14 @@ export function planAttach(input: AttachInput): AttachPlan {
 
 export interface QuitInput {
   readonly keep: boolean;
-  /** Other TUIs of the run alive (presence files), mine removed. */
+  /**
+   * Other TUIs of the run alive (presence files), mine excluded, read after
+   * this quit's close (and, for a `/quit` closing for all, after its session's
+   * other TUIs left): any left is on another session, or hung.
+   */
   readonly othersAttached: number;
+  /** Of those, the ones on this TUI's session: hung, a close reaches them. */
+  readonly othersOnSession: number;
   /** The last read-back and its write to the laptop copy both confirmed. */
   readonly saved: boolean;
   /** `LocalRuntime.quit`'s: sessions the daemon did not confirm it closed. */
@@ -100,11 +106,22 @@ export type QuitPlan =
  * `closed` steer only the removal of that same workload.
  */
 export function quitPlan(input: QuitInput): QuitPlan {
-  if (input.keep || input.othersAttached > 0) {
+  if (input.keep) {
     return { kind: "stay" };
   }
   if (!input.saved) {
     return { kind: "stay", why: "the last save was not confirmed" };
+  }
+  // Read after this TUI's session was closed for its own TUIs (D1): one still
+  // here is hung, or on another session (`/clear`).
+  if (input.othersAttached > 0) {
+    return {
+      kind: "stay",
+      why:
+        input.othersOnSession > 0
+          ? "another terminal did not leave the session"
+          : "another terminal is on another session",
+    };
   }
   if (input.sessionsKept > 0) {
     return { kind: "stay", why: "the daemon did not confirm the session closed" };
@@ -113,7 +130,7 @@ export function quitPlan(input: QuitInput): QuitPlan {
     return { kind: "stay", why: "could not tell whether it is in use" };
   }
   if (input.use.others > 0) {
-    return { kind: "stay", why: "another client is using it" };
+    return { kind: "stay", why: "another session is in use" };
   }
   return { kind: "remove" };
 }

@@ -9,6 +9,7 @@ import {
   type TuiSessionOptions,
   type TuiSessions,
   openTuiSessions,
+  readSessionRecord,
   runSessionTui,
 } from "../src/tui-sessions.ts";
 
@@ -332,5 +333,46 @@ describe("runSessionTui", () => {
       drain: { slowMs: 10, timeoutMs: 5_000 },
     });
     expect(out).toEqual(["[session] still saving s…\n"]);
+  });
+});
+
+describe("a stale save (docs/fix/detach-live.md Q6)", () => {
+  test("never replaces a longer history: the file stays, the copy goes aside, the TUI is told", async () => {
+    // Mutation: build the store without the guard → the longer history is lost, no notice.
+    const uid = "99999999-9999-4999-8999-999999999999";
+    const root = join(dir, "q6");
+    const sessions = opened(
+      await openTuiSessions({ root, cwd: "/w" }, { wanted: false }, () => {}),
+    );
+    const seen: string[] = [];
+    sessions.notices.onNotice((text) => seen.push(text));
+    const long: SessionRecord = {
+      ...rec(uid, 1),
+      messages: [
+        { role: "user", content: "a" },
+        { role: "assistant", content: "b" },
+      ],
+    };
+    sessions.saver.save(long);
+    await sessions.saver.drain();
+    sessions.saver.save({ ...long, messages: long.messages.slice(0, 1) });
+    expect(await sessions.saver.drain()).toEqual([]);
+    expect((await readSessionRecord({ root, cwd: "/w" }, uid))?.messages.length).toBe(2);
+    expect(seen.join("\n")).toMatch(/saved aside in .*\.aside/);
+    expect(seen.join("\n")).toContain(uid.slice(0, 8));
+  });
+});
+
+describe("readSessionRecord (docs/fix/detach-live.md R8)", () => {
+  const uid = "88888888-8888-4888-8888-888888888888";
+  test("the file as it is NOW: absent → null, present → the record, unusable → rejects", async () => {
+    const root = join(dir, "read-now");
+    const where = { root, cwd: "/w" };
+    expect(await readSessionRecord(where, uid)).toBeNull();
+    const store = new JsonSessionStore(join(root, projectKey("/w")));
+    await store.save(rec(uid, 5));
+    expect((await readSessionRecord(where, uid))?.updatedAt).toBe(5);
+    await writeFile(join(root, projectKey("/w"), `${uid}.json`), "{ not json");
+    await expect(readSessionRecord(where, uid)).rejects.toThrow(/could not read/);
   });
 });

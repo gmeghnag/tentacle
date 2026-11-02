@@ -283,6 +283,24 @@ describe("residentUseOf: `session/list`, as `exitPlan` needs it (L10)", () => {
     expect(residentUseOf({ sessions: [row("other")] }, ME)).toBeNull();
     expect(residentUseOf({ sessions: [] }, ME)).toBeNull();
   });
+
+  test("D16 `ownMayBeAbsent` (a TUI's quit, docs/fix/detach-live.md A5): no own session is no use of it; a cursor still no answer", () => {
+    // Mutation: the option always on → the relay deletes on a missing session.
+    const opt = { ownMayBeAbsent: true } as const;
+    expect(residentUseOf({ sessions: [row("other", { attached: 1 })] }, ME, opt)).toEqual({
+      jobs: 0,
+      running: false,
+      others: 1,
+    });
+    expect(residentUseOf({ sessions: [] }, ME, opt)).toEqual({
+      jobs: 0,
+      running: false,
+      others: 0,
+    });
+    expect(residentUseOf({ sessions: [], cursor: "next" }, ME, opt)).toBeNull();
+    // Off (the relay's read): unchanged.
+    expect(residentUseOf({ sessions: [row("other", { attached: 1 })] }, ME)).toBeNull();
+  });
 });
 
 describe("`busy` (L11): `hold` costs another grace, never a spin", () => {
@@ -302,6 +320,15 @@ describe("`note`: why a workload stayed", () => {
   test("is the detail of the state left behind, sanitised", () => {
     const noted = relayStep(over, { type: "note", detail: "kept \u001b[2Jit" });
     expect(finalView(noted)).toEqual({ state: "idle", detail: "kept [2Jit" });
+  });
+
+  test("a turn still running at the exit: the note stays, after why it was cut", () => {
+    // Fix round 3: the "not saved — workload kept" line must reach `ps`.
+    const cut = run([{ type: "turn_started" }, { type: "stop" }, { type: "note", detail: "kept" }]);
+    expect(finalView(cut)).toEqual({
+      state: "interrupted",
+      detail: "the relay was stopped before the turn ended; kept",
+    });
   });
 });
 

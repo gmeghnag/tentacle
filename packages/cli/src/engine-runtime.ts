@@ -219,6 +219,27 @@ export function execChannelFactory(
 }
 
 /**
+ * A net's save check: one that cannot tell is "not saved". Not saved, the
+ * workload stays and `onKept` (synchronous, best effort) says so in the record.
+ */
+function confirmed(saved: () => boolean, onKept?: () => void): boolean {
+  let ok = false;
+  try {
+    ok = saved();
+  } catch {
+    // Cannot tell: not saved.
+  }
+  if (!ok) {
+    try {
+      onKept?.();
+    } catch {
+      // A record not written: `ps` still says `lost · not saved` mid-run.
+    }
+  }
+  return ok;
+}
+
+/**
  * Register the process-level safety net that deletes the workload on exit.
  *
  * Closing the TUI with Ctrl+C makes the terminal code call `process.exit`
@@ -229,10 +250,23 @@ export function execChannelFactory(
  * blocks the exit and never throws. See `k8s/pod-cleanup.ts` and
  * `docker/container-cleanup.ts`. Returns the disarm: the relay's own normal exit
  * passes here too (docs/feat/detached-relay-lifecycle.md).
+ *
+ * `saved()` (asked synchronously, at exit) gates the delete: false, or a throw,
+ * keeps the workload and calls `onKept` (docs/fix/detach-live.md D4/R6: a
+ * detached run's laptop copy not confirmed, it is the only one; `ps` says
+ * `not saved`). A plain `run` passes `() => true`: it is in no index, so a
+ * leftover would be silent.
  */
-export function armExitNet(host: EngineHost, name: string): () => void {
+export function armExitNet(
+  host: EngineHost,
+  name: string,
+  saved: () => boolean,
+  onKept?: () => void,
+): () => void {
   const fire = (): void => {
-    host.removeBestEffort(name);
+    if (confirmed(saved, onKept)) {
+      host.removeBestEffort(name);
+    }
   };
   process.once("exit", fire);
   return () => {
@@ -244,13 +278,16 @@ export function armExitNet(host: EngineHost, name: string): () => void {
  * `armExitNet` for a TUI of a keep=false detached run (docs/feat/detached-handover.md):
  * every TUI of the run arms it, since any may be the last; it fires only when
  * `othersAlive()` (asked synchronously, at exit: the presence files) says no
- * other TUI of the run lives. So the last one's crash deletes, as a plain
- * `run` does, and another one's never deletes under the rest. Returns the disarm.
+ * other TUI of the run lives AND `saved()` confirms its laptop copy (D4/R6). So
+ * the last one's crash deletes only what is saved, and another one's never
+ * deletes under the rest. Returns the disarm.
  */
 export function armSharedExitNet(
   host: EngineHost,
   name: string,
   othersAlive: () => boolean,
+  saved: () => boolean,
+  onKept?: () => void,
 ): () => void {
   const fire = (): void => {
     let others = true;
@@ -259,7 +296,7 @@ export function armSharedExitNet(
     } catch {
       // Cannot tell: the workload stays (a leftover is one `rm` away).
     }
-    if (!others) {
+    if (!others && confirmed(saved, onKept)) {
       host.removeBestEffort(name);
     }
   };
@@ -382,7 +419,7 @@ export async function provisionWorkload(
   // a detached child. Registered right after it exists, so it covers
   // pre-ready failures too. Not armed with `--keep`: Ctrl+C keeps it too.
   if (!keptLine) {
-    armExitNet(host, name);
+    armExitNet(host, name, () => true);
   }
 
   try {

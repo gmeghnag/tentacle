@@ -529,7 +529,12 @@ describe("cli main: --engine", () => {
     /** `main` with the workload's creation and the relay's spawn as seams. */
     const detached = async (
       args: string[],
-      over: { stdin?: string; record?: boolean; keep?: boolean } = {},
+      over: {
+        stdin?: string;
+        record?: boolean;
+        keep?: boolean;
+        config?: Record<string, unknown>;
+      } = {},
     ) => {
       const out: string[] = [];
       const calls = { provision: 0, spawn: 0, runtime: 0 };
@@ -538,7 +543,10 @@ describe("cli main: --engine", () => {
       let removedAtEnd: boolean | undefined;
       const path = join(dir, "config", "config.jsonc");
       await mkdir(join(dir, "config"), { recursive: true });
-      await writeFile(path, JSON.stringify(over.keep === undefined ? {} : { keep: over.keep }));
+      await writeFile(
+        path,
+        JSON.stringify({ ...over.config, ...(over.keep === undefined ? {} : { keep: over.keep }) }),
+      );
       const code = await main(["bun", "cli", ...args], {
         write: (t) => out.push(t),
         ...(over.stdin !== undefined ? { readStdin: async () => over.stdin ?? "" } : {}),
@@ -610,6 +618,7 @@ describe("cli main: --engine", () => {
           expect(r.text).toContain("removed when the run goes idle");
           expect(r.text).toContain(`tentacle --resume ${r.spec?.sessionId}`);
           expect(r.text).not.toContain("Re-attach once it is done");
+          expect(r.text).toContain("Attach any time: "); // D17: at once, no `--resume`
           expect(r.text).not.toContain("undefined");
           expect(r.removedAtEnd).toBe(true);
         }
@@ -705,12 +714,12 @@ describe("cli main: --engine", () => {
         expect(r.code).toBe(0);
         expect(r.calls).toEqual({ provision: 1, spawn: 1, runtime: 0 });
         expect(r.spec).toMatchObject({ prompt: "hello", autoAccept: true, mode: "start" });
-        expect(r.text).toContain(
-          `tentacle attach --engine docker c1 --resume ${r.spec?.sessionId}`,
-        );
+        // D17 (docs/fix/detach-live.md A7): the launch line, `attach` at once, no `--resume`.
+        expect(r.text).toContain("Attach any time: tentacle attach --engine docker c1.");
+        expect(r.text).not.toContain(`--resume ${r.spec?.sessionId}`);
         expect(r.text).toContain("auto-accepting pod tool asks");
-        // The `kept` line must not send the user to a fresh session (D5).
-        expect(r.hint).toBe(`tentacle attach --engine docker c1 --resume ${r.spec?.sessionId}`);
+        // The hint reaches only the line of a run that never started: nothing to resume.
+        expect(r.hint).toBe("tentacle attach --engine docker c1");
       });
       rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
     });
@@ -758,6 +767,25 @@ describe("cli main: --engine", () => {
         expect(r.code).toBe(0);
         expect(r.spec).toMatchObject({ prompt: "from a pipe\n", autoAccept: false });
       });
+      rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
+    });
+
+    test("round 10 / owner A: the kept entry records the run's profile and model (what `attach` reuses)", async () => {
+      // Mutation: drop `profile` from `keptEntryFor` → the attach cannot find the run's model.
+      await withEnv(
+        { ...unreachable, TENTACLE_PROFILE: undefined, TENTACLE_MODEL: undefined },
+        async () => {
+          const r = await detached(["--profile", "deep", ...base, "--detach", "--prompt", "hi"], {
+            config: { profiles: { deep: { model: { model: "deep-chat" } } } },
+          });
+          expect(r.code).toBe(0);
+          expect(r.spec?.profile).toBe("deep");
+          const entries = readKept(join(dir, "config", "kept")).entries.map((e) => e.entry);
+          expect(entries).toEqual([
+            expect.objectContaining({ profile: "deep", model: "deep-chat" }),
+          ]);
+        },
+      );
       rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
     });
 
@@ -871,8 +899,15 @@ describe("cli main: --engine", () => {
         shared?: boolean;
         attachTo?: string;
         quit: number;
+        runQuit?: unknown;
+        createSession?: unknown;
+        autoAccept?: unknown;
+        confirmed?: boolean;
+        config?: { model?: string; baseURL?: string };
+        tuiModel?: string;
       } = { quit: 0 };
       const runtime = {
+        saveConfirmed: () => seen.confirmed === true,
         createSession: () => ({}),
         jobs: {},
         link: { onLinkStatus: () => () => {} },
@@ -892,20 +927,102 @@ describe("cli main: --engine", () => {
         write: (t) => out.push(t),
         tty,
         attachEngineRuntime: (async (
-          _config: unknown,
+          config: { model?: string; baseURL?: string },
           deps: { permissions: unknown; sessionId?: string; shared?: true },
         ) => {
+          seen.config = config;
           seen.runtimeBroker = deps.permissions;
           seen.sessionId = deps.sessionId;
           seen.shared = deps.shared === true;
           return runtime;
         }) as never,
-        startTui: (async (_session: unknown, options: { permissions: unknown }) => {
+        startTui: (async (
+          _session: unknown,
+          options: {
+            permissions: unknown;
+            runQuit?: unknown;
+            createSession?: unknown;
+            autoAccept?: unknown;
+            model?: string;
+          },
+        ) => {
+          seen.tuiModel = options.model;
           seen.tuiBroker = options.permissions;
+          seen.runQuit = options.runQuit;
+          seen.createSession = options.createSession;
+          seen.autoAccept = options.autoAccept;
         }) as never,
       });
-      return { code, text: out.join(""), seen };
+      return { code, text: out.join(""), seen, runtime };
     };
+
+    test("D1 a detached run's attach: the TUI gets `runQuit` and the presence-moving `createSession`", async () => {
+      // Mutation: drop `runQuit` from `runEngineTui` → `/quit` never asks, never closes for all.
+      setup(`${2 ** 30} 1`);
+      await withEnv(unreachable, async () => {
+        const r = await attached(["attach", "box"]);
+        expect(r.code).toBe(0);
+        const runQuit = r.seen.runQuit as { othersOnSession?: unknown } | undefined;
+        expect(typeof runQuit?.othersOnSession).toBe("function");
+        expect(typeof r.seen.createSession).toBe("function");
+        expect(r.seen.createSession === r.runtime.createSession).toBe(false);
+        // B3. Mutation: drop `autoAccept` → every TUI's toggle stays local, OFF.
+        const feed = r.seen.autoAccept as { current?: unknown } | undefined;
+        expect(typeof feed?.current).toBe("function");
+      });
+      rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+    });
+
+    test("round 10 / owner A: `attach` uses the run's model (its profile + `ps`'s model), unless --profile is explicit", async () => {
+      // Live item 12: `attach lv-h3` (no --profile) talked to the laptop default.
+      // Mutation: ignore the entry's profile → the default config's model.
+      const config = join(dir, "config");
+      const path = join(config, "config.jsonc");
+      await mkdir(config, { recursive: true });
+      const before = (await Bun.file(path).exists()) ? await readFile(path, "utf8") : undefined;
+      await writeFile(
+        path,
+        JSON.stringify({
+          model: { model: "laptop-default", baseURL: "http://default.invalid/v1" },
+          profiles: {
+            deep: { model: { model: "deep-chat", baseURL: "http://deep.invalid/v1" } },
+            other: { model: { model: "other-model", baseURL: "http://other.invalid/v1" } },
+          },
+        }),
+      );
+      try {
+        const env = {
+          ...unreachable,
+          TENTACLE_PROFILE: undefined,
+          TENTACLE_MODEL: undefined,
+          TENTACLE_MODEL_BASE_URL: undefined,
+        };
+        await withEnv(env, async () => {
+          const runEntry: KeptEntry = { ...entry, model: "deep-chat", profile: "deep" };
+          const at = (args: string[]) => {
+            setup(`${2 ** 30} 1`);
+            recordKept(keptIndexDir(config), runEntry); // same file: the entry gains its profile
+            return attached(args);
+          };
+          const r = await at(["attach", "box"]);
+          expect(r.code).toBe(0);
+          expect(r.seen.config).toMatchObject({
+            model: "deep-chat",
+            baseURL: "http://deep.invalid/v1",
+          });
+          expect(r.seen.tuiModel).toBe("deep-chat"); // and SHOWN in the status bar
+          const explicit = await at(["--profile", "other", "attach", "box"]);
+          expect(explicit.seen.config).toMatchObject({
+            model: "other-model",
+            baseURL: "http://other.invalid/v1",
+          });
+        });
+      } finally {
+        if (before === undefined) await rm(path, { force: true });
+        else await writeFile(path, before);
+        rmSync(keptIndexDir(config), { recursive: true, force: true });
+      }
+    });
 
     test("H17 a detached run's attach: the broker the runtime gets IS the TUI's (single broker)", async () => {
       // Mutation: a second broker for the TUI → the runtime's asks never reach the prompt.
@@ -1107,6 +1224,50 @@ describe("cli main: --engine", () => {
         expect(r.seen.runtimeBroker).toBeUndefined();
         expect(r.text).toContain("attaching to box");
       });
+      clean();
+    });
+
+    test("R6/N1 a keep=false run's TUI exit net asks THE RUNTIME's `saveConfirmed`: unconfirmed keeps the workload, confirmed deletes", async () => {
+      // Mutation: `armNet` in main.ts wiring `() => saved() || true` (or `() => true`) →
+      // the net deletes with the save unconfirmed.
+      clean();
+      deadRun(entry, "55555555-5555-4555-8555-555555555554");
+      const exits: Array<() => void> = [];
+      const realOnce = process.once;
+      const realSpawn = Bun.spawn;
+      const spawned: unknown[] = [];
+      process.once = ((event: string, listener: () => void) => {
+        if (event === "exit") {
+          exits.push(listener); // not registered: the test's own exit must not fire it
+          return process;
+        }
+        return realOnce.call(process, event, listener);
+      }) as never;
+      // `removeBestEffort` → `spawnContainerDelete` → `Bun.spawn`: recorded, never run.
+      Bun.spawn = ((cmd: unknown) => {
+        spawned.push(cmd);
+        return { unref: () => {} };
+      }) as never;
+      try {
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box"]);
+          expect(r.code).toBe(0);
+          expect(exits.length).toBe(1);
+          r.seen.confirmed = false;
+          for (const fire of exits) {
+            fire();
+          }
+          expect(spawned.length).toBe(0); // unconfirmed: kept
+          r.seen.confirmed = true;
+          for (const fire of exits) {
+            fire();
+          }
+          expect(spawned.length).toBe(1); // confirmed: deleted
+        });
+      } finally {
+        process.once = realOnce;
+        Bun.spawn = realSpawn;
+      }
       clean();
     });
 

@@ -22,6 +22,7 @@ import {
   ensureRunDir,
   laptopProc,
   logTail,
+  othersOnSession,
   ownerKeeps,
   ownerPath,
   parsePsStat,
@@ -31,6 +32,7 @@ import {
   relayLogPath,
   removePresence,
   runDirFor,
+  setPresenceSession,
   statusOf,
   writeOwner,
   writePresence,
@@ -219,6 +221,18 @@ describe("H12 TUIs on a run (docs/feat/detached-handover.md)", () => {
     expect(readOwner(dir)).toEqual({ kind: "owner", owner: record });
   });
 
+  test("D24 `runTurnId` round-trips (B2); a non-string one is dropped, never trusted", () => {
+    // Mutation: `readOwner` drops `runTurnId` → a TUI never owns the run's turn.
+    const dir = fresh();
+    const { tool: _tool, ...rest } = tui({ autoAccept: true });
+    const record = { ...rest, runTurnId: "77777777-7777-4777-8777-777777777777" };
+    writeOwner(dir, record);
+    expect(readOwner(dir)).toEqual({ kind: "owner", owner: record });
+    writeFileSync(ownerPath(dir), JSON.stringify({ ...rest, runTurnId: 42 }));
+    const read = readOwner(dir);
+    expect(read.kind === "owner" && "runTurnId" in read.owner).toBe(false);
+  });
+
   test("presence: listed while alive; a dead one and a reused pid (another start) are swept", () => {
     // Mutation: skip the start-time test → the reused pid counts as attached.
     const dir = fresh();
@@ -248,6 +262,30 @@ describe("H12 TUIs on a run (docs/feat/detached-handover.md)", () => {
     expect(attachers(fresh(), live)).toEqual([]); // no attach dir at all
   });
 
+  test("D10 presence by session: the body round-trips, `/clear` rewrites it, `othersOnSession` counts one session only", () => {
+    // Mutation: count every presence → a `/clear`ed TUI gets the dialog (D1 scope lost).
+    const dir = fresh();
+    const live = running("100");
+    const [me, other, cleared] = [process.pid, process.ppid, 1];
+    const mine = writePresence(dir, me, live, "S");
+    writePresence(dir, other, live, "S");
+    const theirs = writePresence(dir, cleared, live, "S");
+    expect(
+      attachers(dir, live)
+        .map((a) => `${a.pid}:${a.sessionId}`)
+        .sort(),
+    ).toEqual([`${me}:S`, `${other}:S`, `${cleared}:S`].sort());
+    expect(othersOnSession(dir, live, me, "S")).toBe(2);
+    setPresenceSession(theirs, "FRESH"); // that TUI `/clear`ed
+    expect(attachers(dir, live).find((a) => a.pid === cleared)?.sessionId).toBe("FRESH");
+    expect(othersOnSession(dir, live, me, "S")).toBe(1);
+    expect(othersOnSession(dir, live, cleared, "FRESH")).toBe(0);
+    // A body that is not a session id (an older build's empty file) is on no session.
+    writeFileSync(mine, "");
+    expect(attachers(dir, live).find((a) => a.pid === me)?.sessionId).toBeUndefined();
+    expect(statSync(theirs).mode & 0o777).toBe(0o600);
+  });
+
   test("statusOf with presences: `attached`, `attached (N)`; with none, a TUI record says `tui lost` or `idle`", () => {
     const owned = (o: OwnerRecord) => ({ kind: "owner" as const, owner: o });
     expect(statusOf(owned(tui()), false, NOW, 1)).toBe("attached");
@@ -266,6 +304,28 @@ describe("H12 TUIs on a run (docs/feat/detached-handover.md)", () => {
     expect(statusOf(owned(relaying), true, NOW, 1)).toBe("detached · running 0m");
     const esc = statusOf(owned(tui({ state: "idle", detail: "x\u001b[2J" })), false, NOW, 0);
     expect(esc).not.toContain("\u001b");
+  });
+
+  test("R6 keep=false, its owner gone mid-run, the workload still there: `not saved` until `rm`", () => {
+    // Owner, 2026-11-02: the exit net kept it (a save not confirmed, or a crash:
+    // unknown = not saved). Mutation: drop the suffix → `ps` says only `lost`.
+    const owned = (o: OwnerRecord) => ({ kind: "owner" as const, owner: o });
+    const run = { ...owner, keep: false, tool: undefined, lastActivityAt: NOW };
+    for (const state of ["starting", "running", "waiting-permission"] as const) {
+      expect(statusOf(owned({ ...run, state }), false, NOW, 0)).toBe("relay lost · not saved");
+    }
+    expect(statusOf(owned(tui({ keep: false })), false, NOW, 0)).toBe("tui lost · not saved");
+    // The relay's own veto (round 3): its note, never a bare `interrupted`.
+    const kept =
+      "the relay was stopped before the turn ended; not saved — workload kept: tentacle rm box";
+    expect(statusOf(owned({ ...run, state: "interrupted", detail: kept }), false, NOW, 0)).toBe(
+      `interrupted (${kept})`,
+    );
+    // keep=true keeps anyway; a live owner is not lost.
+    expect(statusOf(owned({ ...run, keep: true }), false, NOW, 0)).toBe("relay lost");
+    expect(statusOf(owned({ ...run, state: "running" }), true, NOW, 0)).toBe(
+      "detached · running 0m",
+    );
   });
 });
 

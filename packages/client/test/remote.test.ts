@@ -218,6 +218,63 @@ describe("model reverse-tunnel, chunked (streaming) cut", () => {
   });
 });
 
+describe("a lost laptop model mid-reply, end to end (docs/fix/detach-live.md round 10, live item 12)", () => {
+  test("the turn names the cause, and the pod's history keeps the partial reply + how it ended", async () => {
+    // Mutation (B): drop the agent's partial push → the history ends on the prompt
+    // plus a bare note. Mutation (label): no `connectionLost` → "internal error".
+    const [daemonCh, clientCh] = createChannelPair();
+    // biome-ignore lint/style/useConst: assigned after the closure that references it
+    let connection: Connection;
+    const model: ModelProvider = {
+      id: "slept",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { type: "text", delta: "Chapter 1. " };
+        yield { type: "text", delta: "The moon" };
+        throw Object.assign(new Error("ECONNRESET: socket closed by http://10.0.0.5 key=sk-X"), {
+          name: "ModelConnectionError",
+          code: "ECONNRESET",
+          phase: "mid-stream",
+        });
+      },
+    };
+    const host = new SessionHost({
+      defaultCwd: "/pod/work",
+      createAgent: () => {
+        const agent = new Agent({
+          model: new ProxyModelProvider(
+            (r) => connection.requestModelStream(r),
+            (r, h) => connection.requestModelStreamChunked(r, h),
+          ),
+          tools: new ToolRegistry(),
+          env: noopEnv,
+        });
+        return { agent, permissions: new PermissionBroker() };
+      },
+    });
+    connection = new Connection(daemonCh, host);
+    const client = new RemoteClient(clientCh, new PermissionBroker(), model, { onError: () => {} });
+    await client.initialize();
+    const session = client.newSession();
+    let failure = "";
+    try {
+      for await (const _ of session.send("the moon, 5000 words")) {
+        // drained
+      }
+    } catch (error) {
+      failure = (error as Error).message;
+    }
+    expect(failure).toContain("model connection lost mid-stream (ECONNRESET)");
+    const messages = (await session.snapshot()) ?? [];
+    const last = messages.at(-1);
+    expect(last?.role).toBe("assistant");
+    expect(last?.content.startsWith("Chapter 1. The moon")).toBe(true);
+    expect(last?.content).toContain("Failed: model connection lost mid-stream (ECONNRESET)");
+    expect(JSON.stringify(messages)).not.toContain("sk-X");
+    connection.close();
+    client.close();
+  });
+});
+
 const WIRE_REQ = { messages: [{ role: "user" as const, content: "hi" }] };
 
 /** A raw daemon-side peer issuing `model/streamChunked` (no agent in between). */
@@ -417,6 +474,43 @@ describe("model/streamChunked — laptop side", () => {
       message = (e as Error).message;
     }
     expect(message).toBe("internal error");
+    expect(message).not.toContain("sk-SECRET");
+    expect(logged.some((l) => l.includes(secret))).toBe(true);
+    daemon.close();
+    client.close();
+  });
+
+  test("a lost model connection reaches the pod as the laptop's OWN words for it, never the provider's (docs/fix/detach-live.md round 10)", async () => {
+    // The relay showed `failed internal error` for a Mac that slept mid-reply.
+    // The cause is the laptop's to name — a fixed text from the error's
+    // kind/code/phase — while the provider's message stays on the laptop.
+    const secret = "ECONNRESET: socket closed by http://10.0.0.5:8080/v1 key=sk-SECRET";
+    const lost = Object.assign(
+      new Error(`model connection lost mid-stream (ECONNRESET) … : ${secret}`),
+      { name: "ModelConnectionError", code: "ECONNRESET", phase: "mid-stream" },
+    );
+    const model: ModelProvider = {
+      id: "slept",
+      async *stream(): AsyncIterable<StreamEvent> {
+        yield { type: "text", delta: "La luna" };
+        throw lost;
+      },
+    };
+    const logged: string[] = [];
+    const { daemon, client } = rawDaemon(model, (e) => logged.push(e.message));
+    const frames: unknown[] = [];
+    let message = "";
+    try {
+      await daemon.request(
+        Method.ModelStreamChunked,
+        { request: WIRE_REQ },
+        { onProgress: (value) => frames.push(value) },
+      );
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(frames.flat()).toEqual([{ type: "text", delta: "La luna" }]);
+    expect(message).toBe("model connection lost mid-stream (ECONNRESET)");
     expect(message).not.toContain("sk-SECRET");
     expect(logged.some((l) => l.includes(secret))).toBe(true);
     daemon.close();
@@ -1924,6 +2018,50 @@ describe("closing sessions (sessions outlive connections)", () => {
       expect(await client.closeSessions(50)).toBe(1);
       client.close();
     }
+  });
+
+  test("D8 closeSessions({ ifLast: false }) ends a shared session for every client; a `session_closed` seen confirms it", async () => {
+    // Mutations: drop the `session_closed` branch (a close that lost the race
+    // to another client's counts as kept); `ifLast` ignored (only a detach).
+    const host = makeHost(slow(1), noopEnv);
+    const other = await connected(host);
+    await other.openSession(undefined, undefined, "X");
+    const closer = await connected(host);
+    await closer.openSession(undefined, undefined, "X");
+    expect(await closer.closeSessions(undefined, { ifLast: false })).toBe(0);
+    expect(host.get("X")).toBeUndefined();
+    closer.close();
+    other.close();
+
+    // The daemon ended it for another client first: its `session_closed`
+    // arrives, then this close is answered `closed: false`.
+    const [daemonCh, clientCh] = createChannelPair();
+    const daemon: RpcPeer = new RpcPeer(daemonCh, {
+      onRequest: async (method) => {
+        if (method === Method.Initialize) {
+          return {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          };
+        }
+        if (method === Method.Open) {
+          return { sessionId: "s1", epoch: "e", created: true, resync: false };
+        }
+        daemon.notify(Notification.SessionUpdate, {
+          sessionId: "s1",
+          seq: 1,
+          mandatory: true,
+          update: { type: "session_closed", reason: "closed" },
+        });
+        await new Promise((r) => setTimeout(r, 5));
+        return { closed: false };
+      },
+    });
+    const late = new RemoteClient(clientCh, new PermissionBroker());
+    await late.initialize();
+    await late.openSession(undefined, undefined, "s1");
+    expect(await late.closeSessions()).toBe(0);
+    late.close();
   });
 
   test("closeSessions() on a closed peer never rejects (no unhandled rejection)", async () => {

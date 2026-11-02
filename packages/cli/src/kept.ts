@@ -49,6 +49,8 @@ export interface KeptEntry {
   readonly mount?: string;
   /** The model the session started with. */
   readonly model: string;
+  /** The config profile `run` was launched with (`attach` talks to the same model). */
+  readonly profile?: string;
   /** RFC 3339 UTC, laptop clock. */
   readonly created: string;
 }
@@ -167,6 +169,7 @@ export function parseKeptEntry(text: string): ParsedEntry {
       ...opt("binDir"),
       ...opt("mount"),
       model: r.model,
+      ...opt("profile"),
       created: r.created,
     },
   };

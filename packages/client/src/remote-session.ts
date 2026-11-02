@@ -96,7 +96,14 @@ export type SessionActivity =
       readonly reason: "compact" | "context_reset" | null;
     }
   /** The session ended daemon-side (another device's close / delete, the reaper). */
-  | { readonly kind: "closed"; readonly reason: "closed" | "deleted" };
+  | { readonly kind: "closed"; readonly reason: EndReason };
+
+/**
+ * How a session ended for this client: a close seen live, a delete, or `gone`:
+ * it vanished while the link was down (a close for all, a reap, a restarted
+ * pod daemon) and nobody can say who ended it.
+ */
+export type EndReason = "closed" | "deleted" | "gone";
 
 export class RemoteSession implements SessionStreamListener {
   private readonly client: RemoteClient;
@@ -148,6 +155,8 @@ export class RemoteSession implements SessionStreamListener {
   private readonly attach: { readonly reopen?: boolean } | undefined;
   /** The memoized eager attach (`open`). */
   private attaching: Promise<void> | null = null;
+  /** The memoized create-or-attach of a seeded session (`openSeeded`, or the first send). */
+  private creating: Promise<string> | null = null;
   /**
    * A session other clients may share (a detached run's TUIs): `close()` (the
    * `/clear`) is `session/close{ifLast}`, so it never ends it under them.
@@ -158,7 +167,27 @@ export class RemoteSession implements SessionStreamListener {
    * `turn_start` or a reset that names one, cleared by its `turn_end`. What
    * steering, send-now and the activity cancel bind to.
    */
-  private streaming: string | null = null;
+  private streamingId: string | null = null;
+  private readonly idleListeners = new Set<() => void>();
+  private get streaming(): string | null {
+    return this.streamingId;
+  }
+  private set streaming(id: string | null) {
+    const was = this.streamingId;
+    this.streamingId = id;
+    if (was !== null && id === null) {
+      for (const listener of [...this.idleListeners]) listener();
+    }
+  }
+  /** A turn runs on the daemon (own or foreign), by its stream: set at an attach mid-turn too. */
+  get busy(): boolean {
+    return this.streamingId !== null;
+  }
+  /** The running turn ended (its `turn_end`, or a resync that shows none): a save after it is due. */
+  onIdle(listener: () => void): () => void {
+    this.idleListeners.add(listener);
+    return () => this.idleListeners.delete(listener);
+  }
   /** The foreign turn being streamed (at most one: the daemon has one slot). */
   private foreign: ActiveTurn | null = null;
   /**
@@ -248,6 +277,53 @@ export class RemoteSession implements SessionStreamListener {
       );
     }
     return this.attaching;
+  }
+
+  /**
+   * Open a session built WITHOUT `attach` now instead of at its first send:
+   * `session/open{sessionId, create, messages?}`. The daemon's open is atomic,
+   * so a live id is ATTACHED (its history wins, it arrives as a `history`
+   * activity) and only an absent one is created from the seed. A client
+   * sharing the session (a TUI of a run reopened after a close,
+   * docs/fix/detach-live.md KO 4) is then on it from the start: it sees the
+   * others' turns and their close, and never re-seeds it from a stale copy.
+   * Once open (or opening), it returns the same open. A no-op for an attach.
+   */
+  openSeeded(): Promise<void> {
+    return this.createOrAttach().then(() => {});
+  }
+
+  /**
+   * `openSeeded`'s one open, memoized. The first send awaits THIS promise: it
+   * subscribed first, so its prompt leaves before an enqueue or a send-now
+   * that awaited the same open resumes (they find a turn running).
+   */
+  private createOrAttach(): Promise<unknown> {
+    if (this.attach || this.id !== null) {
+      return Promise.resolve();
+    }
+    if (!this.creating) {
+      // The id is set INSIDE `opening`: whoever awaits it (an enqueue, a
+      // send-now racing the first send) finds the session open.
+      const opening = this.client
+        .openSession(undefined, this.seedMessages, this.desiredId, this, this.seedTitle)
+        .then(
+          (sessionId) => {
+            this.id = sessionId;
+            this.opening = null;
+            this.client.setListener(sessionId, this);
+            return sessionId;
+          },
+          (error: unknown) => {
+            this.opening = null;
+            this.creating = null;
+            throw error;
+          },
+        );
+      this.opening = opening;
+      this.creating = opening;
+    }
+    return this.creating;
   }
 
   private raise(activity: SessionActivity): void {
@@ -418,6 +494,11 @@ export class RemoteSession implements SessionStreamListener {
    * The session's id (the daemon's once opened, else the one it will open):
    * an opaque key for the caller — shown, never parsed.
    */
+  /** Others share this session (built with `closeIfLast`): see `SessionStreamListener.shared`. */
+  get shared(): boolean {
+    return this.closeIfLast;
+  }
+
   get sessionId(): string | null {
     return this.id ?? this.desiredId ?? null;
   }
@@ -522,15 +603,20 @@ export class RemoteSession implements SessionStreamListener {
     return Promise.resolve();
   }
 
-  /** `opts.skill`: the user activates that skill (`/name`) with this prompt. */
+  /**
+   * `opts.skill`: the user activates that skill (`/name`) with this prompt.
+   * `opts.turnId`: the turn's id, minted by the caller (a detached run's relay
+   * records it so the TUIs that take the run over own its turn,
+   * docs/fix/detach-live.md B2); else a fresh one.
+   */
   async *send(
     prompt: string,
     signal?: AbortSignal,
-    opts: { readonly skill?: string } = {},
+    opts: { readonly skill?: string; readonly turnId?: string } = {},
   ): AsyncGenerator<SessionEvent> {
     // Known before the first `await`, so a steer typed while the session is
     // still opening is already bound to this turn.
-    const turnId = crypto.randomUUID();
+    const turnId = opts.turnId ?? crypto.randomUUID();
     this.turnId = turnId;
     yield* this.runTurn(turnId, prompt, signal, opts.skill);
   }
@@ -714,20 +800,8 @@ export class RemoteSession implements SessionStreamListener {
     if (this.attach) {
       // An attach-only session is never created by a send: the attach first.
       await this.open();
-    } else if (!this.id) {
-      this.opening = this.client.openSession(
-        undefined,
-        this.seedMessages,
-        this.desiredId,
-        this,
-        this.seedTitle,
-      );
-      try {
-        this.id = await this.opening;
-      } finally {
-        this.opening = null;
-      }
-      this.client.setListener(this.id, this);
+    } else {
+      await this.createOrAttach();
     }
     const id = this.id;
     if (id === null) {
@@ -1114,7 +1188,7 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /** Closed daemon-side: every open turn ends (each got `turn_end{cancelled}` before), then the notice. */
-  private onClosed(reason: "closed" | "deleted"): void {
+  private onClosed(reason: EndReason): void {
     this.remoteClosed = true;
     this.streaming = null;
     this.failAll(new RpcError(DomainErrorCode.UnknownSession, "the session was closed"));
@@ -1140,7 +1214,7 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /** Ended or deleted daemon-side while the link was down (the reconnect's refusal, by code). */
-  ended(reason: "closed" | "deleted"): void {
+  ended(reason: EndReason): void {
     this.onClosed(reason);
   }
 

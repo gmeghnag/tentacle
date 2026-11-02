@@ -505,6 +505,18 @@ Daily-driver work (done 2026-10-14):
       `docs/fix/session-store-durability.md` — atomic temp+fsync+rename, per-uid
       latest-wins queue, validated loud `load`/`list`, save failures → TUI notice.
       Type: fix · Size: M · Blast: load-bearing.
+- [ ] **Detach `fix/detach-live`** ([task doc](docs/fix/detach-live.md)): the live
+      test's defects in S1–S3. `/quit` closes the session for every TUI on it (y/N
+      with others), FAIL 39, the attach notice, the launcher line; auto-accept
+      inherited on attach, Shift+Tab per session and shared. EXECUTED 2026-11-01,
+      awaiting the fresh-context Review and the owner's live re-run.
+      Type: fix · Size: L · Blast: load-bearing · Suited: Opus, fresh review.
+      Candidates left by it (owner's list, not planned): footer `↑0 ↓0 · ctx 0%`
+      after attach; the `thinking…` timer starts at attach; Enter on a permission
+      prompt opening while typing `/quit` approves it; `MultiEdit` ask shows `—`;
+      `[resume] … — (empty)` left after exit; `attach` without `--profile` shows the
+      default model; `dispose()`'s same late read (one `seal`); a window close or
+      crash during this TUI's model call fails the other's turn (needs re-routing).
 - [x] ✅ **Detach S2b + S4 `feat/detached-relay-lifecycle`**
       ([task doc](docs/feat/detached-relay-lifecycle.md); split out of S2, owner
       Q1, 2026-10-30; S4 folded in, owner 2026-10-31) — **DONE, merged `4f0fc2f` 2026-10-31**
