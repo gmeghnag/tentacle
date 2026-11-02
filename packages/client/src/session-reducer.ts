@@ -27,11 +27,47 @@ import { classifyUpdate } from "./mapping.ts";
 export const MAX_FORCED_REOPENS = 3;
 export const FORCED_REOPEN_WINDOW_MS = 60_000;
 /**
- * Updates kept while opening/resyncing; past it the oldest go. Bounds memory
- * (a pod that never answers `open`) and the per-update copy; the hole the
- * evicted ones leave is a gap, so a long replay degrades to a resync.
+ * Bytes (JSON length) of the updates kept while opening/resyncing; past it a
+ * new one is dropped, and the hole it leaves is a gap. It must hold every
+ * replay the daemon legitimately sends: a resync replays everything after the
+ * cut — the whole round in flight, which the daemon's ring pins however long
+ * (`daemon/src/ring.ts`) — so a bound below that loses part of the replay on
+ * every reopen and never converges (docs/fix/detach-live.md, round 9). Far
+ * above the ring (4 MiB) and a WebSocket's backpressure limit (16 MiB); it only
+ * bounds a hostile pod that streams without answering `open`.
  */
-export const MAX_BUFFERED_UPDATES = 2048;
+export const MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Updates held while opening/resyncing: `items[0..length)`, sorted by seq,
+ * unique. `items` is shared by the states that hold it — a later state may
+ * extend it past this one's `length`, never write below it — so an in-order
+ * append is O(1) and the reducer stays pure.
+ */
+export interface Held {
+  readonly items: readonly SessionUpdateParams[];
+  readonly length: number;
+  /** JSON length of `items[0..length)`. */
+  readonly bytes: number;
+}
+
+export const NOTHING_HELD: Held = { items: [], length: 0, bytes: 0 };
+
+/** A `Held` of `updates` (sorted by seq, unique). */
+export function heldOf(updates: readonly SessionUpdateParams[]): Held {
+  return { items: [...updates], length: updates.length, bytes: sizeOfAll(updates) };
+}
+
+/** The held updates, in seq order (a copy). */
+export function heldList(held: Held): SessionUpdateParams[] {
+  return held.items.slice(0, held.length);
+}
+
+function sizeOfAll(updates: readonly SessionUpdateParams[]): number {
+  let bytes = 0;
+  for (const params of updates) bytes += JSON.stringify(params).length;
+  return bytes;
+}
 
 export type StreamPhase =
   /** Nothing sent yet. */
@@ -56,7 +92,7 @@ export interface StreamState {
   /** Last applied seq. */
   readonly applied: number;
   /** Received while opening/resyncing, sorted by seq, unique. */
-  readonly buffer: readonly SessionUpdateParams[];
+  readonly buffer: Held;
   /** The turn running as far as this stream shows. */
   readonly turn: string | null;
   /** Permission requests streamed and not resolved. */
@@ -71,7 +107,7 @@ export const initialStream: StreamState = {
   phase: "idle",
   epoch: null,
   applied: 0,
-  buffer: [],
+  buffer: NOTHING_HELD,
   turn: null,
   pending: [],
   reopens: [],
@@ -154,30 +190,38 @@ export function sinceOf(state: StreamState): HistoryCut | undefined {
   return undefined;
 }
 
-/** Buffer one update: sorted by seq, a duplicate seq kept once, at most the newest `MAX_BUFFERED_UPDATES`. */
-function buffered(
-  buffer: readonly SessionUpdateParams[],
-  params: SessionUpdateParams,
-): readonly SessionUpdateParams[] {
+/** Buffer one update: sorted by seq, a duplicate seq kept once, none past `MAX_BUFFERED_BYTES`. */
+function buffered(held: Held, params: SessionUpdateParams): Held {
+  const { items, length } = held;
   // Binary search for the first entry with seq >= params.seq (usually the end).
   let lo = 0;
-  let hi = buffer.length;
+  let hi = length;
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;
-    if ((buffer[mid] as SessionUpdateParams).seq < params.seq) lo = mid + 1;
+    if ((items[mid] as SessionUpdateParams).seq < params.seq) lo = mid + 1;
     else hi = mid;
   }
-  if (buffer[lo]?.seq === params.seq) {
-    return buffer;
+  if (lo < length && items[lo]?.seq === params.seq) {
+    return held;
   }
-  const next = [...buffer.slice(0, lo), params, ...buffer.slice(lo)];
-  return next.length > MAX_BUFFERED_UPDATES ? next.slice(next.length - MAX_BUFFERED_UPDATES) : next;
+  const bytes = held.bytes + JSON.stringify(params).length;
+  if (bytes > MAX_BUFFERED_BYTES) {
+    return held;
+  }
+  if (lo === length && length > 0 && items.length === length) {
+    // The common case, in order and nobody extended `items` yet: append in place.
+    (items as SessionUpdateParams[]).push(params);
+    return { items, length: length + 1, bytes };
+  }
+  const next = [...items.slice(0, lo), params, ...items.slice(lo, length)];
+  return { items: next, length: next.length, bytes };
 }
 
 /** Request ids the buffered updates past `seq` leave pending (in order). */
-function pendingIn(buffer: readonly SessionUpdateParams[], seq: number): string[] {
+function pendingIn(held: Held, seq: number): string[] {
   const pending: string[] = [];
-  for (const params of buffer) {
+  for (let i = 0; i < held.length; i++) {
+    const params = held.items[i] as SessionUpdateParams;
     if (params.seq <= seq) continue;
     const update = params.update as { type: string; requestId?: unknown };
     if (typeof update.requestId !== "string") continue;
@@ -209,11 +253,11 @@ class Stepper {
     const reopens = [...this.state.reopens.filter((t) => now - t < FORCED_REOPEN_WINDOW_MS), now];
     if (reopens.length > MAX_FORCED_REOPENS) {
       const reason = "the daemon's update stream keeps skipping events; giving up on this session";
-      this.set({ phase: "failed", buffer: [], reopens });
+      this.set({ phase: "failed", buffer: NOTHING_HELD, reopens });
       this.out.push({ kind: "failed", reason });
       return;
     }
-    this.set({ phase: "resyncing", epoch: null, buffer: [], reopens });
+    this.set({ phase: "resyncing", epoch: null, buffer: NOTHING_HELD, reopens });
     this.effects.push({ kind: "reopen" });
   }
 
@@ -269,21 +313,21 @@ class Stepper {
     this.out.push({ kind: "update", seq: params.seq, update, turn });
     if (update.type === "history_replaced") {
       // The barrier: nothing after it may be applied over the old history.
-      this.set({ phase: "resyncing", epoch: null, buffer: [] });
+      this.set({ phase: "resyncing", epoch: null, buffer: NOTHING_HELD });
       this.effects.push({ kind: "fetch_snapshot" });
     } else if (update.type === "session_closed") {
-      this.set({ phase: "closed", buffer: [], turn: null, pending: [] });
+      this.set({ phase: "closed", buffer: NOTHING_HELD, turn: null, pending: [] });
     }
   }
 
   /** Go live and apply `buffer` in seq order; what follows a barrier stays buffered. */
-  drain(buffer: readonly SessionUpdateParams[], now: number): void {
-    this.set({ phase: "live", buffer: [] });
+  drain(buffer: Held, now: number): void {
+    this.set({ phase: "live", buffer: NOTHING_HELD });
     for (let i = 0; i < buffer.length; i++) {
-      const params = buffer[i] as SessionUpdateParams;
+      const params = buffer.items[i] as SessionUpdateParams;
       this.apply(params, now);
       if (this.state.phase === "resyncing" && this.effects.at(-1)?.kind === "fetch_snapshot") {
-        this.set({ buffer: buffer.slice(i + 1) });
+        this.set({ buffer: heldOf(buffer.items.slice(i + 1, buffer.length)) });
         return;
       }
       if (this.state.phase !== "live") {
@@ -302,7 +346,7 @@ export function reduceStream(state: StreamState, input: StreamInput): StreamStep
   }
   switch (input.kind) {
     case "open_sent":
-      s.set({ phase: "opening", buffer: [] });
+      s.set({ phase: "opening", buffer: NOTHING_HELD });
       break;
     case "update":
       if (phase === "opening" || phase === "resyncing") {
@@ -340,7 +384,7 @@ export function reduceStream(state: StreamState, input: StreamInput): StreamStep
     }
     case "link_down":
       if (phase === "live" || phase === "opening" || phase === "resyncing") {
-        s.set({ phase: "down", buffer: [] });
+        s.set({ phase: "down", buffer: NOTHING_HELD });
       }
       break;
     case "recreated":
@@ -351,7 +395,7 @@ export function reduceStream(state: StreamState, input: StreamInput): StreamStep
       s.drain(state.buffer, input.now);
       break;
     case "fail":
-      s.set({ phase: "failed", buffer: [] });
+      s.set({ phase: "failed", buffer: NOTHING_HELD });
       s.out.push({ kind: "failed", reason: input.reason });
       break;
   }

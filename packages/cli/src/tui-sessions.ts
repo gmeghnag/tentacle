@@ -62,8 +62,14 @@ export async function openTuiSessions(
   // resume AND the saver use it, so this folder's sessions are the only ones
   // offered. Old flat files at the root are ignored (no migration, pre-v0.1.0).
   const key = projectKey(where.cwd);
-  const store = new JsonSessionStore(join(where.root, key));
   const notices = new NoticeHub();
+  // Q6: a stale writer never replaces a longer history; said in the TUI (a
+  // notice, never a raw write while Ink owns the terminal).
+  const store = new JsonSessionStore(join(where.root, key), undefined, (aside) =>
+    notices.notify(
+      `⚠ Session ${aside.id.slice(0, 8)}: its file holds ${aside.kept} messages, this copy only ${aside.dropped} — the file was kept, this copy saved aside in ${aside.file}`,
+    ),
+  );
   for (const text of startup) {
     notices.notify(text);
   }
@@ -115,6 +121,22 @@ export async function openTuiSessions(
     notices.notify(text);
   }
   return { notices, saver, resume: resolved.record };
+}
+
+/**
+ * `uid`'s laptop copy as the file holds it now (`null`: none). Rejects when the
+ * file is there but unusable: a caller that seeds a session from it must not
+ * fall back to an older copy (docs/fix/detach-live.md R8).
+ */
+export async function readSessionRecord(
+  where: { readonly root: string; readonly cwd: string },
+  uid: string,
+): Promise<SessionRecord | null> {
+  const loaded = await new JsonSessionStore(join(where.root, projectKey(where.cwd))).load(uid);
+  if (loaded.status === "unreadable") {
+    throw new Error(`could not read ${loaded.file}: ${loaded.reason}`);
+  }
+  return loaded.status === "ok" ? loaded.record : null;
 }
 
 /**

@@ -18,7 +18,7 @@ describe("L22 armExitNet (docs/feat/detached-relay-lifecycle.md)", () => {
   test("an exit fires `removeBestEffort` once", () => {
     const before = process.listeners("exit");
     const removed: string[] = [];
-    const disarm = armExitNet(hostOf(removed), "box");
+    const disarm = armExitNet(hostOf(removed), "box", () => true);
     const [listener, ...rest] = armed(before);
     expect(rest).toEqual([]);
     listener?.(0);
@@ -31,9 +31,48 @@ describe("L22 armExitNet (docs/feat/detached-relay-lifecycle.md)", () => {
     // Mutation: a no-op disarm → the relay's own exit fires a second, unverified delete.
     const before = process.listeners("exit");
     const removed: string[] = [];
-    armExitNet(hostOf(removed), "box")();
+    armExitNet(hostOf(removed), "box", () => true)();
     expect(armed(before)).toEqual([]);
     expect(removed).toEqual([]);
+  });
+
+  test("R6 (D4): not confirmed saved, or it cannot be told: the exit keeps the workload", () => {
+    // Mutation: fire without asking `saved` → a relay's second SIGTERM mid-turn deletes the only copy.
+    const before = process.listeners("exit");
+    const removed: string[] = [];
+    let saved = false;
+    let kept = 0;
+    const disarm = armExitNet(
+      hostOf(removed),
+      "box",
+      () => saved,
+      () => {
+        kept += 1;
+      },
+    );
+    const [listener] = armed(before);
+    listener?.(130);
+    expect(removed).toEqual([]);
+    expect(kept).toBe(1); // said in the record
+    disarm();
+    armExitNet(hostOf(removed), "box", () => {
+      throw new Error("unreadable");
+    });
+    armed(before)[0]?.(1);
+    expect(removed).toEqual([]);
+    for (const l of armed(before)) process.off("exit", l as () => void);
+    saved = true;
+    armExitNet(
+      hostOf(removed),
+      "box",
+      () => saved,
+      () => {
+        throw new Error("never asked");
+      },
+    );
+    armed(before)[0]?.(130);
+    expect(removed).toEqual(["box"]);
+    for (const l of armed(before)) process.off("exit", l as () => void);
   });
 });
 
@@ -54,7 +93,7 @@ describe("H16 armSharedExitNet (docs/feat/detached-handover.md)", () => {
     const others = () => attachers(dir, laptopProc).some((a) => a.pid !== process.pid);
     const before = process.listeners("exit");
     const removed: string[] = [];
-    const disarm = armSharedExitNet(hostOf(removed), "box", others);
+    const disarm = armSharedExitNet(hostOf(removed), "box", others, () => true);
     const [listener, ...rest] = armed(before);
     expect(rest).toEqual([]);
     listener?.(0);
@@ -63,9 +102,44 @@ describe("H16 armSharedExitNet (docs/feat/detached-handover.md)", () => {
     child.kill("SIGKILL");
     await exited;
     listener?.(0);
-    expect(removed).toEqual(["box"]); // the last one: as a plain `run`
+    expect(removed).toEqual(["box"]); // the last one, its save confirmed
     disarm();
     expect(armed(before)).toEqual([]);
+  });
+
+  test("R6 (D4): the last TUI's SIGTERM / SIGHUP / crash, not confirmed saved: the workload stays", () => {
+    // Mutation: drop the `saved` check → the last TUI's crash mid-turn deletes the only copy.
+    const before = process.listeners("exit");
+    const removed: string[] = [];
+    let kept = 0;
+    let others = true;
+    const disarm = armSharedExitNet(
+      hostOf(removed),
+      "box",
+      () => others,
+      () => false,
+      () => {
+        kept += 1;
+      },
+    );
+    armed(before)[0]?.(143);
+    expect(kept).toBe(0); // not the last: its record is the others'
+    others = false;
+    armed(before)[0]?.(143);
+    expect(removed).toEqual([]);
+    expect(kept).toBe(1);
+    disarm();
+    armSharedExitNet(
+      hostOf(removed),
+      "box",
+      () => false,
+      () => {
+        throw new Error("unreadable");
+      },
+    );
+    armed(before)[0]?.(1);
+    expect(removed).toEqual([]);
+    for (const l of armed(before)) process.off("exit", l as () => void);
   });
 });
 

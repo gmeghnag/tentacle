@@ -116,7 +116,13 @@ export interface SessionStreamListener {
    * (`SessionArchived` → `closed`) or was deleted (`SessionDeleted` →
    * `deleted`) while the link was down — told by error CODE, before its turns fail.
    */
-  ended?(reason: "closed" | "deleted"): void;
+  ended?(reason: "closed" | "deleted" | "gone"): void;
+  /**
+   * Other clients share this session (`closeIfLast`): when the daemon no longer
+   * has it after a drop, it was closed for everyone while this one was away —
+   * it is told so, never recreated from its own copy (docs/fix/detach-live.md R7).
+   */
+  readonly shared?: boolean;
 }
 
 /** A background-job exit surfaced by the daemon, outside any turn. */
@@ -210,6 +216,12 @@ interface Snap {
   readonly queued?: QueueState;
 }
 
+/** The error of a session the reducer gave up on, WITH its cause (docs/fix/detach-live.md KO 3). */
+function notResumed(entry: SessionEntry): string {
+  const why = entry.failReason !== undefined ? `: ${entry.failReason}` : "";
+  return `session ${entry.id} could not be resumed${why}`;
+}
+
 /** One session this client opened (or is opening) and has not closed. */
 interface SessionEntry {
   readonly id: string;
@@ -229,6 +241,10 @@ interface SessionEntry {
   owesNotice: boolean;
   /** `closeSession` was called: no recovery, no new commands; forgotten once the daemon answers. */
   closing: boolean;
+  /** Its `session_closed` arrived: the daemon ended it (for any client). */
+  closedSeen: boolean;
+  /** Why the reducer gave up on it (`failed`): carried by the "could not be resumed" error. */
+  failReason?: string;
   /** `turn_end`s applied from the stream. */
   turnEndsApplied: number;
   /** `turn_end`s already applied when `history` was read: fewer than applied ⇒ `history` lags. */
@@ -267,6 +283,13 @@ export interface HistoryLostNotice {
  */
 export interface SessionDeletedNotice {
   readonly sessionId: string;
+}
+
+/** A shared session the daemon no longer has after a drop: it ended while this client was away (R7). */
+class VanishedError extends RpcError {
+  constructor() {
+    super(DomainErrorCode.SessionArchived, "the session ended while the link was down");
+  }
 }
 
 /** A command that must not cross a session recreate (its turn/request is gone). */
@@ -751,21 +774,28 @@ export class RemoteClient {
 
   /**
    * Close every session this client opened and has not closed yet — the exit
-   * path. `session/close{ifLast}`: a session another client is still attached
-   * to is only detached, so a quit never ends it under them. AWAIT it before `close()`: a frame written just before closing is not
+   * path. `session/close{ifLast}` by default: a session another client is
+   * still attached to is only detached, so a quit never ends it under them;
+   * `ifLast: false` ends it for every client (a confirmed `/quit` of a shared
+   * session, docs/fix/detach-live.md D1). AWAIT it before `close()`: a frame written just before closing is not
    * guaranteed to be delivered on every transport (the in-memory pair drops
    * it). Bounded by `timeoutMs` so a hung daemon never blocks the exit; never
    * rejects. Resolves with how many of them the daemon did NOT confirm it
-   * closed (`closed: true`): a detach, a timeout, a dropped link and an older
+   * closed (`closed: true`, or its `session_closed` seen: another client's
+   * close won the race): a detach, a timeout, a dropped link and an older
    * daemon all count — the side a quit deciding a delete must take.
    */
-  async closeSessions(timeoutMs: number = CLOSE_SESSIONS_TIMEOUT_MS): Promise<number> {
+  async closeSessions(
+    timeoutMs: number = CLOSE_SESSIONS_TIMEOUT_MS,
+    opts: { readonly ifLast?: boolean } = {},
+  ): Promise<number> {
+    const ifLast = opts.ifLast ?? true;
     let confirmed = 0;
     const pending = [...this.sessions.values()]
       .filter((entry) => !entry.closing)
       .map((entry) =>
-        this.endSession(Method.Close, entry.id, true).then((closed) => {
-          if (closed) confirmed += 1;
+        this.endSession(Method.Close, entry.id, ifLast).then((closed) => {
+          if (closed || entry.closedSeen) confirmed += 1;
         }),
       );
     if (pending.length === 0) {
@@ -1311,6 +1341,7 @@ export class RemoteClient {
       liveGen: -1,
       owesNotice: false,
       closing: false,
+      closedSeen: false,
       turnEndsApplied: 0,
       turnEndsInHistory: 0,
       title,
@@ -1406,6 +1437,12 @@ export class RemoteClient {
       }
       this.noteDeleted(entry, error);
       const unknown = error instanceof RpcError && error.code === DomainErrorCode.UnknownSession;
+      if (unknown && params.create !== true && entry.everLive && entry.listener?.shared === true) {
+        // A session others share, gone after a drop: another client's close for
+        // all (or a reap) ended it. Its end, told as the archive's, not a loss to
+        // recreate from this copy (R7): `failSession` ends it for the frontend.
+        throw new VanishedError();
+      }
       // An attach that was never live has nothing to recreate: the id is gone.
       if (unknown && params.create !== true && (entry.attach === undefined || entry.everLive)) {
         await this.recreate(entry, gen);
@@ -1540,11 +1577,13 @@ export class RemoteClient {
     // session is gone for this client (nothing to follow, close or answer).
     const ended =
       error instanceof RpcError
-        ? error.code === DomainErrorCode.SessionArchived
-          ? "closed"
-          : error.code === DomainErrorCode.SessionDeleted
-            ? "deleted"
-            : null
+        ? error instanceof VanishedError
+          ? "gone"
+          : error.code === DomainErrorCode.SessionArchived
+            ? "closed"
+            : error.code === DomainErrorCode.SessionDeleted
+              ? "deleted"
+              : null
         : null;
     if (ended !== null) {
       this.sessions.delete(entry.id);
@@ -1565,6 +1604,11 @@ export class RemoteClient {
   private step(entry: SessionEntry, input: StreamInput): void {
     const result = reduceStream(entry.state, input);
     entry.state = result.state;
+    for (const out of result.out) {
+      if (out.kind === "failed") {
+        entry.failReason = out.reason;
+      }
+    }
     const live = result.state.phase === "live";
     entry.liveGen = live ? this.gen : -1;
     if (live) {
@@ -1645,6 +1689,7 @@ export class RemoteClient {
       // Closed daemon-side (by any client): nothing left to close at exit,
       // nothing left to answer.
       if (update.type === "session_closed") {
+        entry.closedSeen = true;
         if (this.sessions.get(entry.id) === entry) {
           this.sessions.delete(entry.id);
         }
@@ -1680,7 +1725,7 @@ export class RemoteClient {
           return true;
         }
         if (entry.state.phase === "failed") {
-          reject(new Error(`session ${entry.id} could not be resumed`));
+          reject(new Error(notResumed(entry)));
           return true;
         }
         if (this.up && entry.state.phase === "live" && entry.liveGen === this.gen) {
@@ -1714,7 +1759,7 @@ export class RemoteClient {
     const entry = this.sessions.get(sessionId);
     if (entry?.state.phase === "failed") {
       // Its stream is no longer applied: a turn sent now would never end.
-      throw new Error(`session ${entry.id} could not be resumed`);
+      throw new Error(notResumed(entry));
     }
     if (!this.channelFactory || !entry) {
       onSent?.();
@@ -1800,10 +1845,42 @@ export class RemoteClient {
   private async onModelStream(params: ModelStreamParams): Promise<ModelStreamResult> {
     const model = this.servingModel(Method.ModelStream, params.purpose);
     const events: WireStreamEvent[] = [];
-    for await (const event of model.stream(params.request as unknown as ChatRequest)) {
-      events.push(event as WireStreamEvent);
+    try {
+      for await (const event of model.stream(params.request as unknown as ChatRequest)) {
+        events.push(event as WireStreamEvent);
+      }
+    } catch (error) {
+      throw this.connectionLost(error) ?? error;
     }
     return { events };
+  }
+
+  /**
+   * A lost connection to the LOCAL model (`ModelConnectionError`, providers'
+   * retry layer) as an `RpcError` the pod may see: a text built here from its
+   * code and phase only, never its message (that one can carry the endpoint).
+   * The full error still goes to `onError`. So the run's turn ends naming its
+   * cause, not "internal error" (docs/fix/detach-live.md round 10). `null`:
+   * any other error, left to the peer's opaque default.
+   */
+  private connectionLost(error: unknown): RpcError | null {
+    const e = error as { name?: unknown; code?: unknown; phase?: unknown } | null;
+    if (
+      !(error instanceof Error) ||
+      e?.name !== "ModelConnectionError" ||
+      typeof e.code !== "string" ||
+      !/^E[A-Z]{2,15}$/.test(e.code)
+    ) {
+      return null;
+    }
+    this.onError?.(error);
+    const what =
+      e.phase === "mid-stream"
+        ? "model connection lost mid-stream"
+        : e.code === "ECONNREFUSED"
+          ? "could not connect to the model endpoint"
+          : "model connection lost";
+    return new RpcError(JsonRpcErrorCode.InternalError, `${what} (${e.code})`);
   }
 
   /**
@@ -1915,8 +1992,9 @@ export class RemoteClient {
       // Rethrow as-is (NOT an RpcError): the peer reports it to `onError` on
       // the laptop and answers the pod with an opaque "internal error", like
       // `model/stream`. A provider message can carry the endpoint or key
-      // material, and the pod is not trusted (AGENTS §7).
-      throw error;
+      // material, and the pod is not trusted (AGENTS §7). Except a lost model
+      // connection: its cause in the laptop's own words (`connectionLost`).
+      throw this.connectionLost(error) ?? error;
     }
     // Flush the tail synchronously so the last events precede the result frame.
     flush();

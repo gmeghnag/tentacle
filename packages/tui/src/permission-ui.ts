@@ -131,19 +131,39 @@ export interface PermissionController {
 }
 
 /**
+ * Auto-accept held outside this TUI (a detached run's session, shared by
+ * every TUI on it, docs/fix/detach-live.md B3): its state at mount, a flip
+ * from elsewhere (`onChange`), and this TUI's own flips (`set`).
+ */
+export interface AutoAcceptFeed {
+  current(): boolean;
+  set(on: boolean): void;
+  /** Another TUI flipped it; returns the unsubscribe. */
+  onChange(listener: (on: boolean) => void): () => void;
+}
+
+/**
  * `ownsTurn`: read at each request — the current session's own-vs-foreign test
  * (`ownRequest`), or undefined when no session decides. Auto-accept answers
- * only a request of my own turn.
+ * only a request of my own turn. `feed`: auto-accept's state lives there
+ * (seeded at mount, so a request held until mount is answered by it); absent,
+ * it starts off and stays this TUI's.
  */
 export function usePermissionBroker(
   permissions?: PermissionBroker,
   ownsTurn?: () => ((turnId: string) => boolean) | undefined,
+  feed?: AutoAcceptFeed,
 ): PermissionController {
   const [pending, setPending] = useState<PermissionRequest | null>(null);
   const [selected, setSelected] = useState(0);
-  const [autoApprove, setAutoApprove] = useState(false);
+  const [autoApprove, setAutoApprove] = useState(() => feed?.current() ?? false);
   const resolveRef = useRef<((r: PermissionResponse) => void) | null>(null);
-  const autoApproveRef = useRef(false);
+  // Seeded before any effect: the broker's held requests reach the requester
+  // installed below, and are answered by THIS value.
+  const autoApproveRef = useRef<boolean | null>(null);
+  if (autoApproveRef.current === null) {
+    autoApproveRef.current = feed?.current() ?? false;
+  }
   const pendingRef = useRef<PermissionRequest | null>(null);
   /** The request on screen is of my own turn (auto-accept may answer it). */
   const pendingOwnRef = useRef(true);
@@ -158,22 +178,42 @@ export function usePermissionBroker(
     resolve?.(response);
   }, []);
 
+  /** The one way auto-accept changes: this TUI's toggle and a flip from the feed. */
+  const applyAuto = useCallback(
+    (next: boolean) => {
+      autoApproveRef.current = next;
+      setAutoApprove(next);
+      // If a request is on screen when auto-accept turns on, grant it immediately
+      // — unless auto-accept may not answer it (a hooks trust request, another
+      // device's turn).
+      if (
+        next &&
+        resolveRef.current &&
+        pendingRef.current &&
+        autoApproves(pendingRef.current, pendingOwnRef.current)
+      ) {
+        answer({ allowed: true, scope: "once" });
+      }
+    },
+    [answer],
+  );
+
+  const feedRef = useRef(feed);
+  feedRef.current = feed;
   const toggleAutoApprove = useCallback(() => {
     const next = !autoApproveRef.current;
-    autoApproveRef.current = next;
-    setAutoApprove(next);
-    // If a request is on screen when auto-accept turns on, grant it immediately
-    // — unless auto-accept may not answer it (a hooks trust request, another
-    // device's turn).
-    if (
-      next &&
-      resolveRef.current &&
-      pendingRef.current &&
-      autoApproves(pendingRef.current, pendingOwnRef.current)
-    ) {
-      answer({ allowed: true, scope: "once" });
+    applyAuto(next);
+    feedRef.current?.set(next);
+  }, [applyAuto]);
+
+  useEffect(() => {
+    const off = feed?.onChange(applyAuto);
+    // A flip between the render's read and this subscription has no later event.
+    if (feed && feed.current() !== autoApproveRef.current) {
+      applyAuto(feed.current());
     }
-  }, [answer]);
+    return off;
+  }, [feed, applyAuto]);
 
   useEffect(() => {
     if (!permissions) {

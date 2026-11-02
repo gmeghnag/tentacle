@@ -90,6 +90,7 @@ import {
   type PersistedTurnKey,
   type ResumedTurn,
   classifyPending,
+  closeFailedTurn,
   pendingForRecord,
 } from "./persisted-session.ts";
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
@@ -1310,10 +1311,14 @@ export class HostedSession {
       // it unredacted, then end the turn. `finishTurn` is idempotent, so a
       // throw from its own `turn_end` emit sends no second `turn_end`.
       this.reportTurnError(error);
+      const wire = redactTurnError(error, this.errorPolicy.exposeTurnErrors === true);
+      // The history says how the turn ended, in the wire's words (never more):
+      // `finishTurn` moves the cut and persists it with the rest.
+      closeFailedTurn(this.session.messages, wire.message);
       try {
         this.finishTurn(turnId, {
           stopReason: "error",
-          error: redactTurnError(error, this.errorPolicy.exposeTurnErrors === true),
+          error: wire,
         });
       } catch (sinkError) {
         // The state is already final (set before the emit); only the frame is lost.

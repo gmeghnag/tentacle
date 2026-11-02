@@ -25,7 +25,7 @@ Umbrella: [`docs/feat/detached-runs.md`](detached-runs.md) (DR-1…DR-9, sub-pla
 
 **Owner decisions that bind it.**
 - **DR-1 (c):** one laptop owner at a time.
-- **DR-3 (A):** a detached run waits at the first ask unless `--auto-accept`. It stays allow-once, pod asks only, logged.
+- **DR-3 (A):** a detached run waits at the first ask unless `--auto-accept`. It stays allow-once, pod asks only, logged. (Since `docs/fix/detach-live.md`, D2 + D3: auto-accept no longer ends with the relay; it is inherited on attach and shared per session.)
 - **DR-4 (A)+:** the relay exits after 60 s of idle, or on stop, or when the workload is gone.
 - **DR-5 (B):** removal on a normal exit (idle or stop), an exit net for crashes, a pending ask keeps it alive.
 - **DR-6:** `ps` STATUS words, the log path in `-v`, `rm` stops the owner first.
@@ -388,17 +388,17 @@ S3 hand-over and N terminals (`docs/feat/detached-handover.md`):
 
 27. Held ask, no auto-accept: `attach <name>` from another terminal, no `--resume`: TUI opens the session, the prompt appears, "allow": the tool runs once, the turn ends, the relay is gone, the record is on the laptop.
 28. Mid model stream (a long answer): `attach`: the text keeps streaming, no error. `relay.log` shows the drain and `relay exit`.
-29. `--auto-accept`, a turn with several tools: `attach` mid-turn: a notice, and the next ask prompts.
+29. `--auto-accept`, a turn with several tools, `attach` mid-turn: the notice, footer on, the remaining tools run with no prompt; Shift+Tab: the next ask prompts.
 30. `kill -9` the `attach` before the TUI appears: the relay goes on and finishes. (A window of moments: script the `kill -9`.)
 31. `attach` from two terminals at once on a live relay: one takes over, the other joins. Both show the session. (Same: "at once" needs a script.)
 32. Two TUIs, an ask: on both screens. Answer on one: gone from the other, tool once. Answer both quickly: one decision.
-33. Two TUIs: `ps`: `attached (2)`, `-v` with both pids. Quit one: `attached`, the other goes on.
-34. Two TUIs: the newest quits during a long answer: the other's turn ends clean.
+33. Two TUIs: `ps`: `attached (2)`, `-v` with both pids.
+34. Two TUIs, a long answer: the newest `/quit`s, `y`: the turn stops, the other's shell comes back with `session closed by another terminal`, no `RpcError`.
 35. Two TUIs: `/clear` on one: the other's session goes on.
 36. keep, last quit: `ps`: `idle`, container up. `attach <name>`: the same session from the record.
-37. keep=false, two TUIs: quit one: container up. Quit the other: container gone, entry gone, run dir gone, record on the laptop.
+37. keep=false, two TUIs: `/quit`, `y`: both gone, container gone, entry and run dir gone, record on the laptop.
 38. keep=false, `kill -9` the only TUI: container up, `ps` `tui lost`, `rm` clears it.
-39. keep=false, two TUIs, `kill -9` one, quit the other: deleted.
+39. keep=false, two TUIs, `kill -9` one, `/quit` the other: no dialog, deleted.
 40. keep=false, `attach` during the 60 s grace: no removal, or a clean "gone" if it lost the race.
 41. Quit mid-turn after a hand-over, keep: the turn stops, what it did is on the laptop, `attach` reopens it.
 42. Quit mid-turn after a hand-over, keep=false: deleted (Q6 (a)); the attach-time notice said so. With the last save unconfirmed: see item 56.
@@ -416,7 +416,29 @@ S3 hand-over and N terminals (`docs/feat/detached-handover.md`):
 54. SIGTERM on the last TUI on keep=false: the net fires and the workload goes (unlike item 38's `kill -9`).
 55. A keep=false run ended `failed`; `docker rm -f box`; plain `tentacle run --name box` (keep); `attach box`: today's attach, a fresh session, no "quitting removes" notice; its quit leaves the new `box` up. (`ps` still shows the old run's status on that row until the name is run detached or removed.)
 56. keep=false, a pod that stops answering (`docker pause`) or a full laptop disk, quit: `not removed: the last save was not confirmed — tentacle rm <name>`, the workload up; with the pod back, `attach <name>` reopens the session, which was detached, not closed.
-57. keep=false, the only TUI `/clear`s, then quits: a leftover, `not removed: could not tell whether it is in use`; `rm` clears it.
+57. keep=false, the only TUI `/clear`s, then quits: removed.
+
+**After `docs/fix/detach-live.md`.** Re-run list: 27, 29, 34, 35, 36, 37, 39, 41, 42, 56, 57, then 58–76, in the order and with the tmux harness of that doc's "Live test"; 76 by hand; the owner's 12-item list: 5, 6, 7, 10, 11, as these same checks (34/35, 36/41, 37/42, 57, 29).
+
+58. `/quit` alone: no dialog.
+59. `/quit` with another TUI, `n`, and Enter: nothing changes, the turn goes on.
+60. `/quit`, `y` from the OLDER TUI, and from the one that typed the prompt: as 34.
+61. A TUI `/clear`s, the other `/quit`s: no dialog, the first untouched. On keep=false the container stays, the message says why; the first's quit removes it.
+62. keep=false, one TUI, the run's own turn in a long tool, `/quit`: removed, no `not saved`, the interrupted tool in `tentacle --resume`.
+63. keep=false: attach at idle and mid-turn: the notice is on screen in both.
+64. The launcher's line, keep and keep=false: `attach` without `--resume`, at once, works.
+65. Two TUIs: close one window, and `kill -9` one, idle: the other goes on.
+66. Two TUIs: Ctrl+C mid-turn: the turn stops on both, nobody leaves. Ctrl+C idle: that one leaves, no dialog, the other goes on.
+67. `--auto-accept`: a second terminal, and an attach after the relay left: footer on, notice shown.
+68. Two TUIs: Shift+Tab in one: both footers flip at once. With a prompt on both: ON answers it, tool once; OFF leaves it.
+69. A turn typed in one TUI, ON: no prompt stays on the other.
+70. keep, two TUIs: `/quit`, `y`. Once both are gone, `ps`: `idle`, never `tui lost`.
+71. `--auto-accept`: Shift+Tab to OFF, every TUI quits by Ctrl+C or a closed window, the relay gone; a new `attach`: footer OFF, no `auto-accept on` notice, an ask prompts.
+72. Two TUIs, keep=false: `/quit` on both, `y` on both within a second: one delete, the other prints `another terminal is closing the run`; no `not saved`, no `RpcError`.
+73. Two TUIs: `/quit` on A, the dialog open; on B a prompt that makes an ask. `y` on A closes the session and approves nothing: the tool never runs.
+74. `--auto-accept`, an attached TUI: write `garbage` into `<runDir>/auto-accept/<sessionId>`: the footer goes OFF within a second. A new `attach`: OFF. Replace it with a directory: OFF, an ask prompts.
+75. keep=false, relay draining a long answer on the run's session, B on it, A `/clear`ed: A `/quit`s: B's answer goes on, no `RpcError`; A prints `not removed: another terminal is on another session`; B's quit removes.
+76. Close the lid mid-turn (item 16, the owner's item 12): by hand.
 
 ### Open questions for the owner
 

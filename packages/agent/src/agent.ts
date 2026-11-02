@@ -771,6 +771,13 @@ export class Agent {
           yield { type: "turn_end", reason: "cancelled" };
           return;
         }
+        // A failure after text was streamed (a lost model connection): what the
+        // user already saw stays in the history, so a later attach or resume
+        // shows it too (docs/fix/detach-live.md round 10, owner B). Its tool
+        // calls never ran: dropped. The host closes the history with the cause.
+        if (text !== "") {
+          messages.push({ role: "assistant", content: text });
+        }
         throw error;
       }
 

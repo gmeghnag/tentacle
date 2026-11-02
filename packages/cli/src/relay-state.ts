@@ -205,18 +205,22 @@ export interface ResidentUse {
  * `session/list` read for `exitPlan`; `null` when it is not the whole truth (a
  * further page, or its own session missing). A session whose client left is
  * listed with `attached: 0`: it uses nothing, so it does not count.
+ * `ownMayBeAbsent` (a TUI's quit, docs/fix/detach-live.md A5): its session
+ * may not be open (a `/clear`ed one not used yet, one already closed), so a
+ * missing own row is no use of it; the relay never sets it.
  */
 export function residentUseOf(
   list: Pick<SessionListResult, "sessions" | "cursor">,
   id: string,
+  opts: { readonly ownMayBeAbsent?: boolean } = {},
 ): ResidentUse | null {
   const own = list.sessions.find((session) => session.sessionId === id);
-  if (!own || list.cursor !== undefined) {
+  if ((!own && opts.ownMayBeAbsent !== true) || list.cursor !== undefined) {
     return null;
   }
   return {
-    jobs: own.jobs ?? 0,
-    running: own.running,
+    jobs: own?.jobs ?? 0,
+    running: own?.running ?? false,
     others: list.sessions.filter(
       (session) =>
         session.sessionId !== id &&
@@ -242,7 +246,9 @@ export function needsUse(model: RelayModel, keep: boolean): boolean {
  * otherwise a workload is removed only when a run ended cleanly and one fresh
  * read says nobody uses it. Keeping it is the safe side of every unknown: a
  * leftover is one `rm` away, deleted files are gone. Pod-supplied `use` steers
- * only the removal of that same workload.
+ * only the removal of that same workload. A `remove` is still vetoed by the
+ * relay when the laptop's last save did not land (docs/fix/detach-live.md, fix
+ * round 3).
  */
 export function exitPlan(model: RelayModel, keep: boolean, use: ResidentUse | null): ExitPlan {
   // Handed over (docs/feat/detached-handover.md): the TUIs own the workload now.
@@ -271,12 +277,19 @@ export function exitPlan(model: RelayModel, keep: boolean, use: ResidentUse | nu
   return use.others > 0 ? { kind: "leave", why: "another client is using it" } : { kind: "remove" };
 }
 
-/** The state left behind at exit: nothing runs any more. */
+/** The state left behind at exit: nothing runs any more. A `note` stays. */
 export function finalView(model: RelayModel): RelayView {
   const view = relayView(model);
-  return view.state === "starting" ||
-    view.state === "running" ||
-    view.state === "waiting-permission"
-    ? { state: "interrupted", detail: "the relay was stopped before the turn ended" }
-    : view;
+  if (
+    view.state !== "starting" &&
+    view.state !== "running" &&
+    view.state !== "waiting-permission"
+  ) {
+    return view;
+  }
+  const cut = "the relay was stopped before the turn ended";
+  return {
+    state: "interrupted",
+    detail: model.detail !== undefined ? `${cut}; ${model.detail}` : cut,
+  };
 }

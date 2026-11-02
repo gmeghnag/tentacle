@@ -52,7 +52,7 @@ const REFUSALS: readonly string[] = [
 ] satisfies readonly ControlRefusal[];
 
 export type ControlReply =
-  | { readonly ok: true; readonly appVersion?: string; readonly autoAccept?: boolean }
+  | { readonly ok: true; readonly appVersion?: string }
   | { readonly ok: false; readonly reason: ControlRefusal };
 
 export type ControlParse =
@@ -100,8 +100,9 @@ export function parseReply(line: string): ControlReply | null {
   if (r.ok === true) {
     return {
       ok: true,
+      // No `autoAccept`: the run's bit is the laptop's owner.json, never a
+      // second carrier (docs/fix/detach-live.md B1).
       ...(typeof r.appVersion === "string" ? { appVersion: r.appVersion } : {}),
-      ...(typeof r.autoAccept === "boolean" ? { autoAccept: r.autoAccept } : {}),
     };
   }
   if (r.ok === false && typeof r.reason === "string" && REFUSALS.includes(r.reason)) {

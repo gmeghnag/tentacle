@@ -468,6 +468,55 @@ describe("re-attach: commands across a drop", () => {
     );
     client.close();
   });
+
+  test("R7 a SHARED session the daemon no longer has after a drop is closed for this client: told, never recreated from its copy", async () => {
+    // docs/fix/detach-live.md fix round 7 (owner Q5=a). Mutation: drop the
+    // `shared` check in `openOn` → the session is recreated from this copy.
+    const runs = { n: 0 };
+    const target = new Target(makeHost(new GatedModel([[t("one"), done]]), runs));
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S", undefined, { closeIfLast: true });
+    const seen: string[] = [];
+    const reasons: string[] = [];
+    session.watch((activity) => {
+      seen.push(activity.kind);
+      if (activity.kind === "closed") reasons.push(activity.reason);
+    });
+    await drain(session.send("first"));
+    // Closed for all while the link was down: the daemon has never heard of S.
+    target.host = makeHost(new GatedModel([]), runs);
+    target.last?.close();
+    await until(() => seen.includes("closed") || target.host.size > 0, 1000).catch(() => {});
+    expect(target.host.size).toBe(0);
+    expect(seen).toContain("closed");
+    // Q10: it vanished while away; nobody is known to have closed it.
+    expect(reasons).toEqual(["gone"]);
+    await expect(drain(session.send("again"))).rejects.toBeDefined();
+    expect(target.host.size).toBe(0);
+    client.close();
+  });
+
+  test("R7 a session that is NOT shared is still recreated (the lone client of a pod that forgot it)", async () => {
+    const runs = { n: 0 };
+    const target = new Target(makeHost(new GatedModel([[t("one"), done]]), runs));
+    const client = new RemoteClient(target.connect(), new PermissionBroker(), undefined, {
+      channelFactory: async () => target.connect(),
+      random: () => 0,
+    });
+    await client.initialize();
+    const session = client.newSession(undefined, "S");
+    await drain(session.send("first"));
+    await session.snapshot();
+    target.host = makeHost(new GatedModel([]), runs);
+    target.last?.close();
+    await until(() => target.host.size > 0, 1000);
+    expect(target.host.size).toBe(1);
+    client.close();
+  });
 });
 
 /** An in-memory record store (what a `serve` restart reads back). */
@@ -637,6 +686,45 @@ const outcome = (p: Promise<unknown>, ms = 500): Promise<string> =>
 /** A long reply: the turn spans many macrotasks, so a cancel can still land mid-turn. */
 const long = (n: number): Step[] => [...Array.from({ length: n }, (_, i) => t(`${i} `)), done];
 
+describe("attach mid-turn behind a long reply (docs/fix/detach-live.md, round 9 / KO 3)", () => {
+  test("a replay past the client's buffer bound converges: live, every delta once, in order, no give-up", async () => {
+    // The cut is the turn's start: the attach replays every delta streamed so
+    // far — more than the old 2048-update buffer, whose eviction lost the
+    // replay's head on every reopen → "keeps skipping events; giving up".
+    const n = 2048 + 200;
+    const model = new GatedModel([
+      [...Array.from({ length: n }, (_, i) => t(`${i} `)), { kind: "gate" }, t("end"), done],
+    ]);
+    const target = new Target(makeHost(model, { n: 0 }));
+    const a = new RemoteClient(target.connect(), new PermissionBroker());
+    await a.initialize();
+    const turn = drain(a.newSession(undefined, "S").send("go"));
+    expect(await until(() => model.waiting)).toBe(true);
+    const b = new RemoteClient(target.connect(), new PermissionBroker());
+    await b.initialize();
+    const texts: string[] = [];
+    let resets = 0;
+    const session = b.newSession(undefined, "S", undefined, { attach: {} });
+    session.watch((activity) => {
+      if (activity.kind === "history") resets += 1;
+      if (activity.kind !== "turn") return;
+      void (async () => {
+        for await (const event of activity.events) {
+          if (event.type === "text") texts.push(event.delta);
+        }
+      })();
+    });
+    expect(await outcome(session.open(), 5000)).toBe("completed");
+    model.open();
+    await turn;
+    expect(await until(() => texts.at(-1) === "end")).toBe(true);
+    expect(texts).toEqual([...Array.from({ length: n }, (_, i) => `${i} `), "end"]);
+    expect(resets).toBeLessThanOrEqual(1);
+    a.close();
+    b.close();
+  }, 30_000);
+});
+
 describe("re-attach: review findings (docs/feat/client-reattach.md, Review)", () => {
   test("finding 1: Esc while down, for a prompt that never reached the daemon, cancels the turn", async () => {
     // Mutation: drop the cancel on the prompt's ack → the cancel sent from
@@ -710,7 +798,11 @@ describe("re-attach: review findings (docs/feat/client-reattach.md, Review)", ()
     );
     loss.on = false;
     await until(() => host.get("S")?.running === false);
-    expect(await outcome(drain(session.send("two")))).toMatch(/could not be resumed/);
+    const refused = await outcome(drain(session.send("two")));
+    expect(refused).toMatch(/could not be resumed/);
+    // KO 3 (docs/fix/detach-live.md fix round 6): the cause rides the error,
+    // not only `onError` (a TUI's buffered sink the user may never see).
+    expect(refused).toMatch(/could not be resumed: .*giving up on this session/);
     expect(model.calls).toBe(1); // never sent to the daemon
     client.close();
   });
@@ -756,7 +848,9 @@ describe("re-attach: review findings (docs/feat/client-reattach.md, Review)", ()
     // A raw command (no turn listener to fail it): only `whenLive` can settle it.
     const next = outcome(client.prompt("S", "t2", "two"), 1000); // waits for the link
     dial.release();
-    expect(await next).toMatch(/could not be resumed/);
+    const refused = await next;
+    expect(refused).toMatch(/could not be resumed/);
+    expect(refused).toMatch(/could not be resumed: .*open refused/); // KO 3: the cause
     expect(model.calls).toBe(1);
     client.close();
   });

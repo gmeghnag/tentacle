@@ -138,6 +138,11 @@ export class SessionSaver {
     }
   }
 
+  /** Synchronous `drain() → []`: no save pending and none whose last one failed (an exit net's check). */
+  clean(): boolean {
+    return this.pending.size === 0 && ![...this.states.values()].some((state) => state.failing);
+  }
+
   private pendingIds(): string[] {
     return [...new Set(this.pending.values())];
   }

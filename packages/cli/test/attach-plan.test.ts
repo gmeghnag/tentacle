@@ -122,17 +122,36 @@ describe("H10 planAttach (docs/feat/detached-handover.md), first match wins", ()
 
 describe("H11 quitPlan: the only place a TUI's removal is decided", () => {
   const use = { jobs: 0, running: false, others: 0 };
-  const base = { keep: false, othersAttached: 0, saved: true, sessionsKept: 0, use };
+  const base = {
+    keep: false,
+    othersAttached: 0,
+    othersOnSession: 0,
+    saved: true,
+    sessionsKept: 0,
+    use,
+  };
 
-  test("every row, in order", () => {
-    // Mutations: drop `othersAttached`; drop `sessionsKept`; count `running` as a hold.
-    expect(quitPlan({ ...base, keep: true, othersAttached: 0 })).toEqual({ kind: "stay" });
-    expect(quitPlan({ ...base, othersAttached: 1 })).toEqual({ kind: "stay" });
-    expect(quitPlan({ ...base, saved: false, sessionsKept: 1 })).toEqual({
+  test("D9 every row, in order (docs/fix/detach-live.md A5)", () => {
+    // Mutations: drop `othersAttached`; drop `use.others`; swap `saved` and
+    // `othersAttached`; drop `sessionsKept`; count `running` as a hold.
+    expect(quitPlan({ ...base, keep: true, othersAttached: 1, saved: false })).toEqual({
+      kind: "stay",
+    });
+    expect(quitPlan({ ...base, saved: false, othersAttached: 1, sessionsKept: 1 })).toEqual({
       kind: "stay",
       why: "the last save was not confirmed",
     });
-    expect(quitPlan({ ...base, sessionsKept: 1 })).toEqual({
+    // The confirmed `/quit` waited for its session's others: one left is on another session.
+    expect(quitPlan({ ...base, othersAttached: 1, sessionsKept: 1, use: null })).toEqual({
+      kind: "stay",
+      why: "another terminal is on another session",
+    });
+    // One still on THIS session after the wait is hung: said as such.
+    expect(quitPlan({ ...base, othersAttached: 1, othersOnSession: 1 })).toEqual({
+      kind: "stay",
+      why: "another terminal did not leave the session",
+    });
+    expect(quitPlan({ ...base, sessionsKept: 1, use: null })).toEqual({
       kind: "stay",
       why: "the daemon did not confirm the session closed",
     });
@@ -142,7 +161,7 @@ describe("H11 quitPlan: the only place a TUI's removal is decided", () => {
     });
     expect(quitPlan({ ...base, use: { ...use, others: 1 } })).toEqual({
       kind: "stay",
-      why: "another client is using it",
+      why: "another session is in use",
     });
     expect(quitPlan(base)).toEqual({ kind: "remove" });
   });
@@ -153,10 +172,10 @@ describe("H11 quitPlan: the only place a TUI's removal is decided", () => {
     });
   });
 
-  test("keep wins over everything; another TUI wins over a doubt", () => {
+  test("keep wins over everything; an unconfirmed save is said before another terminal", () => {
     expect(quitPlan({ ...base, keep: true, saved: false })).toEqual({ kind: "stay" });
     expect(
       quitPlan({ ...base, othersAttached: 2, saved: false, sessionsKept: 1, use: null }),
-    ).toEqual({ kind: "stay" });
+    ).toEqual({ kind: "stay", why: "the last save was not confirmed" });
   });
 });

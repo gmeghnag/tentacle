@@ -5,6 +5,7 @@ import {
   type DisplayState,
   type NoticeItem,
   appendBackgroundExit,
+  appendNotice,
   applyEvent,
   applySessionEvent,
   backgroundExitNotice,
@@ -15,6 +16,7 @@ import {
   startTurn,
   withdrawUserTurn,
 } from "../src/state.ts";
+import { commitWarmed } from "../src/turn-feed.ts";
 
 function fold(state: DisplayState, events: AgentEvent[], from = 1000): DisplayState {
   let current = state;
@@ -391,5 +393,23 @@ describe("withdrawn prompt / an end with no outcome", () => {
     expect(ended.running).toBe(false);
     expect(ended.lastStopReason).toBeNull();
     expect(ended.items).toEqual(running.items);
+  });
+});
+
+// docs/fix/detach-live.md A6: a host notice survives the attach's history.
+describe("D15 host notices survive a history", () => {
+  test("resetHistory keeps a host notice after the history and drops a plain one; commitWarmed keeps it once", () => {
+    // Mutations: `resetHistory` filters every item; the flag never set.
+    const plain = appendNotice(initialState, "plain");
+    const hosted = appendNotice(plain, "from the host", { host: true });
+    const reset = resetHistory(hosted, [{ role: "user", content: "hello" }]);
+    expect(reset.items.map((i) => (i.kind === "notice" ? `notice:${i.text}` : i.kind))).toEqual([
+      "user",
+      "notice:from the host",
+    ]);
+    // A warm that began on `hosted` and committed `reset`: the notice once.
+    expect(
+      commitWarmed(hosted.items, hosted.items, reset.items).filter((i) => i.kind === "notice"),
+    ).toHaveLength(1);
   });
 });

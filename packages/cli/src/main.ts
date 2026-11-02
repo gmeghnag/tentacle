@@ -27,7 +27,7 @@ import { DELETE_POD_SUBCOMMAND, deletePodFromEnv } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import { type SessionController, pickSession, startTui } from "@tentacle/tui";
 import { type AttachPlan, planAttach } from "./attach-plan.ts";
-import { joinRun } from "./attach-run.ts";
+import { type Joined, joinRun } from "./attach-run.ts";
 import {
   type TentacleConfig,
   configDirFromEnv,
@@ -93,6 +93,7 @@ import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
 import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
 import { render } from "./render.ts";
+import { runModelPlan } from "./run-model.ts";
 import {
   RELAY_SUBCOMMAND,
   RUN_STATE_VERSION,
@@ -106,7 +107,12 @@ import {
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { startTerminal } from "./terminal.ts";
-import { type TuiSessions, openTuiSessions, runSessionTui } from "./tui-sessions.ts";
+import {
+  type TuiSessions,
+  openTuiSessions,
+  readSessionRecord,
+  runSessionTui,
+} from "./tui-sessions.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { runUpdate, spawnVersion } from "./update.ts";
 import { APP_VERSION } from "./version.ts";
@@ -137,8 +143,10 @@ Usage:
   tentacle run --detach --prompt <text|-> [--auto-accept[=true|false]] --image <ref> [...] [<name>]
                                 the same with no TUI: a background laptop process runs the
                                 turn, serves the model and saves it, then leaves once the
-                                session is idle. It waits at the first permission unless
-                                --auto-accept (pod tool asks only, allow once, logged).
+                                session is idle. A tool that needs permission waits for
+                                you unless --auto-accept (pod tool asks only, allow once,
+                                logged; on for the terminals that attach, Shift+Tab in
+                                any of them flips it for all on the session).
                                 kill <pid> stops it; attach <name> takes it over, mid-turn.
                                 --keep=false removes the workload when the run goes idle
                                 or is stopped (a failed or interrupted run keeps it). On
@@ -152,9 +160,10 @@ Usage:
                                 no --engine: its engine and location are looked up.
                                 On a detached run it opens the run's session (from a
                                 terminal, in the folder it ran in); more terminals
-                                join it. Quitting ends the run once no other terminal
-                                is attached; with --keep=false that last quit
-                                removes the workload, a running turn included
+                                join it. /quit closes the session for every terminal
+                                on it (y/N when others are attached), a running turn
+                                stops; with --keep=false it removes the workload if
+                                no other session is in use. Ctrl+C idle leaves alone
   tentacle ps [--engine <e>] [-q] [-v]
                                 list the pods/containers run kept, checked against
                                 their engine, with a detached run's state (-q names
@@ -718,15 +727,17 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // decouple the two — a second broker's default `allowAll` approves everything
   // and the TUI prompt is never reached. Built with `holdUntilSet`, so a request
   // that arrives before the TUI mounts waits for its prompt instead.
-  // `finish`: a detached run's quit (`attach-run.ts`) instead of `dispose`;
-  // told whether Ink ran (a TUI that never mounted quit nothing).
+  // `run`: a detached run's TUI (`attach-run.ts`): its `finish` is the quit
+  // instead of `dispose`, told whether Ink ran (a TUI that never mounted quit
+  // nothing); its `runQuit` and `createSession` go to the TUI.
   const runEngineTui = async (
     runtime: Awaited<ReturnType<typeof startEngineRuntime>>,
     permissions: PermissionBroker,
     sessions: TuiSessions,
-    finish?: (inkRan: boolean) => Promise<void>,
+    run?: Pick<Joined, "finish" | "runQuit" | "createSession" | "autoAccept">,
   ): Promise<number> => {
     let inkRan = false;
+    const finish = run?.finish;
     await runSessionTui(sessions, {
       start: async (sessionOptions) => {
         await (io.startTui ?? startTui)(null, {
@@ -736,7 +747,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           permissions,
           jobs: runtime.jobs,
           autoWakeOnJobExit: config.autoWake,
-          createSession: runtime.createSession,
+          // A detached run's TUI: its presence follows `/clear`, its `/quit`
+          // closes the session for all (docs/fix/detach-live.md A2/A4).
+          createSession: run?.createSession ?? runtime.createSession,
+          ...(run ? { runQuit: run.runQuit, autoAccept: run.autoAccept } : {}),
           link: runtime.link,
           mcpStatus: runtime.mcpStatus,
           // A fact of the runtime this laptop started, never guessed: a
@@ -881,6 +895,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       ...(binDir ? { binDir } : {}),
       ...(wsPlan.kind === "mount" ? { mount: wsPlan.mount.target } : {}),
       model: config.model,
+      ...(config.profile !== undefined ? { profile: config.profile } : {}),
       created,
     });
     const recordKeptEntry = (keptName: string): (() => void) => {
@@ -916,8 +931,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       try {
         workload = await (io.provisionWorkload ?? provisionWorkload)(config, {
           ...workloadDeps,
-          // A plain `attach` would open a fresh session (D5).
-          keepHint: (keptName) => `${workloadDeps.keepHint?.(keptName)} --resume ${sessionId}`,
           ...(kept.keep ? {} : { removedAtEnd: true }),
           recordKept: (keptName) => {
             const undo = recordKeptEntry(keptName);
@@ -1085,6 +1098,42 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       const at = askedWhere(kind);
       return at === null ? null : locationKey(at);
     };
+    /**
+     * Owner A (docs/fix/detach-live.md round 10): a kept workload's attach talks
+     * to the run's model, shown in the status bar, unless this command named
+     * one. `false`: the run's profile no longer loads (said).
+     */
+    let runModelOf: string | null = null;
+    const useRunModel = async (entry: KeptEntry): Promise<boolean> => {
+      if (runModelOf === entry.created) {
+        return true;
+      }
+      runModelOf = entry.created;
+      const plan = runModelPlan(entry, config, {
+        profile: globals.profile !== undefined || Boolean(process.env.TENTACLE_PROFILE),
+        model: Boolean(process.env.TENTACLE_MODEL),
+      });
+      if (plan.kind === "as-is") {
+        return true;
+      }
+      try {
+        const loaded =
+          plan.profile === config.profile
+            ? config
+            : await loadConfig({
+                cwd: process.cwd(),
+                scaffold: false,
+                ...(plan.profile !== undefined ? { profile: plan.profile } : {}),
+              });
+        config = loaded.model === plan.model ? loaded : { ...loaded, model: plan.model };
+        return true;
+      } catch (error) {
+        write(
+          `\n[config error] ${untrustedText(name)} was started with profile ${untrustedText(plan.profile ?? "(none)")}: ${error instanceof Error ? error.message : String(error)} — pass --profile to choose one\n`,
+        );
+        return false;
+      }
+    };
     const lookup = explicit ? undefined : resolveKeptAttach(name, keptDir(config.configDir));
     for (const problem of lookup?.problems ?? []) {
       writeErr(`kept index: ${untrustedText(problem)} — left untouched\n`);
@@ -1115,6 +1164,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         const places = { run: placeText(run.entry), asked: at === null ? null : placeText(at) };
         const pid = run.holder?.pid ?? 0;
         write(`\n[error] ${elsewhereMessage(name, { pid, owner: run.owner }, places)}\n`);
+        return 1;
+      }
+      if (!(await useRunModel(run.entry))) {
         return 1;
       }
       const plan = planAttach({
@@ -1155,6 +1207,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             undefined,
             [titleConfigNotice(config)].filter((text): text is string => text !== null),
           ),
+        readRecord: () =>
+          readSessionRecord(
+            { root: join(config.configDir, "sessions"), cwd: config.cwd },
+            plan.sessionId,
+          ),
         host: () => {
           write(
             `[${runNoun}] resolved ${untrustedText(name)} → ${run.entry.engine}, ${untrustedText(whereOf(run.entry))}\n`,
@@ -1184,7 +1241,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             notify: (text) => sessions.notices.notify(text),
           });
         },
-        armNet: (host, othersAlive) => armSharedExitNet(host, name, othersAlive),
+        armNet: (host, othersAlive, saved, onKept) =>
+          armSharedExitNet(host, name, othersAlive, saved, onKept),
         // No hand-over can happen (no socket, skew, another session): S2's refusal.
         relayRefusal: () => attachRefusal(name, { kind: "refuse", why: "relay" }, run, runNoun),
       });
@@ -1200,9 +1258,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       }
       // The session's `history` activity draws an attached screen, not the record.
       const sessions = joined.attached ? { ...joined.sessions, resume: null } : joined.sessions;
-      return await runEngineTui(joined.runtime, joined.permissions, sessions, joined.finish);
+      return await runEngineTui(joined.runtime, joined.permissions, sessions, joined);
     }
     const keptEntry = lookup?.resolved.kind === "one" ? lookup.resolved.match.entry : undefined;
+    if (keptEntry && !(await useRunModel(keptEntry))) {
+      return 1;
+    }
     const engine = keptEntry
       ? keptEntry.engine
       : (asked ?? selectEngine("attach", attachFlags, attachBools));

@@ -300,6 +300,22 @@ describe("tentacle ps: detached runs (docs/feat/detached-relay-lifecycle.md L28)
     expect(text).toContain("running · relay lost");
   });
 
+  test("R6 keep=false, its relay gone mid-run: `not saved` while the workload is there, not once it is gone", async () => {
+    // Owner, 2026-11-02. A workload the net deleted (its save confirmed) is `gone`, nothing more.
+    const text = await rows((dir) => {
+      writeFileSync(join(dir, ".lock.1"), "");
+      writeOwner(dir, { ...ownerOf("running"), keep: false });
+    });
+    expect(text).toContain("running · relay lost · not saved");
+    const docker = new FakeEngine(); // nothing named `a`: gone
+    const e = entry("a");
+    const s = setup([e], { [key]: docker });
+    writeOwner(ensureRunDir(runDirIn(s.dir, e)), { ...ownerOf("running"), keep: false });
+    expect(await psCommand({}, s.deps({ procOf }))).toBe(0);
+    expect(s.text()).toContain("gone");
+    expect(s.text()).not.toContain("not saved");
+  });
+
   test("a workload left behind: the reason reaches `ps`, sanitised", async () => {
     // Mutation: drop `detail` for `idle` → the owner sees a plain `idle`.
     const text = await rows((dir) => {

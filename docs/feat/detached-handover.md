@@ -8,6 +8,7 @@
 - **Q1:** quit after a hand-over (Ctrl+C or `/quit`) ends the run: a last save, then `session/close{ifLast}`, never `release`. The workload follows the run's `keep` as on a plain `run` quit: keep → stays, `rm` is the user's; keep=false → deleted, the TUI inheriting the relay's ownership of the exit net and of the delete.
 - **Q2:** decided by Q1, option (b) for keep=false.
 - **Q3 (b):** a second `attach` JOINS the same session as a second client, each laptop process with its own single broker. Only the LAST client closes the session and runs the keep=false delete.
+- **Superseded by `docs/fix/detach-live.md` (owner, 2026-11-01):** Q1, Q2, Q3's "LAST client" and P9 for the run's turn. `/quit` closes the session for every TUI on it, and the TUI closing it does the delete; auto-accept is inherited and shared. The text below is left as history.
 - **Q4 (a):** owner tracking and `attached` on detached-origin runs only.
 - **Q5 (a):** `attach <name>` on an ended detached run reopens its session; `/clear` for a fresh one.
 - **Q6 (a):** keep=false quit mid-turn (or after a failed/interrupted end) DELETES: a quit is an explicit stop; the attach-time notice says so.

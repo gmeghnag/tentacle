@@ -25,7 +25,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { keptDir, keptFileName } from "./kept-index.ts";
 import type { KeptEntry } from "./kept.ts";
 import { type ProcOf, type ProcStat, holderAlive, procStat } from "./pod-resident.ts";
@@ -85,6 +85,12 @@ export interface OwnerRecord {
   readonly control?: string;
   /** The kept entry's `created`: ties the record to THAT workload (a run dir outlives a reused name). */
   readonly created?: string;
+  /**
+   * The id of the run's own turn, minted by its relay (docs/fix/detach-live.md
+   * B2): a TUI that takes the run over owns that turn, so auto-accept may
+   * answer its asks. Absent: it stays foreign (the safe side).
+   */
+  readonly runTurnId?: string;
 }
 
 export type OwnerRead =
@@ -203,8 +209,28 @@ export function readOwner(dir: string): OwnerRead {
       ...(str(r.cwd) ? { cwd: r.cwd } : {}),
       ...(str(r.control) ? { control: r.control } : {}),
       ...(str(r.created) ? { created: r.created } : {}),
+      ...(str(r.runTurnId) ? { runTurnId: r.runTurnId } : {}),
     },
   };
+}
+
+/**
+ * `<runDir>/auto-accept/<sessionId>`: that session's auto-accept, shared by
+ * the TUIs on it (docs/fix/detach-live.md B3). Laptop-only, like the run dir.
+ */
+export const autoAcceptPath = (dir: string, sessionId: string): string =>
+  join(dir, "auto-accept", sessionId);
+
+/** The file's one word; `null` for anything else (OFF for the caller, never ON). */
+export function parseAutoAccept(text: string): boolean | null {
+  const word = text.trim();
+  return word === "on" ? true : word === "off" ? false : null;
+}
+
+/** Write that file: 0600, temp + rename, in a 0700 dir. Throws on failure. */
+export function writeAutoAccept(path: string, on: boolean): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeAtomic(path, on ? "on" : "off");
 }
 
 /** `<runDir>/attach`: one presence file per TUI on the run. */
@@ -216,17 +242,49 @@ function presenceName(pid: number, start: string | undefined): string {
 }
 
 /**
- * Say "this TUI is on the run": an empty 0600 file named after the process
- * (pid + start time, the lock's own identity). Not exclusive: N TUIs join one
- * run. Returns its path, for `removePresence`. Throws when it cannot be written:
- * without it the exit net and the last quit would lie.
+ * Say "this TUI is on the run": a 0600 file named after the process (pid +
+ * start time, the lock's own identity) whose body is the session it is on
+ * (docs/fix/detach-live.md A4). Not exclusive: N TUIs join one run. Returns
+ * its path, for `setPresenceSession` and `removePresence`. Throws when it
+ * cannot be written: without it the exit net and the last quit would lie.
  */
-export function writePresence(dir: string, pid: number, procOf: ProcOf): string {
+export function writePresence(dir: string, pid: number, procOf: ProcOf, sessionId = ""): string {
   const attach = attachDirOf(dir);
   mkdirSync(attach, { recursive: true, mode: 0o700 });
   const path = join(attach, presenceName(pid, procOf(pid)?.start));
-  writeFileSync(path, "", { mode: 0o600 });
+  writeFileSync(path, sessionId, { mode: 0o600 });
   return path;
+}
+
+/**
+ * The TUI moved to another session (`/clear`): its presence says so. In
+ * place, not temp + rename: `attachers` sweeps any other name in the dir.
+ */
+export function setPresenceSession(path: string, sessionId: string): void {
+  writeFileSync(path, sessionId, { mode: 0o600 });
+}
+
+/**
+ * Other live TUIs on `sessionId` (laptop truth: the presence files; a TUI on
+ * another session of the run, or a draining relay, is not counted).
+ */
+export function othersOnSession(
+  dir: string,
+  procOf: ProcOf,
+  pid: number,
+  sessionId: string,
+): number {
+  return attachers(dir, procOf).filter((a) => a.pid !== pid && a.sessionId === sessionId).length;
+}
+
+/** A presence file's session id; `undefined` when it names none. */
+function presenceSession(path: string): string | undefined {
+  try {
+    const text = readFileSync(path, "utf8").trim();
+    return /^[\w-]{1,128}$/.test(text) ? text : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Idempotent. */
@@ -237,19 +295,19 @@ export function removePresence(path: string): void {
 /**
  * The TUIs on the run now, by their presence files, with the lock's liveness
  * test (`holderAlive`): a dead process and a reused pid (another start time)
- * are swept. No dir: none.
+ * are swept. No dir: none. `sessionId`: the session each is on, if it says.
  */
 export function attachers(
   dir: string,
   procOf: ProcOf,
-): readonly { readonly pid: number; readonly path: string }[] {
+): readonly { readonly pid: number; readonly path: string; readonly sessionId?: string }[] {
   let names: string[];
   try {
     names = readdirSync(attachDirOf(dir));
   } catch {
     return [];
   }
-  const live: { pid: number; path: string }[] = [];
+  const live: { pid: number; path: string; sessionId?: string }[] = [];
   for (const name of names) {
     const match = /^(\d+)(?:-(\d+))?$/.exec(name);
     const path = join(attachDirOf(dir), name);
@@ -260,7 +318,8 @@ export function attachers(
       pid > 0 &&
       holderAlive({ pid, start: match[2] }, procOf)
     ) {
-      live.push({ pid, path });
+      const sessionId = presenceSession(path);
+      live.push(sessionId !== undefined ? { pid, path, sessionId } : { pid, path });
       continue;
     }
     rmSync(path, { force: true });
@@ -371,7 +430,8 @@ function ownerText(owner: OwnerRecord, alive: boolean, now: number): string {
       // `detail` (relay.ts `not removed: …`): `ps` must show it, not a plain `idle`.
       return detail !== undefined ? `${owner.state} (${detail})` : owner.state;
     case "interrupted":
-      return owner.state;
+      // The relay's save veto (`not saved — workload kept: …`) is in `detail`.
+      return detail !== undefined ? `${owner.state} (${detail})` : owner.state;
     case "attached":
       // No presence is alive (`statusOf` checked): the last TUI went without a quit.
       return "tui lost";
@@ -384,6 +444,11 @@ function ownerText(owner: OwnerRecord, alive: boolean, now: number): string {
  * record (a lost write cannot lie), except a live relay's own row. A TUI
  * record's lock holder is the last TUI closing the run. `null`: no relay ever.
  * Sanitised: the text comes from a file.
+ *
+ * A keep=false run whose owner went mid-run (`lost`) is `not saved`
+ * (docs/fix/detach-live.md R6, owner 2026-11-02): its exit net deletes only a
+ * save it confirmed, a crash's state is unknown, so the workload stays until
+ * `rm` (`statusCell` shows this text only while the workload is there).
  */
 export function statusOf(
   read: OwnerRead,
@@ -395,8 +460,12 @@ export function statusOf(
   if (!(alive && !tui) && attached > 0) {
     return attached === 1 ? "attached" : `attached (${attached})`;
   }
+  const lost = (owner: OwnerRecord): string => {
+    const text = ownerText(owner, false, now);
+    return !ownerKeeps(owner) && text.endsWith(" lost") ? `${text} · not saved` : text;
+  };
   if (tui && read.kind === "owner") {
-    return alive ? "closing" : ownerText(read.owner, false, now);
+    return alive ? "closing" : lost(read.owner);
   }
   const live = (text: string): string => (alive ? `detached · ${text}` : text);
   switch (read.kind) {
@@ -405,7 +474,7 @@ export function statusOf(
     case "unknown":
       return live("unknown owner");
     case "owner": {
-      const text = live(ownerText(read.owner, alive, now));
+      const text = alive ? live(ownerText(read.owner, true, now)) : lost(read.owner);
       return alive && read.owner.autoAccept ? `${text} · auto` : text;
     }
   }

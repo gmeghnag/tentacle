@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionUpdateParams } from "@tentacle/protocol";
 import {
-  MAX_BUFFERED_UPDATES,
+  MAX_BUFFERED_BYTES,
   MAX_FORCED_REOPENS,
   type StreamInput,
   type StreamState,
   type StreamStep,
+  heldList,
+  heldOf,
   initialStream,
   reduceStream,
   sinceOf,
@@ -219,7 +221,7 @@ describe("session stream reducer (pure)", () => {
       { ...live(3), phase: "down" },
     );
     expect(r.out).toEqual(["4:agent_message_chunk", "5:history_replaced"]);
-    expect(r.state.buffer.map((p) => p.seq)).toEqual([6]);
+    expect(heldList(r.state.buffer).map((p) => p.seq)).toEqual([6]);
     expect(run([snap(5, null, "e2")], r.state).out).toEqual([
       "reset(1, turn=null, keep=)",
       "6:agent_message_chunk",
@@ -309,25 +311,67 @@ describe("session stream reducer (pure)", () => {
     expect(r.state.phase).toBe("closed");
   });
 
-  test("the buffer is bounded: past the cap the oldest go, and the hole they leave forces a resync", () => {
-    // Review finding 3: a replay (or a hostile pod that never answers `open`)
-    // must not grow the laptop's memory without limit.
-    const extra = 100;
+  test("a long replay is held whole: thousands of updates past the cut all apply, once, in order", () => {
+    // docs/fix/detach-live.md round 9: the daemon replays the whole round in
+    // flight; a count bound (2048) lost its head on every reopen → give-up.
+    const n = 10_000;
     let state: StreamState = reduceStream(
       { ...live(3), phase: "down" },
       { kind: "open_sent" },
     ).state;
-    for (let seq = 4; seq < 4 + MAX_BUFFERED_UPDATES + extra; seq++) {
+    for (let seq = 4; seq < 4 + n; seq++) {
       state = reduceStream(state, upd(chunk(seq))).state;
     }
-    expect(state.buffer).toHaveLength(MAX_BUFFERED_UPDATES);
-    expect(state.buffer[0]?.seq).toBe(4 + extra); // the newest are kept
-    // An out-of-order arrival inside the window still lands in seq order, once.
-    state = reduceStream(state, upd(chunk(4 + extra + 1))).state;
-    expect(state.buffer).toHaveLength(MAX_BUFFERED_UPDATES);
+    // An out-of-order duplicate inside the window lands once.
+    state = reduceStream(state, upd(chunk(4 + n / 2))).state;
+    expect(heldList(state.buffer).map((p) => p.seq)).toEqual(
+      Array.from({ length: n }, (_, i) => 4 + i),
+    );
     const r = run([openReplay()], state);
-    expect(r.out).toEqual([]); // nothing applied over the hole
-    expect(r.effects).toEqual(["reopen"]);
+    expect(r.out).toHaveLength(n);
+    expect(r.effects).toEqual([]);
+    expect(r.state).toMatchObject({ phase: "live", applied: 3 + n });
+  });
+
+  test("the held updates stay pure: two steps from ONE state never see each other's update", () => {
+    const opening = run([{ kind: "open_sent" }, upd(chunk(4)), upd(chunk(5))], {
+      ...live(3),
+      phase: "down",
+    }).state;
+    const a = reduceStream(opening, upd(chunk(6, "a"))).state;
+    const b = reduceStream(opening, upd(chunk(6, "b"))).state;
+    const c = reduceStream(opening, upd(chunk(7))).state;
+    expect(heldList(opening.buffer).map((p) => p.seq)).toEqual([4, 5]);
+    expect(heldList(a.buffer).map((p) => p.update)).toEqual([
+      chunk(4).update,
+      chunk(5).update,
+      chunk(6, "a").update,
+    ]);
+    expect(heldList(b.buffer).map((p) => p.update)).toEqual([
+      chunk(4).update,
+      chunk(5).update,
+      chunk(6, "b").update,
+    ]);
+    expect(heldList(c.buffer).map((p) => p.seq)).toEqual([4, 5, 7]);
+  });
+
+  test("the buffer is bounded in bytes: past the cap an update is dropped, and the hole forces a resync", () => {
+    // Review finding 3: a hostile pod that never answers `open` must not grow
+    // the laptop's memory without limit.
+    const big = "x".repeat(1024 * 1024);
+    const fit = Math.floor(MAX_BUFFERED_BYTES / JSON.stringify(chunk(4, big)).length);
+    let state: StreamState = reduceStream(
+      { ...live(3), phase: "down" },
+      { kind: "open_sent" },
+    ).state;
+    for (let seq = 4; seq < 4 + fit + 5; seq++) {
+      state = reduceStream(state, upd(chunk(seq, big))).state;
+    }
+    expect(state.buffer.length).toBe(fit);
+    expect(state.buffer.bytes).toBeLessThanOrEqual(MAX_BUFFERED_BYTES);
+    const r = run([openReplay(), upd(chunk(4 + fit + 5))], state);
+    expect(r.out).toHaveLength(fit); // what it held applies
+    expect(r.effects).toEqual(["reopen"]); // the dropped ones are a gap
   });
 });
 
@@ -366,7 +410,11 @@ describe("the turn of each update (T-Br)", () => {
   });
 
   test("after a reset, updates carry the snapshot's turn", () => {
-    const resyncing: StreamState = { ...initialStream, phase: "resyncing", buffer: [chunk(6)] };
+    const resyncing: StreamState = {
+      ...initialStream,
+      phase: "resyncing",
+      buffer: heldOf([chunk(6)]),
+    };
     const step = reduceStream(resyncing, {
       kind: "snapshot",
       messages: [],

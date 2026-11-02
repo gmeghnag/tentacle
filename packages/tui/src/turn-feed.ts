@@ -32,7 +32,7 @@ export type SessionActivity =
       readonly reason: "compact" | "context_reset" | null;
     }
   /** The session ended daemon-side (another device's close / delete, the reaper). */
-  | { readonly kind: "closed"; readonly reason: "closed" | "deleted" };
+  | { readonly kind: "closed"; readonly reason: "closed" | "deleted" | "gone" };
 
 export type FeedStep = "consume" | "hold" | "history" | "closed";
 
@@ -91,8 +91,11 @@ export const FOREIGN_COMPACTED_NOTICE = "_the conversation was compacted on anot
  * closed one is archived, so `/sessions` (when the runtime lists) can reopen
  * it; a deleted one cannot come back.
  */
-export function closedNotice(reason: "closed" | "deleted", canList = false): string {
+export function closedNotice(reason: "closed" | "deleted" | "gone", canList = false): string {
   const next = "what you type next starts a new session";
+  if (reason === "gone") {
+    return `_this session ended on the daemon while the link was down — ${next}_`;
+  }
   return reason === "deleted"
     ? `_this session was deleted on another device — ${next}_`
     : `_this session was closed on another device — ${next}${canList ? " (/sessions to reopen it)" : ""}_`;

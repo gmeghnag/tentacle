@@ -197,6 +197,8 @@ already has the TUI input).
 
 **Owner decision (2026-10-27): (A) by default** — a detached run waits at the first ask — UNLESS it was launched with `--auto-accept`, or the TUI was already in auto-accept mode when the user typed `/detach` (the relay inherits that mode). Auto-accept keeps the (C) limits: pod-side asks only, allow-once, logged; laptop-side gates never auto-approved (AGENTS §7).
 
+**Amended by `docs/fix/detach-live.md` (owner, 2026-11-01):** auto-accept does not end with the relay. It is ON for every TUI of an `--auto-accept` run (the bit from `owner.json` only), and Shift+Tab is per session, shared, laptop-side.
+
 Options: (A) no auto-accept: a detached run stalls on the first ask until
 someone attaches; (B) auto-accept every pod-side ask; (C) B but scoped.
 **Recommendation:** (C), default **off**, explicit opt-in:
@@ -588,6 +590,10 @@ to `ignore` or the log, `cwd = config.cwd`, and `unref`'d. What it does:
 - **DR-8:** `owner.json` present and `describe(name) === null` → exit 1 with
   "<name>: the <noun> no longer exists — session <uid> cannot be re-attached;
   its transcript is kept on this laptop". There is no fallback.
+
+**Added by `docs/fix/detach-live.md`:** `/detach` is also how one terminal leaves
+while the others continue, mid-turn included (`/quit` closes the session for all).
+It must drain a model call this client serves, bound and wait as the relay's.
 
 **`/detach` (S5).** `commands.ts` gets `/detach`. It is available only when
 `daemonInPod` (`main.ts:669`); elsewhere it shows a notice. The App only calls

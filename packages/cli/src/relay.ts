@@ -7,8 +7,10 @@
  *
  * `run --detach` provisions in the foreground, then `launchRelay` spawns this
  * detached and waits for it to start. The relay leaves when the session is idle
- * (`relay-state.ts`), on SIGTERM/SIGINT (the turn is cancelled and saved) or when
+ * (`relay-state.ts`), on SIGTERM/SIGINT (the turn is cancelled and saved; a turn
+ * that outlives the bound is not, and the workload is then kept) or when
  * the link stops. It only ever DETACHES: a `dispose` would close the session.
+ * Its exit net (a crash, a second signal) deletes only a confirmed save (R6).
  *
  * `--keep=false` (docs/feat/detached-relay-lifecycle.md): on a normal exit the
  * relay removes the workload, `exitPlan` alone deciding. The order is the safety
@@ -37,7 +39,7 @@ import { type KeepAwakeOptions, createKeepAwake } from "./keep-awake.ts";
 import { type KeptRemoval, bounded, removalFate, removeVerifiedKept } from "./kept-cmd.ts";
 import { keptDir, keptFileName, readKept } from "./kept-index.ts";
 import type { KeptEntry } from "./kept.ts";
-import type { LocalRuntime } from "./local-runtime.ts";
+import { FLUSH_ON_EXIT_TIMEOUT_MS, type LocalRuntime } from "./local-runtime.ts";
 import { type ProcOf, acquireResidentLock, selfCommand } from "./pod-resident.ts";
 import { relayPolicy } from "./relay-policy.ts";
 import {
@@ -182,6 +184,9 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   )(dir, spec.stem);
   let model = initialRelay;
   let written = "";
+  // The run's turn's id, minted here and in every record from the first: a
+  // TUI that takes the run over owns that turn (docs/fix/detach-live.md B2).
+  const runTurnId = crypto.randomUUID();
   const record = (view: RelayView): void => {
     // Handed over: the run's record is the TUIs' now (never two writers).
     if (model.handover === "done") {
@@ -205,6 +210,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
         keep: spec.keep,
         cwd: spec.cwd,
         created: entry.created,
+        runTurnId,
         ...(controlAt !== null && controlAt !== join(dir, "control.sock")
           ? { control: controlAt }
           : {}),
@@ -249,6 +255,18 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     stopSignal.abort();
   });
   let disarmNet = (): void => {};
+  /**
+   * The net's save check (docs/fix/detach-live.md R6, owner 2026-11-02): a crash
+   * or a second SIGTERM deletes only once the turn ended and its save is
+   * confirmed on the laptop. No runtime yet: nothing is, so the workload stays.
+   */
+  let netSaved = (): boolean => false;
+  const keptNote = `not saved — workload kept: tentacle rm ${entry.name}`;
+  /** At exit, the net kept it: the record says so (synchronous write), `ps` shows it. */
+  const netKept = (): void => {
+    model = relayStep(model, { type: "note", detail: keptNote });
+    record(finalView(model)); // the process ends here: a turn cut short is `interrupted`
+  };
   /** `purge` (Q4): the workload is gone, so its run dir goes, the lock with it. */
   const leave = (purge = false): number => {
     preparer = null; // the plan is final: a socket closing now aborts nothing, re-arms nothing
@@ -284,7 +302,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   // another relay is using. Covers a crash; a SIGKILL or a power loss leaves the
   // workload, listed in `ps`.
   if (!spec.keep) {
-    disarmNet = (deps.armNet ?? armExitNet)(host, entry.name);
+    disarmNet = (deps.armNet ?? armExitNet)(host, entry.name, () => netSaved(), netKept);
   }
 
   const policy = relayPolicy({ autoAccept: spec.autoAccept, emit, log });
@@ -327,6 +345,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   const offLink = runtime.link.onLinkStatus((status) => {
     emit({ type: "link", status });
   });
+  netSaved = () => model.turn !== "running" && runtime.saveConfirmed();
 
   const session = runtime.createSession();
   policy.bindOwnsTurn((turnId) => session.ownsTurn(turnId));
@@ -334,7 +353,9 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     emit({ type: "turn_started" });
     let reason = "end_turn";
     try {
-      for await (const event of session.send(spec.prompt, stopSignal.signal)) {
+      for await (const event of session.send(spec.prompt, stopSignal.signal, {
+        turnId: runTurnId,
+      })) {
         if (event.type === "turn_end") {
           reason = event.reason;
         } else if (event.type === "tool_start") {
@@ -363,7 +384,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     clearTimeout(lease);
     peer.close(); // a late `commit` finds the socket closed
     if (!spec.keep) {
-      disarmNet = (deps.armNet ?? armExitNet)(host, entry.name);
+      disarmNet = (deps.armNet ?? armExitNet)(host, entry.name, () => netSaved(), netKept);
     }
     policy.thaw();
     emit({ type: "handover_aborted" });
@@ -397,7 +418,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
         deps.leaseMs ?? HANDOVER_LEASE_MS,
       );
       log("hand-over prepared");
-      return { ok: true, appVersion: APP_VERSION, autoAccept: spec.autoAccept };
+      return { ok: true, appVersion: APP_VERSION };
     }
     if (peer !== preparer || committing || model.handover !== "prepared") {
       return { ok: false, reason: "invalid" };
@@ -486,12 +507,40 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     emit({ type: "note", detail: plan.why });
   }
 
+  // The laptop holds the session's last state only once its turn ended and
+  // that save landed: `release` seals what comes later (docs/fix/detach-live.md,
+  // fix round 3).
+  const settled =
+    model.turn !== "running" &&
+    (await bounded(session.flushed(), FLUSH_ON_EXIT_TIMEOUT_MS).then(
+      () => true,
+      () => false,
+    ));
   offLink();
   await runtime.release();
-  for (const line of await saver.drain()) {
+  const unsaved = await saver.drain();
+  for (const line of unsaved) {
     log(line);
   }
   if (plan.kind !== "remove") {
+    // keep=true (owner Q3, fix round 7): nothing is deleted here, but `ps` says
+    // when the laptop copy lacks the last turn. Informational only; after a
+    // hand-over the TUIs hold the save, so it is not this relay's to report.
+    if (
+      spec.keep &&
+      model.handover === "none" &&
+      finalView(model).state !== "failed" && // a failed run keeps its own reason
+      (!settled || unsaved.length > 0)
+    ) {
+      emit({ type: "note", detail: "not saved — the laptop copy lacks the last turn" });
+    }
+    return leave();
+  }
+  // Owner decision (a): with no copy on the laptop the workload is the only
+  // one, so it stays, said, never silent; `rm` converges.
+  if (!settled || unsaved.length > 0) {
+    log(keptNote);
+    emit({ type: "note", detail: keptNote });
     return leave();
   }
   const removal = await bounded(
@@ -616,13 +665,15 @@ function endingOf(spec: RelaySpec, deps: LaunchDeps): string {
   const awake = deps.keepsAwake
     ? " The Mac stays awake while a turn runs; closing the lid still sleeps it."
     : "";
+  // `attach <name>` takes a live run over at once (S3); `--resume` on it is refused.
+  const attach = ` Attach any time: ${deps.attachHint}.`;
   if (spec.keep) {
-    return ` Re-attach once it is done: ${deps.attachHint} --resume ${spec.sessionId}.${awake}`;
+    return `${attach}${awake}`;
   }
   const files = deps.mounted
     ? "files not in the mount go with it, and so does its log; the laptop folder is not touched"
     : `the ${deps.noun}'s files go with it, and so does its log`;
-  return ` The ${deps.noun} is removed when the run goes idle: ${files}; the transcript stays in \`tentacle --resume ${spec.sessionId}\`.${awake}`;
+  return `${attach} The ${deps.noun} is removed when the run goes idle: ${files}; the transcript stays in \`tentacle --resume ${spec.sessionId}\`.${awake}`;
 }
 
 /**
@@ -668,7 +719,7 @@ export async function launchRelay(dir: string, spec: RelaySpec, deps: LaunchDeps
     if (owner && owner.state !== "starting") {
       const policy = spec.autoAccept
         ? `auto-accepting pod tool asks (allow once; logged in ${logPath})`
-        : "it waits at the first permission";
+        : "a tool that needs permission waits for you";
       write(
         `[${noun}] ${name}: detached run started (pid ${owner.pid}), ${policy}.${endingOf(spec, deps)}\n`,
       );

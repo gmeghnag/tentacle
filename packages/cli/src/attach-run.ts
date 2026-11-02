@@ -2,8 +2,11 @@
  * `attach <name>` on a detached run (docs/feat/detached-handover.md): the IO
  * shell around `attach-plan.ts`. `joinRun` opens the run's ONE session as one
  * more client (a stale owner, an ended run and a join are one path); `finish`
- * is its quit, which ends the run when it is the last client (Q1): a last
- * save, `session/close{ifLast}`, and on keep=false the delete.
+ * is its quit (docs/fix/detach-live.md A5): a confirmed `/quit` closes the
+ * session for every TUI on it, a quit alone on it ends it (`ifLast`), a TUI
+ * whose session another one closed just leaves; on keep=false the TUI whose
+ * quit ends the session does the delete, under the run's lock, once its
+ * session's other TUIs left and no other session is in use.
  *
  * Who is attached is the presence files (`run-state.ts`), never `owner.json`:
  * a lost write cannot lie. Presence-then-lock here against lock-then-presence
@@ -13,7 +16,9 @@
  */
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import type { SessionRecord } from "@tentacle/agent";
 import { PermissionBroker } from "@tentacle/core";
+import type { RunQuit } from "@tentacle/tui";
 import type { AttachPlan, QuitPlan } from "./attach-plan.ts";
 import { quitPlan } from "./attach-plan.ts";
 import { type ControlConn, dialControl } from "./control-socket.ts";
@@ -33,11 +38,14 @@ import {
   type OwnerRecord,
   RUN_STATE_VERSION,
   attachers,
+  othersOnSession,
   readOwner,
   removePresence,
+  setPresenceSession,
   writeOwner,
   writePresence,
 } from "./run-state.ts";
+import { type SharedAutoAccept, openSharedAutoAccept } from "./shared-auto-accept.ts";
 import type { TuiSessions } from "./tui-sessions.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { APP_VERSION } from "./version.ts";
@@ -52,6 +60,10 @@ const RELAY_STOP_GRACE_MS = 5000;
 const CLOSING_POLL_MS = 200;
 /** R2: the one wording of an unconfirmed last save (the terminal line and the record). */
 const UNSAVED_NOTE = "the last save was not confirmed";
+/** How long a `/quit` closing for all waits for its session's other TUIs to leave. */
+const OTHERS_LEAVE_MS = 5000;
+/** How often that wait looks at the presence files. */
+const OTHERS_POLL_MS = 50;
 
 export type RunPlan = Extract<AttachPlan, { kind: "run" }>;
 
@@ -77,6 +89,13 @@ export interface JoinDeps {
   readonly now?: () => number;
   /** `openTuiSessions` for the run's session, `live`. */
   readonly openSessions: () => Promise<TuiSessions | { readonly exit: number }>;
+  /**
+   * The run's session as the laptop file holds it NOW: read right before
+   * `openSeeded`, never earlier, so no join seeds a session from a copy that
+   * went stale during the dial (docs/fix/detach-live.md R8). Rejects if the
+   * file is unreadable.
+   */
+  readonly readRecord: () => Promise<SessionRecord | null>;
   /** The engine host of `entry`; `null`: it could not be built (said already). */
   readonly host: () => EngineHost | null;
   /** `attachEngineRuntime` with `shared` and THIS broker (the single-broker invariant). */
@@ -85,8 +104,13 @@ export interface JoinDeps {
     sessions: TuiSessions,
     permissions: PermissionBroker,
   ) => Promise<LocalRuntime>;
-  /** `armSharedExitNet(host, name, othersAlive)`; returns the disarm. */
-  readonly armNet: (host: EngineHost, othersAlive: () => boolean) => () => void;
+  /** `armSharedExitNet(host, name, othersAlive, saved, onKept)`; returns the disarm. */
+  readonly armNet: (
+    host: EngineHost,
+    othersAlive: () => boolean,
+    saved: () => boolean,
+    onKept: () => void,
+  ) => () => void;
   /** Default `lockHolder(dir, procOf)`. */
   readonly lockOf?: (dir: string) => { readonly pid: number } | null;
   /** `residentStop` of the run dir's lock holder (a draining relay). */
@@ -95,6 +119,8 @@ export interface JoinDeps {
   readonly closingWaitMs?: number;
   readonly useTimeoutMs?: number;
   readonly removeTimeoutMs?: number;
+  /** How long a `/quit` closing for all waits for the others to leave; default 5 s. */
+  readonly othersWaitMs?: number;
   /** Phase B: the relay's control socket (default `dialControl`). */
   readonly dial?: (path: string) => Promise<ControlConn | null>;
   /** Phase B: the hand-over's bounds (tests shorten them). */
@@ -116,7 +142,7 @@ const HANDOVER_TIMES = {
 };
 
 type Prepared =
-  | { readonly kind: "prepared"; readonly conn: ControlConn; readonly autoAccept: boolean }
+  | { readonly kind: "prepared"; readonly conn: ControlConn }
   /** Handed over already, or the relay died: a plain join. */
   | { readonly kind: "join" }
   | { readonly kind: "closing" }
@@ -174,7 +200,7 @@ async function prepareHandover(
       .send({ op: "prepare", sessionId: deps.plan.sessionId }, times.ackMs)
       .catch(() => null);
     if (reply?.ok) {
-      return { kind: "prepared", conn, autoAccept: reply.autoAccept === true };
+      return { kind: "prepared", conn };
     }
     conn.close();
     if (reply === null) {
@@ -215,6 +241,12 @@ export interface Joined {
   readonly attached: boolean;
   /** The quit, after Ink unmounted. `inkRan` false: `startTui` threw, nothing ends. */
   finish(inkRan: boolean): Promise<void>;
+  /** The TUI's `runQuit`: what its `/quit` chose, what happened (docs/fix/detach-live.md A2). */
+  readonly runQuit: RunQuit;
+  /** The TUI's `createSession`: the runtime's, its presence moved to each new session (`/clear`). */
+  readonly createSession: LocalRuntime["createSession"];
+  /** The TUI's auto-accept: its session's, shared by its TUIs, laptop-side (B3). */
+  readonly autoAccept: SharedAutoAccept;
 }
 
 export type JoinResult =
@@ -236,7 +268,8 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
   // 2. Presence, THEN the lock (see the module doc).
   let presence: string;
   try {
-    presence = writePresence(dir, pid, deps.procOf);
+    // Its body: the session this TUI is on (A4), the run's until a `/clear`.
+    presence = writePresence(dir, pid, deps.procOf, plan.sessionId);
   } catch (error) {
     write(`\n[error] ${shown}: could not register this terminal on the run: ${message(error)}\n`);
     return { kind: "exit", code: 1 };
@@ -296,7 +329,6 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
   }
   // 6. A live relay: `prepare` (it freezes BEFORE this client opens, D5).
   let conn: ControlConn | null = null;
-  let relayAutoAccept = false;
   if (plan.handover) {
     const prepared = await prepareHandover(deps, lockOf);
     if (prepared.kind !== "prepared" && prepared.kind !== "join") {
@@ -310,13 +342,18 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     }
     if (prepared.kind === "prepared") {
       conn = prepared.conn;
-      relayAutoAccept = prepared.autoAccept;
     }
   }
   // 7. The live session, eagerly (the runtime is lazy otherwise).
   let attached: boolean;
   try {
-    attached = await runtime.attachTo(plan.sessionId, sessions.resume);
+    // The run's own turn (its relay minted the id, owner.json carries it) is
+    // this TUI's too: auto-accept may answer it (B2).
+    attached = await runtime.attachTo(
+      plan.sessionId,
+      sessions.resume,
+      deps.owner.runTurnId !== undefined ? { adoptTurn: deps.owner.runTurnId } : {},
+    );
   } catch (error) {
     conn?.close(); // the relay aborts
     await runtime.release();
@@ -349,13 +386,26 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
       return { kind: "exit", code: 1 };
     }
     // No ack and its lock is dead: the relay died, this client is the owner.
-    if (relayAutoAccept) {
-      sessions.notices.notify(
-        "Auto-accept ended with the hand-over: this terminal answers the asks now.",
-      );
+  }
+  let seeded = sessions;
+  if (!attached) {
+    // The pod no longer has it (closed, reaped): open it NOW from the laptop
+    // copy, create-or-attach. A second TUI attaches the first's live session
+    // instead of keeping its own stale seed until its first send (KO 4). The
+    // copy is read HERE: the one from step 3 predates the dial, and a TUI that
+    // closed the session meanwhile saved a longer one (R8).
+    try {
+      const fresh = await deps.readRecord();
+      await runtime.openSeeded(fresh);
+      seeded = { ...sessions, resume: fresh };
+    } catch (error) {
+      await runtime.release();
+      leave();
+      write(`[${noun}] failed: ${message(error)}\n`);
+      return { kind: "exit", code: 1 };
     }
   }
-  if (!attached && sessions.resume === null) {
+  if (!attached && seeded.resume === null) {
     // The seeded path (the runtime was built with the run's uid and record).
     sessions.notices.notify(
       `The ${noun} no longer has session ${untrustedText(plan.sessionId)}, and this laptop has no copy of it: it starts empty.`,
@@ -371,12 +421,15 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     state,
     ...(detail !== undefined ? { detail } : {}),
     lastActivityAt: now(),
-    autoAccept: false,
+    // The run's `--auto-accept` and its turn, carried on: a later terminal
+    // (the relay gone) starts from them (D2, B2).
+    autoAccept: deps.owner.autoAccept,
     keep: plan.keep,
     cwd: deps.owner.cwd ?? deps.cwd,
     created: deps.entry.created,
     // A later terminal finds a draining relay by it.
     ...(deps.owner.control !== undefined ? { control: deps.owner.control } : {}),
+    ...(deps.owner.runTurnId !== undefined ? { runTurnId: deps.owner.runTurnId } : {}),
   });
   const writeRecord = (state: "attached" | "idle", detail?: string): boolean => {
     try {
@@ -393,14 +446,93 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     );
   }
   const others = (): number => attachers(dir, deps.procOf).filter((a) => a.pid !== pid).length;
-  const disarm = plan.keep ? () => {} : deps.armNet(host, () => others() > 0);
+  // R6 (owner, 2026-11-02): a SIGTERM / SIGHUP / crash of the last TUI deletes
+  // only a session confirmed saved on the laptop; else it stays, and the record
+  // says so (`ps`).
+  const disarm = plan.keep
+    ? () => {}
+    : deps.armNet(
+        host,
+        () => others() > 0,
+        () => runtime.saveConfirmed(),
+        () => void writeRecord("idle", `not saved — workload kept: tentacle rm ${name}`),
+      );
   if (!plan.keep) {
     sessions.notices.notify(
-      `Quitting removes the ${noun} once no other terminal is attached, a running turn included.`,
+      `Quitting removes the ${noun} if no other session is in use, a running turn stops.`,
     );
   }
+  // The session's auto-accept, shared by its TUIs, laptop-side (B3): its file
+  // if one flipped it, else the run's `--auto-accept` from owner.json only —
+  // never the socket, never the pod (D2).
+  const autoAccept = await openSharedAutoAccept({
+    dir,
+    sessionId: plan.sessionId,
+    fallback: deps.owner.autoAccept,
+    onWriteError: (text) => sessions.notices.notify(text),
+  });
+  if (autoAccept.current()) {
+    sessions.notices.notify("auto-accept on (Shift+Tab to turn it off)");
+  }
+  // What the TUI's `/quit` chose and what happened to its session (A2): read
+  // by `finish`; neither changes once it began.
+  let finishing = false;
+  let closeForAll = false;
+  let closedElsewhere = false;
+  let closedBy: "closed" | "deleted" | "gone" = "closed";
+  /** The session this TUI is on: the run's, a fresh one after `/clear`. */
+  let current = plan.sessionId;
+  const runQuit: RunQuit = {
+    othersOnSession: () => othersOnSession(dir, deps.procOf, pid, current),
+    closeForAll: () => {
+      if (!finishing) closeForAll = true;
+    },
+    closedElsewhere: (reason) => {
+      if (!finishing) {
+        closedElsewhere = true;
+        closedBy = reason;
+      }
+    },
+  };
+  const createSession: LocalRuntime["createSession"] = () => {
+    const controller = runtime.createSession();
+    const id = controller.sessionId;
+    if (id !== null && id !== current) {
+      current = id;
+      autoAccept.use(id); // per session: the fresh one's state, the value carried over
+      try {
+        setPresenceSession(presence, id);
+      } catch {
+        // Unwritable: it still counts on the run (`others`); only the dialog's count is off.
+      }
+    }
+    return controller;
+  };
+  /** Wait (bounded) until no other TUI is on `current`: they leave on the close. */
+  const othersLeft = async (): Promise<void> => {
+    const deadline = now() + (deps.othersWaitMs ?? OTHERS_LEAVE_MS);
+    while (runQuit.othersOnSession() > 0 && now() < deadline) {
+      await new Promise((r) => setTimeout(r, OTHERS_POLL_MS));
+    }
+  };
+
+  /**
+   * keep: the run's last state, read AFTER this TUI's presence went, so of two
+   * leaving together one always sees nobody (S3: the last one out writes it,
+   * `ps` never says `tui lost` after a clean quit). keep=false has no such
+   * step: the dir may be under the closer's delete. Only over a record still
+   * `attached`: a closer's noted `idle` (its save not confirmed) stands.
+   */
+  const lastOut = (): void => {
+    const read = readOwner(dir);
+    if (plan.keep && others() === 0 && read.kind === "owner" && read.owner.state === "attached") {
+      writeRecord("idle");
+    }
+  };
 
   const finish = async (inkRan: boolean): Promise<void> => {
+    finishing = true;
+    autoAccept.stop();
     if (!inkRan) {
       // 1. The user quit nothing: the session stays, nothing ends.
       disarm();
@@ -408,71 +540,120 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
       leave();
       return;
     }
-    // 2. Mine first, then who else is here (advisory: decides only whether to
-    // try for the lock, so a non-last TUI never stops a draining relay).
-    leave();
-    let alone = others() === 0;
-    let deleting = !plan.keep && alone;
-    // 3. The run's lock through the delete, exactly the relay's rule. Taken
+    if (closedElsewhere && !closeForAll) {
+      // 2. Another TUI's `/quit` closed the session: it saved it and decides
+      // the workload. Nothing to read or delete here. `release` seals: a turn
+      // ending after it reports nothing.
+      disarm();
+      await runtime.release();
+      leave();
+      lastOut();
+      write(
+        closedBy === "closed"
+          ? `[${noun}] ${shown}: session closed by another terminal\n`
+          : closedBy === "gone"
+            ? // Gone while the link was down: no terminal is known to have closed it (Q10).
+              `[${noun}] ${shown}: the session ended in the ${noun}\n`
+            : `[${noun}] ${shown}: session deleted\n`,
+      );
+      return;
+    }
+    // 3. This quit ends its session: confirmed for all, or alone on it, a TUI
+    // on another session of the run included: `quitPlan` then says why the
+    // workload stays (D1). Advisory: it decides only whether to try for the
+    // lock, so a TUI leaving others on its session never stops a draining
+    // relay. My presence stays until the end: gone first, another TUI's exit
+    // net could fire under this save.
+    let deleting = !plan.keep && (closeForAll || runQuit.othersOnSession() === 0);
+    /** A relay left draining for a TUI on another session: no lock tried, `quitPlan` says why. */
+    let spared = false;
+    // 4. The run's lock through the delete, exactly the relay's rule. Taken
     // BEFORE the authoritative read of who else is here: an attacher that
     // registers after that read sees the lock and waits (`joinRun` step 2).
     let lock: { release(): void } | null = null;
     if (deleting) {
       // Only a draining relay: another holder is a TUI that quit in the same
       // instant, with its save and delete running. The lock lets one through.
+      // Its call may be a turn this quit stops (the session being closed), never
+      // one on another session (D1): that TUI is untouched, the relay stays.
       if (lockOf(dir) !== null && (await relayDraining(deps))) {
-        await (deps.stopHolder ?? ((d) => residentStop(d, RELAY_STOP_GRACE_MS, deps.procOf)))(dir);
+        // ONE read, after the probe's round trip. The same-session exemption
+        // holds only for a close for all: a Ctrl+C closes nobody else's session.
+        const here = attachers(dir, deps.procOf).filter((a) => a.pid !== pid);
+        const onSession = here.filter((a) => a.sessionId === current).length;
+        if (closeForAll ? here.length > onSession : here.length > 0) {
+          spared = true;
+          deleting = false;
+        } else {
+          await (deps.stopHolder ?? ((d) => residentStop(d, RELAY_STOP_GRACE_MS, deps.procOf)))(
+            dir,
+          );
+        }
       }
       try {
-        lock = acquireResidentLock(dir, deps.procOf);
+        lock = spared ? null : acquireResidentLock(dir, deps.procOf);
       } catch {
         lock = null; // lost: no delete
       }
-      if (lock && others() > 0) {
-        // Someone registered meanwhile: theirs now.
+      if (lock && !closeForAll && runQuit.othersOnSession() > 0) {
+        // Alone on it a moment ago, someone registered meanwhile (S3): theirs now.
         lock.release();
         lock = null;
-        alone = false;
         deleting = false;
       }
     }
-    // 4. Before the close: afterwards the session is not listed.
+    // 5. Before the close: afterwards the session is not listed. Read for the
+    // session this TUI is on (its `/clear`ed one may not be open: no use).
     const use: ResidentUse | null = lock
       ? await bounded(
-          runtime.residentUse(plan.sessionId),
+          runtime.residentUse(current, { ownMayBeAbsent: true }),
           deps.useTimeoutMs ?? USE_READ_TIMEOUT_MS,
         ).catch(() => null)
       : null;
-    // 5. The last save, then close{ifLast}.
-    const quit = await runtime.quit();
-    // 6. With nobody else, the run's last state; if the lock went elsewhere it
+    // 6. The last save, then the close: for every TUI on it when confirmed,
+    // else `ifLast`.
+    // `ending`: alone on its session, the `ifLast` close ends it (Q2).
+    const quit = await runtime.quit({ closeForAll, ending: runQuit.othersOnSession() === 0 });
+    // 7. Closed for all: its other TUIs leave on the close (bounded; one that
+    // hangs is counted below and keeps the workload). Only the lock holder
+    // decides, so only it waits: two `/quit`s at once must not wait on each other.
+    // A spared quit decides too (its `stay` line): it waits, or it would blame them.
+    if ((lock || spared) && closeForAll && quit.saved && quit.sessionsKept === 0) {
+      await othersLeft();
+    }
+    // 8. With nobody else, the run's last state; if the lock went elsewhere it
     // is that holder's to write.
     const lost = deleting && lock === null;
-    if (alone && !lost) {
+    if (others() === 0 && !lost) {
       writeRecord("idle");
     }
-    // 7. The transcript is on the laptop before any delete: not confirmed, no delete.
+    // The transcript is on the laptop before any delete: not confirmed, no delete.
     const unsaved = await sessions.saver.drain();
     const saved = quit.saved && unsaved.length === 0;
     if (lost && existsSync(dir)) {
       write(`[${noun}] ${shown}: another terminal is closing the run\n`);
     }
     // R2: never a silent detach. An unconfirmed save is said for keep=false AND
-    // keep=true: the run did not end, its session is in the workload still.
+    // keep=true; "still in the workload" only when the daemon kept it.
     if (!saved) {
-      write(
-        `[${noun}] ${shown}: ${UNSAVED_NOTE} — the session is still in the ${noun}: \`tentacle attach ${name}\` reopens it\n`,
-      );
+      const where =
+        quit.sessionsKept > 0
+          ? `the session is still in the ${noun}: \`tentacle attach ${name}\` reopens it`
+          : "the session ended, but its last save did not reach this laptop";
+      write(`[${noun}] ${shown}: ${UNSAVED_NOTE} — ${where}\n`);
     }
-    const decided: QuitPlan = lock
-      ? quitPlan({
-          keep: plan.keep,
-          othersAttached: 0,
-          saved,
-          sessionsKept: quit.sessionsKept,
-          use,
-        })
-      : { kind: "stay" };
+    // 9. The ONE decision.
+    const decided: QuitPlan =
+      lock || spared
+        ? quitPlan({
+            keep: plan.keep,
+            othersAttached: others(),
+            othersOnSession: runQuit.othersOnSession(),
+            saved,
+            sessionsKept: quit.sessionsKept,
+            use,
+          })
+        : { kind: "stay" };
     if (decided.kind === "stay") {
       if (decided.why !== undefined) {
         const detail = `not removed: ${decided.why} — tentacle rm ${name}`;
@@ -484,6 +665,10 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
         writeRecord("idle", UNSAVED_NOTE);
       }
       disarm();
+      leave();
+      if (saved) {
+        lastOut();
+      }
       lock?.release();
       return;
     }
@@ -512,15 +697,27 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
       // deleted; the stale entry went with the run.
       write(`[${noun}] ${shown}: ${removalFate(removal.kind)} — nothing was removed\n`);
     }
-    // 9. The net LAST (§7); a completed removal takes the run dir, the lock with it.
+    // 10. The net LAST (§7); a completed removal takes the run dir — the lock
+    // and my presence with it; else they go now.
     disarm();
     if (purge) {
       purgeRunDir(dir);
     } else {
+      leave();
       lock?.release();
     }
   };
-  return { kind: "joined", sessions, runtime, permissions, attached, finish };
+  return {
+    kind: "joined",
+    sessions: seeded,
+    runtime,
+    permissions,
+    attached,
+    finish,
+    runQuit,
+    createSession,
+    autoAccept,
+  };
 }
 
 /** S2b Q4 (b): the removal that clears the entry deletes the run dir. */

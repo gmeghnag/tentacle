@@ -1,7 +1,14 @@
 import type { Agent } from "@tentacle/agent";
 import type { ChatMessage, JobController, PermissionBroker } from "@tentacle/core";
 import { render } from "ink";
-import { App, type NoticeFeed, type SessionController, type SessionDirectory } from "./App.tsx";
+import {
+  App,
+  type AutoAcceptFeed,
+  type NoticeFeed,
+  type RunQuit,
+  type SessionController,
+  type SessionDirectory,
+} from "./App.tsx";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { messagesToItems } from "./resume.ts";
@@ -37,6 +44,10 @@ export interface TuiOptions {
   readonly detachOnQuit?: boolean;
   /** The daemon's sessions for `/sessions` (`connect` only). */
   readonly sessions?: SessionDirectory;
+  /** A detached run's TUI (`attach <name>`): `/quit` closes the session for all. */
+  readonly runQuit?: RunQuit;
+  /** A detached run's TUI: its session's shared auto-accept. */
+  readonly autoAccept?: AutoAcceptFeed;
 }
 
 /**
@@ -86,6 +97,8 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       {...(options.daemonInPod ? { daemonInPod: true } : {})}
       {...(options.detachOnQuit ? { detachOnQuit: true } : {})}
       {...(options.sessions ? { sessions: options.sessions } : {})}
+      {...(options.runQuit ? { runQuit: options.runQuit } : {})}
+      {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
     />,
     { exitOnCtrlC: false },
   );
