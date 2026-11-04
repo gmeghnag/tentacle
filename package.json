@@ -9,7 +9,7 @@
     "bun": ">=1.4.3"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit && tsc -p apps/mobile",
+    "typecheck": "tsc --noEmit && tsc -p apps/mobile --noEmit",
     "test": "bun test",
     "test:watch": "bun test --watch",
     "lint": "biome check .",
