@@ -90,3 +90,34 @@ describe("runRepl", () => {
     expect(out.join("")).toContain("hi");
   });
 });
+
+describe("runRepl error placement", () => {
+  class Failing implements ModelProvider {
+    readonly id = "failing";
+    constructor(private readonly partial: string) {}
+    async *stream(): AsyncIterable<StreamEvent> {
+      if (this.partial !== "") {
+        yield { type: "text", delta: this.partial };
+      }
+      throw new Error("ECONNRESET");
+    }
+  }
+  const errorOut = async (partial: string): Promise<string> => {
+    const out: string[] = [];
+    await runRepl(agentWith(new Failing(partial)), {
+      prompts: lines(["hi", "/exit"]),
+      write: (t) => out.push(t),
+    });
+    return out.join("");
+  };
+
+  test("an error after streamed text starts on its own line (never glued)", async () => {
+    // Mutation: no lead newline -> glued to the text.
+    expect(await errorOut("Hello wor")).toContain("Hello wor\n[error] ");
+  });
+
+  test("an error with nothing written yet adds no blank line", async () => {
+    // Mutation: always a lead newline -> a blank line before the error.
+    expect(await errorOut("")).toContain("to quit.\n[error] ");
+  });
+});

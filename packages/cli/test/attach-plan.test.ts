@@ -22,7 +22,6 @@ const input = (over: Partial<AttachInput> = {}): AttachInput => ({
   owner: { kind: "owner", owner: owner() },
   relayAlive: false,
   entryCreated: CREATED,
-  cwd: "/work",
   tty: true,
   ...over,
 });
@@ -44,12 +43,14 @@ describe("H10 planAttach (docs/feat/detached-handover.md), first match wins", ()
     expect(planAttach(input({ owner: { kind: "unknown" } }))).toEqual({ kind: "plain" });
   });
 
-  test("another project: refused, naming the folder, before anything else", () => {
-    const plan = planAttach(input({ cwd: "/elsewhere", tty: false, relayAlive: true }));
-    expect(plan).toEqual({ kind: "refuse", why: "cwd", cwd: "/work" });
-    // A record from before `cwd` was written: no check.
+  test("attach-any-folder: no refusal on a folder; the plan carries the run's own", () => {
+    // Mutation: refuse (or drop `cwd`) again -> no folder to attach from.
+    expect(planAttach(input({ relayAlive: true }))).toMatchObject({ kind: "run", cwd: "/work" });
+    // A record from before `cwd` was written: no folder to move to.
     const { cwd: _cwd, ...old } = owner();
-    expect(planAttach(input({ owner: { kind: "owner", owner: old }, cwd: "/x" })).kind).toBe("run");
+    const plan = planAttach(input({ owner: { kind: "owner", owner: old } }));
+    expect(plan.kind).toBe("run");
+    expect("cwd" in plan).toBe(false);
   });
 
   test("H35 a record of an earlier workload of that name (a reused name): never the run's identity, nor its delete", () => {
@@ -58,7 +59,7 @@ describe("H10 planAttach (docs/feat/detached-handover.md), first match wins", ()
     const stale = { kind: "owner" as const, owner: owner({ keep: false, state: "failed" }) };
     expect(planAttach(input({ owner: stale, ...reused }))).toEqual({ kind: "plain" });
     // Not even its folder refuses: it says nothing about this workload.
-    expect(planAttach(input({ owner: stale, cwd: "/elsewhere", tty: false, ...reused }))).toEqual({
+    expect(planAttach(input({ owner: stale, tty: false, ...reused }))).toEqual({
       kind: "plain",
     });
     // A live lock still decides, as for a record it cannot read.
@@ -99,6 +100,7 @@ describe("H10 planAttach (docs/feat/detached-handover.md), first match wins", ()
   test("a live relay: the hand-over; otherwise the run's session (stale owner, ended run, join)", () => {
     // Mutations: a live relay reaches `plain`; `plain` for a run with TUIs (Q3 lost).
     expect(planAttach(input({ relayAlive: true }))).toEqual({
+      cwd: "/work",
       kind: "run",
       sessionId: UID,
       handover: true,
@@ -112,6 +114,7 @@ describe("H10 planAttach (docs/feat/detached-handover.md), first match wins", ()
     ]) {
       expect(planAttach(input({ owner: { kind: "owner", owner: o } }))).toEqual({
         kind: "run",
+        cwd: "/work",
         sessionId: UID,
         handover: false,
         keep: o.keep !== false,

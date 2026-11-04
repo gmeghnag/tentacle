@@ -273,7 +273,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     // Its body: the session this TUI is on (A4), the run's until a `/clear`.
     presence = writePresence(dir, pid, deps.procOf, plan.sessionId);
   } catch (error) {
-    write(`\n[error] ${shown}: could not register this terminal on the run: ${message(error)}\n`);
+    write(`[error] ${shown}: could not register this terminal on the run: ${message(error)}\n`);
     return { kind: "exit", code: 1 };
   }
   const leave = (): void => removePresence(presence);
@@ -289,7 +289,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
       await new Promise((r) => setTimeout(r, CLOSING_POLL_MS));
     }
     if (lockOf(dir) !== null) {
-      write(`\n[error] ${shown}: the run is still closing; retry in a moment\n`);
+      write(`[error] ${shown}: the run is still closing; retry in a moment\n`);
       return { kind: "exit", code: 1 };
     }
     return { kind: "closing" };
@@ -315,7 +315,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
   if (gone) {
     leave();
     write(
-      `\n[error] ${shown}: the ${noun} no longer exists — session ${untrustedText(plan.sessionId)} cannot be re-attached; its transcript is kept on this laptop\n`,
+      `[error] ${shown}: the ${noun} no longer exists — session ${untrustedText(plan.sessionId)} cannot be re-attached; its transcript is kept on this laptop\n`,
     );
     return { kind: "exit", code: 1 };
   }
@@ -337,7 +337,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
       await runtime.release();
       leave();
       if (prepared.kind === "refuse") {
-        write(`\n[error] ${deps.relayRefusal?.() ?? `${shown}: a detached run owns it`}\n`);
+        write(`[error] ${deps.relayRefusal?.() ?? `${shown}: a detached run owns it`}\n`);
         return { kind: "exit", code: 1 };
       }
       return { kind: "closing" };
@@ -368,7 +368,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     conn.close();
     await runtime.release();
     leave();
-    write(`\n[error] ${shown}: the detached run is still starting; retry in a moment\n`);
+    write(`[error] ${shown}: the detached run is still starting; retry in a moment\n`);
     return { kind: "exit", code: 1 };
   }
   // 8. `commit`: irrevocable on the relay's side; its last save is done at the ack.
@@ -383,7 +383,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
       await runtime.release();
       leave();
       write(
-        `\n[error] ${shown}: the hand-over did not complete; the detached run still owns it — retry in a moment\n`,
+        `[error] ${shown}: the hand-over did not complete; the detached run still owns it — retry in a moment\n`,
       );
       return { kind: "exit", code: 1 };
     }

@@ -19,7 +19,6 @@ export interface AttachInput {
   readonly entryCreated: string;
   /** `--resume <uid>`; `--continue` and a bare `--resume` are no uid: the run's session. */
   readonly resumeUid?: string;
-  readonly cwd: string;
   /** stdin and stdout are a terminal: a TUI can mount. */
   readonly tty: boolean;
 }
@@ -29,13 +28,16 @@ export type AttachPlan =
   | { readonly kind: "plain" }
   /** S2's refusal: a live relay owns the session, and no hand-over can happen. */
   | { readonly kind: "refuse"; readonly why: "relay" }
-  /** The run belongs to another folder: its laptop copy would land in the wrong project. */
-  | { readonly kind: "refuse"; readonly why: "cwd"; readonly cwd: string }
   /** No terminal: a TUI that cannot mount would end the run. */
   | { readonly kind: "refuse"; readonly why: "tty" }
-  /** Open the run's session; `handover`: from a live relay first. */
+  /**
+   * Open the run's session; `handover`: from a live relay first. `cwd`: the
+   * run's own folder (owner.json, written by this laptop), when it recorded
+   * one — the attach behaves as if launched from there (docs/fix/attach-any-folder.md).
+   */
   | {
       readonly kind: "run";
+      readonly cwd?: string;
       readonly sessionId: string;
       readonly handover: boolean;
       readonly keep: boolean;
@@ -56,9 +58,6 @@ export function planAttach(input: AttachInput): AttachPlan {
     // so it gives it no session and no delete (Q4). The lock decides, as above.
     return relayAlive ? { kind: "refuse", why: "relay" } : { kind: "plain" };
   }
-  if (record.cwd !== undefined && record.cwd !== input.cwd) {
-    return { kind: "refuse", why: "cwd", cwd: record.cwd };
-  }
   if (input.resumeUid !== undefined && input.resumeUid !== record.sessionId) {
     return relayAlive && record.kind === "relay"
       ? { kind: "refuse", why: "relay" }
@@ -70,6 +69,7 @@ export function planAttach(input: AttachInput): AttachPlan {
   // A stale owner, an ended run (Q5) and a join (Q3) are one path.
   return {
     kind: "run",
+    ...(record.cwd !== undefined ? { cwd: record.cwd } : {}),
     sessionId: record.sessionId,
     handover: relayAlive,
     keep: ownerKeeps(record),
