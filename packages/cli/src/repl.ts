@@ -7,7 +7,7 @@
  * `prompts` iterable and wires Ctrl+C to cancel the running turn.
  */
 import { type Agent, Session } from "@tentacle/agent";
-import { render } from "./render.ts";
+import { atLineStartAfter, errorLine, render } from "./render.ts";
 
 export interface ReplIO {
   /** Yields each user input line until the input ends. */
@@ -48,12 +48,15 @@ export async function runRepl(agent: Agent, io: ReplIO): Promise<void> {
 
     io.onTurnStart?.();
     const signal = io.signal?.();
+    let atLineStart = true; // the user just pressed enter
     try {
       for await (const event of session.send(input, signal)) {
-        io.write(render(event));
+        const text = render(event);
+        atLineStart = atLineStartAfter(atLineStart, text);
+        io.write(text);
       }
     } catch (error) {
-      io.write(`\n[error] ${String(error)}\n`);
+      io.write(errorLine(error, atLineStart));
     } finally {
       io.onTurnEnd?.();
     }

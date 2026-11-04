@@ -1550,7 +1550,6 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
         owner: read,
         relayAlive: lockHolder(r.dir, procOf) !== null,
         entryCreated: entry.created,
-        cwd: "/work",
         tty: true,
       });
       if (plan.kind !== "run" || read.kind !== "owner") throw new Error(plan.kind);
@@ -1650,7 +1649,6 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
       owner: read,
       relayAlive: lockHolder(r.dir, procOf) !== null,
       entryCreated: entry.created,
-      cwd: "/work",
       tty: true,
     });
     if (plan.kind !== "run" || read.kind !== "owner") throw new Error(plan.kind);

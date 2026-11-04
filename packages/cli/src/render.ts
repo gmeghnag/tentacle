@@ -57,6 +57,22 @@ export function render(event: AgentEvent): string {
   }
 }
 
+/**
+ * Tracks whether the cursor is at the start of a line after `chunk` was
+ * written (an empty chunk changes nothing).
+ */
+export function atLineStartAfter(was: boolean, chunk: string): boolean {
+  return chunk === "" ? was : chunk.endsWith("\n");
+}
+
+/**
+ * The `[error]` line for a failure mid-stream: on its own line, never glued to
+ * streamed text, and no blank line when the cursor is already at a line start.
+ */
+export function errorLine(error: unknown, atLineStart: boolean): string {
+  return `${atLineStart ? "" : "\n"}[error] ${String(error)}\n`;
+}
+
 function firstLine(text: string): string {
   const newline = text.indexOf("\n");
   const line = newline === -1 ? text : text.slice(0, newline);

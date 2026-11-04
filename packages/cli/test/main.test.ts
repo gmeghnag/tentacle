@@ -1206,7 +1206,7 @@ describe("cli main: --engine", () => {
     });
 
     /** `attach` with the engine runtime and the TUI replaced; records what each got. */
-    const attached = async (args: string[], tty = true) => {
+    const attached = async (args: string[], tty = true, plainSeam = false) => {
       const out: string[] = [];
       const seen: {
         runtimeBroker?: unknown;
@@ -1219,7 +1219,7 @@ describe("cli main: --engine", () => {
         createSession?: unknown;
         autoAccept?: unknown;
         confirmed?: boolean;
-        config?: { model?: string; baseURL?: string };
+        config?: { model?: string; baseURL?: string; cwd?: string };
         tuiModel?: string;
       } = { quit: 0 };
       const runtime = {
@@ -1237,21 +1237,24 @@ describe("cli main: --engine", () => {
           return { sessionsKept: 0, saved: true };
         },
         release: async () => {},
+        dispose: async () => {},
         residentUse: async () => null,
       };
+      const fakeAttach = (async (
+        config: { model?: string; baseURL?: string; cwd?: string },
+        deps: { permissions: unknown; sessionId?: string; shared?: true },
+      ) => {
+        seen.config = config;
+        seen.runtimeBroker = deps.permissions;
+        seen.sessionId = deps.sessionId;
+        seen.shared = deps.shared === true;
+        return runtime;
+      }) as never;
       const code = await main(["bun", "cli", ...args], {
         write: (t) => out.push(t),
         tty,
-        attachEngineRuntime: (async (
-          config: { model?: string; baseURL?: string },
-          deps: { permissions: unknown; sessionId?: string; shared?: true },
-        ) => {
-          seen.config = config;
-          seen.runtimeBroker = deps.permissions;
-          seen.sessionId = deps.sessionId;
-          seen.shared = deps.shared === true;
-          return runtime;
-        }) as never,
+        ...(plainSeam ? { attachPlainRuntime: fakeAttach } : {}),
+        attachEngineRuntime: fakeAttach,
         startTui: (async (
           _session: unknown,
           options: {
@@ -1600,8 +1603,7 @@ describe("cli main: --engine", () => {
       clean();
     });
 
-    test("a run of another folder: refused, naming it, nothing dialled", async () => {
-      setup(`${2 ** 30} 1`);
+    const ownerIn = (cwd: string) =>
       writeOwner(runDirFor(join(dir, "config"), entry), {
         schemaVersion: 1,
         kind: "relay",
@@ -1611,16 +1613,122 @@ describe("cli main: --engine", () => {
         state: "idle",
         lastActivityAt: 1,
         autoAccept: false,
-        cwd: "/elsewhere-project",
+        cwd,
         created: entry.created,
       });
+
+    test("attach-any-folder: a run of another folder attaches from ANY folder, as if launched from its own", async () => {
+      // Mutation: keep the launch folder -> the laptop copy lands in the wrong project.
+      setup(`${2 ** 30} 1`);
+      const folder = join(dir, "run-folder");
+      await mkdir(folder, { recursive: true });
+      ownerIn(folder);
+      await withEnv(unreachable, async () => {
+        const r = await attached(["attach", "box"]);
+        expect(r.code).toBe(0);
+        expect(r.text).not.toContain("belongs to");
+        expect(r.seen.sessionId).toBe("44444444-4444-4444-8444-444444444444");
+        expect(r.seen.config?.cwd).toBe(folder);
+      });
+      rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+    });
+
+    test("attach-any-folder: the run's folder is gone: one line, nothing dialled", async () => {
+      // Mutation: skip the existence check -> the attach goes on in a folder that is not there.
+      setup(`${2 ** 30} 1`);
+      const gone = join(dir, "no-such-folder");
+      ownerIn(gone);
       await withEnv(unreachable, async () => {
         const r = await attached(["attach", "box"]);
         expect(r.code).toBe(1);
-        expect(r.text).toContain("this detached run belongs to /elsewhere-project");
+        expect(r.text).toBe(`[error] box: the folder of this run no longer exists: ${gone}\n`);
         expect(r.seen.runtimeBroker).toBeUndefined();
       });
       rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+    });
+
+    test("attach-any-folder: a plain kept container attaches from the folder it mounts (the laptop's index)", async () => {
+      // Mutation: ignore `entry.mount` -> the launch folder.
+      const config = join(dir, "config");
+      const folder = join(dir, "mounted-folder");
+      await mkdir(folder, { recursive: true });
+      rmSync(keptIndexDir(config), { recursive: true, force: true });
+      recordKept(keptIndexDir(config), { ...entry, mount: folder });
+      await withEnv(unreachable, async () => {
+        // `--continue` looks in the sessions filed under the folder it names.
+        const r = await run(["attach", "box", "--continue"]);
+        expect(r.text).toContain(`no saved sessions for ${folder} yet`);
+        // No recorded folder (no mount): today's, the launch folder.
+        rmSync(keptIndexDir(config), { recursive: true, force: true });
+        recordKept(keptIndexDir(config), entry);
+        const none = await run(["attach", "box", "--continue"]);
+        expect(none.text).toContain(`no saved sessions for ${process.cwd()} yet`);
+        // A mount that is gone: one line.
+        const missing = join(dir, "gone-mount");
+        rmSync(keptIndexDir(config), { recursive: true, force: true });
+        recordKept(keptIndexDir(config), { ...entry, mount: missing });
+        const gone = await run(["attach", "box", "--continue"]);
+        expect(gone.code).toBe(1);
+        expect(gone.text).toBe(
+          `[error] box: the folder of this container no longer exists: ${missing}\n`,
+        );
+      });
+      rmSync(keptIndexDir(config), { recursive: true, force: true });
+    });
+
+    test("attach-any-folder: the plain fallthrough of a mounted run keeps the run's model after the move", async () => {
+      // Mutation: `moveTo` without resetting the run-model memo -> the profile's default model.
+      const config = join(dir, "config");
+      const path = join(config, "config.jsonc");
+      await mkdir(config, { recursive: true });
+      const before = (await Bun.file(path).exists()) ? await readFile(path, "utf8") : undefined;
+      await writeFile(
+        path,
+        JSON.stringify({
+          model: { model: "laptop-default", baseURL: "http://default.invalid/v1" },
+          // The profile's model changed since the run started: the run's wins.
+          profiles: { deep: { model: { model: "deep-newer", baseURL: "http://deep.invalid/v1" } } },
+        }),
+      );
+      const folder = join(dir, "mounted-folder-2");
+      await mkdir(folder, { recursive: true });
+      try {
+        await withEnv(
+          {
+            ...unreachable,
+            TENTACLE_PROFILE: undefined,
+            TENTACLE_MODEL: undefined,
+            TENTACLE_MODEL_BASE_URL: undefined,
+          },
+          async () => {
+            clean();
+            deadRun(
+              { ...entry, mount: folder, model: "deep-chat", profile: "deep" },
+              "44444444-4444-4444-8444-444444444444",
+            );
+            // `--resume <another session>`, nobody holds the run -> `plain`.
+            const r = await attached(
+              ["attach", "box", "--resume", "55555555-5555-4555-8555-555555555555"],
+              true,
+              true,
+            );
+            expect(r.seen.config?.cwd).toBe(folder);
+            expect(r.seen.config?.model).toBe("deep-chat");
+          },
+        );
+      } finally {
+        if (before === undefined) await rm(path, { force: true });
+        else await writeFile(path, before);
+        rmSync(keptIndexDir(config), { recursive: true, force: true });
+      }
+    });
+
+    test("an [error] line starts at column 0: no blank line before it", async () => {
+      // Mutation: put the newline back in front of `[error]`.
+      const out: string[] = [];
+      const code = await main(["bun", "cli", "attach"], { write: (t) => out.push(t) });
+      expect(code).toBe(1);
+      expect(out.join("").startsWith("[error]")).toBe(true);
     });
   });
 

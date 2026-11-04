@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -93,7 +94,7 @@ import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
 import { failedLine } from "./pod-stderr-log.ts";
 import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
-import { render } from "./render.ts";
+import { atLineStartAfter, errorLine, render } from "./render.ts";
 import { runModelPlan } from "./run-model.ts";
 import {
   RELAY_SUBCOMMAND,
@@ -316,6 +317,8 @@ export interface CliIO {
   startEngineRuntime?: typeof startEngineRuntime;
   /** Test seam: `attach <name>` of a detached run's engine runtime (docs/feat/detached-handover.md). */
   attachEngineRuntime?: typeof attachEngineRuntime;
+  /** Test seam: the plain (no run) `attach` of a workload — pins the config it gets. */
+  attachPlainRuntime?: typeof attachEngineRuntime;
   /** Test seam: the TUI of an `attach` to a detached run (pins the single broker). */
   startTui?: typeof startTui;
   /** Test seam: stdin and stdout are a terminal. Default: both `isTTY`. */
@@ -376,7 +379,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // (docs/fix/detach-live-followups.md F5).
   const session = extractSessionFlags(argv.slice(2));
   if (!session.ok) {
-    write(`\n[error] ${session.error}\n`);
+    write(`[error] ${session.error}\n`);
     return 1;
   }
   const args = session.rest;
@@ -428,7 +431,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         write(info === "help" ? HELP : `tentacle ${APP_VERSION}\n`);
         return 0;
       }
-      write(`\n[error] ${result.error}\nusage: ${USAGE[mode]}\n`);
+      write(`[error] ${result.error}\nusage: ${USAGE[mode]}\n`);
       return 1;
     }
     parsed = result;
@@ -552,7 +555,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     if (engineFlag !== undefined) {
       const choice = chooseEngine({ flag: engineFlag });
       if (!choice.ok) {
-        write(`\n[error] ${choice.error}\nusage: ${USAGE[mode]}\n`);
+        write(`[error] ${choice.error}\nusage: ${USAGE[mode]}\n`);
         return 1;
       }
       engine = choice.kind;
@@ -720,7 +723,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         })
       : choice.error;
     if (!choice.ok || problem) {
-      write(`\n[error] ${problem}\nusage: ${USAGE[m]}\n`);
+      write(`[error] ${problem}\nusage: ${USAGE[m]}\n`);
       return null;
     }
     return choice.kind;
@@ -861,11 +864,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       detach,
     });
     if (!chosen.ok) {
-      write(`\n[error] ${chosen.error}\nusage: ${USAGE.run}\n`);
+      write(`[error] ${chosen.error}\nusage: ${USAGE.run}\n`);
       return 1;
     }
     if (chosen.stdin && !io.readStdin && process.stdin.isTTY) {
-      write(`\n[error] --prompt -: stdin is a terminal\nusage: ${USAGE.run}\n`);
+      write(`[error] --prompt -: stdin is a terminal\nusage: ${USAGE.run}\n`);
       return 1;
     }
     const prompt = chosen.stdin
@@ -877,7 +880,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       resume: runBools.has("resume") || runFlags.has("resume") || runBools.has("continue"),
     });
     if (detachProblem) {
-      write(`\n[error] ${detachProblem}\nusage: ${USAGE.run}\n`);
+      write(`[error] ${detachProblem}\nusage: ${USAGE.run}\n`);
       return 1;
     }
     const image = runFlags.get("image") ?? process.env.TENTACLE_POD_IMAGE;
@@ -1123,9 +1126,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     noun: string,
   ): string => {
     const shown = untrustedText(name);
-    if (plan.kind === "refuse" && plan.why === "cwd") {
-      return `${shown}: this detached run belongs to ${untrustedText(plan.cwd)}: run \`tentacle attach ${shown}\` from there`;
-    }
     if (plan.kind === "refuse" && plan.why === "tty") {
       return `${shown}: attaching to a detached run needs a terminal (its quit ends the run)`;
     }
@@ -1204,7 +1204,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           plan.profile === config.profile
             ? config
             : await loadConfig({
-                cwd: process.cwd(),
+                cwd: config.cwd,
                 scaffold: false,
                 ...(plan.profile !== undefined ? { profile: plan.profile } : {}),
               });
@@ -1212,10 +1212,48 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         return true;
       } catch (error) {
         write(
-          `\n[config error] ${untrustedText(name)} was started with profile ${untrustedText(plan.profile ?? "(none)")}: ${error instanceof Error ? error.message : String(error)} — pass --profile to choose one\n`,
+          `[config error] ${untrustedText(name)} was started with profile ${untrustedText(plan.profile ?? "(none)")}: ${error instanceof Error ? error.message : String(error)} — pass --profile to choose one\n`,
         );
         return false;
       }
+    };
+    /**
+     * attach-any-folder (docs/fix/attach-any-folder.md): the attach behaves as
+     * if launched from the workload's own folder, which only this laptop
+     * recorded (`owner.json`, the kept index entry's `mount`) — never a label.
+     * Everything derived from the cwd (project config, the sessions filing)
+     * is re-derived from it. `false`: said, one line.
+     */
+    const moveTo = async (folder: string | undefined, what: string): Promise<boolean> => {
+      if (folder === undefined || folder === config.cwd) {
+        return true;
+      }
+      let there = false;
+      try {
+        there = statSync(folder).isDirectory();
+      } catch {
+        there = false;
+      }
+      if (!there) {
+        write(
+          `[error] ${untrustedText(name)}: the folder of this ${what} no longer exists: ${untrustedText(folder)}\n`,
+        );
+        return false;
+      }
+      try {
+        config = await loadConfig({
+          cwd: folder,
+          scaffold: false,
+          ...(config.profile !== undefined ? { profile: config.profile } : {}),
+          ...(modelFlag !== undefined ? { model: modelFlag } : {}),
+        });
+      } catch (error) {
+        write(`[config error] ${error instanceof Error ? error.message : String(error)}\n`);
+        return false;
+      }
+      // The reload dropped the run's model: let `useRunModel` apply it again.
+      runModelOf = null;
+      return true;
     };
     const lookup = explicit ? undefined : resolveKeptAttach(name, keptDir(config.configDir));
     for (const problem of lookup?.problems ?? []) {
@@ -1223,7 +1261,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     if (lookup?.resolved.kind === "ambiguous") {
       write(
-        `\n[error] ${ambiguousMessage(
+        `[error] ${ambiguousMessage(
           name,
           lookup.resolved.candidates.map((c) => c.entry),
         )}\nusage: ${USAGE.attach}\n`,
@@ -1246,10 +1284,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         const at = askedWhere(run.entry.engine);
         const places = { run: placeText(run.entry), asked: at === null ? null : placeText(at) };
         const pid = run.holder?.pid ?? 0;
-        write(`\n[error] ${elsewhereMessage(name, { pid, owner: run.owner }, places)}\n`);
-        return 1;
-      }
-      if (!(await useRunModel(run.entry))) {
+        write(`[error] ${elsewhereMessage(name, { pid, owner: run.owner }, places)}\n`);
         return 1;
       }
       const plan = planAttach({
@@ -1257,16 +1292,21 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         relayAlive: run.holder !== null,
         entryCreated: run.entry.created,
         ...(attachFlags.has("resume") ? { resumeUid: attachFlags.get("resume") } : {}),
-        cwd: config.cwd,
         tty: io.tty ?? (process.stdin.isTTY === true && process.stdout.isTTY === true),
       });
       const runNoun = engineNoun(run.entry.engine);
+      if (plan.kind === "refuse") {
+        write(`[error] ${attachRefusal(name, plan, run, runNoun)}\n`);
+        return 1;
+      }
+      if (plan.kind === "run" && !(await moveTo(plan.cwd, "run"))) {
+        return 1;
+      }
+      if (!(await useRunModel(run.entry))) {
+        return 1;
+      }
       if (plan.kind === "plain") {
         break;
-      }
-      if (plan.kind === "refuse") {
-        write(`\n[error] ${attachRefusal(name, plan, run, runNoun)}\n`);
-        return 1;
       }
       if (run.owner.kind !== "owner") {
         break; // `planAttach` gives `run` only on a record
@@ -1336,7 +1376,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         if (attempt === 0) {
           continue; // planned again, once: keep=false now meets the ordinary "gone"
         }
-        write(`\n[error] ${untrustedText(name)}: the run is still closing; retry in a moment\n`);
+        write(`[error] ${untrustedText(name)}: the run is still closing; retry in a moment\n`);
         return 1;
       }
       // The session's `history` activity draws an attached screen, not the record.
@@ -1344,6 +1384,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return await runEngineTui(joined.runtime, joined.permissions, sessions, joined);
     }
     const keptEntry = lookup?.resolved.kind === "one" ? lookup.resolved.match.entry : undefined;
+    // A plain kept container (no owner record): the folder its index entry
+    // mounts, when it mounts one. None (no mount, or explicit flags, which
+    // skip the index): the launch folder, as before.
+    if (keptEntry && !(await moveTo(keptEntry.mount, "container"))) {
+      return 1;
+    }
     if (keptEntry && !(await useRunModel(keptEntry))) {
       return 1;
     }
@@ -1379,7 +1425,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
     let runtime: Awaited<ReturnType<typeof attachEngineRuntime>>;
     try {
-      runtime = await attachEngineRuntime(config, {
+      runtime = await (io.attachPlainRuntime ?? attachEngineRuntime)(config, {
         host: built.host,
         name,
         ...(container ? { container } : {}),
@@ -1530,13 +1576,16 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   process.on("SIGINT", onSignal);
 
   const userMessage: ChatMessage = { role: "user", content: prompt.join(" ") };
+  let atLineStart = true;
   try {
     for await (const event of agent.run(crypto.randomUUID(), [userMessage], controller.signal)) {
-      write(render(event));
+      const text = render(event);
+      atLineStart = atLineStartAfter(atLineStart, text);
+      write(text);
     }
     return 0;
   } catch (error) {
-    write(`\n[error] ${String(error)}\n`);
+    write(errorLine(error, atLineStart));
     return 1;
   } finally {
     process.off("SIGINT", onSignal);
