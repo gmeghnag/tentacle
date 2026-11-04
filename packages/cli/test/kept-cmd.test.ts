@@ -112,6 +112,8 @@ function setup(entries: KeptEntry[], engines: Record<string, FakeEngine> = {}) {
     now: () => NOW,
     home: "/Users/me",
     dim: (t) => `<dim>${t}</dim>`,
+    dimErr: (t) => `<dim>${t}</dim>`,
+    kubeconfig: () => undefined,
     ...(answer !== undefined
       ? {
           ask: async (p: string) => {
@@ -266,11 +268,14 @@ describe("tentacle ps", () => {
     const text = s.text();
     expect(text).toMatch(/\na +docker +local .* running\n/);
     expect(text).toMatch(/r +docker +ssh:\/\/box .* unreachable/);
-    expect(text).toContain(
-      "<dim>docker ssh://box: not reachable (skipped) — ssh: connect to host box: Connection refused</dim>",
+    // The notes go to STDERR (stdout stays the table), one dim line each.
+    expect(text).not.toContain("not reachable");
+    const notes = s.err.join("");
+    expect(notes).toContain(
+      "<dim>docker ssh://box: not reachable (skipped) — ssh: connect to host box: Connection refused</dim>\n",
     );
-    expect(text).toContain(
-      "<dim>podman local: not reachable (skipped) — no engine at podman:unix:///nope.sock</dim>",
+    expect(notes).toContain(
+      "<dim>podman local: not reachable (skipped) — no engine at podman:unix:///nope.sock</dim>\n",
     );
     expect(readKept(s.dir).entries).toHaveLength(3); // unreachable never prunes
   });
@@ -281,7 +286,97 @@ describe("tentacle ps", () => {
       hostFor: () => ({ describe: () => new Promise(() => {}) }) as unknown as EngineHost,
     });
     expect(await psCommand({}, deps)).toBe(0);
-    expect(s.text()).toContain("not reachable (skipped) — no answer within 0.05s");
+    expect(s.err.join("")).toContain("not reachable (skipped) — no answer within 0.05s");
+  });
+
+  test("a missing podman socket: the short engine-specific note on stderr, no path; -q stays clean", async () => {
+    const gone = (): EngineHost =>
+      ({
+        describe: async () => {
+          throw new Error(
+            "Docker engine socket not found at /var/folders/x/podman-machine-default-api.sock (podman socket (auto-discovered)) — is Docker Desktop running / `podman machine start`?",
+          );
+        },
+      }) as unknown as EngineHost;
+    const s = setup([entry("pm", { engine: "podman", endpoint: "unix:///x.sock" })], {});
+    expect(await psCommand({}, s.deps({ hostFor: gone }))).toBe(0);
+    expect(s.err.join("")).toBe(
+      "<dim>podman local: not reachable (skipped) — no podman socket · run podman machine start</dim>\n",
+    );
+    expect(s.text()).not.toContain("socket");
+    s.err.length = 0;
+    s.out.length = 0;
+    expect(await psCommand({ quiet: true }, s.deps({ hostFor: gone }))).toBe(0);
+    expect(s.text()).toBe("pm\n");
+    expect(s.err).toEqual([]);
+  });
+
+  test("k8s WHERE is <cluster>/<ns> from the kubeconfig, read once; a throwing loader never breaks ps", async () => {
+    const k8s = new FakeEngine();
+    k8s.set("p", { status: "running", labels: K8S_KEPT });
+    k8s.set("q", { status: "running", labels: K8S_KEPT });
+    const s = setup(
+      [
+        entry("p", { engine: "kubernetes", endpoint: undefined, namespace: "n", context: "c" }),
+        entry("q", { engine: "kubernetes", endpoint: undefined, namespace: "n", context: "c" }),
+      ],
+      { "k8s:n": k8s },
+    );
+    let reads = 0;
+    const kube = {
+      contexts: [{ name: "c", context: { cluster: "x" } }],
+      clusters: [{ name: "x", cluster: { server: "https://api.prod.example.com:6443" } }],
+    };
+    const deps = s.deps({
+      kubeconfig: () => {
+        reads++;
+        return kube;
+      },
+    });
+    expect(await psCommand({}, deps)).toBe(0);
+    expect(s.text()).toMatch(/\np +kubernetes +prod\/n /);
+    expect(reads).toBe(1);
+    s.out.length = 0;
+    const boom = s.deps({
+      kubeconfig: () => {
+        throw new Error("unreadable");
+      },
+    });
+    expect(await psCommand({}, boom)).toBe(0);
+    expect(s.text()).toMatch(/\np +kubernetes +c\/n /);
+  });
+
+  test("rm reads the kubeconfig only for a kubernetes name", async () => {
+    const docker = new FakeEngine();
+    docker.set("a", running({ "tentacle.managed": "true", "tentacle.kept": "true" }));
+    const s = setup([entry("a")], { "docker:unix:///var/run/docker.sock": docker });
+    let reads = 0;
+    await rmCommand(
+      "a",
+      { force: true },
+      s.deps({
+        kubeconfig: () => {
+          reads++;
+          return undefined;
+        },
+      }),
+    );
+    expect(reads).toBe(0);
+  });
+
+  test("rm labels use the same cluster", async () => {
+    const k8s = new FakeEngine();
+    k8s.set("p", { status: "running", labels: { "tentacle.kept": "true" } }); // not managed → refused, label printed
+    const s = setup(
+      [entry("p", { engine: "kubernetes", endpoint: undefined, namespace: "n", context: "c" })],
+      { "k8s:n": k8s },
+    );
+    const kube = {
+      contexts: [{ name: "c", context: { cluster: "x" } }],
+      clusters: [{ name: "x", cluster: { server: "https://api.prod.example.com:6443" } }],
+    };
+    expect(await rmCommand("p", { force: true }, s.deps({ kubeconfig: () => kube }))).toBe(1);
+    expect(s.text()).toContain("p (kubernetes, prod/n)");
   });
 
   test("a name now held by a foreign container shows not-tentacle", async () => {

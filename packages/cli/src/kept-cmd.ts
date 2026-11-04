@@ -10,6 +10,7 @@
  * read; an unreachable engine never prunes an entry.
  */
 import { rmSync } from "node:fs";
+import { type Kubeconfig, readKubeconfig } from "@tentacle/k8s";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { type KeptFile, forgetKept, readKept } from "./kept-index.ts";
 import {
@@ -29,6 +30,7 @@ import {
   resolveByName,
   shownInPs,
   sortKept,
+  unreachableNote,
   whereOf,
 } from "./kept.ts";
 import { type ProcOf, lockHolder, residentStop } from "./pod-resident.ts";
@@ -60,6 +62,10 @@ export interface KeptDeps {
   readonly home: string;
   /** Dim marker (identity when not a colour terminal). */
   readonly dim: (text: string) => string;
+  /** Dim marker for STDERR (identity unless stderr is a colour terminal); default identity. */
+  readonly dimErr?: (text: string) => string;
+  /** The laptop kubeconfig for the k8s WHERE; default `readKubeconfig` (undefined = unreadable). */
+  readonly kubeconfig?: () => Kubeconfig | undefined;
   /** Present = interactive (the `rm` y/N); absent = no terminal. */
   readonly ask?: (prompt: string) => Promise<string>;
   readonly timeoutMs?: number;
@@ -67,6 +73,15 @@ export interface KeptDeps {
   readonly procOf?: ProcOf;
   /** Stop the relay holding a run dir; default `residentStop`. */
   readonly stopRelay?: (runDir: string) => Promise<unknown>;
+}
+
+/** The kubeconfig, read once per command; any failure is `undefined`, never a throw. */
+function kubeOf(deps: Pick<KeptDeps, "kubeconfig">): Kubeconfig | undefined {
+  try {
+    return (deps.kubeconfig ?? readKubeconfig)();
+  } catch {
+    return undefined;
+  }
 }
 
 const message = (error: unknown): string =>
@@ -159,18 +174,20 @@ export async function psCommand(
     return 0;
   }
   // One dim line per unreachable location (its rows stay listed: never a silent drop).
-  const down = new Map<string, string>();
+  const kube = rows.some((r) => r.entry.engine === "kubernetes") ? kubeOf(deps) : undefined;
+  const down = new Set<string>();
   for (const { entry, status } of rows) {
     if (status.kind === "unreachable") {
-      down.set(`${entry.engine} ${untrustedText(whereOf(entry))}`, status.reason);
+      down.add(unreachableNote(entry.engine, untrustedText(whereOf(entry, kube)), status.reason));
     }
   }
   const lines = options.verbose
     ? renderVerbose(rows, now, deps.home)
-    : renderTable(rows, now, deps.home);
+    : renderTable(rows, now, deps.home, kube);
   deps.write(`${lines.join("\n")}\n`);
-  for (const [where, reason] of down) {
-    deps.write(`${deps.dim(`${where}: not reachable (skipped) — ${reason}`)}\n`);
+  // STDERR: `ps` / `ps -q` piped stay clean.
+  for (const note of down) {
+    deps.writeErr(`${(deps.dimErr ?? ((t: string) => t))(note)}\n`);
   }
   return 0;
 }
@@ -330,6 +347,10 @@ async function rmOne(
   const index = readKept(deps.dir);
   reportProblems(index.problems, deps, deps.write);
   const found = resolveByName(name, index.entries, options.engine);
+  // Only a k8s name needs the kubeconfig (as in `ps`).
+  const k8sNamed =
+    found.kind === "one" ? [found.match] : found.kind === "ambiguous" ? found.candidates : [];
+  const kube = k8sNamed.some((m) => m.entry.engine === "kubernetes") ? kubeOf(deps) : undefined;
   if (found.kind === "none") {
     deps.write(
       `[error] no kept container or pod named "${untrustedText(name)}" — see \`tentacle ps\`\n`,
@@ -341,12 +362,13 @@ async function rmOne(
       `[error] ${ambiguousMessage(
         name,
         found.candidates.map((c) => c.entry),
+        kube,
       )}\nNothing was removed.\n`,
     );
     return 1;
   }
   const { entry, file } = found.match;
-  const label = `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry))})`;
+  const label = `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry, kube))})`;
   const noun = entry.engine === "kubernetes" ? "pod" : "container";
   const cannotReach = (reason: string): number => {
     deps.write(`[error] cannot reach ${label}: ${reason} — nothing removed, its entry is kept\n`);
@@ -375,8 +397,9 @@ async function rmOne(
           entry,
           holder.pid,
           statusOf(readOwner(runDir), true, deps.now()) ?? "unknown owner",
+          kube,
         )
-      : removeConfirmation(entry);
+      : removeConfirmation(entry, kube);
     if (!isYes(await deps.ask(prompt))) {
       deps.write("Not removed.\n");
       return 1;
@@ -427,7 +450,7 @@ async function rmOne(
       // is still there, so it must not claim it went (the `[warn]` below says it).
       deps.write(
         holder
-          ? `${removedLine(entry, deps.home)}\n`
+          ? `${removedLine(entry, deps.home, kube)}\n`
           : removal.forgetError === undefined
             ? `Removed the entry of ${label}: the ${noun} no longer exists.\n`
             : `The ${noun} of ${label} no longer exists.\n`,
@@ -447,7 +470,7 @@ async function rmOne(
       dropRunDir(runDir, deps.write);
       return 1;
     case "removed":
-      deps.write(`${removedLine(entry, deps.home)}\n`);
+      deps.write(`${removedLine(entry, deps.home, kube)}\n`);
       entryLeft(removal.forgetError);
       dropRunDir(runDir, deps.write);
       return 0;

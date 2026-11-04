@@ -292,11 +292,13 @@ describe("cli main: --engine", () => {
   };
   const run = async (args: string[], colour?: boolean) => {
     const out: string[] = [];
+    const errs: string[] = [];
     const code = await main(["bun", "cli", ...args], {
       write: (t) => out.push(t),
+      writeErr: (t) => errs.push(t),
       ...(colour !== undefined ? { colour } : {}),
     });
-    return { code, text: out.join("") };
+    return { code, text: out.join(""), err: errs.join("") };
   };
   // BOTH engines point nowhere: a kubernetes path must never reach the
   // developer's real kubeconfig cluster from a test (port 9 = discard, closed).
@@ -1747,6 +1749,7 @@ describe("cli main: --engine", () => {
         expect(ps).toEqual({
           code: 0,
           text: "NAME   ENGINE   WHERE   MOUNT   MODEL   AGE   STATUS\n",
+          err: "",
         });
         const bad = await run(["ps", "--bogus"]);
         expect(bad.code).toBe(1);
@@ -1763,6 +1766,39 @@ describe("cli main: --engine", () => {
       });
     });
 
+    test("the stderr note's colour follows the injected writeErr, even with a real TTY stderr", async () => {
+      clear();
+      await record({
+        schemaVersion: 1,
+        name: "box",
+        engine: "docker",
+        endpoint: "unix:///nonexistent/kept.sock",
+        model: "m",
+        created: new Date().toISOString(),
+      });
+      const real = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
+      const noColor = process.env.NO_COLOR;
+      Object.defineProperty(process.stderr, "isTTY", { value: true, configurable: true });
+      Reflect.deleteProperty(process.env, "NO_COLOR");
+      try {
+        await withEnv(unreachable, async () => {
+          const ps = await run(["ps"]);
+          expect(ps.err).toContain("not reachable");
+          expect(ps.err).not.toContain("\x1b");
+        });
+      } finally {
+        if (real) {
+          Object.defineProperty(process.stderr, "isTTY", real);
+        } else {
+          Reflect.deleteProperty(process.stderr, "isTTY");
+        }
+        if (noColor !== undefined) {
+          process.env.NO_COLOR = noColor;
+        }
+        clear();
+      }
+    });
+
     test("ps lists an indexed entry; its unreachable engine is a dim skip, exit 0", async () => {
       clear();
       await record({
@@ -1777,7 +1813,11 @@ describe("cli main: --engine", () => {
         const ps = await run(["ps"]);
         expect(ps.code).toBe(0);
         expect(ps.text).toMatch(/box +docker +local .* unreachable/);
-        expect(ps.text).toContain("docker local: not reachable (skipped)");
+        // the note is on STDERR, short, and names no socket path
+        expect(ps.text).not.toContain("not reachable");
+        expect(ps.err).toBe(
+          "docker local: not reachable (skipped) — no docker socket · is Docker Desktop running?\n",
+        );
       });
       clear();
     });
