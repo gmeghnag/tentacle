@@ -1163,3 +1163,67 @@ error became `{}` for an exact repeat).
 owner approved. It reported that a test of its own was vacuous at first, and
 how it fixed that. It listed the mutation that had no effect and why. It
 said the gap that remains is non-persisted `SettledAnswers`.
+
+### Rebase onto main (2026-11-04)
+
+*— claude-opus-5-5, 2026-11-04*
+
+Rebased `5b77867` onto `main` @ `0874c46` (61 commits ahead) → `6270f40`.
+Three files had textual conflicts. Both sides' intent is kept in each one:
+
+- `packages/client/src/remote-client.ts:292`
+  - Main added `VanishedError` (R7, detach-live) next to `SessionLostError`.
+  - This commit had moved `SessionLostError` to `client/src/session-lost.ts`,
+    imported at `:82`.
+  - Resolution: keep main's `VanishedError` and drop the in-file
+    `SessionLostError` duplicate.
+- `packages/tui/src/permission-ui.ts`:
+  - Both new types are kept: main's `AutoAcceptFeed` (`:150`) and this
+    commit's `DraftBack` (`:163`).
+  - `usePermissionBroker(permissions, ownsTurn, feed?, onDraftBack?)`
+    (`:176`): main's `feed` is third, the draft callback fourth. The initial
+    `autoApprove` stays seeded from `feed`.
+  - Main factored the toggle into `applyAuto` (own toggle + a flip from
+    another TUI). It now does `closeDraft("approved")` before the
+    auto-grant (`:255`, deps `[answer, closeDraft]` `:259`). Owner Q3 (an
+    auto-granted request's draft goes back) therefore also holds for a flip
+    that comes from another TUI.
+- `packages/tui/src/App.tsx`:
+  - Imports both types (`:64-65`); keeps `export type { AutoAcceptFeed }`.
+  - Keeps main's B3 comment plus `draftBackRef` (`:469`).
+  - Passes `autoAccept, draftBack` in that order (`:478`).
+  - `activeRows` (`:780`) keeps main's `quitConfirm` precedence and adds the
+    reply field's rows to `permissionPromptRows`.
+
+**Semantic conflict (no textual one): `packages/tui/test/denial-reply-row.test.ts:34`.**
+- Main's `f00fdf9` (tui-tool-expand) shows an expanded call's full command on
+  `│ ` rows above the body.
+- The test's expanded case predated that, so it failed with an extra
+  `│ rm -rf build` row.
+- Fixed in the test (the row body still shows `✗ Denied · <text>` and never
+  the model text). The change is **uncommitted in the worktree**, as the
+  rebase instruction asked for no new commits. It must be folded in before
+  merge.
+
+**Versions:**
+- `DAEMON_RECORD_VERSION` = 8 = main (7) + 1, `READABLE_VERSIONS` 1..8
+  (`daemon/src/persisted-session.ts:44-46`). No collision.
+- `PROTOCOL_VERSION` stays main's 14 (`protocol/src/version.ts:7`): this
+  change is additive and needs no bump.
+- The laptop store has no version constant; only the strict key list gains
+  `denialReply`.
+
+**Gate (worktree, after the rebase + the test fix):**
+- `bunx biome check .` → 611 files, clean.
+- `bunx tsc --noEmit` → 6 errors, ALL `TS2307 Cannot find module '@noble/…'`
+  in `transport/src/noise.ts` and its two tests. The cause is main's new
+  Noise dependencies, which are not installed in this worktree:
+  `node_modules/@noble` is absent, `bun install` was not approved in this
+  session. They are unrelated to this change.
+- `bun test packages` → 4123 pass / 3 skip (opt-in). Fail lines: the
+  denial-row test above, since fixed (re-run: 4/4 pass), plus 4 file-load
+  errors from the same missing `@noble` modules (the noise and
+  secure-channel suites did not load).
+- **To verify:** run `bun install --frozen-lockfile` in the worktree, then
+  re-run `bun run check`. Expected: 0 tsc errors, and main's 4116 plus this
+  commit's tests passing.
