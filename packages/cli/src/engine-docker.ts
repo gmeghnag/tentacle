@@ -26,7 +26,13 @@ import {
   endpointLabel,
   spawnContainerDelete,
 } from "@tentacle/docker";
-import { type EngineHost, WorkloadRemovedError, type WorkloadState } from "./engine-host.ts";
+import {
+  type EngineHost,
+  RefusalError,
+  WorkloadNotFoundError,
+  WorkloadRemovedError,
+  type WorkloadState,
+} from "./engine-host.ts";
 import {
   WORKSPACE_LABELS,
   type WorkspaceMount,
@@ -183,7 +189,7 @@ export function dockerEngineHost(options: DockerEngineHostOptions): EngineHost {
         error.message.startsWith(`cannot create container ${name}:`);
       const conflict = (error: unknown): Error => {
         if (error instanceof DockerApiError && error.status === 409) {
-          return new Error(
+          return new RefusalError(
             `a container named "${name}" already exists on ${where} — pick another name or remove it (\`${cli} rm ${name}\`)`,
           );
         }
@@ -192,7 +198,7 @@ export function dockerEngineHost(options: DockerEngineHostOptions): EngineHost {
           error instanceof DockerApiError &&
           MOUNT_DENIED.test(error.engineMessage)
         ) {
-          return new Error(
+          return new RefusalError(
             `${cli} cannot mount ${workspace.source}: ${error.engineMessage} — on Docker Desktop add it in Settings → Resources → File sharing; or use --no-mount`,
           );
         }
@@ -270,8 +276,10 @@ export function dockerEngineHost(options: DockerEngineHostOptions): EngineHost {
         defaults = labelledDefaults(info.Config?.Labels);
       } catch (error) {
         if (is404(error)) {
-          throw new Error(
+          throw new WorkloadNotFoundError(
             `container "${name}" not found on ${where} — check the name (\`${cli} ps\`); use \`run\` to create one`,
+            "container",
+            `on ${kind}`,
           );
         }
         throw toError(error);

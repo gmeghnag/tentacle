@@ -3,10 +3,12 @@ import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RefusalError, WorkloadNotFoundError } from "../src/engine-host.ts";
 import {
   failedLine,
   failureLogPath,
   markStillUp,
+  notListedLine,
   openDaemonLog,
   recordFailure,
   shortCause,
@@ -153,6 +155,29 @@ describe("failures: one short line, the whole cause in the log", () => {
     );
     expect(failedLine("pod", markStillUp(new Error("x"), "p1"), home)).toBe(
       "[pod] failed: x · still up: tentacle rm p1\n",
+    );
+  });
+
+  test("a RefusalError is never cut by the ~120-char limit (owner's multi-container line)", () => {
+    // Mutation: drop the `RefusalError` branch in `failedLine` → the line ends in `…`.
+    const message =
+      "a container name must be specified for pod dns-default-4kqw9, choose one of: [dns kube-rbac-proxy] · pass --container <c>";
+    expect(message.length).toBeGreaterThan(120);
+    expect(failedLine("pod", new RefusalError(message))).toBe(`[pod] failed: ${message}\n`);
+    // Any other error of that length is still cut.
+    expect(failedLine("pod", new Error(message)).endsWith("…\n")).toBe(true);
+    // Pod-supplied text in a refusal is still sanitised.
+    expect(failedLine("pod", new RefusalError("bad \u001b[31mname"))).not.toContain("\u001b");
+  });
+
+  test("notListedLine: ONE line, no `failed:`, no log, no cut", () => {
+    const k8s = new WorkloadNotFoundError("gone", "pod", "in openshift-dns");
+    expect(notListedLine("nome-che-non-esiste", k8s)).toBe(
+      "[error] nome-che-non-esiste: not in tentacle ps, and no pod with that name in openshift-dns\n",
+    );
+    const docker = new WorkloadNotFoundError("gone", "container", "on docker");
+    expect(notListedLine("box", docker)).toBe(
+      "[error] box: not in tentacle ps, and no container with that name on docker\n",
     );
   });
 });

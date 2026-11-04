@@ -39,6 +39,7 @@ import {
   type EngineExecTarget,
   type EngineHost,
   type EngineRunExecResult,
+  RefusalError,
   WorkloadRemovedError,
   type WorkloadState,
 } from "./engine-host.ts";
@@ -370,8 +371,9 @@ export async function provisionWorkload(
     return await provisionNamed(config, deps, name);
   } catch (error) {
     // The whole cause goes to the run's log; the caller prints ONE short line.
+    // A refusal (nothing ran, e.g. the namespace does not exist) creates no log.
     const path = deps.daemonLogPath?.(name);
-    if (path !== undefined) {
+    if (path !== undefined && !(error instanceof RefusalError)) {
       recordFailure(error, openDaemonLog(path, undefined, `run ${name}`));
     }
     throw error;
@@ -688,13 +690,11 @@ export async function attachEngineRuntime(
 ): Promise<EngineRuntime> {
   const { host } = deps;
   const { name } = deps;
-  // The pod daemon's stderr goes to a per-run file, never to the terminal (as
-  // in `startEngineRuntime`).
-  const stderr = openDaemonLog(deps.daemonLogPath?.(name), undefined, `attach ${name}`);
   // No `?? AGENT_CONTAINER` default: when the caller does not name a container,
   // the exec API omits the `container` parameter and picks the only/default
   // one (single-container pods need no `-c`).
-  const container = deps.container;
+  // `let`: the preflight may resolve one (k8s `default-container` annotation).
+  let container = deps.container;
   // Same single-line (TTY) / one-line-per-phase (piped) contract as `run`.
   const status = (process.stdout.isTTY ?? false) ? new StatusLine({ write: deps.log }) : null;
   const info = deps.info ?? deps.log;
@@ -709,17 +709,22 @@ export async function attachEngineRuntime(
   phase(`[${host.noun}] attaching to ${name} in ${host.where}…`);
   let state: WorkloadState;
   try {
-    // A missing workload arrives as an actionable error (wrong name / namespace).
-    state = await host.inspect(name);
+    // A missing workload arrives as an actionable error (wrong name / namespace);
+    // k8s also refuses a multi-container pod when no container was named.
+    state = await host.inspect(name, { container });
   } catch (error) {
+    // Nothing ran: no daemon log (docs/fix/k8s-multi-container.md).
     status?.finish();
-    throw recordFailure(error, stderr);
+    throw error;
   }
   // A terminated / not-runnable workload can never host the daemon (and
   // `waitForReady` would just time out) — say so up front. Never started here.
   if (state.kind === "stopped") {
     status?.finish();
-    throw recordFailure(new Error(state.detail), stderr);
+    throw new RefusalError(state.detail);
+  }
+  if (container === undefined && state.container !== undefined) {
+    container = state.container; // silently, like kubectl
   }
   // M7 (owner 2026-10-27): the container's mount is fixed — attaching from
   // another folder is warned about, never refused.
@@ -745,10 +750,14 @@ export async function attachEngineRuntime(
       await host.waitForReady(name, { timeoutMs: 60_000 });
     } catch (error) {
       status?.finish();
-      throw recordFailure(error, stderr);
+      throw error;
     }
   }
 
+  // From here a command runs in the workload, so the log exists: the pod
+  // daemon's stderr goes to a per-run file, never to the terminal (as in
+  // `startEngineRuntime`). Created only now — every refusal above leaves nothing.
+  const stderr = openDaemonLog(deps.daemonLogPath?.(name), undefined, `attach ${name}`);
   try {
     // Preflight: if the pod ALREADY has a working `tentacle` (a re-attach
     // after a previous attach, or an image that ships it), the whole injection

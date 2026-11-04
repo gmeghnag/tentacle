@@ -66,6 +66,29 @@ export interface WorkloadFacts {
 }
 
 /**
+ * A refusal made BEFORE anything ran in the workload (a wrong name, a terminated
+ * pod, a multi-container pod with no `--container`): the message is already short
+ * and complete, so it is never cut to the ~120-char one-line limit
+ * (`failedLine`) and no daemon log is created for it (docs/fix/k8s-multi-container.md).
+ */
+export class RefusalError extends Error {}
+
+/**
+ * The workload does not exist (a 404). `noun` / `place` ("in <namespace>" |
+ * "on docker") let `attach` say, for a name that is not in `tentacle ps`, that
+ * nothing by that name exists either (`notListedLine`).
+ */
+export class WorkloadNotFoundError extends RefusalError {
+  constructor(
+    message: string,
+    readonly noun: "pod" | "container",
+    readonly place: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * A startup failure after which the host ALREADY removed the workload — or
  * tried to, and said so in the message (a workspace probe that failed or
  * could not run, e.g. a visible mask): the runtime must not keep it or report
@@ -77,10 +100,19 @@ export class WorkloadRemovedError extends Error {
 
 /** The `attach` preflight's view of an existing workload. */
 export type WorkloadState =
-  /** `workspace`: the laptop folder a tentacle-made container mounts (its label). */
-  | { readonly kind: "ready"; readonly workspace?: string }
+  /**
+   * `workspace`: the laptop folder a tentacle-made container mounts (its label).
+   * `container`: k8s only — the container to exec into when the user named none
+   * and the pod has several (its `default-container` annotation, as kubectl does).
+   */
+  | { readonly kind: "ready"; readonly workspace?: string; readonly container?: string }
   /** Pulling / restarting: worth a bounded wait. */
-  | { readonly kind: "starting"; readonly detail: string; readonly workspace?: string }
+  | {
+      readonly kind: "starting";
+      readonly detail: string;
+      readonly workspace?: string;
+      readonly container?: string;
+    }
   /** Terminal / not runnable: refuse with `detail` (attach never starts it). */
   | { readonly kind: "stopped"; readonly detail: string };
 
@@ -96,8 +128,12 @@ export interface EngineHost {
   create(name: string, image: string, options?: EngineCreateOptions): Promise<void>;
   /** Wait until the workload can host an exec (docker: start it first). */
   waitForReady(name: string, options?: { readonly timeoutMs?: number }): Promise<void>;
-  /** The `attach` preflight (a missing workload throws an actionable error). */
-  inspect(name: string): Promise<WorkloadState>;
+  /**
+   * The `attach` preflight (a missing workload throws an actionable error).
+   * `container`: the `--container` the user passed, if any — k8s refuses a
+   * multi-container pod when none was named (`RefusalError`, before any exec).
+   */
+  inspect(name: string, options?: { readonly container?: string }): Promise<WorkloadState>;
   /**
    * `ps` / `rm` (slice E): the workload's state and labels — `null` when the
    * engine says it does not exist (404); any other failure throws.

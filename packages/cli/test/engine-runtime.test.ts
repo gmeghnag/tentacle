@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Agent, JsonSessionStore } from "@tentacle/agent";
 import type { LinkStatus } from "@tentacle/client";
 import type {
@@ -848,6 +848,71 @@ describe("startPodRuntime", () => {
       expect(logs.join("")).not.toContain("daemon stderr");
       expect(logs.join("")).not.toContain("bridge: no resident");
       expect(readFileSync(logPath, "utf8")).toContain("bridge: no resident");
+    });
+
+    // docs/fix/k8s-multi-container.md: a refusal before anything ran leaves nothing on disk.
+    test("attach: a multi-container pod with no --container is refused BEFORE any exec, no log created", async () => {
+      // Mutation: drop the container check in `kubeEngineHost.inspect` → exec runs, the pod daemon dies.
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      kube.pod = {
+        metadata: { name: "mypod" },
+        spec: { containers: [{ name: "dns" }, { name: "kube-rbac-proxy" }] },
+        status: { phase: "Running", conditions: [{ type: "Ready", status: "True" }] },
+      };
+      const logPath = freshLog();
+      const error = await attach(kubeEngineHost(kube, "dev"), [], logPath).catch((e) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(
+        "a container name must be specified for pod mypod, choose one of: [dns kube-rbac-proxy] · pass --container <c>",
+      );
+      expect(kube.calls.filter((c) => c.startsWith("exec:") || c.startsWith("runexec:"))).toEqual(
+        [],
+      );
+      expect(existsSync(dirname(logPath))).toBe(false);
+    });
+
+    test("attach: the default-container annotation is the container EVERY exec targets (probe, daemon), silently", async () => {
+      // Mutation: the runtime drops `state.container` → execs go to container `-` (the API would refuse).
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      kube.pod = {
+        metadata: {
+          name: "mypod",
+          annotations: { "kubectl.kubernetes.io/default-container": "etcd" },
+        },
+        spec: { containers: [{ name: "etcdctl" }, { name: "etcd" }] },
+        status: { phase: "Running", conditions: [{ type: "Ready", status: "True" }] },
+      };
+      const logs: string[] = [];
+      const runtime = await attach(kubeEngineHost(kube, "dev"), logs, freshLog());
+      const execs = kube.calls.filter((c) => c.startsWith("exec:"));
+      expect(execs.length).toBeGreaterThan(0);
+      expect(execs.every((c) => c.startsWith("exec:mypod:etcd:"))).toBe(true);
+      expect(logs.join("")).not.toContain("etcd");
+      await runtime.dispose();
+    });
+
+    test("attach: a pod that is not found / terminated creates no log either", async () => {
+      // Mutation: open the log before `inspect` (the old order) → the dir exists.
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      kube.getPod = () => Promise.reject(new KubeApiError(404, "nope"));
+      const logPath = freshLog();
+      await expect(attach(kubeEngineHost(kube, "dev"), [], logPath)).rejects.toThrow(/not found/);
+      expect(existsSync(dirname(logPath))).toBe(false);
+      const gone = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      gone.pod = { metadata: { name: "mypod" }, status: { phase: "Succeeded" } };
+      const goneLog = freshLog();
+      await expect(attach(kubeEngineHost(gone, "dev"), [], goneLog)).rejects.toThrow(/terminated/);
+      expect(existsSync(dirname(goneLog))).toBe(false);
+    });
+
+    test("attach: a failure AFTER something ran (the first exec) still keeps its log", async () => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      kube.runExec = () => Promise.reject(new Error("boom in the pod"));
+      const logPath = freshLog();
+      const error = await attach(kubeEngineHost(kube, "dev"), [], logPath).catch((e) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(existsSync(logPath)).toBe(true);
+      expect(failureLogPath(error)).toBe(logPath);
     });
 
     test("attach: a dropped link: one line with the log path", async () => {
