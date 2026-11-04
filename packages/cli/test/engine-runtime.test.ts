@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,12 +41,13 @@ import {
   type EngineAttachRuntimeDeps,
   type EngineRuntimeDeps,
   attachEngineRuntime,
-  createStderrSink,
+  createFaultWatch,
   podDaemonCommand,
   provisionWorkload,
   startEngineRuntime,
 } from "../src/engine-runtime.ts";
 import { POD_BIN_PATH } from "../src/pod-binary.ts";
+import { failureLogPath } from "../src/pod-stderr-log.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import { formatVersionMarker } from "../src/version.ts";
 
@@ -367,7 +368,7 @@ describe("startPodRuntime", () => {
     expect(kube.calls.some((c) => c === `runexec:box:${POD_BIN_PATH} --version`)).toBe(true);
     expect(kube.calls.some((c) => c.includes("serve --bridge"))).toBe(false);
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
-    expect(lines.join("")).toContain("kept box — resume with: tentacle attach box");
+    expect(lines.join("")).toContain("box still running · tentacle attach box");
   });
 
   test("creates + readies a pod, runs a turn over exec, deletes on dispose", async () => {
@@ -690,6 +691,7 @@ describe("startPodRuntime", () => {
         resume: null,
         log: (line) => logs.push(line),
       });
+      runtime.announce?.(); // the caller opens the TUI (round 4: the line waits for it)
       runtime.dispose();
       await new Promise((r) => setTimeout(r, 10));
     } finally {
@@ -699,13 +701,356 @@ describe("startPodRuntime", () => {
     expect(
       kube.calls.filter((c) => c.startsWith("delete:") || c.startsWith("besteffort:")),
     ).toEqual([]);
-    const kept =
-      "[pod] kept keeper — resume with: tentacle attach --engine kubernetes -n dev keeper\n";
-    // Once before the TUI (survives a Ctrl+C exit), once after dispose.
-    expect(logs.filter((l) => l === kept)).toHaveLength(2);
+    const kept = "[pod] keeper still running · tentacle attach keeper\n";
+    // ONE line, printed before the TUI (it survives a signal exit; the main
+    // screen shows it again after the quit). Mutation: print it again at
+    // dispose → two lines, "kept"/`--engine` wording aside.
+    expect(logs.filter((l) => l === kept)).toHaveLength(1);
+    expect(logs.join("")).not.toContain("kept");
+    expect(logs.join("")).not.toContain("--engine");
   });
 
-  test("--keep: a startup failure leaves the pod up (to inspect) and says how to reach it", async () => {
+  // docs/feat/run-prompt.md round 2: the daemon's stderr is for a failed or
+  // abnormal run only — a normal quit prints none of it ("[daemon] bridge: no
+  // resident … starting one" is routine).
+  describe("daemon stderr on exit", () => {
+    const hostWithStderr = (kube: PodCluster) => {
+      const host = kubeEngineHost(kube, "dev");
+      const emit: { stderr: (text: string) => void; frame: (data: string) => void } = {
+        stderr: () => {},
+        frame: () => {},
+      };
+      const open = host.openExec.bind(host);
+      host.openExec = (target, options) => {
+        emit.stderr = (text) => options?.onStderr?.(text);
+        const channel = open(target, options);
+        // A frame the daemon "sends" to the laptop (the client's own handler).
+        const setOnMessage = channel.setOnMessage.bind(channel);
+        channel.setOnMessage = (handler) => {
+          emit.frame = handler;
+          setOnMessage(handler);
+        };
+        return channel;
+      };
+      return { host, emit };
+    };
+    // Round 4: the daemon's stderr is ALWAYS written to a per-run file and never
+    // to the terminal; only a real failure prints one dim line naming the file.
+    let logCounter = 0;
+    const freshLog = (): string => join(dir, "daemon-logs", `${++logCounter}`, "daemon.log");
+    const start = (host: ReturnType<typeof kubeEngineHost>, logs: string[], logPath: string) =>
+      startEngineRuntime(baseConfig("/pod/work"), {
+        host,
+        image: "img",
+        name: "box",
+        permissions: new PermissionBroker(),
+        saver: new SessionSaver(
+          new JsonSessionStore(join(dir, `stderr-${logPath.length}-${logCounter}`)),
+          () => {},
+        ),
+        resume: null,
+        log: (line) => logs.push(line),
+        info: (line) => logs.push(line),
+        daemonLogPath: () => logPath,
+      });
+    const quitLine = (noun: string, name: string, path: string) =>
+      `[${noun}] ${name}: daemon stopped unexpectedly · log: ${path}\n`;
+
+    test("a normal quit: the daemon's stderr goes to the file only; nothing about it on the terminal", async () => {
+      // Mutation: print the buffered stderr at dispose → the terminal gets it.
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const { host, emit } = hostWithStderr(kube);
+      const logs: string[] = [];
+      const logPath = freshLog();
+      const runtime = await start(host, logs, logPath);
+      emit.stderr("[daemon] bridge: no resident → starting one\n");
+      await runtime.dispose();
+      expect(logs.join("")).not.toContain("daemon stderr");
+      expect(logs.join("")).not.toContain("bridge: no resident");
+      expect(logs.join("")).not.toContain("unexpectedly");
+      expect(readFileSync(logPath, "utf8")).toContain("bridge: no resident");
+    });
+
+    test("a model/turn error is not a failure: it goes to the file, the terminal gets nothing", async () => {
+      // The error was shown in the TUI already. Mutation: mark the fault on a
+      // laptop RPC error → the "stopped unexpectedly" line appears.
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const { host, emit } = hostWithStderr(kube);
+      const logs: string[] = [];
+      const logPath = freshLog();
+      const runtime = await start(host, logs, logPath);
+      // A laptop-side RPC error (a local model failure reaches the client this way).
+      emit.frame(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { nope: 1 } }));
+      await new Promise((r) => setTimeout(r, 30));
+      expect(readFileSync(logPath, "utf8")).toContain("[laptop rpc]");
+      await runtime.dispose();
+      expect(logs.join("")).not.toContain("unexpectedly");
+      expect(logs.join("")).not.toContain("daemon stderr");
+      expect(logs.join("")).not.toContain("[laptop rpc]");
+    });
+
+    test("a link that dropped (the daemon died): ONE line with the log path, no dump", async () => {
+      // Mutation: never report → the line is missing.
+      const kube = new DroppingCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const { host, emit } = hostWithStderr(kube);
+      const logs: string[] = [];
+      const logPath = freshLog();
+      const runtime = await start(host, logs, logPath);
+      const statuses: LinkStatus[] = [];
+      runtime.link.onLinkStatus((s) => statuses.push(s));
+      emit.stderr("boom from the daemon\n");
+      kube.drop();
+      expect(await until(() => statuses.some((s) => s.state !== "up"))).toBe(true);
+      await runtime.dispose();
+      expect(logs.filter((l) => l.includes("unexpectedly"))).toEqual([
+        quitLine("pod", "box", logPath),
+      ]);
+      expect(logs.join("")).not.toContain("boom from the daemon");
+      expect(readFileSync(logPath, "utf8")).toContain("boom from the daemon");
+    });
+
+    test("the TUI itself failing (markFault) is a failure too: the same one line", async () => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const { host } = hostWithStderr(kube);
+      const logs: string[] = [];
+      const logPath = freshLog();
+      const runtime = await start(host, logs, logPath);
+      runtime.markFault?.();
+      await runtime.dispose();
+      expect(logs).toContain(quitLine("pod", "box", logPath));
+    });
+
+    // `attach` follows the same rules.
+    const attach = (host: ReturnType<typeof kubeEngineHost>, logs: string[], logPath: string) =>
+      attachEngineRuntime(baseConfig("/pod/work"), {
+        host,
+        name: "mypod",
+        permissions: new PermissionBroker(),
+        saver: new SessionSaver(
+          new JsonSessionStore(join(dir, `astderr-${logPath.length}-${logCounter}`)),
+          () => {},
+        ),
+        resume: null,
+        log: (line) => logs.push(line),
+        info: (line) => logs.push(line),
+        daemonLogPath: () => logPath,
+      });
+
+    test("attach: a normal quit: file only, nothing on the terminal", async () => {
+      // Mutation: print the stderr at the attach dispose → the lines appear.
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const { host, emit } = hostWithStderr(kube);
+      const logs: string[] = [];
+      const logPath = freshLog();
+      const runtime = await attach(host, logs, logPath);
+      emit.stderr("[daemon] bridge: no resident → starting one\n");
+      await runtime.dispose();
+      expect(logs.join("")).not.toContain("daemon stderr");
+      expect(logs.join("")).not.toContain("bridge: no resident");
+      expect(readFileSync(logPath, "utf8")).toContain("bridge: no resident");
+    });
+
+    test("attach: a dropped link: one line with the log path", async () => {
+      const kube = new DroppingCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const { host, emit } = hostWithStderr(kube);
+      const logs: string[] = [];
+      const logPath = freshLog();
+      const runtime = await attach(host, logs, logPath);
+      const statuses: LinkStatus[] = [];
+      runtime.link.onLinkStatus((s) => statuses.push(s));
+      emit.stderr("attach boom\n");
+      kube.drop();
+      expect(await until(() => statuses.some((s) => s.state !== "up"))).toBe(true);
+      await runtime.dispose();
+      expect(logs).toContain(quitLine("pod", "mypod", logPath));
+      expect(logs.join("")).not.toContain("attach boom");
+    });
+
+    test("`info` carries the informational lines (the exit line, the phases); `log` keeps warnings and errors", async () => {
+      // Mutation: send everything to `log` → the info array is empty.
+      const kube = new FakeCluster(new ScriptedProvider([]));
+      const logs: string[] = [];
+      const infos: string[] = [];
+      await provisionWorkload(baseConfig("/pod/work"), {
+        host: kubeEngineHost(kube, "dev"),
+        image: "img",
+        name: "box",
+        keepHint: (n) => `tentacle attach ${n}`,
+        recordKept: () => {
+          throw new Error("disk full");
+        },
+        log: (line) => logs.push(line),
+        info: (line) => infos.push(line),
+      });
+      expect(infos).toContain("[pod] box still running · tentacle attach box\n");
+      expect(infos.join("")).toContain("[pod] creating box (image img)");
+      expect(infos.join("")).toContain("[pod] waiting for box to become ready");
+      expect(logs.join("")).toContain("[pod] warning: box is not in `tentacle ps`");
+      expect(logs.join("")).not.toContain("still running");
+      expect(infos.join("")).not.toContain("warning");
+    });
+
+    test("a startup failure keeps its error message, carries the log path, and the full text goes to the file; no dump", async () => {
+      // Mutation: do not record the failure → no `logPath` / no text in the file.
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const { host } = hostWithStderr(kube);
+      const logs: string[] = [];
+      const logPath = freshLog();
+      host.openExec = (_target, options) => {
+        options?.onStderr?.("early boom\n");
+        throw new Error("cannot exec\nthe long second line");
+      };
+      const error = await start(host, logs, logPath).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe("cannot exec\nthe long second line");
+      expect(failureLogPath(error)).toBe(logPath);
+      expect(logs.join("")).not.toContain("daemon stderr");
+      expect(logs.join("")).not.toContain("early boom");
+      const text = readFileSync(logPath, "utf8");
+      expect(text).toContain("early boom");
+      expect(text).toContain("the long second line");
+    });
+
+    test("setup before the daemon (`tentacle --version` crashes): the error carries the log path and the file holds the whole cause", async () => {
+      // Mutation: record only in the daemon stage → this path has no log.
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const original = kube.runExec.bind(kube);
+      kube.runExec = (target, input, options) =>
+        target.command.includes("--version")
+          ? Promise.resolve({
+              exitCode: 134,
+              stdout: "",
+              stderr: "Illegal instruction\nbacktrace line 2\n",
+              status: "",
+            })
+          : original(target, input, options);
+      const logs: string[] = [];
+      const logPath = freshLog();
+      const error = await provisionWorkload(baseConfig("/pod/work"), {
+        host: kubeEngineHost(kube, "dev"),
+        image: "img",
+        name: "box",
+        log: (line) => logs.push(line),
+        daemonLogPath: () => logPath,
+      }).catch((e: unknown) => e);
+      expect((error as Error).message).toContain("--version failed (exit 134)");
+      expect(failureLogPath(error)).toBe(logPath);
+      expect(readFileSync(logPath, "utf8")).toContain("backtrace line 2");
+      // Without a log path there is none to name (and nothing is written).
+      const bare = await provisionWorkload(baseConfig("/pod/work"), {
+        host: kubeEngineHost(kube, "dev"),
+        image: "img",
+        name: "box2",
+        log: () => {},
+      }).catch((e: unknown) => e);
+      expect(failureLogPath(bare)).toBeUndefined();
+    });
+
+    describe("the `still running` line (run, kept)", () => {
+      const keptStart = (host: ReturnType<typeof kubeEngineHost>, logs: string[], path: string) =>
+        startEngineRuntime(baseConfig("/pod/work"), {
+          host,
+          image: "img",
+          name: "box",
+          keepHint: (n) => `tentacle attach ${n}`,
+          permissions: new PermissionBroker(),
+          saver: new SessionSaver(
+            new JsonSessionStore(join(dir, `keptline-${path.length}`)),
+            () => {},
+          ),
+          resume: null,
+          log: (line) => logs.push(line),
+          info: (line) => logs.push(line),
+          daemonLogPath: () => path,
+        });
+
+      test("printed only when the caller opens the TUI (`announce`), once, never again at dispose", async () => {
+        // Mutation: announce inside `provisionWorkload` again → the first expect fails.
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        const { host } = hostWithStderr(kube);
+        const logs: string[] = [];
+        const runtime = await keptStart(host, logs, freshLog());
+        const line = "[pod] box still running · tentacle attach box\n";
+        expect(logs).not.toContain(line);
+        runtime.announce?.();
+        runtime.announce?.();
+        expect(logs.filter((l) => l === line)).toHaveLength(1);
+        await runtime.dispose();
+        expect(logs.filter((l) => l === line)).toHaveLength(1);
+      });
+
+      test("never printed when setup fails after the workload exists, nor at the dispose of a run whose TUI never opened", async () => {
+        // The owner saw it printed, then `[container] failed: …`.
+        // Mutation: print it from `removeUnlessKept` again → both cases show it.
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        const { host } = hostWithStderr(kube);
+        host.openExec = () => {
+          throw new Error("cannot exec");
+        };
+        const failedLogs: string[] = [];
+        await expect(keptStart(host, failedLogs, freshLog())).rejects.toThrow("cannot exec");
+        expect(failedLogs.join("")).not.toContain("still running");
+
+        const { host: host2 } = hostWithStderr(new FakeCluster(new ScriptedProvider([[]])));
+        const logs: string[] = [];
+        const runtime = await keptStart(host2, logs, freshLog());
+        await runtime.dispose(); // the TUI never opened (no `announce`)
+        expect(logs.join("")).not.toContain("still running");
+      });
+    });
+
+    test("createFaultWatch: only a dropped or stopped link (not our own close, not `up`) is a fault", () => {
+      // Mutation: count our own "closed" stop → every quit is a failure.
+      const watchWith = (...statuses: LinkStatus[]) => {
+        const fault = createFaultWatch();
+        fault.watch({
+          link: {
+            onLinkStatus: (listener: (s: LinkStatus) => void) => {
+              for (const s of statuses) listener(s);
+              return () => {};
+            },
+          },
+        } as never);
+        return fault.faulted();
+      };
+      expect(watchWith({ state: "up" })).toBe(false);
+      expect(watchWith({ state: "stopped", reason: "closed" })).toBe(false);
+      expect(watchWith({ state: "reconnecting", attempt: 1, nextAtMs: 0 })).toBe(true);
+      expect(watchWith({ state: "stopped", reason: "pod gone" })).toBe(true);
+      // A reconnect that RECOVERED is not a fault; one that never came back is.
+      // Mutation: latch on `reconnecting` → the first expect fails.
+      expect(watchWith({ state: "reconnecting", attempt: 1, nextAtMs: 0 }, { state: "up" })).toBe(
+        false,
+      );
+      expect(
+        watchWith(
+          { state: "reconnecting", attempt: 1, nextAtMs: 0 },
+          { state: "up" },
+          { state: "reconnecting", attempt: 1, nextAtMs: 0 },
+        ),
+      ).toBe(true);
+      // Our own quit while it was down: it never came back.
+      expect(
+        watchWith(
+          { state: "reconnecting", attempt: 1, nextAtMs: 0 },
+          { state: "stopped", reason: "closed" },
+        ),
+      ).toBe(true);
+      // A stop after a recovery is still a fault.
+      expect(
+        watchWith(
+          { state: "reconnecting", attempt: 1, nextAtMs: 0 },
+          { state: "up" },
+          { state: "stopped", reason: "pod gone" },
+        ),
+      ).toBe(true);
+      const marked = createFaultWatch();
+      marked.mark();
+      expect(marked.faulted()).toBe(true);
+    });
+  });
+
+  test("--keep: a startup failure leaves the pod up (to inspect) and prints no `still running`", async () => {
     const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
     const original = kube.runExec.bind(kube);
     kube.runExec = (target, input, options) =>
@@ -728,9 +1073,51 @@ describe("startPodRuntime", () => {
     ).rejects.toThrow(/Exec format error/);
     await new Promise((r) => setTimeout(r, 10));
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
-    expect(logs).toContain(
-      "[pod] kept broken — resume with: tentacle attach --engine kubernetes -n dev broken\n",
-    );
+    // Round 4: nothing says `still running` before a failure (the caller prints the
+    // one `failed:` line); the pod stays up, listed in `ps` for the user to remove.
+    expect(logs.join("")).not.toContain("still running");
+  });
+
+  describe("a failed setup that leaves a kept workload up says so (`stillUp`)", () => {
+    const failing = (): FakeCluster => {
+      const kube = new FakeCluster(new ScriptedProvider([]));
+      const original = kube.runExec.bind(kube);
+      kube.runExec = (target, input, options) =>
+        target.command.join(" ").includes("--version")
+          ? Promise.resolve({ exitCode: 1, stdout: "", stderr: "Exec format error\n" })
+          : original(target, input, options);
+      return kube;
+    };
+    const attempt = (kube: FakeCluster, over: Record<string, unknown>): Promise<unknown> =>
+      provisionWorkload(baseConfig("/pod/work"), {
+        host: kubeEngineHost(kube, "dev"),
+        image: "img",
+        name: "box",
+        log: () => {},
+        ...over,
+      }).catch((e: unknown) => e);
+    const stillUp = (e: unknown): unknown => (e as { stillUp?: unknown }).stillUp;
+
+    test("kept: the error carries the workload's name; not kept / removed at the end / never created: it does not", async () => {
+      // Mutation: tag unconditionally → the 3 negative cases fail.
+      const keepHint = (n: string) => `tentacle attach ${n}`;
+      expect(stillUp(await attempt(failing(), { keepHint }))).toBe("box");
+      expect(stillUp(await attempt(failing(), {}))).toBeUndefined();
+      expect(stillUp(await attempt(failing(), { keepHint, removedAtEnd: true }))).toBeUndefined();
+      const kube = failing();
+      kube.createPod = () => Promise.reject(new Error("quota exceeded"));
+      expect(stillUp(await attempt(kube, { keepHint }))).toBeUndefined();
+    });
+
+    test("the index write failed: no `tentacle rm` promise (the warning already says it)", async () => {
+      const e = await attempt(failing(), {
+        keepHint: (n: string) => `tentacle attach ${n}`,
+        recordKept: () => {
+          throw new Error("disk full");
+        },
+      });
+      expect(stillUp(e)).toBeUndefined();
+    });
   });
 
   test("L12 removedAtEnd: its own line once ready; a failed start says it stays, never `removed`", async () => {
@@ -747,7 +1134,7 @@ describe("startPodRuntime", () => {
     const logs: string[] = [];
     await provision(new FakeCluster(new ScriptedProvider([])), logs, "ok");
     expect(logs).toContain(
-      "[pod] ok — removed when the run ends; until then: tentacle attach ok\n",
+      "[pod] ok still running · removed when the run ends · tentacle attach ok\n",
     );
     expect(logs.join("")).not.toContain("kept ok");
 
@@ -760,7 +1147,7 @@ describe("startPodRuntime", () => {
     const failed: string[] = [];
     await expect(provision(broken, failed, "bad")).rejects.toThrow(/Exec format error/);
     expect(failed).toContain(
-      "[pod] bad stays up: the run never started — tentacle attach bad, or `tentacle rm bad`\n",
+      "[pod] bad stays up: the run never started · tentacle attach bad · tentacle rm bad\n",
     );
     expect(failed.join("")).not.toContain("removed when");
     expect(broken.calls.some((c) => c.startsWith("delete:"))).toBe(false);
@@ -2082,43 +2469,6 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         false,
       );
     });
-  });
-});
-
-describe("createStderrSink", () => {
-  test("buffers daemon stderr instead of writing it live (no TUI corruption)", () => {
-    const lines: string[] = [];
-    const sink = createStderrSink("[pod p-1]", (l) => lines.push(l));
-    sink.onStderr("boom 1\n");
-    sink.onStderr("boom 2\n");
-    // Nothing is written while the TUI owns the screen.
-    expect(lines).toHaveLength(0);
-    // One flush, after teardown, carries everything buffered.
-    sink.flush();
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toBe("[pod p-1] daemon stderr:\nboom 1\nboom 2\n");
-    // Idempotent: a second flush writes nothing more.
-    sink.flush();
-    expect(lines).toHaveLength(1);
-  });
-
-  test("an empty sink flushes nothing", () => {
-    const lines: string[] = [];
-    createStderrSink("[pod p]", (l) => lines.push(l)).flush();
-    expect(lines).toHaveLength(0);
-  });
-
-  test("tail-caps a chatty daemon so the buffer can't grow without bound", () => {
-    const lines: string[] = [];
-    const sink = createStderrSink("[pod p]", (l) => lines.push(l));
-    // Far more than the 16 KB cap; the LAST bytes must survive, the first drop.
-    sink.onStderr("A".repeat(20 * 1024));
-    sink.onStderr("TAIL");
-    sink.flush();
-    const body = (lines[0] ?? "").replace("[pod p] daemon stderr:\n", "");
-    expect(body.endsWith("TAIL\n")).toBe(true);
-    expect(body.length).toBeLessThanOrEqual(16 * 1024 + 1); // cap (+ the added "\n")
-    expect(body.includes("A")).toBe(true); // some head retained, not all
   });
 });
 

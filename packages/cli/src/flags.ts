@@ -120,6 +120,8 @@ export const ARGS = {
       namespace: { short: "n" },
       image: {},
       "bin-dir": {},
+      // The workload's name (random when omitted); the positional is the PROMPT.
+      name: {},
       prompt: {},
       ...SESSION_MODEL,
     },
@@ -173,23 +175,47 @@ export const ARGS = {
 } as const satisfies Record<string, ArgSpec>;
 
 /**
- * `run --detach`'s flags together (docs/feat/detached-relay.md): the usage
- * error, if any. `prompt`: `--prompt`'s value.
+ * `run`'s first prompt (docs/feat/run-prompt.md): the positional or `--prompt`,
+ * never both. `--prompt -` is stdin and only for `--detach` (the interactive TUI
+ * needs the terminal as its stdin). A lone `-` positional is a plain word.
+ */
+export function resolveRunPrompt(input: {
+  readonly positional: string | undefined;
+  readonly promptFlag: string | undefined;
+  readonly detach: boolean;
+}):
+  | { readonly ok: true; readonly prompt: string | undefined; readonly stdin: boolean }
+  | { readonly ok: false; readonly error: string } {
+  if (input.positional !== undefined && input.promptFlag !== undefined) {
+    return { ok: false, error: 'give the prompt once: either "<prompt>" or --prompt, not both' };
+  }
+  if (input.promptFlag === "-") {
+    return input.detach
+      ? { ok: true, prompt: undefined, stdin: true }
+      : { ok: false, error: "--prompt - needs --detach (the TUI needs the terminal as its stdin)" };
+  }
+  return { ok: true, prompt: input.positional ?? input.promptFlag, stdin: false };
+}
+
+/**
+ * `run`'s flags together (docs/feat/run-prompt.md, docs/feat/detached-relay.md):
+ * the usage error, if any. `prompt`: the resolved first prompt (stdin read).
  */
 export function detachFlagProblem(input: {
   readonly detach: boolean;
   readonly prompt: string | undefined;
-  readonly autoAccept: boolean;
   readonly resume: boolean;
 }): string | null {
-  if (!input.detach) {
-    if (input.prompt !== undefined) {
-      return "--prompt needs --detach";
-    }
-    return input.autoAccept ? "--auto-accept needs --detach" : null;
+  if (input.prompt !== undefined && input.prompt.trim() === "") {
+    return "the prompt is empty";
   }
-  if (input.prompt === undefined || input.prompt.trim() === "") {
-    return "--detach needs --prompt <text> (or --prompt - for stdin)";
+  if (!input.detach) {
+    return input.prompt !== undefined && input.resume
+      ? "--resume/--continue cannot be combined with a prompt"
+      : null;
+  }
+  if (input.prompt === undefined) {
+    return '--detach needs a prompt: "<prompt>", --prompt <text>, or --prompt - for stdin';
   }
   return input.resume
     ? "--detach cannot resume a session: run it, then `tentacle attach <name> --resume <uid>`"
@@ -649,7 +675,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
     "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify] [--resume [id]|--continue]",
   serve:
     "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [--model <id>] [--profile <name>] [...] (see tentacle --help)",
-  run: "tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [--model <id>] [--profile <name>] [--detach --prompt <text|-> [--auto-accept[=true|false]]] [<name>]",
+  run: 'tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [--model <id>] [--profile <name>] [--name <n>] [--detach] [--auto-accept[=true|false]] [--prompt <text|->] ["<prompt>"]',
   attach:
     "tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--context <ctx>] [--insecure-docker-tcp] [--bin-dir <dir>] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",
   ps: "tentacle ps [--engine kubernetes|docker|podman] [-a|--all] [-q|--quiet] [-v|--verbose]",

@@ -81,18 +81,39 @@ tentacle --resume                                 # resume a saved session of th
 
 **`run`: in a new Kubernetes pod or Docker/Podman container.** tentacle
 creates it, copies itself in (the pod binaries from [Install](#install)), and
-by default leaves it up on exit (also on Ctrl+C), printing the `tentacle attach …`
-to come back. `--keep=false` (or `keep: false` in the config or a profile)
+by default leaves it up on exit (also on Ctrl+C), printing one line,
+`[container] <name> still running · tentacle attach <name>` (`[pod]` on Kubernetes),
+to come back — printed once the TUI opens, never before a setup failure.
+Informational status lines are dim grey on a terminal (not with `NO_COLOR`).
+The pod daemon's own stderr is never printed: it goes to `daemon.log` in the run's
+state dir (`~/.config/tentacle/kept/runs/<id>/`, else `~/.config/tentacle/logs/<name>/`;
+mode 0600; every run/attach APPENDS after a `--- <time> run|attach <name> ---` line, the
+newest 64 KiB kept). A real failure (the daemon dies, the link ends or never comes back —
+a reconnect that recovered is not one — or the TUI fails) prints ONE line,
+`[container] <name>: daemon stopped unexpectedly · log: <path>`;
+a failed startup prints `[container] failed: <short cause> · log: <path>` (plus
+` · still up: tentacle rm <name>` when a kept workload was left running) and the log
+holds the full text. A model or turn error is not a failure: the TUI already showed
+it. The startup status line redraws in place (cut to the terminal width, never
+padded). `--keep=false` (or `keep: false` in the config or a profile)
 deletes it on exit instead; flag > profile > user config > true. The model key and the approvals
 stay on your machine; sessions are saved locally, so `--resume` works.
 
 ```sh
-tentacle run --image <ref> [-n <namespace>] [--keep=false] [<name>]           # Kubernetes (default)
-tentacle run --engine docker --image <ref> [--context <ctx>] [<name>]     # Docker
-tentacle run --engine podman --image <ref> [<name>]                       # Podman
+tentacle run --image <ref> [-n <namespace>] [--keep=false] [--name <n>] ["<prompt>"]        # Kubernetes (default)
+tentacle run --engine docker --image <ref> [--context <ctx>] [--name <n>] ["<prompt>"]  # Docker
+tentacle run --engine podman --image <ref> [--name <n>] ["<prompt>"]                    # Podman
 ```
 
-**With no TUI.** `tentacle run --detach --prompt <text|-> --image <ref> [<name>]`
+`--name <n>` names the workload (a random name when omitted). The optional
+`"<prompt>"` (or `--prompt <text>`; not both) is the **first message**: the TUI
+opens and sends it at once, as plain text (a leading `/` is not a command). It
+cannot be combined with `--resume`/`--continue`. `--auto-accept[=true]` starts
+the TUI with auto-accept already on (the state Shift+Tab toggles); `=false`
+changes nothing.
+
+**With no TUI.** `tentacle run --detach "<prompt>" --image <ref> [--name <n>]`
+(or `--prompt <text|->`; `--prompt -` reads the prompt from stdin, only with `--detach`)
 creates the workload, then a background process on your machine runs the turn,
 serves the model and saves the session, and leaves after 60 s of idle. A tool
 that needs permission waits for you unless `--auto-accept` (pod tool asks only,
@@ -108,6 +129,10 @@ and the others leave with `session closed by another terminal`. Ctrl+C at idle
 leaves only that terminal. With `--keep=false` the quit that closes the session
 removes the workload, if no other session in it is in use. A workload deleted
 outside tentacle is said as such, naming the session uid.
+
+A successful `run --detach` prints one dim line, `[container] <name> still running ·
+tentacle attach <name>`, and nothing else; `attach` to a run prints no `resolved …` or
+`[resume] …` line either (failures still say why).
 
 With `--keep=false` (or `keep: false`) the workload is listed in `ps` while the
 run lives and removed when it goes idle or is stopped, a held permission keeping
@@ -126,15 +151,17 @@ in it: your real files, with the container's own processes, packages and
 network. `--no-mount` opts out. Only the cwd is mounted (never a parent or the
 git root). Secrets inside the folder are hidden behind an empty read-only
 overlay (checked after start): by default `~/.ssh`, `~/.aws`, `~/.kube`,
-`~/.config/gcloud`, `~/.docker/config.json`, `~/.netrc` — `"mount": {"hide": […]}`
+`~/.config/gcloud`, `~/.docker` (the folder), `~/.netrc` — `"mount": {"hide": […]}`
 in `config.jsonc` (or a profile) replaces that list, `"hideExtra"` adds to it;
 tentacle's config dir and the `apiKeyCommand` key file (`cat <file>`, also
 `cat "$HOME/…"`) are always hidden; for any other command the file cannot be
 named, and the run warns that it is NOT hidden. On a case-insensitive disk
 (macOS, exFAT/NTFS, ext4 casefold — checked on the disk, not by OS) a hidden
 FILE is still readable under another spelling (`KEY` for `Key`), so the run
-refuses: hide the folder that contains it (a directory mask holds), or move
-the file. `--confirm-mount` overrides this for your own entries (and warns,
+refuses, in two lines: `[container] won't mount <folder>: <file> would be readable
+inside the container` and `  fix: add `<its folder>/` to .tentacle/hide` (a directory
+mask holds for every spelling) or `move <file> out of the folder` when it sits in the
+mount root. `--confirm-mount` overrides this for your own entries (and warns,
 naming them) — never for the key file. A project can add its own with `.tentacle/hide` in the folder
 (gitignore-style: `#` comments, globs and `**`, a trailing `/` for directories;
 `!` only un-hides what that same file hid — never the lists above). It only
@@ -142,11 +169,13 @@ ADDS, and the patterns are resolved to the paths that exist when the container
 starts: a file created later is NOT hidden. More than 200 matches stops the run
 (narrow the patterns); a pattern or symlink pointing outside the folder is
 ignored with a warning. A `.tentacle/hide` that is unreadable, not a regular
-file (a FIFO…), a link out of the folder or over 64 KiB stops the run. The startup line says `Hidden from the container: N
-paths from .tentacle/hide, M defaults`. Mounting `/`, `/usr`, `/usr/local[/bin]`, `~/.ssh` or the config
+file (a FIFO…), a link out of the folder or over 64 KiB stops the run. Mounting `/`, `/usr`, `/usr/local[/bin]`, `~/.ssh` or the config
 dir (or a folder inside them) is refused. Your home, its parents, a system dir
-or a folder on the hide list asks first (y/N); without a terminal it is
-refused unless `--confirm-mount`. A remote engine
+or a folder on the hide list asks first, in two lines — `⚠ mount ~ (your home) into
+the container? hidden: .ssh .aws .kube .config/gcloud .docker .config/tentacle`, then
+`Continue? [y/N]` (names relative to the folder; the paths from `.tentacle/hide` are
+counted, `+12 from .tentacle/hide`). Without a terminal it is refused, in one line,
+unless `--confirm-mount`. A remote engine
 (`tcp://`, `ssh://`) mounts nothing and says so. On rootful Docker on Linux the
 agent runs as your uid:gid (files stay yours); Docker Desktop and rootless
 Podman need nothing; SELinux hosts get `label=disable` for the container. The

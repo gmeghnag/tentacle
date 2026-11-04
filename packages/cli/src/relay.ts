@@ -663,26 +663,6 @@ export interface LaunchDeps {
   readonly now?: () => number;
   readonly pollMs?: number;
   readonly timeoutMs?: number;
-  /** keep=false: a laptop folder is mounted, and stays. */
-  readonly mounted?: boolean;
-  /** The relay holds a sleep assertion during a turn (said once: the lid still sleeps it). */
-  readonly keepsAwake?: boolean;
-}
-
-/** What the started line says about the workload's end. */
-function endingOf(spec: RelaySpec, deps: LaunchDeps): string {
-  const awake = deps.keepsAwake
-    ? " The Mac stays awake while a turn runs; closing the lid still sleeps it."
-    : "";
-  // `attach <name>` takes a live run over at once (S3); `--resume` on it is refused.
-  const attach = ` Attach any time: ${deps.attachHint}.`;
-  if (spec.keep) {
-    return `${attach}${awake}`;
-  }
-  const files = deps.mounted
-    ? "files not in the mount go with it, and so does its log; the laptop folder is not touched"
-    : `the ${deps.noun}'s files go with it, and so does its log`;
-  return `${attach} The ${deps.noun} is removed when the run goes idle: ${files}; the transcript stays in \`tentacle --resume ${spec.sessionId}\`.${awake}`;
 }
 
 /**
@@ -726,12 +706,8 @@ export async function launchRelay(dir: string, spec: RelaySpec, deps: LaunchDeps
       return failed();
     }
     if (owner && owner.state !== "starting") {
-      const policy = spec.autoAccept
-        ? `auto-accepting pod tool asks (allow once; logged in ${logPath})`
-        : "a tool that needs permission waits for you";
-      write(
-        `[${noun}] ${name}: detached run started (pid ${owner.pid}), ${policy}.${endingOf(spec, deps)}\n`,
-      );
+      // Silent on success (round 6): the provisioner's dim `still running · tentacle
+      // attach <name>` line is the only output; every failure above/below still says why.
       return 0;
     }
     if (child.exited()) {

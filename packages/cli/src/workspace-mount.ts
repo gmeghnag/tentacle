@@ -25,7 +25,9 @@ export const DEFAULT_HIDE: readonly string[] = [
   "~/.aws",
   "~/.kube",
   "~/.config/gcloud",
-  "~/.docker/config.json",
+  // The FOLDER (not `config.json`): a directory mask holds for every spelling of
+  // its name, so a case-insensitive filesystem no longer refuses for it.
+  "~/.docker",
   "~/.netrc",
 ];
 
@@ -151,17 +153,44 @@ export function caseAliasedFiles(paths: readonly string[], fs: CaseFs): string[]
   });
 }
 
-/** Why case-reachable file masks refuse the mount (`overridable`: the gate's, with the flag). */
+/** `path` with the home directory written `~`. */
+function tilde(path: string, home: string): string {
+  return path === home ? "~" : isInside(path, home) ? `~${path.slice(home.length)}` : path;
+}
+
+/** `path` relative to the mounted folder `root` (or `~/…` when it is outside it). */
+function relativeTo(path: string, root: string, home: string): string {
+  return isInside(path, root) ? path.slice(root === "/" ? 1 : root.length + 1) : tilde(path, home);
+}
+
+/**
+ * Why case-reachable file masks refuse the mount — TWO lines (the long
+ * explanation is in the README): which file, and the fix. `overridable`: the
+ * gate's, with `--confirm-mount` (the API key file never is).
+ */
 function caseMessage(
   source: string,
   files: readonly { readonly path: string; readonly label: string }[],
   overridable: boolean,
+  home: string,
 ): string {
+  const rel = files.map((f) => untrustedText(relativeTo(f.path, source, home)));
+  const shown =
+    rel.length > 3 ? `${rel.slice(0, 3).join(", ")} and ${rel.length - 3} more` : rel.join(", ");
+  const folders = [
+    ...new Set(rel.filter((r) => r.includes("/")).map((r) => `${r.slice(0, r.lastIndexOf("/"))}/`)),
+  ];
+  const inRoot = rel.filter((r) => !r.includes("/"));
+  const fixes = [
+    ...(folders.length > 0
+      ? [`add ${folders.map((d) => `\`${d}\``).join(", ")} to ${HIDE_FILE_LABEL}`]
+      : []),
+    ...(inRoot.length > 0 ? [`move ${inRoot.join(", ")} out of the folder`] : []),
+    ...(overridable ? ["pass --confirm-mount to start anyway"] : []),
+  ];
   return [
-    `Refusing to mount ${source}: its filesystem is case-insensitive, so a hidden FILE stays readable in the container under another spelling of its name (a file mask holds only for the exact spelling; a directory mask holds for every spelling):`,
-    ...files.map((f) => `  ${untrustedText(f.path)} (${f.label})`),
-    `Hide the folder that contains it instead (mount.hideExtra, or a \`dir/\` line in ${HIDE_FILE_LABEL}), or move the file out of ${source}.`,
-    ...(overridable ? ["Or pass --confirm-mount to start anyway with these files readable."] : []),
+    `won't mount ${tilde(source, home)}: ${shown} would be readable inside the container`,
+    `  fix: ${fixes.join(", or ")}`,
   ].join("\n");
 }
 
@@ -417,13 +446,18 @@ export function resolveHideFile(
   return { paths, warnings };
 }
 
-/** The startup / prompt line, or `undefined` when nothing is hidden. */
-export function hiddenSummary(mount: WorkspaceMount): string | undefined {
-  if (mount.masks.length === 0) {
-    return undefined;
-  }
+/**
+ * What the y/N prompt says stays hidden: `hidden: .ssh .aws +12 from .tentacle/hide`
+ * (names relative to the mounted folder; the hide file's paths are counted, not
+ * listed), or `""` when nothing is hidden.
+ */
+function hiddenPart(mount: WorkspaceMount): string {
+  const names = mount.masks
+    .filter((m) => !m.fromFile)
+    .map((m) => untrustedText(m.path.slice(mount.target === "/" ? 1 : mount.target.length + 1)));
   const fromFile = mount.masks.filter((m) => m.fromFile).length;
-  return `Hidden from the container: ${fromFile} paths from ${HIDE_FILE_LABEL}, ${mount.masks.length - fromFile} defaults`;
+  const parts = [...names, ...(fromFile > 0 ? [`+${fromFile} from ${HIDE_FILE_LABEL}`] : [])];
+  return parts.length > 0 ? ` hidden: ${parts.join(" ")}` : "";
 }
 
 /** The labels slice D writes on every container `run` creates (read by `ps`, slice E). */
@@ -511,6 +545,9 @@ export type WorkspacePlan =
   | {
       readonly kind: "mount";
       readonly mount: WorkspaceMount;
+      /** The laptop's home (the gate writes `~`). */
+      readonly home: string;
+      /** A SHORT description for the y/N line: `your home`, `a system directory`… */
       readonly danger?: string;
       readonly warnings?: readonly string[];
       /** Masked files another spelling still reaches (laptop paths): refused unless `--confirm-mount`. */
@@ -565,15 +602,15 @@ const BINARY_DIRS = new Set(["/", "/usr", "/usr/local", "/usr/local/bin"]);
 function dangerOf(input: WorkspaceInput): string | undefined {
   const source = input.realCwd;
   if (source === input.home) {
-    return "your home directory";
+    return "your home";
   }
   if (isInside(input.home, source)) {
-    return "an ancestor of your home directory";
+    return "holds your home";
   }
   // A source inside a hidden dir cannot be masked (it IS the secret): ask.
   const inHidden = input.hide.find((h) => !h.file && isWithin(source, h.path));
   if (inHidden) {
-    return `${inHidden.label}, on your hide list`;
+    return `inside ${inHidden.label}`;
   }
   if (SYSTEM_DIRS.has(source) || SYSTEM_DIRS.has(input.cwd)) {
     return "a system directory";
@@ -648,7 +685,7 @@ export function planWorkspace(input: WorkspaceInput): WorkspacePlan {
   const aliased = new Set(input.caseAliased ?? []);
   const exposed = hiddenPaths.filter((h) => h.file && aliased.has(h.path));
   if (exposed.some((h) => h.always)) {
-    return { kind: "refuse", message: caseMessage(source, exposed, false) };
+    return { kind: "refuse", message: caseMessage(source, exposed, false, input.home) };
   }
   const masks: WorkspaceMask[] = hiddenPaths.map((h) => ({
     path: `${target}${h.path.slice(source.length)}`,
@@ -673,6 +710,7 @@ export function planWorkspace(input: WorkspaceInput): WorkspacePlan {
   return {
     kind: "mount",
     mount,
+    home: input.home,
     ...(danger ? { danger } : {}),
     ...(notes.length > 0 ? { warnings: notes } : {}),
     ...(exposed.length > 0
@@ -705,7 +743,10 @@ export function mountGate(
   }
   const exposed = plan.caseExposed ?? [];
   if (exposed.length > 0 && !options.confirmed) {
-    return { action: "refuse", message: caseMessage(plan.mount.source, exposed, true) };
+    return {
+      action: "refuse",
+      message: caseMessage(plan.mount.source, exposed, true, plan.home),
+    };
   }
   if (plan.danger === undefined || options.confirmed) {
     return exposed.length > 0
@@ -717,26 +758,17 @@ export function mountGate(
         }
       : { action: "proceed" };
   }
-  const what = `${plan.mount.source} (${plan.danger})`;
+  const what = `${untrustedText(tilde(plan.mount.source, plan.home))} (${plan.danger})`;
   if (!options.interactive) {
     return {
       action: "refuse",
-      message: `Refusing to mount ${what} without confirmation.\nRun from your project directory, or pass --confirm-mount to proceed.`,
+      message: `won't mount ${what} without confirmation · run from a project folder, or pass --confirm-mount`,
     };
   }
-  // Named one by one except the hide file's paths (maybe hundreds): counted below.
-  const labels = plan.mount.masks.filter((m) => !m.fromFile).map((m) => m.label);
-  const listed =
-    labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : labels[0];
-  const reach = listed
-    ? `The agent will be able to read everything in it except ${listed}, which stay hidden.`
-    : plan.mount.masks.length > 0
-      ? `The agent will be able to read everything in it except the paths in ${HIDE_FILE_LABEL}, which stay hidden.`
-      : "The agent will be able to read everything in it: SSH keys, tokens, configs.";
-  const summary = hiddenSummary(plan.mount);
+  // Exactly two lines: what and what stays hidden, then the question.
   return {
     action: "ask",
-    prompt: `⚠ You are about to mount ${what} into the container.\n${reach}\n${summary ? `${summary}\n` : ""}Continue? [y/N] `,
+    prompt: `⚠ mount ${what} into the container?${hiddenPart(plan.mount)}\nContinue? [y/N] `,
   };
 }
 

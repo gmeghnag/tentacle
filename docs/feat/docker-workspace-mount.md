@@ -228,7 +228,7 @@ reject it). `main.ts`: `planWorkspace` after `buildEngineHost`, refuse →
 to `host.create` and shows it in the create phase line:
 `[container] creating X (image …) in … — workspace /Users/me/repo (rw)`.
 **`--keep`**: unchanged semantics; the kept container keeps its mount, and the
-resume hint names it: `tentacle attach --engine docker X  # workspace /Users/me/repo`.
+resume hint names it: `tentacle attach --engine docker X  # workspace /Users/me/repo`. *(Superseded by feat/run-prompt: the exit line no longer names the workspace.)*
 `attach` from a different laptop cwd than the label → a one-line notice
 (not an error, Q7).
 
@@ -370,7 +370,7 @@ Implementation ("Design — owner decisions applied").
    verify) stays root, no working dir; `waitForReady` runs the probe on a
    container this host created and, on a problem, removes it and throws
    `WorkloadRemovedError`. `engine-runtime.ts` — passes `{workspace, labels}`,
-   phase line `… — workspace <target> (rw)…`, kept line `…  # workspace <target>`,
+   phase line `… — workspace <target> (rw)…`, kept line `…  # workspace <target>`, *(kept line: superseded by feat/run-prompt — no workspace comment.)*
    `removeUnlessKept(error)` skips a `WorkloadRemovedError`; `attach` emits the
    M7 warning. Red: **11 fail** in `engine-docker.test.ts`; green 32/32; all
    `engine*` tests 105/105.
@@ -480,6 +480,8 @@ from a repo and from `$HOME` (expect the y/N prompt, then `ls -A ~/.ssh` empty i
 > **All 7 questions answered (2026-10-27); plan approved with these decisions. Executes stacked on slice C.**
 
 > **Owner decision D-1 (2026-10-27):** REFUSE (no confirmation possible) — with a message explaining why — when (a) the source is `/`, `/usr`, `/usr/local[/bin]` (tentacle injects its binary there: it would be written onto the laptop or break the container) and (b) the cwd IS or is INSIDE `~/.ssh` or the tentacle config dir (a mask cannot hide the mount root; the model key must never leave the laptop — AGENTS §7). Everything else, `$HOME` included, keeps the y/N confirmation.
+> *(Superseded by feat/run-prompt round 4, 2026-11-04: the default `~/.docker/config.json` is now the FOLDER `~/.docker` (a dir mask holds on a case-insensitive disk); the y/N is two lines (`⚠ mount ~ (your home) into the container? hidden: …` / `Continue? [y/N]`); the non-interactive refusal and the case refusal are short `[container] won't mount …` lines; the `Hidden from the container: N …` startup line is gone. The texts below are history.)*
+>
 > **Owner decision D-2 (2026-10-27):** the hide list is CONFIGURABLE: `mount.hide` (user config + profiles) REPLACES the default list; `mount.hideExtra` ADDS entries. Default list: `~/.ssh`, `~/.aws`, `~/.kube`, `~/.config/gcloud`, `~/.docker/config.json`, `~/.netrc`. The user MAY remove any default entry (their choice). ALWAYS hidden and NOT configurable: the REAL tentacle config dir and the file used by `apiKeyCommand` when the key lives in a file (AGENTS §7: the model key never leaves the laptop). The confirmation prompt lists what stays hidden. Masks apply only to paths inside the mount source; files (not only dirs) must be maskable.
 
 ### Execution — review fixes

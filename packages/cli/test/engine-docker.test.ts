@@ -355,9 +355,7 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
       `runexec:c1:${POD_BIN_PATH} --version`,
       `exec:c1:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
     ]);
-    expect(logs[0]).toBe(
-      '[container] creating c1 (image ubuntu:24.04) in unix:///var/run/docker.sock (context "default")…\n',
-    );
+    expect(logs[0]).toBe("[container] creating c1 (image ubuntu:24.04)…\n");
     // The exit net was armed once, and fires the detached remover for c1.
     expect(listeners).toHaveLength(1);
     listeners[0]?.();
@@ -391,13 +389,12 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
       throw new Error("runtime did not start");
     }
     expect(listeners).toEqual([]);
+    runtime.announce?.(); // the TUI opens
     runtime.dispose();
     await new Promise((r) => setTimeout(r, 10));
     expect(client.calls.filter((c) => c.startsWith("remove:"))).toEqual([]);
     expect(net).toEqual([]);
-    expect(logs).toContain(
-      "[container] kept kept1 — resume with: tentacle attach --engine docker kept1\n",
-    );
+    expect(logs).toContain("[container] kept1 still running · tentacle attach kept1\n");
   });
 
   test("an ask tool's permission lands on the shared broker (single-broker invariant)", async () => {
@@ -775,9 +772,7 @@ describe("the workspace mount on a Docker engine (slice D)", () => {
       "1000:1001",
     );
     // The phase line names the workspace.
-    expect(logs[0]).toBe(
-      '[container] creating w1 (image img) in unix:///var/run/docker.sock (context "default") — workspace /work (rw). Hidden from the container: 0 paths from .tentacle/hide, 1 defaults…\n',
-    );
+    expect(logs[0]).toBe("[container] creating w1 (image img) — workspace /work (rw)…\n");
     // The daemon exec: the workspace dir + the laptop user. One-shot execs
     // (probe, injection, verify) never carry a user or a working dir.
     expect(client.execTargets[0]).toMatchObject({ workingDir: "/work", user: "1000:1001" });
@@ -941,16 +936,16 @@ describe("the workspace mount on a Docker engine (slice D)", () => {
     expect(listeners).toHaveLength(0);
   });
 
-  test("--keep: the resume hint names the workspace", async () => {
+  test("--keep: one short line, no workspace comment", async () => {
     const client = new FakeDockerClient(new ScriptedProvider([[{ type: "done" }]]));
     const { logs, result } = run(client, "ws-keep", {
       keepHint: (n: string) => `tentacle attach --engine docker ${n}`,
     });
     const { result: runtime } = await result;
+    runtime?.announce?.(); // the TUI opens
     runtime?.dispose();
-    expect(logs).toContain(
-      "[container] kept w1 — resume with: tentacle attach --engine docker w1  # workspace /work\n",
-    );
+    // No `--engine`, no `# workspace` comment: `attach <name>` reads the index.
+    expect(logs).toContain("[container] w1 still running · tentacle attach w1\n");
   });
 
   test("attach to a labelled tentacle container: its workspace + user, and a warning from another cwd (M7)", async () => {

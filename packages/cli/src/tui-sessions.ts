@@ -108,7 +108,13 @@ export async function openTuiSessions(
     return { exit: 1 };
   }
   const quiet = resume.live === true && resolved.record === null && !resolved.fatal;
-  for (const line of quiet ? [] : resolved.lines) {
+  // A live run's session (attach to a detached run): the `[resume] <uid> — <title>`
+  // line is noise (round 6); its warnings, and every error/refusal, still print.
+  const lines =
+    resume.live === true && resolved.record !== null
+      ? resolved.notices.map((w) => `[resume] ${w}\n`)
+      : resolved.lines;
+  for (const line of quiet ? [] : lines) {
     write(line);
   }
   if (resolved.cancelled) {

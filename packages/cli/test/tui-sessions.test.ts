@@ -77,6 +77,9 @@ describe("openTuiSessions", () => {
       ),
     );
     expect(some.resume?.id).toBe(uid);
+    // Round 6: no `[resume] <uid> — <title>` line for a live run's record.
+    // Mutation: print it again → `out` is not empty.
+    expect(out).toEqual([]);
     // Without `live`, the absent line stands.
     await openTuiSessions(
       { root, cwd: "/w" },
