@@ -53,12 +53,13 @@ import {
   residentStopCommand,
   residentStopVerdict,
 } from "./pod-resident.ts";
+import { markStillUp, openDaemonLog, recordFailure, tildePath } from "./pod-stderr-log.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { readBinaryVersion } from "./version-marker.ts";
 import { APP_VERSION } from "./version.ts";
-import { type WorkspaceMount, attachCwdWarning, hiddenSummary } from "./workspace-mount.ts";
+import { type WorkspaceMount, attachCwdWarning } from "./workspace-mount.ts";
 
 /**
  * The pod daemon's command line (`run` and `attach`): the BRIDGE to the pod's
@@ -107,43 +108,61 @@ export function laptopModels(config: TentacleConfig): {
   return { modelProvider, titleModelProvider };
 }
 
-/** A bounded stderr collector that flushes once, on teardown. */
-export interface PodStderrSink {
-  /** Accumulate a chunk of the pod daemon's stderr (never written live). */
-  onStderr(text: string): void;
-  /** Write the buffered stderr to the log (idempotent; no-op when empty). */
-  flush(): void;
+/** A started runtime; `markFault` reports a failure only the caller sees (the TUI throwing). */
+export type EngineRuntime = LocalRuntime & {
+  readonly markFault?: () => void;
+  /**
+   * Say `<name> still running · tentacle attach <name>` (a kept run): the caller
+   * calls it right before the TUI opens, so the line never precedes a setup
+   * failure. Once; absent for a run that is not kept.
+   */
+  readonly announce?: () => void;
+};
+
+/**
+ * Whether a run/attach FAILED, for the daemon-stderr rule (docs/feat/run-prompt.md
+ * rounds 2-4): the link dropped or stopped (the daemon or the container died;
+ * not our own close, reason `"closed"`), or the caller `mark`ed a failure (the
+ * TUI itself threw). A model/turn error is NOT one: it was shown in the TUI.
+ * The daemon's stderr never reaches the terminal either way (`pod-stderr-log.ts`);
+ * a failure only adds ONE line naming the log (`quitReport`).
+ */
+export function createFaultWatch(): {
+  readonly mark: () => void;
+  readonly faulted: () => boolean;
+  readonly watch: (runtime: Pick<LocalRuntime, "link">) => void;
+} {
+  // `marked`/`ended` latch; `down` follows the link: a reconnect that came back
+  // `up` is NOT a fault (round 5), one still down at the end is.
+  let marked = false;
+  let ended = false;
+  let down = false;
+  return {
+    mark: () => {
+      marked = true;
+    },
+    faulted: () => marked || ended || down,
+    watch: (runtime) => {
+      runtime.link.onLinkStatus((status) => {
+        if (status.state === "up") {
+          down = false;
+        } else if (status.state === "reconnecting") {
+          down = true;
+        } else if (status.reason !== "closed") {
+          ended = true;
+        }
+      });
+    },
+  };
 }
 
 /**
- * Collect the pod daemon's stderr instead of writing it straight to stdout.
- *
- * During a live session the TUI owns the terminal (Ink's alternate screen), so
- * forwarding daemon stderr to stdout as it arrives corrupts the render (the
- * `d19f10d` TODO: a dropped-connection error leaking over the UI). Instead we
- * buffer it — tail-capped so a chatty daemon can't grow it without bound — and
- * flush it exactly once: on teardown, after Ink has left the alt-screen, and on
- * the startup-failure path (before the TUI mounts), so a daemon that never came
- * up is still diagnosable.
+ * The ONE line a failed run/attach prints in place of the old stderr dump:
+ * `[container] <name>: daemon stopped unexpectedly · log: ~/…/daemon.log`.
  */
-export function createStderrSink(prefix: string, log: (line: string) => void): PodStderrSink {
-  const capBytes = 16 * 1024;
-  let buf = "";
-  return {
-    onStderr(text: string): void {
-      buf += text;
-      if (buf.length > capBytes) {
-        buf = buf.slice(buf.length - capBytes);
-      }
-    },
-    flush(): void {
-      if (buf.length === 0) {
-        return;
-      }
-      log(`${prefix} daemon stderr:\n${buf.endsWith("\n") ? buf : `${buf}\n`}`);
-      buf = "";
-    },
-  };
+export function quitReport(noun: string, name: string, logPath: string | undefined): string {
+  const where = logPath === undefined ? "" : ` · log: ${tildePath(logPath)}`;
+  return `[${noun}] ${name}: daemon stopped unexpectedly${where}\n`;
 }
 
 /** `startEngineRuntime`'s deps (`run`). */
@@ -188,6 +207,18 @@ export interface EngineRuntimeDeps {
   readonly saver: SessionSaver;
   readonly resume: SessionRecord | null;
   readonly log: (line: string) => void;
+  /**
+   * Where the INFORMATIONAL lines go (the phases, the exit line): the caller
+   * greys them on a terminal. Errors, warnings and the stderr block always go
+   * to `log`. Absent: they go to `log` too.
+   */
+  readonly info?: (line: string) => void;
+  /**
+   * Where the pod daemon's stderr is kept (`daemon.log`, 0600, bounded), given the
+   * workload's name: the run's state dir when it has one. Absent: nothing is kept.
+   * The stderr is NEVER written to the terminal (docs/feat/run-prompt.md round 4).
+   */
+  readonly daemonLogPath?: (name: string) => string | undefined;
   /** In-TUI notices (the session's `NoticeHub`), e.g. a reconnect that lost the last turn. */
   readonly notify?: (text: string) => void;
   /** This tentacle's version for the pod-binary check (tests); defaults to `APP_VERSION`. */
@@ -313,6 +344,8 @@ export interface ProvisionedWorkload {
   readonly binPath: string;
   /** Delete it, or (kept) say how to reach it; `error`: the failed start, if any. */
   readonly removeUnlessKept: (error?: unknown) => void;
+  /** The `still running` line (kept runs; idempotent) — see `deferAnnounce`. */
+  readonly announce: () => void;
 }
 
 /**
@@ -323,10 +356,36 @@ export interface ProvisionedWorkload {
  */
 export async function provisionWorkload(
   config: TentacleConfig,
-  deps: Omit<EngineRuntimeDeps, "permissions" | "saver" | "resume" | "notify">,
+  deps: Omit<EngineRuntimeDeps, "permissions" | "saver" | "resume" | "notify"> & {
+    /**
+     * Do not say `still running` yet: the caller calls `announce()` once the TUI
+     * opens (`startEngineRuntime`). Default: say it as soon as the workload is ready
+     * (a detached run has no TUI).
+     */
+    readonly deferAnnounce?: boolean;
+  },
+): Promise<ProvisionedWorkload> {
+  const name = deps.name ?? `tentacle-${crypto.randomUUID().slice(0, 8)}`;
+  try {
+    return await provisionNamed(config, deps, name);
+  } catch (error) {
+    // The whole cause goes to the run's log; the caller prints ONE short line.
+    const path = deps.daemonLogPath?.(name);
+    if (path !== undefined) {
+      recordFailure(error, openDaemonLog(path, undefined, `run ${name}`));
+    }
+    throw error;
+  }
+}
+
+async function provisionNamed(
+  config: TentacleConfig,
+  deps: Omit<EngineRuntimeDeps, "permissions" | "saver" | "resume" | "notify"> & {
+    readonly deferAnnounce?: boolean;
+  },
+  name: string,
 ): Promise<ProvisionedWorkload> {
   const { host } = deps;
-  const name = deps.name ?? `tentacle-${crypto.randomUUID().slice(0, 8)}`;
   // Install path in the pod: a read-only rootfs (a hardened pod) needs a writable
   // dir via --bin-dir (e.g. /tmp); the daemon is then exec'd by this absolute path.
   const binPath = `${deps.binDir ?? "/usr/local/bin"}/tentacle`;
@@ -336,11 +395,12 @@ export async function provisionWorkload(
   // cleared when the daemon starts. Piped (log/CI) logs one line per phase
   // (the `log` sink), so transcripts stay readable.
   const status = (process.stdout.isTTY ?? false) ? new StatusLine({ write: deps.log }) : null;
+  const info = deps.info ?? deps.log;
   const phase = (text: string): void => {
     if (status) {
       status.set(text);
     } else {
-      deps.log(`${text}\n`);
+      info(`${text}\n`);
     }
   };
 
@@ -350,11 +410,10 @@ export async function provisionWorkload(
   await checkPodBinaries({ configDir: config.configDir, appVersion: deps.appVersion });
 
   const { workspace } = deps;
-  const hidden = workspace ? hiddenSummary(workspace) : undefined;
-  const mounted = workspace
-    ? ` — workspace ${workspace.target} (rw)${hidden ? `. ${hidden}` : ""}`
-    : "";
-  phase(`[${host.noun}] creating ${name} (image ${deps.image}) in ${host.where}${mounted}…`);
+  // Short on purpose (round 4): no socket path / discovery note, no hidden-paths
+  // list (the y/N prompt said it); the engine's place goes to the run's log file.
+  const mounted = workspace ? ` — workspace ${workspace.target} (rw)` : "";
+  phase(`[${host.noun}] creating ${name} (image ${deps.image})${mounted}…`);
   try {
     // Errors arrive translated (e.g. a missing k8s namespace → actionable).
     await host.create(name, deps.image, {
@@ -382,16 +441,32 @@ export async function provisionWorkload(
       }) — remove it yourself when done\n`;
     }
   }
-  const lifetime = deps.removedAtEnd ? "removed when the run ends; until then:" : "resume with:";
+  // ONE short line (docs/feat/run-prompt.md): `attach <name>` finds the engine
+  // and place in the index, so the command is just the name — unless the index
+  // write failed, when only the full command (engine, place) can reach it.
+  const attachText = notRecorded && keepHint ? keepHint(name) : `tentacle attach ${name}`;
   const keptLine = keepHint
-    ? `[${host.noun}] ${deps.removedAtEnd ? "" : "kept "}${name} — ${lifetime} ${keepHint(name)}${workspace ? `  # workspace ${workspace.target}` : ""}\n`
+    ? `[${host.noun}] ${name} still running · ${deps.removedAtEnd ? "removed when the run ends · " : ""}${attachText}\n`
     : undefined;
-  const logKept = (line: string): void => {
-    deps.log(line);
-    if (notRecorded) {
+  // Said once, right before the TUI opens (and never before a failure): the line
+  // stays on the main screen under the alt-screen, so it is there after a quit —
+  // and after a signal exit, which runs no `dispose`. Not at dispose: a run whose
+  // TUI never opened has nothing to resume.
+  let announced = false;
+  // `informational`: the exit line; the "stays up" failure is an error → `log`.
+  const logKept = (line: string, informational = true): void => {
+    (informational ? info : deps.log)(line);
+    warnNotRecorded();
+  };
+  // The "not in `tentacle ps`" warning is not the exit line: said once, as soon as
+  // the status line is cleared (success or failure), whether or not the TUI opens.
+  let warned = false;
+  function warnNotRecorded(): void {
+    if (notRecorded && !warned) {
+      warned = true;
       deps.log(notRecorded);
     }
-  };
+  }
   const removeUnlessKept = (error?: unknown): void => {
     if (error instanceof WorkloadRemovedError) {
       // the host already removed it (a failed workspace probe): never "kept".
@@ -404,11 +479,16 @@ export async function provisionWorkload(
     }
     if (keptLine) {
       // No relay will ever run to remove it: a leftover, listed in `ps` (Q2).
-      logKept(
-        deps.removedAtEnd && error !== undefined
-          ? `[${host.noun}] ${name} stays up: the run never started — ${keepHint?.(name)}, or \`tentacle rm ${name}\`\n`
-          : keptLine,
-      );
+      if (deps.removedAtEnd && error !== undefined) {
+        logKept(
+          `[${host.noun}] ${name} stays up: the run never started · ${attachText} · tentacle rm ${name}\n`,
+          false,
+        );
+      } else if (error !== undefined && !notRecorded) {
+        // A kept workload the failure leaves up: the one `failed:` line says how
+        // to remove it (not when the index write failed: `rm <name>` may not find it).
+        markStillUp(error, name);
+      }
     } else {
       void host.remove(name).catch(() => {});
     }
@@ -453,18 +533,27 @@ export async function provisionWorkload(
     // Piped only: in interactive mode the TUI opening IS the confirmation, so
     // no final log line (the status line was already cleared by `finish()`).
     if (!status) {
-      deps.log(`[${host.noun}] ${version} ready in ${name}; starting the agent daemon\n`);
+      info(`[${host.noun}] ${version} ready in ${name}; starting the agent daemon\n`);
     }
-    // Kept: say so BEFORE the TUI mounts too — this line stays on the main
-    // screen, so a Ctrl+C exit (no `dispose`) still shows how to resume.
-    if (keptLine) {
-      logKept(keptLine);
+    // Kept: say so BEFORE the TUI mounts — this line stays on the main screen, so
+    // a Ctrl+C exit (no `dispose`) still shows how to resume. A run with a TUI
+    // calls `announce` itself once everything succeeded.
+    const announce = (): void => {
+      if (keptLine && !announced) {
+        announced = true;
+        logKept(keptLine);
+      }
+    };
+    if (!deps.deferAnnounce) {
+      announce();
     }
-    return { name, binPath, removeUnlessKept };
+    warnNotRecorded();
+    return { name, binPath, removeUnlessKept, announce };
   } catch (error) {
     // The workload was created but never became usable — delete it before
     // surfacing (kept with `--keep`: left to inspect).
     status?.finish();
+    warnNotRecorded();
     removeUnlessKept(error);
     throw error;
   }
@@ -480,12 +569,17 @@ export async function provisionWorkload(
 export async function startEngineRuntime(
   config: TentacleConfig,
   deps: EngineRuntimeDeps,
-): Promise<LocalRuntime> {
+): Promise<EngineRuntime> {
   const { host } = deps;
-  const { name, binPath, removeUnlessKept } = await provisionWorkload(config, deps);
-  // The pod daemon's stderr is buffered (not written live) so it never corrupts
-  // the Ink TUI; flushed once on teardown / startup failure. See `createStderrSink`.
-  const stderr = createStderrSink(`[${host.noun} ${name}]`, deps.log);
+  const { name, binPath, removeUnlessKept, announce } = await provisionWorkload(config, {
+    ...deps,
+    deferAnnounce: true,
+  });
+  // The pod daemon's stderr goes to a per-run file, never to the terminal (the
+  // TUI owns it; a routine daemon line is not an error). A FAILED run prints one
+  // line naming the file (`quitReport`) — see `createFaultWatch`.
+  const stderr = openDaemonLog(deps.daemonLogPath?.(name), undefined, `run ${name}`);
+  const fault = createFaultWatch();
   try {
     const target: EngineExecTarget = {
       name,
@@ -496,7 +590,7 @@ export async function startEngineRuntime(
     // The current exec; a reconnect replaces it (and teardown closes that one).
     let channel = host.openExec(target, execOptions);
     const redial = execChannelFactory(host, target, execOptions);
-    return await createLocalRuntime({
+    const runtime = await createLocalRuntime({
       ...laptopModels(config),
       channel,
       channelFactory: async () => {
@@ -506,8 +600,10 @@ export async function startEngineRuntime(
       disposeTransport: () => {
         channel.close();
         // Safe here: `dispose()` runs after the TUI has unmounted (left the
-        // alt-screen), so the buffered daemon stderr can go to stdout.
-        stderr.flush();
+        // alt-screen). A failed run says so in one line; a normal quit says nothing.
+        if (fault.faulted()) {
+          (deps.info ?? deps.log)(quitReport(host.noun, name, stderr.path));
+        }
         removeUnlessKept();
       },
       permissions: deps.permissions,
@@ -517,14 +613,17 @@ export async function startEngineRuntime(
       resume: deps.resume,
       daemonKind: "container",
       // Laptop-side RPC errors (incl. a local model failure, which the pod only
-      // sees opaque) join the buffered daemon stderr: flushed after unmount.
+      // sees opaque) join the log file. They are NOT a failure of the run: the
+      // TUI showed the turn's error already.
       onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),
       ...(deps.notify ? { notify: deps.notify } : {}),
     });
+    fault.watch(runtime);
+    return Object.assign(runtime, { markFault: fault.mark, announce });
   } catch (error) {
-    // The TUI never mounted on this path, so flushing any daemon stderr (e.g. a
-    // `serve` that failed to start) to stdout is safe and aids diagnosis.
-    stderr.flush();
+    // The TUI never mounted: the caller prints ONE short line; the whole cause
+    // is in the log, whose path rides on the error.
+    recordFailure(error, stderr);
     removeUnlessKept(error);
     throw error;
   }
@@ -548,6 +647,18 @@ export interface EngineAttachRuntimeDeps {
   readonly saver: SessionSaver;
   readonly resume: SessionRecord | null;
   readonly log: (line: string) => void;
+  /**
+   * Where the INFORMATIONAL lines go (the phases, the exit line): the caller
+   * greys them on a terminal. Errors, warnings and the stderr block always go
+   * to `log`. Absent: they go to `log` too.
+   */
+  readonly info?: (line: string) => void;
+  /**
+   * Where the pod daemon's stderr is kept (`daemon.log`, 0600, bounded), given the
+   * workload's name: the run's state dir when it has one. Absent: nothing is kept.
+   * The stderr is NEVER written to the terminal (docs/feat/run-prompt.md round 4).
+   */
+  readonly daemonLogPath?: (name: string) => string | undefined;
   /** In-TUI notices (the session's `NoticeHub`), e.g. a reconnect that lost the last turn. */
   readonly notify?: (text: string) => void;
   /** `createLocalRuntime`'s: false in the relay, no one to ask. */
@@ -574,23 +685,24 @@ export interface EngineAttachRuntimeDeps {
 export async function attachEngineRuntime(
   config: TentacleConfig,
   deps: EngineAttachRuntimeDeps,
-): Promise<LocalRuntime> {
+): Promise<EngineRuntime> {
   const { host } = deps;
   const { name } = deps;
-  // Buffer the pod daemon's stderr so it never corrupts the Ink TUI; flushed
-  // once on teardown / startup failure. See `createStderrSink`.
-  const stderr = createStderrSink(`[${host.noun} ${name}]`, deps.log);
+  // The pod daemon's stderr goes to a per-run file, never to the terminal (as
+  // in `startEngineRuntime`).
+  const stderr = openDaemonLog(deps.daemonLogPath?.(name), undefined, `attach ${name}`);
   // No `?? AGENT_CONTAINER` default: when the caller does not name a container,
   // the exec API omits the `container` parameter and picks the only/default
   // one (single-container pods need no `-c`).
   const container = deps.container;
   // Same single-line (TTY) / one-line-per-phase (piped) contract as `run`.
   const status = (process.stdout.isTTY ?? false) ? new StatusLine({ write: deps.log }) : null;
+  const info = deps.info ?? deps.log;
   const phase = (text: string): void => {
     if (status) {
       status.set(text);
     } else {
-      deps.log(`${text}\n`);
+      info(`${text}\n`);
     }
   };
 
@@ -601,13 +713,13 @@ export async function attachEngineRuntime(
     state = await host.inspect(name);
   } catch (error) {
     status?.finish();
-    throw error;
+    throw recordFailure(error, stderr);
   }
   // A terminated / not-runnable workload can never host the daemon (and
   // `waitForReady` would just time out) — say so up front. Never started here.
   if (state.kind === "stopped") {
     status?.finish();
-    throw new Error(state.detail);
+    throw recordFailure(new Error(state.detail), stderr);
   }
   // M7 (owner 2026-10-27): the container's mount is fixed — attaching from
   // another folder is warned about, never refused.
@@ -633,7 +745,7 @@ export async function attachEngineRuntime(
       await host.waitForReady(name, { timeoutMs: 60_000 });
     } catch (error) {
       status?.finish();
-      throw error;
+      throw recordFailure(error, stderr);
     }
   }
 
@@ -802,7 +914,7 @@ export async function attachEngineRuntime(
     status?.finish();
     // Piped only: the TUI opening IS the confirmation in interactive mode.
     if (!status) {
-      deps.log(
+      info(
         `[${host.noun}] ${version} attached to ${name}; the agent daemon is starting (closing the TUI detaches — the ${host.noun} stays up)\n`,
       );
     }
@@ -815,7 +927,8 @@ export async function attachEngineRuntime(
     // The current exec; a reconnect replaces it (and teardown closes that one).
     let channel = host.openExec(target, execOptions);
     const redial = execChannelFactory(host, target, execOptions);
-    return await createLocalRuntime({
+    const fault = createFaultWatch();
+    const runtime = await createLocalRuntime({
       ...laptopModels(config),
       channel,
       channelFactory: async () => {
@@ -826,8 +939,11 @@ export async function attachEngineRuntime(
       // running (keepalive) — no `deletePod`, by design.
       disposeTransport: () => {
         channel.close();
-        // Safe after the TUI has unmounted (left the alt-screen).
-        stderr.flush();
+        // Safe after the TUI has unmounted (left the alt-screen): a failed attach
+        // says so in one line, like `run`; a normal quit says nothing.
+        if (fault.faulted()) {
+          info(quitReport(host.noun, name, stderr.path));
+        }
       },
       permissions: deps.permissions,
       saver: deps.saver,
@@ -835,20 +951,21 @@ export async function attachEngineRuntime(
       model: config.model,
       resume: deps.resume,
       daemonKind: "container",
-      // Laptop-side RPC errors (incl. a local model failure, which the pod only
-      // sees opaque) join the buffered daemon stderr: flushed after unmount.
+      // Laptop-side RPC errors join the log file; a model/turn error is not a
+      // failure of the attach (the TUI showed it).
       onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),
       ...(deps.notify ? { notify: deps.notify } : {}),
       ...(deps.interactive !== undefined ? { interactive: deps.interactive } : {}),
       ...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),
       ...(deps.shared ? { shared: true as const } : {}),
     });
+    fault.watch(runtime);
+    return Object.assign(runtime, { markFault: fault.mark });
   } catch (error) {
     status?.finish();
-    // The TUI never mounted on this path, so flushing any daemon stderr is safe.
-    stderr.flush();
     // NO delete here: the workload is not ours. The injection's own messages
     // (e.g. the glibc hint) surface untouched; a wrong container is translated.
-    throw host.execError(error, { name, container });
+    // The whole cause goes to the log; its path rides on the error.
+    throw recordFailure(host.execError(error, { name, container }), stderr);
   }
 }

@@ -17,7 +17,6 @@ import {
   attachCwdWarning,
   caseAliasedFiles,
   engineFacts,
-  hiddenSummary,
   hideList,
   hidesPath,
   isYes,
@@ -74,6 +73,7 @@ describe("planWorkspace: when to mount", () => {
     const p = plan({ cwd: "/tmp/x/repo", realCwd: "/private/tmp/x/repo" });
     expect(p).toEqual({
       kind: "mount",
+      home: "/Users/me",
       mount: {
         source: "/private/tmp/x/repo",
         target: "/tmp/x/repo",
@@ -106,8 +106,8 @@ describe("planWorkspace: when to mount", () => {
 
 describe("planWorkspace: dangerous sources → confirmation (M5), never silently", () => {
   for (const [label, over, kind] of [
-    ["$HOME", { cwd: "/Users/me", realCwd: "/Users/me" }, "your home directory"],
-    ["an ancestor of $HOME", { cwd: "/Users", realCwd: "/Users" }, "an ancestor of your home"],
+    ["$HOME", { cwd: "/Users/me", realCwd: "/Users/me" }, "your home"],
+    ["an ancestor of $HOME", { cwd: "/Users", realCwd: "/Users" }, "holds your home"],
     [
       "a dir on the hide list (~/.aws)",
       {
@@ -115,7 +115,7 @@ describe("planWorkspace: dangerous sources → confirmation (M5), never silently
         realCwd: "/Users/me/.aws",
         hide: [{ label: "~/.aws", path: "/Users/me/.aws", file: false }],
       },
-      "~/.aws, on your hide list",
+      "inside ~/.aws",
     ],
     ["/etc", { cwd: "/etc", realCwd: "/private/etc" }, "a system directory"],
     ["/var", { cwd: "/var", realCwd: "/var" }, "a system directory"],
@@ -135,7 +135,7 @@ describe("planWorkspace: dangerous sources → confirmation (M5), never silently
 
   test("a symlinked cwd is judged by its realpath (a link to $HOME is $HOME)", () => {
     const p = plan({ cwd: "/work/link", realCwd: "/Users/me" });
-    expect(p.kind === "mount" ? p.danger : undefined).toContain("your home directory");
+    expect(p.kind === "mount" ? p.danger : undefined).toBe("your home");
   });
 });
 
@@ -268,7 +268,9 @@ describe("hideList / apiKeyFileOf (D-2)", () => {
       "~/.aws",
       "~/.kube",
       "~/.config/gcloud",
-      "~/.docker/config.json",
+      // The FOLDER, not `config.json`: a dir mask holds for every spelling on a
+      // case-insensitive filesystem, so the case refusal no longer fires for it.
+      "~/.docker",
       "~/.netrc",
     ]);
     expect(hideList(undefined, undefined).map((h) => h.path)).toEqual([...DEFAULT_HIDE]);
@@ -310,46 +312,62 @@ describe("mountGate (M5): ask before Ink, refuse without a TTY", () => {
     });
   });
 
-  test("interactive → the exact prompt (with masks: the hidden-dirs line)", () => {
+  // Round 4 (owner 2026-11-04): the y/N is exactly two lines.
+  test("interactive → the exact two-line prompt (names relative to the mounted folder)", () => {
+    // Mutation: the old three-line wording ("The agent will be able to read…") → fails.
     expect(mountGate(dangerous, { interactive: true, confirmed: false })).toEqual({
       action: "ask",
       prompt:
-        "⚠ You are about to mount /Users/me (your home directory) into the container.\n" +
-        "The agent will be able to read everything in it except ~/.ssh and tentacle's config, which stay hidden.\n" +
-        "Hidden from the container: 0 paths from .tentacle/hide, 2 defaults\n" +
+        "⚠ mount ~ (your home) into the container? hidden: .ssh .config/tentacle\n" +
         "Continue? [y/N] ",
     });
   });
 
-  test("the prompt LISTS what stays hidden (D-2)", () => {
+  test("the prompt lists what stays hidden, names relative to the mount (D-2)", () => {
     const home = plan({
       cwd: "/Users/me",
       realCwd: "/Users/me",
       hide: [
         { label: "~/.ssh", path: "/Users/me/.ssh", file: false },
+        { label: "~/.docker", path: "/Users/me/.docker", file: false },
+        { label: "~/.config/gcloud", path: "/Users/me/.config/gcloud", file: false },
         { label: "~/.netrc", path: "/Users/me/.netrc", file: true },
-        { label: "the API key file", path: "/Users/me/.cache/k", file: true },
       ],
     });
     const gate = mountGate(home, { interactive: true, confirmed: false });
-    expect(gate.action === "ask" ? gate.prompt : "").toContain(
-      "The agent will be able to read everything in it except ~/.ssh, ~/.netrc, the API key file and tentacle's config, which stay hidden.\n",
+    expect(gate.action === "ask" ? gate.prompt : "").toBe(
+      "⚠ mount ~ (your home) into the container? hidden: .ssh .docker .config/gcloud .netrc .config/tentacle\n" +
+        "Continue? [y/N] ",
     );
   });
 
-  test("interactive, no mask applies → the owner's original second line", () => {
-    const gate = mountGate(etc, { interactive: true, confirmed: false });
-    expect(gate.action === "ask" ? gate.prompt : "").toContain(
-      "The agent will be able to read everything in it: SSH keys, tokens, configs.\n",
+  test("each danger has its own short description; nothing hidden → no `hidden:` part", () => {
+    const ask = (p: ReturnType<typeof plan>): string => {
+      const gate = mountGate(p, { interactive: true, confirmed: false });
+      return gate.action === "ask" ? gate.prompt : "";
+    };
+    expect(ask(etc)).toBe(
+      "⚠ mount /etc (a system directory) into the container?\nContinue? [y/N] ",
     );
+    expect(ask(plan({ cwd: "/Users", realCwd: "/Users" }))).toBe(
+      "⚠ mount /Users (holds your home) into the container? hidden: me/.ssh me/.config/tentacle\nContinue? [y/N] ",
+    );
+    expect(
+      ask(
+        plan({
+          cwd: "/Users/me/.aws",
+          realCwd: "/Users/me/.aws",
+          hide: [{ label: "~/.aws", path: "/Users/me/.aws", file: false }],
+        }),
+      ),
+    ).toBe("⚠ mount ~/.aws (inside ~/.aws) into the container?\nContinue? [y/N] ");
   });
 
-  test("non-interactive → refused with the exact message", () => {
+  test("non-interactive → ONE line, no `Refusing`", () => {
     expect(mountGate(dangerous, { interactive: false, confirmed: false })).toEqual({
       action: "refuse",
       message:
-        "Refusing to mount /Users/me (your home directory) without confirmation.\n" +
-        "Run from your project directory, or pass --confirm-mount to proceed.",
+        "won't mount ~ (your home) without confirmation · run from a project folder, or pass --confirm-mount",
     });
   });
 
@@ -725,9 +743,6 @@ describe(".tentacle/hide: plan integration", () => {
       { path: "/Users/me/repo/.aws", file: false, label: "~/.aws" },
       { path: "/Users/me/repo/k.pem", file: true, label: ".tentacle/hide", fromFile: true },
     ]);
-    expect(hiddenSummary(m)).toBe(
-      "Hidden from the container: 1 paths from .tentacle/hide, 1 defaults",
-    );
   });
 
   test("a file entry equal to a default / the config dir counts as a default (dedupe keeps the always-hidden one)", () => {
@@ -743,9 +758,6 @@ describe(".tentacle/hide: plan integration", () => {
       ["/Users/me/repo/.aws", false],
       ["/Users/me/repo/cfg", false],
     ]);
-    expect(hiddenSummary(m)).toBe(
-      "Hidden from the container: 0 paths from .tentacle/hide, 2 defaults",
-    );
   });
 
   test("! in the file can NEVER un-hide a default, the config dir or the key file", () => {
@@ -764,17 +776,6 @@ describe(".tentacle/hide: plan integration", () => {
     expect(paths(m)).toEqual(["/Users/me/repo/.aws", "/Users/me/repo/.key", "/Users/me/repo/cfg"]);
   });
 
-  test("the status line: no masks → none; N and M counted", () => {
-    expect(hiddenSummary(mountOf())).toBeUndefined();
-    const m = mountOf({
-      hide: [fileEntry("/Users/me/repo/a"), fileEntry("/Users/me/repo/b")],
-      configDir: "/Users/me/repo/cfg",
-    });
-    expect(hiddenSummary(m)).toBe(
-      "Hidden from the container: 2 paths from .tentacle/hide, 1 defaults",
-    );
-  });
-
   test("a hide-file problem (cap) REFUSES before anything is created", () => {
     const message = refusal({
       hideProblem: ".tentacle/hide matches more than 200 paths — narrow the patterns",
@@ -790,7 +791,8 @@ describe(".tentacle/hide: plan integration", () => {
     expect(plan()).not.toHaveProperty("warnings");
   });
 
-  test("the prompt carries the summary line; file paths are not listed one by one", () => {
+  test("the prompt counts the file's paths (`+N from .tentacle/hide`), never lists them", () => {
+    // Mutation: list them one by one → `/a` shows; drop the count → no `+2`.
     const home = plan({
       cwd: "/Users/me",
       realCwd: "/Users/me",
@@ -798,11 +800,24 @@ describe(".tentacle/hide: plan integration", () => {
     });
     const gate = mountGate(home, { interactive: true, confirmed: false });
     const prompt = gate.action === "ask" ? gate.prompt : "";
-    expect(prompt).toContain(
-      "Hidden from the container: 2 paths from .tentacle/hide, 1 defaults\n",
+    expect(prompt).toBe(
+      "⚠ mount ~ (your home) into the container? hidden: .config/tentacle +2 from .tentacle/hide\n" +
+        "Continue? [y/N] ",
     );
-    expect(prompt).toContain("except tentacle's config, which stay hidden");
-    expect(prompt).not.toContain("/Users/me/a");
+    expect(prompt).not.toContain("/a");
+  });
+
+  test("only file paths hidden → `hidden: +N from .tentacle/hide`", () => {
+    const home = plan({
+      cwd: "/Users/me",
+      realCwd: "/Users/me",
+      configDir: "/elsewhere/cfg",
+      hide: [fileEntry("/Users/me/a")],
+    });
+    const gate = mountGate(home, { interactive: true, confirmed: false });
+    expect(gate.action === "ask" ? gate.prompt : "").toBe(
+      "⚠ mount ~ (your home) into the container? hidden: +1 from .tentacle/hide\nContinue? [y/N] ",
+    );
   });
 });
 
@@ -914,13 +929,17 @@ describe("R2-3: FILE masks on a case-insensitive filesystem", () => {
   const netrc = { label: "~/.netrc", path: "/Users/me/repo/.netrc", file: true };
 
   test("an ALWAYS-hidden file (the key file) aliased → refused, never overridable", () => {
+    // Mutation: offer `--confirm-mount` for the key file → the exact text differs.
     const message = refusal({ hide: [key], caseAliased: [key.path] });
-    expect(message).toContain("Refusing to mount /Users/me/repo");
-    expect(message).toContain("case-insensitive");
-    expect(message).toContain("/Users/me/repo/Key (the API key file)");
-    expect(message).toContain("Hide the folder that contains it");
-    expect(message).toContain("move the file");
-    expect(message).not.toContain("--confirm-mount");
+    expect(message).toBe(
+      "won't mount ~/repo: Key would be readable inside the container\n" +
+        "  fix: move Key out of the folder",
+    );
+    const nested = { ...key, path: "/Users/me/repo/sub/Key" };
+    expect(refusal({ hide: [nested], caseAliased: [nested.path] })).toBe(
+      "won't mount ~/repo: sub/Key would be readable inside the container\n" +
+        "  fix: add `sub/` to .tentacle/hide",
+    );
   });
 
   test("a user-added file aliased → the gate refuses (TTY or not) unless --confirm-mount", () => {
@@ -932,9 +951,19 @@ describe("R2-3: FILE masks on a case-insensitive filesystem", () => {
       const gate = mountGate(p, { interactive, confirmed: false });
       expect(gate.action).toBe("refuse");
       const message = gate.action === "refuse" ? gate.message : "";
-      expect(message).toContain("/Users/me/repo/.netrc (~/.netrc)");
-      expect(message).toContain("--confirm-mount");
+      expect(message).toBe(
+        "won't mount ~/repo: .netrc would be readable inside the container\n" +
+          "  fix: move .netrc out of the folder, or pass --confirm-mount to start anyway",
+      );
     }
+    // In a sub-folder: hide the folder instead.
+    const deep = { label: "k.pem", path: "/Users/me/repo/sub/k.pem", file: true };
+    const q = plan({ hide: [deep], caseAliased: [deep.path] });
+    const gate = mountGate(q, { interactive: false, confirmed: false });
+    expect(gate.action === "refuse" ? gate.message : "").toBe(
+      "won't mount ~/repo: sub/k.pem would be readable inside the container\n" +
+        "  fix: add `sub/` to .tentacle/hide, or pass --confirm-mount to start anyway",
+    );
   });
 
   test("--confirm-mount proceeds and WARNS naming the still-readable files", () => {

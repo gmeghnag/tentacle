@@ -48,6 +48,8 @@ export interface TuiOptions {
   readonly runQuit?: RunQuit;
   /** A detached run's TUI: its session's shared auto-accept. */
   readonly autoAccept?: AutoAcceptFeed;
+  /** `run "<prompt>"`: sent once at mount as the first message, raw text (never a `/command`). */
+  readonly initialPrompt?: string;
 }
 
 /**
@@ -99,6 +101,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       {...(options.sessions ? { sessions: options.sessions } : {})}
       {...(options.runQuit ? { runQuit: options.runQuit } : {})}
       {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
+      {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
     />,
     { exitOnCtrlC: false },
   );

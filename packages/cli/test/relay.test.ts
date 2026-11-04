@@ -2052,73 +2052,32 @@ describe("launchRelay", () => {
   };
   const fresh = (): string => ensureRunDir(join(mkdtempSync(join(tmpdir(), "launch-")), "run"));
 
-  test("started: the line names the pid and the way back; the spec reached the relay", async () => {
-    const dir = fresh();
-    const out: string[] = [];
-    let specText = "";
-    const code = await launch(
-      dir,
-      {
+  test("a successful launch prints NOTHING (the dim `still running` line is the provisioner's); the spec reached the relay", async () => {
+    // Mutation: print a `detached run started …` line again → `out` is not empty.
+    for (const [keep, autoAccept] of [
+      [true, false],
+      [false, true],
+    ] as const) {
+      const dir = fresh();
+      const out: string[] = [];
+      let specText = "";
+      const code = await launchRelay(dir, spec({ keep, autoAccept }), {
+        write: (t) => out.push(t),
+        noun: "container",
+        name: "box",
+        attachHint: "tentacle attach box",
         spawnRelay: (file) => {
           specText = readFileSync(file, "utf8");
           writeOwner(dir, running);
           return { exited: () => false };
         },
-      },
-      out,
-    );
-    expect(code).toBe(0);
-    const text = out.join("");
-    expect(text).toContain("pid 9");
-    // D17 (docs/fix/detach-live.md A7): `attach <name>` works at once, and
-    // `--resume` on a live relay is refused.
-    expect(text).toContain("Attach any time: tentacle attach box.");
-    expect(text).not.toContain("--resume");
-    expect(text).not.toContain("Re-attach once");
-    expect(text).toContain("a tool that needs permission waits for you");
-    expect(text).not.toContain("waits at the first permission");
-    expect(JSON.parse(specText).prompt).toBe("go");
-  });
-
-  test("D17 keep=false: the attach sentence before the removal text, which keeps its `--resume`", async () => {
-    const dir = fresh();
-    const out: string[] = [];
-    await launchRelay(dir, spec({ keep: false }), {
-      write: (t) => out.push(t),
-      noun: "container",
-      name: "box",
-      attachHint: "tentacle attach box",
-      spawnRelay: () => {
-        writeOwner(dir, running);
-        return { exited: () => false };
-      },
-      pollMs: 1,
-      timeoutMs: 2000,
-    });
-    const text = out.join("");
-    const attach = text.indexOf("Attach any time: tentacle attach box.");
-    expect(attach).toBeGreaterThan(-1);
-    expect(attach).toBeLessThan(text.indexOf("removed when the run goes idle"));
-    expect(text).toContain(`tentacle --resume ${UID}`);
-    expect(text).not.toContain("Re-attach once");
-  });
-
-  test("--auto-accept is said, with the log", async () => {
-    const dir = fresh();
-    const out: string[] = [];
-    await launch(
-      dir,
-      {
-        spawnRelay: () => {
-          writeOwner(dir, running);
-          return { exited: () => false };
-        },
-      },
-      out,
-      true,
-    );
-    expect(out.join("")).toContain("auto-accepting pod tool asks");
-    expect(out.join("")).toContain("relay.log");
+        pollMs: 1,
+        timeoutMs: 2000,
+      });
+      expect(code).toBe(0);
+      expect(out).toEqual([]);
+      expect(JSON.parse(specText).autoAccept).toBe(autoAccept);
+    }
   });
 
   test("R12 the relay died: exit 1, the tail sanitised, the workload's way out said", async () => {
@@ -2217,56 +2176,6 @@ describe("launchRelay", () => {
       expect(said).toContain(`delete ${ownerPath(dir)} to run under this name`);
       expect(said).not.toContain("tentacle rm");
     }
-  });
-
-  test("keep=false: the removal, what goes with it, the transcript; never `Re-attach`", async () => {
-    const dir = fresh();
-    const out: string[] = [];
-    const code = await launchRelay(dir, spec({ keep: false }), {
-      write: (t) => out.push(t),
-      noun: "container",
-      name: "box",
-      attachHint: "tentacle attach box",
-      spawnRelay: () => {
-        writeOwner(dir, running);
-        return { exited: () => false };
-      },
-      pollMs: 1,
-      timeoutMs: 2000,
-      mounted: true,
-      keepsAwake: true,
-    });
-    expect(code).toBe(0);
-    const text = out.join("");
-    expect(text).toContain("removed when the run goes idle");
-    expect(text).toContain("files not in the mount go with it, and so does its log");
-    expect(text).toContain("the laptop folder is not touched");
-    expect(text).toContain(`the transcript stays in \`tentacle --resume ${UID}\``);
-    expect(text).toContain(
-      "The Mac stays awake while a turn runs; closing the lid still sleeps it",
-    );
-    expect(text).not.toContain("Re-attach");
-  });
-
-  test("keep=false, no mount: nothing about a laptop folder; no keep-awake: no line", async () => {
-    const dir = fresh();
-    const out: string[] = [];
-    await launchRelay(dir, spec({ keep: false }), {
-      write: (t) => out.push(t),
-      noun: "pod",
-      name: "box",
-      attachHint: "tentacle attach box",
-      spawnRelay: () => {
-        writeOwner(dir, running);
-        return { exited: () => false };
-      },
-      pollMs: 1,
-      timeoutMs: 2000,
-    });
-    const text = out.join("");
-    expect(text).toContain("the pod's files go with it, and so does its log");
-    expect(text).not.toContain("laptop folder");
-    expect(text).not.toContain("The Mac stays awake");
   });
 
   test("still starting past the wait: said, exit 0, the log named", async () => {

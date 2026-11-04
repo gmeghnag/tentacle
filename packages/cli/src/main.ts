@@ -25,7 +25,7 @@ import { type ChatMessage, PermissionBroker } from "@tentacle/core";
 import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND, deletePodFromEnv } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
-import { type SessionController, pickSession, startTui } from "@tentacle/tui";
+import { type AutoAcceptFeed, type SessionController, pickSession, startTui } from "@tentacle/tui";
 import { type AttachPlan, planAttach } from "./attach-plan.ts";
 import { type Joined, joinRun } from "./attach-run.ts";
 import {
@@ -67,11 +67,11 @@ import {
   parseArgs,
   parseContextWindowFlag,
   parseServeLimits,
+  resolveRunPrompt,
   resolveTls,
   resolveToken,
 } from "./flags.ts";
 import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
-import { keepsAwake } from "./keep-awake.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
 import {
   forgetKept,
@@ -87,11 +87,11 @@ import {
   ambiguousMessage,
   keptMetadata,
   placeText,
-  whereOf,
 } from "./kept.ts";
 import { startWorkerRuntime } from "./local-runtime.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
+import { failedLine } from "./pod-stderr-log.ts";
 import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
 import { render } from "./render.ts";
 import { runModelPlan } from "./run-model.ts";
@@ -105,6 +105,7 @@ import {
   runDirFor,
   runStem,
 } from "./run-state.ts";
+import { localAutoAccept, styleInfo } from "./run-ui.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
 import { startTerminal } from "./terminal.ts";
@@ -136,13 +137,16 @@ Usage:
   tentacle --resume [uid]  resume a saved session of this folder (pick one if no uid)
   tentacle --continue      resume this folder's most recent session
   tentacle -i --in-process run the agent on the render thread (opt out of the worker)
-  tentacle run --image <ref> [--engine kubernetes|docker|podman] [--keep[=true|false]] [--no-mount] [--confirm-mount] [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [<name>]
+  tentacle run --image <ref> [--engine kubernetes|docker|podman] [--keep[=true|false]] [--no-mount] [--confirm-mount] [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [--name <n>] [--auto-accept[=true|false]] ["<prompt>" | --prompt <text>]
                                 run the agent inside a new Kubernetes pod or Docker/Podman
-                                container (sandbox), local TUI (<name> is its name; random
-                                when omitted; sessions persist on the laptop, so --resume
-                                works); kept on exit by default (--keep=false deletes)
-  tentacle run --detach --prompt <text|-> [--auto-accept[=true|false]] --image <ref> [...] [<name>]
-                                the same with no TUI: a background laptop process runs the
+                                container (sandbox), local TUI (--name is its name; random
+                                when omitted; "<prompt>" is sent at once as the first
+                                message, raw text; not with --resume/--continue; --auto-accept starts the TUI with auto-accept on (Shift+Tab turns it off); sessions
+                                persist on the laptop, so --resume works); kept on exit by
+                                default (--keep=false deletes)
+  tentacle run --detach ("<prompt>" | --prompt <text|->) [--auto-accept[=true|false]] --image <ref> [...] [--name <n>]
+                                the same with no TUI (--prompt - reads the prompt from stdin,
+                                only here): a background laptop process runs the
                                 turn, serves the model and saves it, then leaves once the
                                 session is idle. A tool that needs permission waits for
                                 you unless --auto-accept (pod tool asks only, allow once,
@@ -277,7 +281,7 @@ Engines (tentacle run / attach --engine kubernetes|docker|podman):
   --insecure-docker-tcp, --no-mount and --confirm-mount are docker/podman-only
   (anything else is an error).
 
-Pod execution (tentacle run --image <ref> [-n|--namespace <ns>] [<name>]):
+Pod execution (tentacle run --image <ref> [-n|--namespace <ns>] [--name <n>] ["<prompt>"]):
   the image must be a Linux glibc image with sh+head (tentacle is injected
   into the pod; musl images cannot run it). --namespace defaults to the
   kubeconfig context's namespace; a MISSING namespace fails with a clear error
@@ -316,6 +320,8 @@ export interface CliIO {
   startTui?: typeof startTui;
   /** Test seam: stdin and stdout are a terminal. Default: both `isTTY`. */
   tty?: boolean;
+  /** Test seam: grey informational status lines. Default: a TTY stdout and no `NO_COLOR`. */
+  colour?: boolean;
   /** Test seam: `serve`'s WebSocket daemon (a misplaced flag must never start a real one). */
   startDaemon?: typeof startDaemon;
   /** Test seam: `run --detach`'s workload creation (pins that no daemon starts in the foreground). */
@@ -357,6 +363,11 @@ function askLine(prompt: string): Promise<string> {
 
 export async function main(argv: readonly string[], io: CliIO = {}): Promise<number> {
   const write = io.write ?? ((text: string) => void process.stdout.write(text));
+  // Informational `[pod]`/`[container]` lines go through `info`: dim grey on a
+  // terminal that takes colour (a TTY stdout, no NO_COLOR). Grey is by explicit
+  // marking — `write` (errors, refusals, warnings, stderr blocks) is never styled.
+  const colour = io.colour ?? (!io.write && process.stdout.isTTY === true && !process.env.NO_COLOR);
+  const info = (text: string): void => write(styleInfo(text, colour));
   const writeErr = io.writeErr ?? ((text: string) => void process.stderr.write(text));
 
   // `--model` / `--profile` are flags of the session commands (parsed below with
@@ -765,30 +776,46 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     permissions: PermissionBroker,
     sessions: TuiSessions,
     run?: Pick<Joined, "finish" | "runQuit" | "createSession" | "autoAccept">,
+    // `run "<prompt>"`: the TUI sends it once, as its first message, raw text.
+    initialPrompt?: string,
+    // `run --auto-accept`: the TUI's auto-accept state, started ON.
+    localAutoAcceptFeed?: AutoAcceptFeed,
   ): Promise<number> => {
     let inkRan = false;
     const finish = run?.finish;
     await runSessionTui(sessions, {
       start: async (sessionOptions) => {
-        await (io.startTui ?? startTui)(null, {
-          model: config.model,
-          cwd: config.cwd,
-          contextWindow: config.contextWindow,
-          permissions,
-          jobs: runtime.jobs,
-          autoWakeOnJobExit: config.autoWake,
-          // A detached run's TUI: its presence follows `/clear`, its `/quit`
-          // closes the session for all (docs/fix/detach-live.md A2/A4).
-          createSession: run?.createSession ?? runtime.createSession,
-          ...(run ? { runQuit: run.runQuit, autoAccept: run.autoAccept } : {}),
-          link: runtime.link,
-          mcpStatus: runtime.mcpStatus,
-          // A fact of the runtime this laptop started, never guessed: a
-          // spilled result's file lives in the pod (docs/feat/tui-spill-note.md).
-          daemonInPod: true,
-          ...sessionOptions,
-        });
-        inkRan = true;
+        try {
+          // Setup all succeeded: NOW say `still running · tentacle attach …` (on the
+          // main screen, under the alt-screen; it survives a signal exit).
+          runtime.announce?.();
+          await (io.startTui ?? startTui)(null, {
+            model: config.model,
+            cwd: config.cwd,
+            contextWindow: config.contextWindow,
+            permissions,
+            jobs: runtime.jobs,
+            autoWakeOnJobExit: config.autoWake,
+            // A detached run's TUI: its presence follows `/clear`, its `/quit`
+            // closes the session for all (docs/fix/detach-live.md A2/A4).
+            createSession: run?.createSession ?? runtime.createSession,
+            ...(localAutoAcceptFeed ? { autoAccept: localAutoAcceptFeed } : {}),
+            ...(run ? { runQuit: run.runQuit, autoAccept: run.autoAccept } : {}),
+            ...(initialPrompt !== undefined ? { initialPrompt } : {}),
+            link: runtime.link,
+            mcpStatus: runtime.mcpStatus,
+            // A fact of the runtime this laptop started, never guessed: a
+            // spilled result's file lives in the pod (docs/feat/tui-spill-note.md).
+            daemonInPod: true,
+            ...sessionOptions,
+          });
+          inkRan = true;
+        } catch (error) {
+          // The TUI itself failed: the runtime's teardown then prints the one
+          // failure line naming the daemon log (docs/feat/run-prompt.md round 4).
+          runtime.markFault?.();
+          throw error;
+        }
       },
       teardown: () => (finish ? finish(inkRan) : runtime.dispose()),
       write,
@@ -824,18 +851,29 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     // `run --detach --prompt` (docs/feat/detached-relay.md): no TUI, its session
     // in a relay. Refused here, before anything exists; `-` is stdin, read once.
+    // The positional is the FIRST PROMPT (docs/feat/run-prompt.md); the workload's
+    // name is `--name`. The TUI sends the prompt at once; a detached run takes it
+    // as its turn. `--prompt -` (stdin) is `--detach`-only.
     const detach = runBools.has("detach");
-    const promptFlag = runFlags.get("prompt");
-    const fromStdin = detach && promptFlag === "-";
-    if (fromStdin && !io.readStdin && process.stdin.isTTY) {
+    const chosen = resolveRunPrompt({
+      positional: runPos[0],
+      promptFlag: runFlags.get("prompt"),
+      detach,
+    });
+    if (!chosen.ok) {
+      write(`\n[error] ${chosen.error}\nusage: ${USAGE.run}\n`);
+      return 1;
+    }
+    if (chosen.stdin && !io.readStdin && process.stdin.isTTY) {
       write(`\n[error] --prompt -: stdin is a terminal\nusage: ${USAGE.run}\n`);
       return 1;
     }
-    const prompt = fromStdin ? await (io.readStdin ?? (() => Bun.stdin.text()))() : promptFlag;
+    const prompt = chosen.stdin
+      ? await (io.readStdin ?? (() => Bun.stdin.text()))()
+      : chosen.prompt;
     const detachProblem = detachFlagProblem({
       detach,
       prompt,
-      autoAccept: runBools.has("auto-accept") || runFlags.has("auto-accept"),
       resume: runBools.has("resume") || runFlags.has("resume") || runBools.has("continue"),
     });
     if (detachProblem) {
@@ -850,7 +888,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       );
       return 1;
     }
-    const name = runPos[0];
+    const name = runFlags.get("name");
     const sessions = await openSessions(runFlags, runBools);
     if ("exit" in sessions) {
       return sessions.exit;
@@ -879,7 +917,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             }),
           );
     if (wsPlan.kind === "refuse") {
-      write(`[${noun}] failed: ${wsPlan.message}\n`);
+      write(`[${noun}] ${wsPlan.message}\n`);
       return 1;
     }
     if (wsPlan.kind === "none" && wsPlan.warning) {
@@ -928,8 +966,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       ...(config.profile !== undefined ? { profile: config.profile } : {}),
       created,
     });
+    // Names whose index entry exists: only those have a run dir for the log (a
+    // setup that failed before the record must not leave a run dir behind).
+    const recordedNames = new Set<string>();
     const recordKeptEntry = (keptName: string): (() => void) => {
       const file = recordKept(keptDir(config.configDir), keptEntryFor(keptName));
+      recordedNames.add(keptName);
       return () => forgetKept(file);
     };
     const workloadDeps = {
@@ -951,6 +993,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         : {}),
       ...(keptMeta ? { labels: keptMeta.labels, annotations: keptMeta.annotations } : {}),
       log: write,
+      info,
+      // The pod daemon's stderr never reaches the terminal: a file in the run's
+      // state dir (a recorded run has one), else under <configDir>/logs/<name>/.
+      daemonLogPath: (workload: string) =>
+        listed && recordedNames.has(workload)
+          ? join(runDirFor(config.configDir, keptEntryFor(workload)), "daemon.log")
+          : join(config.configDir, "logs", workload, "daemon.log"),
     };
     // The relay redials from the kept entry, so a detached run needs one: a
     // failed write, only a warning for `run`, stops it here.
@@ -969,9 +1018,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           },
         });
       } catch (error) {
-        write(
-          `[${noun}] failed: ${untrustedText(error instanceof Error ? error.message : String(error))}\n`,
-        );
+        write(failedLine(noun, error));
         return 1;
       }
       if (recorded === null) {
@@ -996,8 +1043,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           noun,
           name: workload.name,
           attachHint: workloadDeps.keepHint?.(workload.name) ?? "",
-          mounted: wsPlan.kind === "mount",
-          keepsAwake: keepsAwake(process.platform, config.detach?.keepAwake ?? true),
           ...(io.spawnRelay ? { spawnRelay: io.spawnRelay } : {}),
         },
       );
@@ -1015,12 +1060,20 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         notify: (text) => sessions.notices.notify(text),
       });
     } catch (error) {
-      write(
-        `[${noun}] failed: ${untrustedText(error instanceof Error ? error.message : String(error))}\n`,
-      );
+      write(failedLine(noun, error));
       return 1;
     }
-    return await runEngineTui(runtime, permissions, sessions);
+    // `--auto-accept[=true]` without `--detach`: the TUI's own auto-accept, ON
+    // from the start (Shift+Tab turns it off); `=false` changes nothing.
+    const autoAcceptOn = runBools.has("auto-accept") || runFlags.get("auto-accept") === "true";
+    return await runEngineTui(
+      runtime,
+      permissions,
+      sessions,
+      undefined,
+      prompt,
+      autoAcceptOn ? localAutoAccept(true) : undefined,
+    );
   }
 
   /**
@@ -1228,6 +1281,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         owner: run.owner.owner,
         cwd: config.cwd,
         write,
+        info,
         procOf: laptopProc,
         openSessions: () =>
           openTuiSessions(
@@ -1243,9 +1297,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             plan.sessionId,
           ),
         host: () => {
-          write(
-            `[${runNoun}] resolved ${untrustedText(name)} → ${run.entry.engine}, ${untrustedText(whereOf(run.entry))}\n`,
-          );
           try {
             return buildEngineHost(run.entry.engine, hostOptionsFor(run.entry)).host;
           } catch (error) {
@@ -1268,6 +1319,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             sessionId: plan.sessionId,
             shared: true,
             log: write,
+            info,
+            daemonLogPath: () => join(run.dir, "daemon.log"),
             notify: (text) => sessions.notices.notify(text),
           });
         },
@@ -1310,9 +1363,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     let built: ReturnType<typeof engineHost>;
     if (keptEntry) {
-      write(
-        `[${noun}] resolved ${untrustedText(name)} → ${engine}, ${untrustedText(whereOf(keptEntry))}\n`,
-      );
       try {
         built = buildEngineHost(engine, hostOptionsFor(keptEntry));
       } catch (error) {
@@ -1338,12 +1388,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         saver: sessions.saver,
         resume: sessions.resume,
         log: write,
+        info,
+        daemonLogPath: (workload: string) =>
+          keptEntry
+            ? join(runDirFor(config.configDir, keptEntry), "daemon.log")
+            : join(config.configDir, "logs", workload, "daemon.log"),
         notify: (text) => sessions.notices.notify(text),
       });
     } catch (error) {
-      write(
-        `[${noun}] failed: ${untrustedText(error instanceof Error ? error.message : String(error))}\n`,
-      );
+      write(failedLine(noun, error));
       return 1;
     }
     return await runEngineTui(runtime, permissions, sessions);

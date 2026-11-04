@@ -112,7 +112,7 @@ describe("k8s host: byte-identical messages", () => {
         ...commonDeps((l) => logs.push(l)),
       }),
     ).rejects.toThrow(/^namespace "dev" does not exist in this cluster/);
-    expect(logs).toEqual(["[pod] creating p1 (image img:1) in namespace dev…\n"]);
+    expect(logs).toEqual(["[pod] creating p1 (image img:1)…\n"]);
     // Nothing was created → no exit net, no delete.
     expect(kube.calls).toEqual(["create:p1:dev"]);
   });

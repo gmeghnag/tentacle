@@ -320,6 +320,12 @@ export interface AppProps {
   /** Transcript to seed on start (a resumed session); replaces the welcome line. */
   readonly initialItems?: readonly DisplayItem[];
   /**
+   * `run "<prompt>"`: sent ONCE at mount as the first message, through the same
+   * `run` as a typed one — raw text, never a `/command`. A `/clear` or a
+   * re-render never sends it again (docs/feat/run-prompt.md).
+   */
+  readonly initialPrompt?: string;
+  /**
    * The daemon runs in a pod (`run`/`attach`, set only by `runEngineTui`): a
    * spilled result's file is "saved in the pod to" its path. A fact of the
    * runtime the laptop started, never guessed (docs/feat/tui-spill-note.md).
@@ -404,6 +410,7 @@ export function App({
   paste = readClipboard,
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
   initialItems,
+  initialPrompt,
   daemonInPod = false,
   detachOnQuit = false,
   sessions,
@@ -1277,6 +1284,18 @@ export function App({
     [flushNow, pushNotice, streamTurn],
   );
   runRef.current = run;
+
+  // `run "<prompt>"`: the first message, sent once at mount, like a typed one: a
+  // failed send leaves it in the conversation with the error under it (it is
+  // not put back in the input).
+  const sentFirstRef = useRef(false);
+  useEffect(() => {
+    if (initialPrompt === undefined || sentFirstRef.current) {
+      return;
+    }
+    sentFirstRef.current = true;
+    void runRef.current?.(initialPrompt);
+  }, [initialPrompt]);
 
   /**
    * One activity of the session that this TUI did not start (C1/C2/C6): the

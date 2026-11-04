@@ -291,7 +291,7 @@ Red first for each slice (paste the red line); mutations restored only from a
   `process.exit` keep the workload); (b) `disposeTransport` closes the exec but
   does not `remove`; (c) the startup-failure catch does not `remove` either
   (`--keep` = tentacle never deletes this workload; a broken one is left to
-  inspect); (d) prints `[<noun>] kept <name> — resume with: <attach cmd>` as a
+  inspect); (d) prints `[<noun>] kept <name> — resume with: <attach cmd>` as a *(Superseded by feat/run-prompt: ONE line, `[<noun>] <name> still running · tentacle attach <name>`, no "kept", no `--engine`, no `# workspace`.)*
   durable log line once the workload exists (pre-mount, so it survives the
   alt-screen and covers Ctrl+C) and again after dispose / after a startup
   failure. Without `--keep` the path is byte-identical. `--keep` is a `run`
@@ -375,7 +375,7 @@ skip / 0 fail** (3214 tests, 247 files). That matches the brief.
    - `keepHint?: (name) => string` on `run`. With it, no exit net is armed,
      the workload is not removed on dispose or on a startup failure, and
      `[<noun>] kept <name> — resume with: <cmd>` is logged pre-mount and again
-     on dispose or failure.
+     on dispose or failure. *(Superseded by feat/run-prompt: printed once, pre-mount only.)*
    - `pod-runtime.test.ts` → `engine-runtime.test.ts`. Test-local
      `startPodRuntime`/`startAttachRuntime` helpers over the engine entry
      points leave every call site and assertion unchanged.

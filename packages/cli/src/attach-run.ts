@@ -83,6 +83,8 @@ export interface JoinDeps {
   readonly cwd: string;
   /** Lines before Ink mounts and after it unmounted only (AGENTS §7). */
   readonly write: (text: string) => void;
+  /** Informational lines (waiting, closing, removed): grey on a terminal. Absent: `write`. */
+  readonly info?: (text: string) => void;
   readonly procOf: ProcOf;
   /** This process (tests: another). */
   readonly pid?: number;
@@ -215,7 +217,7 @@ async function prepareHandover(
         }
         if (!toldBusy) {
           toldBusy = true;
-          deps.write(
+          (deps.info ?? deps.write)(
             `[${deps.noun}] ${untrustedText(deps.name)}: another terminal is taking this run over; waiting…\n`,
           );
         }
@@ -281,7 +283,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     // A TUI deleting the workload: wait for it to go. A relay draining after its
     // hand-over is no wait: the session is the TUIs' already, this is a join (Q3).
     leave();
-    write(`[${noun}] ${shown}: the run is closing; waiting…\n`);
+    (deps.info ?? write)(`[${noun}] ${shown}: the run is closing; waiting…\n`);
     const deadline = now() + (deps.closingWaitMs ?? RM_STOP_GRACE_MS);
     while (lockOf(dir) !== null && now() < deadline) {
       await new Promise((r) => setTimeout(r, CLOSING_POLL_MS));
@@ -691,7 +693,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
       write(`[${noun}] ${shown} ${detail}\n`);
       writeRecord("idle", detail);
     } else if (removal.kind === "removed") {
-      write(`[${noun}] removed ${shown}\n`);
+      (deps.info ?? write)(`[${noun}] removed ${shown}\n`);
     } else if (removal.kind !== "gone") {
       // `other`: the name now holds another tentacle workload (R3). Nothing was
       // deleted; the stale entry went with the run.

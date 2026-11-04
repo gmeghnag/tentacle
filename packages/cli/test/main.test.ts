@@ -290,9 +290,12 @@ describe("cli main: --engine", () => {
       }
     }
   };
-  const run = async (args: string[]) => {
+  const run = async (args: string[], colour?: boolean) => {
     const out: string[] = [];
-    const code = await main(["bun", "cli", ...args], { write: (t) => out.push(t) });
+    const code = await main(["bun", "cli", ...args], {
+      write: (t) => out.push(t),
+      ...(colour !== undefined ? { colour } : {}),
+    });
     return { code, text: out.join("") };
   };
   // BOTH engines point nowhere: a kubernetes path must never reach the
@@ -343,9 +346,10 @@ describe("cli main: --engine", () => {
         "dev",
         "--image",
         "x",
+        "--name",
         "p1",
       ]);
-      expect(flagWins.text).toContain("[pod] creating p1 (image x) in namespace dev");
+      expect(flagWins.text).toContain("[pod] creating p1 (image x)");
       expect(flagWins.text).not.toContain("[container]");
     });
   });
@@ -534,6 +538,7 @@ describe("cli main: --engine", () => {
         record?: boolean;
         keep?: boolean;
         config?: Record<string, unknown>;
+        colour?: boolean;
       } = {},
     ) => {
       const out: string[] = [];
@@ -549,6 +554,7 @@ describe("cli main: --engine", () => {
       );
       const code = await main(["bun", "cli", ...args], {
         write: (t) => out.push(t),
+        ...(over.colour !== undefined ? { colour: over.colour } : {}),
         ...(over.stdin !== undefined ? { readStdin: async () => over.stdin ?? "" } : {}),
         startEngineRuntime: async () => {
           calls.runtime += 1;
@@ -562,7 +568,12 @@ describe("cli main: --engine", () => {
           if (over.record !== false && deps.keepHint) {
             deps.recordKept?.("c1");
           }
-          return { name: "c1", binPath: "/usr/local/bin/tentacle", removeUnlessKept: () => {} };
+          return {
+            name: "c1",
+            binPath: "/usr/local/bin/tentacle",
+            removeUnlessKept: () => {},
+            announce: () => {},
+          };
         },
         spawnRelay: (file, _cwd, runDir) => {
           calls.spawn += 1;
@@ -577,13 +588,7 @@ describe("cli main: --engine", () => {
     const refused = { provision: 0, spawn: 0, runtime: 0 };
 
     for (const [why, args, needle] of [
-      ["--prompt with no --detach", [...base, "--prompt", "hi"], "--prompt needs --detach"],
-      ["--detach with no prompt", [...base, "--detach"], "--detach needs --prompt"],
-      [
-        "--auto-accept with no --detach",
-        [...base, "--auto-accept"],
-        "--auto-accept needs --detach",
-      ],
+      ["--detach with no prompt", [...base, "--detach"], "--detach needs a prompt"],
       [
         "--detach --resume",
         [...base, "--detach", "--prompt", "hi", "--resume"],
@@ -615,17 +620,16 @@ describe("cli main: --engine", () => {
           expect(r.code).toBe(0);
           expect(r.calls).toEqual({ provision: 1, spawn: 1, runtime: 0 });
           expect(r.spec?.keep).toBe(false);
-          expect(r.text).toContain("removed when the run goes idle");
-          expect(r.text).toContain(`tentacle --resume ${r.spec?.sessionId}`);
-          expect(r.text).not.toContain("Re-attach once it is done");
-          expect(r.text).toContain("Attach any time: "); // D17: at once, no `--resume`
+          // Round 6: a successful `run --detach` prints no launch line of its own.
+          expect(r.text).not.toContain("detached run started");
+          expect(r.text).not.toContain("Attach any time");
           expect(r.text).not.toContain("undefined");
           expect(r.removedAtEnd).toBe(true);
         }
         const kept = await detached([...base, "--detach", "--prompt", "hi"]);
         expect(kept.spec?.keep).toBe(true);
         expect(kept.removedAtEnd).toBeUndefined();
-        expect(kept.text).not.toContain("removed when the run goes idle");
+        expect(kept.text).not.toContain("detached run started");
       });
       rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
     });
@@ -656,7 +660,7 @@ describe("cli main: --engine", () => {
         const before = process.listeners("exit");
         const out: string[] = [];
         const code = await main(
-          ["bun", "cli", ...base, "--detach", "--prompt", "hi", "--keep=false", "box"],
+          ["bun", "cli", ...base, "--detach", "--prompt", "hi", "--keep=false", "--name", "box"],
           {
             write: (t) => out.push(t),
             provisionWorkload: (config, deps) =>
@@ -672,7 +676,7 @@ describe("cli main: --engine", () => {
         expect(removed).toEqual([]);
         expect(labels[0]).toMatchObject({ "tentacle.kept": "true" });
         const text = out.join("");
-        expect(text).toContain("box stays up: the run never started — tentacle attach");
+        expect(text).toContain("box stays up: the run never started · tentacle attach");
         expect(text).not.toContain("kept box");
         expect(text).not.toContain("undefined");
         expect(readKept(join(dir, "config", "kept")).entries.map((e) => e.entry.name)).toEqual([
@@ -700,11 +704,21 @@ describe("cli main: --engine", () => {
       await withEnv(unreachable, async () => {
         const stdin = await detached([...base, "--detach", "--prompt", "-"], { stdin: "  \n" });
         expect(stdin.code).toBe(1);
-        expect(stdin.text).toContain("--detach needs --prompt");
+        expect(stdin.text).toContain("the prompt is empty");
         expect(stdin.calls).toEqual(refused);
         const blank = await detached([...base, "--detach", "--prompt=   "]);
         expect(blank.code).toBe(1);
         expect(blank.calls).toEqual(refused);
+      });
+    });
+
+    test("a successful `run --detach` prints no launch line at all; a refused one stays plain", async () => {
+      // Mutation: print the `detached run started` line again → `grey.text` is not empty.
+      await withEnv(unreachable, async () => {
+        const grey = await detached([...base, "--detach", "--prompt", "hi"], { colour: true });
+        expect(grey.text).toBe("");
+        const refusedRun = await detached([...base, "--detach"], { colour: true });
+        expect(refusedRun.text).not.toContain("\x1b[");
       });
     });
 
@@ -714,10 +728,8 @@ describe("cli main: --engine", () => {
         expect(r.code).toBe(0);
         expect(r.calls).toEqual({ provision: 1, spawn: 1, runtime: 0 });
         expect(r.spec).toMatchObject({ prompt: "hello", autoAccept: true, mode: "start" });
-        // D17 (docs/fix/detach-live.md A7): the launch line, `attach` at once, no `--resume`.
-        expect(r.text).toContain("Attach any time: tentacle attach --engine docker c1.");
-        expect(r.text).not.toContain(`--resume ${r.spec?.sessionId}`);
-        expect(r.text).toContain("auto-accepting pod tool asks");
+        // Round 6: no launch line (the provisioner's dim `still running` is the only output).
+        expect(r.text).toBe("");
         // The hint reaches only the line of a run that never started: nothing to resume.
         expect(r.hint).toBe("tentacle attach --engine docker c1");
       });
@@ -741,11 +753,14 @@ describe("cli main: --engine", () => {
         } as unknown as EngineHost;
         const before = process.listeners("exit");
         const out: string[] = [];
-        const code = await main(["bun", "cli", ...base, "--detach", "--prompt", "hi", "box"], {
-          write: (t) => out.push(t),
-          provisionWorkload: (config, deps) =>
-            provisionWorkload(config, { ...deps, host: fake, appVersion: "dev" }),
-        });
+        const code = await main(
+          ["bun", "cli", ...base, "--detach", "--prompt", "hi", "--name", "box"],
+          {
+            write: (t) => out.push(t),
+            provisionWorkload: (config, deps) =>
+              provisionWorkload(config, { ...deps, host: fake, appVersion: "dev" }),
+          },
+        );
         const armed = process.listeners("exit").filter((l) => !before.includes(l));
         for (const listener of armed) {
           process.off("exit", listener);
@@ -754,7 +769,9 @@ describe("cli main: --engine", () => {
         expect(code).toBe(1);
         expect(removed).toEqual([]);
         expect(armed).toEqual([]);
-        expect(out.join("")).toContain("kept box");
+        // Round 4: no `still running` before a failure — one `failed:` line.
+        expect(out.join("")).not.toContain("still running");
+        expect(out.join("")).toContain("[container] failed: not ready");
       });
       rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
     });
@@ -812,6 +829,288 @@ describe("cli main: --engine", () => {
         expect(r.code).toBe(1);
         expect(r.text).toContain("kept index");
         expect(r.calls).toEqual({ provision: 1, spawn: 0, runtime: 0 });
+      });
+    });
+
+    // docs/feat/run-prompt.md: the positional of `run` is the FIRST PROMPT; the
+    // workload's name is `--name`.
+    describe("run <prompt>", () => {
+      /** `run` with the engine runtime and the TUI replaced; records what each got. */
+      const interactive = async (
+        args: string[],
+        over: {
+          stdin?: string;
+          colour?: boolean;
+          log?: string[];
+          info?: string[];
+          tuiThrows?: boolean;
+          /** `startEngineRuntime` rejects with this (an own `logPath` models a recorded failure). */
+          startFails?: Error;
+        } = {},
+      ) => {
+        const out: string[] = [];
+        const order: string[] = [];
+        const seen: {
+          name?: string;
+          initialPrompt?: string;
+          autoAccept?: { current(): boolean; set(on: boolean): void };
+          logPath?: string | undefined;
+          earlyLogPath?: string | undefined;
+          faulted?: boolean;
+          thrown?: string;
+          tui: number;
+          runtime: number;
+        } = {
+          tui: 0,
+          runtime: 0,
+        };
+        const calls = { provision: 0 };
+        const path = join(dir, "config", "config.jsonc");
+        await mkdir(join(dir, "config"), { recursive: true });
+        await writeFile(path, JSON.stringify({}));
+        const runtime = {
+          createSession: () => ({}),
+          jobs: {},
+          link: { onLinkStatus: () => () => {} },
+          mcpStatus: async () => [],
+          dispose: async () => {},
+          markFault: () => {
+            seen.faulted = true;
+          },
+          announce: () => {
+            order.push("announce");
+          },
+        };
+        const code = await main(["bun", "cli", ...args], {
+          write: (t) => out.push(t),
+          ...(over.colour !== undefined ? { colour: over.colour } : {}),
+          ...(over.stdin !== undefined ? { readStdin: async () => over.stdin ?? "" } : {}),
+          provisionWorkload: (async () => {
+            calls.provision += 1;
+            throw new Error("no detached provision");
+          }) as never,
+          startEngineRuntime: (async (
+            _config: unknown,
+            deps: {
+              name?: string;
+              log: (text: string) => void;
+              info?: (text: string) => void;
+              daemonLogPath?: (name: string) => string | undefined;
+            },
+          ) => {
+            seen.runtime += 1;
+            seen.name = deps.name;
+            // Before the index record there is no run dir: the fallback path.
+            seen.earlyLogPath = deps.daemonLogPath?.("box");
+            (deps as { recordKept?: (n: string) => unknown }).recordKept?.("box");
+            seen.logPath = deps.daemonLogPath?.("box");
+            for (const line of over.info ?? []) {
+              (deps.info ?? deps.log)(line);
+            }
+            for (const line of over.log ?? []) {
+              deps.log(line);
+            }
+            if (over.startFails) {
+              throw over.startFails;
+            }
+            return runtime;
+          }) as never,
+          startTui: (async (
+            _session: unknown,
+            options: { initialPrompt?: string; autoAccept?: never },
+          ) => {
+            order.push("tui");
+            seen.tui += 1;
+            seen.initialPrompt = options.initialPrompt;
+            seen.autoAccept = options.autoAccept;
+            if (over.tuiThrows) {
+              throw new Error("ink exploded");
+            }
+          }) as never,
+        }).catch((error: unknown) => {
+          seen.thrown = String(error);
+          return 1;
+        });
+        await rm(path, { force: true });
+        rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
+        return { code, text: out.join(""), seen, calls, order };
+      };
+
+      test("the `still running` line is announced just before the TUI opens, never when setup failed", async () => {
+        // Mutation: never call `announce` → order lacks it; call it before the
+        // runtime exists → the failure case would print it.
+        await withEnv(unreachable, async () => {
+          const ok = await interactive([...base]);
+          expect(ok.order).toEqual(["announce", "tui"]);
+          const failed = await interactive([...base], { startFails: new Error("boom") });
+          expect(failed.code).toBe(1);
+          expect(failed.order).toEqual([]);
+        });
+      });
+
+      test("a setup failure is ONE short line: first line only, cut near 120 chars, with the log path when there is one", async () => {
+        // Mutation: print the whole message → the second line / the long tail shows.
+        await withEnv(unreachable, async () => {
+          const home = homedir();
+          const err = Object.assign(new Error("tentacle crashed (exit 134)\nsecond line\nthird"), {
+            logPath: `${home}/.config/tentacle/logs/box/daemon.log`,
+          });
+          const r = await interactive([...base], { startFails: err });
+          expect(r.text).toBe(
+            "[container] failed: tentacle crashed (exit 134) · log: ~/.config/tentacle/logs/box/daemon.log\n",
+          );
+          const long = await interactive([...base], { startFails: new Error("x".repeat(500)) });
+          expect(long.text).toBe(`[container] failed: ${"x".repeat(119)}…\n`);
+        });
+      });
+
+      test("interactive: the positional is the first prompt, the name stays automatic", async () => {
+        await withEnv(unreachable, async () => {
+          const r = await interactive([...base, "fix the bug"]);
+          expect(r.code).toBe(0);
+          expect(r.seen.initialPrompt).toBe("fix the bug");
+          expect(r.seen.name).toBeUndefined();
+        });
+      });
+
+      test("--name is the workload's name; with no prompt the TUI gets none", async () => {
+        await withEnv(unreachable, async () => {
+          const r = await interactive([...base, "--name", "box"]);
+          expect(r.seen.name).toBe("box");
+          expect(r.seen.tui).toBe(1);
+          expect(r.seen.initialPrompt).toBeUndefined();
+          const both = await interactive([...base, "--name", "box", "go"]);
+          expect(both.seen).toMatchObject({ name: "box", initialPrompt: "go" });
+        });
+      });
+
+      test("--prompt <text> works without --detach, like the positional", async () => {
+        await withEnv(unreachable, async () => {
+          const r = await interactive([...base, "--prompt", "hello"]);
+          expect(r.seen.initialPrompt).toBe("hello");
+        });
+      });
+
+      test("a prompt starting with / is raw text, kept verbatim (never a command)", async () => {
+        await withEnv(unreachable, async () => {
+          const r = await interactive([...base, "--", "/clear"]);
+          expect(r.seen.initialPrompt).toBe("/clear");
+        });
+      });
+
+      for (const [why, args, needle] of [
+        ["positional and --prompt", [...base, "a", "--prompt", "b"], "once"],
+        ["an empty positional", [...base, ""], "the prompt is empty"],
+        ["a blank --prompt", [...base, "--prompt=   "], "the prompt is empty"],
+        ["--prompt - without --detach", [...base, "--prompt", "-"], "--prompt - needs --detach"],
+        ["--resume with a prompt", [...base, "--resume", "go"], "cannot be combined with a prompt"],
+        [
+          "--continue with a prompt",
+          [...base, "--continue", "go"],
+          "cannot be combined with a prompt",
+        ],
+        [
+          "--continue with --prompt",
+          [...base, "--continue", "--prompt", "go"],
+          "cannot be combined with a prompt",
+        ],
+      ] as const) {
+        test(`${why}: a usage error, nothing started`, async () => {
+          await withEnv(unreachable, async () => {
+            const r = await interactive([...args], { stdin: "from a pipe" });
+            expect(r.code).toBe(1);
+            expect(r.text).toContain(needle);
+            expect(r.seen.runtime).toBe(0);
+            expect(r.seen.tui).toBe(0);
+            expect(r.calls.provision).toBe(0);
+          });
+        });
+      }
+
+      test("--auto-accept[=true] without --detach starts the TUI with auto-accept ON; =false / absent: off", async () => {
+        await withEnv(unreachable, async () => {
+          for (const flag of ["--auto-accept", "--auto-accept=true"]) {
+            const r = await interactive([...base, flag, "go"]);
+            expect(r.code).toBe(0);
+            expect(r.seen.autoAccept?.current()).toBe(true);
+            expect(r.seen.initialPrompt).toBe("go");
+            // Shift+Tab turns it off: the same state the TUI toggles.
+            r.seen.autoAccept?.set(false);
+            expect(r.seen.autoAccept?.current()).toBe(false);
+          }
+          for (const args of [[...base, "--auto-accept=false"], [...base]]) {
+            const r = await interactive(args);
+            expect(r.code).toBe(0);
+            expect(r.seen.autoAccept?.current() ?? false).toBe(false);
+          }
+        });
+      });
+
+      test("grey is by explicit marking: `info` lines are grey on a coloured terminal; every `log` line (errors, refusals, warnings) is written unchanged; plain without colour", async () => {
+        // Mutation: grey every `write` → the `log` lines below turn grey.
+        await withEnv(unreachable, async () => {
+          const info = ["[container] box still running · tentacle attach box\n"];
+          // The lines the wording classifier used to grey by mistake (review of round 2).
+          const plain = [
+            "[container] box: the detached run did not start\n",
+            "[container] box: the relay has not started yet, see /x/relay.log\n",
+            "[container] box: container not found\n",
+            "[container] box: the container was removed — nothing was removed\n",
+            "[container] failed: boom\n",
+            "[container] warning: no mount\n",
+          ];
+          const on = await interactive([...base], { colour: true, info, log: plain });
+          expect(on.text).toContain("\x1b[90m[container] box still running");
+          for (const line of plain) {
+            expect(on.text).toContain(line);
+          }
+          expect(on.text.split("\x1b[90m")).toHaveLength(2); // exactly the one info line
+          const off = await interactive([...base], { colour: false, info, log: plain });
+          expect(off.text).not.toContain("\x1b[");
+          expect(off.text).toContain(info[0] ?? "?");
+        });
+      });
+
+      test("the daemon's stderr goes to <run dir>/daemon.log of a listed (kept) run; else <configDir>/logs/<name>/daemon.log", async () => {
+        // Mutation: always the fallback dir → the kept run's path is wrong.
+        await withEnv(unreachable, async () => {
+          const kept = await interactive([...base]);
+          expect(kept.seen.logPath).toMatch(/\/kept\/runs\/[^/]+\/daemon\.log$/);
+          // A setup that fails before the index record leaves no run dir behind.
+          // Mutation: use the run dir before the record → this fails.
+          expect(kept.seen.earlyLogPath).toBe(join(dir, "config", "logs", "box", "daemon.log"));
+          const unkept = await interactive([...base, "--keep=false"]);
+          expect(unkept.seen.logPath).toBe(join(dir, "config", "logs", "box", "daemon.log"));
+        });
+      });
+
+      test("the TUI itself failing is reported to the runtime (its teardown prints the one failure line)", async () => {
+        // Mutation: drop the `markFault` call → the failure is silent.
+        await withEnv(unreachable, async () => {
+          const ok = await interactive([...base]);
+          expect(ok.seen.faulted).toBeUndefined();
+          const failed = await interactive([...base], { tuiThrows: true });
+          expect(failed.seen.thrown).toContain("ink exploded");
+          expect(failed.seen.faulted).toBe(true);
+        });
+      });
+
+      test("--continue alone (no prompt) is not refused", async () => {
+        await withEnv(unreachable, async () => {
+          const r = await interactive([...base, "--continue"]);
+          expect(r.text).not.toContain("cannot be combined");
+        });
+      });
+
+      test("--detach with the positional: that is the detached prompt; with both: an error", async () => {
+        await withEnv(unreachable, async () => {
+          const ok = await detached([...base, "--detach", "go on", "--name", "box"]);
+          expect(ok.spec).toMatchObject({ prompt: "go on", mode: "start" });
+          rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
+          const both = await detached([...base, "--detach", "a", "--prompt", "b"]);
+          expect(both.code).toBe(1);
+          expect(both.calls).toEqual(refused);
+        });
       });
     });
   });
@@ -1226,7 +1525,7 @@ describe("cli main: --engine", () => {
         await withEnv({ ...unreachable, DOCKER_HOST: endpoint }, async () => {
           const r = await attached(explicit);
           expect(r.seen.sessionId).toBe(uids[i] ?? "");
-          expect(r.text).toContain("resolved box → docker");
+          expect(r.text).not.toContain("resolved box");
         });
       }
       await withEnv({ ...unreachable, DOCKER_HOST: "unix:///nonexistent/three.sock" }, async () => {
@@ -1386,9 +1685,17 @@ describe("cli main: --engine", () => {
         created: new Date().toISOString(),
       });
       await withEnv(unreachable, async () => {
+        // On a coloured terminal: the info lines are grey, the failure is not.
+        const grey = await run(["attach", "box"], true);
+        expect(grey.text).not.toContain("resolved"); // round 6: the line is gone
+        expect(grey.text).toContain("\x1b[90m[container] attaching to box in");
+        expect(grey.text).toContain("[container] failed: Docker engine socket not found");
+        expect(grey.text).not.toContain("\x1b[90m[container] failed");
+        const plainText = (await run(["attach", "box"], false)).text;
+        expect(plainText).not.toContain("\x1b[");
         const resolved = await run(["attach", "box"]);
         expect(resolved.code).toBe(1);
-        expect(resolved.text).toContain("[container] resolved box → docker, local");
+        expect(resolved.text).not.toContain("resolved");
         expect(resolved.text).toContain(
           "[container] attaching to box in unix:///nonexistent/kept.sock",
         );
@@ -1516,9 +1823,8 @@ describe("cli main: --engine", () => {
 
     describe("a dangerous source ($HOME) — M5", () => {
       const home = () => homedir();
-      // Only DIR masks (`~/.ssh`): the real home's default FILE masks
-      // (`~/.docker/config.json`…) would hit the case check on a
-      // case-insensitive disk, which refuses before this prompt.
+      // Only DIR masks (`~/.ssh`): `~/.netrc`, a default FILE mask, would hit the
+      // case check on a case-insensitive disk, which refuses before this prompt.
       const seenAtHome = (args: string[], ask?: (prompt: string) => Promise<string>) =>
         withConfig({ mount: { hide: ["~/.ssh"] } }, () =>
           seenWith(args, { cwd: home(), ...(ask ? { ask } : {}) }),
@@ -1527,16 +1833,19 @@ describe("cli main: --engine", () => {
       test("no TTY → refused with the exact message, nothing started", async () => {
         const r = await seenAtHome(base);
         expect(r.reached).toBe(false);
+        // ONE line, `~` for $HOME (round 4).
         expect(r.text).toContain(
-          `Refusing to mount ${realpathSync(home())} (your home directory) without confirmation.\nRun from your project directory, or pass --confirm-mount to proceed.`,
+          "[container] won't mount ~ (your home) without confirmation · run from a project folder, or pass --confirm-mount\n",
         );
       });
 
       test("TTY: asked once BEFORE the runtime; anything but y → not started", async () => {
         const r = await seenAtHome(base, async () => "\n");
         expect(r.prompts).toHaveLength(1);
-        expect(r.prompts[0]).toContain("⚠ You are about to mount");
-        expect(r.prompts[0]).toContain("Continue? [y/N] ");
+        expect(r.prompts[0]).toMatch(
+          /^⚠ mount ~ \(your home\) into the container\?( hidden: [^\n]+)?\nContinue\? \[y\/N\] $/,
+        );
+        expect(r.prompts[0]).not.toContain("You are about");
         expect(r.reached).toBe(false);
       });
 
@@ -1631,9 +1940,8 @@ describe("cli main: --engine", () => {
         expect(refused.reached).toBe(false);
         expect(refused.prompts).toEqual([]);
         expect(refused.text).toContain(
-          `Refusing to mount ${real}: its filesystem is case-insensitive`,
+          `[container] won't mount ${real}: Token would be readable inside the container\n  fix: move Token out of the folder, or pass --confirm-mount to start anyway\n`,
         );
-        expect(refused.text).toContain(`  ${join(real, "Token")} (.tentacle/hide)`);
         const confirmed = await seenWith([...base, "--confirm-mount"], { cwd: proj });
         expect(confirmed.reached).toBe(true);
         expect(confirmed.text).toContain(
@@ -1654,8 +1962,10 @@ describe("cli main: --engine", () => {
             seenWith([...base, ...extra], { cwd: proj }, keyFromConfig),
           );
           expect(r.reached).toBe(false);
-          expect(r.text).toContain(`${join(real, "Key")} (the API key file)`);
-          expect(r.text).not.toContain("Or pass --confirm-mount");
+          expect(r.text).toContain(
+            `[container] won't mount ${real}: Key would be readable inside the container\n  fix: move Key out of the folder\n`,
+          );
+          expect(r.text).not.toContain("--confirm-mount to start anyway");
         }
       },
     );

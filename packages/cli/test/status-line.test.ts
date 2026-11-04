@@ -3,11 +3,20 @@ import { SPINNER_FRAMES, StatusLine } from "../src/status-line.ts";
 
 const HIDE = "\x1b[?25l";
 const SHOW = "\x1b[?25h";
+/** Every repaint starts like this: back to column 0, erase the whole line. */
+const CLEAR = "\r\x1b[2K";
 
 /** Capture every write from a `StatusLine` into a list (in order). */
 function capture() {
   const writes: string[] = [];
   const line = new StatusLine({ write: (t) => writes.push(t) });
+  return { writes, line };
+}
+
+/** A capture whose terminal is `columns` wide (`undefined`: width unknown). */
+function captureAt(columns: number | undefined) {
+  const writes: string[] = [];
+  const line = new StatusLine({ write: (t) => writes.push(t), columns: () => columns });
   return { writes, line };
 }
 
@@ -18,6 +27,12 @@ function at(list: readonly string[], index: number): string {
     throw new Error(`no entry at index ${index} (got ${list.length})`);
   }
   return value;
+}
+
+/** The visible text of a paint: the `\r` + erase-line prefix dropped. */
+function body(paint: string): string {
+  expect(paint.startsWith(CLEAR)).toBe(true);
+  return paint.slice(CLEAR.length);
 }
 
 /**
@@ -55,41 +70,73 @@ function captureExitHandlers() {
 }
 
 describe("StatusLine", () => {
-  test("set() hides the cursor once and repaints in place (\\r-prefixed, no newline)", () => {
+  test("set() hides the cursor once and repaints in place (\\r + erase-line, no newline, no padding)", () => {
     const { writes, line } = capture();
     line.set("creating pod…");
     expect(writes[0]).toBe(HIDE);
-    expect(writes[1]).toBe("\r⠋ creating pod…");
-    // A second phase repaints the same line (same frame — the timer only
-    // ticks asynchronously — no newline, no second hide). The shorter line is
-    // padded to the previous (wider) width so the old tail is erased.
+    expect(writes[1]).toBe(`${CLEAR}⠋ creating pod…`);
     line.set("waiting…");
-    const newLine = "⠋ waiting…";
-    expect(writes[2]).toBe(`\r${newLine}${" ".repeat(at(writes, 1).length - 1 - newLine.length)}`);
+    // Never padded: the erase-line sequence clears the old tail.
+    expect(writes[2]).toBe(`${CLEAR}⠋ waiting…`);
     expect(writes.filter((w) => w === HIDE)).toHaveLength(1);
     expect(writes.join("")).not.toContain("\n");
   });
 
-  test("a shorter repaint pads to the previous (longer) width so the tail is erased", () => {
-    const { writes, line } = capture();
-    line.set("a longer phase text here…");
-    const firstWidth = at(writes, 1).slice(1).length; // "⠋ a longer phase text here…"
-    line.set("short…");
-    const body = at(writes, 2).slice(1);
-    expect(body.startsWith("⠋ short…")).toBe(true);
-    // Padded with spaces up to (at least) the first, wider width.
-    expect(body.length).toBeGreaterThanOrEqual(firstWidth);
-    expect(body.slice("⠋ short…".length)).toBe(" ".repeat(body.length - "⠋ short…".length));
+  test("a line wider than the terminal never wraps: cut to columns-1 cells; later frames are not padded to it", () => {
+    // podman's `creating … in unix:///var/folders/…sock (podman socket (auto-discovered))`
+    // is ~210 cells. Padding the next frames up to THAT width wrapped them on an
+    // 80-column terminal, and `\r` then returned only to the wrapped row: every
+    // frame landed on a new line. Mutation: pad to the previous width / skip the
+    // cut → fails.
+    for (const columns of [80, 210]) {
+      const { writes, line } = captureAt(columns);
+      line.set("x".repeat(300));
+      line.set("injecting tentacle ▓▓░░ 12% 11.0/89.6 MB");
+      for (const paint of writes.filter((w) => w !== HIDE)) {
+        const text = body(paint);
+        expect(text.length).toBeLessThanOrEqual(columns - 1);
+        expect(text).toBe(text.trimEnd());
+      }
+      expect(body(at(writes, 1))).toBe(`⠋ ${"x".repeat(columns - 3)}`);
+      expect(body(at(writes, 2))).toBe("⠋ injecting tentacle ▓▓░░ 12% 11.0/89.6 MB");
+    }
   });
 
-  test("finish() clears the whole covered width, restores the cursor, and is idempotent", () => {
+  test("the cut counts display cells: a double-width glyph is two", () => {
+    const { writes, line } = captureAt(10);
+    line.set("日本語日本語日本語");
+    // columns-1 = 9 cells: frame + space (2) + 3 wide glyphs (6) = 8; a 4th would make 10.
+    expect(body(at(writes, 1))).toBe("⠋ 日本語");
+  });
+
+  test("an unknown width leaves the text whole", () => {
+    const { writes, line } = captureAt(undefined);
+    line.set("y".repeat(300));
+    expect(body(at(writes, 1))).toBe(`⠋ ${"y".repeat(300)}`);
+  });
+
+  test("a timer tick is the same one-line repaint", async () => {
+    const writes: string[] = [];
+    const line = new StatusLine({
+      write: (t) => writes.push(t),
+      intervalMs: 5,
+      columns: () => 80,
+    });
+    line.set("tick");
+    await new Promise((r) => setTimeout(r, 60));
+    line.finish();
+    const paints = writes.filter((w) => w.startsWith(CLEAR) && w !== CLEAR);
+    expect(paints.length).toBeGreaterThan(1);
+    expect(paints.every((p) => !p.includes("\n") && p.endsWith(" tick"))).toBe(true);
+  });
+
+  test("finish() clears the line (erase-line), restores the cursor, and is idempotent", () => {
     const { writes, line } = capture();
     line.set("a longer phase text here…");
-    const width = at(writes, 1).slice(1).length;
     line.set("short…");
     line.finish();
     // writes: [HIDE, paint1, paint2, clear, SHOW]
-    expect(writes[3]).toBe(`\r${" ".repeat(width)}\r`);
+    expect(writes[3]).toBe(CLEAR);
     expect(writes[4]).toBe(SHOW);
     // Idempotent: a second finish (and a late set) writes nothing.
     line.finish();
