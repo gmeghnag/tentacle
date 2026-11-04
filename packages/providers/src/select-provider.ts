@@ -6,6 +6,11 @@
  */
 import type { ModelProvider } from "@tentacle/core";
 import { AnthropicProvider } from "./anthropic-provider.ts";
+import {
+  DEFAULT_CONNECT_TIMEOUT_MS,
+  type TcpProbe,
+  withConnectTimeout,
+} from "./connect-timeout.ts";
 import { OpenAIProvider } from "./openai-provider.ts";
 import { type RetryInfo, RetryingModelProvider } from "./retry.ts";
 
@@ -26,6 +31,13 @@ export interface CreateModelProviderOptions {
   readonly fetch?: typeof fetch;
   /** Told about each retried connection drop (the caller logs it). */
   readonly onRetry?: (info: RetryInfo) => void;
+  /** TCP connect budget (`connect-timeout.ts`). Default `DEFAULT_CONNECT_TIMEOUT_MS`. */
+  readonly connectTimeoutMs?: number;
+  /**
+   * Injectable probe, for tests. An injected `fetch` without one is not
+   * wrapped: a test fetch has no TCP connection to time.
+   */
+  readonly connectProbe?: TcpProbe;
 }
 
 /**
@@ -34,12 +46,20 @@ export interface CreateModelProviderOptions {
  * site at once.
  */
 export function createModelProvider(options: CreateModelProviderOptions): RetryingModelProvider {
+  // One connect timeout for every provider (docs/fix/model-connect-timeout.md).
+  const timed =
+    options.fetch !== undefined && options.connectProbe === undefined
+      ? options.fetch
+      : withConnectTimeout(options.fetch ?? fetch, {
+          timeoutMs: options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+          ...(options.connectProbe !== undefined ? { probe: options.connectProbe } : {}),
+        });
   const config = {
     baseURL: options.baseURL,
     model: options.model,
     ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
     ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
-    ...(options.fetch !== undefined ? { fetch: options.fetch } : {}),
+    fetch: timed,
   };
   // `openai` is the default (existing behaviour); the config schema is the
   // first gate against an unknown kind, so this only branches on `anthropic`.

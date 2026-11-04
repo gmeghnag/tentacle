@@ -78,9 +78,11 @@ async function flakyEndpoint(
 }> {
   let connections = 0;
   const srv = createServer((socket) => {
-    connections += 1;
-    const n = connections;
+    // Counted on the first byte: the connect-timeout probe connects and closes
+    // without sending one (docs/fix/model-connect-timeout.md), and is not a request.
     socket.once("data", () => {
+      connections += 1;
+      const n = connections;
       if (n > drops) {
         socket.end(
           `HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: ${Buffer.byteLength(sse)}\r\nconnection: close\r\n\r\n${sse}`,

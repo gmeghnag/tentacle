@@ -218,6 +218,69 @@ describe("model reverse-tunnel, chunked (streaming) cut", () => {
   });
 });
 
+describe("an unreachable laptop model, end to end (docs/fix/model-connect-timeout.md)", () => {
+  test("the pod never receives the endpoint; the laptop's turn error shows it (round 2, Q4)", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    // Every frame the laptop sends toward the pod.
+    const wire: string[] = [];
+    const sendOrig = clientCh.send.bind(clientCh);
+    clientCh.send = (data: string) => {
+      wire.push(data);
+      sendOrig(data);
+    };
+    // biome-ignore lint/style/useConst: assigned after the closure that references it
+    let connection: Connection;
+    const model: ModelProvider = {
+      id: "off",
+      // biome-ignore lint/correctness/useYield: fails before any event, like a dead host
+      async *stream(): AsyncIterable<StreamEvent> {
+        throw Object.assign(
+          new Error("model unreachable: 192.168.1.17:8080 did not answer in 15s"),
+          { name: "ModelUnreachableError", code: "ECONNTIMEOUT", phase: "pre-stream" },
+        );
+      },
+    };
+    const host = new SessionHost({
+      defaultCwd: "/pod/work",
+      createAgent: () => {
+        const agent = new Agent({
+          model: new ProxyModelProvider(
+            (r) => connection.requestModelStream(r),
+            (r, h) => connection.requestModelStreamChunked(r, h),
+          ),
+          tools: new ToolRegistry(),
+          env: noopEnv,
+        });
+        return { agent, permissions: new PermissionBroker() };
+      },
+    });
+    connection = new Connection(daemonCh, host);
+    const seen: unknown[] = [];
+    const client = new RemoteClient(clientCh, new PermissionBroker(), model, {
+      onError: (e) => seen.push(e),
+    });
+    await client.initialize();
+    const session = client.newSession();
+    let failure = "";
+    try {
+      for await (const _ of session.send("ciao")) {
+        // drained
+      }
+    } catch (error) {
+      failure = (error as Error).message;
+    }
+    // The laptop's TUI shows the SAME text as a local run...
+    expect(failure).toBe("model unreachable: 192.168.1.17:8080 did not answer in 15s");
+    // ...while the pod never got the host: no frame the laptop sent names it.
+    expect(wire.length).toBeGreaterThan(0);
+    expect(wire.filter((f) => f.includes("192.168.1.17"))).toEqual([]);
+    // The laptop keeps the full error for its own log, with the host.
+    expect(seen.some((e) => (e as Error).message.includes("192.168.1.17:8080"))).toBe(true);
+    connection.close();
+    client.close();
+  });
+});
+
 describe("a lost laptop model mid-reply, end to end (docs/fix/detach-live.md round 10, live item 12)", () => {
   test("the turn names the cause, and the pod's history keeps the partial reply + how it ended", async () => {
     // Mutation (B): drop the agent's partial push → the history ends on the prompt

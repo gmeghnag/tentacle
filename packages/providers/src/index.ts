@@ -11,4 +11,5 @@ export * from "./sse.ts";
 export * from "./openai-provider.ts";
 export * from "./anthropic-provider.ts";
 export * from "./retry.ts";
+export * from "./connect-timeout.ts";
 export * from "./select-provider.ts";
