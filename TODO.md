@@ -412,8 +412,11 @@ Daily-driver work (done 2026-10-14):
       shared workspace, one "always" for the session tree, trust MCP
       `readOnlyHint` + override, cap sub-agents at llama.cpp slots). Order: 1
       `feat/fs-path-locks` (S, DONE `bfffdb4`) · 2 `feat/subagent-progress-wire` (M, DONE `ada7918`) · 3
-      `feat/model-retry-429` (S, DONE `bb43767`) · 4 `feat/permission-call-attribution` DONE `206adbf` → 5 (plan written) → 6 → 7 (load-bearing, strictly
-      ordered; 5 takes a record version, see permission-reply v8).
+      `feat/model-retry-429` (S, DONE `bb43767`) · 4 `feat/permission-call-attribution` DONE `206adbf` → 5 `feat/round-groups-persistence` DONE `1ee6123` (merged with permission-reply, shared record v8; owner 2026-11-04: phase-1 "Interrupted" accepted; `beforeRun` → `Promise<boolean>`, `true` for never-persisted sessions; task 6 adds the one-at-a-time fallback on a failed write AND the laptop `cutHistory` option (b): "Interrupted" for calls the laptop saw a `tool_start` for, "Not run" for the rest) → 6 → 7 (load-bearing, strictly
+      ordered).
+- [ ] **fix: a resumed call authorized without an ask runs with its pending entry on disk** (task-5 review F3, pre-existing on main; owner 2026-11-04: separate fix). A second crash in that window re-runs the call. Idea: clear carried + awaited write at the gate's no-ask allow on a resumed call. Type: fix · Size: S · Blast: load-bearing.
+- [ ] **fix: `attach` on a container whose pod binary is older than the laptop's** fails with a bare `connection closed` (old binary: `unknown option --bridge`, found live 2026-11-04). Must say clearly that the pod binary is stale (and how to fix), or re-copy it. Type: fix · Size: S · Blast: cross-module.
+- [ ] **feat/run-prompt** (owner 2026-11-04): `tentacle run … "<prompt>"` — the positional becomes the first prompt (TUI opens and sends it; with `--detach`, no TUI); the container name moves to `--name <n>` (automatic name when absent); `--prompt` stays as an alternative, also without `--detach` (`--prompt -` = stdin). `attach`/`rm` keep the positional name. Next after task 5. Type: feat · Size: S–M · Blast: cross-module.
 - [ ] **Parallel tool calls** ([`docs/eval/parallel-tools.md`](docs/eval/parallel-tools.md);
       owner, 2026-10-25) — run a round's calls in parallel where safe; which
       tools are parallel-safe to evaluate; setting `sequential` | `parallel`,
@@ -1038,7 +1041,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
       `PROTOCOL_VERSION` bump); the text leaves the laptop like every answer,
       so it holds for every target. Order: after send-now 4d, before the app's
       tasks (task 13's approvals inherit it). **Planned 2026-10-24** (slug
-      `permission-reply`, awaiting the owner): re-sized M · load-bearing. A
+      `permission-reply`, awaiting the owner): re-sized M · load-bearing. **DONE 2026-11-04, merged `1ee6123`** (rebased onto main, record v8 shared with parallel task 5). A
       rejection already does not end the turn (it becomes the call's `tool`
       result and the model runs again — proved), so only the rejection's
       content changes. Wire: `permission_request.reply?: {maxChars}` (the
