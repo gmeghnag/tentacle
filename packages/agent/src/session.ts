@@ -6,7 +6,13 @@
  * one-shot loop into an interactive assistant.
  */
 import type { ChatMessage } from "@tentacle/core";
-import { type Agent, type AgentEvent, type BeforeRun, UnknownSkillError } from "./agent.ts";
+import {
+  type Agent,
+  type AgentEvent,
+  type BeforeResumedCall,
+  type BeforeRun,
+  UnknownSkillError,
+} from "./agent.ts";
 import { type CompactResult, carryOverSkills, compactedHistory } from "./compact.ts";
 import type { AskHooksTrust } from "./hooks.ts";
 import type { SkillListing } from "./session-skills.ts";
@@ -37,6 +43,8 @@ export interface SendOptions {
 export interface ResumeOptions {
   /** As `SendOptions.beforeRun`. */
   readonly beforeRun?: BeforeRun;
+  /** Awaited before each call of the resumed round runs (see `RunOptions.beforeResumedCall`). */
+  readonly beforeResumedCall?: BeforeResumedCall;
 }
 
 export interface SessionOptions {
@@ -150,6 +158,9 @@ export class Session {
       yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
         resumeFrom: toolCallId,
         ...(opts.beforeRun !== undefined ? { beforeRun: opts.beforeRun } : {}),
+        ...(opts.beforeResumedCall !== undefined
+          ? { beforeResumedCall: opts.beforeResumedCall }
+          : {}),
       });
     } finally {
       this.persist();

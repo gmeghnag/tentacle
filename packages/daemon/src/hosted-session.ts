@@ -484,7 +484,10 @@ export class HostedSession {
       void this.drive(
         resume.turnId,
         // From the group's head: its calls are asked again, in order.
-        session.resume(resume.from, this.controller.signal, { beforeRun: this.beforeRunFn }),
+        session.resume(resume.from, this.controller.signal, {
+          beforeRun: this.beforeRunFn,
+          beforeResumedCall: (signal) => this.beforeResumedCall(signal),
+        }),
         this.controller,
       );
     }
@@ -752,6 +755,26 @@ export class HostedSession {
     const landed = this.persister.write(this.id, () => this.persistedState());
     await untilAborted(landed, signal);
     return signal.aborted ? false : landed;
+  }
+
+  /**
+   * A call of the resumed round passed the gate and is about to run
+   * (docs/fix/resumed-call-pending.md). A carried entry still set means no ask
+   * settled for it (F1 clears them there): the gate allowed it WITHOUT one — a
+   * hook `force: "allow"`, a permission now `none`. Drop every carried entry
+   * and wait for that write, so "pending on disk ⇒ never started" holds: a
+   * reload closes the turn ("Interrupted") instead of running the call again.
+   * Nothing carried (an ask settled, a later call): immediate, no write. As
+   * after an ask, a failed write is reported by the persister and the call
+   * runs anyway; a cancel ends the wait at once (the agent re-checks it).
+   */
+  private async beforeResumedCall(signal: AbortSignal): Promise<void> {
+    if (this.carried.length === 0) {
+      return;
+    }
+    this.carried = [];
+    this.persist();
+    await untilAborted(this.persisted(), signal);
   }
 
   /** The state a record captures, copied now (the arrays are live). */
