@@ -41,6 +41,22 @@ export interface Pod {
 /** Terminal pod phases: a pod in one of these will never become Ready. */
 export const TERMINAL_PHASES: ReadonlySet<string> = new Set(["Succeeded", "Failed"]);
 
+/**
+ * The pod's `spec.containers` names, in order (init and ephemeral containers
+ * are not listed). `spec` is opaque here, so this reads it defensively:
+ * anything unexpected yields fewer names, never a throw.
+ */
+export function podContainerNames(pod: Pod): string[] {
+  const containers = (pod.spec as { containers?: unknown } | undefined)?.containers;
+  if (!Array.isArray(containers)) {
+    return [];
+  }
+  return containers.flatMap((c) => {
+    const name = (c as { name?: unknown } | null)?.name;
+    return typeof name === "string" ? [name] : [];
+  });
+}
+
 /** True once the pod is Running and its `Ready` condition is `"True"`. */
 export function podIsReady(pod: Pod): boolean {
   if (pod.status?.phase !== "Running") {

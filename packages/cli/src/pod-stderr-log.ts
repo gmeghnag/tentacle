@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
+import { RefusalError, type WorkloadNotFoundError } from "./engine-host.ts";
 import { untrustedText } from "./untrusted-text.ts";
 
 /** The most the file keeps: the TAIL of what the pod daemon wrote to its stderr. */
@@ -100,13 +101,18 @@ export function tildePath(path: string, home: string = homedir()): string {
 
 const SHORT_CAUSE_MAX = 120;
 
-/** The first non-empty line of a failure's text, cut to ~120 chars (`…`). */
-export function shortCause(message: string): string {
-  const first =
+function firstLine(message: string): string {
+  return (
     message
       .split("\n")
       .map((l) => l.trim())
-      .find((l) => l !== "") ?? "unknown error";
+      .find((l) => l !== "") ?? "unknown error"
+  );
+}
+
+/** The first non-empty line of a failure's text, cut to ~120 chars (`…`). */
+export function shortCause(message: string): string {
+  const first = firstLine(message);
   return first.length > SHORT_CAUSE_MAX ? `${first.slice(0, SHORT_CAUSE_MAX - 1)}…` : first;
 }
 
@@ -142,8 +148,18 @@ export function failedLine(noun: string, error: unknown, home: string = homedir(
   const up = stillUpName(error);
   const left = up === undefined ? "" : ` · still up: tentacle rm ${untrustedText(up)}`;
   // The cause can carry pod-supplied text: sanitised before it reaches the terminal.
-  const cause = untrustedText(shortCause(error instanceof Error ? error.message : String(error)));
+  // A refusal is short and complete at the source: never cut mid-hint.
+  const text = error instanceof Error ? error.message : String(error);
+  const cause = untrustedText(error instanceof RefusalError ? firstLine(text) : shortCause(text));
   return `[${noun}] failed: ${cause}${where}${left}\n`;
+}
+
+/**
+ * `attach <name>` where `<name>` is not in `tentacle ps` and the engine has no
+ * such workload either: ONE line, no `failed:`, no log, never cut.
+ */
+export function notListedLine(name: string, error: WorkloadNotFoundError): string {
+  return `[error] ${untrustedText(name)}: not in tentacle ps, and no ${error.noun} with that name ${untrustedText(error.place)}\n`;
 }
 
 /**

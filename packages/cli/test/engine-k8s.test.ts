@@ -16,6 +16,7 @@ import {
 } from "@tentacle/k8s";
 import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 import type { TentacleConfig } from "../src/config.ts";
+import { RefusalError, WorkloadNotFoundError } from "../src/engine-host.ts";
 import { type PodCluster, kubeEngineHost } from "../src/engine-k8s.ts";
 import { attachEngineRuntime, startEngineRuntime } from "../src/engine-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
@@ -184,6 +185,96 @@ describe("kubeEngineHost", () => {
     );
     kube.getError = new KubeApiError(403, "forbidden: rbac");
     await expect(host.inspect("p")).rejects.toThrow(/forbidden: rbac/);
+  });
+
+  test("inspect: >1 spec.containers and no container → kubectl's refusal; one, or a named one → unchanged", async () => {
+    // Mutation: drop the check → the two-container pod reports `ready`.
+    const kube = new StubCluster();
+    const host = kubeEngineHost(kube, "dev");
+    const status = { phase: "Running", conditions: [{ type: "Ready", status: "True" }] };
+    kube.pod = {
+      metadata: { name: "p" },
+      spec: {
+        containers: [{ name: "dns" }, { name: "kube-rbac-proxy" }],
+        initContainers: [{ name: "init" }],
+      },
+      status,
+    };
+    const refusal = await host.inspect("p").catch((e) => e);
+    expect(refusal).toBeInstanceOf(RefusalError);
+    expect((refusal as Error).message).toBe(
+      "a container name must be specified for pod p, choose one of: [dns kube-rbac-proxy] · pass --container <c>",
+    );
+    // A named container: nothing to refuse (a wrong name is the exec's to say).
+    expect(await host.inspect("p", { container: "dns" })).toEqual({ kind: "ready" });
+    kube.pod = { metadata: { name: "p" }, spec: { containers: [{ name: "only" }] }, status };
+    expect(await host.inspect("p")).toEqual({ kind: "ready" });
+    // A terminated pod stays a "stopped" verdict, whatever its containers.
+    kube.pod = {
+      metadata: { name: "p" },
+      spec: { containers: [{ name: "a" }, { name: "b" }] },
+      status: { phase: "Failed" },
+    };
+    expect((await host.inspect("p")).kind).toBe("stopped");
+  });
+
+  test("inspect: the `kubectl.kubernetes.io/default-container` annotation picks the container, like kubectl", async () => {
+    // Live 2026-11-04 (OpenShift 4.19): etcd pod → `etcd`; dns-default has no annotation → refusal.
+    const kube = new StubCluster();
+    const host = kubeEngineHost(kube, "openshift-etcd");
+    const status = { phase: "Running", conditions: [{ type: "Ready", status: "True" }] };
+    const etcd = ["etcdctl", "etcd", "etcd-metrics", "etcd-readyz", "etcd-rev"];
+    const podWith = (annotations: Record<string, string> | undefined): Pod => ({
+      metadata: { name: "p", ...(annotations ? { annotations } : {}) },
+      spec: { containers: etcd.map((name) => ({ name })) },
+      status,
+    });
+    const KEY = "kubectl.kubernetes.io/default-container";
+    // Mutation: ignore the annotation → a refusal (red here).
+    kube.pod = podWith({ [KEY]: "etcd" });
+    expect(await host.inspect("p")).toEqual({ kind: "ready", container: "etcd" });
+    // Not yet ready: the same resolution on `starting`.
+    kube.pod = { ...podWith({ [KEY]: "etcd" }), status: { phase: "Running" } };
+    expect(await host.inspect("p")).toMatchObject({ kind: "starting", container: "etcd" });
+    // Missing, empty, or naming a container that is not in spec.containers → the refusal, unchanged.
+    // Mutation: trust the annotation without checking spec.containers → "ghost" is accepted.
+    const bad: (Record<string, string> | undefined)[] = [
+      undefined,
+      {},
+      { [KEY]: "" },
+      { [KEY]: "ghost" },
+    ];
+    for (const annotations of bad) {
+      kube.pod = podWith(annotations);
+      const refusal = await host.inspect("p").catch((e) => e);
+      expect(refusal).toBeInstanceOf(RefusalError);
+      expect((refusal as Error).message).toBe(
+        `a container name must be specified for pod p, choose one of: [${etcd.join(" ")}] · pass --container <c>`,
+      );
+    }
+    // An explicit --container wins and needs no annotation: nothing resolved on the state.
+    // Mutation: resolve the annotation even with --container → `container` appears.
+    kube.pod = podWith({ [KEY]: "etcd" });
+    expect(await host.inspect("p", { container: "etcd-rev" })).toEqual({ kind: "ready" });
+    // One container: unchanged, whatever the annotation says.
+    kube.pod = {
+      metadata: { name: "p", annotations: { [KEY]: "etcd" } },
+      spec: { containers: [{ name: "only" }] },
+      status,
+    };
+    expect(await host.inspect("p")).toEqual({ kind: "ready" });
+  });
+
+  test("inspect: a 404 is a WorkloadNotFoundError naming the place (`in <ns>`)", async () => {
+    const kube = new StubCluster();
+    kube.getError = new KubeApiError(404, "nope");
+    const error = await kubeEngineHost(kube, "dev")
+      .inspect("p")
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(WorkloadNotFoundError);
+    expect(error).toBeInstanceOf(RefusalError);
+    expect((error as WorkloadNotFoundError).noun).toBe("pod");
+    expect((error as WorkloadNotFoundError).place).toBe("in dev");
   });
 
   test("dialVerdict: running → dial; deleted → gone; 401 → unauthorized; else transient", async () => {

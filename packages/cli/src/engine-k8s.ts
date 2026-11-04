@@ -16,10 +16,16 @@ import {
   TERMINAL_PHASES,
   type WaitForReadyOptions,
   buildPodManifest,
+  podContainerNames,
   podIsReady,
 } from "@tentacle/k8s";
 import type { DuplexChannel } from "@tentacle/transport";
-import type { EngineExecTarget, EngineHost } from "./engine-host.ts";
+import {
+  type EngineExecTarget,
+  type EngineHost,
+  RefusalError,
+  WorkloadNotFoundError,
+} from "./engine-host.ts";
 
 /** The subset of `KubeClient` the pod runtime needs (injectable for tests). */
 export interface PodCluster {
@@ -51,7 +57,7 @@ function podCreateError(error: unknown, namespace: string): Error {
     error.status === 404 &&
     /namespaces\s+["']?[^"'\s]+["']?\s+not found/.test(body)
   ) {
-    return new Error(
+    return new RefusalError(
       `namespace "${namespace}" does not exist in this cluster — create it (e.g. kubectl create namespace ${namespace}) or pass --namespace <existing>`,
     );
   }
@@ -119,6 +125,9 @@ export function podDialError(
   );
 }
 
+/** The annotation `kubectl exec` / `logs` read to pick a container of a multi-container pod. */
+const DEFAULT_CONTAINER_ANNOTATION = "kubectl.kubernetes.io/default-container";
+
 const podTarget = (t: EngineExecTarget): ExecTarget => ({
   pod: t.name,
   container: t.container,
@@ -158,7 +167,7 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
     async waitForReady(name, options) {
       await kube.waitForReady(name, options);
     },
-    async inspect(name) {
+    async inspect(name, options) {
       let pod: Pod;
       try {
         pod = await kube.getPod(name);
@@ -167,8 +176,10 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
         // wrong namespace — the kubeconfig context's namespace is not guaranteed
         // to be the pod's). 403 keeps its RBAC message; it is the operator's to fix.
         if (error instanceof KubeApiError && error.status === 404) {
-          throw new Error(
+          throw new WorkloadNotFoundError(
             `pod "${name}" not found in namespace "${namespace}" — check the name (kubectl get pods -n ${namespace}) or pass --namespace <ns>; use \`run\` to create one`,
+            "pod",
+            `in ${namespace}`,
           );
         }
         throw error instanceof Error ? error : new Error(String(error));
@@ -182,9 +193,29 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
           detail: `pod "${name}" is ${phase}; cannot attach to a terminated pod`,
         };
       }
+      // kubectl's rule, decided HERE from the pod read — not guessed after an
+      // exec dies: no `--container` and more than one `spec.containers` → the
+      // API cannot pick one. Same wording as `kubectl exec`.
+      // With several containers, kubectl first honours the pod's
+      // `default-container` annotation (silently) when it names a container of
+      // `spec.containers`; only then does it refuse.
+      let resolved: { container?: string } = {};
+      if (options?.container === undefined) {
+        const names = podContainerNames(pod);
+        if (names.length > 1) {
+          const preferred = pod.metadata?.annotations?.[DEFAULT_CONTAINER_ANNOTATION];
+          if (preferred !== undefined && names.includes(preferred)) {
+            resolved = { container: preferred };
+          } else {
+            throw new RefusalError(
+              `a container name must be specified for pod ${name}, choose one of: [${names.join(" ")}] · pass --container <c>`,
+            );
+          }
+        }
+      }
       return podIsReady(pod)
-        ? { kind: "ready" }
-        : { kind: "starting", detail: `pod "${name}" is ${phase ?? "pending"}` };
+        ? { kind: "ready", ...resolved }
+        : { kind: "starting", detail: `pod "${name}" is ${phase ?? "pending"}`, ...resolved };
     },
     async describe(name) {
       let pod: Pod;

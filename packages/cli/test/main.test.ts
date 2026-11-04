@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { DELETE_CONTAINER_SUBCOMMAND } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND } from "@tentacle/k8s";
-import type { EngineHost } from "../src/engine-host.ts";
+import { type EngineHost, WorkloadNotFoundError } from "../src/engine-host.ts";
 import { provisionWorkload } from "../src/engine-runtime.ts";
 import { main } from "../src/index.ts";
 import { keptDir as keptIndexDir, readKept, recordKept } from "../src/kept-index.ts";
@@ -1277,6 +1277,36 @@ describe("cli main: --engine", () => {
       return { code, text: out.join(""), seen, runtime };
     };
 
+    test("attach of a name not in `ps`: ONE `[error]` line, no `failed:`, no log path", async () => {
+      // Mutation: print `failedLine` for a not-found → `[pod] failed: pod "x" not found … · log:`.
+      setup(`${2 ** 30} 1`);
+      await withEnv(unreachable, async () => {
+        const out: string[] = [];
+        const code = await main(
+          ["bun", "cli", "attach", "nome-che-non-esiste", "--namespace", "openshift-dns"],
+          {
+            write: (t) => out.push(t),
+            tty: true,
+            attachPlainRuntime: (async () => {
+              throw new WorkloadNotFoundError("pod gone", "pod", "in openshift-dns");
+            }) as never,
+          },
+        );
+        expect(code).toBe(1);
+        expect(
+          out
+            .join("")
+            .split("\n")
+            .filter((l) => l.startsWith("[error]")),
+        ).toEqual([
+          "[error] nome-che-non-esiste: not in tentacle ps, and no pod with that name in openshift-dns",
+        ]);
+        expect(out.join("")).not.toContain("failed:");
+        expect(out.join("")).not.toContain("log:");
+      });
+      rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+    });
+
     test("D1 a detached run's attach: the TUI gets `runQuit` and the presence-moving `createSession`", async () => {
       // Mutation: drop `runQuit` from `runEngineTui` → `/quit` never asks, never closes for all.
       setup(`${2 ** 30} 1`);
@@ -1674,6 +1704,29 @@ describe("cli main: --engine", () => {
         expect(gone.text).toBe(
           `[error] box: the folder of this container no longer exists: ${missing}\n`,
         );
+      });
+      rmSync(keptIndexDir(config), { recursive: true, force: true });
+    });
+
+    test("attach of a name that IS in `ps` but whose workload is gone: the not-found stays a failure line (not `not in tentacle ps`)", async () => {
+      // Mutation: drop `!keptEntry` in main's attach catch → the false "not in tentacle ps" line.
+      const config = join(dir, "config");
+      rmSync(keptIndexDir(config), { recursive: true, force: true });
+      recordKept(keptIndexDir(config), entry);
+      await withEnv(unreachable, async () => {
+        const out: string[] = [];
+        const code = await main(["bun", "cli", "attach", "box"], {
+          write: (t) => out.push(t),
+          tty: true,
+          attachPlainRuntime: (async () => {
+            throw new WorkloadNotFoundError("container box gone", "container", "on docker");
+          }) as never,
+        });
+        expect(code).toBe(1);
+        const text = out.join("");
+        expect(text).toContain("[container] failed: container box gone");
+        expect(text).not.toContain("not in tentacle ps");
+        expect(text).not.toContain("log:");
       });
       rmSync(keptIndexDir(config), { recursive: true, force: true });
     });

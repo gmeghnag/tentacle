@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Agent, JsonSessionStore } from "@tentacle/agent";
 import type {
   ChatRequest,
@@ -32,9 +32,15 @@ import { ToolRegistry, fsWriteTool } from "@tentacle/tools";
 import { type DuplexChannel, createChannelPair } from "@tentacle/transport";
 import type { TentacleConfig } from "../src/config.ts";
 import { type DockerClientLike, containerBody, dockerEngineHost } from "../src/engine-docker.ts";
-import { type EngineHost, WorkloadRemovedError } from "../src/engine-host.ts";
+import {
+  type EngineHost,
+  RefusalError,
+  WorkloadNotFoundError,
+  WorkloadRemovedError,
+} from "../src/engine-host.ts";
 import { attachEngineRuntime, startEngineRuntime } from "../src/engine-runtime.ts";
 import { POD_BIN_PATH } from "../src/pod-binary.ts";
+import { failedLine } from "../src/pod-stderr-log.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import type { WorkspaceMount } from "../src/workspace-mount.ts";
 
@@ -475,6 +481,37 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
     expect(client.calls).toEqual(["create:taken:img"]);
   });
 
+  test("a 409 / mounts-denied create is a RefusalError and creates no log (nothing ran in the workload)", async () => {
+    // Mutation: make `conflict` return a plain `Error` → not a RefusalError, the log dir appears.
+    const mountDenied = new DockerApiError(
+      500,
+      "Mounts denied: The path /real/work is not shared",
+      "",
+    );
+    const cases: [string, unknown, Record<string, unknown>][] = [
+      ["r409", new DockerApiError(409, "Conflict. The container name is in use", ""), {}],
+      ["rmount", mountDenied, { workspace: wsMount }],
+    ];
+    for (const [slug, createError, extra] of cases) {
+      const client = new FakeDockerClient(new ScriptedProvider([]));
+      client.createErrors = [createError];
+      const logPath = join(dir, "refusal-logs", slug, "daemon.log");
+      const { error } = await captureExitListeners(() =>
+        startEngineRuntime(config, {
+          host: hostFor(client),
+          image: "img",
+          name: "taken",
+          daemonLogPath: () => logPath,
+          ...extra,
+          ...common(slug).deps,
+        }),
+      );
+      expect(error).toBeInstanceOf(RefusalError);
+      expect(failedLine("container", error)).not.toContain("log:");
+      expect(existsSync(dirname(logPath))).toBe(false);
+    }
+  });
+
   test("a start failure removes the created container", async () => {
     const client = new FakeDockerClient(new ScriptedProvider([]));
     client.startError = new DockerApiError(500, "OCI runtime create failed", "");
@@ -603,6 +640,10 @@ describe("attach on a Docker engine (attachEngineRuntime + dockerEngineHost)", (
     expect(String(error)).toMatch(
       /container "users-box" not found on unix:\/\/\/var\/run\/docker\.sock .*`docker ps`.*use `run` to create one/,
     );
+    // Same shape as k8s: a typed not-found naming the place (`on docker`).
+    expect(error).toBeInstanceOf(WorkloadNotFoundError);
+    expect((error as WorkloadNotFoundError).noun).toBe("container");
+    expect((error as WorkloadNotFoundError).place).toBe("on docker");
     neverOwned(client, net);
   });
 

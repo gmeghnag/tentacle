@@ -37,7 +37,7 @@ import {
   titleConfigNotice,
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
-import type { EngineKind } from "./engine-host.ts";
+import { type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
 import {
   armSharedExitNet,
   attachEngineRuntime,
@@ -92,7 +92,7 @@ import {
 import { startWorkerRuntime } from "./local-runtime.ts";
 import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
-import { failedLine } from "./pod-stderr-log.ts";
+import { failedLine, notListedLine } from "./pod-stderr-log.ts";
 import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
 import { atLineStartAfter, errorLine, render } from "./render.ts";
 import { runModelPlan } from "./run-model.ts";
@@ -1453,7 +1453,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         notify: (text) => sessions.notices.notify(text),
       });
     } catch (error) {
-      write(failedLine(noun, error));
+      // A name that is neither in `ps` nor on the engine: one plain line.
+      write(
+        !keptEntry && error instanceof WorkloadNotFoundError
+          ? notListedLine(name, error)
+          : failedLine(noun, error),
+      );
       return 1;
     }
     return await runEngineTui(runtime, permissions, sessions);
