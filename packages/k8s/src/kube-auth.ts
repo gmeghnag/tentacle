@@ -12,6 +12,7 @@ import type { KubeClientOptions } from "./client.ts";
 import type { WebSocketLike } from "./exec-channel.ts";
 import {
   type KubeExecConfig,
+  type Kubeconfig,
   type PemSource,
   type ResolveOptions,
   parseKubeconfig,
@@ -90,6 +91,18 @@ function defaultKubeconfigPath(): string {
 export function currentKubeContext(path: string = defaultKubeconfigPath()): string | undefined {
   try {
     return parseKubeconfig(readFileSync(path, "utf8"))["current-context"] || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The parsed kubeconfig (the file `loadKubeClientOptions` reads); `undefined`
+ * when it cannot be read or parsed. For display (`tentacle ps`), never auth.
+ */
+export function readKubeconfig(path: string = defaultKubeconfigPath()): Kubeconfig | undefined {
+  try {
+    return parseKubeconfig(readFileSync(path, "utf8"));
   } catch {
     return undefined;
   }

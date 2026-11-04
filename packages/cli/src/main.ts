@@ -24,7 +24,7 @@ import { Session, recordFromSnapshot } from "@tentacle/agent";
 import { webSocketChannelFactory } from "@tentacle/client";
 import { type ChatMessage, PermissionBroker } from "@tentacle/core";
 import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/docker";
-import { DELETE_POD_SUBCOMMAND, deletePodFromEnv } from "@tentacle/k8s";
+import { DELETE_POD_SUBCOMMAND, deletePodFromEnv, readKubeconfig } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import { type AutoAcceptFeed, type SessionController, pickSession, startTui } from "@tentacle/tui";
 import { type AttachPlan, planAttach } from "./attach-plan.ts";
@@ -570,6 +570,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       now: Date.now,
       home: homedir(),
       dim: (text) => (colour ? `\x1b[2m${text}\x1b[22m` : text),
+      // stderr's own colour decision (the `ps` note goes there).
+      // Follows the stream written to: an injected `writeErr` is never a terminal.
+      dimErr: (text) =>
+        !io.writeErr && process.stderr.isTTY === true && !process.env.NO_COLOR
+          ? `\x1b[2m${text}\x1b[22m`
+          : text,
       ...(ask ? { ask } : {}),
     };
     return mode === "ps"
@@ -1264,6 +1270,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         `[error] ${ambiguousMessage(
           name,
           lookup.resolved.candidates.map((c) => c.entry),
+          readKubeconfig(),
         )}\nusage: ${USAGE.attach}\n`,
       );
       return 1;
@@ -1282,7 +1289,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         // remove a workload in ANOTHER place than the flags name. The run is
         // elsewhere by definition here, so `askedWhere` is not null.
         const at = askedWhere(run.entry.engine);
-        const places = { run: placeText(run.entry), asked: at === null ? null : placeText(at) };
+        const kube = readKubeconfig();
+        const places = {
+          run: placeText(run.entry, kube),
+          asked: at === null ? null : placeText(at, kube),
+        };
         const pid = run.holder?.pid ?? 0;
         write(`[error] ${elsewhereMessage(name, { pid, owner: run.owner }, places)}\n`);
         return 1;

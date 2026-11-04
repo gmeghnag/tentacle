@@ -9,6 +9,7 @@
  * (managed marker + `tentacle.kept=true`) before `rm` deletes anything. Text
  * that came from a file or a workload is sanitised before it is printed.
  */
+import type { Kubeconfig } from "@tentacle/k8s";
 import type { EngineKind } from "./engine-host.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { WORKSPACE_LABELS } from "./workspace-mount.ts";
@@ -175,13 +176,49 @@ export function parseKeptEntry(text: string): ParsedEntry {
   };
 }
 
-/** WHERE: `local` | `ssh://host` | `tcp://host:port` | `context/namespace`. */
+/** Display width of a k8s WHERE that could not be resolved (rule 3). */
+const WHERE_MAX = 30;
+
+/** `text` cut to `max` characters, the last one `…` (counted by code point). */
+function truncate(text: string, max: number): string {
+  const chars = [...text];
+  return chars.length <= max ? text : `${chars.slice(0, max - 1).join("")}…`;
+}
+
+/**
+ * A short name for the cluster a kubeconfig context points at, or `undefined`
+ * (the context is gone / no kubeconfig). Pure.
+ *  1. server host `api.<name>.<domain>` → `<name>` (OpenShift; an IP never matches);
+ *  2. else the cluster's name; an EKS ARN `arn:…:cluster/<name>` → `<name>`.
+ */
+export function clusterName(kube: Kubeconfig | undefined, context: string): string | undefined {
+  const clusterRef = kube?.contexts?.find((c) => c.name === context)?.context?.cluster;
+  if (clusterRef === undefined) {
+    return undefined;
+  }
+  const cluster = kube?.clusters?.find((c) => c.name === clusterRef);
+  const server = cluster?.cluster?.server;
+  const api = server !== undefined ? /^api\.([a-z][a-z0-9-]*)\./i.exec(hostOf(server)) : null;
+  if (api?.[1] !== undefined) {
+    return api[1];
+  }
+  const arn = /^arn:[^:]*:eks:[^:]*:[^:]*:cluster\/(.+)$/.exec(clusterRef);
+  return arn?.[1] ?? clusterRef;
+}
+
+/** WHERE: `local` | `ssh://host` | `tcp://host:port` | `cluster/namespace`. */
 export function whereOf(
   entry: Pick<KeptEntry, "engine" | "endpoint" | "context" | "server" | "namespace">,
+  kube?: Kubeconfig,
 ): string {
   if (entry.engine === "kubernetes") {
+    const namespace = entry.namespace ?? "?";
+    const named = entry.context !== undefined ? clusterName(kube, entry.context) : undefined;
+    if (named !== undefined) {
+      return `${truncate(named, WHERE_MAX)}/${namespace}`;
+    }
     const cluster = entry.context ?? (entry.server ? hostOf(entry.server) : "?");
-    return `${cluster}/${entry.namespace ?? "?"}`;
+    return `${truncate(cluster, WHERE_MAX)}/${namespace}`;
   }
   const endpoint = entry.endpoint ?? "";
   if (endpoint.startsWith("unix://")) {
@@ -199,8 +236,9 @@ export function whereOf(
  */
 export function placeText(
   at: Pick<KeptEntry, "engine" | "endpoint" | "context" | "server" | "namespace">,
+  kube?: Kubeconfig,
 ): string {
-  const where = whereOf(at);
+  const where = whereOf(at, kube);
   return at.engine === "kubernetes" || at.endpoint === undefined
     ? where
     : `${where} (${at.endpoint})`;
@@ -326,11 +364,16 @@ export function statusCell(row: KeptRow): string {
 const HEADER = ["NAME", "ENGINE", "WHERE", "MOUNT", "MODEL", "AGE", "STATUS"] as const;
 
 /** The table (header + one line per row, already sorted by the caller). */
-export function renderTable(rows: readonly KeptRow[], nowMs: number, home: string): string[] {
+export function renderTable(
+  rows: readonly KeptRow[],
+  nowMs: number,
+  home: string,
+  kube?: Kubeconfig,
+): string[] {
   const cells = rows.map((row) => [
     untrustedText(row.entry.name),
     row.entry.engine,
-    untrustedText(whereOf(row.entry)),
+    untrustedText(whereOf(row.entry, kube)),
     untrustedText(formatMount(row.entry.mount, home)),
     untrustedText(row.entry.model),
     formatAge(nowMs, row.entry.created),
@@ -415,26 +458,56 @@ export function resolveByName<T extends { readonly entry: KeptEntry }>(
 }
 
 /** The ambiguity error: every candidate, and how to narrow. */
-export function ambiguousMessage(name: string, entries: readonly KeptEntry[]): string {
+export function ambiguousMessage(
+  name: string,
+  entries: readonly KeptEntry[],
+  kube?: Kubeconfig,
+): string {
   return [
     `"${untrustedText(name)}" names ${entries.length} kept workloads:`,
-    ...entries.map((e) => `  ${e.engine} · ${untrustedText(whereOf(e))}`),
+    ...entries.map((e) => `  ${e.engine} · ${untrustedText(whereOf(e, kube))}`),
     "Narrow it with --engine <kubernetes|docker|podman>.",
   ].join("\n");
 }
 
 /** `rm`'s confirmation for a running workload (a session may be attached). */
-export function removeConfirmation(entry: KeptEntry): string {
-  return `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry))}) is running — a session may be attached. Remove it? [y/N] `;
+export function removeConfirmation(entry: KeptEntry, kube?: Kubeconfig): string {
+  return `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry, kube))}) is running — a session may be attached. Remove it? [y/N] `;
 }
 
 /** `rm`'s confirmation with a live relay: `state` is `statusOf`'s, already sanitised. */
-export function relayRemoveConfirmation(entry: KeptEntry, pid: number, state: string): string {
-  return `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry))}) is owned by a detached run (pid ${pid}, ${state}): stop it and remove it? [y/N] `;
+export function relayRemoveConfirmation(
+  entry: KeptEntry,
+  pid: number,
+  state: string,
+  kube?: Kubeconfig,
+): string {
+  return `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry, kube))}) is owned by a detached run (pid ${pid}, ${state}): stop it and remove it? [y/N] `;
 }
 
 /** `Removed tentacle-1b2c3d (docker, ~/code/tentacle).` — the mount, else WHERE. */
-export function removedLine(entry: KeptEntry, home: string): string {
-  const detail = entry.mount !== undefined ? formatMount(entry.mount, home) : whereOf(entry);
+export function removedLine(entry: KeptEntry, home: string, kube?: Kubeconfig): string {
+  const detail = entry.mount !== undefined ? formatMount(entry.mount, home) : whereOf(entry, kube);
   return `Removed ${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(detail)}).`;
 }
+
+/**
+ * `ps`'s one-line note for a location whose engine did not answer. `where` is
+ * already sanitised; `reason` is the engine's own text.
+ */
+export function unreachableNote(engine: EngineKind, where: string, reason: string): string {
+  const head = `${engine} ${where}: not reachable (skipped) — `;
+  // `dialError`'s ENOENT text (docker's byte-duplex): a missing socket path is noise here.
+  if (reason.startsWith("Docker engine socket not found at")) {
+    if (engine === "podman") {
+      return `${head}no podman socket · run podman machine start`;
+    }
+    if (engine === "docker") {
+      return `${head}no docker socket · is Docker Desktop running?`;
+    }
+  }
+  return `${head}${truncate(reason.split("\n")[0] ?? "", REASON_MAX)}`;
+}
+
+/** Longest cause shown in the `ps` note, in characters. */
+const REASON_MAX = 120;
