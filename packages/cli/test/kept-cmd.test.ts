@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EngineHost, WorkloadFacts } from "../src/engine-host.ts";
+import { ARGS, parseArgs } from "../src/flags.ts";
 import {
   type KeptDeps,
   psCommand,
@@ -152,16 +153,68 @@ const ownerOf = (state: OwnerRecord["state"], created = entry("a").created): Own
 });
 
 describe("tentacle ps", () => {
-  test("empty index → the empty line, exit 0; -q prints nothing", async () => {
+  test("empty index → only the header row (like `docker ps`), exit 0; -q prints nothing", async () => {
+    // Mutation: print a message instead of the header → this fails (owner Q-R2).
     const s = setup([]);
     expect(await psCommand({}, s.deps())).toBe(0);
-    expect(s.text()).toBe("No kept containers or pods.\n");
+    expect(s.text()).toBe("NAME   ENGINE   WHERE   MOUNT   MODEL   AGE   STATUS\n");
     s.out.length = 0;
     expect(await psCommand({ quiet: true }, s.deps())).toBe(0);
     expect(s.text()).toBe("");
+    expect(await psCommand({ verbose: true }, s.deps())).toBe(0); // no blocks, no message
+    expect(s.text()).toBe("");
   });
 
-  test("lists every entry with the engine's status; vanished ones are MARKED gone, not dropped", async () => {
+  test("F4 (owner OQ8): plain `ps` hides a gone row, with no footer; the entry stays; -a lists it", async () => {
+    // Mutation: no filter → the `b … gone` row is printed by a plain `ps`.
+    const docker = new FakeEngine();
+    docker.set("a", running());
+    const s = setup([entry("a"), entry("b", { created: new Date(NOW - 2 * H).toISOString() })], {
+      "docker:unix:///var/run/docker.sock": docker,
+    });
+    expect(await psCommand({}, s.deps())).toBe(0);
+    expect(s.text()).toBe(
+      [
+        "NAME   ENGINE   WHERE   MOUNT   MODEL   AGE   STATUS",
+        "a      docker   local   —       m       1h    running",
+        "",
+      ].join("\n"),
+    );
+    expect(readKept(s.dir).entries).toHaveLength(2); // hidden, never pruned
+    s.out.length = 0;
+    expect(await psCommand({ all: true }, s.deps())).toBe(0);
+    expect(s.text()).toMatch(/\nb +docker .* gone\n/);
+  });
+
+  test("F4: only gone rows → only the header row, no message or hint (owner Q-R2)", async () => {
+    const s = setup([entry("b")], { "docker:unix:///var/run/docker.sock": new FakeEngine() });
+    expect(await psCommand({}, s.deps())).toBe(0);
+    expect(s.text()).toBe("NAME   ENGINE   WHERE   MOUNT   MODEL   AGE   STATUS\n");
+    s.out.length = 0;
+    expect(await psCommand({ all: true }, s.deps())).toBe(0); // `-a` is unchanged
+    expect(s.text()).toMatch(/\nb +docker .* gone\n/);
+  });
+
+  test("F4: a gone row a live relay or TUI still acts on stays visible", async () => {
+    // Mutation: hide every gone row → a running relay disappears from `ps`.
+    const procOf: ProcOf = () => ({ state: "S", start: "1" });
+    const e = entry("b");
+    const s = setup([e], { "docker:unix:///var/run/docker.sock": new FakeEngine() });
+    const dir = ensureRunDir(runDirIn(s.dir, e));
+    writeFileSync(join(dir, ".lock.1"), String(process.pid));
+    writeOwner(dir, ownerOf("running", e.created));
+    expect(await psCommand({}, s.deps({ procOf }))).toBe(0);
+    expect(s.text()).toMatch(/\nb +docker .* gone\n/);
+    // A TUI's presence counts too.
+    const t = setup([e], { "docker:unix:///var/run/docker.sock": new FakeEngine() });
+    const tdir = ensureRunDir(runDirIn(t.dir, e));
+    writeOwner(tdir, { ...ownerOf("attached", e.created), kind: "tui" });
+    writePresence(tdir, process.pid, procOf);
+    expect(await psCommand({}, t.deps({ procOf }))).toBe(0);
+    expect(t.text()).toMatch(/\nb +docker .* gone\n/);
+  });
+
+  test("-a: lists every entry with the engine's status; vanished ones are MARKED gone, not dropped", async () => {
     const docker = new FakeEngine();
     docker.set("a", running());
     const k8s = new FakeEngine();
@@ -180,7 +233,7 @@ describe("tentacle ps", () => {
       ],
       { "docker:unix:///var/run/docker.sock": docker, "k8s:agents": k8s },
     );
-    expect(await psCommand({}, s.deps())).toBe(0);
+    expect(await psCommand({ all: true }, s.deps())).toBe(0);
     expect(s.text()).toBe(
       [
         "NAME   ENGINE       WHERE        MOUNT      MODEL   AGE   STATUS",
@@ -311,7 +364,7 @@ describe("tentacle ps: detached runs (docs/feat/detached-relay-lifecycle.md L28)
     const e = entry("a");
     const s = setup([e], { [key]: docker });
     writeOwner(ensureRunDir(runDirIn(s.dir, e)), { ...ownerOf("running"), keep: false });
-    expect(await psCommand({}, s.deps({ procOf }))).toBe(0);
+    expect(await psCommand({ all: true }, s.deps({ procOf }))).toBe(0);
     expect(s.text()).toContain("gone");
     expect(s.text()).not.toContain("not saved");
   });
@@ -814,6 +867,60 @@ describe("tentacle rm", () => {
     expect(docker.calls).toEqual([]);
     expect(await rmCommand("x", { engine: "docker" }, s.deps())).toBe(0);
     expect(readdirSync(s.dir)).toHaveLength(1);
+  });
+
+  test("F3 the parser takes several names (and still needs one); ps takes -a", () => {
+    const many = parseArgs(["a", "-f", "b", "c"], ARGS.rm);
+    expect(many.ok && many.positional).toEqual(["a", "b", "c"]);
+    expect(parseArgs([], ARGS.rm).ok).toBe(false);
+    const all = parseArgs(["-a"], ARGS.ps);
+    expect(all.ok && all.bools.has("all")).toBe(true);
+  });
+
+  test("F3 several names: each removed in order, exit 0", async () => {
+    const docker = new FakeEngine();
+    docker.set("a", { status: "exited", labels: DOCKER_KEPT });
+    docker.set("b", { status: "exited", labels: DOCKER_KEPT });
+    const s = setup([entry("a"), entry("b")], { [key]: docker });
+    expect(await rmCommand(["a", "b"], {}, s.deps())).toBe(0);
+    expect(docker.calls.filter((c) => c.startsWith("remove:"))).toEqual(["remove:a", "remove:b"]);
+    expect(readKept(s.dir).entries).toEqual([]);
+  });
+
+  test("F3 (owner OQ7): past a failure the next names still go; exit 1", async () => {
+    // Mutation: stop at the first failure → `b` is never removed.
+    const docker = new FakeEngine();
+    docker.set("a", { status: "exited", labels: DOCKER_KEPT });
+    docker.set("b", { status: "exited", labels: DOCKER_KEPT });
+    const s = setup([entry("a"), entry("b")], { [key]: docker });
+    expect(await rmCommand(["a", "nope", "b"], {}, s.deps())).toBe(1);
+    expect(s.text()).toContain('[error] no kept container or pod named "nope"');
+    expect(docker.calls.filter((c) => c.startsWith("remove:"))).toEqual(["remove:a", "remove:b"]);
+  });
+
+  test("F3 a repeated name is handled once: one question, no second error", async () => {
+    // Mutation: no dedup → the declined `a` is asked twice.
+    const docker = new FakeEngine();
+    docker.set("a", running());
+    const s = setup([entry("a")], { [key]: docker });
+    s.interactive("n");
+    expect(await rmCommand(["a", "a"], {}, s.deps())).toBe(1);
+    expect(s.asked).toHaveLength(1);
+    expect(s.text()).toBe("Not removed.\n");
+  });
+
+  test("F3 one y/N per running name; -f asks nothing", async () => {
+    const docker = new FakeEngine();
+    docker.set("a", running());
+    docker.set("b", running());
+    const s = setup([entry("a"), entry("b")], { [key]: docker });
+    s.interactive("y");
+    expect(await rmCommand(["a", "b"], {}, s.deps())).toBe(0);
+    expect(s.asked).toHaveLength(2);
+    const f = setup([entry("a"), entry("b")], { [key]: docker });
+    f.interactive("n");
+    expect(await rmCommand(["a", "b"], { force: true }, f.deps())).toBe(0);
+    expect(f.asked).toEqual([]);
   });
 });
 

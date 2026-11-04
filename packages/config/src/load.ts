@@ -56,6 +56,8 @@ export interface LoadConfigOptions {
   readonly runCommand?: CommandRunner;
   /** The profile to apply (`--profile`); beats `TENTACLE_PROFILE`. */
   readonly profile?: string;
+  /** The model id (`--model`), on the active profile's endpoint; beats `TENTACLE_MODEL`. */
+  readonly model?: string;
 }
 
 export interface TentacleConfig {
@@ -406,7 +408,10 @@ function parseConfigFile(text: string, path: string): unknown {
 }
 
 export async function loadConfig(options: LoadConfigOptions = {}): Promise<TentacleConfig> {
-  const env = options.env ?? process.env;
+  const base = options.env ?? process.env;
+  // `--model` is TENTACLE_MODEL's CLI twin: resolved from a COPY, so no child
+  // process (nor the caller) ever sees it in its environment.
+  const env = options.model !== undefined ? { ...base, TENTACLE_MODEL: options.model } : base;
   const home = env.HOME ?? homedir();
   const launchCwd = options.cwd ?? process.cwd();
   const scaffold = options.scaffold ?? true;

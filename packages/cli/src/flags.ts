@@ -59,6 +59,16 @@ const AUTO_ACCEPT = {
 } as const;
 const RESUME_CONFLICTS = [["resume", "continue"]] as const;
 const TOKEN = { token: {}, "token-command": {} } as const;
+/**
+ * The model of a SESSION command (docs/fix/detach-live-followups.md F5): `--model
+ * <id>` is `TENTACLE_MODEL`'s CLI twin, `--profile <name>` `TENTACLE_PROFILE`'s.
+ * Only `run`, `attach`, `serve` and the bare local session (`tui`, `plain`, a
+ * one-shot prompt) take them, written after the command. Not `ps`/`rm` (each
+ * kept entry carries its own engine and location: a profile must not filter
+ * them), `update`, `hooks`, `package`; `connect` refuses them (its model is the
+ * `serve` daemon's).
+ */
+const SESSION_MODEL = { model: {}, profile: {} } as const;
 /** `run`/`attach`: the engine and its docker/podman endpoint options (docs/feat/docker-engine-cli.md). */
 const ENGINE = { engine: {}, context: {} } as const;
 const ENGINE_BOOLS = { "insecure-docker-tcp": {} } as const;
@@ -88,6 +98,7 @@ export const ARGS = {
       "context-window": {},
       // The pod's resident daemon socket (docs/feat/detached-runs.md S1); default in TMPDIR.
       socket: {},
+      ...SESSION_MODEL,
     },
     // `--auto-title` (with `--model-proxy`): the laptop's `model.autoTitle`.
     // `--bridge` / `--resident` / `--resident-status` / `--resident-stop`: the
@@ -104,7 +115,14 @@ export const ARGS = {
     positional: { min: 0, max: 0 },
   },
   run: {
-    values: { ...ENGINE, namespace: { short: "n" }, image: {}, "bin-dir": {}, prompt: {} },
+    values: {
+      ...ENGINE,
+      namespace: { short: "n" },
+      image: {},
+      "bin-dir": {},
+      prompt: {},
+      ...SESSION_MODEL,
+    },
     // docker/podman: the cwd mount (docs/feat/docker-workspace-mount.md); `run` only.
     bools: { ...CONTINUE, ...ENGINE_BOOLS, "no-mount": {}, "confirm-mount": {}, detach: {} },
     optional: { ...RESUME, ...KEEP, ...AUTO_ACCEPT },
@@ -112,19 +130,26 @@ export const ARGS = {
     positional: { min: 0, max: 1 },
   },
   attach: {
-    values: { ...ENGINE, namespace: { short: "n" }, container: { short: "c" }, "bin-dir": {} },
+    values: {
+      ...ENGINE,
+      namespace: { short: "n" },
+      container: { short: "c" },
+      "bin-dir": {},
+      ...SESSION_MODEL,
+    },
     bools: { ...CONTINUE, ...ENGINE_BOOLS },
     optional: RESUME,
     conflicts: RESUME_CONFLICTS,
     positional: { min: 1, max: 1 },
   },
   tui: {
+    values: SESSION_MODEL,
     bools: { interactive: { short: "i" }, "in-process": {}, "no-worker": {}, ...CONTINUE },
     optional: RESUME,
     conflicts: RESUME_CONFLICTS,
     positional: { min: 0, max: 0 },
   },
-  plain: { bools: { plain: {} }, positional: { min: 0, max: 0 } },
+  plain: { values: SESSION_MODEL, bools: { plain: {} }, positional: { min: 0, max: 0 } },
   hooks: {
     values: { revoke: {} },
     bools: { list: {} },
@@ -134,11 +159,15 @@ export const ARGS = {
   // Kept workloads (docs/feat/engine-ps-rm.md).
   ps: {
     values: { engine: {} },
-    bools: { quiet: { short: "q" }, verbose: { short: "v" } },
+    bools: { quiet: { short: "q" }, verbose: { short: "v" }, all: { short: "a" } },
     conflicts: [["quiet", "verbose"]],
     positional: { min: 0, max: 0 },
   },
-  rm: { values: { engine: {} }, bools: { force: { short: "f" } }, positional: { min: 1, max: 1 } },
+  rm: {
+    values: { engine: {} },
+    bools: { force: { short: "f" } },
+    positional: { min: 1, max: Number.MAX_SAFE_INTEGER },
+  },
   package: { positional: { min: 1, max: 2 } },
   update: { values: { version: {} }, bools: { check: {} }, positional: { min: 0, max: 0 } },
 } as const satisfies Record<string, ArgSpec>;
@@ -448,12 +477,19 @@ export async function resolveToken(flags: Map<string, string>): Promise<string |
   return env && env.length > 0 ? env : undefined;
 }
 
-export type GlobalOptions =
-  | { readonly ok: true; readonly profile?: string; readonly rest: string[] }
+export type SessionFlags =
+  | {
+      readonly ok: true;
+      /** From a one-shot prompt's options (`tentacle --profile P <prompt>`); else in `rest`. */
+      readonly profile?: string;
+      /** The same, for `--model`. */
+      readonly model?: string;
+      readonly rest: string[];
+    }
   | { readonly ok: false; readonly error: string };
 
-/** The first arguments that select a command or a mode; anything else starts a one-shot prompt. */
-const COMMANDS = new Set([
+/** Every subcommand word; any other first word starts a one-shot prompt. */
+const SUBCOMMANDS = new Set([
   "serve",
   "run",
   "attach",
@@ -464,14 +500,21 @@ const COMMANDS = new Set([
   "package",
   "update",
   "install",
-  "-i",
-  "--interactive",
-  "--resume",
-  "--continue",
-  "--plain",
 ]);
+/** The subcommands that start a session, so take `--model`/`--profile` after them. */
+const SESSION_COMMANDS = new Set(["serve", "run", "attach"]);
 
-const isProfileFlag = (arg: string): boolean => arg === "--profile" || arg.startsWith("--profile=");
+const SESSION_FLAGS = ["model", "profile"] as const;
+type SessionFlag = (typeof SESSION_FLAGS)[number];
+const flagOf = (arg: string): SessionFlag | undefined =>
+  SESSION_FLAGS.find((key) => arg === `--${key}` || arg.startsWith(`--${key}=`));
+
+/** Why `connect` takes neither: its model and config are the remote daemon's. */
+const CONNECT_REFUSAL: Readonly<Record<SessionFlag, string>> = {
+  model:
+    "--model has no effect with connect: it uses the model its `tentacle serve` daemon serves — start that daemon with `tentacle serve --model <id>`",
+  profile: "--profile has no effect with connect: the remote daemon uses its own config",
+};
 
 /** Leading-word aliases, expanded before dispatch: `tentacle install …` = `tentacle package install …`. */
 const ALIASES: Readonly<Record<string, readonly string[]>> = {
@@ -479,52 +522,78 @@ const ALIASES: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
- * Take the LEADING global options off argv, before `main` dispatches on
- * `args[0]` (docs/feat/config-profiles.md). Today: `--profile <name>` /
- * `--profile=<name>`. Never silently dropped: a missing value, a repeat, a
- * `--profile` after a command or mode, or one with `connect` is an error. In
- * one-shot mode everything after the leading options is prompt text, kept as is.
+ * What `main` does with `--model <id>` / `--profile <name>` before it dispatches
+ * (docs/fix/detach-live-followups.md F5). They are flags of the session commands,
+ * parsed by `parseArgs` with the rest of the command's flags (`ARGS`), so this
+ * only handles what that cannot:
+ *  - a one-shot prompt, which has no spec: `tentacle --model X fix it` takes the
+ *    leading options off and returns them (the prompt keeps its own text, even a
+ *    `--model` inside it);
+ *  - the same options BEFORE a subcommand (`tentacle --model X run`): an error
+ *    naming the right form for `run`/`attach`/`serve`, the normal unknown-option
+ *    error for the commands that take no model (`ps`, `rm`, …);
+ *  - `connect`, which refuses both wherever they are.
+ * Everything else — `tentacle --model X`, `-i --profile Y`, `run … --model X` —
+ * is returned as is, for `cliMode` + `parseArgs`. Also expands the `install` alias.
  */
-export function extractGlobalOptions(args: readonly string[]): GlobalOptions {
-  let profile: string | undefined;
+export function extractSessionFlags(args: readonly string[]): SessionFlags {
+  const lead: { model?: string; profile?: string } = {};
+  let firstLead: SessionFlag | undefined;
   let i = 0;
   while (i < args.length) {
     const arg = args[i] ?? "";
-    if (!isProfileFlag(arg)) {
+    const key = flagOf(arg);
+    if (key === undefined) {
       break;
     }
-    let value: string | undefined;
-    if (arg === "--profile") {
-      value = args[i + 1];
-      i += 2;
-    } else {
-      value = arg.slice("--profile=".length);
-      i += 1;
-    }
+    const value = arg === `--${key}` ? args[i + 1] : arg.slice(`--${key}=`.length);
     if (value === undefined || value === "" || value.startsWith("-")) {
-      return { ok: false, error: "--profile needs a profile name" };
+      break; // `parseArgs` says what is wrong with it
     }
-    if (profile !== undefined) {
-      return { ok: false, error: "--profile given more than once" };
+    if (lead[key] !== undefined) {
+      return { ok: false, error: `--${key} given more than once` };
     }
-    profile = value;
+    lead[key] = value;
+    firstLead ??= key;
+    i += arg === `--${key}` ? 2 : 1;
   }
   const tail = args.slice(i);
   const alias = tail[0] !== undefined ? ALIASES[tail[0]] : undefined;
   const rest = alias !== undefined ? [...alias, ...tail.slice(1)] : tail;
   const first = rest[0];
-  const isMode =
-    first !== undefined && (COMMANDS.has(first) || (first.startsWith("-") && first !== "--"));
-  if (isMode && rest.some(isProfileFlag)) {
-    return { ok: false, error: "--profile must come before the command" };
+  if (first === "connect") {
+    const key = firstLead ?? rest.map(flagOf).find((k) => k !== undefined);
+    return key !== undefined ? { ok: false, error: CONNECT_REFUSAL[key] } : { ok: true, rest };
   }
-  if (profile !== undefined && first === "connect") {
+  if (firstLead === undefined) {
+    return { ok: true, rest };
+  }
+  if (first !== undefined && SUBCOMMANDS.has(first)) {
+    const given = lead[firstLead];
     return {
       ok: false,
-      error: "--profile has no effect with connect: the remote daemon uses its own config",
+      error: SESSION_COMMANDS.has(first)
+        ? `--${firstLead} goes after the command: tentacle ${first} --${firstLead} ${given}`
+        : `unknown option --${firstLead}`,
     };
   }
-  return profile !== undefined ? { ok: true, profile, rest } : { ok: true, rest };
+  if (first === undefined || (first.startsWith("-") && first !== "--")) {
+    return { ok: true, rest: [...args] }; // the bare session: `parseArgs` takes the options
+  }
+  return { ok: true, ...lead, rest };
+}
+
+/**
+ * `--help` / `-h` / `--version` written AFTER other options (`--model X
+ * --version`, `run --profile p --help`) reach `parseArgs` as an unknown option,
+ * since `main` only looks at the first word. That exact error is what asks for
+ * them (owner Q-R7); nothing that parsed before changes meaning.
+ */
+export function infoRequest(parseError: string): "help" | "version" | undefined {
+  if (parseError === "unknown option --help" || parseError === "unknown option -h") {
+    return "help";
+  }
+  return parseError === "unknown option --version" ? "version" : undefined;
 }
 
 /** Which path `main` takes, decided from the first argument alone. */
@@ -566,11 +635,10 @@ export function cliMode(args: readonly string[]): CliMode {
   ) {
     return first;
   }
-  if (first === "--plain") {
-    return "plain";
-  }
   if (first.startsWith("-") && first !== "-" && first !== "--") {
-    return "tui";
+    // `--plain` wherever it is among the options (`--model X --plain`); the
+    // plain spec then refuses the TUI-only ones.
+    return args.includes("--plain") ? "plain" : "tui";
   }
   return "prompt";
 }
@@ -580,15 +648,15 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   connect:
     "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify] [--resume [id]|--continue]",
   serve:
-    "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [...] (see tentacle --help)",
-  run: "tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [--detach --prompt <text|-> [--auto-accept[=true|false]]] [<name>]",
+    "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [--model <id>] [--profile <name>] [...] (see tentacle --help)",
+  run: "tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [--model <id>] [--profile <name>] [--detach --prompt <text|-> [--auto-accept[=true|false]]] [<name>]",
   attach:
-    "tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--context <ctx>] [--insecure-docker-tcp] [--bin-dir <dir>] [--resume [uid]|--continue]",
-  ps: "tentacle ps [--engine kubernetes|docker|podman] [-q|--quiet] [-v|--verbose]",
-  rm: "tentacle rm [--engine kubernetes|docker|podman] [-f|--force] <name>",
-  plain: "tentacle --plain",
+    "tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--context <ctx>] [--insecure-docker-tcp] [--bin-dir <dir>] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",
+  ps: "tentacle ps [--engine kubernetes|docker|podman] [-a|--all] [-q|--quiet] [-v|--verbose]",
+  rm: "tentacle rm [--engine kubernetes|docker|podman] [-f|--force] <name>...",
+  plain: "tentacle --plain [--model <id>] [--profile <name>]",
   hooks: "tentacle hooks trust --list | --revoke <folder>",
   package: "tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]",
   update: "tentacle update [--check] [--version vX.Y.Z]",
-  tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process]",
+  tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process] [--model <id>] [--profile <name>]",
 };

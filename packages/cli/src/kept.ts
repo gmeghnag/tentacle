@@ -289,6 +289,19 @@ export function statusText(status: KeptStatus): string {
   }
 }
 
+/**
+ * Plain `ps` hides a workload the engine says is GONE (owner OQ8,
+ * docs/fix/detach-live-followups.md F4): no footer; `ps -a` lists it, `rm`
+ * drops its entry. Never hidden while a relay or a TUI still acts on it, and
+ * never pruned here (a 404 from a renamed context may name a pod elsewhere).
+ */
+export function shownInPs(row: KeptRow, all: boolean): boolean {
+  if (all || row.status.kind !== "gone") {
+    return true;
+  }
+  return row.relay?.pid !== undefined || (row.relay?.attached?.length ?? 0) > 0;
+}
+
 /** Newest first (oldest at the bottom); ties by name. */
 export function sortKept<T extends { readonly entry: KeptEntry }>(rows: readonly T[]): T[] {
   return [...rows].sort(
@@ -332,8 +345,6 @@ export function renderTable(rows: readonly KeptRow[], nowMs: number, home: strin
       .trimEnd(),
   );
 }
-
-export const EMPTY_LINE = "No kept containers or pods.";
 
 /** `ps -v`: one block per workload. */
 export function renderVerbose(rows: readonly KeptRow[], nowMs: number, home: string): string[] {

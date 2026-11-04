@@ -26,8 +26,17 @@ function meterColor(fraction: number): string {
   return "green";
 }
 
-/** A fixed-width context-fill meter: `ctx ████░░░░░░ 42% (54k/128k)`. */
-export function ContextMeter({ used, window }: { used: number; window: number }): ReactElement {
+/**
+ * A fixed-width context-fill meter: `ctx ████░░░░░░ 42% (54k/128k)`; `ctx –`
+ * when nothing was measured yet (`used` null, `status-view.ts`).
+ */
+export function ContextMeter({
+  used,
+  window,
+}: { used: number | null; window: number }): ReactElement {
+  if (used === null) {
+    return <Text dimColor>ctx –</Text>;
+  }
   const fraction = window > 0 ? Math.min(1, Math.max(0, used / window)) : 0;
   const filled = Math.round(fraction * METER_WIDTH);
   const bar = "█".repeat(filled) + "░".repeat(METER_WIDTH - filled);
@@ -58,8 +67,10 @@ export function StatusBar({
 }: {
   model: string;
   cwd: string;
-  tokens: TokenTotals;
-  contextTokens: number;
+  /** `null`: not measured yet, shown `↑– ↓–`. */
+  tokens: TokenTotals | null;
+  /** `null`: not measured yet, shown `ctx –`. */
+  contextTokens: number | null;
   contextWindow: number;
   columns?: number;
   scrolledUp?: boolean;
@@ -90,7 +101,7 @@ export function StatusBar({
       <Box flexGrow={1} flexShrink={1} minWidth={0}>
         <Text wrap="truncate-end">
           <Text dimColor>
-            {shortCwd(cwd)} · ↑{formatTokens(tokens.prompt)} ↓{formatTokens(tokens.completion)} ·{" "}
+            {`${shortCwd(cwd)} · ↑${tokens ? formatTokens(tokens.prompt) : "–"} ↓${tokens ? formatTokens(tokens.completion) : "–"} · `}
           </Text>
           <ContextMeter used={contextTokens} window={contextWindow} />
           {scrolledUp ? (

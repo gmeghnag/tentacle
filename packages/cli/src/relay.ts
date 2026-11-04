@@ -144,7 +144,12 @@ export interface RelayDeps {
 
 /** Run one detached session to its end; the exit code. Only a run dir it cannot make throws. */
 export async function runRelay(deps: RelayDeps): Promise<number> {
-  const { config, spec, entry } = deps;
+  const { spec, entry } = deps;
+  // The run's model is the one its launcher recorded (`ps` shows it): a
+  // `--model` reaches this process only through the entry, never its env
+  // (docs/fix/detach-live-followups.md F5). Endpoint and key: this config's.
+  const config =
+    deps.config.model === entry.model ? deps.config : { ...deps.config, model: entry.model };
   const now = deps.now ?? Date.now;
   const tickMs = deps.tickMs ?? RELAY_TICK_MS;
   const jobsPollMs = deps.jobsPollMs ?? RELAY_JOBS_POLL_MS;
@@ -526,13 +531,17 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     // keep=true (owner Q3, fix round 7): nothing is deleted here, but `ps` says
     // when the laptop copy lacks the last turn. Informational only; after a
     // hand-over the TUIs hold the save, so it is not this relay's to report.
-    if (
-      spec.keep &&
-      model.handover === "none" &&
-      finalView(model).state !== "failed" && // a failed run keeps its own reason
-      (!settled || unsaved.length > 0)
-    ) {
-      emit({ type: "note", detail: "not saved — the laptop copy lacks the last turn" });
+    // A failed run says both: its reason, then `not saved` (Q13, OQ12).
+    if (spec.keep && model.handover === "none" && (!settled || unsaved.length > 0)) {
+      const notSaved = "not saved — the laptop copy lacks the last turn";
+      const view = finalView(model);
+      emit({
+        type: "note",
+        detail:
+          view.state === "failed" && view.detail !== undefined
+            ? `${view.detail} · ${notSaved}`
+            : notSaved,
+      });
     }
     return leave();
   }

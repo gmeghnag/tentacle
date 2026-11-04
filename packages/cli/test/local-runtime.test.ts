@@ -563,6 +563,37 @@ describe("createLocalRuntime (local over RPC)", () => {
     expect(saved).toEqual([["A"]]);
   });
 
+  test("R9 synchrony: the idle notification starts the post-turn save in the same tick — saveConfirmed is false at once, true only after that save", async () => {
+    // docs/fix/detach-live-followups.md round 3 (review finding 1). The other half
+    // of the property is `client/test/idle-sync.test.ts` (the listeners run inside
+    // the update that ends the turn). Mutation (local-runtime.ts, the `onIdle`
+    // subscription): `flush()` → `queueMicrotask(flush)` → `true` right after.
+    const listeners: (() => void)[] = [];
+    let busy = true;
+    const inner = {
+      get busy() {
+        return busy;
+      },
+      onIdle: (listener: () => void) => {
+        listeners.push(listener);
+        return () => {};
+      },
+      onTitle: () => () => {},
+      readBack: async () => ({ messages: [{ role: "user", content: "a" }] }),
+    } as unknown as RemoteSession;
+    const saved: number[] = [];
+    const ctl = persistingController(inner, (messages) => saved.push(messages.length));
+    expect(ctl.saveConfirmed()).toBe(false); // a turn runs on the daemon
+    busy = false; // its end, as `RemoteSession`'s setter applies it …
+    for (const listener of listeners) {
+      listener(); // … then calls the idle listeners, synchronously
+    }
+    expect(ctl.saveConfirmed()).toBe(false); // the laptop does not hold its end yet
+    await ctl.flushed();
+    expect(saved).toEqual([1]);
+    expect(ctl.saveConfirmed()).toBe(true);
+  });
+
   test("T-B12 persistingController: a foreign turn's end and an idle history each cause one save (docs/feat/tui-foreign-turns.md B8)", async () => {
     let snapshots = 0;
     let raise: (a: unknown) => void = () => {};

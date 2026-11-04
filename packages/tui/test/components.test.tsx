@@ -39,6 +39,11 @@ describe("ContextMeter", () => {
     expect(frame).toContain("64k/128k");
   });
 
+  test("nothing measured: `ctx –`, no bar, no 0%", () => {
+    const frame = render(<ContextMeter used={null} window={128000} />).lastFrame() ?? "";
+    expect(frame).toBe("ctx –");
+  });
+
   test("handles a zero window without dividing by zero", () => {
     const frame = render(<ContextMeter used={10} window={0} />).lastFrame() ?? "";
     expect(frame).toContain("0%");

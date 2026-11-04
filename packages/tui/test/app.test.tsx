@@ -114,6 +114,50 @@ describe("App", () => {
     unmount();
   });
 
+  test("F2 (owner OQ5): a failed first turn shows tokens and ctx as unknown, never a fake 0; a measured turn shows them", async () => {
+    // docs/fix/detach-live-followups.md F2. The agent reports usage only on a
+    // stream's `done`, so a failed turn measured nothing. Mutation: render the
+    // unmeasured totals as numbers → `↑0 ↓0` and `0%`.
+    let fail = true;
+    const createSession = () => ({
+      async *send() {
+        if (fail) {
+          yield { type: "text" as const, delta: "partial" };
+          throw new Error("model connection lost mid-stream (ECONNRESET)");
+        }
+        yield { type: "text" as const, delta: "fine" };
+        yield { type: "usage" as const, usage: { promptTokens: 64000, completionTokens: 2 } };
+        yield { type: "turn_end" as const, reason: "end_turn" as const };
+      },
+    });
+    const app = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" contextWindow={128000} />,
+    );
+    try {
+      await delay(30);
+      app.stdin.write("hi");
+      await delay(20);
+      app.stdin.write("\r");
+      await delay(150);
+      const failed = app.lastFrame() ?? "";
+      expect(failed).toContain("ECONNRESET");
+      expect(failed).toContain("↑– ↓–");
+      expect(failed).toContain("ctx –");
+      expect(failed).not.toContain("↑0 ↓0");
+      expect(failed).not.toContain("0%");
+      fail = false;
+      app.stdin.write("again");
+      await delay(20);
+      app.stdin.write("\r");
+      await delay(150);
+      const measured = app.lastFrame() ?? "";
+      expect(measured).toContain("↑64k ↓2");
+      expect(measured).toContain("50%");
+    } finally {
+      app.unmount();
+    }
+  });
+
   test("Ctrl+O does not leak an 'o' into the input box", async () => {
     const agent = new Agent({
       model: new ScriptedProvider([]),

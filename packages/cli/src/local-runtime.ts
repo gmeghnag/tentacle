@@ -344,6 +344,11 @@ export function persistingController(
   // A turn that ends while nobody iterates it (an attach mid-turn, R9) still
   // gets its end saved: only that save makes the session confirmed again.
   // (A turn somebody iterates saves itself when its stream ends: `saved`.)
+  // LOAD-BEARING: `onIdle` fires synchronously in `RemoteSession`'s `streaming`
+  // setter, so `flush` (which clears `confirmed`) runs before any read of
+  // `saveConfirmed`. Keep it synchronous. Pinned by the test "R9 synchrony" in
+  // test/local-runtime.test.ts (this call) and by client/test/idle-sync.test.ts
+  // (the setter's); the R9 mid-turn test alone does NOT catch a deferred call.
   const unsubscribeIdle = inner.onIdle?.(() => {
     // `?.`: unit-test fakes of a session
     if (turns === 0) {

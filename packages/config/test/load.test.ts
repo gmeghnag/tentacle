@@ -338,6 +338,24 @@ describe("loadConfig profiles (docs/feat/config-profiles.md)", () => {
     expect(ran).toEqual(["work-cmd"]);
   });
 
+  test("F5 `--model` (option) beats TENTACLE_MODEL and the profile, on the profile's endpoint; env untouched", async () => {
+    // Mutation: ignore `options.model` → env-model.
+    await writeProfiles();
+    const env = { ...baseEnv(), TENTACLE_MODEL: "env-model" };
+    const cfg = await loadConfig({
+      env,
+      configDir,
+      cwd: dir,
+      profile: "work",
+      model: "cli-model",
+      runCommand: async () => "k",
+    });
+    expect(cfg.model).toBe("cli-model");
+    expect(cfg.baseURL).toBe("https://api.anthropic.com/v1"); // the profile's endpoint
+    expect(cfg.profile).toBe("work");
+    expect(env.TENTACLE_MODEL).toBe("env-model"); // a copy, never the caller's env
+  });
+
   test("TENTACLE_PROFILE selects it; the option beats the env; an empty env is unset", async () => {
     await writeProfiles();
     const run = async (): Promise<string> => "k";

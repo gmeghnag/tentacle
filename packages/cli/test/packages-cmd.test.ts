@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ARGS, cliMode, extractGlobalOptions, parseArgs } from "../src/flags.ts";
+import { ARGS, cliMode, extractSessionFlags, parseArgs } from "../src/flags.ts";
 import {
   type GitRunner,
   type PackagesCmdDeps,
@@ -272,10 +272,14 @@ describe("packages list / remove / update", () => {
 describe("`tentacle package` dispatch", () => {
   test("`package` is a subcommand taking 1–2 words and no flags", () => {
     expect(cliMode(["package", "list"])).toBe("package");
-    expect(extractGlobalOptions(["--profile", "p", "package", "list"])).toEqual({
-      ok: true,
-      profile: "p",
-      rest: ["package", "list"],
+    // A package command takes no profile (owner 2026-11-03): the normal errors.
+    expect(extractSessionFlags(["--profile", "p", "package", "list"])).toEqual({
+      ok: false,
+      error: "unknown option --profile",
+    });
+    expect(parseArgs(["list", "--profile", "p"], ARGS.package)).toEqual({
+      ok: false,
+      error: "unknown option --profile",
     });
     expect(parseArgs(["install", "/x"], ARGS.package).ok).toBe(true);
     expect(parseArgs(["install", "/x", "y"], ARGS.package).ok).toBe(false);
@@ -283,18 +287,15 @@ describe("`tentacle package` dispatch", () => {
   });
 
   test("`install` is an alias of `package install`", () => {
-    expect(extractGlobalOptions(["install", "/x#v1"])).toEqual({
+    expect(extractSessionFlags(["install", "/x#v1"])).toEqual({
       ok: true,
       rest: ["package", "install", "/x#v1"],
     });
-    expect(extractGlobalOptions(["--profile", "p", "install", "/x"])).toEqual({
-      ok: true,
-      profile: "p",
-      rest: ["package", "install", "/x"],
-    });
-    expect(extractGlobalOptions(["install", "/x", "--profile", "p"]).ok).toBe(false);
+    expect(extractSessionFlags(["--profile", "p", "install", "/x"]).ok).toBe(false);
+    // `install /x --profile p` reaches `parseArgs` as `package install /x --profile p`.
+    expect(parseArgs(["install", "/x", "--profile", "p"], ARGS.package).ok).toBe(false);
     // Only the leading word: `install` later in a one-shot prompt stays prompt text.
-    expect(extractGlobalOptions(["please", "install", "deps"])).toEqual({
+    expect(extractSessionFlags(["please", "install", "deps"])).toEqual({
       ok: true,
       rest: ["please", "install", "deps"],
     });
