@@ -3,6 +3,7 @@ import { existsSync, readdirSync, realpathSync, rmSync, writeFileSync } from "no
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { JsonSessionStore, type SessionRecord, projectKey } from "@tentacle/agent";
 import { DELETE_CONTAINER_SUBCOMMAND } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND } from "@tentacle/k8s";
 import { type EngineHost, WorkloadNotFoundError } from "../src/engine-host.ts";
@@ -848,6 +849,8 @@ describe("cli main: --engine", () => {
           tuiThrows?: boolean;
           /** `startEngineRuntime` rejects with this (an own `logPath` models a recorded failure). */
           startFails?: Error;
+          /** Session uids the run's saver saves, in order (after the index record). */
+          saves?: string[];
         } = {},
       ) => {
         const out: string[] = [];
@@ -862,6 +865,7 @@ describe("cli main: --engine", () => {
           thrown?: string;
           tui: number;
           runtime: number;
+          kept?: KeptEntry[];
         } = {
           tui: 0,
           runtime: 0,
@@ -906,6 +910,17 @@ describe("cli main: --engine", () => {
             seen.earlyLogPath = deps.daemonLogPath?.("box");
             (deps as { recordKept?: (n: string) => unknown }).recordKept?.("box");
             seen.logPath = deps.daemonLogPath?.("box");
+            for (const id of over.saves ?? []) {
+              (deps as unknown as { saver: { save: (r: unknown) => void } }).saver.save({
+                id,
+                cwd: process.cwd(),
+                model: "m",
+                createdAt: 1,
+                updatedAt: 1,
+                title: id,
+                messages: [{ role: "user", content: "hi" }],
+              });
+            }
             for (const line of over.info ?? []) {
               (deps.info ?? deps.log)(line);
             }
@@ -934,7 +949,11 @@ describe("cli main: --engine", () => {
           return 1;
         });
         await rm(path, { force: true });
+        seen.kept = readKept(join(dir, "config", "kept")).entries.map((e) => e.entry);
         rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
+        // The fake run's saves (`over.saves`) went to the real store: drain, then drop them.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        rmSync(join(dir, "config", "sessions"), { recursive: true, force: true });
         return { code, text: out.join(""), seen, calls, order };
       };
 
@@ -1097,6 +1116,31 @@ describe("cli main: --engine", () => {
         });
       });
 
+      test("attach-plain-resume: the run's saved session lands in its kept index entry, and follows /clear", async () => {
+        // Mutation: drop trackKeptSession from the run -> no sessionId in the entry.
+        const A = "11111111-1111-4111-8111-111111111111";
+        const B = "22222222-2222-4222-8222-222222222222";
+        await withEnv(unreachable, async () => {
+          const one = await interactive([...base, "--name", "box"], { saves: [A] });
+          expect(one.seen.kept?.map((e) => e.sessionId)).toEqual([A]);
+          // Every engine records the folder `run` was launched from (the attach's folder
+          // when nothing is mounted). Mutation: drop `cwd` from keptEntryFor -> undefined.
+          expect(one.seen.kept?.map((e) => e.cwd)).toEqual([process.cwd()]);
+          // /clear: a later turn saves another uid -> the latest.
+          const two = await interactive([...base, "--name", "box"], { saves: [A, B] });
+          expect(two.seen.kept?.map((e) => e.sessionId)).toEqual([B]);
+          // No save (quit before a turn): no id, today's entry.
+          const none = await interactive([...base, "--name", "box"]);
+          expect(none.seen.kept?.map((e) => e.sessionId)).toEqual([undefined]);
+          // keep=false is in no index: nothing to write, nothing thrown.
+          const gone = await interactive([...base, "--name", "box", "--keep=false"], {
+            saves: [A],
+          });
+          expect(gone.code).toBe(0);
+          expect(gone.seen.kept).toEqual([]);
+        });
+      });
+
       test("--continue alone (no prompt) is not refused", async () => {
         await withEnv(unreachable, async () => {
           const r = await interactive([...base, "--continue"]);
@@ -1223,7 +1267,10 @@ describe("cli main: --engine", () => {
         confirmed?: boolean;
         config?: { model?: string; baseURL?: string; cwd?: string };
         tuiModel?: string;
-      } = { quit: 0 };
+        resume?: { id: string; messages: unknown[] } | null;
+        saver?: { save: (record: unknown) => void };
+        notices: string[];
+      } = { quit: 0, notices: [] };
       const runtime = {
         saveConfirmed: () => seen.confirmed === true,
         createSession: () => ({}),
@@ -1244,9 +1291,17 @@ describe("cli main: --engine", () => {
       };
       const fakeAttach = (async (
         config: { model?: string; baseURL?: string; cwd?: string },
-        deps: { permissions: unknown; sessionId?: string; shared?: true },
+        deps: {
+          permissions: unknown;
+          sessionId?: string;
+          shared?: true;
+          resume?: { id: string; messages: unknown[] } | null;
+          saver?: { save: (record: unknown) => void };
+        },
       ) => {
         seen.config = config;
+        seen.resume = deps.resume;
+        seen.saver = deps.saver;
         seen.runtimeBroker = deps.permissions;
         seen.sessionId = deps.sessionId;
         seen.shared = deps.shared === true;
@@ -1265,8 +1320,10 @@ describe("cli main: --engine", () => {
             createSession?: unknown;
             autoAccept?: unknown;
             model?: string;
+            notices?: { onNotice: (listener: (text: string) => void) => unknown };
           },
         ) => {
+          options.notices?.onNotice((text) => seen.notices.push(text));
           seen.tuiModel = options.model;
           seen.tuiBroker = options.permissions;
           seen.runQuit = options.runQuit;
@@ -1665,16 +1722,17 @@ describe("cli main: --engine", () => {
       rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
     });
 
-    test("attach-any-folder: the run's folder is gone: one line, nothing dialled", async () => {
-      // Mutation: skip the existence check -> the attach goes on in a folder that is not there.
+    test("the run's folder is gone: the attach still works, filed under the ORIGINAL path (attach-plain-resume round 3)", async () => {
+      // Mutation: put the existence refusal back -> exit 1 `no longer exists`.
       setup(`${2 ** 30} 1`);
       const gone = join(dir, "no-such-folder");
       ownerIn(gone);
       await withEnv(unreachable, async () => {
         const r = await attached(["attach", "box"]);
-        expect(r.code).toBe(1);
-        expect(r.text).toBe(`[error] box: the folder of this run no longer exists: ${gone}\n`);
-        expect(r.seen.runtimeBroker).toBeUndefined();
+        expect(r.code).toBe(0);
+        expect(r.text).not.toContain("no longer exists");
+        expect(r.seen.config?.cwd).toBe(gone);
+        expect(r.seen.sessionId).toBe("44444444-4444-4444-8444-444444444444");
       });
       rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
     });
@@ -1695,17 +1753,207 @@ describe("cli main: --engine", () => {
         recordKept(keptIndexDir(config), entry);
         const none = await run(["attach", "box", "--continue"]);
         expect(none.text).toContain(`no saved sessions for ${process.cwd()} yet`);
-        // A mount that is gone: one line.
+        // A mount that is gone: the folder only keys the session store, so the
+        // attach goes on and looks under the ORIGINAL path.
         const missing = join(dir, "gone-mount");
         rmSync(keptIndexDir(config), { recursive: true, force: true });
         recordKept(keptIndexDir(config), { ...entry, mount: missing });
         const gone = await run(["attach", "box", "--continue"]);
-        expect(gone.code).toBe(1);
-        expect(gone.text).toBe(
-          `[error] box: the folder of this container no longer exists: ${missing}\n`,
-        );
+        expect(gone.text).toContain(`no saved sessions for ${missing} yet`);
+        expect(gone.text).not.toContain("no longer exists");
       });
       rmSync(keptIndexDir(config), { recursive: true, force: true });
+    });
+
+    describe("attach-plain-resume: a plain kept container reopens the run's conversation", () => {
+      const A = "11111111-1111-4111-8111-111111111111";
+      const B = "22222222-2222-4222-8222-222222222222";
+      let folder = "";
+      beforeAll(() => {
+        folder = join(dir, "resume-folder");
+      });
+      const record = (id: string, cwd: string, updatedAt = 10): SessionRecord => ({
+        id,
+        cwd,
+        model: "m",
+        createdAt: 1,
+        updatedAt,
+        title: `conv ${id.slice(0, 4)}`,
+        messages: [
+          { role: "user", content: "ciao" },
+          { role: "assistant", content: "salve" },
+        ],
+      });
+      const store = (cwd: string) =>
+        new JsonSessionStore(join(dir, "config", "sessions", projectKey(cwd)));
+      const index = async (over: Partial<KeptEntry>, records: SessionRecord[] = []) => {
+        const config = join(dir, "config");
+        await mkdir(folder, { recursive: true });
+        rmSync(join(config, "sessions"), { recursive: true, force: true });
+        rmSync(keptIndexDir(config), { recursive: true, force: true });
+        recordKept(keptIndexDir(config), { ...entry, mount: folder, ...over });
+        for (const r of records) {
+          await store(r.cwd).save(r);
+        }
+      };
+      const cleanup = () => {
+        rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+        rmSync(join(dir, "config", "sessions"), { recursive: true, force: true });
+      };
+
+      test("the entry's session is reopened from the laptop record, in the run's folder", async () => {
+        // Mutation: plainResumeUid returns undefined -> resume null, an empty session.
+        await index({ sessionId: A }, [record(A, folder)]);
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box"], true, true);
+          expect(r.code).toBe(0);
+          expect(r.seen.config?.cwd).toBe(folder);
+          expect(r.seen.resume?.id).toBe(A);
+          expect(r.seen.resume?.messages).toHaveLength(2);
+          expect(r.seen.notices).toEqual([]);
+        });
+        cleanup();
+      });
+
+      test("the record is gone, unreadable or of another folder: a fresh session and ONE note", async () => {
+        // Mutation: let openSessions take the id unchecked -> `unreadable` / `another folder` are fatal.
+        await withEnv(unreachable, async () => {
+          const note = (r: Awaited<ReturnType<typeof attached>>) => {
+            expect(r.code).toBe(0);
+            expect(r.seen.resume ?? null).toBeNull();
+            expect(r.seen.notices).toHaveLength(1);
+            expect(r.seen.notices[0]).toContain(A.slice(0, 8));
+          };
+          await index({ sessionId: A });
+          note(await attached(["attach", "box"], true, true));
+          // Another folder's record of that uid (never resumed here).
+          const other = join(dir, "other-folder");
+          await mkdir(other, { recursive: true });
+          await index({ sessionId: A }, [record(A, other)]);
+          note(await attached(["attach", "box"], true, true));
+          // The file is there but unusable.
+          await index({ sessionId: A });
+          await store(folder).save(record(A, folder));
+          await writeFile(
+            join(dir, "config", "sessions", projectKey(folder), `${A}.json`),
+            "{nope",
+          );
+          note(await attached(["attach", "box"], true, true));
+        });
+        cleanup();
+      });
+
+      test("an entry without an id (an older run) is today's fresh session, no note", async () => {
+        await index({}, [record(A, folder)]);
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box"], true, true);
+          expect(r.code).toBe(0);
+          expect(r.seen.resume ?? null).toBeNull();
+          expect(r.seen.notices).toEqual([]);
+        });
+        cleanup();
+      });
+
+      test("a bare --resume (no uid, no terminal) takes the newest session, not the entry's", async () => {
+        // Mutation: ignore `resume` in plainResumeUid's flags (the M2 family) -> A is forced.
+        await index({ sessionId: A }, [record(A, folder, 10), record(B, folder, 20)]);
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box", "--resume"], true, true);
+          expect(r.seen.resume?.id).toBe(B);
+        });
+        cleanup();
+      });
+
+      test("every engine records the run's folder: a no-mount entry (k8s) reopens from it, from ANY folder", async () => {
+        // Mutation: moveTo(keptEntry.mount) without `?? cwd` -> the launch folder, no record, a note.
+        const config = join(dir, "config");
+        await index({ sessionId: A }, [record(A, folder)]);
+        const { mount: _mount, ...noMount } = { ...entry, mount: folder };
+        recordKept(keptIndexDir(config), { ...noMount, sessionId: A, cwd: folder });
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box"], true, true);
+          expect(r.code).toBe(0);
+          expect(r.seen.config?.cwd).toBe(folder);
+          expect(r.seen.resume?.id).toBe(A);
+          expect(r.seen.notices).toEqual([]);
+          // Its folder is gone (renamed, deleted): never a refusal — the conversation is
+          // reopened from the record filed under the ORIGINAL path.
+          const missing = join(dir, "gone-run-folder");
+          await store(missing).save(record(B, missing));
+          recordKept(keptIndexDir(config), { ...noMount, cwd: missing, sessionId: B });
+          const gone = await attached(["attach", "box"], true, true);
+          expect(gone.code).toBe(0);
+          expect(gone.text).not.toContain("no longer exists");
+          expect(gone.seen.config?.cwd).toBe(missing);
+          expect(gone.seen.resume?.id).toBe(B);
+          expect(gone.seen.notices).toEqual([]);
+        });
+        cleanup();
+      });
+
+      test("the mount wins over a differing cwd; an entry with neither keeps the launch folder", async () => {
+        // Mutation: prefer `cwd` over `mount` -> the cwd folder is used.
+        const config = join(dir, "config");
+        await index({ sessionId: A }, [record(A, folder)]);
+        recordKept(keptIndexDir(config), {
+          ...entry,
+          mount: folder,
+          cwd: join(dir, "elsewhere-never-created"),
+          sessionId: A,
+        });
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box"], true, true);
+          expect(r.code).toBe(0);
+          expect(r.seen.config?.cwd).toBe(folder);
+          expect(r.seen.resume?.id).toBe(A);
+          // Neither field (an older entry): the launch folder, nothing moved.
+          recordKept(keptIndexDir(config), entry);
+          const older = await attached(["attach", "box"], true, true);
+          expect(older.code).toBe(0);
+          expect(older.seen.config?.cwd).toBe(process.cwd());
+          expect(older.seen.resume ?? null).toBeNull();
+        });
+        cleanup();
+      });
+
+      test("--resume <uid> and --continue still win over the entry's session", async () => {
+        // Mutation: ignore the flags in plainResumeUid -> the entry's session is forced.
+        await index({ sessionId: A }, [record(A, folder, 10), record(B, folder, 20)]);
+        await withEnv(unreachable, async () => {
+          const explicit = await attached(["attach", "box", "--resume", B], true, true);
+          expect(explicit.seen.resume?.id).toBe(B);
+          const latest = await attached(["attach", "box", "--continue"], true, true);
+          expect(latest.seen.resume?.id).toBe(B); // the newest, not the entry's A
+        });
+        cleanup();
+      });
+
+      test("an attach follows the session too: /clear in it, then the next attach reopens THAT one", async () => {
+        // Mutation: drop trackKeptSession from the attach -> the entry keeps A.
+        await index({ sessionId: A }, [record(A, folder)]);
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box"], true, true);
+          r.seen.saver?.save(record(B, folder));
+          const entries = readKept(keptIndexDir(join(dir, "config"))).entries;
+          expect(entries.map((e) => e.entry.sessionId)).toEqual([B]);
+        });
+        cleanup();
+      });
+
+      test("a reused name (the entry re-recorded by a newer run) carries no old session", async () => {
+        await index({ sessionId: A, created: "2026-11-01T00:00:00.000Z" }, [record(A, folder)]);
+        recordKept(keptIndexDir(join(dir, "config")), {
+          ...entry,
+          mount: folder,
+          created: "2026-11-02T00:00:00.000Z",
+        });
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box"], true, true);
+          expect(r.seen.resume ?? null).toBeNull();
+          expect(r.seen.notices).toEqual([]);
+        });
+        cleanup();
+      });
     });
 
     test("attach of a name that IS in `ps` but whose workload is gone: the not-found stays a failure line (not `not in tentacle ps`)", async () => {

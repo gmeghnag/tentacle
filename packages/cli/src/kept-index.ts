@@ -108,3 +108,61 @@ export function readKept(dir: string): KeptIndex {
 export function forgetKept(file: string): void {
   rmSync(file, { force: true });
 }
+
+/**
+ * Record the laptop session a kept workload last saved (docs/fix/attach-plain-resume.md):
+ * what a plain `attach` reopens. A read-modify-write of the entry's OWN file, only if it
+ * still exists and is still THIS workload's (`created`): a `tentacle rm` is not undone,
+ * and a re-run under the same name is not touched by the old process. `false`: not written
+ * for that reason. Throws on a write failure.
+ */
+export function setKeptSession(dir: string, entry: KeptEntry, sessionId: string): boolean {
+  let text: string;
+  try {
+    text = readFileSync(join(dir, keptFileName(entry)), "utf8");
+  } catch {
+    return false;
+  }
+  const parsed = parseKeptEntry(text);
+  if (!parsed.ok || parsed.entry.created !== entry.created) {
+    return false;
+  }
+  if (parsed.entry.sessionId !== sessionId) {
+    recordKept(dir, { ...parsed.entry, sessionId });
+  }
+  return true;
+}
+
+/** The in-TUI notice for a failing `trackKeptSession` write. */
+export const keptSessionNotice = (message: string): string =>
+  `⚠ Could not record this conversation in the kept index (${message}): a later attach will start a new one.`;
+
+/**
+ * Keep `entry`'s `sessionId` at the latest session the saver saves (a `/clear` or
+ * `/resume` makes another uid). Writes only on a change; a failing write is `onError`
+ * once, never thrown into the saver.
+ */
+export function trackKeptSession(
+  saver: { observe: (listener: (record: { readonly id: string }) => void) => void },
+  dir: string,
+  entry: KeptEntry,
+  onError: (message: string) => void,
+): void {
+  let written = entry.sessionId;
+  let failed = false;
+  saver.observe((record) => {
+    if (record.id === written) {
+      return;
+    }
+    try {
+      setKeptSession(dir, entry, record.id);
+      written = record.id;
+      failed = false;
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        onError(error instanceof Error ? error.message : String(error));
+      }
+    }
+  });
+}

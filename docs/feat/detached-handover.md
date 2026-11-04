@@ -495,7 +495,7 @@ with
 | Workload gone after a relay's or last TUI's own removal | Entry and run dir purged: no `owner.json`, so no uid to name. | The ordinary "not found". The launch line gave the `--resume` uid. Accepted. |
 | Pod restarted, relay dead | `attachTo` false, seeded path. | As `--resume`. No record → empty session + notice. |
 | `attach` not on a terminal, detached-origin run | Refused. | Nothing touched. S2's `< /dev/null` debugging path is gone for these runs. |
-| Attach from another folder | Superseded by docs/fix/attach-any-folder.md: attaches as if launched from the run's folder; one line only if that folder is gone. | Record never filed under the wrong project. |
+| Attach from another folder | Superseded by docs/fix/attach-any-folder.md: attaches as if launched from the run's folder; a folder that is gone is no refusal (docs/fix/attach-plain-resume.md round 3): the session is filed under the original path. | Record never filed under the wrong project. |
 | `--resume <other uid>` with a live relay | Refused. | S2's message. |
 | `allow_once` not offered (S2 F7) | The stuck run is now reachable: attach, answer by hand. | Better than S2; no code. |
 

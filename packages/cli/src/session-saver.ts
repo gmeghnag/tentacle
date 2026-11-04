@@ -61,16 +61,32 @@ export class SessionSaver {
   private readonly pending = new Map<Promise<void>, string>();
   /** Uids whose local copy was removed: a later save of one is dropped (never written back). */
   private readonly removed = new Set<string>();
+  private readonly listeners: Array<(record: SessionRecord) => void> = [];
 
   constructor(
     private readonly target: SaveTarget,
     private readonly notify: (text: string) => void,
   ) {}
 
+  /**
+   * Told of every record `save` takes (a laptop-side bookkeeping hook, e.g. the
+   * kept index's latest session). A listener that throws is ignored.
+   */
+  observe(listener: (record: SessionRecord) => void): void {
+    this.listeners.push(listener);
+  }
+
   /** Save in the background; the outcome is reported, never thrown. */
   save(record: SessionRecord): void {
     if (this.removed.has(record.id)) {
       return;
+    }
+    for (const listener of this.listeners) {
+      try {
+        listener(record);
+      } catch {
+        // Bookkeeping must never break a save.
+      }
     }
     const settled = this.target.save(record).then(
       () => this.settle(record.id, { ok: true }),

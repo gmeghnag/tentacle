@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -27,7 +26,7 @@ import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/d
 import { DELETE_POD_SUBCOMMAND, deletePodFromEnv, readKubeconfig } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import { type AutoAcceptFeed, type SessionController, pickSession, startTui } from "@tentacle/tui";
-import { type AttachPlan, planAttach } from "./attach-plan.ts";
+import { type AttachPlan, plainResumeUid, planAttach } from "./attach-plan.ts";
 import { type Joined, joinRun } from "./attach-run.ts";
 import {
   type TentacleConfig,
@@ -78,9 +77,11 @@ import {
   forgetKept,
   keptDir,
   keptFileName,
+  keptSessionNotice,
   locationKey,
   readKept,
   recordKept,
+  trackKeptSession,
 } from "./kept-index.ts";
 import {
   KEPT_SCHEMA_VERSION,
@@ -971,6 +972,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       ...keptLocation(engine, built, { context, insecureTcp }),
       ...(binDir ? { binDir } : {}),
       ...(wsPlan.kind === "mount" ? { mount: wsPlan.mount.target } : {}),
+      // The launch folder, every engine: where `attach` files the session when nothing is mounted.
+      cwd: config.cwd,
       model: config.model,
       ...(config.profile !== undefined ? { profile: config.profile } : {}),
       created,
@@ -1062,7 +1065,22 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     try {
       runtime = await (io.startEngineRuntime ?? startEngineRuntime)(config, {
         ...workloadDeps,
-        ...(keptMeta ? { recordKept: recordKeptEntry } : {}),
+        ...(keptMeta
+          ? {
+              recordKept: (keptName: string) => {
+                const undo = recordKeptEntry(keptName);
+                // The run's latest saved session goes in the entry (laptop-written):
+                // a plain `attach` reopens it (docs/fix/attach-plain-resume.md).
+                trackKeptSession(
+                  sessions.saver,
+                  keptDir(config.configDir),
+                  keptEntryFor(keptName),
+                  (message) => sessions.notices.notify(keptSessionNotice(message)),
+                );
+                return undo;
+              },
+            }
+          : {}),
         permissions,
         saver: sessions.saver,
         resume: sessions.resume,
@@ -1228,24 +1246,16 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
      * if launched from the workload's own folder, which only this laptop
      * recorded (`owner.json`, the kept index entry's `mount`) — never a label.
      * Everything derived from the cwd (project config, the sessions filing)
-     * is re-derived from it. `false`: said, one line.
+     * is re-derived from it. The folder need not exist any more. `false`: the
+     * project config there does not load (said).
      */
-    const moveTo = async (folder: string | undefined, what: string): Promise<boolean> => {
+    const moveTo = async (folder: string | undefined): Promise<boolean> => {
       if (folder === undefined || folder === config.cwd) {
         return true;
       }
-      let there = false;
-      try {
-        there = statSync(folder).isDirectory();
-      } catch {
-        there = false;
-      }
-      if (!there) {
-        write(
-          `[error] ${untrustedText(name)}: the folder of this ${what} no longer exists: ${untrustedText(folder)}\n`,
-        );
-        return false;
-      }
+      // The folder need not exist any more (attach-plain-resume round 3): it only
+      // keys the laptop session store (`sessions/<projectKey(path)>/`), so the
+      // session is filed under the ORIGINAL path string. Never a refusal.
       try {
         config = await loadConfig({
           cwd: folder,
@@ -1310,7 +1320,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         write(`[error] ${attachRefusal(name, plan, run, runNoun)}\n`);
         return 1;
       }
-      if (plan.kind === "run" && !(await moveTo(plan.cwd, "run"))) {
+      if (plan.kind === "run" && !(await moveTo(plan.cwd))) {
         return 1;
       }
       if (!(await useRunModel(run.entry))) {
@@ -1396,9 +1406,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     const keptEntry = lookup?.resolved.kind === "one" ? lookup.resolved.match.entry : undefined;
     // A plain kept container (no owner record): the folder its index entry
-    // mounts, when it mounts one. None (no mount, or explicit flags, which
-    // skip the index): the launch folder, as before.
-    if (keptEntry && !(await moveTo(keptEntry.mount, "container"))) {
+    // mounts, else the folder `run` was launched from (every engine records it).
+    // None (an older entry, or explicit flags, which skip the index): the
+    // launch folder, as before.
+    if (keptEntry && !(await moveTo(keptEntry.mount ?? keptEntry.cwd))) {
       return 1;
     }
     if (keptEntry && !(await useRunModel(keptEntry))) {
@@ -1414,9 +1425,46 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const container = attachFlags.get("container");
     const binDir =
       attachFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR ?? keptEntry?.binDir;
-    const sessions = await openSessions(attachFlags, attachBools);
+    // docs/fix/attach-plain-resume.md: the conversation its run last saved
+    // (the kept entry's `sessionId`, written by this laptop) is reopened from the
+    // laptop record, unless `--resume`/`--continue` chose. The user did not ask for
+    // THAT uid, so a record that is gone, unreadable or of another folder is a
+    // fresh session and one note — never `openSessions`' fatal.
+    const reopenUid = plainResumeUid(keptEntry, {
+      resume: attachBools.has("resume") || attachFlags.has("resume"),
+      continue: attachBools.has("continue"),
+    });
+    let reopenNote: string | undefined;
+    let reopen: string | undefined;
+    if (reopenUid !== undefined) {
+      try {
+        const found = await readSessionRecord(
+          { root: join(config.configDir, "sessions"), cwd: config.cwd },
+          reopenUid,
+        );
+        reopen = found === null ? undefined : reopenUid;
+        if (found === null) {
+          reopenNote = `The conversation of this container (session ${reopenUid.slice(0, 8)}) is not among the saved sessions of ${untrustedText(config.cwd)}: starting a new one.`;
+        }
+      } catch (error) {
+        reopenNote = `The conversation of this container (session ${reopenUid.slice(0, 8)}) could not be read (${untrustedText(error instanceof Error ? error.message : String(error))}): starting a new one.`;
+      }
+    }
+    const sessions = await openSessions(
+      reopen === undefined ? attachFlags : new Map([...attachFlags, ["resume", reopen]]),
+      attachBools,
+    );
     if ("exit" in sessions) {
       return sessions.exit;
+    }
+    if (reopenNote !== undefined) {
+      sessions.notices.notify(reopenNote);
+    }
+    if (keptEntry) {
+      // An attach is a session too (`/clear`, `/resume`): the entry follows the latest.
+      trackKeptSession(sessions.saver, keptDir(config.configDir), keptEntry, (message) =>
+        sessions.notices.notify(keptSessionNotice(message)),
+      );
     }
     let built: ReturnType<typeof engineHost>;
     if (keptEntry) {

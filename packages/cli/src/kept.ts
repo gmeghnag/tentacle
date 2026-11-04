@@ -9,6 +9,7 @@
  * (managed marker + `tentacle.kept=true`) before `rm` deletes anything. Text
  * that came from a file or a workload is sanitised before it is printed.
  */
+import { isValidSessionId } from "@tentacle/agent";
 import type { Kubeconfig } from "@tentacle/k8s";
 import type { EngineKind } from "./engine-host.ts";
 import { untrustedText } from "./untrusted-text.ts";
@@ -48,12 +49,22 @@ export interface KeptEntry {
   readonly binDir?: string;
   /** The laptop folder mounted (slice D), absent without a mount. */
   readonly mount?: string;
+  /**
+   * The laptop folder `run` was launched from, every engine (docs/fix/attach-plain-resume.md
+   * round 2): the run's folder when there is no `mount` (k8s, `--no-mount`). Laptop-written.
+   */
+  readonly cwd?: string;
   /** The model the session started with. */
   readonly model: string;
   /** The config profile `run` was launched with (`attach` talks to the same model). */
   readonly profile?: string;
   /** RFC 3339 UTC, laptop clock. */
   readonly created: string;
+  /**
+   * The laptop session the run last saved (docs/fix/attach-plain-resume.md): what a
+   * plain `attach` reopens. Written by this laptop only (`setKeptSession`).
+   */
+  readonly sessionId?: string;
 }
 
 /** Labels + annotations a kept `run` writes (k8s label values cannot hold a model id with `/`). */
@@ -169,9 +180,12 @@ export function parseKeptEntry(text: string): ParsedEntry {
       ...(r.insecureTcp === true ? { insecureTcp: true } : {}),
       ...opt("binDir"),
       ...opt("mount"),
+      ...opt("cwd"),
       model: r.model,
       ...opt("profile"),
       created: r.created,
+      // A bad id is dropped, never a reason to refuse the entry (it only names a session file).
+      ...(str(r.sessionId) && isValidSessionId(r.sessionId) ? { sessionId: r.sessionId } : {}),
     },
   };
 }
