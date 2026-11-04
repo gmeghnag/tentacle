@@ -43,7 +43,6 @@ import {
   SUBAGENT_INTERRUPTED_NOTE,
   classifyPending,
   parseDaemonRecord,
-  pendingForRecord,
   reconcileOnReload,
   restoredActivity,
   toDaemonRecord,
@@ -330,7 +329,11 @@ describe("daemon persistence: what is written, when", () => {
     const runs: string[] = [];
     const tools = () => [tool("look", "none", runs), tool("run", "ask", runs)];
     const { record, oldId } = await suspendedOnC2(runs, tools);
-    expect(record.turn?.pending).toMatchObject({ toolCallId: "c2", tool: "run", resumable: true });
+    expect(record.turn?.pending?.[0]).toMatchObject({
+      toolCallId: "c2",
+      tool: "run",
+      resumable: true,
+    });
     expect(record.turn?.steering).toEqual(["steer-1"]);
 
     const r2 = rig([text("all done")], tools);
@@ -398,7 +401,11 @@ describe("daemon persistence: what is written, when", () => {
     await until(() => c.asks.length === 1);
     await restored.persisted();
     const second = reread(r2.store.durable.get(restored.id));
-    expect(second.turn?.pending).toMatchObject({ toolCallId: "c2", tool: "run", resumable: true });
+    expect(second.turn?.pending?.[0]).toMatchObject({
+      toolCallId: "c2",
+      tool: "run",
+      resumable: true,
+    });
 
     const r3 = rig([text("all done")], tools);
     const again = r3.host.restore(second);
@@ -450,7 +457,7 @@ describe("daemon persistence: what is written, when", () => {
         send: (u) => {
           updates.push(u);
           if (u.update.type === "permission_request") {
-            durableAtEmit.push(store.durable.get(u.sessionId)?.turn?.pending?.toolCallId);
+            durableAtEmit.push(store.durable.get(u.sessionId)?.turn?.pending?.[0]?.toolCallId);
           }
         },
       },
@@ -650,7 +657,6 @@ describe("daemon persistence: what is written, when", () => {
           turns: [],
           enqueueIds: [],
           resume,
-          cutShort: true,
         },
       },
     );
@@ -799,7 +805,11 @@ describe("daemon persistence: what is written, when", () => {
     await until(() => c.asks.length === 1);
     await hosted.persisted();
     const record = reread(r.store.durable.get(hosted.id));
-    expect(record.turn?.pending).toMatchObject({ toolCallId: "t1", tool: "run", resumable: false });
+    expect(record.turn?.pending?.[0]).toMatchObject({
+      toolCallId: "t1",
+      tool: "run",
+      resumable: false,
+    });
     const restored = rig([], tools).host.restore(record);
     expect(shape(restored.snapshotPage().messages).at(-1)).toBe(
       `tool(t1):${SUBAGENT_INTERRUPTED_NOTE}`,
@@ -825,7 +835,7 @@ describe("daemon persistence: what is written, when", () => {
     hosted.prompt("T1", go);
     await until(() => c.asks.length === 1);
     await hosted.persisted();
-    expect(store.durable.get(hosted.id)?.turn?.pending?.toolCallId).toBe("c1");
+    expect(store.durable.get(hosted.id)?.turn?.pending?.[0]?.toolCallId).toBe("c1");
     // The disk is slow from here: the approval must wait for it.
     store.hold = true;
     c.allow(hosted);
@@ -1129,7 +1139,7 @@ describe("daemon persistence: review fixes (the TTL clock, compaction, shutdown)
         title: "t",
         messages: [{ role: "user", content: "go" }],
         kind: "tentacle.daemon-session",
-        schemaVersion: 7,
+        schemaVersion: 8,
         lastActiveAt: 5,
         turns: [{ turnId: "T" }],
         enqueueIds: [],
@@ -1198,7 +1208,7 @@ describe("daemon persistence: the record's updatedAt is the last conversation ch
       title: "t",
       messages: [{ role: "user", content: "go" }],
       kind: "tentacle.daemon-session",
-      schemaVersion: 7,
+      schemaVersion: 8,
       lastActiveAt: 7,
       turns: [],
       enqueueIds: [],
@@ -1318,7 +1328,7 @@ describe("persisted-session (pure)", () => {
     title: "t",
     messages: [],
     kind: "tentacle.daemon-session",
-    schemaVersion: 7,
+    schemaVersion: 8,
     lastActiveAt: 2,
     turns: [],
     enqueueIds: [],
@@ -1348,7 +1358,7 @@ describe("persisted-session (pure)", () => {
       return p.ok ? "ok" : p.reason;
     };
     expect(reason({ ...base(), kind: undefined })).toMatch(/not a daemon session record/);
-    expect(reason({ ...base(), schemaVersion: 8 })).toMatch(/unsupported record version 8/);
+    expect(reason({ ...base(), schemaVersion: 9 })).toMatch(/unsupported record version 9/);
     expect(reason(base(), "/elsewhere")).toMatch(/another project/);
     expect(reason({ ...base(), turns: [{ turnId: "x", end: { stopReason: "nope" } }] })).toMatch(
       /invalid end/,
@@ -1378,15 +1388,6 @@ describe("persisted-session (pure)", () => {
     expect(classifyPending(messages.slice(0, 2), "c2", "call", "run")).toBe(false); // c1 unanswered
     expect(classifyPending(messages, undefined, "call", "run")).toBe(false); // no attribution
     expect(classifyPending(messages, "c2", undefined, "run")).toBe(false); // no origin
-  });
-
-  test("pendingForRecord: 0 → none, 1 → that entry as is, more → none (T6)", () => {
-    // Mutation: `list[0]` for any length → two live asks write the first as pending.
-    const a = { toolCallId: "a", tool: "run", resumable: true, requestedAt: 1 };
-    const b = { toolCallId: "b", tool: "run", resumable: true, requestedAt: 2 };
-    expect(pendingForRecord([])).toBeUndefined();
-    expect(pendingForRecord([a])).toBe(a);
-    expect(pendingForRecord([a, b])).toBeUndefined();
   });
 
   test("P7 pinned: agent_task never asks for permission itself", () => {
@@ -1446,7 +1447,7 @@ describe("persisted-session (pure)", () => {
         turn: {
           turnId: "T",
           steering: [],
-          pending: { toolCallId: "zz", tool: "x", resumable: true, requestedAt: 1 },
+          pending: [{ toolCallId: "zz", tool: "x", resumable: true, requestedAt: 1 }],
         },
       }),
     );
@@ -1473,11 +1474,11 @@ describe("persisted-session (pure)", () => {
       base({
         messages,
         turns: [{ turnId: "T" }],
-        turn: { turnId: "T", steering: ["s1"], pending },
+        turn: { turnId: "T", steering: ["s1"], pending: [pending] },
         ...over,
       });
     const ok = reconcileOnReload(record({}));
-    expect(ok.resume).toEqual({ turnId: "T", toolCallId: "c2", steering: ["s1"], pending });
+    expect(ok.resume).toEqual({ turnId: "T", from: "c2", steering: ["s1"], pending: [pending] });
     expect(ok.messages).toEqual(messages); // untouched: no notes, no steers appended
     expect(ok.turns).toEqual([{ turnId: "T" }]);
 
@@ -1496,7 +1497,7 @@ describe("persisted-session (pure)", () => {
     expect(
       closed(
         reconcileOnReload(
-          record({ turn: { turnId: "T", steering: ["s1"], pending: { ...pending, tool: "x" } } }),
+          record({ turn: { turnId: "T", steering: ["s1"], pending: [{ ...pending, tool: "x" }] } }),
         ),
       ),
     ).toEqual(notRun);
@@ -1504,20 +1505,20 @@ describe("persisted-session (pure)", () => {
     expect(
       reconcileOnReload(
         record({
-          turn: { turnId: "T", steering: [], pending: { ...pending, resumable: false } },
+          turn: { turnId: "T", steering: [], pending: [{ ...pending, resumable: false }] },
         }),
       ).resume,
     ).toBeUndefined();
   });
 
-  test("U2 parseDaemonRecord: a v1 record reads as current, not archived; archivedAt is a wire stamp; v8 refused", () => {
+  test("U2 parseDaemonRecord: a v1 record reads as current, not archived; archivedAt is a wire stamp; v9 refused", () => {
     // Mutation: refuse v1 → every session of the previous build is skipped at the upgrade.
     // (Task 3 took the current version to 3, task 5 to 4, tui-spill-note to 5, tool-duration
-    // to 6, context-awareness to 7: v1–v6 all read as v7.)
+    // to 6, context-awareness to 7, permission-reply to 8: v1–v7 all read as v8.)
     const parse = (r: unknown) => parseDaemonRecord(r as DaemonSessionRecord, (c) => c === CWD);
     const v1 = parse({ ...base(), schemaVersion: 1, archivedAt: 9 });
     expect(v1.ok ? [v1.record.schemaVersion, v1.record.archivedAt] : v1.reason).toEqual([
-      7,
+      8,
       undefined,
     ]);
     const v2 = parse(base({ archivedAt: 5 }));
@@ -1527,9 +1528,9 @@ describe("persisted-session (pure)", () => {
       const p = parse({ ...base(), archivedAt: bad });
       expect(p.ok ? "ok" : p.reason).toBe('"archivedAt" is not a non-negative integer');
     }
-    const v8 = parse({ ...base(), schemaVersion: 8 });
-    expect(v8.ok ? "ok" : v8.reason).toMatch(
-      /unsupported record version 8 \(this daemon reads 1, 2, 3, 4, 5, 6, 7\)/,
+    const v9 = parse({ ...base(), schemaVersion: 9 });
+    expect(v9.ok ? "ok" : v9.reason).toMatch(
+      /unsupported record version 9 \(this daemon reads 1, 2, 3, 4, 5, 6, 7, 8\)/,
     );
   });
 
@@ -1554,7 +1555,7 @@ describe("persisted-session (pure)", () => {
         archivedAt: 10,
         messages,
         turns: [{ turnId: "T" }],
-        turn: { turnId: "T", steering: ["s1"], pending },
+        turn: { turnId: "T", steering: ["s1"], pending: [pending] },
       }),
     );
     expect(r.resume).toBeUndefined();
@@ -1575,7 +1576,7 @@ describe("persisted-session (pure)", () => {
         archivedAt: 10,
         messages,
         turns: [],
-        turn: { turnId: "T", steering: [], pending: { ...pending, resumable: false } },
+        turn: { turnId: "T", steering: [], pending: [{ ...pending, resumable: false }] },
       }),
     );
     expect(shape(sub.messages).at(-2)).toBe(`tool(c2):${ENDED_SUBAGENT_INTERRUPTED_NOTE}`);
@@ -1585,7 +1586,7 @@ describe("persisted-session (pure)", () => {
         archivedAt: 10,
         messages,
         turns: [{ turnId: "T", end: { stopReason: "cancelled" } }],
-        turn: { turnId: "T", steering: [], pending },
+        turn: { turnId: "T", steering: [], pending: [pending] },
       }),
     );
     expect(keyed.turns).toEqual([{ turnId: "T", end: { stopReason: "cancelled" } }]);
@@ -2225,7 +2226,7 @@ describe("the v4 record: steer ids and returned rows (docs/feat/queued-broadcast
     );
     expect(
       v3.ok ? [v3.record.schemaVersion, v3.record.turn, v3.record.returned] : v3.reason,
-    ).toEqual([7, { turnId: "T", steering: ["s1"] }, []]);
+    ).toEqual([8, { turnId: "T", steering: ["s1"] }, []]);
     const v3Title = parse(v4({ schemaVersion: 3, title: { text: "Fix login", source: "user" } }));
     expect(v3Title.ok ? v3Title.record.title : v3Title.reason).toEqual({
       text: "Fix login",
@@ -2394,7 +2395,11 @@ describe("the v4 record: steer ids and returned rows (docs/feat/queued-broadcast
       entries: [{ id: "e1", text: "steer-1" }],
       returned: [],
     });
-    const old = parse({ ...JSON.parse(JSON.stringify(record)), schemaVersion: 3 });
+    // A v3 record held ONE pending object, never a group (the v8 list and
+    // `groupStart` are round-groups-persistence's).
+    const v3 = JSON.parse(JSON.stringify(record));
+    const { groupStart: _g, ...entry } = v3.turn?.pending?.[0] ?? {};
+    const old = parse({ ...v3, schemaVersion: 3, turn: { ...v3.turn, pending: entry } });
     if (!old.ok) throw new Error(old.reason);
     const minted = rig([], tools).host.restore(old.record).snapshotPage().queued?.entries ?? [];
     expect(minted.map((r) => r.text)).toEqual(["steer-1"]);
@@ -2503,7 +2508,7 @@ describe("the v5 record: a tool message may carry its spill (docs/feat/tui-spill
   test("V5-1 a v5 record still reads (as the current v7; tool-duration took the version to 6, context-awareness to 7)", () => {
     // Was "written as v5; v6 refused" — superseded by V6-1, then V7-1 below.
     const ok = parse(v4({ schemaVersion: 5 }));
-    expect(ok.ok ? ok.record.schemaVersion : ok.reason).toBe(7);
+    expect(ok.ok ? ok.record.schemaVersion : ok.reason).toBe(8);
   });
 
   test("V5-2 a v4 record reads as current with its ids, rows and messages intact — and still refuses a v4 turn without ids", () => {
@@ -2516,7 +2521,7 @@ describe("the v5 record: a tool message may carry its spill (docs/feat/tui-spill
         ? [ok.record.schemaVersion, ok.record.turn, ok.record.returned, ok.record.messages]
         : ok.reason,
     ).toEqual([
-      7,
+      8,
       { turnId: "T", steering: ["s1"], steeringIds: ["i1"] },
       [{ id: "r1", text: "R", cause: "cancelled" }],
       [{ role: "user", content: "go" }],
@@ -2545,7 +2550,7 @@ describe("the v5 record: a tool message may carry its spill (docs/feat/tui-spill
     const stored = parseSessionRecord(bytes, hosted.id);
     expect(stored.ok ? "ok" : stored.reason).toBe("ok");
     const record = reread(durable);
-    expect(record.schemaVersion).toBe(7);
+    expect(record.schemaVersion).toBe(8);
     const restored = rig([], () => []).host.restore(record);
     const toolMessage = restored.snapshotPage().messages.find((m) => m.role === "tool");
     expect(toolMessage?.spill).toEqual(spill);
@@ -2578,14 +2583,14 @@ describe("the v6 record: a tool message may carry its durationMs (docs/fix/tool-
   test("V6-1 a v6 record still reads (as the current v7; docs/feat/context-awareness.md took the version to 7)", () => {
     // Was "written as v6; v7 refused" — superseded by V7-1 below.
     const ok = parse(v5({ schemaVersion: 6 }));
-    expect(ok.ok ? ok.record.schemaVersion : ok.reason).toBe(7);
+    expect(ok.ok ? ok.record.schemaVersion : ok.reason).toBe(8);
   });
 
   test("V6-2 a v1–v5 record reads as current with no durations, its messages intact", () => {
     for (const schemaVersion of [1, 2, 3, 4, 5]) {
       const turn = schemaVersion >= 4 ? { turnId: "T", steering: [], steeringIds: [] } : undefined;
       const ok = parse(v5({ schemaVersion, ...(turn ? { turn } : {}) }));
-      expect(ok.ok ? ok.record.schemaVersion : ok.reason).toBe(7);
+      expect(ok.ok ? ok.record.schemaVersion : ok.reason).toBe(8);
       expect(ok.ok ? (ok.record.messages as unknown) : ok.reason).toEqual(v5().messages);
       expect(ok.ok && ok.record.messages.some((m) => "durationMs" in m)).toBe(false);
     }
@@ -2616,7 +2621,7 @@ describe("the v6 record: a tool message may carry its durationMs (docs/fix/tool-
     const stored = parseSessionRecord(bytes, hosted.id);
     expect(stored.ok ? "ok" : stored.reason).toBe("ok");
     const record = reread(durable);
-    expect(record.schemaVersion).toBe(7);
+    expect(record.schemaVersion).toBe(8);
     const restored = rig([], () => []).host.restore(record);
     const toolMessage = restored.snapshotPage().messages.find((m) => m.role === "tool");
     expect(toolMessage?.durationMs).toBe(live[0] ?? -1);
@@ -2646,33 +2651,17 @@ describe("the v7 record: a message may carry its contextUsage (docs/feat/context
   });
   const parse = (r: unknown) => parseDaemonRecord(r as DaemonSessionRecord, (c) => c === CWD);
 
-  test("V7-1 a record is written as v7; a v8 one is refused (a v6 daemon refuses a v7 the same way)", () => {
-    const written = toDaemonRecord(
-      {
-        id: "s",
-        createdAt: 1,
-        lastActiveAt: 1,
-        lastChangeAt: 1,
-        messages: [],
-        turns: [],
-        enqueueIds: [],
-      },
-      { cwd: CWD, model: "m" },
-      1,
-    );
-    expect(written.schemaVersion).toBe(7);
-    expect(parse(v6({ schemaVersion: 7 })).ok).toBe(true);
-    const v8 = parse(v6({ schemaVersion: 8 }));
-    expect(v8.ok ? "ok" : v8.reason).toBe(
-      "unsupported record version 8 (this daemon reads 1, 2, 3, 4, 5, 6, 7)",
-    );
+  test("V7-1 a v7 record still reads (as the current v8; docs/feat/permission-reply.md took the version to 8)", () => {
+    // Was "written as v7; v8 refused" — superseded by V8-1 below.
+    const ok = parse(v6({ schemaVersion: 7 }));
+    expect(ok.ok ? ok.record.schemaVersion : ok.reason).toBe(8);
   });
 
   test("V7-2 a v1–v6 record reads as v7 with no lines, its messages intact", () => {
     for (const schemaVersion of [1, 2, 3, 4, 5, 6]) {
       const turn = schemaVersion >= 4 ? { turnId: "T", steering: [], steeringIds: [] } : undefined;
       const ok = parse(v6({ schemaVersion, ...(turn ? { turn } : {}) }));
-      expect(ok.ok ? ok.record.schemaVersion : ok.reason).toBe(7);
+      expect(ok.ok ? ok.record.schemaVersion : ok.reason).toBe(8);
       expect(ok.ok ? (ok.record.messages as unknown) : ok.reason).toEqual(v6().messages);
       expect(ok.ok && ok.record.messages.some((m) => "contextUsage" in m)).toBe(false);
     }
@@ -2699,13 +2688,141 @@ describe("the v7 record: a message may carry its contextUsage (docs/feat/context
     const stored = parseSessionRecord(bytes, hosted.id);
     expect(stored.ok ? "ok" : stored.reason).toBe("ok");
     const record = reread(durable);
-    expect(record.schemaVersion).toBe(7);
+    expect(record.schemaVersion).toBe(8);
     const line = record.messages.find((m) => m.role === "user")?.contextUsage;
     expect(line?.window).toBe(1000);
     const restored = rig([], () => []).host.restore(record);
     const user = restored.snapshotPage().messages.find((m) => m.role === "user");
     expect(user?.content).toBe("go");
     expect(user?.contextUsage).toEqual(line ?? { used: -1, window: 1 });
+  });
+});
+
+describe("the v8 record: a refused call's reply and the installed head (docs/feat/permission-reply.md)", () => {
+  const SYS: ChatMessage = { role: "system", content: "S" };
+  const HEAD: ChatMessage = { role: "user", content: "RESTART PROMPT" };
+  const record = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: "s",
+    cwd: CWD,
+    model: "m",
+    createdAt: 1,
+    updatedAt: 2,
+    title: "t",
+    messages: [SYS, HEAD],
+    kind: "tentacle.daemon-session",
+    schemaVersion: 8,
+    lastActiveAt: 2,
+    turns: [{ turnId: "t1" }],
+    enqueueIds: [],
+    returned: [],
+    ...over,
+  });
+  const parse = (r: unknown) => parseDaemonRecord(r as DaemonSessionRecord, (c) => c === CWD);
+  const parsed = (r: unknown): DaemonSessionRecord => {
+    const p = parse(JSON.parse(JSON.stringify(r)));
+    if (!p.ok) throw new Error(p.reason);
+    return p.record;
+  };
+  /** Cut short AT a context reset's barrier: the fresh history, its turn in flight. */
+  const atBarrier = { turn: { turnId: "t1", steering: [], steeringIds: [] } };
+
+  test("V8-1 a record is written as v8; a v9 one is refused (a v7 daemon refuses a v8 the same way)", () => {
+    const written = toDaemonRecord(
+      {
+        id: "s",
+        createdAt: 1,
+        lastActiveAt: 1,
+        lastChangeAt: 1,
+        messages: [],
+        turns: [],
+        enqueueIds: [],
+      },
+      { cwd: CWD, model: "m" },
+      1,
+    );
+    expect(written.schemaVersion).toBe(8);
+    expect(parse(record()).ok).toBe(true);
+    const v9 = parse(record({ schemaVersion: 9 }));
+    expect(v9.ok ? "ok" : v9.reason).toBe(
+      "unsupported record version 9 (this daemon reads 1, 2, 3, 4, 5, 6, 7, 8)",
+    );
+  });
+
+  test("V8-2 a tool message's denialReply survives a restart: the bytes pass the store's strict parser, the snapshot carries it", () => {
+    const messages: ChatMessage[] = [
+      { role: "user", content: "go" },
+      { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "shell", arguments: "{}" }] },
+      { role: "tool", content: "denied…", toolCallId: "c1", denialReply: "try bun run build" },
+    ];
+    const bytes = JSON.parse(
+      JSON.stringify(
+        record({ messages, turns: [{ turnId: "t1", end: { stopReason: "end_turn" } }] }),
+      ),
+    );
+    const stored = parseSessionRecord(bytes, "s");
+    expect(stored.ok ? "ok" : stored.reason).toBe("ok");
+    const restored = rig([], () => []).host.restore(parsed(bytes));
+    const tool = restored.snapshotPage().messages.find((m) => m.role === "tool");
+    expect(tool?.denialReply).toBe("try bun run build");
+  });
+
+  test("V8-3 `head` must name a user message of the history", () => {
+    expect(parse(record({ head: 1 })).ok).toBe(true);
+    for (const head of [0, 2, -1, 1.5, "1", null]) {
+      const p = parse(record({ head }));
+      expect(p.ok ? "ok" : p.reason).toBe('"head" is malformed');
+    }
+  });
+
+  test("V8-4 an unmarked head is the reload rule (idle and `[system?, user]` only), for v1–v7 and v8 alike", () => {
+    const v8 = parse(record({ turns: [] }));
+    expect(v8.ok ? v8.record.head : v8.reason).toBe(1);
+    const head = (over: Record<string, unknown>): unknown => {
+      const p = parse(record({ schemaVersion: 7, ...over }));
+      return p.ok ? (p.record.head ?? "none") : p.reason;
+    };
+    expect(head({})).toBe(1);
+    expect(head({ messages: [HEAD] })).toBe(0);
+    expect(head(atBarrier)).toBe("none");
+    expect(head({ messages: [SYS, HEAD, { role: "assistant", content: "hi" }] })).toBe("none");
+    // A head an older build somehow wrote is not read: v8 is its first version.
+    expect(head({ messages: [SYS, HEAD, { role: "assistant", content: "x" }], head: 1 })).toBe(
+      "none",
+    );
+  });
+
+  test("V8-5 (context-reset slice-2 F1) cut short at a reset: the marked head is the summary again — a send-now has nothing to answer, as before the crash", () => {
+    // Mutation: ignore `head` on reload → the send-now starts a turn answering the restart prompt.
+    const marked = rig([text("unasked")], () => []).host.restore(
+      parsed(record({ ...atBarrier, head: 1 })),
+    );
+    let code: number | undefined;
+    try {
+      marked.sendNow("t2", { kind: "turn", turnId: "t1" }, []);
+    } catch (error) {
+      code = error instanceof RpcError ? error.code : -1;
+    }
+    expect(code).toBe(DomainErrorCode.NoTurnRunning);
+    expect(marked.running).toBe(false);
+    // What v7 could not say (the debt): the same record unmarked starts a turn.
+    const unmarked = rig([text("unasked")], () => []).host.restore(
+      parsed(record({ ...atBarrier, schemaVersion: 7 })),
+    );
+    expect(unmarked.sendNow("t2", { kind: "turn", turnId: "t1" }, [])).toEqual({ turnId: "t2" });
+  });
+
+  test("V8-6 every write marks the installed head while it is in the history", async () => {
+    // Mutation: drop `head` from `persistedState` → the record after the turn has none.
+    const r = rig([text("done")], () => []);
+    const restored = r.host.restore(parsed(record({ head: 1, turns: [] })));
+    const c = client();
+    restored.attach(c.attachment);
+    restored.prompt("T2", go);
+    await until(() => c.ended("T2"));
+    await restored.persisted();
+    const after = reread(r.store.durable.get("s"));
+    expect(after.head).toBe(1);
+    expect(after.messages[1]).toEqual(HEAD);
   });
 });
 
@@ -2734,7 +2851,7 @@ describe("permission call attribution", () => {
     await until(() => c.asks.length === 1);
     expect(c.asks[0]?.toolCallId).toBe("c1");
     await hosted.persisted();
-    expect(reread(r.store.durable.get(hosted.id)).turn?.pending).toMatchObject({
+    expect(reread(r.store.durable.get(hosted.id)).turn?.pending?.[0]).toMatchObject({
       toolCallId: "c1",
       tool: "run",
     });
@@ -2767,7 +2884,7 @@ describe("permission call attribution", () => {
       agent: { type: "explore", description: "find callers" },
     });
     await hosted.persisted();
-    expect(reread(r.store.durable.get(hosted.id)).turn?.pending).toMatchObject({
+    expect(reread(r.store.durable.get(hosted.id)).turn?.pending?.[0]).toMatchObject({
       toolCallId: "t1",
       resumable: false,
     });
@@ -2776,7 +2893,7 @@ describe("permission call attribution", () => {
     expect(c.asks[0]?.agent).toBeUndefined();
     await hosted.persisted();
     // No attribution: never resumable, never the wrong call.
-    expect(reread(r.store.durable.get(hosted.id)).turn?.pending).toMatchObject({
+    expect(reread(r.store.durable.get(hosted.id)).turn?.pending?.[0]).toMatchObject({
       toolCallId: "",
       resumable: false,
     });
@@ -2802,10 +2919,11 @@ describe("permission call attribution", () => {
     return rig([[call("f1", "fan"), { type: "done" }]], tools);
   }
 
-  test("T5/T6 two live asks: each its own request; answered one by one; disk holds only a single one", async () => {
+  test("T5/T6 two live asks: each its own request; answered one by one; disk holds both (v8 list)", async () => {
     // Mutation: one `pending` slot overwritten by each ask (main) → the record
-    // names x2 while two are live; or `pendingForRecord` keeps the first of
-    // two → the record says "x1 pending" while x2 is too.
+    // names x2 while two are live; or only the first of two is written → the
+    // record says "x1 pending" while x2 is too
+    // (docs/feat/round-groups-persistence.md: the list goes on disk with v8).
     const answers: boolean[] = [];
     const r = fanRig(answers);
     const c = client();
@@ -2818,8 +2936,12 @@ describe("permission call attribution", () => {
     await hosted.persisted();
     const both = reread(r.store.durable.get(hosted.id));
     expect(both.turn).toBeDefined();
-    expect(both.turn?.pending).toBeUndefined();
-    // A record written with two live asks reloads CLOSED: never resumed, never re-run.
+    expect(both.turn?.pending?.map((p) => [p.toolCallId, p.resumable])).toEqual([
+      ["x1", false],
+      ["x2", false],
+    ]);
+    // A record written with two live asks (not the call's own: f1 asked nothing)
+    // reloads CLOSED: never resumed, never re-run.
     const reloaded = rig([], () => []).host.restore(both);
     expect(shape(reloaded.snapshotPage().messages).at(-1)).toBe(`tool(f1):${INTERRUPTED_NOTE}`);
     expect(reconcileOnReload(both).resume).toBeUndefined();
@@ -2829,9 +2951,9 @@ describe("permission call attribution", () => {
     expect(c.asks.map((a) => a.toolCallId)).toEqual(["x2"]);
     await tick(); // the settled ask's write is scheduled after the answer returns
     await hosted.persisted();
-    expect(reread(r.store.durable.get(hosted.id)).turn?.pending).toMatchObject({
-      toolCallId: "x2",
-    });
+    expect(reread(r.store.durable.get(hosted.id)).turn?.pending?.map((p) => p.toolCallId)).toEqual([
+      "x2",
+    ]);
     // A stale answer to the first never binds to the second.
     expect(() => hosted.resolvePermission(first?.requestId ?? "", "reject_once")).toThrow(
       expect.objectContaining({ code: DomainErrorCode.PermissionNotPending }),
@@ -2886,12 +3008,426 @@ describe("permission call attribution", () => {
     hosted.prompt("T1", go);
     await until(() => parkedRunning && c.asks.length === 1);
     await hosted.persisted();
-    expect(reread(r.store.durable.get(hosted.id)).turn?.pending).toMatchObject({
+    expect(reread(r.store.durable.get(hosted.id)).turn?.pending?.[0]).toMatchObject({
       toolCallId: "c1",
     });
     c.allow(hosted);
     await answered;
     unpark();
     await until(() => c.ended("T1"));
+  });
+});
+
+// --- round groups on disk (docs/feat/round-groups-persistence.md) ----------
+
+describe("round groups on disk: groupStart, pending[] and inFlight (v8)", () => {
+  const rec = (over: Partial<DaemonSessionRecord> = {}): DaemonSessionRecord => ({
+    id: "s",
+    cwd: CWD,
+    model: "m",
+    createdAt: 1,
+    updatedAt: 2,
+    title: "t",
+    messages: [],
+    kind: "tentacle.daemon-session",
+    schemaVersion: 8,
+    lastActiveAt: 2,
+    turns: [],
+    enqueueIds: [],
+    returned: [],
+    ...over,
+  });
+  const round: ChatMessage[] = [
+    { role: "user", content: "go" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [
+        { id: "c1", name: "run", arguments: '{"n":1}' },
+        { id: "c2", name: "run", arguments: '{"n":2}' },
+        { id: "c3", name: "agent_task", arguments: "{}" },
+      ],
+    },
+  ];
+  const entry = (toolCallId: string, over: Record<string, unknown> = {}) => ({
+    toolCallId,
+    tool: "run",
+    resumable: true,
+    requestedAt: 1,
+    ...over,
+  });
+  const parse = (r: unknown) => parseDaemonRecord(r as DaemonSessionRecord, (c) => c === CWD);
+  const closedBy = (r: DaemonSessionRecord) =>
+    shape(reconcileOnReload(r).messages).filter((s) => s.startsWith("tool("));
+
+  test("T1 (repro B) classifyPending: an ask inside its group, before any of it ran, is resumable", () => {
+    // Mutation: ignore `groupStart` (today's `suspendedCalls(c2)`) → false.
+    expect(classifyPending(round, "c2", "call", "run", "c1")).toBe(true);
+    // Absent → the call itself: today's answer (c1 unanswered before c2).
+    expect(classifyPending(round, "c2", "call", "run")).toBe(false);
+    expect(classifyPending(round, "c2", "subagent", "run", "c1")).toBe(false);
+    expect(classifyPending(round, "c2", "call", "look", "c1")).toBe(false);
+    expect(classifyPending(round, "c2", "call", "run", "c2")).toBe(false); // c1 unanswered
+  });
+
+  test("T2 a record suspended inside a group resumes from the group head: c1 asked again, then c2", async () => {
+    // Mutation: resume from `pending.toolCallId` (c2) → ResumeShapeError / closed, c1 never asked.
+    const runs: string[] = [];
+    const record = rec({
+      messages: round.slice(0, 1).concat({
+        ...round[1],
+        toolCalls: round[1]?.toolCalls?.slice(0, 2),
+      } as ChatMessage),
+      turns: [{ turnId: "T1" }],
+      turn: {
+        turnId: "T1",
+        steering: [],
+        steeringIds: [],
+        pending: [{ ...entry("c2"), groupStart: "c1" }],
+      },
+    });
+    const reloaded = reread(record);
+    expect(reconcileOnReload(reloaded).resume).toMatchObject({ turnId: "T1", from: "c1" });
+    const restored = rig([text("done")], () => [tool("run", "ask", runs)]).host.restore(reloaded);
+    const c = client();
+    restored.attach(c.attachment);
+    expect(restored.running).toBe(true);
+    await until(() => c.asks.length === 1);
+    expect(c.asks[0]?.toolCallId).toBe("c1");
+    c.allow(restored);
+    await until(() => c.asks[0]?.toolCallId === "c2");
+    c.allow(restored);
+    await until(() => !restored.running);
+    expect(runs).toEqual(['run:{"n":1}', 'run:{"n":2}']);
+  });
+
+  test("T2b not resumed: inFlight present, entries on different groups, or one not resumable", () => {
+    const turn = (over: Record<string, unknown>) =>
+      rec({
+        messages: round,
+        turns: [{ turnId: "T" }],
+        turn: { turnId: "T", steering: [], steeringIds: [], ...over } as never,
+      });
+    const g = { groupStart: "c1" };
+    expect(reconcileOnReload(turn({ pending: [{ ...entry("c2"), ...g }] })).resume).toBeDefined();
+    expect(
+      reconcileOnReload(turn({ pending: [{ ...entry("c2"), ...g }], inFlight: ["c1"] })).resume,
+    ).toBeUndefined();
+    expect(
+      reconcileOnReload(
+        turn({
+          pending: [
+            { ...entry("c1"), ...g },
+            { ...entry("c2"), groupStart: "c2" },
+          ],
+        }),
+      ).resume,
+    ).toBeUndefined();
+    expect(
+      reconcileOnReload(
+        turn({
+          pending: [
+            { ...entry("c1"), ...g },
+            { ...entry("c2"), ...g, resumable: false },
+          ],
+        }),
+      ).resume,
+    ).toBeUndefined();
+  });
+
+  test("T3 labels with inFlight: in flight → Interrupted (or the sub-agent note), the rest → Not run", () => {
+    // Mutation: label from the first unanswered call only (today) → c2 'Not run'.
+    const record = (archivedAt?: number) =>
+      rec({
+        messages: round,
+        turns: [{ turnId: "T" }],
+        ...(archivedAt !== undefined ? { archivedAt } : {}),
+        turn: {
+          turnId: "T",
+          steering: [],
+          steeringIds: [],
+          inFlight: ["c1", "c3"],
+          pending: [entry("c3", { tool: "run", resumable: false })],
+        },
+      });
+    expect(closedBy(record())).toEqual([
+      `tool(c1):${INTERRUPTED_NOTE}`,
+      `tool(c2):${NOT_RUN_NOTE}`,
+      `tool(c3):${SUBAGENT_INTERRUPTED_NOTE}`,
+    ]);
+    expect(closedBy(record(10))).toEqual([
+      `tool(c1):${ENDED_INTERRUPTED_NOTE}`,
+      `tool(c2):${ENDED_NOT_RUN_NOTE}`,
+      `tool(c3):${ENDED_SUBAGENT_INTERRUPTED_NOTE}`,
+    ]);
+    // No inFlight: today's rule (only the first unanswered call may have run).
+    const plain = rec({
+      messages: round,
+      turns: [{ turnId: "T" }],
+      turn: { turnId: "T", steering: [], steeringIds: [] },
+    });
+    expect(closedBy(plain)).toEqual([
+      `tool(c1):${INTERRUPTED_NOTE}`,
+      `tool(c2):${NOT_RUN_NOTE}`,
+      `tool(c3):${NOT_RUN_NOTE}`,
+    ]);
+  });
+
+  test("T6 v7 → v8: a v7 pending object reads as a one-entry list; malformed v8 turn fields are refused", () => {
+    // Mutation: drop the `< V8` wrap → a v7 suspended record is refused at the upgrade.
+    const turn = (version: number, over: Record<string, unknown>) =>
+      parse({
+        ...rec({ messages: round, turns: [{ turnId: "T" }] }),
+        schemaVersion: version,
+        turn: { turnId: "T", steering: [], steeringIds: [], ...over },
+      });
+    const v7 = turn(7, { pending: entry("c1") });
+    expect(v7.ok ? v7.record.turn?.pending : v7.reason).toEqual([entry("c1")]);
+    if (v7.ok) {
+      expect(reconcileOnReload(v7.record).resume).toMatchObject({
+        from: "c1",
+        pending: [entry("c1")],
+      });
+    }
+    const v8 = turn(8, { pending: [{ ...entry("c2"), groupStart: "c1" }], inFlight: ["c1"] });
+    expect(v8.ok).toBe(true);
+    const reasons = [
+      turn(8, { pending: entry("c1") }),
+      turn(8, { pending: [] }),
+      turn(8, { pending: [{ ...entry("c1"), groupStart: 3 }] }),
+      turn(8, { pending: [{ toolCallId: "c1" }] }),
+      turn(8, { inFlight: [] }),
+      turn(8, { inFlight: ["c1", 2] }),
+      turn(7, { inFlight: ["c1"] }),
+      turn(7, { pending: entry("c1", { groupStart: "c1" }) }),
+    ].map((p) => (p.ok ? "ok" : p.reason));
+    expect(reasons).toEqual([
+      '"turn.pending" is malformed',
+      '"turn.pending" is malformed',
+      '"turn.pending" is malformed',
+      '"turn.pending" is malformed',
+      '"turn.inFlight" is malformed',
+      '"turn.inFlight" is malformed',
+      '"turn.inFlight" is malformed',
+      '"turn.pending" is malformed',
+    ]);
+  });
+
+  /** A session whose agent is replaced by `fake` (a scripted group, task 6's executor shape). */
+  function hostedWith(
+    store: SpyStore,
+    fake: (
+      messages: ChatMessage[],
+      opts: { beforeRun?: (ids: readonly string[], s: AbortSignal) => Promise<boolean> },
+      signal: AbortSignal,
+    ) => AsyncGenerator<import("@tentacle/agent").AgentEvent>,
+    persisted = true,
+    setup: (persister: SessionPersister) => void = () => {},
+  ) {
+    const persister = new SessionPersister({ store, cwd: CWD, model: "m", onError: () => {} });
+    setup(persister);
+    const agent = new Agent({ model: new Scripted([]), tools: new ToolRegistry(), env });
+    agent.runMessages = (messages, _id, signal, _drain, opts = {}) =>
+      fake(messages, opts, signal ?? new AbortController().signal);
+    const hosted = new HostedSession(
+      "s1",
+      new Session(agent),
+      new PermissionBroker(),
+      undefined,
+      {},
+      undefined,
+      Date.now,
+      persisted ? { persister } : undefined,
+    );
+    const updates: KnownSessionUpdateParams[] = [];
+    hosted.attach({ send: (u) => updates.push(u) });
+    return { hosted, updates };
+  }
+
+  test("T4 beforeRun: inFlight is durable before the group runs, resolves true, cleared at the group's commit", async () => {
+    // Mutation: drop the `await` on the write in `beforeRun` → resolved before the disk has it.
+    const store = new SpyStore();
+    const atRun: (string[] | undefined)[] = [];
+    let landed: boolean | undefined;
+    let settledWhileHeld: boolean | undefined;
+    const { hosted } = hostedWith(store, async function* (messages, opts) {
+      messages.push({
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "c1", name: "run", arguments: "{}" },
+          { id: "c2", name: "run", arguments: "{}" },
+        ],
+      });
+      yield { type: "history_commit" };
+      yield { type: "tool_start", id: "c1", name: "run", arguments: "{}" };
+      yield { type: "tool_start", id: "c2", name: "run", arguments: "{}" };
+      store.hold = true;
+      const wrote = opts.beforeRun?.(["c1", "c2"], new AbortController().signal);
+      void wrote?.then(() => {
+        settledWhileHeld = store.hold;
+      });
+      await tick(5);
+      atRun.push(store.durable.get("s1")?.turn?.inFlight as string[] | undefined);
+      store.hold = false;
+      store.release();
+      landed = await wrote;
+      atRun.push(store.durable.get("s1")?.turn?.inFlight as string[] | undefined);
+      messages.push({ role: "tool", content: "a", toolCallId: "c1" });
+      messages.push({ role: "tool", content: "b", toolCallId: "c2" });
+      yield { type: "history_commit" };
+      yield { type: "turn_end", reason: "end_turn" };
+    });
+    hosted.prompt("T1", go);
+    await until(() => !hosted.running);
+    await hosted.persisted();
+    // Held: not on disk yet (and `wrote` had not resolved); released: on disk.
+    expect(atRun).toEqual([undefined, ["c1", "c2"]]);
+    expect(settledWhileHeld).toBe(false); // resolved only once the disk had it
+    expect(landed).toBe(true);
+    // The group's commit captured the results AND cleared inFlight together.
+    const commit = store.saves.find((s) =>
+      s.messages.some((m) => m.role === "tool" && m.toolCallId === "c2"),
+    );
+    expect(commit?.turn?.inFlight).toBeUndefined();
+  });
+
+  test("T4b beforeRun: a failed write resolves false; a cancel releases a hung write (false)", async () => {
+    // Mutation: return true whatever the write did → task 6 would run a group the disk never saw.
+    const failing = new SpyStore();
+    let failed: boolean | undefined;
+    const a = hostedWith(failing, async function* (_m, opts) {
+      failing.fail = new Error("disk full");
+      failed = await opts.beforeRun?.(["c1", "c2"], new AbortController().signal);
+      failing.fail = null;
+      yield { type: "turn_end", reason: "end_turn" };
+    });
+    a.hosted.prompt("T1", go);
+    await until(() => !a.hosted.running);
+    expect(failed).toBe(false);
+
+    const hung = new SpyStore();
+    let released: boolean | undefined;
+    const b = hostedWith(hung, async function* (_m, opts, signal) {
+      hung.hold = true;
+      released = await opts.beforeRun?.(["c1", "c2"], signal);
+      yield { type: "turn_end", reason: "cancelled" };
+    });
+    b.hosted.prompt("T1", go);
+    await tick(5);
+    b.hosted.cancel();
+    await until(() => released !== undefined);
+    expect(released).toBe(false);
+    hung.hold = false;
+    hung.release();
+  });
+
+  test("T4c no persister (pods, the worker): beforeRun resolves true at once and writes nothing", async () => {
+    const store = new SpyStore();
+    let wrote: boolean | undefined;
+    const { hosted } = hostedWith(
+      store,
+      async function* (_m, opts) {
+        wrote = await opts.beforeRun?.(["c1", "c2"], new AbortController().signal);
+        yield { type: "turn_end", reason: "end_turn" };
+      },
+      false,
+    );
+    hosted.prompt("T1", go);
+    await until(() => !hosted.running);
+    expect(wrote).toBe(true);
+    expect(store.saves).toEqual([]);
+  });
+
+  test("T4d a session the persister never writes (blocked file): beforeRun resolves true, like no persister", async () => {
+    // docs/feat/round-groups-persistence.md Q-R2. Mutation: return the write's
+    // `false` for an unwritable session → task 6 would run its groups one at a
+    // time for nothing (no disk to be honest to).
+    const store = new SpyStore();
+    let wrote: boolean | undefined;
+    const { hosted } = hostedWith(
+      store,
+      async function* (_m, opts) {
+        wrote = await opts.beforeRun?.(["c1", "c2"], new AbortController().signal);
+        yield { type: "turn_end", reason: "end_turn" };
+      },
+      true,
+      (persister) => persister.block("s1"),
+    );
+    hosted.prompt("T1", go);
+    await until(() => !hosted.running);
+    expect(wrote).toBe(true);
+    expect(store.saves).toEqual([]);
+  });
+
+  test("T9 (F1) a resumed group: while c1 runs the disk no longer says 'resume from c1'", async () => {
+    // docs/feat/round-groups-persistence.md Review F1 / Q-R1. The record holds
+    // c2 asking inside group c1. c1 is asked again, approved, and RUNS: the
+    // carried c2 entry must be gone from the disk by then, or a crash here
+    // re-asks (re-runs) c1. Mutation: keep the other carried entries when an
+    // ask settles → the reload still resumes from c1 while c1 runs.
+    const runs: string[] = [];
+    const seen: Array<string | undefined> = [];
+    const store = new SpyStore();
+    const record = rec({
+      messages: round.slice(0, 1).concat({
+        ...round[1],
+        toolCalls: round[1]?.toolCalls?.slice(0, 2),
+      } as ChatMessage),
+      turns: [{ turnId: "T1" }],
+      turn: {
+        turnId: "T1",
+        steering: [],
+        steeringIds: [],
+        pending: [{ ...entry("c2"), groupStart: "c1" }],
+      },
+    });
+    const r = rig(
+      [text("done")],
+      () => [
+        tool("run", "ask", runs, () => {
+          const durable = store.durable.get("s");
+          seen.push(durable ? reconcileOnReload(reread(durable)).resume?.from : "nothing durable");
+        }),
+      ],
+      store,
+    );
+    const restored = r.host.restore(reread(record));
+    const c = client();
+    restored.attach(c.attachment);
+    await until(() => c.asks.length === 1);
+    expect(c.asks[0]?.toolCallId).toBe("c1");
+    c.allow(restored);
+    await until(() => c.asks[0]?.toolCallId === "c2");
+    c.allow(restored);
+    await until(() => !restored.running);
+    expect(runs).toEqual(['run:{"n":1}', 'run:{"n":2}']);
+    // At c1's run and at c2's: neither reload resumes anything.
+    expect(seen).toEqual([undefined, undefined]);
+  });
+
+  test("T5 sequential pinned: a multi-call round never writes inFlight; each ask is its own group", async () => {
+    // Mutation: call beforeRun for a group of one → an `inFlight` appears in a save.
+    // A call alone writes the v7 entry shape (no `groupStart`: absent = itself).
+    const runs: string[] = [];
+    const r = rig(
+      [[call("c1", "run", { n: 1 }), call("c2", "run", { n: 2 }), { type: "done" }], text("ok")],
+      () => [tool("run", "ask", runs)],
+    );
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => c.asks.length === 1);
+    await hosted.persisted();
+    const entries = reread(r.store.durable.get(hosted.id)).turn?.pending;
+    expect(entries?.map((p) => [p.toolCallId, p.resumable, "groupStart" in p])).toEqual([
+      ["c1", true, false],
+    ]);
+    c.allow(hosted);
+    await until(() => c.asks[0]?.toolCallId === "c2");
+    c.allow(hosted);
+    await until(() => c.ended("T1"));
+    expect(runs).toEqual(['run:{"n":1}', 'run:{"n":2}']);
+    expect(r.store.saves.some((s) => s.turn?.inFlight !== undefined)).toBe(false);
   });
 });

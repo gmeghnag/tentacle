@@ -13,6 +13,7 @@
  */
 import { z } from "zod";
 import { ContentBlockSchema } from "./content.ts";
+import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { ToolResultSpillSchema } from "./spill.ts";
 import { line } from "./text-line.ts";
 
@@ -38,6 +39,8 @@ export const ChatMessageSchema = z.object({
   spill: ToolResultSpillSchema.optional(),
   /** On a tool result that ran: its measured run time in ms (display only, docs/fix/tool-duration.md). */
   durationMs: z.number().int().nonnegative().optional(),
+  /** On a refused tool call: the person's reply with the refusal (display only, docs/feat/permission-reply.md). */
+  denialReply: PermissionReplyTextSchema.optional(),
   /**
    * On a user/tool message: the context fill the model was told about (NOT
    * display-only — rendered into the model's prompt; docs/feat/context-awareness.md).

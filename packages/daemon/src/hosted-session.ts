@@ -39,7 +39,7 @@
  * epoch (the agent's one `pop` is never behind a marker; a replacement starts
  * a new epoch).
  */
-import type { AgentEvent, AskHooksTrust, Session } from "@tentacle/agent";
+import type { AgentEvent, AskHooksTrust, BeforeRun, Session } from "@tentacle/agent";
 import type {
   ChatMessage,
   JobController,
@@ -91,7 +91,6 @@ import {
   type ResumedTurn,
   classifyPending,
   closeFailedTurn,
-  pendingForRecord,
 } from "./persisted-session.ts";
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
@@ -110,6 +109,7 @@ import {
   titleRequest,
   titleText,
 } from "./session-title.ts";
+import { SettledAnswers } from "./settled-answers.ts";
 
 /** Receives each streamed `session/update` (one per emitted update). Synchronous; never awaited. */
 export type UpdateSink = (params: KnownSessionUpdateParams) => void;
@@ -132,15 +132,21 @@ export interface Attachment {
 /** A permission request waiting for its first answer (keyed by its nonce). */
 interface PendingAsk {
   readonly offered: ReadonlySet<string>;
-  /** What the record says of it while it is unanswered (`pendingForRecord`). */
+  /**
+   * The options a reply may come with (the `reject_*` kinds), when the ask
+   * offered `reply`; empty otherwise (docs/feat/permission-reply.md).
+   */
+  readonly replyable: ReadonlySet<string>;
+  /** What the record says of it while it is unanswered (`turn.pending`). */
   readonly record: PendingPermission;
   /** Streamed to the clients yet (only once its record is durable). */
   shown: boolean;
   /**
    * Resolve the gate's wait with this outcome (detaches the abort listener);
-   * `reason`: nobody could answer (the gate tells the model why).
+   * `reason`: nobody could answer (the gate tells the model why); `message`:
+   * the person's reply with a refusal.
    */
-  readonly settle: (outcome: PermissionOutcome, reason?: string) => void;
+  readonly settle: (outcome: PermissionOutcome, reason?: string, message?: string) => void;
 }
 
 /**
@@ -190,8 +196,11 @@ export interface RestoredSessionState {
   readonly enqueueIds: readonly string[];
   /** A turn suspended on a permission at the restart: it runs again (re-asked). */
   readonly resume?: ResumedTurn;
-  /** The record had a turn in flight (cut short, or resumed): its history is not a summary. */
-  readonly cutShort: boolean;
+  /**
+   * The record's installed head (`DaemonSessionRecord.head`: its index in the
+   * reloaded history): the summary again, cut short or not. Absent: none.
+   */
+  readonly head?: number;
   /** The record's title (absent = `auto`). */
   readonly title?: TitleState;
   /** The rows the record kept for their writer (absent = none). */
@@ -310,17 +319,26 @@ export class HostedSession {
   private compactionSummary: ChatMessage | undefined;
   private readonly errorPolicy: TurnErrorPolicy;
   /**
-   * A resumed turn's pending entry from the record, until its call is asked
-   * again (an ask for the same call replaces it) or answered without a re-ask
-   * (cleared at the next commit, a context reset, the turn's end).
+   * A resumed turn's pending entries from the record, each until its call is
+   * asked again (an ask for the same call replaces it) or answered without a
+   * re-ask (all cleared at the next commit, a context reset, the turn's end).
    */
-  private carried: PendingPermission | undefined;
+  private carried: readonly PendingPermission[] = [];
+  /**
+   * The calls of a group that may have started (`beforeRun`, R2): written
+   * before any of them runs, cleared where `carried` is — at the group's ONE
+   * commit, a context reset, the turn's end
+   * (docs/feat/round-groups-persistence.md). Absent: calls run one at a time.
+   */
+  private inFlight: readonly string[] | undefined;
   /**
    * Every unanswered ask, by `requestId`, in request order — with `carried`,
    * the one truth of what is pending (persisted with the turn,
    * `pendingList`). One at a time today: calls run in order.
    */
   private readonly asks = new Map<string, PendingAsk>();
+  /** The answers that settled recent asks: an identical re-send is a success. */
+  private readonly answered = new SettledAnswers();
   private readonly persister: SessionPersister | null;
   private readonly createdAt: number;
   private seq = 0;
@@ -384,16 +402,14 @@ export class HostedSession {
       this.enqueued.add(enqueueId);
       this.restoredIds.add(enqueueId);
     }
-    // A reload lost the summary's identity. An IDLE record whose history is a
-    // lone user message after the system prompt may be a just-compacted one
-    // (or a first turn that ended with no reply): read it as the summary, so a
-    // send-now there is `NoTurnRunning`, never an unasked turn that may run
-    // tools. A record cut short mid-turn is never a summary (it continues).
-    if (restored && !restored.cutShort) {
-      const history = session.messages;
-      const at = history[0]?.role === "system" ? 1 : 0;
-      if (history.length === at + 1 && history[at]?.role === "user") {
-        this.compactionSummary = history[at];
+    // A reload lost the summary's identity: the record names it (v8 `head`;
+    // an older record's by the old rule, `parseDaemonRecord`) — so a send-now
+    // there is `NoTurnRunning`, never an unasked turn that may run tools, even
+    // after a crash at a context reset's barrier.
+    if (restored?.head !== undefined) {
+      const head = session.messages[restored.head];
+      if (head?.role === "user") {
+        this.compactionSummary = head;
       }
     }
     this.session = session;
@@ -467,7 +483,8 @@ export class HostedSession {
     if (resume && this.controller) {
       void this.drive(
         resume.turnId,
-        session.resume(resume.toolCallId, this.controller.signal),
+        // From the group's head: its calls are asked again, in order.
+        session.resume(resume.from, this.controller.signal, { beforeRun: this.beforeRunFn }),
         this.controller,
       );
     }
@@ -514,28 +531,49 @@ export class HostedSession {
       req,
       options?.agent,
     );
+    // The asking call's group head (a call alone: itself), kept with the entry:
+    // a reload resumes from it and never recomputes the group.
+    const groupStart = toolCallId !== undefined ? options?.groupStart || undefined : undefined;
     const record: PendingPermission = {
       toolCallId: toolCallId ?? "",
       tool: req.tool,
-      resumable: classifyPending(this.session.messages, toolCallId, options?.origin, req.tool),
+      resumable: classifyPending(
+        this.session.messages,
+        toolCallId,
+        options?.origin,
+        req.tool,
+        groupStart,
+      ),
       requestedAt: this.now(),
+      ...(groupStart !== undefined ? { groupStart } : {}),
     };
-    const decided = new Promise<{ outcome: PermissionOutcome; reason?: string }>((resolve) => {
-      const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
-      this.asks.set(requestId, {
-        offered: new Set(update.options.map((o) => o.optionId)),
-        record,
-        shown: false,
-        settle: (outcome, reason) => {
-          signal.removeEventListener("abort", onAbort);
-          resolve(reason !== undefined ? { outcome, reason } : { outcome });
-        },
-      });
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
+    const decided = new Promise<{ outcome: PermissionOutcome; reason?: string; message?: string }>(
+      (resolve) => {
+        const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
+        this.asks.set(requestId, {
+          offered: new Set(update.options.map((o) => o.optionId)),
+          replyable: new Set(
+            update.reply
+              ? update.options.filter((o) => o.kind.startsWith("reject_")).map((o) => o.optionId)
+              : [],
+          ),
+          record,
+          shown: false,
+          settle: (outcome, reason, message) => {
+            signal.removeEventListener("abort", onAbort);
+            resolve({
+              outcome,
+              ...(reason !== undefined ? { reason } : {}),
+              ...(message !== undefined ? { message } : {}),
+            });
+          },
+        });
+        signal.addEventListener("abort", onAbort, { once: true });
+      },
+    );
     // The resumed call asked again: its live ask replaces the record's entry.
-    if (toolCallId !== undefined && this.carried?.toolCallId === toolCallId) {
-      this.carried = undefined;
+    if (toolCallId !== undefined) {
+      this.carried = this.carried.filter((p) => p.toolCallId !== toolCallId);
     }
     this.persist();
     // Shown once on disk (`persisted` never rejects: a failed write is logged
@@ -553,15 +591,25 @@ export class HostedSession {
         this.reportTurnError(error);
       }
     });
-    return decided.then(async ({ outcome, reason }) => {
-      // `settle` already took this ask out of `asks`: write the record without it.
+    return decided.then(async ({ outcome, reason, message }) => {
+      // `settle` already took this ask out of `asks`: write the record without
+      // it. And without ANY carried entry: an answered ask means the resumed
+      // group has begun (its head may run now), so a record still saying
+      // "resume from the group's head" would run that call twice
+      // (docs/feat/round-groups-persistence.md, Review F1).
+      this.carried = [];
       this.persist();
       // The turn's abort ends this wait: a hung disk must never trap a cancel
       // (docs/fix/cancel-hung-disk.md). Safe: the agent checks the abort
       // before the answer (agent.ts `runTool`), so an aborted turn never runs
       // the tool and "pending on disk ⇒ never started" still holds.
       await untilAborted(this.persisted(), signal);
-      return reason !== undefined ? { allowed: false, reason } : outcomeToResponse(outcome);
+      if (reason !== undefined) {
+        return { allowed: false, reason };
+      }
+      // A message only ever comes with a reject (`resolvePermission` checked it).
+      const response = outcomeToResponse(outcome);
+      return message !== undefined ? { ...response, message } : response;
     });
   }
 
@@ -603,17 +651,31 @@ export class HostedSession {
    * two answers — in any order, in the same tick or not — exactly one wins.
    * Not pending → `PermissionNotPending` (no effect). An option that was not
    * offered → `InvalidParams`, and the request STAYS pending: a malformed
-   * answer is never a denial.
+   * answer is never a denial. So is a `message` (the person's reply,
+   * docs/feat/permission-reply.md) with an option that is not a `reject_*`
+   * one, or for an ask that did not offer `reply`. The SAME answer as the one
+   * that settled it (a `keyed` re-send after a link drop) is a success with no
+   * effect (`SettledAnswers`); a different one is `PermissionNotPending`.
    */
-  resolvePermission(requestId: string, optionId: string): void {
+  resolvePermission(requestId: string, optionId: string, message?: string): void {
     const ask = this.asks.get(requestId);
     if (!ask) {
+      if (this.answered.isRepeat(requestId, { optionId, message })) {
+        return;
+      }
       throw new RpcError(DomainErrorCode.PermissionNotPending, "permission request not pending");
     }
     if (!ask.offered.has(optionId)) {
       throw new RpcError(JsonRpcErrorCode.InvalidParams, "option not offered for this request");
     }
-    this.settle(requestId, { outcome: "selected", optionId });
+    if (message !== undefined && !ask.replyable.has(optionId)) {
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidParams,
+        "a reply comes only with a refusal of a request that offered one",
+      );
+    }
+    this.answered.remember(requestId, { optionId, message });
+    this.settle(requestId, { outcome: "selected", optionId }, undefined, message);
   }
 
   /**
@@ -621,7 +683,12 @@ export class HostedSession {
    * `permission_resolved` goes out BEFORE the gate is woken, so its seq
    * precedes everything the tool's execution streams.
    */
-  private settle(requestId: string, outcome: PermissionOutcome, reason?: string): void {
+  private settle(
+    requestId: string,
+    outcome: PermissionOutcome,
+    reason?: string,
+    message?: string,
+  ): void {
     const ask = this.asks.get(requestId);
     if (!ask) {
       return;
@@ -633,7 +700,8 @@ export class HostedSession {
         this.emit({ type: "permission_resolved", requestId, outcome });
       }
     } finally {
-      ask.settle(outcome, reason);
+      // The text never rides `permission_resolved`: only the gate gets it.
+      ask.settle(outcome, reason, message);
     }
   }
 
@@ -653,10 +721,37 @@ export class HostedSession {
     return this.persister ? this.persister.flush(this.id) : Promise.resolve();
   }
 
-  /** What is pending now, in request order: the resumed turn's carried entry, then each live ask. */
+  /** What is pending now, in request order: the resumed turn's carried entries, then each live ask. */
   private pendingList(): PendingPermission[] {
     const live = [...this.asks.values()].map((ask) => ask.record);
-    return this.carried ? [this.carried, ...live] : live;
+    return [...this.carried, ...live];
+  }
+
+  /** `RunOptions.beforeRun` for this session's turns (one function: passed to every send/resume). */
+  private readonly beforeRunFn: BeforeRun = (ids, signal) => this.beforeRun(ids, signal);
+
+  /**
+   * A group of calls is about to run (R2, docs/feat/round-groups-persistence.md):
+   * its ids go on disk as `turn.inFlight` BEFORE any of them starts, so a
+   * reload labels each one "Interrupted" and never "Not run". Awaited by the
+   * agent, never by `drive` (the steering window stays await-free); a cancel
+   * ends the wait at once (a hung disk never traps it — the agent re-checks
+   * the abort before running). Resolves whether the set landed: `false` on a
+   * failed write, a cancel, or a closed session. No persister (pods, the
+   * worker), or one that never writes this session (a blocked file, an unsafe
+   * id): nothing to make durable, `true` at once.
+   */
+  private async beforeRun(ids: readonly string[], signal: AbortSignal): Promise<boolean> {
+    if (this.closed || signal.aborted) {
+      return false;
+    }
+    this.inFlight = [...ids];
+    if (!this.persister || !this.persister.writable(this.id)) {
+      return true;
+    }
+    const landed = this.persister.write(this.id, () => this.persistedState());
+    await untilAborted(landed, signal);
+    return signal.aborted ? false : landed;
   }
 
   /** The state a record captures, copied now (the arrays are live). */
@@ -666,7 +761,13 @@ export class HostedSession {
       turns.push(entry.end ? { turnId, end: entry.end } : { turnId });
     }
     const turnId = this.compacting ? null : this.activeTurnId;
-    const pending = pendingForRecord(this.pendingList());
+    const pending = this.pendingList();
+    const inFlight = this.inFlight;
+    // By identity, like `awaitsAnswer`: gone from the history → not marked.
+    const head =
+      this.compactionSummary === undefined
+        ? -1
+        : this.session.messages.indexOf(this.compactionSummary);
     return {
       id: this.id,
       createdAt: this.createdAt,
@@ -677,6 +778,7 @@ export class HostedSession {
       enqueueIds: [...this.enqueued],
       title: this.title,
       returned: this.returned.map((r) => ({ ...r })),
+      ...(head >= 0 ? { head } : {}),
       // From the mirror (= the agent's queue in every stretch, the module's
       // load-bearing assumption), so texts and ids never disagree.
       ...(turnId !== null
@@ -685,7 +787,8 @@ export class HostedSession {
               turnId,
               steering: this.queue.map((r) => r.text),
               steeringIds: this.queue.map((r) => r.id),
-              ...(pending ? { pending } : {}),
+              ...(pending.length > 0 ? { pending } : {}),
+              ...(inFlight !== undefined ? { inFlight: [...inFlight] } : {}),
             },
           }
         : {}),
@@ -1024,6 +1127,7 @@ export class HostedSession {
       this.session.send(text, controller.signal, {
         ...(skill !== undefined ? { skill } : {}),
         ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
+        beforeRun: this.beforeRunFn,
       }),
       controller,
     );
@@ -1204,6 +1308,7 @@ export class HostedSession {
       this.session.send(prompt, controller.signal, {
         steering: seed,
         ...(next.askHooksTrust !== undefined ? { askHooksTrust: next.askHooksTrust } : {}),
+        beforeRun: this.beforeRunFn,
       }),
       controller,
     );
@@ -1270,7 +1375,10 @@ export class HostedSession {
           // was answered without being asked again (cancelled) — never write
           // it as pending. Live asks stay: each is cleared by its own settle
           // (a sibling call's commit must not drop it, once calls overlap).
-          this.carried = undefined;
+          // A group's ONE commit carries its results: no call of it is in
+          // flight any more, captured in the same write.
+          this.carried = [];
+          this.inFlight = undefined;
           this.recordCut(turnId);
           this.persist();
           continue;
@@ -1280,7 +1388,8 @@ export class HostedSession {
         // and here). The barrier, mid-turn — then the record holds the fresh
         // history at once, with the turn in flight.
         if (event.type === "context_reset") {
-          this.carried = undefined;
+          this.carried = [];
+          this.inFlight = undefined;
           this.historyReplaced("context_reset");
           this.persist();
           continue;
@@ -1372,7 +1481,8 @@ export class HostedSession {
       this.recordCut(this.activeTurnId);
       // Inside the steering window, and safe there: this method cannot await,
       // and `persist` only captures — the I/O starts after the window.
-      this.carried = undefined;
+      this.carried = [];
+      this.inFlight = undefined;
       this.persist();
       // Last, in the same stretch: a reserved send-now takes the slot now.
       this.settleSuccessor();

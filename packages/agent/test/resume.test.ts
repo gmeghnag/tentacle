@@ -13,7 +13,7 @@ import type {
 import { ToolRegistry } from "@tentacle/tools";
 import { z } from "zod";
 import { Agent, type AgentEvent, ResumeShapeError } from "../src/agent.ts";
-import { suspendedCalls } from "../src/resume.ts";
+import { suspendedCalls, suspendedInGroup } from "../src/resume.ts";
 import { Session } from "../src/session.ts";
 
 // A turn suspended on a permission is continued after a `serve` restart
@@ -312,5 +312,45 @@ describe("resume a suspended turn (agent seam)", () => {
     expect(ids([a, { role: "user", content: "x" }], "c1")).toBeNull();
     expect(ids([{ role: "assistant", content: "hi" }], "c1")).toBeNull();
     expect(ids([], "c1")).toBeNull();
+  });
+});
+
+describe("suspendedInGroup (docs/feat/round-groups-persistence.md)", () => {
+  // A group's calls are authorized one at a time, then run together: while a
+  // later call asks, its group's earlier calls are approved but unanswered.
+  const a: ChatMessage = {
+    role: "assistant",
+    content: "",
+    toolCalls: [
+      { id: "c0", name: "look", arguments: "{}" },
+      { id: "c1", name: "look", arguments: "{}" },
+      { id: "c2", name: "run", arguments: "{}" },
+      { id: "c3", name: "run", arguments: "{}" },
+    ],
+  };
+  const done: ChatMessage = { role: "tool", content: "ok", toolCallId: "c0" };
+  const ids = (m: ChatMessage[], start: string, asking: string) =>
+    suspendedInGroup(m, start, asking)?.map((c) => c.id) ?? null;
+
+  test("T1 repro B: the asking call lies in the group the answered prefix ends at", () => {
+    // Mutation: require `asking === start` (today's `suspendedCalls(asking)`) → null.
+    expect(ids([a, done], "c1", "c2")).toEqual(["c1", "c2", "c3"]);
+    expect(suspendedCalls([a, done], "c2")).toBeNull(); // today's predicate: not suspended
+  });
+
+  test("a group of one is exactly suspendedCalls", () => {
+    for (const id of ["c0", "c1", "c2", "c3"]) {
+      expect(ids([a, done], id, id)).toEqual(
+        suspendedCalls([a, done], id)?.map((c) => c.id) ?? null,
+      );
+    }
+  });
+
+  test("null when the prefix does not end at the group head, or the asking call is outside it", () => {
+    expect(ids([a, done], "c2", "c3")).toBeNull(); // c1 unanswered before the head
+    expect(ids([a, done], "c1", "c0")).toBeNull(); // the asking call is answered
+    expect(ids([a, done], "c1", "zz")).toBeNull(); // unknown asking call
+    expect(ids([a, done], "zz", "c2")).toBeNull(); // unknown head
+    expect(ids([a], "c1", "c2")).toBeNull(); // c0 unanswered
   });
 });

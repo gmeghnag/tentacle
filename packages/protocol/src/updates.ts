@@ -8,6 +8,7 @@
  */
 import { z } from "zod";
 import { ContentBlockSchema } from "./content.ts";
+import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { PermissionRequestUpdateSchema, PermissionResolvedUpdateSchema } from "./permission.ts";
 import {
   MAX_SESSION_TITLE,
@@ -56,6 +57,8 @@ export const ToolCallUpdateSchema = z.object({
   spill: ToolResultSpillSchema.optional(),
   /** Set when the tool actually ran: its daemon-measured run time in ms (display only, docs/fix/tool-duration.md). */
   durationMs: z.number().int().nonnegative().optional(),
+  /** Set on a refused call the person replied to: their reply (display only, docs/feat/permission-reply.md). */
+  denialReply: PermissionReplyTextSchema.optional(),
 });
 
 export const PlanEntryStatusSchema = z.enum(["pending", "in_progress", "completed"]);

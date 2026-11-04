@@ -86,17 +86,26 @@ export class SessionPersister {
 
   /** Write `build()` for `id`, captured NOW. Synchronous; never awaited, never throws. */
   schedule(id: string, build: () => DaemonSessionState): void {
+    void this.write(id, build);
+  }
+
+  /**
+   * `schedule`, and resolves whether THIS write landed (never rejects): `false`
+   * when it failed, or when `id` is not written at all (stopped, blocked, an
+   * unsafe name). The capture is synchronous, like `schedule`'s.
+   */
+  write(id: string, build: () => DaemonSessionState): Promise<boolean> {
     if (this.stopped || !this.persistable(id)) {
-      return;
+      return Promise.resolve(false);
     }
     let record: DaemonSessionRecord;
     try {
       record = this.toRecord(build());
     } catch (error) {
       this.report(error);
-      return;
+      return Promise.resolve(false);
     }
-    void this.writeRecord(record);
+    return this.writeRecord(record);
   }
 
   /**
@@ -179,6 +188,15 @@ export class SessionPersister {
       result.record,
       this.opts.sameProject ?? ((cwd) => cwd === this.opts.cwd),
     );
+  }
+
+  /**
+   * Whether `id` is ever written by this persister (not a blocked file, not an
+   * unsafe name): nothing is durable for it, whatever happens. Silent, unlike
+   * the write path.
+   */
+  writable(id: string): boolean {
+    return !this.blocked.has(id) && isValidSessionId(id);
   }
 
   /** Whether `id` may be written; reports once (per id) why not. */

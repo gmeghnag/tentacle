@@ -354,6 +354,11 @@ Order inside `authorize`:
 
 #### 5. `tool_result` as a pipeline stage
 
+> Note (docs/feat/permission-reply.md, 2026-10-27): a refusal's result reaches
+> `tool_result` hooks with the person's reply inside `content` (after
+> redaction). A hook may rewrite it like any result; the structured
+> `denialReply` copy is then dropped, so the row shows what the model saw.
+
 - `ResultTransformContext` gains `readonly input?: unknown`,
   `readonly hooks?: HookRunner` and `readonly sessionId?: string`.
 - `transformResult(call, result, signal)` (`agent.ts:718-743`) gains a 4th

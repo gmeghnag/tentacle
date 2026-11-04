@@ -26,10 +26,13 @@ import {
   useRef,
   useState,
 } from "react";
+import { MENU, type OrphanCause, type ReplyMode, draftOf } from "./permission-reply.ts";
 
 export interface PermissionChoice {
   readonly label: string;
   readonly response: PermissionResponse;
+  /** "No, let's talk about it": opens the reply field instead of answering. */
+  readonly reply?: true;
 }
 
 /**
@@ -111,6 +114,10 @@ export function buildPermissionChoices(req: PermissionRequest): PermissionChoice
     { label: "Yes", response: { allowed: true, scope: "once" } },
     { label: always, response: { allowed: true, scope: "session" } },
     { label: "No", response: { allowed: false } },
+    // Only where the asker takes a reply (docs/feat/permission-reply.md).
+    ...(req.reply
+      ? [{ label: "No, let's talk about it", response: { allowed: false }, reply: true as const }]
+      : []),
   ];
 }
 
@@ -128,6 +135,11 @@ export interface PermissionController {
   readonly autoApprove: boolean;
   /** Toggle auto-accept; granting a prompt already on screen when turning on. */
   toggleAutoApprove(): void;
+  /** The dialog's mode: the menu, or the reply field open (`permission-reply.ts`). */
+  readonly mode: ReplyMode;
+  /** The mode as of now (a ref: keys and pastes arriving between renders compose). */
+  readMode(): ReplyMode;
+  setMode(mode: ReplyMode): void;
 }
 
 /**
@@ -143,6 +155,14 @@ export interface AutoAcceptFeed {
 }
 
 /**
+ * Where a reply's text goes when it was not sent (docs/feat/permission-reply.md,
+ * owner Q4 "a message is never lost silently"): the request closed with a
+ * draft in the field, or a sent reply did not reach the agent. `App` puts it
+ * back in the main input with `orphanNotice(cause)`.
+ */
+export type DraftBack = (text: string, cause: OrphanCause) => void;
+
+/**
  * `ownsTurn`: read at each request — the current session's own-vs-foreign test
  * (`ownRequest`), or undefined when no session decides. Auto-accept answers
  * only a request of my own turn. `feed`: auto-accept's state lives there
@@ -153,10 +173,12 @@ export function usePermissionBroker(
   permissions?: PermissionBroker,
   ownsTurn?: () => ((turnId: string) => boolean) | undefined,
   feed?: AutoAcceptFeed,
+  onDraftBack?: DraftBack,
 ): PermissionController {
   const [pending, setPending] = useState<PermissionRequest | null>(null);
   const [selected, setSelected] = useState(0);
   const [autoApprove, setAutoApprove] = useState(() => feed?.current() ?? false);
+  const [mode, setModeState] = useState<ReplyMode>(MENU);
   const resolveRef = useRef<((r: PermissionResponse) => void) | null>(null);
   // Seeded before any effect: the broker's held requests reach the requester
   // installed below, and are answered by THIS value.
@@ -169,14 +191,51 @@ export function usePermissionBroker(
   const pendingOwnRef = useRef(true);
   const ownsTurnRef = useRef(ownsTurn);
   ownsTurnRef.current = ownsTurn;
+  /** Mirrors `mode` for the callbacks (a withdrawal reads the draft at once). */
+  const modeRef = useRef<ReplyMode>(MENU);
+  const draftBackRef = useRef(onDraftBack);
+  draftBackRef.current = onDraftBack;
 
-  const answer = useCallback((response: PermissionResponse) => {
-    const resolve = resolveRef.current;
-    resolveRef.current = null;
-    pendingRef.current = null;
-    setPending(null);
-    resolve?.(response);
+  const setMode = useCallback((next: ReplyMode) => {
+    modeRef.current = next;
+    setModeState(next);
   }, []);
+  const readMode = useCallback(() => modeRef.current, []);
+
+  /** The request closed: an unsent draft goes back (`cause`), the mode resets. */
+  const closeDraft = useCallback(
+    (cause: OrphanCause) => {
+      const draft = draftOf(modeRef.current);
+      setMode(MENU);
+      if (draft.trim() !== "") {
+        draftBackRef.current?.(draft, cause);
+      }
+    },
+    [setMode],
+  );
+
+  const answer = useCallback(
+    (response: PermissionResponse) => {
+      const resolve = resolveRef.current;
+      resolveRef.current = null;
+      pendingRef.current = null;
+      setPending(null);
+      const message = response.message;
+      if (message !== undefined) {
+        // Sent: the field's text IS the message. If it never reaches the
+        // agent, the runtime hands it back (`onAnswerLost`).
+        setMode(MENU);
+        resolve?.({
+          ...response,
+          onAnswerLost: (cause) => draftBackRef.current?.(message, cause),
+        });
+        return;
+      }
+      closeDraft(response.dismissed ? "withdrawn" : "answered");
+      resolve?.(response);
+    },
+    [closeDraft, setMode],
+  );
 
   /** The one way auto-accept changes: this TUI's toggle and a flip from the feed. */
   const applyAuto = useCallback(
@@ -185,17 +244,19 @@ export function usePermissionBroker(
       setAutoApprove(next);
       // If a request is on screen when auto-accept turns on, grant it immediately
       // — unless auto-accept may not answer it (a hooks trust request, another
-      // device's turn).
+      // device's turn). Its reply draft, if any, goes back (owner Q3): the
+      // field of a request NOT granted stays open — still being answered.
       if (
         next &&
         resolveRef.current &&
         pendingRef.current &&
         autoApproves(pendingRef.current, pendingOwnRef.current)
       ) {
+        closeDraft("approved");
         answer({ allowed: true, scope: "once" });
       }
     },
-    [answer],
+    [answer, closeDraft],
   );
 
   const feedRef = useRef(feed);
@@ -231,11 +292,13 @@ export function usePermissionBroker(
       }
       return new Promise<PermissionResponse>((resolve) => {
         const onAbort = (): void => {
-          // Withdrawn: close the dialog only if it is still this request's.
+          // Withdrawn: close the dialog only if it is still this request's
+          // (its unsent reply draft goes back to the input).
           if (resolveRef.current === settle) {
             resolveRef.current = null;
             pendingRef.current = null;
             setPending(null);
+            closeDraft("withdrawn");
           }
           resolve(DISMISSED);
         };
@@ -248,17 +311,30 @@ export function usePermissionBroker(
         pendingRef.current = req;
         pendingOwnRef.current = own;
         setSelected(0);
+        setMode(MENU);
         setPending(req);
       });
     });
     return () => {
       // Unmounting is not a decision: resolve a dangling request DISMISSED.
+      // (A reply draft is lost with the TUI: the session view ends.)
       resolveRef.current?.(DISMISSED);
       resolveRef.current = null;
       permissions.reset();
     };
-  }, [permissions]);
+  }, [permissions, closeDraft, setMode]);
 
   const choices = pending ? buildPermissionChoices(pending) : [];
-  return { pending, choices, selected, setSelected, answer, autoApprove, toggleAutoApprove };
+  return {
+    pending,
+    choices,
+    selected,
+    setSelected,
+    answer,
+    autoApprove,
+    toggleAutoApprove,
+    mode,
+    readMode,
+    setMode,
+  };
 }

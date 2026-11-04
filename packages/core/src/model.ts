@@ -45,6 +45,12 @@ export interface ChatMessage {
    */
   readonly durationMs?: number;
   /**
+   * On a `role: "tool"` message of a call the person refused with a reply:
+   * the reply (docs/feat/permission-reply.md). Display only, like `spill`:
+   * the model sees it inside `content`.
+   */
+  readonly denialReply?: string;
+  /**
    * On a `user` or `tool` message that crossed a new step of context fill: how
    * full the context was (docs/feat/context-awareness.md). NOT display-only,
    * unlike `spill`/`durationMs`: the agent loop renders it into `content` as a

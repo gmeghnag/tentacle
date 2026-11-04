@@ -52,9 +52,12 @@ export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[]
         items[idx as number] = {
           ...tool,
           resultText: m.content,
-          status: "ok",
+          // A refused call is known from its reply; any other result's error flag is not stored.
+          status: m.denialReply !== undefined ? "error" : "ok",
           // A spilled result shows the same note as live (docs/feat/tui-spill-note.md).
           ...(m.spill ? { spill: m.spill } : {}),
+          // So does a refusal with a reply (docs/feat/permission-reply.md).
+          ...(m.denialReply !== undefined ? { denialReply: m.denialReply } : {}),
           // The stored measurement, or none: never a fake 0.0s (docs/fix/tool-duration.md).
           ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
         };

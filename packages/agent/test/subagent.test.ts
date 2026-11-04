@@ -413,7 +413,9 @@ describe("createSubagentRunner", () => {
     );
     await wrapped(
       { tool: "shell", level: "ask", title: "t", input: {} },
-      { signal, turnId: "t1", toolCallId: "child-3", origin: "call" },
+      // A child's group head names a call unknown to the parent history:
+      // dropped (docs/feat/round-groups-persistence.md T7).
+      { signal, turnId: "t1", toolCallId: "child-3", origin: "call", groupStart: "child-2" },
     );
     expect(seen).toEqual([
       {

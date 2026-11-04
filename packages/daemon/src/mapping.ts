@@ -228,6 +228,9 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
         content: toolResultContent(event.result),
         ...(event.result.spill ? { spill: event.result.spill } : {}),
         ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
+        ...(event.result.denialReply !== undefined
+          ? { denialReply: event.result.denialReply }
+          : {}),
       };
     case "usage":
       return {

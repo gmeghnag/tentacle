@@ -707,6 +707,8 @@ describe("RemoteSession over an in-memory channel", () => {
         detail: "git status",
         input: {},
         suggestion: { prefix: "git status" },
+        // The daemon takes a reply with a refusal (docs/feat/permission-reply.md).
+        reply: { maxChars: 2000 },
       },
     ]);
     expect(execCalls).toEqual(["git status", "git status -s"]);

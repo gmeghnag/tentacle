@@ -264,6 +264,101 @@ describe("Ctrl+X Ctrl+S — send the queued messages now", () => {
     unmount();
   });
 
+  // docs/feat/permission-reply.md fix round 1 F3: the chord with the reply
+  // field open. The chord is read before the dialog: its keys never reach the
+  // field; a draft goes back to the input exactly once when the ask closes.
+  const askReply = (permissions: PermissionBroker, signal?: AbortSignal) => {
+    const answered: { response?: PermissionResponse } = {};
+    void permissions
+      .request(
+        {
+          tool: "shell",
+          level: "ask",
+          title: "Run a shell command",
+          detail: "ls",
+          input: {},
+          reply: { maxChars: 2000 },
+        },
+        signal ? { signal } : undefined,
+      )
+      .then((r) => {
+        answered.response = r;
+      });
+    return answered;
+  };
+  const typeReply = async (stdin: { write(data: string): void }, text: string) => {
+    stdin.write("t");
+    await delay(20);
+    stdin.write(text);
+    await delay(30);
+  };
+
+  test("R-C1: reply field open, nothing queued → the chord changes nothing: the field and its draft stay", async () => {
+    const permissions = new PermissionBroker();
+    const { ctrl, log } = fakeSession({ sendNow: async () => successor("x") });
+    const { stdin, lastFrame, unmount } = await startWithRows(ctrl, [], { permissions });
+    const answered = askReply(permissions);
+    await delay(40);
+    await typeReply(stdin, "zebra words");
+    await chord(stdin);
+    expect(answered.response).toBeUndefined();
+    expect(log.sendNows).toHaveLength(0);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("Tell the agent why");
+    expect(frame).toContain("zebra words");
+    expect(frame).not.toContain("zebra words\x18");
+    stdin.write("\r");
+    await delay(30);
+    expect(answered.response).toMatchObject({ allowed: false, message: "zebra words" });
+    unmount();
+  });
+
+  test("R-C2: reply field open, accepted send-now → the withdrawal puts the draft back in the input exactly once", async () => {
+    const permissions = new PermissionBroker();
+    const withdraw = new AbortController();
+    const { ctrl, log } = fakeSession({
+      sendNow: async (call, release) => {
+        withdraw.abort();
+        release();
+        return successor(call.messages.map((m) => m.text).join("\n\n"));
+      },
+    });
+    const { stdin, lastFrame, unmount } = await startWithRows(ctrl, ["alpha"], { permissions });
+    const answered = askReply(permissions, withdraw.signal);
+    await delay(40);
+    await typeReply(stdin, "zebra words");
+    await chord(stdin);
+    await delay(40);
+    expect(log.sendNows).toHaveLength(1);
+    expect(answered.response).toBe(DISMISSED);
+    const frame = lastFrame() ?? "";
+    expect(frame).not.toContain("Tell the agent why");
+    expect(count(frame, "zebra words")).toBe(1);
+    expect(frame).toContain("your reply was not sent (the request was withdrawn)");
+    unmount();
+  });
+
+  test("R-C3: reply field open, the fallback (MethodNotFound) dismisses the ask → the draft back exactly once", async () => {
+    const permissions = new PermissionBroker();
+    const { ctrl, log } = fakeSession({
+      sendNow: async () => {
+        throw rpcError(METHOD_NOT_FOUND, "method not found");
+      },
+    });
+    const { stdin, lastFrame, unmount } = await startWithRows(ctrl, ["alpha"], { permissions });
+    const answered = askReply(permissions);
+    await delay(40);
+    await typeReply(stdin, "zebra words");
+    await chord(stdin);
+    await delay(40);
+    expect(log.aborted).toEqual(["go"]);
+    expect(answered.response).toBe(DISMISSED);
+    const frame = lastFrame() ?? "";
+    expect(count(frame, "zebra words")).toBe(1);
+    expect(frame).toContain("your reply was not sent (the request was withdrawn)");
+    unmount();
+  });
+
   test("T-C5: MethodNotFound → one notice, abort, then send the joined texts; later chords skip the request", async () => {
     const { ctrl, log } = fakeSession({
       sendNow: async () => {

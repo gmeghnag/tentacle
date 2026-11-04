@@ -42,3 +42,21 @@ export function suspendedCalls(
   }
   return calls.slice(index);
 }
+
+/**
+ * The calls still to run when call `toolCallId` asks inside the group that
+ * starts at `groupStart` (docs/feat/round-groups-persistence.md): the history
+ * is exactly suspended before the group's head (`suspendedCalls`) and the
+ * asking call is one of the calls from there on. A group's calls are all
+ * authorized before any of them runs, so this shape too means "none of them
+ * started". Returns the calls from `groupStart` on; `null` otherwise. With
+ * `groupStart === toolCallId` (a call alone) it IS `suspendedCalls`.
+ */
+export function suspendedInGroup(
+  messages: readonly ChatMessage[],
+  groupStart: string,
+  toolCallId: string,
+): readonly ToolCall[] | null {
+  const calls = suspendedCalls(messages, groupStart);
+  return calls?.some((c) => c.id === toolCallId) ? calls : null;
+}

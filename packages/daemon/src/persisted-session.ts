@@ -6,8 +6,13 @@
  * Only `serve` persists (its host is the user's own machine). A pod daemon
  * never does: a record it wrote would be pod-supplied history (AGENTS §7).
  */
-import { type SessionRecord, type TitleState, encodeTitle, suspendedCalls } from "@tentacle/agent";
-import type { ChatMessage } from "@tentacle/core";
+import {
+  type SessionRecord,
+  type TitleState,
+  encodeTitle,
+  suspendedInGroup,
+} from "@tentacle/agent";
+import type { ChatMessage, ToolCall } from "@tentacle/core";
 import { DomainErrorCode, type ReturnedEntry, type TurnEnd } from "@tentacle/protocol";
 
 export const DAEMON_RECORD_KIND = "tentacle.daemon-session";
@@ -32,14 +37,28 @@ export const DAEMON_RECORD_KIND = "tentacle.daemon-session";
  * 7: a user/tool message may carry `contextUsage` (docs/feat/context-awareness.md):
  * a v6 daemon refuses every v7 record instead of dropping the model's context
  * lines at its next write. A v1–v6 record reads as a v7 one with no lines.
+ * 8 (docs/feat/permission-reply.md): a tool message may carry `denialReply`,
+ * and `head` marks the user message this session installed as its head (a
+ * compaction's summary, a context reset's restart message — context-reset
+ * slice-2 F1), so a reload knows it even in a record cut short mid-turn. A v7
+ * daemon refuses every v8 record instead of dropping either. A v1–v7 record
+ * reads as a v8 one with no replies and its head by the reload rule
+ * (`legacyHead`, which also covers a v8 record that marks none). One version
+ * shared with docs/feat/round-groups-persistence.md, which adds its turn
+ * fields under the same `V8` gate: `turn.pending` is a LIST (each entry may
+ * name its `groupStart`) and `turn.inFlight` names the calls of a group that
+ * may have started. A v1–v7 pending object reads as a one-entry list, its
+ * group the call itself; a v1–v7 record never has `inFlight`.
  */
-export const DAEMON_RECORD_VERSION = 7;
+export const DAEMON_RECORD_VERSION = 8;
 /** Every version `parseDaemonRecord` reads (each read as the current shape). */
-const READABLE_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6, DAEMON_RECORD_VERSION];
+const READABLE_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, DAEMON_RECORD_VERSION];
 /** The first version whose `title` may be a chosen one (`{ text, source }`). */
 const CHOSEN_TITLE_VERSION = 3;
 /** The first version with steer ids (`turn.steeringIds`) and `returned` rows. */
 const STEER_IDS_VERSION = 4;
+/** The first version that marks the installed head (`head`) — and the version of every v8 field. */
+const V8 = 8;
 
 /** The permission request a turn was suspended on at the write. */
 export interface PendingPermission {
@@ -48,6 +67,11 @@ export interface PendingPermission {
   /** The request came from that call itself (false: from a sub-agent inside it). */
   readonly resumable: boolean;
   readonly requestedAt: number;
+  /**
+   * The first call of the asking call's group (v8): the calls authorized one
+   * at a time and then run together. Absent: the call itself.
+   */
+  readonly groupStart?: string;
 }
 
 /** Present iff a turn was running at the write. */
@@ -57,7 +81,14 @@ export interface PersistedTurn {
   readonly steering: readonly string[];
   /** Each steer's enqueue id, parallel to `steering` (v4; absent in a v1–v3 record). */
   readonly steeringIds?: readonly string[];
-  readonly pending?: PendingPermission;
+  /** Every unanswered permission request, in request order (non-empty when present). */
+  readonly pending?: readonly PendingPermission[];
+  /**
+   * The calls of a group that may have started (v8): durable BEFORE any of
+   * them runs (`HostedSession.beforeRun`), cleared at the group's commit.
+   * Non-empty when present. Absent: calls run one at a time.
+   */
+  readonly inFlight?: readonly string[];
 }
 
 /** One accepted turn, by its client key (idempotency of `session/prompt`). */
@@ -83,6 +114,8 @@ export interface DaemonSessionState {
   readonly title?: TitleState;
   /** Rows back with their writer until reclaimed (oldest first; absent = none). */
   readonly returned?: readonly ReturnedEntry[];
+  /** The installed head's index in `messages` (absent = none in the history now). */
+  readonly head?: number;
 }
 
 export interface DaemonSessionRecord extends SessionRecord {
@@ -99,6 +132,13 @@ export interface DaemonSessionRecord extends SessionRecord {
    * archived, reloaded by an explicit reopen. Absent → restored live at start.
    */
   readonly archivedAt?: number;
+  /**
+   * v8: the index in `messages` of the user message the session installed as
+   * its head (a compaction's summary, a context reset's restart message),
+   * while it is still there. A reload treats it as the summary (a send-now
+   * there has nothing to answer), cut short or not. Absent: none.
+   */
+  readonly head?: number;
 }
 
 /** A live session's state as a record (`title` in the client store's form: `encodeTitle`). */
@@ -123,6 +163,7 @@ export function toDaemonRecord(
     returned: state.returned ?? [],
     ...(state.turn ? { turn: state.turn } : {}),
     ...(state.archivedAt !== undefined ? { archivedAt: state.archivedAt } : {}),
+    ...(state.head !== undefined ? { head: state.head } : {}),
   };
 }
 
@@ -171,19 +212,41 @@ function turnProblem(turn: unknown, version: number): string | null {
   ) {
     return '"turn.steeringIds" is malformed';
   }
+  // v8 writes the list (round groups); v1–v7 one object, never a group.
   if (turn.pending !== undefined) {
-    const p = turn.pending;
+    const list = version >= V8 ? turn.pending : [turn.pending];
     if (
-      !isObject(p) ||
-      typeof p.toolCallId !== "string" ||
-      typeof p.tool !== "string" ||
-      typeof p.resumable !== "boolean" ||
-      !isFiniteNumber(p.requestedAt)
+      !Array.isArray(list) ||
+      list.length === 0 ||
+      !list.every((p) => pendingEntryOk(p, version >= V8))
     ) {
       return '"turn.pending" is malformed';
     }
   }
+  if (
+    turn.inFlight !== undefined &&
+    (version < V8 || !isStringArray(turn.inFlight) || turn.inFlight.length === 0)
+  ) {
+    return '"turn.inFlight" is malformed';
+  }
   return null;
+}
+
+function pendingEntryOk(p: unknown, groups: boolean): boolean {
+  return (
+    isObject(p) &&
+    typeof p.toolCallId === "string" &&
+    typeof p.tool === "string" &&
+    typeof p.resumable === "boolean" &&
+    isFiniteNumber(p.requestedAt) &&
+    (p.groupStart === undefined || (groups && typeof p.groupStart === "string"))
+  );
+}
+
+/** A turn as the current version holds it: a v1–v3 one without ids, a v1–v7 pending as a list. */
+function currentTurn(turn: Record<string, unknown>, version: number): Record<string, unknown> {
+  const ided = version < STEER_IDS_VERSION ? withoutIds(turn) : turn;
+  return version < V8 && ided.pending !== undefined ? { ...ided, pending: [ided.pending] } : ided;
 }
 
 /**
@@ -255,15 +318,28 @@ export function parseDaemonRecord(
   if (returned === null) {
     return { ok: false, reason: '"returned" is malformed' };
   }
-  // A v1–v3 turn has no ids, whatever it carries: never read half.
-  const turn =
-    isObject(value.turn) && value.schemaVersion < STEER_IDS_VERSION
-      ? withoutIds(value.turn)
-      : value.turn;
+  // A v1–v3 turn has no ids, whatever it carries: never read half. A v1–v7
+  // pending object is the one-entry list v8 writes.
+  const turn = isObject(value.turn) ? currentTurn(value.turn, value.schemaVersion) : value.turn;
+  // The marked head (v8), else the old rule — which stays for every version:
+  // its idle `[system?, user]` reading is a decision of its own (no unasked
+  // turn after a reload), not only a stand-in for the missing mark.
+  if (
+    value.schemaVersion >= V8 &&
+    value.head !== undefined &&
+    !isUserIndex(record.messages, value.head)
+  ) {
+    return { ok: false, reason: '"head" is malformed' };
+  }
+  const marked = value.schemaVersion >= V8 ? (value.head as number | undefined) : undefined;
+  const head = marked ?? legacyHead(record.messages, value.turn !== undefined);
+  // Only a v8+ `head` is read: an older record's is derived, never taken.
+  const { head: _raw, ...fields } = value;
   const current: Record<string, unknown> = {
-    ...value,
+    ...fields,
     ...(turn !== undefined ? { turn } : {}),
     returned,
+    ...(head !== undefined ? { head } : {}),
     schemaVersion: DAEMON_RECORD_VERSION,
   };
   if (value.schemaVersion === 1) {
@@ -301,6 +377,25 @@ function returnedRows(value: unknown): ReturnedEntry[] | null {
   return rows;
 }
 
+/** `index` is an integer naming a user message of `messages`. */
+function isUserIndex(messages: readonly ChatMessage[], index: unknown): boolean {
+  return Number.isInteger(index) && messages[index as number]?.role === "user";
+}
+
+/**
+ * The head a record does not mark (any v1–v7 record; a v8 one with no
+ * `head`): the reload rule. An IDLE history that is a lone user message after
+ * the system prompt may be a just-compacted one (or a first turn that ended
+ * with no reply): read it as the summary, so a send-now there is
+ * `NoTurnRunning`, never an unasked turn that may run tools. A record cut
+ * short mid-turn has none by this rule (a reset's restart message there is
+ * what v8's mark adds: context-reset slice-2 F1).
+ */
+function legacyHead(messages: readonly ChatMessage[], cutShort: boolean): number | undefined {
+  const at = messages[0]?.role === "system" ? 1 : 0;
+  return !cutShort && messages.length === at + 1 && messages[at]?.role === "user" ? at : undefined;
+}
+
 function withoutIds(turn: Record<string, unknown>): Record<string, unknown> {
   const { steeringIds: _ignored, ...rest } = turn;
   return rest;
@@ -309,35 +404,35 @@ function withoutIds(turn: Record<string, unknown>): Record<string, unknown> {
 /**
  * Whether a permission request attributed to call `toolCallId` is resumable
  * after a restart: the call asked for ITSELF (`origin: "call"`, never a
- * sub-agent inside it, D4), the history is exactly suspended before that call
- * (`suspendedCalls` — the same definition the reload and the agent's resume
- * use), and that call is the asked tool. Explicit, from the requester's
- * options (docs/feat/permission-call-attribution.md); no attribution → false.
+ * sub-agent inside it, D4), the history is exactly suspended before its
+ * group's head with that call among the calls still to run
+ * (`suspendedInGroup` — the same definition the reload uses; the agent's
+ * resume checks the head with `suspendedCalls`), and that call is the asked
+ * tool. Explicit, from the requester's options
+ * (docs/feat/permission-call-attribution.md); no attribution → false.
+ * `groupStart` absent → the call itself (a call alone).
  */
 export function classifyPending(
   messages: readonly ChatMessage[],
   toolCallId: string | undefined,
   origin: "call" | "subagent" | undefined,
   requestTool: string,
+  groupStart?: string,
 ): boolean {
   return (
     origin === "call" &&
     toolCallId !== undefined &&
-    suspendedCalls(messages, toolCallId)?.[0]?.name === requestTool
+    askingCall(messages, groupStart ?? toolCallId, toolCallId)?.name === requestTool
   );
 }
 
-/**
- * The record's `turn.pending` for the live asks (in request order). The record
- * holds ONE entry (v7): 0 → none; 1 → it, as is; more → none, so a reload
- * closes the turn honestly — never resumed, never re-run. Several live asks
- * only happen with concurrent calls (docs/feat/permission-call-attribution.md
- * §6; the list goes on disk with the next record version).
- */
-export function pendingForRecord(
-  list: readonly PendingPermission[],
-): PendingPermission | undefined {
-  return list.length === 1 ? list[0] : undefined;
+/** The asking call when the history is suspended inside its group (`suspendedInGroup`), else undefined. */
+function askingCall(
+  messages: readonly ChatMessage[],
+  groupStart: string,
+  toolCallId: string,
+): ToolCall | undefined {
+  return suspendedInGroup(messages, groupStart, toolCallId)?.find((c) => c.id === toolCallId);
 }
 
 /** The last assistant message's tool calls and which of them have an answer after it. */
@@ -390,6 +485,19 @@ export function answerUnansweredCalls(
   notRun: string,
   firstNote: (callId: string) => string,
 ): void {
+  labelUnansweredCalls(messages, (callId, first) => (first ? firstNote(callId) : notRun));
+}
+
+/**
+ * The general form of `answerUnansweredCalls`: each unanswered call of the
+ * trailing assistant message gets `noteFor(its id, whether it is the first
+ * unanswered one)`, in call order (docs/feat/round-groups-persistence.md: a
+ * group's calls may all have started, so the first is not the only one).
+ */
+export function labelUnansweredCalls(
+  messages: ChatMessage[],
+  noteFor: (callId: string, first: boolean) => string,
+): void {
   const trailing = trailingCalls(messages);
   if (!trailing) {
     return;
@@ -399,11 +507,7 @@ export function answerUnansweredCalls(
     if (trailing.answered.has(call.id)) {
       continue;
     }
-    messages.push({
-      role: "tool",
-      content: first ? firstNote(call.id) : notRun,
-      toolCallId: call.id,
-    });
+    messages.push({ role: "tool", content: noteFor(call.id, first), toolCallId: call.id });
     first = false;
   }
 }
@@ -456,14 +560,18 @@ export const RESTART_TURN_END: TurnEnd = {
 /** A turn the reload continues: suspended on its own call's permission (`reconcileOnReload`). */
 export interface ResumedTurn {
   readonly turnId: string;
-  /** The call it waits on: asked again, then it and the rest of its round run. */
-  readonly toolCallId: string;
+  /**
+   * The first call it continues from — the asking call's group head (the
+   * asking call itself when it was alone): it and every later call of the
+   * round are asked again, then run.
+   */
+  readonly from: string;
   /** Accepted, not yet drained — re-queued, drained where they would have been. */
   readonly steering: readonly string[];
   /** Their enqueue ids, parallel to `steering` (v4); absent from an older record (minted at the reload). */
   readonly steeringIds?: readonly string[];
-  /** The record's pending entry, kept until the re-ask replaces it. */
-  readonly pending: PendingPermission;
+  /** The record's pending entries, each kept until its call's re-ask replaces it. */
+  readonly pending: readonly PendingPermission[];
 }
 
 export interface Reconciled {
@@ -477,25 +585,34 @@ export interface Reconciled {
 }
 
 /**
- * The turn of `record` that can be continued, if any: suspended on a
- * permission of its OWN call (not a sub-agent's, D4), the history exactly
- * suspended before that call, the call the one that asked, and the turn's key
- * still open. Anything else is closed honestly instead.
+ * The turn of `record` that can be continued, if any: no call of it may have
+ * started (no `inFlight`), and every pending request is of its OWN call (not
+ * a sub-agent's, D4), all in ONE group, the history exactly suspended before
+ * that group's head with each asking call among the calls still to run and
+ * named as asked (`suspendedInGroup`), and the turn's key still open. It
+ * continues from the group's head. Anything else is closed honestly instead.
  */
 function resumableTurn(record: DaemonSessionRecord): ResumedTurn | undefined {
   const turn = record.turn;
-  const pending = turn?.pending;
-  if (!turn || !pending?.resumable) {
+  const pending = turn?.pending ?? [];
+  const first = pending[0];
+  if (!turn || !first || turn.inFlight !== undefined) {
     return undefined;
   }
-  const calls = suspendedCalls(record.messages, pending.toolCallId);
+  const from = first.groupStart ?? first.toolCallId;
   const key = record.turns.find((k) => k.turnId === turn.turnId);
-  if (!calls || calls[0]?.name !== pending.tool || !key || key.end) {
+  const ok = pending.every(
+    (p) =>
+      p.resumable &&
+      (p.groupStart ?? p.toolCallId) === from &&
+      askingCall(record.messages, from, p.toolCallId)?.name === p.tool,
+  );
+  if (!ok || !key || key.end) {
     return undefined;
   }
   return {
     turnId: turn.turnId,
-    toolCallId: pending.toolCallId,
+    from,
     steering: turn.steering,
     ...(turn.steeringIds ? { steeringIds: turn.steeringIds } : {}),
     pending,
@@ -510,8 +627,9 @@ function resumableTurn(record: DaemonSessionRecord): ResumedTurn | undefined {
  * mid-turn) is closed honestly — nothing is re-run and nothing is denied on
  * the user's behalf:
  * every unanswered call of the trailing assistant message gets a synthetic
- * answer (which one: see the notes above; only the FIRST unanswered call can
- * have started — calls run in order), the steering queue goes back to its
+ * answer (which one: see the notes above; the calls that may have started are
+ * the record's `inFlight` group, else only the FIRST unanswered call — calls
+ * run in order), the steering queue goes back to its
  * writers (v4; an older record keeps it as user messages), and the turn gets
  * its restart end.
  *
@@ -540,9 +658,21 @@ export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
         subagent: ENDED_SUBAGENT_INTERRUPTED_NOTE,
       }
     : { notRun: NOT_RUN_NOTE, interrupted: INTERRUPTED_NOTE, subagent: SUBAGENT_INTERRUPTED_NOTE };
-  answerUnansweredCalls(messages, notes.notRun, (callId) => {
-    const pending = turn.pending?.toolCallId === callId ? turn.pending : undefined;
-    return !pending ? notes.interrupted : pending.resumable ? notes.notRun : notes.subagent;
+  // Which calls may have started: a group's `inFlight` set when the record has
+  // one (durable before any of them ran), else only the first unanswered call
+  // (calls run one at a time). A call that may have started is "Interrupted" —
+  // with the sub-agent note when a sub-agent of it was asking — unless its own
+  // ask was pending and no group was running (then it never started).
+  const inFlight = turn.inFlight;
+  labelUnansweredCalls(messages, (callId, first) => {
+    if (!(inFlight ? inFlight.includes(callId) : first)) {
+      return notes.notRun;
+    }
+    const pending = turn.pending?.find((p) => p.toolCallId === callId);
+    if (!pending) {
+      return notes.interrupted;
+    }
+    return !pending.resumable ? notes.subagent : inFlight ? notes.interrupted : notes.notRun;
   });
   const end = ended ? ARCHIVED_TURN_END : RESTART_TURN_END;
   const turns = record.turns.map((key) =>

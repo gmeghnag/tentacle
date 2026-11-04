@@ -142,6 +142,9 @@
           "required": ["used", "window"],
           "type": "object"
         },
+        "denialReply": {
+          "$ref": "#/$defs/PermissionReplyText"
+        },
         "durationMs": {
           "minimum": 0,
           "type": "integer"
@@ -883,6 +886,19 @@
       "required": ["optionId", "outcome"],
       "type": "object"
     },
+    "PermissionReplyText": {
+      "allOf": [
+        {
+          "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+        },
+        {
+          "pattern": "\\S"
+        }
+      ],
+      "maxLength": 2000,
+      "minLength": 1,
+      "type": "string"
+    },
     "PermissionRequestId": {
       "maxLength": 128,
       "minLength": 1,
@@ -913,6 +929,17 @@
           },
           "minItems": 1,
           "type": "array"
+        },
+        "reply": {
+          "additionalProperties": true,
+          "properties": {
+            "maxChars": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": ["maxChars"],
+          "type": "object"
         },
         "requestId": {
           "$ref": "#/$defs/PermissionRequestId"
@@ -1173,6 +1200,9 @@
     "ResolvePermissionParams": {
       "additionalProperties": true,
       "properties": {
+        "message": {
+          "$ref": "#/$defs/PermissionReplyText"
+        },
         "optionId": {
           "minLength": 1,
           "type": "string"
@@ -1884,6 +1914,9 @@
             "$ref": "#/$defs/ContentBlock"
           },
           "type": "array"
+        },
+        "denialReply": {
+          "$ref": "#/$defs/PermissionReplyText"
         },
         "durationMs": {
           "minimum": 0,

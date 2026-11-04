@@ -4,6 +4,15 @@
 > **Branch:** `feat/suspended-turn-resume`
 > **Type:** feat (promoted from eval 2026-10-20) · **Size:** M · **Blast:** load-bearing (agent loop, steering window, persistence + permission invariants) · **Suited:** strong model executes; mandatory fresh-context Review (one, by owner choice)
 
+> **Generalised by `docs/feat/round-groups-persistence.md` (2026-11-04).**
+> - P1 ("calls run in order") now holds per GROUP. A suspension is "the
+>   answered prefix ends at the group's head, and the asking call is in that
+>   group" (`suspendedInGroup`).
+> - A reload resumes from the group's head (`ResumedTurn.from`), not from the
+>   asking call.
+> - The labels use the record's `inFlight` set when it has one. A call alone is
+>   still exactly this doc's behaviour.
+
 ---
 
 ## Context

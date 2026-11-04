@@ -17,6 +17,7 @@ export * from "./content.ts";
 export * from "./session.ts";
 export * from "./spill.ts";
 export * from "./updates.ts";
+export * from "./permission-reply.ts";
 export * from "./permission.ts";
 export * from "./model.ts";
 export * from "./mcp.ts";

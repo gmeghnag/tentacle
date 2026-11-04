@@ -61,6 +61,13 @@ export interface ToolResult {
     readonly name: string;
     readonly reason?: string;
   };
+  /**
+   * Set on a call the person refused WITH a reply: the reply as data
+   * (docs/feat/permission-reply.md). A frontend shows it instead of the
+   * model's text; kept only while `content` is the agent's own denial text
+   * (a transform that rewrote it drops this copy).
+   */
+  readonly denialReply?: string;
 }
 
 /**

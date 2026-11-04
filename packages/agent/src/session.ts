@@ -6,7 +6,7 @@
  * one-shot loop into an interactive assistant.
  */
 import type { ChatMessage } from "@tentacle/core";
-import { type Agent, type AgentEvent, UnknownSkillError } from "./agent.ts";
+import { type Agent, type AgentEvent, type BeforeRun, UnknownSkillError } from "./agent.ts";
 import { type CompactResult, carryOverSkills, compactedHistory } from "./compact.ts";
 import type { AskHooksTrust } from "./hooks.ts";
 import type { SkillListing } from "./session-skills.ts";
@@ -29,6 +29,14 @@ export interface SendOptions {
    * undrained steers over (docs/feat/send-now-a.md). Absent → empty.
    */
   readonly steering?: readonly string[];
+  /** Makes a parallel group's start durable before it runs (see `RunOptions.beforeRun`). */
+  readonly beforeRun?: BeforeRun;
+}
+
+/** Per-turn options of `resume`. */
+export interface ResumeOptions {
+  /** As `SendOptions.beforeRun`. */
+  readonly beforeRun?: BeforeRun;
 }
 
 export interface SessionOptions {
@@ -101,6 +109,7 @@ export class Session {
         userMessage: text !== "",
         ...(opts.skill !== undefined ? { skill: opts.skill } : {}),
         ...(opts.askHooksTrust !== undefined ? { askHooksTrust: opts.askHooksTrust } : {}),
+        ...(opts.beforeRun !== undefined ? { beforeRun: opts.beforeRun } : {}),
       });
     } finally {
       // Persist once the turn settles (normal end, error, or abort), so a
@@ -132,10 +141,15 @@ export class Session {
    * accepted. A history not suspended there rejects (`ResumeShapeError`)
    * before anything runs.
    */
-  async *resume(toolCallId: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
+  async *resume(
+    toolCallId: string,
+    signal?: AbortSignal,
+    opts: ResumeOptions = {},
+  ): AsyncGenerator<AgentEvent> {
     try {
       yield* this.agent.runMessages(this.messages, this.id, signal, () => this.steering.splice(0), {
         resumeFrom: toolCallId,
+        ...(opts.beforeRun !== undefined ? { beforeRun: opts.beforeRun } : {}),
       });
     } finally {
       this.persist();

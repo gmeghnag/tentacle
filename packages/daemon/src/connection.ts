@@ -295,7 +295,7 @@ export class Connection {
   // `PermissionNotPending` and learns the outcome from `permission_resolved`.
   private resolvePermission(params: ResolvePermissionParams): ResolvePermissionResult {
     const hosted = this.lookup(params.sessionId);
-    hosted.resolvePermission(params.requestId, params.optionId);
+    hosted.resolvePermission(params.requestId, params.optionId, params.message);
     return {};
   }
 

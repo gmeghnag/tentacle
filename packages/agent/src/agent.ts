@@ -125,7 +125,23 @@ export interface RunOptions {
    * a resume, which keep it.
    */
   readonly userMessage?: boolean;
+  /**
+   * Make a group's start durable before it runs (R2,
+   * docs/feat/round-groups-persistence.md). Contract for the round executor:
+   * awaited after a group of MORE THAN ONE call is authorized (one at a time,
+   * in call order) and before any of its calls runs, with `ids` = the calls
+   * that will run (authorized, not cancelled); never for a call alone. Then
+   * the abort is checked again: aborted → those calls are answered cancelled
+   * and never start. Resolves whether the set landed (`false`: a failed write,
+   * or an abort released the wait) — on `false` the executor runs the group
+   * one call at a time. Absent → nothing to persist. Not called yet: every
+   * call is its own group until the parallel executor (task 6).
+   */
+  readonly beforeRun?: BeforeRun;
 }
+
+/** `RunOptions.beforeRun`: resolves whether the group's in-flight set is durable. */
+export type BeforeRun = (ids: readonly string[], signal: AbortSignal) => Promise<boolean>;
 
 /** The context-line estimate's counter when the config names none. */
 const DEFAULT_COUNTER = new HeuristicTokenCounter();
@@ -152,6 +168,7 @@ function toolMessage(callId: string, result: ToolResult, durationMs?: number): C
     toolCallId: callId,
     ...(result.spill ? { spill: result.spill } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(result.denialReply !== undefined ? { denialReply: result.denialReply } : {}),
   };
 }
 
@@ -1104,10 +1121,11 @@ export class Agent {
       }
       const { result: raw, input, durationMs } = await resultPromise;
       // After the duration was taken: a transform is harness time, not the tool's.
-      const result = await this.transformResult(call, raw, signal, {
+      const transformed = await this.transformResult(call, raw, signal, {
         sessionId: toolContext.sessionId,
         input,
       });
+      const result = keepDenialReply(raw, transformed);
       yield {
         type: "tool_result",
         id: call.id,
@@ -1421,6 +1439,9 @@ export class Agent {
     const outcome = await this.gate.authorize(tool, input, {
       sessionId: ctx.sessionId,
       toolCallId: call.id,
+      // No `groupStart`: every call runs alone, its own group (absent = itself;
+      // the parallel executor passes its group's head —
+      // docs/feat/round-groups-persistence.md).
       signal: ctx.signal,
     });
     // The abort first, whatever the answer: a request settled by a cancel
@@ -1479,11 +1500,35 @@ function gateRefusal(
       isError: true,
     };
   }
+  const denied = `Permission denied by the user: \`${call.name}\` was not run.`;
+  if (outcome.message === undefined) {
+    return { content: denied, isError: true };
+  }
+  // The person's reply (docs/feat/permission-reply.md): the turn goes on, so
+  // the model answers it or changes plan instead of guessing why.
   return {
-    content: `Permission denied by the user: \`${call.name}\` was not run.`,
+    content: `${denied} The user replied:\n${outcome.message}\n${REPLY_GUIDANCE}`,
     isError: true,
+    denialReply: outcome.message,
   };
 }
+
+/**
+ * A denial's reply survives the result transforms only if they left the
+ * content byte-identical: a redaction, a hook or a spill that rewrote it means
+ * the structured copy could show what the model did not see (or a secret).
+ */
+function keepDenialReply(raw: ToolResult, transformed: ToolResult): ToolResult {
+  if (transformed.denialReply === undefined || transformed.content === raw.content) {
+    return transformed;
+  }
+  const { denialReply: _dropped, ...rest } = transformed;
+  return rest;
+}
+
+/** The line after a denial's reply: what the model should do with it. */
+const REPLY_GUIDANCE =
+  "Answer the user or change your approach; request this tool again only if you still need it.";
 
 /** A call's parsed arguments; `{}` when empty or malformed (the registry reports those). */
 function parseArguments(args: string): unknown {

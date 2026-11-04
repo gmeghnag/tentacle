@@ -646,7 +646,7 @@ export class SessionHost {
       turns: reconciled.turns,
       enqueueIds: reconciled.enqueueIds,
       returned: reconciled.returned,
-      cutShort: record.turn !== undefined,
+      ...(record.head !== undefined ? { head: record.head } : {}),
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
     });
     this.sessions.set(record.id, hosted);
