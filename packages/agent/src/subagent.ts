@@ -102,7 +102,8 @@ export function subagentRequester(
   agent: { readonly type: string; readonly description: string },
 ): PermissionRequester {
   return (req, options) => {
-    const { toolCallId: _childCallId, ...rest } = options ?? {};
+    // A child's call ids are unknown to the parent history: never forwarded.
+    const { toolCallId: _childCallId, groupStart: _childGroup, ...rest } = options ?? {};
     return requester(req, {
       ...rest,
       ...(parentCallId !== undefined ? { toolCallId: parentCallId } : {}),

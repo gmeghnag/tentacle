@@ -119,6 +119,12 @@ export interface PermissionRequestOptions {
   readonly toolCallId?: string;
   /** `call`: the call asked for itself. `subagent`: a sub-agent inside call `toolCallId` asked. */
   readonly origin?: "call" | "subagent";
+  /**
+   * The first call of the asking call's group: the calls authorized together
+   * and then run together (docs/feat/round-groups-persistence.md). A call
+   * alone is its own group. Absent: the call itself. Process-internal.
+   */
+  readonly groupStart?: string;
   /** Which sub-agent asked (display only; set with `origin: "subagent"`). */
   readonly agent?: { readonly type: string; readonly description: string };
 }

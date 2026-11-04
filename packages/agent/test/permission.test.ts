@@ -12,7 +12,7 @@ import type {
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { Agent, type AgentEvent } from "../src/agent.ts";
 import { HookRunner, runResultHooks } from "../src/hooks.ts";
-import { describeToolCall } from "../src/permission-gate.ts";
+import { PermissionGate, describeToolCall } from "../src/permission-gate.ts";
 
 function toolCallTurn(command: string): StreamEvent[] {
   return [
@@ -63,7 +63,8 @@ async function collect(agent: Agent): Promise<AgentEvent[]> {
 describe("permission gate in the agent loop", () => {
   test("the requester is told which call asks: { toolCallId, origin: call }", async () => {
     // docs/feat/permission-call-attribution.md T1: the daemon attributes the
-    // ask from these options, not from the last `tool_start` it saw.
+    // ask from these options, not from the last `tool_start` it saw. A call
+    // alone is its own group: no `groupStart` (docs/feat/round-groups-persistence.md).
     const { env } = makeEnv();
     const seen: unknown[] = [];
     const agent = new Agent({
@@ -77,6 +78,40 @@ describe("permission gate in the agent loop", () => {
     });
     await collect(agent);
     expect(seen).toEqual([{ toolCallId: "c1", origin: "call" }]);
+  });
+
+  test("T8 the gate forwards the call's group head to the requester", async () => {
+    // docs/feat/round-groups-persistence.md. Mutation: drop the `groupStart`
+    // spread in `authorize` → the daemon cannot record where the group starts.
+    const seen: unknown[] = [];
+    const gate = new PermissionGate(async (_req, options) => {
+      seen.push(options);
+      return { allowed: true };
+    });
+    const signal = new AbortController().signal;
+    await gate.authorize(
+      shellTool,
+      { command: "make deploy" },
+      {
+        sessionId: "s",
+        toolCallId: "c2",
+        groupStart: "c1",
+        signal,
+      },
+    );
+    await gate.authorize(
+      shellTool,
+      { command: "make test" },
+      {
+        sessionId: "s",
+        toolCallId: "c3",
+        signal,
+      },
+    );
+    expect(seen).toEqual([
+      { toolCallId: "c2", origin: "call", groupStart: "c1" },
+      { toolCallId: "c3", origin: "call" },
+    ]);
   });
 
   test("a tool runs with its own call id in the context", async () => {

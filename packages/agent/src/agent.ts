@@ -125,7 +125,23 @@ export interface RunOptions {
    * a resume, which keep it.
    */
   readonly userMessage?: boolean;
+  /**
+   * Make a group's start durable before it runs (R2,
+   * docs/feat/round-groups-persistence.md). Contract for the round executor:
+   * awaited after a group of MORE THAN ONE call is authorized (one at a time,
+   * in call order) and before any of its calls runs, with `ids` = the calls
+   * that will run (authorized, not cancelled); never for a call alone. Then
+   * the abort is checked again: aborted → those calls are answered cancelled
+   * and never start. Resolves whether the set landed (`false`: a failed write,
+   * or an abort released the wait) — on `false` the executor runs the group
+   * one call at a time. Absent → nothing to persist. Not called yet: every
+   * call is its own group until the parallel executor (task 6).
+   */
+  readonly beforeRun?: BeforeRun;
 }
+
+/** `RunOptions.beforeRun`: resolves whether the group's in-flight set is durable. */
+export type BeforeRun = (ids: readonly string[], signal: AbortSignal) => Promise<boolean>;
 
 /** The context-line estimate's counter when the config names none. */
 const DEFAULT_COUNTER = new HeuristicTokenCounter();
@@ -1423,6 +1439,9 @@ export class Agent {
     const outcome = await this.gate.authorize(tool, input, {
       sessionId: ctx.sessionId,
       toolCallId: call.id,
+      // No `groupStart`: every call runs alone, its own group (absent = itself;
+      // the parallel executor passes its group's head —
+      // docs/feat/round-groups-persistence.md).
       signal: ctx.signal,
     });
     // The abort first, whatever the answer: a request settled by a cancel

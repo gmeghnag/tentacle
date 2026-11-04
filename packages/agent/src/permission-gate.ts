@@ -96,6 +96,8 @@ export type GateOutcome =
 export interface GateCall {
   readonly sessionId: string;
   readonly toolCallId: string;
+  /** The first call of this call's group (`PermissionRequestOptions.groupStart`). */
+  readonly groupStart?: string;
   readonly signal: AbortSignal;
 }
 
@@ -166,6 +168,7 @@ export class PermissionGate {
     const response = await this.requester(request, {
       toolCallId: call.toolCallId,
       origin: "call",
+      ...(call.groupStart !== undefined ? { groupStart: call.groupStart } : {}),
     });
     if (response.allowed && response.scope === "session") {
       this.remember(tool, request);

@@ -39,7 +39,7 @@
  * epoch (the agent's one `pop` is never behind a marker; a replacement starts
  * a new epoch).
  */
-import type { AgentEvent, AskHooksTrust, Session } from "@tentacle/agent";
+import type { AgentEvent, AskHooksTrust, BeforeRun, Session } from "@tentacle/agent";
 import type {
   ChatMessage,
   JobController,
@@ -91,7 +91,6 @@ import {
   type ResumedTurn,
   classifyPending,
   closeFailedTurn,
-  pendingForRecord,
 } from "./persisted-session.ts";
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
@@ -138,7 +137,7 @@ interface PendingAsk {
    * offered `reply`; empty otherwise (docs/feat/permission-reply.md).
    */
   readonly replyable: ReadonlySet<string>;
-  /** What the record says of it while it is unanswered (`pendingForRecord`). */
+  /** What the record says of it while it is unanswered (`turn.pending`). */
   readonly record: PendingPermission;
   /** Streamed to the clients yet (only once its record is durable). */
   shown: boolean;
@@ -320,11 +319,18 @@ export class HostedSession {
   private compactionSummary: ChatMessage | undefined;
   private readonly errorPolicy: TurnErrorPolicy;
   /**
-   * A resumed turn's pending entry from the record, until its call is asked
-   * again (an ask for the same call replaces it) or answered without a re-ask
-   * (cleared at the next commit, a context reset, the turn's end).
+   * A resumed turn's pending entries from the record, each until its call is
+   * asked again (an ask for the same call replaces it) or answered without a
+   * re-ask (all cleared at the next commit, a context reset, the turn's end).
    */
-  private carried: PendingPermission | undefined;
+  private carried: readonly PendingPermission[] = [];
+  /**
+   * The calls of a group that may have started (`beforeRun`, R2): written
+   * before any of them runs, cleared where `carried` is — at the group's ONE
+   * commit, a context reset, the turn's end
+   * (docs/feat/round-groups-persistence.md). Absent: calls run one at a time.
+   */
+  private inFlight: readonly string[] | undefined;
   /**
    * Every unanswered ask, by `requestId`, in request order — with `carried`,
    * the one truth of what is pending (persisted with the turn,
@@ -477,7 +483,8 @@ export class HostedSession {
     if (resume && this.controller) {
       void this.drive(
         resume.turnId,
-        session.resume(resume.toolCallId, this.controller.signal),
+        // From the group's head: its calls are asked again, in order.
+        session.resume(resume.from, this.controller.signal, { beforeRun: this.beforeRunFn }),
         this.controller,
       );
     }
@@ -524,11 +531,21 @@ export class HostedSession {
       req,
       options?.agent,
     );
+    // The asking call's group head (a call alone: itself), kept with the entry:
+    // a reload resumes from it and never recomputes the group.
+    const groupStart = toolCallId !== undefined ? options?.groupStart || undefined : undefined;
     const record: PendingPermission = {
       toolCallId: toolCallId ?? "",
       tool: req.tool,
-      resumable: classifyPending(this.session.messages, toolCallId, options?.origin, req.tool),
+      resumable: classifyPending(
+        this.session.messages,
+        toolCallId,
+        options?.origin,
+        req.tool,
+        groupStart,
+      ),
       requestedAt: this.now(),
+      ...(groupStart !== undefined ? { groupStart } : {}),
     };
     const decided = new Promise<{ outcome: PermissionOutcome; reason?: string; message?: string }>(
       (resolve) => {
@@ -555,8 +572,8 @@ export class HostedSession {
       },
     );
     // The resumed call asked again: its live ask replaces the record's entry.
-    if (toolCallId !== undefined && this.carried?.toolCallId === toolCallId) {
-      this.carried = undefined;
+    if (toolCallId !== undefined) {
+      this.carried = this.carried.filter((p) => p.toolCallId !== toolCallId);
     }
     this.persist();
     // Shown once on disk (`persisted` never rejects: a failed write is logged
@@ -575,7 +592,12 @@ export class HostedSession {
       }
     });
     return decided.then(async ({ outcome, reason, message }) => {
-      // `settle` already took this ask out of `asks`: write the record without it.
+      // `settle` already took this ask out of `asks`: write the record without
+      // it. And without ANY carried entry: an answered ask means the resumed
+      // group has begun (its head may run now), so a record still saying
+      // "resume from the group's head" would run that call twice
+      // (docs/feat/round-groups-persistence.md, Review F1).
+      this.carried = [];
       this.persist();
       // The turn's abort ends this wait: a hung disk must never trap a cancel
       // (docs/fix/cancel-hung-disk.md). Safe: the agent checks the abort
@@ -699,10 +721,37 @@ export class HostedSession {
     return this.persister ? this.persister.flush(this.id) : Promise.resolve();
   }
 
-  /** What is pending now, in request order: the resumed turn's carried entry, then each live ask. */
+  /** What is pending now, in request order: the resumed turn's carried entries, then each live ask. */
   private pendingList(): PendingPermission[] {
     const live = [...this.asks.values()].map((ask) => ask.record);
-    return this.carried ? [this.carried, ...live] : live;
+    return [...this.carried, ...live];
+  }
+
+  /** `RunOptions.beforeRun` for this session's turns (one function: passed to every send/resume). */
+  private readonly beforeRunFn: BeforeRun = (ids, signal) => this.beforeRun(ids, signal);
+
+  /**
+   * A group of calls is about to run (R2, docs/feat/round-groups-persistence.md):
+   * its ids go on disk as `turn.inFlight` BEFORE any of them starts, so a
+   * reload labels each one "Interrupted" and never "Not run". Awaited by the
+   * agent, never by `drive` (the steering window stays await-free); a cancel
+   * ends the wait at once (a hung disk never traps it — the agent re-checks
+   * the abort before running). Resolves whether the set landed: `false` on a
+   * failed write, a cancel, or a closed session. No persister (pods, the
+   * worker), or one that never writes this session (a blocked file, an unsafe
+   * id): nothing to make durable, `true` at once.
+   */
+  private async beforeRun(ids: readonly string[], signal: AbortSignal): Promise<boolean> {
+    if (this.closed || signal.aborted) {
+      return false;
+    }
+    this.inFlight = [...ids];
+    if (!this.persister || !this.persister.writable(this.id)) {
+      return true;
+    }
+    const landed = this.persister.write(this.id, () => this.persistedState());
+    await untilAborted(landed, signal);
+    return signal.aborted ? false : landed;
   }
 
   /** The state a record captures, copied now (the arrays are live). */
@@ -712,7 +761,8 @@ export class HostedSession {
       turns.push(entry.end ? { turnId, end: entry.end } : { turnId });
     }
     const turnId = this.compacting ? null : this.activeTurnId;
-    const pending = pendingForRecord(this.pendingList());
+    const pending = this.pendingList();
+    const inFlight = this.inFlight;
     // By identity, like `awaitsAnswer`: gone from the history → not marked.
     const head =
       this.compactionSummary === undefined
@@ -737,7 +787,8 @@ export class HostedSession {
               turnId,
               steering: this.queue.map((r) => r.text),
               steeringIds: this.queue.map((r) => r.id),
-              ...(pending ? { pending } : {}),
+              ...(pending.length > 0 ? { pending } : {}),
+              ...(inFlight !== undefined ? { inFlight: [...inFlight] } : {}),
             },
           }
         : {}),
@@ -1076,6 +1127,7 @@ export class HostedSession {
       this.session.send(text, controller.signal, {
         ...(skill !== undefined ? { skill } : {}),
         ...(askHooksTrust !== undefined ? { askHooksTrust } : {}),
+        beforeRun: this.beforeRunFn,
       }),
       controller,
     );
@@ -1256,6 +1308,7 @@ export class HostedSession {
       this.session.send(prompt, controller.signal, {
         steering: seed,
         ...(next.askHooksTrust !== undefined ? { askHooksTrust: next.askHooksTrust } : {}),
+        beforeRun: this.beforeRunFn,
       }),
       controller,
     );
@@ -1322,7 +1375,10 @@ export class HostedSession {
           // was answered without being asked again (cancelled) — never write
           // it as pending. Live asks stay: each is cleared by its own settle
           // (a sibling call's commit must not drop it, once calls overlap).
-          this.carried = undefined;
+          // A group's ONE commit carries its results: no call of it is in
+          // flight any more, captured in the same write.
+          this.carried = [];
+          this.inFlight = undefined;
           this.recordCut(turnId);
           this.persist();
           continue;
@@ -1332,7 +1388,8 @@ export class HostedSession {
         // and here). The barrier, mid-turn — then the record holds the fresh
         // history at once, with the turn in flight.
         if (event.type === "context_reset") {
-          this.carried = undefined;
+          this.carried = [];
+          this.inFlight = undefined;
           this.historyReplaced("context_reset");
           this.persist();
           continue;
@@ -1424,7 +1481,8 @@ export class HostedSession {
       this.recordCut(this.activeTurnId);
       // Inside the steering window, and safe there: this method cannot await,
       // and `persist` only captures — the I/O starts after the window.
-      this.carried = undefined;
+      this.carried = [];
+      this.inFlight = undefined;
       this.persist();
       // Last, in the same stretch: a reserved send-now takes the slot now.
       this.settleSuccessor();

@@ -13,6 +13,12 @@
 > through the same `restore` path as a restart; `session/delete` is the only
 > removal. A v1 record reads as a live v2 one.
 
+> **Extended by `docs/feat/round-groups-persistence.md` (record v8, 2026-11-04).**
+> `turn.pending` is now a LIST (each entry may name its `groupStart`), and
+> `turn.inFlight` names the calls of a group that may have started. It is
+> written by `HostedSession.beforeRun`, the one awaited write per parallel
+> group. A v1–v7 pending object reads as a one-entry list.
+
 ## Context
 
 *— claude-opus-5-5, 2026-10-19*
