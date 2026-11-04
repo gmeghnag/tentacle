@@ -166,8 +166,9 @@ tentacle attach --engine docker|podman <container>
 **Kept pods and containers: `ps` → `attach <name>` → `rm`.** Every kept `run`
 is recorded on your machine (`<configDir>/kept/`, where it was created — no
 credentials). `tentacle ps` lists them, checked against their engine (NAME
-ENGINE WHERE MOUNT MODEL AGE STATUS; one removed outside tentacle shows `gone`;
-an engine that does not answer within 3 s is a dim `not reachable (skipped)`
+ENGINE WHERE MOUNT MODEL AGE STATUS; one removed outside tentacle is `gone` and
+hidden unless `-a` — or while a detached run or terminal still acts on it — and
+`tentacle rm <name>` drops its entry; an engine that does not answer within 3 s is a dim `not reachable (skipped)`
 line, never an error); `--engine` filters, `-q` prints names, `-v` details. A
 detached run shows its state: `detached · running 3m`, `detached · waiting:
 permission (shell)`, ` · auto` with `--auto-accept`, `attached (2)` with two
@@ -181,10 +182,12 @@ managed and kept labels, re-checked right before the delete; a running one asks
 `[y/N]` (`-f` skips; without a terminal, `-f` is required). A live detached run
 is named in that question and stopped first (turn cancelled and saved). A name
 that now belongs to something else is left alone and its stale entry dropped.
+Several names are removed one by one, each as above; a failure does not stop the
+others (exit 1 if any failed).
 
 ```sh
-tentacle ps [--engine <e>] [-q|-v]
-tentacle rm [--engine <e>] [-f] <name>
+tentacle ps [--engine <e>] [-a] [-q|-v]
+tentacle rm [--engine <e>] [-f] <name>...
 ```
 
 **Engines.** `--engine kubernetes|docker|podman` picks where it runs; the
@@ -233,7 +236,7 @@ Precedence: **environment variables › `config.jsonc` › built-in defaults**.
 | --- | --- | --- |
 | `model.provider` | `TENTACLE_PROVIDER` | `openai` (default) or `anthropic` |
 | `model.baseURL` | `TENTACLE_MODEL_BASE_URL` | Base URL incl. version. Default: `http://localhost:8080/v1` (openai) or `https://api.anthropic.com/v1` (anthropic) |
-| `model.model` | `TENTACLE_MODEL` | Model id sent to the endpoint |
+| `model.model` | `TENTACLE_MODEL` | Model id sent to the endpoint (`--model <id>` beats both, for that command — see below) |
 | `model.apiKey` | `TENTACLE_MODEL_API_KEY` | API key, **stored in plaintext** (discouraged) |
 | `model.apiKeyCommand` | — | Shell command whose stdout is the key; never written to disk |
 | `model.contextWindow` | — | Token budget for the TUI context meter |
@@ -245,6 +248,19 @@ Precedence: **environment variables › `config.jsonc` › built-in defaults**.
 | `contextReset.maxPerMessage` | `TENTACLE_CONTEXT_RESET_MAX` | Context resets per user message (default `-1` = unlimited) |
 | `loadSkills` | `TENTACLE_NO_SKILLS` (truthy disables) | Agent Skills discovery (default on) |
 | `engine` | `TENTACLE_ENGINE` | Default engine of `run`/`attach`: `kubernetes` (default), `docker` or `podman`; `--engine` wins. An unknown value is an error |
+
+**`--model <id>` and `--profile <name>`** are flags of the commands that start a
+session, written **after** the command: `tentacle run --image x --model m`,
+`tentacle attach box --model m`, `tentacle serve --model m`, and for the bare
+local session right after `tentacle` (`tentacle --model m`, `tentacle -i
+--profile p`, `tentacle --resume --model m`, `tentacle --plain …`, a one-shot
+`tentacle --model m "prompt"`). `--model` is `TENTACLE_MODEL`'s twin: that model
+id on the active profile's endpoint (the context window stays the profile's),
+no config change; `--profile` beats `TENTACLE_PROFILE`. `attach` uses the run's
+own model unless one is given. `serve --model` is the model its `connect`
+clients use: `connect` itself, like `ps`, `rm`, `update`, `hooks` and
+`package`, refuses both (`tentacle --model m run …`, before the command, is an
+error naming the right form).
 
 Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyCommand`.
 `TENTACLE_CONFIG_DIR` (or `XDG_CONFIG_HOME`) moves the config directory.

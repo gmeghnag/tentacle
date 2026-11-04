@@ -1,6 +1,7 @@
 # feat/config-profiles — named profiles in the user config, picked with `--profile <name>`
 
 > **Status:** done — merged to `main` 2026-10-20 (`3dcd5fa`; in-context review) · status synced by audit 2026-10-20
+> **AMENDED 2026-11-03 (owner decision, `docs/fix/detach-live-followups.md` round 3):** `--profile <name>` is no longer a LEADING global option. Like the new `--model <id>`, it is a flag of the commands that start a session, written AFTER the command: `tentacle run … --profile P`, `tentacle attach <name> --profile P`, `tentacle serve --profile P`, and for the bare local session right after `tentacle` (`tentacle --profile P`, `-i --profile P`, `--resume --profile P`, `--plain`, a one-shot `tentacle --profile P "prompt"`). Before a subcommand (`tentacle --profile P run`) it is an error naming the right form; on `ps`, `rm`, `update`, `hooks`, `package`, `install` it is the normal unknown-option error (a profile must not filter what `ps` shows); `connect` keeps refusing it. The pure parsing lives in `flags.ts` (`ARGS` specs + `extractSessionFlags`). Everything below that says "leading option" / "must come before the command" is the original design, kept as history.
 > **Branch:** `feat/config-profiles`
 > **Size:** S–M · **Blast:** cross-module (the config loader every runtime uses + the CLI's argument dispatch; no protocol, persistence or terminal change) · **Suited:** any model executes; standard in-context Review
 
@@ -131,6 +132,16 @@ worker gets the resolved `TentacleConfig` by `postMessage` (`worker.ts:51`),
      prompt text and is left untouched.
    - `--profile` with `connect` is an error: the remote daemon owns its config,
      so the flag would be a silent no-op.
+   - AMENDED (`fix/detach-live-followups`, owner 2026-11-03): the whole bullet
+     list above is superseded. `--profile <name>` and the new `--model <id>`
+     (`TENTACLE_MODEL`'s CLI twin: `loadConfig({model})`, which beats the env,
+     on the active profile's endpoint) are flags of the session commands
+     (`run`, `attach`, `serve`, the bare session), after the command, parsed by
+     `parseArgs` against `ARGS` with the command's other flags. `extractGlobalOptions`
+     became `extractSessionFlags`, which only handles what a spec cannot: a
+     one-shot prompt's options, the options before a subcommand (an error naming
+     `tentacle run --model X`), and `connect`'s refusal (it names
+     `tentacle serve --model <id>`).
 
    `main` calls it first, dispatches on `rest`, and passes `profile` to
    `loadConfig`. Help text: the flag, `TENTACLE_PROFILE`, and a commented
@@ -152,7 +163,7 @@ worker gets the resolved `TentacleConfig` by `postMessage` (`worker.ts:51`),
 |---|---|
 | `--profile x`, x not defined | `[config error] … unknown profile "x" (defined: …)`, exit 1, nothing spawned or run. |
 | `--profile` with no value / `--profile --resume` | CLI error, exit 1. |
-| `tentacle serve --profile x` (after the command) | CLI error "must come before the command", never a silent ignore. |
+| `tentacle serve --profile x` (after the command) | (amended 2026-11-03) accepted: the right form. `tentacle --profile x serve` is the error: "`--profile` goes after the command: tentacle serve --profile x". |
 | `tentacle --profile x connect …` | CLI error (no effect on a remote daemon). |
 | One-shot `tentacle --profile x fix the --profile docs` | Only the leading pair is consumed; the prompt is `fix the --profile docs`. |
 | Profile changes the endpoint, base has `apiKey` | Base key dropped (connection group); the profile's own key/command, or env, or none. |

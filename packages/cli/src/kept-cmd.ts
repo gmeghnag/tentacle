@@ -13,7 +13,6 @@ import { rmSync } from "node:fs";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { type KeptFile, forgetKept, readKept } from "./kept-index.ts";
 import {
-  EMPTY_LINE,
   type KeptEntry,
   type KeptRelay,
   type KeptRow,
@@ -28,6 +27,7 @@ import {
   renderTable,
   renderVerbose,
   resolveByName,
+  shownInPs,
   sortKept,
   whereOf,
 } from "./kept.ts";
@@ -120,12 +120,14 @@ function reportProblems(problems: readonly string[], deps: KeptDeps, out: (t: st
   }
 }
 
-/** `tentacle ps [--engine e] [-q] [-v]`. Exit 0: skips are informational. */
+/** `tentacle ps [--engine e] [-a] [-q] [-v]`. Exit 0: skips are informational. */
 export async function psCommand(
   options: {
     readonly engine?: EngineKind | undefined;
     readonly quiet?: boolean;
     readonly verbose?: boolean;
+    /** `-a`: also the rows the engine says are gone (`shownInPs`). */
+    readonly all?: boolean;
   },
   deps: KeptDeps,
 ): Promise<number> {
@@ -141,10 +143,6 @@ export async function psCommand(
     return 0;
   }
   reportProblems(index.problems, deps, deps.write);
-  if (entries.length === 0) {
-    deps.write(`${EMPTY_LINE}\n`);
-    return 0;
-  }
   const now = deps.now();
   const rows: KeptRow[] = sortKept(
     await Promise.all(
@@ -154,7 +152,12 @@ export async function psCommand(
         return { entry, status, ...(relay ? { relay } : {}) };
       }),
     ),
-  );
+  ).filter((row) => shownInPs(row, options.all === true));
+  // Nothing to show (none kept, or only `gone` rows hidden): the table has just
+  // its header, like `docker ps` (owner Q-R2); `-v` has no blocks, so no output.
+  if (rows.length === 0 && options.verbose) {
+    return 0;
+  }
   // One dim line per unreachable location (its rows stay listed: never a silent drop).
   const down = new Map<string, string>();
   for (const { entry, status } of rows) {
@@ -301,8 +304,25 @@ function dropRunDir(dir: string, write: (text: string) => void): void {
   }
 }
 
-/** `tentacle rm [--engine e] [-f] <name>`. */
+/**
+ * `tentacle rm [--engine e] [-f] <name>...` (docs/fix/detach-live-followups.md
+ * F3, owner OQ7): one name at a time, in order, each exactly as a lone `rm`
+ * (its own engine read, y/N and stop); a repeat runs once. A failure does not
+ * stop the next names; exit 1 if any failed.
+ */
 export async function rmCommand(
+  names: string | readonly string[],
+  options: { readonly engine?: EngineKind | undefined; readonly force?: boolean },
+  deps: KeptDeps,
+): Promise<number> {
+  let code = 0;
+  for (const name of new Set(typeof names === "string" ? [names] : names)) {
+    code = Math.max(code, await rmOne(name, options, deps));
+  }
+  return code;
+}
+
+async function rmOne(
   name: string,
   options: { readonly engine?: EngineKind | undefined; readonly force?: boolean },
   deps: KeptDeps,

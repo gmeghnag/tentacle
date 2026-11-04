@@ -507,6 +507,29 @@ describe("JsonSessionStore never silently replaces a longer history (docs/fix/de
     expect(kept.messages).toHaveLength(2);
   });
 
+  test("Q11: removing a session removes its aside copies too, never another id's", async () => {
+    // docs/fix/detach-live-followups.md F7 (owner OQ9). Mutation: `removeFile`
+    // without the aside sweep → `s.stale-…aside` survives the delete.
+    const where = join(dir, "q11");
+    const store = new JsonSessionStore(where, undefined, () => {});
+    await store.save(record("s", full));
+    await store.save(record("s", full.slice(0, 2))); // → s.stale-<ms>-<hex>.aside
+    // An id that only LOOKS like s's aside (SAFE_ID allows `.`), with its own aside.
+    const twin = "s.stale-1-deadbeef";
+    await store.save(record(twin, full));
+    await store.save(record(twin, full.slice(0, 2)));
+    expect((await readdir(where)).filter((n) => n.endsWith(".aside"))).toHaveLength(2);
+    await store.remove("s");
+    const left = (await readdir(where)).sort();
+    expect(
+      left.filter((n) => n === "s.json" || /^s\.stale-\d+-[0-9a-f]{8}\.aside$/.test(n)),
+    ).toEqual([]);
+    expect(left).toContain(`${twin}.json`);
+    expect(left.filter((n) => n.startsWith(`${twin}.stale-`) && n.endsWith(".aside"))).toHaveLength(
+      1,
+    );
+  });
+
   test("not a drop: a longer history, an equal one, a rewritten one (a compaction) all write", async () => {
     const asides: unknown[] = [];
     const store = new JsonSessionStore(join(dir, "q6-ok"), undefined, (i) => asides.push(i));

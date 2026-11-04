@@ -175,6 +175,12 @@ export class RemoteSession implements SessionStreamListener {
   private set streaming(id: string | null) {
     const was = this.streamingId;
     this.streamingId = id;
+    // LOAD-BEARING (docs/fix/detach-live.md R9): the idle listeners run
+    // SYNCHRONOUSLY, inside this setter. `persistingController`'s listener
+    // starts the post-turn save (its `flush` clears `confirmed`) before anything
+    // can read `saveConfirmed`; an async notification would let an exit net read
+    // `true` for a turn the laptop has not saved, and delete the workload.
+    // Pinned by test/idle-sync.test.ts (and cli/test/local-runtime.test.ts "R9 synchrony").
     if (was !== null && id === null) {
       for (const listener of [...this.idleListeners]) listener();
     }

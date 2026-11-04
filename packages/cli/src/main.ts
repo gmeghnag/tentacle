@@ -62,7 +62,8 @@ import {
   USAGE,
   cliMode,
   detachFlagProblem,
-  extractGlobalOptions,
+  extractSessionFlags,
+  infoRequest,
   parseArgs,
   parseContextWindowFlag,
   parseServeLimits,
@@ -192,9 +193,19 @@ Usage:
                            only reports (exit 10: an update is available)
   tentacle --help          show this help
   tentacle --version       print the version and exit
-  tentacle --profile <name> ...
-                           apply a profile from config.jsonc ("profiles"); a
-                           leading option, before the command or the prompt
+  --model <id> | --profile <name>
+                           flags of the commands that start a session, written
+                           AFTER the command: run, attach, serve, and the bare
+                           session (tentacle --model X, -i --profile Y, --resume
+                           --model X, --plain, tentacle --model X <prompt>).
+                           --profile applies a profile from config.jsonc
+                           ("profiles"); --model uses that model id on the
+                           active profile's endpoint (beats TENTACLE_MODEL; the
+                           context window stays the profile's). attach uses the
+                           run's own model unless one is given. serve: the model
+                           its connect clients use. Not before a command
+                           (tentacle --model X run is an error), and not on
+                           connect, ps, rm, update, hooks, package
 
 Remote control:
   tentacle serve [--host 127.0.0.1] [--port 4000] [--token T|--token-command CMD]
@@ -227,7 +238,7 @@ Environment:
   TENTACLE_PROVIDER         provider kind: openai (default) | anthropic
   TENTACLE_MODEL_BASE_URL   base URL incl. version (default: localhost:8080/v1,
                             or https://api.anthropic.com/v1 for anthropic)
-  TENTACLE_MODEL            model id
+  TENTACLE_MODEL            model id (overridden by --model)
   TENTACLE_MODEL_API_KEY    bearer token / Anthropic x-api-key (overrides
                             config apiKey/apiKeyCommand)
   TENTACLE_SYSTEM_PROMPT    inline system prompt (overrides PROMPT.md)
@@ -305,6 +316,8 @@ export interface CliIO {
   startTui?: typeof startTui;
   /** Test seam: stdin and stdout are a terminal. Default: both `isTTY`. */
   tty?: boolean;
+  /** Test seam: `serve`'s WebSocket daemon (a misplaced flag must never start a real one). */
+  startDaemon?: typeof startDaemon;
   /** Test seam: `run --detach`'s workload creation (pins that no daemon starts in the foreground). */
   provisionWorkload?: typeof provisionWorkload;
   /** Test seam: `run --detach`'s relay process. */
@@ -346,14 +359,16 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const write = io.write ?? ((text: string) => void process.stdout.write(text));
   const writeErr = io.writeErr ?? ((text: string) => void process.stderr.write(text));
 
-  // Leading global options (`--profile`) come off argv BEFORE the dispatch on
-  // args[0], so they never reach a one-shot prompt (docs/feat/config-profiles.md).
-  const globals = extractGlobalOptions(argv.slice(2));
-  if (!globals.ok) {
-    write(`\n[error] ${globals.error}\n`);
+  // `--model` / `--profile` are flags of the session commands (parsed below with
+  // the rest of each command's flags). Here only what a spec cannot hold: a
+  // one-shot prompt's options, the misplaced ones, `connect`'s refusal
+  // (docs/fix/detach-live-followups.md F5).
+  const session = extractSessionFlags(argv.slice(2));
+  if (!session.ok) {
+    write(`\n[error] ${session.error}\n`);
     return 1;
   }
-  const args = globals.rest;
+  const args = session.rest;
 
   // Hidden subcommand: the detached pod-delete child when THIS process is a
   // compiled binary (so the delete-on-exit safety net needs no external `bun`).
@@ -396,11 +411,20 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const own = mode === "tui" || mode === "plain" ? args : args.slice(1);
     const result = parseArgs(own, ARGS[mode]);
     if (!result.ok) {
+      // `--help` / `--version` after other options (`--model X --version`).
+      const info = infoRequest(result.error);
+      if (info !== undefined) {
+        write(info === "help" ? HELP : `tentacle ${APP_VERSION}\n`);
+        return 0;
+      }
       write(`\n[error] ${result.error}\nusage: ${USAGE[mode]}\n`);
       return 1;
     }
     parsed = result;
   }
+  // The model and profile this command names (a prompt's came off argv above).
+  const profileFlag = session.profile ?? parsed.flags.get("profile");
+  const modelFlag = session.model ?? parsed.flags.get("model");
 
   // `connect` drives a remote daemon; it needs no local model configuration.
   if (mode === "connect") {
@@ -477,7 +501,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     config = await loadConfig({
       cwd: process.cwd(),
       scaffold: !isStdioDaemon,
-      ...(globals.profile !== undefined ? { profile: globals.profile } : {}),
+      ...(profileFlag !== undefined ? { profile: profileFlag } : {}),
+      ...(modelFlag !== undefined ? { model: modelFlag } : {}),
     });
   } catch (error) {
     write(`\n[config error] ${error instanceof Error ? error.message : String(error)}\n`);
@@ -535,10 +560,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     };
     return mode === "ps"
       ? psCommand(
-          { engine, quiet: parsed.bools.has("quiet"), verbose: parsed.bools.has("verbose") },
+          {
+            engine,
+            quiet: parsed.bools.has("quiet"),
+            verbose: parsed.bools.has("verbose"),
+            all: parsed.bools.has("all"),
+          },
           deps,
         )
-      : rmCommand(parsed.positional[0] ?? "", { engine, force: parsed.bools.has("force") }, deps);
+      : rmCommand(parsed.positional, { engine, force: parsed.bools.has("force") }, deps);
   }
 
   // Skill discovery problems, once, before any Ink mount (AGENTS §7: no raw
@@ -614,7 +644,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         ? { cert: await Bun.file(certPath).text(), key: await Bun.file(keyPath).text() }
         : undefined;
     try {
-      const server = await startDaemon(config, {
+      const server = await (io.startDaemon ?? startDaemon)(config, {
         ...limits,
         host,
         port,
@@ -959,7 +989,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           autoAccept: runBools.has("auto-accept") || runFlags.get("auto-accept") === "true",
           keep: kept.keep,
           cwd: config.cwd,
-          ...(globals.profile !== undefined ? { profile: globals.profile } : {}),
+          ...(profileFlag !== undefined ? { profile: profileFlag } : {}),
         },
         {
           write,
@@ -1110,8 +1140,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       }
       runModelOf = entry.created;
       const plan = runModelPlan(entry, config, {
-        profile: globals.profile !== undefined || Boolean(process.env.TENTACLE_PROFILE),
-        model: Boolean(process.env.TENTACLE_MODEL),
+        profile: profileFlag !== undefined || Boolean(process.env.TENTACLE_PROFILE),
+        model: modelFlag !== undefined || Boolean(process.env.TENTACLE_MODEL),
       });
       if (plan.kind === "as-is") {
         return true;

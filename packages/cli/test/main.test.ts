@@ -454,10 +454,10 @@ describe("cli main: --engine", () => {
 
     test("a profile's keep beats the user config", async () => {
       const profiles = { profiles: { p: { keep: true } } };
-      const on = await keepHintFor(["--profile", "p", ...base], { keep: false, ...profiles });
+      const on = await keepHintFor([...base, "--profile", "p"], { keep: false, ...profiles });
       expect(on.hint).toContain("attach");
       const offProfiles = { profiles: { p: { keep: false } } };
-      const off = await keepHintFor(["--profile", "p", ...base], { keep: true, ...offProfiles });
+      const off = await keepHintFor([...base, "--profile", "p"], { keep: true, ...offProfiles });
       expect(off.hint).toBeUndefined();
     });
 
@@ -775,7 +775,7 @@ describe("cli main: --engine", () => {
       await withEnv(
         { ...unreachable, TENTACLE_PROFILE: undefined, TENTACLE_MODEL: undefined },
         async () => {
-          const r = await detached(["--profile", "deep", ...base, "--detach", "--prompt", "hi"], {
+          const r = await detached([...base, "--detach", "--prompt", "hi", "--profile", "deep"], {
             config: { profiles: { deep: { model: { model: "deep-chat" } } } },
           });
           expect(r.code).toBe(0);
@@ -784,6 +784,23 @@ describe("cli main: --engine", () => {
           expect(entries).toEqual([
             expect.objectContaining({ profile: "deep", model: "deep-chat" }),
           ]);
+        },
+      );
+      rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
+    });
+
+    test("F5: `--model` reaches the kept entry (what the relay serves and `ps` shows)", async () => {
+      // Mutation: drop `model` from the `loadConfig` call → the profile's deep-chat.
+      await withEnv(
+        { ...unreachable, TENTACLE_PROFILE: undefined, TENTACLE_MODEL: undefined },
+        async () => {
+          const r = await detached(
+            [...base, "--detach", "--prompt", "hi", "--profile", "deep", "--model", "cli-x"],
+            { config: { profiles: { deep: { model: { model: "deep-chat" } } } } },
+          );
+          expect(r.code).toBe(0);
+          const entries = readKept(join(dir, "config", "kept")).entries.map((e) => e.entry);
+          expect(entries).toEqual([expect.objectContaining({ profile: "deep", model: "cli-x" })]);
         },
       );
       rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
@@ -1011,11 +1028,24 @@ describe("cli main: --engine", () => {
             baseURL: "http://deep.invalid/v1",
           });
           expect(r.seen.tuiModel).toBe("deep-chat"); // and SHOWN in the status bar
-          const explicit = await at(["--profile", "other", "attach", "box"]);
+          const explicit = await at(["attach", "box", "--profile", "other"]);
           expect(explicit.seen.config).toMatchObject({
             model: "other-model",
             baseURL: "http://other.invalid/v1",
           });
+          // F5 / OQ4: `--model` is explicit too — that id, on this command's
+          // endpoint, for this TUI only; the kept entry (what `ps` shows) keeps
+          // the run's. Mutation: `useRunModel` without `modelFlag` → deep-chat.
+          const cli = await at(["attach", "box", "--model", "cli-x"]);
+          expect(cli.code).toBe(0);
+          expect(cli.seen.config).toMatchObject({
+            model: "cli-x",
+            baseURL: "http://default.invalid/v1",
+          });
+          expect(cli.seen.tuiModel).toBe("cli-x");
+          expect(readKept(keptIndexDir(config)).entries.map((e) => e.entry.model)).toEqual([
+            "deep-chat",
+          ]);
         });
       } finally {
         if (before === undefined) await rm(path, { force: true });
@@ -1307,7 +1337,10 @@ describe("cli main: --engine", () => {
       clear();
       await withEnv(unreachable, async () => {
         const ps = await run(["ps"]);
-        expect(ps).toEqual({ code: 0, text: "No kept containers or pods.\n" });
+        expect(ps).toEqual({
+          code: 0,
+          text: "NAME   ENGINE   WHERE   MOUNT   MODEL   AGE   STATUS\n",
+        });
         const bad = await run(["ps", "--bogus"]);
         expect(bad.code).toBe(1);
         expect(bad.text).toContain("usage: tentacle ps");

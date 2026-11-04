@@ -419,7 +419,7 @@ export function anthropicErrorHint(status: number, body: string): string | undef
     return undefined;
   }
   if (status === 404 && type === "not_found_error") {
-    return "check the model id: set model.model in config.jsonc or TENTACLE_MODEL (e.g. claude-opus-5-5)";
+    return "check the model id: set model.model in config.jsonc, TENTACLE_MODEL, or --model on the command that starts the session (e.g. claude-opus-5-5)";
   }
   if ((status === 401 || status === 403) && type === "authentication_error") {
     return "check the API key: set model.apiKeyCommand / model.apiKey in config.jsonc or TENTACLE_MODEL_API_KEY";

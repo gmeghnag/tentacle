@@ -180,6 +180,8 @@ export function projectKey(cwd: string): string {
 const STALE_TEMP_MS = 60 * 60 * 1000;
 /** `.<uid>.json.tmp-<pid>-<rand>`: the writer's pid tells a leftover from a write in flight. */
 const TEMP_NAME = /^\..+\.json\.tmp-(\d+)-[0-9a-f]+$/;
+/** What follows `<id>.stale-` in a Q6 aside's name (`writeAtomic`): `<ms>-<8 hex>.aside`. */
+const ASIDE_TAIL = /^\d+-[0-9a-f]{8}\.aside$/;
 const FS_ERRORS: Record<string, string> = {
   EACCES: "permission denied",
   EPERM: "operation not permitted",
@@ -566,6 +568,28 @@ export class JsonSessionStore {
       await rm(target, { force: true });
     } catch (error) {
       throw new Error(`couldn't remove ${target}: ${describeFsError(error)}`, { cause: error });
+    }
+    await this.removeAsides(id);
+  }
+
+  /**
+   * The Q6 copies set aside for `id` go with it (docs/fix/detach-live-followups.md
+   * F7). Matched by the EXACT name `writeAtomic` makes, never a prefix: `SAFE_ID`
+   * allows `.`, so another id can start with `<id>.stale-`. Best-effort: the
+   * session itself is removed; a leftover is never loaded (`scan` takes `.json`).
+   */
+  private async removeAsides(id: string): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(this.dir);
+    } catch {
+      return;
+    }
+    const prefix = `${id}.stale-`;
+    for (const name of names) {
+      if (name.startsWith(prefix) && ASIDE_TAIL.test(name.slice(prefix.length))) {
+        await rm(join(this.dir, name), { force: true }).catch(() => {});
+      }
     }
   }
 

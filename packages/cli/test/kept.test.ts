@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  EMPTY_LINE,
   KEPT_LABEL,
   type KeptEntry,
   type KeptRow,
@@ -247,7 +246,6 @@ describe("renderTable (the owner-approved UX)", () => {
         "tentacle-77c0aa   kubernetes   dev/agents        —                 gpt-x             5d    running",
       ].join("\n"),
     );
-    expect(EMPTY_LINE).toBe("No kept containers or pods.");
   });
 
   test("sort ties break by name", () => {

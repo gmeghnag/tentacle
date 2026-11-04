@@ -26,7 +26,7 @@ tentacle-ab12cd   docker      local            ~/code/tentacle   2h    running
 
 Fixed by the approved UX: columns; oldest at the bottom; `--engine <e>` filter;
 `-q` names only; `-v` detail (incl. masked paths `~/.ssh` + tentacle config);
-empty → `No kept containers or pods.`; an unreachable engine → a dim
+empty → only the header row, like `docker ps` (docs/fix/detach-live-followups.md, Q-R2); an unreachable engine → a dim
 `podman: not reachable (skipped)` line, never an error; `rm` → `Removed
 tentacle-1b2c3d (docker, ~/code/tentacle).`, a running one asks `[y/N]`, `-f`
 skips; `attach <name>` needs no `--engine`.
@@ -289,7 +289,7 @@ Not touched: protocol, daemon, TUI, persistence of sessions, `wiring.ts`.
 | Index file missing / corrupt / newer `schemaVersion` | `kept-index` | missing ⇒ empty (local engines still scanned); corrupt ⇒ ignored + dim line; newer ⇒ refused and untouched, dim line "upgrade tentacle". Never half-loaded. |
 | Index lists a workload that was removed outside tentacle (`docker rm`) | `scan` | definitive 404 / empty list ⇒ entry pruned silently; unreachable ⇒ kept. |
 | Pod/daemon tries to write the index | — | impossible: the index lives only on the laptop; pods never see it (and `ps` never trusts a label to choose a dial target). |
-| Empty (nothing kept anywhere) | `ps` | `No kept containers or pods.` exit 0 (`-q`: no output). |
+| Empty (nothing kept anywhere) | `ps` | only the header row, exit 0 (`-q`: no output; plain `ps` also hides `gone` rows, `-a` lists them). |
 | Name given to `rm` is empty / has several | strict args | usage error, exit 1. |
 | `--engine` filter names an unknown engine | `parseEngine` (C) | `[error] unknown engine …` + usage, exit 1 — before any dial. |
 | `attach <name>` with no match | resolve `none` | falls through to C's path (default engine) so user-owned workloads still attach; its "not found … see `tentacle ps`" hint stays. |

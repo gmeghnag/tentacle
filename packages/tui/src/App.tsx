@@ -146,6 +146,7 @@ import {
   startTurn,
   withdrawUserTurn,
 } from "./state.ts";
+import { statusTokens } from "./status-view.ts";
 import { CLICK_IDLE, type ClickState, nextClick, toggleExpanded } from "./tool-expand.ts";
 import { toolCallAtViewport } from "./tool-hit.ts";
 import { panelHeight, panelMaxBody, treeKey } from "./tree-panel.ts";
@@ -715,6 +716,7 @@ export function App({
 
   // --- derived layout (recomputed each render) -----------------------------
   const st = stateRef.current;
+  const tokensShown = statusTokens(st);
   const columns = Math.max(20, size.columns);
   const termRows = Math.max(8, size.rows);
   // Slash-command autocomplete: open only while idle and typing a `/command`.
@@ -2586,8 +2588,8 @@ export function App({
       <StatusBar
         model={model}
         cwd={cwd}
-        tokens={st.sessionTokens}
-        contextTokens={st.lastTurnTokens?.prompt ?? 0}
+        tokens={tokensShown.totals}
+        contextTokens={tokensShown.context}
         contextWindow={contextWindow}
         columns={columns}
         scrolledUp={scrolledUp}

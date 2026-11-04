@@ -187,7 +187,10 @@ export const DEFAULT_CONFIG_JSONC = `{
   //  - tabulateJson: render a JSON array-of-objects result as a compact table. Off by default.
   // "tools": { "maxInlineOutputChars": ${DEFAULT_MAX_INLINE_OUTPUT_CHARS}, "redactSecrets": ${DEFAULT_REDACT_SECRETS}, "summarizeLargeOutput": ${DEFAULT_SUMMARIZE_LARGE_OUTPUT}, "dedupOutput": ${DEFAULT_DEDUP_OUTPUT}, "tabulateJson": ${DEFAULT_TABULATE_JSON} },
 
-  // Named profiles, applied with \`tentacle --profile <name>\` (or TENTACLE_PROFILE).
+  // Named profiles, applied with \`--profile <name>\` on the command that starts the
+  // session (\`tentacle --profile <name>\`, \`tentacle run … --profile <name>\`,
+  // \`tentacle attach <name> --profile <name>\`) or with TENTACLE_PROFILE.
+  // \`--model <id>\` picks just a model id on the active profile's endpoint.
   // A profile holds the same settings as this file and is merged over them:
   //  - "model" merges per key, but provider/baseURL/apiKey/apiKeyCommand move as
   //    one unit: set any of them and the others are NOT inherited (a key is never

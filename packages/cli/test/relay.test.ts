@@ -409,7 +409,12 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
       listener({ state: "stopped", reason: "the container is gone" });
     }
     expect(await exit).toBe(1);
-    expect(owner(dir)).toMatchObject({ state: "failed", detail: "the container is gone" });
+    // Q13 (docs/fix/detach-live-followups.md F6): the turn was still running,
+    // so the laptop copy lacks it, and a failed keep=true run says so too.
+    expect(owner(dir)).toMatchObject({
+      state: "failed",
+      detail: "the container is gone · not saved — the laptop copy lacks the last turn",
+    });
   });
 
   test("a model error: `failed`, out after the grace", async () => {
@@ -428,6 +433,21 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
     // through `onPeerError` (in `attachEngineRuntime`, not in this rig).
     expect(owner(dir)?.detail).toBe("internal error");
     expect(await afterGrace(exit)).toBe(1);
+  });
+
+  test("F5: the relay serves the run's model (its kept entry's), not what its own config resolves", async () => {
+    // `--model` reaches the relay only through the entry (main.ts records
+    // `config.model`); the relay process re-loads its config without the flag.
+    // Mutation: hand `deps.config` through untouched → `laptop-x`.
+    const seen: string[] = [];
+    const { start } = rig({}, {}, { model: "laptop-x" });
+    expect(
+      await start(async (config) => {
+        seen.push(config.model);
+        throw new Error("enough");
+      }),
+    ).toBe(1);
+    expect(seen).toEqual([entry.model]);
   });
 
   test("a failed attach is `failed`, its text sanitised, and the lock is free", async () => {
@@ -808,6 +828,54 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
     expect(detail).toContain("not saved");
     expect(detail).not.toContain("tentacle rm"); // keep=true: nothing to remove
     expect(statusOf(readOwner(r.dir), false, clock.now())).toContain("not saved");
+  });
+
+  test("F6 / Q13 keep=true, a FAILED run whose save did not land: its reason AND `not saved`", async () => {
+    // docs/fix/detach-live-followups.md F6 (owner OQ12). Mutation: the old
+    // `state !== "failed"` guard → only `internal error`, no `not saved`.
+    const model: ModelProvider = {
+      id: "broken",
+      // After its first event: the turn changed something, so a save is due.
+      async *stream() {
+        yield { type: "text", delta: "Chapter 1" };
+        throw new Error("401 from the model");
+      },
+    };
+    const pod = resident(model);
+    const r = rig({ keep: true });
+    // The laptop store cannot be written: its directory's place is a file.
+    writeFileSync(join(r.configDir, "sessions"), "");
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "failed", "failed");
+    expect(await afterGrace(exit)).toBe(1);
+    expect(owner(r.dir)?.detail).toBe(
+      "internal error · not saved — the laptop copy lacks the last turn",
+    );
+    expect(statusOf(readOwner(r.dir), false, clock.now())).toBe(
+      "failed: internal error · not saved — the laptop copy lacks the last turn",
+    );
+  });
+
+  test("F6 / Q-N1 (OPEN, deferred to feat/resume-after-model-loss): a run that fails before its first event keeps only its reason — no save ran, so no `not saved` (pins TODAY's behaviour)", async () => {
+    // NOT a "save landed" case: a turn that fails before its first event reads
+    // nothing back (`local-runtime.ts` `saved`: "changed nothing"), so the laptop
+    // copy can lack the prompt and the daemon's failed note while `ps` shows no
+    // `not saved`. The owner decided (2026-11-03) to settle this with
+    // feat/resume-after-model-loss, which reworks that path. When it does, this
+    // test is expected to change: update it, do not delete it.
+    const model: ModelProvider = {
+      id: "broken",
+      // biome-ignore lint/correctness/useYield: fails before its first event
+      async *stream() {
+        throw new Error("401 from the model");
+      },
+    };
+    const pod = resident(model);
+    const r = rig({ keep: true });
+    const exit = r.start(pod.attach);
+    await waitFor(() => owner(r.dir)?.state === "failed", "failed");
+    expect(await afterGrace(exit)).toBe(1);
+    expect(owner(r.dir)?.detail).toBe("internal error");
   });
 
   test("Q3 keep=true, the turn ended and its save landed: no `not saved`", async () => {
