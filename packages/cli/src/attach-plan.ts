@@ -134,3 +134,16 @@ export function quitPlan(input: QuitInput): QuitPlan {
   }
   return { kind: "remove" };
 }
+
+/**
+ * A plain attach of a kept container (no owner record): the session its run last
+ * saved, which the attach reopens from the laptop record (docs/fix/attach-plain-resume.md).
+ * `--resume [uid]` and `--continue` are the user's explicit choice and win; an entry
+ * without an id (an older run) gives nothing.
+ */
+export function plainResumeUid(
+  entry: { readonly sessionId?: string } | undefined,
+  flags: { readonly resume: boolean; readonly continue: boolean },
+): string | undefined {
+  return flags.resume || flags.continue ? undefined : entry?.sessionId;
+}

@@ -181,7 +181,7 @@ agent runs as your uid:gid (files stay yours); Docker Desktop and rootless
 Podman need nothing; SELinux hosts get `label=disable` for the container. The
 image's code can write your folder (`.git/hooks`, `package.json` scripts…):
 run only images you trust there, or use `--no-mount`. A kept container keeps its
-mount; `attach <name>` works from any folder, as if launched from the one it mounts (the laptop's kept index records it; a run started with no mount: the folder you are in).
+mount; `attach <name>` works from any folder, as if launched from the one it mounts (the laptop's kept index records it; a run started with no mount: the folder it was launched from, also recorded; that folder may have been deleted or renamed, the attach still works).
 
 **`attach`: in a pod or container that already exists.** Same as `run`, but
 tentacle never creates, starts or deletes it: closing the TUI detaches and it
