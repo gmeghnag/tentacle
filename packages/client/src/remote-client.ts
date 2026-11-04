@@ -354,6 +354,8 @@ export class RemoteClient {
   private readonly prompts = new Map<string, AbortController>();
 
   private readonly modelProvider?: ModelProvider;
+  /** pod-safe model-error text → its full laptop-side message (display only). */
+  private readonly laptopTexts = new Map<string, string>();
   private readonly titleModelProvider?: ModelProvider;
   private readonly onError?: (error: Error) => void;
   private readonly channelFactory?: () => Promise<DuplexChannel>;
@@ -1860,20 +1862,43 @@ export class RemoteClient {
     const e = error as { name?: unknown; code?: unknown; phase?: unknown } | null;
     if (
       !(error instanceof Error) ||
-      e?.name !== "ModelConnectionError" ||
+      (e?.name !== "ModelConnectionError" && e?.name !== "ModelUnreachableError") ||
       typeof e.code !== "string" ||
       !/^E[A-Z]{2,15}$/.test(e.code)
     ) {
       return null;
     }
     this.onError?.(error);
+    // `ModelUnreachableError`: the connect timeout (docs/fix/model-connect-timeout.md);
+    // its message names the endpoint, so the pod gets this text instead.
     const what =
-      e.phase === "mid-stream"
-        ? "model connection lost mid-stream"
-        : e.code === "ECONNREFUSED"
-          ? "could not connect to the model endpoint"
-          : "model connection lost";
-    return new RpcError(JsonRpcErrorCode.InternalError, `${what} (${e.code})`);
+      e.name === "ModelUnreachableError"
+        ? "model unreachable: the model endpoint did not answer"
+        : e.phase === "mid-stream"
+          ? "model connection lost mid-stream"
+          : e.code === "ECONNREFUSED"
+            ? "could not connect to the model endpoint"
+            : "model connection lost";
+    const text = `${what} (${e.code})`;
+    if (e.name === "ModelUnreachableError") {
+      // Kept ON THE LAPTOP only: `laptopText` swaps it back in when the turn's
+      // error is shown here, so a pod run reads like a local run.
+      this.laptopTexts.set(text, error.message);
+    }
+    return new RpcError(JsonRpcErrorCode.InternalError, text);
+  }
+
+  /**
+   * The text of a turn error as the laptop shows it: the pod-safe model-error
+   * text (`connectionLost`) swapped for the full laptop-side message, which
+   * names the endpoint. Display only; nothing of it is ever sent to the pod.
+   */
+  laptopText(message: string): string {
+    let out = message;
+    for (const [safe, full] of this.laptopTexts) {
+      out = out.replaceAll(safe, full);
+    }
+    return out;
   }
 
   /**

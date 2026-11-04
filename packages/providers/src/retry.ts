@@ -15,6 +15,8 @@
  * untouched. A drop after output has started is never retried (it would
  * duplicate what was shown): it surfaces as a `ModelConnectionError` that names
  * the phase. An exhausted retryable status surfaces as its own `ModelRequestError`.
+ * A connect timeout (`ModelUnreachableError`, code `ECONNTIMEOUT`, deliberately
+ * not on the allowlist) is not retried: a host silent for 15 s is down, not a blip.
  */
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { ModelRequestError } from "./openai-provider.ts";

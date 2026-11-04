@@ -1302,7 +1302,7 @@ export class RemoteSession implements SessionStreamListener {
       turn.queue.fail(
         new RpcError(
           outcome.error?.code ?? JsonRpcErrorCode.InternalError,
-          outcome.error?.message ?? "turn failed",
+          this.client.laptopText(outcome.error?.message ?? "turn failed"),
         ),
       );
     } else {

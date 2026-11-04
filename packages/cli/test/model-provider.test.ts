@@ -20,9 +20,11 @@ async function resetOnce(): Promise<{ readonly baseURL: string; readonly close: 
   const sse =
     'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
   const srv = createServer((socket) => {
-    connections += 1;
-    const first = connections === 1;
+    // Counted on the first byte: the connect-timeout probe connects and closes
+    // without sending one (docs/fix/model-connect-timeout.md), and is not a request.
     socket.once("data", () => {
+      connections += 1;
+      const first = connections === 1;
       if (first) {
         socket.resetAndDestroy();
         return;
