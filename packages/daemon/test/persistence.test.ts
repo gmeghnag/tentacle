@@ -3406,6 +3406,131 @@ describe("round groups on disk: groupStart, pending[] and inFlight (v8)", () => 
     expect(seen).toEqual([undefined, undefined]);
   });
 
+  // docs/fix/resumed-call-pending.md (task-5 Review F3): a resumed call the
+  // gate allows WITHOUT an ask (here: its tool's permission became `none`
+  // across the restart; a hook `force: "allow"` is the same path) settles no
+  // ask, so F1's clear never runs. Mutation: drop the awaited clear before the
+  // resumed call runs → the disk still resumes it while it runs.
+  const alone = (): DaemonSessionRecord =>
+    rec({
+      messages: round.slice(0, 1).concat({
+        ...round[1],
+        toolCalls: round[1]?.toolCalls?.slice(0, 1),
+      } as ChatMessage),
+      turns: [{ turnId: "T1" }],
+      turn: { turnId: "T1", steering: [], steeringIds: [], pending: [entry("c1")] },
+    });
+
+  test("T10 (F3) a resumed call allowed without an ask: a crash while it runs never runs it again", async () => {
+    const runs: string[] = [];
+    const store = new SpyStore();
+    let atRun: DaemonSessionRecord | undefined;
+    const r = rig(
+      [text("done")],
+      () => [
+        tool("run", "none", runs, () => {
+          const durable = store.durable.get("s");
+          atRun = durable
+            ? (JSON.parse(JSON.stringify(durable)) as DaemonSessionRecord)
+            : undefined;
+        }),
+      ],
+      store,
+    );
+    const restored = r.host.restore(reread(alone()));
+    const c = client();
+    restored.attach(c.attachment);
+    await until(() => !restored.running);
+    expect(runs).toEqual(['run:{"n":1}']);
+    expect(c.asks).toEqual([]);
+    // The daemon died while c1 ran: a restart reads `atRun` back.
+    const crashed = reread(atRun);
+    expect(reconcileOnReload(crashed).resume).toBeUndefined();
+    const again: string[] = [];
+    const r2 = rig([text("after")], () => [tool("run", "none", again)]);
+    const second = r2.host.restore(crashed);
+    await until(() => !second.running);
+    expect(again).toEqual([]);
+    expect(shape(second.snapshotPage().messages)).toContain(`tool(c1):${INTERRUPTED_NOTE}`);
+  });
+
+  test("T10b (F3) a resumed group allowed without asks: while c1 runs the disk no longer resumes from c1", async () => {
+    const runs: string[] = [];
+    const seen: Array<string | undefined> = [];
+    const store = new SpyStore();
+    const record = rec({
+      messages: round.slice(0, 1).concat({
+        ...round[1],
+        toolCalls: round[1]?.toolCalls?.slice(0, 2),
+      } as ChatMessage),
+      turns: [{ turnId: "T1" }],
+      turn: {
+        turnId: "T1",
+        steering: [],
+        steeringIds: [],
+        pending: [{ ...entry("c2"), groupStart: "c1" }],
+      },
+    });
+    const r = rig(
+      [text("done")],
+      () => [
+        tool("run", "none", runs, () => {
+          const durable = store.durable.get("s");
+          seen.push(durable ? reconcileOnReload(reread(durable)).resume?.from : "nothing durable");
+        }),
+      ],
+      store,
+    );
+    const restored = r.host.restore(reread(record));
+    await until(() => !restored.running);
+    expect(runs).toEqual(['run:{"n":1}', 'run:{"n":2}']);
+    expect(seen).toEqual([undefined, undefined]);
+  });
+
+  test("T10e (F3) the clear is AWAITED: the call does not start until its write lands", async () => {
+    // Mutation: schedule the clear without waiting → c1 runs while the disk
+    // still says "resume from c1".
+    const runs: string[] = [];
+    const store = new SpyStore();
+    store.hold = true;
+    const r = rig([text("done")], () => [tool("run", "none", runs)], store);
+    const restored = r.host.restore(reread(alone()));
+    await tick(5);
+    expect(runs).toEqual([]);
+    store.hold = false;
+    store.release();
+    await until(() => !restored.running);
+    expect(runs).toEqual(['run:{"n":1}']);
+  });
+
+  test("T10c (F3) the clear's write fails: the call still runs once and the failure is reported", async () => {
+    // The `beforeRun` / clear-before-run rule: a failed write never blocks a
+    // call (the daemon decides nothing itself); the persister reports it.
+    const runs: string[] = [];
+    const store = new SpyStore();
+    store.fail = new Error("disk full");
+    const r = rig([text("done")], () => [tool("run", "none", runs)], store);
+    const restored = r.host.restore(reread(alone()));
+    await until(() => !restored.running);
+    expect(runs).toEqual(['run:{"n":1}']);
+    expect(r.errors.length).toBeGreaterThan(0);
+  });
+
+  test("T10d (F3) a cancel while the clear's write hangs: released at once, the call never runs", async () => {
+    // Mutation: no abort check after the awaited clear → c1 runs after the cancel.
+    const runs: string[] = [];
+    const store = new SpyStore();
+    store.hold = true;
+    const r = rig([text("done")], () => [tool("run", "none", runs)], store);
+    const restored = r.host.restore(reread(alone()));
+    await tick(5);
+    restored.cancel();
+    await until(() => !restored.running);
+    expect(runs).toEqual([]);
+    store.hold = false;
+    store.release();
+  });
+
   test("T5 sequential pinned: a multi-call round never writes inFlight; each ask is its own group", async () => {
     // Mutation: call beforeRun for a group of one → an `inFlight` appears in a save.
     // A call alone writes the v7 entry shape (no `groupStart`: absent = itself).

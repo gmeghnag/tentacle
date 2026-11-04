@@ -138,10 +138,22 @@ export interface RunOptions {
    * call is its own group until the parallel executor (task 6).
    */
   readonly beforeRun?: BeforeRun;
+  /**
+   * A call of the resumed round (`resumeFrom`) passed the gate and is about
+   * to run: awaited after the allow and before it starts, then the abort is
+   * checked again (aborted → answered cancelled, never started). The daemon
+   * makes "this call may have started" durable here when no ask did
+   * (docs/fix/resumed-call-pending.md). Never for a later round. Absent →
+   * nothing to persist.
+   */
+  readonly beforeResumedCall?: BeforeResumedCall;
 }
 
 /** `RunOptions.beforeRun`: resolves whether the group's in-flight set is durable. */
 export type BeforeRun = (ids: readonly string[], signal: AbortSignal) => Promise<boolean>;
+
+/** `RunOptions.beforeResumedCall`: resolves once it is safe to start the call (never rejects). */
+export type BeforeResumedCall = (signal: AbortSignal) => Promise<void>;
 
 /** The context-line estimate's counter when the config names none. */
 const DEFAULT_COUNTER = new HeuristicTokenCounter();
@@ -674,7 +686,15 @@ export class Agent {
     if (resumed) {
       // A reset in it: the fresh history is all unseen (the loop below starts
       // at round 0 anyway).
-      if ((yield* this.runToolCalls(resumed, messages, toolContext, signal)) === "context_reset") {
+      if (
+        (yield* this.runToolCalls(
+          resumed,
+          messages,
+          toolContext,
+          signal,
+          opts.beforeResumedCall,
+        )) === "context_reset"
+      ) {
         unseen = 0;
       }
     }
@@ -1065,12 +1085,14 @@ export class Agent {
    * suspended inside a call is always "earlier calls answered, this one and
    * the later ones not" (`suspendedCalls`). A call reached after an abort is
    * answered as cancelled without prompting, keeping the round answered.
+   * `beforeStart`: the resumed round's `RunOptions.beforeResumedCall`.
    */
   private async *runToolCalls(
     calls: readonly ToolCall[],
     messages: ChatMessage[],
     toolContext: ToolContext,
     signal: AbortSignal | undefined,
+    beforeStart?: BeforeResumedCall,
   ): AsyncGenerator<AgentEvent, RoundOutcome> {
     for (const call of calls) {
       const resetConfig = this.config.contextReset;
@@ -1115,7 +1137,7 @@ export class Agent {
         emitProgress: (event: ToolProgressEvent) => progress.push(progressToEvent(call.id, event)),
         toolCallId: call.id,
       };
-      const resultPromise = this.runTool(call, ctx).finally(() => progress.close());
+      const resultPromise = this.runTool(call, ctx, beforeStart).finally(() => progress.close());
       for await (const event of progress.drain()) {
         yield event;
       }
@@ -1427,9 +1449,14 @@ export class Agent {
    * the result and the input it ran with (a `tool_call` hook may rewrite it),
    * for the `tool_result` hooks, and the run's `durationMs` iff `execute` ran:
    * the clock is read only around `execute`, after `authorize` — the prompt
-   * wait and the pre-hooks are never tool time.
+   * wait and the pre-hooks are never tool time. `beforeStart` (a resumed
+   * round's call) is awaited after an allow and before the run.
    */
-  private async runTool(call: ToolCall, ctx: ToolContext): Promise<ToolRun & { input: unknown }> {
+  private async runTool(
+    call: ToolCall,
+    ctx: ToolContext,
+    beforeStart?: BeforeResumedCall,
+  ): Promise<ToolRun & { input: unknown }> {
     const tool = this.config.tools.get(call.name);
     const input = parseArguments(call.arguments);
     if (!tool) {
@@ -1453,6 +1480,13 @@ export class Agent {
     }
     if (!outcome.allowed) {
       return { result: gateRefusal(call, outcome), input: outcome.input };
+    }
+    if (beforeStart) {
+      await beforeStart(ctx.signal);
+      // A cancel released the wait: the call must not start.
+      if (ctx.signal.aborted) {
+        return { result: { content: CANCELLED_TOOL_NOTE, isError: true }, input: outcome.input };
+      }
     }
     if (!outcome.modified) {
       // Unchanged: the raw argument string, byte-identical to a hook-less run.
