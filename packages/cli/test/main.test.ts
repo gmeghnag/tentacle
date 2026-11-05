@@ -2571,3 +2571,51 @@ describe("cli main: --engine", () => {
     expect(help.text).toBe("");
   });
 });
+
+describe("cli main: terminal's production default (fix/cli-main-terminal-seam F2/F3)", () => {
+  /** Run `body` with `process.stdin.isTTY` / `process.stdout.isTTY` stubbed (restored after). */
+  const withTty = async <T>(tty: { stdin: boolean; stdout: boolean }, body: () => Promise<T>) => {
+    const keep = {
+      stdin: Object.getOwnPropertyDescriptor(process.stdin, "isTTY"),
+      stdout: Object.getOwnPropertyDescriptor(process.stdout, "isTTY"),
+    };
+    Object.defineProperty(process.stdin, "isTTY", { value: tty.stdin, configurable: true });
+    Object.defineProperty(process.stdout, "isTTY", { value: tty.stdout, configurable: true });
+    try {
+      return await body();
+    } finally {
+      for (const [stream, d] of [
+        [process.stdin, keep.stdin],
+        [process.stdout, keep.stdout],
+      ] as const) {
+        if (d) {
+          Object.defineProperty(stream, "isTTY", d);
+        } else {
+          Reflect.deleteProperty(stream, "isTTY");
+        }
+      }
+    }
+  };
+  const runNoSeam = async (args: string[]) => {
+    const err: string[] = [];
+    const code = await main(["bun", "cli", ...args], {
+      out: (t) => strayStdout.push(t),
+      err: (t) => err.push(t),
+    });
+    return { code, err: err.join("") };
+  };
+
+  test("stdin a TTY → `terminal.stdin` is true: `--prompt -` is refused (the seam omitted)", async () => {
+    const r = await withTty({ stdin: true, stdout: true }, () =>
+      runNoSeam(["run", "--detach", "--prompt", "-", "--engine", "docker", "--image", "x"]),
+    );
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("--prompt -: stdin is a terminal");
+  });
+
+  test("stdin not a TTY → a bare `main` does not mount the TUI: help, exit 1 (the seam omitted)", async () => {
+    const r = await withTty({ stdin: false, stdout: false }, () => runNoSeam([]));
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("tentacle — run an agent task");
+  });
+});

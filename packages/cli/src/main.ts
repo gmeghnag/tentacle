@@ -335,7 +335,8 @@ export interface CliIO {
   startTui?: typeof startTui;
   /**
    * Test seam: which of stdin / stdout are a terminal. Default: the process's own
-   * `isTTY` (resolved once, at the top of `main`). A test never reads the runner's.
+   * `isTTY` (resolved once, at the top of `main`). A test that omits this seam DOES
+   * read the runner's terminal: pass it (`{ stdin: false, stdout: false }`) to be hermetic.
    */
   terminal?: { stdin: boolean; stdout: boolean };
   /** Test seam: the stream the pre-Ink y/N question reads. Default: `process.stdin`. */

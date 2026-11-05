@@ -180,3 +180,26 @@ its drift is declared. One miss: it did not run the preloads across `packages/cl
 
 **Owner question:** one. `script` cannot run here, so please run
 `script -q /dev/null bun test packages/cli/test/main.test.ts` from a terminal before merge.
+
+### Execution — final pass
+
+*— claude-sonnet-5-5, 2026-11-05*
+
+- **F2 + F3:** new in-suite describe at the end of `packages/cli/test/main.test.ts`
+  ("terminal's production default"). It stubs `process.stdin.isTTY` / `stdout.isTTY`
+  and calls `main` WITHOUT the `terminal` seam: (a) stdin TTY → `run --detach --prompt -`
+  is refused with "stdin is a terminal"; (b) stdin not a TTY → a bare `main` does not
+  mount the TUI (help on stderr, exit 1). The TTY-true side of the bare mount (`:1584`)
+  is not run (it would mount a real TUI); it shares the same `terminal.stdin` value as (a).
+- **Mutation:** `terminal.stdin` default → `false`: test (a) red (1 pass / 1 fail).
+  Restored from a `cp` backup, shasum `57bb5d6f…` identical before and after.
+  The `stdin: true` and `stdout` variants were not run.
+- **F4:** `main.ts:338` comment corrected (a test that omits the seam DOES read the runner's terminal).
+- **mobile tsconfig:** added `"noEmit": true` to `apps/mobile/tsconfig.json`. In this
+  worktree (no mobile deps) `bunx tsc -p apps/mobile` still reports type errors
+  (missing deps, as before) but `git status --short apps/mobile` shows only the
+  tsconfig edit: no emitted `.js` (before: 6 files).
+- **F1:** now TODO entry `fix/cli-tests-terminal-clean`.
+- **Gate:** `bunx biome check .` clean; `bun test packages` 4588 pass / 3 skip / 0 fail;
+  `bun run typecheck`: the root `tsc --noEmit` passes, the mobile half still fails
+  here (missing mobile deps, pre-existing, not this change).
