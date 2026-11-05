@@ -1,6 +1,6 @@
 # feat/config-carry — the laptop carries its settings into a pod via `session/open.settings`
 
-> **Status:** executed; fresh-context Review pending
+> **Status:** reviewed (PASS, LOW only); owner live check pending
 > **Branch:** `feat/config-carry`
 > **Type:** feat · **Size:** L · **Blast:** load-bearing · **Suited:** AGENTS §10's `load-bearing` rule, with a mandatory fresh-context Review; the owner assigns the executor
 
@@ -690,4 +690,83 @@ directly), which belongs with `TODO.md`'s `cli-tests-terminal-clean`.
 
 ## Review
 
-*(pending; mandatory fresh-context per AGENTS §10)*
+*— claude-opus-5-5, 2026-11-05*
+
+**Verdict: APPROVE-WITH-NITS → PASS** (LOW only). Fresh context, but the **same model
+as the executor** (claude-opus-5-5): shared blind spots can survive both passes on a
+load-bearing task (§10). The owner's live checklist (Execution) is the different-angle check.
+
+### Findings
+
+1. **LOW: a pod's own invalid *inline* description still kills a pod daemon's load.**
+   `packages/config/src/load.ts:446` checks `subagents.agentTaskDescription` (empty after
+   trim, over 4096 B) even when `podDaemon` is set. Only the File form is skipped. Scenario
+   (run, in `.tentacle/tmp/config-carry/trace.test.ts`): a container's `config.jsonc` has
+   `subagents.agentTaskDescription: "x".repeat(5000)` → `loadConfig({ podDaemon: true })`
+   throws `ConfigError … over 4096 bytes`, so `serve --bridge --model-proxy` dies, for a
+   value the laptop always overrides (P). This contradicts the Design's own rule ("a value
+   the laptop decides must not be able to kill the pod's daemon"). It is low because any other
+   invalid key in the container's file is fatal too (the strict schema). It is the same class
+   as "invalid config", not a new crash path.
+2. **LOW (cosmetic, daemon log only):** `packages/config/src/resolve.ts:515` stamps
+   `sources.agentTaskDescription` from the *read* text. A pod that sets only
+   `agentTaskDescriptionFile` (not read under `podDaemon`) shows `default`, so `pinnedOver`
+   never logs that the laptop replaced it. It has no effect on behaviour or on the laptop.
+
+No MEDIUM or HIGH findings.
+
+### Gate (run once, foreground)
+
+`bunx tsc --noEmit`: clean. `bunx biome check .`: 654 files, clean. `bun test packages`:
+**4727 pass, 3 skip (the opt-in ones), 0 fail**, 4730 tests across 317 files. The reaper GC
+flake did not occur, so no rerun was needed. `schema:export` was not rerun (the orchestrator
+ran it with no diff). `tsc -p apps/mobile` was not run (as instructed).
+
+### Mutations (non-vacuity, §9)
+
+The 4 files were backed up to `.tentacle/tmp/config-carry/bak/`. Each mutation was applied
+alone and reverted by `cp`. After that, `shasum -c` gave OK for all 4 and `git status` was
+clean.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 (exec T2) | W rows ignore `sources` (`set = class === "P" && …`) | **28 red** in `carried-settings.test.ts` + `model-proxy.test.ts` (every "pod FILE/ENV wins, even at the default" row, plus the e2e `redactSecrets` and the AGENTS.md-true case) |
+| M2 (exec T7/T8) | `recreate` drops `...this.carried` | **2 red** in the client tests: the recreate rebuild test, and `onSessionSettings` fired on a recreate |
+| M3 (exec T10) | `connect.ts` passes `sessionSettings` | **1 red**: "connect never sends `settings`" |
+| M4 (mine) | `Connection.open` omits `settings` from its result | **4 red**, in the daemon (create + live-id report), the client (`onSessionSettings`) and the e2e re-attach report |
+
+### Red-team (the 8 asked)
+
+1. **v16 honest, both ends wired.** True. `version.ts` is 16, and `version-mismatch.test.ts` and `tool-phase.test.ts` are updated. `OpenParams` / `SessionContextParams` / `SessionSkillsParams.settings` and `OpenResult.settings` are all strip schemas. The daemon forwards them (`connection.ts` → `session-host.ts` → factory), and the client sends them and reads the result. A v15 daemon would silently strip `settings` with the flags gone. That is a changed meaning, so the bump is right.
+2. **Removed flags have no reader left.** `rg` finds no `context-window` / `auto-title` / `parseContextWindowFlag` in `packages/*/src`. Only `pod-resident.ts:104` and `engine-runtime.ts:89` spawn `serve`, and neither passes a setting. Old resident (v15): `VersionMismatch` at `initialize`, then attach replaces it, or `tentacle rm` for a live detached run (unchanged path). Old laptop + new pod binary: the closed parser refuses the flag, which reads as "connection closed" (accepted debt). Detached run re-attached with another profile: `attachSession` sends nothing and gets the relay-created report, so you see the drift notice. Recreate from `messages`: resends this laptop's settings (M2 pins it).
+3. **`connect` never sends.** True. `connect.ts:129` has no option, so `RemoteClient.carried` is `{}` (M3 pins it). `serve`'s factory takes `(cwd)` only, so a hand-made frame is ignored anyway. The worker (`local-runtime.ts:885`) sets no `sessionSettings` either (read; T11 by reading, as Execution says).
+4. **Invalid or hostile values.** Every config bound (schema and env parsers: `parsePositiveInt`, `parseNonNegativeInt`, `parseIterationLimit`, stepPercent 1..100, the enums) is a subset of the wire's. A valid laptop config therefore never makes the outbound check reject (`peer.ts:150-156`). An inbound bad `settings` gets `InvalidParams` (`peer.ts:337-340`) and nothing is built. A hostile pod's bad report fails that open's result parse (`peer.ts:446-450`): its own session only. A well-formed lying report is filtered by `CARRIED`: names only, never a value, and no approval. Titles stay gated on the laptop. Pins are policy, not security (§7), and that is stated in the code and protocol comments.
+5. **`subagents.*`.** All 7 are P: they beat the pod's file and env (trace: the pod's `maxParallel: 9` loses to the laptop's default 4, and the laptop profile's `execution: "sequential"` wins). The description is read and trimmed on the laptop and capped at 4096 B (T20 by bytes). The wire allows 4096 units, which are always at least as many as the bytes. One layer with both keys → schema error, and across layers the profile wins. Under `podDaemon` the pod's File is never read (but see finding 1 for the inline form).
+6. **W as the LOWEST layer, `autoWake` not carried.** True. `sources !== "default"` decides, never the value (trace: a pod's explicit `dedupOutput: true` and env `TENTACLE_MAX_ITERATIONS=7` win, the unset `redactSecrets` takes the laptop's `true`; M1 turns 28 tests red). `autoWake` is not in `CARRIED`, and the `Record` over the wire keys enforces the table at compile time.
+7. **Report and notices, no raw write.** `createLocalRuntime` subscribes `createSettingsNotifier` → `deps.notify`. That is `NoticeHub.notify` in `run`/`attach`, which buffers until the TUI subscribes, so nothing is lost before mount and nothing is written raw, and the relay's log. It is deduped per session and line across reconnects.
+8. **Tests non-vacuous.** 4 of 4 mutations went red (above). The e2e trace through real `loadConfig` → `carriedSettings` → `OpenParamsSchema.parse` → `applyCarried` → `settingsNotices` matched the design. The pod's `apiKeyCommand: "exit 7"` did not run under `podDaemon`.
+
+### Premise table (spot-checked)
+
+| Premise | Verdict |
+|---|---|
+| Outbound params validated, rejected locally (`peer.ts:150-156`) | TRUE |
+| Inbound params → `InvalidParams` (`peer.ts:337-340`) | TRUE |
+| Inbound result validated (`peer.ts:446-450`) | TRUE |
+| Version mismatch refused at `initialize` (`connection.ts:363`) | TRUE |
+| `connect` builds its own `RemoteClient` with no settings (`connect.ts:129`) | TRUE |
+| A context reset recomposes from the merged flags (`load.ts` `refreshSessionContext`) | TRUE: it reads `config.agentsMdEnabled` / `skillsEnabled` |
+| Repro (Context) | **Not run.** `bun <script>` needs an approval this session lacked too. My `bun test` trace (above) covers steps 1–3 and 5 on the branch, not on `main`. |
+
+### Attacks that found nothing
+
+A config bound wider than the wire's (none). A third-party client sending `{}` as `settings`: P keys absent keep the pod's values, except `autoTitle` (off) and the description (neutral); this is intended. A notice flood from a hostile pod: bounded to the names in `CARRIED`, deduped per line. `serve` and the archived reopen honouring `settings`: neither does, since only the create branch passes them and only the proxy factory reads them.
+
+### How the executor behaved
+
+The executor was honest and thorough. It listed every drift with a reason: the units cap instead of a byte cap on the wire, the hand-edited `protocol.json`, the extra `sources`. It flagged unverified parts itself (Repro, mobile typecheck, live engines). It ran 28 mutations, and the 3 I re-ran reproduce as claimed. The "red first" gap (`carried-settings.ts` written with its test) was declared openly.
+
+### Owner questions (all at once)
+
+1. **Finding 1: skip the inline description check under `podDaemon` too?** **Recommendation: no fix round now** (LOW only, beta rule). Note it for `feat/parallel-agents` (task 7), which touches the description anyway: a one-line `readFromFile`-style guard on the inline branch.
+2. **Same-model review on a load-bearing task.** Executor and reviewer are both claude-opus-5-5. **Recommendation: accept**, and treat the Execution's live checklist as the independent check: at least items 1 (docker `run`), 3 (container's own config + notice), 4 (drift notice once) and 6 (v15 resident replaced). Run them *before* merge (beta: early live).
