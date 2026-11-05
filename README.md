@@ -196,8 +196,13 @@ session already running keeps the settings it was created with, and shows you th
 that differ from yours:
 
 ```
-This session keeps the settings it was created with (a new session, /clear, uses yours):
-  { "maxIterations": 3, "tools.dedupOutput": false }
+Session settings: { "maxIterations": 3, "tools.dedupOutput": false } (/clear to reset)
+```
+
+The values that win from the container's own config are shown the same way:
+
+```
+Container config: { "maxIterations": 7 }
 ```
 
 ```sh

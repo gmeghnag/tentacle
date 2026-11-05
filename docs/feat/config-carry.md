@@ -352,24 +352,23 @@ modules). It is the one place holding the table.
     reset agrees, since it reads the merged flags (`load.ts:302`, `:333`, `:358`).
   - `pinnedOver`: P keys the pod's own env or file set to a different value, logged once
     per session to the daemon log. Not sent to the laptop.
-- `settingsNotices(mine, report): string[]`, pure, on the laptop (format: owner F2, round 2).
-  Only keys of this laptop's `CARRIED` table, under their config names, as one line of JSON:
-  - overridden, the values that win:
+- `settingsNotices(mine, report): string[]`, pure, on the laptop (format: owner, round 3).
+  Only keys of this laptop's `CARRIED` table, under their config names, ONE line each:
+  - overridden, the pod's winning values, only those that differ from `mine`:
     ```
-    This container's own config wins over yours for this session:
-      { "maxIterations": 7 }
+    Container config: { "maxIterations": 7 }
     ```
   - drift (`report.carried` ≠ `mine`, per key; a key in `overridden` is told only above,
     since its value is the one running):
     ```
-    This session keeps the settings it was created with (a new session, /clear, uses yours):
-      { "maxIterations": 3, "tools.dedupOutput": false }
+    Session settings: { "maxIterations": 3, "tools.dedupOutput": false } (/clear to reset)
     ```
 
   Numbers, booleans and execution modes are printed. `subagents.agentTaskDescription` and
-  any other text are `"(text differs)"`, so no pod-supplied text reaches the terminal. The
-  notice's own text has no indent: the TUI indents a notice's later lines
-  (`packages/tui/src/render-lines.ts:587-593`).
+  any other text are `"(text differs)"`, so no pod-supplied text reaches the terminal. Each
+  notice is a single string with no newline; the TUI renders a whole notice dim
+  (`noticeLines`, `packages/tui/src/render-lines.ts:587`), so the hint is dim with no new
+  notice shape. In `relay.log` it is plain text.
 
 **CLI wiring.**
 
@@ -788,6 +787,25 @@ The reaper flake did not occur. `tsc -p apps/mobile` was not run (as instructed)
 
 **Unverified:** nothing in this round ran against a real engine; items 3 and 4 of the checklist
 above need a rerun, item 4 as described under F1.
+
+### Round 3
+
+Owner decision (2026-11-05): the two notices are ONE line each, exactly
+`Session settings: { … } (/clear to reset)` and `Container config: { … }`; JSON rules as in round 2.
+
+- `settingsNotices` (`packages/cli/src/carried-settings.ts`) builds the two strings above; no `\n`.
+- **Dim: yes, with no new shape.** A notice is one string, and `noticeLines`
+  (`packages/tui/src/render-lines.ts:587`) already wraps the whole text in `theme.subtle`, so the
+  `(/clear to reset)` hint is dim like the rest of the line. The TUI was not touched. `relay.log`
+  gets the same plain text.
+- **Round-2 LOW 1 fixed:** the container notice keeps a key only if `report.overridden[key] !== mine[key]`
+  (the pod's value differs from this laptop's). Red first: the new test "a pod value equal to this
+  laptop's is not told" failed on the old code, passes now. A key dropped this way is still left out of
+  the drift line (the session runs the pod's value, which equals the user's).
+- Tests updated to the new text: `carried-settings.test.ts`, `model-proxy.test.ts`,
+  `settings-notice-attach.test.ts`. README and CHANGELOG quote the new lines.
+
+*— claude-sonnet-5-5, 2026-11-05*
 
 ## Review
 

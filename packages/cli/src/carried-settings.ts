@@ -320,17 +320,19 @@ function valuesLine(keys: readonly Key[], values: SessionSettings): string {
 }
 
 /**
- * What the laptop tells the user about a session's report: only what differs,
- * for keys of THIS table. The second line has no indent of its own: the TUI
- * indents a notice's later lines (`noticeLines`).
+ * What the laptop tells the user about a session's report: ONE line each, only
+ * what differs, for keys of THIS table. The `(/clear to reset)` hint is plain
+ * text: a notice is one string, and the TUI renders the whole notice dim
+ * (`noticeLines`), so the hint is dim there with no new shape.
  */
 export function settingsNotices(mine: SessionSettings, report: SessionSettingsReport): string[] {
   const lines: string[] = [];
-  const overridden = KEYS.filter((key) => report.overridden[key] !== undefined);
+  // Only what differs from THIS laptop: a pod value equal to mine is not news.
+  const overridden = KEYS.filter(
+    (key) => report.overridden[key] !== undefined && report.overridden[key] !== mine[key],
+  );
   if (overridden.length > 0) {
-    lines.push(
-      `This container's own config wins over yours for this session:\n${valuesLine(overridden, report.overridden)}`,
-    );
+    lines.push(`Container config: ${valuesLine(overridden, report.overridden)}`);
   }
   // An overridden key is not what the session keeps: the line above has its value.
   // Absent on the session's side: nothing to show, but for the description.
@@ -341,9 +343,7 @@ export function settingsNotices(mine: SessionSettings, report: SessionSettingsRe
       (report.carried[key] !== undefined || key === "agentTaskDescription"),
   );
   if (differing.length > 0) {
-    lines.push(
-      `This session keeps the settings it was created with (a new session, /clear, uses yours):\n${valuesLine(differing, report.carried)}`,
-    );
+    lines.push(`Session settings: ${valuesLine(differing, report.carried)} (/clear to reset)`);
   }
   return lines;
 }

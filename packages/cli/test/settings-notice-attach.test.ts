@@ -93,7 +93,7 @@ describe("the settings notice through the real attach", () => {
     return loaded.record;
   }
 
-  const DRIFT = "This session keeps the settings it was created with";
+  const DRIFT = "Session settings: ";
 
   test("join (`attachTo`): a live session created with 3, a laptop on 5: the notice", async () => {
     const host = await residentHost();

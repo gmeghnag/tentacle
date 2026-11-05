@@ -531,7 +531,7 @@ describe("the laptop's settings reach the pod's agents, per session", () => {
     await say(b, "S", "again");
     expect(toolsOf(modelB.seen[0])).not.toContain("agent_task");
     expect(said).toEqual([
-      'This session keeps the settings it was created with (a new session, /clear, uses yours):\n{ "subagents.enabled": false, "maxIterations": 4 }',
+      'Session settings: { "subagents.enabled": false, "maxIterations": 4 } (/clear to reset)',
     ]);
     conn1.close();
     conn2.close();

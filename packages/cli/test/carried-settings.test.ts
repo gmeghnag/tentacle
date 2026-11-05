@@ -509,9 +509,7 @@ describe("createLocalRuntime: the report reaches the user through `notify`", () 
     const raw = stdout.mock.calls.length;
     stdout.mockRestore();
     expect((opens[0] as { settings?: unknown }).settings).toEqual(mine);
-    expect(notices).toEqual([
-      'This container\'s own config wins over yours for this session:\n{ "tools.dedupOutput": true }',
-    ]);
+    expect(notices).toEqual(['Container config: { "tools.dedupOutput": true }']);
     expect(raw).toBe(0);
   });
 
@@ -529,9 +527,9 @@ describe("createLocalRuntime: the report reaches the user through `notify`", () 
 
 describe("settingsNotices: only what differs, as one line of JSON under the config's names", () => {
   const mine: SessionSettings = { maxIterations: 9, agentTaskDescription: "my secret plan" };
-  const WINS = "This container's own config wins over yours for this session:\n";
-  const KEEPS =
-    "This session keeps the settings it was created with (a new session, /clear, uses yours):\n";
+  const WINS = "Container config: ";
+  const KEEPS = "Session settings: ";
+  const CLEAR = " (/clear to reset)";
 
   test("nothing to say", () => {
     expect(settingsNotices(mine, { carried: mine, overridden: {} })).toEqual([]);
@@ -562,7 +560,7 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
       { toolExecution: "parallel" },
       { carried: { toolExecution: pod } as unknown as SessionSettings, overridden: {} },
     );
-    expect(kept).toEqual([`${KEEPS}{ "tools.execution": "(text differs)" }`]);
+    expect(kept).toEqual([`${KEEPS}{ "tools.execution": "(text differs)" }${CLEAR}`]);
   });
 
   test("names this laptop's table does not know are dropped", () => {
@@ -586,7 +584,7 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
       },
     );
     expect(lines).toEqual([
-      `${KEEPS}{ "subagents.agentTaskDescription": "(text differs)", "maxIterations": 3, "tools.dedupOutput": false }`,
+      `${KEEPS}{ "subagents.agentTaskDescription": "(text differs)", "maxIterations": 3, "tools.dedupOutput": false }${CLEAR}`,
     ]);
     expect(lines.join()).not.toContain("plan");
   });
@@ -597,7 +595,7 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
       [{}, { agentTaskDescription: "text" }],
     ] as const) {
       expect(settingsNotices(left, { carried: right, overridden: {} })).toEqual([
-        `${KEEPS}{ "subagents.agentTaskDescription": "(text differs)" }`,
+        `${KEEPS}{ "subagents.agentTaskDescription": "(text differs)" }${CLEAR}`,
       ]);
     }
   });
@@ -609,6 +607,23 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
       { carried: { maxIterations: 3 }, overridden: { maxIterations: 7 } },
     );
     expect(lines).toEqual([`${WINS}{ "maxIterations": 7 }`]);
+  });
+
+  test("a pod value equal to this laptop's is not told: only what differs", () => {
+    // Mutation: list every overridden key → "maxIterations": 9 appears though it is 9 here.
+    const same = { carried: { maxIterations: 3, dedupOutput: true }, overridden: {} };
+    expect(
+      settingsNotices(
+        { maxIterations: 9, dedupOutput: false },
+        { ...same, overridden: { maxIterations: 9, dedupOutput: true } },
+      ),
+    ).toEqual([`${WINS}{ "tools.dedupOutput": true }`]);
+    expect(
+      settingsNotices(
+        { maxIterations: 9 },
+        { carried: { maxIterations: 3 }, overridden: { maxIterations: 9 } },
+      ),
+    ).toEqual([]);
   });
 
   test("a value the session's report leaves out has nothing to show", () => {
@@ -626,6 +641,6 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
     expect(said).toHaveLength(2);
     notify({ sessionId: "a", report: { carried: { maxIterations: 1 }, overridden: {} } });
     expect(said).toHaveLength(3);
-    expect(said[2]).toContain("keeps the settings");
+    expect(said[2]).toContain("Session settings:");
   });
 });

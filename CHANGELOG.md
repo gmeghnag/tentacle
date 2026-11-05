@@ -20,7 +20,10 @@ those.
   your laptop's** in a pod or container; its own config cannot change them.
 - **`attach --profile <name>` now applies to the new sessions it opens.** A
   session already running keeps the settings it was created with, and shows those
-  that differ from yours as soon as you attach.
+  that differ from yours as soon as you attach, as one line:
+  `Session settings: { "maxIterations": 3 } (/clear to reset)`. The container's
+  winning values read `Container config: { "maxIterations": 7 }`, and only those
+  that differ from yours.
 - The protocol is now version 16. A daemon left running by an older tentacle is
   refused at connect; attach again to replace it, or `tentacle rm <name>` if a
   detached run still uses it.
