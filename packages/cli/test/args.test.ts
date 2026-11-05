@@ -277,8 +277,15 @@ describe("tentacle run/attach (end to end, fake API server)", () => {
     args: string[],
   ): Promise<{ code: number; seen?: string; out: string }> => {
     seen.length = 0;
+    // `out`: every line run/attach print — stderr's (docs/fix/cli-output-streams.md);
+    // their stdout carries no data, so it must stay empty.
     const out: string[] = [];
-    const code = await main(["bun", "tentacle", ...args], { write: (t) => out.push(t) });
+    const stdout: string[] = [];
+    const code = await main(["bun", "tentacle", ...args], {
+      err: (t) => out.push(t),
+      out: (t) => stdout.push(t),
+    });
+    expect(stdout).toEqual([]);
     return { code, ...(seen[0] ? { seen: seen[0] } : {}), out: out.join("") };
   };
 

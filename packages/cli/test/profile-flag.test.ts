@@ -70,7 +70,7 @@ describe("tentacle --profile (end-to-end)", () => {
     requests.length = 0;
     const out: string[] = [];
     const code = await main(["bun", "cli", "--profile", "p", "say", "hi"], {
-      write: (t) => out.push(t),
+      out: (t) => out.push(t),
     });
     expect(code).toBe(0);
     expect(requests).toEqual([{ model: "profile-model", last: "say hi" }]);
@@ -80,7 +80,8 @@ describe("tentacle --profile (end-to-end)", () => {
     requests.length = 0;
     const out: string[] = [];
     const code = await main(["bun", "cli", "--profile", "nope", "say", "hi"], {
-      write: (t) => out.push(t),
+      err: (t) => out.push(t),
+      out: () => {},
     });
     expect(code).toBe(1);
     expect(out.join("")).toContain('unknown profile "nope" (defined: p)');
@@ -94,7 +95,8 @@ describe("tentacle --profile (end-to-end)", () => {
     const out: string[] = [];
     const started: string[] = [];
     const code = await main(["bun", "cli", "--profile", "p", "serve"], {
-      write: (t) => out.push(t),
+      err: (t) => out.push(t),
+      out: () => {},
       startDaemon: async (config) => {
         started.push(config.model);
         throw new Error("a misplaced --profile must not start a daemon");
@@ -110,7 +112,8 @@ describe("tentacle --profile (end-to-end)", () => {
     const out: string[] = [];
     const started: string[] = [];
     const code = await main(["bun", "cli", "serve", "--model", "x", "--profile", "p"], {
-      write: (t) => out.push(t),
+      err: (t) => out.push(t),
+      out: () => {},
       startDaemon: async (config) => {
         started.push(config.model);
         throw new Error("stub: no real daemon");
@@ -123,7 +126,10 @@ describe("tentacle --profile (end-to-end)", () => {
 
   test("`ps --profile p` is the normal unknown-option error (ps shows every entry)", async () => {
     const out: string[] = [];
-    const code = await main(["bun", "cli", "ps", "--profile", "p"], { write: (t) => out.push(t) });
+    const code = await main(["bun", "cli", "ps", "--profile", "p"], {
+      err: (t) => out.push(t),
+      out: () => {},
+    });
     expect(code).toBe(1);
     expect(out.join("")).toContain("unknown option --profile");
   });
@@ -133,7 +139,8 @@ describe("tentacle --model (end-to-end)", () => {
   test("a one-shot prompt: the id beats the file's, the prompt is exactly the prompt", async () => {
     requests.length = 0;
     const code = await main(["bun", "cli", "--model", "cli-model", "say", "hi"], {
-      write: () => {},
+      out: () => {},
+      err: () => {},
     });
     expect(code).toBe(0);
     expect(requests).toEqual([{ model: "cli-model", last: "say hi" }]);
@@ -144,7 +151,8 @@ describe("tentacle --model (end-to-end)", () => {
     process.env.TENTACLE_MODEL = "env-model";
     try {
       const code = await main(["bun", "cli", "--profile", "p", "--model=cli-model", "say", "hi"], {
-        write: () => {},
+        out: () => {},
+        err: () => {},
       });
       expect(code).toBe(0);
     } finally {
@@ -166,7 +174,7 @@ describe("tentacle --model (end-to-end)", () => {
     ] as const) {
       const out: string[] = [];
       const code = await main(["bun", "cli", ...argv], {
-        write: (t) => out.push(t),
+        out: (t) => out.push(t),
         startDaemon: async () => {
           throw new Error("--help must not start a daemon");
         },
@@ -176,12 +184,15 @@ describe("tentacle --model (end-to-end)", () => {
     }
     // A one-shot prompt keeps its own `--help` text, and a real unknown option still errors.
     const out: string[] = [];
-    expect(await main(["bun", "cli", "--model", "m", "say", "--help"], { write: () => {} })).toBe(
-      0,
-    );
+    expect(
+      await main(["bun", "cli", "--model", "m", "say", "--help"], { out: () => {}, err: () => {} }),
+    ).toBe(0);
     expect(requests).toEqual([{ model: "m", last: "say --help" }]);
     expect(
-      await main(["bun", "cli", "run", "--bogus", "--help"], { write: (t) => out.push(t) }),
+      await main(["bun", "cli", "run", "--bogus", "--help"], {
+        err: (t) => out.push(t),
+        out: () => {},
+      }),
     ).toBe(1);
     expect(out.join("")).toContain("unknown option --bogus");
   });
@@ -189,7 +200,7 @@ describe("tentacle --model (end-to-end)", () => {
   test("before a session command, or on `connect`: refused with the right form", async () => {
     requests.length = 0;
     const out: string[] = [];
-    const io = { write: (t: string) => void out.push(t) };
+    const io = { err: (t: string) => void out.push(t), out: () => {} };
     expect(await main(["bun", "cli", "--model", "x", "run", "--image", "i"], io)).toBe(1);
     expect(out.join("")).toContain("--model goes after the command: tentacle run --model x");
     out.length = 0;

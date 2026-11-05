@@ -18,6 +18,8 @@
  * line per phase instead, so captured transcripts stay readable.
  */
 
+import { termOf } from "./streams.ts";
+
 export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /** ANSI: hide / show the terminal cursor (DEC private mode 25). */
@@ -32,7 +34,7 @@ export interface StatusLineOptions {
   readonly write: (text: string) => void;
   /** Spinner tick interval in ms. Default 80. */
   readonly intervalMs?: number;
-  /** The terminal width in cells (default: stdout's); unknown → the text is not cut. */
+  /** The terminal width in cells (default: stderr's, where it paints); unknown → the text is not cut. */
   readonly columns?: () => number | undefined;
 }
 
@@ -86,7 +88,8 @@ export class StatusLine {
   constructor(options: StatusLineOptions) {
     this.write = options.write;
     this.intervalMs = options.intervalMs ?? 80;
-    this.columns = options.columns ?? (() => process.stdout.columns);
+    // The width of the stream it paints on: stderr (docs/fix/cli-output-streams.md).
+    this.columns = options.columns ?? termOf(process.stderr).columns;
   }
 
   /** Update the phase text (repaints immediately; starts the spinner lazily). */

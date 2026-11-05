@@ -10,9 +10,11 @@ import type { Agent } from "@tentacle/agent";
 import { runRepl } from "./repl.ts";
 
 export async function startTerminal(agent: Agent): Promise<number> {
+  // Only the answer is data (stdout); the prompt, the echo of the typed line
+  // and the rest of the session go to stderr (docs/fix/cli-output-streams.md D5).
   const rl = readline.createInterface({
     input: process.stdin,
-    output: process.stdout,
+    output: process.stderr,
     terminal: process.stdin.isTTY ?? false,
   });
 
@@ -30,7 +32,7 @@ export async function startTerminal(agent: Agent): Promise<number> {
   const lines = rl[Symbol.asyncIterator]();
   async function* prompts(): AsyncGenerator<string> {
     while (true) {
-      process.stdout.write("\n› ");
+      process.stderr.write("\n› ");
       const next = await lines.next();
       if (next.done) {
         return;
@@ -42,7 +44,9 @@ export async function startTerminal(agent: Agent): Promise<number> {
   try {
     await runRepl(agent, {
       prompts: prompts(),
-      write: (text) => void process.stdout.write(text),
+      out: (text) => void process.stdout.write(text),
+      err: (text) => void process.stderr.write(text),
+      shared: process.stdout.isTTY === true && process.stderr.isTTY === true,
       signal: () => {
         controller = new AbortController();
         return controller.signal;

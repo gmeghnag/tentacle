@@ -7,12 +7,17 @@
  * `prompts` iterable and wires Ctrl+C to cancel the running turn.
  */
 import { type Agent, Session } from "@tentacle/agent";
-import { atLineStartAfter, errorLine, render } from "./render.ts";
+import { AnswerSplit } from "./render.ts";
 
 export interface ReplIO {
   /** Yields each user input line until the input ends. */
   readonly prompts: AsyncIterable<string>;
-  readonly write: (text: string) => void;
+  /** The answer text (stdout): data only (docs/fix/cli-output-streams.md D5). */
+  readonly out: (text: string) => void;
+  /** Everything else (stderr): the banner, `/help`, the trace, errors, the goodbye. */
+  readonly err: (text: string) => void;
+  /** stdout and stderr are one terminal: the answer moves the trace's cursor. */
+  readonly shared?: boolean;
   /** Optional per-turn cancellation signal. */
   readonly signal?: () => AbortSignal | undefined;
   readonly onTurnStart?: () => void;
@@ -31,7 +36,7 @@ const HELP =
 
 export async function runRepl(agent: Agent, io: ReplIO): Promise<void> {
   const session = new Session(agent);
-  io.write(BANNER);
+  io.err(BANNER);
 
   for await (const raw of io.prompts) {
     const input = raw.trim();
@@ -42,25 +47,25 @@ export async function runRepl(agent: Agent, io: ReplIO): Promise<void> {
       break;
     }
     if (input === "/help") {
-      io.write(HELP);
+      io.err(HELP);
       continue;
     }
 
     io.onTurnStart?.();
     const signal = io.signal?.();
-    let atLineStart = true; // the user just pressed enter
+    const split = new AnswerSplit(io.shared === true); // the user just pressed enter: at a line start
     try {
       for await (const event of session.send(input, signal)) {
-        const text = render(event);
-        atLineStart = atLineStartAfter(atLineStart, text);
-        io.write(text);
+        const { out, err } = split.push(event);
+        if (out !== "") io.out(out);
+        if (err !== "") io.err(err);
       }
     } catch (error) {
-      io.write(errorLine(error, atLineStart));
+      io.err(split.error(error));
     } finally {
       io.onTurnEnd?.();
     }
   }
 
-  io.write("\n👋\n");
+  io.err("\n👋\n");
 }

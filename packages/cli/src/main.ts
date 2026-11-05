@@ -95,7 +95,7 @@ import { packagesCommand, spawnGit } from "./packages-cmd.ts";
 import { POD_DAEMON_MODES, lockHolder, runResidentMode } from "./pod-resident.ts";
 import { failedLine, notListedLine } from "./pod-stderr-log.ts";
 import { launchRelay, relayMain, type spawnRelayProcess } from "./relay.ts";
-import { atLineStartAfter, errorLine, render } from "./render.ts";
+import { AnswerSplit } from "./render.ts";
 import { runModelPlan } from "./run-model.ts";
 import {
   RELAY_SUBCOMMAND,
@@ -110,6 +110,7 @@ import {
 import { localAutoAccept, styleInfo } from "./run-ui.ts";
 import { startDaemon, startStdioDaemon } from "./serve.ts";
 import { inProcessSessions } from "./session-jobs.ts";
+import { NOT_A_TERMINAL, dimIf, termOf } from "./streams.ts";
 import { startTerminal } from "./terminal.ts";
 import {
   type TuiSessions,
@@ -310,10 +311,20 @@ Pod attach (tentacle attach <pod> [-n|--namespace <ns>] [-c|--container <c>]):
   dir instead of /usr/local/bin (e.g. --bin-dir /tmp).
 `;
 
+/**
+ * The CLI's output (docs/fix/cli-output-streams.md): `out` is STDOUT and carries
+ * ONLY the data a command produces (tables, `-q` names, `--help`, `--version`, a
+ * one-shot's answer, result lines); `err` is STDERR and carries everything else
+ * outside Ink (progress, notes, warnings, errors, `usage:` after an error,
+ * hints, the y/N prompt, logs). Each line picks one; there is no default sink.
+ */
 export interface CliIO {
-  write?: (text: string) => void;
-  /** Diagnostics (default stderr: never mixed into a one-shot's stdout or `serve --stdio`'s RPC). */
-  writeErr?: (text: string) => void;
+  /** Test seam: STDOUT (data only). An injected sink is never a terminal. */
+  out?: (text: string) => void;
+  /** Test seam: STDERR (everything else). An injected sink is never a terminal. */
+  err?: (text: string) => void;
+  /** Test seam: stdout is a terminal (`run --detach` prints its name only when not). Default: a real TTY stdout, `false` with an injected `out`. */
+  outTty?: boolean;
   /** Test seam: replaces the `run` engine runtime (pins the flag/config → `keepHint` wiring). */
   startEngineRuntime?: typeof startEngineRuntime;
   /** Test seam: `attach <name>` of a detached run's engine runtime (docs/feat/detached-handover.md). */
@@ -324,7 +335,10 @@ export interface CliIO {
   startTui?: typeof startTui;
   /** Test seam: stdin and stdout are a terminal. Default: both `isTTY`. */
   tty?: boolean;
-  /** Test seam: grey informational status lines. Default: a TTY stdout and no `NO_COLOR`. */
+  /**
+   * Test seam: grey/dim on the lines `err` writes (they are the only styled
+   * ones). Default: stderr's own decision (`termOf`: a TTY and no `NO_COLOR`).
+   */
   colour?: boolean;
   /** Test seam: `serve`'s WebSocket daemon (a misplaced flag must never start a real one). */
   startDaemon?: typeof startDaemon;
@@ -336,18 +350,19 @@ export interface CliIO {
   readStdin?: () => Promise<string>;
   /**
    * Test seam: the pre-Ink y/N question (a dangerous mount source); present =
-   * interactive. Default: a readline prompt, on a terminal only.
+   * interactive. Default: a readline prompt, when stdin and STDERR (where it is
+   * asked) are terminals.
    */
   ask?: (prompt: string) => Promise<string>;
 }
 
 /**
- * One line from the terminal, BEFORE Ink mounts (the mount confirmation).
- * Ctrl+C or EOF answers "" — the default No.
+ * One line from the terminal, BEFORE Ink mounts (the mount confirmation), asked
+ * on STDERR (D4): `run … >out` still asks. Ctrl+C or EOF answers "" — the default No.
  */
 function askLine(prompt: string): Promise<string> {
   return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
     let done = false;
     const finish = (answer: string): void => {
       if (!done) {
@@ -357,7 +372,7 @@ function askLine(prompt: string): Promise<string> {
       }
     };
     rl.on("SIGINT", () => {
-      process.stdout.write("\n");
+      process.stderr.write("\n");
       finish("");
     });
     rl.on("close", () => finish(""));
@@ -366,13 +381,20 @@ function askLine(prompt: string): Promise<string> {
 }
 
 export async function main(argv: readonly string[], io: CliIO = {}): Promise<number> {
-  const write = io.write ?? ((text: string) => void process.stdout.write(text));
-  // Informational `[pod]`/`[container]` lines go through `info`: dim grey on a
-  // terminal that takes colour (a TTY stdout, no NO_COLOR). Grey is by explicit
-  // marking — `write` (errors, refusals, warnings, stderr blocks) is never styled.
-  const colour = io.colour ?? (!io.write && process.stdout.isTTY === true && !process.env.NO_COLOR);
-  const info = (text: string): void => write(styleInfo(text, colour));
-  const writeErr = io.writeErr ?? ((text: string) => void process.stderr.write(text));
+  // Two sinks (docs/fix/cli-output-streams.md): `out` = data only (stdout),
+  // `err` = everything else (stderr). Every styled line is an `err` line, so
+  // colour, the y/N gate and the startup spinner follow STDERR's terminal.
+  const out = io.out ?? ((text: string) => void process.stdout.write(text));
+  const err = io.err ?? ((text: string) => void process.stderr.write(text));
+  const errTerm = io.err ? NOT_A_TERMINAL : termOf(process.stderr);
+  const outTty = io.outTty ?? (!io.out && process.stdout.isTTY === true);
+  // Informational `[pod]`/`[container]` lines go through `info`: grey on a
+  // stderr that takes colour. Grey is by explicit marking — a plain `err`
+  // (errors, refusals, warnings) is never styled; `out` (data) never is.
+  const colour = io.colour ?? errTerm.colour;
+  const info = (text: string): void => err(styleInfo(text, colour));
+  // The y/N question (D4): stdin answers it, stderr shows it.
+  const canAsk = process.stdin.isTTY === true && errTerm.tty;
 
   // `--model` / `--profile` are flags of the session commands (parsed below with
   // the rest of each command's flags). Here only what a spec cannot hold: a
@@ -380,7 +402,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // (docs/fix/detach-live-followups.md F5).
   const session = extractSessionFlags(argv.slice(2));
   if (!session.ok) {
-    write(`[error] ${session.error}\n`);
+    err(`[error] ${session.error}\n`);
     return 1;
   }
   const args = session.rest;
@@ -402,18 +424,20 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   }
   // The relay of a detached run (`relay.ts`): its spec comes through the env.
   if (args[0] === RELAY_SUBCOMMAND) {
-    return relayMain(process.env, writeErr);
+    return relayMain(process.env, err);
   }
 
+  // An explicit `--help` is the command's data (stdout); the help after an
+  // error (an empty prompt, below) is stderr's.
   if (args[0] === "--help" || args[0] === "-h") {
-    write(HELP);
+    out(HELP);
     return 0;
   }
 
   // `--version` exits before config loading, model setup, or TTY handling —
   // it doubles as the post-injection health probe in a pod.
   if (args[0] === "--version") {
-    write(`tentacle ${APP_VERSION}\n`);
+    out(`tentacle ${APP_VERSION}\n`);
     return 0;
   }
 
@@ -429,10 +453,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       // `--help` / `--version` after other options (`--model X --version`).
       const info = infoRequest(result.error);
       if (info !== undefined) {
-        write(info === "help" ? HELP : `tentacle ${APP_VERSION}\n`);
+        out(info === "help" ? HELP : `tentacle ${APP_VERSION}\n`);
         return 0;
       }
-      write(`[error] ${result.error}\nusage: ${USAGE[mode]}\n`);
+      err(`[error] ${result.error}\nusage: ${USAGE[mode]}\n`);
       return 1;
     }
     parsed = result;
@@ -464,7 +488,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           ...(tls ? { tls } : {}),
           ...(resume ? { resume } : {}),
         },
-        write,
+        err,
         {
           dial: webSocketChannelFactory,
           startTui,
@@ -476,7 +500,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       );
       return 0;
     } catch (error) {
-      write(
+      err(
         `\n[connect error] ${untrustedText(error instanceof Error ? error.message : String(error))}\n`,
       );
       return 1;
@@ -497,7 +521,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         arch: process.arch,
         fetch,
         runVersion: spawnVersion,
-        write,
+        out,
+        err,
       },
     );
   }
@@ -520,7 +545,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       ...(modelFlag !== undefined ? { model: modelFlag } : {}),
     });
   } catch (error) {
-    write(`\n[config error] ${error instanceof Error ? error.message : String(error)}\n`);
+    err(`\n[config error] ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
 
@@ -530,7 +555,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       configDir: config.configDir,
       enabled: config.packagesEnabled,
       git: spawnGit,
-      write,
+      out,
+      err,
     });
   }
 
@@ -544,7 +570,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         list: parsed.bools.has("list"),
         ...(revoke !== undefined ? { revoke } : {}),
       },
-      write,
+      { out, err },
     );
   }
 
@@ -556,27 +582,21 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     if (engineFlag !== undefined) {
       const choice = chooseEngine({ flag: engineFlag });
       if (!choice.ok) {
-        write(`[error] ${choice.error}\nusage: ${USAGE[mode]}\n`);
+        err(`[error] ${choice.error}\nusage: ${USAGE[mode]}\n`);
         return 1;
       }
       engine = choice.kind;
     }
-    const colour = (process.stdout.isTTY ?? false) && !process.env.NO_COLOR;
-    const ask = io.ask ?? (process.stdin.isTTY && process.stdout.isTTY ? askLine : undefined);
+    const ask = io.ask ?? (canAsk ? askLine : undefined);
     const deps: KeptDeps = {
       dir: keptDir(config.configDir),
       hostFor: (entry) => buildEngineHost(entry.engine, hostOptionsFor(entry)).host,
-      write,
-      writeErr,
+      out,
+      err,
       now: Date.now,
       home: homedir(),
-      dim: (text) => (colour ? `\x1b[2m${text}\x1b[22m` : text),
-      // stderr's own colour decision (the `ps` note goes there).
-      // Follows the stream written to: an injected `writeErr` is never a terminal.
-      dimErr: (text) =>
-        !io.writeErr && process.stderr.isTTY === true && !process.env.NO_COLOR
-          ? `\x1b[2m${text}\x1b[22m`
-          : text,
+      // The dim lines are `err`'s: stderr's colour decision (the same as `info`).
+      dim: (text) => dimIf(text, colour),
       ...(ask ? { ask } : {}),
     };
     return mode === "ps"
@@ -598,25 +618,25 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // reported) by the pod daemon.
   if (mode !== "run" && mode !== "attach") {
     for (const line of config.skillDiagnostics) {
-      writeErr(`[skills] ${line}\n`);
+      err(`[skills] ${line}\n`);
     }
     for (const line of config.projectHooksDiagnostics) {
-      writeErr(`[hooks] ${line}\n`);
+      err(`[hooks] ${line}\n`);
     }
     const wireProblem = config.projectHooks && projectHooksWireProblem(config.projectHooks);
     if (wireProblem) {
-      writeErr(`[hooks] ${wireProblem}\n`);
+      err(`[hooks] ${wireProblem}\n`);
     }
     const agentTypes = loadUserAgentTypes(config.configDir, config.packageAgentDirs);
     for (const line of config.packageDiagnostics) {
-      writeErr(`[packages] ${line}\n`);
+      err(`[packages] ${line}\n`);
     }
     for (const line of agentTypes.diagnostics) {
-      writeErr(`[agents] ${line}\n`);
+      err(`[agents] ${line}\n`);
     }
   } else if (config.packages.length > 0) {
     // D11: laptop packages are not shipped to the pod in v1.
-    writeErr(
+    err(
       `[packages] ${config.packages.length} installed package(s) are not loaded in a pod session (the pod uses its own config)\n`,
     );
   }
@@ -653,7 +673,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       limits = parseServeLimits({ flags, bools });
       token = await resolveToken(flags);
     } catch (error) {
-      write(`\n[serve error] ${error instanceof Error ? error.message : String(error)}\n`);
+      err(`\n[serve error] ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
     }
     const host = flags.get("host") ?? process.env.TENTACLE_REMOTE_HOST ?? "127.0.0.1";
@@ -671,15 +691,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         port,
         ...(token ? { token } : {}),
         ...(tls ? { tls } : {}),
-        onAudit: (line) => write(`[daemon] ${line}\n`),
-        onError: (error) => write(`[daemon] error: ${error.message}\n`),
-        onNotice: (line) => write(`[daemon] ${line}\n`),
+        onAudit: (line) => err(`[daemon] ${line}\n`),
+        onError: (error) => err(`[daemon] error: ${error.message}\n`),
+        onNotice: (line) => err(`[daemon] ${line}\n`),
       });
-      write(`daemon listening on ${server.url}\n`);
+      err(`daemon listening on ${server.url}\n`);
       // `serve`'s own config decides its titles; no Ink here, so its log line.
       const titleNotice = titleConfigNotice(config);
       if (titleNotice) {
-        write(`[daemon] ${titleNotice}\n`);
+        err(`[daemon] ${titleNotice}\n`);
       }
       // First Ctrl+C: stop, let the session writes land, release the store
       // lock. A second one exits at once (a hung disk must not trap the user).
@@ -695,7 +715,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       });
       return 0;
     } catch (error) {
-      write(`\n[serve error] ${error instanceof Error ? error.message : String(error)}\n`);
+      err(`\n[serve error] ${error instanceof Error ? error.message : String(error)}\n`);
       return 1;
     }
   }
@@ -730,7 +750,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         })
       : choice.error;
     if (!choice.ok || problem) {
-      write(`[error] ${problem}\nusage: ${USAGE[m]}\n`);
+      err(`[error] ${problem}\nusage: ${USAGE[m]}\n`);
       return null;
     }
     return choice.kind;
@@ -746,7 +766,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         allowInsecureTcp: bools.has("insecure-docker-tcp"),
       });
     } catch (error) {
-      write(setupFailureLine(kind, error));
+      err(setupFailureLine(kind, error));
       return null;
     }
   };
@@ -763,7 +783,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         uid: flags.get("resume"),
         latest: bools.has("continue"),
       },
-      write,
+      err,
       process.stdin.isTTY && process.stdout.isTTY ? (choices) => pickSession(choices) : undefined,
       // This laptop's config decides titles in every TUI runtime (worker, pod
       // `run`/`attach`): a `titleModel` that does nothing is said once, in the TUI.
@@ -828,7 +848,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         }
       },
       teardown: () => (finish ? finish(inkRan) : runtime.dispose()),
-      write,
+      write: err,
     });
     return 0;
   };
@@ -856,7 +876,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       configured: config.keep,
     });
     if (!kept.ok) {
-      write(`[${noun}] ${kept.error}\n`);
+      err(`[${noun}] ${kept.error}\n`);
       return 1;
     }
     // `run --detach --prompt` (docs/feat/detached-relay.md): no TUI, its session
@@ -871,11 +891,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       detach,
     });
     if (!chosen.ok) {
-      write(`[error] ${chosen.error}\nusage: ${USAGE.run}\n`);
+      err(`[error] ${chosen.error}\nusage: ${USAGE.run}\n`);
       return 1;
     }
     if (chosen.stdin && !io.readStdin && process.stdin.isTTY) {
-      write(`[error] --prompt -: stdin is a terminal\nusage: ${USAGE.run}\n`);
+      err(`[error] --prompt -: stdin is a terminal\nusage: ${USAGE.run}\n`);
       return 1;
     }
     const prompt = chosen.stdin
@@ -887,13 +907,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       resume: runBools.has("resume") || runFlags.has("resume") || runBools.has("continue"),
     });
     if (detachProblem) {
-      write(`[error] ${detachProblem}\nusage: ${USAGE.run}\n`);
+      err(`[error] ${detachProblem}\nusage: ${USAGE.run}\n`);
       return 1;
     }
     const image = runFlags.get("image") ?? process.env.TENTACLE_POD_IMAGE;
     const binDir = runFlags.get("bin-dir") ?? process.env.TENTACLE_POD_BIN_DIR;
     if (!image) {
-      write(
+      err(
         `[${noun}] --image <ref> is required (any Linux glibc image with sh+head; tentacle is injected)\n`,
       );
       return 1;
@@ -927,34 +947,34 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             }),
           );
     if (wsPlan.kind === "refuse") {
-      write(`[${noun}] ${wsPlan.message}\n`);
+      err(`[${noun}] ${wsPlan.message}\n`);
       return 1;
     }
     if (wsPlan.kind === "none" && wsPlan.warning) {
-      write(`[${noun}] warning: ${wsPlan.warning}\n`);
+      err(`[${noun}] warning: ${wsPlan.warning}\n`);
     }
     if (wsPlan.kind === "mount") {
       for (const warning of wsPlan.warnings ?? []) {
         // Pattern text comes from a project file: sanitised like any untrusted text.
-        write(`[${noun}] warning: ${untrustedText(warning)}\n`);
+        err(`[${noun}] warning: ${untrustedText(warning)}\n`);
       }
     }
-    const ask = io.ask ?? (process.stdin.isTTY && process.stdout.isTTY ? askLine : undefined);
+    const ask = io.ask ?? (canAsk ? askLine : undefined);
     const gate = mountGate(wsPlan, {
       interactive: ask !== undefined,
       confirmed: runBools.has("confirm-mount"),
     });
     if (gate.action === "refuse") {
-      write(`[${noun}] ${gate.message}\n`);
+      err(`[${noun}] ${gate.message}\n`);
       return 1;
     }
     if (gate.action === "ask" && !(ask && isYes(await ask(gate.prompt)))) {
-      write(`[${noun}] not confirmed — nothing was created\n`);
+      err(`[${noun}] not confirmed — nothing was created\n`);
       return 1;
     }
     if (gate.action === "proceed") {
       for (const warning of gate.warnings ?? []) {
-        write(`[${noun}] warning: ${warning}\n`);
+        err(`[${noun}] warning: ${warning}\n`);
       }
     }
     // Slice E: a kept workload carries its metadata and goes in the laptop
@@ -1004,7 +1024,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           }
         : {}),
       ...(keptMeta ? { labels: keptMeta.labels, annotations: keptMeta.annotations } : {}),
-      log: write,
+      log: err,
+      logTerm: errTerm,
       info,
       // The pod daemon's stderr never reaches the terminal: a file in the run's
       // state dir (a recorded run has one), else under <configDir>/logs/<name>/.
@@ -1030,14 +1051,14 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           },
         });
       } catch (error) {
-        write(failedLine(noun, error));
+        err(failedLine(noun, error));
         return 1;
       }
       if (recorded === null) {
-        write(`[${noun}] failed: a detached run needs its kept index entry; nothing started\n`);
+        err(`[${noun}] failed: a detached run needs its kept index entry; nothing started\n`);
         return 1;
       }
-      return launchRelay(
+      const launched = await launchRelay(
         runDirFor(config.configDir, recorded),
         {
           schemaVersion: RUN_STATE_VERSION,
@@ -1051,13 +1072,20 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           ...(profileFlag !== undefined ? { profile: profileFlag } : {}),
         },
         {
-          write,
+          write: err,
           noun,
           name: workload.name,
           attachHint: workloadDeps.keepHint?.(workload.name) ?? "",
           ...(io.spawnRelay ? { spawnRelay: io.spawnRelay } : {}),
         },
       );
+      // D1 (docs/fix/cli-output-streams.md): the workload's NAME is the data of
+      // a launched run — on stdout only when it is not a terminal
+      // (`name=$(tentacle run --detach …)`); a terminal has the `still running` line.
+      if (launched === 0 && !outTty) {
+        out(`${workload.name}\n`);
+      }
+      return launched;
     }
     // ONE broker shared by the engine runtime and the TUI (see `runEngineTui`).
     const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
@@ -1087,7 +1115,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         notify: (text) => sessions.notices.notify(text),
       });
     } catch (error) {
-      write(failedLine(noun, error));
+      err(failedLine(noun, error));
       return 1;
     }
     // `--auto-accept[=true]` without `--detach`: the TUI's own auto-accept, ON
@@ -1235,7 +1263,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         config = loaded.model === plan.model ? loaded : { ...loaded, model: plan.model };
         return true;
       } catch (error) {
-        write(
+        err(
           `[config error] ${untrustedText(name)} was started with profile ${untrustedText(plan.profile ?? "(none)")}: ${error instanceof Error ? error.message : String(error)} — pass --profile to choose one\n`,
         );
         return false;
@@ -1264,7 +1292,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           ...(modelFlag !== undefined ? { model: modelFlag } : {}),
         });
       } catch (error) {
-        write(`[config error] ${error instanceof Error ? error.message : String(error)}\n`);
+        err(`[config error] ${error instanceof Error ? error.message : String(error)}\n`);
         return false;
       }
       // The reload dropped the run's model: let `useRunModel` apply it again.
@@ -1273,10 +1301,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     };
     const lookup = explicit ? undefined : resolveKeptAttach(name, keptDir(config.configDir));
     for (const problem of lookup?.problems ?? []) {
-      writeErr(`kept index: ${untrustedText(problem)} — left untouched\n`);
+      err(`kept index: ${untrustedText(problem)} — left untouched\n`);
     }
     if (lookup?.resolved.kind === "ambiguous") {
-      write(
+      err(
         `[error] ${ambiguousMessage(
           name,
           lookup.resolved.candidates.map((c) => c.entry),
@@ -1305,7 +1333,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           asked: at === null ? null : placeText(at, kube),
         };
         const pid = run.holder?.pid ?? 0;
-        write(`[error] ${elsewhereMessage(name, { pid, owner: run.owner }, places)}\n`);
+        err(`[error] ${elsewhereMessage(name, { pid, owner: run.owner }, places)}\n`);
         return 1;
       }
       const plan = planAttach({
@@ -1317,7 +1345,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       });
       const runNoun = engineNoun(run.entry.engine);
       if (plan.kind === "refuse") {
-        write(`[error] ${attachRefusal(name, plan, run, runNoun)}\n`);
+        err(`[error] ${attachRefusal(name, plan, run, runNoun)}\n`);
         return 1;
       }
       if (plan.kind === "run" && !(await moveTo(plan.cwd))) {
@@ -1341,14 +1369,14 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         plan,
         owner: run.owner.owner,
         cwd: config.cwd,
-        write,
+        write: err,
         info,
         procOf: laptopProc,
         openSessions: () =>
           openTuiSessions(
             { root: join(config.configDir, "sessions"), cwd: config.cwd },
             { wanted: true, uid: plan.sessionId, live: true },
-            write,
+            err,
             undefined,
             [titleConfigNotice(config)].filter((text): text is string => text !== null),
           ),
@@ -1361,7 +1389,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           try {
             return buildEngineHost(run.entry.engine, hostOptionsFor(run.entry)).host;
           } catch (error) {
-            write(setupFailureLine(run.entry.engine, error));
+            err(setupFailureLine(run.entry.engine, error));
             return null;
           }
         },
@@ -1379,7 +1407,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             resume: sessions.resume,
             sessionId: plan.sessionId,
             shared: true,
-            log: write,
+            log: err,
+            logTerm: errTerm,
             info,
             daemonLogPath: () => join(run.dir, "daemon.log"),
             notify: (text) => sessions.notices.notify(text),
@@ -1397,7 +1426,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         if (attempt === 0) {
           continue; // planned again, once: keep=false now meets the ordinary "gone"
         }
-        write(`[error] ${untrustedText(name)}: the run is still closing; retry in a moment\n`);
+        err(`[error] ${untrustedText(name)}: the run is still closing; retry in a moment\n`);
         return 1;
       }
       // The session's `history` activity draws an attached screen, not the record.
@@ -1471,7 +1500,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       try {
         built = buildEngineHost(engine, hostOptionsFor(keptEntry));
       } catch (error) {
-        write(setupFailureLine(engine, error));
+        err(setupFailureLine(engine, error));
         built = null;
       }
     } else {
@@ -1492,7 +1521,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         permissions,
         saver: sessions.saver,
         resume: sessions.resume,
-        log: write,
+        log: err,
+        logTerm: errTerm,
         info,
         daemonLogPath: (workload: string) =>
           keptEntry
@@ -1502,7 +1532,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       });
     } catch (error) {
       // A name that is neither in `ps` nor on the engine: one plain line.
-      write(
+      err(
         !keptEntry && error instanceof WorkloadNotFoundError
           ? notListedLine(name, error)
           : failedLine(noun, error),
@@ -1544,7 +1574,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       const runtime = await startWorkerRuntime(
         config,
         { permissions, saver, resume: resumeRecord },
-        write,
+        err,
       );
       if (runtime) {
         await runSessionTui(sessions, {
@@ -1562,7 +1592,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               ...sessionOptions,
             }),
           teardown: () => runtime.dispose(),
-          write,
+          write: err,
         });
         return 0;
       }
@@ -1575,10 +1605,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     const { permissions, build } = inProcessAgents(config);
     const mcp = await connectMcpServers(config.mcpServers);
     for (const [name, message] of Object.entries(mcp.errors)) {
-      write(`[mcp] server "${name}" failed to connect: ${message}\n`);
+      err(`[mcp] server "${name}" failed to connect: ${message}\n`);
     }
     for (const line of longToolNameWarnings(mcp.tools.map((t) => t.name))) {
-      write(`[mcp] ${line}\n`);
+      err(`[mcp] ${line}\n`);
     }
     const mcpTracker = new McpStatusTracker(Object.keys(config.mcpServers));
     mcpTracker.settle(mcp);
@@ -1611,7 +1641,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           ...sessionOptions,
         }),
       teardown: () => mcp.dispose(),
-      write,
+      write: err,
     });
     return 0;
   }
@@ -1619,37 +1649,43 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // A one-shot prompt: its words verbatim (`--` lets one start with '-').
   const prompt = args[0] === "--" ? args.slice(1) : args;
   if (prompt.length === 0) {
-    write(HELP);
+    // No prompt is an error (exit 1): its help is stderr's (D6).
+    err(HELP);
     return 1;
   }
 
   // One-shot, no Ink: an ignored hook failure goes to stderr.
   const { agent, tools } = buildAgent(config, {
-    log: (l) => process.stderr.write(`[hook] ${l}\n`),
-    notice: (l) => process.stderr.write(`[context] ${l}\n`),
+    log: (l) => err(`[hook] ${l}\n`),
+    notice: (l) => err(`[context] ${l}\n`),
   });
   const mcp = await connectConfiguredMcp(config, tools);
   for (const [name, message] of Object.entries(mcp.errors)) {
-    write(`[mcp] server "${name}" failed to connect: ${message}\n`);
+    err(`[mcp] server "${name}" failed to connect: ${message}\n`);
   }
   for (const line of longToolNameWarnings(mcp.tools.map((t) => t.name))) {
-    write(`[mcp] ${line}\n`);
+    err(`[mcp] ${line}\n`);
   }
   const controller = new AbortController();
   const onSignal = (): void => controller.abort();
   process.on("SIGINT", onSignal);
 
   const userMessage: ChatMessage = { role: "user", content: prompt.join(" ") };
-  let atLineStart = true;
+  // D5: the answer alone on stdout; the trace (and an error) on stderr.
+  const split = new AnswerSplit(outTty && errTerm.tty);
   try {
     for await (const event of agent.run(crypto.randomUUID(), [userMessage], controller.signal)) {
-      const text = render(event);
-      atLineStart = atLineStartAfter(atLineStart, text);
-      write(text);
+      const chunk = split.push(event);
+      if (chunk.out !== "") {
+        out(chunk.out);
+      }
+      if (chunk.err !== "") {
+        err(chunk.err);
+      }
     }
     return 0;
   } catch (error) {
-    write(errorLine(error, atLineStart));
+    err(split.error(error));
     return 1;
   } finally {
     process.off("SIGINT", onSignal);
