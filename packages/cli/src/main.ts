@@ -333,8 +333,18 @@ export interface CliIO {
   attachPlainRuntime?: typeof attachEngineRuntime;
   /** Test seam: the TUI of an `attach` to a detached run (pins the single broker). */
   startTui?: typeof startTui;
-  /** Test seam: stdin and stdout are a terminal. Default: both `isTTY`. */
-  tty?: boolean;
+  /**
+   * Test seam: which of stdin / stdout are a terminal. Default: the process's own
+   * `isTTY` (resolved once, at the top of `main`). A test never reads the runner's.
+   */
+  terminal?: { stdin: boolean; stdout: boolean };
+  /** Test seam: the stream the pre-Ink y/N question reads. Default: `process.stdin`. */
+  stdin?: NodeJS.ReadableStream;
+  /**
+   * Test seam: the pre-mount `--resume` picker. Default: the real one, on a
+   * terminal (stdin AND stdout); `null` = none (the newest session resumes).
+   */
+  pickSession?: typeof pickSession | null;
   /**
    * Test seam: grey/dim on the lines `err` writes (they are the only styled
    * ones). Default: stderr's own decision (`termOf`: a TTY and no `NO_COLOR`).
@@ -360,9 +370,9 @@ export interface CliIO {
  * One line from the terminal, BEFORE Ink mounts (the mount confirmation), asked
  * on STDERR (D4): `run … >out` still asks. Ctrl+C or EOF answers "" — the default No.
  */
-function askLine(prompt: string): Promise<string> {
+function askLine(prompt: string, input: NodeJS.ReadableStream = process.stdin): Promise<string> {
   return new Promise((resolve) => {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    const rl = createInterface({ input, output: process.stderr });
     let done = false;
     const finish = (answer: string): void => {
       if (!done) {
@@ -394,7 +404,18 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const colour = io.colour ?? errTerm.colour;
   const info = (text: string): void => err(styleInfo(text, colour));
   // The y/N question (D4): stdin answers it, stderr shows it.
-  const canAsk = process.stdin.isTTY === true && errTerm.tty;
+  const terminal = io.terminal ?? {
+    stdin: process.stdin.isTTY === true,
+    stdout: process.stdout.isTTY === true,
+  };
+  const canAsk = terminal.stdin && errTerm.tty;
+  const pick: typeof pickSession | undefined =
+    io.pickSession !== undefined
+      ? (io.pickSession ?? undefined)
+      : terminal.stdin && terminal.stdout
+        ? pickSession
+        : undefined;
+  const askStdin = (prompt: string) => askLine(prompt, io.stdin);
 
   // `--model` / `--profile` are flags of the session commands (parsed below with
   // the rest of each command's flags). Here only what a spec cannot hold: a
@@ -497,9 +518,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           dial: webSocketChannelFactory,
           startTui,
           // The pre-mount picker, on a terminal only (as the local `--resume`).
-          ...(process.stdin.isTTY && process.stdout.isTTY
-            ? { pick: (choices: Parameters<typeof pickSession>[0]) => pickSession(choices) }
-            : {}),
+          ...(pick ? { pick: (choices: Parameters<typeof pickSession>[0]) => pick(choices) } : {}),
         },
       );
       return 0;
@@ -591,7 +610,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       }
       engine = choice.kind;
     }
-    const ask = io.ask ?? (canAsk ? askLine : undefined);
+    const ask = io.ask ?? (canAsk ? askStdin : undefined);
     const deps: KeptDeps = {
       dir: keptDir(config.configDir),
       hostFor: (entry) => buildEngineHost(entry.engine, hostOptionsFor(entry)).host,
@@ -788,7 +807,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         latest: bools.has("continue"),
       },
       err,
-      process.stdin.isTTY && process.stdout.isTTY ? (choices) => pickSession(choices) : undefined,
+      pick ? (choices) => pick(choices) : undefined,
       // This laptop's config decides titles in every TUI runtime (worker, pod
       // `run`/`attach`): a `titleModel` that does nothing is said once, in the TUI.
       [titleConfigNotice(config)].filter((text): text is string => text !== null),
@@ -900,7 +919,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       err(`[error] ${chosen.error}\nusage: ${USAGE.run}\n`);
       return 1;
     }
-    if (chosen.stdin && !io.readStdin && process.stdin.isTTY) {
+    if (chosen.stdin && !io.readStdin && terminal.stdin) {
       err(`[error] --prompt -: stdin is a terminal\nusage: ${USAGE.run}\n`);
       return 1;
     }
@@ -965,7 +984,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         err(`[${noun}] warning: ${untrustedText(warning)}\n`);
       }
     }
-    const ask = io.ask ?? (canAsk ? askLine : undefined);
+    const ask = io.ask ?? (canAsk ? askStdin : undefined);
     const gate = mountGate(wsPlan, {
       interactive: ask !== undefined,
       confirmed: runBools.has("confirm-mount"),
@@ -1347,7 +1366,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         relayAlive: run.holder !== null,
         entryCreated: run.entry.created,
         ...(attachFlags.has("resume") ? { resumeUid: attachFlags.get("resume") } : {}),
-        tty: io.tty ?? (process.stdin.isTTY === true && process.stdout.isTTY === true),
+        tty: terminal.stdin && terminal.stdout,
       });
       const runNoun = engineNoun(run.entry.engine);
       if (plan.kind === "refuse") {
@@ -1562,7 +1581,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
 
   // Rich interactive TUI. `--resume [uid]` also enters it (resuming a session).
   const { flags: topFlags, bools: topBools } = parsed;
-  if (mode === "tui" || (mode === "empty" && process.stdin.isTTY)) {
+  if (mode === "tui" || (mode === "empty" && terminal.stdin)) {
     const sessions = await openSessions(topFlags, topBools);
     if ("exit" in sessions) {
       return sessions.exit;

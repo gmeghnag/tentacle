@@ -3,6 +3,7 @@ import { existsSync, readdirSync, realpathSync, rmSync, writeFileSync } from "no
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { JsonSessionStore, type SessionRecord, projectKey } from "@tentacle/agent";
 import { DELETE_CONTAINER_SUBCOMMAND } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND } from "@tentacle/k8s";
@@ -21,6 +22,9 @@ import {
   runDirFor,
   writeOwner,
 } from "../src/run-state.ts";
+
+/** Piped stdin and stdout, whatever terminal runs the suite (CliIO.terminal). */
+const NO_TERMINAL = { stdin: false, stdout: false };
 
 // End-to-end: a fake OpenAI-compatible server scripts a two-turn conversation —
 // turn 1 calls the `fs_write` tool, turn 2 replies with text — exercising the
@@ -144,6 +148,7 @@ describe("cli main (end-to-end)", () => {
     const code = await main(["bun", "cli"], {
       out: (t) => out.push(t),
       err: (t) => err.push(t),
+      terminal: NO_TERMINAL,
     });
     expect(code).toBe(1);
     // An error's help: stderr (D6).
@@ -196,7 +201,11 @@ describe("cli main: skill diagnostics", () => {
     try {
       const out: string[] = [];
       const err: string[] = [];
-      const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
+      const io = {
+        out: (t: string) => out.push(t),
+        err: (t: string) => err.push(t),
+        terminal: NO_TERMINAL,
+      };
       expect(await main(["bun", "cli"], io)).toBe(1); // help path: config loaded locally
       // stderr also carries that error's help (D6): only the `[skills]` lines are counted.
       const skills = () => err.filter((l) => l.startsWith("[skills]"));
@@ -225,7 +234,11 @@ describe("cli main: agent definition diagnostics (fix/agent-defs-warn)", () => {
     try {
       const out: string[] = [];
       const err: string[] = [];
-      const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
+      const io = {
+        out: (t: string) => out.push(t),
+        err: (t: string) => err.push(t),
+        terminal: NO_TERMINAL,
+      };
       expect(await main(["bun", "cli"], io)).toBe(1); // help path: config loaded locally
       // stderr also carries that error's help (D6): only the `[agents]` lines are counted.
       const agentLines = () => err.filter((l) => l.startsWith("[agents]"));
@@ -329,6 +342,7 @@ describe("cli main: --engine", () => {
     const code = await main(["bun", "cli", ...args], {
       out: (t) => out.push(t),
       err: (t) => errs.push(t),
+      terminal: NO_TERMINAL, // piped: never the runner's own terminal
       ...(colour !== undefined ? { colour } : {}),
     });
     // docs/fix/cli-output-streams.md: `run`/`attach` (no `--detach`) produce no
@@ -1259,7 +1273,11 @@ describe("cli main: --engine", () => {
         const out: string[] = [];
         const code = await main(
           ["bun", "cli", "attach", "box", "--resume", "99999999-9999-4999-8999-999999999999"],
-          { err: (t) => out.push(t), out: (t) => strayStdout.push(t), tty: true },
+          {
+            err: (t) => out.push(t),
+            out: (t) => strayStdout.push(t),
+            terminal: { stdin: true, stdout: true },
+          },
         );
         const r = { code, text: out.join("") };
         expect(r.code).toBe(1);
@@ -1281,7 +1299,11 @@ describe("cli main: --engine", () => {
             "--resume",
             "99999999-9999-4999-8999-999999999999",
           ],
-          { err: (t) => other.push(t), out: (t) => strayStdout.push(t), tty: true },
+          {
+            err: (t) => other.push(t),
+            out: (t) => strayStdout.push(t),
+            terminal: { stdin: true, stdout: true },
+          },
         );
         expect(code2).toBe(1);
         expect(other.join("")).toContain("unix:///nonexistent/kept.sock");
@@ -1304,7 +1326,7 @@ describe("cli main: --engine", () => {
         await main(["bun", "cli", "attach", "box"], {
           err: (t) => out.push(t),
           out: (t) => strayStdout.push(t),
-          tty: true,
+          terminal: { stdin: true, stdout: true },
         });
         expect(out.join("")).toContain("attaching to box");
         setup(live());
@@ -1373,7 +1395,8 @@ describe("cli main: --engine", () => {
       const code = await main(["bun", "cli", ...args], {
         err: (t) => out.push(t),
         out: (t) => strayStdout.push(t),
-        tty,
+        terminal: { stdin: tty, stdout: tty },
+        pickSession: null,
         ...(plainSeam ? { attachPlainRuntime: fakeAttach } : {}),
         attachEngineRuntime: fakeAttach,
         startTui: (async (
@@ -1408,7 +1431,7 @@ describe("cli main: --engine", () => {
           {
             err: (t) => out.push(t),
             out: (t) => strayStdout.push(t),
-            tty: true,
+            terminal: { stdin: true, stdout: true },
             attachPlainRuntime: (async () => {
               throw new WorkloadNotFoundError("pod gone", "pod", "in openshift-dns");
             }) as never,
@@ -2031,7 +2054,7 @@ describe("cli main: --engine", () => {
         const code = await main(["bun", "cli", "attach", "box"], {
           err: (t) => out.push(t),
           out: (t) => strayStdout.push(t),
-          tty: true,
+          terminal: { stdin: true, stdout: true },
           attachPlainRuntime: (async () => {
             throw new WorkloadNotFoundError("container box gone", "container", "on docker");
           }) as never,
@@ -2284,6 +2307,7 @@ describe("cli main: --engine", () => {
     const withConfig = async <T>(config: Record<string, unknown>, body: () => Promise<T>) => {
       const path = join(dir, "config", "config.jsonc");
       const before = (await Bun.file(path).exists()) ? await readFile(path, "utf8") : undefined;
+      await mkdir(join(dir, "config"), { recursive: true }); // no order dependency
       await writeFile(path, JSON.stringify(config));
       try {
         return await body();
@@ -2372,12 +2396,11 @@ describe("cli main: --engine", () => {
 
       test("D4: stdout redirected, stdin+stderr TTYs → the y/N is asked, on STDERR", async () => {
         // Mutation: gate `canAsk` on stdout (or write the prompt to stdout) → red.
-        const real = { stdin: process.stdin.isTTY, stderr: process.stderr.isTTY };
+        const real = { stderr: process.stderr.isTTY };
         const realErrWrite = process.stderr.write.bind(process.stderr);
         const realOutWrite = process.stdout.write.bind(process.stdout);
         const onErr: string[] = [];
         const onOut: string[] = [];
-        process.stdin.isTTY = true;
         process.stderr.isTTY = true;
         process.stderr.write = ((t: string | Uint8Array) => {
           onErr.push(String(t));
@@ -2387,6 +2410,8 @@ describe("cli main: --engine", () => {
           onOut.push(String(t));
           return true;
         }) as typeof process.stdout.write;
+        const stdinAtEof = new PassThrough();
+        stdinAtEof.end();
         const before = process.cwd();
         let reached = false;
         try {
@@ -2395,6 +2420,8 @@ describe("cli main: --engine", () => {
             withEnv(unreachable, async () => {
               await main(["bun", "cli", ...base], {
                 out: (t) => strayStdout.push(t), // stdout redirected: a sink, not a terminal
+                terminal: { stdin: true, stdout: false },
+                stdin: stdinAtEof, // the answer: EOF = the default No
                 startEngineRuntime: async () => {
                   reached = true;
                   throw new Error("stop");
@@ -2406,7 +2433,6 @@ describe("cli main: --engine", () => {
           process.chdir(before);
           process.stderr.write = realErrWrite;
           process.stdout.write = realOutWrite;
-          process.stdin.isTTY = real.stdin;
           process.stderr.isTTY = real.stderr;
         }
         expect(onErr.join("")).toContain("Continue? [y/N] ");
