@@ -260,6 +260,11 @@ export function updateToEvent(
       return { type: "context_note", text: update.text, reason: update.reason };
     case "tool_progress":
       return progressToEvent(update);
+    // A call's phase in its round: an unknown (newer) phase is skipped.
+    case "tool_call_phase":
+      return update.phase === "queued" || update.phase === "running"
+        ? { type: "tool_phase", id: update.toolCallId, phase: update.phase }
+        : null;
     // The turn bracket is consumed by `RemoteSession` (it ends the turn by
     // `turnId`); it is not an `AgentEvent` of its own. `history_replaced` is
     // the barrier the reducer resyncs on; `RemoteSession` turns the snapshot

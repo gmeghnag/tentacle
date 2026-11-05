@@ -126,5 +126,30 @@ export interface Tool<Input = unknown> {
    */
   readonly jsonSchema?: Record<string, unknown>;
   readonly permission: PermissionLevel;
+  /**
+   * What a call touches, for the round executor (docs/feat/parallel-tools.md):
+   * calls whose keys do not conflict may run at the same time. Absent =
+   * `"exclusive"` (conflicts with everything: always runs alone).
+   */
+  readonly concurrency?: ToolConcurrency;
   execute(input: Input, ctx: ToolContext): Promise<ToolResult>;
 }
+
+/**
+ * A resource a call touches. Two keys CONFLICT iff they name the same
+ * `resource` and at least one is a `write`.
+ */
+export interface ResourceKey {
+  readonly mode: "read" | "write";
+  readonly resource: string;
+}
+
+/**
+ * A tool's concurrency class: `"exclusive"`, or a TOTAL function of the call's
+ * (unvalidated) input to its keys — a garbage input must give `"exclusive"`;
+ * a throw counts as `"exclusive"`. A call is read-class iff its keys are
+ * non-empty and all `read`.
+ */
+export type ToolConcurrency =
+  | "exclusive"
+  | ((input: unknown) => readonly ResourceKey[] | "exclusive");

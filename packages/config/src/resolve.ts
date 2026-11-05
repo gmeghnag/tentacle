@@ -28,6 +28,8 @@ import {
   DEFAULT_SUMMARIZE_LARGE_OUTPUT,
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_TABULATE_JSON,
+  DEFAULT_TOOL_EXECUTION,
+  DEFAULT_TOOL_MAX_PARALLEL,
 } from "./defaults.ts";
 import type { FileConfig, HookSpecConfig, McpServerConfig, MountConfig } from "./schema.ts";
 import { type SkillInfo, renderSkillsCatalog } from "./skills.ts";
@@ -89,6 +91,8 @@ export interface ResolvedConfig {
   readonly tabulateJson: boolean;
   /** Whether a background-job exit auto-starts a continuation turn while idle. */
   readonly autoWake: boolean;
+  /** How a round's tool calls may overlap (`tools.execution` / `tools.maxParallel`). */
+  readonly toolExecution: { readonly mode: ToolExecutionMode; readonly maxParallel: number };
   /**
    * The configured default engine of `run`/`attach` (file or profile); absent
    * when unset. Its env form (`TENTACLE_ENGINE`) and the flag are layered by
@@ -129,7 +133,17 @@ export interface ResolvedConfig {
     readonly dedupOutput: Source;
     readonly tabulateJson: Source;
     readonly autoWake: Source;
+    readonly toolExecution: Source;
+    readonly toolMaxParallel: Source;
   };
+}
+
+/** `tools.execution` (docs/feat/parallel-tools.md). */
+export type ToolExecutionMode = "sequential" | "read-only" | "parallel";
+
+function parseToolExecution(raw: string | undefined): ToolExecutionMode | undefined {
+  const v = raw?.trim().toLowerCase();
+  return v === "sequential" || v === "read-only" || v === "parallel" ? v : undefined;
 }
 
 export interface ResolveContext {
@@ -361,6 +375,16 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     DEFAULT_TABULATE_JSON,
   );
   const autoWake = pick(parseBool(env.TENTACLE_AUTO_WAKE), fileConfig.autoWake, DEFAULT_AUTO_WAKE);
+  const toolExecution = pick<ToolExecutionMode>(
+    parseToolExecution(env.TENTACLE_TOOL_EXECUTION),
+    fileConfig.tools?.execution,
+    DEFAULT_TOOL_EXECUTION,
+  );
+  const toolMaxParallel = pick(
+    parsePositiveInt(env.TENTACLE_TOOL_MAX_PARALLEL),
+    fileConfig.tools?.maxParallel,
+    DEFAULT_TOOL_MAX_PARALLEL,
+  );
 
   // API key precedence: env var > file `apiKey` > file `apiKeyCommand`.
   let apiKey: string | undefined;
@@ -407,6 +431,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     dedupOutput: dedupOutput.value,
     tabulateJson: tabulateJson.value,
     autoWake: autoWake.value,
+    toolExecution: { mode: toolExecution.value, maxParallel: toolMaxParallel.value },
     ...(fileConfig.engine !== undefined ? { engine: fileConfig.engine } : {}),
     ...(fileConfig.keep !== undefined ? { keep: fileConfig.keep } : {}),
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
@@ -435,6 +460,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       dedupOutput: dedupOutput.source,
       tabulateJson: tabulateJson.source,
       autoWake: autoWake.source,
+      toolExecution: toolExecution.source,
+      toolMaxParallel: toolMaxParallel.source,
     },
   };
 }

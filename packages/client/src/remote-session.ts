@@ -207,6 +207,12 @@ export class RemoteSession implements SessionStreamListener {
   } | null = null;
   /** The session ended daemon-side (`session_closed`): a later send is refused clearly. */
   private remoteClosed = false;
+  /**
+   * The calls of the running turn the daemon said START (`tool_call_phase`
+   * `running`, docs/feat/parallel-tools.md), recorded at receipt in `output`
+   * — before any consumer pulls an event — and cleared at a `turn_start`.
+   */
+  private readonly started = new Set<string>();
   private watcher: ((activity: SessionActivity) => void) | null = null;
   /** Activities raised before `watch`: handed over on subscribe, in order. */
   private unwatched: SessionActivity[] = [];
@@ -908,6 +914,7 @@ export class RemoteSession implements SessionStreamListener {
         this.onReset(out);
         return;
       case "update":
+        this.noteStarted(out.update);
         this.route(out.update, out.turn);
         return;
       case "error": {
@@ -1144,6 +1151,24 @@ export class RemoteSession implements SessionStreamListener {
       turnRecovery({ recreated: false, ended: turn.ended, acked: turn.acked }).resendPrompt
     ) {
       this.sendPrompt(id, turn);
+    }
+  }
+
+  /**
+   * The calls of the running turn that STARTED, as the daemon streamed them
+   * (`running` precedes each start in stream order): what a cut labels
+   * "Interrupted"; every other unanswered call "Not run".
+   */
+  runningCalls(): ReadonlySet<string> {
+    return new Set(this.started);
+  }
+
+  /** Record a start signal (or forget the last turn's) at receipt. */
+  private noteStarted(update: SessionUpdate): void {
+    if (update.type === "turn_start") {
+      this.started.clear();
+    } else if (update.type === "tool_call_phase" && update.phase === "running") {
+      this.started.add(update.toolCallId);
     }
   }
 

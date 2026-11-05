@@ -23,6 +23,7 @@ import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
 import { dashedRule, theme } from "./theme.ts";
 import { fitSubtitle, isExpanded } from "./tool-expand.ts";
+import { queuedRow } from "./tool-phase-view.ts";
 import { type WordOp, changeRatio, diffWords } from "./word-diff.ts";
 
 export interface RenderOptions {
@@ -421,6 +422,9 @@ function plainToolBody(
   if (tool.status === "running") {
     return [theme.subtle("running…")];
   }
+  if (tool.status === "queued") {
+    return [];
+  }
   // Spilled: the structured fact, never the model's banner (docs/feat/tui-spill-note.md).
   if (tool.spill) {
     return spillBody(tool, tool.spill, expanded, inPod);
@@ -454,6 +458,9 @@ function plainToolBody(
 function bullet(tool: ToolItem): string {
   if (tool.status === "running") {
     return theme.accent(BULLET);
+  }
+  if (tool.status === "queued") {
+    return theme.subtle(BULLET); // unreachable: a queued row has its own header (`toolLines`)
   }
   return tool.status === "ok" ? theme.success(BULLET) : theme.error(BULLET);
 }
@@ -530,6 +537,14 @@ function commandRows(subtitle: string, cols: number): string[] {
 
 function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const cols = Math.max(1, Math.floor(opts.width ?? DEFAULT_WIDTH));
+  if (tool.status === "queued") {
+    // Approved, not started: one dim row, no body, no spinner.
+    const row = queuedRow(toolTitle(tool));
+    const head = `${row.glyph} ${row.label}`;
+    const budget = cols - stringWidth(head) - stringWidth(row.suffix) - 2;
+    const fitted = row.subtitle === "" ? "" : fitSubtitle(row.subtitle, budget);
+    return [theme.subtle(`${head}${fitted === "" ? "" : ` ${fitted}`} ${row.suffix}`)];
+  }
   const width = Math.max(20, cols - INDENT.length - 1);
   const elapsed = tool.durationMs !== undefined ? ` ${formatDurationMs(tool.durationMs)}` : "";
   const { label, subtitle } = toolTitle(tool);

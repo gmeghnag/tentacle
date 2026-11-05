@@ -204,7 +204,10 @@ fresh context. Shared blind spots can survive both passes (AGENTS §10).
    one-at-a-time fallback (`beforeRun → false`) must still pass
    `beforeStart`. Otherwise this gap reopens on that path. A landed
    `inFlight` is safe by itself: `resumableTurn` refuses a record with
-   `inFlight` (`persisted-session.ts:599`).
+   `inFlight` (`persisted-session.ts:599`). *Answered in
+   [`feat/parallel-tools`](../feat/parallel-tools.md): the hold runs once per
+   group, before `beforeRun`, so the fallback starts with no carried entry
+   (pinned by T-F3b; the hook-`force`d variant is T-F3d).*
 3. **LOW (gate environment, not the diff).** In this worktree, `bun run check`
    stops at `tsc -p apps/mobile` (no Expo install). Worse, that failing `tsc`
    **emits** six `.js` files into `apps/mobile/`, and they then make

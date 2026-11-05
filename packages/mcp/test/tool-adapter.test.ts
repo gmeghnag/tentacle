@@ -73,3 +73,38 @@ describe("mcp tool adapter", () => {
     expect(received).toBe(ac.signal);
   });
 });
+
+describe("mcp tool concurrency (readOnlyTools × readOnlyHint, T-K)", () => {
+  const { client } = fakeClient({ content: [] });
+  const def = (name: string, readOnlyHint?: unknown) => ({
+    name,
+    ...(readOnlyHint !== undefined ? { annotations: { readOnlyHint } } : {}),
+  });
+  const keysOf = (tool: ReturnType<typeof mcpToolToTool>): unknown => {
+    const c = tool.concurrency;
+    return c === undefined || c === "exclusive" ? "exclusive" : c({});
+  };
+  const READ = [{ mode: "read", resource: "mcp:s" }];
+
+  test('"hint" (default): only readOnlyHint === true reads; else exclusive', () => {
+    expect(keysOf(mcpToolToTool("s", client, def("a", true)))).toEqual(READ);
+    expect(keysOf(mcpToolToTool("s", client, def("a", true), "hint"))).toEqual(READ);
+    expect(keysOf(mcpToolToTool("s", client, def("a", false)))).toBe("exclusive");
+    expect(keysOf(mcpToolToTool("s", client, def("a", "true")))).toBe("exclusive");
+    expect(keysOf(mcpToolToTool("s", client, def("a")))).toBe("exclusive");
+  });
+
+  test('"none": never read-only, even with the hint', () => {
+    expect(keysOf(mcpToolToTool("s", client, def("a", true), "none"))).toBe("exclusive");
+  });
+
+  test("a list: exactly those bare names, whatever the hint", () => {
+    expect(keysOf(mcpToolToTool("s", client, def("a"), ["a"]))).toEqual(READ);
+    expect(keysOf(mcpToolToTool("s", client, def("b", true), ["a"]))).toBe("exclusive");
+  });
+
+  test("garbage annotations → exclusive", () => {
+    const bad = { name: "a", annotations: "x" } as unknown as { name: string };
+    expect(keysOf(mcpToolToTool("s", client, bad))).toBe("exclusive");
+  });
+});

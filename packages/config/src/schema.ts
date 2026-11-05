@@ -50,6 +50,17 @@ export const ModelConfigSchema = z
 
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 
+/**
+ * Which of a server's tools may run beside other reads in one round
+ * (docs/feat/parallel-tools.md): `"hint"` (default) — those the server marks
+ * `readOnlyHint`; `"none"` — none; a list — exactly those, by bare MCP name.
+ */
+const McpReadOnlyToolsSchema = z.union([
+  z.literal("hint"),
+  z.literal("none"),
+  z.array(z.string().min(1)),
+]);
+
 /** A stdio MCP server: a command to spawn, exchanging JSON-RPC over stdio. */
 const McpStdioServerSchema = z
   .object({
@@ -62,6 +73,7 @@ const McpStdioServerSchema = z
     env: z.record(z.string()).optional(),
     /** Working directory for the server process. */
     cwd: z.string().min(1).optional(),
+    readOnlyTools: McpReadOnlyToolsSchema.optional(),
   })
   .strict();
 
@@ -73,6 +85,7 @@ const McpHttpServerSchema = z
     url: z.string().url(),
     /** Extra request headers (e.g. `Authorization`); sent only to `url`. */
     headers: z.record(z.string()).optional(),
+    readOnlyTools: McpReadOnlyToolsSchema.optional(),
   })
   .strict();
 
@@ -300,6 +313,15 @@ const settingsShape = {
        * result. Default: disabled.
        */
       summarizeLargeOutput: z.boolean().optional(),
+      /**
+       * How a round's tool calls may overlap (docs/feat/parallel-tools.md):
+       * `sequential` — one at a time; `read-only` (default) — read-class calls
+       * (fs_read, read-only MCP tools) together, every write and shell call
+       * alone; `parallel` — any calls on different resources together.
+       */
+      execution: z.enum(["sequential", "read-only", "parallel"]).optional(),
+      /** At most this many calls of a round at once (`1` = sequential). Default 8. */
+      maxParallel: z.number().int().positive().optional(),
     })
     .strict()
     .optional(),

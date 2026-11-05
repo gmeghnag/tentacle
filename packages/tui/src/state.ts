@@ -11,8 +11,13 @@
 import type { AgentEvent, AgentStopReason } from "@tentacle/agent";
 import type { ChatMessage, ToolResult, ToolResultDetail, ToolResultSpill } from "@tentacle/core";
 import { messagesToItems } from "./resume.ts";
+import { nextToolStatus } from "./tool-phase-view.ts";
 
-export type ToolStatus = "running" | "ok" | "error";
+/**
+ * `queued`: approved in a parallel group, not started yet
+ * (docs/feat/parallel-tools.md); unanswered like `running`, but never blinks.
+ */
+export type ToolStatus = "queued" | "running" | "ok" | "error";
 
 export interface UserItem {
   readonly kind: "user";
@@ -323,6 +328,22 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
       } else {
         items.push(finished);
       }
+      return { ...state, items };
+    }
+
+    case "tool_phase": {
+      // The latest row of that id; an unknown id creates nothing.
+      const idx = state.items.findLastIndex((i) => i.kind === "tool" && i.id === event.id);
+      const item = state.items[idx];
+      if (item?.kind !== "tool") {
+        return state;
+      }
+      const status = nextToolStatus(item.status, event.phase);
+      if (status === item.status) {
+        return state;
+      }
+      const items = state.items.slice();
+      items[idx] = { ...item, status };
       return { ...state, items };
     }
 

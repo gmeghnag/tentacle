@@ -433,6 +433,8 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     ...(options.askHooksTrust ? { askHooksTrust: options.askHooksTrust } : {}),
     ...(contextAwareness ? { contextAwareness } : {}),
     ...(contextReset ? { contextReset } : {}),
+    // The main agent only: sub-agents' rounds stay sequential (task 7).
+    toolExecution: config.toolExecution,
   });
   // Names the session after its first exchange (docs/feat/session-titles.md),
   // only with `model.autoTitle` (opt-in; off → no title model, no call):

@@ -176,6 +176,7 @@ describe("context_reset over the real daemon (the mid-turn barrier)", () => {
     expect(await run.ended).toBe("ended");
     expect(shape(run.into)).toEqual([
       "tool_start",
+      "tool_phase",
       "tool_result:reset_probe",
       "context_reset:system:FRESH SYSTEM|user:RESTART PROMPT",
       "text:after ",
@@ -203,6 +204,7 @@ describe("context_reset over the real daemon (the mid-turn barrier)", () => {
     expect(await run.ended).toBe("ended");
     expect(shape(run.into)).toEqual([
       "tool_start",
+      "tool_phase",
       "tool_result:reset_probe",
       "context_reset:system:FRESH SYSTEM|user:RESTART PROMPT|assistant:after the reset",
       "turn_end:end_turn",
@@ -276,6 +278,7 @@ describe("context_reset over the real daemon (the mid-turn barrier)", () => {
     expect(shape(foreign.into)).toEqual([
       "user_message",
       "tool_start",
+      "tool_phase",
       "tool_result:reset_probe",
       "context_reset:system:FRESH SYSTEM|user:RESTART PROMPT",
       "text:after ",

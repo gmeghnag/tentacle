@@ -269,7 +269,8 @@ All checked on the rebased tree.
     - After it resolves, the executor re-checks the abort. If aborted, those
       calls are answered `CANCELLED_TOOL_NOTE` and never start.
   - **Task 5 adds the type and contract only; the call site is task 6's
-    executor** (no multi-call group exists yet).
+    executor** (no multi-call group exists yet). *Done in
+    [`feat/parallel-tools`](parallel-tools.md): `Agent.runGroup`.*
   - It is never called for a group of one, so the sequential write points do
     not change.
 - `SendOptions.beforeRun?`, passed through `Session.send`. Same option on

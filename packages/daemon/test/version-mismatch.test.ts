@@ -122,12 +122,13 @@ describe("Connection refuses initialize with the worded message and its data", (
     });
   }
 
-  test("13 ↔ 14 (detached-runs' bump): a resident pod daemon of the old build is refused cleanly at initialize", async () => {
-    // A laptop on protocol 13 bridged to a 14 resident (or the reverse) must
-    // fail here, not mid-session on a changed `session/detach` meaning.
+  test("14 ↔ 15 (parallel-tools' bump): a resident pod daemon of the old build is refused cleanly at initialize", async () => {
+    // A laptop on protocol 14 bridged to a 15 resident (or the reverse) must
+    // fail here, not mislabel a cut: a 14 daemon never sends `tool_call_phase`
+    // (docs/feat/parallel-tools.md; 13 ↔ 14 was detached-runs' `session/detach`).
     const error = await refuse(
       {
-        protocolVersion: 13,
+        protocolVersion: 14,
         clientCapabilities: { streaming: true },
         clientInfo: { name: "tentacle", version: "0.3.0" },
       },
@@ -135,14 +136,14 @@ describe("Connection refuses initialize with the worded message and its data", (
     );
     expect(error.code).toBe(DomainErrorCode.VersionMismatch);
     expect(error.data).toMatchObject({
-      client: { protocol: 13, tentacle: "0.3.0" },
-      daemon: { protocol: 14, tentacle: "0.4.0" },
+      client: { protocol: 14, tentacle: "0.3.0" },
+      daemon: { protocol: 15, tentacle: "0.4.0" },
     });
   });
 
-  test("10 ↔ current (session-archive's bump, context-reset's, skills-hot-reload's, then detached-runs'): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
+  test("10 ↔ current (session-archive's bump, context-reset's, skills-hot-reload's, detached-runs', then parallel-tools'): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
     // What a tentacle 0.1.0 sends (protocol 10, clientInfo since version-mismatch-notice).
-    expect(PROTOCOL_VERSION as number).toBe(14);
+    expect(PROTOCOL_VERSION as number).toBe(15);
     const error = await refuse(
       {
         protocolVersion: 10,
@@ -153,11 +154,11 @@ describe("Connection refuses initialize with the worded message and its data", (
     );
     expect(error.code).toBe(DomainErrorCode.VersionMismatch);
     expect(error.message).toBe(
-      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 14 (tentacle 0.2.0) — update this client: "tentacle update"',
+      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 15 (tentacle 0.2.0) — update this client: "tentacle update"',
     );
     expect(error.data).toEqual({
       client: { protocol: 10, tentacle: "0.1.0" },
-      daemon: { protocol: 14, tentacle: "0.2.0" },
+      daemon: { protocol: 15, tentacle: "0.2.0" },
       update: "client",
     });
   });

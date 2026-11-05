@@ -353,6 +353,8 @@ describe("createLocalRuntime (local over RPC)", () => {
     }
     expect(seen).toEqual([
       { type: "tool_start", id: "p1", name: "agent_task", arguments: ARGS },
+      // The start signal crossed the wire too (docs/feat/parallel-tools.md).
+      { type: "tool_phase", id: "p1", phase: "running" },
       { type: "subagent_start", id: "p1", agentType: "explore", description: "find" },
       { type: "subagent_tool", id: "p1", label: "Read a.ts" },
       { type: "subagent_usage", id: "p1", promptTokens: 40, completionTokens: 2 },

@@ -62,6 +62,14 @@ import { type AskHooksTrust, type HookRunner, hookNote } from "./hooks.ts";
 import { type GateOutcome, PermissionGate } from "./permission-gate.ts";
 import { type ResultTransform, applyResultTransforms } from "./result-pipeline.ts";
 import { suspendedCalls } from "./resume.ts";
+import {
+  type CallState,
+  type ExecutionMode,
+  classOf,
+  dependencies,
+  nextRunnable,
+  planGroups,
+} from "./round-plan.ts";
 import { EMPTY_SKILL_LISTING, type SkillListing, userRescanListing } from "./session-skills.ts";
 
 export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations";
@@ -134,15 +142,17 @@ export interface RunOptions {
    * the abort is checked again: aborted → those calls are answered cancelled
    * and never start. Resolves whether the set landed (`false`: a failed write,
    * or an abort released the wait) — on `false` the executor runs the group
-   * one call at a time. Absent → nothing to persist. Not called yet: every
-   * call is its own group until the parallel executor (task 6).
+   * one call at a time, a commit after each (`runGroup`). Absent → nothing to
+   * persist. Called only when `toolExecution` groups calls.
    */
   readonly beforeRun?: BeforeRun;
   /**
-   * A call of the resumed round (`resumeFrom`) passed the gate and is about
-   * to run: awaited after the allow and before it starts, then the abort is
-   * checked again (aborted → answered cancelled, never started). The daemon
-   * makes "this call may have started" durable here when no ask did
+   * A call of the resumed round (`resumeFrom`) is about to run: awaited
+   * before the resumed round's first start of each group — for a call alone
+   * after its allow, for a group once between its phases, BEFORE `beforeRun`
+   * (docs/feat/parallel-tools.md) — then the abort is checked again (aborted
+   * → answered cancelled, never started). The daemon makes "this call may
+   * have started" durable here when no ask did
    * (docs/fix/resumed-call-pending.md). Never for a later round. Absent →
    * nothing to persist.
    */
@@ -218,6 +228,11 @@ export type AgentEvent =
       /** The tool's own run time (ms); absent when it never ran (denied, blocked, cancelled). */
       readonly durationMs?: number;
     }
+  // A call's phase in its round (docs/feat/parallel-tools.md): `queued` —
+  // approved in a group, not started yet; `running` — yielded right BEFORE
+  // the call starts (every executed call; never one that did not start).
+  // Rendering-only: never persisted.
+  | { readonly type: "tool_phase"; readonly id: string; readonly phase: "queued" | "running" }
   | { readonly type: "usage"; readonly usage: Usage }
   // Nested sub-agent progress (the `agent_task` tool), keyed by the parent tool-call id.
   | {
@@ -359,10 +374,27 @@ export interface AgentConfig {
     readonly maxPerMessage: number;
     refresh(): Promise<{ readonly systemPrompt: string; readonly skills: SessionSkills }>;
   };
+  /**
+   * How a round's calls may overlap (`tools.execution` / `tools.maxParallel`,
+   * docs/feat/parallel-tools.md). Absent → sequential: every call alone, as
+   * every agent built without it (tests, sub-agents) expects.
+   */
+  readonly toolExecution?: { readonly mode: ExecutionMode; readonly maxParallel: number };
 }
 
 /** What `runToolCalls` reports to the loop: an accepted context reset ran. */
 type RoundOutcome = "context_reset" | undefined;
+
+/** The `RunOptions` hooks a round's executor calls (the resumed round gets both). */
+interface RoundHooks {
+  readonly beforeRun?: BeforeRun | undefined;
+  readonly beforeResumedCall?: BeforeResumedCall | undefined;
+}
+
+/** An item of a group's queue: a call's live progress, or a call's settled run. */
+type GroupItem =
+  | { readonly kind: "event"; readonly event: AgentEvent }
+  | { readonly kind: "done"; readonly index: number; readonly run: ToolRun };
 
 /**
  * `work`'s outcome, unless `signal` aborts first: then reject with its reason
@@ -687,13 +719,10 @@ export class Agent {
       // A reset in it: the fresh history is all unseen (the loop below starts
       // at round 0 anyway).
       if (
-        (yield* this.runToolCalls(
-          resumed,
-          messages,
-          toolContext,
-          signal,
-          opts.beforeResumedCall,
-        )) === "context_reset"
+        (yield* this.runToolCalls(resumed, messages, toolContext, signal, {
+          beforeRun: opts.beforeRun,
+          beforeResumedCall: opts.beforeResumedCall,
+        })) === "context_reset"
       ) {
         unseen = 0;
       }
@@ -912,7 +941,9 @@ export class Agent {
       }
 
       if (
-        (yield* this.runToolCalls(toolCalls, messages, toolContext, signal)) === "context_reset"
+        (yield* this.runToolCalls(toolCalls, messages, toolContext, signal, {
+          beforeRun: opts.beforeRun,
+        })) === "context_reset"
       ) {
         budgetFrom = iteration + 1;
         // The model has seen nothing of the fresh history: its context line
@@ -1080,21 +1111,36 @@ export class Agent {
   }
 
   /**
-   * Run one round's tool calls in order: each is authorized and run, and its
-   * result pushed and committed before the next one starts — so a history
-   * suspended inside a call is always "earlier calls answered, this one and
-   * the later ones not" (`suspendedCalls`). A call reached after an abort is
-   * answered as cancelled without prompting, keeping the round answered.
-   * `beforeStart`: the resumed round's `RunOptions.beforeResumedCall`.
+   * Run one round's tool calls, group by group (`planGroups`, by
+   * `toolExecution`; absent = sequential, every call alone). A call alone is
+   * authorized and run, and its result pushed and committed before the next
+   * one starts — so a history suspended inside it is "earlier calls answered,
+   * this one and the later ones not" (`suspendedCalls`). A group of several
+   * is `runGroup`. A call reached after an abort is answered as cancelled
+   * without prompting, keeping the round answered.
    */
   private async *runToolCalls(
     calls: readonly ToolCall[],
     messages: ChatMessage[],
     toolContext: ToolContext,
     signal: AbortSignal | undefined,
-    beforeStart?: BeforeResumedCall,
+    hooks: RoundHooks = {},
   ): AsyncGenerator<AgentEvent, RoundOutcome> {
-    for (const call of calls) {
+    const mode = this.config.toolExecution?.mode ?? "sequential";
+    const maxParallel = this.config.toolExecution?.maxParallel ?? 1;
+    const classes = calls.map((call) =>
+      classOf(this.config.tools.get(call.name), parseArguments(call.arguments)),
+    );
+    for (const indexes of planGroups(classes, mode, maxParallel)) {
+      const group = indexes.flatMap((i) => (calls[i] ? [calls[i]] : []));
+      if (group.length > 1) {
+        yield* this.runGroup(group, messages, toolContext, hooks, mode, maxParallel);
+        continue;
+      }
+      const call = group[0];
+      if (call === undefined) {
+        continue;
+      }
       const resetConfig = this.config.contextReset;
       if (
         call.name === CONTEXT_RESET_TOOL_NAME &&
@@ -1111,7 +1157,7 @@ export class Agent {
       if (signal?.aborted) {
         // The user cancelled while the previous tool ran (or before this one
         // could start). It must not start — and must not prompt for
-        // permission either (`authorize` lives inside runTool). Answer it
+        // permission either (`authorizeCall` asks). Answer it
         // synthetically so the assistant's `toolCalls` stay valid in the
         // history; the next iteration top ends the turn as cancelled.
         messages.push({
@@ -1137,11 +1183,23 @@ export class Agent {
         emitProgress: (event: ToolProgressEvent) => progress.push(progressToEvent(call.id, event)),
         toolCallId: call.id,
       };
-      const resultPromise = this.runTool(call, ctx, beforeStart).finally(() => progress.close());
-      for await (const event of progress.drain()) {
-        yield event;
+      const prepared = await this.authorizeCall(call, ctx, {
+        beforeStart: hooks.beforeResumedCall,
+      });
+      let run: ToolRun & { input: unknown };
+      if (prepared.kind === "done") {
+        run = prepared;
+      } else if (yield* this.signalRunning(call.id, toolContext.signal)) {
+        // Cancelled in the hop after the signal: never started.
+        run = { result: cancelledResult(), input: prepared.input };
+      } else {
+        const resultPromise = this.executeCall(prepared, ctx).finally(() => progress.close());
+        for await (const event of progress.drain()) {
+          yield event;
+        }
+        run = await resultPromise;
       }
-      const { result: raw, input, durationMs } = await resultPromise;
+      const { result: raw, input, durationMs } = run;
       // After the duration was taken: a transform is harness time, not the tool's.
       const transformed = await this.transformResult(call, raw, signal, {
         sessionId: toolContext.sessionId,
@@ -1160,6 +1218,270 @@ export class Agent {
       yield { type: "history_commit" };
     }
     return undefined;
+  }
+
+  /**
+   * A group of several calls (docs/feat/parallel-tools.md), in two phases.
+   *
+   * PHASE 1 — authorize, serially, in call order, each ask carrying the
+   * group's head as `groupStart`. A refusal or a cancel is answered at once
+   * (its `tool_result`); nothing is pushed. This is the ONLY place a call of
+   * the group may wait on a human: nothing in phase 2 asks anyone (the
+   * load-bearing assumption — no tool that asks while it runs is ever
+   * grouped).
+   *
+   * BETWEEN — if some call may run and no abort: the resumed round's F3 hold
+   * (`beforeResumedCall`), then `beforeRun` with the ids that will run, each
+   * followed by an abort check (aborted → those calls answered cancelled,
+   * none starts).
+   *
+   * PHASE 2 — `beforeRun` landed: the calls run concurrently, each once the
+   * earlier calls it conflicts with (on its EFFECTIVE input) have settled,
+   * at most `maxParallel` at a time; results are yielded as they complete and
+   * pushed in call order with ONE commit at the end. Not landed: one at a
+   * time, in call order, a commit after each (never parallel without a
+   * durable record). Either way, a result-processing failure is that call's
+   * error (the turn goes on); a running call is never abandoned.
+   */
+  private async *runGroup(
+    calls: readonly ToolCall[],
+    messages: ChatMessage[],
+    toolContext: ToolContext,
+    hooks: RoundHooks,
+    mode: ExecutionMode,
+    maxParallel: number,
+  ): AsyncGenerator<AgentEvent, void> {
+    const signal = toolContext.signal;
+    const head = calls[0]?.id;
+    // One queue for the whole group: live progress of every call, and the
+    // completions of phase 2.
+    const queue = new EventQueue<GroupItem>();
+    const answered = new Map<number, ToolRun>();
+    const ready = new Map<number, { prepared: RunPrepared; ctx: ToolContext }>();
+    const answer = (index: number, call: ToolCall, run: ToolRun): AgentEvent => {
+      answered.set(index, run);
+      return {
+        type: "tool_result",
+        id: call.id,
+        name: call.name,
+        result: run.result,
+        ...(run.durationMs !== undefined ? { durationMs: run.durationMs } : {}),
+      };
+    };
+
+    // PHASE 1.
+    for (const [index, call] of calls.entries()) {
+      this.otherCallSinceReset = true;
+      if (signal.aborted) {
+        yield answer(index, call, { result: cancelledResult() });
+        continue;
+      }
+      yield { type: "tool_start", id: call.id, name: call.name, arguments: call.arguments };
+      const ctx: ToolContext = {
+        ...toolContext,
+        emitProgress: (event: ToolProgressEvent) =>
+          queue.push({ kind: "event", event: progressToEvent(call.id, event) }),
+        toolCallId: call.id,
+      };
+      const prepared = await this.authorizeCall(call, ctx, {
+        ...(head !== undefined ? { groupStart: head } : {}),
+      });
+      if (prepared.kind === "done") {
+        yield answer(index, call, await this.finishCall(call, prepared, toolContext));
+        continue;
+      }
+      ready.set(index, { prepared, ctx });
+      yield { type: "tool_phase", id: call.id, phase: "queued" };
+    }
+
+    // BETWEEN.
+    let landed = true;
+    if (ready.size > 0 && !signal.aborted) {
+      await hooks.beforeResumedCall?.(signal);
+      if (!signal.aborted && hooks.beforeRun) {
+        const ids = [...ready.keys()].flatMap((i) => (calls[i] ? [calls[i].id] : []));
+        landed = await hooks.beforeRun(ids, signal);
+      }
+    }
+    if (signal.aborted) {
+      for (const index of ready.keys()) {
+        const call = calls[index];
+        if (call) {
+          yield answer(index, call, { result: cancelledResult() });
+        }
+      }
+      ready.clear();
+    }
+
+    if (!landed) {
+      // One at a time, a commit after each: the first commit clears the
+      // daemon's in-memory in-flight set, after which "the first unanswered
+      // call is the only one that may have started" holds again.
+      for (const [index, call] of calls.entries()) {
+        const entry = ready.get(index);
+        if (entry !== undefined) {
+          if (signal.aborted || (yield* this.signalRunning(call.id, signal))) {
+            yield answer(index, call, { result: cancelledResult() });
+          } else {
+            const settled = this.runPrepared(entry.prepared, entry.ctx, toolContext).then((run) => {
+              queue.push({ kind: "done", index, run });
+            });
+            yield* this.drainUntilDone(queue, index, (run) => answer(index, call, run));
+            await settled;
+          }
+        }
+        const run = answered.get(index);
+        if (run !== undefined) {
+          messages.push(toolMessage(call.id, run.result, run.durationMs));
+          yield { type: "history_commit" };
+        }
+      }
+      queue.close();
+      return;
+    }
+
+    // PHASE 2 (landed): concurrent, under the dependency order and the cap.
+    const order = [...ready.keys()];
+    const deps = dependencies(
+      order.map((i) => {
+        const entry = ready.get(i);
+        return classOf(this.config.tools.get(calls[i]?.name ?? ""), entry?.prepared.input);
+      }),
+      mode,
+    );
+    const states: CallState[] = order.map(() => "pending");
+    let running = 0;
+    while (true) {
+      while (!signal.aborted) {
+        const k = nextRunnable(deps, states, maxParallel);
+        const index = k === undefined ? undefined : order[k];
+        const entry = index === undefined ? undefined : ready.get(index);
+        const call = index === undefined ? undefined : calls[index];
+        if (k === undefined || index === undefined || entry === undefined || call === undefined) {
+          break;
+        }
+        if (yield* this.signalRunning(call.id, signal)) {
+          break; // cancelled in the hop: still pending, answered cancelled below
+        }
+        states[k] = "running";
+        running++;
+        void this.runPrepared(entry.prepared, entry.ctx, toolContext).then((run) => {
+          queue.push({ kind: "done", index, run });
+        });
+      }
+      if (signal.aborted) {
+        // Never started: answered cancelled. Running ones are awaited below.
+        for (const [k, state] of states.entries()) {
+          const index = order[k];
+          const call = index === undefined ? undefined : calls[index];
+          if (state === "pending" && index !== undefined && call !== undefined) {
+            states[k] = "settled";
+            yield answer(index, call, { result: cancelledResult() });
+          }
+        }
+      }
+      if (running === 0) {
+        break;
+      }
+      const item = await queue.next();
+      if (item === undefined) {
+        break;
+      }
+      if (item.kind === "event") {
+        yield item.event;
+        continue;
+      }
+      running--;
+      states[order.indexOf(item.index)] = "settled";
+      const call = calls[item.index];
+      if (call) {
+        yield answer(item.index, call, item.run);
+      }
+    }
+    queue.close();
+    for (const [index, call] of calls.entries()) {
+      const run = answered.get(index);
+      if (run !== undefined) {
+        messages.push(toolMessage(call.id, run.result, run.durationMs));
+      }
+    }
+    // After every push: the group's results precede it. No ask is pending.
+    yield { type: "history_commit" };
+  }
+
+  /**
+   * Tell the stream a call is about to start (`tool_phase` `running`) — the
+   * call starts only when the consumer pulls again, so every frame of the
+   * signal precedes the start (the laptop's exact cut labels rely on it).
+   * Returns whether a cancel landed in that hop (then the call must not start).
+   */
+  private async *signalRunning(
+    id: string,
+    signal: AbortSignal,
+  ): AsyncGenerator<AgentEvent, boolean> {
+    yield { type: "tool_phase", id, phase: "running" };
+    return signal.aborted;
+  }
+
+  /** Yield `queue`'s progress until `index` completes; then yield its answer. */
+  private async *drainUntilDone(
+    queue: EventQueue<GroupItem>,
+    index: number,
+    answer: (run: ToolRun) => AgentEvent,
+  ): AsyncGenerator<AgentEvent, void> {
+    while (true) {
+      const item = await queue.next();
+      if (item === undefined) {
+        return;
+      }
+      if (item.kind === "event") {
+        yield item.event;
+      } else if (item.index === index) {
+        yield answer(item.run);
+        return;
+      }
+    }
+  }
+
+  /** Run an authorized call of a group and process its result: never rejects. */
+  private async runPrepared(
+    prepared: RunPrepared,
+    ctx: ToolContext,
+    toolContext: ToolContext,
+  ): Promise<ToolRun> {
+    const run = await this.executeCall(prepared, ctx);
+    return this.finishCall(prepared.call, run, toolContext);
+  }
+
+  /**
+   * A group's call's result through the transforms. A throw there is that
+   * call's error result (the rest of the group and the turn go on —
+   * decision 4 of docs/feat/parallel-tools.md); a call alone keeps failing
+   * the turn.
+   */
+  private async finishCall(
+    call: ToolCall,
+    run: ToolRun & { readonly input: unknown },
+    toolContext: ToolContext,
+  ): Promise<ToolRun> {
+    try {
+      const transformed = await this.transformResult(call, run.result, toolContext.signal, {
+        sessionId: toolContext.sessionId,
+        input: run.input,
+      });
+      return {
+        result: keepDenialReply(run.result, transformed),
+        ...(run.durationMs !== undefined ? { durationMs: run.durationMs } : {}),
+      };
+    } catch (error) {
+      return {
+        result: {
+          content: `Result processing failed: ${error instanceof Error ? error.message : String(error)}`,
+          isError: true,
+        },
+        ...(run.durationMs !== undefined ? { durationMs: run.durationMs } : {}),
+      };
+    }
   }
 
   /**
@@ -1445,70 +1767,111 @@ export class Agent {
   }
 
   /**
-   * Authorize (if the tool needs it) and then run a single tool call. Returns
-   * the result and the input it ran with (a `tool_call` hook may rewrite it),
-   * for the `tool_result` hooks, and the run's `durationMs` iff `execute` ran:
-   * the clock is read only around `execute`, after `authorize` — the prompt
-   * wait and the pre-hooks are never tool time. `beforeStart` (a resumed
-   * round's call) is awaited after an allow and before the run.
+   * Phase 1 of a call: authorize it (if the tool needs it). `done`: a result
+   * without running — cancelled (the abort is checked first, whatever the
+   * answer: a request settled by a cancel comes back as a refusal, the
+   * daemon's `cancelled`, and must read as cancelled, never as a denial the
+   * user did not give; an approval that lands after a cancel must not start
+   * the tool) or refused. `run`: the arguments it will run with (a
+   * `tool_call` hook may rewrite them) and the effective input, for the
+   * `tool_result` hooks and the scheduler's keys. `groupStart`: the head of
+   * the call's group (absent = a call alone, its own group —
+   * docs/feat/round-groups-persistence.md). `beforeStart` (a resumed round's
+   * call alone) is awaited after an allow, then the abort is checked again.
+   * Never runs the tool.
    */
-  private async runTool(
+  private async authorizeCall(
     call: ToolCall,
     ctx: ToolContext,
-    beforeStart?: BeforeResumedCall,
-  ): Promise<ToolRun & { input: unknown }> {
+    opts: { readonly groupStart?: string; readonly beforeStart?: BeforeResumedCall | undefined },
+  ): Promise<Prepared> {
     const tool = this.config.tools.get(call.name);
     const input = parseArguments(call.arguments);
     if (!tool) {
-      const run = await this.timed(() => this.config.tools.execute(call.name, call.arguments, ctx));
-      return { ...run, input };
+      // Unknown: the registry answers it (an error result), timed like a run.
+      return { kind: "run", call, args: call.arguments, input };
     }
     const outcome = await this.gate.authorize(tool, input, {
       sessionId: ctx.sessionId,
       toolCallId: call.id,
-      // No `groupStart`: every call runs alone, its own group (absent = itself;
-      // the parallel executor passes its group's head —
-      // docs/feat/round-groups-persistence.md).
+      ...(opts.groupStart !== undefined ? { groupStart: opts.groupStart } : {}),
       signal: ctx.signal,
     });
-    // The abort first, whatever the answer: a request settled by a cancel
-    // comes back as a refusal (the daemon's `cancelled`) and must read as
-    // cancelled, never as a denial the user did not give; and an approval
-    // that lands after a cancel must not start the tool.
     if (ctx.signal.aborted) {
-      return { result: { content: CANCELLED_TOOL_NOTE, isError: true }, input: outcome.input };
+      return { kind: "done", result: cancelledResult(), input: outcome.input };
     }
     if (!outcome.allowed) {
-      return { result: gateRefusal(call, outcome), input: outcome.input };
+      return { kind: "done", result: gateRefusal(call, outcome), input: outcome.input };
     }
-    if (beforeStart) {
-      await beforeStart(ctx.signal);
+    if (opts.beforeStart) {
+      await opts.beforeStart(ctx.signal);
       // A cancel released the wait: the call must not start.
       if (ctx.signal.aborted) {
-        return { result: { content: CANCELLED_TOOL_NOTE, isError: true }, input: outcome.input };
+        return { kind: "done", result: cancelledResult(), input: outcome.input };
       }
     }
     if (!outcome.modified) {
       // Unchanged: the raw argument string, byte-identical to a hook-less run.
-      const run = await this.timed(() => this.config.tools.execute(call.name, call.arguments, ctx));
-      return { ...run, input };
+      return { kind: "run", call, args: call.arguments, input };
     }
-    const name = outcome.hookName ?? "hook";
-    const { result, durationMs } = await this.timed(() =>
-      this.config.tools.execute(call.name, JSON.stringify(outcome.input), ctx),
-    );
-    // H4: the history keeps the model's original arguments, so say what ran.
-    const ran = clipText(JSON.stringify(outcome.input), 500);
     return {
-      result: {
-        ...result,
-        content: `[hook] input modified by hook ${name}; ran with: ${ran}\n${result.content}`,
-        hook: { action: "modified", name },
-      },
-      ...(durationMs !== undefined ? { durationMs } : {}),
+      kind: "run",
+      call,
+      args: JSON.stringify(outcome.input),
       input: outcome.input,
+      hookName: outcome.hookName ?? "hook",
     };
   }
+
+  /**
+   * Phase 2 of a call: run an authorized call. Returns the result, the input
+   * it ran with, and the run's `durationMs`: the clock is read only around
+   * `execute` — the prompt wait and the pre-hooks are never tool time. Never
+   * throws (`ToolRegistry.execute` catches everything).
+   */
+  private async executeCall(
+    prepared: RunPrepared,
+    ctx: ToolContext,
+  ): Promise<ToolRun & { input: unknown }> {
+    const { call, args, input, hookName } = prepared;
+    const run = await this.timed(() => this.config.tools.execute(call.name, args, ctx));
+    if (hookName === undefined) {
+      return { ...run, input };
+    }
+    // H4: the history keeps the model's original arguments, so say what ran.
+    const ran = clipText(args, 500);
+    return {
+      result: {
+        ...run.result,
+        content: `[hook] input modified by hook ${hookName}; ran with: ${ran}\n${run.result.content}`,
+        hook: { action: "modified", name: hookName },
+      },
+      ...(run.durationMs !== undefined ? { durationMs: run.durationMs } : {}),
+      input,
+    };
+  }
+}
+
+/** An authorized call, ready to run (`Agent.authorizeCall`). */
+interface RunPrepared {
+  readonly kind: "run";
+  readonly call: ToolCall;
+  /** The argument string it runs with: the model's, or the hook-rewritten input. */
+  readonly args: string;
+  /** The effective input (for the `tool_result` hooks and the scheduler's keys). */
+  readonly input: unknown;
+  /** Set iff a `tool_call` hook rewrote the input (the H4 banner). */
+  readonly hookName?: string;
+}
+
+/** A call's phase-1 outcome: answered without running, or ready to run. */
+type Prepared =
+  | { readonly kind: "done"; readonly result: ToolResult; readonly input: unknown }
+  | RunPrepared;
+
+/** A fresh cancelled result (a call that never started). */
+function cancelledResult(): ToolResult {
+  return { content: CANCELLED_TOOL_NOTE, isError: true };
 }
 
 /** The result of a call the gate refused: blocked by a hook, nobody to ask, or denied. */

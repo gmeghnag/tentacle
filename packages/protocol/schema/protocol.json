@@ -1625,6 +1625,7 @@
           "session_title": "#/$defs/SessionTitleUpdate",
           "steer": "#/$defs/Steer",
           "tool_call": "#/$defs/ToolCall",
+          "tool_call_phase": "#/$defs/ToolCallPhase",
           "tool_call_update": "#/$defs/ToolCallUpdate",
           "tool_progress": "#/$defs/ToolProgress",
           "turn_end": "#/$defs/TurnEndUpdate",
@@ -1662,6 +1663,9 @@
         },
         {
           "$ref": "#/$defs/ToolProgress"
+        },
+        {
+          "$ref": "#/$defs/ToolCallPhase"
         },
         {
           "$ref": "#/$defs/TurnStart"
@@ -1899,6 +1903,26 @@
         }
       },
       "required": ["status", "title", "toolCallId", "type"],
+      "type": "object",
+      "x-event-class": "display"
+    },
+    "ToolCallPhase": {
+      "additionalProperties": true,
+      "properties": {
+        "phase": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "toolCallId": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": {
+          "const": "tool_call_phase",
+          "type": "string"
+        }
+      },
+      "required": ["phase", "toolCallId", "type"],
       "type": "object",
       "x-event-class": "display"
     },
@@ -2520,5 +2544,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 14
+  "x-protocol-version": 15
 }

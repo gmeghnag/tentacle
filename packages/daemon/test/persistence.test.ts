@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   Agent,
   type AgentConfig,
+  HookRunner,
   JsonSessionStore,
   type LoadResult,
   Session,
@@ -3554,5 +3555,252 @@ describe("round groups on disk: groupStart, pending[] and inFlight (v8)", () => 
     await until(() => c.ended("T1"));
     expect(runs).toEqual(['run:{"n":1}', 'run:{"n":2}']);
     expect(r.store.saves.some((s) => s.turn?.inFlight !== undefined)).toBe(false);
+  });
+});
+
+// --- the group executor against the real daemon (docs/feat/parallel-tools.md) ---
+
+describe("parallel tools: groups on the real daemon (T-F3, T-D1)", () => {
+  const readOnly = { mode: "read-only", maxParallel: 8 } as const;
+  /** A read-class `run` tool (it may share a group); `during` observes the disk mid-run. */
+  const readTool = (runs: string[], during?: () => Promise<void> | void): Tool => ({
+    ...tool("run", "none", runs, during),
+    concurrency: () => [{ mode: "read", resource: "r" }],
+  });
+  const resumedGroup = (): DaemonSessionRecord =>
+    reread({
+      id: "s",
+      cwd: CWD,
+      model: "m",
+      createdAt: 1,
+      updatedAt: 2,
+      title: "t",
+      kind: "tentacle.daemon-session",
+      schemaVersion: 8,
+      lastActiveAt: 2,
+      enqueueIds: [],
+      returned: [],
+      messages: [
+        { role: "user", content: "go" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "c1", name: "run", arguments: '{"n":1}' },
+            { id: "c2", name: "run", arguments: '{"n":2}' },
+          ],
+        },
+      ],
+      turns: [{ turnId: "T1" }],
+      turn: {
+        turnId: "T1",
+        steering: [],
+        steeringIds: [],
+        pending: [
+          { toolCallId: "c2", tool: "run", resumable: true, requestedAt: 1, groupStart: "c1" },
+        ],
+      },
+    });
+  /** A store whose writes of an in-flight set fail (beforeRun → false); the rest land. */
+  class NoInFlightStore extends SpyStore {
+    override save(record: Parameters<RecordStore["save"]>[0]): Promise<void> {
+      if ((record as DaemonSessionRecord).turn?.inFlight !== undefined) {
+        this.saves.push(JSON.parse(JSON.stringify(record)) as DaemonSessionRecord);
+        return Promise.reject(new Error("disk full"));
+      }
+      return super.save(record);
+    }
+  }
+  const snapshot = (store: SpyStore, id = "s") => {
+    const durable = store.durable.get(id);
+    return durable ? reread(durable) : undefined;
+  };
+
+  test("T-F3a a resumed group, no asks, beforeRun lands: while the tools run the disk holds inFlight and never resumes", async () => {
+    const runs: string[] = [];
+    const seen: { resume?: string; inFlight?: readonly string[] }[] = [];
+    const store = new SpyStore();
+    const r = rig(
+      [text("done")],
+      () => [
+        readTool(runs, () => {
+          const rec = snapshot(store);
+          const resume = rec ? reconcileOnReload(rec).resume?.from : "nothing durable";
+          seen.push({
+            ...(resume !== undefined ? { resume } : {}),
+            ...(rec?.turn?.inFlight ? { inFlight: rec.turn.inFlight } : {}),
+          });
+        }),
+      ],
+      store,
+      Date.now,
+      {},
+      { toolExecution: readOnly },
+    );
+    const restored = r.host.restore(resumedGroup());
+    await until(() => !restored.running);
+    expect(runs.sort()).toEqual(['run:{"n":1}', 'run:{"n":2}']);
+    expect(seen).toEqual([{ inFlight: ["c1", "c2"] }, { inFlight: ["c1", "c2"] }]);
+    await restored.persisted();
+    expect(snapshot(store)?.turn?.inFlight).toBeUndefined();
+  });
+
+  test("T-F3b the same with beforeRun → false: while c1 runs (one at a time) the disk does not resume", async () => {
+    // Mutation: skip the F3 hook in the group path → the disk still resumes from c1.
+    const runs: string[] = [];
+    const seen: (string | undefined)[] = [];
+    const store = new NoInFlightStore();
+    const r = rig(
+      [text("done")],
+      () => [
+        readTool(runs, () => {
+          const rec = snapshot(store);
+          seen.push(rec ? reconcileOnReload(rec).resume?.from : "nothing durable");
+        }),
+      ],
+      store,
+      Date.now,
+      {},
+      { toolExecution: readOnly },
+    );
+    const restored = r.host.restore(resumedGroup());
+    await until(() => !restored.running);
+    expect(runs).toEqual(['run:{"n":1}', 'run:{"n":2}']);
+    expect(seen).toEqual([undefined, undefined]);
+    expect(r.errors.length).toBeGreaterThan(0); // the failed inFlight write is reported
+  });
+
+  test("T-F3c a cancel while the F3 write hangs in a group: no call starts", async () => {
+    const runs: string[] = [];
+    const store = new SpyStore();
+    store.hold = true;
+    const r = rig(
+      [text("done")],
+      () => [readTool(runs)],
+      store,
+      Date.now,
+      {},
+      {
+        toolExecution: readOnly,
+      },
+    );
+    const restored = r.host.restore(resumedGroup());
+    await tick(5);
+    restored.cancel();
+    await until(() => !restored.running);
+    expect(runs).toEqual([]);
+    store.hold = false;
+    store.release();
+  });
+
+  test("T-F3d a hook force-allows an `ask` tool in a resumed group: the hold still runs first", async () => {
+    // F3 Review finding 1: the allow without an ask may come from a hook.
+    const runs: string[] = [];
+    const seen: (string | undefined)[] = [];
+    const store = new SpyStore();
+    const hookEnv = {
+      exec: async () => ({ stdout: '{"decision":"allow"}', stderr: "", exitCode: 0 }),
+    } as unknown as ExecutionEnvironment;
+    const r = rig(
+      [text("done")],
+      () => [
+        {
+          ...tool("run", "ask", runs, () => {
+            const rec = snapshot(store);
+            seen.push(rec ? reconcileOnReload(rec).resume?.from : "nothing durable");
+          }),
+          concurrency: () => [{ mode: "read", resource: "r" }],
+        },
+      ],
+      store,
+      Date.now,
+      {},
+      {
+        toolExecution: readOnly,
+        hooks: new HookRunner({
+          specs: [{ event: "tool_call", command: "allow" }],
+          env: hookEnv,
+          cwd: CWD,
+        }),
+      },
+    );
+    const c = client();
+    const restored = r.host.restore(resumedGroup());
+    restored.attach(c.attachment);
+    await until(() => !restored.running);
+    expect(c.asks).toEqual([]);
+    expect(runs.sort()).toEqual(['run:{"n":1}', 'run:{"n":2}']);
+    expect(seen).toEqual([undefined, undefined]);
+  });
+
+  test("T-D1 a live group: inFlight durable while it runs, a reload labels exactly, gone after the commit; a failed write → one at a time", async () => {
+    const runs: string[] = [];
+    const release = Promise.withResolvers<void>();
+    const store = new SpyStore();
+    const r = rig(
+      [
+        [
+          call("c1", "run", { n: 1 }),
+          call("c2", "run", { n: 2 }),
+          call("c3", "x"),
+          { type: "done" },
+        ],
+        text("ok"),
+      ],
+      () => [
+        readTool(runs, async () => {
+          await release.promise;
+        }),
+        tool("x", "none", runs),
+      ],
+      store,
+      Date.now,
+      {},
+      { toolExecution: readOnly },
+    );
+    const c = client();
+    const { hosted } = r.host.open({ create: true }, c.attachment);
+    hosted.prompt("T1", go);
+    await until(() => runs.length === 2);
+    const mid = snapshot(store, hosted.id);
+    release.resolve();
+    await until(() => c.ended("T1"));
+    expect(mid?.turn?.inFlight).toEqual(["c1", "c2"]);
+    expect(
+      shape(mid ? reconcileOnReload(mid).messages : []).filter((s) => s.startsWith("tool(")),
+    ).toEqual([
+      `tool(c1):${INTERRUPTED_NOTE}`,
+      `tool(c2):${INTERRUPTED_NOTE}`,
+      `tool(c3):${NOT_RUN_NOTE}`,
+    ]);
+    await hosted.persisted();
+    expect(reread(store.durable.get(hosted.id)).turn).toBeUndefined();
+    expect(store.saves.filter((s) => s.turn?.inFlight !== undefined).length).toBe(1);
+
+    // A failed inFlight write: one at a time.
+    const order: string[] = [];
+    const gate = Promise.withResolvers<void>();
+    const failing = new NoInFlightStore();
+    const r2 = rig(
+      [[call("c1", "run", { n: 1 }), call("c2", "run", { n: 2 }), { type: "done" }], text("ok")],
+      () => [
+        readTool(order, async () => {
+          if (order.length === 1) await gate.promise;
+        }),
+      ],
+      failing,
+      Date.now,
+      {},
+      { toolExecution: readOnly },
+    );
+    const c2 = client();
+    const second = r2.host.open({ create: true }, c2.attachment).hosted;
+    second.prompt("T1", go);
+    await until(() => order.length === 1);
+    await tick(5);
+    expect(order).toEqual(['run:{"n":1}']);
+    gate.resolve();
+    await until(() => c2.ended("T1"));
+    expect(order).toEqual(['run:{"n":1}', 'run:{"n":2}']);
   });
 });

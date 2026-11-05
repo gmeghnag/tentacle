@@ -6,6 +6,7 @@
  */
 import type { JobStatus, Tool } from "@tentacle/core";
 import { z } from "zod";
+import { jobCursorConcurrency } from "./concurrency.ts";
 
 /** Human-readable status suffix including the exit code once a job has ended. */
 function statusText(status: JobStatus, exitCode: number | null): string {
@@ -25,6 +26,7 @@ export const shellOutputTool: Tool<z.infer<typeof shellOutputInput>> = {
     "Read output produced by a background shell job since the last read (incremental), along with its status and exit code once it has finished.",
   inputSchema: shellOutputInput,
   permission: "none",
+  concurrency: jobCursorConcurrency,
   async execute(input, ctx) {
     if (!ctx.jobs) {
       return { content: "background jobs are not available here", isError: true };

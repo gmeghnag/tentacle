@@ -43,7 +43,7 @@ export interface SendOptions {
 export interface ResumeOptions {
   /** As `SendOptions.beforeRun`. */
   readonly beforeRun?: BeforeRun;
-  /** Awaited before each call of the resumed round runs (see `RunOptions.beforeResumedCall`). */
+  /** Awaited before the resumed round's first start of each group (see `RunOptions.beforeResumedCall`). */
   readonly beforeResumedCall?: BeforeResumedCall;
 }
 

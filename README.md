@@ -276,6 +276,9 @@ Precedence: **environment variables › `config.jsonc` › built-in defaults**.
 | `contextReset.enabled` | `TENTACLE_CONTEXT_RESET` | The model's `context_reset` tool: it renews its own context from a restart prompt it writes, asked like any tool (default on) |
 | `contextReset.maxPerMessage` | `TENTACLE_CONTEXT_RESET_MAX` | Context resets per user message (default `-1` = unlimited) |
 | `loadSkills` | `TENTACLE_NO_SKILLS` (truthy disables) | Agent Skills discovery (default on) |
+| `tools.execution` | `TENTACLE_TOOL_EXECUTION` | How a round's tool calls overlap: `read-only` (default: reads — `fs_read`, read-only MCP tools — run together; writes and `shell` one at a time), `sequential`, or `parallel` (any calls on different files/resources) |
+| `tools.maxParallel` | `TENTACLE_TOOL_MAX_PARALLEL` | At most this many calls of a round at once (default `8`; `1` = sequential) |
+| `mcpServers.<name>.readOnlyTools` | — | Which of a server's tools count as reads: `"hint"` (default: those it marks `readOnlyHint`), `"none"`, or a list of its tool names |
 | `engine` | `TENTACLE_ENGINE` | Default engine of `run`/`attach`: `kubernetes` (default), `docker` or `podman`; `--engine` wins. An unknown value is an error |
 
 **`--model <id>` and `--profile <name>`** are flags of the commands that start a
@@ -338,7 +341,10 @@ Full reference and worked examples: [docs/extensions.md](docs/extensions.md#3-ho
   result (after secret redaction, when `tools.redactSecrets` is on); exit 2 = an error result
   with stderr. When a `tool_call` hook rewrote the input, the result it sees
   starts with the `[hook] input modified by hook <name>; ran with: …` line
-  the model also gets.
+  the model also gets. When a round's calls run in parallel (`tools.execution`),
+  their `tool_result` hooks can run at the same time (`tool_call` hooks still
+  run one at a time, in call order): a `tool_result` hook that writes shared
+  state (a log file, a counter) must tolerate concurrent runs.
 - **`turn_start`** (once per turn, before the first model call; not on a
   resumed turn): input adds `prompt`. `{"context": "…"}` injects a note; exit 2
   stops the turn (stderr is the reason); a message you queued while it ran is

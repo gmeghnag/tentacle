@@ -13,6 +13,7 @@ import { pathLocksFor } from "@tentacle/core";
 import { createTwoFilesPatch } from "diff";
 import { z } from "zod";
 import { shellKillTool, shellOutputTool } from "./background.ts";
+import { pathConcurrency } from "./concurrency.ts";
 
 /** Build a unified-diff detail and count changed lines. */
 function makeDiff(path: string, before: string, after: string): ToolResultDetail {
@@ -80,6 +81,7 @@ export const fsReadTool: Tool<z.infer<typeof fsReadInput>> = {
     "Read a UTF-8 text file. By default returns the whole file; pass `offset`/`limit` (or a `path:start:end` range) to read only a slice — preferred for large files, then edit precisely. A ranged read is prefixed with a `[path lines A-B of N]` header.",
   inputSchema: fsReadInput,
   permission: "none",
+  concurrency: pathConcurrency("read", (path) => parsePathRange(path).path),
   async execute(input, ctx) {
     // A range may come from explicit offset/limit, or a `path:start:end` suffix.
     const fromPath =
@@ -114,6 +116,7 @@ export const fsWriteTool: Tool<z.infer<typeof fsWriteInput>> = {
   description: "Write (creating or overwriting) a UTF-8 text file.",
   inputSchema: fsWriteInput,
   permission: "ask",
+  concurrency: pathConcurrency("write"),
   execute(input, ctx) {
     return lockPath(ctx, input.path, async () => {
       let before = "";
@@ -187,6 +190,7 @@ export const fsEditTool: Tool<z.infer<typeof fsEditInput>> = {
     "Edit a file by replacing an exact string. Fails if the string is missing, or not unique unless replace_all is set.",
   inputSchema: fsEditInput,
   permission: "ask",
+  concurrency: pathConcurrency("write"),
   execute(input, ctx) {
     return lockPath(ctx, input.path, async () => {
       const before = await ctx.env.readFile(input.path);
@@ -223,6 +227,7 @@ export const fsMultiEditTool: Tool<z.infer<typeof fsMultiEditInput>> = {
     "Apply several exact-string edits to one file in a single call, in order. Each edit sees the result of the previous one. Atomic: if any edit can't be applied, nothing is written. Prefer this over multiple fs_edit calls when changing the same file in several places.",
   inputSchema: fsMultiEditInput,
   permission: "ask",
+  concurrency: pathConcurrency("write"),
   execute(input, ctx) {
     return lockPath(ctx, input.path, async () => {
       const before = await ctx.env.readFile(input.path);
