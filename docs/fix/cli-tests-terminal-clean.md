@@ -194,3 +194,9 @@ As built (test-only, no `src/` change, no CHANGELOG line). Re-verified on main@9
 
 1. Decided by the standing rule (parallel code tasks only on disjoint files): **after feat/config-carry merges**.
 2. **B — yes**: the in-suite silent-terminal simulation also covers `main.test.ts` (owner chose over the recommendation).
+
+## Review
+
+*— claude-opus-5-5 (orchestrator), 2026-11-06*
+
+Standard in-context review (contained, S, test-only). Root cause: `capture` and the pod wrappers in the tests passed no `terminal` / `logTerm` seam, so they read the runner's terminal; fixed in the tests only, production unchanged. `simulateSilentTerminal()` (`test/silent-terminal.ts`) restores every descriptor. Evidence (orchestrator): `script -q /dev/null bun test packages/cli` 4 runs → 3 × 1901 pass / 0 fail, 1 × 1900 pass / 1 fail (not captured, not reproduced in the next 3 — logged as an open flake to watch, not attributable to this change by evidence); the silent-TTY preload run: 1901 pass / 0 fail. Combined build gate: 4742 pass, 3 skip, 0 fail. Verdict: PASS. Merged under the owner's one-night delegation (2026-11-06).
