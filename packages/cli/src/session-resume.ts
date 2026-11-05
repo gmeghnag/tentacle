@@ -100,7 +100,7 @@ export async function resolveResume(
     if (id === null) {
       return {
         record: null,
-        lines: ["[resume] cancelled\n"],
+        lines: [],
         notices: [],
         fatal: false,
         cancelled: true,

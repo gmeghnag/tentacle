@@ -10,6 +10,9 @@ those.
 
 ### Changed
 
+- **Esc / Ctrl+C in the `--resume` session picker now exits silently**, with no
+  `[resume] cancelled` line (local and `connect --resume`). The exit code is
+  unchanged.
 - **Your config now reaches a pod or container.** `run` and `attach` carry your
   `maxIterations`, `tools.*`, `contextAwareness`, `contextReset`, `loadAgentsMd`
   and `loadSkills` (your environment, active profile and global file, resolved on

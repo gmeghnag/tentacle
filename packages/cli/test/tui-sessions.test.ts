@@ -207,7 +207,7 @@ describe("openTuiSessions: choosing the session", () => {
     ]);
   });
 
-  test("cancelled in the picker: don't start, exit 0, nothing saved", async () => {
+  test("cancelled in the picker: don't start, exit 0, silent, nothing saved", async () => {
     // Mutation: return the sessions on cancel → the TUI starts fresh after Esc.
     const d = await twoSessions("cancelled");
     const out: string[] = [];
@@ -218,7 +218,7 @@ describe("openTuiSessions: choosing the session", () => {
       async () => null,
     );
     expect(sessions).toEqual({ exit: 0 });
-    expect(out).toEqual(["[resume] cancelled\n"]);
+    expect(out).toEqual([]);
   });
 
   test("a picker that throws: don't start, exit 1, the reason written", async () => {
