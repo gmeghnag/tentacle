@@ -38,3 +38,9 @@ Tests edited first: 3 red on the "no output" assertion; fix applied: 99 pass
 (the three files). Mutation: restoring the `write` in `connect.ts` turns the
 new connect test red; reverted. Exit code untouched. CHANGELOG line added.
 Gate: see the final report.
+
+## Review
+
+*— claude-opus-5-5 (orchestrator), 2026-11-06*
+
+Standard in-context review (contained, S). Diff read: two one-line source changes (`session-resume.ts` `lines: []`, `connect.ts` no write), exit code untouched. Gate of the combined build (main + this + fix/cli-tests-terminal-clean): tsc/biome clean, 4742 pass, 3 skip, 0 fail. Live (installed binary, a real pseudo-terminal in the repo root with many sessions): `tentacle --resume`, Esc → no output line, `EXIT=0`. Executor's mutation (line restored in `connect.ts` → red) accepted. Verdict: PASS. Merged under the owner's one-night delegation (2026-11-06).
