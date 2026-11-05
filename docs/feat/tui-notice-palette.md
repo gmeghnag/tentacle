@@ -66,3 +66,9 @@ Gate: see Review. A stray debug file `packages/tui/test/zz-dbg.test.ts` was writ
 *— claude-sonnet-5-5, 2026-11-06*
 
 In-context review only (contained, S). Protocol untouched; no wire/persistence change.
+
+## Review
+
+*— claude-opus-5-5 (orchestrator), 2026-11-06*
+
+Standard in-context review (contained, S; laptop-local, no protocol change). Diff read: `theme.notice` token (dark `#8caaee`, light `#3b5bdb` kept as a named constant), `noticeLines(text, hint)` appends the hint in `theme.subtle`, a typed `hint` field end to end (NoticeHub → App → display item), `relay.log` prints `text hint` as one line, separator notices unchanged. The executor left a stray `packages/tui/test/zz-dbg.test.ts` in the MAIN checkout (outside its worktree; a chalk debug print): removed by the orchestrator, never committed. Gate of main + this branch: tsc/biome clean, 4750 pass, 3 skip, 0 fail. Live (installed binary, real pseudo-terminal, `attach --profile p` on a fresh detached docker run): `⏺ auto-accept on` and `⏺ Session settings: { "maxIterations": 3 }` drawn in 38;2;140;170;238 (`#8caaee`), their hints `(Shift+Tab to turn it off)` / `(/clear to reset)` in 38;2;140;140;140. Verdict: PASS. Merged under the owner's one-night delegation (2026-11-06).
