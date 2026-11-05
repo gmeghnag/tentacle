@@ -35,7 +35,7 @@ describe("the failed-replacement warning (R2-1)", () => {
 
 describe("daemon text printed before the TUI mounts (R2-2)", () => {
   test("`connect`'s error line carries no escape sequences, whatever the daemon says", async () => {
-    // Mutation: print the message raw at main.ts (connect error) → ESC reaches `write`.
+    // Mutation: print the message raw at main.ts (connect error) → ESC reaches `err`.
     const server = Bun.serve({
       port: 0,
       fetch(req, srv) {
@@ -56,10 +56,14 @@ describe("daemon text printed before the TUI mounts (R2-2)", () => {
     });
     try {
       const out: string[] = [];
+      const err: string[] = [];
       const code = await main(["bun", "cli", "connect", `ws://127.0.0.1:${server.port}`], {
-        write: (t) => out.push(t),
+        out: (t) => out.push(t),
+        err: (t) => err.push(t),
       });
-      const text = out.join("");
+      // An error: stderr's (docs/fix/cli-output-streams.md D6).
+      const text = err.join("");
+      expect(out).toEqual([]);
       expect(code).toBe(1);
       expect(text).toContain("[connect error] ");
       // The line's own newlines are ours; the daemon's text has none left.

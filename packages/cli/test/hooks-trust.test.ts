@@ -319,18 +319,28 @@ describe("tentacle hooks trust (P3)", () => {
   test("--list prints each decision; --revoke deletes one", () => {
     const { store } = memoryStore({ "/repo": { hash: "abcdef0123456789", decision: "trusted" } });
     const out: string[] = [];
-    expect(
-      hooksTrustCommand(store, { positional: ["trust"], list: true }, (l) => out.push(l)),
-    ).toBe(0);
+    const err: string[] = [];
+    const io = { out: (l: string) => void out.push(l), err: (l: string) => void err.push(l) };
+    expect(hooksTrustCommand(store, { positional: ["trust"], list: true }, io)).toBe(0);
     expect(out).toEqual(["trusted\tabcdef012345\t/repo\n"]);
     expect(
-      hooksTrustCommand(store, { positional: ["trust"], list: false, revoke: "/repo" }, () => {}),
+      hooksTrustCommand(store, { positional: ["trust"], list: false, revoke: "/repo" }, io),
     ).toBe(0);
     expect(store.get("/repo")).toBeUndefined();
+    // docs/fix/cli-output-streams.md D3: the result on stdout; notes and usage on stderr.
+    expect(out).toEqual(["trusted\tabcdef012345\t/repo\n", "revoked: /repo\n"]);
+    expect(err).toEqual([]);
     expect(
-      hooksTrustCommand(store, { positional: ["trust"], list: false, revoke: "/repo" }, () => {}),
+      hooksTrustCommand(store, { positional: ["trust"], list: false, revoke: "/repo" }, io),
     ).toBe(1);
-    expect(hooksTrustCommand(store, { positional: ["nope"], list: true }, () => {})).toBe(1);
+    expect(hooksTrustCommand(store, { positional: ["nope"], list: true }, io)).toBe(1);
+    expect(hooksTrustCommand(store, { positional: ["trust"], list: true }, io)).toBe(0);
+    expect(out).toHaveLength(2);
+    expect(err).toEqual([
+      "no stored decision for /repo\n",
+      "usage: tentacle hooks trust --list | --revoke <folder>\n",
+      "no stored project hooks decisions\n",
+    ]);
   });
 });
 
@@ -344,7 +354,7 @@ describe("revoke and startup diagnostics", () => {
     const code = hooksTrustCommand(
       store,
       { positional: ["trust"], list: false, revoke: join(dir, "sub", "..") },
-      (l) => out.push(l),
+      { out: (l) => void out.push(l), err: () => {} },
     );
     expect(code).toBe(0);
     expect(store.get(real)).toBeUndefined();

@@ -55,15 +55,17 @@ export interface KeptDeps {
   readonly dir: string;
   /** The ONE host builder (`buildEngineHost` + `hostOptionsFor`); may throw. */
   readonly hostFor: (entry: KeptEntry) => EngineHost;
-  readonly write: (text: string) => void;
-  /** Diagnostics when stdout must stay machine-readable (`ps -q`). */
-  readonly writeErr: (text: string) => void;
+  /**
+   * STDOUT: the data only — `ps`'s table, `ps -q`'s names, the NAME of each
+   * workload `rm` removed (docs/fix/cli-output-streams.md D3).
+   */
+  readonly out: (text: string) => void;
+  /** STDERR: everything else — notes, prose, errors, warnings, progress. */
+  readonly err: (text: string) => void;
   readonly now: () => number;
   readonly home: string;
-  /** Dim marker (identity when not a colour terminal). */
+  /** Dim marker for `err`'s lines (identity unless stderr is a colour terminal). */
   readonly dim: (text: string) => string;
-  /** Dim marker for STDERR (identity unless stderr is a colour terminal); default identity. */
-  readonly dimErr?: (text: string) => string;
   /** The laptop kubeconfig for the k8s WHERE; default `readKubeconfig` (undefined = unreadable). */
   readonly kubeconfig?: () => Kubeconfig | undefined;
   /** Present = interactive (the `rm` y/N); absent = no terminal. */
@@ -129,9 +131,10 @@ async function verify(
   }
 }
 
-function reportProblems(problems: readonly string[], deps: KeptDeps, out: (t: string) => void) {
+/** The kept index's unreadable files: a note on STDERR (a piped `ps` stays clean). */
+function reportProblems(problems: readonly string[], deps: KeptDeps) {
   for (const problem of problems) {
-    out(`${deps.dim(`kept index: ${untrustedText(problem)} — left untouched`)}\n`);
+    deps.err(`${deps.dim(`kept index: ${untrustedText(problem)} — left untouched`)}\n`);
   }
 }
 
@@ -150,14 +153,13 @@ export async function psCommand(
   const entries = index.entries.filter(
     (e) => options.engine === undefined || e.entry.engine === options.engine,
   );
+  reportProblems(index.problems, deps);
   if (options.quiet) {
-    reportProblems(index.problems, deps, deps.writeErr);
     for (const { entry } of sortKept(entries)) {
-      deps.write(`${untrustedText(entry.name)}\n`);
+      deps.out(`${untrustedText(entry.name)}\n`);
     }
     return 0;
   }
-  reportProblems(index.problems, deps, deps.write);
   const now = deps.now();
   const rows: KeptRow[] = sortKept(
     await Promise.all(
@@ -184,10 +186,10 @@ export async function psCommand(
   const lines = options.verbose
     ? renderVerbose(rows, now, deps.home)
     : renderTable(rows, now, deps.home, kube);
-  deps.write(`${lines.join("\n")}\n`);
+  deps.out(`${lines.join("\n")}\n`);
   // STDERR: `ps` / `ps -q` piped stay clean.
   for (const note of down) {
-    deps.writeErr(`${(deps.dimErr ?? ((t: string) => t))(note)}\n`);
+    deps.err(`${deps.dim(note)}\n`);
   }
   return 0;
 }
@@ -345,20 +347,20 @@ async function rmOne(
   deps: KeptDeps,
 ): Promise<number> {
   const index = readKept(deps.dir);
-  reportProblems(index.problems, deps, deps.write);
+  reportProblems(index.problems, deps);
   const found = resolveByName(name, index.entries, options.engine);
   // Only a k8s name needs the kubeconfig (as in `ps`).
   const k8sNamed =
     found.kind === "one" ? [found.match] : found.kind === "ambiguous" ? found.candidates : [];
   const kube = k8sNamed.some((m) => m.entry.engine === "kubernetes") ? kubeOf(deps) : undefined;
   if (found.kind === "none") {
-    deps.write(
+    deps.err(
       `[error] no kept container or pod named "${untrustedText(name)}" — see \`tentacle ps\`\n`,
     );
     return 1;
   }
   if (found.kind === "ambiguous") {
-    deps.write(
+    deps.err(
       `[error] ${ambiguousMessage(
         name,
         found.candidates.map((c) => c.entry),
@@ -371,7 +373,7 @@ async function rmOne(
   const label = `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry, kube))})`;
   const noun = entry.engine === "kubernetes" ? "pod" : "container";
   const cannotReach = (reason: string): number => {
-    deps.write(`[error] cannot reach ${label}: ${reason} — nothing removed, its entry is kept\n`);
+    deps.err(`[error] cannot reach ${label}: ${reason} — nothing removed, its entry is kept\n`);
     return 1;
   };
   const runDir = runDirIn(deps.dir, entry);
@@ -385,7 +387,7 @@ async function rmOne(
   const running = first.status.kind === "state" && first.status.state === "running";
   if ((running || holder) && !options.force) {
     if (!deps.ask) {
-      deps.write(
+      deps.err(
         holder
           ? `[error] ${label} is owned by a detached run (pid ${holder.pid}). Pass -f to stop it and remove it without asking.\n`
           : `[error] ${label} is running — a session may be attached. Pass -f to remove it without asking.\n`,
@@ -401,18 +403,18 @@ async function rmOne(
         )
       : removeConfirmation(entry, kube);
     if (!isYes(await deps.ask(prompt))) {
-      deps.write("Not removed.\n");
+      deps.err("Not removed.\n");
       return 1;
     }
   }
   // After the answer: a "no" must cost the run nothing. SIGTERM: the relay
   // cancels the turn, saves and leaves, removing the workload itself on keep=false.
   if (holder) {
-    deps.write(`stopping the detached run (pid ${holder.pid})…\n`);
+    deps.err(`stopping the detached run (pid ${holder.pid})…\n`);
     try {
       await (deps.stopRelay ?? ((dir) => residentStop(dir, RM_STOP_GRACE_MS, procOf)))(runDir);
     } catch (error) {
-      deps.write(
+      deps.err(
         `[error] could not stop the detached run (pid ${holder.pid}): ${message(error)} — nothing removed\n`,
       );
       return 1;
@@ -421,9 +423,12 @@ async function rmOne(
   const removal = await removeVerifiedKept(entry, file, deps);
   // The workload's fate is already reported above; this says only that its index
   // ENTRY survived (a failed `rmSync`): never "not removed" for a delete that worked.
+  // D3 (docs/fix/cli-output-streams.md): an `rm` that succeeded (exit 0) prints
+  // the workload's NAME on stdout, like `docker rm`; its prose went to stderr.
+  const removedName = (): void => deps.out(`${untrustedText(entry.name)}\n`);
   const entryLeft = (forgetError: string | undefined): void => {
     if (forgetError !== undefined) {
-      deps.write(
+      deps.err(
         `[warn] its entry in the kept index was not dropped: ${forgetError} — delete that file by hand\n`,
       );
     }
@@ -432,23 +437,23 @@ async function rmOne(
     case "unreachable":
       return cannotReach(removal.reason);
     case "failed":
-      deps.write(`[error] removing ${label} failed: ${removal.reason} — its entry is kept\n`);
+      deps.err(`[error] removing ${label} failed: ${removal.reason} — its entry is kept\n`);
       return 1;
     case "foreign":
       // "dropped its stale entry" only when it really was dropped (finding B).
-      deps.write(
+      deps.err(
         `[error] ${label} is no longer a tentacle-kept ${noun} (no tentacle managed + kept labels) — left it alone${
           removal.forgetError === undefined ? "; dropped its stale entry" : ""
         }\n`,
       );
       entryLeft(removal.forgetError);
-      dropRunDir(runDir, deps.write);
+      dropRunDir(runDir, deps.err);
       return 1;
     case "gone":
       // After a stop it is the relay's own keep=false removal: the same result.
       // The line names the WORKLOAD's fate only: on a failed forget the entry
       // is still there, so it must not claim it went (the `[warn]` below says it).
-      deps.write(
+      deps.err(
         holder
           ? `${removedLine(entry, deps.home, kube)}\n`
           : removal.forgetError === undefined
@@ -456,23 +461,25 @@ async function rmOne(
             : `The ${noun} of ${label} no longer exists.\n`,
       );
       entryLeft(removal.forgetError);
-      dropRunDir(runDir, deps.write);
+      dropRunDir(runDir, deps.err);
+      removedName();
       return 0;
     case "other":
       // R3: the name now holds a KEPT workload that is not this entry's (its own
       // `created` is another's). Nothing was deleted; the stale entry is dropped.
-      deps.write(
+      deps.err(
         `[error] ${label} now names another tentacle workload (its creation time is not this entry's) — left it alone${
           removal.forgetError === undefined ? "; dropped its stale entry" : ""
         }\n`,
       );
       entryLeft(removal.forgetError);
-      dropRunDir(runDir, deps.write);
+      dropRunDir(runDir, deps.err);
       return 1;
     case "removed":
-      deps.write(`${removedLine(entry, deps.home, kube)}\n`);
+      deps.err(`${removedLine(entry, deps.home, kube)}\n`);
       entryLeft(removal.forgetError);
-      dropRunDir(runDir, deps.write);
+      dropRunDir(runDir, deps.err);
+      removedName();
       return 0;
   }
 }

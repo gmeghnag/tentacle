@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -57,6 +57,18 @@ const TURN2 = sse([
   { choices: [{ delta: {}, finish_reason: "stop" }] },
 ]);
 
+/**
+ * STDOUT of the scenarios whose capture reads STDERR (run/attach setup, refusals,
+ * errors): none of them produces data, so after each test it must be empty
+ * (docs/fix/cli-output-streams.md). Emptied before the check, so one failure
+ * does not cascade.
+ */
+const strayStdout: string[] = [];
+afterEach(() => {
+  const seen = strayStdout.splice(0);
+  expect(seen).toEqual([]);
+});
+
 let server: ReturnType<typeof Bun.serve>;
 let dir: string;
 const saved: Record<string, string | undefined> = {};
@@ -103,36 +115,52 @@ afterAll(async () => {
 describe("cli main (end-to-end)", () => {
   test("runs a tool call and writes the file, then prints the reply", async () => {
     const out: string[] = [];
+    const err: string[] = [];
     // The workspace is the launch directory (no TENTACLE_CWD): launch from `dir`.
     const launch = process.cwd();
     process.chdir(dir);
     let code: number;
     try {
-      code = await main(["bun", "cli", "create out.txt"], { write: (t) => out.push(t) });
+      code = await main(["bun", "cli", "create out.txt"], {
+        out: (t) => out.push(t),
+        err: (t) => err.push(t),
+      });
     } finally {
       process.chdir(launch);
     }
-    const text = out.join("");
+    const trace = err.join("");
 
     expect(code).toBe(0);
-    expect(text).toContain("[tool] fs_write");
-    expect(text).toContain("[diff] out.txt");
-    expect(text).toContain("Done. File written.");
+    // docs/fix/cli-output-streams.md D5: the answer alone on stdout, the trace on stderr.
+    expect(trace).toContain("[tool] fs_write");
+    expect(trace).toContain("[diff] out.txt");
+    expect(out.join("")).toBe("Done. File written.\n");
     expect(await readFile(join(dir, "out.txt"), "utf8")).toBe("hello from agent");
   });
 
   test("prints help and exits non-zero with no prompt", async () => {
     const out: string[] = [];
-    const code = await main(["bun", "cli"], { write: (t) => out.push(t) });
+    const err: string[] = [];
+    const code = await main(["bun", "cli"], {
+      out: (t) => out.push(t),
+      err: (t) => err.push(t),
+    });
     expect(code).toBe(1);
-    expect(out.join("")).toContain("Usage:");
+    // An error's help: stderr (D6).
+    expect(err.join("")).toContain("Usage:");
+    expect(out).toEqual([]);
   });
 
   test("attach without a pod name prints usage and exits non-zero", async () => {
     const out: string[] = [];
-    const code = await main(["bun", "cli", "attach"], { write: (t) => out.push(t) });
+    const err: string[] = [];
+    const code = await main(["bun", "cli", "attach"], {
+      out: (t) => out.push(t),
+      err: (t) => err.push(t),
+    });
     expect(code).toBe(1);
-    expect(out.join("")).toContain("usage: tentacle attach <name>");
+    expect(err.join("")).toContain("usage: tentacle attach <name>");
+    expect(out).toEqual([]);
   });
 
   test("--version prints the version and exits 0 without touching config", async () => {
@@ -143,7 +171,7 @@ describe("cli main (end-to-end)", () => {
     process.env.TENTACLE_CONFIG_DIR = freshConfigDir;
     try {
       const out: string[] = [];
-      const code = await main(["bun", "cli", "--version"], { write: (t) => out.push(t) });
+      const code = await main(["bun", "cli", "--version"], { out: (t) => out.push(t) });
       expect(code).toBe(0);
       expect(out.join("")).toMatch(/^tentacle \S+\n$/);
       // Config was never loaded: no scaffolding happened.
@@ -168,16 +196,18 @@ describe("cli main: skill diagnostics", () => {
     try {
       const out: string[] = [];
       const err: string[] = [];
-      const io = { write: (t: string) => out.push(t), writeErr: (t: string) => err.push(t) };
+      const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
       expect(await main(["bun", "cli"], io)).toBe(1); // help path: config loaded locally
-      expect(err).toEqual([
+      // stderr also carries that error's help (D6): only the `[skills]` lines are counted.
+      const skills = () => err.filter((l) => l.startsWith("[skills]"));
+      expect(skills()).toEqual([
         `[skills] skipped skill at ${join(badDir, "SKILL.md")}: no description\n`,
       ]);
       expect(out.join("")).not.toContain("[skills]"); // never on stdout
 
       err.length = 0;
       expect(await main(["bun", "cli", "run"], io)).toBe(1); // no --image: fails after config
-      expect(err).toEqual([]); // a pod session uses the pod's skills
+      expect(skills()).toEqual([]); // a pod session uses the pod's skills
     } finally {
       await rm(join(dir, "config", "skills"), { recursive: true, force: true });
     }
@@ -195,9 +225,11 @@ describe("cli main: agent definition diagnostics (fix/agent-defs-warn)", () => {
     try {
       const out: string[] = [];
       const err: string[] = [];
-      const io = { write: (t: string) => out.push(t), writeErr: (t: string) => err.push(t) };
+      const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
       expect(await main(["bun", "cli"], io)).toBe(1); // help path: config loaded locally
-      expect(err).toEqual([
+      // stderr also carries that error's help (D6): only the `[agents]` lines are counted.
+      const agentLines = () => err.filter((l) => l.startsWith("[agents]"));
+      expect(agentLines()).toEqual([
         `[agents] agent "reviewer" (${join(agents, "reviewer.md")}): model [oops] ignored — expected a non-empty string\n`,
         `[agents] agent "reviewer" (${join(agents, "reviewer.md")}): contextWindow "abc" ignored — expected a positive whole number of tokens\n`,
       ]);
@@ -205,7 +237,7 @@ describe("cli main: agent definition diagnostics (fix/agent-defs-warn)", () => {
 
       err.length = 0;
       expect(await main(["bun", "cli", "run"], io)).toBe(1); // no --image: fails after config
-      expect(err).toEqual([]); // a pod session uses the pod's agent defs
+      expect(agentLines()).toEqual([]); // a pod session uses the pod's agent defs
     } finally {
       await rm(agents, { recursive: true, force: true });
     }
@@ -230,7 +262,7 @@ describe("cli main: hidden exit-net subcommands (docs/feat/docker-engine-cli.md)
       try {
         const out: string[] = [];
         const err: string[] = [];
-        const io = { write: (t: string) => out.push(t), writeErr: (t: string) => err.push(t) };
+        const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
         expect(await main(["bun", "cli", sub], io)).toBe(0);
         expect({ out, err }).toEqual({ out: [], err: [] });
         expect(await Bun.file(join(freshConfigDir, "config.jsonc")).exists()).toBe(false);
@@ -253,7 +285,7 @@ describe("cli main: the relay's hidden subcommand (docs/feat/detached-relay.md R
     try {
       const out: string[] = [];
       const err: string[] = [];
-      const io = { write: (t: string) => out.push(t), writeErr: (t: string) => err.push(t) };
+      const io = { out: (t: string) => out.push(t), err: (t: string) => err.push(t) };
       expect(await main(["bun", "cli", RELAY_SUBCOMMAND], io)).toBe(1);
       expect(out).toEqual([]);
       expect(err.join("")).toContain("TENTACLE_RELAY_SPEC");
@@ -295,11 +327,17 @@ describe("cli main: --engine", () => {
     const out: string[] = [];
     const errs: string[] = [];
     const code = await main(["bun", "cli", ...args], {
-      write: (t) => out.push(t),
-      writeErr: (t) => errs.push(t),
+      out: (t) => out.push(t),
+      err: (t) => errs.push(t),
       ...(colour !== undefined ? { colour } : {}),
     });
-    return { code, text: out.join(""), err: errs.join("") };
+    // docs/fix/cli-output-streams.md: `run`/`attach` (no `--detach`) produce no
+    // data: every line they write is stderr's, whatever the outcome.
+    if ((args[0] === "run" || args[0] === "attach") && !args.includes("--detach")) {
+      expect(out).toEqual([]);
+    }
+    // `text`: stderr (every non-data line); `stdout`: the data (`ps`, `--help`).
+    return { code, text: errs.join(""), stdout: out.join(""), err: errs.join("") };
   };
   // BOTH engines point nowhere: a kubernetes path must never reach the
   // developer's real kubeconfig cluster from a test (port 9 = discard, closed).
@@ -413,7 +451,8 @@ describe("cli main: --engine", () => {
       try {
         await withEnv(env, async () => {
           await main(["bun", "cli", ...args], {
-            write: (t) => out.push(t),
+            err: (t) => out.push(t),
+            out: (t) => out.push(t),
             startEngineRuntime: async (_config, deps) => {
               seen = deps;
               throw new Error("stop");
@@ -545,6 +584,7 @@ describe("cli main: --engine", () => {
       } = {},
     ) => {
       const out: string[] = [];
+      const err: string[] = [];
       const calls = { provision: 0, spawn: 0, runtime: 0 };
       let spec: RelaySpec | undefined;
       let hint: string | undefined;
@@ -556,7 +596,8 @@ describe("cli main: --engine", () => {
         JSON.stringify({ ...over.config, ...(over.keep === undefined ? {} : { keep: over.keep }) }),
       );
       const code = await main(["bun", "cli", ...args], {
-        write: (t) => out.push(t),
+        out: (t) => out.push(t),
+        err: (t) => err.push(t),
         ...(over.colour !== undefined ? { colour: over.colour } : {}),
         ...(over.stdin !== undefined ? { readStdin: async () => over.stdin ?? "" } : {}),
         startEngineRuntime: async () => {
@@ -586,7 +627,9 @@ describe("cli main: --engine", () => {
         },
       });
       await rm(path, { force: true });
-      return { code, text: out.join(""), calls, spec, hint, removedAtEnd };
+      // `text`: stderr, where every line but the D1 name goes; `stdout`: the
+      // data (an injected `out` is not a terminal: the name of a launched run).
+      return { code, text: err.join(""), stdout: out.join(""), calls, spec, hint, removedAtEnd };
     };
     const refused = { provision: 0, spawn: 0, runtime: 0 };
 
@@ -665,7 +708,8 @@ describe("cli main: --engine", () => {
         const code = await main(
           ["bun", "cli", ...base, "--detach", "--prompt", "hi", "--keep=false", "--name", "box"],
           {
-            write: (t) => out.push(t),
+            err: (t) => out.push(t),
+            out: (t) => strayStdout.push(t),
             provisionWorkload: (config, deps) =>
               provisionWorkload(config, { ...deps, host: fake, appVersion: "dev" }),
           },
@@ -693,7 +737,8 @@ describe("cli main: --engine", () => {
       await withEnv(unreachable, async () => {
         const hints: (string | undefined)[] = [];
         await main(["bun", "cli", ...base, "--keep=false"], {
-          write: () => {},
+          out: (t) => strayStdout.push(t),
+          err: () => {},
           startEngineRuntime: async (_config, deps) => {
             hints.push(deps.keepHint?.("c1"), deps.labels?.["tentacle.kept"]);
             throw new Error("stop here");
@@ -759,7 +804,8 @@ describe("cli main: --engine", () => {
         const code = await main(
           ["bun", "cli", ...base, "--detach", "--prompt", "hi", "--name", "box"],
           {
-            write: (t) => out.push(t),
+            err: (t) => out.push(t),
+            out: (t) => strayStdout.push(t),
             provisionWorkload: (config, deps) =>
               provisionWorkload(config, { ...deps, host: fake, appVersion: "dev" }),
           },
@@ -888,7 +934,8 @@ describe("cli main: --engine", () => {
           },
         };
         const code = await main(["bun", "cli", ...args], {
-          write: (t) => out.push(t),
+          err: (t) => out.push(t),
+          out: (t) => strayStdout.push(t),
           ...(over.colour !== undefined ? { colour: over.colour } : {}),
           ...(over.stdin !== undefined ? { readStdin: async () => over.stdin ?? "" } : {}),
           provisionWorkload: (async () => {
@@ -1200,7 +1247,7 @@ describe("cli main: --engine", () => {
         const out: string[] = [];
         const code = await main(
           ["bun", "cli", "attach", "box", "--resume", "99999999-9999-4999-8999-999999999999"],
-          { write: (t) => out.push(t), tty: true },
+          { err: (t) => out.push(t), out: (t) => strayStdout.push(t), tty: true },
         );
         const r = { code, text: out.join("") };
         expect(r.code).toBe(1);
@@ -1222,7 +1269,7 @@ describe("cli main: --engine", () => {
             "--resume",
             "99999999-9999-4999-8999-999999999999",
           ],
-          { write: (t) => other.push(t), tty: true },
+          { err: (t) => other.push(t), out: (t) => strayStdout.push(t), tty: true },
         );
         expect(code2).toBe(1);
         expect(other.join("")).toContain("unix:///nonexistent/kept.sock");
@@ -1242,7 +1289,11 @@ describe("cli main: --engine", () => {
       setup(`${2 ** 30} 1`);
       await withEnv(unreachable, async () => {
         const out: string[] = [];
-        await main(["bun", "cli", "attach", "box"], { write: (t) => out.push(t), tty: true });
+        await main(["bun", "cli", "attach", "box"], {
+          err: (t) => out.push(t),
+          out: (t) => strayStdout.push(t),
+          tty: true,
+        });
         expect(out.join("")).toContain("attaching to box");
         setup(live());
         const other = await run(["attach", "--engine", "podman", "box"]);
@@ -1308,7 +1359,8 @@ describe("cli main: --engine", () => {
         return runtime;
       }) as never;
       const code = await main(["bun", "cli", ...args], {
-        write: (t) => out.push(t),
+        err: (t) => out.push(t),
+        out: (t) => strayStdout.push(t),
         tty,
         ...(plainSeam ? { attachPlainRuntime: fakeAttach } : {}),
         attachEngineRuntime: fakeAttach,
@@ -1342,7 +1394,8 @@ describe("cli main: --engine", () => {
         const code = await main(
           ["bun", "cli", "attach", "nome-che-non-esiste", "--namespace", "openshift-dns"],
           {
-            write: (t) => out.push(t),
+            err: (t) => out.push(t),
+            out: (t) => strayStdout.push(t),
             tty: true,
             attachPlainRuntime: (async () => {
               throw new WorkloadNotFoundError("pod gone", "pod", "in openshift-dns");
@@ -1964,7 +2017,8 @@ describe("cli main: --engine", () => {
       await withEnv(unreachable, async () => {
         const out: string[] = [];
         const code = await main(["bun", "cli", "attach", "box"], {
-          write: (t) => out.push(t),
+          err: (t) => out.push(t),
+          out: (t) => strayStdout.push(t),
           tty: true,
           attachPlainRuntime: (async () => {
             throw new WorkloadNotFoundError("container box gone", "container", "on docker");
@@ -2029,7 +2083,10 @@ describe("cli main: --engine", () => {
     test("an [error] line starts at column 0: no blank line before it", async () => {
       // Mutation: put the newline back in front of `[error]`.
       const out: string[] = [];
-      const code = await main(["bun", "cli", "attach"], { write: (t) => out.push(t) });
+      const code = await main(["bun", "cli", "attach"], {
+        err: (t) => out.push(t),
+        out: (t) => strayStdout.push(t),
+      });
       expect(code).toBe(1);
       expect(out.join("").startsWith("[error]")).toBe(true);
     });
@@ -2049,12 +2106,14 @@ describe("cli main: --engine", () => {
         const ps = await run(["ps"]);
         expect(ps).toEqual({
           code: 0,
-          text: "NAME   ENGINE   WHERE   MOUNT   MODEL   AGE   STATUS\n",
+          text: "",
+          stdout: "NAME   ENGINE   WHERE   MOUNT   MODEL   AGE   STATUS\n",
           err: "",
         });
         const bad = await run(["ps", "--bogus"]);
         expect(bad.code).toBe(1);
         expect(bad.text).toContain("usage: tentacle ps");
+        expect(bad.stdout).toBe(""); // D6: the error and its usage are stderr's
         const noName = await run(["rm"]);
         expect(noName.code).toBe(1);
         expect(noName.text).toContain("usage: tentacle rm");
@@ -2067,7 +2126,7 @@ describe("cli main: --engine", () => {
       });
     });
 
-    test("the stderr note's colour follows the injected writeErr, even with a real TTY stderr", async () => {
+    test("the stderr note's colour follows the injected err, even with a real TTY stderr", async () => {
       clear();
       await record({
         schemaVersion: 1,
@@ -2113,9 +2172,9 @@ describe("cli main: --engine", () => {
       await withEnv(unreachable, async () => {
         const ps = await run(["ps"]);
         expect(ps.code).toBe(0);
-        expect(ps.text).toMatch(/box +docker +local .* unreachable/);
+        expect(ps.stdout).toMatch(/box +docker +local .* unreachable/);
         // the note is on STDERR, short, and names no socket path
-        expect(ps.text).not.toContain("not reachable");
+        expect(ps.stdout).not.toContain("not reachable");
         expect(ps.err).toBe(
           "docker local: not reachable (skipped) — no docker socket · is Docker Desktop running?\n",
         );
@@ -2178,7 +2237,8 @@ describe("cli main: --engine", () => {
       try {
         await withEnv(env, async () => {
           await main(["bun", "cli", ...args], {
-            write: (t) => out.push(t),
+            err: (t) => out.push(t),
+            out: (t) => strayStdout.push(t),
             ...(options.ask
               ? {
                   ask: (p: string) => {
@@ -2296,6 +2356,50 @@ describe("cli main: --engine", () => {
         );
         expect(r.prompts[0]).not.toContain("You are about");
         expect(r.reached).toBe(false);
+      });
+
+      test("D4: stdout redirected, stdin+stderr TTYs → the y/N is asked, on STDERR", async () => {
+        // Mutation: gate `canAsk` on stdout (or write the prompt to stdout) → red.
+        const real = { stdin: process.stdin.isTTY, stderr: process.stderr.isTTY };
+        const realErrWrite = process.stderr.write.bind(process.stderr);
+        const realOutWrite = process.stdout.write.bind(process.stdout);
+        const onErr: string[] = [];
+        const onOut: string[] = [];
+        process.stdin.isTTY = true;
+        process.stderr.isTTY = true;
+        process.stderr.write = ((t: string | Uint8Array) => {
+          onErr.push(String(t));
+          return true;
+        }) as typeof process.stderr.write;
+        process.stdout.write = ((t: string | Uint8Array) => {
+          onOut.push(String(t));
+          return true;
+        }) as typeof process.stdout.write;
+        const before = process.cwd();
+        let reached = false;
+        try {
+          process.chdir(home());
+          await withConfig({ mount: { hide: ["~/.ssh"] } }, () =>
+            withEnv(unreachable, async () => {
+              await main(["bun", "cli", ...base], {
+                out: (t) => strayStdout.push(t), // stdout redirected: a sink, not a terminal
+                startEngineRuntime: async () => {
+                  reached = true;
+                  throw new Error("stop");
+                },
+              });
+            }),
+          );
+        } finally {
+          process.chdir(before);
+          process.stderr.write = realErrWrite;
+          process.stdout.write = realOutWrite;
+          process.stdin.isTTY = real.stdin;
+          process.stderr.isTTY = real.stderr;
+        }
+        expect(onErr.join("")).toContain("Continue? [y/N] ");
+        expect(onOut.join("")).not.toContain("[y/N]");
+        expect(reached).toBe(false);
       });
 
       test("TTY: y → started with the mount", async () => {
@@ -2422,8 +2526,10 @@ describe("cli main: --engine", () => {
 
   test("help and usage document --engine and --keep", async () => {
     const help = await run(["--help"]);
-    expect(help.text).toContain("--engine kubernetes|docker|podman");
-    expect(help.text).toContain("--keep[=true|false]");
-    expect(help.text).toContain("TENTACLE_ENGINE");
+    // An explicit --help is data: stdout.
+    expect(help.stdout).toContain("--engine kubernetes|docker|podman");
+    expect(help.stdout).toContain("--keep[=true|false]");
+    expect(help.stdout).toContain("TENTACLE_ENGINE");
+    expect(help.text).toBe("");
   });
 });

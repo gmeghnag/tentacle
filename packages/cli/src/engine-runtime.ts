@@ -57,6 +57,7 @@ import {
 import { markStillUp, openDaemonLog, recordFailure, tildePath } from "./pod-stderr-log.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
+import { type StreamTerm, termOf } from "./streams.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { readBinaryVersion } from "./version-marker.ts";
 import { APP_VERSION } from "./version.ts";
@@ -158,6 +159,15 @@ export function createFaultWatch(): {
 }
 
 /**
+ * The startup spinner, on the terminal `log` writes to (stderr by default) and
+ * cut to ITS width; `null` when that is not a terminal: one line per phase then.
+ */
+function statusLineFor(deps: Pick<EngineRuntimeDeps, "log" | "logTerm">): StatusLine | null {
+  const term = deps.logTerm ?? termOf(process.stderr);
+  return term.tty ? new StatusLine({ write: deps.log, columns: term.columns }) : null;
+}
+
+/**
  * The ONE line a failed run/attach prints in place of the old stderr dump:
  * `[container] <name>: daemon stopped unexpectedly · log: ~/…/daemon.log`.
  */
@@ -214,6 +224,11 @@ export interface EngineRuntimeDeps {
    * to `log`. Absent: they go to `log` too.
    */
   readonly info?: (line: string) => void;
+  /**
+   * The terminal `log` writes to (docs/fix/cli-output-streams.md): the startup
+   * spinner runs only on a terminal, cut to its width. Default: stderr's.
+   */
+  readonly logTerm?: Pick<StreamTerm, "tty" | "columns">;
   /**
    * Where the pod daemon's stderr is kept (`daemon.log`, 0600, bounded), given the
    * workload's name: the run's state dir when it has one. Absent: nothing is kept.
@@ -396,7 +411,7 @@ async function provisionNamed(
   // (create → ready → inject, with the transfer bar as the bar phase's text),
   // cleared when the daemon starts. Piped (log/CI) logs one line per phase
   // (the `log` sink), so transcripts stay readable.
-  const status = (process.stdout.isTTY ?? false) ? new StatusLine({ write: deps.log }) : null;
+  const status = statusLineFor(deps);
   const info = deps.info ?? deps.log;
   const phase = (text: string): void => {
     if (status) {
@@ -656,6 +671,11 @@ export interface EngineAttachRuntimeDeps {
    */
   readonly info?: (line: string) => void;
   /**
+   * The terminal `log` writes to (docs/fix/cli-output-streams.md): the startup
+   * spinner runs only on a terminal, cut to its width. Default: stderr's.
+   */
+  readonly logTerm?: Pick<StreamTerm, "tty" | "columns">;
+  /**
    * Where the pod daemon's stderr is kept (`daemon.log`, 0600, bounded), given the
    * workload's name: the run's state dir when it has one. Absent: nothing is kept.
    * The stderr is NEVER written to the terminal (docs/feat/run-prompt.md round 4).
@@ -696,7 +716,7 @@ export async function attachEngineRuntime(
   // `let`: the preflight may resolve one (k8s `default-container` annotation).
   let container = deps.container;
   // Same single-line (TTY) / one-line-per-phase (piped) contract as `run`.
-  const status = (process.stdout.isTTY ?? false) ? new StatusLine({ write: deps.log }) : null;
+  const status = statusLineFor(deps);
   const info = deps.info ?? deps.log;
   const phase = (text: string): void => {
     if (status) {

@@ -107,12 +107,11 @@ function setup(entries: KeptEntry[], engines: Record<string, FakeEngine> = {}) {
   const deps = (over: Partial<KeptDeps> = {}): KeptDeps => ({
     dir,
     hostFor: (e) => engineOf(e).host(),
-    write: (t) => out.push(t),
-    writeErr: (t) => err.push(t),
+    out: (t) => out.push(t),
+    err: (t) => err.push(t),
     now: () => NOW,
     home: "/Users/me",
     dim: (t) => `<dim>${t}</dim>`,
-    dimErr: (t) => `<dim>${t}</dim>`,
     kubeconfig: () => undefined,
     ...(answer !== undefined
       ? {
@@ -134,7 +133,10 @@ function setup(entries: KeptEntry[], engines: Record<string, FakeEngine> = {}) {
     interactive: (a: string) => {
       answer = a;
     },
+    /** STDOUT: the data only (the table, `-q` names, `rm`'s removed names). */
     text: () => out.join(""),
+    /** STDERR: every note, prose line, error (docs/fix/cli-output-streams.md). */
+    errText: () => err.join(""),
   };
 }
 
@@ -376,7 +378,8 @@ describe("tentacle ps", () => {
       clusters: [{ name: "x", cluster: { server: "https://api.prod.example.com:6443" } }],
     };
     expect(await rmCommand("p", { force: true }, s.deps({ kubeconfig: () => kube }))).toBe(1);
-    expect(s.text()).toContain("p (kubernetes, prod/n)");
+    expect(s.errText()).toContain("p (kubernetes, prod/n)");
+    expect(s.text()).toBe(""); // a failed rm: nothing on stdout
   });
 
   test("a name now held by a foreign container shows not-tentacle", async () => {
@@ -395,10 +398,14 @@ describe("tentacle ps", () => {
     writeFileSync(join(s.dir, "broken.json"), "{");
     await psCommand({ engine: "docker" }, s.deps());
     expect(s.text()).not.toContain("pod1");
-    expect(s.text()).toContain(
+    // docs/fix/cli-output-streams.md (audit row 7): the note is stderr's; the table alone on stdout.
+    expect(s.text()).toStartWith("NAME ");
+    expect(s.text()).not.toContain("kept index");
+    expect(s.errText()).toContain(
       `<dim>kept index: ${join(s.dir, "broken.json")}: not valid JSON — left untouched</dim>`,
     );
     s.out.length = 0;
+    s.err.length = 0;
     await psCommand({ quiet: true }, s.deps());
     expect(s.text()).toBe("a\npod1\n");
     expect(s.err.join("")).toContain("not valid JSON");
@@ -556,7 +563,11 @@ describe("tentacle rm", () => {
     docker.set("a", { status: "exited", labels: DOCKER_KEPT });
     const s = setup([entry("a", { mount: "/Users/me/code/tentacle" })], { [key]: docker });
     expect(await rmCommand("a", {}, s.deps())).toBe(0);
-    expect(s.text()).toBe("Removed a (docker, ~/code/tentacle).\n");
+    // docs/fix/cli-output-streams.md D3: the NAME on stdout (like `docker rm`),
+    // the prose on stderr.
+    // Mutation: drop `removedName()` → stdout is empty.
+    expect(s.text()).toBe("a\n");
+    expect(s.errText()).toBe("Removed a (docker, ~/code/tentacle).\n");
     expect(docker.calls).toEqual(["describe:a", "describe:a", "remove:a"]);
     expect(readKept(s.dir).entries).toEqual([]);
   });
@@ -585,7 +596,7 @@ describe("tentacle rm", () => {
     docker.set("a", running());
     const s = setup([entry("a")], { [key]: docker });
     expect(await rmCommand("a", {}, s.deps())).toBe(1);
-    expect(s.text()).toContain("Pass -f to remove it without asking.");
+    expect(s.errText()).toContain("Pass -f to remove it without asking.");
     expect(docker.calls).not.toContain("remove:a");
     expect(await rmCommand("a", { force: true }, s.deps())).toBe(0);
     expect(docker.calls).toContain("remove:a");
@@ -603,7 +614,7 @@ describe("tentacle rm", () => {
       const s = setup([entry("a")], { [key]: docker });
       expect(await rmCommand("a", { force: true }, s.deps())).toBe(1);
       expect(docker.calls.filter((c) => c.startsWith("remove:"))).toEqual([]);
-      expect(s.text()).toContain("left it alone; dropped its stale entry");
+      expect(s.errText()).toContain("left it alone; dropped its stale entry");
       expect(readKept(s.dir).entries).toEqual([]);
     }
   });
@@ -621,8 +632,8 @@ describe("tentacle rm", () => {
     const s = setup([mine], { [key]: docker });
     expect(await rmCommand("a", { force: true }, s.deps())).toBe(1);
     expect(docker.calls.filter((c) => c.startsWith("remove:"))).toEqual([]);
-    expect(s.text()).toContain("now names another tentacle workload");
-    expect(s.text()).toContain("left it alone; dropped its stale entry");
+    expect(s.errText()).toContain("now names another tentacle workload");
+    expect(s.errText()).toContain("left it alone; dropped its stale entry");
     expect(readKept(s.dir).entries).toEqual([]);
   });
 
@@ -683,7 +694,7 @@ describe("tentacle rm", () => {
     docker.set("a", null);
     const s = setup([entry("a")], { [key]: docker });
     expect(await rmCommand("a", {}, s.deps())).toBe(0);
-    expect(s.text()).toBe(
+    expect(s.errText()).toBe(
       "Removed the entry of a (docker, local): the container no longer exists.\n",
     );
     expect(readKept(s.dir).entries).toEqual([]);
@@ -724,9 +735,9 @@ describe("tentacle rm", () => {
       chmodSync(s.dir, 0o700);
     }
     expect(docker.calls).toContain("remove:a");
-    expect(s.text()).toContain("Removed a (docker, local).");
-    expect(s.text()).not.toContain("not removed");
-    expect(s.text()).toContain("[warn] its entry in the kept index was not dropped");
+    expect(s.errText()).toContain("Removed a (docker, local).");
+    expect(s.errText()).not.toContain("not removed");
+    expect(s.errText()).toContain("[warn] its entry in the kept index was not dropped");
   });
 
   test("a foreign workload whose entry will not drop: left alone is said, the entry too", async () => {
@@ -740,11 +751,11 @@ describe("tentacle rm", () => {
       chmodSync(s.dir, 0o700);
     }
     expect(docker.calls.filter((c) => c.startsWith("remove:"))).toEqual([]);
-    expect(s.text()).toContain("left it alone");
+    expect(s.errText()).toContain("left it alone");
     // The entry was NOT dropped, so the first line must not say it was: only the
     // `[warn]` may mention it (docs/feat…lifecycle.md, Review fix round 1 — B).
-    expect(s.text()).not.toContain("dropped its stale entry");
-    expect(s.text()).toContain("[warn] its entry in the kept index was not dropped");
+    expect(s.errText()).not.toContain("dropped its stale entry");
+    expect(s.errText()).toContain("[warn] its entry in the kept index was not dropped");
   });
 
   test("gone with a failed forget: the line never says the ENTRY was removed", async () => {
@@ -759,9 +770,9 @@ describe("tentacle rm", () => {
     } finally {
       chmodSync(s.dir, 0o700);
     }
-    expect(s.text()).toContain("The container of a (docker, local) no longer exists.");
-    expect(s.text()).not.toContain("Removed the entry");
-    expect(s.text()).toContain("[warn] its entry in the kept index was not dropped");
+    expect(s.errText()).toContain("The container of a (docker, local) no longer exists.");
+    expect(s.errText()).not.toContain("Removed the entry");
+    expect(s.errText()).toContain("[warn] its entry in the kept index was not dropped");
   });
 
   test("unreachable → error, entry KEPT; a failed delete → error, entry kept", async () => {
@@ -769,12 +780,12 @@ describe("tentacle rm", () => {
     docker.set("a", new Error("socket not found"));
     const s = setup([entry("a")], { [key]: docker });
     expect(await rmCommand("a", { force: true }, s.deps())).toBe(1);
-    expect(s.text()).toContain("[error] cannot reach a (docker, local): socket not found");
+    expect(s.errText()).toContain("[error] cannot reach a (docker, local): socket not found");
     expect(readKept(s.dir).entries).toHaveLength(1);
     docker.set("a", { status: "exited", labels: DOCKER_KEPT });
     docker.removeError = new Error("refusing to remove container");
     expect(await rmCommand("a", {}, s.deps())).toBe(1);
-    expect(s.text()).toContain(
+    expect(s.errText()).toContain(
       "[error] removing a (docker, local) failed: refusing to remove container",
     );
     expect(readKept(s.dir).entries).toHaveLength(1);
@@ -812,8 +823,8 @@ describe("tentacle rm", () => {
       expect(s.asked[0]).toContain(`pid ${pid}`);
       expect(s.asked[0]).toContain("detached · waiting: permission");
       expect(locked).toBeNull();
-      expect(s.text()).toContain(`stopping the detached run (pid ${pid})…`);
-      expect(s.text()).toContain("Removed a (docker, local).");
+      expect(s.errText()).toContain(`stopping the detached run (pid ${pid})…`);
+      expect(s.errText()).toContain("Removed a (docker, local).");
       expect(readKept(s.dir).entries).toEqual([]);
       expect(existsSync(dir)).toBe(false);
       child.kill("SIGKILL");
@@ -826,14 +837,14 @@ describe("tentacle rm", () => {
       const s = setup([e], { [key]: docker });
       const { dir, child, pid } = holder(s);
       expect(await rmCommand("a", {}, s.deps())).toBe(1);
-      expect(s.text()).toContain(`owned by a detached run (pid ${pid})`);
-      expect(s.text()).toContain("Pass -f to stop it and remove it without asking.");
+      expect(s.errText()).toContain(`owned by a detached run (pid ${pid})`);
+      expect(s.errText()).toContain("Pass -f to stop it and remove it without asking.");
       s.interactive("n");
       expect(await rmCommand("a", {}, s.deps())).toBe(1);
       expect(s.asked).toHaveLength(1);
       expect(alive(dir, pid)).toBe(true);
       expect(docker.calls).not.toContain("remove:a");
-      expect(s.text()).not.toContain("stopping the detached run");
+      expect(s.errText()).not.toContain("stopping the detached run");
       child.kill("SIGKILL");
     });
 
@@ -854,8 +865,8 @@ describe("tentacle rm", () => {
       const s = setup([e], { [key]: docker });
       const { dir, child, pid } = holder(s);
       expect(await rmCommand("a", { force: true }, s.deps())).toBe(1);
-      expect(s.text()).toContain("[error] cannot reach a (docker, local): socket not found");
-      expect(s.text()).not.toContain("stopping the detached run");
+      expect(s.errText()).toContain("[error] cannot reach a (docker, local): socket not found");
+      expect(s.errText()).not.toContain("stopping the detached run");
       expect(alive(dir, pid)).toBe(true);
       expect(existsSync(dir)).toBe(true);
       expect(readKept(s.dir).entries).toHaveLength(1);
@@ -868,8 +879,8 @@ describe("tentacle rm", () => {
       const s = setup([e], { [key]: docker });
       const { dir, child } = holder(s);
       expect(await rmCommand("a", { force: true }, s.deps())).toBe(0);
-      expect(s.text()).toContain("Removed a (docker, local).");
-      expect(s.text()).not.toContain("no longer exists");
+      expect(s.errText()).toContain("Removed a (docker, local).");
+      expect(s.errText()).not.toContain("no longer exists");
       expect(docker.calls).not.toContain("remove:a");
       expect(existsSync(dir)).toBe(false);
       child.kill("SIGKILL");
@@ -886,8 +897,8 @@ describe("tentacle rm", () => {
         s.deps({ stopRelay: () => Promise.reject(new Error("EPERM")) }),
       );
       expect(code).toBe(1);
-      expect(s.text()).toContain("[error] could not stop the detached run");
-      expect(s.text()).toContain("EPERM");
+      expect(s.errText()).toContain("[error] could not stop the detached run");
+      expect(s.errText()).toContain("EPERM");
       expect(docker.calls).not.toContain("remove:a");
       expect(existsSync(dir)).toBe(true);
       child.kill("SIGKILL");
@@ -900,7 +911,7 @@ describe("tentacle rm", () => {
       const dir = ensureRunDir(runDirIn(s.dir, e));
       writeOwner(dir, ownerOf("idle"));
       expect(await rmCommand("a", {}, s.deps())).toBe(0);
-      expect(s.text()).toBe("Removed a (docker, local).\n");
+      expect(s.errText()).toBe("Removed a (docker, local).\n");
       expect(existsSync(dir)).toBe(false);
 
       recordKept(s.dir, e);
@@ -908,7 +919,7 @@ describe("tentacle rm", () => {
       writeOwner(dir, ownerOf("idle"));
       docker.set("a", null);
       expect(await rmCommand("a", {}, s.deps())).toBe(0);
-      expect(s.text()).toContain("the container no longer exists");
+      expect(s.errText()).toContain("the container no longer exists");
       expect(existsSync(dir)).toBe(false);
     });
 
@@ -942,8 +953,8 @@ describe("tentacle rm", () => {
       const dir = ensureRunDir(runDirIn(s.dir, e));
       writeFileSync(ownerPath(dir), '{"schemaVersion":99,"future":true}');
       expect(await rmCommand("a", {}, s.deps())).toBe(0);
-      expect(s.text()).toContain("Removed a (docker, local).");
-      expect(s.text()).toContain(ownerPath(dir));
+      expect(s.errText()).toContain("Removed a (docker, local).");
+      expect(s.errText()).toContain(ownerPath(dir));
       expect(readFileSync(ownerPath(dir), "utf8")).toBe('{"schemaVersion":99,"future":true}');
     });
   });
@@ -955,10 +966,12 @@ describe("tentacle rm", () => {
       [key]: docker,
     });
     expect(await rmCommand("nope", {}, s.deps())).toBe(1);
-    expect(s.text()).toContain('[error] no kept container or pod named "nope" — see `tentacle ps`');
+    expect(s.errText()).toContain(
+      '[error] no kept container or pod named "nope" — see `tentacle ps`',
+    );
     expect(await rmCommand("x", {}, s.deps())).toBe(1);
-    expect(s.text()).toContain('"x" names 2 kept workloads:');
-    expect(s.text()).toContain("Nothing was removed.");
+    expect(s.errText()).toContain('"x" names 2 kept workloads:');
+    expect(s.errText()).toContain("Nothing was removed.");
     expect(docker.calls).toEqual([]);
     expect(await rmCommand("x", { engine: "docker" }, s.deps())).toBe(0);
     expect(readdirSync(s.dir)).toHaveLength(1);
@@ -989,8 +1002,10 @@ describe("tentacle rm", () => {
     docker.set("b", { status: "exited", labels: DOCKER_KEPT });
     const s = setup([entry("a"), entry("b")], { [key]: docker });
     expect(await rmCommand(["a", "nope", "b"], {}, s.deps())).toBe(1);
-    expect(s.text()).toContain('[error] no kept container or pod named "nope"');
+    expect(s.errText()).toContain('[error] no kept container or pod named "nope"');
     expect(docker.calls.filter((c) => c.startsWith("remove:"))).toEqual(["remove:a", "remove:b"]);
+    // stdout: exactly the names removed, in order (`rm $(…) | …` reads them).
+    expect(s.text()).toBe("a\nb\n");
   });
 
   test("F3 a repeated name is handled once: one question, no second error", async () => {
@@ -1001,7 +1016,7 @@ describe("tentacle rm", () => {
     s.interactive("n");
     expect(await rmCommand(["a", "a"], {}, s.deps())).toBe(1);
     expect(s.asked).toHaveLength(1);
-    expect(s.text()).toBe("Not removed.\n");
+    expect(s.errText()).toBe("Not removed.\n");
   });
 
   test("F3 one y/N per running name; -f asks nothing", async () => {

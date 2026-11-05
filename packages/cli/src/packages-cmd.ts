@@ -32,7 +32,13 @@ export interface PackagesCmdDeps {
   /** The config's `packages` map (false = disabled). */
   readonly enabled: Readonly<Record<string, boolean>>;
   readonly git: GitRunner;
-  readonly write: (text: string) => void;
+  /**
+   * STDOUT: the command's result — what was installed/removed/updated and its
+   * contents, the `list` rows (docs/fix/cli-output-streams.md D3).
+   */
+  readonly out: (text: string) => void;
+  /** STDERR: errors, `usage`, the trust warning, notes, diagnostics. */
+  readonly err: (text: string) => void;
 }
 
 const GIT_URL = /^(https?|ssh|git|file):\/\/|^[\w.-]+@[\w.-]+:/;
@@ -175,10 +181,10 @@ async function cleanStaging(root: string): Promise<void> {
 }
 
 async function install(arg: string, deps: PackagesCmdDeps): Promise<number> {
-  const { write } = deps;
+  const { out, err } = deps;
   const source = parsePackageSource(arg, await isDirectory(arg));
   if ("error" in source) {
-    write(`packages: ${source.error}\n`);
+    err(`packages: ${source.error}\n`);
     return 1;
   }
   const root = join(deps.configDir, "packages");
@@ -199,19 +205,19 @@ async function install(arg: string, deps: PackagesCmdDeps): Promise<number> {
       const ref = source.ref !== undefined ? ["--branch", source.ref] : [];
       const cloned = await deps.git(["clone", "--depth", "1", ...ref, "--", source.url, staged]);
       if (cloned.code !== 0) {
-        write(`packages: git clone failed: ${cloned.stderr || `exit ${cloned.code}`}\n`);
+        err(`packages: git clone failed: ${cloned.stderr || `exit ${cloned.code}`}\n`);
         return 1;
       }
     }
     const loaded = await loadPackage(staged);
     if ("error" in loaded) {
-      write(`packages: not a valid package: ${loaded.error}\n`);
+      err(`packages: not a valid package: ${loaded.error}\n`);
       return 1;
     }
     const info = loaded.info;
     const target = join(root, info.name);
     if (existsSync(target)) {
-      write(
+      err(
         `packages: ${info.name} is already installed (use: tentacle package update ${info.name})\n`,
       );
       return 1;
@@ -219,17 +225,17 @@ async function install(arg: string, deps: PackagesCmdDeps): Promise<number> {
     const c = contents(info);
     await writeFile(join(staged, PACKAGE_SOURCE_FILE), `${JSON.stringify(source)}\n`);
     await rename(staged, target);
-    write(`installed ${info.name}${info.version ? ` ${info.version}` : ""} → ${target}\n`);
-    if (c.skills.length > 0) write(`  skills: ${c.skills.join(", ")}\n`);
-    if (c.agents.length > 0) write(`  agent types: ${c.agents.join(", ")}\n`);
-    if (c.mcp.length > 0) write(`  MCP servers: ${c.mcp.join(", ")}\n`);
-    writeTrusted(write, "installing", trustedCommands(info));
+    out(`installed ${info.name}${info.version ? ` ${info.version}` : ""} → ${target}\n`);
+    if (c.skills.length > 0) out(`  skills: ${c.skills.join(", ")}\n`);
+    if (c.agents.length > 0) out(`  agent types: ${c.agents.join(", ")}\n`);
+    if (c.mcp.length > 0) out(`  MCP servers: ${c.mcp.join(", ")}\n`);
+    writeTrusted(err, "installing", trustedCommands(info));
     if (deps.enabled[info.name] === false) {
-      write(`  note: disabled by "packages": { "${info.name}": false } in your config\n`);
+      err(`  note: disabled by "packages": { "${info.name}": false } in your config\n`);
     }
     return 0;
   } catch (error) {
-    write(`packages: install failed: ${error instanceof Error ? error.message : String(error)}\n`);
+    err(`packages: install failed: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   } finally {
     await rm(tmp, { recursive: true, force: true });
@@ -238,12 +244,13 @@ async function install(arg: string, deps: PackagesCmdDeps): Promise<number> {
 
 async function list(deps: PackagesCmdDeps): Promise<number> {
   const { packages, diagnostics } = await scanPackages(deps.configDir);
+  // An empty list is an empty stdout; the note is stderr's.
   if (packages.length === 0 && diagnostics.length === 0) {
-    deps.write("no packages installed\n");
+    deps.err("no packages installed\n");
   }
   for (const info of packages) {
     const c = contents(info);
-    deps.write(
+    deps.out(
       `${[
         info.name,
         info.version ?? "-",
@@ -254,7 +261,7 @@ async function list(deps: PackagesCmdDeps): Promise<number> {
     );
   }
   for (const line of diagnostics) {
-    deps.write(`${line}\n`);
+    deps.err(`${line}\n`);
   }
   return 0;
 }
@@ -271,11 +278,11 @@ function installedDir(name: string, deps: PackagesCmdDeps): string | { error: st
 async function remove(name: string, deps: PackagesCmdDeps): Promise<number> {
   const dir = installedDir(name, deps);
   if (typeof dir !== "string") {
-    deps.write(`packages: ${dir.error}\n`);
+    deps.err(`packages: ${dir.error}\n`);
     return 1;
   }
   await rm(dir, { recursive: true, force: true });
-  deps.write(`removed ${name}\n`);
+  deps.out(`removed ${name}\n`);
   return 0;
 }
 
@@ -287,7 +294,7 @@ async function update(name: string | undefined, deps: PackagesCmdDeps): Promise<
   } else {
     names = listNames(root, (_, isDir) => isDir);
     if (names.length === 0) {
-      deps.write("no packages installed\n");
+      deps.err("no packages installed\n");
       return 0;
     }
   }
@@ -295,20 +302,20 @@ async function update(name: string | undefined, deps: PackagesCmdDeps): Promise<
   for (const n of names) {
     const dir = installedDir(n, deps);
     if (typeof dir !== "string") {
-      deps.write(`packages: ${dir.error}\n`);
+      deps.err(`packages: ${dir.error}\n`);
       status = 1;
       continue;
     }
     const source = readSource(dir);
     if (source?.type !== "git") {
-      deps.write(
+      deps.err(
         `${n}: not installed from git — reinstall: tentacle package remove ${n} && tentacle package install ${source?.type === "path" ? source.path : "<path>"}\n`,
       );
       continue;
     }
     // A `#tag` clone is a detached HEAD: pinned, nothing to pull.
     if ((await deps.git(["-C", dir, "symbolic-ref", "-q", "HEAD"])).code !== 0) {
-      deps.write(
+      deps.out(
         `${n}: pinned to ${source.ref ?? "a commit"}, unchanged (reinstall to change version)\n`,
       );
       continue;
@@ -320,33 +327,33 @@ async function update(name: string | undefined, deps: PackagesCmdDeps): Promise<
     const oldHead = await head();
     const pulled = await deps.git(["-C", dir, "pull", "--ff-only"]);
     if (pulled.code !== 0) {
-      deps.write(`packages: ${n}: git pull failed: ${pulled.stderr || `exit ${pulled.code}`}\n`);
+      deps.err(`packages: ${n}: git pull failed: ${pulled.stderr || `exit ${pulled.code}`}\n`);
       status = 1;
       continue;
     }
     const newHead = await head();
     if (newHead === oldHead) {
-      deps.write(`${n}: already up to date\n`);
+      deps.out(`${n}: already up to date\n`);
       continue;
     }
     const loaded = await loadPackage(dir, n);
     if ("error" in loaded) {
-      deps.write(
+      deps.err(
         `packages: ${n}: updated but now invalid (${loaded.error}); it is skipped at session start\n`,
       );
       status = 1;
       continue;
     }
-    deps.write(`updated ${n} (takes effect at the next session start)\n`);
+    deps.out(`updated ${n} (takes effect at the next session start)\n`);
     // Updating trusts the whole new version: show every changed file (a
     // script a hook runs can change while its command line does not).
     const stat = await deps.git(["-C", dir, "diff", "--stat", `${oldHead}..${newHead}`]);
     if (stat.stdout) {
-      deps.write(`  changed files:\n${stat.stdout.replace(/^/gm, "  ").trimEnd()}\n`);
+      deps.out(`  changed files:\n${stat.stdout.replace(/^/gm, "  ").trimEnd()}\n`);
     }
     // Updating is trusting too: show every command that is new or changed.
     const after = trustedCommands(loaded.info);
-    writeTrusted(deps.write, "updating", {
+    writeTrusted(deps.err, "updating", {
       hooks: after.hooks.filter((l) => !before.hooks.includes(l)),
       mcp: after.mcp.filter((l) => !before.mcp.includes(l)),
     });
@@ -366,6 +373,6 @@ export async function packagesCommand(
     if (sub === "remove" && arg !== undefined) return remove(arg, deps);
     if (sub === "update") return update(arg, deps);
   }
-  deps.write(`usage: ${USAGE.package}\n`);
+  deps.err(`usage: ${USAGE.package}\n`);
   return 1;
 }

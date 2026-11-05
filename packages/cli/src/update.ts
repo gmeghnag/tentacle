@@ -68,7 +68,10 @@ export interface UpdateDeps {
   readonly sudoOwner?: { readonly uid: number; readonly gid: number } | null;
   /** The chown seam (tests); default `fs.chown`. */
   readonly chown?: (path: string, uid: number, gid: number) => Promise<void>;
-  readonly write: (text: string) => void;
+  /** STDOUT: the version report and the `updated:` result (docs/fix/cli-output-streams.md D3). */
+  readonly out: (text: string) => void;
+  /** STDERR: errors, hints, `downloading …` progress. */
+  readonly err: (text: string) => void;
 }
 
 function defaultSudoOwner(): { uid: number; gid: number } | null {
@@ -211,9 +214,9 @@ function releaseError(error: unknown, tag: string, repo: string): Error {
 
 /** Run `tentacle update`; returns the process exit code. */
 export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promise<number> {
-  const write = deps.write;
+  const { out, err } = deps;
   if (deps.appVersion === "dev") {
-    write(
+    err(
       "[update] this tentacle runs from source (version dev): it never overwrites the `bun` executable. Update the checkout instead: git pull && bun install && bun run compile\n",
     );
     return 1;
@@ -257,17 +260,17 @@ export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promi
     const podLine = (t: PodBinaryTarget): string =>
       `  ${t}: ${pods[t] ?? (existsSync(configBinPath(deps.configDir, t)) ? "unknown version" : "missing")}${plan.podTargets.includes(t) ? ` → ${plan.podVersion}` : ""}\n`;
     if (plan.self) {
-      write(`tentacle ${deps.appVersion} → ${plan.self}\n`);
+      out(`tentacle ${deps.appVersion} → ${plan.self}\n`);
     } else if (plan.status === "ahead") {
-      write(`tentacle ${deps.appVersion} is newer than latest (${targetTag}); kept\n`);
+      out(`tentacle ${deps.appVersion} is newer than latest (${targetTag}); kept\n`);
     } else {
-      write(`tentacle ${deps.appVersion} is up to date (${targetTag})\n`);
+      out(`tentacle ${deps.appVersion} is up to date (${targetTag})\n`);
     }
-    write(`pod binaries (${binDir}):\n${POD_BINARY_TARGETS.map(podLine).join("")}`);
+    out(`pod binaries (${binDir}):\n${POD_BINARY_TARGETS.map(podLine).join("")}`);
     if (plan.status === "ahead" && POD_BINARY_TARGETS.some((t) => pods[t] !== deps.appVersion)) {
       // Not fetched: this version may be unreleased. Exit 0: nothing `update`
-      // would do; the user decides.
-      write(
+      // would do; the user decides. A hint: stderr.
+      err(
         `pod binaries not at ${deps.appVersion} are left alone (it may be unreleased); if v${deps.appVersion} is a published release: tentacle update --version v${deps.appVersion}\n`,
       );
     }
@@ -289,7 +292,7 @@ export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promi
     }
     // D5: refuse an unwritable destination BEFORE downloading anything.
     if (plan.self && !(await isWritable(installDir))) {
-      write(
+      err(
         `[update error] ${installDir} is not writable, so ${deps.execPath} cannot be replaced. Re-run with the rights to write there, keeping your config dir:\n  sudo TENTACLE_CONFIG_DIR=${deps.configDir} ${deps.execPath} update${options.version ? ` --version ${targetTag}` : ""}\n`,
       );
       return 1;
@@ -307,7 +310,7 @@ export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promi
         }
       }
       if (!(await isWritable(binDir))) {
-        write(`[update error] ${binDir} is not writable; fix its permissions and re-run\n`);
+        err(`[update error] ${binDir} is not writable; fix its permissions and re-run\n`);
         return 1;
       }
     }
@@ -343,7 +346,7 @@ export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promi
     const podTag = `v${plan.podVersion}`;
     const podTemps: [string, string][] = [];
     for (const t of plan.podTargets) {
-      write(`downloading ${t} (${podTag})…\n`);
+      err(`downloading ${t} (${podTag})…\n`);
       const temp = await stage(podTag, `tentacle-${t}`, binDir);
       // The marker must name exactly this release (D2): `run` would refuse
       // anything else, so an inconsistent or marker-less asset is never installed.
@@ -359,7 +362,7 @@ export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promi
     }
     let selfTemp: string | undefined;
     if (plan.self) {
-      write(`downloading ${asset} (${targetTag})…\n`);
+      err(`downloading ${asset} (${targetTag})…\n`);
       selfTemp = await stage(targetTag, asset, installDir);
       // The new CLI must run here and be exactly the target version.
       let answer: string;
@@ -394,12 +397,12 @@ export async function runUpdate(options: UpdateOptions, deps: UpdateDeps): Promi
       await rename(selfTemp, deps.execPath);
       staged.delete(selfTemp);
     }
-    write(
+    out(
       `updated: ${plan.self ? `tentacle ${deps.appVersion} → ${plan.self}` : `tentacle ${deps.appVersion} (unchanged)`}${plan.podTargets.length ? `; pod binaries ${plan.podTargets.join(", ")} → ${plan.podVersion}` : ""}\n`,
     );
     return 0;
   } catch (error) {
-    write(`[update error] ${error instanceof Error ? error.message : String(error)}\n`);
+    err(`[update error] ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   } finally {
     for (const temp of staged) {

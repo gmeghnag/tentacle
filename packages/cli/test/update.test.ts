@@ -88,7 +88,10 @@ let root: string;
 let installDir: string;
 let configDir: string;
 let execPath: string;
+/** STDOUT: the version report and the `updated:` result (docs/fix/cli-output-streams.md D3). */
 let out: string[];
+/** STDERR: errors, hints, progress. */
+let err: string[];
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "tentacle-update-"));
   installDir = join(root, "install");
@@ -96,6 +99,7 @@ beforeEach(async () => {
   execPath = join(installDir, "tentacle");
   mkdirSync(installDir, { recursive: true });
   out = [];
+  err = [];
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -134,7 +138,8 @@ function deps(gh: ReturnType<typeof fakeGitHub>, extra: Partial<UpdateDeps> = {}
     // The "new binary" answers --version from its own marker, like the real one.
     runVersion: async (path) =>
       `tentacle ${findVersionMarker(new Uint8Array(readFileSync(path))) ?? "?"}\n`,
-    write: (t) => out.push(t),
+    out: (t) => out.push(t),
+    err: (t) => err.push(t),
     ...extra,
   };
 }
@@ -169,6 +174,11 @@ describe("tentacle update", () => {
     expect(renames).toHaveLength(3);
     expect(temps()).toEqual([]);
     expect(out.join("")).toContain("tentacle 0.3.0 → 0.4.0");
+    // D3 (docs/fix/cli-output-streams.md): the report and the result on stdout;
+    // the progress on stderr. Mutation: `downloading …` on `out` → red.
+    expect(out.join("")).toContain("updated: tentacle 0.3.0 → 0.4.0");
+    expect(out.join("")).not.toContain("downloading");
+    expect(err.join("")).toContain("downloading bun-linux-x64 (v0.4.0)…");
   });
 
   test("--check: exit 10 when an update is available, 0 when current; never writes", async () => {
@@ -212,7 +222,7 @@ describe("tentacle update", () => {
     expect(await runUpdate({ check: false }, deps(gh, { appVersion: "0.5.0" }))).toBe(0);
     expect(gh.urls.some((u) => u.includes("/download/"))).toBe(false);
     expect(podVersions()).toEqual(["0.4.0", undefined]);
-    expect(out.join("")).toContain("tentacle update --version v0.5.0");
+    expect(err.join("")).toContain("tentacle update --version v0.5.0");
   });
 
   test("an install that is not this tentacle is never overwritten (marker ≠ appVersion)", async () => {
@@ -220,7 +230,7 @@ describe("tentacle update", () => {
     writeFileSync(execPath, "#!/bin/sh\necho some other program\n");
     const gh = fakeGitHub({ "v0.4.0": releaseOf("0.4.0") }, "v0.4.0");
     expect(await runUpdate({ check: false }, deps(gh))).toBe(1);
-    expect(out.join("")).toContain(`${execPath} is not tentacle 0.3.0`);
+    expect(err.join("")).toContain(`${execPath} is not tentacle 0.3.0`);
     expect(gh.downloads()).toEqual([]);
     expect(readFileSync(execPath, "utf8")).toContain("some other program");
   });
@@ -253,7 +263,7 @@ describe("tentacle update", () => {
       expect(await runUpdate({ check: true, version }, deps(gh))).toBe(1);
       expect(await runUpdate({ check: false, version }, deps(gh))).toBe(1);
     }
-    expect(out.join("")).toContain("versions before 0.1.0 cannot be installed by update");
+    expect(err.join("")).toContain("versions before 0.1.0 cannot be installed by update");
     expect(gh.urls).toEqual([]);
     expect(selfVersion()).toBe("0.3.0");
   });
@@ -264,7 +274,7 @@ describe("tentacle update", () => {
     const bad: Release = { assets: { ...release.assets, [PODS[1]]: binary(PODS[1], undefined) } };
     const gh = fakeGitHub({ "v0.4.0": bad }, "v0.4.0");
     expect(await runUpdate({ check: false }, deps(gh))).toBe(1);
-    expect(out.join("")).toContain("bun-linux-arm64 carries no version marker");
+    expect(err.join("")).toContain("bun-linux-arm64 carries no version marker");
     expect(podVersions()).toEqual(["0.3.0", "0.3.0"]);
     expect(temps()).toEqual([]);
   });
@@ -308,7 +318,7 @@ describe("tentacle update", () => {
     const gh = fakeGitHub({ "v0.4.0": releaseOf("0.4.0") }, "v0.4.0");
     expect(await runUpdate({ check: false }, deps(gh, { appVersion: "dev" }))).toBe(1);
     expect(gh.urls).toEqual([]);
-    expect(out.join("")).toContain("never overwrites the `bun` executable");
+    expect(err.join("")).toContain("never overwrites the `bun` executable");
     expect(await runUpdate({ check: true }, deps(gh, { appVersion: "dev" }))).toBe(1);
   });
 
@@ -320,7 +330,7 @@ describe("tentacle update", () => {
       deps(gh, { isWritable: async (dir) => dir !== installDir }),
     );
     expect(code).toBe(1);
-    expect(out.join("")).toContain(`sudo TENTACLE_CONFIG_DIR=${configDir} ${execPath} update`);
+    expect(err.join("")).toContain(`sudo TENTACLE_CONFIG_DIR=${configDir} ${execPath} update`);
     expect(gh.downloads()).toEqual([]);
     expect(gh.urls.some((u) => u.endsWith("/SHA256SUMS"))).toBe(false);
     expect(selfVersion()).toBe("0.3.0");
@@ -360,7 +370,7 @@ describe("tentacle update", () => {
       expect(selfVersion()).toBe("0.3.0");
       expect(podVersions()).toEqual(["0.3.0", "0.3.0"]);
       expect(temps()).toEqual([]);
-      expect(out.join("")).toContain("[update error]");
+      expect(err.join("")).toContain("[update error]");
     });
   }
 
@@ -374,11 +384,11 @@ describe("tentacle update", () => {
       deps(gh, { rename: async (_f, to) => void renamed.push(to) }),
     );
     expect(code).toBe(1);
-    expect(out.join("")).toContain('reports "tentacle 0.3.9", expected "tentacle 0.4.0"');
+    expect(err.join("")).toContain('reports "tentacle 0.3.9", expected "tentacle 0.4.0"');
     expect(renamed).toEqual([]);
     expect(temps()).toEqual([]);
 
-    out = [];
+    err = [];
     const crashing = await runUpdate(
       { check: false },
       deps(fakeGitHub({ "v0.4.0": releaseOf("0.4.0") }, "v0.4.0"), {
@@ -389,7 +399,7 @@ describe("tentacle update", () => {
       }),
     );
     expect(crashing).toBe(1);
-    expect(out.join("")).toContain("does not run: exited 137");
+    expect(err.join("")).toContain("does not run: exited 137");
     expect(renamed).toEqual([]);
     expect(temps()).toEqual([]);
   });
@@ -441,7 +451,7 @@ describe("tentacle update", () => {
     const bad: Release = { assets: { ...release.assets, [PODS[0]]: binary(PODS[0], "0.3.5") } };
     const gh = fakeGitHub({ "v0.4.0": bad }, "v0.4.0");
     expect(await runUpdate({ check: false }, deps(gh))).toBe(1);
-    expect(out.join("")).toContain("bun-linux-x64 carries version 0.3.5, not 0.4.0");
+    expect(err.join("")).toContain("bun-linux-x64 carries version 0.3.5, not 0.4.0");
     expect(podVersions()).toEqual(["0.3.0", "0.3.0"]);
     expect(selfVersion()).toBe("0.3.0");
     expect(temps()).toEqual([]);
@@ -459,21 +469,21 @@ describe("tentacle update", () => {
         }),
     );
     expect(await runUpdate({ check: true }, deps(gh))).toBe(1);
-    expect(out.join("")).toMatch(/no published release .*Pick a tag with --version/);
+    expect(err.join("")).toMatch(/no published release .*Pick a tag with --version/);
   });
 
   test("latest 404 (private repo / only pre-releases) is a clear error", async () => {
     install("0.3.0", ["0.3.0", "0.3.0"]);
     const gh = fakeGitHub({}, null);
     expect(await runUpdate({ check: true }, deps(gh))).toBe(1);
-    expect(out.join("")).toMatch(/no published release .*not public\. Pick a tag with --version/);
+    expect(err.join("")).toMatch(/no published release .*not public\. Pick a tag with --version/);
   });
 
   test("--version of a tag that does not exist names the release", async () => {
     install("0.3.0", ["0.3.0", "0.3.0"]);
     const gh = fakeGitHub({}, null);
     expect(await runUpdate({ check: false, version: "v9.9.9" }, deps(gh))).toBe(1);
-    expect(out.join("")).toMatch(
+    expect(err.join("")).toMatch(
       /release v9\.9\.9 not found .*no such tag, or the repository is not public/,
     );
     expect(temps()).toEqual([]);

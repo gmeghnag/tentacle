@@ -277,8 +277,8 @@ beforeAll(async () => {
   savedPodBin = process.env.TENTACLE_POD_BIN;
   process.env.TENTACLE_POD_BIN = join(dir, "fake-tentacle");
   writeFileSync(process.env.TENTACLE_POD_BIN, "01234567"); // 8 bytes
-  savedTty = process.stdout.isTTY;
-  process.stdout.isTTY = false;
+  savedTty = process.stderr.isTTY;
+  process.stderr.isTTY = false;
 });
 afterAll(async () => {
   if (savedPodBin === undefined) {
@@ -286,7 +286,7 @@ afterAll(async () => {
   } else {
     process.env.TENTACLE_POD_BIN = savedPodBin;
   }
-  process.stdout.isTTY = savedTty as boolean;
+  process.stderr.isTTY = savedTty as boolean;
   await rm(dir, { recursive: true, force: true });
 });
 

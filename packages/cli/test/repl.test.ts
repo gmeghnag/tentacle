@@ -50,16 +50,19 @@ describe("runRepl", () => {
       [{ type: "text", delta: "second reply" }, { type: "done" }],
     ]);
     const out: string[] = [];
+    const err: string[] = [];
 
     await runRepl(agentWith(model), {
       prompts: lines(["hi", "again", "/exit"]),
-      write: (t) => out.push(t),
+      out: (t) => out.push(t),
+      err: (t) => err.push(t),
     });
 
-    const text = out.join("");
-    expect(text).toContain("first reply");
-    expect(text).toContain("second reply");
-    expect(text).toContain("👋");
+    // docs/fix/cli-output-streams.md D5: stdout is the answers alone; the
+    // banner and the goodbye are stderr's.
+    expect(out.join("")).toBe("first reply\nsecond reply\n");
+    expect(err.join("")).toContain("tentacle — interactive session");
+    expect(err.join("")).toContain("👋");
     expect(model.requests).toHaveLength(2);
     expect(model.requests[1]?.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
   });
@@ -67,13 +70,16 @@ describe("runRepl", () => {
   test("/help prints help without calling the model", async () => {
     const model = new ScriptedProvider([]);
     const out: string[] = [];
+    const err: string[] = [];
 
     await runRepl(agentWith(model), {
       prompts: lines(["/help", "/exit"]),
-      write: (t) => out.push(t),
+      out: (t) => out.push(t),
+      err: (t) => err.push(t),
     });
 
-    expect(out.join("")).toContain("Commands:");
+    expect(err.join("")).toContain("Commands:");
+    expect(out).toEqual([]);
     expect(model.requests).toHaveLength(0);
   });
 
@@ -83,7 +89,8 @@ describe("runRepl", () => {
 
     await runRepl(agentWith(model), {
       prompts: lines(["", "   ", "ping", "/exit"]),
-      write: (t) => out.push(t),
+      out: (t) => out.push(t),
+      err: () => {},
     });
 
     expect(model.requests).toHaveLength(1);
@@ -102,22 +109,39 @@ describe("runRepl error placement", () => {
       throw new Error("ECONNRESET");
     }
   }
-  const errorOut = async (partial: string): Promise<string> => {
+  /** Both streams interleaved as on one terminal, and each apart. */
+  const errorOut = async (partial: string) => {
+    const screen: string[] = [];
     const out: string[] = [];
+    const err: string[] = [];
     await runRepl(agentWith(new Failing(partial)), {
+      shared: true, // the screen below is one terminal
       prompts: lines(["hi", "/exit"]),
-      write: (t) => out.push(t),
+      out: (t) => {
+        screen.push(t);
+        out.push(t);
+      },
+      err: (t) => {
+        screen.push(t);
+        err.push(t);
+      },
     });
-    return out.join("");
+    return { screen: screen.join(""), out: out.join(""), err: err.join("") };
   };
 
   test("an error after streamed text starts on its own line (never glued)", async () => {
     // Mutation: no lead newline -> glued to the text.
-    expect(await errorOut("Hello wor")).toContain("Hello wor\n[error] ");
+    const r = await errorOut("Hello wor");
+    expect(r.screen).toContain("Hello wor\n[error] ");
+    // The partial answer is stdout's; the error is stderr's.
+    expect(r.out).toBe("Hello wor");
+    expect(r.err).toContain("[error] ");
   });
 
   test("an error with nothing written yet adds no blank line", async () => {
     // Mutation: always a lead newline -> a blank line before the error.
-    expect(await errorOut("")).toContain("to quit.\n[error] ");
+    const r = await errorOut("");
+    expect(r.screen).toContain("to quit.\n[error] ");
+    expect(r.out).toBe("");
   });
 });
