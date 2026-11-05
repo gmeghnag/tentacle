@@ -410,6 +410,32 @@ describe("connect: quit detaches, resume attaches", () => {
     other.close();
   });
 
+  test("RED: Esc in the --resume picker exits silently: nothing written, TUI never mounted, resolves (exit 0)", async () => {
+    // Mutation: write("[resume] cancelled\n") back in resumeFirst → `lines` is not empty.
+    const g = gatedHost();
+    const other = await device(g.host);
+    await drain(other.newSession(undefined, crypto.randomUUID()).send("a"));
+    await drain(other.newSession(undefined, crypto.randomUUID()).send("b"));
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, g.host);
+    const lines: string[] = [];
+    let mounted = false;
+    await connectTui(
+      { url: "ws://fake", resume: { resume: true, latest: false } },
+      (l) => lines.push(l),
+      {
+        dial: () => async () => clientCh,
+        pick: async () => null,
+        startTui: async () => {
+          mounted = true;
+        },
+      },
+    );
+    expect(lines).toEqual([]);
+    expect(mounted).toBe(false);
+    other.close();
+  });
+
   test("RED: --resume of an unknown id fails before the TUI mounts and creates nothing", async () => {
     const g = gatedHost();
     const [daemonCh, clientCh] = createChannelPair();

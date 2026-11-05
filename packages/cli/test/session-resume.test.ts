@@ -144,13 +144,13 @@ describe("resolveResume with a picker", () => {
     ]);
   });
 
-  test("cancelled: nothing resumes, not fatal, a line says so", async () => {
+  test("cancelled: nothing resumes, not fatal, silent (no line)", async () => {
     // Mutation: treat null as "start fresh" → a fresh session starts after Esc.
     const store = await storeWith("cancel", rec("s1", 1000), rec("s2", 2000));
     const result = await resolveResume(store, undefined, undefined, spyPick(() => null).pick);
     expect(result).toEqual({
       record: null,
-      lines: ["[resume] cancelled\n"],
+      lines: [],
       notices: [],
       fatal: false,
       cancelled: true,

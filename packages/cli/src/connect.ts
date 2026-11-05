@@ -232,8 +232,7 @@ async function resumeFirst(
   if (plan.kind === "pick") {
     const id = deps.pick && list?.ok ? await deps.pick(plan.choices) : null;
     if (id === null || !list?.ok) {
-      write("[resume] cancelled\n");
-      return "cancelled";
+      return "cancelled"; // Esc / Ctrl+C: exit silently
     }
     plan = planPicked(list.result, id);
   }
