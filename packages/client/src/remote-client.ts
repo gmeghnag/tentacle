@@ -24,6 +24,7 @@ import {
   DISMISSED,
   type ModelProvider,
   type PermissionBroker,
+  countTokensBounded,
 } from "@tentacle/core";
 import {
   type ClientInfo,
@@ -38,6 +39,8 @@ import {
   type McpServerStatus,
   type McpStatusResult,
   Method,
+  type ModelCountTokensParams,
+  type ModelCountTokensResult,
   type ModelPurpose,
   type ModelStreamChunkedParams,
   type ModelStreamChunkedResult,
@@ -52,6 +55,7 @@ import {
   type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
+  type SessionContextResult,
   type SessionListParams,
   type SessionListResult,
   type SessionSkillsResult,
@@ -417,6 +421,24 @@ export class RemoteClient {
     return this.call(this.peer, Method.McpStatus, {}).then(
       (result) => (result as McpStatusResult).servers,
     );
+  }
+
+  /**
+   * The context a session would send now (`session/context`,
+   * docs/feat/tui-target-badge.md): exact when the daemon's provider counts it,
+   * else its estimate. `sessionId` absent → the fresh conversation a session
+   * created now would send. Not re-sent after a drop; the caller treats a
+   * rejection as "unknown".
+   */
+  sessionContext(sessionId?: string, seed?: readonly ChatMessage[]): Promise<SessionContextResult> {
+    if (!this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    return this.call(
+      this.peer,
+      Method.SessionContext,
+      sessionId !== undefined ? { sessionId } : seed && seed.length > 0 ? { messages: seed } : {},
+    ).then((result) => result as SessionContextResult);
   }
 
   /**
@@ -1059,6 +1081,11 @@ export class RemoteClient {
               params as ModelStreamChunkedParams,
               context as RequestContext,
             ),
+          );
+        }
+        if (method === Method.ModelCountTokens) {
+          return this.servingCall(() =>
+            this.onModelCountTokens(params as ModelCountTokensParams, context?.signal),
           );
         }
         if (method === Method.HooksTrust) {
@@ -1829,6 +1856,27 @@ export class RemoteClient {
       ...(first?.title ? { title: first.title } : {}),
       ...(first?.queued ? { queued: first.queued } : {}),
     };
+  }
+
+  /**
+   * Serve `model/countTokens` (docs/feat/tui-target-badge.md): the LOCAL
+   * provider counts the pod's request without generating. The answer is one
+   * number — omitted when this provider cannot count or the count failed (the
+   * daemon then estimates); the error itself never crosses to the pod.
+   */
+  private async onModelCountTokens(
+    params: ModelCountTokensParams,
+    signal?: AbortSignal,
+  ): Promise<ModelCountTokensResult> {
+    const model = this.servingModel(Method.ModelCountTokens, undefined);
+    // The same 2 s cap as the daemon's own count (`countTokensBounded`): a hung
+    // endpoint never holds the pod's request, nor `servingCall`, nor a quit.
+    const tokens = await countTokensBounded(
+      model,
+      params.request as unknown as ChatRequest,
+      signal,
+    );
+    return tokens === undefined ? {} : { tokens };
   }
 
   /**

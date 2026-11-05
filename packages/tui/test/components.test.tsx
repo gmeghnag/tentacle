@@ -39,9 +39,9 @@ describe("ContextMeter", () => {
     expect(frame).toContain("64k/128k");
   });
 
-  test("nothing measured: `ctx –`, no bar, no 0%", () => {
+  test("nothing measured: `ctx –/128k` (the max is always shown), no bar, no 0%", () => {
     const frame = render(<ContextMeter used={null} window={128000} />).lastFrame() ?? "";
-    expect(frame).toBe("ctx –");
+    expect(frame).toBe("ctx –/128k");
   });
 
   test("handles a zero window without dividing by zero", () => {
@@ -51,18 +51,17 @@ describe("ContextMeter", () => {
 });
 
 describe("StatusBar", () => {
-  test("shows model, token totals and the context meter", () => {
+  test("shows token totals and the context meter (the model lives on the input border)", () => {
     const frame =
       render(
         <StatusBar
-          model="qwen3"
           cwd="/tmp/work"
           tokens={{ prompt: 12, completion: 7 }}
           contextTokens={64000}
           contextWindow={128000}
         />,
       ).lastFrame() ?? "";
-    expect(frame).toContain("qwen3");
+    expect(frame).not.toContain("qwen3");
     expect(frame).toContain("↑12");
     expect(frame).toContain("↓7");
     expect(frame).toContain("ctx");
@@ -71,7 +70,6 @@ describe("StatusBar", () => {
 
   test("always shows the auto-accept mode (off advertises the keybind, on when enabled)", () => {
     const base = {
-      model: "qwen3",
       cwd: "/tmp/work",
       tokens: { prompt: 0, completion: 0 },
       contextTokens: 0,

@@ -106,6 +106,22 @@ export type ModelStreamChunkedParams = z.infer<typeof ModelStreamChunkedParamsSc
 export const ModelStreamChunkedResultSchema = z.object({ chunks: z.number().int().nonnegative() });
 export type ModelStreamChunkedResult = z.infer<typeof ModelStreamChunkedResultSchema>;
 
+// --- model/countTokens (docs/feat/tui-target-badge.md) ---------------------
+// The daemon asks the client's LOCAL provider how many tokens a request's
+// prompt is, without generating (Anthropic `count_tokens`, llama.cpp
+// `/tokenize`). The pod reaches the model only through the laptop; the answer
+// is one number. Additive: an older client answers `MethodNotFound`, a
+// provider that cannot count omits `tokens` — the daemon estimates.
+
+export const ModelCountTokensParamsSchema = z.object({ request: WireChatRequestSchema });
+export type ModelCountTokensParams = z.infer<typeof ModelCountTokensParamsSchema>;
+
+export const ModelCountTokensResultSchema = z.object({
+  /** Absent: this provider cannot count (an optional field is omitted, never null). */
+  tokens: z.number().int().nonnegative().optional(),
+});
+export type ModelCountTokensResult = z.infer<typeof ModelCountTokensResultSchema>;
+
 // --- $/progress / $/cancelRequest (generic peer primitives) ---------------
 //
 // Two generic, method-agnostic notifications the peer understands: a responder

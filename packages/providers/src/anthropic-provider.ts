@@ -77,6 +77,39 @@ export class AnthropicProvider implements ModelProvider {
     this.doFetch = config.fetch ?? fetch;
   }
 
+  /**
+   * The exact prompt size via `POST /messages/count_tokens` — no generation, no
+   * charge. `undefined` on any non-2xx or unexpected shape (the caller falls
+   * back to an estimate); a transport failure rejects (same fallback).
+   */
+  async countTokens(request: ChatRequest): Promise<number | undefined> {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      "anthropic-version": this.config.anthropicVersion ?? ANTHROPIC_DEFAULT_VERSION,
+    };
+    if (this.config.apiKey) {
+      headers["x-api-key"] = this.config.apiKey;
+    }
+    // The stream payload minus what only generation uses.
+    const {
+      max_tokens: _m,
+      stream: _s,
+      temperature: _t,
+      ...body
+    } = buildPayload(this.config.model, request, this.config.maxTokens);
+    const init: RequestInit = { method: "POST", headers, body: JSON.stringify(body) };
+    if (request.signal) {
+      init.signal = request.signal;
+    }
+    const res = await this.doFetch(`${this.config.baseURL}/messages/count_tokens`, init);
+    if (!res.ok) {
+      return undefined;
+    }
+    const json = (await res.json().catch(() => null)) as { input_tokens?: unknown } | null;
+    const n = json?.input_tokens;
+    return typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : undefined;
+  }
+
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     const headers: Record<string, string> = {
       "content-type": "application/json",

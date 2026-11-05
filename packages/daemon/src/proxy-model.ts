@@ -21,6 +21,7 @@
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { JsonRpcErrorCode, ModelStreamProgressValueSchema } from "@tentacle/protocol";
 import type {
+  ModelCountTokensResult,
   ModelStreamChunkedResult,
   ModelStreamResult,
   WireChatRequest,
@@ -43,6 +44,15 @@ export type ModelStreamChunkedSender = (
     readonly onProgress: (value: unknown, seq: number) => void;
   },
 ) => Promise<ModelStreamChunkedResult>;
+
+/**
+ * Sends a `model/countTokens` request to the client: its LOCAL provider counts
+ * the prompt without generating (docs/feat/tui-target-badge.md).
+ */
+export type ModelCountTokensSender = (
+  request: WireChatRequest,
+  signal?: AbortSignal,
+) => Promise<ModelCountTokensResult>;
 
 function toWireRequest(request: ChatRequest): WireChatRequest {
   return {
@@ -158,7 +168,29 @@ export class ProxyModelProvider implements ModelProvider {
   constructor(
     private readonly send: ModelStreamSender,
     private readonly sendChunked?: ModelStreamChunkedSender,
+    private readonly sendCount?: ModelCountTokensSender,
   ) {}
+
+  /**
+   * The exact prompt size, counted by the LAPTOP's provider (the model and its
+   * key stay there). `undefined` when no sender, the laptop's provider cannot
+   * count (`tokens` omitted) or the laptop is old (`MethodNotFound`); any other
+   * failure rejects — the caller (`Agent.contextUsage`) estimates.
+   */
+  async countTokens(request: ChatRequest): Promise<number | undefined> {
+    if (!this.sendCount) {
+      return undefined;
+    }
+    try {
+      const { tokens } = await this.sendCount(toWireRequest(request), request.signal);
+      return tokens;
+    } catch (error) {
+      if (isMethodNotFound(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
 
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     const wire = toWireRequest(request);

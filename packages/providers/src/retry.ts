@@ -174,6 +174,11 @@ export class RetryingModelProvider implements ModelProvider {
     this.id = inner.id;
   }
 
+  /** The wrapped provider's exact count, if it has one (no retries: a count is best effort). */
+  async countTokens(request: ChatRequest): Promise<number | undefined> {
+    return this.inner.countTokens?.(request);
+  }
+
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     const maxAttempts = this.policy.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     const sleep = this.policy.sleep ?? abortableSleep;

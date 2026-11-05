@@ -694,6 +694,26 @@
       "required": ["servers"],
       "type": "object"
     },
+    "ModelCountTokensParams": {
+      "additionalProperties": true,
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/WireChatRequest"
+        }
+      },
+      "required": ["request"],
+      "type": "object"
+    },
+    "ModelCountTokensResult": {
+      "additionalProperties": true,
+      "properties": {
+        "tokens": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ModelPurpose": {
       "enum": ["title"],
       "type": "string"
@@ -1392,6 +1412,35 @@
       "required": ["reason", "type"],
       "type": "object",
       "x-event-class": "mandatory"
+    },
+    "SessionContextParams": {
+      "additionalProperties": true,
+      "properties": {
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/ChatMessage"
+          },
+          "type": "array"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "type": "object"
+    },
+    "SessionContextResult": {
+      "additionalProperties": true,
+      "properties": {
+        "exact": {
+          "type": "boolean"
+        },
+        "used": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["exact", "used"],
+      "type": "object"
     },
     "SessionId": {
       "minLength": 1,
@@ -2392,6 +2441,14 @@
         "$ref": "#/$defs/McpStatusResult"
       }
     },
+    "model/countTokens": {
+      "params": {
+        "$ref": "#/$defs/ModelCountTokensParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ModelCountTokensResult"
+      }
+    },
     "model/stream": {
       "params": {
         "$ref": "#/$defs/ModelStreamParams"
@@ -2422,6 +2479,14 @@
       },
       "result": {
         "$ref": "#/$defs/CompactResult"
+      }
+    },
+    "session/context": {
+      "params": {
+        "$ref": "#/$defs/SessionContextParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SessionContextResult"
       }
     },
     "session/delete": {

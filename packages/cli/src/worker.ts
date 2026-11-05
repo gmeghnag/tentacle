@@ -101,6 +101,9 @@ port.addEventListener("message", (event: { data: unknown }) => {
     identity: { tentacle: version, kind: "worker" },
     newSessionSkills: () => skillScan.newSession(),
     mcpStatus: () => mcpTracker.probe(),
+    // A fresh session's context count lacks the MCP tools until they connect:
+    // shown as an estimate (`~`) till then (docs/feat/tui-target-badge.md).
+    toolsReady: () => mcpReady,
     // A failed turn now ends in the stream (`turn_end.error`), not as a handler
     // throw: same policy as below — the real message to this LOCAL client, the
     // full error (with stack) to the daemon error log.

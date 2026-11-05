@@ -148,7 +148,9 @@ import {
   startTurn,
   withdrawUserTurn,
 } from "./state.ts";
-import { statusTokens } from "./status-view.ts";
+import { modelBorder } from "./status-line.ts";
+import { type ContextOpen, contextShown, statusTokens } from "./status-view.ts";
+import type { TargetBadge } from "./target-view.ts";
 import { CLICK_IDLE, type ClickState, nextClick, toggleExpanded } from "./tool-expand.ts";
 import { toolCallAtViewport } from "./tool-hit.ts";
 import { panelHeight, panelMaxBody, treeKey } from "./tree-panel.ts";
@@ -210,6 +212,12 @@ export interface SessionController {
    * no skills.
    */
   skills?(): Promise<SessionSkillsView>;
+  /**
+   * The context size the daemon counts at open (docs/feat/tui-target-badge.md):
+   * exact where the provider can count without generating, else an estimate.
+   * Asked once per session the view follows; a rejection leaves `ctx –/max`.
+   */
+  context?(): Promise<ContextOpen>;
   /**
    * Rename the session daemon-side (`/rename`); resolves with the title the
    * daemon stored. Optional: absent where no daemon owns the session.
@@ -297,6 +305,8 @@ export interface AppProps {
   readonly model: string;
   readonly cwd: string;
   readonly contextWindow?: number;
+  /** In a container/pod: the status bar's accent badge (laptop-side facts). Absent: local. */
+  readonly target?: TargetBadge;
   /** Broker whose interactive requester this app installs for tool approvals. */
   readonly permissions?: PermissionBroker;
   /** Background-job registry; the TUI surfaces job exits live when present. */
@@ -400,6 +410,7 @@ export function App({
   model,
   cwd,
   contextWindow = 128000,
+  target,
   permissions,
   jobs,
   autoWakeOnJobExit = true,
@@ -610,6 +621,7 @@ export function App({
     skillsSyncRef.current = new SkillsSync(() => setSkillsVersion((n) => n + 1));
   }
   const skillsSync = skillsSyncRef.current;
+  const [contextOpen, setContextOpen] = useState<ContextOpen | null>(null);
   const skills = useCallback(() => skillsSync.slash(), [skillsSync]);
   // The latest `handleCommand`: an unknown `/word` resolves again through it.
   const handleCommandRef = useRef<((raw: string, again?: boolean) => void) | null>(null);
@@ -730,6 +742,7 @@ export function App({
   // --- derived layout (recomputed each render) -----------------------------
   const st = stateRef.current;
   const tokensShown = statusTokens(st);
+  const ctxShown = contextShown(tokensShown.context, contextOpen);
   const columns = Math.max(20, size.columns);
   const termRows = Math.max(8, size.rows);
   // Slash-command autocomplete: open only while idle and typing a `/command`.
@@ -1377,6 +1390,21 @@ export function App({
    * history is never missed. The previous session's subscriptions end, and
    * what was held for it is dropped.
    */
+  /**
+   * Ask the daemon for the session's context (never awaited by render). An
+   * answer for a session the view has since left is dropped; a failure leaves
+   * the figure as it was (`ctx –/max` until something measures).
+   */
+  const askContext = useCallback((session: SessionController | null): void => {
+    void session?.context?.().then(
+      (open) => {
+        if (sessionRef.current === session) {
+          setContextOpen(open);
+        }
+      },
+      () => {},
+    );
+  }, []);
   const watchSession = useCallback(
     (session: SessionController | null, onOpened?: (ok: boolean) => void) => {
       activitySubRef.current?.();
@@ -1385,6 +1413,10 @@ export function App({
       setDaemonQueue(undefined);
       // Its own skills (a remote session waits for its eager open first).
       skillsSync.use(session);
+      // The context at open (never awaited by render): an answer for a session
+      // the view has since left is dropped.
+      setContextOpen(null);
+      askContext(session);
       activitySubRef.current = session?.watch?.((a) => onActivityRef.current?.(a)) ?? null;
       queueSubRef.current = session?.onQueued?.((q) => setDaemonQueue(q)) ?? null;
       const opening = session?.open?.();
@@ -1402,7 +1434,7 @@ export function App({
         },
       );
     },
-    [pushNotice, skillsSync],
+    [pushNotice, skillsSync, askContext],
   );
   useEffect(() => {
     watchSession(sessionRef.current);
@@ -1779,7 +1811,11 @@ export function App({
             wakeIfPending(); // a wake deferred during the compaction
           };
           void session.compact().then(
-            (r) => settled({ ok: true, before: r.before, after: r.after }),
+            (r) => {
+              settled({ ok: true, before: r.before, after: r.after });
+              // The history shrank: the open figure is stale until a turn measures.
+              askContext(session);
+            },
             (error: unknown) => settled({ ok: false, error }),
           );
           return;
@@ -1893,6 +1929,7 @@ export function App({
       mcpStatus,
       sessions,
       skillsSync,
+      askContext,
       model,
       pushNotice,
       requestQuit,
@@ -2651,10 +2688,14 @@ export function App({
                     columns={columns}
                   />
                 ) : null}
+                {/* The top border carries the model name, right-aligned
+                    (`modelBorder`, pure): Ink's own border has no title. */}
+                <Text color="gray">{modelBorder(model, columns)}</Text>
                 <Box
                   width={columns}
                   borderStyle="round"
                   borderColor="gray"
+                  borderTop={false}
                   borderLeft={false}
                   borderRight={false}
                 >
@@ -2674,10 +2715,11 @@ export function App({
       </Box>
 
       <StatusBar
-        model={model}
         cwd={cwd}
+        target={target ?? null}
         tokens={tokensShown.totals}
-        contextTokens={tokensShown.context}
+        contextTokens={ctxShown.used}
+        contextApprox={ctxShown.approx}
         contextWindow={contextWindow}
         columns={columns}
         scrolledUp={scrolledUp}

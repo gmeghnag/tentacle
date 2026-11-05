@@ -14,6 +14,27 @@ export interface StatusTokens {
   readonly context: number | null;
 }
 
+/** The count the daemon made at open (`session/context`): `exact` = the provider counted it. */
+export interface ContextOpen {
+  readonly used: number;
+  readonly exact: boolean;
+}
+
+/**
+ * What the ctx meter shows: the figure THIS TUI measured (a turn's usage) wins
+ * and is exact; before that, the daemon's count at open (an estimate is
+ * `approx`); with neither, unknown (`used: null`).
+ */
+export function contextShown(
+  measured: number | null,
+  open: ContextOpen | null,
+): { used: number | null; approx: boolean } {
+  if (measured !== null) {
+    return { used: measured, approx: false };
+  }
+  return open === null ? { used: null, approx: false } : { used: open.used, approx: !open.exact };
+}
+
 export function statusTokens(
   state: Pick<DisplayState, "sessionTokens" | "lastTurnTokens">,
 ): StatusTokens {

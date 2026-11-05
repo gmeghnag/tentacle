@@ -417,6 +417,9 @@ export function persistingController(
     skills() {
       return inner.skills();
     },
+    context() {
+      return inner.context();
+    },
     rename(title) {
       return inner.rename(title);
     },

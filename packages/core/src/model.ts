@@ -91,4 +91,12 @@ export interface ModelProvider {
   readonly id: string;
   /** Stream a completion as a sequence of events, ending with a `done` event. */
   stream(request: ChatRequest): AsyncIterable<StreamEvent>;
+  /**
+   * The EXACT prompt size of `request` in tokens, counted by the provider
+   * WITHOUT generating (Anthropic `count_tokens`, llama.cpp `/tokenize`).
+   * `undefined`: this provider cannot — the caller falls back to an estimate.
+   * Best effort: rejects on a transport failure, the caller treats it alike.
+   * Optional (docs/feat/tui-target-badge.md).
+   */
+  countTokens?(request: ChatRequest): Promise<number | undefined>;
 }
