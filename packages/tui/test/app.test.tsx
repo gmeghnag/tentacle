@@ -141,8 +141,9 @@ describe("App", () => {
       await delay(150);
       const failed = app.lastFrame() ?? "";
       expect(failed).toContain("ECONNRESET");
-      expect(failed).toContain("↑– ↓–");
-      expect(failed).toContain("ctx –");
+      // tui-target-badge: ↑↓ are HIDDEN until measured; ctx always carries its max.
+      expect(failed).not.toContain("↑");
+      expect(failed).toContain("ctx –/128k");
       expect(failed).not.toContain("↑0 ↓0");
       expect(failed).not.toContain("0%");
       fail = false;

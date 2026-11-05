@@ -16,6 +16,7 @@
  */
 import {
   type BackgroundJob,
+  COUNT_TOKENS_CAP_MS,
   type ChatMessage,
   type ChatRequest,
   type ContextUsage,
@@ -32,6 +33,7 @@ import {
   type ToolResult,
   type Usage,
   allowAll,
+  countTokensBounded,
 } from "@tentacle/core";
 import {
   CONTEXT_RESET_TOOL_NAME,
@@ -167,6 +169,9 @@ export type BeforeResumedCall = (signal: AbortSignal) => Promise<void>;
 
 /** The context-line estimate's counter when the config names none. */
 const DEFAULT_COUNTER = new HeuristicTokenCounter();
+
+/** The bound on a provider's exact count at open: past it the estimate is shown. */
+export const CONTEXT_COUNT_TIMEOUT_MS = COUNT_TOKENS_CAP_MS;
 /** Max consecutive empty-response auto-nudges before a stall ends the turn. */
 const MAX_EMPTY_CONTINUES = 2;
 /** Max `turn_end` hook continues per turn (R2, docs/feat/hooks-turn.md). */
@@ -1087,6 +1092,36 @@ export class Agent {
     if (usage.promptTokens > 0 && ref !== undefined) {
       this.anchors.set(messages, { promptTokens: usage.promptTokens, len: sent, ref });
     }
+  }
+
+  /**
+   * The size of the request `messages` would become now — the context a client
+   * shows BEFORE any turn measured it (docs/feat/tui-target-badge.md). Counted
+   * by the provider without generating when it can (`countTokens`, bounded by
+   * `timeoutMs`); otherwise (cannot, failed, too slow, `signal` aborted) the
+   * estimate, silently. Never throws.
+   */
+  async contextUsage(
+    messages: ChatMessage[],
+    signal?: AbortSignal,
+    timeoutMs: number = CONTEXT_COUNT_TIMEOUT_MS,
+  ): Promise<{ readonly used: number; readonly exact: boolean }> {
+    const tools = this.config.tools.definitions();
+    // Bounded and silent (`countTokensBounded`): a count that cannot, fails or
+    // is slow falls through to the estimate.
+    const exact = await countTokensBounded(
+      this.config.model,
+      { messages: messages.map(renderForModel), tools },
+      signal,
+      timeoutMs,
+    );
+    if (exact !== undefined) {
+      return { used: exact, exact: true };
+    }
+    return {
+      used: estimateUsed(messages, tools, this.anchors.get(messages), DEFAULT_COUNTER),
+      exact: false,
+    };
   }
 
   /** `turn_end` notification hooks (cancelled / max_iterations): synchronous, never awaited. */

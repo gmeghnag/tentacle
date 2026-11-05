@@ -133,6 +133,45 @@ export class OpenAIProvider implements ModelProvider {
     this.doFetch = config.fetch ?? fetch;
   }
 
+  /**
+   * The exact prompt size on a llama.cpp server, without generating: the chat
+   * is rendered by the model's own template (`POST /apply-template`) and the
+   * resulting prompt tokenized (`POST /tokenize`), both at the server ROOT
+   * (`baseURL` minus its `/v1`). Any other OpenAI-compatible server lacks them
+   * (404) → `undefined`, and the caller estimates.
+   */
+  async countTokens(request: ChatRequest): Promise<number | undefined> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.config.apiKey) {
+      headers.authorization = `Bearer ${this.config.apiKey}`;
+    }
+    const root = this.config.baseURL.replace(/\/v1\/?$/, "");
+    const post = async (path: string, body: unknown): Promise<Record<string, unknown> | null> => {
+      const init: RequestInit = { method: "POST", headers, body: JSON.stringify(body) };
+      if (request.signal) {
+        init.signal = request.signal;
+      }
+      const res = await this.doFetch(`${root}${path}`, init);
+      if (!res.ok) {
+        return null;
+      }
+      return (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    };
+    const payload = buildPayload(this.config.model, request);
+    const templated = await post("/apply-template", {
+      messages: payload.messages,
+      ...(payload.tools ? { tools: payload.tools } : {}),
+    });
+    const prompt = templated?.prompt;
+    if (typeof prompt !== "string") {
+      return undefined;
+    }
+    // The template already carries its special tokens (BOS…): add none.
+    const tokenized = await post("/tokenize", { content: prompt, add_special: false });
+    const tokens = tokenized?.tokens;
+    return Array.isArray(tokens) ? tokens.length : undefined;
+  }
+
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.config.apiKey) {

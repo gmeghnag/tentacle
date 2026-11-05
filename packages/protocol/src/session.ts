@@ -551,6 +551,36 @@ export const RenameResultSchema = z.object({
 });
 export type RenameResult = z.infer<typeof RenameResultSchema>;
 
+// --- session/context (docs/feat/tui-target-badge.md) ---------------------
+// The size of the context a session would send NOW (system prompt, tools and
+// history), for a client's meter before any turn measured it. Read-only,
+// concurrent with everything (it may take up to a couple of seconds: the daemon
+// asks the provider to count, bounded, else it estimates). Additive: an older
+// daemon answers `MethodNotFound` and the client shows an unknown fill.
+
+export const SessionContextParamsSchema = z.object({
+  /**
+   * A session this connection opened. Absent → a session the daemon creates NOW
+   * (a client opens its session lazily, at the first prompt): its fresh context.
+   */
+  sessionId: SessionIdSchema.optional(),
+  /**
+   * With no `sessionId`: the history a session would be CREATED from (a resumed
+   * session's seed, not opened yet) — counted instead of an empty conversation.
+   * Ignored with a `sessionId` (the live history wins).
+   */
+  messages: z.array(ChatMessageSchema).optional(),
+});
+export type SessionContextParams = z.infer<typeof SessionContextParamsSchema>;
+
+export const SessionContextResultSchema = z.object({
+  /** Tokens of the next request's prompt. */
+  used: z.number().int().nonnegative(),
+  /** `true`: the provider counted it; `false`: a heuristic estimate. */
+  exact: z.boolean(),
+});
+export type SessionContextResult = z.infer<typeof SessionContextResultSchema>;
+
 // --- session/enqueue (steering) ------------------------------------------
 // Queue a user message for injection into the turn currently running, at the
 // next model-round boundary. The daemon resolves it as soon as it has pushed

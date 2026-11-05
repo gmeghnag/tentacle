@@ -20,5 +20,7 @@ export {
 export { autoApproves, ownRequest } from "./permission-ui.ts";
 export type { SessionsEntry, SessionsView } from "./sessions-panel.ts";
 export { startTui, type TuiOptions } from "./run.tsx";
+export type { TargetBadge } from "./target-view.ts";
+export type { ContextOpen } from "./status-view.ts";
 export type { SessionChoice, SessionPick } from "./session-picker.ts";
 export { pickSession, type PickSessionOptions } from "./session-picker-run.tsx";

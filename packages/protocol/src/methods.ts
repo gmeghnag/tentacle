@@ -10,6 +10,8 @@ import { HooksTrustParamsSchema, HooksTrustResultSchema } from "./hooks.ts";
 import { McpStatusParamsSchema, McpStatusResultSchema } from "./mcp.ts";
 import {
   CancelRequestParamsSchema,
+  ModelCountTokensParamsSchema,
+  ModelCountTokensResultSchema,
   ModelStreamChunkedParamsSchema,
   ModelStreamChunkedResultSchema,
   ModelStreamParamsSchema,
@@ -40,6 +42,8 @@ import {
   RenameParamsSchema,
   RenameResultSchema,
   SendNowParamsSchema,
+  SessionContextParamsSchema,
+  SessionContextResultSchema,
   SessionListParamsSchema,
   SessionListResultSchema,
   SnapshotParamsSchema,
@@ -66,6 +70,10 @@ export const Method = {
   ResolvePermission: "session/resolve_permission",
   ModelStream: "model/stream",
   ModelStreamChunked: "model/streamChunked",
+  /** Daemon → client: the exact prompt size of a request, counted by the laptop's provider. */
+  ModelCountTokens: "model/countTokens",
+  /** The size of the context a session would send now (docs/feat/tui-target-badge.md). */
+  SessionContext: "session/context",
   McpStatus: "mcp/status",
   /** A session's skills, read again from disk (docs/feat/skills-hot-reload.md). */
   SessionSkills: "session/skills",
@@ -112,6 +120,14 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.ModelStreamChunked]: {
     params: ModelStreamChunkedParamsSchema,
     result: ModelStreamChunkedResultSchema,
+  },
+  [Method.ModelCountTokens]: {
+    params: ModelCountTokensParamsSchema,
+    result: ModelCountTokensResultSchema,
+  },
+  [Method.SessionContext]: {
+    params: SessionContextParamsSchema,
+    result: SessionContextResultSchema,
   },
   [Method.McpStatus]: { params: McpStatusParamsSchema, result: McpStatusResultSchema },
   [Method.SessionSkills]: { params: SessionSkillsParamsSchema, result: SessionSkillsResultSchema },

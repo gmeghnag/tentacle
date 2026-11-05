@@ -206,9 +206,9 @@ describe("kubeEngineHost", () => {
       "a container name must be specified for pod p, choose one of: [dns kube-rbac-proxy] · pass --container <c>",
     );
     // A named container: nothing to refuse (a wrong name is the exec's to say).
-    expect(await host.inspect("p", { container: "dns" })).toEqual({ kind: "ready" });
+    expect(await host.inspect("p", { container: "dns" })).toEqual({ kind: "ready", inUse: "dns" });
     kube.pod = { metadata: { name: "p" }, spec: { containers: [{ name: "only" }] }, status };
-    expect(await host.inspect("p")).toEqual({ kind: "ready" });
+    expect(await host.inspect("p")).toEqual({ kind: "ready", inUse: "only" });
     // A terminated pod stays a "stopped" verdict, whatever its containers.
     kube.pod = {
       metadata: { name: "p" },
@@ -232,7 +232,7 @@ describe("kubeEngineHost", () => {
     const KEY = "kubectl.kubernetes.io/default-container";
     // Mutation: ignore the annotation → a refusal (red here).
     kube.pod = podWith({ [KEY]: "etcd" });
-    expect(await host.inspect("p")).toEqual({ kind: "ready", container: "etcd" });
+    expect(await host.inspect("p")).toEqual({ kind: "ready", container: "etcd", inUse: "etcd" });
     // Not yet ready: the same resolution on `starting`.
     kube.pod = { ...podWith({ [KEY]: "etcd" }), status: { phase: "Running" } };
     expect(await host.inspect("p")).toMatchObject({ kind: "starting", container: "etcd" });
@@ -255,14 +255,17 @@ describe("kubeEngineHost", () => {
     // An explicit --container wins and needs no annotation: nothing resolved on the state.
     // Mutation: resolve the annotation even with --container → `container` appears.
     kube.pod = podWith({ [KEY]: "etcd" });
-    expect(await host.inspect("p", { container: "etcd-rev" })).toEqual({ kind: "ready" });
+    expect(await host.inspect("p", { container: "etcd-rev" })).toEqual({
+      kind: "ready",
+      inUse: "etcd-rev",
+    });
     // One container: unchanged, whatever the annotation says.
     kube.pod = {
       metadata: { name: "p", annotations: { [KEY]: "etcd" } },
       spec: { containers: [{ name: "only" }] },
       status,
     };
-    expect(await host.inspect("p")).toEqual({ kind: "ready" });
+    expect(await host.inspect("p")).toEqual({ kind: "ready", inUse: "only" });
   });
 
   test("inspect: a 404 is a WorkloadNotFoundError naming the place (`in <ns>`)", async () => {

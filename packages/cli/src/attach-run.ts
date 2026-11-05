@@ -23,6 +23,7 @@ import type { AttachPlan, QuitPlan } from "./attach-plan.ts";
 import { quitPlan } from "./attach-plan.ts";
 import { type ControlConn, dialControl } from "./control-socket.ts";
 import type { EngineHost } from "./engine-host.ts";
+import type { EngineRuntime } from "./engine-runtime.ts";
 import {
   type KeptRemoval,
   RM_STOP_GRACE_MS,
@@ -105,7 +106,7 @@ export interface JoinDeps {
     host: EngineHost,
     sessions: TuiSessions,
     permissions: PermissionBroker,
-  ) => Promise<LocalRuntime>;
+  ) => Promise<EngineRuntime>;
   /** `armSharedExitNet(host, name, othersAlive, saved, onKept)`; returns the disarm. */
   readonly armNet: (
     host: EngineHost,
@@ -236,7 +237,7 @@ async function prepareHandover(
 export interface Joined {
   readonly kind: "joined";
   readonly sessions: TuiSessions;
-  readonly runtime: LocalRuntime;
+  readonly runtime: EngineRuntime;
   /** THE broker: the runtime's, and the one `startTui` must get. */
   readonly permissions: PermissionBroker;
   /** The live session was opened; false: the seeded path (`--resume`-like). */
@@ -321,7 +322,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
   }
   // 5. ONE broker for the runtime and the TUI (AGENTS §7).
   const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
-  let runtime: LocalRuntime;
+  let runtime: EngineRuntime;
   try {
     runtime = await deps.attach(host, sessions, permissions);
   } catch (error) {

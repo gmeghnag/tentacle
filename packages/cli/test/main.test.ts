@@ -908,6 +908,7 @@ describe("cli main: --engine", () => {
           logPath?: string | undefined;
           earlyLogPath?: string | undefined;
           faulted?: boolean;
+          target?: unknown;
           thrown?: string;
           tui: number;
           runtime: number;
@@ -932,6 +933,8 @@ describe("cli main: --engine", () => {
           announce: () => {
             order.push("announce");
           },
+          // What `startEngineRuntime` returns for the status bar (laptop-side facts).
+          target: { engine: "docker", name: "box" },
         };
         const code = await main(["bun", "cli", ...args], {
           err: (t) => out.push(t),
@@ -981,10 +984,11 @@ describe("cli main: --engine", () => {
           }) as never,
           startTui: (async (
             _session: unknown,
-            options: { initialPrompt?: string; autoAccept?: never },
+            options: { initialPrompt?: string; autoAccept?: never; target?: unknown },
           ) => {
             order.push("tui");
             seen.tui += 1;
+            seen.target = options.target;
             seen.initialPrompt = options.initialPrompt;
             seen.autoAccept = options.autoAccept;
             if (over.tuiThrows) {
@@ -1003,6 +1007,14 @@ describe("cli main: --engine", () => {
         rmSync(join(dir, "config", "sessions"), { recursive: true, force: true });
         return { code, text: out.join(""), seen, calls, order };
       };
+
+      test("tui-target-badge: the runtime's badge is handed to the TUI (laptop-side facts)", async () => {
+        // Mutation: drop `target` from the `startTui` options in `runEngineTui` → undefined.
+        await withEnv(unreachable, async () => {
+          const ok = await interactive([...base]);
+          expect(ok.seen.target).toEqual({ engine: "docker", name: "box" });
+        });
+      });
 
       test("the `still running` line is announced just before the TUI opens, never when setup failed", async () => {
         // Mutation: never call `announce` → order lacks it; call it before the

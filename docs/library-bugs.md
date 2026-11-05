@@ -140,3 +140,43 @@ race it against a short timer and assert on the outcome — the `rejection(p,
 ms)` helper in `packages/daemon/test/integration.test.ts` ("compaction is
 exclusive with a turn"). Existing `.rejects` on promises that always settle
 are unaffected.
+
+---
+
+## Ink — output grid disagrees with `string-width` for single-unit and ZWJ emoji
+
+- **Library:** `ink`
+- **Version in use:** `5.0.1` (`string-width` as bundled by Ink)
+- **Affected:** `5.0.1` (tested; not checked on other versions)
+- **Fixed in:** unknown
+- **Status:** accepted, no workaround (owner, 2026-11-05)
+
+### Symptom
+
+Ink's layout measures a `<Text>` with `string-width`, but its output grid
+writes the text code point by code point. For an emoji that is ONE UTF-16 unit
+and width 2 (`✅ ✨ ⚡`) the layout reserves 2 cells while the grid writes 1 and
+pads, so the row comes out wider than its box. A joined (ZWJ) emoji
+(`👨‍👩‍👧‍👦`) is split per code point, so the cells that follow are overwritten.
+Surrogate-pair emoji (`🚀🔥🎉`) and CJK are fine.
+
+### Repro (isolated, no repo code; a 30-cell row, text then `END`)
+
+```
+ascii   textWidth=6 rowWidth=30 |abcdef                     END|
+cjk     textWidth=6 rowWidth=30 |日本語                     END|
+astral  textWidth=6 rowWidth=30 |🚀🔥🎉                     END|
+bmp     textWidth=6 rowWidth=33 |✅✨⚡                        END|
+zwj     textWidth=6 rowWidth=11 |👨‍👩‍👧‍👦👨‍👩‍👧‍👦👨‍👩END‍👦|
+```
+
+In the status bar (80 columns) a cwd with such emoji gives a 86-cell row
+(`✅✨⚡`) or garbles the max (`👨‍👩‍👧‍👦`).
+
+### Our side
+
+`packages/tui/src/cells.ts` measures and cuts in cells with `string-width` and
+grapheme segmentation — correct. The mismatch is inside Ink's grid. Only text
+the user controls can hit it (the cwd; a link message, a model name): pod and
+container names are ASCII. No workaround (replacing the emoji in the shown
+path would add code for a rare case).

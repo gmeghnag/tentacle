@@ -26,6 +26,7 @@ import {
   type InitializeResult,
   type McpStatusResult,
   Method,
+  type ModelCountTokensResult,
   type ModelPurpose,
   type ModelStreamChunkedResult,
   type ModelStreamResult,
@@ -42,6 +43,8 @@ import {
   type ResolvePermissionParams,
   type ResolvePermissionResult,
   type SendNowParams,
+  type SessionContextParams,
+  type SessionContextResult,
   type SessionListParams,
   type SessionSkillsParams,
   type SessionSkillsResult,
@@ -86,7 +89,8 @@ export interface ConnectionOptions {
 }
 
 /** The two tunnel requests of a model-serving connection (the pod reverse-tunnel). */
-export type ModelLink = Pick<Connection, "requestModelStream" | "requestModelStreamChunked">;
+export type ModelLink = Pick<Connection, "requestModelStream" | "requestModelStreamChunked"> &
+  Partial<Pick<Connection, "requestModelCountTokens">>;
 
 /** One session this connection opened. */
 interface Attached {
@@ -176,6 +180,22 @@ export class Connection {
       .then((result) => result as ModelStreamChunkedResult);
   }
 
+  /**
+   * Ask the connected client to count a request's prompt with its LOCAL
+   * provider, without generating (`model/countTokens`, the pod reverse-tunnel:
+   * the model and its key stay on the laptop). Outbound daemon→client request;
+   * an older client answers `MethodNotFound`. `signal` cancels it (a
+   * `$/cancelRequest` reaches the laptop, which aborts its provider's fetch).
+   */
+  requestModelCountTokens(
+    request: WireChatRequest,
+    signal?: AbortSignal,
+  ): Promise<ModelCountTokensResult> {
+    return this.peer
+      .request(Method.ModelCountTokens, { request }, signal ? { signal } : undefined)
+      .then((result) => result as ModelCountTokensResult);
+  }
+
   private async onRequest(
     method: string,
     params: unknown,
@@ -214,6 +234,8 @@ export class Connection {
         return this.mcpStatus();
       case Method.SessionSkills:
         return this.sessionSkills(params as SessionSkillsParams);
+      case Method.SessionContext:
+        return this.sessionContext(params as SessionContextParams, context?.signal);
       // A read of the registry: does not attach this connection to anything.
       case Method.SessionList:
         return this.host.list(params as SessionListParams);
@@ -234,6 +256,21 @@ export class Connection {
   // like all handlers here (AGENTS §7) — never awaited under a lock.
   private async mcpStatus(): Promise<McpStatusResult> {
     return { servers: [...(await this.host.mcpStatus())] };
+  }
+
+  // The count may take up to its cap (a couple of seconds); like every request
+  // it is concurrent with the others and holds no lock. No session id → the
+  // conversation a session created now would send (the `messages` seed of a
+  // resume, else the fresh one), counted through THIS connection's model link
+  // (a pod daemon reaches the model only through it).
+  private sessionContext(
+    params: SessionContextParams,
+    signal?: AbortSignal,
+  ): Promise<SessionContextResult> {
+    if (params.sessionId === undefined) {
+      return this.host.newSessionContext(this.servesModel ? this : null, signal, params.messages);
+    }
+    return this.lookup(params.sessionId).context(signal);
   }
 
   // A disk scan: concurrent with every other request (AGENTS §7), never under

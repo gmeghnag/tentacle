@@ -16,8 +16,33 @@ those.
   `connection closed`). A binary with a live detached run is never replaced:
   attach says `<name> runs an older tentacle build than this one · tentacle rm
   <name>, then run again`.
+### Added
+
+- **The status bar names where the agent runs.** In a container or pod the
+  left of the bar shows a badge: `docker:<name>`, `podman:<name>`,
+  `kubernetes:<pod>/<container>` (the container is always shown); the prefix
+  is grey and the name keeps the accent colour. A local session shows nothing.
+  The bar stays one row: on a narrow terminal the path shrinks first, then
+  `kubernetes:` becomes `k8s:`, then the badge name is cut in the middle. The
+  scroll hint and `expanded` never cut the name (they are left out instead),
+  and the `ctx` meter always keeps its max.
+- **Context at open.** `ctx` is shown with its max from the start, before any
+  turn: the exact count where the provider can count without generating
+  (Anthropic `count_tokens`; llama.cpp `/apply-template` + `/tokenize`), else
+  an estimate marked `~` (`ctx █░░░░░░░░░ ~7% (~9k/128k)`). It covers the real
+  history on `attach` and `--resume`, refreshes after `/compact`, and the first
+  turn replaces it with the measured figure. `↑ ↓` token totals are hidden until
+  measured. The count is capped at 2 s and falls back to the estimate silently;
+  in a pod run it is made by your laptop, so the model key never leaves it.
 
 ### Changed
+
+- The model name moved from the status bar to the top border of the input
+  field, right-aligned (cut on the left with `…` when too long).
+- `⏵⏵ auto-accept on` in the status bar is now golden yellow (`#fec20a`)
+  instead of cyan; `off` stays grey.
+- A line break in the link-status text no longer gives the status bar a second
+  row, and a cut no longer shows a doubled `…`.
 
 - A model endpoint answering HTTP 500, 502 or 503 before any output is now
   retried like a rate limit (up to 3 attempts, honouring `retry-after`). A 504

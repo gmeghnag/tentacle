@@ -113,13 +113,20 @@ export type WorkloadState =
    * `container`: k8s only — the container to exec into when the user named none
    * and the pod has several (its `default-container` annotation, as kubectl does).
    */
-  | { readonly kind: "ready"; readonly workspace?: string; readonly container?: string }
+  | {
+      readonly kind: "ready";
+      readonly workspace?: string;
+      readonly container?: string;
+      /** k8s: the container the TUI runs in, for the badge (`kubernetes:<pod>/<container>`). */
+      readonly inUse?: string;
+    }
   /** Pulling / restarting: worth a bounded wait. */
   | {
       readonly kind: "starting";
       readonly detail: string;
       readonly workspace?: string;
       readonly container?: string;
+      readonly inUse?: string;
     }
   /** Terminal / not runnable: refuse with `detail` (attach never starts it). */
   | { readonly kind: "stopped"; readonly detail: string };

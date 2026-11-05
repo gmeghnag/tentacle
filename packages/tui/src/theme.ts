@@ -17,6 +17,9 @@ import chalk from "chalk";
  */
 export const accentHex = "#06b6d4";
 
+/** The status bar's `⏵⏵ auto-accept on` (golden yellow; `off` stays dim) — owner, 2026-11-05. */
+export const autoAcceptHex = "#fec20a";
+
 /**
  * User-message rows: a full-width background tint and the grey of a queued
  * one, as RGB triples. `dark` is the default; `light` is the matching tint for

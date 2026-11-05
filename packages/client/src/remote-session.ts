@@ -572,6 +572,29 @@ export class RemoteSession implements SessionStreamListener {
     return this.client.sessionSkills(id ?? undefined);
   }
 
+  /**
+   * The context the daemon counts for this session (`session/context`,
+   * docs/feat/tui-target-badge.md): exact when its provider can count, else an
+   * estimate. Before the first send there is no daemon-side session: the fresh
+   * conversation a session created now would send. While the eager attach is
+   * still opening the session, waits for the id.
+   */
+  async context(): Promise<{ readonly used: number; readonly exact: boolean }> {
+    let id = this.id ?? (this.opening ? await this.opening : null);
+    // An attach not opened yet (the TUI asks before its eager open): open it
+    // first and count THAT history — never a fresh empty conversation. A failed
+    // attach rejects (no figure), it does not fall through.
+    if (id === null && this.attach && this.desiredId !== undefined) {
+      await this.open();
+      id = this.id;
+    }
+    if (id !== null) {
+      return this.client.sessionContext(id);
+    }
+    // A resumed session not opened yet: its seed is what the first prompt sends.
+    return this.client.sessionContext(undefined, this.seedMessages);
+  }
+
   /** Compact the remote conversation (no-op if no session was opened yet). */
   async compact(): Promise<{ before: number; after: number }> {
     if (!this.id) {

@@ -5,7 +5,53 @@
  * heuristic fallback. `ContextManager` decides what fits the budget and when
  * compaction is required; `DefaultContextManager` provides the baseline policy.
  */
-import type { ChatMessage } from "./model.ts";
+import type { ChatMessage, ChatRequest, ModelProvider } from "./model.ts";
+
+/** The bound on any exact token count made for a meter (docs/feat/tui-target-badge.md). */
+export const COUNT_TOKENS_CAP_MS = 2000;
+
+/**
+ * `model.countTokens(request)` under a deadline: the provider's exact count, or
+ * `undefined` when it cannot, fails, is slower than `timeoutMs` or `signal`
+ * aborts — never throws (the caller estimates, silently). The provider's own
+ * signal is aborted on the way out, so a still-pending fetch (or tunnelled
+ * request) is dropped instead of left hanging.
+ */
+export async function countTokensBounded(
+  model: Pick<ModelProvider, "countTokens">,
+  request: ChatRequest,
+  signal?: AbortSignal,
+  timeoutMs: number = COUNT_TOKENS_CAP_MS,
+): Promise<number | undefined> {
+  if (model.countTokens === undefined) {
+    return undefined;
+  }
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), timeoutMs);
+  const stop = (): void => deadline.abort();
+  if (signal?.aborted) {
+    stop();
+  }
+  signal?.addEventListener("abort", stop, { once: true });
+  try {
+    const cut = new Promise<undefined>((resolve) => {
+      deadline.signal.addEventListener("abort", () => resolve(undefined), { once: true });
+      if (deadline.signal.aborted) {
+        resolve(undefined);
+      }
+    });
+    return await Promise.race([
+      model.countTokens({ ...request, signal: deadline.signal }).catch(() => undefined),
+      cut,
+    ]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", stop);
+    deadline.abort();
+  }
+}
 
 export interface TokenCounter {
   readonly id: string;

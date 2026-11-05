@@ -208,6 +208,22 @@ async function rig(
   };
 }
 
+describe("tui-target-badge round 3: a joined run's TUI carries the badge", () => {
+  test("the badge of the attached runtime reaches `joined.runtime.target` (what `runEngineTui` hands to startTui)", async () => {
+    // Mutation: build the joined runtime without the attach's `target` → undefined.
+    const r = await rig();
+    const target = { engine: "docker", name: "tentacle-ba89d072" } as const;
+    const plain = r.deps().attach;
+    const joined = await r.join({
+      attach: async (host, sessions, permissions) => {
+        const runtime = await plain(host, sessions, permissions);
+        return Object.assign(runtime, { target });
+      },
+    });
+    expect(joined.runtime.target).toEqual(target);
+  });
+});
+
 describe("H13 joinRun → finish: one recorded order (docs/feat/detached-handover.md)", () => {
   test("keep=false, the only TUI: presence, runtime, attach, owner, net; quit: lock, use, quit, idle, drain, remove, disarm, purge; presence until the end", async () => {
     // Mutations: delete before `drain`; disarm before the delete; lock released

@@ -63,6 +63,7 @@ import {
   type SendNowMessage,
   type SendNowRefusal,
   type SendNowTarget,
+  type SessionContextResult,
   type SessionSkillsResult,
   type SessionTitle,
   type SessionUpdate,
@@ -1092,6 +1093,15 @@ export class HostedSession {
    */
   async skills(): Promise<SessionSkillsResult> {
     return toSessionSkills(await this.session.refreshSkills());
+  }
+
+  /**
+   * `session/context` (docs/feat/tui-target-badge.md): the context this session
+   * would send now — the provider's exact count when it can, else an estimate.
+   * Never throws, bounded; mid-turn or idle alike, no lock.
+   */
+  context(signal?: AbortSignal): Promise<SessionContextResult> {
+    return this.session.contextUsage(signal);
   }
 
   /**

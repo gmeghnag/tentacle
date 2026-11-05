@@ -141,6 +141,17 @@ export class Session {
   }
 
   /**
+   * The context this session would send now, counted by the provider when it
+   * can (exact) or estimated (`Agent.contextUsage`): never throws, bounded.
+   */
+  contextUsage(
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<{ readonly used: number; readonly exact: boolean }> {
+    return this.agent.contextUsage(this.messages, signal, timeoutMs);
+  }
+
+  /**
    * Continue the turn the history is suspended in, before tool call
    * `toolCallId` (a `serve` restart rebuilt it): that call and the rest of its
    * round go through the permission gate again, then the loop goes on as

@@ -28,6 +28,7 @@ import type { SessionRecord } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import type { ModelProvider, PermissionBroker } from "@tentacle/core";
 import type { DuplexChannel } from "@tentacle/transport";
+import type { TargetBadge } from "@tentacle/tui";
 import {
   containerDecision,
   expectedContainerBuild,
@@ -48,6 +49,7 @@ import {
   WorkloadRemovedError,
   type WorkloadState,
 } from "./engine-host.ts";
+import { engineTarget } from "./engine-target.ts";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { configuredModelProvider } from "./model-provider.ts";
 import {
@@ -123,6 +125,8 @@ export function laptopModels(config: TentacleConfig): {
 
 /** A started runtime; `markFault` reports a failure only the caller sees (the TUI throwing). */
 export type EngineRuntime = LocalRuntime & {
+  /** The status bar's badge: engine + workload (+ container), laptop-side facts. */
+  readonly target?: TargetBadge;
   readonly markFault?: () => void;
   /**
    * Say `<name> still running · tentacle attach <name>` (a kept run): the caller
@@ -647,7 +651,13 @@ export async function startEngineRuntime(
       ...(deps.notify ? { notify: deps.notify } : {}),
     });
     fault.watch(runtime);
-    return Object.assign(runtime, { markFault: fault.mark, announce });
+    // A tentacle-made pod's container is `host.defaultContainer` (k8s: always
+    // shown as `/container`); docker/podman have none.
+    return Object.assign(runtime, {
+      markFault: fault.mark,
+      announce,
+      target: engineTarget(host, name, host.defaultContainer),
+    });
   } catch (error) {
     // The TUI never mounted: the caller prints ONE short line; the whole cause
     // is in the log, whose path rides on the error.
@@ -1038,7 +1048,10 @@ export async function attachEngineRuntime(
       ...(deps.shared ? { shared: true as const } : {}),
     });
     fault.watch(runtime);
-    return Object.assign(runtime, { markFault: fault.mark });
+    return Object.assign(runtime, {
+      markFault: fault.mark,
+      target: engineTarget(host, name, state.inUse),
+    });
   } catch (error) {
     status?.finish();
     // NO delete here: the workload is not ours. The injection's own messages

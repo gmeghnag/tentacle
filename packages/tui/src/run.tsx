@@ -12,6 +12,7 @@ import {
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { messagesToItems } from "./resume.ts";
+import type { TargetBadge } from "./target-view.ts";
 import {
   ENTER_FULLSCREEN,
   LEAVE_FULLSCREEN,
@@ -23,6 +24,8 @@ export interface TuiOptions {
   readonly model: string;
   readonly cwd: string;
   readonly contextWindow?: number;
+  /** In a container/pod: the status bar's badge (`engine-runtime`'s laptop-side facts). */
+  readonly target?: TargetBadge;
   readonly permissions?: PermissionBroker;
   /** Background-job registry; the TUI surfaces job exits live when present. */
   readonly jobs?: JobController;
@@ -87,6 +90,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       model={options.model}
       cwd={options.cwd}
       {...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {})}
+      {...(options.target ? { target: options.target } : {})}
       {...(options.permissions ? { permissions: options.permissions } : {})}
       {...(options.jobs ? { jobs: options.jobs } : {})}
       {...(options.autoWakeOnJobExit !== undefined

@@ -202,6 +202,19 @@ const FIXTURES: Record<string, Json[]> = {
     { idleTtlMs: "never", persisted: false },
     { idleTtlMs: 86400000, persisted: false },
   ],
+  "methods/session~1context/params": [
+    {},
+    { sessionId: "s" },
+    { messages: [{ role: "user", content: "hi" }] },
+  ],
+  "methods/session~1context/result": [
+    { used: 0, exact: false },
+    { used: 9000, exact: true },
+  ],
+  "methods/model~1countTokens/params": [
+    { request: { messages: [{ role: "user", content: "hi" }] } },
+  ],
+  "methods/model~1countTokens/result": [{}, { tokens: 0 }, { tokens: 1234 }],
   "methods/session~1skills/params": [{}, { sessionId: "s" }],
   "methods/session~1skills/result": [
     { slash: [], skills: [], problems: [], moreProblems: 0 },

@@ -389,6 +389,15 @@ export function tunnelledAgent(
     new ProxyModelProvider(
       (request) => ready().requestModelStream(request, purpose),
       (request, handlers) => ready().requestModelStreamChunked(request, handlers, purpose),
+      // The exact context count at open is the LAPTOP's (the model and its key
+      // stay there); an older link without it → the estimate.
+      (request, signal) => {
+        const connection = ready();
+        if (!connection.requestModelCountTokens) {
+          return Promise.resolve({});
+        }
+        return connection.requestModelCountTokens(request, signal);
+      },
     );
   return buildAgent(
     {

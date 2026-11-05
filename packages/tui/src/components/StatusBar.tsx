@@ -1,20 +1,13 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
-import { formatTokens } from "../format.ts";
 import type { LinkIndicator } from "../link-status.ts";
 import type { TokenTotals } from "../state.ts";
-import { accentHex } from "../theme.ts";
-
-function shortCwd(cwd: string): string {
-  const home = process.env.HOME;
-  const path = home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
-  return path.length > 40 ? `…${path.slice(-39)}` : path;
-}
+import { METER_WIDTH, contextMeterView, statusLayout } from "../status-line.ts";
+import type { TargetBadge } from "../target-view.ts";
+import { accentHex, autoAcceptHex } from "../theme.ts";
 
 // The compact count lives in the pure `format.ts`; re-exported for callers.
 export { formatTokens } from "../format.ts";
-
-const METER_WIDTH = 10;
 
 function meterColor(fraction: number): string {
   if (fraction >= 0.9) {
@@ -27,36 +20,45 @@ function meterColor(fraction: number): string {
 }
 
 /**
- * A fixed-width context-fill meter: `ctx ████░░░░░░ 42% (54k/128k)`; `ctx –`
- * when nothing was measured yet (`used` null, `status-view.ts`).
+ * A fixed-width context-fill meter: `ctx ████░░░░░░ 42% (54k/128k)`; an
+ * estimate (no turn measured yet) reads `ctx █░░░░░░░░░ ~7% (~9k/128k)`; an
+ * unknown fill reads `ctx –/128k`; `compact` drops the bar on a short line. The
+ * figures come from `contextMeterView` (pure); the max is always there.
  */
 export function ContextMeter({
   used,
   window,
-}: { used: number | null; window: number }): ReactElement {
-  if (used === null) {
-    return <Text dimColor>ctx –</Text>;
+  approx = false,
+  compact = false,
+}: {
+  used: number | null;
+  window: number;
+  approx?: boolean;
+  compact?: boolean;
+}): ReactElement {
+  const view = contextMeterView(used, approx, window);
+  if (view.kind === "unknown") {
+    return <Text dimColor>ctx –/{view.max}</Text>;
   }
-  const fraction = window > 0 ? Math.min(1, Math.max(0, used / window)) : 0;
-  const filled = Math.round(fraction * METER_WIDTH);
-  const bar = "█".repeat(filled) + "░".repeat(METER_WIDTH - filled);
+  const bar = "█".repeat(view.filled) + "░".repeat(METER_WIDTH - view.filled);
   return (
     <Text>
       <Text dimColor>ctx </Text>
-      <Text color={meterColor(fraction)}>{bar}</Text>
+      {compact ? null : <Text color={meterColor(view.fraction)}>{bar}</Text>}
       <Text dimColor>
-        {" "}
-        {Math.round(fraction * 100)}% ({formatTokens(used)}/{formatTokens(window)})
+        {compact ? "" : " "}
+        {view.percent} ({view.used}/{view.max})
       </Text>
     </Text>
   );
 }
 
 export function StatusBar({
-  model,
   cwd,
+  target = null,
   tokens,
   contextTokens,
+  contextApprox = false,
   contextWindow,
   columns = 80,
   scrolledUp = false,
@@ -65,12 +67,15 @@ export function StatusBar({
   autoApprove = false,
   link = null,
 }: {
-  model: string;
   cwd: string;
-  /** `null`: not measured yet, shown `↑– ↓–`. */
+  /** In a container/pod: the accent badge at the left, never cut unless it alone does not fit. */
+  target?: TargetBadge | null;
+  /** `null`: not measured yet by this TUI — `↑ ↓` are hidden. */
   tokens: TokenTotals | null;
-  /** `null`: not measured yet, shown `ctx –`. */
+  /** `null`: nothing known yet, shown `ctx –/max`. */
   contextTokens: number | null;
+  /** The figure is an estimate (no turn measured yet): shown with `~`. */
+  contextApprox?: boolean;
   contextWindow: number;
   columns?: number;
   scrolledUp?: boolean;
@@ -80,56 +85,73 @@ export function StatusBar({
   /** The link's state when it is not up ("reconnecting…", "disconnected: …"). */
   link?: LinkIndicator | null;
 }): ReactElement {
-  // One line: workspace + tokens + context meter on the left (truncated, never
-  // wrapped); the auto-accept mode indicator (always shown, so the keybind is
-  // discoverable) and the model name pinned right.
+  const width = Math.max(10, columns);
+  const hintText = autoApprove ? " ⏵⏵ auto-accept on " : " ⏵⏵ auto-accept off (shift+tab) ";
+  const suffix = scrolledUp
+    ? ` · ↑${hiddenAbove} more (↓ to follow)`
+    : expandAll
+      ? " · expanded"
+      : "";
+  const meter = contextMeterView(contextTokens, contextApprox, contextWindow);
+  // What is shown, and what gives way on a short line, is decided in the pure
+  // `statusLayout` (the bar stays ONE row); this component only paints it.
+  const layout = statusLayout({
+    columns: width,
+    linkText: link?.text ?? null,
+    target,
+    cwd,
+    home: process.env.HOME,
+    tokens,
+    meter,
+    hint: hintText,
+    suffix,
+  });
+  const lead = [layout.path, layout.tokens].filter((p): p is string => p !== null && p !== "");
   return (
-    <Box width={Math.max(10, columns)}>
+    <Box width={width}>
       {/* The link state first, as a SIBLING box: nested in the truncated Text
           below it kept the first render's width (docs/library-bugs.md, Ink
-          nested-Text mis-measure). Capped so the line keeps some context. */}
-      {link ? (
-        <Box
-          flexShrink={0}
-          width={Math.min(link.text.length + 3, Math.max(10, Math.floor(columns * 0.7)))}
-        >
-          <Text color={link.tone === "error" ? "red" : "yellow"} wrap="truncate-end">
-            {`${link.text} · `}
-          </Text>
+          nested-Text mis-measure). */}
+      {link && layout.link !== "" ? (
+        <Box flexShrink={0} width={layout.linkCells}>
+          {/* The layout's own text (cut with `…`, with its separator): what
+              `plain` says is what is painted. */}
+          <Text color={link.tone === "error" ? "red" : "yellow"}>{layout.link}</Text>
+        </Box>
+      ) : null}
+      {layout.badge !== null ? (
+        <Box flexShrink={0}>
+          {/* Prefix (colon included) grey, the name in the accent colour. */}
+          <Text dimColor>{layout.badgePrefix}</Text>
+          <Text color={accentHex}>{layout.badge.slice(layout.badgePrefix.length)}</Text>
+          <Text dimColor>{" · "}</Text>
         </Box>
       ) : null}
       <Box flexGrow={1} flexShrink={1} minWidth={0}>
         <Text wrap="truncate-end">
-          <Text dimColor>
-            {`${shortCwd(cwd)} · ↑${tokens ? formatTokens(tokens.prompt) : "–"} ↓${tokens ? formatTokens(tokens.completion) : "–"} · `}
-          </Text>
-          <ContextMeter used={contextTokens} window={contextWindow} />
-          {scrolledUp ? (
-            <Text color="yellow"> · ↑{hiddenAbove} more (↓ to follow)</Text>
-          ) : expandAll ? (
-            <Text dimColor> · expanded</Text>
-          ) : null}
+          {lead.length > 0 ? <Text dimColor>{`${lead.join(" · ")} · `}</Text> : null}
+          <ContextMeter
+            used={contextTokens}
+            window={contextWindow}
+            approx={contextApprox}
+            compact={layout.compact}
+          />
+          {layout.suffix === "" ? null : scrolledUp ? (
+            <Text color="yellow">{layout.suffix}</Text>
+          ) : (
+            <Text dimColor>{layout.suffix}</Text>
+          )}
         </Text>
       </Box>
-      {/* The mode indicator yields space before the model name: on a narrow
-          line the hint truncates, the model id stays readable. */}
-      <Box flexShrink={1} minWidth={0}>
-        {autoApprove ? (
-          <Text color={accentHex} wrap="truncate-end">
-            {" ⏵⏵ auto-accept on "}
-          </Text>
-        ) : (
-          <Text dimColor wrap="truncate-end">
-            {" ⏵⏵ auto-accept off (shift+tab) "}
-          </Text>
-        )}
-      </Box>
-      <Box flexShrink={0}>
-        <Text dimColor wrap="truncate-end">
-          {" "}
-          {model}
-        </Text>
-      </Box>
+      {layout.hint !== null ? (
+        <Box flexShrink={0}>
+          {autoApprove ? (
+            <Text color={autoAcceptHex}>{layout.hint}</Text>
+          ) : (
+            <Text dimColor>{layout.hint}</Text>
+          )}
+        </Box>
+      ) : null}
     </Box>
   );
 }

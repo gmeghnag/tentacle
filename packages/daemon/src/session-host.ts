@@ -19,6 +19,7 @@ import {
   JsonRpcErrorCode,
   type McpServerStatus,
   type OpenParams,
+  type SessionContextResult,
   type SessionListParams,
   type SessionListResult,
   type SessionSkillsResult,
@@ -127,6 +128,12 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    */
   readonly mcpStatus?: () => Promise<readonly McpServerStatus[]>;
   /**
+   * Whether every tool this daemon will offer is already listed (the worker's
+   * MCP servers finished connecting). `false`: a count of a fresh conversation
+   * may lack tools, so it is shown as an estimate. Absent → always complete.
+   */
+  readonly toolsReady?: () => boolean;
+  /**
    * This daemon's tentacle version and kind, injected by the cli (the daemon
    * cannot import `APP_VERSION`): it words a `VersionMismatch`. Absent → the
    * refusal names only the protocol on the daemon side.
@@ -227,6 +234,35 @@ export class SessionHost {
    */
   async newSessionSkills(): Promise<SessionSkillsResult> {
     return toSessionSkills((await this.opts.newSessionSkills?.()) ?? EMPTY_SKILL_LISTING);
+  }
+
+  /**
+   * `session/context` with no session: the context a session created now would
+   * send (system prompt + tools), counted like a live one's. The same
+   * `createAgent` factory builds a throwaway agent (its jobs are disposed at
+   * once; nothing is hosted or listed). `link`: the asking connection when it
+   * serves the model (a pod daemon counts through the laptop); none → null.
+   */
+  async newSessionContext(
+    link: ModelLink | null,
+    signal?: AbortSignal,
+    seed?: readonly ChatMessage[],
+  ): Promise<SessionContextResult> {
+    const { agent, jobs } = this.opts.createAgent(this.opts.defaultCwd, { modelLink: () => link });
+    // Read in the same stretch as the agent's tool list is built.
+    const complete = this.opts.toolsReady?.() ?? true;
+    try {
+      // A seed (a resumed session not opened yet) is counted as `build` would
+      // make it: the history as it is; none → the fresh conversation.
+      const session =
+        seed && seed.length > 0
+          ? new Session(agent, "context-probe", { messages: seed })
+          : new Session(agent, "context-probe");
+      const usage = await session.contextUsage(signal);
+      return complete ? usage : { used: usage.used, exact: false };
+    } finally {
+      jobs?.dispose();
+    }
   }
 
   /**

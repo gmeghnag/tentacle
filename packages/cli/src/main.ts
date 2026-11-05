@@ -827,6 +827,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             model: config.model,
             cwd: config.cwd,
             contextWindow: config.contextWindow,
+            // The status bar's badge: from this laptop's engine host, never the pod.
+            ...(runtime.target ? { target: runtime.target } : {}),
             permissions,
             jobs: runtime.jobs,
             autoWakeOnJobExit: config.autoWake,
