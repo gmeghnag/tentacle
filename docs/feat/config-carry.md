@@ -1,6 +1,6 @@
 # feat/config-carry — the laptop carries its settings into a pod via `session/open.settings`
 
-> **Status:** reviewed (PASS, LOW only); owner live check pending
+> **Status:** round 2 reviewed (PASS, LOW only); live round-2 notices PASS; merge pending the owner's OK
 > **Branch:** `feat/config-carry`
 > **Type:** feat · **Size:** L · **Blast:** load-bearing · **Suited:** AGENTS §10's `load-bearing` rule, with a mandatory fresh-context Review; the owner assigns the executor
 
@@ -871,3 +871,118 @@ The executor was honest and thorough. It listed every drift with a reason: the u
 
 1. **Finding 1: skip the inline description check under `podDaemon` too?** **Recommendation: no fix round now** (LOW only, beta rule). Note it for `feat/parallel-agents` (task 7), which touches the description anyway: a one-line `readFromFile`-style guard on the inline branch.
 2. **Same-model review on a load-bearing task.** Executor and reviewer are both claude-opus-5-5. **Recommendation: accept**, and treat the Execution's live checklist as the independent check: at least items 1 (docker `run`), 3 (container's own config + notice), 4 (drift notice once) and 6 (v15 resident replaced). Run them *before* merge (beta: early live).
+
+### Review — round 2
+
+*— claude-opus-5-5, 2026-11-05*
+
+**Verdict: APPROVE-WITH-NITS → PASS** (LOW only). Scope: `git diff 1b93bfe..fda2395`. This is a fresh
+context, but the **same model as the executor**, so blind spots the two passes share can survive.
+The orchestrator's live round-2 checks (`live/results.md`: drift notice on a first `attach --profile p`
+and the container notice in the new format, both PASS) are the independent angle.
+
+#### Findings
+
+1. **LOW (cosmetic): the "wins over yours" notice can name a value equal to yours.**
+   `overridden` is computed at create time against the *creator's* `carried`. `settingsNotices`
+   (`packages/cli/src/carried-settings.ts`, the `overridden` filter) shows every key in it without
+   comparing it to `mine`. Trace (`.tentacle/tmp/config-carry/trace-r2.test.ts`): the session was
+   created with `maxIterations: 3`, the pod keeps `7`, and this laptop now has `7`. The notice is
+   `This container's own config wins over yours for this session:` / `{ "maxIterations": 7 }`. The
+   statement is true, but nothing differs from the user's value, and the owner's rule is "only what
+   differs". The fix is one condition (`report.overridden[key] !== mine[key]`) plus one test row.
+2. **LOW (pre-existing shape, now on one more path):** the plain attach now awaits `session/open`
+   before the TUI mounts (`packages/cli/src/main.ts:1549-1551`). No `requestTimeoutMs` is set
+   anywhere in `packages/*/src`. So a daemon that keeps the link up but never answers the open now
+   hangs *before* mount, where before it hung at the first send. The join path
+   (`attach-run.ts:355`) already behaves this way, and a dead link rejects (→ lazy). I did not
+   exercise this. A bounded open for both paths could go with any later attach task.
+
+Round-1 finding 1 is **resolved** by F4. Round-1 finding 2 (`sources.agentTaskDescription` shows
+`default` for a File-only pod) is unchanged and still cosmetic.
+
+#### Gate (once, foreground, on `fda2395`)
+
+`bunx tsc --noEmit`: clean. `bunx biome check .`: 655 files, clean. `bun test packages`:
+**4738 pass, 3 skip (the opt-in ones), 0 fail**, 4741 tests across 318 files. These are the same
+counts as Execution. The reaper GC flake did not occur. `tsc -p apps/mobile` was not run, as
+instructed.
+
+#### Mutations (§9)
+
+`carried-settings.ts` and `load.ts` were copied to `.tentacle/tmp/config-carry/bak-r2/`. Each
+mutation was applied alone and restored by `cp`. Afterwards `shasum` matched the backups
+(`70dfce3c…`, `e93a00ac…`) and `git status` was clean.
+
+| # | Mutation | Result |
+|---|---|---|
+| E1 (exec) | `shown()` returns `String(value)` for a non-enum string | **1 red**: "any text is hidden, in either notice" |
+| E2 (exec) | the `podDaemon` drop is removed from the inline-description `catch` | **1 red**: "an invalid inline description never fails the load" |
+| M3 (mine) | `valuesLine` prints the wire key instead of `configKey` (no dotted names) | **6 red** (`carried-settings.test.ts` + `settings-notice-attach.test.ts`, run together), e.g. "a key the pod overrode is told once" |
+
+#### Red-team (the 5 asked)
+
+1. **Plain attach (`main.ts:1545-1556`).** It runs only when `sessions.resume !== null`. If
+   `attachTo` returns false (`UnknownSession`) or throws, the `.catch(() => false)` makes the
+   session lazy from the record (`resume` kept). `attachTo` removes and closes its controller
+   *before* it touches `seed`/`firstId` (`local-runtime.ts:706-724`), so the seed is intact. The
+   one await after that point, `written()`, cannot reject: `saver.drain` races settled promises
+   against a timer (`session-saver.ts:91-99`, `:171-190`). **No double open:** on success,
+   `createSession` hands out the attached controller once (`local-runtime.ts:645-650`).
+   **No history drawn twice:** `resume: null` when live, pinned by "opened at the attach" (the
+   executor's mutation). **No raw write:** the error is swallowed, and the notice goes through
+   `deps.notify` → `sessions.notices`, which buffers until the TUI subscribes. **Single broker:**
+   the same `permissions` goes to `attachEngineRuntime` and `runEngineTui`. A live turn's re-raised
+   ask is held by `holdUntilSet: true` until the TUI mounts. This is the same sequence as the join
+   path (`attach-run.ts:355`). Holds, except finding 2.
+2. **`overridden` carries pod values.** `SessionSettingsReportSchema.overridden` is
+   `SessionSettingsSchema`, a strip object with every field bounded (`session.ts:449-485`).
+   Trace through the real schema: an unknown key `evil` is stripped, and `1e999` (JSON.parse →
+   `Infinity`) is rejected by `.int()`, which fails that open only. The only strings on the wire
+   are the description and two `ExecutionModeSchema` enums. `shown()` masks the description
+   always and any non-enum string. Trace: a pod's `"\u001b[31mpwn"` description is printed as
+   `"(text differs)"`, with no ESC in the output. Keys are printed from the laptop's own table
+   (`CARRIED[key].configKey`). **No bump needed:** `main` is at `PROTOCOL_VERSION = 15`, the
+   newest tag `v0.2.0` predates it, `git log -S"PROTOCOL_VERSION = 16"` hits only `5f721cb` (this
+   branch), and no remote branch contains it. The orchestrator's round-1 test residents carry v16
+   with the old shape, but the build-id check (`container-version.ts:52`) replaces them, as the
+   live `cc-t2` "daemon replaced" shows. Holds.
+3. **F4 (`load.ts:446-458`).** Under `podDaemon`, an invalid inline text (empty or over 4096 B)
+   becomes `undefined`. A valid one is kept, so a bare open still has the pod's inline text. The
+   File is never read. Off `podDaemon`, the error is rethrown. The `catch` can only see a
+   `ConfigError` from `check`. The laptop always overrides it: with `settings` present the
+   description is P, and an absent key gives the neutral default (round 1, T21). E2 pins the drop.
+   Holds.
+4. **Notice format.** The owner's text is exact (`carried-settings.ts` `settingsNotices`, the
+   test constants `WINS`/`KEEPS`): one line of JSON per notice, dotted config names (M3 pins
+   them), only differing keys in the drift notice, and an overridden key told once with its
+   winning value. The TUI adds the indent (`render-lines.ts:587-593`). I did not check the indent in a frame or
+   in `t4.raw`; the live log shows the two lines. Finding 1 is the one place where a value that does not differ is shown.
+5. **Mutations.** 3 of 3 went red (above).
+
+#### Attacks that found nothing
+
+- A forged `overridden` with `__proto__` / `constructor` / unknown names: stripped, so no notice
+  (pinned by "names this laptop's table does not know are dropped").
+- A huge or non-integer number in a report: rejected by the schema.
+- The non-TTY REPL path: untouched by the change.
+- `--resume` naming a session that is not live: lazy, with one record draw ("stays lazy" test).
+- A drifted key absent from `report.carried` is skipped, except the description, which is masked
+  either way: accepted drift 3.
+
+#### How the executor behaved
+
+The executor was honest. It reproduced F1 before fixing it, showed `main.test.ts` red, and
+separated what it observed from what it inferred about the live `cc-t1`/`cc-t2` cases. That
+inference was later confirmed by `cc-t4` live. It declared F4's wider-than-asked shape, and the
+hand-edited `protocol.json` again. Its 6 mutations reproduce: I re-ran 2 of them.
+
+#### Owner questions (all at once)
+
+1. **Finding 1 (a "wins" value equal to yours).** **Recommendation: no fix round** (LOW only,
+   beta rule). Fold the one-condition fix into `pod-laptop-only-notice`, the next task, which
+   touches the notices anyway.
+2. **Merge.** Live items 1–4 and 6 PASS (round 2 reran 3 and 4). Items 5 (detached resident, no
+   notice with the same config), 7 (`connect`) and 8 (failing pod `apiKeyCommand`) were not run
+   live. 7 and 8 are pinned by tests. **Recommendation: merge now.** Run item 5 at the next live
+   session, then `tentacle rm cc-t1 cc-t2 cc-t4 cc-v15`.
