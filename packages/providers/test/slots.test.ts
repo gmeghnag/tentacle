@@ -91,6 +91,18 @@ describe("OpenAIProvider.slots", () => {
     expect(seen.length).toBe(2);
   });
 
+  test.each([[401], [403], [408], [429]])(
+    "a %p (a transient refusal) is not memoized: the next fan-out reads the slots",
+    async (refusal) => {
+      let status = refusal;
+      const { p, seen } = provider(async () => new Response('{"total_slots":2}', { status }));
+      expect(await p.slots()).toBeUndefined();
+      status = 200;
+      expect(await p.slots()).toBe(2);
+      expect(seen.length).toBe(2);
+    },
+  );
+
   test("a network failure is not memoized, and never rejects", async () => {
     let fail = true;
     const { p, seen } = provider(async () => {

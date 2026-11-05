@@ -152,9 +152,10 @@ export class OpenAIProvider implements ModelProvider {
 
   /**
    * llama.cpp's parallel slots, from `GET <root>/props` (`total_slots`), for the
-   * sub-agents' cap (docs/feat/parallel-agents.md, Design 6). Any answer — a
-   * number, garbage, a 404 from another server — is kept for this instance; a
-   * timeout, a network failure or a 5xx (a server still loading) is not. Never
+   * sub-agents' cap (docs/feat/parallel-agents.md, Design 6). Only a successful
+   * answer (a number, or a well-formed one without `total_slots`) and a 404
+   * (another server) are kept for this instance; any other non-2xx (401, 403,
+   * 408, 429, 5xx), a timeout or a network failure is retried next time. Never
    * rejects: no answer is `undefined`.
    */
   async slots(signal?: AbortSignal): Promise<number | undefined> {
@@ -180,10 +181,14 @@ export class OpenAIProvider implements ModelProvider {
         redirect: "error",
         signal: deadline.signal,
       });
-      if (res.status >= 500) {
+      if (res.status === 404) {
+        this.knownSlots = { value: undefined };
         return undefined;
       }
-      const value = res.ok ? parseSlots(await res.json().catch(() => null)) : undefined;
+      if (!res.ok) {
+        return undefined;
+      }
+      const value = parseSlots(await res.json().catch(() => null));
       this.knownSlots = { value };
       return value;
     } catch {

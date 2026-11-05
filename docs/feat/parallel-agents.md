@@ -559,7 +559,7 @@ channel-pair pod harness of `cli/test/model-proxy.test.ts` (config-carry's end-t
 - **T-E3:** cap 2, 3 agents → never 3 running; the third is `queued`, then `running`.
 - **T-E4:** independence: `tools: sequential` + `agents: parallel` and the reverse; `tools: read-only` never puts an `explore` with an `fs_read`.
 - **T-E5:** one child fails, siblings finish; Esc mid-group with an ask live: every id answered once, no start after abort.
-- **T-D1 (S3, real daemon + persister):** during a child's ask, the record has `inFlight` + `pending` `resumable:false`; a reload closes with sub-agent note / "Interrupted" and re-runs nothing. Mutation: `origin: "call"` in the wrapper → red.
+- **T-D1 (S3, real daemon + persister):** during a child's ask, the record has `inFlight` + `pending` `resumable:false`; a reload closes with sub-agent note / "Interrupted" and re-runs nothing. Two guards keep the entry non-resumable: the origin, and the asked tool's name (a child's ask names the child's tool, never `agent_task`). Mutation: `origin: "call"` + `classifyPending` without the name check → red (`origin: "call"` alone survives here).
 - **T-D2:** `NoInFlightStore`: children one at a time, a commit each. Mutation: ignore the boolean → red.
 - **T-D3 (task 4's limit):** an ask live while a sibling finished: the cut has not moved; a fresh attach re-offers it; a second client's answer works. Mutation: commit per call in 2a → red.
 - **T-D4:** the ask's attribution: each wire `toolCallId` is its own `agent_task`; a single daemon-side broker, by the existing separate-broker spy (`wiring.test.ts`).
@@ -704,6 +704,21 @@ is empty.
 7. **Esc** during a group with a dialog open denies that ask; again with no dialog cancels the turn:
    every row settles, and no agent starts afterwards.
 
+### Round 2
+
+Findings 2 and 4 of the Review (orchestrator decision Q2); 1, 3, 5 go to `TODO.md`.
+
+- **Finding 2:** `openai-provider.ts` `slots()` now memoizes only a 2xx answer (a number, or a
+  well-formed one without `total_slots`) and a 404. Any other non-2xx (401/403/408/429, 5xx) and network
+  errors return `undefined` unmemoized, so the next fan-out asks again (still bounded by the timeouts).
+  Test in `providers/test/slots.test.ts`: 401/403/408/429, then 200 → second call reads 2. Red before
+  the fix (4 fail), green after. Mutation (memoize every non-5xx again): 5 red; reverted.
+- **Finding 4:** the T-D1 comment (`daemon/test/parallel-agents.test.ts`) and the plan's T-D1 row now name
+  the real guards (origin + the asked tool's name) and the mutation that does fail it.
+- **Gate:** `bunx tsc --noEmit`, `bunx biome check .`, `bun test packages`: see the final report.
+
+*— claude-sonnet-5-5, 2026-11-06*
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-06*
@@ -827,3 +842,5 @@ the memo in finding 2 went unreported. The planned live test was skipped and sai
   failing closed would make a type naming a stale tool run alone for good.
 
 *Orchestrator note, 2026-11-06:* drift 2 verified live — `GET http://192.168.1.17:8080/props` (with the configured key) answers `"total_slots":1`, `"n_ctx":174080`: the parser's field name is right, and on the owner's local endpoint the effective cap is 1 (children run one at a time). `bun run schema:export` re-run by the orchestrator: no diff with the hand-edited `protocol.json`.
+
+*Orchestrator decisions (owner delegation 2026-11-06):* Q1 — merge only after the orchestrator's own live smoke run on the owner's endpoint (one slot: sequential children, real model, docker); the `-np 2` fan-out + permission-flow checklist goes to `TODO.md`. Q2 — fix findings 2 and 4 now (round 2); findings 1, 3, 5 → `TODO.md`. Q3 — leave it (plan's choice).

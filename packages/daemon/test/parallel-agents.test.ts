@@ -215,7 +215,9 @@ const toolRows = (record: DaemonSessionRecord): string[] =>
 
 describe("a sub-agent's ask during a group", () => {
   test("T-D1 inFlight + pending resumable:false on disk; a reload closes and re-runs nothing", async () => {
-    // Mutation: `origin: "call"` in `subagentRequester` → the entry reads resumable.
+    // What keeps the entry non-resumable: `classifyPending` wants the origin AND the asking call
+    // named as asked, and a child's ask names the child's tool, never `agent_task`. Mutation:
+    // `origin: "call"` alone survives here; with `classifyPending`'s name check removed too → red.
     const model = new TreeModel([spawn("c1", "asks"), spawn("c2", "two"), { type: "done" }]);
     model.gates.set("two", Promise.withResolvers<void>());
     const r = rig(model);
