@@ -377,7 +377,14 @@ export function transcriptToMarkdown(items: readonly DisplayItem[]): string {
     } else if (item.kind === "notice") {
       parts.push(`> ${item.text}`);
     } else {
-      const status = item.status === "ok" ? "✔" : item.status === "error" ? "✘" : "⟳";
+      const status =
+        item.status === "ok"
+          ? "✔"
+          : item.status === "error"
+            ? "✘"
+            : item.status === "queued"
+              ? "◌ queued"
+              : "⟳";
       const lines = [`### Tool ${status} \`${item.name}\``, "", "```", item.args, "```"];
       if (item.detail?.kind === "diff") {
         lines.push("", "```diff", item.detail.patch.replace(/\n+$/, ""), "```");

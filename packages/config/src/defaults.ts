@@ -43,6 +43,10 @@ export const DEFAULT_SUMMARIZE_LARGE_OUTPUT = false;
 export const DEFAULT_DEDUP_OUTPUT = true;
 /** Rendering JSON arrays as tables is off by default (opinionated). */
 export const DEFAULT_TABULATE_JSON = false;
+/** A round's read-class tool calls run together; writes and shell alone (docs/feat/parallel-tools.md). */
+export const DEFAULT_TOOL_EXECUTION = "read-only";
+/** At most this many calls of a round at once. */
+export const DEFAULT_TOOL_MAX_PARALLEL = 8;
 export const PROMPT_FILENAME = "PROMPT.md";
 export const CONFIG_FILENAME = "config.jsonc";
 /**
@@ -185,7 +189,12 @@ export const DEFAULT_CONFIG_JSONC = `{
   //    preview (full output still spilled to a file). Costs a model call; off by default.
   //  - dedupOutput: collapse runs of identical consecutive lines (log spam). On by default.
   //  - tabulateJson: render a JSON array-of-objects result as a compact table. Off by default.
-  // "tools": { "maxInlineOutputChars": ${DEFAULT_MAX_INLINE_OUTPUT_CHARS}, "redactSecrets": ${DEFAULT_REDACT_SECRETS}, "summarizeLargeOutput": ${DEFAULT_SUMMARIZE_LARGE_OUTPUT}, "dedupOutput": ${DEFAULT_DEDUP_OUTPUT}, "tabulateJson": ${DEFAULT_TABULATE_JSON} },
+  //  - execution: how a round's tool calls may overlap — "sequential", "read-only"
+  //    (default: reads such as fs_read and read-only MCP tools together; writes and
+  //    shell one at a time) or "parallel" (any calls on different files/resources).
+  //    Env: TENTACLE_TOOL_EXECUTION. maxParallel: at most this many at once
+  //    (env TENTACLE_TOOL_MAX_PARALLEL; 1 = sequential).
+  // "tools": { "maxInlineOutputChars": ${DEFAULT_MAX_INLINE_OUTPUT_CHARS}, "redactSecrets": ${DEFAULT_REDACT_SECRETS}, "summarizeLargeOutput": ${DEFAULT_SUMMARIZE_LARGE_OUTPUT}, "dedupOutput": ${DEFAULT_DEDUP_OUTPUT}, "tabulateJson": ${DEFAULT_TABULATE_JSON}, "execution": "${DEFAULT_TOOL_EXECUTION}", "maxParallel": ${DEFAULT_TOOL_MAX_PARALLEL} },
 
   // Named profiles, applied with \`--profile <name>\` on the command that starts the
   // session (\`tentacle --profile <name>\`, \`tentacle run … --profile <name>\`,

@@ -117,7 +117,7 @@ export async function connectServer(
   }
   try {
     const defs = await withTimeout(client.listTools(), timeout, `MCP server "${name}" tools/list`);
-    const tools = defs.map((def) => mcpToolToTool(name, client, def));
+    const tools = defs.map((def) => mcpToolToTool(name, client, def, spec.readOnlyTools));
     return {
       name,
       tools,

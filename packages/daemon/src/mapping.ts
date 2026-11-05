@@ -278,6 +278,8 @@ export function eventToUpdate(event: AgentEvent): SessionUpdate | null {
         toolUses: event.toolUses,
         stopReason: event.stopReason,
       };
+    case "tool_phase":
+      return { type: "tool_call_phase", toolCallId: event.id, phase: event.phase };
     // A background-job exit isn't streamed to remote clients yet (the
     // model still gets its injected note server-side, so behaviour is correct).
     case "background_exit":

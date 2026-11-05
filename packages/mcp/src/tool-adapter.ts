@@ -11,7 +11,7 @@
 import type { Tool } from "@tentacle/core";
 import { z } from "zod";
 import type { McpClient } from "./client.ts";
-import type { McpCallResult, McpToolDef } from "./types.ts";
+import type { McpCallResult, McpReadOnlyTools, McpToolDef } from "./types.ts";
 
 const EMPTY_OBJECT_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -41,14 +41,43 @@ export function mcpToolName(server: string, tool: string): string {
   return `mcp__${server}__${tool}`;
 }
 
-export function mcpToolToTool(server: string, client: McpClient, def: McpToolDef): Tool {
+/** Whether `readOnlyTools` lets `def` run as a read (docs/feat/parallel-tools.md). */
+function isReadOnly(def: McpToolDef, readOnlyTools: McpReadOnlyTools): boolean {
+  if (readOnlyTools === "none") {
+    return false;
+  }
+  if (readOnlyTools === "hint") {
+    const annotations: unknown = def.annotations;
+    return (
+      typeof annotations === "object" &&
+      annotations !== null &&
+      (annotations as { readOnlyHint?: unknown }).readOnlyHint === true
+    );
+  }
+  return readOnlyTools.includes(def.name);
+}
+
+/**
+ * `readOnlyTools` (default `"hint"`) decides the tool's concurrency: a
+ * read-only tool reads `mcp:<server>` (it may run beside other reads; a hint
+ * is untrusted, but every call stays ask-gated and the worst case is a
+ * reordering within that server), any other is exclusive.
+ */
+export function mcpToolToTool(
+  server: string,
+  client: McpClient,
+  def: McpToolDef,
+  readOnlyTools: McpReadOnlyTools = "hint",
+): Tool {
   const schema = def.inputSchema ?? EMPTY_OBJECT_SCHEMA;
+  const readKeys = [{ mode: "read", resource: `mcp:${server}` }] as const;
   const tool: Tool<Record<string, unknown>> = {
     name: mcpToolName(server, def.name),
     description: def.description ?? `MCP tool \`${def.name}\` from server \`${server}\`.`,
     inputSchema: z.record(z.unknown()),
     jsonSchema: schema,
     permission: "ask",
+    ...(isReadOnly(def, readOnlyTools) ? { concurrency: () => readKeys } : {}),
     async execute(input, ctx) {
       try {
         // Thread the turn's abort signal so a cancelled turn (or a wedged

@@ -85,6 +85,8 @@ export interface TentacleConfig {
   readonly dedupOutput: boolean;
   readonly tabulateJson: boolean;
   readonly autoWake: boolean;
+  /** How a round's tool calls may overlap (on a pod: the pod's own config, like `maxIterations`). */
+  readonly toolExecution: ResolvedConfig["toolExecution"];
   /** The configured default engine of `run`/`attach` (file/profile); absent = unset. */
   readonly engine?: ResolvedConfig["engine"];
   /** The configured `run --keep` default (file/profile); absent = the CLI default (true). */
@@ -547,6 +549,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     dedupOutput: resolved.dedupOutput,
     tabulateJson: resolved.tabulateJson,
     autoWake: resolved.autoWake,
+    toolExecution: resolved.toolExecution,
     ...(resolved.engine !== undefined ? { engine: resolved.engine } : {}),
     ...(resolved.keep !== undefined ? { keep: resolved.keep } : {}),
     ...(resolved.detach !== undefined ? { detach: resolved.detach } : {}),

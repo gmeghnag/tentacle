@@ -143,6 +143,20 @@ export const ToolProgressSchema = z.object({
   completionTokens: z.number().int().nonnegative().optional(),
 });
 
+/**
+ * A tool call's phase inside its round (docs/feat/parallel-tools.md):
+ * `queued` — approved in its group, waiting for its turn to start; `running` —
+ * emitted, in stream order, right BEFORE the call starts (every executed call
+ * gets it; a call that never started never does). Free string, like
+ * `tool_progress.kind`: an unknown phase is skipped by the client mapping.
+ * Rendering-only, never persisted.
+ */
+export const ToolCallPhaseSchema = z.object({
+  type: z.literal("tool_call_phase"),
+  toolCallId: z.string().min(1),
+  phase: z.string().min(1),
+});
+
 /** A turn began (first update of every turn); carries the prompt so a replay shows what was asked. */
 export const TurnStartSchema = z.object({
   type: z.literal("turn_start"),
@@ -224,6 +238,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   SteerSchema,
   ContextNoteSchema,
   ToolProgressSchema,
+  ToolCallPhaseSchema,
   TurnStartSchema,
   TurnEndUpdateSchema,
   HistoryReplacedSchema,
@@ -265,6 +280,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   context_note: "display",
   // A label/meter on a running tool: skipping it hangs nothing (the result rides tool_call_update).
   tool_progress: "display",
+  // A row's queued/running label; the laptop's cut labels use `running` (v15).
+  tool_call_phase: "display",
   turn_start: "mandatory",
   turn_end: "mandatory",
   history_replaced: "mandatory",

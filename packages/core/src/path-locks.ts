@@ -16,7 +16,7 @@
 import type { ExecutionEnvironment } from "./execution.ts";
 
 /** Lexical key: collapse `.`/`..`/repeated slashes so `a//b` and `a/./b` agree. */
-function lockKey(path: string): string {
+export function lockKey(path: string): string {
   const absolute = path.startsWith("/");
   const parts: string[] = [];
   for (const part of path.split("/")) {
@@ -34,6 +34,20 @@ function lockKey(path: string): string {
     }
   }
   return (absolute ? "/" : "") + parts.join("/");
+}
+
+/**
+ * The round executor's resource name for a file path
+ * (docs/feat/parallel-tools.md): the case-folded BASENAME of `lockKey`.
+ * Deliberately coarse — `a.ts`, `./x/../a.ts`, `/ws/a.ts` and `A.ts` all
+ * agree (which `PathLocks` does not unify) at the cost of serialising two
+ * different files that share a basename. A false conflict only serialises.
+ * Paths through symlinks with different basenames stay undetected.
+ */
+export function pathResource(path: string): string {
+  const key = lockKey(path);
+  const base = key.slice(key.lastIndexOf("/") + 1);
+  return `path:${base.toLowerCase()}`;
 }
 
 export class PathLocks {

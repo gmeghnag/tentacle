@@ -311,6 +311,19 @@ describe("updateToEvent: tool_progress (docs/feat/subagent-progress-wire.md)", (
     expect(long?.type === "subagent_tool" ? long.label.length : -1).toBe(200);
   });
 
+  test("tool_call_phase: queued / running map back to tool_phase; an unknown phase → null (T-W)", () => {
+    for (const phase of ["queued", "running"] as const) {
+      expect(updateToEvent({ type: "tool_call_phase", toolCallId: "c1", phase }, names)).toEqual({
+        type: "tool_phase",
+        id: "c1",
+        phase,
+      });
+    }
+    expect(
+      updateToEvent({ type: "tool_call_phase", toolCallId: "c1", phase: "later" }, names),
+    ).toBeNull();
+  });
+
   test("an unknown kind, or a known kind missing its fields, is ignored (null), never thrown", () => {
     const bad: SessionUpdate[] = [
       { type: "tool_progress", toolCallId: "c1", kind: "from_the_future" },

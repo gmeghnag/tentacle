@@ -7,3 +7,4 @@ export * from "./background.ts";
 export * from "./task.ts";
 export * from "./skill.ts";
 export * from "./context-reset.ts";
+export * from "./concurrency.ts";

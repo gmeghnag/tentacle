@@ -904,3 +904,15 @@ describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
     expect(set.listing).toEqual({ skills: [], problems: ["a problem"] });
   });
 });
+
+describe("tools.execution wiring (docs/feat/parallel-tools.md)", () => {
+  const exec = (wired: ReturnType<typeof buildAgent>) =>
+    (wired.agent as unknown as { config: { toolExecution?: unknown } }).config.toolExecution;
+
+  test("the main agent gets the resolved mode (default read-only, 8)", () => {
+    expect(exec(buildAgent(config))).toEqual({ mode: "read-only", maxParallel: 8 });
+    expect(
+      exec(buildAgent({ ...config, toolExecution: { mode: "parallel", maxParallel: 2 } })),
+    ).toEqual({ mode: "parallel", maxParallel: 2 });
+  });
+});

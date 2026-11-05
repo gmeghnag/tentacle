@@ -40,6 +40,7 @@ import {
   ENDED_NOT_RUN_NOTE,
   ENDED_TURN_NOTE,
   answerUnansweredCalls,
+  labelUnansweredCalls,
 } from "@tentacle/daemon";
 import { applyGroupMessage } from "@tentacle/exec";
 import { DomainErrorCode, type McpServerStatus, type SessionTitle } from "@tentacle/protocol";
@@ -231,13 +232,26 @@ export interface PersistingController extends SessionController {
 }
 
 /**
- * `messages` as a session ended mid-turn keeps them: the daemon reload's rule
- * for an ended session (`answerUnansweredCalls`), so the resumed history never
- * stops on a call nobody answered.
+ * `messages` as a session ended mid-turn keeps them, so the resumed history
+ * never stops on a call nobody answered. `started`: the calls the daemon said
+ * START (`RemoteSession.runningCalls`, docs/feat/parallel-tools.md decision 6)
+ * — each reads "Interrupted", every other unanswered call (queued, asking,
+ * not reached) "Not run". `null` (a session that keeps no such record): the
+ * daemon reload's rule for an ended session (`answerUnansweredCalls`: only the
+ * first unanswered call may have started).
  */
-function cutHistory(messages: readonly ChatMessage[]): readonly ChatMessage[] {
+export function cutHistory(
+  messages: readonly ChatMessage[],
+  started: ReadonlySet<string> | null,
+): readonly ChatMessage[] {
   const closed = [...messages];
-  answerUnansweredCalls(closed, ENDED_NOT_RUN_NOTE, () => ENDED_INTERRUPTED_NOTE);
+  if (started === null) {
+    answerUnansweredCalls(closed, ENDED_NOT_RUN_NOTE, () => ENDED_INTERRUPTED_NOTE);
+  } else {
+    labelUnansweredCalls(closed, (callId) =>
+      started.has(callId) ? ENDED_INTERRUPTED_NOTE : ENDED_NOT_RUN_NOTE,
+    );
+  }
   // A cut before the model answered (live item 6): the tail is the prompt or a
   // tool result. A finished turn ends on an assistant message.
   const last = closed.at(-1)?.role;
@@ -303,7 +317,12 @@ export function persistingController(
           if (back.title) {
             lastTitle = titleState(back.title);
           }
-          persist(cut ? cutHistory(back.messages) : back.messages, lastTitle);
+          // The start record is read AFTER the read-back resolved: every frame
+          // that preceded its reply on the ordered channel is recorded (P14).
+          persist(
+            cut ? cutHistory(back.messages, inner.runningCalls?.() ?? null) : back.messages,
+            lastTitle,
+          );
         }
         confirmed = !again;
       } catch (error) {

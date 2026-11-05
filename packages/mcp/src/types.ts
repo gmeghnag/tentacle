@@ -7,8 +7,14 @@
  * out of scope for this first slice.
  */
 
+/** What every server spec may carry, whatever its transport. */
+interface McpServerSpecBase {
+  /** Which tools may run as reads (`McpReadOnlyTools`). Absent → `"hint"`. */
+  readonly readOnlyTools?: McpReadOnlyTools;
+}
+
 /** A configured stdio MCP server (spawned as a subprocess). */
-export interface McpStdioServerSpec {
+export interface McpStdioServerSpec extends McpServerSpecBase {
   readonly type?: "stdio";
   readonly command: string;
   readonly args?: readonly string[];
@@ -17,7 +23,7 @@ export interface McpStdioServerSpec {
 }
 
 /** A configured remote MCP server, reached over Streamable HTTP. */
-export interface McpHttpServerSpec {
+export interface McpHttpServerSpec extends McpServerSpecBase {
   readonly type: "http";
   readonly url: string;
   /** Extra request headers (e.g. `Authorization`); sent only to `url`. */
@@ -35,7 +41,17 @@ export interface McpToolDef {
   readonly description?: string;
   /** JSON Schema for the tool's arguments. */
   readonly inputSchema?: Record<string, unknown>;
+  /** The server's hints about the tool (untrusted: the server says so). */
+  readonly annotations?: { readonly readOnlyHint?: unknown };
 }
+
+/**
+ * `mcpServers.<name>.readOnlyTools` (docs/feat/parallel-tools.md): which of a
+ * server's tools may run beside other read-class calls. `"hint"` (default):
+ * those whose `annotations.readOnlyHint` is `true`; `"none"`: none; a list:
+ * exactly those, by their bare MCP name.
+ */
+export type McpReadOnlyTools = "hint" | "none" | readonly string[];
 
 /** One content block returned by `tools/call`. */
 export interface McpContentBlock {

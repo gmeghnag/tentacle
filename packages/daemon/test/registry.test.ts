@@ -548,8 +548,9 @@ describe("per-session model link (protocol 14)", () => {
     return { ...d, links };
   }
 
-  test("protocol 14: a model-serving detach changed meaning", () => {
-    expect(PROTOCOL_VERSION).toBe(14);
+  test("protocol ≥ 14: a model-serving detach changed meaning", () => {
+    // 15 (docs/feat/parallel-tools.md) keeps this meaning.
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(14);
   });
 
   test("T1: the newest of two serving connections leaves mid-turn — no cancel; the next call goes to the other", async () => {

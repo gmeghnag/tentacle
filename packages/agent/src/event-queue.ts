@@ -33,6 +33,21 @@ export class EventQueue<T> {
     }
   }
 
+  /** The next item, waiting for one; `undefined` once closed and empty. */
+  async next(): Promise<T | undefined> {
+    const item = this.items.shift();
+    if (item !== undefined) {
+      return item;
+    }
+    if (this.closed) {
+      return undefined;
+    }
+    const result = await new Promise<IteratorResult<T>>((resolve) => {
+      this.waiter = resolve;
+    });
+    return result.done ? undefined : result.value;
+  }
+
   async *drain(): AsyncGenerator<T> {
     while (true) {
       const item = this.items.shift();
