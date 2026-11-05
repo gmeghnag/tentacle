@@ -64,6 +64,7 @@ import {
   type SendNowRefusal,
   type SendNowTarget,
   type SessionContextResult,
+  type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionTitle,
   type SessionUpdate,
@@ -274,6 +275,8 @@ export function untilAborted(done: Promise<unknown>, signal: AbortSignal): Promi
 
 export class HostedSession {
   readonly id: string;
+  /** What the factory did with `session/open.settings`; told to whoever attaches. */
+  settingsReport: SessionSettingsReport | undefined;
   private readonly session: Session;
   /** The busy slot: the active turn's OR compaction's controller (`cancel` aborts it). */
   private controller: AbortController | null = null;

@@ -268,7 +268,12 @@ export class Connection {
     signal?: AbortSignal,
   ): Promise<SessionContextResult> {
     if (params.sessionId === undefined) {
-      return this.host.newSessionContext(this.servesModel ? this : null, signal, params.messages);
+      return this.host.newSessionContext(
+        this.servesModel ? this : null,
+        signal,
+        params.messages,
+        params.settings,
+      );
     }
     return this.lookup(params.sessionId).context(signal);
   }
@@ -279,7 +284,7 @@ export class Connection {
   // opens its session lazily, at the first prompt).
   private sessionSkills(params: SessionSkillsParams): Promise<SessionSkillsResult> {
     if (params.sessionId === undefined) {
-      return this.host.newSessionSkills();
+      return this.host.newSessionSkills(params.settings);
     }
     return this.lookup(params.sessionId).skills();
   }
@@ -413,7 +418,13 @@ export class Connection {
     };
     const { hosted, created, resync, epoch } = this.host.open(params, attachment, prepared);
     this.attached.set(hosted.id, { hosted, attachment });
-    return { sessionId: hosted.id, epoch, created, resync };
+    return {
+      sessionId: hosted.id,
+      epoch,
+      created,
+      resync,
+      ...(hosted.settingsReport ? { settings: hosted.settingsReport } : {}),
+    };
   }
 
   /** Forget every attachment whose session is no longer the live one under its id. */

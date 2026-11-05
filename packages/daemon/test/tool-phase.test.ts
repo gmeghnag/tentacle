@@ -26,7 +26,7 @@ describe("tool_call_phase on the wire (T-W)", () => {
     ).toBe(false);
   });
 
-  test("PROTOCOL_VERSION is 15: a peer without the signal fails at initialize", () => {
-    expect(PROTOCOL_VERSION).toBe(15);
+  test("PROTOCOL_VERSION is at least 15: a peer without the signal fails at initialize", () => {
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(15);
   });
 });

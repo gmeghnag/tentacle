@@ -110,11 +110,11 @@ unless noted.
 | `maxIterations` | 207 | W | ok | ok | Worst case is cost (default 16, `defaults.ts:11`; a repo may say -1). Named in the notice. |
 | `subagents.enabled` | 216 | P | no | overridden | Owner decision, task 7. |
 | `subagents.maxIterations` | 218 | P | no | overridden | Owner decision, task 7. |
-| `subagents.execution` *(task 7, not yet in the schema)* | — | P | no | overridden | Owner decision, task 7. |
-| `subagents.maxParallel` *(task 7, not yet in the schema)* | — | P | no | overridden | Load on the laptop's endpoint. The cap comes from that endpoint's slots (`docs/eval/parallel-execution-plan.md:616`), which a pod cannot probe. |
+| `subagents.execution` *(`feat/config-carry`; task 7 reads it)* | 228 | P | no | overridden | Owner decision, task 7. |
+| `subagents.maxParallel` *(`feat/config-carry`; task 7 reads it)* | 230 | P | no | overridden | Load on the laptop's endpoint. The cap comes from that endpoint's slots (`docs/eval/parallel-execution-plan.md:616`), which a pod cannot probe. |
 | `contextAwareness.enabled`, `.stepPercent` | 233, 235 | W | ok | ok | Prompt lines only. The window is P, the switch stays workspace (`serve.ts:368`). |
 | `contextReset.enabled`, `.maxPerMessage` | 243, 245 | W | ok | ok | Agent behaviour; no reach beyond the session. |
-| `autoWake` | 257 | W | ok | ok | Default on. A repo can start no turn the default would not. |
+| `autoWake` | 257 | L *(corrected 2026-11-05, was W)* | no | inert | Its only reader is the laptop's TUI (`packages/tui/src/App.tsx:658`, `packages/cli/src/main.ts:834`): no daemon or agent code reads it, so carrying it would be a dead field. Whether a repo file may set it locally is for `feat/project-config`. |
 | `engine` | 262 | L | no | inert | Chooses where code runs, and which credentials the laptop dials with (`main.ts:740`). |
 | `keep` | 267 | L | no | inert | A repo's `false` would delete a workload and its state at exit (`main.ts:876`, §7 lifecycle). |
 | `detach.keepAwake` | 272 | L | no | inert | The relay's power assertion (`packages/cli/src/relay.ts:178`). |

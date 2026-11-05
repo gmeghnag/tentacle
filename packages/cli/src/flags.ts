@@ -94,19 +94,15 @@ export const ARGS = {
       "max-sessions": {},
       "max-detached-sessions": {},
       "ws-idle-timeout": {},
-      // (with `--model-proxy`): the laptop's `model.contextWindow`.
-      "context-window": {},
       // The pod's resident daemon socket (docs/feat/detached-runs.md S1); default in TMPDIR.
       socket: {},
       ...SESSION_MODEL,
     },
-    // `--auto-title` (with `--model-proxy`): the laptop's `model.autoTitle`.
     // `--bridge` / `--resident` / `--resident-status` / `--resident-stop`: the
     // pod's resident daemon (`pod-resident.ts`), run by `run`/`attach` execs.
     bools: {
       stdio: {},
       "model-proxy": {},
-      "auto-title": {},
       bridge: {},
       resident: {},
       "resident-status": {},
@@ -396,24 +392,16 @@ export function parseServeLimits(parsed: Pick<ParsedFlags, "flags" | "bools">): 
 }
 
 /**
- * `serve --context-window <n>`: the window of the model the LAPTOP serves (a
- * pod daemon's context lines, docs/feat/context-awareness.md). Absent →
- * undefined; anything but a positive whole number throws.
+ * Is this `serve` a pod daemon's load (`LoadConfigOptions.podDaemon`)? With the
+ * model proxy, nothing there uses the key. The status and stop probes run
+ * without it, and need no key either: a failing command there would fail
+ * attach's probe as well. A plain `serve --stdio` calls its own provider: no.
  */
-export function parseContextWindowFlag(
-  parsed: Pick<ParsedFlags, "flags" | "bools">,
-): number | undefined {
-  if (parsed.bools.has("context-window")) {
-    throw new Error("--context-window needs a value");
-  }
-  const raw = parsed.flags.get("context-window");
-  if (raw === undefined) {
-    return undefined;
-  }
-  if (!/^[0-9]{1,9}$/.test(raw) || Number(raw) <= 0) {
-    throw new Error(`--context-window must be a positive whole number, got "${raw}"`);
-  }
-  return Number(raw);
+export function isPodDaemonLoad(bools: ReadonlySet<string>): boolean {
+  const tunnelled =
+    bools.has("model-proxy") &&
+    (bools.has("stdio") || bools.has("bridge") || bools.has("resident"));
+  return tunnelled || bools.has("resident-status") || bools.has("resident-stop");
 }
 
 /** One PEM certificate block (a `--ca-cert` file may be a bundle of several). */

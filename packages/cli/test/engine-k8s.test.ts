@@ -69,7 +69,14 @@ class StubCluster implements PodCluster {
   }
 }
 
-const config = { cwd: "/w", model: "m", contextWindow: 1000 } as unknown as TentacleConfig;
+const config = {
+  cwd: "/w",
+  model: "m",
+  contextWindow: 1000,
+  contextAwareness: { enabled: true, stepPercent: 1 },
+  contextReset: { enabled: true, maxPerMessage: -1 },
+  toolExecution: { mode: "read-only", maxParallel: 8 },
+} as unknown as TentacleConfig;
 
 let dir: string;
 let savedPodBin: string | undefined;

@@ -1,18 +1,14 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RemoteClient, connectWebSocket } from "@tentacle/client";
+import { PermissionBroker } from "@tentacle/core";
 import { SessionHost } from "@tentacle/daemon";
 import { PROTOCOL_VERSION } from "@tentacle/protocol";
 import { DomainErrorCode } from "@tentacle/transport";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
-import {
-  ARGS,
-  parseArgs,
-  parseContextWindowFlag,
-  parseDuration,
-  parseServeLimits,
-} from "../src/flags.ts";
+import { ARGS, isPodDaemonLoad, parseArgs, parseDuration, parseServeLimits } from "../src/flags.ts";
 import { startDaemon } from "../src/serve.ts";
 import { APP_VERSION } from "../src/version.ts";
 
@@ -583,20 +579,67 @@ describe("startDaemon bounds sessions (end to end over a real socket)", () => {
   });
 });
 
-// docs/feat/context-awareness.md: the pod daemon is told the LAPTOP's model window.
-describe("parseContextWindowFlag (serve --context-window)", () => {
-  const window = (args: string[]) => {
-    const parsed = parseArgs(args, ARGS.serve);
-    if (!parsed.ok) throw new Error(parsed.error);
-    return parseContextWindowFlag(parsed);
-  };
-  test("absent → undefined; a positive whole number → it", () => {
-    expect(window(["--stdio"])).toBeUndefined();
-    expect(window(["--stdio", "--context-window", "200000"])).toBe(200000);
+// docs/feat/config-carry.md: the values go per session now, no compat.
+describe("serve's removed flags", () => {
+  test("--context-window and --auto-title are refused", () => {
+    expect(parseArgs(["--stdio", "--context-window", "200000"], ARGS.serve).ok).toBe(false);
+    expect(parseArgs(["--stdio", "--auto-title"], ARGS.serve).ok).toBe(false);
+    expect(parseArgs(["--bridge", "--model-proxy"], ARGS.serve).ok).toBe(true);
   });
-  test("anything else throws", () => {
-    for (const bad of ["0", "-1", "1.5", "abc", "1e6"]) {
-      expect(() => window(["--context-window", bad])).toThrow(/--context-window/);
+});
+
+describe("isPodDaemonLoad: a pod daemon's load runs no apiKeyCommand", () => {
+  test("every mode that needs no key, and no other", () => {
+    for (const modes of [
+      ["bridge", "model-proxy"],
+      ["resident", "model-proxy"],
+      ["stdio", "model-proxy"],
+      ["resident-status"],
+      ["resident-stop"],
+    ]) {
+      expect(isPodDaemonLoad(new Set(modes))).toBe(true);
+    }
+    // These call their own provider.
+    for (const modes of [[], ["stdio"], ["model-proxy"], ["bridge"], ["resident"]]) {
+      expect(isPodDaemonLoad(new Set(modes))).toBe(false);
+    }
+  });
+});
+
+describe("a `serve` daemon ignores a client's `settings` (docs/feat/config-carry.md)", () => {
+  test("its agent comes from its own config, and no report goes back", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "serve-settings-"));
+    const skills = join(dir, ".agents", "skills", "demo");
+    await mkdir(skills, { recursive: true });
+    await writeFile(
+      join(skills, "SKILL.md"),
+      "---\nname: demo\ndescription: a demo skill\n---\nBody\n",
+    );
+    const own = await loadConfig({
+      configDir: join(dir, "config"),
+      cwd: dir,
+      scaffold: false,
+      env: { HOME: dir, TENTACLE_MODEL_API_KEY: "k" },
+    });
+    const server = await startDaemon(own, { host: "127.0.0.1", port: 0 });
+    const channel = await connectWebSocket(`ws://127.0.0.1:${server.port}`);
+    const client = new RemoteClient(channel, new PermissionBroker(), undefined, {
+      sessionSettings: { loadSkills: false, subagentsEnabled: false },
+    });
+    let reports = 0;
+    client.onSessionSettings(() => {
+      reports++;
+    });
+    try {
+      await client.initialize();
+      expect((await client.sessionSkills()).skills.map((s) => s.name)).toEqual(["demo"]);
+      await client.openSession(undefined, undefined, "S");
+      expect(reports).toBe(0);
+      expect((await client.sessionSkills("S")).skills.map((s) => s.name)).toEqual(["demo"]);
+    } finally {
+      client.close();
+      await server.stop();
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

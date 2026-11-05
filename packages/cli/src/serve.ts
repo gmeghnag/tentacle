@@ -4,7 +4,7 @@
  * Binding is loopback-safe by default (a non-loopback bind requires a token).
  */
 import { join } from "node:path";
-import { JsonSessionStore, projectKey } from "@tentacle/agent";
+import { EMPTY_SKILL_LISTING, JsonSessionStore, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import {
   Connection,
@@ -25,8 +25,9 @@ import {
   startWsServer,
   sweepIntervalFor,
 } from "@tentacle/daemon";
-import type { ModelPurpose } from "@tentacle/protocol";
+import type { ModelPurpose, SessionSettings, SessionSettingsReport } from "@tentacle/protocol";
 import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@tentacle/transport";
+import { applyCarried } from "./carried-settings.ts";
 import type { ServeLimits } from "./flags.ts";
 import { APP_VERSION } from "./version.ts";
 import { type SkillScan, type WiredAgent, buildAgent, createSkillScan } from "./wiring.ts";
@@ -359,25 +360,26 @@ function listen(
  * A pod daemon's agent (`serve --stdio --model-proxy`): every model call
  * travels back to the laptop over `link` — the chunked (streaming) path, and
  * the batch path the provider falls back to on a `MethodNotFound` from an old
- * laptop. With `autoTitle` (the LAPTOP's flag, `--auto-title`; the pod's own
- * `model.autoTitle` is overridden), the title call rides a second tunnel that
- * marks it `purpose: "title"`, so the laptop serves it with ITS
- * `model.titleModel`; the pod never names a model (docs/feat/session-titles.md).
- * `contextWindow` (the LAPTOP's, `--context-window`) replaces the pod's own:
- * the model's context lines count against the window of the model the laptop
- * serves (docs/feat/context-awareness.md); whether they are on stays the pod's.
+ * laptop. `settings` (`session/open.settings`, docs/feat/config-carry.md) lay
+ * the laptop's values over the pod's config, per session (`applyCarried`). With
+ * `autoTitle` on, the title call rides a second tunnel that marks it `purpose:
+ * "title"`, so the laptop serves it with ITS `model.titleModel`; the pod never
+ * names a model (docs/feat/session-titles.md).
  */
 export function tunnelledAgent(
-  config: TentacleConfig,
+  podConfig: TentacleConfig,
   link: () => ModelLink | null,
   options: {
-    readonly autoTitle: boolean;
-    readonly contextWindow?: number;
+    readonly settings?: SessionSettings;
     readonly log?: (line: string) => void;
     /** The pod daemon's shared skill scan (docs/feat/skills-hot-reload.md). */
     readonly skillScan?: SkillScan;
-  },
-): WiredAgent {
+  } = {},
+): WiredAgent & {
+  readonly settingsReport?: SessionSettingsReport;
+  readonly pinnedOver: readonly string[];
+} {
+  const { config, report, pinnedOver } = applyCarried(podConfig, options.settings);
   const ready = (): ModelLink => {
     const connection = link();
     if (!connection) {
@@ -399,26 +401,19 @@ export function tunnelledAgent(
         return connection.requestModelCountTokens(request, signal);
       },
     );
-  return buildAgent(
-    {
-      ...config,
-      autoTitle: options.autoTitle,
-      ...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {}),
-    },
-    {
-      ...(options.log ? { log: options.log, notice: options.log } : {}),
-      ...(options.skillScan ? { skillScan: options.skillScan } : {}),
-      modelOverride: tunnelFor(),
-      ...(options.autoTitle ? { titleModelOverride: tunnelFor("title") } : {}),
-    },
-  );
+  const wired = buildAgent(config, {
+    ...(options.log ? { log: options.log, notice: options.log } : {}),
+    // With skills off, no scan: `rescanSkills` then reads nothing (`rediscoverSkills`).
+    ...(options.skillScan && config.skillsEnabled ? { skillScan: options.skillScan } : {}),
+    modelOverride: tunnelFor(),
+    ...(config.autoTitle ? { titleModelOverride: tunnelFor("title") } : {}),
+  });
+  return { ...wired, ...(report ? { settingsReport: report } : {}), pinnedOver };
 }
 
-/** A pod daemon's flags, set by the laptop that launched it (`podDaemonCommand`). */
+/** A pod daemon's flag, set by the laptop that launched it (`podDaemonCommand`). */
 export interface PodDaemonOptions {
   readonly modelProxy?: boolean;
-  readonly autoTitle?: boolean;
-  readonly contextWindow?: number;
 }
 
 /**
@@ -436,29 +431,41 @@ export function podSessionHost(
   // The pod's own skills (Q4): its config, its filesystem — one scan for every
   // session and for a session not created yet (docs/feat/skills-hot-reload.md).
   const skillScan = createSkillScan(config);
+  // Per line, per daemon: a `session/context` probe builds an agent too.
+  const pinsLogged = new Set<string>();
+  const logPins = (pinnedOver: readonly string[]): void => {
+    const line = `the laptop's settings replace this pod's own: ${pinnedOver.join(", ")}`;
+    if (pinnedOver.length > 0 && !pinsLogged.has(line)) {
+      pinsLogged.add(line);
+      log?.(line);
+    }
+  };
   return new SessionHost({
     defaultCwd: config.cwd,
     // `run`/`attach`'s daemon: a skew is fixed by attaching again (it replaces it).
     identity: { tentacle: APP_VERSION, kind: "container" },
-    newSessionSkills: () => skillScan.newSession(),
+    // Only the model-proxy branch honours `settings`: a daemon the laptop does
+    // not launch decides by its own config.
+    newSessionSkills: async (settings) =>
+      options.modelProxy && settings && !applyCarried(config, settings).config.skillsEnabled
+        ? EMPTY_SKILL_LISTING
+        : skillScan.newSession(),
     // The laptop gets an opaque turn error (the pod is not trusted with more
     // than it needs, and stays symmetric with `serve`); the real one goes to
     // the daemon's stderr log (piped + routed by the laptop, never inherited).
     ...(log ? { onTurnError: (error: Error) => log(`error: ${error.message}`) } : {}),
-    createAgent: (cwd, { modelLink }) =>
-      options.modelProxy
-        ? tunnelledAgent({ ...config, cwd }, modelLink, {
-            // `--auto-title`: the LAPTOP's `model.autoTitle` (it launched us);
-            // the pod's own config never turns titles on.
-            autoTitle: options.autoTitle === true,
-            // `--context-window`: the LAPTOP's `model.contextWindow`.
-            ...(options.contextWindow !== undefined
-              ? { contextWindow: options.contextWindow }
-              : {}),
-            ...(log ? { log } : {}),
-            skillScan,
-          })
-        : buildAgent({ ...config, cwd }, { ...(log ? { log, notice: log } : {}), skillScan }),
+    createAgent: (cwd, { modelLink, settings }) => {
+      if (!options.modelProxy) {
+        return buildAgent({ ...config, cwd }, { ...(log ? { log, notice: log } : {}), skillScan });
+      }
+      const wired = tunnelledAgent({ ...config, cwd }, modelLink, {
+        ...(settings ? { settings } : {}),
+        ...(log ? { log } : {}),
+        skillScan,
+      });
+      logPins(wired.pinnedOver);
+      return wired;
+    },
   });
 }
 

@@ -348,6 +348,10 @@
       "properties": {},
       "type": "object"
     },
+    "ExecutionMode": {
+      "enum": ["sequential", "read-only", "parallel"],
+      "type": "string"
+    },
     "HistoryCut": {
       "additionalProperties": true,
       "properties": {
@@ -517,6 +521,18 @@
       },
       "required": ["agentCapabilities", "protocolVersion"],
       "type": "object"
+    },
+    "IterationLimit": {
+      "anyOf": [
+        {
+          "const": -1,
+          "type": "number"
+        },
+        {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        }
+      ]
     },
     "JsonRpcError": {
       "additionalProperties": true,
@@ -812,6 +828,9 @@
         "sessionId": {
           "$ref": "#/$defs/SessionId"
         },
+        "settings": {
+          "$ref": "#/$defs/SessionSettings"
+        },
         "since": {
           "$ref": "#/$defs/HistoryCut"
         },
@@ -837,6 +856,9 @@
         },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
+        },
+        "settings": {
+          "$ref": "#/$defs/SessionSettingsReport"
         }
       },
       "required": ["created", "epoch", "resync", "sessionId"],
@@ -1424,6 +1446,9 @@
         },
         "sessionId": {
           "$ref": "#/$defs/SessionId"
+        },
+        "settings": {
+          "$ref": "#/$defs/SessionSettings"
         }
       },
       "type": "object"
@@ -1532,11 +1557,104 @@
       "required": ["sessions"],
       "type": "object"
     },
+    "SessionSettings": {
+      "additionalProperties": true,
+      "properties": {
+        "agentTaskDescription": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "autoTitle": {
+          "type": "boolean"
+        },
+        "contextAwarenessEnabled": {
+          "type": "boolean"
+        },
+        "contextAwarenessStepPercent": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "contextResetEnabled": {
+          "type": "boolean"
+        },
+        "contextResetMaxPerMessage": {
+          "$ref": "#/$defs/IterationLimit"
+        },
+        "contextWindow": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "dedupOutput": {
+          "type": "boolean"
+        },
+        "loadAgentsMd": {
+          "type": "boolean"
+        },
+        "loadSkills": {
+          "type": "boolean"
+        },
+        "maxInlineOutputChars": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxIterations": {
+          "$ref": "#/$defs/IterationLimit"
+        },
+        "redactSecrets": {
+          "type": "boolean"
+        },
+        "subagentExecution": {
+          "$ref": "#/$defs/ExecutionMode"
+        },
+        "subagentMaxIterations": {
+          "$ref": "#/$defs/IterationLimit"
+        },
+        "subagentMaxParallel": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "subagentsEnabled": {
+          "type": "boolean"
+        },
+        "summarizeLargeOutput": {
+          "type": "boolean"
+        },
+        "tabulateJson": {
+          "type": "boolean"
+        },
+        "toolExecution": {
+          "$ref": "#/$defs/ExecutionMode"
+        },
+        "toolMaxParallel": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "SessionSettingsReport": {
+      "additionalProperties": true,
+      "properties": {
+        "carried": {
+          "$ref": "#/$defs/SessionSettings"
+        },
+        "overridden": {
+          "$ref": "#/$defs/SessionSettings"
+        }
+      },
+      "required": ["carried", "overridden"],
+      "type": "object"
+    },
     "SessionSkillsParams": {
       "additionalProperties": true,
       "properties": {
         "sessionId": {
           "$ref": "#/$defs/SessionId"
+        },
+        "settings": {
+          "$ref": "#/$defs/SessionSettings"
         }
       },
       "type": "object"
@@ -2609,5 +2727,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 15
+  "x-protocol-version": 16
 }

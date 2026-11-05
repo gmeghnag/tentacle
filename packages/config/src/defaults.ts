@@ -16,6 +16,12 @@ export const DEFAULT_SUBAGENTS_ENABLED = true;
  * delegated investigation/task often needs more tool rounds. `-1` = unlimited.
  */
 export const DEFAULT_SUBAGENT_MAX_ITERATIONS = 50;
+/** How a parent's `agent_task` calls of one round may overlap (read by `feat/parallel-agents`). */
+export const DEFAULT_SUBAGENT_EXECUTION = "parallel" as const;
+/** At most this many sub-agents at once (read by `feat/parallel-agents`). */
+export const DEFAULT_SUBAGENT_MAX_PARALLEL = 4;
+/** Max bytes of a custom `agent_task` description, after trimming. */
+export const MAX_AGENT_TASK_DESCRIPTION_BYTES = 4096;
 /**
  * When a background job exits while the agent is idle, auto-start a continuation
  * turn so the model reacts to the exit without the user prompting. On by default.
@@ -122,6 +128,8 @@ export const DEFAULT_CONFIG_JSONC = `{
 
   // Sub-agents: the \`agent_task\` tool that delegates work to an isolated child agent.
   // "subagents": { "enabled": ${DEFAULT_SUBAGENTS_ENABLED}, "maxIterations": ${DEFAULT_SUBAGENT_MAX_ITERATIONS} }, // maxIterations: -1 = unlimited
+  // Reserved for parallel sub-agents, not read yet ("execution": "${DEFAULT_SUBAGENT_EXECUTION}", "maxParallel": ${DEFAULT_SUBAGENT_MAX_PARALLEL},
+  // "agentTaskDescription" or "agentTaskDescriptionFile": replace the tool's description, at most ${MAX_AGENT_TASK_DESCRIPTION_BYTES} bytes).
 
   // Context awareness: tell the model how full its context is — a short line
   // ("[context: 82k / 128k tokens (64%)]") appended to the message that crosses

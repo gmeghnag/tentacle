@@ -187,6 +187,24 @@ mount; `attach <name>` works from any folder, as if launched from the one it mou
 tentacle never creates, starts or deletes it: closing the TUI detaches and it
 stays up.
 
+**What of your config reaches a pod or container (`run`, `attach`).** Each new
+session takes your resolved settings. `subagents.*`, `model.contextWindow` and
+`model.autoTitle` are always yours. `maxIterations`, `tools.*`, `contextAwareness`,
+`contextReset`, `loadAgentsMd` and `loadSkills` are yours unless the container's own
+environment or config file sets them, and tentacle shows you the values that win. A
+session already running keeps the settings it was created with, and shows you those
+that differ from yours:
+
+```
+Session settings: { "maxIterations": 3, "tools.dedupOutput": false } (/clear to reset)
+```
+
+The values that win from the container's own config are shown the same way:
+
+```
+Container config: { "maxIterations": 7 }
+```
+
 ```sh
 tentacle attach <pod> [-n <namespace>] [-c <container>]
 tentacle attach --engine docker|podman <container>
@@ -273,6 +291,9 @@ Precedence: **environment variables › `config.jsonc` › built-in defaults**.
 | `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline) | System prompt file (default `PROMPT.md`) |
 | `maxIterations` | `TENTACLE_MAX_ITERATIONS` | Max model/tool rounds per turn |
 | `subagents.enabled` | `TENTACLE_SUBAGENTS` | The `agent_task` sub-agent tool (default on) |
+| `subagents.execution` | `TENTACLE_SUBAGENT_EXECUTION` | Reserved for parallel sub-agents, not read yet: `parallel` (default), `read-only` or `sequential` |
+| `subagents.maxParallel` | `TENTACLE_SUBAGENT_MAX_PARALLEL` | Reserved for parallel sub-agents, not read yet (default `4`) |
+| `subagents.agentTaskDescription` / `agentTaskDescriptionFile` | — | Reserved for parallel sub-agents, not read yet: replaces the `agent_task` description, at most 4096 bytes. The file is relative to the config dir, or absolute. Setting both is an error |
 | `contextReset.enabled` | `TENTACLE_CONTEXT_RESET` | The model's `context_reset` tool: it renews its own context from a restart prompt it writes, asked like any tool (default on) |
 | `contextReset.maxPerMessage` | `TENTACLE_CONTEXT_RESET_MAX` | Context resets per user message (default `-1` = unlimited) |
 | `loadSkills` | `TENTACLE_NO_SKILLS` (truthy disables) | Agent Skills discovery (default on) |

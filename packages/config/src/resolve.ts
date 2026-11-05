@@ -24,7 +24,9 @@ import {
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
   DEFAULT_SUBAGENTS_ENABLED,
+  DEFAULT_SUBAGENT_EXECUTION,
   DEFAULT_SUBAGENT_MAX_ITERATIONS,
+  DEFAULT_SUBAGENT_MAX_PARALLEL,
   DEFAULT_SUMMARIZE_LARGE_OUTPUT,
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_TABULATE_JSON,
@@ -36,8 +38,11 @@ import { type SkillInfo, renderSkillsCatalog } from "./skills.ts";
 
 export type Env = Record<string, string | undefined>;
 
-/** Where a resolved value came from. */
-export type Source = "env" | "file" | "default";
+/**
+ * Where a resolved value came from. `carried`: on a pod daemon, from the laptop's
+ * `session/open.settings` (never from a load; docs/feat/config-carry.md).
+ */
+export type Source = "env" | "file" | "default" | "carried";
 
 /** `contextAwareness`, resolved: a line per `stepPercent` of the window, when `enabled`. */
 export interface ContextAwarenessConfig {
@@ -72,6 +77,8 @@ export interface ResolvedConfig {
   /** Max output tokens per response; unset → the provider's own default. */
   readonly maxTokens?: number;
   readonly systemPrompt: string;
+  /** The identity part of `systemPrompt`, before AGENTS.md and the skills catalog. */
+  readonly promptIdentity: string;
   /** Whether a per-repo AGENTS.md was folded into `systemPrompt`. */
   readonly agentsMdLoaded: boolean;
   /** Discovered skills (empty when disabled); the offered ones are cataloged in `systemPrompt`. */
@@ -79,6 +86,12 @@ export interface ResolvedConfig {
   readonly subagentsEnabled: boolean;
   /** Sub-agent step limit; a positive integer, or -1 (unlimited). */
   readonly subagentMaxIterations: number;
+  /** How a parent's `agent_task` calls may overlap (read by `feat/parallel-agents`). */
+  readonly subagentExecution: ToolExecutionMode;
+  /** At most this many sub-agents at once (read by `feat/parallel-agents`). */
+  readonly subagentMaxParallel: number;
+  /** A custom `agent_task` description, resolved (I/O in load.ts); absent → the neutral default. */
+  readonly agentTaskDescription?: string;
   /** Max characters of a tool result kept inline before spilling to a file. */
   readonly maxInlineOutputChars: number;
   /** Whether to mask secrets in tool output. */
@@ -125,6 +138,14 @@ export interface ResolvedConfig {
     readonly systemPrompt: Source;
     readonly subagentsEnabled: Source;
     readonly subagentMaxIterations: Source;
+    readonly subagentExecution: Source;
+    readonly subagentMaxParallel: Source;
+    readonly agentTaskDescription: Source;
+    readonly autoTitle: Source;
+    readonly loadAgentsMd: Source;
+    readonly loadSkills: Source;
+    readonly contextAwarenessEnabled: Source;
+    readonly contextAwarenessStepPercent: Source;
     readonly contextResetEnabled: Source;
     readonly contextResetMaxPerMessage: Source;
     readonly maxInlineOutputChars: Source;
@@ -157,6 +178,8 @@ export interface ResolveContext {
   readonly agentsMd?: string | undefined;
   /** Discovered skills, after precedence (I/O in load.ts); ignored when disabled. */
   readonly skills?: readonly SkillInfo[] | undefined;
+  /** The custom `agent_task` description, read and checked (I/O in load.ts). */
+  readonly agentTaskDescription?: string | undefined;
 }
 
 /** Header the auto-loaded AGENTS.md is appended under, after the identity prompt. */
@@ -231,8 +254,12 @@ function parseBool(raw: string | undefined): boolean | undefined {
  * `load.ts` must know it BEFORE scanning (a disabled scan does no I/O).
  */
 export function skillsEnabled(fileConfig: FileConfig, env: Env): boolean {
+  return pickSkillsEnabled(fileConfig, env).value;
+}
+
+function pickSkillsEnabled(fileConfig: FileConfig, env: Env): { value: boolean; source: Source } {
   const noSkillsEnv = parseBool(env.TENTACLE_NO_SKILLS);
-  return noSkillsEnv !== undefined ? !noSkillsEnv : (fileConfig.loadSkills ?? true);
+  return pick(noSkillsEnv !== undefined ? !noSkillsEnv : undefined, fileConfig.loadSkills, true);
 }
 
 /**
@@ -241,8 +268,12 @@ export function skillsEnabled(fileConfig: FileConfig, env: Env): boolean {
  * `loadAgentsMd` > enabled. Exported for the same reason as `skillsEnabled`.
  */
 export function agentsMdEnabled(fileConfig: FileConfig, env: Env): boolean {
+  return pickAgentsMdEnabled(fileConfig, env).value;
+}
+
+function pickAgentsMdEnabled(fileConfig: FileConfig, env: Env): { value: boolean; source: Source } {
   const noAgentsEnv = parseBool(env.TENTACLE_NO_AGENTS_MD);
-  return noAgentsEnv !== undefined ? !noAgentsEnv : (fileConfig.loadAgentsMd ?? true);
+  return pick(noAgentsEnv !== undefined ? !noAgentsEnv : undefined, fileConfig.loadAgentsMd, true);
 }
 
 export interface ComposeSystemPromptInput {
@@ -339,6 +370,28 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.subagents?.maxIterations,
     DEFAULT_SUBAGENT_MAX_ITERATIONS,
   );
+  const subagentExecution = pick<ToolExecutionMode>(
+    parseToolExecution(env.TENTACLE_SUBAGENT_EXECUTION),
+    fileConfig.subagents?.execution,
+    DEFAULT_SUBAGENT_EXECUTION,
+  );
+  const subagentMaxParallel = pick(
+    parsePositiveInt(env.TENTACLE_SUBAGENT_MAX_PARALLEL),
+    fileConfig.subagents?.maxParallel,
+    DEFAULT_SUBAGENT_MAX_PARALLEL,
+  );
+  const autoTitle = pick(undefined, model.autoTitle, DEFAULT_AUTO_TITLE);
+  // File-only, like `autoTitle`: no env form.
+  const contextAwarenessEnabled = pick(
+    undefined,
+    fileConfig.contextAwareness?.enabled,
+    DEFAULT_CONTEXT_AWARENESS,
+  );
+  const contextAwarenessStepPercent = pick(
+    undefined,
+    fileConfig.contextAwareness?.stepPercent,
+    DEFAULT_CONTEXT_STEP_PERCENT,
+  );
   const contextResetEnabled = pick(
     parseBool(env.TENTACLE_CONTEXT_RESET),
     fileConfig.contextReset?.enabled,
@@ -405,15 +458,14 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     provider: providerValue,
     baseURL: baseURL.value,
     model: modelId.value,
-    autoTitle: model.autoTitle ?? DEFAULT_AUTO_TITLE,
+    autoTitle: autoTitle.value,
     ...(model.titleModel !== undefined ? { titleModel: model.titleModel } : {}),
     cwd,
     maxIterations: maxIterations.value,
     contextWindow: contextWindow.value,
-    // File-only, like `autoTitle`: no env form.
     contextAwareness: {
-      enabled: fileConfig.contextAwareness?.enabled ?? DEFAULT_CONTEXT_AWARENESS,
-      stepPercent: fileConfig.contextAwareness?.stepPercent ?? DEFAULT_CONTEXT_STEP_PERCENT,
+      enabled: contextAwarenessEnabled.value,
+      stepPercent: contextAwarenessStepPercent.value,
     },
     contextReset: {
       enabled: contextResetEnabled.value,
@@ -421,10 +473,16 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     },
     ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
     systemPrompt: systemPromptValue,
+    promptIdentity: systemPrompt.value,
     agentsMdLoaded,
     skills,
     subagentsEnabled: subagentsEnabled.value,
     subagentMaxIterations: subagentMaxIterations.value,
+    subagentExecution: subagentExecution.value,
+    subagentMaxParallel: subagentMaxParallel.value,
+    ...(ctx.agentTaskDescription !== undefined
+      ? { agentTaskDescription: ctx.agentTaskDescription }
+      : {}),
     maxInlineOutputChars: maxInlineOutputChars.value,
     redactSecrets: redactSecrets.value,
     summarizeLargeOutput: summarizeLargeOutput.value,
@@ -452,6 +510,14 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       systemPrompt: systemPrompt.source,
       subagentsEnabled: subagentsEnabled.source,
       subagentMaxIterations: subagentMaxIterations.source,
+      subagentExecution: subagentExecution.source,
+      subagentMaxParallel: subagentMaxParallel.source,
+      agentTaskDescription: ctx.agentTaskDescription !== undefined ? "file" : "default",
+      autoTitle: autoTitle.source,
+      loadAgentsMd: pickAgentsMdEnabled(fileConfig, env).source,
+      loadSkills: pickSkillsEnabled(fileConfig, env).source,
+      contextAwarenessEnabled: contextAwarenessEnabled.source,
+      contextAwarenessStepPercent: contextAwarenessStepPercent.source,
       contextResetEnabled: contextResetEnabled.source,
       contextResetMaxPerMessage: contextResetMaxPerMessage.source,
       maxInlineOutputChars: maxInlineOutputChars.source,

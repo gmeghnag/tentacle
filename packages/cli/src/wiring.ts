@@ -363,7 +363,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   };
 
   // The model is told how full its context is (docs/feat/context-awareness.md),
-  // on `model.contextWindow` (a pod daemon's is the laptop's: `--context-window`).
+  // on `model.contextWindow` (a pod daemon's is the laptop's, carried).
   // Each sub-agent counts its own history on the same window.
   const contextAwareness = config.contextAwareness.enabled
     ? { window: config.contextWindow, stepPercent: config.contextAwareness.stepPercent }

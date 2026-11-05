@@ -272,7 +272,14 @@ class SpyFakeCluster extends FakeCluster {
 
 function baseConfig(cwd: string): TentacleConfig {
   // Only the fields the pod runtime reads (cwd, model) matter here.
-  return { cwd, model: "qwen3", contextWindow: 128000 } as unknown as TentacleConfig;
+  return {
+    cwd,
+    model: "qwen3",
+    contextWindow: 128000,
+    contextAwareness: { enabled: true, stepPercent: 1 },
+    contextReset: { enabled: true, maxPerMessage: -1 },
+    toolExecution: { mode: "read-only", maxParallel: 8 },
+  } as unknown as TentacleConfig;
 }
 
 let dir: string;
@@ -298,26 +305,13 @@ afterAll(async () => {
 });
 
 describe("podDaemonCommand (docs/feat/detached-runs.md S1)", () => {
-  test("T9: every exec runs the BRIDGE to the resident daemon, with the laptop's model flags", () => {
+  test("T9: every exec runs the BRIDGE to the resident daemon, and no setting travels in argv", () => {
     // Mutation: back to `serve --bridge` → the pod daemon dies with each exec again.
-    expect(
-      podDaemonCommand("/usr/local/bin/tentacle", { autoTitle: true, contextWindow: 1000 }),
-    ).toEqual([
+    expect(podDaemonCommand("/usr/local/bin/tentacle")).toEqual([
       "/usr/local/bin/tentacle",
       "serve",
       "--bridge",
       "--model-proxy",
-      "--context-window",
-      "1000",
-      "--auto-title",
-    ]);
-    expect(podDaemonCommand("tentacle", { autoTitle: false, contextWindow: 5 })).toEqual([
-      "tentacle",
-      "serve",
-      "--bridge",
-      "--model-proxy",
-      "--context-window",
-      "5",
     ]);
   });
 });
@@ -1365,9 +1359,30 @@ class TunnelCluster extends FakeCluster {
   }
 }
 
+/** A `TunnelCluster` that keeps the settings each daemon-side agent was built from. */
+class SettingsCluster extends TunnelCluster {
+  readonly settings: unknown[] = [];
+  override openExec(target: ExecTarget, _options?: ExecChannelOptions): DuplexChannel {
+    this.calls.push(`exec:${target.pod}:${target.container ?? "-"}:${target.command.join(" ")}`);
+    const [daemonCh, clientCh] = createChannelPair();
+    const host = new SessionHost({
+      defaultCwd: "/pod/work",
+      createAgent: (_cwd, { settings }) => {
+        this.settings.push(settings);
+        return {
+          agent: new Agent({ model: this.model, tools: new ToolRegistry(), env: noopEnv }),
+          permissions: new PermissionBroker(),
+        };
+      },
+    });
+    this.connection = new Connection(daemonCh, host);
+    return clientCh;
+  }
+}
+
 // docs/feat/session-titles.md, follow-up 1: on a pod the LAPTOP's
-// `model.autoTitle` decides. It launches the daemon with `--auto-title`, and
-// the laptop serves (or refuses) the pod's title calls itself.
+// `model.autoTitle` decides. It carries the value per session, and the laptop
+// serves (or refuses) the pod's title calls itself.
 describe("pod titles: the laptop's model.autoTitle decides", () => {
   const deps = (kube: PodCluster, name: string) => ({
     kube,
@@ -1389,37 +1404,34 @@ describe("pod titles: the laptop's model.autoTitle decides", () => {
       ...extra,
     }) as TentacleConfig;
 
-  // `run` builds its command with the same `podDaemonCommand`; driven here through `attach`.
-  test("autoTitle on → the daemon is launched with --auto-title; off → without", async () => {
-    const on = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
-    const a = await startAttachRuntime(failing("/pod/work", { autoTitle: true }), deps(on, "t-on"));
-    expect(on.calls[2]).toBe(
-      `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000 --auto-title`,
+  // docs/feat/config-carry.md (and context-awareness.md: the window is the model's).
+  test("attach: no setting in the daemon's argv; the laptop's reach a session it creates", async () => {
+    // Mutation: drop `sessionSettings` at the `attach` call site → undefined here.
+    const c = new SettingsCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const a = await startAttachRuntime(
+      failing("/pod/work", { autoTitle: true, contextWindow: 200000 }),
+      deps(c, "t-attach"),
     );
+    expect(c.calls[2]).toBe(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
+    for await (const _event of a.createSession().send("hi")) {
+      // drain
+    }
+    expect(c.settings[0]).toMatchObject({ autoTitle: true, contextWindow: 200000 });
     a.dispose();
-    const off = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
-    const b = await startAttachRuntime(
-      failing("/pod/work", { autoTitle: false }),
-      deps(off, "t-off"),
-    );
-    expect(off.calls[2]).toBe(
-      `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-    );
-    b.dispose();
   });
 
-  // docs/feat/context-awareness.md: the window is a property of the model, which
-  // lives on the laptop — the pod's own config never decides it.
-  test("the daemon is launched with the LAPTOP's --context-window", async () => {
-    const c = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
-    const a = await startAttachRuntime(
-      failing("/pod/work", { contextWindow: 200000 }),
-      deps(c, "t-window"),
-    );
-    expect(c.calls[2]).toBe(
-      `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 200000`,
-    );
-    a.dispose();
+  test("run: the laptop's settings reach a session it creates", async () => {
+    // Mutation: drop `sessionSettings` at the `run` call site → undefined here.
+    const c = new SettingsCluster(new ScriptedProvider([[{ type: "done" }]]));
+    const r = await startPodRuntime(failing("/pod/work", { autoTitle: false, contextWindow: 5 }), {
+      ...deps(c, "t-run"),
+      image: "repo/img:tag",
+    });
+    for await (const _event of r.createSession().send("hi")) {
+      // drain
+    }
+    expect(c.settings[0]).toMatchObject({ autoTitle: false, contextWindow: 5 });
+    r.dispose();
   });
 
   test("the laptop's gate: off → a pod's title call is refused even unasked-for; on → the laptop serves it", async () => {
@@ -1475,9 +1487,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     // only/default one — a single-container pod needs no `-c`.
     expect(kube.calls[0]).toBe("get:mypod");
     expect(kube.calls[1]).toBe(`runexec:mypod:${POD_BIN_PATH} --version`);
-    expect(kube.calls[2]).toBe(
-      `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-    );
+    expect(kube.calls[2]).toBe(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
     expect(kube.calls.some((c) => c.includes("uname"))).toBe(false);
     expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
 
@@ -1603,9 +1613,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     // records only the command, so the exec target is the assertion point.
     expect(kube.calls[0]).toBe("get:mypod");
     expect(kube.calls[1]).toBe(`runexec:mypod:${POD_BIN_PATH} --version`);
-    expect(kube.calls[2]).toBe(
-      `exec:mypod:dns:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-    );
+    expect(kube.calls[2]).toBe(`exec:mypod:dns:${POD_BIN_PATH} serve --bridge --model-proxy`);
     runtime.dispose();
     expect(kube.calls.some((c) => c.startsWith("delete:"))).toBe(false);
   });
@@ -1790,9 +1798,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         podName: "mypod",
         notify: (text) => notices.push(text),
       });
-      expect(kube.calls).toContain(
-        `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-      );
+      expect(kube.calls).toContain(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
       expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
       expect(notices).toEqual([]);
       runtime.dispose();
@@ -1823,9 +1829,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
           expect(kube.calls.some((c) => c.includes(`head -c ${size} > ${POD_BIN_PATH}.new`))).toBe(
             true,
           );
-          expect(kube.calls).toContain(
-            `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-          );
+          expect(kube.calls).toContain(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
           const line = `the container had tentacle ${had}; replaced with 0.3.0 (this laptop's)`;
           expect(notices).toEqual([line]);
           expect(logs).toContain(`${line}\n`); // piped: the same line on the log
@@ -2169,9 +2173,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
       });
       expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
       expect(notices[0]).toContain("replacing it failed");
-      expect(kube.calls).toContain(
-        `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-      );
+      expect(kube.calls).toContain(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
       runtime.dispose();
     });
   });
@@ -2350,9 +2352,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         binDir: "/tmp",
         notify: (text) => notices.push(text),
       });
-      expect(kube.calls).toContain(
-        "exec:mypod:-:/tmp/tentacle serve --bridge --model-proxy --context-window 128000",
-      );
+      expect(kube.calls).toContain("exec:mypod:-:/tmp/tentacle serve --bridge --model-proxy");
       expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
       expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
       expect(notices).toEqual([]);
@@ -2374,9 +2374,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
           podName: "mypod",
           notify: (text) => notices.push(text),
         });
-        expect(kube.calls).toContain(
-          `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-        );
+        expect(kube.calls).toContain(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
         expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
         expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
         // The busy resident's 0.2.0 is not this laptop's: said, and joined.
@@ -2397,9 +2395,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         podName: "mypod",
         notify: (text) => notices.push(text),
       });
-      expect(kube.calls).toContain(
-        `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-      );
+      expect(kube.calls).toContain(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
       expect(notices).toEqual([
         `the container's tentacle 0.2.0 on PATH stays; installed 0.3.0 (this laptop's) at ${POD_BIN_PATH}, which this session runs`,
       ]);
@@ -2436,9 +2432,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         podName: "mypod",
         binDir: "/tmp",
       });
-      expect(kube.calls).toContain(
-        "exec:mypod:-:tentacle serve --bridge --model-proxy --context-window 128000",
-      );
+      expect(kube.calls).toContain("exec:mypod:-:tentacle serve --bridge --model-proxy");
       expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
       expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
       runtime.dispose();
@@ -2475,9 +2469,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         binDir: "/tmp",
         notify: (text) => notices.push(text),
       });
-      expect(kube.calls).toContain(
-        "exec:mypod:-:/tmp/tentacle serve --bridge --model-proxy --context-window 128000",
-      );
+      expect(kube.calls).toContain("exec:mypod:-:/tmp/tentacle serve --bridge --model-proxy");
       expect(notices).toEqual([
         "the container's tentacle 0.2.0 on PATH stays; installed 0.3.0 (this laptop's) at /tmp/tentacle, which this session runs",
       ]);
@@ -2534,9 +2526,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         notify: () => {},
       });
       expect(kube.calls).toContain("runexec:mypod:/tmp/tentacle serve --resident-status");
-      expect(kube.calls).toContain(
-        "exec:mypod:-:/tmp/tentacle serve --bridge --model-proxy --context-window 128000",
-      );
+      expect(kube.calls).toContain("exec:mypod:-:/tmp/tentacle serve --bridge --model-proxy");
       runtime.dispose();
     });
   });
@@ -2577,9 +2567,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
       expect(notices).toEqual([warning]);
       expect(logs).toContain(`${warning}\n`);
       // The container's own tentacle: the install failed before its rename.
-      expect(kube.calls).toContain(
-        `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-      );
+      expect(kube.calls).toContain(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
       expect(kube.calls.some((c) => c.startsWith("delete:") || c.startsWith("besteffort:"))).toBe(
         false,
       );
@@ -2603,9 +2591,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
       expect(notices).toEqual([
         "⚠ the container has tentacle 0.2.0, this laptop 0.3.0; replacing it failed: [pod mypod] failed to inject tentacle (exit 1): sh: can't create: Read-only file system — continuing with the container's tentacle 0.2.0 (a protocol mismatch is still refused). To replace it: re-run \"tentacle attach\" with --bin-dir <a writable directory, e.g. /tmp>, or install tentacle 0.3.0 in the container image",
       ]);
-      expect(kube.calls).toContain(
-        "exec:mypod:-:tentacle serve --bridge --model-proxy --context-window 128000",
-      );
+      expect(kube.calls).toContain("exec:mypod:-:tentacle serve --bridge --model-proxy");
       runtime.dispose();
     });
   });
@@ -2659,9 +2645,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         /^⚠ the container has tentacle 0\.1\.0, this laptop 0\.3\.0; replacing it failed: .*x64 is at version 0\.2\.0.* — continuing with the container's tentacle 0\.1\.0 \(a protocol mismatch is still refused\)\. To replace it: run "tentacle update" on this laptop, then "tentacle attach" again$/,
       );
       expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
-      expect(kube.calls).toContain(
-        `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-      );
+      expect(kube.calls).toContain(`exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`);
       runtime.dispose();
     });
   });
@@ -3022,8 +3006,8 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
     await drain(session.send("again"));
     await runtime.dispose();
     expect(kube.execs()).toEqual([
-      `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
-      `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
+      `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`,
+      `exec:mypod:-:${POD_BIN_PATH} serve --bridge --model-proxy`,
     ]);
     // The reconnect checked the pod first (preflight), and nothing deleted it.
     expect(kube.calls.filter((c) => c === "get:mypod").length).toBeGreaterThanOrEqual(2);

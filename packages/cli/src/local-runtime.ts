@@ -43,9 +43,15 @@ import {
   labelUnansweredCalls,
 } from "@tentacle/daemon";
 import { applyGroupMessage } from "@tentacle/exec";
-import { DomainErrorCode, type McpServerStatus, type SessionTitle } from "@tentacle/protocol";
+import {
+  DomainErrorCode,
+  type McpServerStatus,
+  type SessionSettings,
+  type SessionTitle,
+} from "@tentacle/protocol";
 import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import type { SessionController } from "@tentacle/tui";
+import { createSettingsNotifier } from "./carried-settings.ts";
 import { logDaemonError } from "./daemon-log.ts";
 import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
 import { type ResidentUse, residentUseOf } from "./relay-state.ts";
@@ -510,6 +516,11 @@ export interface LocalRuntimeDeps {
   readonly modelProvider?: ModelProvider;
   /** Serves the pod's TITLE calls; absent → refused (the laptop's `model.autoTitle` is off). */
   readonly titleModelProvider?: ModelProvider;
+  /**
+   * What this laptop carries into a pod (`run`/`attach`, docs/feat/config-carry.md).
+   * Absent → nothing is sent: the local worker gets the config at bootstrap.
+   */
+  readonly sessionSettings?: SessionSettings;
   /** `container` for `run`/`attach`: picks the advice for a daemon too old to give its own. */
   readonly daemonKind?: DaemonKind;
   /**
@@ -558,8 +569,13 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     clientInfo: CLIENT_INFO,
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
     ...(deps.titleModelProvider ? { titleModelProvider: deps.titleModelProvider } : {}),
+    ...(deps.sessionSettings ? { sessionSettings: deps.sessionSettings } : {}),
   });
   await client.initialize();
+  // A pod's report of what it did with them: through `notify`, never a raw write.
+  if (deps.sessionSettings && deps.notify) {
+    client.onSessionSettings(createSettingsNotifier(deps.sessionSettings, deps.notify));
+  }
   client.onHistoryLost(({ turns }) => {
     deps.notify?.(
       `⚠ The daemon lost the session while the link was down; it was restored without your last ${
