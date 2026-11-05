@@ -127,9 +127,9 @@ export const DEFAULT_CONFIG_JSONC = `{
   // "maxIterations": ${DEFAULT_MAX_ITERATIONS}, // -1 = unlimited
 
   // Sub-agents: the \`agent_task\` tool that delegates work to an isolated child agent.
-  // "subagents": { "enabled": ${DEFAULT_SUBAGENTS_ENABLED}, "maxIterations": ${DEFAULT_SUBAGENT_MAX_ITERATIONS} }, // maxIterations: -1 = unlimited
-  // Reserved for parallel sub-agents, not read yet ("execution": "${DEFAULT_SUBAGENT_EXECUTION}", "maxParallel": ${DEFAULT_SUBAGENT_MAX_PARALLEL},
-  // "agentTaskDescription" or "agentTaskDescriptionFile": replace the tool's description, at most ${MAX_AGENT_TASK_DESCRIPTION_BYTES} bytes).
+  // "subagents": { "enabled": ${DEFAULT_SUBAGENTS_ENABLED}, "maxIterations": ${DEFAULT_SUBAGENT_MAX_ITERATIONS}, "execution": "${DEFAULT_SUBAGENT_EXECUTION}", "maxParallel": ${DEFAULT_SUBAGENT_MAX_PARALLEL} }, // maxIterations: -1 = unlimited
+  // execution: "parallel", "read-only" (only sub-agents that cannot write overlap) or "sequential". maxParallel: at most that many at once, lower on a server with fewer slots.
+  // "agentTaskDescription" or "agentTaskDescriptionFile": replace the tool's description, at most ${MAX_AGENT_TASK_DESCRIPTION_BYTES} bytes.
 
   // Context awareness: tell the model how full its context is — a short line
   // ("[context: 82k / 128k tokens (64%)]") appended to the message that crosses

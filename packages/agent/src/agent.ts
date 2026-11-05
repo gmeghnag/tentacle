@@ -34,6 +34,7 @@ import {
   type Usage,
   allowAll,
   countTokensBounded,
+  slotsBounded,
 } from "@tentacle/core";
 import {
   CONTEXT_RESET_TOOL_NAME,
@@ -69,9 +70,14 @@ import {
   type ExecutionMode,
   classOf,
   dependencies,
+  effectiveAgentCap,
+  hasSpawnFanOut,
   nextRunnable,
-  planGroups,
+  planRound,
+  spawnDependencies,
+  spawnKindOf,
 } from "./round-plan.ts";
+import type { SessionGrants } from "./session-grants.ts";
 import { EMPTY_SKILL_LISTING, type SkillListing, userRescanListing } from "./session-skills.ts";
 
 export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations";
@@ -382,9 +388,31 @@ export interface AgentConfig {
   /**
    * How a round's calls may overlap (`tools.execution` / `tools.maxParallel`,
    * docs/feat/parallel-tools.md). Absent → sequential: every call alone, as
-   * every agent built without it (tests, sub-agents) expects.
+   * every agent built without it (tests) expects.
    */
   readonly toolExecution?: { readonly mode: ExecutionMode; readonly maxParallel: number };
+  /**
+   * How a round's `agent_task` calls may overlap (`subagents.execution` /
+   * `subagents.maxParallel`, docs/feat/parallel-agents.md): their own lane,
+   * independent of `toolExecution`. `slots`: the server's parallel slots, asked
+   * only when a round fans out; the cap is the lower of the two. Absent →
+   * sequential.
+   */
+  readonly subagentExecution?: {
+    readonly mode: ExecutionMode;
+    readonly maxParallel: number;
+    slots?(signal?: AbortSignal): Promise<number | undefined>;
+  };
+  /**
+   * The session tree's approvals and ask lane, shared with its sub-agents
+   * (docs/feat/parallel-agents.md, Design 3). Absent → this agent's own.
+   */
+  readonly grants?: SessionGrants;
+  /**
+   * A prefix for this agent's spill files. A sub-agent has one: the path is
+   * built from a call id the server chose, which two children may share.
+   */
+  readonly spillScope?: string;
 }
 
 /** What `runToolCalls` reports to the loop: an accepted context reset ran. */
@@ -394,6 +422,14 @@ type RoundOutcome = "context_reset" | undefined;
 interface RoundHooks {
   readonly beforeRun?: BeforeRun | undefined;
   readonly beforeResumedCall?: BeforeResumedCall | undefined;
+}
+
+/** What a group's phase 2 runs under: its lane's cap and dependency rule. */
+interface GroupRule {
+  readonly cap: number;
+  dependencies(
+    calls: readonly { readonly tool: Tool | undefined; readonly input: unknown }[],
+  ): number[][];
 }
 
 /** An item of a group's queue: a call's live progress, or a call's settled run. */
@@ -480,7 +516,11 @@ export class Agent {
     this.config = config;
     this.activator = config.skills;
     this.listing = config.skillListing ?? EMPTY_SKILL_LISTING;
-    this.gate = new PermissionGate(config.requestPermission ?? allowAll, config.hooks);
+    this.gate = new PermissionGate(
+      config.requestPermission ?? allowAll,
+      config.hooks,
+      config.grants,
+    );
     // Collect background-job exits as they happen; they are flushed into the
     // conversation (and event stream) at the top of the next turn.
     config.jobs?.onExit((job) => this.pendingExits.push(job));
@@ -1146,8 +1186,10 @@ export class Agent {
   }
 
   /**
-   * Run one round's tool calls, group by group (`planGroups`, by
-   * `toolExecution`; absent = sequential, every call alone). A call alone is
+   * Run one round's tool calls, group by group (`planRound`, by
+   * `toolExecution` and `subagentExecution`; absent = sequential, every call
+   * alone). The server's slots are asked only here and only for a fan-out, so
+   * every other round has no extra await. A call alone is
    * authorized and run, and its result pushed and committed before the next
    * one starts — so a history suspended inside it is "earlier calls answered,
    * this one and the later ones not" (`suspendedCalls`). A group of several
@@ -1166,10 +1208,43 @@ export class Agent {
     const classes = calls.map((call) =>
       classOf(this.config.tools.get(call.name), parseArguments(call.arguments)),
     );
-    for (const indexes of planGroups(classes, mode, maxParallel)) {
+    const kinds = calls.map((call) =>
+      spawnKindOf(this.config.tools.get(call.name), parseArguments(call.arguments)),
+    );
+    const agents = this.config.subagentExecution;
+    const agentMode = agents?.mode ?? "sequential";
+    let agentCap = agents?.maxParallel ?? 1;
+    if (agents && agentCap > 1 && hasSpawnFanOut(kinds, agentMode)) {
+      agentCap = effectiveAgentCap(agentCap, await slotsBounded(agents, toolContext.signal));
+    }
+    const rules: Record<"tools" | "agents", GroupRule> = {
+      tools: {
+        cap: maxParallel,
+        dependencies: (items) =>
+          dependencies(
+            items.map((item) => classOf(item.tool, item.input)),
+            mode,
+          ),
+      },
+      agents: {
+        cap: agentCap,
+        dependencies: (items) =>
+          spawnDependencies(
+            items.map((item) => spawnKindOf(item.tool, item.input)),
+            agentMode,
+          ),
+      },
+    };
+    const round = planRound(
+      classes,
+      kinds,
+      { mode, maxParallel },
+      { mode: agentMode, cap: agentCap },
+    );
+    for (const { indexes, lane } of round) {
       const group = indexes.flatMap((i) => (calls[i] ? [calls[i]] : []));
       if (group.length > 1) {
-        yield* this.runGroup(group, messages, toolContext, hooks, mode, maxParallel);
+        yield* this.runGroup(group, messages, toolContext, hooks, rules[lane]);
         continue;
       }
       const call = group[0];
@@ -1260,10 +1335,14 @@ export class Agent {
    *
    * PHASE 1 — authorize, serially, in call order, each ask carrying the
    * group's head as `groupStart`. A refusal or a cancel is answered at once
-   * (its `tool_result`); nothing is pushed. This is the ONLY place a call of
-   * the group may wait on a human: nothing in phase 2 asks anyone (the
-   * load-bearing assumption — no tool that asks while it runs is ever
-   * grouped).
+   * (its `tool_result`); nothing is pushed. A call's OWN ask happens only here.
+   *
+   * A sub-agent's ask may be raised in phase 2, while its `agent_task` runs
+   * (docs/feat/parallel-agents.md, the load-bearing assumption). That cannot
+   * break the disk or the replay: such an ask is never resumable and the
+   * group's `inFlight` is durable before any child starts, so a reload never
+   * re-runs the group; and the group's one commit follows every child, so the
+   * cut cannot pass a live ask.
    *
    * BETWEEN — if some call may run and no abort: the resumed round's F3 hold
    * (`beforeResumedCall`), then `beforeRun` with the ids that will run, each
@@ -1271,8 +1350,8 @@ export class Agent {
    * none starts).
    *
    * PHASE 2 — `beforeRun` landed: the calls run concurrently, each once the
-   * earlier calls it conflicts with (on its EFFECTIVE input) have settled,
-   * at most `maxParallel` at a time; results are yielded as they complete and
+   * earlier calls its lane's rule makes it wait for (on its EFFECTIVE input)
+   * have settled, at most the lane's cap at a time; results are yielded as they complete and
    * pushed in call order with ONE commit at the end. Not landed: one at a
    * time, in call order, a commit after each (never parallel without a
    * durable record). Either way, a result-processing failure is that call's
@@ -1283,8 +1362,7 @@ export class Agent {
     messages: ChatMessage[],
     toolContext: ToolContext,
     hooks: RoundHooks,
-    mode: ExecutionMode,
-    maxParallel: number,
+    rule: GroupRule,
   ): AsyncGenerator<AgentEvent, void> {
     const signal = toolContext.signal;
     const head = calls[0]?.id;
@@ -1377,18 +1455,17 @@ export class Agent {
 
     // PHASE 2 (landed): concurrent, under the dependency order and the cap.
     const order = [...ready.keys()];
-    const deps = dependencies(
-      order.map((i) => {
-        const entry = ready.get(i);
-        return classOf(this.config.tools.get(calls[i]?.name ?? ""), entry?.prepared.input);
-      }),
-      mode,
+    const deps = rule.dependencies(
+      order.map((i) => ({
+        tool: this.config.tools.get(calls[i]?.name ?? ""),
+        input: ready.get(i)?.prepared.input,
+      })),
     );
     const states: CallState[] = order.map(() => "pending");
     let running = 0;
     while (true) {
       while (!signal.aborted) {
-        const k = nextRunnable(deps, states, maxParallel);
+        const k = nextRunnable(deps, states, rule.cap);
         const index = k === undefined ? undefined : order[k];
         const entry = index === undefined ? undefined : ready.get(index);
         const call = index === undefined ? undefined : calls[index];
@@ -1440,7 +1517,8 @@ export class Agent {
         messages.push(toolMessage(call.id, run.result, run.durationMs));
       }
     }
-    // After every push: the group's results precede it. No ask is pending.
+    // After every push: the group's results precede it. No ask is pending: every
+    // call settled, so every sub-agent's ask did too.
     yield { type: "history_commit" };
   }
 
@@ -1771,7 +1849,8 @@ export class Agent {
     }
     const hooks = this.config.hooks;
     const safe = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 60);
-    const path = `.tentacle/tool-output/${safe(call.name)}-${safe(call.id)}.txt`;
+    const scope = this.config.spillScope;
+    const path = `.tentacle/tool-output/${scope !== undefined ? `${safe(scope)}-` : ""}${safe(call.name)}-${safe(call.id)}.txt`;
     return applyResultTransforms(result, transforms, {
       toolName: call.name,
       toolCallId: call.id,

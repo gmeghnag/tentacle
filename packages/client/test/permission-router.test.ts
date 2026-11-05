@@ -215,4 +215,15 @@ describe("PermissionRouter — the sub-agent a request comes from", () => {
     expect(prompt?.kind === "prompt" && prompt.requestId).toBe("r2");
     expect(prompt?.kind === "prompt" && "agent" in prompt).toBe(false);
   });
+
+  test("a pod's label is stripped of control characters and bounded (T-L)", () => {
+    const r = new PermissionRouter();
+    const agent = { type: "ex\u001b[2Jplore", description: `a\nb${"x".repeat(500)}` };
+    const [prompt] = r.request("S", req("r1", { agent }), "X");
+    const seen = prompt?.kind === "prompt" ? prompt.agent : undefined;
+    expect(seen?.type).toBe("ex [2Jplore");
+    expect(seen?.description.startsWith("a b")).toBe(true);
+    expect(seen?.description.length).toBe(200);
+    expect(seen?.description.endsWith("…")).toBe(true);
+  });
 });

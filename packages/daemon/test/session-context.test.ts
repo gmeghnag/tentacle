@@ -178,6 +178,40 @@ describe("ProxyModelProvider.countTokens (the pod reverse-tunnel)", () => {
   });
 });
 
+describe("ProxyModelProvider.slots (T-S, docs/feat/parallel-agents.md)", () => {
+  const never = () => Promise.reject(new Error("unused"));
+
+  test("asks the laptop; a number comes back, an omitted `slots` is undefined", async () => {
+    const ok = new ProxyModelProvider(never, undefined, undefined, async () => ({ slots: 2 }));
+    expect(await ok.slots()).toBe(2);
+    const none = new ProxyModelProvider(never, undefined, undefined, async () => ({}));
+    expect(await none.slots()).toBeUndefined();
+  });
+
+  test("an old laptop (MethodNotFound): undefined; any other failure rejects", async () => {
+    const old = new ProxyModelProvider(never, undefined, undefined, async () => {
+      throw Object.assign(new Error("nope"), { code: JsonRpcErrorCode.MethodNotFound });
+    });
+    expect(await old.slots()).toBeUndefined();
+    const broken = new ProxyModelProvider(never, undefined, undefined, async () => {
+      throw new Error("link down");
+    });
+    await expect(broken.slots()).rejects.toThrow("link down");
+  });
+
+  test("the signal reaches the sender; no sender: undefined", async () => {
+    let seen: AbortSignal | undefined;
+    const provider = new ProxyModelProvider(never, undefined, undefined, async (signal) => {
+      seen = signal;
+      return {};
+    });
+    const controller = new AbortController();
+    await provider.slots(controller.signal);
+    expect(seen).toBe(controller.signal);
+    expect(await new ProxyModelProvider(never).slots()).toBeUndefined();
+  });
+});
+
 describe("a pod daemon: the count is done by the LAPTOP, through the model link", () => {
   test("session/context → model/countTokens on the client; the answer comes back exact", async () => {
     const asked: ModelCountTokensParams[] = [];

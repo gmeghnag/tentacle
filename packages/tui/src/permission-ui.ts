@@ -28,6 +28,12 @@ import {
 } from "react";
 import { MENU, type OrphanCause, type ReplyMode, draftOf } from "./permission-reply.ts";
 
+/** The sub-agent a request comes from. */
+export interface PermissionAgent {
+  readonly type: string;
+  readonly description: string;
+}
+
 export interface PermissionChoice {
   readonly label: string;
   readonly response: PermissionResponse;
@@ -63,6 +69,16 @@ export function ownRequest(
 /** Whether the dialog shows the "writes confined here" row: tool calls only, not a trust request. */
 export function permissionShowsCwd(req: PermissionRequest): boolean {
   return req.kind !== "hooks_trust";
+}
+
+/**
+ * The dialog's row naming the sub-agent that asks (`explore · "find callers"`),
+ * truncated to the width. Display only: nothing decides on it.
+ */
+export function permissionAgentLine(agent: PermissionAgent, columns: number): string {
+  const line = `${agent.type} · "${agent.description}"`;
+  const max = Math.max(10, columns - 3);
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
 /** At most this many detail rows in the dialog (a hooks trust request lists several). */
@@ -124,6 +140,8 @@ export function buildPermissionChoices(req: PermissionRequest): PermissionChoice
 export interface PermissionController {
   /** The request currently awaiting a choice, or null. */
   readonly pending: PermissionRequest | null;
+  /** The sub-agent that asks `pending`, or null (the session's own call). */
+  readonly pendingAgent: PermissionAgent | null;
   /** The menu options for `pending` (empty when idle). */
   readonly choices: PermissionChoice[];
   /** Highlighted option index. */
@@ -176,6 +194,7 @@ export function usePermissionBroker(
   onDraftBack?: DraftBack,
 ): PermissionController {
   const [pending, setPending] = useState<PermissionRequest | null>(null);
+  const [pendingAgent, setPendingAgent] = useState<PermissionAgent | null>(null);
   const [selected, setSelected] = useState(0);
   const [autoApprove, setAutoApprove] = useState(() => feed?.current() ?? false);
   const [mode, setModeState] = useState<ReplyMode>(MENU);
@@ -312,6 +331,7 @@ export function usePermissionBroker(
         pendingOwnRef.current = own;
         setSelected(0);
         setMode(MENU);
+        setPendingAgent(options?.agent ?? null);
         setPending(req);
       });
     });
@@ -327,6 +347,7 @@ export function usePermissionBroker(
   const choices = pending ? buildPermissionChoices(pending) : [];
   return {
     pending,
+    pendingAgent: pending ? pendingAgent : null,
     choices,
     selected,
     setSelected,

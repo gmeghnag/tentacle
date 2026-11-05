@@ -7,7 +7,7 @@
  * on the MODEL's input (before anything is asked), `dependencies` orders the
  * group's calls on their EFFECTIVE input (a `tool_call` hook may rewrite it).
  */
-import type { ResourceKey, Tool } from "@tentacle/core";
+import type { ResourceKey, SpawnKind, Tool } from "@tentacle/core";
 
 /** `tools.execution`: how a round's calls may overlap. */
 export type ExecutionMode = "sequential" | "read-only" | "parallel";
@@ -95,6 +95,129 @@ export function planGroups(
   });
   flush();
   return groups;
+}
+
+/**
+ * The kind of a call to `tool` with `input`: total. Not a spawn, a throw, or
+ * something that is not a kind → `undefined` (not groupable as a spawn).
+ */
+export function spawnKindOf(tool: Tool | undefined, input: unknown): SpawnKind | undefined {
+  try {
+    const kind = tool?.spawnKind?.(input);
+    return kind === "read-only" || kind === "writer" ? kind : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether a spawn of `kind` may overlap others in `mode` (`subagents.execution`). */
+function spawnAdmissible(kind: SpawnKind | undefined, mode: ExecutionMode): boolean {
+  switch (mode) {
+    case "sequential":
+      return false;
+    case "read-only":
+      return kind === "read-only";
+    case "parallel":
+      return kind !== undefined;
+  }
+}
+
+/** A round's group: which lane's cap and dependency rule it runs under. */
+export interface RoundGroup {
+  readonly indexes: readonly number[];
+  readonly lane: "tools" | "agents";
+}
+
+/**
+ * Cut a round across both lanes (docs/feat/parallel-agents.md, Design 1):
+ * contiguous groups, in call order, covering every call once. Maximal runs of
+ * consecutive admissible spawns are an `agents` group; everything else is
+ * exactly `planGroups`. So `[a, a, read, a]` → `[a,a] [read] [a]`.
+ */
+export function planRound(
+  classes: readonly CallClass[],
+  kinds: readonly (SpawnKind | undefined)[],
+  tools: { readonly mode: ExecutionMode; readonly maxParallel: number },
+  agents: { readonly mode: ExecutionMode; readonly cap: number },
+): RoundGroup[] {
+  const groups: RoundGroup[] = [];
+  let spawns: number[] = [];
+  let others: number[] = [];
+  const flushSpawns = (): void => {
+    if (spawns.length > 0) {
+      groups.push({ indexes: spawns, lane: "agents" });
+      spawns = [];
+    }
+  };
+  const flushOthers = (): void => {
+    const offsets = others;
+    if (offsets.length > 0) {
+      const segment = offsets.map((i) => classes[i] ?? "exclusive");
+      for (const group of planGroups(segment, tools.mode, tools.maxParallel)) {
+        groups.push({ indexes: group.flatMap((k) => offsets[k] ?? []), lane: "tools" });
+      }
+      others = [];
+    }
+  };
+  classes.forEach((_, index) => {
+    if (agents.cap > 1 && spawnAdmissible(kinds[index], agents.mode)) {
+      flushOthers();
+      spawns.push(index);
+    } else {
+      flushSpawns();
+      others.push(index);
+    }
+  });
+  flushSpawns();
+  flushOthers();
+  return groups;
+}
+
+/** Whether a round has a run of at least two admissible spawns (the only time the cap matters). */
+export function hasSpawnFanOut(
+  kinds: readonly (SpawnKind | undefined)[],
+  mode: ExecutionMode,
+): boolean {
+  let run = 0;
+  for (const kind of kinds) {
+    run = spawnAdmissible(kind, mode) ? run + 1 : 0;
+    if (run >= 2) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * `dependencies` for an `agents` group, on the EFFECTIVE input (a hook may
+ * rewrite `subagent_type`): admissible spawns wait for nothing among
+ * themselves; a kind no longer admissible, or undefined, waits for every
+ * earlier call and every later one waits for it.
+ */
+export function spawnDependencies(
+  kinds: readonly (SpawnKind | undefined)[],
+  mode: ExecutionMode,
+): number[][] {
+  const free = kinds.map((kind) => spawnAdmissible(kind, mode));
+  return kinds.map((_, i) => {
+    const deps: number[] = [];
+    for (let j = 0; j < i; j++) {
+      if (!free[i] || !free[j]) {
+        deps.push(j);
+      }
+    }
+    return deps;
+  });
+}
+
+/**
+ * The sub-agents' cap: the config's ceiling, lowered to a server's slots when
+ * they are known. Anything but a positive integer is not an answer.
+ */
+export function effectiveAgentCap(maxParallel: number, slots: number | undefined): number {
+  return slots !== undefined && Number.isInteger(slots) && slots > 0
+    ? Math.min(maxParallel, slots)
+    : maxParallel;
 }
 
 /** Two classes conflict: `exclusive` with anything; else a shared resource with a write. */

@@ -179,6 +179,11 @@ export class RetryingModelProvider implements ModelProvider {
     return this.inner.countTokens?.(request);
   }
 
+  /** The wrapped provider's slots, if it can tell (no retries: a probe is best effort). */
+  async slots(signal?: AbortSignal): Promise<number | undefined> {
+    return this.inner.slots?.(signal);
+  }
+
   async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     const maxAttempts = this.policy.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     const sleep = this.policy.sleep ?? abortableSleep;
@@ -217,15 +222,15 @@ export class RetryingModelProvider implements ModelProvider {
             throw new ModelConnectionError(code, "pre-stream", attempt, maxAttempts, error);
           }
         }
-        const delayMs = Math.max(
+        // On top of a `retry-after`, not instead of it: sub-agents limited
+        // together are told one wait, and must not all wake on its last tick.
+        const delayMs =
           backoffDelay(
             attempt,
             this.policy.baseDelayMs ?? DEFAULT_BASE_DELAY_MS,
             this.policy.capDelayMs ?? DEFAULT_CAP_DELAY_MS,
             this.policy.random ?? Math.random,
-          ),
-          retryAfterMs ?? 0,
-        );
+          ) + (retryAfterMs ?? 0);
         const reported = code ?? `HTTP ${limited?.status}`;
         try {
           this.policy.onRetry?.({

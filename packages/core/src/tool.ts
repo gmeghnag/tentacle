@@ -132,8 +132,18 @@ export interface Tool<Input = unknown> {
    * `"exclusive"` (conflicts with everything: always runs alone).
    */
   readonly concurrency?: ToolConcurrency;
+  /**
+   * This call spawns a sub-agent: what kind, by its (unvalidated) input. Absent =
+   * not a spawn. Spawns overlap in their own lane under `subagents.*`, whatever
+   * `concurrency` says (docs/feat/parallel-agents.md, Design 1). A throw counts
+   * as "not groupable".
+   */
+  readonly spawnKind?: (input: unknown) => SpawnKind;
   execute(input: Input, ctx: ToolContext): Promise<ToolResult>;
 }
+
+/** A spawned sub-agent's kind: `read-only` when its whole tool-set only reads. */
+export type SpawnKind = "read-only" | "writer";
 
 /**
  * A resource a call touches. Two keys CONFLICT iff they name the same

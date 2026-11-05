@@ -291,9 +291,9 @@ Precedence: **environment variables › `config.jsonc` › built-in defaults**.
 | `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline) | System prompt file (default `PROMPT.md`) |
 | `maxIterations` | `TENTACLE_MAX_ITERATIONS` | Max model/tool rounds per turn |
 | `subagents.enabled` | `TENTACLE_SUBAGENTS` | The `agent_task` sub-agent tool (default on) |
-| `subagents.execution` | `TENTACLE_SUBAGENT_EXECUTION` | Reserved for parallel sub-agents, not read yet: `parallel` (default), `read-only` or `sequential` |
-| `subagents.maxParallel` | `TENTACLE_SUBAGENT_MAX_PARALLEL` | Reserved for parallel sub-agents, not read yet (default `4`) |
-| `subagents.agentTaskDescription` / `agentTaskDescriptionFile` | — | Reserved for parallel sub-agents, not read yet: replaces the `agent_task` description, at most 4096 bytes. The file is relative to the config dir, or absolute. Setting both is an error |
+| `subagents.execution` | `TENTACLE_SUBAGENT_EXECUTION` | How a message's `agent_task` calls overlap: `parallel` (default; they share one workspace), `read-only` (only sub-agents that cannot write) or `sequential` |
+| `subagents.maxParallel` | `TENTACLE_SUBAGENT_MAX_PARALLEL` | At most this many sub-agents at once (default `4`). A llama.cpp server with fewer slots lowers it automatically |
+| `subagents.agentTaskDescription` / `agentTaskDescriptionFile` | — | Replaces the `agent_task` description, at most 4096 bytes (the list of sub-agent types is always appended). The file is relative to the config dir, or absolute. Setting both is an error |
 | `contextReset.enabled` | `TENTACLE_CONTEXT_RESET` | The model's `context_reset` tool: it renews its own context from a restart prompt it writes, asked like any tool (default on) |
 | `contextReset.maxPerMessage` | `TENTACLE_CONTEXT_RESET_MAX` | Context resets per user message (default `-1` = unlimited) |
 | `loadSkills` | `TENTACLE_NO_SKILLS` (truthy disables) | Agent Skills discovery (default on) |
@@ -364,8 +364,9 @@ Full reference and worked examples: [docs/extensions.md](docs/extensions.md#3-ho
   starts with the `[hook] input modified by hook <name>; ran with: …` line
   the model also gets. When a round's calls run in parallel (`tools.execution`),
   their `tool_result` hooks can run at the same time (`tool_call` hooks still
-  run one at a time, in call order): a `tool_result` hook that writes shared
-  state (a log file, a counter) must tolerate concurrent runs.
+  run one at a time, in call order, within an agent; sub-agents running in
+  parallel, `subagents.execution`, run theirs side by side): a hook that writes
+  shared state (a log file, a counter) must tolerate concurrent runs.
 - **`turn_start`** (once per turn, before the first model call; not on a
   resumed turn): input adds `prompt`. `{"context": "…"}` injects a note; exit 2
   stops the turn (stderr is the reason); a message you queued while it ran is

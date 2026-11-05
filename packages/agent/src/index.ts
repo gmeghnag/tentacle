@@ -13,6 +13,7 @@ export * from "./session-skills.ts";
 export * from "./result-pipeline.ts";
 export * from "./redact.ts";
 export * from "./permission-gate.ts";
+export * from "./session-grants.ts";
 export * from "./shell-prefix.ts";
 export * from "./subagent.ts";
 export * from "./agent-defs.ts";

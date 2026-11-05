@@ -15,6 +15,7 @@ import {
   EMPTY_SKILL_LISTING,
   HookRunner,
   type ResultTransform,
+  SessionGrants,
   type SessionSkills,
   type SkillListing,
   collapseRepeatedLines,
@@ -276,6 +277,26 @@ export interface BuildAgentOptions {
   readonly skillScan?: SkillScan;
 }
 
+/**
+ * `model.slots`, saying once in the daemon log (never the terminal, AGENTS §7)
+ * that the server's slots lower the sub-agents' cap.
+ */
+function slotsReader(
+  model: ModelProvider,
+  maxParallel: number,
+  log: ((line: string) => void) | undefined,
+): (signal?: AbortSignal) => Promise<number | undefined> {
+  let said = false;
+  return async (signal) => {
+    const slots = await model.slots?.(signal);
+    if (!said && slots !== undefined && slots < maxParallel) {
+      said = true;
+      log?.(`sub-agents capped at ${slots} at once: the model server's slots`);
+    }
+    return slots;
+  };
+}
+
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
   const model = options.modelOverride ?? configuredModelProvider(config);
   const env = new HostExecution({ cwd: config.cwd, root: config.cwd });
@@ -369,6 +390,11 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     ? { window: config.contextWindow, stepPercent: config.contextAwareness.stepPercent }
     : undefined;
 
+  // One store of approvals and one ask at a time for this session's whole tree
+  // (docs/feat/parallel-agents.md, Design 3). The ONE broker is still the only
+  // requester: the lane only orders calls to it.
+  const grants = new SessionGrants();
+
   // Sub-agents: when enabled, register the `agent_task` delegation tool. Children
   // inherit the same confined env + permission requester; the runner filters
   // out `agent_task` itself so a sub-agent cannot spawn further sub-agents.
@@ -377,7 +403,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       BUILTIN_AGENT_TYPES,
       loadUserAgentTypes(config.configDir, config.packageAgentDirs).types,
     );
-    const { run, types } = createSubagentRunner({
+    const { run, types, readOnlyType } = createSubagentRunner({
       model,
       // Per-type model override: same endpoint, a different model id. Over a
       // model tunnel the override provider is used for every type.
@@ -390,8 +416,17 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       resultTransforms,
       ...(hooks ? { hooks } : {}),
       ...(contextAwareness ? { contextAwareness } : {}),
+      grants,
+      // A child's own rounds follow `tools.*` (task 7, owner decision 4).
+      toolExecution: config.toolExecution,
     });
-    tools.register(createTaskTool((opts, controls) => run(opts, controls), types));
+    tools.register(
+      createTaskTool((opts, controls) => run(opts, controls), types, {
+        description: config.agentTaskDescription,
+        mode: config.subagentExecution,
+        readOnlyType,
+      }),
+    );
   }
 
   // Context reset (docs/feat/context-reset.md): the model renews its own
@@ -433,8 +468,15 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     ...(options.askHooksTrust ? { askHooksTrust: options.askHooksTrust } : {}),
     ...(contextAwareness ? { contextAwareness } : {}),
     ...(contextReset ? { contextReset } : {}),
-    // The main agent only: sub-agents' rounds stay sequential (task 7).
+    grants,
     toolExecution: config.toolExecution,
+    subagentExecution: {
+      mode: config.subagentExecution,
+      maxParallel: config.subagentMaxParallel,
+      ...(model.slots
+        ? { slots: slotsReader(model, config.subagentMaxParallel, options.log) }
+        : {}),
+    },
   });
   // Names the session after its first exchange (docs/feat/session-titles.md),
   // only with `model.autoTitle` (opt-in; off → no title model, no call):

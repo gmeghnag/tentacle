@@ -222,15 +222,17 @@ const settingsShape = {
         .optional(),
       /**
        * How a parent's `agent_task` calls of one round may overlap: `sequential`,
-       * `read-only` or `parallel` (default). Not read yet: parallel sub-agents
-       * (`feat/parallel-agents`) are its reader. On `run`/`attach` the laptop's.
+       * `read-only` or `parallel` (default). On `run`/`attach` the laptop's.
        */
       execution: z.enum(["sequential", "read-only", "parallel"]).optional(),
-      /** At most this many sub-agents at once. Default 4. Reader and owner: as `execution`. */
+      /**
+       * At most this many sub-agents at once. Default 4; a llama.cpp endpoint's
+       * slots lower it, never raise it. Owner: as `execution`.
+       */
       maxParallel: z.number().int().positive().optional(),
       /**
        * Replaces the `agent_task` tool's description (at most 4096 bytes, trimmed).
-       * Reader and owner: as `execution`. Not with `agentTaskDescriptionFile`.
+       * Owner: as `execution`. Not with `agentTaskDescriptionFile`.
        */
       agentTaskDescription: z.string().min(1).optional(),
       /** The same, read once at start from a file relative to the config dir, or absolute. */

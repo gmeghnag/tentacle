@@ -28,6 +28,7 @@ import {
   Method,
   type ModelCountTokensResult,
   type ModelPurpose,
+  type ModelSlotsResult,
   type ModelStreamChunkedResult,
   type ModelStreamResult,
   Notification,
@@ -90,7 +91,7 @@ export interface ConnectionOptions {
 
 /** The two tunnel requests of a model-serving connection (the pod reverse-tunnel). */
 export type ModelLink = Pick<Connection, "requestModelStream" | "requestModelStreamChunked"> &
-  Partial<Pick<Connection, "requestModelCountTokens">>;
+  Partial<Pick<Connection, "requestModelCountTokens" | "requestModelSlots">>;
 
 /** One session this connection opened. */
 interface Attached {
@@ -194,6 +195,17 @@ export class Connection {
     return this.peer
       .request(Method.ModelCountTokens, { request }, signal ? { signal } : undefined)
       .then((result) => result as ModelCountTokensResult);
+  }
+
+  /**
+   * Ask the connected client how many requests its LOCAL endpoint runs at once
+   * (`model/slots`, docs/feat/parallel-agents.md). No pod input crosses: the
+   * laptop probes one fixed URL of its own and answers one integer.
+   */
+  requestModelSlots(signal?: AbortSignal): Promise<ModelSlotsResult> {
+    return this.peer
+      .request(Method.ModelSlots, {}, signal ? { signal } : undefined)
+      .then((result) => result as ModelSlotsResult);
   }
 
   private async onRequest(

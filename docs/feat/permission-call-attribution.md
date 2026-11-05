@@ -57,7 +57,7 @@ value, and makes the data structures able to hold several asks.
 touching the permission attribution again.
 
 **PE-Q4 (one "Yes, always" for the whole session tree) is NOT in this task;
-it belongs to task 7.** Reasons:
+it belongs to task 7** (done there: `SessionGrants`, `docs/feat/parallel-agents.md`). Reasons:
 1. It changes behaviour even with sequential execution: today a sub-agent's
    "always" does not cover its parent or later sub-agents (each `Agent` builds
    its own `PermissionGate`, `packages/agent/src/agent.ts:417`). Sharing grants

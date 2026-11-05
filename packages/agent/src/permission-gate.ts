@@ -22,15 +22,11 @@ import {
 } from "@tentacle/core";
 import { CONTEXT_RESET_TOOL_NAME } from "@tentacle/tools";
 import type { HookRunner } from "./hooks.ts";
-import { commandCoveredByPrefixes, suggestShellPrefix } from "./shell-prefix.ts";
+import { ABORTED, SessionGrants } from "./session-grants.ts";
+import { suggestShellPrefix } from "./shell-prefix.ts";
 
 function asRecord(input: unknown): Record<string, unknown> {
   return input && typeof input === "object" ? (input as Record<string, unknown>) : {};
-}
-
-function commandOf(input: unknown): string | undefined {
-  const value = asRecord(input).command;
-  return typeof value === "string" ? value : undefined;
 }
 
 /** Build the prompt request for a tool call (title, subject, suggested rule). */
@@ -101,15 +97,18 @@ export interface GateCall {
   readonly signal: AbortSignal;
 }
 
-export class PermissionGate {
-  /** Non-shell tools approved for the whole session. */
-  private readonly grantedTools = new Set<string>();
-  /** Approved shell command prefixes (e.g. `git commit`). */
-  private readonly shellPrefixes: string[] = [];
+/** The lane's answer when a rule granted meanwhile covers the call. */
+const COVERED: unique symbol = Symbol("covered");
 
+export class PermissionGate {
+  /**
+   * `grants`: the session tree's rules and ask lane (docs/feat/parallel-agents.md,
+   * Design 3). Absent → a private store, as an agent alone has.
+   */
   constructor(
     private readonly requester: PermissionRequester,
     private readonly hooks?: HookRunner,
+    private readonly grants: SessionGrants = new SessionGrants(),
   ) {}
 
   async authorize(tool: Tool, input: unknown, call: GateCall): Promise<GateOutcome> {
@@ -159,19 +158,34 @@ export class PermissionGate {
     if (tool.permission === "none" && force !== "ask") {
       return run;
     }
-    if (force !== "ask" && this.isRemembered(tool, effective)) {
+    if (force !== "ask" && this.grants.covers(tool, effective)) {
       return run;
     }
     const request = describeToolCall(tool, effective);
-    // Explicit attribution: the daemon must not guess the call from its stream
-    // (docs/feat/permission-call-attribution.md).
-    const response = await this.requester(request, {
-      toolCallId: call.toolCallId,
-      origin: "call",
-      ...(call.groupStart !== undefined ? { groupStart: call.groupStart } : {}),
+    // One ask at a time for the tree; a waiter re-checks once admitted, so an
+    // "always" answered ahead of it covers it without a second dialog.
+    const response = await this.grants.serial(call.signal, async () => {
+      if (force !== "ask" && this.grants.covers(tool, effective)) {
+        return COVERED;
+      }
+      // Explicit attribution: the daemon must not guess the call from its stream
+      // (docs/feat/permission-call-attribution.md).
+      const answer = await this.requester(request, {
+        toolCallId: call.toolCallId,
+        origin: "call",
+        ...(call.groupStart !== undefined ? { groupStart: call.groupStart } : {}),
+      });
+      if (answer.allowed && answer.scope === "session") {
+        this.grants.remember(tool, request);
+      }
+      return answer;
     });
-    if (response.allowed && response.scope === "session") {
-      this.remember(tool, request);
+    if (response === ABORTED) {
+      // Cancelled in the lane: never prompted; the caller reports the cancel.
+      return { allowed: false, input: effective, by: "user" };
+    }
+    if (response === COVERED) {
+      return run;
     }
     if (response.allowed) {
       return run;
@@ -186,25 +200,5 @@ export class PermissionGate {
       by: "user",
       ...(response.message !== undefined ? { message: response.message } : {}),
     };
-  }
-
-  /** Whether an existing session rule already covers this call. */
-  private isRemembered(tool: Tool, input: unknown): boolean {
-    if (tool.name === "shell") {
-      const command = commandOf(input);
-      return command !== undefined && commandCoveredByPrefixes(command, this.shellPrefixes);
-    }
-    return this.grantedTools.has(tool.name);
-  }
-
-  /** Persist a session-scoped approval as the narrowest applicable rule. */
-  private remember(tool: Tool, request: PermissionRequest): void {
-    if (tool.name === "shell" && request.suggestion) {
-      if (!this.shellPrefixes.includes(request.suggestion.prefix)) {
-        this.shellPrefixes.push(request.suggestion.prefix);
-      }
-      return;
-    }
-    this.grantedTools.add(tool.name);
   }
 }
