@@ -58,6 +58,8 @@ import {
   type SessionContextResult,
   type SessionListParams,
   type SessionListResult,
+  type SessionSettings,
+  type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionTitle,
   type SessionTtlResult,
@@ -211,6 +213,19 @@ export interface RemoteClientOptions {
    * on the laptop; the pod never names a model (docs/feat/session-titles.md).
    */
   readonly titleModelProvider?: ModelProvider;
+  /**
+   * The laptop's settings for a pod (docs/feat/config-carry.md), sent wherever a
+   * session may be created or described as new; never on an attach. Absent →
+   * never sent: `connect` and the worker do not carry anything.
+   */
+  readonly sessionSettings?: SessionSettings;
+}
+
+/** What a session did with the settings it was created from (`onSessionSettings`). */
+export interface SessionSettingsNotice {
+  readonly sessionId: string;
+  /** From the daemon, which may be a pod (not trusted): a frontend filters and never prints it raw. */
+  readonly report: SessionSettingsReport;
 }
 
 /** A snapshot read in full: the history, the cut and turn of its first page, the title. */
@@ -361,6 +376,9 @@ export class RemoteClient {
   /** pod-safe model-error text → its full laptop-side message (display only). */
   private readonly laptopTexts = new Map<string, string>();
   private readonly titleModelProvider?: ModelProvider;
+  /** `{ settings }`, or nothing: spread into each frame that may create a session. */
+  private readonly carried: { readonly settings?: SessionSettings };
+  private readonly settingsListeners = new Set<(notice: SessionSettingsNotice) => void>();
   private readonly onError?: (error: Error) => void;
   private readonly channelFactory?: () => Promise<DuplexChannel>;
   private readonly clock: Clock;
@@ -399,6 +417,7 @@ export class RemoteClient {
     if (options.titleModelProvider) {
       this.titleModelProvider = options.titleModelProvider;
     }
+    this.carried = options.sessionSettings ? { settings: options.sessionSettings } : {};
     this.link = { ...initialLink, upSince: this.clock.now() };
     this.lastInboundAt = this.clock.now();
     this.peer = this.makePeer(channel, 0);
@@ -437,7 +456,9 @@ export class RemoteClient {
     return this.call(
       this.peer,
       Method.SessionContext,
-      sessionId !== undefined ? { sessionId } : seed && seed.length > 0 ? { messages: seed } : {},
+      sessionId !== undefined
+        ? { sessionId }
+        : { ...(seed && seed.length > 0 ? { messages: seed } : {}), ...this.carried },
     ).then((result) => result as SessionContextResult);
   }
 
@@ -456,7 +477,7 @@ export class RemoteClient {
     return this.call(
       this.peer,
       Method.SessionSkills,
-      sessionId !== undefined ? { sessionId } : {},
+      sessionId !== undefined ? { sessionId } : this.carried,
     ).then((result) => result as SessionSkillsResult);
   }
 
@@ -608,6 +629,16 @@ export class RemoteClient {
   }
 
   /**
+   * Subscribe to the daemon's report of what a session did with its settings
+   * (see `SessionSettingsNotice`), on every open that carries one, a re-attach
+   * included; returns an unsubscribe.
+   */
+  onSessionSettings(listener: (notice: SessionSettingsNotice) => void): () => void {
+    this.settingsListeners.add(listener);
+    return () => this.settingsListeners.delete(listener);
+  }
+
+  /**
    * Subscribe to "the daemon says this session was deleted" (see
    * `SessionDeletedNotice`); returns an unsubscribe. Decided by the error
    * CODE, never its text.
@@ -645,6 +676,7 @@ export class RemoteClient {
       ...(cwd ? { cwd } : {}),
       ...(seed.length > 0 ? { messages: seed } : {}),
       ...(title ? { title } : {}),
+      ...this.carried,
     };
     if (sessionId === undefined) {
       const gen = this.gen;
@@ -1427,6 +1459,7 @@ export class RemoteClient {
                 create: true,
                 ...(entry.history.length > 0 ? { messages: entry.history } : {}),
                 ...(entry.title ? { title: entry.title } : {}),
+                ...this.carried,
               },
       );
     } catch (error) {
@@ -1446,6 +1479,7 @@ export class RemoteClient {
       cwd?: string;
       title?: SeedTitle;
       reopen?: boolean;
+      settings?: SessionSettings;
     },
   ): Promise<void> {
     this.step(entry, { kind: "open_sent" });
@@ -1479,6 +1513,7 @@ export class RemoteClient {
     if (gen !== this.gen || this.sessions.get(entry.id) !== entry) {
       return;
     }
+    this.noteSettings(entry, result);
     this.step(entry, {
       kind: "open_result",
       created: result.created,
@@ -1486,6 +1521,16 @@ export class RemoteClient {
       epoch: result.epoch,
       now: this.clock.now(),
     });
+  }
+
+  /** The daemon's report of this open, to whoever listens. */
+  private noteSettings(entry: SessionEntry, result: OpenResult): void {
+    if (!result.settings) {
+      return;
+    }
+    for (const listener of this.settingsListeners) {
+      listener({ sessionId: entry.id, report: result.settings });
+    }
   }
 
   /**
@@ -1522,6 +1567,8 @@ export class RemoteClient {
         ...(messages.length > 0 ? { messages } : { create: true }),
         // Our copy of its chosen title: a recreate is never regenerated over a rename.
         ...(entry.title ? { title: entry.title } : {}),
+        // Nothing was persisted: the laptop that recreates it decides.
+        ...this.carried,
       })) as OpenResult;
     } catch (error) {
       // Deleted between the reconnect and this recreate (another device).
@@ -1534,6 +1581,7 @@ export class RemoteClient {
     entry.recreates += 1;
     entry.turnEndsInHistory = entry.turnEndsApplied;
     if (result.created) {
+      this.noteSettings(entry, result);
       // Seeded from OUR history: what it lagged is gone (a racing device that
       // recreated it first seeded its own — not ours to report).
       if (lostTurns > 0) {

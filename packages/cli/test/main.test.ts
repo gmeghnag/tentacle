@@ -188,6 +188,56 @@ describe("cli main (end-to-end)", () => {
   });
 });
 
+describe("cli main: what config-carry moved (docs/feat/config-carry.md)", () => {
+  test("serve refuses the removed flags", async () => {
+    for (const flag of [["--context-window", "5"], ["--auto-title"]]) {
+      const err: string[] = [];
+      const code = await main(["bun", "cli", "serve", "--stdio", ...flag], {
+        out: () => {},
+        err: (t) => err.push(t),
+      });
+      expect(code).not.toBe(0);
+      expect(err.join("")).toContain(flag[0] ?? "");
+    }
+  });
+
+  test("a pod's own failing apiKeyCommand stops neither the status probe; plain --stdio still runs it", async () => {
+    // Mutation: never set `podDaemon` in `main` → the probe dies on the command;
+    // always set it → plain `--stdio` starts with no key.
+    const configDir = await mkdtemp(join(tmpdir(), "config-carry-main-"));
+    await writeFile(
+      join(configDir, "config.jsonc"),
+      JSON.stringify({ model: { apiKeyCommand: "exit 7" } }),
+    );
+    const saved = process.env.TENTACLE_CONFIG_DIR;
+    const savedKey = process.env.TENTACLE_MODEL_API_KEY;
+    process.env.TENTACLE_CONFIG_DIR = configDir;
+    // An env key would win over the command (`apiKeySource`), so it never ran.
+    Reflect.deleteProperty(process.env, "TENTACLE_MODEL_API_KEY");
+    const run = async (args: string[]) => {
+      const err: string[] = [];
+      const code = await main(["bun", "cli", "serve", ...args], {
+        out: () => {},
+        err: (t) => err.push(t),
+      });
+      return { code, err: err.join("") };
+    };
+    try {
+      const plain = await run(["--stdio"]);
+      expect(plain.code).toBe(1);
+      expect(plain.err).toContain("apiKeyCommand exited with code 7");
+      const probe = await run(["--resident-status", "--socket", join(configDir, "none.sock")]);
+      expect(probe.err).not.toContain("config error");
+    } finally {
+      process.env.TENTACLE_CONFIG_DIR = saved;
+      if (savedKey !== undefined) {
+        process.env.TENTACLE_MODEL_API_KEY = savedKey;
+      }
+      await rm(configDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("cli main: skill diagnostics", () => {
   test("printed once to stderr where this config builds the agent; not for run/attach", async () => {
     const badDir = join(dir, "config", "skills", "bad");

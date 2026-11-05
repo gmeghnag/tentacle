@@ -8,8 +8,32 @@ those.
 
 ## [Unreleased]
 
+### Changed
+
+- **Your config now reaches a pod or container.** `run` and `attach` carry your
+  `maxIterations`, `tools.*`, `contextAwareness`, `contextReset`, `loadAgentsMd`
+  and `loadSkills` (your environment, active profile and global file, resolved on
+  your laptop) as the lowest layer. The container's own environment and config
+  file still win, and you are told which keys they set. Pods no longer run on
+  plain defaults, so a limit such as `maxIterations` now follows you.
+- **Sub-agent settings, `model.contextWindow` and `model.autoTitle` are always
+  your laptop's** in a pod or container; its own config cannot change them.
+- **`attach --profile <name>` now applies to the new sessions it opens.** A
+  session already running keeps the settings it was created with, and says which
+  ones differ.
+- The protocol is now version 16. A daemon left running by an older tentacle is
+  refused at connect; attach again to replace it, or `tentacle rm <name>` if a
+  detached run still uses it.
+
+### Removed
+
+- `tentacle serve --context-window` and `--auto-title`: the laptop now sends those
+  values per session.
+
 ### Fixed
 
+- A `model.apiKeyCommand` in a container's own config no longer runs there, and
+  can no longer stop the daemon from starting. The container never uses that key.
 - `tentacle attach` no longer reuses an older tentacle binary in a pod or
   container just because it reports the same version: it compares build ids and
   re-copies this laptop's binary on a mismatch (instead of failing with
@@ -18,6 +42,12 @@ those.
   <name>, then run again`.
 ### Added
 
+- **New `subagents` settings, reserved for parallel sub-agents.** `subagents.execution`
+  (default `parallel`), `subagents.maxParallel` (default 4; env
+  `TENTACLE_SUBAGENT_EXECUTION`, `TENTACLE_SUBAGENT_MAX_PARALLEL`) and
+  `subagents.agentTaskDescription` or `agentTaskDescriptionFile` (at most 4096 bytes;
+  setting both is a config error). They are accepted, checked and carried into a pod,
+  but nothing reads them yet.
 - **The status bar names where the agent runs.** In a container or pod the
   left of the bar shows a badge: `docker:<name>`, `podman:<name>`,
   `kubernetes:<pod>/<container>` (the container is always shown); the prefix

@@ -122,13 +122,14 @@ describe("Connection refuses initialize with the worded message and its data", (
     });
   }
 
-  test("14 ↔ 15 (parallel-tools' bump): a resident pod daemon of the old build is refused cleanly at initialize", async () => {
-    // A laptop on protocol 14 bridged to a 15 resident (or the reverse) must
-    // fail here, not mislabel a cut: a 14 daemon never sends `tool_call_phase`
-    // (docs/feat/parallel-tools.md; 13 ↔ 14 was detached-runs' `session/detach`).
+  test("15 ↔ 16 (config-carry's bump): a resident pod daemon of the old build is refused cleanly at initialize", async () => {
+    // A laptop on protocol 15 bridged to a 16 resident (or the reverse) must
+    // fail here: a 15 daemon strips `session/open.settings`, and a 16 laptop no
+    // longer passes the flags (docs/feat/config-carry.md; 14 ↔ 15 was
+    // parallel-tools' `tool_call_phase`).
     const error = await refuse(
       {
-        protocolVersion: 14,
+        protocolVersion: 15,
         clientCapabilities: { streaming: true },
         clientInfo: { name: "tentacle", version: "0.3.0" },
       },
@@ -136,14 +137,14 @@ describe("Connection refuses initialize with the worded message and its data", (
     );
     expect(error.code).toBe(DomainErrorCode.VersionMismatch);
     expect(error.data).toMatchObject({
-      client: { protocol: 14, tentacle: "0.3.0" },
-      daemon: { protocol: 15, tentacle: "0.4.0" },
+      client: { protocol: 15, tentacle: "0.3.0" },
+      daemon: { protocol: 16, tentacle: "0.4.0" },
     });
   });
 
-  test("10 ↔ current (session-archive's bump, context-reset's, skills-hot-reload's, detached-runs', then parallel-tools'): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
+  test("10 ↔ current (session-archive's bump, context-reset's, skills-hot-reload's, detached-runs', parallel-tools', then config-carry's): a 0.1.0 client is told to update, worded by THIS daemon", async () => {
     // What a tentacle 0.1.0 sends (protocol 10, clientInfo since version-mismatch-notice).
-    expect(PROTOCOL_VERSION as number).toBe(15);
+    expect(PROTOCOL_VERSION as number).toBe(16);
     const error = await refuse(
       {
         protocolVersion: 10,
@@ -154,11 +155,11 @@ describe("Connection refuses initialize with the worded message and its data", (
     );
     expect(error.code).toBe(DomainErrorCode.VersionMismatch);
     expect(error.message).toBe(
-      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 15 (tentacle 0.2.0) — update this client: "tentacle update"',
+      'protocol version mismatch: client 10 (tentacle 0.1.0), daemon 16 (tentacle 0.2.0) — update this client: "tentacle update"',
     );
     expect(error.data).toEqual({
       client: { protocol: 10, tentacle: "0.1.0" },
-      daemon: { protocol: 15, tentacle: "0.2.0" },
+      daemon: { protocol: 16, tentacle: "0.2.0" },
       update: "client",
     });
   });

@@ -426,6 +426,65 @@ export type SnapshotResult = z.infer<typeof SnapshotResultSchema>;
 // before any live one and possibly BEFORE this response: a client routes (or
 // buffers) a session's updates from the moment it sends `open`.
 // Any authenticated client may open any session (one token = one principal).
+//
+// `settings` (docs/feat/config-carry.md): the laptop's resolved settings, sent
+// to a pod daemon. Honoured only by a session this open CREATES; ignored in
+// every other case (a live id keeps what it was created with, and an archived
+// one is reloaded as it was). Only a `--model-proxy` daemon reads it: `serve`
+// and the worker ignore it, and `connect` never sends it. A pod may ignore it
+// too: a daemon-side check is UX, never security (AGENTS §7).
+
+/** A positive step limit, or -1 (unlimited). */
+export const IterationLimitSchema = z.union([z.literal(-1), z.number().int().positive()]);
+
+/** How a round's calls may overlap (`tools.execution`, `subagents.execution`). */
+export const ExecutionModeSchema = z.enum(["sequential", "read-only", "parallel"]);
+
+/**
+ * The settings a laptop carries into a pod. The same bounds as the config file,
+ * except the description: the config's cap is 4096 UTF-8 BYTES (checked at load,
+ * on the laptop); a wire schema must stay representable as JSON Schema, so here
+ * it is 4096 units, which every text within the config's cap satisfies.
+ */
+export const SessionSettingsSchema = z.object({
+  contextWindow: z.number().int().positive().optional(),
+  autoTitle: z.boolean().optional(),
+  subagentsEnabled: z.boolean().optional(),
+  subagentMaxIterations: IterationLimitSchema.optional(),
+  subagentExecution: ExecutionModeSchema.optional(),
+  subagentMaxParallel: z.number().int().positive().optional(),
+  /** Absent with `settings` present → the neutral default, never the pod's own text. */
+  agentTaskDescription: z.string().min(1).max(4096).optional(),
+  loadAgentsMd: z.boolean().optional(),
+  loadSkills: z.boolean().optional(),
+  maxIterations: IterationLimitSchema.optional(),
+  contextAwarenessEnabled: z.boolean().optional(),
+  contextAwarenessStepPercent: z.number().int().min(1).max(100).optional(),
+  contextResetEnabled: z.boolean().optional(),
+  contextResetMaxPerMessage: IterationLimitSchema.optional(),
+  maxInlineOutputChars: z.number().int().nonnegative().optional(),
+  redactSecrets: z.boolean().optional(),
+  dedupOutput: z.boolean().optional(),
+  tabulateJson: z.boolean().optional(),
+  summarizeLargeOutput: z.boolean().optional(),
+  toolExecution: ExecutionModeSchema.optional(),
+  toolMaxParallel: z.number().int().positive().optional(),
+});
+export type SessionSettings = z.infer<typeof SessionSettingsSchema>;
+
+/**
+ * What a session did with the `settings` it was created from. From a pod (not
+ * trusted, AGENTS §7): it can only make a laptop print a notice, so the names
+ * are bounded strings the laptop filters, never an enum (a newer daemon's key
+ * must not reject the whole open).
+ */
+export const SessionSettingsReportSchema = z.object({
+  /** The `settings` this session was created from. */
+  carried: SessionSettingsSchema,
+  /** Carried keys the pod's own env or file kept, with a different value. */
+  overridden: z.array(line(64)).max(64),
+});
+export type SessionSettingsReport = z.infer<typeof SessionSettingsReportSchema>;
 
 export const OpenParamsSchema = z.object({
   /** Client-chosen id (so the client owns the persistence uid); absent → daemon-chosen. */
@@ -442,6 +501,8 @@ export const OpenParamsSchema = z.object({
   reopen: z.boolean().optional(),
   /** Seed title of a session this open CREATES (ignored otherwise; see above). */
   title: SeedTitleSchema.optional(),
+  /** The laptop's settings, for a session this open CREATES (ignored otherwise; see above). */
+  settings: SessionSettingsSchema.optional(),
 });
 export type OpenParams = z.infer<typeof OpenParamsSchema>;
 
@@ -453,6 +514,8 @@ export const OpenResultSchema = z.object({
   created: z.boolean(),
   /** `since` could not be honoured: snapshot, then apply the buffered updates past its cut. */
   resync: z.boolean(),
+  /** Present iff the session was created from `settings`; also on a later attach. */
+  settings: SessionSettingsReportSchema.optional(),
 });
 export type OpenResult = z.infer<typeof OpenResultSchema>;
 
@@ -570,6 +633,8 @@ export const SessionContextParamsSchema = z.object({
    * Ignored with a `sessionId` (the live history wins).
    */
   messages: z.array(ChatMessageSchema).optional(),
+  /** With no `sessionId`: the `session/open` settings that session would be created from. */
+  settings: SessionSettingsSchema.optional(),
 });
 export type SessionContextParams = z.infer<typeof SessionContextParamsSchema>;
 

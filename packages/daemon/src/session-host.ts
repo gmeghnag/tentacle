@@ -22,6 +22,8 @@ import {
   type SessionContextResult,
   type SessionListParams,
   type SessionListResult,
+  type SessionSettings,
+  type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionTitle,
   type SessionTtlParams,
@@ -59,6 +61,12 @@ export interface AgentContext {
    * call — it changes as clients attach and leave.
    */
   readonly modelLink: () => ModelLink | null;
+  /**
+   * `session/open.settings` of the session being created (docs/feat/config-carry.md).
+   * Opaque here: the daemon never reads a key. A factory that does not take it
+   * (`serve`, the worker) ignores it by construction.
+   */
+  readonly settings?: SessionSettings;
 }
 
 export type AgentFactory = (
@@ -75,6 +83,8 @@ export type AgentFactory = (
    * the request runs on the laptop. Absent → titles are never generated.
    */
   titleModel?: ModelProvider;
+  /** What it did with `context.settings`: `session/open`'s result reports it. */
+  settingsReport?: SessionSettingsReport;
 };
 
 /**
@@ -119,9 +129,10 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * at the first prompt; docs/feat/skills-hot-reload.md). The cli backs it
    * with the same scan its `createAgent` builds a new session's activator
    * from, so the list shown before the first prompt is what that prompt's
-   * `/name` is checked against. May throw. Absent → an empty listing.
+   * `/name` is checked against. `settings`: what that session would be created
+   * from (opaque, like `AgentContext.settings`). May throw. Absent → an empty listing.
    */
-  readonly newSessionSkills?: () => Promise<SkillListing>;
+  readonly newSessionSkills?: (settings?: SessionSettings) => Promise<SkillListing>;
   /**
    * This daemon's MCP servers, probed live (`mcp/status`, the TUI's `/mcp`).
    * Absent → none (`serve` and pod daemons start no MCP servers today).
@@ -232,8 +243,8 @@ export class SessionHost {
    * have, wire-safe (`SessionHostOptions.newSessionSkills`). Rejects when the
    * scan does.
    */
-  async newSessionSkills(): Promise<SessionSkillsResult> {
-    return toSessionSkills((await this.opts.newSessionSkills?.()) ?? EMPTY_SKILL_LISTING);
+  async newSessionSkills(settings?: SessionSettings): Promise<SessionSkillsResult> {
+    return toSessionSkills((await this.opts.newSessionSkills?.(settings)) ?? EMPTY_SKILL_LISTING);
   }
 
   /**
@@ -247,8 +258,12 @@ export class SessionHost {
     link: ModelLink | null,
     signal?: AbortSignal,
     seed?: readonly ChatMessage[],
+    settings?: SessionSettings,
   ): Promise<SessionContextResult> {
-    const { agent, jobs } = this.opts.createAgent(this.opts.defaultCwd, { modelLink: () => link });
+    const { agent, jobs } = this.opts.createAgent(this.opts.defaultCwd, {
+      modelLink: () => link,
+      ...(settings ? { settings } : {}),
+    });
     // Read in the same stretch as the agent's tool list is built.
     const complete = this.opts.toolsReady?.() ?? true;
     try {
@@ -432,8 +447,15 @@ export class SessionHost {
     }
     this.admit();
     const id = params.sessionId ?? crypto.randomUUID();
-    // `title` seeds only a session this open creates (a live or archived id never got here).
-    const hosted = this.build(id, params.messages, undefined, seedState(params.title));
+    // `title` and `settings` count only for a session this open creates (a live
+    // or archived id never got here).
+    const hosted = this.build(
+      id,
+      params.messages,
+      undefined,
+      seedState(params.title),
+      params.settings,
+    );
     // Registered BEFORE attaching: nothing can observe the id half-built.
     this.sessions.set(id, hosted);
     const { epoch } = hosted.attach(attachment);
@@ -800,13 +822,18 @@ export class SessionHost {
     messages: readonly ChatMessage[] | undefined,
     restored?: RestoredSessionState,
     seed?: TitleState,
+    settings?: SessionSettings,
   ): HostedSession {
     // The agent exists before its session (P4): its link is bound late, and a
     // session is only reachable (hence prompted) once built.
     const bound: { hosted?: HostedSession } = {};
-    const { agent, permissions, jobs, titleModel } = this.opts.createAgent(this.opts.defaultCwd, {
-      modelLink: () => bound.hosted?.modelLink() ?? null,
-    });
+    const { agent, permissions, jobs, titleModel, settingsReport } = this.opts.createAgent(
+      this.opts.defaultCwd,
+      {
+        modelLink: () => bound.hosted?.modelLink() ?? null,
+        ...(settings ? { settings } : {}),
+      },
+    );
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
     const { exposeTurnErrors, onTurnError } = this.opts;
@@ -832,6 +859,7 @@ export class SessionHost {
       },
     );
     bound.hosted = hosted;
+    hosted.settingsReport = settingsReport;
     return hosted;
   }
 }

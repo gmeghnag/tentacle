@@ -184,6 +184,46 @@ describe("connect: buffered peer-error sink (never a raw write while Ink owns th
     expect(writtenDuringTui).toBe(0);
     expect(written).toEqual(["[connect] error: invalid params for notification session/update\n"]);
   });
+
+  test("connect never sends `settings`: the serve host's config rules (docs/feat/config-carry.md)", async () => {
+    // Mutation: pass `sessionSettings` in `connect.ts` → the frames carry it.
+    const host = new SessionHost({
+      defaultCwd: "/srv",
+      createAgent: () => ({
+        agent: new Agent({
+          model: {
+            id: "m",
+            async *stream() {
+              yield { type: "done" as const };
+            },
+          },
+          tools: new ToolRegistry(),
+          env: { id: "noop" } as never,
+        }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(daemonCh, host);
+    const frames: { method?: string; params?: { settings?: unknown } }[] = [];
+    const send = clientCh.send.bind(clientCh);
+    clientCh.send = (data: string) => {
+      frames.push(JSON.parse(data));
+      send(data);
+    };
+    await connectTui({ url: "ws://fake" }, () => {}, {
+      dial: () => async () => clientCh,
+      startTui: async (_agent, options) => {
+        for await (const _event of options.createSession?.().send("hi") ?? []) {
+          // drain
+        }
+      },
+    });
+    expect(frames.some((f) => f.method === "session/open")).toBe(true);
+    for (const frame of frames) {
+      expect(frame.params?.settings).toBeUndefined();
+    }
+  });
 });
 
 // docs/feat/connect-sessions.md: quitting `connect` DETACHES (the socket closes,

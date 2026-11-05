@@ -267,7 +267,14 @@ const workspaceLabelsEmpty = {
   "tentacle.workspace-user": "",
 };
 
-const config = { cwd: "/work", model: "m", contextWindow: 128000 } as unknown as TentacleConfig;
+const config = {
+  cwd: "/work",
+  model: "m",
+  contextWindow: 128000,
+  contextAwareness: { enabled: true, stepPercent: 1 },
+  contextReset: { enabled: true, maxPerMessage: -1 },
+  toolExecution: { mode: "read-only", maxParallel: 8 },
+} as unknown as TentacleConfig;
 
 let dir: string;
 let savedPodBin: string | undefined;
@@ -359,7 +366,7 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
       // The install command is VERBATIM the k8s one (head -c N survives a half-close).
       `runexec:c1:sh -c mkdir -p /usr/local/bin && head -c 8 > ${POD_BIN_PATH}.new && chmod 755 ${POD_BIN_PATH}.new && mv -f ${POD_BIN_PATH}.new ${POD_BIN_PATH}`,
       `runexec:c1:${POD_BIN_PATH} --version`,
-      `exec:c1:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
+      `exec:c1:${POD_BIN_PATH} serve --bridge --model-proxy`,
     ]);
     expect(logs[0]).toBe("[container] creating c1 (image ubuntu:24.04)…\n");
     // The exit net was armed once, and fires the detached remover for c1.
@@ -579,7 +586,7 @@ describe("attach on a Docker engine (attachEngineRuntime + dockerEngineHost)", (
     expect(client.calls).toEqual([
       "inspect:users-box",
       `runexec:users-box:${POD_BIN_PATH} --version`,
-      `exec:users-box:${POD_BIN_PATH} serve --bridge --model-proxy --context-window 128000`,
+      `exec:users-box:${POD_BIN_PATH} serve --bridge --model-proxy`,
     ]);
     expect(logs[0]).toBe(
       '[container] attaching to users-box in unix:///var/run/docker.sock (context "default")…\n',

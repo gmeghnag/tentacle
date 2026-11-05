@@ -13,6 +13,7 @@ import {
   CONFIG_FILENAME,
   DEFAULT_CONFIG_JSONC,
   DEFAULT_SYSTEM_PROMPT,
+  MAX_AGENT_TASK_DESCRIPTION_BYTES,
   PROMPT_FILENAME,
 } from "./defaults.ts";
 import { type ProjectHooks, discoverProjectHooks } from "./hooks-scan.ts";
@@ -58,34 +59,52 @@ export interface LoadConfigOptions {
   readonly profile?: string;
   /** The model id (`--model`), on the active profile's endpoint; beats `TENTACLE_MODEL`. */
   readonly model?: string;
+  /**
+   * A pod daemon's load (`serve --model-proxy`, `--resident-status`,
+   * `--resident-stop`): it neither runs `apiKeyCommand` nor reads
+   * `agentTaskDescriptionFile`, the values the laptop decides that could fail a
+   * load, so neither runs code in a pod nor stops the daemon for something it
+   * never uses (docs/feat/config-carry.md).
+   */
+  readonly podDaemon?: boolean;
 }
 
 export interface TentacleConfig {
   readonly provider: ResolvedConfig["provider"];
   readonly baseURL: string;
   readonly model: string;
-  /** Whether a model names each session (default false; on a pod the laptop's value). */
+  /** Whether a model names each session (default false; on a pod always the laptop's, carried). */
   readonly autoTitle: boolean;
   /** The model id that names sessions when `autoTitle`; unset → `model`. */
   readonly titleModel?: string;
   readonly cwd: string;
   readonly maxIterations: number;
   readonly contextWindow: number;
-  /** Tell the model how full its context is (on a pod: the pod's own config). */
+  /** Tell the model how full its context is (on a pod: its own env and file, else the laptop's, carried). */
   readonly contextAwareness: ResolvedConfig["contextAwareness"];
-  /** The model's `context_reset` tool and its cap (on a pod: the pod's own config). */
+  /** The model's `context_reset` tool and its cap (on a pod: its own env and file, else the laptop's, carried). */
   readonly contextReset: ResolvedConfig["contextReset"];
   readonly maxTokens?: number;
   readonly systemPrompt: string;
+  /** The identity part of `systemPrompt`: with `agentsMdContent`, what a recompose needs. */
+  readonly promptIdentity: string;
+  /** The AGENTS.md text read at start, whether or not it was folded into `systemPrompt`. */
+  readonly agentsMdContent?: string;
   readonly subagentsEnabled: boolean;
   readonly subagentMaxIterations: number;
+  /** How a parent's `agent_task` calls may overlap (read by `feat/parallel-agents`; on a pod the laptop's, carried). */
+  readonly subagentExecution: ResolvedConfig["subagentExecution"];
+  /** At most this many sub-agents at once (read by `feat/parallel-agents`; on a pod the laptop's, carried). */
+  readonly subagentMaxParallel: number;
+  /** A custom `agent_task` description, resolved (read by `feat/parallel-agents`; on a pod the laptop's, carried). */
+  readonly agentTaskDescription?: string;
   readonly maxInlineOutputChars: number;
   readonly redactSecrets: boolean;
   readonly summarizeLargeOutput: boolean;
   readonly dedupOutput: boolean;
   readonly tabulateJson: boolean;
   readonly autoWake: boolean;
-  /** How a round's tool calls may overlap (on a pod: the pod's own config, like `maxIterations`). */
+  /** How a round's tool calls may overlap (on a pod: its own env and file, else the laptop's, carried). */
   readonly toolExecution: ResolvedConfig["toolExecution"];
   /** The configured default engine of `run`/`attach` (file/profile); absent = unset. */
   readonly engine?: ResolvedConfig["engine"];
@@ -397,6 +416,52 @@ async function defaultRunner(command: string): Promise<string> {
   return stdout;
 }
 
+/** A path a config key names: relative to the config dir, absolute, or `~/…`. */
+function configRelativePath(value: string, configDir: string, home: string): string {
+  const p = expandTilde(value, home);
+  return isAbsolute(p) ? p : join(configDir, p);
+}
+
+/**
+ * The custom `agent_task` description, resolved once at start: the inline text
+ * or the file's, trimmed. Empty, over the cap, or an unreadable file →
+ * `ConfigError`, in every runtime: a text valid locally never fails only on `run`.
+ */
+async function resolveAgentTaskDescription(
+  subagents: FileConfig["subagents"],
+  configDir: string,
+  home: string,
+  readFromFile: boolean,
+): Promise<string | undefined> {
+  const check = (raw: string, setting: string): string => {
+    const text = raw.trim();
+    if (text === "") {
+      throw new ConfigError(`${setting} is empty`);
+    }
+    if (Buffer.byteLength(text) > MAX_AGENT_TASK_DESCRIPTION_BYTES) {
+      throw new ConfigError(`${setting} is over ${MAX_AGENT_TASK_DESCRIPTION_BYTES} bytes`);
+    }
+    return text;
+  };
+  if (subagents?.agentTaskDescription !== undefined) {
+    return check(subagents.agentTaskDescription, "subagents.agentTaskDescription");
+  }
+  if (subagents?.agentTaskDescriptionFile === undefined || !readFromFile) {
+    return undefined;
+  }
+  const path = configRelativePath(subagents.agentTaskDescriptionFile, configDir, home);
+  const setting = `subagents.agentTaskDescriptionFile (${path})`;
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    throw new ConfigError(
+      `${setting} cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return check(raw, setting);
+}
+
 function parseConfigFile(text: string, path: string): unknown {
   const errors: ParseError[] = [];
   const value = parse(text, errors, { allowTrailingComma: true });
@@ -461,15 +526,17 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
 
   // Resolve the prompt file: explicit `systemPromptFile` (relative to the
   // config dir) or the default `PROMPT.md`.
-  let promptPath: string;
-  if (fileConfig.systemPromptFile) {
-    const p = expandTilde(fileConfig.systemPromptFile, home);
-    promptPath = isAbsolute(p) ? p : join(configDir, p);
-  } else {
-    promptPath = defaultPromptPath;
-  }
+  const promptPath = fileConfig.systemPromptFile
+    ? configRelativePath(fileConfig.systemPromptFile, configDir, home)
+    : defaultPromptPath;
   const promptFileRequired = fileConfig.systemPromptFile !== undefined;
   const promptFromFile = await readPromptFile(promptPath, promptFileRequired);
+  const agentTaskDescription = await resolveAgentTaskDescription(
+    fileConfig.subagents,
+    configDir,
+    home,
+    options.podDaemon !== true,
+  );
 
   // Auto-load a per-repo AGENTS.md from the launch workspace (best-effort: an
   // unreadable file must never crash startup over an optional convenience). The
@@ -510,10 +577,11 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     promptFromFile,
     agentsMd,
     skills,
+    agentTaskDescription,
   });
 
   let apiKey = resolved.apiKey;
-  if (resolved.apiKeySource === "command" && resolved.apiKeyCommand) {
+  if (resolved.apiKeySource === "command" && resolved.apiKeyCommand && options.podDaemon !== true) {
     apiKey = (await runCommand(resolved.apiKeyCommand)).trim();
     if (apiKey === "") {
       throw new ConfigError("apiKeyCommand produced an empty key");
@@ -541,8 +609,15 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     contextReset: resolved.contextReset,
     ...(resolved.maxTokens !== undefined ? { maxTokens: resolved.maxTokens } : {}),
     systemPrompt: resolved.systemPrompt,
+    promptIdentity: resolved.promptIdentity,
+    ...(agentsMd !== undefined ? { agentsMdContent: agentsMd } : {}),
     subagentsEnabled: resolved.subagentsEnabled,
     subagentMaxIterations: resolved.subagentMaxIterations,
+    subagentExecution: resolved.subagentExecution,
+    subagentMaxParallel: resolved.subagentMaxParallel,
+    ...(resolved.agentTaskDescription !== undefined
+      ? { agentTaskDescription: resolved.agentTaskDescription }
+      : {}),
     maxInlineOutputChars: resolved.maxInlineOutputChars,
     redactSecrets: resolved.redactSecrets,
     summarizeLargeOutput: resolved.summarizeLargeOutput,

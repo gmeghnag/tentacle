@@ -80,7 +80,19 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
     config.model = mergeModel(base.model, model);
   }
   if (subagents) {
-    config.subagents = { ...base.subagents, ...subagents };
+    // The description's two forms are one setting: the profile's replaces the base's.
+    const { agentTaskDescription, agentTaskDescriptionFile, ...rest } = base.subagents ?? {};
+    const profileHasOne =
+      subagents.agentTaskDescription !== undefined ||
+      subagents.agentTaskDescriptionFile !== undefined;
+    config.subagents = {
+      ...rest,
+      ...(!profileHasOne && agentTaskDescription !== undefined ? { agentTaskDescription } : {}),
+      ...(!profileHasOne && agentTaskDescriptionFile !== undefined
+        ? { agentTaskDescriptionFile }
+        : {}),
+      ...subagents,
+    };
   }
   if (contextAwareness) {
     config.contextAwareness = { ...base.contextAwareness, ...contextAwareness };

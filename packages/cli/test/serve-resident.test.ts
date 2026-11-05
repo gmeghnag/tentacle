@@ -828,21 +828,12 @@ describe("pure helpers", () => {
     expect(say({ resident: true, version: "dev" }, undefined)).toContain("resident dev:");
   });
 
-  test("residentCommand / selfCommand: the resident inherits the bridge's model flags; from source it is `bun <script>`", () => {
-    expect(
-      residentCommand(["/usr/local/bin/tentacle"], {
-        modelProxy: true,
-        contextWindow: 1000,
-        autoTitle: true,
-      }),
-    ).toEqual([
+  test("residentCommand / selfCommand: the resident inherits the bridge's model proxy; from source it is `bun <script>`", () => {
+    expect(residentCommand(["/usr/local/bin/tentacle"], { modelProxy: true })).toEqual([
       "/usr/local/bin/tentacle",
       "serve",
       "--resident",
       "--model-proxy",
-      "--context-window",
-      "1000",
-      "--auto-title",
     ]);
     expect(residentCommand(["t"], { socket: "/s" })).toEqual([
       "t",

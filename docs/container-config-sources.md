@@ -1,5 +1,9 @@
 # Da dove una sessione in container prende la sua configurazione
 
+> **Aggiornato da `feat/config-carry`:** il laptop porta i suoi valori nel pod per
+> sessione, con `session/open.settings` (`docs/feat/config-carry.md`). Dove il testo
+> sotto cita ancora `--context-window` o `--auto-title`, vale §1, §2.1, §2.9 e §3.
+
 Scopo: elencare, per ogni pezzo di setup, **chi lo legge** (laptop o
 container/daemon), **da quale percorso**, **quando**, e **cosa passa** dal
 laptop al container. Casi: `tentacle run` / `run --detach` / `attach` su
@@ -20,7 +24,7 @@ Glossario breve:
 |---|---|---|---|---|---|
 | `config.jsonc` + profilo | laptop | laptop (modello, engine, keep, mount) **+ pod** (tutto il resto) | come k8s | come k8s | host di `serve` |
 | `--profile` / `--model` | laptop | solo laptop; non inoltrati al pod | come k8s | come k8s | flag di `serve`; vietati su `connect` |
-| context window | laptop | laptop → `--context-window` | come k8s | come k8s | host di `serve` |
+| context window | laptop | laptop → `session/open.settings` (P) | come k8s | come k8s | host di `serve` |
 | provider, endpoint, API key | laptop | laptop (tunnel `model/stream`) | come k8s | come k8s | host di `serve` |
 | server MCP | laptop (worker) | **nessuno** | **nessuno** | **nessuno** | **nessuno** |
 | skill | laptop | pod (FS del pod) | container (+ progetto montato) | come docker | host di `serve` |
@@ -30,7 +34,8 @@ Glossario breve:
 | hook utente | laptop | pod config | container config | come docker | host di `serve` |
 | project hooks + trust | laptop, trust salvato | pod scopre, laptop chiede, **mai salvato** | come k8s | come k8s | `serve` scopre, laptop chiede, mai salvato |
 | permessi | broker unico laptop | broker unico laptop (via RPC) | come k8s | come k8s | broker laptop (via RPC) |
-| `tools.*` | laptop | pod config | container config | come docker | host di `serve` |
+| `tools.*` | laptop | env/file del pod, altrimenti laptop (W) | env/file del container, altrimenti laptop (W) | come docker | host di `serve` |
+| `subagents.*`, `model.autoTitle` | laptop | sempre laptop (P) | come k8s | come k8s | host di `serve` |
 | binario | — | laptop inietta in `/usr/local/bin` (o `--bin-dir`) | come k8s | come k8s | — |
 | storia sessioni | laptop `<configDir>/sessions` | laptop; pod solo in memoria | come k8s | come k8s | solo `serve` (`<configDir>/daemon/…`) |
 
@@ -57,15 +62,17 @@ Glossario breve:
   (`main.ts:530-546`, `pod-resident.ts:757-764`). Legge quindi la configDir
   **del pod** (env e `HOME` del container). File assente → default
   (`load.ts:449-451`).
-- Cosa passa al pod: solo argv di `podDaemonCommand`: `serve --bridge
-  --model-proxy --context-window <N> [--auto-title]`
-  (`packages/cli/src/engine-runtime.ts:76-89`). Nessuna env: il container
-  Docker/Podman è creato "no env" (`engine-docker.ts:85-106`), il pod k8s non
-  ha `env` nel manifest (`packages/k8s/src/pod.ts:54-60`). `--profile` e
-  `--model` **non** arrivano al pod.
-- Quando: il pod daemon legge la config **una volta**, all'avvio del resident.
-  Un resident già vivo tiene i flag dell'exec che lo ha avviato
-  (`engine-runtime.ts:74`, `pod-resident.ts:792-810`).
+- Cosa passa al pod: argv di `podDaemonCommand` è solo `serve --bridge
+  --model-proxy`; i valori viaggiano per sessione in `session/open.settings`
+  (`packages/cli/src/carried-settings.ts`): 7 chiavi P (decide il laptop) e 14 W
+  (il valore del laptop è il livello più basso; env e file del pod vincono). Nessuna
+  env: il container Docker/Podman è creato "no env" (`engine-docker.ts:85-106`), il
+  pod k8s non ha `env` nel manifest (`packages/k8s/src/pod.ts:54-60`). `--profile` e
+  `--model` non arrivano al pod: un profilo vale tramite i valori che risolve.
+- Quando: il pod daemon legge la **sua** config una volta, all'avvio del resident
+  (senza eseguire `apiKeyCommand` né leggere `agentTaskDescriptionFile`). I valori del
+  laptop si applicano a ogni sessione **creata**; una sessione viva tiene i suoi, e il
+  laptop avvisa delle differenze.
 - `run --detach`: il relay (processo laptop) ricarica `config.jsonc` al suo
   avvio con il profilo dello spec (`packages/cli/src/relay.ts:604-608`); il
   modello è quello registrato nell'entry kept, non dall'env
@@ -188,9 +195,10 @@ Glossario breve:
   `tabulateJson`, `summarizeLargeOutput`, `execution`, `maxParallel`
   (`schema.ts:296-327`). Applicate in `buildAgent` (`wiring.ts:287-339`,
   `437`).
-- Run/attach: valgono quelle **del pod** (`load.ts:74-89`: "on a pod: the
-  pod's own config"). Idem `maxIterations`, `subagents`, `contextAwareness`,
-  `contextReset`, `autoWake`.
+- Run/attach: env e file del pod, altrimenti il valore del laptop portato in
+  `session/open.settings`. Idem `maxIterations`, `contextAwareness`,
+  `contextReset`, `loadAgentsMd`, `loadSkills`. `subagents.*` è sempre del laptop.
+  `autoWake` non viaggia: lo legge solo la TUI del laptop.
 - Output grande: spill in `.tentacle/tool-output/<tool>-<id>.txt` **relativo
   al workspace della sessione** (`packages/agent/src/agent.ts:1722-1739`):
   nel FS del pod; con mount Docker/Podman finisce nella cartella del laptop.
@@ -227,7 +235,9 @@ Glossario breve:
 
 ## 3. Punti da rivedere
 
-1. **La config "di comportamento" è quella del pod, non del laptop.** In
+1. **(Fatto per `tools.*`, `maxIterations`, `subagents`, `contextAwareness`,
+   `contextReset`: `feat/config-carry`. Restano `PROMPT.md`, `hooks`, `agents/`.)**
+   **La config "di comportamento" è quella del pod, non del laptop.** In
    Docker/Podman la configDir del laptop è sempre nascosta, in k8s non c'è
    proprio: in pratica il pod gira con i **default** (`PROMPT.md`, `tools.*`,
    `maxIterations`, `subagents`, `hooks`, `agents/`). L'utente vede il suo
@@ -239,10 +249,13 @@ Glossario breve:
    e quelli del pod non vengono avviati (`session-host.ts:126`). → Decidere
    se il pod debba avviare i *suoi* MCP (calcolo vicino al codice, §7) e
    dirlo all'utente all'avvio come per i pacchetti.
-3. **`--profile`/`--model` cambiano solo il modello.** Un profilo che
+3. **(Fatto per le chiavi portate: `feat/config-carry`. L'avviso per `hooks`,
+   `mcpServers`, `PROMPT.md`, `agents/` è il task successivo.)**
+   **`--profile`/`--model` cambiano solo il modello.** Un profilo che
    modifica `tools.*` o `hooks` non ha effetto nel pod. → Avvisare quando il
    profilo attivo tocca chiavi che il pod ignora.
-4. **Resident con flag "congelati".** Un `attach` con `--context-window`
+4. **(Fatto: `feat/config-carry`.)**
+   **Resident con flag "congelati".** Un `attach` con `--context-window`
    o `autoTitle` diversi entra in un resident che tiene i flag del primo exec
    (`engine-runtime.ts:74`). → Avvisare sulla differenza, o far viaggiare
    questi valori per sessione/connessione invece che in argv.

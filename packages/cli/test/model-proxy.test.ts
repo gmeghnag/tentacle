@@ -1,14 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Agent } from "@tentacle/agent";
 import { RemoteClient } from "@tentacle/client";
 import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
 import { type AgentFactory, Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
+import type { SessionSettings } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
+import { createSettingsNotifier } from "../src/carried-settings.ts";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import * as serve from "../src/serve.ts";
 
@@ -215,7 +217,7 @@ describe("the pod daemon's agent (serve --stdio --model-proxy): the LAPTOP's aut
   type Tunnelled = (
     config: TentacleConfig,
     link: () => Connection | null,
-    options: { autoTitle: boolean },
+    options: { settings: { autoTitle: boolean } },
   ) => ReturnType<AgentFactory>;
 
   async function pod(podConfig: TentacleConfig, autoTitle: boolean) {
@@ -226,7 +228,9 @@ describe("the pod daemon's agent (serve --stdio --model-proxy): the LAPTOP's aut
     const host = new SessionHost({
       defaultCwd: dir,
       createAgent: (cwd) =>
-        (tunnelled as Tunnelled)({ ...podConfig, cwd }, () => connection, { autoTitle }),
+        (tunnelled as Tunnelled)({ ...podConfig, cwd }, () => connection, {
+          settings: { autoTitle },
+        }),
     });
     connection = new Connection(daemonCh, host);
     const main = new ScriptedProvider([
@@ -290,8 +294,10 @@ describe("the pod daemon's agent: context lines on the laptop's window", () => {
       defaultCwd: dir,
       createAgent: (cwd) =>
         serve.tunnelledAgent({ ...podConfig, cwd }, () => connection, {
-          autoTitle: false,
-          ...(contextWindow !== undefined ? { contextWindow } : {}),
+          settings: {
+            autoTitle: false,
+            ...(contextWindow !== undefined ? { contextWindow } : {}),
+          },
         }),
     });
     connection = new Connection(daemonCh, host);
@@ -307,7 +313,7 @@ describe("the pod daemon's agent: context lines on the laptop's window", () => {
     return laptop.seen[0]?.messages.at(-1)?.content ?? "";
   }
 
-  test("the laptop's window (--context-window) wins over the pod's own", async () => {
+  test("the laptop's window (carried) wins over the pod's own", async () => {
     const sent = await firstPrompt({ ...config, contextWindow: 128000 }, 200000);
     expect(sent).toMatch(/^hello\n\n\[context: [\d.]+[kM]? \/ 200k tokens \(\d+%\)\]$/);
   });
@@ -318,5 +324,312 @@ describe("the pod daemon's agent: context lines on the laptop's window", () => {
       200000,
     );
     expect(sent).toBe("hello");
+  });
+});
+
+// docs/feat/config-carry.md, end to end: the real client's `sessionSettings`, the
+// real pod host, and the behaviour the laptop's model sees over the tunnel.
+describe("the laptop's settings reach the pod's agents, per session", () => {
+  const made: string[] = [];
+  afterAll(async () => {
+    for (const d of made) {
+      await rm(d, { recursive: true, force: true });
+    }
+  });
+  async function folder(files: Record<string, string> = {}): Promise<string> {
+    const d = await mkdtemp(join(tmpdir(), "config-carry-"));
+    made.push(d);
+    for (const [name, text] of Object.entries(files)) {
+      await mkdir(dirname(join(d, name)), { recursive: true });
+      await writeFile(join(d, name), text);
+    }
+    return d;
+  }
+  /** The pod's config, as a pod daemon loads it, in a pod workspace `cwd`. */
+  async function podConfig(file: unknown = {}, cwd?: string): Promise<TentacleConfig> {
+    return loadConfig({
+      configDir: await folder({ "config.jsonc": JSON.stringify(file) }),
+      cwd: cwd ?? (await folder()),
+      scaffold: false,
+      env: { HOME: await folder() },
+      podDaemon: true,
+    });
+  }
+
+  const toolCall = (name: string, args: string, id = "c1"): readonly StreamEvent[] => [
+    { type: "tool_call", toolCall: { id, name, arguments: args } },
+    { type: "done" },
+  ];
+  const done: readonly StreamEvent[] = [{ type: "text", delta: "ok" }, { type: "done" }];
+
+  /** A laptop (a real `RemoteClient` with `settings`) on a pod host over a channel pair. */
+  async function linked(
+    config: TentacleConfig,
+    settings: SessionSettings | undefined,
+    script: readonly (readonly StreamEvent[])[] = [done, done, done],
+  ) {
+    const [daemonCh, clientCh] = createChannelPair();
+    const host = serve.podSessionHost(config, undefined, { modelProxy: true });
+    const connection = new Connection(daemonCh, host, undefined, { servesModel: true });
+    const laptop = new ScriptedProvider(script);
+    const client = new RemoteClient(clientCh, new PermissionBroker(), laptop, {
+      ...(settings ? { sessionSettings: settings } : {}),
+    });
+    await client.initialize();
+    const finish = (): void => {
+      connection.close();
+      client.close();
+    };
+    return { host, client, laptop, finish };
+  }
+  const say = async (client: RemoteClient, id: string, text = "hello"): Promise<void> => {
+    for await (const _event of client.newSession(undefined, id).send(text)) {
+      // drain
+    }
+  };
+  const toolsOf = (request: ChatRequest | undefined): string[] =>
+    (request?.tools ?? []).map((t) => t.name);
+  const systemOf = (request: ChatRequest | undefined): string =>
+    String(request?.messages[0]?.content);
+
+  test("maxIterations: the turn stops where the LAPTOP says (a pod that set nothing)", async () => {
+    // Mutation: don't pass `settings` in `podSessionHost` → a second round runs.
+    const script = [
+      toolCall("no_such_tool", "{}"),
+      toolCall("no_such_tool", "{}"),
+      toolCall("no_such_tool", "{}"),
+      toolCall("no_such_tool", "{}"),
+      done,
+    ];
+    const rounds = async (settings: SessionSettings | undefined): Promise<number> => {
+      const { client, laptop, finish } = await linked(await podConfig(), settings, script);
+      await say(client, "S");
+      finish();
+      return laptop.seen.length;
+    };
+    const free = await rounds(undefined);
+    expect(free).toBe(script.length);
+    expect(await rounds({ maxIterations: 1 })).toBeLessThan(free);
+  });
+
+  test("redactSecrets: the tool result the model reads is redacted by the carried value", async () => {
+    const secret = "AKIAIOSFODNN7EXAMPLE";
+    const cwd = await folder({ "creds.txt": `key=${secret}\n` });
+    const script = [toolCall("fs_read", JSON.stringify({ path: "creds.txt" })), done];
+    const on = await linked(await podConfig({}, cwd), { redactSecrets: true }, script);
+    await say(on.client, "S");
+    expect(JSON.stringify(on.laptop.seen[1]?.messages)).toContain("[REDACTED]");
+    expect(JSON.stringify(on.laptop.seen[1]?.messages)).not.toContain(secret);
+    on.finish();
+
+    // The pod's own explicit `false` beats it (W): even at the default value.
+    const pinned = await linked(
+      await podConfig({ tools: { redactSecrets: false } }, cwd),
+      { redactSecrets: true },
+      script,
+    );
+    await say(pinned.client, "S");
+    expect(JSON.stringify(pinned.laptop.seen[1]?.messages)).toContain(secret);
+    pinned.finish();
+  });
+
+  test("contextWindow reaches the model's context line", async () => {
+    const { client, laptop, finish } = await linked(await podConfig(), { contextWindow: 200000 });
+    await say(client, "S");
+    expect(String(laptop.seen[0]?.messages.at(-1)?.content)).toContain("/ 200k tokens");
+    finish();
+  });
+
+  test("subagents off and contextReset off: the pod's agent does not offer those tools", async () => {
+    const offered = await linked(await podConfig(), {});
+    await say(offered.client, "S");
+    expect(toolsOf(offered.laptop.seen[0])).toContain("agent_task");
+    expect(toolsOf(offered.laptop.seen[0])).toContain("context_reset");
+    offered.finish();
+
+    const off = await linked(await podConfig(), {
+      subagentsEnabled: false,
+      contextResetEnabled: false,
+    });
+    await say(off.client, "S");
+    expect(toolsOf(off.laptop.seen[0])).not.toContain("agent_task");
+    expect(toolsOf(off.laptop.seen[0])).not.toContain("context_reset");
+    off.finish();
+  });
+
+  test("loadAgentsMd / loadSkills off: the FIRST request has neither, and /name lists none", async () => {
+    // Mutation: flip the flags without recomposing → the rules reach the model.
+    const repo = {
+      "AGENTS.md": "RULE-FROM-AGENTS-MD\n",
+      ".git/HEAD": "ref\n",
+      ".agents/skills/demo/SKILL.md": "---\nname: demo\ndescription: a demo skill\n---\nBody\n",
+    };
+    const on = await linked(await podConfig({}, await folder(repo)), {});
+    expect((await on.client.sessionSkills()).skills.map((s) => s.name)).toEqual(["demo"]);
+    await say(on.client, "S");
+    expect(systemOf(on.laptop.seen[0])).toContain("RULE-FROM-AGENTS-MD");
+    expect(toolsOf(on.laptop.seen[0])).toContain("skill");
+    on.finish();
+
+    const off = await linked(await podConfig({}, await folder(repo)), {
+      loadAgentsMd: false,
+      loadSkills: false,
+    });
+    expect((await off.client.sessionSkills()).skills).toEqual([]);
+    await say(off.client, "S");
+    expect(systemOf(off.laptop.seen[0])).not.toContain("RULE-FROM-AGENTS-MD");
+    expect(systemOf(off.laptop.seen[0])).not.toContain("demo");
+    expect(toolsOf(off.laptop.seen[0])).not.toContain("skill");
+    expect((await off.client.sessionSkills("S")).skills).toEqual([]);
+    off.finish();
+  });
+
+  test("two sessions on one resident follow whichever laptop opens each (the frozen flags are gone)", async () => {
+    // Mutation: cache the first merge in `podSessionHost` → B gets A's tools.
+    const [d1, c1] = createChannelPair();
+    const [d2, c2] = createChannelPair();
+    const host = serve.podSessionHost(await podConfig(), undefined, { modelProxy: true });
+    const conn1 = new Connection(d1, host, undefined, { servesModel: true });
+    const conn2 = new Connection(d2, host, undefined, { servesModel: true });
+    const modelA = new ScriptedProvider([done]);
+    const modelB = new ScriptedProvider([done]);
+    const a = new RemoteClient(c1, new PermissionBroker(), modelA, {
+      sessionSettings: { subagentsEnabled: false },
+    });
+    const b = new RemoteClient(c2, new PermissionBroker(), modelB, {
+      sessionSettings: { subagentsEnabled: true },
+    });
+    await a.initialize();
+    await b.initialize();
+    await say(a, "A");
+    await say(b, "B");
+    expect(toolsOf(modelA.seen[0])).not.toContain("agent_task");
+    expect(toolsOf(modelB.seen[0])).toContain("agent_task");
+    conn1.close();
+    conn2.close();
+    a.close();
+    b.close();
+  });
+
+  test("re-attaching a live session with other settings: its agent stands, the report says so", async () => {
+    const [d1, c1] = createChannelPair();
+    const [d2, c2] = createChannelPair();
+    const host = serve.podSessionHost(await podConfig(), undefined, { modelProxy: true });
+    const conn1 = new Connection(d1, host, undefined, { servesModel: true });
+    const conn2 = new Connection(d2, host, undefined, { servesModel: true });
+    const modelA = new ScriptedProvider([done]);
+    const modelB = new ScriptedProvider([done]);
+    const mineA: SessionSettings = { subagentsEnabled: false, maxIterations: 4 };
+    const mineB: SessionSettings = { subagentsEnabled: true, maxIterations: 9 };
+    const a = new RemoteClient(c1, new PermissionBroker(), modelA, { sessionSettings: mineA });
+    const b = new RemoteClient(c2, new PermissionBroker(), modelB, { sessionSettings: mineB });
+    await a.initialize();
+    await b.initialize();
+    await say(a, "S");
+    const said: string[] = [];
+    b.onSessionSettings(createSettingsNotifier(mineB, (line) => said.push(line)));
+    await say(b, "S", "again");
+    expect(toolsOf(modelB.seen[0])).not.toContain("agent_task");
+    expect(said).toEqual([
+      "This session keeps the settings it was created with (subagents.enabled, maxIterations differ); a new session uses yours.",
+    ]);
+    conn1.close();
+    conn2.close();
+    a.close();
+    b.close();
+  });
+
+  test("session/context with no id counts what the session then opened sends", async () => {
+    // Mutation: ignore `settings` in `newSessionContext` → the probe offers more tools.
+    class Counting extends ScriptedProvider {
+      readonly counted: ChatRequest[] = [];
+      async countTokens(request: ChatRequest): Promise<number> {
+        this.counted.push(request);
+        return 1;
+      }
+    }
+    const [daemonCh, clientCh] = createChannelPair();
+    const host = serve.podSessionHost(await podConfig(), undefined, { modelProxy: true });
+    const connection = new Connection(daemonCh, host, undefined, { servesModel: true });
+    const laptop = new Counting([done]);
+    const client = new RemoteClient(clientCh, new PermissionBroker(), laptop, {
+      sessionSettings: { subagentsEnabled: false, contextResetEnabled: false },
+    });
+    await client.initialize();
+    await client.sessionContext();
+    await client.openSession(undefined, undefined, "S");
+    await client.sessionContext("S");
+    expect(laptop.counted).toHaveLength(2);
+    expect(toolsOf(laptop.counted[0])).not.toContain("agent_task");
+    expect(toolsOf(laptop.counted[0])).toEqual(toolsOf(laptop.counted[1]));
+    connection.close();
+    client.close();
+  });
+
+  test("hostile pod: a daemon that drops the settings changes nothing on the laptop, and the title gate holds", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    const own = await podConfig();
+    // The pod ignores everything it is sent, and its own config says titles on.
+    const hostile = new SessionHost({
+      defaultCwd: "/pod",
+      createAgent: (cwd, { modelLink }) =>
+        serve.tunnelledAgent(
+          { ...own, cwd, autoTitle: true },
+          modelLink,
+          // Sends a title call whatever the laptop said.
+          { settings: { autoTitle: true } },
+        ),
+    });
+    const connection = new Connection(daemonCh, hostile, undefined, { servesModel: true });
+    const main = new ScriptedProvider([done, done]);
+    const client = new RemoteClient(clientCh, new PermissionBroker(), main, {
+      sessionSettings: { autoTitle: false },
+    });
+    await client.initialize();
+    await say(client, "S");
+    await new Promise((r) => setTimeout(r, 30));
+    // Only the turn: with no title provider here the laptop refused the title call.
+    expect(main.seen).toHaveLength(1);
+    expect(hostile.get("S")?.summary("/pod").title).toBe("hello");
+    connection.close();
+    client.close();
+  });
+});
+
+describe("a daemon the laptop does not launch ignores `settings`", () => {
+  const skill = "---\nname: demo\ndescription: a demo skill\n---\nBody\n";
+  async function own(dir: string): Promise<TentacleConfig> {
+    await mkdir(join(dir, ".agents", "skills", "demo"), { recursive: true });
+    await writeFile(join(dir, ".agents", "skills", "demo", "SKILL.md"), skill);
+    return loadConfig({
+      configDir: dir,
+      cwd: dir,
+      scaffold: false,
+      env: { HOME: dir, TENTACLE_MODEL_API_KEY: "k" },
+    });
+  }
+  async function check(host: SessionHost): Promise<void> {
+    const [daemonCh, clientCh] = createChannelPair();
+    const connection = new Connection(daemonCh, host);
+    const client = new RemoteClient(clientCh, new PermissionBroker(), undefined, {
+      sessionSettings: { loadSkills: false, subagentsEnabled: false },
+    });
+    let reports = 0;
+    client.onSessionSettings(() => {
+      reports++;
+    });
+    await client.initialize();
+    expect((await client.sessionSkills()).skills.map((s) => s.name)).toEqual(["demo"]);
+    await client.openSession(undefined, undefined, "S");
+    expect(reports).toBe(0);
+    expect((await client.sessionSkills("S")).skills.map((s) => s.name)).toEqual(["demo"]);
+    connection.close();
+    client.close();
+  }
+
+  test("a plain `serve --stdio` host (no model proxy) builds from its own config", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "config-carry-plain-"));
+    await check(serve.podSessionHost(await own(dir), undefined, {}));
+    await rm(dir, { recursive: true, force: true });
   });
 });

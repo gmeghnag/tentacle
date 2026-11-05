@@ -64,8 +64,8 @@ import {
   detachFlagProblem,
   extractSessionFlags,
   infoRequest,
+  isPodDaemonLoad,
   parseArgs,
-  parseContextWindowFlag,
   parseServeLimits,
   resolveRunPrompt,
   resolveTls,
@@ -545,6 +545,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     config = await loadConfig({
       cwd: process.cwd(),
       scaffold: !isStdioDaemon,
+      ...(mode === "serve" && isPodDaemonLoad(parsed.bools) ? { podDaemon: true } : {}),
       ...(profileFlag !== undefined ? { profile: profileFlag } : {}),
       ...(modelFlag !== undefined ? { model: modelFlag } : {}),
     });
@@ -656,12 +657,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     if (bools.has("stdio")) {
       try {
-        const contextWindow = parseContextWindowFlag(parsed);
         await startStdioDaemon(config, (line) => process.stderr.write(`[daemon] ${line}\n`), {
           modelProxy: bools.has("model-proxy"),
-          // The laptop that launched us decides (`podDaemonCommand`).
-          autoTitle: bools.has("auto-title"),
-          ...(contextWindow !== undefined ? { contextWindow } : {}),
         });
         return 0;
       } catch (error) {

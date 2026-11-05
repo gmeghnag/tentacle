@@ -8,7 +8,12 @@
  * characters before anything reaches the UI.
  */
 import { z } from "zod";
-import { MAX_SKILL_CATALOG, SessionIdSchema, SkillSummarySchema } from "./session.ts";
+import {
+  MAX_SKILL_CATALOG,
+  SessionIdSchema,
+  SessionSettingsSchema,
+  SkillSummarySchema,
+} from "./session.ts";
 import { line } from "./text-line.ts";
 
 /** At most this many skills in one `session/skills` result. */
@@ -43,6 +48,8 @@ export const SessionSkillsParamsSchema = z.object({
    * first prompt: its `/name` list is asked before it exists).
    */
   sessionId: SessionIdSchema.optional(),
+  /** With no `sessionId`: the `session/open` settings that session would be created from. */
+  settings: SessionSettingsSchema.optional(),
 });
 export type SessionSkillsParams = z.infer<typeof SessionSkillsParamsSchema>;
 

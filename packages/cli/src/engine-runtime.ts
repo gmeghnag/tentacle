@@ -29,6 +29,7 @@ import type { TentacleConfig } from "@tentacle/config";
 import type { ModelProvider, PermissionBroker } from "@tentacle/core";
 import type { DuplexChannel } from "@tentacle/transport";
 import type { TargetBadge } from "@tentacle/tui";
+import { carriedSettings } from "./carried-settings.ts";
 import {
   containerDecision,
   expectedContainerBuild,
@@ -79,26 +80,13 @@ import { type WorkspaceMount, attachCwdWarning } from "./workspace-mount.ts";
 /**
  * The pod daemon's command line (`run` and `attach`): the BRIDGE to the pod's
  * resident daemon, started by the first exec and outliving it
- * (`pod-resident.ts`, docs/feat/detached-runs.md S1). `--auto-title` carries
- * the LAPTOP's `model.autoTitle` (docs/feat/session-titles.md): the pod's own
- * config never turns model titles on. `--context-window` carries the LAPTOP's
- * `model.contextWindow`: the window is the model's, and the model lives here
- * (docs/feat/context-awareness.md). Neither is a secret, so argv is fine. A
- * resident already running keeps the flags of the exec that started it.
+ * (`pod-resident.ts`, docs/feat/detached-runs.md S1). No setting travels here:
+ * the laptop's go per session on `session/open.settings`, so a resident already
+ * running honours whichever laptop opens a new session
+ * (docs/feat/config-carry.md).
  */
-export function podDaemonCommand(
-  bin: string,
-  config: Pick<TentacleConfig, "autoTitle" | "contextWindow">,
-): string[] {
-  return [
-    bin,
-    "serve",
-    "--bridge",
-    "--model-proxy",
-    "--context-window",
-    String(config.contextWindow),
-    ...(config.autoTitle ? ["--auto-title"] : []),
-  ];
+export function podDaemonCommand(bin: string): string[] {
+  return [bin, "serve", "--bridge", "--model-proxy"];
 }
 
 /**
@@ -616,7 +604,7 @@ export async function startEngineRuntime(
     const target: EngineExecTarget = {
       name,
       container: host.defaultContainer,
-      command: podDaemonCommand(binPath, config),
+      command: podDaemonCommand(binPath),
     };
     const execOptions: EngineExecChannelOptions = { onStderr: stderr.onStderr };
     // The current exec; a reconnect replaces it (and teardown closes that one).
@@ -624,6 +612,7 @@ export async function startEngineRuntime(
     const redial = execChannelFactory(host, target, execOptions);
     const runtime = await createLocalRuntime({
       ...laptopModels(config),
+      sessionSettings: carriedSettings(config),
       channel,
       channelFactory: async () => {
         channel = await redial();
@@ -1009,7 +998,7 @@ export async function attachEngineRuntime(
     const target: EngineExecTarget = {
       name,
       container,
-      command: podDaemonCommand(serveBin, config),
+      command: podDaemonCommand(serveBin),
     };
     const execOptions: EngineExecChannelOptions = { onStderr: stderr.onStderr };
     // The current exec; a reconnect replaces it (and teardown closes that one).
@@ -1018,6 +1007,8 @@ export async function attachEngineRuntime(
     const fault = createFaultWatch();
     const runtime = await createLocalRuntime({
       ...laptopModels(config),
+      // This config: `attach`'s reload for the run's folder, the relay's profile.
+      sessionSettings: carriedSettings(config),
       channel,
       channelFactory: async () => {
         channel = await redial();

@@ -50,7 +50,7 @@ import {
   RpcPeer,
   streamChannel,
 } from "@tentacle/transport";
-import { type ParsedFlags, parseContextWindowFlag } from "./flags.ts";
+import type { ParsedFlags } from "./flags.ts";
 import { type PodDaemonOptions, podSessionHost } from "./serve.ts";
 import { untrustedText } from "./untrusted-text.ts";
 
@@ -91,8 +91,8 @@ export function selfCommand(
 }
 
 /**
- * The resident a bridge starts: its own flags, so the resident's agents take
- * the model flags of the laptop that started it (`podDaemonCommand`).
+ * The resident a bridge starts. It takes no setting from whoever started it:
+ * those come per session (`session/open.settings`, docs/feat/config-carry.md).
  */
 export function residentCommand(
   self: readonly string[],
@@ -103,10 +103,6 @@ export function residentCommand(
     "serve",
     "--resident",
     ...(options.modelProxy ? ["--model-proxy"] : []),
-    ...(options.contextWindow !== undefined
-      ? ["--context-window", String(options.contextWindow)]
-      : []),
-    ...(options.autoTitle ? ["--auto-title"] : []),
     ...(options.socket !== undefined ? ["--socket", options.socket] : []),
   ];
 }
@@ -791,12 +787,7 @@ export async function runResidentMode(
       process.stdout.write(`${JSON.stringify({ stopped: await residentStop(stateDir) })}\n`);
       return 0;
     }
-    const contextWindow = parseContextWindowFlag(parsed);
-    const options: PodDaemonOptions = {
-      modelProxy: bools.has("model-proxy"),
-      autoTitle: bools.has("auto-title"),
-      ...(contextWindow !== undefined ? { contextWindow } : {}),
-    };
+    const options: PodDaemonOptions = { modelProxy: bools.has("model-proxy") };
     if (bools.has("bridge")) {
       const argv = residentCommand(selfCommand(), {
         ...options,
