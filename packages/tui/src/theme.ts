@@ -21,6 +21,14 @@ export const accentHex = "#06b6d4";
 export const autoAcceptHex = "#fec20a";
 
 /**
+ * Every TUI notice (`noticeLines`): one soft blue (owner, 2026-11-05). Its hint
+ * stays grey (`theme.subtle`). The TUI has one palette today, so the dark value
+ * is in use; `noticeHexLight` waits for the light-theme task to pick it up.
+ */
+export const noticeHex = "#8caaee";
+export const noticeHexLight = "#3b5bdb";
+
+/**
  * User-message rows: a full-width background tint and the grey of a queued
  * one, as RGB triples. `dark` is the default; `light` is the matching tint for
  * a light terminal (the TUI has no light-mode switch yet).
@@ -76,6 +84,7 @@ export const theme = {
   accent: chalk.hex(accentHex),
   /** De-emphasised grey for metadata, context, hints. */
   subtle: chalk.rgb(140, 140, 140),
+  notice: chalk.hex(noticeHex),
   /**
    * SGR conceal ("hidden"): draws the characters in the background colour, so
    * the cells are still OCCUPIED. The OFF half of a running call's blink is the

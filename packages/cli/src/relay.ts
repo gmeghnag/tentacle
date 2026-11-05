@@ -324,7 +324,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     return leave();
   }
   const { saver, notices } = sessions;
-  notices.onNotice(log);
+  notices.onNotice((text, hint) => log(hint ? `${text} ${hint}` : text));
 
   let runtime: LocalRuntime;
   try {

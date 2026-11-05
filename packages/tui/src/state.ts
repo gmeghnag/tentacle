@@ -42,6 +42,8 @@ export interface AssistantItem {
 export interface NoticeItem {
   readonly kind: "notice";
   readonly text: string;
+  /** A grey aside after the text (`(/clear to reset)`): its own field, never parsed from `text`. */
+  readonly hint?: string;
   /** Identifies a background-job notice so the live + event paths dedupe. */
   readonly jobId?: string;
   /** Drawn as a full-width rule around `text` (the context-reset separator). */
@@ -138,11 +140,14 @@ export function backgroundExitNotice(
 export function appendNotice(
   state: DisplayState,
   text: string,
-  opts: { readonly host?: true } = {},
+  opts: { readonly host?: true; readonly hint?: string } = {},
 ): DisplayState {
-  const item: NoticeItem = opts.host
-    ? { kind: "notice", text, host: true }
-    : { kind: "notice", text };
+  const item: NoticeItem = {
+    kind: "notice",
+    text,
+    ...(opts.hint ? { hint: opts.hint } : {}),
+    ...(opts.host ? { host: true as const } : {}),
+  };
   return { ...state, items: append(state.items, item) };
 }
 

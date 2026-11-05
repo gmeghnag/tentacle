@@ -321,18 +321,25 @@ function valuesLine(keys: readonly Key[], values: SessionSettings): string {
 
 /**
  * What the laptop tells the user about a session's report: ONE line each, only
- * what differs, for keys of THIS table. The `(/clear to reset)` hint is plain
- * text: a notice is one string, and the TUI renders the whole notice dim
- * (`noticeLines`), so the hint is dim there with no new shape.
+ * what differs, for keys of THIS table. The `(/clear to reset)` hint is its own
+ * field, so the TUI draws it grey beside the blue text.
  */
-export function settingsNotices(mine: SessionSettings, report: SessionSettingsReport): string[] {
-  const lines: string[] = [];
+export interface SettingsNotice {
+  readonly text: string;
+  readonly hint?: string;
+}
+
+export function settingsNotices(
+  mine: SessionSettings,
+  report: SessionSettingsReport,
+): SettingsNotice[] {
+  const lines: SettingsNotice[] = [];
   // Only what differs from THIS laptop: a pod value equal to mine is not news.
   const overridden = KEYS.filter(
     (key) => report.overridden[key] !== undefined && report.overridden[key] !== mine[key],
   );
   if (overridden.length > 0) {
-    lines.push(`Container config: ${valuesLine(overridden, report.overridden)}`);
+    lines.push({ text: `Container config: ${valuesLine(overridden, report.overridden)}` });
   }
   // An overridden key is not what the session keeps: the line above has its value.
   // Absent on the session's side: nothing to show, but for the description.
@@ -343,7 +350,10 @@ export function settingsNotices(mine: SessionSettings, report: SessionSettingsRe
       (report.carried[key] !== undefined || key === "agentTaskDescription"),
   );
   if (differing.length > 0) {
-    lines.push(`Session settings: ${valuesLine(differing, report.carried)} (/clear to reset)`);
+    lines.push({
+      text: `Session settings: ${valuesLine(differing, report.carried)}`,
+      hint: "(/clear to reset)",
+    });
   }
   return lines;
 }
@@ -351,15 +361,15 @@ export function settingsNotices(mine: SessionSettings, report: SessionSettingsRe
 /** Sends each notice once per session and text, since a reconnect opens the session again. */
 export function createSettingsNotifier(
   mine: SessionSettings,
-  notify: (line: string) => void,
+  notify: (text: string, hint?: string) => void,
 ): (notice: { readonly sessionId: string; readonly report: SessionSettingsReport }) => void {
   const said = new Set<string>();
   return ({ sessionId, report }) => {
-    for (const line of settingsNotices(mine, report)) {
-      const key = `${sessionId}\n${line}`;
+    for (const { text, hint } of settingsNotices(mine, report)) {
+      const key = `${sessionId}\n${text}`;
       if (!said.has(key)) {
         said.add(key);
-        notify(line);
+        notify(text, hint);
       }
     }
   };

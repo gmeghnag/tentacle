@@ -13,6 +13,12 @@ those.
 - **Esc / Ctrl+C in the `--resume` session picker now exits silently**, with no
   `[resume] cancelled` line (local and `connect --resume`). The exit code is
   unchanged.
+- **Notices are soft blue, their hint grey.** Every notice line in the TUI
+  (`Session settings: …`, `Container config: …`, `auto-accept on`, …) now has
+  one colour instead of dim grey, and its hint (`(/clear to reset)`,
+  `(Shift+Tab to turn it off)`) stays grey beside it. Separator rules are
+  unchanged; `relay.log` still prints each notice as one plain line.
+
 - **Your config now reaches a pod or container.** `run` and `attach` carry your
   `maxIterations`, `tools.*`, `contextAwareness`, `contextReset`, `loadAgentsMd`
   and `loadSkills` (your environment, active profile and global file, resolved on

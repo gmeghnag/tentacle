@@ -147,7 +147,7 @@ async function rig(
   );
   if ("exit" in sessions) throw new Error("no sessions");
   const notices: string[] = [];
-  sessions.notices.onNotice((text) => notices.push(text));
+  sessions.notices.onNotice((text, hint) => notices.push(hint ? `${text} ${hint}` : text));
   const drain = sessions.saver.drain.bind(sessions.saver);
   sessions.saver.drain = async (options) => {
     const read = readOwner(dir);

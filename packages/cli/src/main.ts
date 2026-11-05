@@ -1135,7 +1135,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         permissions,
         saver: sessions.saver,
         resume: sessions.resume,
-        notify: (text) => sessions.notices.notify(text),
+        notify: (text, hint) => sessions.notices.notify(text, hint),
       });
     } catch (error) {
       err(failedLine(noun, error));
@@ -1434,7 +1434,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             logTerm: errTerm,
             info,
             daemonLogPath: () => join(run.dir, "daemon.log"),
-            notify: (text) => sessions.notices.notify(text),
+            notify: (text, hint) => sessions.notices.notify(text, hint),
           });
         },
         armNet: (host, othersAlive, saved, onKept) =>
@@ -1551,7 +1551,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           keptEntry
             ? join(runDirFor(config.configDir, keptEntry), "daemon.log")
             : join(config.configDir, "logs", workload, "daemon.log"),
-        notify: (text) => sessions.notices.notify(text),
+        notify: (text, hint) => sessions.notices.notify(text, hint),
       });
     } catch (error) {
       // A name that is neither in `ps` nor on the engine: one plain line.

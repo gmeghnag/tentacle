@@ -530,13 +530,24 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
   const WINS = "Container config: ";
   const KEEPS = "Session settings: ";
   const CLEAR = " (/clear to reset)";
+  // The plain-text view (what `relay.log` prints): text, a space, the hint.
+  const joined = (...a: Parameters<typeof settingsNotices>): string[] =>
+    settingsNotices(...a).map((n) => (n.hint ? `${n.text} ${n.hint}` : n.text));
+
+  test("the hint is its own field, never inside the text", () => {
+    const [n] = settingsNotices(mine, { carried: { maxIterations: 1 }, overridden: {} });
+    expect(n?.hint).toBe("(/clear to reset)");
+    expect(n?.text).not.toContain("clear");
+    const [c] = settingsNotices(mine, { carried: mine, overridden: { dedupOutput: false } });
+    expect(c?.hint).toBeUndefined();
+  });
 
   test("nothing to say", () => {
-    expect(settingsNotices(mine, { carried: mine, overridden: {} })).toEqual([]);
+    expect(joined(mine, { carried: mine, overridden: {} })).toEqual([]);
   });
 
   test("overridden: the values that win, under the config's names", () => {
-    const lines = settingsNotices(mine, {
+    const lines = joined(mine, {
       carried: mine,
       overridden: { dedupOutput: false, maxIterations: 7, toolExecution: "sequential" },
     });
@@ -552,11 +563,11 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
       carried: { maxIterations: 9, toolExecution: pod },
       overridden: { toolExecution: pod, agentTaskDescription: "pod text" },
     } as unknown as SessionSettingsReport;
-    const lines = settingsNotices({ maxIterations: 9, toolExecution: "parallel" }, forged);
+    const lines = joined({ maxIterations: 9, toolExecution: "parallel" }, forged);
     expect(lines).toEqual([
       `${WINS}{ "subagents.agentTaskDescription": "(text differs)", "tools.execution": "(text differs)" }`,
     ]);
-    const kept = settingsNotices(
+    const kept = joined(
       { toolExecution: "parallel" },
       { carried: { toolExecution: pod } as unknown as SessionSettings, overridden: {} },
     );
@@ -567,11 +578,11 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
     const forged = JSON.parse(
       '{"carried":{"maxIterations":9},"overridden":{"evil name":1,"__proto__":2,"constructor":3}}',
     ) as SessionSettingsReport;
-    expect(settingsNotices({ maxIterations: 9 }, forged)).toEqual([]);
+    expect(joined({ maxIterations: 9 }, forged)).toEqual([]);
   });
 
   test("drift: the session's values, only those that differ; the description's text never", () => {
-    const lines = settingsNotices(
+    const lines = joined(
       { ...mine, dedupOutput: true, redactSecrets: true },
       {
         carried: {
@@ -594,7 +605,7 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
       [{ agentTaskDescription: "text" }, {}],
       [{}, { agentTaskDescription: "text" }],
     ] as const) {
-      expect(settingsNotices(left, { carried: right, overridden: {} })).toEqual([
+      expect(joined(left, { carried: right, overridden: {} })).toEqual([
         `${KEEPS}{ "subagents.agentTaskDescription": "(text differs)" }${CLEAR}`,
       ]);
     }
@@ -602,7 +613,7 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
 
   test("a key the pod overrode is told once, with the value that wins", () => {
     // Mutation: leave it in the drift → the session seems to keep 3, while 7 runs.
-    const lines = settingsNotices(
+    const lines = joined(
       { maxIterations: 5 },
       { carried: { maxIterations: 3 }, overridden: { maxIterations: 7 } },
     );
@@ -613,13 +624,13 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
     // Mutation: list every overridden key → "maxIterations": 9 appears though it is 9 here.
     const same = { carried: { maxIterations: 3, dedupOutput: true }, overridden: {} };
     expect(
-      settingsNotices(
+      joined(
         { maxIterations: 9, dedupOutput: false },
         { ...same, overridden: { maxIterations: 9, dedupOutput: true } },
       ),
     ).toEqual([`${WINS}{ "tools.dedupOutput": true }`]);
     expect(
-      settingsNotices(
+      joined(
         { maxIterations: 9 },
         { carried: { maxIterations: 3 }, overridden: { maxIterations: 9 } },
       ),
@@ -627,12 +638,12 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
   });
 
   test("a value the session's report leaves out has nothing to show", () => {
-    expect(settingsNotices({ maxIterations: 5 }, { carried: {}, overridden: {} })).toEqual([]);
+    expect(joined({ maxIterations: 5 }, { carried: {}, overridden: {} })).toEqual([]);
   });
 
   test("once per session and text: a reconnect's re-open repeats nothing", () => {
     const said: string[] = [];
-    const notify = createSettingsNotifier(mine, (line) => said.push(line));
+    const notify = createSettingsNotifier(mine, (text) => said.push(text));
     const report = { carried: mine, overridden: { dedupOutput: false } };
     notify({ sessionId: "a", report });
     notify({ sessionId: "a", report });

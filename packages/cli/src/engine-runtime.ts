@@ -239,7 +239,7 @@ export interface EngineRuntimeDeps {
    */
   readonly daemonLogPath?: (name: string) => string | undefined;
   /** In-TUI notices (the session's `NoticeHub`), e.g. a reconnect that lost the last turn. */
-  readonly notify?: (text: string) => void;
+  readonly notify?: (text: string, hint?: string) => void;
   /** This tentacle's version for the pod-binary check (tests); defaults to `APP_VERSION`. */
   readonly appVersion?: string;
 }
@@ -692,7 +692,7 @@ export interface EngineAttachRuntimeDeps {
    */
   readonly daemonLogPath?: (name: string) => string | undefined;
   /** In-TUI notices (the session's `NoticeHub`), e.g. a reconnect that lost the last turn. */
-  readonly notify?: (text: string) => void;
+  readonly notify?: (text: string, hint?: string) => void;
   /** `createLocalRuntime`'s: false in the relay, no one to ask. */
   readonly interactive?: boolean;
   /** `createLocalRuntime`'s: the first session's uid. */

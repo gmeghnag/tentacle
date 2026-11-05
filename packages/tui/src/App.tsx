@@ -280,7 +280,7 @@ export interface SessionDirectory {
  * as a system line even while idle. Returns the unsubscribe function.
  */
 export interface NoticeFeed {
-  onNotice(listener: (text: string) => void): () => void;
+  onNotice(listener: (text: string, hint?: string) => void): () => void;
 }
 
 /**
@@ -671,9 +671,12 @@ export function App({
     if (!notices) {
       return;
     }
-    return notices.onNotice((text) => {
+    return notices.onNotice((text, hint) => {
       // `host`: an attach's notice outlives the history that follows it (A6).
-      stateRef.current = appendNotice(stateRef.current, text, { host: true });
+      stateRef.current = appendNotice(stateRef.current, text, {
+        host: true,
+        ...(hint ? { hint } : {}),
+      });
       setScrollOffset(0);
       flushNow();
     });
