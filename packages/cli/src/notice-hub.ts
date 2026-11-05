@@ -9,25 +9,26 @@
 import type { NoticeFeed } from "@tentacle/tui";
 
 export class NoticeHub implements NoticeFeed {
-  private readonly listeners = new Set<(text: string) => void>();
-  private buffered: string[] = [];
+  private readonly listeners = new Set<(text: string, hint?: string) => void>();
+  private buffered: Array<{ readonly text: string; readonly hint?: string }> = [];
 
-  notify(text: string): void {
+  /** `hint`: a grey aside the TUI draws after `text` (a plain-text sink joins them). */
+  notify(text: string, hint?: string): void {
     if (this.listeners.size === 0) {
-      this.buffered.push(text);
+      this.buffered.push(hint ? { text, hint } : { text });
       return;
     }
     for (const listener of this.listeners) {
-      listener(text);
+      listener(text, hint);
     }
   }
 
-  onNotice(listener: (text: string) => void): () => void {
+  onNotice(listener: (text: string, hint?: string) => void): () => void {
     this.listeners.add(listener);
     const pending = this.buffered;
     this.buffered = [];
-    for (const text of pending) {
-      listener(text);
+    for (const { text, hint } of pending) {
+      listener(text, hint);
     }
     return () => {
       this.listeners.delete(listener);

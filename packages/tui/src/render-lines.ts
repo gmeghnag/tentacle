@@ -584,12 +584,17 @@ function separatorLines(text: string, width: number): string[] {
   return [theme.subtle(`${head}${"─".repeat(rest)}`)];
 }
 
-function noticeLines(text: string): string[] {
+function noticeLines(text: string, hint?: string): string[] {
   const [first = "", ...rest] = text.split("\n");
-  return [
-    `${theme.subtle("⏺")} ${theme.subtle(first)}`,
-    ...rest.map((l) => `  ${theme.subtle(l)}`),
+  const lines = [
+    `${theme.notice("⏺")} ${theme.notice(first)}`,
+    ...rest.map((l) => `  ${theme.notice(l)}`),
   ];
+  if (hint) {
+    // The hint ends the last line, grey: a separate field, never cut out of the text.
+    lines[lines.length - 1] += ` ${theme.subtle(hint)}`;
+  }
+  return lines;
 }
 
 /** Logical (pre-wrap) lines for a single display item. */
@@ -606,7 +611,7 @@ export function itemLines(item: DisplayItem, opts: RenderOptions): string[] {
     case "notice":
       return item.separator
         ? separatorLines(item.text, Math.floor(opts.width ?? DEFAULT_WIDTH))
-        : noticeLines(item.text);
+        : noticeLines(item.text, item.hint);
   }
 }
 

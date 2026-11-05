@@ -505,7 +505,7 @@ export interface LocalRuntimeDeps {
    * An in-TUI notice (the session's `NoticeHub`): e.g. a reconnect that could
    * not restore the latest turn. Absent → dropped (tests, no TUI).
    */
-  readonly notify?: (text: string) => void;
+  readonly notify?: (text: string, hint?: string) => void;
   /** Where each turn's history goes; its failures are reported, never thrown. */
   readonly saver: SessionSaver;
   readonly cwd: string;

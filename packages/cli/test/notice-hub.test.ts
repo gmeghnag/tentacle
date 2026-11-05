@@ -18,4 +18,18 @@ describe("NoticeHub", () => {
     hub.onNotice((t) => later.push(t));
     expect(later).toEqual(["after unmount"]);
   });
+
+  test("the hint travels beside the text, buffered or live", () => {
+    const hub = new NoticeHub();
+    hub.notify("early", "(h1)");
+    const seen: Array<[string, string | undefined]> = [];
+    hub.onNotice((t, h) => seen.push([t, h]));
+    hub.notify("live");
+    hub.notify("live2", "(h2)");
+    expect(seen).toEqual([
+      ["early", "(h1)"],
+      ["live", undefined],
+      ["live2", "(h2)"],
+    ]);
+  });
 });

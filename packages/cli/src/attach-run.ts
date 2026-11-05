@@ -475,7 +475,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     onWriteError: (text) => sessions.notices.notify(text),
   });
   if (autoAccept.current()) {
-    sessions.notices.notify("auto-accept on (Shift+Tab to turn it off)");
+    sessions.notices.notify("auto-accept on", "(Shift+Tab to turn it off)");
   }
   // What the TUI's `/quit` chose and what happened to its session (A2): read
   // by `finish`; neither changes once it began.

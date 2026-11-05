@@ -527,7 +527,9 @@ describe("the laptop's settings reach the pod's agents, per session", () => {
     await b.initialize();
     await say(a, "S");
     const said: string[] = [];
-    b.onSessionSettings(createSettingsNotifier(mineB, (line) => said.push(line)));
+    b.onSessionSettings(
+      createSettingsNotifier(mineB, (text, hint) => said.push(`${text} ${hint}`)),
+    );
     await say(b, "S", "again");
     expect(toolsOf(modelB.seen[0])).not.toContain("agent_task");
     expect(said).toEqual([
