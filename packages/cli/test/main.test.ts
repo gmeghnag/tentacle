@@ -22,6 +22,7 @@ import {
   runDirFor,
   writeOwner,
 } from "../src/run-state.ts";
+import { simulateSilentTerminal } from "./silent-terminal.ts";
 
 /** Piped stdin and stdout, whatever terminal runs the suite (CliIO.terminal). */
 const NO_TERMINAL = { stdin: false, stdout: false };
@@ -76,8 +77,10 @@ afterEach(() => {
 let server: ReturnType<typeof Bun.serve>;
 let dir: string;
 const saved: Record<string, string | undefined> = {};
+let restoreTerminal: () => void = () => {};
 
 beforeAll(async () => {
+  restoreTerminal = simulateSilentTerminal();
   dir = await mkdtemp(join(tmpdir(), "harness-cli-"));
   let calls = 0;
   server = Bun.serve({
@@ -105,6 +108,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  restoreTerminal();
   server.stop(true);
   for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) {

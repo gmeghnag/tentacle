@@ -49,7 +49,9 @@ import {
 import { POD_BIN_PATH } from "../src/pod-binary.ts";
 import { failedLine, failureLogPath } from "../src/pod-stderr-log.ts";
 import { SessionSaver } from "../src/session-saver.ts";
+import { NOT_A_TERMINAL } from "../src/streams.ts";
 import { formatBuildMarker, formatVersionMarker } from "../src/version.ts";
+import { simulateSilentTerminal } from "./silent-terminal.ts";
 
 /**
  * The k8s `run` / `attach` as this oracle was written against them (the former
@@ -62,7 +64,11 @@ function startPodRuntime(
   deps: Omit<EngineRuntimeDeps, "host"> & { kube: PodCluster; namespace: string },
 ) {
   const { kube, namespace, ...rest } = deps;
-  return startEngineRuntime(config, { ...rest, host: kubeEngineHost(kube, namespace) });
+  return startEngineRuntime(config, {
+    logTerm: NOT_A_TERMINAL,
+    ...rest,
+    host: kubeEngineHost(kube, namespace),
+  });
 }
 function startAttachRuntime(
   config: TentacleConfig,
@@ -74,6 +80,7 @@ function startAttachRuntime(
 ) {
   const { kube, namespace, podName, ...rest } = deps;
   return attachEngineRuntime(config, {
+    logTerm: NOT_A_TERMINAL,
     ...rest,
     name: podName,
     host: kubeEngineHost(kube, namespace),
@@ -284,7 +291,9 @@ function baseConfig(cwd: string): TentacleConfig {
 
 let dir: string;
 let savedPodBin: string | undefined;
+let restoreTerminal: () => void = () => {};
 beforeAll(async () => {
+  restoreTerminal = simulateSilentTerminal();
   dir = await mkdtemp(join(tmpdir(), "harness-pod-rt-"));
   // startPodRuntime resolves the binary through the REAL `resolvePodBinary`
   // (the seam is wired, not faked): point TENTACLE_POD_BIN at a small fake file
@@ -294,6 +303,7 @@ beforeAll(async () => {
   writeFileSync(process.env.TENTACLE_POD_BIN, "01234567"); // 8 bytes
 });
 afterAll(async () => {
+  restoreTerminal();
   // Restoring via Reflect.deleteProperty keeps biome's `noDelete` happy; in
   // Bun, assigning `undefined` would stringify the value (not unset it).
   if (savedPodBin === undefined) {
@@ -349,6 +359,7 @@ describe("startPodRuntime", () => {
     const kube = new FakeCluster(new ScriptedProvider([]));
     const lines: string[] = [];
     const provisioned = await provisionWorkload(baseConfig("/pod/work"), {
+      logTerm: NOT_A_TERMINAL,
       host: kubeEngineHost(kube, "dev"),
       image: "repo/img:tag",
       name: "box",
@@ -952,6 +963,7 @@ describe("startPodRuntime", () => {
       const logs: string[] = [];
       const infos: string[] = [];
       await provisionWorkload(baseConfig("/pod/work"), {
+        logTerm: NOT_A_TERMINAL,
         host: kubeEngineHost(kube, "dev"),
         image: "img",
         name: "box",
@@ -1007,6 +1019,7 @@ describe("startPodRuntime", () => {
       const logs: string[] = [];
       const logPath = freshLog();
       const error = await provisionWorkload(baseConfig("/pod/work"), {
+        logTerm: NOT_A_TERMINAL,
         host: kubeEngineHost(kube, "dev"),
         image: "img",
         name: "box",
@@ -1018,6 +1031,7 @@ describe("startPodRuntime", () => {
       expect(readFileSync(logPath, "utf8")).toContain("backtrace line 2");
       // Without a log path there is none to name (and nothing is written).
       const bare = await provisionWorkload(baseConfig("/pod/work"), {
+        logTerm: NOT_A_TERMINAL,
         host: kubeEngineHost(kube, "dev"),
         image: "img",
         name: "box2",
@@ -1170,6 +1184,7 @@ describe("startPodRuntime", () => {
     };
     const attempt = (kube: FakeCluster, over: Record<string, unknown>): Promise<unknown> =>
       provisionWorkload(baseConfig("/pod/work"), {
+        logTerm: NOT_A_TERMINAL,
         host: kubeEngineHost(kube, "dev"),
         image: "img",
         name: "box",
@@ -1204,6 +1219,7 @@ describe("startPodRuntime", () => {
     // Mutation: the one line for both → a promise no relay exists to keep.
     const provision = (kube: FakeCluster, logs: string[], name: string) =>
       provisionWorkload(baseConfig("/pod/work"), {
+        logTerm: NOT_A_TERMINAL,
         host: kubeEngineHost(kube, "dev"),
         image: "img",
         name,
