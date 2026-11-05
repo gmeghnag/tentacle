@@ -706,6 +706,124 @@ is empty.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-06*
+
+**Verdict: PASS (APPROVE-WITH-NITS).** No CRITICAL, HIGH or MEDIUM finding; 4 LOW and 1 NIT. All
+of them can wait for a follow-up. The reviewer is the same model as the executor, only in a
+fresh context, so shared blind spots can survive both passes. The real model, engine and TUI
+were not exercised (Open, below).
+
+### Findings
+
+1. **LOW: a wide label makes the dialog one row taller than planned.** `tui/src/permission-ui.ts:81`
+   truncates by UTF-16 length, not by cells. A description of CJK text, written by the model
+   or forged by a pod, wraps. Measured at 100 columns: the frame has 9 rows,
+   `permissionPromptRows` says 8; the same case in ASCII has 8. The viewport is then off by one
+   while that dialog is open. Display only: nothing decides on the label. The neighbouring
+   `truncate` (`PermissionPrompt.tsx:11-13`) has the same flaw for details, so this is an
+   existing class with a new input.
+2. **LOW: a transient refusal disables the cap for the provider's lifetime.**
+   `providers/src/openai-provider.ts:187` memoizes every status below 500, while the plan says "an
+   answer or a 404". A 429, 401 or 408 on the first fan-out leaves `{ value: undefined }`, so the
+   server's slots are not read again until the process restarts: a `-np 1` server then gets
+   4 concurrent requests, which it should queue (not measured, Open). Likewise a remembered
+   number outlives a server restart with another `-np`, the very freeze Design 6 holds against
+   a carried setting. Not reported as drift. The ceiling stays the config's, and no
+   permission or data is affected.
+3. **LOW: the slot-cap line is mislabelled outside the TUI.** `cli/src/wiring.ts:294` writes through
+   `options.log`, which `cli/src/main.ts:1585` and `:1693` prefix with `[hook]`. A one-shot run on a
+   one-slot server prints `[hook] sub-agents capped at 1 at once…` to stderr, though no hook is
+   involved. Ink is not mounted there, so §7 holds. Found by reading, not run.
+4. **LOW: T-D1's comment names a mutation that does not fail it.** `daemon/test/parallel-agents.test.ts:218`
+   says `origin: "call"` makes the entry resumable; it does not (below). The plan's T-D1 row says
+   the same. The executor reported the survivor but left the comment.
+5. **NIT: the "Repeated id" failure mode says "no loss", which looks wrong for a large report.** By
+   reading, not run: a parent has no `spillScope` (`agent/src/agent.ts:1852-1853`), so two
+   `agent_task` calls with one id in one message would spill to one file and the first report would
+   be overwritten. It needs a misbehaving server, and sequential calls already had it. The open
+   `fix/tool-output-location` is the natural place.
+
+Also noted, not a finding: `readOnlyType` counts an unregistered tool as read-only
+(`agent/src/subagent.ts:309`). The plan asks for it and drift 6 reports it. It only affects overlap
+under `read-only`, between planning and the child's start; it bypasses no permission.
+
+### The surviving mutation (T-D1 `origin: "call"`)
+
+**The second guard is real, and no test is missing.** Results, each on otherwise restored source:
+
+| Mutation | Result |
+|---|---|
+| `origin: "call"` alone, `daemon/test/parallel-agents.test.ts` + `persistence.test.ts` | green: the mutation survives there |
+| `origin: "call"` alone, `agent/test/subagent.test.ts` + `cli/test/wiring.test.ts` | 5 red (4 + 1): the wrapper's `origin` is pinned directly |
+| `origin: "call"` + `classifyPending` without the name check | T-D1 and 2 more red: the entry reads `resumable: true` |
+
+`classifyPending` wants the asking call named as the asked tool. A child's call is `agent_task`, and a
+child can never ask for `agent_task` (`subagent.ts:212`), so the name check holds alone in production.
+`persistence.test.ts:1386` pins the classifier's `origin` check when the name does match. A third guard
+stands behind both: `resumableTurn` refuses any `inFlight` (`persisted-session.ts:599`).
+
+### Gate (once, foreground, on 265075c)
+
+`bunx tsc --noEmit` clean · `bunx biome check .` clean (663 files) · `bun test packages`: **4842 pass, 3
+skip (opt-in), 0 fail**, 59022 assertions, 4845 tests in 325 files. No reaper flake this run.
+`bun run check` and the `apps/mobile` typecheck were not run, as instructed.
+
+### Mutations (backups in `.tentacle/tmp/parallel-agents/`)
+
+| Mutation | Origin | Red |
+|---|---|---|
+| Lane re-check off (`permission-gate.ts`) | executor | T-G race (ONE requester call) |
+| A commit per call in phase 2 (`agent.ts`) | executor | T-D3 |
+| `beforeRun`'s answer ignored (`agent.ts`) | executor | T-D2 |
+| An aborted waiter stays in the queue (`session-grants.ts`) | reviewer | "an abort releases the waiters" |
+
+`shasum` of all five touched files is identical to before; `git status` is clean. `persisted-session.ts`
+is the fifth, for the name-check row above.
+
+### Red-team
+
+| Attack | Result |
+|---|---|
+| **(1)** Each ask reaches the right child, through one broker | Holds. `subagentRequester` wins over the child's fields (`subagent.ts:106-114`); T-D4 shows each `toolCallId` and label; every gate calls the same `permissions.request` (`wiring.ts:413`, `:463`). T-D4's `brokers.length === 1` proves little in its own rig; `wiring.test.ts` carries the invariant |
+| **(1)** Auto-approval leak | None found. The lane calls the same requester; a `force: "ask"` skips both `covers` checks; a waiter re-checks with the same rule (T-G) |
+| **(1)** Lasting approval on the laptop from a pod | None. `permission-router.ts:11-14` keeps no grant; `SessionGrants` lives in the daemon, one per `buildAgent` (`session-host.ts:830`); the label is stripped, capped and display only |
+| **(2)** Crash with a child's ask live: reviewer's script, real `SessionHost` + `SessionPersister` | `resume` undefined; the finished sibling reads "Interrupted", the asker gets the sub-agent note; nothing re-runs. Conservative and honest: a finished sibling's report is lost, its effects stay |
+| **(2)** Crash during phase 1 of an `agents` group (a `tool_call` hook's forced ask, stood in by `permission: "ask"`) | `pending=[c2, resumable, groupStart c1]`, no `inFlight`, no child started. The restart re-asks from c1, then c2; both overlap, each starts once, `inFlight` is durable, results land in call order |
+| **(3)** A cancel with a live ask and a lane waiter, then a new turn | Lane free: the next turn's child is asked and runs. Every id answered once (existing test) |
+| **(3)** Result order | Pushed in call order whatever the completion order, one commit (`agent.ts:1514-1522`, T-E2) |
+| **(4)** `slots`, cap and version | Fan-out-only probe, `slots = 1` runs alone, a garbage answer falls back to the config (T-S). Bounds: 1.5 s provider, 2 s agent, 2 s laptop. **No bump needed, per §7:** a new request method is free, `MethodNotFound` is handled (`proxy-model.ts`), and `slots` is omitted when unknown, as `model/countTokens` does |
+| **(4)** Carried `subagents.*` consumed in the pod | Holds (T-CARRY, over the channel pair); executor's mutation on the merged config is on record, not re-run here |
+| **(5)** Dialog names the child; nothing raw under Ink | Holds: one row, counted in the viewport (except finding 1). The worker logs to a file (`worker.ts:118`), a pod to its daemon log; stderr only in `plain`/one-shot, with Ink absent |
+| Other callers of `model/countTokens` that `model/slots` could miss | None: all 7 sites match, including the relay (it is a `RemoteClient`). `RetryingModelProvider` forwards; `select-provider.ts` has no other wrapper |
+| Hand-over with N streams | No starvation: new calls go to the new link and the old one drains, at most 5 min (`relay.ts:96`). By reading |
+| Shared state across concurrent children | No problem found in tools or `HookRunner` (a fresh runner per child; project trust is the one shared decision). A reused call id no longer collides (T-C2) |
+
+**Premises.** The Repro is TRUE on the main checkout (no `spawnKind` there): `c2` starts at 206 ms, total
+409 ms. On this branch with `parallel`: both start at 5 ms, total 207 ms. The load-bearing assumption
+(a) and (b) holds, by reading and by execution. P1, P3, P4, P5, P7, P10, P12 and the rows of P8 and P9
+above were opened and are TRUE. P2, P6 and P11 were not re-opened line by line: they rest on T-D1, T-E
+and T-CARRY.
+
+### Open
+
+**Unverified: nothing ran on a real model, engine or TUI.** The Execution checklist items 2–7 and the
+plan's "Live, before the Review" did not run. `/props` is verified (orchestrator note); the N=1 vs N=3
+timing is not. Since `total_slots` is 1 on the owner's endpoint, **the default config there never fans
+out**: a live test needs `-np 2` or more.
+
+**Executor's behaviour.** Honest and useful: it reported which tests were not red first, the survivor,
+the restore not done from a backup, and its 8 drifts. Each drift claim checked here held, except that
+the memo in finding 2 went unreported. The planned live test was skipped and said so.
+
+**Questions (owner unreachable; the orchestrator decides):**
+
+- **Q1. Merge before the live checklist?** Recommendation: yes. Track the checklist in `TODO.md`, run
+  with `-np 2`, permission flow and Esc first. The gate, the daemon traces and a one-slot default
+  on the owner's endpoint limit the exposure there; another endpoint gets the fan-out by default.
+- **Q2. Fix the LOWs before merging?** Recommendation: findings 2 and 4 now (a one-line condition and
+  a comment), findings 1, 3 and 5 as `TODO.md` entries. Finding 1 is best fixed with the existing
+  `truncate`, as one width-aware helper.
+- **Q3. Should an unregistered tool count as a writer?** Recommendation: leave it. The plan chose it, and
+  failing closed would make a type naming a stale tool run alone for good.
 
 *Orchestrator note, 2026-11-06:* drift 2 verified live — `GET http://192.168.1.17:8080/props` (with the configured key) answers `"total_slots":1`, `"n_ctx":174080`: the parser's field name is right, and on the owner's local endpoint the effective cap is 1 (children run one at a time). `bun run schema:export` re-run by the orchestrator: no diff with the hand-edited `protocol.json`.
