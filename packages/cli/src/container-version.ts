@@ -80,8 +80,9 @@ export function parseBuildFromVersionProbe(
  * binary may be another build of the same version), or `undefined` for "no
  * build rule": `TENTACLE_POD_BIN` → that file; a source (`dev`) laptop → none
  * (Q3: the container's tentacle is reused; set `TENTACLE_POD_BIN`); a release →
- * the config-dir binaries' build when the readable ones agree (the pod's arch
- * is not known yet), none when they have no id or disagree.
+ * the config-dir binaries' build when all of the existing ones carry the same
+ * id (the pod's arch is not known yet); none when ANY existing one has no
+ * readable id, or when they disagree.
  */
 export async function expectedContainerBuild(options: {
   readonly appVersion: string;

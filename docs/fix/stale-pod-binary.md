@@ -404,3 +404,26 @@ identical (`ec7c526a…`).
 ### Executor behaviour
 The fix is precise and red-first. The executor reported the mobile `tsc` side effect
 (emitted files, then deleted) honestly.
+
+### Execution — final pass
+
+*— claude-sonnet-5-5, 2026-11-05*
+
+Done: the JSDoc of `expectedContainerBuild` (`container-version.ts:78-85`) now says "any existing
+binary without a readable id → none"; no other comment was out of date (grep of the build-id
+comments). `CHANGELOG.md` `[Unreleased]` → `### Fixed` entry added.
+
+**Live check (owner, not run here — needs a real container built by an older tentacle):**
+1. `tentacle attach <name>` on a container holding an older tentacle that reports the SAME version
+   (e.g. one created before today) → `the container had tentacle X (an older build); replaced with
+   X (this laptop's)`, then the TUI opens (no `connection closed`).
+2. Attach again to the same container (now the laptop's build) → no copy, no replace notice.
+3. A detached run (`run --detach`) of the CURRENT build, busy → `attach <name>` attaches normally.
+4. A busy detached run of an OLDER build → one line `[container] <name> runs an older tentacle
+   build than this one · tentacle rm <name>, then run again`, nothing stopped or copied.
+5. From source (`dev`) without `TENTACLE_POD_BIN`: unchanged (Q3, container binary reused).
+Also unverified: the compiled binary's `--version --build-id` output (the build check passes).
+
+Gate (final pass): `bunx tsc --noEmit` clean; `bunx biome check .` clean; `bun test packages/cli` —
+first run 2 fails in `cli main: --engine > workspace mount wiring` (a 5 s timeout test and an
+apiKeyCommand one: the known flaky-tests item, unrelated to this diff), re-run 1767 pass · 0 fail.
