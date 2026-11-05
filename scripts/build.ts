@@ -17,8 +17,12 @@
  * to cross-compile; see `bun build --help` for target triples).
  */
 import { resolve } from "node:path";
-import { buildBinary, cliVersion } from "../packages/cli/src/pod-binary-build.ts";
-import { findAllVersionMarkers, readBinaryVersion } from "../packages/cli/src/version-marker.ts";
+import { buildBinary, cliVersion, computeBuildId } from "../packages/cli/src/pod-binary-build.ts";
+import {
+  findAllBuildMarkers,
+  findAllVersionMarkers,
+  readBinaryVersion,
+} from "../packages/cli/src/version-marker.ts";
 
 const root = resolve(import.meta.dir, "..");
 const outfile = resolve(root, "dist/tentacle");
@@ -58,5 +62,16 @@ if (markers.length !== 1 || markers[0] !== expected || marked !== expected) {
   process.exit(1);
 }
 console.log(`version marker ${marked} ok`);
+
+// The build id (docs/fix/stale-pod-binary.md): exactly one, and this source's.
+const expectedBuild = computeBuildId();
+const builds = findAllBuildMarkers(new Uint8Array(await Bun.file(outfile).arrayBuffer()));
+if (builds.length !== 1 || builds[0] !== expectedBuild) {
+  console.error(
+    `error: ${outfile} carries build marker(s) [${builds.join(", ") || "none"}], expected exactly one: ${expectedBuild}`,
+  );
+  process.exit(1);
+}
+console.log(`build marker ${expectedBuild} ok`);
 
 console.log(`compiled → ${outfile}`);

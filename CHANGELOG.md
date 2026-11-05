@@ -8,6 +8,15 @@ those.
 
 ## [Unreleased]
 
+### Fixed
+
+- `tentacle attach` no longer reuses an older tentacle binary in a pod or
+  container just because it reports the same version: it compares build ids and
+  re-copies this laptop's binary on a mismatch (instead of failing with
+  `connection closed`). A binary with a live detached run is never replaced:
+  attach says `<name> runs an older tentacle build than this one · tentacle rm
+  <name>, then run again`.
+
 ### Changed
 
 - A model endpoint answering HTTP 500, 502 or 503 before any output is now

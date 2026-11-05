@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
-import { RefusalError, type WorkloadNotFoundError } from "./engine-host.ts";
+import { RefusalError, StaleBuildError, type WorkloadNotFoundError } from "./engine-host.ts";
 import { untrustedText } from "./untrusted-text.ts";
 
 /** The most the file keeps: the TAIL of what the pod daemon wrote to its stderr. */
@@ -143,6 +143,9 @@ export function failureLogPath(error: unknown): string | undefined {
  * failed startup prints; the log part only when the failure was recorded.
  */
 export function failedLine(noun: string, error: unknown, home: string = homedir()): string {
+  if (error instanceof StaleBuildError) {
+    return `[${noun}] ${untrustedText(error.message)}\n`;
+  }
   const path = failureLogPath(error);
   const where = path === undefined ? "" : ` · log: ${tildePath(path, home)}`;
   const up = stillUpName(error);

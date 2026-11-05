@@ -8,6 +8,7 @@ import {
   buildBinary,
   checkPodBinaries,
   cliVersion,
+  computeBuildId,
   configBinPath,
   resolvePodBinary,
 } from "../src/pod-binary-build.ts";
@@ -319,4 +320,70 @@ describe("version marker in a real compiled binary (D2)", () => {
       await rm(dir, { recursive: true, force: true });
     }
   }, 60_000);
+});
+
+describe("computeBuildId (docs/fix/stale-pod-binary.md)", () => {
+  const tree = async (files: Record<string, string>): Promise<string> => {
+    const root = await mkdtemp(join(tmpdir(), "tentacle-buildid-"));
+    for (const [path, text] of Object.entries(files)) {
+      mkdirSync(join(root, path, ".."), { recursive: true });
+      writeFileSync(join(root, path), text);
+    }
+    return root;
+  };
+  const base = {
+    "packages/cli/src/a.ts": "export const a = 1;\n",
+    "packages/cli/package.json": '{"version":"0.2.0"}\n',
+    "bun.lock": "lock\n",
+  };
+
+  test("12 hex; the same source gives the same id wherever it lives", async () => {
+    const one = await tree(base);
+    const two = await tree(base);
+    try {
+      expect(computeBuildId(one)).toMatch(/^[0-9a-f]{12}$/);
+      expect(computeBuildId(one)).toBe(computeBuildId(two));
+    } finally {
+      await rm(one, { recursive: true, force: true });
+      await rm(two, { recursive: true, force: true });
+    }
+  });
+
+  test("the build settings (scripts/build.ts, bunfig.toml) are part of the id", async () => {
+    // Mutation: drop them from the hashed list → the id stays the same.
+    const root = await tree({
+      ...base,
+      "scripts/build.ts": "minify\n",
+      "bunfig.toml": "[test]\n",
+    });
+    try {
+      const before = computeBuildId(root);
+      writeFileSync(join(root, "scripts/build.ts"), "no minify\n");
+      const script = computeBuildId(root);
+      expect(script).not.toBe(before);
+      writeFileSync(join(root, "bunfig.toml"), "[test]\npreload = []\n");
+      expect(computeBuildId(root)).not.toBe(script);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("any edit under src/, a new src file, or a changed lock changes it; a doc does not", async () => {
+    const root = await tree(base);
+    try {
+      const before = computeBuildId(root);
+      writeFileSync(join(root, "README.md"), "docs\n");
+      expect(computeBuildId(root)).toBe(before);
+      writeFileSync(join(root, "packages/cli/src/a.ts"), "export const a = 2;\n");
+      const edited = computeBuildId(root);
+      expect(edited).not.toBe(before);
+      writeFileSync(join(root, "packages/cli/src/b.ts"), "");
+      const added = computeBuildId(root);
+      expect(added).not.toBe(edited);
+      writeFileSync(join(root, "bun.lock"), "lock2\n");
+      expect(computeBuildId(root)).not.toBe(added);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

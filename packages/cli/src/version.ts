@@ -52,5 +52,42 @@ export function compiledVersionMarker(): string | undefined {
  */
 export const APP_VERSION: string = parseVersionMarker(compiledVersionMarker()) ?? "dev";
 
+/**
+ * The BUILD id (docs/fix/stale-pod-binary.md): beside the version, a second
+ * compiled-in literal `TENTACLE_BUILD_MARKER:<id>:END` naming the exact source
+ * a binary was built from (`computeBuildId`: 12 hex of a content hash). Two
+ * builds of one version differ, so `attach` can tell a container's tentacle is
+ * not this laptop's even when `--version` agrees. A separate marker, not a
+ * suffix of the version: `update` compares versions exactly against the release.
+ */
+export const BUILD_MARKER_PREFIX = "TENTACLE_BUILD_MARKER:";
+/** A build id: 12 lowercase hex characters. */
+export const BUILD_ID_RE = /^[0-9a-f]{12}$/;
+
+/** The build marker literal for `id` (what `buildBinary` compiles in). */
+export function formatBuildMarker(id: string): string {
+  if (!BUILD_ID_RE.test(id)) {
+    throw new Error(`invalid build id for the binary marker: ${JSON.stringify(id)}`);
+  }
+  return `${BUILD_MARKER_PREFIX}${id}${MARKER_SUFFIX}`;
+}
+
+/** The build id in a well-formed build marker string, else `undefined`. */
+export function parseBuildMarker(marker: string | undefined): string | undefined {
+  if (!marker?.startsWith(BUILD_MARKER_PREFIX) || !marker.endsWith(MARKER_SUFFIX)) {
+    return undefined;
+  }
+  const id = marker.slice(BUILD_MARKER_PREFIX.length, marker.length - MARKER_SUFFIX.length);
+  return BUILD_ID_RE.test(id) ? id : undefined;
+}
+
+/** Replaced at compile time by `buildBinary`'s `define`; undeclared from source. */
+declare const __TENTACLE_BUILD_MARKER__: string | undefined;
+
+/** This binary's build id, or `undefined` from source. */
+export const APP_BUILD: string | undefined = parseBuildMarker(
+  typeof __TENTACLE_BUILD_MARKER__ === "string" ? __TENTACLE_BUILD_MARKER__ : undefined,
+);
+
 /** Who this CLI is in `initialize` (a daemon words a version skew with it). */
 export const CLIENT_INFO = { name: "tentacle", version: APP_VERSION } as const;
