@@ -5,11 +5,12 @@
  * would inject, else replaced — so the daemon speaks this client's protocol.
  */
 import { untrustedText } from "./untrusted-text.ts";
-import { MARKER_VERSION_RE } from "./version.ts";
+import { BUILD_ID_RE, MARKER_VERSION_RE } from "./version.ts";
 
 /** The version in a `tentacle --version` line (`tentacle <version>`), else `undefined`. */
 export function parseVersionLine(stdout: string): string | undefined {
-  const match = /^tentacle (\S+)$/.exec(stdout.trim());
+  // The first line only: `--version --build-id` adds the build id on a second.
+  const match = /^tentacle (\S+)$/.exec((stdout.trim().split("\n")[0] ?? "").trim());
   const version = match?.[1];
   return version !== undefined && MARKER_VERSION_RE.test(version) ? version : undefined;
 }
@@ -45,8 +46,76 @@ export async function expectedContainerVersion(
 export type ContainerDecision =
   | { readonly kind: "reuse" }
   | { readonly kind: "inject" }
-  /** It answers, but not with `expected`; `had` is its version when readable. */
-  | { readonly kind: "replace"; readonly had: string | undefined };
+  /**
+   * It answers, but not with `expected`; `had` is its version when readable.
+   * `reason`: its version differs, or the version agrees and its BUILD does not
+   * (an older build of the same version, or one with no build id at all).
+   */
+  | {
+      readonly kind: "replace";
+      readonly had: string | undefined;
+      readonly reason: "version" | "build";
+    };
+
+/**
+ * The build id in a `<bin> --version --build-id` answer: exit 0 and EXACTLY two
+ * lines, `tentacle <version>` then one `[0-9a-f]{12}`. An older binary ignores
+ * the extra argument (`--version` exits first) and prints ONE line → none. One
+ * exec carries both, so an attach pays no extra round trip.
+ */
+export function parseBuildFromVersionProbe(
+  run: { readonly exitCode: number | null; readonly stdout: string } | null,
+): string | undefined {
+  if (run?.exitCode !== 0) {
+    return undefined;
+  }
+  const lines = run.stdout.trim().split("\n");
+  const id = lines[1]?.trim();
+  return lines.length === 2 && id !== undefined && BUILD_ID_RE.test(id) ? id : undefined;
+}
+
+/**
+ * The build id of the binary this laptop would INJECT (read laptop-side from
+ * the file, like its version — never this process's own build: the config-dir
+ * binary may be another build of the same version), or `undefined` for "no
+ * build rule": `TENTACLE_POD_BIN` → that file; a source (`dev`) laptop → none
+ * (Q3: the container's tentacle is reused; set `TENTACLE_POD_BIN`); a release →
+ * the config-dir binaries' build when the readable ones agree (the pod's arch
+ * is not known yet), none when they have no id or disagree.
+ */
+export async function expectedContainerBuild(options: {
+  readonly appVersion: string;
+  readonly podBinOverride?: string;
+  /** The release's EXISTING `<configDir>/bin/tentacle-<target>` paths; one without a build id turns the rule off. */
+  readonly binaries: readonly string[];
+  readonly readBuild: (path: string) => Promise<string | undefined>;
+}): Promise<string | undefined> {
+  if (options.podBinOverride) {
+    return options.readBuild(options.podBinOverride).catch(() => undefined);
+  }
+  if (options.appVersion === "dev") {
+    return undefined;
+  }
+  const ids = new Set<string>();
+  for (const path of options.binaries) {
+    const id = await options.readBuild(path).catch(() => undefined);
+    if (id === undefined) {
+      // An existing binary that would be injected carries no id (built before
+      // build ids): every attach would find the injected one "different". Off.
+      return undefined;
+    }
+    ids.add(id);
+  }
+  return ids.size === 1 ? [...ids][0] : undefined;
+}
+
+/**
+ * The refusal when an older-build tentacle still has a live daemon (a detached
+ * run, a resident): never killed, so the way out is `rm` and run again.
+ */
+export function staleBuildBusyLine(name: string): string {
+  return `${untrustedText(name)} runs an older tentacle build than this one · tentacle rm ${untrustedText(name)}, then run again`;
+}
 
 /**
  * The warning when a replace failed and `attach` goes on with the container's
@@ -77,8 +146,13 @@ export function replacedNotice(options: {
   readonly had: string | undefined;
   readonly expected: string | undefined;
   readonly installedAt?: string;
+  /** `"build"`: the version agreed, the build did not — said, or the line reads "replaced X with X". */
+  readonly reason?: "version" | "build";
 }): string {
-  const had = options.had ?? "of an unknown version";
+  const had =
+    options.reason === "build"
+      ? `${options.had ?? "of an unknown version"} (an older build)`
+      : (options.had ?? "of an unknown version");
   return options.installedAt
     ? `the container's tentacle ${had} on PATH stays; installed ${options.expected} (this laptop's) at ${options.installedAt}, which this session runs`
     : `the container had tentacle ${had}; replaced with ${options.expected} (this laptop's)`;
@@ -91,13 +165,21 @@ export function replacedNotice(options: {
 export function containerDecision(
   probe: { readonly exitCode: number | null; readonly stdout: string },
   expected: string | undefined,
+  /** The build rule; absent / `expected` undefined → versions only (Q3). */
+  build?: { readonly expected: string | undefined; readonly found: string | undefined },
 ): ContainerDecision {
   if (probe.exitCode !== 0) {
     return { kind: "inject" };
   }
   const found = parseVersionLine(probe.stdout);
-  if (expected === undefined || found === expected) {
-    return { kind: "reuse" };
+  if (expected !== undefined && found !== expected) {
+    return { kind: "replace", had: found, reason: "version" };
   }
-  return { kind: "replace", had: found };
+  // The version agrees (or is not judged): the build must too. A MISSING build
+  // id is every binary built before build ids — it can be older than the
+  // protocol while still reporting the same version.
+  if (build?.expected !== undefined && build.found !== build.expected) {
+    return { kind: "replace", had: found, reason: "build" };
+  }
+  return { kind: "reuse" };
 }

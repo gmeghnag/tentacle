@@ -709,6 +709,7 @@ describe("the resident (`serve --resident`)", () => {
       kind: "refuse",
       message:
         "a detached run is using tentacle 0.2.0 in w — wait for it, `tentacle rm w`, or attach with tentacle 0.2.0",
+      busy: true,
     });
     a.socket.destroy();
   });
@@ -795,6 +796,7 @@ describe("pure helpers", () => {
         kind: "refuse",
         message:
           "a detached run is using tentacle 0.2.0 in w — wait for it, `tentacle rm w`, or attach with tentacle 0.2.0",
+        busy: true,
       });
     }
   });

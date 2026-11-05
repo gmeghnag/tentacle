@@ -120,7 +120,7 @@ import {
 } from "./tui-sessions.ts";
 import { untrustedText } from "./untrusted-text.ts";
 import { runUpdate, spawnVersion } from "./update.ts";
-import { APP_VERSION } from "./version.ts";
+import { APP_BUILD, APP_VERSION } from "./version.ts";
 import { buildAgent, connectConfiguredMcp, inProcessAgents, loadUserAgentTypes } from "./wiring.ts";
 import {
   type WorkspacePlan,
@@ -436,8 +436,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
 
   // `--version` exits before config loading, model setup, or TTY handling —
   // it doubles as the post-injection health probe in a pod.
+  // `--version --build-id` (docs/fix/stale-pod-binary.md) adds the compiled-in
+  // build id on a second line (`dev` from source): what `attach` asks a
+  // container's tentacle in the SAME exec. An older binary ignores the extra
+  // argument and prints one line, which reads as "no build id".
   if (args[0] === "--version") {
-    out(`tentacle ${APP_VERSION}\n`);
+    out(`tentacle ${APP_VERSION}\n${args[1] === "--build-id" ? `${APP_BUILD ?? "dev"}\n` : ""}`);
     return 0;
   }
 

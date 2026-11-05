@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   containerDecision,
+  expectedContainerBuild,
   expectedContainerVersion,
+  parseBuildFromVersionProbe,
   parseVersionLine,
+  replacedNotice,
+  staleBuildBusyLine,
 } from "../src/container-version.ts";
 
 describe("parseVersionLine (the container's `tentacle --version`)", () => {
@@ -99,14 +103,170 @@ describe("containerDecision", () => {
     expect(containerDecision(ok("tentacle 0.2.0\n"), "0.3.0")).toEqual({
       kind: "replace",
       had: "0.2.0",
+      reason: "version",
     });
     expect(containerDecision(ok("tentacle 0.4.0\n"), "0.3.0")).toEqual({
       kind: "replace",
       had: "0.4.0",
+      reason: "version",
     });
     expect(containerDecision(ok("something else\n"), "0.3.0")).toEqual({
       kind: "replace",
       had: undefined,
+      reason: "version",
     });
+  });
+
+  describe("the build rule (docs/fix/stale-pod-binary.md)", () => {
+    const B = "0123456789ab";
+    test("same version, same build → reuse", () => {
+      expect(containerDecision(ok("tentacle 0.3.0\n"), "0.3.0", { expected: B, found: B })).toEqual(
+        { kind: "reuse" },
+      );
+    });
+
+    test("same version, a DIFFERENT build → replace (reason build)", () => {
+      expect(
+        containerDecision(ok("tentacle 0.3.0\n"), "0.3.0", { expected: B, found: "ba9876543210" }),
+      ).toEqual({ kind: "replace", had: "0.3.0", reason: "build" });
+    });
+
+    test("same version, a MISSING build id (every older binary) → replace", () => {
+      expect(
+        containerDecision(ok("tentacle 0.3.0\n"), "0.3.0", { expected: B, found: undefined }),
+      ).toEqual({ kind: "replace", had: "0.3.0", reason: "build" });
+    });
+
+    test("a different version stays a version replace, whatever the build", () => {
+      expect(containerDecision(ok("tentacle 0.2.0\n"), "0.3.0", { expected: B, found: B })).toEqual(
+        { kind: "replace", had: "0.2.0", reason: "version" },
+      );
+    });
+
+    test("no expected build (from source, Q3) → today's rule: reuse", () => {
+      expect(
+        containerDecision(ok("tentacle 0.3.0\n"), "0.3.0", {
+          expected: undefined,
+          found: undefined,
+        }),
+      ).toEqual({ kind: "reuse" });
+    });
+
+    test("no working tentacle → inject, the build is not asked", () => {
+      expect(
+        containerDecision({ exitCode: 127, stdout: "" }, "0.3.0", { expected: B, found: B }),
+      ).toEqual({ kind: "inject" });
+    });
+  });
+});
+
+describe("parseBuildFromVersionProbe (the container's `tentacle --version --build-id`)", () => {
+  test("exit 0 and a second line of 12 hex → the id", () => {
+    expect(
+      parseBuildFromVersionProbe({ exitCode: 0, stdout: "tentacle 0.3.0\n0123456789ab\n" }),
+    ).toBe("0123456789ab");
+  });
+
+  test("an older binary ignores the extra argument: ONE line → no build id", () => {
+    expect(parseBuildFromVersionProbe({ exitCode: 0, stdout: "tentacle 0.3.0\n" })).toBeUndefined();
+  });
+
+  test("a failure, `dev`, junk, extra lines or no answer → none", () => {
+    for (const run of [
+      { exitCode: 1, stdout: "tentacle 0.3.0\n0123456789ab\n" },
+      { exitCode: 0, stdout: "tentacle 0.3.0\ndev\n" },
+      { exitCode: 0, stdout: "tentacle 0.3.0\n0123456789ab\u001b[2J\n" },
+      { exitCode: 0, stdout: "tentacle 0.3.0\nx\n0123456789ab\n" },
+      { exitCode: null, stdout: "tentacle 0.3.0\n0123456789ab\n" },
+      null,
+    ]) {
+      expect(parseBuildFromVersionProbe(run)).toBeUndefined();
+    }
+  });
+
+  test("parseVersionLine reads the first line only", () => {
+    expect(parseVersionLine("tentacle 0.3.0\n0123456789ab\n")).toBe("0.3.0");
+  });
+});
+
+describe("expectedContainerBuild (the build of the binary this laptop INJECTS)", () => {
+  const never = async () => {
+    throw new Error("must not read a file");
+  };
+  const B = "0123456789ab";
+  const by = (map: Record<string, string | undefined>) => async (path: string) => map[path];
+
+  test("release: the config-dir binaries' build when they agree", async () => {
+    expect(
+      await expectedContainerBuild({
+        appVersion: "0.3.0",
+        binaries: ["/x64", "/arm64"],
+        readBuild: by({ "/x64": B, "/arm64": B }),
+      }),
+    ).toBe(B);
+    // Only the arch the user installed exists (the caller passes existing paths).
+    expect(
+      await expectedContainerBuild({
+        appVersion: "0.3.0",
+        binaries: ["/arm64"],
+        readBuild: by({ "/arm64": B }),
+      }),
+    ).toBe(B);
+  });
+
+  test("release: none readable, ONE without an id, or two builds → no build rule", async () => {
+    for (const map of [{}, { "/arm64": B }, { "/x64": B, "/arm64": "ba9876543210" }]) {
+      expect(
+        await expectedContainerBuild({
+          appVersion: "0.3.0",
+          binaries: ["/x64", "/arm64"],
+          readBuild: by(map),
+        }),
+      ).toBeUndefined();
+    }
+  });
+
+  test("from source (dev) with no override → no build rule (Q3), nothing read", async () => {
+    expect(
+      await expectedContainerBuild({ appVersion: "dev", binaries: ["/x64"], readBuild: never }),
+    ).toBeUndefined();
+  });
+
+  test("TENTACLE_POD_BIN → that file's build, in either mode; unreadable or without one → none", async () => {
+    const readBuild = by({ "/x": "aaaaaaaaaaaa" });
+    for (const appVersion of ["dev", "0.3.0"]) {
+      expect(
+        await expectedContainerBuild({ appVersion, podBinOverride: "/x", binaries: [], readBuild }),
+      ).toBe("aaaaaaaaaaaa");
+      expect(
+        await expectedContainerBuild({ appVersion, podBinOverride: "/y", binaries: [], readBuild }),
+      ).toBeUndefined();
+      expect(
+        await expectedContainerBuild({
+          appVersion,
+          podBinOverride: "/z",
+          binaries: [],
+          readBuild: never,
+        }),
+      ).toBeUndefined();
+    }
+  });
+});
+
+describe("the stale-build wording", () => {
+  test("the busy refusal is one fixed sentence naming the way out", () => {
+    expect(staleBuildBusyLine("ciao")).toBe(
+      "ciao runs an older tentacle build than this one · tentacle rm ciao, then run again",
+    );
+    expect(staleBuildBusyLine("a\u001b[2Jb")).not.toContain("\u001b");
+  });
+
+  test("the replace notice says it was an older build when the version agreed", () => {
+    expect(replacedNotice({ had: "0.3.0", expected: "0.3.0", reason: "build" })).toBe(
+      "the container had tentacle 0.3.0 (an older build); replaced with 0.3.0 (this laptop's)",
+    );
+    expect(replacedNotice({ had: "0.2.0", expected: "0.3.0", reason: "version" })).toBe(
+      "the container had tentacle 0.2.0; replaced with 0.3.0 (this laptop's)",
+    );
   });
 });

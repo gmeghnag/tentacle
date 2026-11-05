@@ -18,11 +18,12 @@
  * `buildBinary` from here) so the worker second entrypoint, the embedded
  * yoga-wasm, and the version `define` stay identical across both paths.
  */
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { PodBinaryTarget } from "./pod-binary.ts";
 import { readBinaryVersion } from "./version-marker.ts";
-import { APP_VERSION, formatVersionMarker } from "./version.ts";
+import { APP_VERSION, formatBuildMarker, formatVersionMarker } from "./version.ts";
 
 /**
  * Resolve the monorepo root so the cache/build paths work in BOTH run modes:
@@ -110,6 +111,8 @@ export async function buildBinary(outfile: string, target: string | undefined): 
     // executing it. From source it is undefined → "dev".
     define: {
       __TENTACLE_VERSION_MARKER__: JSON.stringify(formatVersionMarker(cliVersion())),
+      // The build id (docs/fix/stale-pod-binary.md): same idea, a second literal.
+      __TENTACLE_BUILD_MARKER__: JSON.stringify(formatBuildMarker(computeBuildId(root))),
     },
     minify: true,
     plugins: [
@@ -138,6 +141,40 @@ export async function buildBinary(outfile: string, target: string | undefined): 
     return false;
   }
   return true;
+}
+
+/**
+ * The BUILD id of the source tree under `root`: 12 hex of a sha256 over every
+ * workspace `src/` file, `scripts/yoga-auto.ts`, the package manifests and
+ * `bun.lock` (sorted paths + bytes). Stable for the same source (any target,
+ * any machine, clean or dirty alike), different for any edit — what a version
+ * string cannot say. Computed by the build, never at run time.
+ */
+export function computeBuildId(root: string = repoRoot()): string {
+  const files: string[] = [];
+  for (const pattern of [
+    "packages/*/src/**/*",
+    "packages/*/package.json",
+    "apps/*/package.json",
+    "scripts/yoga-auto.ts",
+    // The build settings: the define/minify options live in this package's
+    // `src/` (above); the script and Bun's config change the output too.
+    "scripts/build.ts",
+    "bunfig.toml",
+    "bun.lock",
+  ]) {
+    for (const file of new Bun.Glob(pattern).scanSync({ cwd: root, onlyFiles: true })) {
+      files.push(file);
+    }
+  }
+  files.sort();
+  const hash = createHash("sha256");
+  for (const file of files) {
+    hash.update(`${file}\0`);
+    hash.update(new Uint8Array(readFileSync(resolve(root, file))));
+    hash.update("\0");
+  }
+  return hash.digest("hex").slice(0, 12);
 }
 
 /** `packages/cli/package.json` `version`: the single source of a build's version. */

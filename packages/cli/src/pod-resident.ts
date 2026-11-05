@@ -645,7 +645,8 @@ export async function residentStop(
 export type ResidentVerdict =
   | { readonly kind: "none" }
   | { readonly kind: "stop" }
-  | { readonly kind: "refuse"; readonly message: string };
+  /** `busy`: a live run is using it (not a failed probe) — `attach` words that case itself for a stale build. */
+  | { readonly kind: "refuse"; readonly message: string; readonly busy?: true };
 
 /**
  * Replace the pod's tentacle only when no run uses its resident: the OLD
@@ -749,6 +750,7 @@ function busyVerdict(status: ResidentStatus, name: string): ResidentVerdict {
     return {
       kind: "refuse",
       message: `a detached run is using tentacle ${version} in ${name} — wait for it, \`tentacle rm ${name}\`, or attach with tentacle ${version}`,
+      busy: true,
     };
   }
   return { kind: "stop" };

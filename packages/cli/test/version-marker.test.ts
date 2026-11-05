@@ -3,8 +3,21 @@ import { writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_MARKER_BYTES, findVersionMarker, readBinaryVersion } from "../src/version-marker.ts";
-import { MARKER_PREFIX, formatVersionMarker, parseVersionMarker } from "../src/version.ts";
+import {
+  MAX_MARKER_BYTES,
+  findAllBuildMarkers,
+  findBuildMarker,
+  findVersionMarker,
+  readBinaryBuildId,
+  readBinaryVersion,
+} from "../src/version-marker.ts";
+import {
+  MARKER_PREFIX,
+  formatBuildMarker,
+  formatVersionMarker,
+  parseBuildMarker,
+  parseVersionMarker,
+} from "../src/version.ts";
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 /** `n` filler bytes that can never form a marker. */
@@ -139,5 +152,44 @@ describe("APP_VERSION source (review N2)", () => {
       env: { ...process.env, TENTACLE_VERSION_MARKER: formatVersionMarker("9.9.9") },
     });
     expect(proc.stdout.toString()).toBe("tentacle dev\n");
+  });
+});
+
+describe("the build marker (docs/fix/stale-pod-binary.md)", () => {
+  const B = "0123456789ab";
+  test("format/parse round-trip; junk is refused", () => {
+    expect(parseBuildMarker(formatBuildMarker(B))).toBe(B);
+    expect(parseBuildMarker("TENTACLE_BUILD_MARKER:xyz:END")).toBeUndefined();
+    expect(parseBuildMarker(`TENTACLE_BUILD_MARKER:${B}`)).toBeUndefined();
+    expect(() => formatBuildMarker("nothex")).toThrow(/invalid build id/);
+  });
+
+  test("findBuildMarker: the last well-formed one; a bare prefix or malformed id is skipped", () => {
+    const bytes = concat(
+      enc(formatBuildMarker("aaaaaaaaaaaa")),
+      filler(8),
+      enc(formatBuildMarker(B)),
+      enc("TENTACLE_BUILD_MARKER:"),
+      enc("TENTACLE_BUILD_MARKER:ZZZZZZZZZZZZ:END"),
+    );
+    expect(findBuildMarker(bytes)).toBe(B);
+    expect(findAllBuildMarkers(bytes)).toEqual(["aaaaaaaaaaaa", B]);
+    expect(findBuildMarker(filler(100))).toBeUndefined();
+  });
+
+  test("the version marker and the build marker never read each other", () => {
+    const bytes = concat(enc(formatVersionMarker("0.3.0")), enc(formatBuildMarker(B)));
+    expect(findVersionMarker(bytes)).toBe("0.3.0");
+    expect(findBuildMarker(bytes)).toBe(B);
+    expect(findBuildMarker(enc(formatVersionMarker("0.3.0")))).toBeUndefined();
+  });
+
+  test("readBinaryBuildId: from a file; a binary with none (every older one) → undefined", async () => {
+    const withId = join(dir, "with-build");
+    writeFileSync(withId, concat(filler(64), enc(formatBuildMarker(B)), filler(16)));
+    expect(await readBinaryBuildId(withId)).toBe(B);
+    const without = join(dir, "no-build");
+    writeFileSync(without, concat(filler(64), enc(formatVersionMarker("0.3.0"))));
+    expect(await readBinaryBuildId(without)).toBeUndefined();
   });
 });

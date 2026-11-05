@@ -7,7 +7,7 @@
  * never modified (that would break the macOS signature / Bun's trailing payload).
  */
 import { open } from "node:fs/promises";
-import { MARKER_PREFIX, MARKER_SUFFIX } from "./version.ts";
+import { BUILD_ID_RE, BUILD_MARKER_PREFIX, MARKER_PREFIX, MARKER_SUFFIX } from "./version.ts";
 
 const PREFIX: Uint8Array = new TextEncoder().encode(MARKER_PREFIX);
 const SUFFIX: Uint8Array = new TextEncoder().encode(MARKER_SUFFIX);
@@ -87,6 +87,68 @@ export function findAllVersionMarkers(bytes: Uint8Array): string[] {
     }
     from = at + 1;
   }
+}
+
+const BUILD_PREFIX: Uint8Array = new TextEncoder().encode(BUILD_MARKER_PREFIX);
+const BUILD_ID_LEN = 12;
+
+/** The id in the LAST well-formed build marker in `bytes` (`TENTACLE_BUILD_MARKER:<id>:END`), else `undefined`. */
+export function findBuildMarker(bytes: Uint8Array): string | undefined {
+  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let from = buf.length;
+  for (;;) {
+    const at = buf.lastIndexOf(BUILD_PREFIX, from);
+    if (at < 0) {
+      return undefined;
+    }
+    const start = at + BUILD_PREFIX.length;
+    const id = buf.toString("latin1", start, start + BUILD_ID_LEN);
+    const tail = buf.subarray(start + BUILD_ID_LEN, start + BUILD_ID_LEN + SUFFIX.length);
+    if (BUILD_ID_RE.test(id) && tail.equals(SUFFIX)) {
+      return id;
+    }
+    if (at === 0) {
+      return undefined;
+    }
+    from = at - 1;
+  }
+}
+
+/** Every well-formed build marker's id in `bytes`, in file order (the build check requires exactly one). */
+export function findAllBuildMarkers(bytes: Uint8Array): string[] {
+  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const found: string[] = [];
+  let from = 0;
+  for (;;) {
+    const at = buf.indexOf(BUILD_PREFIX, from);
+    if (at < 0) {
+      return found;
+    }
+    const start = at + BUILD_PREFIX.length;
+    const id = buf.toString("latin1", start, start + BUILD_ID_LEN);
+    const tail = buf.subarray(start + BUILD_ID_LEN, start + BUILD_ID_LEN + SUFFIX.length);
+    if (BUILD_ID_RE.test(id) && tail.equals(SUFFIX)) {
+      found.push(id);
+    }
+    from = at + 1;
+  }
+}
+
+/**
+ * The build id compiled into the binary at `path` (read, never executed), or
+ * `undefined` when it carries none (a binary built before build ids). Tail
+ * first (where Bun puts the bundle), then the whole file.
+ */
+export async function readBinaryBuildId(path: string): Promise<string | undefined> {
+  const file = Bun.file(path);
+  const tail = 16 * 1024 * 1024;
+  const fromTail = findBuildMarker(
+    new Uint8Array(await file.slice(Math.max(0, file.size - tail)).arrayBuffer()),
+  );
+  if (fromTail !== undefined || file.size <= tail) {
+    return fromTail;
+  }
+  return findBuildMarker(new Uint8Array(await file.arrayBuffer()));
 }
 
 export interface ReadBinaryVersionOptions {

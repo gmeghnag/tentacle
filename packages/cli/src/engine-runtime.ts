@@ -23,16 +23,20 @@
  * Persistence stays on the laptop (the `createLocalRuntime` saver), so the pod
  * is a stateless sandbox and `--resume` works locally.
  */
+import { existsSync } from "node:fs";
 import type { SessionRecord } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import type { ModelProvider, PermissionBroker } from "@tentacle/core";
 import type { DuplexChannel } from "@tentacle/transport";
 import {
   containerDecision,
+  expectedContainerBuild,
   expectedContainerVersion,
+  parseBuildFromVersionProbe,
   parseVersionLine,
   replaceFailedWarning,
   replacedNotice,
+  staleBuildBusyLine,
 } from "./container-version.ts";
 import {
   type EngineExecChannelOptions,
@@ -40,12 +44,19 @@ import {
   type EngineHost,
   type EngineRunExecResult,
   RefusalError,
+  StaleBuildError,
   WorkloadRemovedError,
   type WorkloadState,
 } from "./engine-host.ts";
 import { type LocalRuntime, createLocalRuntime } from "./local-runtime.ts";
 import { configuredModelProvider } from "./model-provider.ts";
-import { PodBinaryError, checkPodBinaries, resolvePodBinary } from "./pod-binary-build.ts";
+import {
+  POD_BINARY_TARGETS,
+  PodBinaryError,
+  checkPodBinaries,
+  configBinPath,
+  resolvePodBinary,
+} from "./pod-binary-build.ts";
 import { injectAgentBinary, probePod } from "./pod-binary.ts";
 import {
   residentGuard,
@@ -59,7 +70,7 @@ import type { SessionSaver } from "./session-saver.ts";
 import { StatusLine } from "./status-line.ts";
 import { type StreamTerm, termOf } from "./streams.ts";
 import { untrustedText } from "./untrusted-text.ts";
-import { readBinaryVersion } from "./version-marker.ts";
+import { readBinaryBuildId, readBinaryVersion } from "./version-marker.ts";
 import { APP_VERSION } from "./version.ts";
 import { type WorkspaceMount, attachCwdWarning } from "./workspace-mount.ts";
 
@@ -792,13 +803,35 @@ export async function attachEngineRuntime(
     // depend on the install dir). When we inject, the daemon is exec'd by the
     // absolute install path.
     const binPath = `${deps.binDir ?? "/usr/local/bin"}/tentacle`;
+    // The BUILD rule (docs/fix/stale-pod-binary.md): a binary built before build
+    // ids has none, and may reject `serve --bridge` while reporting this very
+    // version. Reused only when its build id is the one of the binary THIS
+    // laptop would inject (read from the file, laptop-side); from source with no
+    // override there is nothing to compare (Q3: reused as before). Known before
+    // the probe, so the probe asks for the build in the same exec.
+    const expectedBuild = await expectedContainerBuild({
+      appVersion: deps.appVersion ?? APP_VERSION,
+      ...(process.env.TENTACLE_POD_BIN ? { podBinOverride: process.env.TENTACLE_POD_BIN } : {}),
+      binaries: config.configDir
+        ? POD_BINARY_TARGETS.map((target) =>
+            configBinPath(config.configDir as string, target),
+          ).filter((path) => existsSync(path)) // a missing one fails at inject (`podBinaryProblem`)
+        : [],
+      readBuild: (path) => readBinaryBuildId(path),
+    });
     const versionOf = (bin: string): Promise<EngineRunExecResult> =>
-      host.runExec({ name, container, command: [bin, "--version"] }, undefined, {
-        timeoutMs: 15_000,
-      });
-    // The answer is pod stdout, and it reaches the log.
+      host.runExec(
+        {
+          name,
+          container,
+          command: [bin, "--version", ...(expectedBuild !== undefined ? ["--build-id"] : [])],
+        },
+        undefined,
+        { timeoutMs: 15_000 },
+      );
+    // The answer is pod stdout, and it reaches the log: its first line only.
     const versionLabel = (run: EngineRunExecResult): string =>
-      untrustedText(run.stdout.trim()) || "tentacle";
+      untrustedText((run.stdout.trim().split("\n")[0] ?? "").trim()) || "tentacle";
     let serveBin = binPath;
     let probe: EngineRunExecResult;
     try {
@@ -820,8 +853,16 @@ export async function attachEngineRuntime(
       ...(process.env.TENTACLE_POD_BIN ? { podBinOverride: process.env.TENTACLE_POD_BIN } : {}),
       readMarker: (path) => readBinaryVersion(path),
     });
-    const decision = containerDecision(probe, expected);
+    const decision = containerDecision(probe, expected, {
+      expected: expectedBuild,
+      found: parseBuildFromVersionProbe(probe),
+    });
     const found = serveBin;
+    // A live daemon of an older build is never killed: ONE line, no log.
+    const refuseLive = (message: string, busy: boolean | undefined): Error =>
+      decision.kind === "replace" && decision.reason === "build" && busy
+        ? new StaleBuildError(staleBuildBusyLine(name))
+        : new Error(message);
     const residentStatusOf = (bin: string): Promise<EngineRunExecResult | null> =>
       host
         .runExec({ name, container, command: residentStatusCommand(bin) }, undefined, {
@@ -837,7 +878,7 @@ export async function attachEngineRuntime(
       const oldBin = decision.kind === "replace" ? found : binPath;
       const verdict = residentGuard(await residentStatusOf(oldBin), name);
       if (verdict.kind === "refuse") {
-        throw new Error(verdict.message);
+        throw refuseLive(verdict.message, verdict.busy);
       }
       // Once the bytes are staged, so an install that cannot land stops nothing,
       // and before the rename, so `oldBin` still exists. The transfer gave a
@@ -845,7 +886,10 @@ export async function attachEngineRuntime(
       const stopResident = async (): Promise<void> => {
         const again = residentGuard(await residentStatusOf(oldBin), name);
         if (again.kind === "refuse") {
-          throw new ResidentStopRefused(again.message);
+          const refusal = refuseLive(again.message, again.busy);
+          throw refusal instanceof StaleBuildError
+            ? refusal
+            : new ResidentStopRefused(again.message);
         }
         if (again.kind === "none") {
           return;
@@ -885,7 +929,11 @@ export async function attachEngineRuntime(
       } catch (error) {
         // A plain injection failure: unchanged (nothing else to run). A refused
         // stop is an answer, not a failed replace: never "go on with the old one".
-        if (decision.kind !== "replace" || error instanceof ResidentStopRefused) {
+        if (
+          decision.kind !== "replace" ||
+          error instanceof ResidentStopRefused ||
+          error instanceof StaleBuildError
+        ) {
           throw error;
         }
         // Replacing failed (orchestrator decision, follow-up 1): do not abort —
@@ -916,7 +964,8 @@ export async function attachEngineRuntime(
         decision.kind === "replace" && replaced
           ? replacedNotice({
               had: decision.had,
-              expected,
+              expected: expected ?? decision.had,
+              reason: decision.reason,
               ...(found === "tentacle" ? { installedAt: binPath } : {}),
             })
           : undefined;

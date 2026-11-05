@@ -3,7 +3,7 @@ import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RefusalError, WorkloadNotFoundError } from "../src/engine-host.ts";
+import { RefusalError, StaleBuildError, WorkloadNotFoundError } from "../src/engine-host.ts";
 import {
   failedLine,
   failureLogPath,
@@ -155,6 +155,17 @@ describe("failures: one short line, the whole cause in the log", () => {
     );
     expect(failedLine("pod", markStillUp(new Error("x"), "p1"), home)).toBe(
       "[pod] failed: x · still up: tentacle rm p1\n",
+    );
+  });
+
+  test("a StaleBuildError is ONE line: no `failed:`, no log path (docs/fix/stale-pod-binary.md)", () => {
+    // Mutation: drop the `StaleBuildError` branch in `failedLine` → `failed:` and the log path appear.
+    const error = new StaleBuildError(
+      "ciao runs an older tentacle build than this one · tentacle rm ciao, then run again",
+    );
+    Object.defineProperty(error, "logPath", { value: "/home/u/.tentacle/x/daemon.log" });
+    expect(failedLine("container", error, "/home/u")).toBe(
+      "[container] ciao runs an older tentacle build than this one · tentacle rm ciao, then run again\n",
     );
   });
 

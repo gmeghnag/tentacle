@@ -74,6 +74,14 @@ export interface WorkloadFacts {
 export class RefusalError extends Error {}
 
 /**
+ * `attach` found an OLDER tentacle build in the container with a live daemon
+ * still using it (docs/fix/stale-pod-binary.md): never killed, so it is refused
+ * with `<name> runs an older … · tentacle rm <name>, then run again`. Printed
+ * as `[noun] <message>` — not a "failed:", no log path (`failedLine`).
+ */
+export class StaleBuildError extends RefusalError {}
+
+/**
  * The workload does not exist (a 404). `noun` / `place` ("in <namespace>" |
  * "on docker") let `attach` say, for a name that is not in `tentacle ps`, that
  * nothing by that name exists either (`notListedLine`).

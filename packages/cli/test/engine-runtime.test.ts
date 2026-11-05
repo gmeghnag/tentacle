@@ -35,7 +35,7 @@ import {
   createChannelPair,
 } from "@tentacle/transport";
 import type { TentacleConfig } from "../src/config.ts";
-import { WorkloadRemovedError } from "../src/engine-host.ts";
+import { StaleBuildError, WorkloadRemovedError } from "../src/engine-host.ts";
 import { type PodCluster, kubeEngineHost, podDialError } from "../src/engine-k8s.ts";
 import {
   type EngineAttachRuntimeDeps,
@@ -47,9 +47,9 @@ import {
   startEngineRuntime,
 } from "../src/engine-runtime.ts";
 import { POD_BIN_PATH } from "../src/pod-binary.ts";
-import { failureLogPath } from "../src/pod-stderr-log.ts";
+import { failedLine, failureLogPath } from "../src/pod-stderr-log.ts";
 import { SessionSaver } from "../src/session-saver.ts";
-import { formatVersionMarker } from "../src/version.ts";
+import { formatBuildMarker, formatVersionMarker } from "../src/version.ts";
 
 /**
  * The k8s `run` / `attach` as this oracle was written against them (the former
@@ -1678,13 +1678,15 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
     label: string,
     bins: Partial<Record<"bun-linux-x64" | "bun-linux-arm64", string>>,
     fn: (config: TentacleConfig) => Promise<void>,
+    /** The build id compiled into each config-dir binary (absent: an older binary without one). */
+    build?: string,
   ): Promise<void> => {
     const configDir = join(dir, `release-${label}`);
     mkdirSync(join(configDir, "bin"), { recursive: true });
     for (const [target, version] of Object.entries(bins)) {
       writeFileSync(
         join(configDir, "bin", `tentacle-${target}`),
-        `ELF___${version ? formatVersionMarker(version) : ""}___`,
+        `ELF___${version ? formatVersionMarker(version) : ""}${build ? formatBuildMarker(build) : ""}___`,
       );
     }
     const saved = process.env.TENTACLE_POD_BIN;
@@ -1865,6 +1867,228 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
       expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
       expect(kube.calls.some((c) => c.startsWith("exec:"))).toBe(false);
     });
+  });
+
+  // ── docs/fix/stale-pod-binary.md: the BUILD rule ──
+  // The expected build is the one of the binary this laptop would INJECT
+  // (`<configDir>/bin`, read laptop-side), not the laptop binary's own.
+  /** One probe: the container's `--version --build-id` answers `stdout` (an older binary ignores the extra argument: one line). */
+  const containerAnswers = (kube: FakeCluster, stdout: string) => {
+    const original = kube.runExec.bind(kube);
+    kube.runExec = (target, input, options) => {
+      const installed = kube.calls.some((c) => c.includes("head -c"));
+      if (target.command.join(" ") === `${POD_BIN_PATH} --version --build-id` && !installed) {
+        kube.calls.push(`runexec:${target.pod}:${POD_BIN_PATH} --version --build-id`);
+        return Promise.resolve({ exitCode: 0, stdout, stderr: "" });
+      }
+      return original(target, input, options);
+    };
+  };
+  const buildDeps = (kube: FakeCluster, label: string, extra: object = {}) => ({
+    ...runDeps(kube, label),
+    podName: "mypod",
+    ...extra,
+  });
+
+  test("attach: same version but an OLDER binary with no build id → replaced, and says so", async () => {
+    // Mutation: ignore the build rule (expectedBuild = undefined) → reused, `serve --bridge` on the old binary.
+    await release(
+      "build-missing",
+      BINS,
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerAnswers(kube, "tentacle 0.3.0\n"); // one line: no build id
+        const notices: string[] = [];
+        const runtime = await startAttachRuntime(
+          config,
+          buildDeps(kube, "build-missing", { notify: (text: string) => notices.push(text) }),
+        );
+        expect(kube.calls.some((c) => c.includes("head -c"))).toBe(true);
+        expect(notices).toEqual([
+          "the container had tentacle 0.3.0 (an older build); replaced with 0.3.0 (this laptop's)",
+        ]);
+        runtime.dispose();
+      },
+      "1a2b3c4d5e6f",
+    );
+  });
+
+  test("attach: same version, a DIFFERENT build id → replaced", async () => {
+    // Mutation: compare only presence of a build id, not equality → reused.
+    await release(
+      "build-other",
+      BINS,
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerAnswers(kube, "tentacle 0.3.0\nba9876543210\n");
+        const runtime = await startAttachRuntime(config, buildDeps(kube, "build-other"));
+        expect(kube.calls.some((c) => c.includes("head -c"))).toBe(true);
+        runtime.dispose();
+      },
+      "2b3c4d5e6f7a",
+    );
+  });
+
+  test("attach: the build of the binary this laptop INJECTS (configDir) → reused, one probe, no stop", async () => {
+    // Mutation: expect the laptop binary's own build (APP_BUILD) instead of the configDir binary's → replaced / stopped.
+    await release(
+      "build-same",
+      BINS,
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerAnswers(kube, "tentacle 0.3.0\n3c4d5e6f7a8b\n");
+        const runtime = await startAttachRuntime(config, buildDeps(kube, "build-same"));
+        expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
+        expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
+        // ONE exec carries version and build (no separate `--build-id` exec).
+        expect(kube.calls.filter((c) => c.includes("--build-id"))).toEqual([
+          `runexec:mypod:${POD_BIN_PATH} --version --build-id`,
+        ]);
+        runtime.dispose();
+      },
+      "3c4d5e6f7a8b",
+    );
+  });
+
+  test("attach: a BUSY detached run of that same build attaches normally (never 'older')", async () => {
+    await release(
+      "build-same-busy",
+      BINS,
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerAnswers(kube, "tentacle 0.3.0\n4d5e6f7a8b9c\n");
+        residentSays(
+          kube,
+          `${JSON.stringify({ resident: true, version: "0.3.0", sessions: 1, running: 1, attached: 0 })}\n`,
+        );
+        const runtime = await startAttachRuntime(config, buildDeps(kube, "build-same-busy"));
+        expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
+        expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
+        runtime.dispose();
+      },
+      "4d5e6f7a8b9c",
+    );
+  });
+
+  test("attach: configDir binaries with no build id (or two builds) → build rule off: version rule only", async () => {
+    await release("build-none", BINS, async (config) => {
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      containerHas(kube, "tentacle 0.3.0\n");
+      const runtime = await startAttachRuntime(config, buildDeps(kube, "build-none"));
+      expect(kube.calls.some((c) => c.includes("--build-id"))).toBe(false);
+      expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
+      runtime.dispose();
+    });
+  });
+
+  test("attach: ONE configDir binary without a build id turns the build rule off → version rule only", async () => {
+    // Mutation: skip a binary with no id (instead of disabling the rule) → expected = the other's id → replaced / stopped.
+    const noIdX64 = async (config: TentacleConfig) => {
+      // arm64 carries a build id (from `release`), the x64 one (this pod's arch) is an older binary without.
+      writeFileSync(
+        join(config.configDir as string, "bin", "tentacle-bun-linux-x64"),
+        `ELF___${formatVersionMarker("0.3.0")}___`,
+      );
+    };
+    await release(
+      "build-one-no-id",
+      BINS,
+      async (config) => {
+        await noIdX64(config);
+        // Same version: reused, nothing copied, nothing stopped, no build-mismatch path.
+        const same = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerHas(same, "tentacle 0.3.0\n");
+        residentSays(
+          same,
+          `${JSON.stringify({ resident: true, version: "0.3.0", sessions: 1, running: 1, attached: 0 })}\n`,
+        );
+        const runtime = await startAttachRuntime(config, buildDeps(same, "build-one-no-id-a"));
+        expect(same.calls.some((c) => c.includes("--build-id"))).toBe(false);
+        expect(same.calls.some((c) => c.includes("head -c"))).toBe(false);
+        expect(same.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
+        runtime.dispose();
+        // A different version: replaced by the VERSION rule (not "an older build").
+        const older = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerHas(older, "tentacle 0.2.0\n");
+        const notices: string[] = [];
+        const rt2 = await startAttachRuntime(
+          config,
+          buildDeps(older, "build-one-no-id-b", { notify: (text: string) => notices.push(text) }),
+        );
+        expect(older.calls.some((c) => c.includes("head -c"))).toBe(true);
+        expect(notices).toEqual([
+          "the container had tentacle 0.2.0; replaced with 0.3.0 (this laptop's)",
+        ]);
+        rt2.dispose();
+      },
+      "8b9c0d1e2f3a",
+    );
+  });
+
+  test("attach: from source (dev) keeps today's rule — an old binary is reused (Q3)", async () => {
+    await release(
+      "build-dev",
+      BINS,
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerHas(kube, "tentacle dev\n");
+        const runtime = await startAttachRuntime(
+          config,
+          buildDeps(kube, "build-dev", { appVersion: "dev" }),
+        );
+        expect(kube.calls.some((c) => c.includes("--build-id"))).toBe(false);
+        expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
+        runtime.dispose();
+      },
+      "5e6f7a8b9c0d",
+    );
+  });
+
+  test("attach: an older build with a LIVE daemon → one line, nothing killed, nothing copied", async () => {
+    // Mutation: drop the `busy` mapping → the generic "a detached run is using tentacle …" message.
+    await release(
+      "build-busy",
+      BINS,
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerAnswers(kube, "tentacle 0.3.0\n");
+        residentSays(
+          kube,
+          `${JSON.stringify({ resident: true, version: "0.3.0", sessions: 1, running: 1, attached: 0 })}\n`,
+        );
+        const error = await startAttachRuntime(config, buildDeps(kube, "build-busy")).then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+        expect(error).toBeInstanceOf(StaleBuildError);
+        expect(failedLine("pod", error)).toBe(
+          "[pod] mypod runs an older tentacle build than this one · tentacle rm mypod, then run again\n",
+        );
+        expect(kube.calls.some((c) => c.includes("head -c"))).toBe(false);
+        expect(kube.calls.some((c) => c.includes("--resident-stop"))).toBe(false);
+        expect(kube.calls.some((c) => c.startsWith("exec:"))).toBe(false);
+      },
+      "6f7a8b9c0d1e",
+    );
+  });
+
+  test("attach: a VERSION replace under a live daemon keeps its own (older) message", async () => {
+    await release(
+      "build-busy-version",
+      BINS,
+      async (config) => {
+        const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+        containerAnswers(kube, "tentacle 0.2.0\n");
+        residentSays(
+          kube,
+          `${JSON.stringify({ resident: true, version: "0.2.0", sessions: 1, running: 1, attached: 0 })}\n`,
+        );
+        await expect(
+          startAttachRuntime(config, buildDeps(kube, "build-busy-version")),
+        ).rejects.toThrow("a detached run is using tentacle 0.2.0 in mypod");
+      },
+      "7a8b9c0d1e2f",
+    );
   });
 
   test("L6 an IDLE resident: status, stage, status, stop through the OLD path, rename", async () => {
