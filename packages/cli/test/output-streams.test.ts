@@ -9,6 +9,7 @@ import type { EngineHost } from "../src/engine-host.ts";
 import { provisionWorkload } from "../src/engine-runtime.ts";
 import { main } from "../src/index.ts";
 import { type OwnerRecord, readSpec, writeOwner } from "../src/run-state.ts";
+import { simulateSilentTerminal } from "./silent-terminal.ts";
 
 /** A docker host whose workload never gets ready: setup fails after its first phase. */
 const neverReady = (): EngineHost =>
@@ -59,8 +60,10 @@ let server: ReturnType<typeof Bun.serve>;
 let dir: string;
 let calls = 0;
 const saved: Record<string, string | undefined> = {};
+let restoreTerminal: () => void = () => {};
 
 beforeAll(async () => {
+  restoreTerminal = simulateSilentTerminal();
   dir = await mkdtemp(join(tmpdir(), "tentacle-streams-"));
   server = Bun.serve({
     port: 0,
@@ -80,6 +83,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  restoreTerminal();
   server.stop(true);
   for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) {
@@ -101,6 +105,7 @@ async function capture(
   const code = await main(["bun", "cli", ...args], {
     out: (t) => out.push(t),
     err: (t) => err.push(t),
+    terminal: { stdin: false, stdout: false },
     ...over,
   });
   return { code, out: out.join(""), err: err.join("") };
