@@ -1,10 +1,14 @@
 /**
  * The status bar's and the input border's text, decided here (pure, no React;
  * docs/feat/tui-target-badge.md). Components only map these to elements.
+ *
+ * Everything is measured in terminal CELLS (`cells.ts`, `string-width`), never
+ * code points: a double-width character must not push the ctx max off the line.
  */
+import { cellWidth, headCells, tailCells } from "./cells.ts";
 import { formatTokens } from "./format.ts";
 import type { TokenTotals } from "./state.ts";
-import { type TargetBadge, targetText } from "./target-view.ts";
+import { type TargetBadge, minBadgeCells, targetText } from "./target-view.ts";
 
 const RULE = "─";
 /** The leading dashes kept before the model name on the border. */
@@ -18,36 +22,33 @@ const MIN_LEAD = 4;
  */
 export function modelBorder(model: string, width: number): string {
   const w = Math.max(0, width);
-  const chars = [...model];
   // " <model> ─": the model plus its two spaces and the closing dash.
   const room = w - 3 - MIN_LEAD;
-  if (chars.length === 0 || room < 2) {
+  if (model === "" || room < 2) {
     return RULE.repeat(w);
   }
-  const shown =
-    chars.length <= room ? model : `…${chars.slice(chars.length - (room - 1)).join("")}`;
-  const lead = w - [...shown].length - 3;
+  const shown = cellWidth(model) <= room ? model : `…${tailCells(model, room - 1)}`;
+  const lead = w - cellWidth(shown) - 3;
   return `${RULE.repeat(lead)} ${shown} ${RULE}`;
 }
 
-/** `cwd` with `$HOME` as `~`, at most `max` cells: over it, `…` + the tail. */
+/** `cwd` with `$HOME` as `~`, at most `max` CELLS: over it, `…` + the tail. */
 export function shortPath(cwd: string, home: string | undefined, max: number): string {
   const path = home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
-  const chars = [...path];
-  if (chars.length <= max) {
+  if (cellWidth(path) <= max) {
     return path;
   }
   if (max <= 1) {
     return "…".slice(0, Math.max(0, max));
   }
-  return `…${chars.slice(chars.length - (max - 1)).join("")}`;
+  return `…${tailCells(path, max - 1)}`;
 }
 
 const MIN_PATH = 8;
 const MAX_PATH = 40;
-/** Below this many cells the link state is dropped (a stub says nothing). */
-const MIN_LINK = 6;
 const SEP = " · ";
+/** The link may take at most this share of what the badge and the meter leave, while both fit. */
+const LINK_SHARE = 0.6;
 
 const METER_WIDTH = 10;
 
@@ -114,57 +115,99 @@ export interface StatusLayoutInput {
   readonly meter: ContextMeterView;
   /** The auto-accept indicator's text (it differs on/off). */
   readonly hint: string;
-  /** ` · ↑3 more (↓ to follow)` / ` · expanded` / `` — counted, never cut. */
+  /** ` · ↑3 more (↓ to follow)` / ` · expanded` / `` — whole or dropped, never cut. */
   readonly suffix: string;
 }
 
 export interface StatusLayout {
-  /** Cells of the link box (its text, ` · `), 0 without a link. */
+  /** The link state exactly as painted (cut with `…`, with its ` · `); `""` without one. */
+  readonly link: string;
+  /** Cells of `link`. */
   readonly linkCells: number;
   readonly badge: string | null;
   readonly path: string | null;
   readonly tokens: string | null;
   readonly compact: boolean;
+  /** The scroll/expand hint when it fits whole; `""` when dropped. */
+  readonly suffix: string;
   readonly hint: string | null;
-  /** The whole row as plain text (what the components render, uncoloured). */
+  /** The whole row as plain text — exactly what the components paint, uncoloured. */
   readonly plain: string;
 }
 
-const cells = (s: string): number => [...s].length;
+/** The first word of a link message (`disconnected: …` → `disconnected`). */
+function firstWord(text: string): string {
+  return /^[^\s:]+/.exec(text)?.[0] ?? text;
+}
+
+/** `text` in `max` cells: whole, else cut with `…` — never below its first word. */
+function cutLink(text: string, max: number): string {
+  if (cellWidth(text) <= max) {
+    return text;
+  }
+  const word = firstWord(text);
+  if (max <= cellWidth(word)) {
+    return headCells(word, max);
+  }
+  return `${headCells(text, max - 1)}…`;
+}
 
 /**
- * ONE row, decided here (pure; the component only paints it). The order in
- * which things give way when the line is short: the PATH shrinks first (down
- * to `MIN_PATH`), then the auto-accept hint is dropped, then `↑ ↓`, then the
- * meter loses its bar — the ctx figure WITH its max is always kept. The badge
- * is never cut unless it alone (with the compact meter) does not fit: then its
- * NAME is cut in the middle (`targetText`). The path may disappear last.
+ * ONE row, decided here (pure; the component only paints it). When the line is
+ * short things give way in this order: the PATH shrinks (to `MIN_PATH`), the
+ * auto-accept hint goes, `↑ ↓` go, the meter loses its bar; the ctx figure WITH
+ * its max always stays. The badge is whole unless it does not fit; the owner's
+ * rule (`targetText`) cuts its name, then name/container, then `pod…`; under
+ * the width where `pod…`, the separator and the meter fit, the WHOLE badge goes.
+ * The link state beats the badge NAME (it keeps at least its first word) and is
+ * dropped only when not even 4 cells are left (a line under ~22 columns).
  */
 export function statusLayout(input: StatusLayoutInput): StatusLayout {
   const width = Math.max(10, input.columns);
-  const compactMeter = cells(meterText(input.meter, true));
-  // The badge's room: the line minus its separator and the compact meter (the
-  // ctx max is never traded for the badge, nor is the badge for the link).
-  const badge = input.target
-    ? targetText(input.target, Math.max(1, width - SEP.length - compactMeter))
-    : null;
-  const badgePart = badge === null ? "" : `${badge}${SEP}`;
-  // The link state is transient and gives way FIRST: only what the badge and
-  // the compact meter leave (cut with `…`); too little room → it is dropped.
-  const linkRoom = width - cells(badgePart) - compactMeter;
-  const linkCells =
-    input.linkText && linkRoom >= MIN_LINK
-      ? Math.min(cells(input.linkText) + SEP.length, Math.floor(width * 0.7), linkRoom)
-      : 0;
-  const linkBody = input.linkText ? [...input.linkText] : [];
+  const meterCells = cellWidth(meterText(input.meter, true));
+  const target = input.target;
+  const linkFull = input.linkText ? cellWidth(input.linkText) + SEP.length : 0;
+  const linkMin = input.linkText
+    ? Math.min(linkFull, cellWidth(firstWord(input.linkText)) + SEP.length)
+    : 0;
+  const badgeMin = target ? minBadgeCells(target) + SEP.length : 0;
+  // The hint (` · ↑3 more …`) is whole or dropped; it is counted before the badge.
+  const suffixCells = cellWidth(input.suffix);
+  const suffix =
+    input.suffix !== "" && width - meterCells - suffixCells >= linkMin + badgeMin
+      ? input.suffix
+      : "";
+  const avail = width - meterCells - cellWidth(suffix);
+
+  let badge: string | null = null;
+  let linkCells = 0;
+  if (target !== null && avail >= badgeMin + linkMin) {
+    if (!input.linkText) {
+      badge = targetText(target, avail - SEP.length);
+    } else if (linkFull + cellWidth(targetText(target)) + SEP.length <= avail) {
+      linkCells = linkFull;
+      badge = targetText(target);
+    } else {
+      // The link beats the badge NAME: it takes up to its share, never under its
+      // first word, and leaves the badge at least `pod…`.
+      linkCells = Math.min(
+        linkFull,
+        Math.max(linkMin, Math.floor(avail * LINK_SHARE)),
+        avail - badgeMin,
+      );
+      badge = targetText(target, avail - linkCells - SEP.length);
+    }
+  } else if (input.linkText) {
+    // No badge (it does not fit with the meter): the link gets what is left.
+    linkCells = Math.min(linkFull, avail);
+  }
   const link =
-    linkCells === 0
-      ? ""
-      : `${
-          linkBody.length + SEP.length <= linkCells
-            ? linkBody.join("")
-            : `${linkBody.slice(0, Math.max(0, linkCells - SEP.length - 1)).join("")}…`
-        }${SEP}`;
+    input.linkText && linkCells - SEP.length >= 1
+      ? `${cutLink(input.linkText, linkCells - SEP.length)}${SEP}`
+      : "";
+  const linkWidth = cellWidth(link);
+  const badgePart = badge === null ? "" : `${badge}${SEP}`;
+
   const tokenText = input.tokens
     ? `↑${formatTokens(input.tokens.prompt)} ↓${formatTokens(input.tokens.completion)}`
     : null;
@@ -177,12 +220,12 @@ export function statusLayout(input: StatusLayoutInput): StatusLayout {
   let chosen: { tokens: boolean; compact: boolean; hint: boolean; room: number } | null = null;
   for (const v of variants) {
     const others =
-      linkCells +
-      cells(badgePart) +
-      cells(meterText(input.meter, v.compact)) +
-      cells(input.suffix) +
-      (v.hint ? cells(input.hint) : 0) +
-      (v.tokens && tokenText ? cells(tokenText) + SEP.length : 0);
+      linkWidth +
+      cellWidth(badgePart) +
+      cellWidth(meterText(input.meter, v.compact)) +
+      cellWidth(suffix) +
+      (v.hint ? cellWidth(input.hint) : 0) +
+      (v.tokens && tokenText ? cellWidth(tokenText) + SEP.length : 0);
     // The path also needs its separator before the next part.
     const room = width - others - SEP.length;
     if (room >= MIN_PATH) {
@@ -196,6 +239,16 @@ export function statusLayout(input: StatusLayoutInput): StatusLayout {
   const tokens = v.tokens ? tokenText : null;
   const hint = v.hint ? input.hint : null;
   const lead = [path, tokens].filter((p): p is string => p !== null && p !== "").join(SEP);
-  const plain = `${link}${badgePart}${lead}${lead ? SEP : ""}${meterText(input.meter, v.compact)}${input.suffix}${hint ?? ""}`;
-  return { linkCells, badge, path, tokens, compact: v.compact, hint, plain };
+  const plain = `${link}${badgePart}${lead}${lead ? SEP : ""}${meterText(input.meter, v.compact)}${suffix}${hint ?? ""}`;
+  return {
+    link,
+    linkCells: linkWidth,
+    badge,
+    path,
+    tokens,
+    compact: v.compact,
+    suffix,
+    hint,
+    plain,
+  };
 }

@@ -8,7 +8,27 @@ those.
 
 ## [Unreleased]
 
+### Added
+
+- **The status bar names where the agent runs.** In a container or pod the
+  left of the bar shows an accent badge: `docker <name>`, `podman <name>`,
+  `pod <name>` (and `pod <name>/<container>` when the pod has several
+  containers); a local session shows nothing. The bar stays one row: on a
+  narrow terminal the path shrinks first, then the badge name is cut in the
+  middle, and the `ctx` meter always keeps its max.
+- **Context at open.** `ctx` is shown with its max from the start, before any
+  turn: the exact count where the provider can count without generating
+  (Anthropic `count_tokens`; llama.cpp `/apply-template` + `/tokenize`), else
+  an estimate marked `~` (`ctx █░░░░░░░░░ ~7% (~9k/128k)`). It covers the real
+  history on `attach` and `--resume`, refreshes after `/compact`, and the first
+  turn replaces it with the measured figure. `↑ ↓` token totals are hidden until
+  measured. The count is capped at 2 s and falls back to the estimate silently;
+  in a pod run it is made by your laptop, so the model key never leaves it.
+
 ### Changed
+
+- The model name moved from the status bar to the top border of the input
+  field, right-aligned (cut on the left with `…` when too long).
 
 - A model endpoint answering HTTP 500, 502 or 503 before any output is now
   retried like a rate limit (up to 3 attempts, honouring `retry-after`). A 504

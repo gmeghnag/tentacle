@@ -112,11 +112,11 @@ export function StatusBar({
       {/* The link state first, as a SIBLING box: nested in the truncated Text
           below it kept the first render's width (docs/library-bugs.md, Ink
           nested-Text mis-measure). */}
-      {link && layout.linkCells > 0 ? (
+      {link && layout.link !== "" ? (
         <Box flexShrink={0} width={layout.linkCells}>
-          <Text color={link.tone === "error" ? "red" : "yellow"} wrap="truncate-end">
-            {`${link.text} · `}
-          </Text>
+          {/* The layout's own text (cut with `…`, with its separator): what
+              `plain` says is what is painted. */}
+          <Text color={link.tone === "error" ? "red" : "yellow"}>{layout.link}</Text>
         </Box>
       ) : null}
       {layout.badge !== null ? (
@@ -134,11 +134,11 @@ export function StatusBar({
             approx={contextApprox}
             compact={layout.compact}
           />
-          {scrolledUp ? (
-            <Text color="yellow"> · ↑{hiddenAbove} more (↓ to follow)</Text>
-          ) : expandAll ? (
-            <Text dimColor> · expanded</Text>
-          ) : null}
+          {layout.suffix === "" ? null : scrolledUp ? (
+            <Text color="yellow">{layout.suffix}</Text>
+          ) : (
+            <Text dimColor>{layout.suffix}</Text>
+          )}
         </Text>
       </Box>
       {layout.hint !== null ? (

@@ -769,3 +769,213 @@ Accurate: every claim on MEDIUM 1, LOW 4 and LOW 5 held, and it reported what it
 left out. Two overreaches: it widened LOW 2 into a priority decision without marking
 it as one, and it stated the 20-column claim without measuring. Its tests share one
 blind spot with the code, ASCII only.
+
+### Execution — round 4
+
+*— claude-sonnet-5-5, 2026-11-05*
+
+Answers "Review — round 3" (REQUEST-CHANGES). Red first: the new tests failed on
+the round-3 code (10 reds on the first run; the `≥ 5` boundary test was green on
+the old code, as the Review found, and is pinned by mutation below).
+
+1. **MEDIUM 1 (fixed).** New pure `cells.ts` (`cellWidth` = `string-width`,
+   grapheme-aware `headCells` / `tailCells` / `middleCells`). `statusLayout`,
+   `shortPath`, `modelBorder` and `targetText` measure and cut in terminal CELLS,
+   never code points. Tests: unit (`shortPath`, `modelBorder`, `targetText` with
+   CJK/emoji), the sweep, and real `StatusBar` frames with CJK/emoji cwd, names
+   and link at 40 and 80 columns (one row, ≤ width, ctx max visible).
+2. **MEDIUM 2 (owner rule, fixed).** The link beats the badge NAME and is never
+   dropped silently: it keeps at least its first word, takes up to 60 % of what
+   the meter leaves while the badge still fits, and the badge goes down to
+   `pod…`. Owner frames, pinned on real Ink: 40 cols
+   `disconnected · pod… · ctx ~7% (~9k/128k)`; 80 cols
+   `disconnected: connection refused … · pod etcd-g…ter-0/guard · ctx ~7% (~9k/128k)`
+   (the exact cut differs slightly from the owner's sketch: the layout cuts the
+   link at 60 % of the room). If the link and even `pod…` do not both fit, the
+   badge goes whole and the link gets the room; the link is dropped only when
+   under 4 cells remain (a line under ~22 columns).
+3. **LOW 3 (fixed).** The `≥ 5` boundary is pinned (5 name cells keep `/abc`
+   whole; 4 cut `name/container` together).
+4. **LOW 4 (fixed).** `statusLayout` returns the link exactly as painted
+   (`link`, with `…` and separator); `StatusBar` paints `layout.link` (no
+   `truncate-end`), so `plain` is what is rendered.
+5. **LOW 5 (fixed).** The scroll/expand hint is counted before the badge limit
+   and is whole or dropped (`layout.suffix`), never cut.
+6. **LOW 6 (owner rule, fixed).** Below the width where the engine word + `…`,
+   the separator and the compact meter fit, the WHOLE badge goes and the meter
+   stays whole. Measured thresholds: `pod` 25 columns, `docker`/`podman` 28
+   (`pod…` 4 + 3 + 18; `docker…` 7 + 3 + 18). Round 3's "not reachable above ~20
+   columns" claim was wrong and is replaced: the engine-word fallback never
+   shows, the badge disappears below those widths. Tested at every width 20–30.
+7. **LOW 7 (fixed).** The sweep covers CJK and emoji names, containers, link
+   messages and cwds, suffixes, widths 30–130, and asserts "link present ⇒ link
+   shown" (its first 8 cells), engine word whole, ctx max present, ≤ width.
+8. **CHANGELOG (done).** `[Unreleased]`: Added (target badge; context at open)
+   and Changed (model name on the input border).
+
+**Mutations** (one per item, reverted, `shasum` identical for the 4 files):
+item 1 `cellWidth` counting code points → killed (6); item 2 link share 0.2 →
+killed (2); item 3 `>=`→`>` → killed (1); item 4 paint `link.text` instead of
+`layout.link` → killed (4); item 5 suffix always kept → killed (3); item 6
+badge shown below the threshold → killed (2); item 7 link never shown → killed
+(5). (Item 8 has no code.)
+
+**Gate** (once, foreground): `bunx tsc --noEmit` clean; `bunx biome check .`
+clean (648 files); `bun test packages` 4537 pass · 3 skip (opt-in) · 0 fail;
+`git status apps` clean. Still unverified: llama.cpp / Anthropic against real
+servers.
+
+## Review — round 4
+
+*— claude-opus-5-5, 2026-11-05*
+
+**Verdict: PASS (LOW only).** Both MEDIUMs and all of round 3's LOWs are fixed. Five
+new LOWs for a final pass. Five owner questions: three new, two still unanswered from
+round 3.
+
+The closest call is finding 1: some emoji in the cwd overflow or garble the row. It
+is LOW because it needs those emoji in a folder name and Ink does the same with no
+repo code. The owner can overrule that in question 1.
+
+Reviewer `claude-opus-5-5`, executor `claude-sonnet-5-5`: a different model, and the
+same reviewer context as rounds 1 to 3, so this pass is not fresh-context.
+
+### Findings (all LOW)
+
+1. **Single-unit and joined emoji in the cwd still break the row, inside Ink.**
+   `string-width` is right, but Ink's output grid disagrees with it. A single-unit
+   emoji (`✅✨⚡`) lays out as 2 cells and writes as 1, then pads; a joined one
+   (`👨‍👩‍👧‍👦`) is split per code point. With no repo code, a 30-cell row:
+   ```
+   ascii   textWidth=6 rowWidth=30 |abcdef                     END|
+   cjk     textWidth=6 rowWidth=30 |日本語                     END|
+   astral  textWidth=6 rowWidth=30 |🚀🔥🎉                     END|
+   bmp     textWidth=6 rowWidth=33 |✅✨⚡                        END|
+   zwj     textWidth=6 rowWidth=11 |👨‍👩‍👧‍👦👨‍👩‍👧‍👦👨‍👩END‍👦|
+   ```
+   In the bar, at 80 columns:
+   ```
+   emoji cwd (bmp)  w=86      |…✅✨⚡✅✨⚡✅ · ctx █░░░░░░░░░ ~7% (~9k/128k)         ⏵⏵ auto-accept off (shift+tab)|
+   emoji cwd (zwj)  max=NO    |…omeone/👨‍👩‍👧‍👦👨‍👩‍👧‍👦👨‍👩‍👧‍👦👨‍👩‍👧 ⏵⏵ auto-accept off (shift+tab) 28k)|
+   ```
+   A row over the width should wrap in a real terminal (not run in one). Names and
+   containers cannot reach this, because Kubernetes and Docker names are ASCII; only
+   the cwd can, and by mechanism the link text and model name. The executor's "the
+   sweep covers emoji" holds only for emoji Ink handles. `docs/library-bugs.md` has
+   no entry for it, and it should get one. See question 1.
+2. **Below the first word's width the link is a fragment, then nothing.** Under 33
+   columns with an 18-cell meter, the first word and the whole meter cannot both fit:
+   `d · ctx…` at 22, `disco · ctx…` at 26. At 20 and 21 nothing shows, and at 22 and
+   23 some inputs also show nothing (a 19-cell meter, a double-width first
+   character). The owner rule does not cover this range. Sweep count of frames with
+   no link: 20: 1350, 21: 1350, 22: 630, 23: 90, and none above. See question 2.
+3. **The scroll and expand hints beat the badge name.** At 80 columns the owner's pod
+   is whole until the user scrolls: `pod etcd-guard-s…rv-master-0/guard · ctx ~7%
+   (~9k/128k) · ↑12 more (↓ to follow)`. `expanded` is a lasting mode, so it holds the
+   cut: `pod et…d · ctx ~7% (~9k/128k) · expanded` at 40. The path is already gone in
+   both, so nothing else is left to give way. Round 3 asked for "whole or dropped"
+   only; this priority was the executor's. See question 3.
+4. **A newline in the link text gives the bar two rows.** At 80 columns with
+   `disconnected: line one\nline two`: `rows=2`. This predates round 4: the old
+   `truncate-end` painting also gives 2 rows. `link-status.ts` says a stop reason may
+   embed a daemon's message and sanitises it for the transcript (`oneLine`), but
+   `linkIndicator` does not for the bar. So a pod could plausibly cause this; the path
+   from pod to reason was not traced. An `ESC` is dropped by Ink, so that is not an
+   injection, and a tab counts as 0 cells. One `oneLine` call should cover all three.
+5. **Double ellipsis.** `cutLink` can append `…` to text already ending in one:
+   `reconnecting…… · pod a/…`, seen once in the sweep at 72 columns.
+
+### Round 3 findings
+
+| Finding | Result | Evidence |
+|---|---|---|
+| MEDIUM 1, cells | **Fixed, pinned** for CJK and surrogate-pair emoji | 80 `…名前とても長い · ctx █░░░░░░░░░ ~7% (~9k/128k)  ⏵⏵ auto-accept off (shift+tab)`; the sweep's astral run has 0 width, ctx or engine violations; other emoji are finding 1 |
+| MEDIUM 2, link rule | **Fixed, pinned** | 40 `disconnected · pod… · ctx ~7% (~9k/128k)`; 80 `disconnected: connection refused … · pod etcd-g…ter-0/guard · ctx ~7% (~9k/128k)`; the first word and engine word are always present where they fit |
+| LOW 3, `≥ 5` | **Pinned** | Test present; executor's mutation reported killed, not re-run |
+| LOW 4, painted link | **Fixed** | Separators intact on every link frame; `StatusBar` paints `layout.link` |
+| LOW 5, hint | **Fixed** | Whole or absent on every frame; priority is finding 3 |
+| LOW 6, thresholds | **Fixed, pinned** | Measured on real frames: `pod…` from 25, `docker…` from 28; below that `ctx ~7% (~9k/128k)` alone and whole, including `App` at 27 and 20 |
+| CHANGELOG | **Present and accurate** | Added and Changed under `[Unreleased]`; each claim checked against this review |
+
+### Frames (real width, real Ink)
+
+`App`, last rows:
+```
+80 |──────────────────────────────── rits/プロジェクト名前とても長い/DeepSeek-V4.1 ─|
+80 |pod etcd-guard-sharedocp419-f84rv-master-0/guard · …も長い · ctx ~7% (~9k/128k)|
+40 |──── …クト名前とても長い/DeepSeek-V4.1 ─|
+40 |pod etcd…er-0/guard · ctx ~7% (~9k/128k)|
+27 |ctx ~7% (~9k/128k)|
+20 |ctx ~7% (~9k/128k)|
+```
+`StatusBar`, widths 25 to 34 (a selection):
+```
+25 |pod… · ctx ~7% (~9k/128k)|              27 |ctx ~7% (~9k/128k)|  (docker)
+28 |docker… · ctx ~7% (~9k/128k)|           30 |docker t… · ctx ~7% (~9k/128k)|
+33 |disconnected · ctx ~7% (~9k/128k)|      34 |disconnected… · ctx ~7% (~9k/128k)|
+```
+
+**Sweep through real Ink:** 116,640 combinations per run: every width from 20 to 34
+in full, and one in five at widths up to 129. Kubernetes and Docker; 5 names, 5
+containers, 3 cwds, 4 links (none, long, short, CJK), 6 modes. Thresholds are computed
+from the real meter. Results, one run each, CJK in all of them:
+
+| Emoji class | One row | ≤ width | ctx whole | Engine word, first word |
+|---|---|---|---|---|
+| surrogate pair (`🚀🔥🎉😀`) | 0 violations | 0 | 0 | 0 |
+| single unit (`✅✨⚡`) | 0 | **fails**, 127 with an ASCII target | 0 | 0 |
+| joined (`👨‍👩‍👧‍👦`) | 0 | 0 | **fails**, 52 with an ASCII target | 0 |
+
+Flags and `❤️`-style sequences were not swept on their own; flags were in the first,
+mixed run. Row widths are measured with `string-width`, not in a real terminal.
+
+### Gate
+
+`bunx tsc --noEmit` clean; `bunx biome check .` clean (648 files); `bun test packages`
+**4537 pass · 3 skip (opt-in) · 0 fail**. `git status apps` clean. `apps/mobile` not
+run. Live llama.cpp and Anthropic remain unverified.
+
+### Mutation
+
+One: removed the first-word floor, `Math.max(linkMin, …)` in `statusLayout`
+(`status-line.ts`), the owner's "link keeps ≥ its first word". **KILLED** by 3 tests
+(two `statusLayout`, one real frame at 40 columns): 57 pass, 3 fail. Reverted; `shasum`
+identical before and after (`3a3d97119b8d40a660df144717698bb1c9228b04`).
+
+### Attacks tried
+
+- **Emoji by class, against Ink alone:** found finding 1, and that its cause is
+  upstream.
+- **Widths 20 to 34 with and without a link:** LOW 6 holds; found finding 2.
+- **Control characters in the link:** found finding 4. `ESC` does not reach the
+  terminal, in either the old or the new painting.
+- **Scroll and expand against a long badge:** found finding 3.
+- **Owner's pod with a link, a hint, a CJK path and a CJK model:** nothing beyond
+  the above; one row and the max at 80 and 40.
+
+### Owner questions (all of them)
+
+1. **Accept Ink's limit on single-unit and joined emoji in the cwd?** Recommended:
+   yes, and register it in `docs/library-bugs.md`. It takes such emoji in a folder
+   name. The alternative is to replace them in the shown path, which adds code for a
+   rare case.
+2. **Under 33 columns the first word and the whole meter cannot both fit: what shows?**
+   Recommended: keep the meter whole and accept the fragment, since these widths are
+   rare. At 20 to 23 the disconnect stays invisible unless you want a one-cell marker.
+3. **Should a scroll or `expanded` hint cut the badge name?** Recommended: no. The name
+   comes first, and the hint shows only if it fits whole, which follows "whole unless
+   it does not fit".
+4. **Merge with llama.cpp and Anthropic counting verified only against fake `fetch`?**
+   Asked in round 3, no answer recorded. Recommended: one manual check against each
+   first.
+5. **Open a separate fix for `bun run check` writing `.js` into `apps/mobile`?** Asked in
+   round 3, no answer recorded, and not in `TODO.md`. Recommended: yes, outside this
+   branch.
+
+### How the executor behaved
+
+Accurate: its thresholds, frames and its bound on the dropped link all held to within
+a column or two. It gave the link's cut a reason where it differs from the owner's
+sketch. Two gaps: "the sweep covers emoji" was true only for the emoji class that
+works, and the hint's priority over the name was again a decision it did not mark as
+one.

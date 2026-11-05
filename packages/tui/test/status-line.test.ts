@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import stringWidth from "string-width";
+import { headCells } from "../src/cells.ts";
 import { contextMeterView, modelBorder, shortPath, statusLayout } from "../src/status-line.ts";
 import { contextShown } from "../src/status-view.ts";
 
@@ -24,6 +26,24 @@ describe("modelBorder: the model name right-aligned on the input's top border", 
 
   test("no model: a plain rule", () => {
     expect(modelBorder("", 10)).toBe("─".repeat(10));
+  });
+});
+
+describe("round 4 (MEDIUM 1): shortPath and modelBorder measure cells (CJK, emoji)", () => {
+  test("shortPath: a double-width path is cut to `max` CELLS", () => {
+    for (const max of [8, 10, 20, 40]) {
+      const p = shortPath("/ユーザー/フォルダの名前/さらに深い場所/🚀🚀🚀", undefined, max);
+      expect(stringWidth(p)).toBeLessThanOrEqual(max);
+      expect(p.startsWith("…")).toBe(true);
+    }
+  });
+
+  test("modelBorder: exactly `width` cells with a double-width model name, cut on the left", () => {
+    for (const width of [24, 30, 40, 80]) {
+      const row = modelBorder("モデル名前/とても長いモデル識別子-v4.1-Flash", width);
+      expect(stringWidth(row)).toBe(width);
+      expect(row.endsWith(" ─")).toBe(true);
+    }
   });
 });
 
@@ -53,7 +73,7 @@ describe("statusLayout (round 2, MEDIUM 2/3): one row, the path shrinks first, c
     hint: OFF,
     suffix: "",
   } as const;
-  const cells = (s: string): number => [...s].length;
+  const cells = (s: string): number => stringWidth(s);
 
   test("80 columns, long cwd, local: fits one row, the path gives way, `(~9k/128k)` whole", () => {
     const l = statusLayout(base);
@@ -109,28 +129,162 @@ describe("statusLayout (round 2, MEDIUM 2/3): one row, the path shrinks first, c
     expect(l.plain).toContain("~9k/128k)");
   });
 
-  test("round 3: a long link message gives way to the compact meter and the whole badge (40 and 80)", () => {
-    const linkText = `disconnected: ${"x".repeat(47)}`;
-    const target = { engine: "kubernetes", name: "dev-pod", container: "app" } as const;
-    for (const columns of [40, 80]) {
-      const l = statusLayout({ ...base, columns, target, linkText });
+  const owner = {
+    engine: "kubernetes",
+    name: "etcd-guard-sharedocp419-f84rv-master-0",
+    container: "guard",
+  } as const;
+  const longLink = "disconnected: connection refused by the remote daemon and more";
+
+  test("round 4 (owner rule): the link beats the badge NAME — owner's frames at 40 and 80", () => {
+    const at40 = statusLayout({ ...base, columns: 40, target: owner, linkText: longLink });
+    expect(at40.plain).toBe("disconnected · pod… · ctx ~7% (~9k/128k)");
+    const at80 = statusLayout({ ...base, columns: 80, target: owner, linkText: longLink });
+    expect(cells(at80.plain)).toBeLessThanOrEqual(80);
+    expect(at80.plain.startsWith("disconnected: connection refused")).toBe(true);
+    expect(at80.plain).toContain("/guard · ctx ~7% (~9k/128k)");
+    expect(at80.badge?.startsWith("pod etcd-")).toBe(true);
+  });
+
+  test("round 4: the link keeps its first word whatever else gives way; the badge may go to `pod…`", () => {
+    for (const columns of [40, 50]) {
+      const l = statusLayout({ ...base, columns, target: owner, linkText: longLink });
+      expect(l.plain.startsWith("disconnected")).toBe(true);
       expect(cells(l.plain)).toBeLessThanOrEqual(columns);
       expect(l.plain).toContain("~9k/128k)");
-      expect(l.badge).toBe("pod dev-pod/app");
-      // The same badge as with no link at all.
-      expect(l.badge).toBe(statusLayout({ ...base, columns, target }).badge);
+      expect(l.badge?.startsWith("pod")).toBe(true);
     }
   });
 
-  test("round 3: no room left for any link text: the link is dropped, ctx stays", () => {
-    const l = statusLayout({
-      ...base,
-      columns: 40,
-      target: { engine: "kubernetes", name: "x".repeat(60) },
-      linkText: "reconnecting…",
-    });
-    expect(cells(l.plain)).toBeLessThanOrEqual(40);
-    expect(l.plain).toContain("~9k/128k)");
+  test("round 4 (7): sweep — ASCII, CJK and emoji inputs × widths 30..130: one row, ctx max, engine word whole, link present ⇒ link shown", () => {
+    const names = [
+      "a",
+      "etcd-guard-sharedocp419-f84rv-master-0",
+      "ポッド名前テスト-ポッド名前テスト",
+      "🚀🚀🚀-pod-🚀🚀🚀",
+    ];
+    const containers = [undefined, "guard", "c".repeat(63), "コンテナ-コンテナ", "🚀x"];
+    const links = [null, "reconnecting…", longLink, `切断されました: ${"接続".repeat(20)}`];
+    const cwds = ["/tmp/w", "/ユーザー/フォルダの名前/さらに深い場所/🚀🚀🚀"];
+    const suffixes = ["", " · ↑12 more (↓ to follow)", " · expanded"];
+    let frames = 0;
+    for (let columns = 30; columns <= 130; columns += 4) {
+      for (const name of names) {
+        for (const container of containers) {
+          for (const linkText of links) {
+            for (const engine of ["kubernetes", "docker"] as const) {
+              const suffix = suffixes[(columns + frames) % suffixes.length] ?? "";
+              const l = statusLayout({
+                ...base,
+                columns,
+                linkText,
+                suffix,
+                cwd: cwds[frames % cwds.length] ?? "/",
+                tokens: frames % 2 === 0 ? { prompt: 54000, completion: 1200 } : null,
+                target: {
+                  engine,
+                  name,
+                  ...(container !== undefined && engine === "kubernetes" ? { container } : {}),
+                },
+              });
+              frames++;
+              const where = JSON.stringify({
+                columns,
+                name,
+                container,
+                linkText,
+                engine,
+                plain: l.plain,
+              });
+              expect({ where, ok: cells(l.plain) <= columns }).toEqual({ where, ok: true });
+              expect({ where, ok: l.plain.includes("/128k)") }).toEqual({ where, ok: true });
+              if (l.badge !== null) {
+                const word = engine === "kubernetes" ? "pod" : "docker";
+                expect({ where, ok: l.badge.startsWith(word) }).toEqual({ where, ok: true });
+              }
+              if (linkText !== null) {
+                const first = /^[^\s:]+/.exec(linkText)?.[0] ?? linkText;
+                expect({ where, ok: l.plain.startsWith(headCells(first, 8)) }).toEqual({
+                  where,
+                  ok: true,
+                });
+              }
+              expect({ where, ok: l.suffix === "" || l.suffix === suffix }).toEqual({
+                where,
+                ok: true,
+              });
+            }
+          }
+        }
+      }
+    }
+    expect(frames).toBeGreaterThan(1000);
+  });
+
+  test("round 4: the link text is the layout's own (cut with `…`, separator), and the component paints it", () => {
+    const l = statusLayout({ ...base, columns: 80, linkText: longLink });
+    expect(l.link.endsWith(" · ")).toBe(true);
+    expect(l.plain.startsWith(l.link)).toBe(true);
+    expect(cells(l.link)).toBe(l.linkCells);
+  });
+
+  test("round 4 (owner rule): below the width where the engine word, separator and meter fit, the WHOLE badge goes; ctx stays whole — every width 20..30", () => {
+    const meterCells = cells("ctx ~7% (~9k/128k)");
+    for (const [engine, word] of [
+      ["docker", "docker"],
+      ["kubernetes", "pod"],
+    ] as const) {
+      const threshold = cells(`${word}…`) + 3 + meterCells;
+      for (let columns = 20; columns <= 30; columns++) {
+        const l = statusLayout({
+          ...base,
+          columns,
+          target: { engine, name: "some-long-workload-name" },
+        });
+        expect(l.plain).toContain("ctx ~7% (~9k/128k)");
+        expect(cells(l.plain)).toBeLessThanOrEqual(columns);
+        expect({ columns, badge: l.badge !== null }).toEqual({
+          columns,
+          badge: columns >= threshold,
+        });
+      }
+    }
+  });
+
+  test("round 4: the scroll hint is counted in the badge limit and never cut — whole or dropped", () => {
+    const suffix = " · ↑12 more (↓ to follow)";
+    for (const columns of [40, 60, 80, 100]) {
+      const l = statusLayout({ ...base, columns, target: owner, suffix });
+      expect(cells(l.plain)).toBeLessThanOrEqual(columns);
+      expect(l.plain).toContain("~9k/128k)");
+      expect(l.suffix === "" || l.suffix === suffix).toBe(true);
+      expect(l.plain.includes("↑12 mor") && l.suffix === "").toBe(false);
+    }
+    expect(statusLayout({ ...base, columns: 100, target: owner, suffix }).suffix).toBe(suffix);
+    expect(statusLayout({ ...base, columns: 40, target: owner, suffix }).suffix).toBe("");
+  });
+
+  test("round 4 (MEDIUM 1): terminal CELLS, not code points — CJK and emoji cwd / names / link", () => {
+    const wide = "/ユーザー/フォルダの名前/さらに深い場所/🚀🚀🚀/データ";
+    const names = ["ポッド名前テスト-ポッド名前テスト", "🚀🚀🚀🚀🚀🚀🚀🚀-pod"];
+    for (const columns of [30, 40, 80]) {
+      for (const name of names) {
+        for (const linkText of [null, "reconnecting…", `切断されました: ${"接続".repeat(20)}`]) {
+          const l = statusLayout({
+            ...base,
+            columns,
+            cwd: wide,
+            linkText,
+            target: { engine: "kubernetes", name, container: "コンテナ" },
+          });
+          expect(cells(l.plain)).toBeLessThanOrEqual(columns);
+          expect(l.plain).toContain("(~9k/128k)");
+        }
+      }
+      const local = statusLayout({ ...base, columns, cwd: wide });
+      expect(cells(local.plain)).toBeLessThanOrEqual(columns);
+      expect(local.plain).toContain("(~9k/128k)");
+    }
   });
 
   test("a wide terminal: nothing is cut, the full hint stays", () => {

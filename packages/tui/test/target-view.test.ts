@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import stringWidth from "string-width";
 import { targetText } from "../src/target-view.ts";
 
 describe("targetText with a limit (round 2, MEDIUM 3): cut the NAME in the middle, keep the engine word and /container", () => {
@@ -22,7 +23,32 @@ describe("targetText with a limit (round 2, MEDIUM 3): cut the NAME in the middl
     expect(targetText({ engine: "docker", name: "tentacle-ba89d072" }, 19)).toBe(
       "docker tentac…9d072",
     );
-    expect(targetText({ engine: "podman", name: "abcdefgh" }, 8)).toBe("podman …");
+    expect(targetText({ engine: "podman", name: "abcdefgh" }, 8)).toBe("podman…");
+  });
+
+  test("round 4 (LOW 3): the owner's `≥ 5` boundary — 5 name cells keep the container whole, 4 do not", () => {
+    const t = { engine: "kubernetes", name: "abcdefghijklmnop", container: "abc" } as const;
+    // "pod " (4) + name (5) + "/abc" (4) = 13: the name is cut alone.
+    const five = targetText(t, 13);
+    expect(five).toBe("pod ab…op/abc");
+    // 12: the name would have 4 cells: name/container are cut TOGETHER.
+    const four = targetText(t, 12);
+    expect([...four].length).toBeLessThanOrEqual(12);
+    expect(four.endsWith("/abc")).toBe(false);
+    expect(four.startsWith("pod abc")).toBe(true);
+  });
+
+  test("round 4: wide characters are measured in cells, never code points", () => {
+    const got = targetText(
+      { engine: "kubernetes", name: "ポッド名前テスト-ポッド名前テスト", container: "コンテナ" },
+      19,
+    );
+    expect(stringWidth(got)).toBeLessThanOrEqual(19);
+    expect(got.startsWith("pod ")).toBe(true);
+    for (const limit of [8, 12, 20, 30]) {
+      const g = targetText({ engine: "docker", name: "🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀" }, limit);
+      expect(stringWidth(g)).toBeLessThanOrEqual(Math.max(limit, 7));
+    }
   });
 });
 
@@ -73,7 +99,7 @@ describe("targetText round 3 (owner rule): the engine word whole; cut the name, 
               got,
               ok: true,
             });
-            expect(got.startsWith(`${word} `)).toBe(true);
+            expect(got.startsWith(word)).toBe(true);
           }
         }
       }

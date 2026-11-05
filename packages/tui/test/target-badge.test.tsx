@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import chalk from "chalk";
 import { render } from "ink-testing-library";
+import stringWidth from "string-width";
 import { App, type SessionController } from "../src/App.tsx";
 import { StatusBar } from "../src/components/StatusBar.tsx";
 import type { ContextOpen } from "../src/status-view.ts";
@@ -196,19 +197,59 @@ describe("round 3: the owner's rule on real frames", () => {
     }
   });
 
-  test("a 61-char link message costs neither the ctx max nor the badge name (40 and 80)", () => {
-    const link = { text: `disconnected: ${"x".repeat(47)}`, tone: "error" as const };
-    expect(link.text).toHaveLength(61);
+  const longLink = {
+    text: "disconnected: connection refused by the remote daemon and more",
+    tone: "error" as const,
+  };
+
+  test("round 4 (owner rule), real frame at 40: `disconnected · pod… · ctx ~7% (~9k/128k)`", () => {
+    const f = at(40, {
+      target: { engine: "kubernetes", name: pod, container: "guard" },
+      link: longLink,
+    });
+    expect(f).toBe("disconnected · pod… · ctx ~7% (~9k/128k)");
+  });
+
+  test("round 4, real frame at 80: the link whole-ish, the badge cut, ctx whole — one row", () => {
+    const f = at(80, {
+      target: { engine: "kubernetes", name: pod, container: "guard" },
+      link: longLink,
+    });
+    expect(f.split("\n")).toHaveLength(1);
+    expect(f.startsWith("disconnected: connection refused")).toBe(true);
+    expect(f).toContain("/guard · ctx ~7% (~9k/128k)");
+  });
+
+  test("round 4 (MEDIUM 1): CJK and emoji at 40 and 80 — one row, within the terminal, ctx max visible", () => {
+    const wide = "/ユーザー/フォルダの名前/さらに深い場所/🚀🚀🚀/データ";
     for (const columns of [40, 80]) {
-      const target = { engine: "kubernetes" as const, name: "dev-pod", container: "app" };
-      const without = at(columns, { target });
-      const f = at(columns, { target, link });
-      expect(f.split("\n")).toHaveLength(1);
-      expect([...f].length).toBeLessThanOrEqual(columns);
-      expect(f).toContain("/128k)");
-      expect(f).toContain("pod dev-pod/app");
-      expect(without).toContain("pod dev-pod/app");
+      for (const extra of [
+        {},
+        {
+          target: {
+            engine: "kubernetes" as const,
+            name: "ポッド名前テスト-ポッド名前テスト",
+            container: "コンテナ",
+          },
+        },
+        { target: { engine: "docker" as const, name: "🚀🚀🚀🚀🚀🚀🚀🚀-pod" }, link: longLink },
+      ]) {
+        const f = at(columns, { cwd: wide, ...extra });
+        expect(f.split("\n")).toHaveLength(1);
+        expect(stringWidth(f)).toBeLessThanOrEqual(columns);
+        expect(f).toContain("(~9k/128k)");
+      }
     }
+  });
+
+  test("round 4 (LOW 4/5): the painted row IS the layout's plain text; the scroll hint is whole or absent", () => {
+    const target = { engine: "docker" as const, name: "tentacle-ba89d072" };
+    const wide = at(100, { target, scrolledUp: true, hiddenAbove: 12, link: longLink });
+    expect(wide).toContain("↑12 more (↓ to follow)");
+    expect(wide.split("\n")).toHaveLength(1);
+    const narrow = at(40, { target, scrolledUp: true, hiddenAbove: 12 });
+    expect(narrow).not.toContain("↑12 mor");
+    expect(narrow).toContain("(~9k/128k)");
   });
 });
 
