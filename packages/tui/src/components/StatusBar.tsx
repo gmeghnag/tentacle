@@ -4,7 +4,7 @@ import type { LinkIndicator } from "../link-status.ts";
 import type { TokenTotals } from "../state.ts";
 import { METER_WIDTH, contextMeterView, statusLayout } from "../status-line.ts";
 import type { TargetBadge } from "../target-view.ts";
-import { accentHex } from "../theme.ts";
+import { accentHex, autoAcceptHex } from "../theme.ts";
 
 // The compact count lives in the pure `format.ts`; re-exported for callers.
 export { formatTokens } from "../format.ts";
@@ -121,7 +121,9 @@ export function StatusBar({
       ) : null}
       {layout.badge !== null ? (
         <Box flexShrink={0}>
-          <Text color={accentHex}>{layout.badge}</Text>
+          {/* Prefix (colon included) grey, the name in the accent colour. */}
+          <Text dimColor>{layout.badgePrefix}</Text>
+          <Text color={accentHex}>{layout.badge.slice(layout.badgePrefix.length)}</Text>
           <Text dimColor>{" · "}</Text>
         </Box>
       ) : null}
@@ -144,7 +146,7 @@ export function StatusBar({
       {layout.hint !== null ? (
         <Box flexShrink={0}>
           {autoApprove ? (
-            <Text color={accentHex}>{layout.hint}</Text>
+            <Text color={autoAcceptHex}>{layout.hint}</Text>
           ) : (
             <Text dimColor>{layout.hint}</Text>
           )}

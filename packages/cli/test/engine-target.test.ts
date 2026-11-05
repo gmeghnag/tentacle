@@ -7,33 +7,27 @@ describe("engineTarget: the TUI badge's facts, from the laptop's side", () => {
       engine: "docker",
       name: "tentacle-ba89d072",
     });
-    expect(engineTarget({ kind: "podman" }, "t-1", "ignored", 3)).toEqual({
+    expect(engineTarget({ kind: "podman" }, "t-1", "ignored")).toEqual({
       engine: "podman",
       name: "t-1",
     });
   });
 
-  test("kubernetes, one container: `pod <name>` only — even when --container named it", () => {
-    expect(engineTarget({ kind: "kubernetes" }, "dev", "app", 1)).toEqual({
+  test("kubernetes ALWAYS names the container in use — also for a one-container pod", () => {
+    expect(engineTarget({ kind: "kubernetes" }, "dev", "app")).toEqual({
       engine: "kubernetes",
       name: "dev",
+      container: "app",
     });
-    expect(engineTarget({ kind: "kubernetes" }, "dev")).toEqual({
-      engine: "kubernetes",
-      name: "dev",
-    });
-  });
-
-  test("kubernetes, several containers: the one in use is named", () => {
-    expect(engineTarget({ kind: "kubernetes" }, "dev", "sidecar", 2)).toEqual({
+    expect(engineTarget({ kind: "kubernetes" }, "dev", "sidecar")).toEqual({
       engine: "kubernetes",
       name: "dev",
       container: "sidecar",
     });
   });
 
-  test("kubernetes, several containers but none resolved: no container part (nothing to show)", () => {
-    expect(engineTarget({ kind: "kubernetes" }, "dev", undefined, 2)).toEqual({
+  test("kubernetes with no container resolved: no container part (nothing to show)", () => {
+    expect(engineTarget({ kind: "kubernetes" }, "dev")).toEqual({
       engine: "kubernetes",
       name: "dev",
     });
@@ -41,5 +35,6 @@ describe("engineTarget: the TUI badge's facts, from the laptop's side", () => {
 
   test("a name carrying terminal control bytes is sanitised before it can reach the screen", () => {
     expect(engineTarget({ kind: "docker" }, "a\u001b[2Jb").name).toBe("a [2Jb");
+    expect(engineTarget({ kind: "kubernetes" }, "p", "c\u001b[2Jd").container).toBe("c [2Jd");
   });
 });

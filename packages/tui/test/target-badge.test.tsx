@@ -6,6 +6,7 @@ import { App, type SessionController } from "../src/App.tsx";
 import { StatusBar } from "../src/components/StatusBar.tsx";
 import type { ContextOpen } from "../src/status-view.ts";
 import type { TargetBadge } from "../src/target-view.ts";
+import { accentHex, autoAcceptHex } from "../src/theme.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -42,6 +43,19 @@ async function frame(props: {
   }
 }
 
+// SGR runs chalk/Ink write at colour level 3: dim, its end, the accent #06b6d4, the gold #fec20a.
+const DIM = "\x1b[2m";
+const DIM_OFF = "\x1b[22m";
+const ACCENT = "\x1b[38;2;6;182;212m";
+const GOLD = "\x1b[38;2;254;194;10m";
+const bar = {
+  cwd: "/w",
+  tokens: null,
+  contextTokens: 9000,
+  contextApprox: true,
+  contextWindow: 128000,
+} as const;
+
 const rows = (f: string): string[] => stripAnsi(f).split("\n");
 const statusRow = (f: string): string =>
   rows(f)
@@ -50,26 +64,26 @@ const statusRow = (f: string): string =>
 const borderRow = (f: string): string => rows(f).find((r) => /^─+ .* ─$/.test(r.trimEnd())) ?? "";
 
 describe("target badge (left of the status bar)", () => {
-  test("docker: `docker <name> · <path> · …`", async () => {
+  test("docker: `docker:<name> · <path> · …`", async () => {
     const f = await frame({ target: { engine: "docker", name: "tentacle-ba89d072" } });
-    expect(statusRow(f).startsWith("docker tentacle-ba89d072 · /tmp/work")).toBe(true);
+    expect(statusRow(f).startsWith("docker:tentacle-ba89d072 · /tmp/work")).toBe(true);
   });
 
   test("podman, pod, and pod/container", async () => {
     expect(
       statusRow(await frame({ target: { engine: "podman", name: "t-1" } })).startsWith(
-        "podman t-1 · ",
+        "podman:t-1 · ",
       ),
     ).toBe(true);
     expect(
       statusRow(await frame({ target: { engine: "kubernetes", name: "dev" } })).startsWith(
-        "pod dev · ",
+        "kubernetes:dev · ",
       ),
     ).toBe(true);
     expect(
       statusRow(
         await frame({ target: { engine: "kubernetes", name: "dev", container: "app" } }),
-      ).startsWith("pod dev/app · "),
+      ).startsWith("kubernetes:dev/app · "),
     ).toBe(true);
   });
 
@@ -77,7 +91,7 @@ describe("target badge (left of the status bar)", () => {
     expect(statusRow(await frame({})).startsWith("/tmp/work · ")).toBe(true);
   });
 
-  test("the badge is accent-coloured, not dim (SGR kept)", async () => {
+  test("final pass (6): the prefix (colon included) is dim, the name keeps the accent colour (SGR kept)", async () => {
     const level = chalk.level;
     chalk.level = 3;
     const app = render(
@@ -91,16 +105,49 @@ describe("target badge (left of the status bar)", () => {
     try {
       await delay(60);
       const raw =
-        (app.lastFrame() ?? "").split("\n").filter((r) => r.includes("docker tentacle-x"))[0] ?? "";
-      // The badge's own run carries a foreground colour and is not wrapped in the dim attribute.
-      const at = raw.indexOf("docker tentacle-x");
-      const before = raw.slice(0, at);
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: matching an ANSI SGR code
-      expect(before).toMatch(/\x1b\[(3[0-7]|38;[0-9;]+)m$/);
-      expect(before.endsWith("\x1b[2m")).toBe(false);
+        (app.lastFrame() ?? "").split("\n").filter((r) => r.includes("tentacle-x"))[0] ?? "";
+      // The prefix is wrapped in the dim attribute; the name carries the accent
+      // (#06b6d4) and is not wrapped in dim.
+      expect(raw).toContain(`${DIM}docker:${DIM_OFF}`);
+      expect(raw).toContain(`${ACCENT}tentacle-x`);
+      expect(raw).not.toContain(`${DIM}tentacle-x`);
+      expect(raw).not.toContain(`${ACCENT}docker:`);
     } finally {
       chalk.level = level;
       app.unmount();
+    }
+  });
+
+  test("final pass (6): the same split for `kubernetes:` and for the cut `k8s:`", () => {
+    const level = chalk.level;
+    chalk.level = 3;
+    try {
+      const pod = "etcd-guard-sharedocp419-f84rv-master-0";
+      const target = { engine: "kubernetes" as const, name: pod, container: "guard" };
+      const wide = render(<StatusBar {...bar} columns={80} target={target} />).lastFrame() ?? "";
+      expect(wide).toContain(`${DIM}kubernetes:${DIM_OFF}`);
+      expect(wide).toContain(`${ACCENT}${pod}/guard`);
+      const narrow = render(<StatusBar {...bar} columns={40} target={target} />).lastFrame() ?? "";
+      expect(narrow).toContain(`${DIM}k8s:${DIM_OFF}`);
+      expect(narrow).toContain(`${ACCENT}etcd…er-0/guard`);
+    } finally {
+      chalk.level = level;
+    }
+  });
+
+  test("final pass (7): `auto-accept on` is golden yellow (autoAcceptHex), `off` stays dim", () => {
+    const level = chalk.level;
+    chalk.level = 3;
+    try {
+      const on = render(<StatusBar {...bar} columns={120} autoApprove />).lastFrame() ?? "";
+      expect(on).toContain(`${GOLD} ⏵⏵ auto-accept on `);
+      expect(on).not.toContain(`${ACCENT} ⏵⏵ auto-accept on `);
+      const off = render(<StatusBar {...bar} columns={120} />).lastFrame() ?? "";
+      expect(off).toContain(`${DIM} ⏵⏵ auto-accept off (shift+tab) `);
+      expect(autoAcceptHex).toBe("#fec20a");
+      expect(autoAcceptHex).not.toBe(accentHex);
+    } finally {
+      chalk.level = level;
     }
   });
 
@@ -110,7 +157,7 @@ describe("target badge (left of the status bar)", () => {
       cwd: "/very/long/directory/name/that/goes/on/and/on/forever/and/ever/trash",
     });
     const row = statusRow(f);
-    expect(row.startsWith("docker tentacle-ba89d072 · ")).toBe(true);
+    expect(row.startsWith("docker:tentacle-ba89d072 · ")).toBe(true);
     expect(row).toContain("…");
     expect(row).toContain("ctx ");
   });
@@ -142,7 +189,7 @@ describe("round 2: real StatusBar frames at 80 and 40 columns (one row, ctx max 
   test("80 docker: badge whole, ctx max whole", () => {
     const f = at(80, { target: { engine: "docker", name: "tentacle-ba89d072" } });
     expect(f.split("\n")).toHaveLength(1);
-    expect(f.startsWith("docker tentacle-ba89d072 · ")).toBe(true);
+    expect(f.startsWith("docker:tentacle-ba89d072 · ")).toBe(true);
     expect(f).toContain("(~9k/128k)");
   });
 
@@ -155,7 +202,7 @@ describe("round 2: real StatusBar frames at 80 and 40 columns (one row, ctx max 
       },
     });
     expect(f.split("\n")).toHaveLength(1);
-    expect(f.startsWith("pod ")).toBe(true);
+    expect(f.startsWith("k8s:")).toBe(true);
     expect(f).toContain("/sidecar");
     expect(f).toContain("…");
     expect(f).toContain("/128k)");
@@ -179,9 +226,9 @@ describe("round 3: the owner's rule on real frames", () => {
     );
   const pod = "etcd-guard-sharedocp419-f84rv-master-0";
 
-  test("owner example at 40 columns: `pod etcd…er-0/guard · ctx ~7% (~9k/128k)`", () => {
+  test("owner example at 40 columns: `k8s:etcd…er-0/guard · ctx ~7% (~9k/128k)`", () => {
     const f = at(40, { target: { engine: "kubernetes", name: pod, container: "guard" } });
-    expect(f).toBe("pod etcd…er-0/guard · ctx ~7% (~9k/128k)");
+    expect(f).toBe("k8s:etcd…er-0/guard · ctx ~7% (~9k/128k)");
   });
 
   test("a 63-char container (the k8s maximum): ONE row, within the terminal, ctx max visible — at 40 and 80", () => {
@@ -193,7 +240,7 @@ describe("round 3: the owner's rule on real frames", () => {
       expect(rows).toHaveLength(1);
       expect([...(rows[0] ?? "")].length).toBeLessThanOrEqual(columns);
       expect(f).toContain("/128k)");
-      expect(f.startsWith("pod ")).toBe(true);
+      expect(f.startsWith("k8s:")).toBe(true);
     }
   });
 
@@ -202,12 +249,14 @@ describe("round 3: the owner's rule on real frames", () => {
     tone: "error" as const,
   };
 
-  test("round 4 (owner rule), real frame at 40: `disconnected · pod… · ctx ~7% (~9k/128k)`", () => {
+  test("round 4 (owner rule), real frame at 40: the link whole-ish, no badge (`k8s:…` does not fit beside it)", () => {
     const f = at(40, {
       target: { engine: "kubernetes", name: pod, container: "guard" },
       link: longLink,
     });
-    expect(f).toBe("disconnected · pod… · ctx ~7% (~9k/128k)");
+    expect(f.startsWith("disconnected")).toBe(true);
+    expect(f.endsWith(" · ctx ~7% (~9k/128k)")).toBe(true);
+    expect(f).not.toContain("k8s:");
   });
 
   test("round 4, real frame at 80: the link whole-ish, the badge cut, ctx whole — one row", () => {
@@ -244,12 +293,35 @@ describe("round 3: the owner's rule on real frames", () => {
 
   test("round 4 (LOW 4/5): the painted row IS the layout's plain text; the scroll hint is whole or absent", () => {
     const target = { engine: "docker" as const, name: "tentacle-ba89d072" };
-    const wide = at(100, { target, scrolledUp: true, hiddenAbove: 12, link: longLink });
+    const wide = at(100, { target, scrolledUp: true, hiddenAbove: 12 });
     expect(wide).toContain("↑12 more (↓ to follow)");
     expect(wide.split("\n")).toHaveLength(1);
     const narrow = at(40, { target, scrolledUp: true, hiddenAbove: 12 });
     expect(narrow).not.toContain("↑12 mor");
     expect(narrow).toContain("(~9k/128k)");
+  });
+
+  test("final pass (3): owner frames, scrolled and expanded, at 80 and 40 — the hint never cuts the badge name", () => {
+    const target = { engine: "kubernetes" as const, name: pod, container: "guard" };
+    const at80 = "kubernetes:etcd-guard-sharedocp419-f84rv-master-0/guard · ctx ~7% (~9k/128k)";
+    const at40 = "k8s:etcd…er-0/guard · ctx ~7% (~9k/128k)";
+    expect(at(80, { target })).toBe(at80);
+    expect(at(40, { target })).toBe(at40);
+    for (const extra of [{ scrolledUp: true, hiddenAbove: 12 }, { expandAll: true }]) {
+      expect(at(80, { target, ...extra })).toBe(at80);
+      expect(at(40, { target, ...extra })).toBe(at40);
+    }
+  });
+
+  test("final pass (4): a newline in the link text is ONE row on a real frame", () => {
+    for (const columns of [40, 80]) {
+      const f = at(columns, {
+        target: { engine: "docker" as const, name: "tentacle-x" },
+        link: { text: "disconnected: line one\nline two", tone: "error" as const },
+      });
+      expect(f.split("\n")).toHaveLength(1);
+      expect(stringWidth(f)).toBeLessThanOrEqual(columns);
+    }
   });
 });
 

@@ -109,8 +109,8 @@ export type WorkloadState =
       readonly kind: "ready";
       readonly workspace?: string;
       readonly container?: string;
-      /** k8s: how many containers the pod has (the TUI's badge names the container when > 1). */
-      readonly containers?: number;
+      /** k8s: the container the TUI runs in, for the badge (`kubernetes:<pod>/<container>`). */
+      readonly inUse?: string;
     }
   /** Pulling / restarting: worth a bounded wait. */
   | {
@@ -118,7 +118,7 @@ export type WorkloadState =
       readonly detail: string;
       readonly workspace?: string;
       readonly container?: string;
-      readonly containers?: number;
+      readonly inUse?: string;
     }
   /** Terminal / not runnable: refuse with `detail` (attach never starts it). */
   | { readonly kind: "stopped"; readonly detail: string };

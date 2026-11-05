@@ -90,7 +90,7 @@ describe("statusLayout (round 2, MEDIUM 2/3): one row, the path shrinks first, c
       tokens: { prompt: 12000, completion: 700 },
     });
     expect(cells(l.plain)).toBeLessThanOrEqual(80);
-    expect(l.plain.startsWith("docker tentacle-ba89d072 · ")).toBe(true);
+    expect(l.plain.startsWith("docker:tentacle-ba89d072 · ")).toBe(true);
     expect(l.plain).toContain("~9k/128k)");
   });
 
@@ -109,10 +109,10 @@ describe("statusLayout (round 2, MEDIUM 2/3): one row, the path shrinks first, c
     });
     expect(cells(l.plain)).toBeLessThanOrEqual(40);
     expect(l.plain).toContain("~9k/128k)");
-    expect(l.plain.startsWith("docker ")).toBe(true);
+    expect(l.plain.startsWith("docker:")).toBe(true);
   });
 
-  test("a badge wider than the terminal: one row, the NAME cut in the middle, engine word kept", () => {
+  test("a badge wider than the terminal: one row, the NAME cut in the middle, prefix kept", () => {
     const l = statusLayout({
       ...base,
       columns: 40,
@@ -123,7 +123,7 @@ describe("statusLayout (round 2, MEDIUM 2/3): one row, the path shrinks first, c
       },
     });
     expect(cells(l.plain)).toBeLessThanOrEqual(40);
-    expect(l.badge?.startsWith("pod ")).toBe(true);
+    expect(l.badge?.startsWith("k8s:")).toBe(true);
     expect(l.badge?.endsWith("/sidecar")).toBe(true);
     expect(l.badge).toContain("…");
     expect(l.plain).toContain("~9k/128k)");
@@ -138,21 +138,26 @@ describe("statusLayout (round 2, MEDIUM 2/3): one row, the path shrinks first, c
 
   test("round 4 (owner rule): the link beats the badge NAME — owner's frames at 40 and 80", () => {
     const at40 = statusLayout({ ...base, columns: 40, target: owner, linkText: longLink });
-    expect(at40.plain).toBe("disconnected · pod… · ctx ~7% (~9k/128k)");
+    // `disconnected · k8s:… · ctx …` is 41 cells: at 40 not even `k8s:…` fits beside
+    // the first word and the meter, so the badge goes whole and the link gets the room.
+    expect(at40.badge).toBeNull();
+    expect(at40.plain.startsWith("disconnected")).toBe(true);
+    expect(at40.plain.endsWith(" · ctx ~7% (~9k/128k)")).toBe(true);
+    expect(cells(at40.plain)).toBeLessThanOrEqual(40);
     const at80 = statusLayout({ ...base, columns: 80, target: owner, linkText: longLink });
     expect(cells(at80.plain)).toBeLessThanOrEqual(80);
     expect(at80.plain.startsWith("disconnected: connection refused")).toBe(true);
     expect(at80.plain).toContain("/guard · ctx ~7% (~9k/128k)");
-    expect(at80.badge?.startsWith("pod etcd-")).toBe(true);
+    expect(at80.badge?.startsWith("k8s:etcd-")).toBe(true);
   });
 
-  test("round 4: the link keeps its first word whatever else gives way; the badge may go to `pod…`", () => {
-    for (const columns of [40, 50]) {
+  test("round 4: the link keeps its first word whatever else gives way; the badge may go to `k8s:…`", () => {
+    for (const columns of [41, 50]) {
       const l = statusLayout({ ...base, columns, target: owner, linkText: longLink });
       expect(l.plain.startsWith("disconnected")).toBe(true);
       expect(cells(l.plain)).toBeLessThanOrEqual(columns);
       expect(l.plain).toContain("~9k/128k)");
-      expect(l.badge?.startsWith("pod")).toBe(true);
+      expect(l.badge?.startsWith("k8s:")).toBe(true);
     }
   });
 
@@ -199,8 +204,19 @@ describe("statusLayout (round 2, MEDIUM 2/3): one row, the path shrinks first, c
               expect({ where, ok: cells(l.plain) <= columns }).toEqual({ where, ok: true });
               expect({ where, ok: l.plain.includes("/128k)") }).toEqual({ where, ok: true });
               if (l.badge !== null) {
-                const word = engine === "kubernetes" ? "pod" : "docker";
-                expect({ where, ok: l.badge.startsWith(word) }).toEqual({ where, ok: true });
+                const word = engine === "kubernetes" ? "k8s:" : "docker:";
+                const long = engine === "kubernetes" ? "kubernetes:" : "docker:";
+                expect({ where, ok: l.badge.startsWith(word) || l.badge.startsWith(long) }).toEqual(
+                  {
+                    where,
+                    ok: true,
+                  },
+                );
+                // A shown hint never cut the badge name.
+                expect({ where, ok: l.suffix === "" || !l.badge.includes("…") }).toEqual({
+                  where,
+                  ok: true,
+                });
               }
               if (linkText !== null) {
                 const first = /^[^\s:]+/.exec(linkText)?.[0] ?? linkText;
@@ -231,8 +247,8 @@ describe("statusLayout (round 2, MEDIUM 2/3): one row, the path shrinks first, c
   test("round 4 (owner rule): below the width where the engine word, separator and meter fit, the WHOLE badge goes; ctx stays whole — every width 20..30", () => {
     const meterCells = cells("ctx ~7% (~9k/128k)");
     for (const [engine, word] of [
-      ["docker", "docker"],
-      ["kubernetes", "pod"],
+      ["docker", "docker:"],
+      ["kubernetes", "k8s:"],
     ] as const) {
       const threshold = cells(`${word}…`) + 3 + meterCells;
       for (let columns = 20; columns <= 30; columns++) {
@@ -260,7 +276,8 @@ describe("statusLayout (round 2, MEDIUM 2/3): one row, the path shrinks first, c
       expect(l.suffix === "" || l.suffix === suffix).toBe(true);
       expect(l.plain.includes("↑12 mor") && l.suffix === "").toBe(false);
     }
-    expect(statusLayout({ ...base, columns: 100, target: owner, suffix }).suffix).toBe(suffix);
+    expect(statusLayout({ ...base, columns: 101, target: owner, suffix }).suffix).toBe(suffix);
+    expect(statusLayout({ ...base, columns: 100, target: owner, suffix }).suffix).toBe("");
     expect(statusLayout({ ...base, columns: 40, target: owner, suffix }).suffix).toBe("");
   });
 
@@ -297,6 +314,132 @@ describe("statusLayout (round 2, MEDIUM 2/3): one row, the path shrinks first, c
     const l = statusLayout({ ...base, linkText: "reconnecting…" });
     expect(cells(l.plain)).toBeLessThanOrEqual(80);
     expect(l.linkCells).toBe("reconnecting…".length + 3);
+  });
+});
+
+describe("final pass (3, 6): the scroll hint and `expanded` never cut the badge NAME", () => {
+  const meter = contextMeterView(9000, true, 128000);
+  const owner = {
+    engine: "kubernetes",
+    name: "etcd-guard-sharedocp419-f84rv-master-0",
+    container: "guard",
+  } as const;
+  const base = {
+    linkText: null,
+    target: owner,
+    cwd: "/x/y",
+    home: undefined,
+    tokens: null,
+    meter,
+    hint: " ⏵⏵ auto-accept off (shift+tab) ",
+    suffix: "",
+  } as const;
+  const scrolled = " · ↑12 more (↓ to follow)";
+  const expanded = " · expanded";
+  const at80 = "kubernetes:etcd-guard-sharedocp419-f84rv-master-0/guard · ctx ~7% (~9k/128k)";
+  const at40 = "k8s:etcd…er-0/guard · ctx ~7% (~9k/128k)";
+
+  test("owner frames: 80 columns whole `kubernetes:…`; 40 columns `k8s:etcd…er-0/guard`", () => {
+    expect(statusLayout({ ...base, columns: 80 }).plain).toBe(at80);
+    expect(statusLayout({ ...base, columns: 40 }).plain).toBe(at40);
+  });
+
+  test("scrolled and expanded, at 80 and at 40: the same frame — the name is never cut, the hint is omitted", () => {
+    for (const suffix of [scrolled, expanded]) {
+      const a = statusLayout({ ...base, columns: 80, suffix });
+      expect(a.plain).toBe(at80);
+      expect(a.suffix).toBe("");
+      const b = statusLayout({ ...base, columns: 40, suffix });
+      expect(b.plain).toBe(at40);
+      expect(b.suffix).toBe("");
+    }
+  });
+
+  test("a hint that fits WHOLE beside the whole badge is shown", () => {
+    const l = statusLayout({ ...base, columns: 120, suffix: scrolled });
+    expect(l.suffix).toBe(scrolled);
+    expect(l.plain.startsWith("kubernetes:etcd-guard-sharedocp419-f84rv-master-0/guard · ")).toBe(
+      true,
+    );
+    expect(l.plain.endsWith(`~9k/128k)${scrolled}`)).toBe(true);
+  });
+
+  test("a hint beside a link that cut the name is omitted too", () => {
+    const link = "disconnected: connection refused by the remote daemon and more";
+    for (let columns = 60; columns <= 110; columns++) {
+      const l = statusLayout({ ...base, columns, linkText: link, suffix: expanded });
+      expect(l.suffix === "" || !(l.badge ?? "").includes("…")).toBe(true);
+    }
+  });
+});
+
+describe("final pass (2, 4, 5): narrow widths, a multi-line link, no double ellipsis", () => {
+  const meter = contextMeterView(9000, true, 128000);
+  const base = {
+    linkText: null,
+    target: null,
+    cwd: "/x/y",
+    home: undefined,
+    tokens: null,
+    meter,
+    hint: " ⏵⏵ auto-accept off (shift+tab) ",
+    suffix: "",
+  } as const;
+  const CTX = "ctx ~7% (~9k/128k)";
+  const link = "disconnected: connection refused by the remote daemon and more";
+
+  test("under ~33 columns the meter stays whole and the link is a fragment — pinned (no marker)", () => {
+    const frames: Record<number, string> = {};
+    for (let columns = 20; columns <= 32; columns++) {
+      const l = statusLayout({ ...base, columns, linkText: link });
+      frames[columns] = l.plain;
+      expect(l.plain.endsWith(CTX)).toBe(true);
+      expect(stringWidth(l.plain)).toBeLessThanOrEqual(columns);
+      expect(l.plain).not.toContain("· ·");
+      expect(l.plain.startsWith(" ")).toBe(false);
+    }
+    expect(frames[20]).toBe(CTX);
+    expect(frames[22]).toBe(`d · ${CTX}`);
+    expect(frames[26]).toBe(`disco · ${CTX}`);
+    expect(statusLayout({ ...base, columns: 33, linkText: link }).plain).toBe(
+      `disconnected · ${CTX}`,
+    );
+  });
+
+  test("a newline (or other control character) in the link text never gives a second row", () => {
+    const control = /[\n\r\t]/;
+    for (const text of ["disconnected: line one\nline two", "disconnected: a\r\nb\tcd"]) {
+      for (const columns of [30, 40, 80, 120]) {
+        const l = statusLayout({ ...base, columns, linkText: text });
+        expect(control.test(l.plain)).toBe(false);
+        expect(control.test(l.link)).toBe(false);
+        expect(stringWidth(l.plain)).toBeLessThanOrEqual(columns);
+      }
+    }
+    expect(
+      statusLayout({ ...base, columns: 80, linkText: "disconnected: line one\nline two" }).link,
+    ).toBe("disconnected: line one line two · ");
+  });
+
+  test("a cut never doubles the link's own `…` (`reconnecting……`)", () => {
+    const text = "reconnecting… (attempt 3, retry in 5s)";
+    let cut = 0;
+    for (let columns = 20; columns <= 120; columns++) {
+      for (const target of [
+        null,
+        { engine: "kubernetes", name: "pod-1", container: "c" } as const,
+      ]) {
+        const l = statusLayout({ ...base, columns, linkText: text, target });
+        expect(l.plain).not.toContain("……");
+        expect(l.plain).not.toContain("… …");
+        if (l.link.includes("…") && !l.link.includes("(attempt 3, retry in 5s)")) {
+          cut++;
+        }
+      }
+    }
+    expect(cut).toBeGreaterThan(0);
+    // Exactly the case: the cut lands right after the text's own `…`.
+    expect(statusLayout({ ...base, columns: 35, linkText: text }).link).toBe("reconnecting… · ");
   });
 });
 

@@ -2,7 +2,9 @@
  * Terminal CELLS, not code points (the owner's rule, `tool-expand.ts`): the
  * status bar and the input border measure and cut text with `string-width`, so a
  * double-width character (CJK, emoji) never overflows the line Ink lays out.
- * Pure.
+ * Pure. Known limit, not ours: Ink's output grid disagrees with `string-width`
+ * for single-unit (`✅`) and ZWJ emoji — see docs/library-bugs.md (Ink, output
+ * grid); the measure here is right and there is no workaround.
  */
 import stringWidth from "string-width";
 

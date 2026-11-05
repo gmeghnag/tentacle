@@ -640,11 +640,12 @@ export async function startEngineRuntime(
       ...(deps.notify ? { notify: deps.notify } : {}),
     });
     fault.watch(runtime);
-    // A tentacle-made workload has the one container: no `/container` part.
+    // A tentacle-made pod's container is `host.defaultContainer` (k8s: always
+    // shown as `/container`); docker/podman have none.
     return Object.assign(runtime, {
       markFault: fault.mark,
       announce,
-      target: engineTarget(host, name),
+      target: engineTarget(host, name, host.defaultContainer),
     });
   } catch (error) {
     // The TUI never mounted: the caller prints ONE short line; the whole cause
@@ -1000,7 +1001,7 @@ export async function attachEngineRuntime(
     fault.watch(runtime);
     return Object.assign(runtime, {
       markFault: fault.mark,
-      target: engineTarget(host, name, container, state.containers),
+      target: engineTarget(host, name, state.inUse),
     });
   } catch (error) {
     status?.finish();

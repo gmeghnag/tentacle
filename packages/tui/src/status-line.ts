@@ -6,9 +6,10 @@
  * code points: a double-width character must not push the ctx max off the line.
  */
 import { cellWidth, headCells, tailCells } from "./cells.ts";
+import { oneLine } from "./commands.ts";
 import { formatTokens } from "./format.ts";
 import type { TokenTotals } from "./state.ts";
-import { type TargetBadge, minBadgeCells, targetText } from "./target-view.ts";
+import { type TargetBadge, minBadgeCells, targetParts, targetText } from "./target-view.ts";
 
 const RULE = "─";
 /** The leading dashes kept before the model name on the border. */
@@ -124,7 +125,10 @@ export interface StatusLayout {
   readonly link: string;
   /** Cells of `link`. */
   readonly linkCells: number;
+  /** The whole badge as painted (`prefix` + name); the component splits it at `badgePrefix`. */
   readonly badge: string | null;
+  /** The badge's leading part, colon included (`kubernetes:` / `k8s:` / …): painted grey. */
+  readonly badgePrefix: string;
   readonly path: string | null;
   readonly tokens: string | null;
   readonly compact: boolean;
@@ -149,7 +153,9 @@ function cutLink(text: string, max: number): string {
   if (max <= cellWidth(word)) {
     return headCells(word, max);
   }
-  return `${headCells(text, max - 1)}…`;
+  // The cut can land right after the text's own `…` (`reconnecting…`): no second one.
+  const head = headCells(text, max - 1).trimEnd();
+  return head.endsWith("…") ? head : `${head}…`;
 }
 
 /**
@@ -157,21 +163,25 @@ function cutLink(text: string, max: number): string {
  * short things give way in this order: the PATH shrinks (to `MIN_PATH`), the
  * auto-accept hint goes, `↑ ↓` go, the meter loses its bar; the ctx figure WITH
  * its max always stays. The badge is whole unless it does not fit; the owner's
- * rule (`targetText`) cuts its name, then name/container, then `pod…`; under
- * the width where `pod…`, the separator and the meter fit, the WHOLE badge goes.
+ * rule (`targetText`) uses `k8s:` for `kubernetes:` when it would be cut, cuts
+ * its name, then name/container, then `k8s:…`; under the width where `k8s:…`
+ * (5 cells; `docker:…` 8), the separator and the meter fit (26; docker 29), the
+ * WHOLE badge goes. The scroll/expand hint comes AFTER the badge name: shown only
+ * if it fits whole beside the whole badge, else omitted — it never cuts the name.
  * The link state beats the badge NAME (it keeps at least its first word) and is
  * dropped only when not even 4 cells are left (a line under ~22 columns).
  */
-export function statusLayout(input: StatusLayoutInput): StatusLayout {
+function layoutRow(input: StatusLayoutInput): StatusLayout {
   const width = Math.max(10, input.columns);
   const meterCells = cellWidth(meterText(input.meter, true));
   const target = input.target;
-  const linkFull = input.linkText ? cellWidth(input.linkText) + SEP.length : 0;
-  const linkMin = input.linkText
-    ? Math.min(linkFull, cellWidth(firstWord(input.linkText)) + SEP.length)
-    : 0;
+  // ONE line whatever the text carries (a stop reason may embed a daemon's message).
+  const linkText = input.linkText ? oneLine(input.linkText) : "";
+  const linkFull = linkText ? cellWidth(linkText) + SEP.length : 0;
+  const linkMin = linkText ? Math.min(linkFull, cellWidth(firstWord(linkText)) + SEP.length) : 0;
   const badgeMin = target ? minBadgeCells(target) + SEP.length : 0;
-  // The hint (` · ↑3 more …`) is whole or dropped; it is counted before the badge.
+  // The hint (` · ↑3 more …`) is whole or dropped (`statusLayout` also drops it
+  // when it would cost the badge its name).
   const suffixCells = cellWidth(input.suffix);
   const suffix =
     input.suffix !== "" && width - meterCells - suffixCells >= linkMin + badgeMin
@@ -179,33 +189,34 @@ export function statusLayout(input: StatusLayoutInput): StatusLayout {
       : "";
   const avail = width - meterCells - cellWidth(suffix);
 
-  let badge: string | null = null;
+  let badgeParts: { prefix: string; name: string } | null = null;
   let linkCells = 0;
   if (target !== null && avail >= badgeMin + linkMin) {
-    if (!input.linkText) {
-      badge = targetText(target, avail - SEP.length);
+    if (!linkText) {
+      badgeParts = targetParts(target, avail - SEP.length);
     } else if (linkFull + cellWidth(targetText(target)) + SEP.length <= avail) {
       linkCells = linkFull;
-      badge = targetText(target);
+      badgeParts = targetParts(target);
     } else {
       // The link beats the badge NAME: it takes up to its share, never under its
-      // first word, and leaves the badge at least `pod…`.
+      // first word, and leaves the badge at least `k8s:…`.
       linkCells = Math.min(
         linkFull,
         Math.max(linkMin, Math.floor(avail * LINK_SHARE)),
         avail - badgeMin,
       );
-      badge = targetText(target, avail - linkCells - SEP.length);
+      badgeParts = targetParts(target, avail - linkCells - SEP.length);
     }
-  } else if (input.linkText) {
+  } else if (linkText) {
     // No badge (it does not fit with the meter): the link gets what is left.
     linkCells = Math.min(linkFull, avail);
   }
   const link =
-    input.linkText && linkCells - SEP.length >= 1
-      ? `${cutLink(input.linkText, linkCells - SEP.length)}${SEP}`
+    linkText && linkCells - SEP.length >= 1
+      ? `${cutLink(linkText, linkCells - SEP.length)}${SEP}`
       : "";
   const linkWidth = cellWidth(link);
+  const badge = badgeParts === null ? null : `${badgeParts.prefix}${badgeParts.name}`;
   const badgePart = badge === null ? "" : `${badge}${SEP}`;
 
   const tokenText = input.tokens
@@ -244,6 +255,7 @@ export function statusLayout(input: StatusLayoutInput): StatusLayout {
     link,
     linkCells: linkWidth,
     badge,
+    badgePrefix: badgeParts?.prefix ?? "",
     path,
     tokens,
     compact: v.compact,
@@ -251,4 +263,19 @@ export function statusLayout(input: StatusLayoutInput): StatusLayout {
     hint,
     plain,
   };
+}
+
+export function statusLayout(input: StatusLayoutInput): StatusLayout {
+  const first = layoutRow(input);
+  const { target } = input;
+  // The scroll/expand hint NEVER cuts the badge name (owner, final pass): if the
+  // row with the hint cut or dropped the badge, the hint is the one to go.
+  if (
+    first.suffix !== "" &&
+    target !== null &&
+    (first.badge === null || cellWidth(first.badge) < cellWidth(targetText(target)))
+  ) {
+    return layoutRow({ ...input, suffix: "" });
+  }
+  return first;
 }

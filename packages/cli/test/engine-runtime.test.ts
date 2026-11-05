@@ -891,6 +891,27 @@ describe("startPodRuntime", () => {
       await runtime.dispose();
     });
 
+    test("attach: the badge ALWAYS names the container, resolved laptop-side — also for a one-container pod", async () => {
+      // Mutation: engineTarget drops the container for one container → no `container` here.
+      const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const status = { phase: "Running", conditions: [{ type: "Ready", status: "True" }] };
+      kube.pod = { metadata: { name: "mypod" }, spec: { containers: [{ name: "app" }] }, status };
+      const single = await attach(kubeEngineHost(kube, "dev"), [], freshLog());
+      expect(single.target).toEqual({ engine: "kubernetes", name: "mypod", container: "app" });
+      await single.dispose();
+      kube.pod = {
+        metadata: {
+          name: "mypod",
+          annotations: { "kubectl.kubernetes.io/default-container": "etcd" },
+        },
+        spec: { containers: [{ name: "etcdctl" }, { name: "etcd" }] },
+        status,
+      };
+      const annotated = await attach(kubeEngineHost(kube, "dev"), [], freshLog());
+      expect(annotated.target).toEqual({ engine: "kubernetes", name: "mypod", container: "etcd" });
+      await annotated.dispose();
+    });
+
     test("attach: a pod that is not found / terminated creates no log either", async () => {
       // Mutation: open the log before `inspect` (the old order) → the dir exists.
       const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
@@ -1736,6 +1757,9 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
         const size = `ELF___${formatVersionMarker("0.3.0")}___`.length;
         expect(kube.calls[0]).toMatch(/^create:tentacle-/);
         expect(kube.calls.some((c) => c.includes(`head -c ${size} >`))).toBe(true);
+        // The badge of a tentacle-made pod names its container (`kubernetes:<pod>/agent`).
+        expect(runtime.target?.engine).toBe("kubernetes");
+        expect(runtime.target?.container).toBe("agent");
         runtime.dispose();
       },
     );

@@ -200,11 +200,8 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
       // `default-container` annotation (silently) when it names a container of
       // `spec.containers`; only then does it refuse.
       let resolved: { container?: string } = {};
-      // Told to the caller for the badge: a pod with several containers shows
-      // which one the TUI runs in (`pod <name>/<container>`).
-      const containers = podContainerNames(pod).length;
+      const names = podContainerNames(pod);
       if (options?.container === undefined) {
-        const names = podContainerNames(pod);
         if (names.length > 1) {
           const preferred = pod.metadata?.annotations?.[DEFAULT_CONTAINER_ANNOTATION];
           if (preferred !== undefined && names.includes(preferred)) {
@@ -216,12 +213,18 @@ export function kubeEngineHost(kube: PodCluster, namespace: string): EngineHost 
           }
         }
       }
+      // Told to the caller for the badge (`kubernetes:<pod>/<container>`, always):
+      // the named container, the annotation's, or the pod's only one. Resolved
+      // laptop-side from the pod read; the exec target is unchanged.
+      const inUse =
+        options?.container ?? resolved.container ?? (names.length === 1 ? names[0] : undefined);
+      const badge = inUse === undefined ? {} : { inUse };
       return podIsReady(pod)
-        ? { kind: "ready", containers, ...resolved }
+        ? { kind: "ready", ...badge, ...resolved }
         : {
             kind: "starting",
             detail: `pod "${name}" is ${phase ?? "pending"}`,
-            containers,
+            ...badge,
             ...resolved,
           };
     },

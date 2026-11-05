@@ -171,7 +171,7 @@ describe("kubeEngineHost", () => {
       metadata: { name: "p" },
       status: { phase: "Running", conditions: [{ type: "Ready", status: "True" }] },
     };
-    expect(await host.inspect("p")).toEqual({ kind: "ready", containers: 0 });
+    expect(await host.inspect("p")).toEqual({ kind: "ready" });
     kube.pod = { metadata: { name: "p" }, status: { phase: "Running" } };
     expect((await host.inspect("p")).kind).toBe("starting");
     kube.pod = { metadata: { name: "p" }, status: { phase: "Succeeded" } };
@@ -206,9 +206,9 @@ describe("kubeEngineHost", () => {
       "a container name must be specified for pod p, choose one of: [dns kube-rbac-proxy] · pass --container <c>",
     );
     // A named container: nothing to refuse (a wrong name is the exec's to say).
-    expect(await host.inspect("p", { container: "dns" })).toEqual({ kind: "ready", containers: 2 });
+    expect(await host.inspect("p", { container: "dns" })).toEqual({ kind: "ready", inUse: "dns" });
     kube.pod = { metadata: { name: "p" }, spec: { containers: [{ name: "only" }] }, status };
-    expect(await host.inspect("p")).toEqual({ kind: "ready", containers: 1 });
+    expect(await host.inspect("p")).toEqual({ kind: "ready", inUse: "only" });
     // A terminated pod stays a "stopped" verdict, whatever its containers.
     kube.pod = {
       metadata: { name: "p" },
@@ -232,7 +232,7 @@ describe("kubeEngineHost", () => {
     const KEY = "kubectl.kubernetes.io/default-container";
     // Mutation: ignore the annotation → a refusal (red here).
     kube.pod = podWith({ [KEY]: "etcd" });
-    expect(await host.inspect("p")).toEqual({ kind: "ready", container: "etcd", containers: 5 });
+    expect(await host.inspect("p")).toEqual({ kind: "ready", container: "etcd", inUse: "etcd" });
     // Not yet ready: the same resolution on `starting`.
     kube.pod = { ...podWith({ [KEY]: "etcd" }), status: { phase: "Running" } };
     expect(await host.inspect("p")).toMatchObject({ kind: "starting", container: "etcd" });
@@ -257,7 +257,7 @@ describe("kubeEngineHost", () => {
     kube.pod = podWith({ [KEY]: "etcd" });
     expect(await host.inspect("p", { container: "etcd-rev" })).toEqual({
       kind: "ready",
-      containers: 5,
+      inUse: "etcd-rev",
     });
     // One container: unchanged, whatever the annotation says.
     kube.pod = {
@@ -265,7 +265,7 @@ describe("kubeEngineHost", () => {
       spec: { containers: [{ name: "only" }] },
       status,
     };
-    expect(await host.inspect("p")).toEqual({ kind: "ready", containers: 1 });
+    expect(await host.inspect("p")).toEqual({ kind: "ready", inUse: "only" });
   });
 
   test("inspect: a 404 is a WorkloadNotFoundError naming the place (`in <ns>`)", async () => {

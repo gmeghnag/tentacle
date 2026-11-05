@@ -979,3 +979,86 @@ a column or two. It gave the link's cut a reason where it differs from the owner
 sketch. Two gaps: "the sweep covers emoji" was true only for the emoji class that
 works, and the hint's priority over the name was again a decision it did not mark as
 one.
+
+### Execution — final pass
+
+*— claude-sonnet-5-5, 2026-11-05*
+
+Answers "Review — round 4" (PASS, 5 LOWs) and the owner's live feedback of 2026-11-05.
+The two "Review — final pass: Not OK, absent" notes (written while no executor ran) are
+deleted. **Drift from Implementation:** the badge format below replaces `pod <name>` /
+`docker <name>` everywhere in Context/Implementation/rounds 1–4 (those texts are history).
+
+1. **LOW 1 (owner: accept Ink's limit).** `docs/library-bugs.md` has an entry (Ink output
+   grid vs `string-width`, single-unit and ZWJ emoji, the review's repro frame); the
+   comment in `cells.ts` points to it. No workaround.
+2. **LOW 2 (owner: accept).** Under ~33 columns the meter stays whole and the link is a
+   fragment, no one-cell marker. No code change; pinned in `status-line.test.ts`
+   (widths 20–32: meter whole, ≤ width, no `· ·`; 20 → `ctx ~7% (~9k/128k)`, 22 →
+   `d · ctx …`, 26 → `disco · ctx …`, 33 → `disconnected · ctx …`).
+3. **LOW 3 (owner rule).** The scroll hint and `expanded` never cut the badge name:
+   `statusLayout` lays the row out, and if the hint is in it while the badge is cut or
+   gone, it lays the row out again without the hint. Owner frames (real Ink, scrolled
+   and expanded alike): 80 `kubernetes:etcd-guard-sharedocp419-f84rv-master-0/guard ·
+   ctx ~7% (~9k/128k)`; 40 `k8s:etcd…er-0/guard · ctx ~7% (~9k/128k)`.
+4. **LOW 4.** `statusLayout` runs the link text through `oneLine` (`commands.ts`, the one
+   `link-status.ts` uses): a newline/tab never makes a second row. Tested pure and on a
+   real frame at 40 and 80.
+5. **LOW 5.** `cutLink` no longer appends `…` to a head that already ends in one.
+   Tested over widths 20–120, with and without a badge (no `……`, no `… …`).
+6. **Live feedback, new format.** `<engine>:<name>`, no space. Pure `target-view.ts`:
+   `targetParts` returns `{prefix, name}`; `kubernetes:` when the whole badge fits, else
+   `k8s:`, then the existing cut rule (prefix whole; pod name first while it keeps ≥ 5
+   cells, else name/container together). `StatusBar` paints the prefix (colon included)
+   `dimColor` and the name `accentHex`. Kubernetes ALWAYS shows `/container`:
+   `kubeEngineHost.inspect` returns `inUse` (the `--container`, else the annotation's,
+   else the pod's only container; replaces `containers`), `run` uses
+   `host.defaultContainer` (`agent`). All laptop-side from the pod read, sanitised by
+   `engineTarget`; the exec target is unchanged. **Thresholds recomputed:** the whole
+   badge goes below `k8s:…` (5) + 3 + 18 = **26** columns (`docker:…` 8 → **29**,
+   `podman:…` 29). Side effect worth knowing: with a link at 40 columns `k8s:…` no
+   longer fits beside the first word (`disconnected · k8s:… · ctx …` is 41), so the badge
+   goes and the link gets the room (`disconnected: conn… · ctx ~7% (~9k/128k)`); at 41
+   the badge is back. Colour split asserted in non-stripped frames (`\e[2mkubernetes:\e[22m`,
+   accent `\e[38;2;6;182;212m` on the name; `k8s:` the same).
+7. **Live feedback, auto-accept colour.** `autoAcceptHex = "#fec20a"` in `theme.ts` next to
+   `accentHex`, used by `StatusBar`; `off` stays dim. Pinned in a non-stripped frame.
+8. **CHANGELOG.** Added text rewritten for the new format; Changed: the auto-accept colour,
+   one-row link text, no doubled `…`.
+
+**Mutations** (one per item, reverted; `shasum` of the 6 touched sources identical before
+and after): 3 wrapper does not re-lay-out → killed (5); 4 no `oneLine` → killed (2);
+5 always append `…` → killed (1); 6a `k8s:` short prefix off → killed (20); 6b prefix
+painted accent → killed (2); 7 hint back to `accentHex` → killed (1); container only for
+a multi-container pod (`inUse` undefined for one container) → killed (3). Items 1–2 have
+no behaviour change (2 is a pin).
+
+**Gate** (once, foreground): `bunx tsc --noEmit` clean; `bunx biome check .` clean (648
+files); `bun test packages` 4553 pass · 3 skip (opt-in) · 0 fail.
+
+**Live check for the owner (not verified by this pass):**
+- Badge per engine, at 40 and 80 columns: `kubernetes:<pod>/<container>` (one-container pod
+  too, and a pod you `run`: `/agent`), `docker:<name>`, `podman:<name>`; prefix grey, name cyan.
+- Long names: 80 `kubernetes:…` whole, 40 `k8s:etcd…er-0/guard`; under 26 columns the badge
+  disappears and `ctx` stays.
+- Disconnect (kill the daemon / drop the network): the link text in the bar, one row; at 40
+  columns the badge gives way to the link.
+- Scroll up and `expanded` with the long pod: the badge name is never cut (the hint is absent).
+- `⏵⏵ auto-accept on` golden yellow, `off` grey.
+- ctx exact at open on `attach` and on `--resume`, and after `/compact`.
+- Real count against llama.cpp (`/apply-template` + `/tokenize`) and Anthropic
+  (`count_tokens`): only fake `fetch` so far.
+
+## Review — final pass
+
+*— claude-opus-5-5, 2026-11-05*
+
+**OK: items 1-7 hold,** and the diff touches only the 18 listed files. Same reviewer context, not fresh.
+- **Frames, real Ink.** 80: `kubernetes:etcd-guard-sharedocp419-f84rv-master-0/guard · ctx ~7% (~9k/128k)`, scrolled and expanded alike; `docker:t-1 · … · ↑12 more (↓ to follow)`. 40: `k8s:etcd…er-0/guard · ctx ~7% (~9k/128k)`; `disconnected: conn… · ctx ~7% (~9k/128k)`.
+- **Under 33 columns.** Fragment as answered: `d · ctx…` at 22, `disco · ctx…` at 26. Badge from 26 (`k8s:…`) and 29 (`docker:…`).
+- **Colours, raw frames.** Prefix `\e[2m` with its colon, name `\e[38;2;6;182;212m`; auto-accept on `\e[38;2;254;194;10m`, off dim.
+- **Sweep.** 75,600 frames, widths 20-130, ASCII, CJK and surrogate-pair emoji, newline links: 0 violations of one row, ≤ width, ctx whole, prefix, first word, hint whole, no name cut beside a hint, no `……`. Accepted emoji classes excluded.
+- **Mutation.** `run` drops `host.defaultContainer` from the badge: killed (89 pass, 1 fail); `shasum` identical (`418f3d85…`).
+- **Gate.** `bunx tsc --noEmit` clean; `bunx biome check .` clean (648 files); `bun test packages` 4553 pass · 3 skip · 0 fail.
+
+**LOW, for the owner to know.** With a link at 40, `k8s:…` no longer fits (41 cells), so the badge goes: disclosed in Execution, and it differs from round 4's frame. `docs/library-bugs.md` says only user-controlled text reaches the Ink limit, but a link message can embed a daemon's text. Live engines and real count endpoints remain unverified.
