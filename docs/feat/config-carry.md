@@ -283,9 +283,9 @@ already W, and task 7 passes it to children.
   optional. "Honoured only by a session this open creates; ignored in every other
   case", added to the rule block at `session.ts:389-428`.
 - `OpenResult.settings` (Q1), optional:
-  `{ carried: SessionSettingsSchema, overridden: z.array(line(64)).max(64) }`, using
-  `line` from `packages/protocol/src/text-line.ts:11`. `overridden` is bounded strings
-  rather than an enum, so a newer daemon's key cannot reject the whole open.
+  `{ carried: SessionSettingsSchema, overridden: SessionSettingsSchema }`. `overridden`
+  holds the pod's values that win (round 2, owner F2). The schema validates them, and a
+  key a newer daemon adds is stripped, so it cannot reject the whole open.
 - `PROTOCOL_VERSION` → **16** (`packages/protocol/src/version.ts:7`). The schema change
   alone is additive, but the meaning is not: a v15 daemon strips `settings`, and the
   new laptop no longer passes the flags, so every P value would be lost with no
@@ -352,12 +352,24 @@ modules). It is the one place holding the table.
     reset agrees, since it reads the merged flags (`load.ts:302`, `:333`, `:358`).
   - `pinnedOver`: P keys the pod's own env or file set to a different value, logged once
     per session to the daemon log. Not sent to the laptop.
-- `settingsNotices(mine, report): string[]`, pure, on the laptop. Key names are matched
-  against this laptop's `CARRIED` table and others are dropped. Output:
-  - overridden: `This container's own config sets <keys>; its values win over yours for this session.`
-  - drift (`report.carried` ≠ `mine`, compared per key): `This session keeps the settings it was created with (<keys> differ); a new session uses yours.`
+- `settingsNotices(mine, report): string[]`, pure, on the laptop (format: owner F2, round 2).
+  Only keys of this laptop's `CARRIED` table, under their config names, as one line of JSON:
+  - overridden, the values that win:
+    ```
+    This container's own config wins over yours for this session:
+      { "maxIterations": 7 }
+    ```
+  - drift (`report.carried` ≠ `mine`, per key; a key in `overridden` is told only above,
+    since its value is the one running):
+    ```
+    This session keeps the settings it was created with (a new session, /clear, uses yours):
+      { "maxIterations": 3, "tools.dedupOutput": false }
+    ```
 
-  Key names only, so no pod-supplied text reaches the terminal.
+  Numbers, booleans and execution modes are printed. `subagents.agentTaskDescription` and
+  any other text are `"(text differs)"`, so no pod-supplied text reaches the terminal. The
+  notice's own text has no indent: the TUI indents a notice's later lines
+  (`packages/tui/src/render-lines.ts:587-593`).
 
 **CLI wiring.**
 
@@ -428,7 +440,8 @@ Tests:
 | **Version skew:** old laptop, new binary | The laptop injects its own binary, so this needs `TENTACLE_POD_BIN`. The removed flag then fails the closed parser (`flags.ts:267`), seen as "connection closed", with the reason in the routed daemon log | Pre-public, no shim (§7). Accepted, in Notes |
 | **Version skew:** same version, a key unknown to the daemon | Stripped. `overridden` from a newer daemon is dropped by the laptop's table | Task 7 bumps for this reason |
 | **Resident already up, laptop has other settings** | A new session uses this laptop's values, which fixes §3.4. Other live sessions are untouched | Per session |
-| **Attach to a live session with another profile** | Ignored (`session.ts:394`). The drift notice names the differing keys | The user opens a new session for the new values |
+| **Attach to a live session with another profile** | Ignored (`session.ts:394`). The session is attached at the attach, on the plain path too (round 2), and the drift notice shows its differing values | The user opens a new session for the new values |
+| **Attach after the session left the daemon** (daemon restarted, or a quit closed it) | Rebuilt from the laptop's record with this laptop's settings: nothing is kept, so no drift notice | Same as a recreate, below |
 | **Two TUIs racing to create one id** | Synchronous open: the first wins; the second attaches and gets the drift notice | One agent |
 | **`run --detach`, then `attach --profile X`** | The relay created the session from the run's profile (`relay.ts:604-608`), so the TUI gets drift. A later `/clear` session uses X | As above |
 | **Relay reconnects** | Live id → re-attach, no settings. Notice deduplicated | No repeat |
@@ -437,7 +450,7 @@ Tests:
 | **In-process worker** | Never sends; gets the laptop's config by bootstrap (`worker.ts:55`) | Unchanged |
 | **Invalid value** | The laptop can't produce one: same bounds, and an invalid file is fatal (`main.ts:551-553`). If a bug did, the outbound check rejects locally (`peer.ts:152-155`) and the open fails visibly. From another client: `InvalidParams` (`peer.ts:340`), nothing built, never half-applied | The error surfaces in the turn |
 | **Hostile pod ignores a pin** | Possible and accepted (§7: UX, not security). It could already burst `model/stream`. The laptop gates still hold: titles (`remote-client.ts:1955-1967`), permissions (broker) | No laptop effect |
-| **Hostile pod lies in the report** | At worst a false notice. Names are filtered by the laptop's table, values are never printed, and it creates no approval | §7 holds |
+| **Hostile pod lies in the report** | At worst a false notice. Names are filtered by the laptop's table, only numbers, booleans and execution modes are printed (any text is `"(text differs)"`), and it creates no approval | §7 holds |
 | **Hostile pod sends a malformed report** | The peer rejects that open's result (`peer.ts:449`), so the pod breaks its own session only | Visible error |
 | **Pod's own `apiKeyCommand`** | Not run under the proxy, including when it would fail | Removes a fatal for a value never used (eval Notes) |
 | **Bare open on a proxy daemon** (no `settings`) | The pod's own values, titles off. Only a future or third-party client | Same as today's "no flags" |
@@ -496,13 +509,13 @@ Under `## [Unreleased]`:
   `maxIterations`, `tools.*`, `contextAwareness`, `contextReset`, `loadAgentsMd`
   and `loadSkills` (your environment, active profile and global file, resolved on
   your laptop) as the lowest layer. The container's own environment and config
-  file still win, and you are told which keys they set. Pods no longer run on
+  file still win, and you are shown the values that win. Pods no longer run on
   plain defaults, so a limit such as `maxIterations` now follows you.
 - **Sub-agent settings, `model.contextWindow` and `model.autoTitle` are always
   your laptop's** in a pod or container; its own config cannot change them.
 - **`attach --profile <name>` now applies to the new sessions it opens.** A
-  session already running keeps the settings it was created with, and says which
-  ones differ.
+  session already running keeps the settings it was created with, and shows those
+  that differ from yours as soon as you attach.
 - The protocol is now version 16. A daemon left running by an older tentacle is
   refused at connect; attach again to replace it, or `tentacle rm <name>` if a
   detached run still uses it.
@@ -676,9 +689,9 @@ directly), which belongs with `TODO.md`'s `cli-tests-terminal-clean`.
 2. **k8s, `run --profile p`:** stops at 5, on a pod with no config of its own.
 3. **Container's own config:** in the image or by `exec`, write `maxIterations: 7` to its
    `~/.config/tentacle/config.jsonc`, restart its daemon, open a session: 7 wins, and the TUI
-   says `This container's own config sets maxIterations; …`.
+   says `This container's own config wins over yours for this session:` and `{ "maxIterations": 7 }`.
 4. **Re-attach with different settings:** `attach <name> --profile p` to a live session: the
-   notice `This session keeps the settings it was created with (maxIterations differ); …`,
+   notice `This session keeps the settings it was created with (…):` and `{ "maxIterations": 3 }`,
    once, not again after a reconnect. `/clear` there: the new session uses 5, no notice.
 5. **Detached resident:** `run --detach`, then `attach` with the same config: no notice. With
    `--profile p`: the drift notice. In the relay's log: nothing raw on any terminal.
@@ -687,6 +700,94 @@ directly), which belongs with `TODO.md`'s `cli-tests-terminal-clean`.
 7. **`connect`:** to a `serve` with `maxIterations: 9` from a laptop with 3: the turn uses 9, no
    settings notice.
 8. **A pod's failing `model.apiKeyCommand`:** the attach and its status probe still work.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-05*
+
+**F1, the missing drift notice.** New `packages/cli/test/settings-notice-attach.test.ts`:
+the real `podSessionHost` and the real `createLocalRuntime`, a resident host outliving each
+laptop. Three results, on the round-1 code:
+
+| Attach | Session on the daemon | Result |
+|---|---|---|
+| Join (`attachTo`, a run with a record) | live | notice shown: the comparison works |
+| Plain (`main.ts`, kept container, no record of a run) | live | **no notice before the first prompt** (red) |
+| Any, daemon restarted | gone | no notice, and the session runs on the laptop's values |
+
+**Root cause, reproduced:** the plain path handed the TUI a lazy session
+(`packages/cli/src/main.ts`, the `runEngineTui` call after `attachPlainRuntime`), and the
+notice comes from the open's report (`packages/client/src/remote-client.ts`, `noteSettings`),
+so no open meant no report. Red: `main.test.ts` "the session is opened at the attach"
+(`Expected: "1111…", Received: undefined`). **Fix:** the plain path calls
+`runtime.attachTo(resume.id, resume)` before the TUI. Attached: the daemon's history draws
+(`resume: null`, as `main.ts` does for a join). Not there, or any failure: lazy from the record.
+
+**The live cases are NOT explained by that fix, and the notice would be false in them.**
+`cc-t2` had a restarted daemon: `attachTo` is false, `openSeeded` creates the session with
+this open's settings, so `report.carried` equals `mine` and nothing is kept (the Design's
+recreate row; pinned by a test). `cc-t1` has an `owner.json`, so it takes the join path
+(`attach-plan.ts:69-76`), where a live session does give the notice. So its session was
+probably gone at that attach: `daemon.log` records two attaches (18:01:58, 18:02:43), and a
+quit of the first closes the session. **This is inferred, not observed:** `docker exec` needed
+an approval this session did not have, and the first attach has no capture. To verify: a fresh
+`run --detach` with `maxIterations: 3`, wait for `relay exit`, then one FIRST
+`attach --profile p <name>` with no earlier attach: the notice must show at once.
+
+**F2, the format.** As specified, in `settingsNotices` (Design updated). Wire:
+`OpenResult.settings.overridden` is now `SessionSettingsSchema`, the pod's values, instead of
+names. No version bump: v16 is this branch's own and is unreleased.
+
+**F3, pre-existing: yes, not fixed.** Same code on `main` (`main-docs`): the laptop's `model/stream`
+handler rethrows a provider error unless it is a lost connection
+(`remote-client.ts:2063`, `connectionLost`), the peer answers the pod an opaque text
+(`transport/src/peer.ts:376`), and the daemon reports it as the turn's error
+(`daemon/src/hosted-session.ts:254`). `peer.ts` and `relay.ts` are untouched on this branch.
+TODO-ready entry:
+
+> **`fix/detached-model-error-reason`** — `Type: fix · Size: S · Blast: cross-module`. A
+> `run --detach` whose model answers an HTTP error (a 401 from a config with no API key) ends
+> `state: failed internal error` in `relay.log`, with no reason. The redaction is right, since
+> a provider's message can carry the endpoint or key and the pod is not trusted (AGENTS §7), but
+> the laptop knows the cause and does not say it where the user looks. By reading, the real
+> message goes through `onPeerError` to the run's `daemon.log` (`engine-runtime.ts:1044` on
+> `main`), not observed live. Extend `connectionLost` (`remote-client.ts:2063`) so the laptop
+> answers with a text built from the HTTP status only (`the model endpoint answered 401`), never
+> the provider's message, or log the local error to `relay.log`. Test: a provider that throws a
+> 401 → the relay's `failed` detail names it, and no provider text reaches the pod.
+
+**F4.** `resolveAgentTaskDescription` (`packages/config/src/load.ts:430`): under `podDaemon` an
+invalid inline text is dropped instead of failing the load. Red first (`ConfigError … over 4096
+bytes`).
+
+**Drift from the brief:**
+
+1. F4 is more than one line. Skipping the check outright would keep an invalid text on a bare
+   open, and dropping every inline text would break the Design's "a bare open has the pod's
+   inline text". So a valid text stays, and an invalid one is dropped. The parameter
+   `readFromFile` became `podDaemon`.
+2. The notice's second line has no indent in its text: the TUI adds two spaces
+   (`render-lines.ts:587-593`), which gives the owner's format on screen. In `relay.log` it has
+   no indent. Not checked in a rendered frame: pinned by reading that function only.
+3. A key in `overridden` is left out of the drift notice, since the value that runs is the pod's.
+   A key absent from `report.carried` is skipped too (nothing to show), except the description.
+4. `schema/protocol.json` was edited by hand again: `bun run schema:export` needed an approval
+   this session did not have. `json-schema.test.ts` compares it with the generator by value, and
+   passes. To confirm the bytes: run the export, and `git diff` should show nothing new.
+
+**Mutations: 6, each seen failing the named test, restored from a `cp` backup (`shasum` identical
+to the backups).** No `attachTo` on the plain path ("opened at the attach", "stays lazy") · `resume`
+kept when attached ("opened at the attach") · no `.catch` ("the attach fails") · an overridden key
+left in the drift ("told once") · raw text printed ("any text is hidden") · inline description
+checked under `podDaemon` ("an invalid inline description"). Three ran in one batch and three in
+another; each failed in a different test.
+
+**Gate, on the final sources:** `bunx tsc --noEmit` clean; `bunx biome check .` 655 files, clean;
+`bun test packages` **4738 pass, 3 skip (the opt-in ones), 0 fail**, 4741 tests across 318 files.
+The reaper flake did not occur. `tsc -p apps/mobile` was not run (as instructed).
+
+**Unverified:** nothing in this round ran against a real engine; items 3 and 4 of the checklist
+above need a rerun, item 4 as described under F1.
 
 ## Review
 

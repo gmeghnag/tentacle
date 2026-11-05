@@ -44,7 +44,7 @@ function makeHost(built: (SessionSettings | undefined)[] = []): SessionHost {
         agent: new Agent({ model: quiet, tools: new ToolRegistry(), env: noopEnv }),
         permissions: new PermissionBroker(),
         ...(context.settings
-          ? { settingsReport: { carried: context.settings, overridden: ["dedupOutput"] } }
+          ? { settingsReport: { carried: context.settings, overridden: { dedupOutput: true } } }
           : {}),
       };
     },
@@ -233,19 +233,19 @@ describe("onSessionSettings: the daemon's report (docs/feat/config-carry.md)", (
   test("fired on a create, on an attach, and on a recreate", async () => {
     const d = dialer(makeHost());
     const c = client(d.dial, { sessionSettings: SETTINGS });
-    const seen: { sessionId: string; overridden: readonly string[] }[] = [];
+    const seen: { sessionId: string; overridden: SessionSettings }[] = [];
     c.onSessionSettings(({ sessionId, report }) => {
       seen.push({ sessionId, overridden: report.overridden });
     });
     await c.initialize();
     await c.openSession(undefined, undefined, "S");
-    expect(seen).toEqual([{ sessionId: "S", overridden: ["dedupOutput"] }]);
+    expect(seen).toEqual([{ sessionId: "S", overridden: { dedupOutput: true } }]);
 
     const fresh = makeHost();
     d.daemon.host = fresh;
     d.drop();
     await until(() => seen.length === 2);
-    expect(seen[1]).toEqual({ sessionId: "S", overridden: ["dedupOutput"] });
+    expect(seen[1]).toEqual({ sessionId: "S", overridden: { dedupOutput: true } });
     c.close();
   });
 

@@ -1365,7 +1365,12 @@ describe("cli main: --engine", () => {
     });
 
     /** `attach` with the engine runtime and the TUI replaced; records what each got. */
-    const attached = async (args: string[], tty = true, plainSeam = false) => {
+    const attached = async (
+      args: string[],
+      tty = true,
+      plainSeam = false,
+      attachResult: () => Promise<boolean> = async () => true,
+    ) => {
       const out: string[] = [];
       const seen: {
         runtimeBroker?: unknown;
@@ -1380,6 +1385,7 @@ describe("cli main: --engine", () => {
         confirmed?: boolean;
         config?: { model?: string; baseURL?: string; cwd?: string };
         tuiModel?: string;
+        resumeMessages?: unknown;
         resume?: { id: string; messages: unknown[] } | null;
         saver?: { save: (record: unknown) => void };
         notices: string[];
@@ -1392,7 +1398,7 @@ describe("cli main: --engine", () => {
         mcpStatus: async () => [],
         attachTo: async (id: string) => {
           seen.attachTo = id;
-          return true;
+          return attachResult();
         },
         quit: async () => {
           seen.quit += 1;
@@ -1434,10 +1440,12 @@ describe("cli main: --engine", () => {
             createSession?: unknown;
             autoAccept?: unknown;
             model?: string;
+            resumeMessages?: unknown;
             notices?: { onNotice: (listener: (text: string) => void) => unknown };
           },
         ) => {
           options.notices?.onNotice((text) => seen.notices.push(text));
+          seen.resumeMessages = options.resumeMessages;
           seen.tuiModel = options.model;
           seen.tuiBroker = options.permissions;
           seen.runQuit = options.runQuit;
@@ -1926,6 +1934,45 @@ describe("cli main: --engine", () => {
           expect(r.seen.resume?.id).toBe(A);
           expect(r.seen.resume?.messages).toHaveLength(2);
           expect(r.seen.notices).toEqual([]);
+        });
+        cleanup();
+      });
+
+      // docs/feat/config-carry.md, round 2 (F1): the settings notice comes from the
+      // open's report, so a lazy open tells nothing until the first prompt.
+      test("the session is opened at the attach, not at the first prompt", async () => {
+        // Mutation: drop the `attachTo` of the plain path -> undefined here.
+        await index({ sessionId: A }, [record(A, folder)]);
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box"], true, true);
+          expect(r.code).toBe(0);
+          expect(r.seen.attachTo).toBe(A);
+          // Mutation: keep `resume` when attached → the screen draws the record AND the history.
+          expect(r.seen.resumeMessages).toBeUndefined();
+        });
+        cleanup();
+      });
+
+      test("the daemon no longer has it, or the attach fails: the record draws, the session stays lazy", async () => {
+        // Mutation: drop the `.catch` → a failed attach ends the command.
+        await index({ sessionId: A }, [record(A, folder)]);
+        await withEnv(unreachable, async () => {
+          for (const outcome of [async () => false, () => Promise.reject(new Error("link down"))]) {
+            const r = await attached(["attach", "box"], true, true, outcome);
+            expect(r.code).toBe(0);
+            expect(r.seen.attachTo).toBe(A);
+            expect(r.seen.resumeMessages).toHaveLength(2);
+          }
+        });
+        cleanup();
+      });
+
+      test("no record to reopen: nothing to attach, the session stays lazy", async () => {
+        await index({});
+        await withEnv(unreachable, async () => {
+          const r = await attached(["attach", "box"], true, true);
+          expect(r.code).toBe(0);
+          expect(r.seen.attachTo).toBeUndefined();
         });
         cleanup();
       });

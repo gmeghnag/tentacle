@@ -50,7 +50,7 @@ function setup() {
         agent: new Agent({ model, tools: new ToolRegistry(), env: noopEnv }),
         permissions: new PermissionBroker(),
         ...(context.settings
-          ? { settingsReport: { carried: context.settings, overridden: ["dedupOutput"] } }
+          ? { settingsReport: { carried: context.settings, overridden: { dedupOutput: true } } }
           : {}),
       };
     },
@@ -76,7 +76,7 @@ describe("session/open.settings: an opaque carrier (docs/feat/config-carry.md)",
     expect(contexts.map((c) => c.settings)).toEqual([{ maxIterations: 7 }]);
     expect(opened.settings).toEqual({
       carried: { maxIterations: 7 },
-      overridden: ["dedupOutput"],
+      overridden: { dedupOutput: true },
     });
     connection.close();
   });

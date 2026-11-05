@@ -474,15 +474,14 @@ export type SessionSettings = z.infer<typeof SessionSettingsSchema>;
 
 /**
  * What a session did with the `settings` it was created from. From a pod (not
- * trusted, AGENTS §7): it can only make a laptop print a notice, so the names
- * are bounded strings the laptop filters, never an enum (a newer daemon's key
- * must not reject the whole open).
+ * trusted, AGENTS §7): it can only make a laptop print a notice, of values this
+ * schema validated (a key a newer daemon adds is stripped, it rejects nothing).
  */
 export const SessionSettingsReportSchema = z.object({
   /** The `settings` this session was created from. */
   carried: SessionSettingsSchema,
-  /** Carried keys the pod's own env or file kept, with a different value. */
-  overridden: z.array(line(64)).max(64),
+  /** The carried keys the pod's own env or file kept, with the pod's different value. */
+  overridden: SessionSettingsSchema,
 });
 export type SessionSettingsReport = z.infer<typeof SessionSettingsReportSchema>;
 

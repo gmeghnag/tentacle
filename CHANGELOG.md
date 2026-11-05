@@ -14,13 +14,13 @@ those.
   `maxIterations`, `tools.*`, `contextAwareness`, `contextReset`, `loadAgentsMd`
   and `loadSkills` (your environment, active profile and global file, resolved on
   your laptop) as the lowest layer. The container's own environment and config
-  file still win, and you are told which keys they set. Pods no longer run on
+  file still win, and you are shown the values that win. Pods no longer run on
   plain defaults, so a limit such as `maxIterations` now follows you.
 - **Sub-agent settings, `model.contextWindow` and `model.autoTitle` are always
   your laptop's** in a pod or container; its own config cannot change them.
 - **`attach --profile <name>` now applies to the new sessions it opens.** A
-  session already running keeps the settings it was created with, and says which
-  ones differ.
+  session already running keeps the settings it was created with, and shows those
+  that differ from yours as soon as you attach.
 - The protocol is now version 16. A daemon left running by an older tentacle is
   refused at connect; attach again to replace it, or `tentacle rm <name>` if a
   detached run still uses it.

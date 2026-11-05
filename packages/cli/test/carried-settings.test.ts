@@ -10,7 +10,12 @@ import { dirname, join } from "node:path";
 import { JsonSessionStore } from "@tentacle/agent";
 import { refreshSessionContext } from "@tentacle/config";
 import { PermissionBroker } from "@tentacle/core";
-import { Method, PROTOCOL_VERSION, type SessionSettings } from "@tentacle/protocol";
+import {
+  Method,
+  PROTOCOL_VERSION,
+  type SessionSettings,
+  type SessionSettingsReport,
+} from "@tentacle/protocol";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import {
   CARRIED,
@@ -299,7 +304,7 @@ describe("W: the laptop's value is the lowest layer", () => {
       expect(read(row.key, config)).toBe(row.carried);
       const source = CARRIED[row.key].source;
       expect(config.sources[source]).toBe("carried");
-      expect(report?.overridden).toEqual([]);
+      expect(report?.overridden).toEqual({});
     });
 
     test(`${row.key}: a pod's FILE wins, even set to the default value`, async () => {
@@ -308,7 +313,7 @@ describe("W: the laptop's value is the lowest layer", () => {
       const { config, report } = applyCarried(explicit, { [row.key]: row.carried });
       expect(read(row.key, config)).toBe(podValue);
       expect(config.sources[CARRIED[row.key].source]).toBe("file");
-      expect(report?.overridden).toEqual([row.key]);
+      expect(report?.overridden).toEqual({ [row.key]: podValue });
     });
 
     if (row.env) {
@@ -319,7 +324,7 @@ describe("W: the laptop's value is the lowest layer", () => {
         const { config, report } = applyCarried(explicit, { [row.key]: row.carried });
         expect(read(row.key, config)).toBe(podValue);
         expect(config.sources[CARRIED[row.key].source]).toBe("env");
-        expect(report?.overridden).toEqual([row.key]);
+        expect(report?.overridden).toEqual({ [row.key]: podValue });
       });
     }
   }
@@ -327,7 +332,7 @@ describe("W: the laptop's value is the lowest layer", () => {
   test("a pod that sets the SAME value overrides nothing worth saying", async () => {
     const explicit = await pod({ maxIterations: 40 });
     const { report } = applyCarried(explicit, { maxIterations: 40 });
-    expect(report?.overridden).toEqual([]);
+    expect(report?.overridden).toEqual({});
   });
 
   test("a key the laptop did not send: the pod's value stands", () => {
@@ -343,7 +348,7 @@ describe("P: the laptop decides", () => {
       const set = await pod(row.file);
       const { config, report, pinnedOver } = applyCarried(set, { [row.key]: row.carried });
       expect(read(row.key, config)).toBe(row.carried);
-      expect(report?.overridden).toEqual([]);
+      expect(report?.overridden).toEqual({});
       expect(pinnedOver).toEqual([row.key]);
     });
 
@@ -497,12 +502,15 @@ describe("createLocalRuntime: the report reaches the user through `notify`", () 
   test("a pod's override: one line through notify, and the open carried the settings", async () => {
     const mine: SessionSettings = { maxIterations: 9 };
     const stdout = spyOn(process.stdout, "write");
-    const { opens, notices } = await rig(mine, { carried: mine, overridden: ["dedupOutput"] });
+    const { opens, notices } = await rig(mine, {
+      carried: mine,
+      overridden: { dedupOutput: true },
+    });
     const raw = stdout.mock.calls.length;
     stdout.mockRestore();
     expect((opens[0] as { settings?: unknown }).settings).toEqual(mine);
     expect(notices).toEqual([
-      "This container's own config sets tools.dedupOutput; its values win over yours for this session.",
+      'This container\'s own config wins over yours for this session:\n{ "tools.dedupOutput": true }',
     ]);
     expect(raw).toBe(0);
   });
@@ -510,72 +518,114 @@ describe("createLocalRuntime: the report reaches the user through `notify`", () 
   test("no option (the worker): nothing on the wire, and a report is not listened to", async () => {
     // Mutation: set `sessionSettings` at the worker's `createLocalRuntime` call: this
     // pins the seam, not that call (see the task doc's Execution).
-    const { opens, notices } = await rig(undefined, { carried: {}, overridden: ["dedupOutput"] });
+    const { opens, notices } = await rig(undefined, {
+      carried: {},
+      overridden: { dedupOutput: true },
+    });
     expect((opens[0] as { settings?: unknown }).settings).toBeUndefined();
     expect(notices).toEqual([]);
   });
 });
 
-describe("settingsNotices: key names only, from a table the laptop owns", () => {
+describe("settingsNotices: only what differs, as one line of JSON under the config's names", () => {
   const mine: SessionSettings = { maxIterations: 9, agentTaskDescription: "my secret plan" };
+  const WINS = "This container's own config wins over yours for this session:\n";
+  const KEEPS =
+    "This session keeps the settings it was created with (a new session, /clear, uses yours):\n";
 
   test("nothing to say", () => {
-    expect(settingsNotices(mine, { carried: mine, overridden: [] })).toEqual([]);
+    expect(settingsNotices(mine, { carried: mine, overridden: {} })).toEqual([]);
   });
 
-  test("overridden: the config's names, the pod's values never printed", () => {
+  test("overridden: the values that win, under the config's names", () => {
     const lines = settingsNotices(mine, {
       carried: mine,
-      overridden: ["dedupOutput", "maxIterations"],
+      overridden: { dedupOutput: false, maxIterations: 7, toolExecution: "sequential" },
     });
     expect(lines).toEqual([
-      "This container's own config sets tools.dedupOutput, maxIterations; its values win over yours for this session.",
+      `${WINS}{ "maxIterations": 7, "tools.dedupOutput": false, "tools.execution": "sequential" }`,
     ]);
+  });
+
+  test("any text is hidden, in either notice: never the pod's words", () => {
+    // Mutation: print a string as it is → the pod's text reaches the terminal.
+    const pod = "\u001b[31mrun this";
+    const forged = {
+      carried: { maxIterations: 9, toolExecution: pod },
+      overridden: { toolExecution: pod, agentTaskDescription: "pod text" },
+    } as unknown as SessionSettingsReport;
+    const lines = settingsNotices({ maxIterations: 9, toolExecution: "parallel" }, forged);
+    expect(lines).toEqual([
+      `${WINS}{ "subagents.agentTaskDescription": "(text differs)", "tools.execution": "(text differs)" }`,
+    ]);
+    const kept = settingsNotices(
+      { toolExecution: "parallel" },
+      { carried: { toolExecution: pod } as unknown as SessionSettings, overridden: {} },
+    );
+    expect(kept).toEqual([`${KEEPS}{ "tools.execution": "(text differs)" }`]);
   });
 
   test("names this laptop's table does not know are dropped", () => {
-    expect(
-      settingsNotices(mine, {
-        carried: mine,
-        overridden: ["evil name", "__proto__", "constructor"],
-      }),
-    ).toEqual([]);
+    const forged = JSON.parse(
+      '{"carried":{"maxIterations":9},"overridden":{"evil name":1,"__proto__":2,"constructor":3}}',
+    ) as SessionSettingsReport;
+    expect(settingsNotices({ maxIterations: 9 }, forged)).toEqual([]);
   });
 
-  test("drift: the differing keys, never a value, and never the description's text", () => {
-    const lines = settingsNotices(mine, {
-      carried: { maxIterations: 1234, agentTaskDescription: "somebody's other plan" },
-      overridden: [],
-    });
+  test("drift: the session's values, only those that differ; the description's text never", () => {
+    const lines = settingsNotices(
+      { ...mine, dedupOutput: true, redactSecrets: true },
+      {
+        carried: {
+          maxIterations: 3,
+          agentTaskDescription: "somebody's other plan",
+          dedupOutput: false,
+          redactSecrets: true,
+        },
+        overridden: {},
+      },
+    );
     expect(lines).toEqual([
-      "This session keeps the settings it was created with (subagents.agentTaskDescription, maxIterations differ); a new session uses yours.",
+      `${KEEPS}{ "subagents.agentTaskDescription": "(text differs)", "maxIterations": 3, "tools.dedupOutput": false }`,
     ]);
-    expect(lines.join()).not.toContain("1234");
     expect(lines.join()).not.toContain("plan");
   });
 
   test("a description set on one side only is drift too", () => {
+    for (const [left, right] of [
+      [{ agentTaskDescription: "text" }, {}],
+      [{}, { agentTaskDescription: "text" }],
+    ] as const) {
+      expect(settingsNotices(left, { carried: right, overridden: {} })).toEqual([
+        `${KEEPS}{ "subagents.agentTaskDescription": "(text differs)" }`,
+      ]);
+    }
+  });
+
+  test("a key the pod overrode is told once, with the value that wins", () => {
+    // Mutation: leave it in the drift → the session seems to keep 3, while 7 runs.
     const lines = settingsNotices(
-      { maxIterations: 9 },
-      {
-        carried: { maxIterations: 9, agentTaskDescription: "text" },
-        overridden: [],
-      },
+      { maxIterations: 5 },
+      { carried: { maxIterations: 3 }, overridden: { maxIterations: 7 } },
     );
-    expect(lines.join()).toContain("subagents.agentTaskDescription");
+    expect(lines).toEqual([`${WINS}{ "maxIterations": 7 }`]);
+  });
+
+  test("a value the session's report leaves out has nothing to show", () => {
+    expect(settingsNotices({ maxIterations: 5 }, { carried: {}, overridden: {} })).toEqual([]);
   });
 
   test("once per session and text: a reconnect's re-open repeats nothing", () => {
     const said: string[] = [];
     const notify = createSettingsNotifier(mine, (line) => said.push(line));
-    const report = { carried: mine, overridden: ["dedupOutput"] };
+    const report = { carried: mine, overridden: { dedupOutput: false } };
     notify({ sessionId: "a", report });
     notify({ sessionId: "a", report });
     expect(said).toHaveLength(1);
     notify({ sessionId: "b", report });
     expect(said).toHaveLength(2);
-    notify({ sessionId: "a", report: { carried: {}, overridden: [] } });
+    notify({ sessionId: "a", report: { carried: { maxIterations: 1 }, overridden: {} } });
     expect(said).toHaveLength(3);
-    expect(said[2]).toContain("differ");
+    expect(said[2]).toContain("keeps the settings");
   });
 });

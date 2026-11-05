@@ -202,6 +202,17 @@ describe("a pod daemon's load (`podDaemon`)", () => {
     });
   }
 
+  test("an invalid inline description never fails the load: the laptop decides it", async () => {
+    // Mutation: check the inline form under `podDaemon` too → ConfigError, over 4096 bytes.
+    const never = async () => "";
+    for (const text of ["x".repeat(5000), "   "]) {
+      const c = await pod({ subagents: { agentTaskDescription: text } }, never);
+      expect(c.agentTaskDescription).toBeUndefined();
+    }
+    const valid = await pod({ subagents: { agentTaskDescription: " mine " } }, never);
+    expect(valid.agentTaskDescription).toBe("mine");
+  });
+
   test("never runs apiKeyCommand: the key is the laptop's", async () => {
     const ran: string[] = [];
     const c = await pod({ model: { apiKeyCommand: "exit 7" } }, async (command) => {

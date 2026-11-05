@@ -10,9 +10,14 @@
  * Settings flow laptop → pod and create no effect on the laptop, so a pin is
  * policy for honest pods, never security (AGENTS §7). What comes back is a
  * report a laptop filters through this table: a hostile pod gets a false notice
- * at worst, with names this table holds and no value.
+ * at worst, with names this table holds and only numbers, booleans and enum
+ * values: never its text.
  */
-import type { SessionSettings, SessionSettingsReport } from "@tentacle/protocol";
+import {
+  ExecutionModeSchema,
+  type SessionSettings,
+  type SessionSettingsReport,
+} from "@tentacle/protocol";
 import { type TentacleConfig, composeSystemPrompt } from "./config.ts";
 
 type Key = keyof SessionSettings;
@@ -224,7 +229,7 @@ export function applyCarried(
   }
   let next = config;
   const stamped: Partial<Record<SourceKey, "carried">> = {};
-  const overridden: string[] = [];
+  const overridden: Record<string, unknown> = {};
   const pinnedOver: string[] = [];
   const overlay = <K extends Key>(key: K): void => {
     const row: Row<K> = CARRIED[key];
@@ -236,7 +241,7 @@ export function applyCarried(
       }
       if (set) {
         if (row.read(config) !== carried) {
-          overridden.push(key);
+          overridden[key] = row.read(config);
         }
         return;
       }
@@ -257,7 +262,7 @@ export function applyCarried(
   }
   return {
     config: recomposed({ ...next, sources: { ...next.sources, ...stamped } }, config),
-    report: { carried: settings, overridden },
+    report: { carried: settings, overridden: overridden as SessionSettings },
     pinnedOver,
   };
 }
@@ -291,26 +296,53 @@ function recomposed(next: TentacleConfig, loaded: TentacleConfig): TentacleConfi
   };
 }
 
+const TEXT_DIFFERS = "(text differs)";
+
+/** A value a notice may print. Any text is hidden: it could be the pod's (AGENTS §7). */
+function shown(key: Key, value: unknown): string | number | boolean {
+  if (key === "agentTaskDescription") {
+    return TEXT_DIFFERS;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  const mode = ExecutionModeSchema.safeParse(value);
+  return mode.success ? mode.data : TEXT_DIFFERS;
+}
+
+/** A one-line JSON of these keys and values, under the config's own names. */
+function valuesLine(keys: readonly Key[], values: SessionSettings): string {
+  const entries = keys.map(
+    (key) =>
+      `${JSON.stringify(CARRIED[key].configKey)}: ${JSON.stringify(shown(key, values[key]))}`,
+  );
+  return `{ ${entries.join(", ")} }`;
+}
+
 /**
- * What the laptop tells the user about a session's report: key names from THIS
- * table, never a value or anything the pod wrote (it is not trusted, AGENTS §7).
+ * What the laptop tells the user about a session's report: only what differs,
+ * for keys of THIS table. The second line has no indent of its own: the TUI
+ * indents a notice's later lines (`noticeLines`).
  */
 export function settingsNotices(mine: SessionSettings, report: SessionSettingsReport): string[] {
   const lines: string[] = [];
-  const overridden = report.overridden.flatMap((name) =>
-    Object.hasOwn(CARRIED, name) ? [CARRIED[name as Key].configKey] : [],
-  );
+  const overridden = KEYS.filter((key) => report.overridden[key] !== undefined);
   if (overridden.length > 0) {
     lines.push(
-      `This container's own config sets ${overridden.join(", ")}; its values win over yours for this session.`,
+      `This container's own config wins over yours for this session:\n${valuesLine(overridden, report.overridden)}`,
     );
   }
-  const differing = KEYS.filter((key) => report.carried[key] !== mine[key]).map(
-    (key) => CARRIED[key].configKey,
+  // An overridden key is not what the session keeps: the line above has its value.
+  // Absent on the session's side: nothing to show, but for the description.
+  const differing = KEYS.filter(
+    (key) =>
+      report.carried[key] !== mine[key] &&
+      report.overridden[key] === undefined &&
+      (report.carried[key] !== undefined || key === "agentTaskDescription"),
   );
   if (differing.length > 0) {
     lines.push(
-      `This session keeps the settings it was created with (${differing.join(", ")} differ); a new session uses yours.`,
+      `This session keeps the settings it was created with (a new session, /clear, uses yours):\n${valuesLine(differing, report.carried)}`,
     );
   }
   return lines;

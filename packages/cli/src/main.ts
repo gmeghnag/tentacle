@@ -1542,7 +1542,18 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       );
       return 1;
     }
-    return await runEngineTui(runtime, permissions, sessions);
+    // A session still live on the daemon is attached now, not at the first prompt:
+    // its report says what it keeps (the settings notice), and its `history`
+    // activity draws the screen. Not there, or any failure: lazy, from the record;
+    // the first send reports a link that is really down.
+    const live =
+      sessions.resume !== null &&
+      (await runtime.attachTo(sessions.resume.id, sessions.resume).catch(() => false));
+    return await runEngineTui(
+      runtime,
+      permissions,
+      live ? { ...sessions, resume: null } : sessions,
+    );
   }
 
   // Plain line-based REPL (scripting / no-TTY fallback). No interactive

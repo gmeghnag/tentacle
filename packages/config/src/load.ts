@@ -431,7 +431,7 @@ async function resolveAgentTaskDescription(
   subagents: FileConfig["subagents"],
   configDir: string,
   home: string,
-  readFromFile: boolean,
+  podDaemon: boolean,
 ): Promise<string | undefined> {
   const check = (raw: string, setting: string): string => {
     const text = raw.trim();
@@ -444,9 +444,17 @@ async function resolveAgentTaskDescription(
     return text;
   };
   if (subagents?.agentTaskDescription !== undefined) {
-    return check(subagents.agentTaskDescription, "subagents.agentTaskDescription");
+    try {
+      return check(subagents.agentTaskDescription, "subagents.agentTaskDescription");
+    } catch (error) {
+      // The laptop decides this value: it must not be able to kill a pod's daemon.
+      if (podDaemon) {
+        return undefined;
+      }
+      throw error;
+    }
   }
-  if (subagents?.agentTaskDescriptionFile === undefined || !readFromFile) {
+  if (subagents?.agentTaskDescriptionFile === undefined || podDaemon) {
     return undefined;
   }
   const path = configRelativePath(subagents.agentTaskDescriptionFile, configDir, home);
@@ -535,7 +543,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     fileConfig.subagents,
     configDir,
     home,
-    options.podDaemon !== true,
+    options.podDaemon === true,
   );
 
   // Auto-load a per-repo AGENTS.md from the launch workspace (best-effort: an

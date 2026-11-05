@@ -1641,14 +1641,7 @@
           "$ref": "#/$defs/SessionSettings"
         },
         "overridden": {
-          "items": {
-            "maxLength": 64,
-            "minLength": 1,
-            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
-            "type": "string"
-          },
-          "maxItems": 64,
-          "type": "array"
+          "$ref": "#/$defs/SessionSettings"
         }
       },
       "required": ["carried", "overridden"],

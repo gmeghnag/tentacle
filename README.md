@@ -191,8 +191,14 @@ stays up.
 session takes your resolved settings. `subagents.*`, `model.contextWindow` and
 `model.autoTitle` are always yours. `maxIterations`, `tools.*`, `contextAwareness`,
 `contextReset`, `loadAgentsMd` and `loadSkills` are yours unless the container's own
-environment or config file sets them, and tentacle tells you which it set. A session
-already running keeps the settings it was created with.
+environment or config file sets them, and tentacle shows you the values that win. A
+session already running keeps the settings it was created with, and shows you those
+that differ from yours:
+
+```
+This session keeps the settings it was created with (a new session, /clear, uses yours):
+  { "maxIterations": 3, "tools.dedupOutput": false }
+```
 
 ```sh
 tentacle attach <pod> [-n <namespace>] [-c <container>]

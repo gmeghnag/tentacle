@@ -68,15 +68,21 @@ describe("session/open.settings (docs/feat/config-carry.md)", () => {
     }
   });
 
-  test("the report: `overridden` is bounded names, so a newer daemon's key cannot reject an open", () => {
+  test("the report: `overridden` holds validated values; a newer daemon's key is stripped", () => {
     const base = { sessionId: "s", epoch: "e", created: true, resync: false };
     expect(OpenResultSchema.parse(base).settings).toBeUndefined();
-    const report = { carried: { maxIterations: 9 }, overridden: ["key-from-the-future"] };
+    const report = { carried: { maxIterations: 9 }, overridden: { maxIterations: 7 } };
     expect(OpenResultSchema.parse({ ...base, settings: report }).settings).toEqual(report);
-    const tooMany = { carried: {}, overridden: Array.from({ length: 65 }, (_, i) => `k${i}`) };
-    expect(OpenResultSchema.safeParse({ ...base, settings: tooMany }).success).toBe(false);
-    const control = { carried: {}, overridden: ["\u001b[31m"] };
-    expect(OpenResultSchema.safeParse({ ...base, settings: control }).success).toBe(false);
+    const future = { carried: {}, overridden: { keyFromTheFuture: "\u001b[31m" } };
+    expect(OpenResultSchema.parse({ ...base, settings: future }).settings).toEqual({
+      carried: {},
+      overridden: {},
+    });
+    // Pod text where a number or an enum goes: its own open fails, nothing is printed.
+    for (const overridden of [{ maxIterations: "\u001b[31m" }, { toolExecution: "evil" }]) {
+      const bad = { carried: {}, overridden };
+      expect(OpenResultSchema.safeParse({ ...base, settings: bad }).success).toBe(false);
+    }
   });
 
   test("protocol 16: without the bump a v15 daemon would strip `settings` silently", () => {
