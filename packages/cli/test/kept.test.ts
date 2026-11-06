@@ -134,9 +134,9 @@ describe("the detached cell (docs/feat/detached-relay-lifecycle.md L28)", () => 
     pid: 7,
     sessionId: "u1",
     log: "/k/relay.log",
-    keep: false,
+    rm: true,
   };
-  const dead = { text: "relay lost", log: "/k/relay.log", keep: false };
+  const dead = { text: "relay lost", log: "/k/relay.log", rm: true };
 
   test("relay alive: its text; dead: the engine state, then its text", () => {
     expect(statusCell({ entry: e, status: state, relay: alive })).toBe(alive.text);
@@ -168,7 +168,7 @@ describe("the detached cell (docs/feat/detached-relay-lifecycle.md L28)", () => 
 
   test("-v: a kept run has no removal line; a dead relay no pid, and nothing will remove it", () => {
     const kept = renderVerbose(
-      [{ entry: e, status: state, relay: { ...alive, keep: true } }],
+      [{ entry: e, status: state, relay: { ...alive, rm: false } }],
       NOW,
       HOME,
     ).join("\n");

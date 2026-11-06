@@ -100,7 +100,7 @@ export class WorkloadNotFoundError extends RefusalError {
  * A startup failure after which the host ALREADY removed the workload — or
  * tried to, and said so in the message (a workspace probe that failed or
  * could not run, e.g. a visible mask): the runtime must not keep it or report
- * it kept, whatever `--keep` says.
+ * it kept, with or without `--rm`.
  */
 export class WorkloadRemovedError extends Error {
   override readonly name = "WorkloadRemovedError";

@@ -128,24 +128,24 @@ export function engineFlagProblem(
 }
 
 /**
- * `run --keep[=true|false]`: flag > profile > user config (`keep:`) > true. A bare
- * `--keep` is `bare`; `--keep=<v>` is `value`; any value but true/false is an error.
+ * `run --rm[=true|false]`: flag > profile > user config (`rm:`) > false (kept). A
+ * bare `--rm` is `bare`; `--rm=<v>` is `value`; any value but true/false is an error.
  */
-export function resolveKeep(input: {
+export function resolveRm(input: {
   readonly bare?: boolean;
   readonly value?: string | undefined;
   readonly configured?: boolean | undefined;
-}): { readonly ok: true; readonly keep: boolean } | { readonly ok: false; readonly error: string } {
+}): { readonly ok: true; readonly rm: boolean } | { readonly ok: false; readonly error: string } {
   if (input.value !== undefined) {
     if (input.value === "true" || input.value === "false") {
-      return { ok: true, keep: input.value === "true" };
+      return { ok: true, rm: input.value === "true" };
     }
-    return { ok: false, error: `--keep takes true or false, got "${input.value}"` };
+    return { ok: false, error: `--rm takes true or false, got "${input.value}"` };
   }
-  return { ok: true, keep: input.bare === true || (input.configured ?? true) };
+  return { ok: true, rm: input.bare === true || (input.configured ?? false) };
 }
 
-/** The command that re-attaches to a workload `run --keep` left up. */
+/** The command that re-attaches to a workload a `run` (without `--rm`) left up. */
 export function attachCommand(
   kind: EngineKind,
   name: string,
@@ -235,7 +235,7 @@ export function defaultEngineHostIO(): EngineHostIO {
 
 export interface BuiltEngineHost {
   readonly host: EngineHost;
-  /** kubernetes: the resolved namespace (for the `--keep` attach hint). */
+  /** kubernetes: the resolved namespace (for the re-attach hint of a kept run). */
   readonly namespace?: string;
   /** docker/podman: the endpoint (its locality decides the workspace mount). */
   readonly endpoint?: EngineEndpoint;

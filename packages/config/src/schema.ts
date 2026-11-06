@@ -289,10 +289,10 @@ const settingsShape = {
    */
   engine: z.enum(["kubernetes", "docker", "podman"]).optional(),
   /**
-   * Whether `run` leaves its pod/container up on exit (docs/feat/docker-engine-cli.md);
-   * `--keep[=true|false]` wins. Unset: true (the CLI default).
+   * Whether `run` removes its pod/container when the run ends (fix/run-rm-flag;
+   * docs/feat/docker-engine-cli.md); `--rm[=true|false]` wins. Unset: false (kept).
    */
-  keep: z.boolean().optional(),
+  rm: z.boolean().optional(),
   /**
    * `run --detach` (docs/feat/detached-relay-lifecycle.md): `keepAwake` holds a
    * macOS sleep assertion while a turn runs. Unset: true.

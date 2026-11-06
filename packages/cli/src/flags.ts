@@ -49,11 +49,11 @@ const RESUME = { resume: { accepts: (word: string) => SESSION_UID.test(word) } }
 /** `--continue` resumes the newest session; `--resume` picks one (docs/feat/resume-picker.md). */
 const CONTINUE = { continue: {} } as const;
 /**
- * `run --keep[=true|false]`: the next word is its value only when exactly `true`/`false`
- * (`run --keep true`); any other word stays positional (`run --keep name` keeps `name`).
+ * `run --rm[=true|false]`: the next word is its value only when exactly `true`/`false`
+ * (`run --rm true`); any other word stays positional (`run --rm name` keeps `name`).
  */
-const KEEP = { keep: { accepts: (word: string) => word === "true" || word === "false" } } as const;
-/** `run --detach --auto-accept[=true|false]`, parsed like `KEEP`. */
+const RM = { rm: { accepts: (word: string) => word === "true" || word === "false" } } as const;
+/** `run --detach --auto-accept[=true|false]`, parsed like `RM`. */
 const AUTO_ACCEPT = {
   "auto-accept": { accepts: (word: string) => word === "true" || word === "false" },
 } as const;
@@ -122,8 +122,14 @@ export const ARGS = {
       ...SESSION_MODEL,
     },
     // docker/podman: the cwd mount (docs/feat/docker-workspace-mount.md); `run` only.
-    bools: { ...CONTINUE, ...ENGINE_BOOLS, "no-mount": {}, "confirm-mount": {}, detach: {} },
-    optional: { ...RESUME, ...KEEP, ...AUTO_ACCEPT },
+    bools: {
+      ...CONTINUE,
+      ...ENGINE_BOOLS,
+      "no-mount": {},
+      "confirm-mount": {},
+      detach: { short: "d" },
+    },
+    optional: { ...RESUME, ...RM, ...AUTO_ACCEPT },
     conflicts: RESUME_CONFLICTS,
     positional: { min: 0, max: 1 },
   },
@@ -663,7 +669,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
     "tentacle connect ws(s)://host:port [--token T|--token-command CMD] [--ca-cert PEM|--insecure-skip-tls-verify] [--resume [id]|--continue]",
   serve:
     "tentacle serve [--host H] [--port P] [--token T|--token-command CMD] [--model <id>] [--profile <name>] [...] (see tentacle --help)",
-  run: 'tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--keep[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [--model <id>] [--profile <name>] [--name <n>] [--detach] [--auto-accept[=true|false]] [--prompt <text|->] ["<prompt>"]',
+  run: 'tentacle run --image <ref> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [--context <ctx>] [--insecure-docker-tcp] [--no-mount] [--confirm-mount] [--rm[=true|false]] [--bin-dir <dir>] [--resume [uid]|--continue] [--model <id>] [--profile <name>] [--name <n>] [-d|--detach] [--auto-accept[=true|false]] [--prompt <text|->] ["<prompt>"]',
   attach:
     "tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--context <ctx>] [--insecure-docker-tcp] [--bin-dir <dir>] [--resume [uid]|--continue] [--model <id>] [--profile <name>]",
   ps: "tentacle ps [--engine kubernetes|docker|podman] [-a|--all] [-q|--quiet] [-v|--verbose]",

@@ -384,7 +384,7 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
     expect(client.calls.at(-1)).toBe("remove:c1");
   });
 
-  test("--keep: no exit net, never removed (dispose), the resume hint names the engine", async () => {
+  test("kept (no --rm): no exit net, never removed (dispose), the resume hint names the engine", async () => {
     const client = new FakeDockerClient(new ScriptedProvider([[{ type: "done" }]]));
     const net: string[] = [];
     const logs: string[] = [];
@@ -394,7 +394,7 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
         host: hostFor(client, net),
         image: "img",
         name: "kept1",
-        keepHint: (name) => `tentacle attach --engine docker ${name}`,
+        resumeHint: (name) => `tentacle attach --engine docker ${name}`,
         ...deps,
       }),
     );
@@ -872,7 +872,7 @@ describe("the workspace mount on a Docker engine (slice D)", () => {
     expect(hostConfig.SecurityOpt).toBeUndefined();
   });
 
-  test("a visible mask → the HOST removes the container, even with --keep, and never says kept", async () => {
+  test("a visible mask → the HOST removes the container, even when kept (no --rm), and never says kept", async () => {
     const client = new FakeDockerClient(new ScriptedProvider([]));
     client.execResults = [
       {
@@ -881,7 +881,7 @@ describe("the workspace mount on a Docker engine (slice D)", () => {
       },
     ];
     const { logs, result } = run(client, "ws-mask", {
-      keepHint: (n: string) => `tentacle attach --engine docker ${n}`,
+      resumeHint: (n: string) => `tentacle attach --engine docker ${n}`,
     });
     const { error } = await result;
     expect(error).toBeInstanceOf(WorkloadRemovedError);
@@ -894,13 +894,13 @@ describe("the workspace mount on a Docker engine (slice D)", () => {
     expect(String(error)).toContain("The container was removed.");
   });
 
-  test("F2: a probe that THROWS (timeout) also removes the container, even with --keep", async () => {
+  test("F2: a probe that THROWS (timeout) also removes the container, even when kept (no --rm)", async () => {
     const client = new FakeDockerClient(new ScriptedProvider([]));
     client.execErrors = [
       { match: "tentacle-workspace-probe", error: new Error("exec timed out after 15000 ms") },
     ];
     const { logs, result } = run(client, "ws-probe-throw", {
-      keepHint: (n: string) => `tentacle attach --engine docker ${n}`,
+      resumeHint: (n: string) => `tentacle attach --engine docker ${n}`,
     });
     const { error } = await result;
     expect(error).toBeInstanceOf(WorkloadRemovedError);
@@ -921,7 +921,7 @@ describe("the workspace mount on a Docker engine (slice D)", () => {
     ];
     client.removeError = new Error("engine went away");
     const { error } = await run(client, "ws-rm-fail", {
-      keepHint: (n: string) => `tentacle attach --engine docker ${n}`,
+      resumeHint: (n: string) => `tentacle attach --engine docker ${n}`,
     }).result;
     expect(error).toBeInstanceOf(WorkloadRemovedError);
     expect(String(error)).not.toContain("was removed");
@@ -984,10 +984,10 @@ describe("the workspace mount on a Docker engine (slice D)", () => {
     expect(listeners).toHaveLength(0);
   });
 
-  test("--keep: one short line, no workspace comment", async () => {
+  test("kept (no --rm): one short line, no workspace comment", async () => {
     const client = new FakeDockerClient(new ScriptedProvider([[{ type: "done" }]]));
     const { logs, result } = run(client, "ws-keep", {
-      keepHint: (n: string) => `tentacle attach --engine docker ${n}`,
+      resumeHint: (n: string) => `tentacle attach --engine docker ${n}`,
     });
     const { result: runtime } = await result;
     runtime?.announce?.(); // the TUI opens

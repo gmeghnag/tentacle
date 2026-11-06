@@ -95,12 +95,12 @@ a failed startup prints `[container] failed: <short cause> · log: <path>` (plus
 ` · still up: tentacle rm <name>` when a kept workload was left running) and the log
 holds the full text. A model or turn error is not a failure: the TUI already showed
 it. The startup status line redraws in place (cut to the terminal width, never
-padded). `--keep=false` (or `keep: false` in the config or a profile)
-deletes it on exit instead; flag > profile > user config > true. The model key and the approvals
+padded). `--rm` (or `rm: true` in the config or a profile)
+removes it when the run ends instead (`--rm=false` overrides the config); flag > profile > user config > default (kept). The model key and the approvals
 stay on your machine; sessions are saved locally, so `--resume` works.
 
 ```sh
-tentacle run --image <ref> [-n <namespace>] [--keep=false] [--name <n>] ["<prompt>"]        # Kubernetes (default)
+tentacle run --image <ref> [-n <namespace>] [--rm] [--name <n>] ["<prompt>"]        # Kubernetes (default)
 tentacle run --engine docker --image <ref> [--context <ctx>] [--name <n>] ["<prompt>"]  # Docker
 tentacle run --engine podman --image <ref> [--name <n>] ["<prompt>"]                    # Podman
 ```
@@ -112,7 +112,7 @@ cannot be combined with `--resume`/`--continue`. `--auto-accept[=true]` starts
 the TUI with auto-accept already on (the state Shift+Tab toggles); `=false`
 changes nothing.
 
-**With no TUI.** `tentacle run --detach "<prompt>" --image <ref> [--name <n>]`
+**With no TUI.** `tentacle run -d|--detach "<prompt>" --image <ref> [--name <n>]`
 (or `--prompt <text|->`; `--prompt -` reads the prompt from stdin, only with `--detach`)
 creates the workload, then a background process on your machine runs the turn,
 serves the model and saves the session, and leaves after 60 s of idle. A tool
@@ -126,7 +126,7 @@ the terminals that attach; Shift+Tab flips it for every terminal on that session
 and a session turned off stays off. `/quit` closes the session for every terminal on it (asking `y/N`
 first when others are attached): a running turn stops, the last save is taken,
 and the others leave with `session closed by another terminal`. Ctrl+C at idle
-leaves only that terminal. With `--keep=false` the quit that closes the session
+leaves only that terminal. With `--rm` the quit that closes the session
 removes the workload, if no other session in it is in use. A workload deleted
 outside tentacle is said as such, naming the session uid.
 
@@ -134,7 +134,7 @@ A successful `run --detach` prints one dim line, `[container] <name> still runni
 tentacle attach <name>`, and nothing else; `attach` to a run prints no `resolved …` or
 `[resume] …` line either (failures still say why).
 
-With `--keep=false` (or `keep: false`) the workload is listed in `ps` while the
+With `--rm` (or `rm: true`) the workload is listed in `ps` while the
 run lives and removed when it goes idle or is stopped, a held permission keeping
 it alive. `kill <pid>` counts as a stop, and so does a laptop shutdown that sends
 SIGTERM. Its files go with it, a mounted laptop folder excepted; the transcript

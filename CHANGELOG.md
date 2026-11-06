@@ -10,6 +10,18 @@ those.
 
 ### Changed
 
+- **`tentacle run --rm` replaces `--keep`, as in docker and kubectl.** A run still
+  keeps its pod or container by default; `--rm` removes it when the run ends
+  (`--detach --rm`: when the run goes idle or is stopped), and `--rm=false`
+  overrides the config. In the config (and profiles) `keep: false` becomes
+  `rm: true`; `keep` is no longer accepted and is reported as an unknown key.
+  There is no `--keep` alias: it is an unknown option; the help names `--rm`.
+- **`-d` is the short form of `run --detach`.**
+- **Detached-run state files change format (version 2).** `owner.json` and
+  `spec.json` now carry `rm` instead of `keep`. Runs started by a previous build
+  keep running and keep their workload, but this build lists them as `unknown
+  owner`, cannot attach to them, and leaves their `owner.json` for you to delete;
+  `tentacle rm <name>` still removes them.
 - **`ps` and `rm` no longer make a finished detached run look alive.** Once its relay
   has finished and no terminal is on it, `ps` shows `up · idle` (or `up · failed: …`, `up ·
   interrupted`) instead of `running · idle`, and `rm` says the run has ended

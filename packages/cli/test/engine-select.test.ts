@@ -59,7 +59,7 @@ describe("engineFlagProblem", () => {
 });
 
 describe("attachCommand / setupFailureLine", () => {
-  test("the --keep resume hint names the engine and its scope", () => {
+  test("the resume hint of a kept run names the engine and its scope", () => {
     expect(attachCommand("kubernetes", "p1", { namespace: "dev" })).toBe(
       "tentacle attach --engine kubernetes -n dev p1",
     );

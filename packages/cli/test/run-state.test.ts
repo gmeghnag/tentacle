@@ -16,6 +16,7 @@ import { type ProcOf, acquireResidentLock, lockHolder } from "../src/pod-residen
 import {
   type OwnerRecord,
   RELAY_LOG_CAP_BYTES,
+  RUN_STATE_VERSION,
   type RelaySpec,
   attachers,
   createRelayLog,
@@ -23,8 +24,8 @@ import {
   laptopProc,
   logTail,
   othersOnSession,
-  ownerKeeps,
   ownerPath,
+  ownerRemoves,
   parsePsStat,
   readOwner,
   readSpec,
@@ -50,7 +51,7 @@ const entry = (name: string, over: Partial<KeptEntry> = {}): KeptEntry => ({
   ...over,
 });
 const owner: OwnerRecord = {
-  schemaVersion: 1,
+  schemaVersion: RUN_STATE_VERSION,
   kind: "relay",
   pid: 42,
   appVersion: "1.2.3",
@@ -61,13 +62,13 @@ const owner: OwnerRecord = {
   autoAccept: false,
 };
 const spec: RelaySpec = {
-  schemaVersion: 1,
+  schemaVersion: RUN_STATE_VERSION,
   mode: "start",
   stem: "0123456789abcdef",
   sessionId: "11111111-1111-4111-8111-111111111111",
   prompt: "hello",
   autoAccept: true,
-  keep: false,
+  rm: true,
   cwd: "/work",
 };
 /** `pid` runs, started at `start`. */
@@ -115,15 +116,26 @@ describe("owner.json (R5)", () => {
     expect(readOwner(dir)).toEqual({ kind: "unknown" });
   });
 
-  test("L23 `keep` round trip; absent reads as kept", () => {
-    // Mutation: `ownerKeeps` defaults to false → a pre-S2b run reads as one that removes.
+  test("L23 `rm` round trip; absent reads as not removed", () => {
+    // Mutation: `ownerRemoves` as `rm !== false` → a record without the field reads as one that removes.
     const dir = fresh();
-    writeOwner(dir, { ...owner, keep: false });
+    writeOwner(dir, { ...owner, rm: true });
     const read = readOwner(dir);
-    expect(read).toEqual({ kind: "owner", owner: { ...owner, keep: false } });
-    expect(read.kind === "owner" && ownerKeeps(read.owner)).toBe(false);
-    expect(ownerKeeps(owner)).toBe(true);
-    expect(ownerKeeps({ ...owner, keep: true })).toBe(true);
+    expect(read).toEqual({ kind: "owner", owner: { ...owner, rm: true } });
+    expect(read.kind === "owner" && ownerRemoves(read.owner)).toBe(true);
+    expect(ownerRemoves(owner)).toBe(false);
+    expect(ownerRemoves({ ...owner, rm: false })).toBe(false);
+  });
+
+  test("fix/run-rm-flag: a previous build's (v1) owner.json is `unknown`, byte-identical", () => {
+    // The old shape exactly: version 1, `keep:false` (it removed), otherwise valid.
+    // Mutation: RUN_STATE_VERSION left at 1 → it parses as an owner.
+    const dir = fresh();
+    const { rm: _rm, ...rest } = { ...owner, rm: true };
+    const text = JSON.stringify({ ...rest, schemaVersion: 1, keep: false });
+    writeFileSync(ownerPath(dir), text);
+    expect(readOwner(dir)).toEqual({ kind: "unknown" });
+    expect(readFileSync(ownerPath(dir), "utf8")).toBe(text);
   });
 });
 
@@ -167,7 +179,7 @@ describe("L27 statusOf (DR-6)", () => {
     expect(of({ state: "waiting-permission", tool: "shell" }, false)).toBe("relay lost");
     expect(of({ state: "idle" }, true)).toBe("detached · idle");
     expect(of({ state: "idle" }, false)).toBe("idle");
-    // A keep=false workload left behind carries why: `ps` must say it, not hide it.
+    // An `--rm` workload left behind carries why: `ps` must say it, not hide it.
     const left = "not removed: engine down — tentacle rm box";
     expect(of({ state: "idle", detail: left }, true)).toBe(`detached · idle (${left})`);
     expect(of({ state: "idle", detail: left }, false)).toBe(`idle (${left})`);
@@ -306,23 +318,23 @@ describe("H12 TUIs on a run (docs/feat/detached-handover.md)", () => {
     expect(esc).not.toContain("\u001b");
   });
 
-  test("R6 keep=false, its owner gone mid-run, the workload still there: `not saved` until `rm`", () => {
+  test("R6 `rm: true`, its owner gone mid-run, the workload still there: `not saved` until `rm`", () => {
     // Owner, 2026-11-02: the exit net kept it (a save not confirmed, or a crash:
     // unknown = not saved). Mutation: drop the suffix → `ps` says only `lost`.
     const owned = (o: OwnerRecord) => ({ kind: "owner" as const, owner: o });
-    const run = { ...owner, keep: false, tool: undefined, lastActivityAt: NOW };
+    const run = { ...owner, rm: true, tool: undefined, lastActivityAt: NOW };
     for (const state of ["starting", "running", "waiting-permission"] as const) {
       expect(statusOf(owned({ ...run, state }), false, NOW, 0)).toBe("relay lost · not saved");
     }
-    expect(statusOf(owned(tui({ keep: false })), false, NOW, 0)).toBe("tui lost · not saved");
+    expect(statusOf(owned(tui({ rm: true })), false, NOW, 0)).toBe("tui lost · not saved");
     // The relay's own veto (round 3): its note, never a bare `interrupted`.
     const kept =
       "the relay was stopped before the turn ended; not saved — workload kept: tentacle rm box";
     expect(statusOf(owned({ ...run, state: "interrupted", detail: kept }), false, NOW, 0)).toBe(
       `interrupted (${kept})`,
     );
-    // keep=true keeps anyway; a live owner is not lost.
-    expect(statusOf(owned({ ...run, keep: true }), false, NOW, 0)).toBe("relay lost");
+    // `rm: false` (or absent) keeps anyway; a live owner is not lost.
+    expect(statusOf(owned({ ...run, rm: false }), false, NOW, 0)).toBe("relay lost");
     expect(statusOf(owned({ ...run, state: "running" }), true, NOW, 0)).toBe(
       "detached · running 0m",
     );
@@ -337,12 +349,22 @@ describe("spec.json", () => {
     expect(readSpec(path)).toEqual(spec);
   });
 
-  test("L23 `keep` is required: a spec without it is refused", () => {
+  test("L23 `rm` is required: a spec without it, or with the old `keep` instead, is refused", () => {
     const dir = fresh();
     const path = join(dir, "spec.json");
-    const { keep: _dropped, ...old } = spec;
+    const { rm: _dropped, ...old } = spec;
     writeFileSync(path, JSON.stringify(old));
     expect(() => readSpec(path)).toThrow(/spec/);
+    writeFileSync(path, JSON.stringify({ ...old, keep: false }));
+    expect(() => readSpec(path)).toThrow(/spec/);
+  });
+
+  test("fix/run-rm-flag: a previous build's (v1) spec is refused, naming both versions", () => {
+    const dir = fresh();
+    const path = join(dir, "spec.json");
+    const { rm: _dropped, ...old } = spec;
+    writeFileSync(path, JSON.stringify({ ...old, schemaVersion: 1, keep: false }));
+    expect(() => readSpec(path)).toThrow(`schemaVersion 1 is not ${RUN_STATE_VERSION}`);
   });
 
   test("a stem that is not one path component is refused", () => {
@@ -354,7 +376,7 @@ describe("spec.json", () => {
   test("an unknown schema is refused", () => {
     const dir = fresh();
     const path = join(dir, "spec.json");
-    writeFileSync(path, JSON.stringify({ ...spec, schemaVersion: 2 }));
+    writeFileSync(path, JSON.stringify({ ...spec, schemaVersion: 99 }));
     expect(() => readSpec(path)).toThrow(/schemaVersion/);
   });
 });
@@ -444,12 +466,12 @@ describe("relayBlockingMessage (R13)", () => {
     expect(text).not.toContain("--resume");
   });
 
-  test("L23 keep=false: no `attach` promised, the removal said", () => {
-    // Mutation: the keep=true wording → an `attach` that finds nothing.
+  test("L23 `rm: true`: no `attach` promised, the removal said", () => {
+    // Mutation: the kept-run wording → an `attach` that finds nothing.
     const text = relayBlockingMessage("box", {
       pid: 7,
       noun: "container",
-      owner: { kind: "owner", owner: { ...owner, keep: false } },
+      owner: { kind: "owner", owner: { ...owner, rm: true } },
     });
     expect(text).toContain("kill 7");
     expect(text).toContain("stopping it removes the container");

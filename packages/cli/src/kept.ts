@@ -110,7 +110,7 @@ export function workloadCreated(facts: {
 /**
  * Is the workload at that name the one THIS entry was made for? The laptop
  * index says where, the workload says which: a kept workload re-created at the
- * same place OUTSIDE this index (`run --keep --name box` on another laptop or
+ * same place OUTSIDE this index (`run --name box` on another laptop or
  * config dir) carries the kept labels too, and its `created` differs. `unknown`:
  * it declares none (an older build) — the labels alone decide, as before, so a
  * workload this build cannot date stays removable.
@@ -318,8 +318,8 @@ export interface KeptRelay {
   readonly attached?: readonly number[];
   readonly sessionId?: string;
   readonly log: string;
-  /** False: this relay removes the workload when the run ends. */
-  readonly keep: boolean;
+  /** True (`run --rm`): this relay removes the workload when the run ends. */
+  readonly rm: boolean;
   /** The run is over (`runFinished`): the engine's `running` is only the workload. */
   readonly finished?: boolean;
 }
@@ -448,7 +448,7 @@ export function renderVerbose(rows: readonly KeptRow[], nowMs: number, home: str
       ...(relay?.sessionId !== undefined ? [`  session   ${untrustedText(relay.sessionId)}`] : []),
       ...(relay ? [`  log       ${untrustedText(relay.log)}`] : []),
       // A dead relay removes nothing: the workload stays until `rm`.
-      ...(relay?.pid !== undefined && !relay.keep ? ["  removal   when the run ends"] : []),
+      ...(relay?.pid !== undefined && relay.rm ? ["  removal   when the run ends"] : []),
       "",
     );
   }

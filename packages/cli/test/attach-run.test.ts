@@ -12,6 +12,7 @@ import type { LocalRuntime } from "../src/local-runtime.ts";
 import { acquireResidentLock, lockHolder } from "../src/pod-resident.ts";
 import {
   type OwnerRecord,
+  RUN_STATE_VERSION,
   attachDirOf,
   attachers,
   ensureRunDir,
@@ -40,7 +41,7 @@ const KEPT = { "tentacle.managed": "true", "tentacle.kept": "true" };
 /** A run dir with an ended relay's record, a kept entry, fakes that record every effect. */
 async function rig(
   over: {
-    keep?: boolean;
+    rm?: boolean;
     owner?: Partial<OwnerRecord>;
     quit?: { sessionsKept: number; saved: boolean };
     drainLines?: string[];
@@ -62,13 +63,13 @@ async function rig(
     readFails?: string;
   } = {},
 ) {
-  const keep = over.keep ?? false;
+  const rm = over.rm ?? true;
   const config = mkdtempSync(join(tmpdir(), "attach-run-"));
   const index = keptDir(config);
   recordKept(index, entry);
   const dir = ensureRunDir(runDirFor(config, entry));
   const owner: OwnerRecord = {
-    schemaVersion: 1,
+    schemaVersion: RUN_STATE_VERSION,
     kind: "relay",
     pid: 2 ** 30,
     appVersion: "1",
@@ -76,7 +77,7 @@ async function rig(
     state: "idle",
     lastActivityAt: 1,
     autoAccept: false,
-    keep,
+    rm,
     cwd: "/work",
     ...over.owner,
   };
@@ -161,7 +162,7 @@ async function rig(
     entry,
     keptFile: join(index, keptFileName(entry)),
     dir,
-    plan: { kind: "run", sessionId: UID, handover: false, keep },
+    plan: { kind: "run", sessionId: UID, handover: false, rm },
     owner,
     cwd: "/work",
     write: (t) => out.push(t),
@@ -225,7 +226,7 @@ describe("tui-target-badge round 3: a joined run's TUI carries the badge", () =>
 });
 
 describe("H13 joinRun → finish: one recorded order (docs/feat/detached-handover.md)", () => {
-  test("keep=false, the only TUI: presence, runtime, attach, owner, net; quit: lock, use, quit, idle, drain, remove, disarm, purge; presence until the end", async () => {
+  test("rm=true, the only TUI: presence, runtime, attach, owner, net; quit: lock, use, quit, idle, drain, remove, disarm, purge; presence until the end", async () => {
     // Mutations: delete before `drain`; disarm before the delete; lock released
     // before the delete; presence removed first (docs/fix/detach-live.md A5).
     const r = await rig();
@@ -342,8 +343,8 @@ describe("H13 joinRun → finish: one recorded order (docs/feat/detached-handove
     expect(r.presence()).toEqual([]);
   });
 
-  test("keep: no lock, no read, no delete; the run's record says idle", async () => {
-    const r = await rig({ keep: true });
+  test("rm=false: no lock, no read, no delete; the run's record says idle", async () => {
+    const r = await rig({ rm: false });
     const joined = await r.join();
     expect(r.calls).not.toContain("arm(owner=tui:attached)");
     r.calls.length = 0;
@@ -352,6 +353,16 @@ describe("H13 joinRun → finish: one recorded order (docs/feat/detached-handove
     expect(existsSync(r.dir)).toBe(true);
     expect(r.held()).toBe(false);
     expect(r.presence()).toEqual([]);
+  });
+
+  test("fix/run-rm-flag: only an `rm` run warns that quitting removes the workload", async () => {
+    // Mutation: invert the notice's test → a kept run is told its quit deletes it.
+    const removing = await rig();
+    await (await removing.join()).finish(true);
+    expect(removing.notices.join("\n")).toContain("Quitting removes the container");
+    const kept = await rig({ rm: false });
+    await (await kept.join()).finish(true);
+    expect(kept.notices.join("\n")).not.toContain("Quitting removes");
   });
 
   test("a delete that fails: said, kept in `detail`, net disarmed, the run dir and the lock released", async () => {
@@ -379,7 +390,7 @@ describe("H13 joinRun → finish: one recorded order (docs/feat/detached-handove
 });
 
 describe("D11/D12 a `/quit` that closes the session for all (docs/fix/detach-live.md A5)", () => {
-  test("D11 keep=false, `y` with O on the session: lock, use, quit(forAll), wait for O, idle, drain, remove, disarm, purge; my presence until the end", async () => {
+  test("D11 rm=true, `y` with O on the session: lock, use, quit(forAll), wait for O, idle, drain, remove, disarm, purge; my presence until the end", async () => {
     // Mutations: presence removed first (`quit(forAll,presence=1)`); delete
     // before the wait (`remove(…,presence=2)`); `closeForAll` not passed.
     const o = { path: "" };
@@ -455,10 +466,10 @@ describe("D11/D12 a `/quit` that closes the session for all (docs/fix/detach-liv
 
   test("Q2 a quit alone on its session is `ending` (the ifLast close ends it); with another TUI on it, not", async () => {
     // Mutation: `ending` never set → a lone /quit leaves the bare prompt in the history.
-    const alone = await rig({ keep: true });
+    const alone = await rig({ rm: false });
     await (await alone.join()).finish(true);
     expect(alone.quitOpts).toEqual([{ closeForAll: false, ending: true }]);
-    const shared = await rig({ keep: true });
+    const shared = await rig({ rm: false });
     const joined = await shared.join();
     writePresence(shared.dir, process.ppid, laptopProc, UID); // another TUI, same session
     await joined.finish(true);
@@ -516,9 +527,9 @@ describe("D11/D12 a `/quit` that closes the session for all (docs/fix/detach-liv
   const ps = (r: Awaited<ReturnType<typeof rig>>) =>
     statusOf(readOwner(r.dir), false, Date.now(), attachers(r.dir, laptopProc).length);
 
-  test("F1 keep, `y`, O leaves after Q: the last one out writes the run's state, `ps` says idle, never `tui lost`", async () => {
+  test("F1 rm=false, `y`, O leaves after Q: the last one out writes the run's state, `ps` says idle, never `tui lost`", async () => {
     // Mutation: O's write gone (`owner.state` stays `attached`).
-    const r = await rig({ keep: true });
+    const r = await rig({ rm: false });
     const q = await r.join();
     const o = await r.join({ pid: process.ppid });
     q.runQuit.closeForAll();
@@ -529,12 +540,12 @@ describe("D11/D12 a `/quit` that closes the session for all (docs/fix/detach-liv
     expect(ps(r)).toBe("idle");
   });
 
-  test("F1 keep, `y`, Q and O each see the other, then both go: `ps` still says idle", async () => {
+  test("F1 rm=false, `y`, Q and O each see the other, then both go: `ps` still says idle", async () => {
     // Mutation: Q's write after its leave gone. O runs inside Q's drain: past
     // the check of Q's first write, O's check still sees Q.
     const late: { o?: Joined } = {};
     const r = await rig({
-      keep: true,
+      rm: false,
       onDrain: async () => {
         const o = late.o;
         late.o = undefined;
@@ -551,9 +562,9 @@ describe("D11/D12 a `/quit` that closes the session for all (docs/fix/detach-liv
     expect(ps(r)).toBe("idle");
   });
 
-  test("F1 keep, O leaves with a TUI left on another session: no last state yet, it stays `attached`", async () => {
+  test("F1 rm=false, O leaves with a TUI left on another session: no last state yet, it stays `attached`", async () => {
     // Mutation: O writes with no look at who is left.
-    const r = await rig({ keep: true });
+    const r = await rig({ rm: false });
     const o = await r.join();
     writePresence(r.dir, process.ppid, laptopProc, "FRESH-1");
     o.runQuit.closedElsewhere("closed");
@@ -561,9 +572,9 @@ describe("D11/D12 a `/quit` that closes the session for all (docs/fix/detach-liv
     expect(ps(r)).toBe("attached");
   });
 
-  test("R1 keep, `y`, Q's save not confirmed, O leaves after Q: Q's noted record stands, `ps -v` agrees with Q's line", async () => {
+  test("R1 rm=false, `y`, Q's save not confirmed, O leaves after Q: Q's noted record stands, `ps -v` agrees with Q's line", async () => {
     // Mutation: O's last-out write over any record (a plain `idle` wipes the note).
-    const r = await rig({ keep: true, quit: { sessionsKept: 0, saved: false } });
+    const r = await rig({ rm: false, quit: { sessionsKept: 0, saved: false } });
     const q = await r.join();
     const o = await r.join({ pid: process.ppid });
     q.runQuit.closeForAll();
@@ -575,8 +586,8 @@ describe("D11/D12 a `/quit` that closes the session for all (docs/fix/detach-liv
     expect(read.kind === "owner" && read.owner.detail).toBe("the last save was not confirmed");
   });
 
-  test("F1 keep=false: O never writes after the close, the dir is the closer's to delete", async () => {
-    // Mutation: O's write not gated on keep (a write racing the purge).
+  test("F1 rm=true: O never writes after the close, the dir is the closer's to delete", async () => {
+    // Mutation: O's write not gated on rm (a write racing the purge).
     const r = await rig();
     const o = await r.join();
     o.runQuit.closedElsewhere("closed");
@@ -622,7 +633,7 @@ describe("D23 auto-accept on attach: the bit is owner.json's only (docs/fix/deta
     const replies = [{ ok: true, appVersion: "1", autoAccept: true }, { ok: true }];
     const joined = await joinRun(
       r.deps({
-        plan: { kind: "run", sessionId: UID, handover: true, keep: false },
+        plan: { kind: "run", sessionId: UID, handover: true, rm: true },
         handoverTimes: { noSocketMs: 30, busyMs: 2000, pollMs: 5, busyPollMs: 5, ackMs: 200 },
         dial: async () => ({
           closed: new Promise(() => {}),
@@ -670,7 +681,7 @@ describe("D23 auto-accept on attach: the bit is owner.json's only (docs/fix/deta
       { ok: true, wakePending: true },
     ];
     const joined = await r.join({
-      plan: { kind: "run", sessionId: UID, handover: true, keep: true },
+      plan: { kind: "run", sessionId: UID, handover: true, rm: false },
       dial: async () => ({
         closed: new Promise(() => {}),
         close: () => {},
@@ -700,7 +711,7 @@ describe("D23 auto-accept on attach: the bit is owner.json's only (docs/fix/deta
     const lock = acquireResidentLock(r.dir, laptopProc);
     const replies = [{ ok: true }, { ok: true }];
     const joined = await r.join({
-      plan: { kind: "run", sessionId: UID, handover: true, keep: true },
+      plan: { kind: "run", sessionId: UID, handover: true, rm: false },
       dial: async () => ({
         closed: new Promise(() => {}),
         close: () => {},
@@ -779,7 +790,7 @@ describe("H14 the last-quit race, deterministic", () => {
   });
 });
 
-describe("H15 keep=false, two TUIs", () => {
+describe("H15 rm=true, two TUIs", () => {
   test("the first quits: no delete, its net disarmed; the second: the delete", async () => {
     // Mutation: delete on any quit.
     const r = await rig();
@@ -848,7 +859,7 @@ describe("Phase B: the attacher's hand-over (steps 6 and 8)", () => {
   const fast = { noSocketMs: 30, busyMs: 2000, pollMs: 5, busyPollMs: 5, ackMs: 200 };
   const handover = (r: Awaited<ReturnType<typeof live>>, more: Partial<JoinDeps> = {}) =>
     r.deps({
-      plan: { kind: "run", sessionId: UID, handover: true, keep: false },
+      plan: { kind: "run", sessionId: UID, handover: true, rm: true },
       handoverTimes: fast,
       ...more,
     });
@@ -1051,7 +1062,7 @@ describe("Phase B: the attacher's hand-over (steps 6 and 8)", () => {
   });
 });
 
-describe("H35 the keep=false delete depends on a CONFIRMED last save", () => {
+describe("H35 the rm=true delete depends on a CONFIRMED last save", () => {
   test("not confirmed by the quit: the workload stays and it is said; the net disarmed, the lock released", async () => {
     // Mutation: drop `saved` from `quitPlan` → deleted with the pod's only copy.
     const r = await rig({ quit: { sessionsKept: 0, saved: false } });
@@ -1075,24 +1086,24 @@ describe("H35 the keep=false delete depends on a CONFIRMED last save", () => {
     expect(r.out.join("")).toContain("not removed: the last save was not confirmed");
   });
 
-  test("keep: a save not confirmed changes nothing (no delete to hold)", async () => {
-    const r = await rig({ keep: true, quit: { sessionsKept: 0, saved: false } });
+  test("rm=false: a save not confirmed changes nothing (no delete to hold)", async () => {
+    const r = await rig({ rm: false, quit: { sessionsKept: 0, saved: false } });
     const joined = await r.join();
     await joined.finish(true);
     expect(r.out.join("")).not.toContain("not removed");
   });
 
-  test("R2 keep=true: a save not confirmed is NOT a silent detach — the session is still in the container, `attach` reopens it", async () => {
+  test("R2 rm=false: a save not confirmed is NOT a silent detach — the session is still in the container, `attach` reopens it", async () => {
     // Mutation: only the `why` paths say anything → the user believes the run ended.
     // An unconfirmed save detaches: the daemon keeps the session (`sessionsKept` 1).
-    const r = await rig({ keep: true, quit: { sessionsKept: 1, saved: false } });
+    const r = await rig({ rm: false, quit: { sessionsKept: 1, saved: false } });
     const joined = await r.join();
     await joined.finish(true);
     const text = r.out.join("");
     expect(text).toContain("the last save was not confirmed");
     expect(text).toContain("the session is still in the container");
     expect(text).toContain("`tentacle attach box` reopens it");
-    // A keep=true detach deletes nothing: never the removal wording.
+    // A rm=false detach deletes nothing: never the removal wording.
     expect(text).not.toContain("not removed");
     expect(text).not.toContain("tentacle rm");
     // The state file carries it too: `ps` agrees with what the terminal said.
@@ -1102,7 +1113,7 @@ describe("H35 the keep=false delete depends on a CONFIRMED last save", () => {
     );
   });
 
-  test("R2 keep=false: the same line, next to `not removed` (the session is live, not gone)", async () => {
+  test("R2 rm=true: the same line, next to `not removed` (the session is live, not gone)", async () => {
     // Mutation: the `why` line alone → "not removed … tentacle rm box" reads as "the run ended".
     const r = await rig({ quit: { sessionsKept: 1, saved: false } });
     const joined = await r.join();

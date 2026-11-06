@@ -4,34 +4,43 @@ import { applyProfile } from "../src/profile.ts";
 import { resolveConfig } from "../src/resolve.ts";
 import { FileConfigSchema } from "../src/schema.ts";
 
-// `keep` (docs/feat/docker-engine-cli.md, owner 2026-10-27): whether `run`
-// leaves the workload up on exit. Default true (absent here; the CLI applies it); the `--keep[=bool]` flag is
-// layered on top by the CLI (`engine-select.ts`).
-describe("keep", () => {
+// `rm` (fix/run-rm-flag; was `keep`, docs/feat/docker-engine-cli.md): whether
+// `run` removes the workload when the run ends. Default false (absent here; the
+// CLI applies it); the `--rm[=bool]` flag is layered on top by the CLI (`engine-select.ts`).
+describe("rm", () => {
   test("a boolean is accepted in the file and in a profile; anything else is an error", () => {
-    expect(FileConfigSchema.safeParse({ keep: true }).success).toBe(true);
-    expect(FileConfigSchema.safeParse({ profiles: { p: { keep: false } } }).success).toBe(true);
-    expect(FileConfigSchema.safeParse({ keep: "yes" }).success).toBe(false);
-    expect(FileConfigSchema.safeParse({ profiles: { p: { keep: 1 } } }).success).toBe(false);
+    expect(FileConfigSchema.safeParse({ rm: true }).success).toBe(true);
+    expect(FileConfigSchema.safeParse({ profiles: { p: { rm: false } } }).success).toBe(true);
+    expect(FileConfigSchema.safeParse({ rm: "yes" }).success).toBe(false);
+    expect(FileConfigSchema.safeParse({ profiles: { p: { rm: 1 } } }).success).toBe(false);
+  });
+
+  test("the old `keep` key is REJECTED, never silently ignored", () => {
+    // Ignoring it would turn a user's `keep: false` (delete on exit) into "kept forever".
+    expect(FileConfigSchema.safeParse({ keep: true }).success).toBe(false);
+    expect(FileConfigSchema.safeParse({ keep: false }).success).toBe(false);
+    expect(FileConfigSchema.safeParse({ profiles: { p: { keep: false } } }).success).toBe(false);
   });
 
   test("resolved from the file; absent when unset (the CLI then defaults to false)", () => {
-    const file = FileConfigSchema.parse({ keep: true });
-    expect(resolveConfig({ fileConfig: file, env: {}, defaultCwd: "/w" }).keep).toBe(true);
+    const file = FileConfigSchema.parse({ rm: true });
+    expect(resolveConfig({ fileConfig: file, env: {}, defaultCwd: "/w" }).rm).toBe(true);
     const plain = resolveConfig({ fileConfig: {}, env: {}, defaultCwd: "/w" });
-    expect("keep" in plain).toBe(false);
+    expect("rm" in plain).toBe(false);
   });
 
-  test("a profile's keep beats the file's", () => {
-    const file = FileConfigSchema.parse({ keep: true, profiles: { p: { keep: false } } });
+  test("a profile's rm beats the file's", () => {
+    const file = FileConfigSchema.parse({ rm: true, profiles: { p: { rm: false } } });
     const applied = applyProfile(file, "p");
-    expect(applied.ok && applied.config.keep).toBe(false);
+    expect(applied.ok && applied.config.rm).toBe(false);
     const base = applyProfile(file, undefined);
-    expect(base.ok && base.config.keep).toBe(true);
+    expect(base.ok && base.config.rm).toBe(true);
   });
 
-  test("the config template documents the key", () => {
-    expect(DEFAULT_CONFIG_JSONC).toContain('// "keep": true,');
+  test("the config template documents the key, not the old one", () => {
+    expect(DEFAULT_CONFIG_JSONC).toContain('// "rm": false,');
+    expect(DEFAULT_CONFIG_JSONC).not.toContain('"keep"');
+    expect(DEFAULT_CONFIG_JSONC).not.toContain("--keep");
   });
 });
 

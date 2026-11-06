@@ -196,7 +196,7 @@ export function relayExits(model: RelayModel, now: number): boolean {
  * May the wake start now? No limit, as in a TUI: a poll loop must go on, and
  * `tentacle stop` / `attach` is how the user ends a runaway. `enabled` is the
  * relay's subscription (`autoWake`). A failed or cut run stays that: a wake
- * would overwrite its reason, and with keep=false turn the workload a failed
+ * would overwrite its reason, and with `--rm` turn the workload a failed
  * run keeps into one it removes. `exiting`: the exit plan is being read, or is final.
  */
 export function relayWakeDue(model: RelayModel, exiting: boolean): boolean {
@@ -282,8 +282,8 @@ export type ExitPlan =
   | { readonly kind: "remove" };
 
 /** The rows of `exitPlan` a fresh read can change: only then is one made. */
-export function needsUse(model: RelayModel, keep: boolean): boolean {
-  return !keep && !model.linkStopped && !model.stopping && model.rest === "idle";
+export function needsUse(model: RelayModel, rm: boolean): boolean {
+  return rm && !model.linkStopped && !model.stopping && model.rest === "idle";
 }
 
 /**
@@ -296,7 +296,7 @@ export function needsUse(model: RelayModel, keep: boolean): boolean {
  * relay when the laptop's last save did not land (docs/fix/detach-live.md, fix
  * round 3).
  */
-export function exitPlan(model: RelayModel, keep: boolean, use: ResidentUse | null): ExitPlan {
+export function exitPlan(model: RelayModel, rm: boolean, use: ResidentUse | null): ExitPlan {
   // Handed over (docs/feat/detached-handover.md): the TUIs own the workload now.
   if (model.handover === "done") {
     return { kind: "leave" };
@@ -309,7 +309,7 @@ export function exitPlan(model: RelayModel, keep: boolean, use: ResidentUse | nu
     // A job's exit landed during the read: back to the ticks, where the wake fires.
     return { kind: "hold" };
   }
-  if (keep || model.linkStopped) {
+  if (!rm || model.linkStopped) {
     return { kind: "leave" };
   }
   if (model.stopping) {

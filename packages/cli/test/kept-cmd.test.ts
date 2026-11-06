@@ -26,6 +26,7 @@ import type { KeptEntry } from "../src/kept.ts";
 import { type ProcOf, lockHolder } from "../src/pod-resident.ts";
 import {
   type OwnerRecord,
+  RUN_STATE_VERSION,
   ensureRunDir,
   laptopProc,
   ownerPath,
@@ -145,7 +146,7 @@ const running = (labels: Record<string, string> = DOCKER_KEPT): WorkloadFacts =>
   labels,
 });
 const ownerOf = (state: OwnerRecord["state"], created = entry("a").created): OwnerRecord => ({
-  schemaVersion: 1,
+  schemaVersion: RUN_STATE_VERSION,
   kind: "relay",
   pid: 9,
   appVersion: "1",
@@ -455,17 +456,31 @@ describe("tentacle ps: detached runs (docs/feat/detached-relay-lifecycle.md L28)
     expect(text).toContain("running · relay lost");
   });
 
-  test("R6 keep=false, its relay gone mid-run: `not saved` while the workload is there, not once it is gone", async () => {
+  test("fix/run-rm-flag: a live relay of the previous build (v1 owner.json): `unknown owner`, no removal line", async () => {
+    // Mutation: RUN_STATE_VERSION left at 1 → its `keep:false` is read and `ps` shows a removal.
+    let v1 = "";
+    const text = await rows((dir) => {
+      writeFileSync(join(dir, ".lock.1"), String(process.pid));
+      const { schemaVersion: _v, ...rest } = ownerOf("running");
+      v1 = JSON.stringify({ ...rest, schemaVersion: 1, keep: false, sessionId: "u1" });
+      writeFileSync(ownerPath(dir), v1);
+    }, true);
+    expect(text).toContain("detached · unknown owner");
+    expect(text).not.toContain("removal");
+    expect(text).not.toContain("  session   u1");
+  });
+
+  test("R6 `rm: true`, its relay gone mid-run: `not saved` while the workload is there, not once it is gone", async () => {
     // Owner, 2026-11-02. A workload the net deleted (its save confirmed) is `gone`, nothing more.
     const text = await rows((dir) => {
       writeFileSync(join(dir, ".lock.1"), "");
-      writeOwner(dir, { ...ownerOf("running"), keep: false });
+      writeOwner(dir, { ...ownerOf("running"), rm: true });
     });
     expect(text).toContain("running · relay lost · not saved");
     const docker = new FakeEngine(); // nothing named `a`: gone
     const e = entry("a");
     const s = setup([e], { [key]: docker });
-    writeOwner(ensureRunDir(runDirIn(s.dir, e)), { ...ownerOf("running"), keep: false });
+    writeOwner(ensureRunDir(runDirIn(s.dir, e)), { ...ownerOf("running"), rm: true });
     expect(await psCommand({ all: true }, s.deps({ procOf }))).toBe(0);
     expect(s.text()).toContain("gone");
     expect(s.text()).not.toContain("not saved");
@@ -477,7 +492,7 @@ describe("tentacle ps: detached runs (docs/feat/detached-relay-lifecycle.md L28)
       writeFileSync(join(dir, ".lock.1"), "");
       writeOwner(dir, {
         ...ownerOf("idle"),
-        keep: false,
+        rm: true,
         detail: "not removed: engine \u001b[31mdown — tentacle rm a",
       });
     });
@@ -522,7 +537,7 @@ describe("tentacle ps: detached runs (docs/feat/detached-relay-lifecycle.md L28)
     const text = await rows((dir) => {
       log = relayLogPath(dir);
       writeFileSync(join(dir, ".lock.1"), String(process.pid));
-      writeOwner(dir, { ...ownerOf("running"), keep: false, sessionId: "u1" });
+      writeOwner(dir, { ...ownerOf("running"), rm: true, sessionId: "u1" });
     }, true);
     expect(text).toContain(`  relay     pid ${process.pid}`);
     expect(text).toContain("  session   u1");
@@ -537,7 +552,7 @@ describe("tentacle ps: detached runs (docs/feat/detached-relay-lifecycle.md L28)
       writeFileSync(join(dir, ".lock.1"), String(process.pid));
       writeOwner(dir, {
         ...ownerOf("running", new Date(NOW - 9 * H).toISOString()),
-        keep: false,
+        rm: true,
         sessionId: "stale-session",
       });
     }, true);
@@ -947,7 +962,7 @@ describe("tentacle rm", () => {
       child.kill("SIGKILL");
     });
 
-    test("gone after a stop is the relay's own keep=false removal: the normal line, exit 0", async () => {
+    test("gone after a stop is the relay's own `--rm` removal: the normal line, exit 0", async () => {
       const docker = new FakeEngine();
       docker.set("a", running(), null);
       const s = setup([e], { [key]: docker });
@@ -1030,6 +1045,23 @@ describe("tentacle rm", () => {
       expect(s.errText()).toContain("Removed a (docker, local).");
       expect(s.errText()).toContain(ownerPath(dir));
       expect(readFileSync(ownerPath(dir), "utf8")).toBe('{"schemaVersion":99,"future":true}');
+    });
+
+    test("fix/run-rm-flag: a previous build's (v1, `keep:false`) owner.json: the workload goes, the file stays, named", async () => {
+      // Mutation: RUN_STATE_VERSION left at 1 → the old record is read and the run dir removed.
+      const docker = new FakeEngine();
+      docker.set("a", { status: "exited", labels: DOCKER_KEPT });
+      const s = setup([e], { [key]: docker });
+      const dir = ensureRunDir(runDirIn(s.dir, e));
+      const { schemaVersion: _v, ...rest } = ownerOf("idle", e.created);
+      const v1 = JSON.stringify({ ...rest, schemaVersion: 1, keep: false });
+      writeFileSync(ownerPath(dir), v1);
+      expect(await rmCommand("a", {}, s.deps())).toBe(0);
+      expect(s.errText()).toContain("Removed a (docker, local).");
+      expect(s.errText()).toContain(
+        `Left ${ownerPath(dir)}: it is not readable by this version, delete it yourself.`,
+      );
+      expect(readFileSync(ownerPath(dir), "utf8")).toBe(v1);
     });
   });
 

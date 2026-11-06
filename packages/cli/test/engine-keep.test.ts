@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EngineHost } from "../src/engine-host.ts";
 import { armExitNet, armSharedExitNet } from "../src/engine-runtime.ts";
-import { attachCommand, resolveKeep } from "../src/engine-select.ts";
-import { ARGS, parseArgs } from "../src/flags.ts";
+import { attachCommand, resolveRm } from "../src/engine-select.ts";
+import { ARGS, USAGE, parseArgs } from "../src/flags.ts";
 import { attachers, laptopProc, writePresence } from "../src/run-state.ts";
 
 describe("L22 armExitNet (docs/feat/detached-relay-lifecycle.md)", () => {
@@ -143,7 +143,7 @@ describe("H16 armSharedExitNet (docs/feat/detached-handover.md)", () => {
   });
 });
 
-// `run --keep[=bool]` (docs/feat/docker-engine-cli.md, owner 2026-10-27).
+// `run --rm[=bool]` (fix/run-rm-flag; was `--keep`, docs/feat/docker-engine-cli.md).
 describe("attachCommand carries every flag needed to reconnect", () => {
   test("--insecure-docker-tcp is repeated when the run needed it", () => {
     expect(attachCommand("docker", "c1", { insecureTcp: true })).toBe(
@@ -167,55 +167,85 @@ describe("attachCommand carries every flag needed to reconnect", () => {
   });
 });
 
-describe("resolveKeep: flag > profile > user config > true", () => {
-  test("bare --keep, --keep=true and --keep=false", () => {
-    expect(resolveKeep({ bare: true, configured: false })).toEqual({ ok: true, keep: true });
-    expect(resolveKeep({ value: "true", configured: false })).toEqual({ ok: true, keep: true });
-    expect(resolveKeep({ value: "false", configured: true })).toEqual({ ok: true, keep: false });
+describe("resolveRm: flag > profile > user config > false (fix/run-rm-flag)", () => {
+  test("bare --rm, --rm=true and --rm=false (which beats a configured true)", () => {
+    expect(resolveRm({ bare: true, configured: false })).toEqual({ ok: true, rm: true });
+    expect(resolveRm({ value: "true", configured: false })).toEqual({ ok: true, rm: true });
+    expect(resolveRm({ value: "false", configured: true })).toEqual({ ok: true, rm: false });
   });
 
-  test("no flag: the configured value, else true", () => {
-    expect(resolveKeep({ configured: true })).toEqual({ ok: true, keep: true });
-    expect(resolveKeep({ configured: false })).toEqual({ ok: true, keep: false });
-    expect(resolveKeep({})).toEqual({ ok: true, keep: true });
+  test("no flag: the configured value, else false (the workload is kept)", () => {
+    expect(resolveRm({ configured: true })).toEqual({ ok: true, rm: true });
+    expect(resolveRm({ configured: false })).toEqual({ ok: true, rm: false });
+    expect(resolveRm({})).toEqual({ ok: true, rm: false });
   });
 
-  test("any other --keep value is a loud error naming the value", () => {
-    expect(resolveKeep({ value: "yes" })).toEqual({
+  test("any other --rm value is a loud error naming the value", () => {
+    expect(resolveRm({ value: "yes" })).toEqual({
       ok: false,
-      error: '--keep takes true or false, got "yes"',
+      error: '--rm takes true or false, got "yes"',
     });
   });
 });
 
-describe("parseArgs: run --keep takes an optional value (=v or the next word true/false)", () => {
+describe("parseArgs: run --rm takes an optional value (=v or the next word true/false)", () => {
   const parse = (...args: string[]) => parseArgs(args, ARGS.run);
-  test("--keep true / --keep false (space form) is the value, not the name", () => {
-    const on = parse("--image", "x", "--keep", "true");
-    expect(on.ok && on.flags.get("keep")).toBe("true");
+  test("--rm true / --rm false (space form) is the value, not the name", () => {
+    const on = parse("--image", "x", "--rm", "true");
+    expect(on.ok && on.flags.get("rm")).toBe("true");
     expect(on.ok && on.positional).toEqual([]);
-    const off = parse("--keep", "false", "--image", "x", "myname");
-    expect(off.ok && off.flags.get("keep")).toBe("false");
+    const off = parse("--rm", "false", "--image", "x", "myname");
+    expect(off.ok && off.flags.get("rm")).toBe("false");
     expect(off.ok && off.positional).toEqual(["myname"]);
   });
-  test("any other next word stays positional: --keep myname, myname --keep", () => {
-    const a = parse("--image", "x", "--keep", "myname");
-    expect(a.ok && a.bools.has("keep")).toBe(true);
+  test("any other next word stays positional: --rm myname, myname --rm", () => {
+    const a = parse("--image", "x", "--rm", "myname");
+    expect(a.ok && a.bools.has("rm")).toBe(true);
     expect(a.ok && a.positional).toEqual(["myname"]);
-    const b = parse("--image", "x", "myname", "--keep");
-    expect(b.ok && b.bools.has("keep")).toBe(true);
+    const b = parse("--image", "x", "myname", "--rm");
+    expect(b.ok && b.bools.has("rm")).toBe(true);
     expect(b.ok && b.positional).toEqual(["myname"]);
   });
-  test("bare, =true, =false; the following word stays positional", () => {
-    const bare = parse("--image", "x", "--keep", "box");
-    expect(bare.ok && bare.bools.has("keep")).toBe(true);
-    expect(bare.ok && bare.positional).toEqual(["box"]);
-    const off = parse("--image", "x", "--keep=false");
-    expect(off.ok && off.flags.get("keep")).toBe("false");
-    const on = parse("--image", "x", "--keep=true");
-    expect(on.ok && on.flags.get("keep")).toBe("true");
+  test("=true, =false", () => {
+    const off = parse("--image", "x", "--rm=false");
+    expect(off.ok && off.flags.get("rm")).toBe("false");
+    const on = parse("--image", "x", "--rm=true");
+    expect(on.ok && on.flags.get("rm")).toBe("true");
   });
-  test("attach has no --keep", () => {
-    expect(parseArgs(["--keep", "p"], ARGS.attach).ok).toBe(false);
+  test("--rm twice is the usual repeated-flag error", () => {
+    const r = parse("--image", "x", "--rm", "--rm=false");
+    expect(r.ok).toBe(false);
+  });
+  test("--keep is gone: a plain unknown option, no hint (owner answer 1)", () => {
+    expect(parse("--image", "x", "--keep")).toEqual({ ok: false, error: "unknown option --keep" });
+    expect(parse("--image", "x", "--keep=false")).toEqual({
+      ok: false,
+      error: "unknown option --keep",
+    });
+  });
+  test("attach has neither --rm nor -d", () => {
+    expect(parseArgs(["--rm", "p"], ARGS.attach).ok).toBe(false);
+    expect(parseArgs(["-d", "p"], ARGS.attach).ok).toBe(false);
+  });
+});
+
+test("USAGE.run names --rm and -d, never --keep", () => {
+  expect(USAGE.run).toContain("[--rm[=true|false]]");
+  expect(USAGE.run).toContain("[-d|--detach]");
+  expect(USAGE.run).not.toContain("--keep");
+});
+
+describe("parseArgs: -d is run's short --detach", () => {
+  const parse = (...args: string[]) => parseArgs(args, ARGS.run);
+  test("-d ≡ --detach; the prompt stays positional", () => {
+    const r = parse("-d", "hi", "--image", "x");
+    expect(r.ok && r.bools.has("detach")).toBe(true);
+    expect(r.ok && r.positional).toEqual(["hi"]);
+  });
+  test("-d with --detach is given twice; -d=1 takes no value", () => {
+    const twice = parse("-d", "--detach", "--image", "x");
+    expect(twice.ok ? "ok" : twice.error).toContain("--detach given more than once");
+    const valued = parse("-d=1", "--image", "x");
+    expect(valued.ok ? "ok" : valued.error).toContain("takes no value");
   });
 });

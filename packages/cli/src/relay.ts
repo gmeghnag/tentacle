@@ -14,7 +14,7 @@
  * A background job's exit starts a continuation turn, per the laptop's `autoWake`
  * (docs/fix/detached-autowake.md).
  *
- * `--keep=false` (docs/feat/detached-relay-lifecycle.md): on a normal exit the
+ * `--rm` (docs/feat/detached-relay-lifecycle.md): on a normal exit the
  * relay removes the workload, `exitPlan` alone deciding. The order is the safety
  * argument: the lock is taken before the net is armed (a relay refused by the
  * lock must never delete anything), the session is detached and saved before the
@@ -230,7 +230,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
         sessionId: spec.sessionId,
         lastActivityAt: now(),
         autoAccept: spec.autoAccept,
-        keep: spec.keep,
+        rm: spec.rm,
         cwd: spec.cwd,
         created: entry.created,
         runTurnId,
@@ -332,7 +332,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   // Under the lock: a relay refused by it must never delete a workload that
   // another relay is using. Covers a crash; a SIGKILL or a power loss leaves the
   // workload, listed in `ps`.
-  if (!spec.keep) {
+  if (spec.rm) {
     disarmNet = (deps.armNet ?? armExitNet)(host, entry.name, () => netSaved(), netKept);
   }
 
@@ -444,7 +444,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     preparer = null;
     clearTimeout(lease);
     peer.close(); // a late `commit` finds the socket closed
-    if (!spec.keep) {
+    if (spec.rm) {
       disarmNet = (deps.armNet ?? armExitNet)(host, entry.name, () => netSaved(), netKept);
     }
     policy.thaw();
@@ -552,9 +552,9 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       await new Promise((resolve) => setTimeout(resolve, tickMs));
     }
     exiting = true;
-    const use = model.handover === "none" && needsUse(model, spec.keep) ? await readUse() : null;
+    const use = model.handover === "none" && needsUse(model, spec.rm) ? await readUse() : null;
     // On the state after the read: a stop, a `prepare` or a job's exit may have landed during it.
-    plan = exitPlan(model, spec.keep, use);
+    plan = exitPlan(model, spec.rm, use);
     if (plan.kind !== "hold") {
       // In the same tick as the final plan: a `prepare` from here is `leaving`.
       leaving = true;
@@ -589,11 +589,11 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     log(line);
   }
   if (plan.kind !== "remove") {
-    // keep=true (owner Q3, fix round 7): nothing is deleted here, but `ps` says
+    // No `--rm` (owner Q3, fix round 7): nothing is deleted here, but `ps` says
     // when the laptop copy lacks the last turn. Informational only; after a
     // hand-over the TUIs hold the save, so it is not this relay's to report.
     // A failed run says both: its reason, then `not saved` (Q13, OQ12).
-    if (spec.keep && model.handover === "none" && (!settled || unsaved.length > 0)) {
+    if (!spec.rm && model.handover === "none" && (!settled || unsaved.length > 0)) {
       const notSaved = "not saved — the laptop copy lacks the last turn";
       const view = finalView(model);
       emit({

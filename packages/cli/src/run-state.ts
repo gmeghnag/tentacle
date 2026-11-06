@@ -35,7 +35,7 @@ import { untrustedText } from "./untrusted-text.ts";
 export const RELAY_SUBCOMMAND = "__relay";
 /** Env: the path of the relay's `spec.json`. */
 export const RELAY_SPEC_ENV = "TENTACLE_RELAY_SPEC";
-export const RUN_STATE_VERSION = 1;
+export const RUN_STATE_VERSION = 2;
 /** `relay.log` rotates once past this size, one rotation kept. */
 export const RELAY_LOG_CAP_BYTES = 1024 * 1024;
 
@@ -62,7 +62,7 @@ export interface OwnerRecord {
   readonly schemaVersion: typeof RUN_STATE_VERSION;
   /**
    * `tui`: the run was handed over to (or joined by) TUIs; the record then says
-   * what the run IS (`sessionId`, `keep`, `cwd`), not who is here: that is
+   * what the run IS (`sessionId`, `rm`, `cwd`), not who is here: that is
    * `attachers`. An older build refuses it as `unknown` and leaves it.
    */
   readonly kind: "relay" | "tui";
@@ -77,8 +77,8 @@ export interface OwnerRecord {
   /** ms since epoch: the last state change. */
   readonly lastActivityAt: number;
   readonly autoAccept: boolean;
-  /** False: the relay removes the workload when the run ends. See `ownerKeeps`. */
-  readonly keep?: boolean;
+  /** True (`run --rm`): the relay removes the workload when the run ends. See `ownerRemoves`. */
+  readonly rm?: boolean;
   /** The folder the run belongs to: its session's laptop copy is filed under it. */
   readonly cwd?: string;
   /** The relay's control socket (`control-socket.ts`), when it is not `<runDir>/control.sock`. */
@@ -108,8 +108,8 @@ export interface RelaySpec {
   readonly sessionId: string;
   readonly prompt: string;
   readonly autoAccept: boolean;
-  /** False: remove the workload when the run ends (`exitPlan`). */
-  readonly keep: boolean;
+  /** True (`run --rm`): remove the workload when the run ends (`exitPlan`). */
+  readonly rm: boolean;
   readonly cwd: string;
   /** The launcher's `--profile`. */
   readonly profile?: string;
@@ -205,7 +205,7 @@ export function readOwner(dir: string): OwnerRead {
       ...(str(r.detail) ? { detail: r.detail } : {}),
       lastActivityAt: r.lastActivityAt,
       autoAccept: r.autoAccept,
-      ...(typeof r.keep === "boolean" ? { keep: r.keep } : {}),
+      ...(typeof r.rm === "boolean" ? { rm: r.rm } : {}),
       ...(str(r.cwd) ? { cwd: r.cwd } : {}),
       ...(str(r.control) ? { control: r.control } : {}),
       ...(str(r.created) ? { created: r.created } : {}),
@@ -351,7 +351,7 @@ export function readSpec(path: string): RelaySpec {
     !str(r.sessionId) ||
     !str(r.prompt) ||
     typeof r.autoAccept !== "boolean" ||
-    typeof r.keep !== "boolean" ||
+    typeof r.rm !== "boolean" ||
     !str(r.cwd)
   ) {
     throw new Error(`${path}: not a relay spec`);
@@ -363,7 +363,7 @@ export function readSpec(path: string): RelaySpec {
     sessionId: r.sessionId,
     prompt: r.prompt,
     autoAccept: r.autoAccept,
-    keep: r.keep,
+    rm: r.rm,
     cwd: r.cwd,
     ...(str(r.profile) ? { profile: r.profile } : {}),
   };
@@ -403,9 +403,9 @@ export function laptopProc(pid: number): ProcStat | undefined {
   return procStat(pid) ?? parsePsStat(psLine(pid));
 }
 
-/** Does this run keep its workload? Absent: a run from before `--detach --keep=false`. */
-export function ownerKeeps(owner: OwnerRecord): boolean {
-  return owner.keep !== false;
+/** Does this run remove its workload when it ends (`run --rm`)? Absent: not removed. */
+export function ownerRemoves(owner: OwnerRecord): boolean {
+  return owner.rm === true;
 }
 
 /** The sentence of one state; `alive` says whether a relay still acts on it. */
@@ -426,7 +426,7 @@ function ownerText(owner: OwnerRecord, alive: boolean, now: number): string {
     case "failed":
       return detail !== undefined ? `failed: ${detail}` : "failed";
     case "idle":
-      // A keep=false run whose delete failed leaves `idle` and says WHY in
+      // An `--rm` run whose delete failed leaves `idle` and says WHY in
       // `detail` (relay.ts `not removed: …`): `ps` must show it, not a plain `idle`.
       return detail !== undefined ? `${owner.state} (${detail})` : owner.state;
     case "interrupted":
@@ -445,7 +445,7 @@ function ownerText(owner: OwnerRecord, alive: boolean, now: number): string {
  * record's lock holder is the last TUI closing the run. `null`: no relay ever.
  * Sanitised: the text comes from a file.
  *
- * A keep=false run whose owner went mid-run (`lost`) is `not saved`
+ * An `--rm` run whose owner went mid-run (`lost`) is `not saved`
  * (docs/fix/detach-live.md R6, owner 2026-11-02): its exit net deletes only a
  * save it confirmed, a crash's state is unknown, so the workload stays until
  * `rm` (`statusCell` shows this text only while the workload is there).
@@ -462,7 +462,7 @@ export function statusOf(
   }
   const lost = (owner: OwnerRecord): string => {
     const text = ownerText(owner, false, now);
-    return !ownerKeeps(owner) && text.endsWith(" lost") ? `${text} · not saved` : text;
+    return ownerRemoves(owner) && text.endsWith(" lost") ? `${text} · not saved` : text;
   };
   if (tui && read.kind === "owner") {
     return alive ? "closing" : lost(read.owner);
@@ -503,7 +503,7 @@ export interface RelayHolder {
 /**
  * `attach`'s refusal when the user's OWN location flags name a place other than
  * a live detached run's (S2's comparison). It must not offer `kill <pid>`: that
- * stops the run and, on keep=false, REMOVES the workload — of another place than
+ * stops the run and, on an `--rm` run, REMOVES the workload — of another place than
  * the one asked for. So it names both places and the safe next step: the index
  * alone (no location flag) resolves the run where it actually is.
  */
@@ -531,7 +531,7 @@ export function relayBlockingMessage(
   const shown = untrustedText(name);
   const { pid, owner } = relay;
   const state = owner.kind === "owner" ? owner.owner.state : "unknown owner";
-  if (owner.kind === "owner" && !ownerKeeps(owner.owner)) {
+  if (owner.kind === "owner" && ownerRemoves(owner.owner)) {
     const session = untrustedText(owner.owner.sessionId);
     return `${shown}: a detached run owns it (pid ${pid}, ${state}). Wait for it, or \`kill ${pid}\` to stop it: stopping it removes the ${relay.noun ?? "workload"}; the transcript stays in \`tentacle --resume ${session}\` from the folder it ran in`;
   }
