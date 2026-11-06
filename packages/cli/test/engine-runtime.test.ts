@@ -804,8 +804,12 @@ describe("startPodRuntime", () => {
       const statuses: LinkStatus[] = [];
       runtime.link.onLinkStatus((s) => statuses.push(s));
       emit.stderr("boom from the daemon\n");
+      // The daemon is GONE: the redial fails for good. Waiting only for "not up"
+      // raced the backoff redial, which could come back `up` (not a fault) before
+      // dispose (docs/fix/engine-runtime-stderr-flake.md).
+      kube.getPodResult = () => Promise.reject(new KubeApiError(404, "pods not found"));
       kube.drop();
-      expect(await until(() => statuses.some((s) => s.state !== "up"))).toBe(true);
+      expect(await until(() => statuses.at(-1)?.state === "stopped")).toBe(true);
       await runtime.dispose();
       expect(logs.filter((l) => l.includes("unexpectedly"))).toEqual([
         quitLine("pod", "box", logPath),
@@ -950,8 +954,10 @@ describe("startPodRuntime", () => {
       const statuses: LinkStatus[] = [];
       runtime.link.onLinkStatus((s) => statuses.push(s));
       emit.stderr("attach boom\n");
+      // Same as the run case above: the redial must fail for good, not race `up`.
+      kube.getPodResult = () => Promise.reject(new KubeApiError(404, "pods not found"));
       kube.drop();
-      expect(await until(() => statuses.some((s) => s.state !== "up"))).toBe(true);
+      expect(await until(() => statuses.at(-1)?.state === "stopped")).toBe(true);
       await runtime.dispose();
       expect(logs).toContain(quitLine("pod", "mypod", logPath));
       expect(logs.join("")).not.toContain("attach boom");
