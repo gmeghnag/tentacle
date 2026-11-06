@@ -314,7 +314,55 @@ sink ignored (4 fail) · dedupe disabled (2 fail) · child ignores parent sessio
 
 ## Review
 
-*— (to be filled by the reviewer)*
+*— claude-opus-5-5, 2026-11-06*
+
+**Verdict: REQUEST-CHANGES.** 1 MEDIUM, 5 LOW. The core move holds: production spills leave the project, read back in every runtime, and a failed spill never costs the turn. The blocker is that the dedupe does not hold across Agents of one session.
+
+**Evidence limits.** The scratch repro (`.tentacle/tmp/tool-output-location/repro.ts`, gitignored) did NOT run: running it needed an approval that was not available. So findings 1-5 come from reading the code and are not executed; the brief's end-to-end trace and the Repro on `main` were not done. Run that script while fixing. Only the gate and the mutation below were executed. Reviewer and executor are different models of the same vendor family.
+
+### Findings
+
+1. **MEDIUM: a second Agent of the same session silently overwrites an earlier spill.** `Agent.spillNames` (`packages/agent/src/agent.ts:515`) is memory-only and per-Agent, while the store writes with a plain overwrite (`packages/agent/src/tool-output.ts:153`). The session id survives a `--resume`, a `serve` reload and a pod re-attach (`open{messages}`, AGENTS §7), and each builds a new Agent over the same `<session>` dir. A server that restarts ids at `call_1` then replaces the old file: the banner still in history points at different content, with no error. `main` overwrites too, so this is not a regression, but Execution's "covers an id reused across turns" is only true within one Agent, and this is the silent-wrong-state class. **Fix:** make the store the truth: exclusive create (`flag: "wx"`) with a retry on a new suffix on `EEXIST`, in `writeIn`. The `Set` can then go. Pin it with two Agents and one store.
+2. **LOW: the dedupe suffix does not survive `segment()`.** `packages/agent/src/tool-output.ts:48,152`: an id of 60+ chars (51+ with a child's scope) loses `~2` to the cut, so the repeat overwrites. `~` becomes `_`, so `c~2` and a real `c_2` share a file. `a` + `b-c` and `a-b` + `c` also share one, while the `spillNames` key sees them as different. Same fix as 1.
+3. **LOW: a relative cache base lands in the process cwd, so possibly in the project.** `packages/agent/src/tool-output.ts:104-106`: `XDG_CACHE_HOME=rel` or `HOME=""` gives a relative root. The write then follows the process cwd, `fs_read` resolves against the session cwd (a different file when they differ), and `owns` is false, so no hint. The XDG spec says to ignore a relative value. **Fix:** accept only absolute candidates, else the next one. Rare trigger, but it is the exact property this task exists for.
+4. **LOW: `removeSession` follows a symlinked project dir.** `packages/agent/src/tool-output.ts:175-178` checks only `<project>/<id>` with `lstat`, which follows the `<project>` component. With `<root>/evil -> /some/dir`, deleting session `x` removes `/some/dir/x`. `sweep` checks this level (`:193`); `removeSession` does not, and no test covers it. Planting the link needs the same uid, so there is no privilege gain, but it breaks "a cleanup stays in its dir". **Fix:** `isRealDir(join(root, project))` first, plus a test.
+5. **LOW: `write` and `removeSession` name a session differently.** `write` uses `segment(id)`; `removeSession` uses the raw id behind `SAFE_SESSION` (`packages/agent/src/tool-output.ts:150,171,176`). `SessionIdSchema` is only `min(1)` (`packages/protocol/src/session.ts:20`), and I found no id check in `session-host.ts`. So a >60-char id leaves its files until retention, while deleting `a_b` removes the spills of a live `a b`, and deleting a 60-char id removes those of a longer live id with that prefix. Needs a client-chosen id: the TUI's own uids are unaffected. Fix: a collision-free directory name for any id `segment` would alter (a hash), used on both sides.
+6. **LOW: leftovers.** `cacheDirFromEnv` (`packages/config/src/load.ts:399`) has no production caller and its rule differs from `resolveToolOutputRoot` (it expands `~`), which contradicts the plan's "not duplicated": remove it. The first candidate has no `lstat`/owner check (`packages/agent/src/tool-output.ts:107`), which only matters for a shared `HOME` such as `/tmp`, i.e. a pod, already untrusted. The doc header still says "plan, awaiting approval".
+
+### Attacks tried
+
+| Attack | Result |
+|---|---|
+| Landing place per runtime | All production paths go through `buildAgent` (`wiring.ts:340`), the only `new Agent` besides the child (`subagent.ts:234`): worker, `serve`, pod and tunnelled. Each uses its own host's cache. Holds, except finding 3 and the Q1 case. |
+| Read-back | `fs_read` is `permission: "none"` and unconfined; the banner carries the absolute path; `wiring.test` pins it through `buildAgent`. In a pod the model reads the pod's file. Holds. |
+| Pod not trusted | `spill.path` is only printed (`tui/src/spill-view.ts:38-44`); nothing on the laptop opens it. No wire change. Holds. |
+| §7 persistence | The worker and pod daemons write only a side file, no session record, and nothing crosses the wire. The in-process file is on the laptop, by owner decision. Holds. |
+| Traversal in `write` / `removeSession` | `..`, `a/b` and empty are neutralised or refused (`segment`, `SAFE_SESSION`; JS `$` has no trailing-newline gap). Holds. |
+| Symlink in `sweep` | Never descended or followed. Holds, proved by the mutation. |
+| Live session's spills | Close and archive keep them. Age sweep can remove a live session's old file (hint given, accepted). Deleting another session reaches them only via finding 5. |
+| Parallel children | Random `spillScope` per child (`subagent.ts:250`), filed under the parent's session. No collision within 51 chars of id. Holds. |
+| Config | The `tools` key is typed and the schema is strict per its header; `.int()`; `<= 0` never sweeps; a non-integer env value falls through to file/default, as with the sibling parsers. Holds. |
+| Loose `/tmp/tentacle-<uid>` rejected | Right. It is the same check as `control-socket.ts:146`, and that dir is shared with the sockets and the resident state. A loose dir could already hold planted entries, which a `chmod` would not clear. Cost: truncation, with no reason given. |
+| Disk full / unwritable / null root | `writeIn` catches everything → `null` → the "could not be saved" banner with the preview (`result-pipeline.ts:93-96`); `Agent` has its own catch too. The turn survives. A partial file can remain until retention. Holds by reading; sink-reject is pinned by a test. |
+
+### Premises
+
+TRUE, opened: `writeFile` confined and reads unconfined (`host-execution.ts`), `fs_read` permission none, `SAFE_ID` and `projectKey` (`session-store.ts:153,164`), banner (`result-pipeline.ts`), `delete` branches (`session-host.ts`), spill path only printed. Not opened: the TUI's no-local-delete premise (grep of `App.tsx` was inconclusive) and the rest of the plan's citations. Symptom on `main`: not re-run (see limits); the old path is visible in the diff.
+
+### Gate and mutation
+
+- `bunx tsc --noEmit`: clean. `bunx biome check .`: clean, 672 files.
+- `bun test packages/agent packages/config packages/daemon packages/exec packages/tools packages/cli`: 3226 pass, 1 skip, 0 fail. The reaper flake did not fire.
+- **Mutation:** `isRealDir` (`tool-output.ts:124`) changed to accept symlinks, the guard the executor had not mutated: `a symlink is neither followed nor does its target go` went RED (1 fail, 15 pass). Restored; shasum identical (`37d790eb…`).
+
+### Questions (recommendation for the orchestrator)
+
+- **Q1. Root inside the session's cwd** (image with `HOME` = mounted workspace, or `tentacle` run from `~`): `container-config-sources.md` accepts it, but then a pod writes into the laptop's folder, the original complaint. **Recommend:** when the root lies inside `cwd`, use the tmp candidate for that project. There is precedent in the `binDir` mount refusal (`workspace-mount.ts:659`).
+- **Q2. The laptop's `outputRetentionDays` does not reach a pod**, whose own default of 30 applies. **Recommend:** accept (pods rarely live that long) and add one line to `container-config-sources.md`.
+
+### How the executor behaved
+
+Honest and thorough on the gate, mutations and drift, and it named the symlink guard as unmutated; that guard holds. The one overclaim is the NIT 5 scope ("covers an id reused across turns"): it reasoned per Agent, while the directory is per session.
 
 ## Owner questions
 
@@ -329,3 +377,16 @@ The entry answers nearly everything; two points it leaves open, neither blocking
 
 1. `tools.outputRetentionDays`: `0` **or any negative value** (e.g. `-1`) = never sweep. The schema accepts negative integers (not "non-negative").
 2. Local in-process sessions have no in-app delete: only the age sweep cleans their files. Accepted; no local-session delete in this task (a separate `feat` if ever wanted).
+
+### Orchestrator decisions on the Review (owner delegation 2026-11-06)
+
+- **F1 + F2 → fix:** the store is the truth: exclusive create (`flag: "wx"`) with a retry on a new suffix on `EEXIST`, in `writeIn`, applied after `segment()` so the suffix survives; drop the per-Agent `Set` if no longer needed. Test: two Agents over one store, and a 60+-char id repeated.
+- **F3 → fix:** accept only absolute cache-base candidates (XDG spec), else the next one; test.
+- **F4 → fix:** `removeSession` checks `isRealDir(join(root, project))` first; test with a symlinked project dir.
+- **F5 → fix:** one collision-free directory name for a session id on both sides (`write` and `removeSession`): ids that `segment` would alter get a hashed name; tests for `a_b` vs `a b` and the long-prefix case.
+- **F6 → fix:** remove `cacheDirFromEnv` (no caller); update the doc header status.
+- **Q1 → yes:** when the resolved root lies inside the session's `cwd`, use the tmp candidate for that project (precedent: `workspace-mount.ts:659`); test.
+- **Q2 → accept:** one line in `container-config-sources.md` (a pod uses its own retention default).
+- Run the reviewer's scratch repro (`.tentacle/tmp/tool-output-location/repro.ts`) and paste its output in Execution.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-06*
