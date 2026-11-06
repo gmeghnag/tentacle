@@ -471,3 +471,12 @@ The entry answers nearly everything; two points it leaves open, neither blocking
 ### How the executor behaved
 
 Honest: it reported both the unrun repro and the missing wiring test as drift, and it showed five mutations. Two claims go too far: "the same properties are covered by the new tests" (finding 2), and the test comment that says "swept". It should have stopped and flagged the blocked repro as an open step rather than treating the tests as equivalent, though it did disclose it.
+
+### Orchestrator live check + decision (owner delegation 2026-11-06)
+
+Live, test binary main(afe15b5)+this branch(7974867), `run --engine docker --detach --no-mount` on ubi9, prompt `pwd; seq 1 200000`: `pwd` = `/`, result banner `[large shell output (1288903 chars), could not be saved to a file — only this preview is shown …]`. So round-2 Finding 1 is not rare: every `--no-mount` pod (WORKDIR `/`) loses every spill, while `main` saved it. A regression → **round 3, before merge**:
+- **Finding 1 → fix:** a cwd of `/` contains no root (treat it as no project); test, plus a live re-check by the orchestrator.
+- **Finding 2 → fix:** the three cheap tests (a) the alternative inside the cwd, (b) the alternative root is swept, (c) `wiring.ts:255` second argument pinned (`toolOutputStore().forProject(process.env.HOME)`).
+- Findings 3–6: debt (TODO), no change.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-06*
