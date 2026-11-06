@@ -91,6 +91,15 @@ describe("session lifecycle schemas", () => {
     expect(OpenParamsSchema.safeParse({ since: 3 }).success).toBe(false);
   });
 
+  test("P-1 session/open result: optional unflushedExits, a non-negative integer", () => {
+    const base = { sessionId: "s", epoch: "e", created: false, resync: false };
+    expect(OpenResultSchema.parse(base).unflushedExits).toBeUndefined();
+    expect(OpenResultSchema.parse({ ...base, unflushedExits: 2 }).unflushedExits).toBe(2);
+    expect(OpenResultSchema.safeParse({ ...base, unflushedExits: -1 }).success).toBe(false);
+    expect(OpenResultSchema.safeParse({ ...base, unflushedExits: 1.5 }).success).toBe(false);
+    expect("extra" in OpenResultSchema.parse({ ...base, extra: 1 })).toBe(false);
+  });
+
   test("session/open result carries the epoch and both flags", () => {
     expect(
       OpenResultSchema.safeParse({ sessionId: "s", epoch: "e", created: false, resync: true })

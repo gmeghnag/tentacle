@@ -146,6 +146,11 @@ export class Session {
     }
   }
 
+  /** Job exits no turn has flushed yet (the current agent's; `replaceAgent` carries them over). */
+  get pendingExitCount(): number {
+    return this.agent.pendingExitCount;
+  }
+
   /** Whether the user may activate `name` (`/name`) in this session — synchronous, for a pre-ack check. */
   canActivateSkill(name: string): boolean {
     return this.agent.canActivateForUser(name);

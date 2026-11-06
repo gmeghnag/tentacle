@@ -33,6 +33,8 @@ export interface TuiOptions {
   readonly autoWakeOnJobExit?: boolean;
   /** A detached run's relay handed over a job's exit no turn has flushed. */
   readonly wakePending?: boolean;
+  /** The wake was HANDED OVER by a relay (it owns it): a refused continuation is retried once. wakePending alone (the open reported unflushed exits) is never retried: another TUI may serve it. */
+  readonly wakeHanded?: boolean;
   /** Session factory (e.g. a remote session); overrides the local `agent`. */
   readonly createSession?: () => SessionController;
   /** Prior conversation to show on start (a resumed session's history). */
@@ -99,6 +101,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         ? { autoWakeOnJobExit: options.autoWakeOnJobExit }
         : {})}
       {...(options.wakePending ? { wakePending: true } : {})}
+      {...(options.wakeHanded ? { wakeHanded: true } : {})}
       {...(initialItems ? { initialItems } : {})}
       {...(options.notices ? { notices: options.notices } : {})}
       {...(options.link ? { link: options.link } : {})}

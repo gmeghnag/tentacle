@@ -158,6 +158,12 @@ export interface LocalRuntime {
   saveConfirmed(): boolean;
   /** `RemoteClient.modelIdle`: the model calls this runtime serves are over, or `ms` passed. */
   modelIdle(ms: number): Promise<void>;
+  /**
+   * Job exits no turn has flushed, as the open sessions' opens reported them
+   * (`RemoteClient.unflushedExits`): above 0 the TUI starts a wake turn
+   * (docs/fix/attach-unflushed-exits.md). 0 before `attachTo`.
+   */
+  unflushedExits(): number;
   /** `id`'s running background jobs, `null` if they cannot be read. */
   sessionJobs(id: string): Promise<number | null>;
   /**
@@ -865,6 +871,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     saveConfirmed: () =>
       saving && [...controllers].every((c) => c.saveConfirmed()) && deps.saver.clean(),
     modelIdle: (ms) => client.modelIdle(ms),
+    unflushedExits: () => client.unflushedExits(),
     sessionJobs: async (id) => {
       try {
         const { sessions } = await client.sessionList();

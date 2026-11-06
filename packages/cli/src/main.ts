@@ -26,7 +26,7 @@ import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/d
 import { DELETE_POD_SUBCOMMAND, deletePodFromEnv, readKubeconfig } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import { type AutoAcceptFeed, type SessionController, pickSession, startTui } from "@tentacle/tui";
-import { attachFailureNotice } from "./attach-notice.ts";
+import { attachFailureNotice, unflushedExitsNotice } from "./attach-notice.ts";
 import { type AttachPlan, plainResumeUid, planAttach } from "./attach-plan.ts";
 import { type Joined, joinRun } from "./attach-run.ts";
 import {
@@ -837,6 +837,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   ): Promise<number> => {
     let inkRan = false;
     const finish = run?.finish;
+    // What the open reported, once: told with `autoWake` on or off (buffered until
+    // Ink mounts; the count only, never pod text).
+    const unflushed = runtime.unflushedExits();
+    const awayNotice = unflushedExitsNotice(unflushed);
+    if (awayNotice !== null) {
+      sessions.notices.notify(awayNotice);
+    }
     await runSessionTui(sessions, {
       start: async (sessionOptions) => {
         try {
@@ -857,8 +864,14 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             createSession: run?.createSession ?? runtime.createSession,
             ...(localAutoAcceptFeed ? { autoAccept: localAutoAcceptFeed } : {}),
             ...(run ? { runQuit: run.runQuit, autoAccept: run.autoAccept } : {}),
-            // A job's exit its relay handed over; the TUI decides by its `autoWake`.
-            ...(run?.wakePending ? { wakePending: true } : {}),
+            // A job's exit its relay handed over, or one the session's open
+            // reported no turn has flushed (docs/fix/attach-unflushed-exits.md);
+            // ONE boolean (never two wakes). The TUI decides by its `autoWake`.
+            // `wakePending` seeds the wake; only the relay's (`wakeHanded`) is
+            // retried when it loses the slot — a count-seeded one may be served by
+            // another TUI attaching at once (exactly one wake).
+            ...(run?.wakePending || unflushed > 0 ? { wakePending: true } : {}),
+            ...(run?.wakePending ? { wakeHanded: true } : {}),
             ...(initialPrompt !== undefined ? { initialPrompt } : {}),
             link: runtime.link,
             mcpStatus: runtime.mcpStatus,

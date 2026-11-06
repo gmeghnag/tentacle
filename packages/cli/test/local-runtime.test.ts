@@ -364,6 +364,51 @@ describe("createLocalRuntime (local over RPC)", () => {
     runtime.dispose();
   });
 
+  test("R-U1/L-1 unflushedExits: 0 before attachTo, the daemon's count after, 0 once a turn flushed them", async () => {
+    // docs/fix/attach-unflushed-exits.md, end to end over the real SessionHost +
+    // Connection. Mutation: `Connection.open` omits the field (or `unflushedExits`
+    // returns 0) → the middle leg fails.
+    const jobs = new FakeJobs();
+    const model = new ScriptedProvider([]);
+    const host = new SessionHost({
+      defaultCwd: "/tmp/work",
+      createAgent: () => ({
+        agent: new Agent({ model, tools: new ToolRegistry(), env: noopEnv, jobs }),
+        permissions: new PermissionBroker(),
+        jobs,
+      }),
+    });
+    const runtimeOn = async (name: string) => {
+      const [daemonCh, clientCh] = createChannelPair();
+      const connection = new Connection(daemonCh, host);
+      return createLocalRuntime({
+        channel: clientCh,
+        disposeTransport: () => connection.close(),
+        permissions: new PermissionBroker(),
+        saver: new SessionSaver(new JsonSessionStore(join(dir, name)), () => {}),
+        cwd: "/tmp/work",
+        model: "qwen3",
+        resume: null,
+        sessionId: "S1",
+        shared: true,
+      });
+    };
+    const a = await runtimeOn("uf-a");
+    await drain(a.createSession().send("hi"));
+    jobs.fire({ id: "j1", command: "sleep 1", startedAt: 0, status: "exited", exitCode: 0 });
+    const b = await runtimeOn("uf-b");
+    expect(b.unflushedExits()).toBe(0);
+    expect(await b.attachTo("S1", null)).toBe(true);
+    expect(b.unflushedExits()).toBe(1);
+    await drain(b.createSession().send(""));
+    const c = await runtimeOn("uf-c");
+    expect(await c.attachTo("S1", null)).toBe(true);
+    expect(c.unflushedExits()).toBe(0);
+    a.dispose();
+    b.dispose();
+    c.dispose();
+  });
+
   test("streams a daemon background-job exit to the client's jobs view while idle", async () => {
     const model = new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
     const jobs = new FakeJobs();

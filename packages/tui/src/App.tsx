@@ -343,6 +343,8 @@ export interface AppProps {
   readonly autoWakeOnJobExit?: boolean;
   /** A detached run's relay handed over a job's exit no turn has flushed (docs/fix/detached-autowake.md). */
   readonly wakePending?: boolean;
+  /** The wake was HANDED OVER by a relay (it owns it): a refused continuation is retried once. wakePending alone (the open reported unflushed exits) is never retried: another TUI may serve it. */
+  readonly wakeHanded?: boolean;
   /** Host notices to surface live (never a raw terminal write while Ink owns it). */
   readonly notices?: NoticeFeed;
   /** The runtime's link status, shown in the StatusBar while it is not up. */
@@ -442,6 +444,7 @@ export function App({
   jobs,
   autoWakeOnJobExit = true,
   wakePending = false,
+  wakeHanded = false,
   notices,
   link,
   mcpStatus,
@@ -625,10 +628,10 @@ export function App({
   // is running sets this, so the wake fires once the current turn settles (the
   // running turn won't see the exit — the agent flushes exits at turn START).
   // The decision is `@tentacle/core`'s, shared with a detached run's relay.
-  const wakeRef = useRef<WakeModel>(wakePending ? { pending: true } : initialWake);
+  const wakeRef = useRef<WakeModel>(wakePending || wakeHanded ? { pending: true } : initialWake);
   // The relay's wake, handed over: this TUI is its only owner, so if it loses
   // the slot to the adopted turn (not seen here yet) it is owed once more.
-  const handedWakeRef = useRef(wakePending);
+  const handedWakeRef = useRef(wakeHanded);
   // Latest `run`, so the jobs subscription and the post-turn check can start a
   // continuation turn without re-subscribing or a circular callback dependency.
   const runRef = useRef<
@@ -670,6 +673,11 @@ export function App({
   const { scheduleFlush, flushNow } = usePaintScheduler(FRAME_MS);
   const linkView = useLinkIndicator(link);
 
+  // `wakeIfPending`, through a ref: the exit handler below is declared first.
+  const wakeIfPendingRef = useRef<(() => void) | null>(null);
+  // The mount effect that watches the session has run (set by it, below).
+  const watchedRef = useRef(false);
+
   // --- live background-job exits -------------------------------------------
   // Surface a finished background job the instant it exits, even while idle.
   // The agent also emits a `background_exit` event at the next turn; the shared
@@ -690,6 +698,15 @@ export function App({
       // start); if idle, start a continuation turn now. Multiple exits coalesce
       // — the agent drains all pending exits at the next turn's start.
       wakeRef.current = wakeStep(wakeRef.current, { type: "exit" });
+      // Before the session is watched (a subscriber's backlog — exits that arrived
+      // before the TUI mounted — is delivered inside THIS effect, ahead of the
+      // watch effect): never start the turn here. The history the watch replays
+      // next would wipe its rows (docs/fix/attach-unflushed-exits.md, round 3).
+      // The deferred check runs after every mount effect, re-reading the gate.
+      if (!watchedRef.current) {
+        wakeIfPendingRef.current?.();
+        return;
+      }
       const gate = {
         enabled: autoWakeOnJobExit,
         idle: !stateRef.current.running,
@@ -1042,6 +1059,7 @@ export function App({
       }
     }, 0);
   }, [autoWakeOnJobExit]);
+  wakeIfPendingRef.current = wakeIfPending;
 
   // `streamTurn`, through a ref: it and `settleSendNow` call each other.
   const streamTurnRef = useRef<
@@ -1494,6 +1512,7 @@ export function App({
   );
   useEffect(() => {
     watchSession(sessionRef.current);
+    watchedRef.current = true;
     return () => {
       activitySubRef.current?.();
       activitySubRef.current = null;
