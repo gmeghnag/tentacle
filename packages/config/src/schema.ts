@@ -299,6 +299,15 @@ const settingsShape = {
    */
   detach: z.object({ keepAwake: z.boolean().optional() }).strict().optional(),
   /**
+   * The TUI's palette (docs/feat/tui-light-theme.md): `auto` (default) probes the
+   * terminal's background before Ink mounts, `dark`/`light` force one and skip
+   * the query. A LAPTOP-ONLY display setting: never carried to a pod.
+   */
+  tui: z
+    .object({ theme: z.enum(["auto", "dark", "light"]).optional() })
+    .strict()
+    .optional(),
+  /**
    * What a docker/podman workspace mount hides from the container
    * (docs/feat/docker-workspace-mount.md): `hide` REPLACES the default list
    * (`~/.ssh`, `~/.aws`, `~/.kube`, `~/.config/gcloud`, `~/.docker/config.json`,

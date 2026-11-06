@@ -4,10 +4,7 @@ import type { ReactElement } from "react";
 import { truncateCells as truncate } from "../cells.ts";
 import { MENU_FOOTER, MENU_FOOTER_REPLY, type ReplyView } from "../permission-reply.ts";
 import { permissionDetailLines, permissionShowsCwd } from "../permission-ui.ts";
-import { accentHex } from "../theme.ts";
-
-// Brand accent (matches the theme's `accent`), used for the frame + selection.
-const ACCENT = accentHex;
+import { dimProps, palette } from "../theme.ts";
 
 /**
  * Fixed row count of the dialog for a given option / detail-row count (App
@@ -53,31 +50,33 @@ export function PermissionPrompt({
   /** The asking sub-agent's row (`permissionAgentLine`); absent for a call's own ask. */
   agentLine?: string;
 }): ReactElement {
+  const accent = palette().accent;
+  const dim = dimProps();
   const titlePrefix = `╭─ ${req.title} `;
   const dashes = Math.max(0, columns - titlePrefix.length - 1);
 
   return (
     <Box flexDirection="column">
-      <Text color={ACCENT}>
+      <Text color={accent}>
         {titlePrefix}
         {"─".repeat(dashes)}
       </Text>
-      {agentLine !== undefined ? <Text dimColor> {agentLine}</Text> : null}
+      {agentLine !== undefined ? <Text {...dim}> {agentLine}</Text> : null}
       {permissionDetailLines(req).map((line, i) => (
-        <Text key={i} dimColor>
+        <Text key={i} {...dim}>
           {" "}
           {truncate(line, Math.max(10, columns - 3))}
         </Text>
       ))}
       {permissionShowsCwd(req) ? (
-        <Text dimColor> {truncate(cwd, Math.max(10, columns - 24))} · writes confined here</Text>
+        <Text {...dim}> {truncate(cwd, Math.max(10, columns - 24))} · writes confined here</Text>
       ) : null}
       {reply ? (
         <>
-          <Text color={ACCENT}> {reply.prompt}</Text>
+          <Text color={accent}> {reply.prompt}</Text>
           {reply.rows.map((row, i) => (
             <Text key={i}>
-              <Text color={row.gutter ? "gray" : ACCENT}>{row.prefix}</Text>
+              <Text color={row.gutter ? palette().gutter : accent}>{row.prefix}</Text>
               {row.segments.map((seg, j) => (
                 <Text key={j} inverse={seg.inverse}>
                   {seg.text}
@@ -85,20 +84,20 @@ export function PermissionPrompt({
               ))}
             </Text>
           ))}
-          <Text dimColor>{reply.footer}</Text>
+          <Text {...dim}>{reply.footer}</Text>
         </>
       ) : (
         <>
           {options.map((label, i) => {
             const active = i === selected;
             return (
-              <Text key={label} color={active ? ACCENT : undefined} bold={active}>
+              <Text key={label} color={active ? accent : undefined} bold={active}>
                 {active ? "❯ " : "  "}
                 {label}
               </Text>
             );
           })}
-          <Text dimColor>{replyable ? MENU_FOOTER_REPLY : MENU_FOOTER}</Text>
+          <Text {...dim}>{replyable ? MENU_FOOTER_REPLY : MENU_FOOTER}</Text>
         </>
       )}
     </Box>

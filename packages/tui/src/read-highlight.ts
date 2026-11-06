@@ -10,9 +10,9 @@
  */
 import chalk from "chalk";
 import { highlight } from "cli-highlight";
-import { syntaxRgb, theme } from "./theme.ts";
+import { colorStyler, theme, themeMode, tokens } from "./theme.ts";
 
-export type SyntaxMode = keyof typeof syntaxRgb;
+export type SyntaxMode = "dark" | "light";
 
 /**
  * Above this a read is not highlighted and renders plain, as before: an
@@ -101,10 +101,11 @@ const RANGE_HEADER = /^\[.+ lines \d+-\d+ of \d+\]$/;
 
 type Styler = (s: string) => string;
 
-const rgb = ([r, g, b]: readonly [number, number, number]): Styler => chalk.rgb(r, g, b);
+const rgb = (color: string): Styler => colorStyler(color);
 
 function highlightTheme(mode: SyntaxMode): Record<string, Styler> {
-  const c = syntaxRgb[mode];
+  // The MODE's tokens, not the active ones: `themeFor` caches per mode.
+  const c = tokens[mode].syntax;
   const keyword = rgb(c.keyword);
   const string = rgb(c.string);
   const number = rgb(c.number);
@@ -182,7 +183,7 @@ export function cleanReadText(text: string): string {
 export function highlightRead(
   text: string,
   path: string,
-  mode: SyntaxMode = "dark",
+  mode: SyntaxMode = themeMode(),
   limit?: number,
 ): string[] | undefined {
   const language = languageForPath(path);

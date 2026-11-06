@@ -40,7 +40,7 @@ export function messageRows(
   text: string,
   width: number,
   tone: MessageTone = "sent",
-  style: MessageStyle = theme.message.dark,
+  style: MessageStyle = theme.message,
 ): string[] {
   const w = Math.max(PREFIX_W + 1, Math.floor(width));
   const rows: string[] = [];
@@ -64,7 +64,7 @@ export function queuedRows(
   texts: readonly string[],
   width: number,
   hint?: string,
-  style: MessageStyle = theme.message.dark,
+  style: MessageStyle = theme.message,
 ): string[] {
   const w = Math.max(PREFIX_W + 1, Math.floor(width));
   const rows = texts.map((text) => {

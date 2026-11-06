@@ -7,12 +7,16 @@
 import { render } from "ink";
 import { SessionPickerApp } from "./components/SessionPicker.tsx";
 import type { SessionChoice } from "./session-picker.ts";
+import { lateGuard, readThemeSetting } from "./terminal-background-probe.ts";
+import { type ThemeSetting, themeProbeWasLate } from "./theme.ts";
 
 export interface PickSessionOptions {
   readonly stdin?: NodeJS.ReadStream;
   readonly stdout?: NodeJS.WriteStream;
   /** For tests: the clock the ages are computed against. */
   readonly now?: number;
+  /** The palette (`tui.theme`); `auto` probes the terminal before mounting. */
+  readonly theme?: ThemeSetting;
 }
 
 /** A size of 0 (some ptys) counts as unknown. Header + "↑ n more" + "↓ n more" + one spare line. */
@@ -23,6 +27,10 @@ export async function pickSession(
   choices: readonly SessionChoice[],
   options: PickSessionOptions = {},
 ): Promise<string | null> {
+  // The palette before Ink mounts (docs/feat/tui-light-theme.md): the picker
+  // paints the accent, so deciding only in `startTui` would leave it on the wrong
+  // one. Memoized, so the runtime that follows reuses this answer.
+  await readThemeSetting(options.theme ?? "auto");
   const stdout = options.stdout ?? process.stdout;
   const stdin = options.stdin ?? process.stdin;
   let answer: string | null = null;
@@ -36,7 +44,12 @@ export async function pickSession(
         answer = id;
       }}
     />,
-    { stdin, stdout, exitOnCtrlC: false, patchConsole: false },
+    {
+      stdin: themeProbeWasLate() ? lateGuard(stdin) : stdin,
+      stdout,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    },
   );
   await instance.waitUntilExit();
   return answer;

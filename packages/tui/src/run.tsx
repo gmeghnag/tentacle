@@ -13,12 +13,14 @@ import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { messagesToItems } from "./resume.ts";
 import type { TargetBadge } from "./target-view.ts";
+import { lateGuard, readThemeSetting } from "./terminal-background-probe.ts";
 import {
   ENTER_FULLSCREEN,
   LEAVE_FULLSCREEN,
   type ProcessLike,
   installTerminalRestore,
 } from "./terminal.ts";
+import { type ThemeSetting, themeProbeWasLate } from "./theme.ts";
 
 export interface TuiOptions {
   readonly model: string;
@@ -55,6 +57,12 @@ export interface TuiOptions {
   readonly autoAccept?: AutoAcceptFeed;
   /** `run "<prompt>"`: sent once at mount as the first message, raw text (never a `/command`). */
   readonly initialPrompt?: string;
+  /**
+   * The palette (`tui.theme`): `auto` (default) reads the terminal's background
+   * before Ink mounts, `dark`/`light` force one. Decided once per process, so the
+   * `--resume` picker and the runtime share the answer.
+   */
+  readonly theme?: ThemeSetting;
 }
 
 /**
@@ -68,6 +76,11 @@ export interface TuiOptions {
  * transcript.
  */
 export async function startTui(agent: Agent | null, options: TuiOptions): Promise<void> {
+  // The palette, FIRST: before ENTER_FULLSCREEN and before Ink owns anything
+  // (docs/feat/tui-light-theme.md). A forced setting never queries; `auto` may
+  // spend up to 200 ms on a mute terminal. Memoized, so a picker that already
+  // decided shares this launch's answer.
+  await readThemeSetting(options.theme ?? "auto");
   const fullscreen = Boolean(process.stdout.isTTY);
   const restore = (): void => {
     if (fullscreen) {
@@ -81,6 +94,9 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
   // signal kill never fires "exit", which would otherwise leave the alt-screen
   // and mouse reporting on). Removed in the `finally` below.
   const uninstallRestore = installTerminalRestore(process as unknown as ProcessLike, restore);
+  // A timed-out probe left the tty raw and a reply may still arrive: guard Ink's
+  // input, or the reply is parsed as keystrokes. Otherwise Ink gets the real stdin.
+  const stdin = themeProbeWasLate() ? lateGuard(process.stdin) : process.stdin;
   const initialItems =
     options.resumeMessages && options.resumeMessages.length > 0
       ? messagesToItems(options.resumeMessages)
@@ -110,7 +126,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
       {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
     />,
-    { exitOnCtrlC: false },
+    { stdin, exitOnCtrlC: false },
   );
   try {
     await instance.waitUntilExit();

@@ -1,45 +1,229 @@
 /**
- * Centralised colour palette for the TUI, as chalk stylers.
+ * Centralised colour palette for the TUI: ONE token table, two modes.
  *
- * Tuned for a dark terminal (the common case): diff lines use dark background
- * tints with bright, readable foregrounds, and changed words get a brighter
- * tint on top. The brand accent is a single distinctive cyan; chalk
- * auto-disables colour when stdout is not a TTY, so the same strings degrade
- * to plain text in tests and pipes.
+ * Every colour the TUI paints is a value in `tokens` (docs/feat/tui-light-theme.md).
+ * `buildTheme(tokens)` turns the active mode's tokens into the chalk stylers the
+ * render path uses; `palette()` exposes the same tokens to the components, so
+ * `<Text color={…}>` reads the SAME value the chalk path does.
+ *
+ * Two modes exist because a palette tuned for a dark terminal is unreadable on a
+ * light one: diff lines use tinted backgrounds with a near-white foreground, and
+ * `subtle` is a mid grey. `dark` is the original palette, byte for byte; `light`
+ * is a darker-on-white set whose WCAG ratios (truecolor AND after chalk's 256
+ * downgrade) are pinned by `test/theme.test.ts`. The mode is decided once per
+ * launch, before the first row exists.
+ *
+ * Light tokens are hexes, not RGB triples, for one measured reason: chalk's 256
+ * downgrade (`rgbToAnsi256`) uses the 24-step grey ramp only when r=g=b and the
+ * 6×6×6 cube otherwise, so a near-grey like `#6b6b6f` lands on the cube (#878787,
+ * 3.59:1) while the exact grey `#6b6b6b` lands on the ramp (5.25:1). Keep the
+ * greys exactly grey.
  */
 import chalk from "chalk";
+import {
+  type Rgb,
+  type ThemeSetting,
+  modeOfBackground,
+  modeOfColorFgBg,
+} from "./terminal-background.ts";
+
+export type { ThemeSetting };
+
+/** Which palette is painted: decided once, before the first frame. */
+export type ThemeMode = "dark" | "light";
+
+/** An opaque colour value: a hex string, or a named chalk colour in dark mode. */
+type Color = string;
+
+interface DiffTokens {
+  readonly addBg: Color;
+  readonly addFg: Color;
+  readonly addGutter: Color;
+  readonly addWordBg: Color;
+  readonly addWordFg: Color;
+  readonly delBg: Color;
+  readonly delFg: Color;
+  readonly delGutter: Color;
+  readonly delWordBg: Color;
+  readonly delWordFg: Color;
+  readonly border: Color;
+}
+
+interface MessageTokens {
+  readonly bg: Color;
+  readonly queuedFg: Color;
+}
+
+interface StatusTokens {
+  readonly linkError: Color;
+  readonly linkWarn: Color;
+  readonly scrolled: Color;
+}
+
+interface MeterTokens {
+  readonly low: Color;
+  readonly mid: Color;
+  readonly high: Color;
+}
+
+interface SyntaxTokens {
+  readonly keyword: Color;
+  readonly string: Color;
+  readonly number: Color;
+  readonly comment: Color;
+  readonly title: Color;
+  readonly type: Color;
+  readonly meta: Color;
+  readonly tag: Color;
+}
+
+interface MarkdownTokens {
+  readonly code: Color;
+  readonly firstHeading: Color;
+  readonly heading: Color;
+  readonly quote: Color;
+  readonly del: Color;
+  readonly link: Color;
+}
+
+/** Every colour the TUI paints. Both modes hold exactly these keys. */
+export interface Tokens {
+  readonly accent: Color;
+  readonly autoAccept: Color;
+  readonly subtle: Color;
+  /** The dim rows: SGR 2 in dark (terminal-defined, free), an explicit grey in light. */
+  readonly dim: Color;
+  /** `dim` as an Ink prop: dark keeps `dimColor`, light passes the measured grey. */
+  readonly dimIsAttribute: boolean;
+  readonly gutter: Color;
+  readonly notice: Color;
+  readonly hidden: Color;
+  readonly success: Color;
+  readonly error: Color;
+  readonly warn: Color;
+  readonly quit: Color;
+  readonly border: Color;
+  readonly status: StatusTokens;
+  readonly meter: MeterTokens;
+  readonly diff: DiffTokens;
+  readonly message: MessageTokens;
+  readonly syntax: SyntaxTokens;
+  readonly md: MarkdownTokens;
+}
 
 /**
- * The single source of truth for the brand accent hex. Both colour paths read
- * it: the chalk path via `chalk.hex(accentHex)` (theme tokens) and the
- * component path via its `color=` props. Keep it here — a stray hard-coded hex
- * anywhere re-scatters the colour.
+ * The dark palette: EXACTLY the values the module painted before the table
+ * existed (pinned byte for byte by `theme.test.ts`). Named chalk colours stay
+ * named where they already were, so a 16-colour terminal keeps its own idea of
+ * "yellow" instead of a downgrade.
  */
-export const accentHex = "#06b6d4";
-
-/** The status bar's `⏵⏵ auto-accept on` (golden yellow; `off` stays dim) — owner, 2026-11-05. */
-export const autoAcceptHex = "#fec20a";
+const DARK: Tokens = {
+  accent: "#06b6d4",
+  autoAccept: "#fec20a",
+  subtle: "#8c8c8c",
+  dim: "dim",
+  dimIsAttribute: true,
+  gutter: "gray",
+  notice: "#8caaee",
+  hidden: "hidden",
+  success: "#4ec974",
+  error: "#ed5454",
+  warn: "#e0af4a",
+  quit: "yellow",
+  border: "gray",
+  status: { linkError: "red", linkWarn: "yellow", scrolled: "yellow" },
+  meter: { low: "green", mid: "yellow", high: "red" },
+  diff: {
+    addBg: "#022800",
+    addFg: "#f8f8f2",
+    addGutter: "#6ec860",
+    addWordBg: "#044700",
+    addWordFg: "#f8f8f2",
+    delBg: "#3d0100",
+    delFg: "#f8f8f2",
+    delGutter: "#e66464",
+    delWordBg: "#5c0200",
+    delWordFg: "#f8f8f2",
+    border: "#585860",
+  },
+  message: { bg: "#373737", queuedFg: "#8c8c8c" },
+  syntax: {
+    keyword: "#c678dd",
+    string: "#98c379",
+    number: "#d19a66",
+    comment: "#6e7681",
+    title: "#61afef",
+    type: "#e5c07b",
+    meta: "#56b6c2",
+    tag: "#e06c75",
+  },
+  md: {
+    // The marked-terminal defaults, unchanged: named so the two modes share a key set.
+    code: "yellow",
+    firstHeading: "magenta",
+    heading: "green",
+    quote: "gray",
+    del: "gray",
+    link: "blue",
+  },
+};
 
 /**
- * Every TUI notice (`noticeLines`): one soft blue (owner, 2026-11-05). Its hint
- * stays grey (`theme.subtle`). The TUI has one palette today, so the dark value
- * is in use; `noticeHexLight` waits for the light-theme task to pick it up.
+ * The light palette: darker-on-white, 4.5:1 on white AND Solarized Light `#fdf6e3`,
+ * AND after chalk's real 256 downgrade — except `accent` (Q3) and `notice`, the two
+ * named exceptions the owner accepted (`theme.test.ts` holds the gate).
  */
-export const noticeHex = "#8caaee";
-export const noticeHexLight = "#3b5bdb";
+const LIGHT: Tokens = {
+  accent: "#0e7490",
+  autoAccept: "#a84a00",
+  subtle: "#6b6b6b",
+  dim: "#6b6b6b",
+  dimIsAttribute: false,
+  gutter: "#6b6b6b",
+  notice: "#3b5bdb",
+  hidden: "hidden",
+  success: "#084718",
+  error: "#b21428",
+  warn: "#8f4c00",
+  quit: "#8f4c00",
+  border: "#8c8c8c",
+  status: { linkError: "#b21428", linkWarn: "#8f4c00", scrolled: "#8f4c00" },
+  meter: { low: "#084718", mid: "#8f4c00", high: "#b21428" },
+  diff: {
+    addBg: "#dafbe1",
+    addFg: "#1a1a1a",
+    addGutter: "#0f4c0f",
+    addWordBg: "#aceebb",
+    addWordFg: "#1a1a1a",
+    delBg: "#ffe1e1",
+    delFg: "#1a1a1a",
+    delGutter: "#b21428",
+    delWordBg: "#ffb2b2",
+    delWordFg: "#1a1a1a",
+    border: "#8c8c8c",
+  },
+  message: { bg: "#eeeeee", queuedFg: "#5c5c5c" },
+  syntax: {
+    keyword: "#5f1cb2",
+    string: "#146e14",
+    number: "#9c4600",
+    comment: "#646464",
+    title: "#1446c8",
+    type: "#784600",
+    meta: "#0e4c5f",
+    tag: "#b21428",
+  },
+  md: {
+    code: "#953800",
+    firstHeading: "#5f1cb2",
+    heading: "#084718",
+    quote: "#6b6b6b",
+    del: "#6b6b6b",
+    link: "#1446c8",
+  },
+};
 
-/**
- * User-message rows: a full-width background tint and the grey of a queued
- * one, as RGB triples. `dark` is the default; `light` is the matching tint for
- * a light terminal (the TUI has no light-mode switch yet).
- */
-export const messageRgb = {
-  // #373737 (owner, 2026-10-25).
-  dark: { bg: [55, 55, 55], queuedFg: [140, 140, 140] },
-  light: { bg: [232, 232, 240], queuedFg: [110, 110, 120] },
-} as const;
-
-type Rgb = readonly [number, number, number];
+export const tokens: Readonly<Record<ThemeMode, Tokens>> = { dark: DARK, light: LIGHT };
 
 /** The stylers a message row is dressed with. */
 export interface MessageStyle {
@@ -47,81 +231,200 @@ export interface MessageStyle {
   readonly queuedFg: (s: string) => string;
 }
 
-function messageStyle(c: { readonly bg: Rgb; readonly queuedFg: Rgb }): MessageStyle {
-  return { bg: chalk.bgRgb(...c.bg), queuedFg: chalk.rgb(...c.queuedFg) };
+/**
+ * A colour value as a chalk function. Read at CALL time, never at import: a
+ * module-load capture would freeze whatever `chalk.level` was then (`blink.ts`
+ * documents that trap) and, after this table, would also freeze the mode.
+ */
+function ink(color: Color): Styler {
+  if (color === "dim") {
+    return chalk.dim;
+  }
+  if (color === "hidden") {
+    return chalk.hidden;
+  }
+  if (color.startsWith("#")) {
+    return chalk.hex(color);
+  }
+  const rgb = /^rgb\((\d+),(\d+),(\d+)\)$/.exec(color);
+  if (rgb) {
+    return chalk.rgb(Number(rgb[1]), Number(rgb[2]), Number(rgb[3]));
+  }
+  // A named chalk colour: `"red"`, `"yellow"`, `"gray"`, …
+  const named = (chalk as unknown as Record<string, Styler>)[color];
+  if (typeof named !== "function") {
+    throw new Error(`unknown colour token: ${JSON.stringify(color)}`);
+  }
+  return named;
+}
+
+/** A chalk styler: callable, and chainable (`.bold`, `.underline`, …) as before. */
+export type Styler = ReturnType<typeof chalk.hex>;
+
+/** A token colour value as a chalk styler — the export `read-highlight.ts` needs. */
+export const colorStyler = (color: Color): Styler => ink(color) as Styler;
+
+/** A message row's two stylers for a mode (what `theme.message` becomes). */
+export function messageStyle(mode: ThemeMode): MessageStyle {
+  return { bg: bg(tokens[mode].message.bg), queuedFg: ink(tokens[mode].message.queuedFg) };
+}
+
+/** Background variants (Ink's `bg…` equivalents for a token value). */
+function bg(color: Color): Styler {
+  if (color.startsWith("#")) {
+    return chalk.bgHex(color);
+  }
+  const rgb = /^rgb\((\d+),(\d+),(\d+)\)$/.exec(color);
+  if (rgb) {
+    return chalk.bgRgb(Number(rgb[1]), Number(rgb[2]), Number(rgb[3]));
+  }
+  throw new Error(`no background for colour token: ${JSON.stringify(color)}`);
+}
+
+/** The chalk stylers for one mode. */
+function buildTheme(t: Tokens) {
+  const fg = (value: Color): Styler => ink(value);
+  return {
+    /** Brand accent — assistant bullets, in-progress, highlights. */
+    accent: fg(t.accent),
+    /** The status bar's `⏵⏵ auto-accept on`. */
+    autoAccept: fg(t.autoAccept),
+    /** De-emphasised grey for metadata, context, hints. */
+    subtle: fg(t.subtle),
+    notice: fg(t.notice),
+    /**
+     * SGR conceal ("hidden"): draws the characters in the background colour, so
+     * the cells are still OCCUPIED. The OFF half of a running call's blink is the
+     * very same glyph under this styler (`fix/tui-blink-off-width`).
+     */
+    hidden: chalk.hidden,
+    success: fg(t.success),
+    error: fg(t.error),
+    warn: fg(t.warn),
+    diff: {
+      addBg: bg(t.diff.addBg),
+      addFg: fg(t.diff.addFg),
+      addGutter: fg(t.diff.addGutter),
+      addWord: (s: string) => bg(t.diff.addWordBg)(fg(t.diff.addWordFg)(s)),
+      delBg: bg(t.diff.delBg),
+      delFg: fg(t.diff.delFg),
+      delGutter: fg(t.diff.delGutter),
+      delWord: (s: string) => bg(t.diff.delWordBg)(fg(t.diff.delWordFg)(s)),
+      border: fg(t.diff.border),
+    },
+    /** Row style of a user message (sent or queued). */
+    message: {
+      bg: bg(t.message.bg),
+      queuedFg: fg(t.message.queuedFg),
+    } satisfies MessageStyle,
+  };
+}
+
+export type Theme = ReturnType<typeof buildTheme>;
+
+/** The chalk path: an ES live binding, so existing `theme.accent(…)` call sites stay. */
+export let theme: Theme = buildTheme(DARK);
+
+let mode: ThemeMode = "dark";
+
+/** Switch the palette. Called once, before the first frame (never mid-session). */
+export function setThemeMode(next: ThemeMode): void {
+  mode = next;
+  theme = buildTheme(tokens[next]);
+}
+
+export function themeMode(): ThemeMode {
+  return mode;
+}
+
+/** The component path: `<Text color={palette().accent}>`, read at render. */
+export function palette(): Tokens {
+  return tokens[mode];
 }
 
 /**
- * Syntax colours for file reads (highlight.js token classes → RGB). `dark` is
- * the default; `light` is the darker-on-white set for a light terminal (no
- * light-mode switch yet — same status as `messageRgb`).
+ * The dim prop, per mode: dark keeps Ink's `dimColor` (SGR 2 — free, and the
+ * terminal decides); light needs a MEASURED grey, since SGR 2's contrast cannot
+ * be computed. Spread it: `<Text {...dimProps()}>`.
  */
-export const syntaxRgb = {
-  dark: {
-    keyword: [198, 120, 221],
-    string: [152, 195, 121],
-    number: [209, 154, 102],
-    comment: [110, 118, 129],
-    title: [97, 175, 239],
-    type: [229, 192, 123],
-    meta: [86, 182, 194],
-    tag: [224, 108, 117],
-  },
-  light: {
-    keyword: [136, 57, 239],
-    string: [64, 128, 24],
-    number: [190, 90, 20],
-    comment: [120, 126, 135],
-    title: [30, 102, 245],
-    type: [160, 110, 10],
-    meta: [14, 130, 150],
-    tag: [200, 40, 60],
-  },
-} as const;
-
-export const theme = {
-  /** Brand accent (cyan) — assistant bullets, in-progress, highlights. */
-  accent: chalk.hex(accentHex),
-  /** De-emphasised grey for metadata, context, hints. */
-  subtle: chalk.rgb(140, 140, 140),
-  notice: chalk.hex(noticeHex),
-  /**
-   * SGR conceal ("hidden"): draws the characters in the background colour, so
-   * the cells are still OCCUPIED. The OFF half of a running call's blink is the
-   * very same glyph under this styler — same character, same cells in every
-   * terminal, only invisible (`fix/tui-blink-off-width`).
-   */
-  hidden: chalk.hidden,
-  success: chalk.rgb(78, 201, 116),
-  error: chalk.rgb(237, 84, 84),
-  warn: chalk.rgb(224, 175, 74),
-  diff: {
-    /** Added line: dark-green background (Claude-Code style). */
-    addBg: chalk.bgRgb(2, 40, 0),
-    /** Line text: explicit near-white (the default foreground is unreadable on light themes). */
-    addFg: chalk.rgb(248, 248, 242),
-    /** Line number and `+` marker: bright green. */
-    addGutter: chalk.rgb(110, 200, 96),
-    /** Changed word within an added line: brighter green background. */
-    addWord: chalk.bgRgb(4, 71, 0).rgb(248, 248, 242),
-    /** Removed line: dark-red background. */
-    delBg: chalk.bgRgb(61, 1, 0),
-    delFg: chalk.rgb(248, 248, 242),
-    /** Line number and `-` marker: bright red. */
-    delGutter: chalk.rgb(230, 100, 100),
-    /** Changed word within a removed line: brighter red background. */
-    delWord: chalk.bgRgb(92, 2, 0).rgb(248, 248, 242),
-    /** Subtle dashed frame around a diff block. */
-    border: chalk.rgb(88, 88, 96),
-  },
-  /** Row style of a user message (sent or queued); see `messageRgb`. */
-  message: {
-    dark: messageStyle(messageRgb.dark),
-    light: messageStyle(messageRgb.light),
-  },
-} as const;
+export function dimProps(): { readonly dimColor: true } | { readonly color: string } {
+  const t = palette();
+  return t.dimIsAttribute ? { dimColor: true } : { color: t.dim };
+}
 
 /** The dashed horizontal rule used as a diff frame's top/bottom border. */
 export function dashedRule(width: number): string {
   return theme.diff.border("╌".repeat(Math.max(1, width)));
+}
+
+// ── Deciding the palette, once per process ──────────────────────────────────
+
+/** What the probe needs from the outside world, all injectable. */
+export interface ThemeIo {
+  /** Whether a query is worth sending (`canProbe` in `terminal-background.ts`). */
+  readonly canProbe: boolean;
+  readonly probe: () => Promise<{ readonly color: Rgb | null; readonly late: boolean }>;
+  /** `process.env.COLORFGBG`: the fallback a terminal exports for exactly this. */
+  readonly colorFgBg: string | undefined;
+}
+
+export interface PreparedTheme {
+  readonly mode: ThemeMode;
+  /**
+   * A reply may still arrive: the probe timed out with the tty left raw. The
+   * caller must guard Ink's stdin (`stepLateFilter`) or the reply lands in the
+   * prompt as junk.
+   */
+  readonly late: boolean;
+}
+
+let prepared: Promise<PreparedTheme> | null = null;
+let preparedLate = false;
+
+/**
+ * Decide and APPLY the palette. The first call does the work; every later call in
+ * the same process reuses it, so two mounts (the `--resume` picker, then the
+ * runtime) cost one query and agree on the answer.
+ *
+ * Called first thing in `startTui` and `pickSession` — before Ink mounts, because
+ * the answer has to be settled before the first row exists (`tui.theme` is not a
+ * mid-session setting, Q8).
+ */
+export async function prepareTheme(setting: ThemeSetting, io: ThemeIo): Promise<PreparedTheme> {
+  if (prepared === null) {
+    prepared = decide(setting, io).then((result) => {
+      setThemeMode(result.mode);
+      preparedLate = result.late;
+      return result;
+    });
+  }
+  return prepared;
+}
+
+async function decide(setting: ThemeSetting, io: ThemeIo): Promise<PreparedTheme> {
+  if (setting !== "auto") {
+    // A forced setting never queries: the user already answered.
+    return { mode: setting, late: false };
+  }
+  if (io.canProbe) {
+    const { color, late } = await io.probe();
+    if (color !== null) {
+      return { mode: modeOfBackground(color), late };
+    }
+    // No colour: a sentinel means nothing more is coming; a timeout means a late
+    // reply still might, so `late` drives the guard either way.
+    return { mode: modeOfColorFgBg(io.colorFgBg) ?? "dark", late };
+  }
+  return { mode: modeOfColorFgBg(io.colorFgBg) ?? "dark", late: false };
+}
+
+/** Whether the settled mode is waiting on a reply that may still arrive. */
+export function themeProbeWasLate(): boolean {
+  return preparedLate;
+}
+
+/** Test-only: forget the memo, so a suite can decide again. */
+export function resetThemeForTest(): void {
+  prepared = null;
+  preparedLate = false;
 }

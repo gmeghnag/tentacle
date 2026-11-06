@@ -3,27 +3,31 @@ import { Chalk } from "chalk";
 import stringWidth from "string-width";
 import { messageRows, queuedRows } from "../src/message-row.ts";
 import { itemLines, transcriptRows, wrapLines } from "../src/render-lines.ts";
-import { type MessageStyle, messageRgb, theme } from "../src/theme.ts";
+import { type MessageStyle, theme, tokens } from "../src/theme.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 const cells = (s: string): number => [...strip(s)].length;
 
 // The harness is not a TTY, so the shared chalk may be colourless: dress rows
-// with a forced truecolor chalk built from the SAME rgb triples as the theme,
-// so the SGR codes exist whatever the environment.
+// with a forced truecolor chalk built from the SAME tokens as the theme, so the
+// SGR codes exist whatever the environment.
 const forced = new Chalk({ level: 3 });
-const styleOf = (mode: keyof typeof messageRgb): MessageStyle => {
-  const [br, bg, bb] = messageRgb[mode].bg;
-  const [fr, fg, fb] = messageRgb[mode].queuedFg;
-  return { bg: forced.bgRgb(br, bg, bb), queuedFg: forced.rgb(fr, fg, fb) };
+/** `#rrggbb` → the three channel numbers the forced chalk needs. */
+const rgbOf = (hex: string): [number, number, number] => {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 };
+const styleOf = (mode: keyof typeof tokens): MessageStyle => ({
+  bg: forced.bgRgb(...rgbOf(tokens[mode].message.bg)),
+  queuedFg: forced.rgb(...rgbOf(tokens[mode].message.queuedFg)),
+});
 const dark = styleOf("dark");
 const light = styleOf("light");
-const bgCode = (mode: keyof typeof messageRgb): string =>
-  `\x1b[48;2;${messageRgb[mode].bg.join(";")}m`;
-const fgCode = (mode: keyof typeof messageRgb): string =>
-  `\x1b[38;2;${messageRgb[mode].queuedFg.join(";")}m`;
+const bgCode = (mode: keyof typeof tokens): string =>
+  `\x1b[48;2;${rgbOf(tokens[mode].message.bg).join(";")}m`;
+const fgCode = (mode: keyof typeof tokens): string =>
+  `\x1b[38;2;${rgbOf(tokens[mode].message.queuedFg).join(";")}m`;
 
 describe("sent user message", () => {
   test("every row — wrapped and blank ones included — is width cells wide", () => {
@@ -149,6 +153,6 @@ describe("queued marker", () => {
 
 describe("message background on a dark terminal", () => {
   test("is #373737 (owner, 2026-10-25)", () => {
-    expect(messageRgb.dark.bg).toEqual([0x37, 0x37, 0x37]);
+    expect(rgbOf(tokens.dark.message.bg)).toEqual([0x37, 0x37, 0x37]);
   });
 });

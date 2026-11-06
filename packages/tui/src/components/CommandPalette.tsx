@@ -7,9 +7,7 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 import type { SlashCommand } from "../commands.ts";
-import { accentHex } from "../theme.ts";
-
-const ACCENT = accentHex;
+import { dimProps, palette } from "../theme.ts";
 
 export function CommandPalette({
   commands,
@@ -21,6 +19,7 @@ export function CommandPalette({
   columns: number;
 }): ReactElement {
   const nameWidth = commands.reduce((w, c) => Math.max(w, c.name.length), 0);
+  const accent = palette().accent;
   return (
     <Box flexDirection="column" width={columns}>
       {commands.map((cmd, i) => {
@@ -28,8 +27,8 @@ export function CommandPalette({
         return (
           <Text
             key={cmd.name}
-            color={isSelected ? ACCENT : undefined}
-            dimColor={!isSelected}
+            color={isSelected ? accent : undefined}
+            {...(isSelected ? {} : dimProps())}
             wrap="truncate"
           >
             {isSelected ? "❯ " : "  "}

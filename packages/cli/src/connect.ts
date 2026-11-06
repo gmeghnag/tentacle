@@ -16,10 +16,11 @@ import {
   type TlsOptions,
   webSocketChannelFactory,
 } from "@tentacle/client";
+import { readFileConfig } from "@tentacle/config";
 import { PermissionBroker } from "@tentacle/core";
 import { MAX_SESSION_LIST } from "@tentacle/protocol";
 import type { DuplexChannel } from "@tentacle/transport";
-import { type SessionPick, oneLine, startTui } from "@tentacle/tui";
+import { type SessionPick, type ThemeSetting, oneLine, startTui } from "@tentacle/tui";
 import {
   type ConnectResumeRequest,
   type ListOutcome,
@@ -39,6 +40,10 @@ export interface ConnectOptions {
   readonly tls?: TlsOptions;
   /** `--resume [id]` / `--continue`: attach a daemon session instead of a new one. */
   readonly resume?: Omit<ConnectResumeRequest, "tty">;
+  /** Where the palette is configured (`tui.theme`); `TENTACLE_CONFIG_DIR` by default. */
+  readonly configDir?: string;
+  /** An explicit `tui.theme` (beats the file); absent → the file's, else `auto`. */
+  readonly theme?: ThemeSetting;
 }
 
 /**
@@ -86,6 +91,40 @@ export function tlsTrustHint(error: unknown, tls: TlsOptions | undefined): strin
     : "to trust a self-signed or private-CA daemon, pass --ca-cert FILE (or --insecure-skip-tls-verify, dev-only)";
 }
 
+/**
+ * The palette for a `connect` session (docs/feat/tui-light-theme.md S5).
+ *
+ * `connect` needs no model configuration — it reaches a daemon that has one — so
+ * the palette comes from the config FILE alone, through `readFileConfig` (the same
+ * parser `loadConfig` uses). An invalid file must never block the connection: a
+ * typo in `tui.theme` would otherwise refuse to connect at all. One line names the
+ * problem and `auto` is used.
+ */
+export async function connectTheme(
+  options: ConnectOptions,
+  write: (line: string) => void,
+): Promise<ThemeSetting> {
+  if (options.theme !== undefined) {
+    return options.theme;
+  }
+  try {
+    const file = await readFileConfig({
+      ...(options.configDir !== undefined
+        ? {
+            configDir: options.configDir,
+            env: { ...process.env, TENTACLE_CONFIG_DIR: options.configDir },
+          }
+        : {}),
+    });
+    return file.tui?.theme ?? "auto";
+  } catch (error) {
+    write(
+      `[config] ${error instanceof Error ? error.message : String(error)} — using tui.theme auto\n`,
+    );
+    return "auto";
+  }
+}
+
 /** Injectable for tests; production uses the real socket and TUI. */
 export interface ConnectDeps {
   /** A channel factory for the daemon at `url` (rejects with a `ChannelError`). */
@@ -100,6 +139,9 @@ export async function connectTui(
   write: (line: string) => void,
   deps: ConnectDeps = { dial: webSocketChannelFactory, startTui },
 ): Promise<void> {
+  // The palette FIRST: it needs no daemon (a local file), Ink has not mounted, and
+  // a broken config must warn before anything else can fail for another reason.
+  const theme = await connectTheme(options, write);
   // RPC path: hold a daemon's request until the TUI's prompt is mounted.
   const permissions = new PermissionBroker(undefined, { holdUntilSet: true });
   const dial = deps.dial(options.url, {
@@ -161,6 +203,7 @@ export async function connectTui(
       link: client,
       mcpStatus: () => client.mcpStatus(),
       detachOnQuit: true,
+      theme,
       sessions: {
         list: () =>
           client.sessionList({ limit: MAX_SESSION_LIST }).then((result) => ({

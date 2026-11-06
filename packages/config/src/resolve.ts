@@ -121,6 +121,8 @@ export interface ResolvedConfig {
   readonly detach?: { readonly keepAwake?: boolean | undefined };
   /** The configured workspace-mount hide list (file or profile); absent = the CLI default list. */
   readonly mount?: MountConfig;
+  /** The configured TUI palette (file or profile); absent = `auto` (the TUI probes). */
+  readonly tui?: { readonly theme?: "auto" | "dark" | "light" | undefined };
   /** User hooks (file-only, no env form); empty when unset. */
   readonly hooks: readonly HookSpecConfig[];
   /** MCP servers to connect to (from the config file), keyed by name. */
@@ -512,6 +514,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(fileConfig.engine !== undefined ? { engine: fileConfig.engine } : {}),
     ...(fileConfig.rm !== undefined ? { rm: fileConfig.rm } : {}),
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
+    ...(fileConfig.tui !== undefined ? { tui: fileConfig.tui } : {}),
     ...(fileConfig.mount !== undefined ? { mount: fileConfig.mount } : {}),
     hooks: fileConfig.hooks ?? [],
     // MCP servers are file-only (no env form); empty when unset.

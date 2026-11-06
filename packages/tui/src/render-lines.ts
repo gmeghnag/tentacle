@@ -21,7 +21,7 @@ import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
-import { dashedRule, theme } from "./theme.ts";
+import { dashedRule, theme, themeMode } from "./theme.ts";
 import { fitSubtitle, isExpanded } from "./tool-expand.ts";
 import { queuedRow } from "./tool-phase-view.ts";
 import { type WordOp, changeRatio, diffWords } from "./word-diff.ts";
@@ -63,7 +63,8 @@ const DEFAULT_WIDTH = 80;
 // that marks a tool's output block (Claude-Code style). Both are 2 columns so
 // bodies stay aligned whichever is used.
 const INDENT = "  ";
-const CONNECTOR = `${theme.subtle("⎿")} `;
+/** Read at CALL time: a module-load capture would freeze the palette (and the mode). */
+const connector = (): string => `${theme.subtle("⎿")} `;
 // An expanded call's command, on the rows under its header (owner mockup):
 // 4 display columns, so the command never wraps under the bullet.
 const COMMAND_PREFIX = "  │ ";
@@ -384,7 +385,7 @@ function readLines(tool: ToolItem, limit: number | undefined): readonly string[]
   const lines =
     path === undefined || tool.resultText === undefined
       ? undefined
-      : highlightRead(cleanReadText(tool.resultText), path, "dark", limit);
+      : highlightRead(cleanReadText(tool.resultText), path, themeMode(), limit);
   slots.set(limit, lines);
   return lines;
 }
@@ -574,7 +575,7 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
     shown = [...body.slice(0, preview), theme.subtle(`… +${hidden} more lines · ctrl+o to expand`)];
   }
   // The first body line carries the corner connector; the rest align under it.
-  return [header, ...command, ...shown.map((l, i) => (i === 0 ? CONNECTOR : INDENT) + l)];
+  return [header, ...command, ...shown.map((l, i) => (i === 0 ? connector() : INDENT) + l)];
 }
 
 /** A full-width grey rule with `text` in it: `── text ─────…`. */
