@@ -212,6 +212,33 @@ Not mutated: W-4 (no cap exists to remove), W-8 (pins the pre-existing ask-with-
 3. `tentacle connect --resume` → the history shows the `[background]` note and the agent's reply; no `ended while you were away` notice, no second turn.
 4. Put `"autoWake": false` in the `serve` host's config, restart `serve`, repeat 1–2 → no turn; `connect --resume` shows `1 background job(s) ended while you were away` (and the laptop's own `autoWake` decides whether the TUI wakes).
 5. Stay attached with `connect` while the job ends → exactly one wake turn (the TUI's), none from the daemon.
+6. (fix round 1) Start a long job, quit `connect`, and reconnect with `connect --resume` WHILE the daemon's wake turn is still answering → that turn finishes, and no second, empty turn follows it.
+
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-06*
+
+Owner answer R-Q1 = (a), daemon-side; it is recorded under the Review's "Owner question (review)".
+
+- **Finding 1 (MEDIUM), fixed.** `packages/daemon/src/hosted-session.ts` `maybeWake`: `this.recordCut(null)` runs right before the wake's `prompt()`.
+  - Why it is safe: the session is idle there, so the history reflects every emit. The cut moves past the session-level `background_exit` frames of the exits this turn will flush.
+  - Effect: a client attaching mid-wake gets the snapshot (pre-wake history) plus `turn_start{""}` and the turn's own `context_note`. It gets no `background_exit` replay, so `RemoteClient`'s exit backlog stays empty and the TUI arms no second wake.
+  - A client with an older `since` resyncs: the ring evicted up to the new cut.
+  - No TUI or client change. No protocol change. No persisted change (`recordCut` writes nothing; `prompt()` persists as before).
+  - Root cause in one sentence: the cut stayed at the previous turn's end, so a mid-wake attach replayed the exit as a live notice (seam B).
+  - Test: `packages/client/test/serve-autowake.test.ts` (new). It drives a real `RemoteClient` against a `SessionHost` with `wakeOnJobExit`.
+    - *Model-bound:* the wake is gated in the model, a client attaches, the wake is released. Asserts `onBackgroundExit` gets nothing, `unflushedExits()` is 0, and there is exactly 1 model call. **RED before the fix**: the backlog delivered `j1`, the reviewer's repro.
+    - *Tool-bound:* the wake's shell call is gated in `exec` (no ask), a client attaches. Asserts no notice and exactly 2 model calls (one turn, two rounds). **Green before the fix too, stated honestly:** on this base the round's `history_commit` moves the cut before the tool runs, so a tool-bound attach did not leak. It is kept as a guard.
+  - Seam A (W-7/W-7b) and the held-ask path (W-8) stay green.
+- **LOW 2, fixed (test only).** W-8 now runs on an injected clock, advances it 10 h, and runs `host.reapExpired({ idleTtlMs: 60_000 })`. It asserts `[]` and that the wake still runs. The red was shown by mutation, because the gap was in the test, not the code.
+- **LOW 3: no code.** Owner-visible behaviour, kept as designed (D6): Esc on ANY turn (the TUI's own included) pauses the daemon's wakes until a later turn ends normally. The exits still flush at the next prompt or attach.
+
+| Mutation (cp backup → edit → narrow test → cp restore → `shasum -c` OK) | Red test |
+|---|---|
+| drop `recordCut(null)` in `maybeWake` | client "model-bound wake" (the backlog has `j1`) |
+| `session-reaper.ts` `expiry`: the idle TTL ignores `busy` | W-8 (`reapExpired` → `[{id:"S", reason:"idle_ttl"}]`) |
+
+Gate: `bunx tsc --noEmit` clean · `bunx biome check .` `Checked 711 files … No fixes applied.` · `bun test packages` **5268 pass · 3 skip · 0 fail**.
 
 ## Review
 
@@ -325,6 +352,8 @@ What it missed: it reasoned about the attach only through seam A (`unflushedExit
 ### Owner question (review)
 
 - **R-Q1 — where to fix finding 1?** *Recommendation: (a), daemon-side.* Commit the cut before the wake's `prompt()` so that a mid-wake attach never replays the exit as a live `background_exit`. It keeps the TUI unchanged and stays inside this task's files. (b), filtering in `RemoteClient`, also helps two-TUI cases but widens the blast to the client.
+
+**Owner answer (fix round 1, 2026-11-06):** R-Q1 = **(a), daemon-side**. In `maybeWake`, commit/move the cut before the wake's `prompt()`. A TUI attaching mid-wake then gets the exit through the snapshot plus the turn's own flush note, never as a live `background_exit`, so it never fires a second continuation. No TUI or client change. LOW 2: make W-8 run the reaper. LOW 3: no code. It stays owner-visible behaviour: Esc on any turn pauses daemon wakes until a turn ends normally.
 
 ## Owner questions
 

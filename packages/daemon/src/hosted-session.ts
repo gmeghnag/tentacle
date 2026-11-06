@@ -1679,6 +1679,12 @@ export class HostedSession {
       return;
     }
     const turnId = `wake-${crypto.randomUUID()}`;
+    // Idle: the history reflects every emit, so the cut may move to "now". It
+    // leaves the session-level `background_exit` frames of the exits this turn
+    // will flush BEFORE the cut: a client attaching mid-wake gets them through
+    // the snapshot plus the turn's own flush note, never as a live exit notice
+    // that would arm its own wake — one turn per exit (Review finding 1).
+    this.recordCut(null);
     // Before `prompt`: its turn's start may flush synchronously, or after an
     // await (project-hook trust) — either way an attach meanwhile reads 0.
     this.wakeUnflushed = turnId;

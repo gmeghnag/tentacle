@@ -119,13 +119,16 @@ const env: ExecutionEnvironment = {
   writeFile: async () => {},
 };
 
-function rig(opts: { wake?: boolean; persister?: SessionPersister; hooks?: object } = {}) {
+function rig(
+  opts: { wake?: boolean; persister?: SessionPersister; hooks?: object; now?: () => number } = {},
+) {
   const jobs = new FakeJobs();
   const model = new Model();
   const audit: string[] = [];
   const errors: Error[] = [];
   const host = new SessionHost({
     defaultCwd: "/tmp/serve-autowake",
+    ...(opts.now ? { now: opts.now } : {}),
     ...(opts.wake !== false ? { wakeOnJobExit: true } : {}),
     ...(opts.persister ? { persister: opts.persister } : {}),
     onAudit: (line) => audit.push(line),
@@ -415,13 +418,19 @@ describe("a serve daemon wakes a session nobody is attached to", () => {
 
   test("W-8 a wake turn needing a permission holds the slot until an attaching client answers", async () => {
     // Mutation: auto-deny in the nobody-attached branch of `awaitDecision` → it never waits.
-    const r = rig();
+    // Mutation: the reaper does not skip a busy session → the sweep closes it.
+    const clock = { t: 1_000 };
+    const r = rig({ now: () => clock.t });
     await r.detachedAfterTurn();
     r.model.steps.push([shell("c1", "make test"), done], [text("tests pass"), done]);
     r.jobs.fire("j1");
     await settle();
     expect(r.hosted().running).toBe(true);
     expect(r.hosted().liveness().busy).toBe(true);
+    // Far past the idle TTL, nobody attached: a busy (held) wake is never reaped.
+    clock.t += 10 * 60 * 60 * 1000;
+    expect(r.host.reapExpired({ idleTtlMs: 60_000 })).toEqual([]);
+    expect(r.host.get("S")?.running).toBe(true);
     // An attach replays the held ask; answering finishes the wake turn.
     const b = await r.connect();
     await b.open();
