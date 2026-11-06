@@ -1,8 +1,6 @@
-/** `tools.outputRetentionDays` / `cacheDirFromEnv` (docs/fix/tool-output-location.md). */
+/** `tools.outputRetentionDays` (docs/fix/tool-output-location.md). */
 import { describe, expect, test } from "bun:test";
-import { join } from "node:path";
 import { DEFAULT_CONFIG_JSONC } from "../src/defaults.ts";
-import { cacheDirFromEnv } from "../src/load.ts";
 import { type ResolveContext, resolveConfig } from "../src/resolve.ts";
 import { FileConfigSchema } from "../src/schema.ts";
 
@@ -50,13 +48,5 @@ describe("tools.outputRetentionDays", () => {
   test("the scaffolded template names the option", () => {
     expect(DEFAULT_CONFIG_JSONC).toContain('"outputRetentionDays": 30');
     expect(DEFAULT_CONFIG_JSONC).not.toContain(".tentacle/tool-output");
-  });
-});
-
-describe("cacheDirFromEnv", () => {
-  test("XDG_CACHE_HOME, else ~/.cache", () => {
-    expect(cacheDirFromEnv({ XDG_CACHE_HOME: "/x/cache" }, "/home/u")).toBe("/x/cache/tentacle");
-    expect(cacheDirFromEnv({}, "/home/u")).toBe(join("/home/u", ".cache", "tentacle"));
-    expect(cacheDirFromEnv({ HOME: "/h" })).toBe(join("/h", ".cache", "tentacle"));
   });
 });

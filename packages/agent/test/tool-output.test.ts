@@ -47,7 +47,7 @@ describe("ToolOutputStore.write", () => {
     expect(mode(resolve(path, ".."))).toBe(0o700);
   });
 
-  test("an overwritten file is 0600 again", async () => {
+  test("a repeated name is never overwritten (F1): the first file is untouched, the second is 0600", async () => {
     const root = temp();
     const sink = createToolOutputStore(root).forProject(temp());
     const first = await sink.write("s", "t", "1", "a");
@@ -55,9 +55,10 @@ describe("ToolOutputStore.write", () => {
       throw new Error("write failed");
     }
     chmodSync(first, 0o644);
-    await sink.write("s", "t", "1", "b");
-    expect(mode(first)).toBe(0o600);
-    expect(readFileSync(first, "utf8")).toBe("b");
+    const second = await sink.write("s", "t", "1", "b");
+    expect(second).not.toBe(first);
+    expect(readFileSync(first, "utf8")).toBe("a");
+    expect(mode(second ?? "")).toBe(0o600);
   });
 
   test("a hostile session / tool / call id never leaves the root", async () => {

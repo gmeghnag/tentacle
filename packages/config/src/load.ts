@@ -392,18 +392,6 @@ export function configDirFromEnv(env: Env = process.env): string {
   return resolveConfigDir(undefined, env, env.HOME ?? homedir());
 }
 
-/**
- * The user's cache dir for tentacle (`$XDG_CACHE_HOME/tentacle` or
- * `~/.cache/tentacle`), without creating it. `HOME` falls back to `os.homedir()`.
- */
-export function cacheDirFromEnv(env: Env = process.env, home?: string): string {
-  const h = home ?? env.HOME ?? homedir();
-  if (env.XDG_CACHE_HOME) {
-    return resolvePath(expandTilde(env.XDG_CACHE_HOME, h), "tentacle");
-  }
-  return join(h, ".cache", "tentacle");
-}
-
 function resolveConfigDir(override: string | undefined, env: Env, home: string): string {
   if (override) {
     return resolvePath(expandTilde(override, home));

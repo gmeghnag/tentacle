@@ -206,6 +206,9 @@ Glossario breve:
   Nel pod resta nel pod (cache/tmp del pod), mai sul laptop né nel mount a meno
   che l'`$HOME` del pod sia dentro il mount. File `0600`; cancellati con la
   sessione e dopo `tools.outputRetentionDays` (default 30; ≤ 0 = mai).
+  La retention del laptop NON viaggia nel pod: il pod usa il proprio default
+  (30) o la propria config/env. Se la radice cadrebbe dentro il cwd della
+  sessione (es. `HOME` = workspace montato), si usa la radice tmp del pod.
 - `summarizeLargeOutput` nel pod usa il modello del tunnel (`wiring.ts:291-295`).
 
 ### 2.10 Binario nel pod

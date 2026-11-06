@@ -511,7 +511,7 @@ export class Agent {
    * Memory only: a reload starts from the estimate.
    */
   private readonly anchors = new WeakMap<ChatMessage[], ContextAnchor>();
-  /** Spill names already used (a server may reuse a call id): see `spillId`. Memory only. */
+  /** Spill names already used on the env fallback path: see `spillId`. Memory only. */
   private readonly spillNames = new Set<string>();
   /**
    * The context-reset guard (one agent per session): accepted resets since
@@ -1890,12 +1890,16 @@ export class Agent {
   }
 
   /**
-   * A call id as a spill name, unique within this agent: a server may reuse an
-   * id (two `agent_task` calls of one message; `call_1` every turn), and two
-   * spills must not share a file. The first use keeps the id as is. The check
-   * and the claim are synchronous, so parallel calls cannot both take a name.
+   * The env FALLBACK path only (no `toolOutput` sink; the sink's store creates
+   * files exclusively and is the truth on names): a call id unique within this
+   * agent, since a server may reuse one (two `agent_task` calls of one message).
+   * The first use keeps the id as is. The check and the claim are synchronous,
+   * so parallel calls cannot both take a name.
    */
   private spillId(sessionId: string, scope: string | undefined, call: ToolCall): string {
+    if (this.config.toolOutput) {
+      return call.id;
+    }
     let id = call.id;
     for (let n = 2; ; n += 1) {
       const key = `${sessionId}\0${scope ?? ""}\0${call.name}\0${id}`;

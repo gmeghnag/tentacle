@@ -1,6 +1,6 @@
 # fix/tool-output-location — Large tool output leaves the project
 
-> **Status:** implementation (plan, awaiting approval)
+> **Status:** executed (round 2 done after the fresh-context Review); awaiting merge
 > **Branch:** `fix/tool-output-location` (off `main` AFTER `feat/tui-target-badge` and `fix/stale-pod-binary` merge)
 > **Type:** fix · **Size:** M · **Blast:** cross-module · **Suited:** a strong model for the `agent.ts`/`session-host.ts` edits (or Sonnet executes, Opus fresh-context Review — the change sits next to the agent loop and `SessionHost.delete`)
 
@@ -311,6 +311,26 @@ sink ignored (4 fail) · dedupe disabled (2 fail) · child ignores parent sessio
 **Gate (once, at the end):** `bunx tsc --noEmit` clean · `bunx biome check .` clean · `bun test packages`: 4916 pass, 3 skip (opt-in), 0 fail.
 
 **Unverified:** a live run in a real pod/container (HOME unwritable → tmp fallback) and on Windows; verify by `tentacle run` with a random uid and a large `fs_read`.
+
+### Execution — round 2
+
+*— claude-sonnet-5-5, 2026-11-06*
+
+Implements the orchestrator decisions F1–F6, Q1, Q2. Red first: `agent/test/tool-output-round2.test.ts` was run on the round-1 store: 12 fail on assertions (3 pass), then green after the change.
+
+- **F1+F2** (`tool-output.ts` `writeIn`): exclusive create (`flag: "wx"`), on `EEXIST` retry `<tool>-<id>~N.txt` — the suffix is added AFTER `segment()`, so it survives the 60-char cut and `c~2` / `c_2` / `a`+`b-c` / `a-b`+`c` cannot share a file. The store is now the truth; the `chmod` is gone (a new file is created 0600). `Agent.spillId`/`spillNames` kept ONLY for the env fallback path (no sink; the library path still needs it, tested), and returns the plain id when a sink is set. Tests: two stores/two Agents of one session, 60+/80-char id repeated, 8 parallel writes. The obsolete "overwritten file is 0600 again" test became "a repeated name is never overwritten"; the sink test "two calls reach the sink under two names" became an Agent+real-store test (two files).
+- **F3**: only absolute cache bases (XDG, then `$HOME/.cache`), else tmp, else `null` (`resolveToolOutputRoot`; tests for a relative `XDG_CACHE_HOME` and `HOME=""`).
+- **F4**: `removeSession` does `isRealDir(<root>/<project>)` first (test: symlinked project dir not followed).
+- **F5**: `sessionDirName(id)`: a safe id (`^[A-Za-z0-9][A-Za-z0-9._-]{0,59}$`) keeps its name, anything else becomes `~<sha256[:16]>`; used by `write` and `removeSession`; `removeSession` no longer refuses unsafe ids (it hashes them, so it can only reach that id's own dir). Tests: `a_b` vs `a b`, 70-char id vs longer same-prefix id, hostile ids, plain name kept.
+- **F6**: `cacheDirFromEnv` and its test removed; doc header status updated.
+- **Q1**: `createToolOutputStore(root, alternative?)`; for a project whose cwd contains the root (realpath-compared), the write goes to the lazily resolved tmp root (`resolveToolOutputTmpRoot`, wired in `toolOutputStore()`), `null` when that is inside the cwd too or missing — never the project. `owns`, `removeSession` and `sweep` cover both roots. Tests: store-level (inside → tmp, outside → unchanged, no alternative → null).
+- **Q2**: one paragraph in `container-config-sources.md` (the pod uses its own retention default; the tmp-root rule).
+
+**Drift:** no wiring-level (`buildAgent`) test for Q1, only the store-level ones; `wiring.ts` changes by one line. The scratch repro (`.tentacle/tmp/tool-output-location/repro.ts`) could NOT be run: `bun <path>` was denied approval in this session, so its output is not pasted; the same properties are covered by the new tests. `alternative` is resolved on demand by `removeSession`/`sweep`/`owns` (creates `/tmp/tentacle-<uid>/tool-output` at the first sweep) so files from a previous run stay reachable. No CHANGELOG change (the visible behaviour is the round-1 entry; these are corrections within it).
+
+**Mutations (cp backup, shasum identical):** `wx`→`w` (4 red) · XDG absolute check dropped (1) · project-dir `isRealDir` dropped (1) · `removeSession` uses the raw id (3) · Q1 `lies` check dropped (2).
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx biome check .` clean (673 files) · `bun test packages`: 4931 pass, 3 skip, 0 fail.
 
 ## Review
 

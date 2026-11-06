@@ -1,6 +1,9 @@
 // docs/fix/tool-output-location.md: the spill goes through its own sink, never
 // the workspace-confined env, and never collides.
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   ChatRequest,
   ExecutionEnvironment,
@@ -12,6 +15,7 @@ import { ToolRegistry } from "@tentacle/tools";
 import { z } from "zod";
 import { Agent, type AgentEvent } from "../src/agent.ts";
 import { spillLargeOutput } from "../src/result-pipeline.ts";
+import { createToolOutputStore } from "../src/tool-output.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -96,15 +100,40 @@ describe("Agent spills through a ToolOutputSink", () => {
 
   // Task-7 review NIT 5: a server may reuse a call id; two calls of one
   // message (or of two turns) with one id must not share a file.
-  test("two calls with the same id in one message reach the sink under two names", async () => {
-    const ids: string[] = [];
-    const { agent } = rig([[call("dup"), call("dup")], done], async (_sid, _tool, id) => {
-      ids.push(id);
-      return `/cache/${id}`;
-    });
-    await drain(agent);
-    expect(ids).toHaveLength(2);
-    expect(new Set(ids).size).toBe(2);
+  test("two calls with the same id in one message end in two files (the store names them)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-sink-"));
+    const project = mkdtempSync(join(tmpdir(), "agent-proj-"));
+    try {
+      const sink = createToolOutputStore(root).forProject(project);
+      const { agent } = rig([[call("dup"), call("dup")], done], (...a) => sink.write(...a));
+      const events = await drain(agent);
+      const paths = events.flatMap((e) =>
+        e.type === "tool_result" ? (/saved to (\S+\.txt)/.exec(e.result.content)?.[1] ?? []) : [],
+      );
+      expect(paths).toHaveLength(2);
+      expect(new Set(paths).size).toBe(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a SECOND agent of the same session never replaces the first one's file (F1)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-sink-"));
+    const project = mkdtempSync(join(tmpdir(), "agent-proj-"));
+    try {
+      const store = createToolOutputStore(root).forProject(project);
+      const first = rig([[call("call_1")], done], (...a) => store.write(...a));
+      const second = rig([[call("call_1")], done], (...a) => store.write(...a));
+      const a = firstResult(await drain(first.agent));
+      const b = firstResult(await drain(second.agent));
+      const pa = /saved to (\S+\.txt)/.exec(a)?.[1];
+      const pb = /saved to (\S+\.txt)/.exec(b)?.[1];
+      expect(pa).toBeDefined();
+      expect(pb).toBeDefined();
+      expect(pa).not.toBe(pb);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("the first use of an id keeps the plain name (no churn for the common case)", async () => {

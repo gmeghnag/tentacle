@@ -27,6 +27,7 @@ import {
   parseAgentDefinition,
   redactSecrets,
   resolveToolOutputRoot,
+  resolveToolOutputTmpRoot,
   runResultHooks,
   spillLargeOutput,
   summarizeLargeOutput,
@@ -251,7 +252,9 @@ let sharedToolOutput: ToolOutputStore | undefined;
  * answer. The cache of THIS host: a pod daemon's lives in the pod.
  */
 export function toolOutputStore(): ToolOutputStore {
-  sharedToolOutput ??= createToolOutputStore(resolveToolOutputRoot());
+  sharedToolOutput ??= createToolOutputStore(resolveToolOutputRoot(), () =>
+    resolveToolOutputTmpRoot(),
+  );
   return sharedToolOutput;
 }
 
