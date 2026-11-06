@@ -155,6 +155,11 @@ export interface TentacleConfig {
   readonly autoWake: boolean;
   /** How a round's tool calls may overlap (on a pod: its own env and file, else the laptop's, carried). */
   readonly toolExecution: ResolvedConfig["toolExecution"];
+  /**
+   * Where `fs_write` may write besides the project, `~` expanded
+   * (docs/feat/write-tmpdir.md). Daemon-side; NOT carried to a pod.
+   */
+  readonly writableDirs: readonly string[];
   /** The configured default engine of `run`/`attach` (file/profile); absent = unset. */
   readonly engine?: ResolvedConfig["engine"];
   /** The configured `run --rm` default (file/profile); absent = the CLI default (false: kept). */
@@ -670,6 +675,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     tabulateJson: resolved.tabulateJson,
     autoWake: resolved.autoWake,
     toolExecution: resolved.toolExecution,
+    writableDirs: resolved.writableDirs.map((d) => expandTilde(d, home)),
     ...(resolved.engine !== undefined ? { engine: resolved.engine } : {}),
     ...(resolved.rm !== undefined ? { rm: resolved.rm } : {}),
     ...(resolved.detach !== undefined ? { detach: resolved.detach } : {}),

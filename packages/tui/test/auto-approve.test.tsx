@@ -5,6 +5,7 @@ import type { ChatRequest } from "@tentacle/core";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { render } from "ink-testing-library";
 import { App } from "../src/App.tsx";
+import { WRITES_NOTE } from "../src/permission-ui.ts";
 
 const noopEnv: ExecutionEnvironment = {
   id: "noop",
@@ -138,7 +139,8 @@ describe("auto-accept never answers a hooks trust request (docs/feat/hooks-proje
     expect(frame).toContain("Always trust this project");
     expect(frame).toContain("Never for this project");
     expect(frame).toContain("turn_start → ./a.sh");
-    // Not a tool call: no "writes confined here" row.
+    // Not a tool call: no cwd row (docs/feat/write-tmpdir.md: its note changed).
+    expect(frame).not.toContain(WRITES_NOTE);
     expect(frame).not.toContain("writes confined here");
     unmount();
   });

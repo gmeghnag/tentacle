@@ -171,6 +171,14 @@ const HidePathSchema = z
     message: 'a hide path must start with "~/" or "/"',
   });
 
+/** A `tools.writableDirs` entry: `~`, `~/…` or an absolute path (a relative one has no anchor). */
+const WritableDirSchema = z
+  .string()
+  .min(1)
+  .refine((path) => path === "~" || path.startsWith("~/") || path.startsWith("/"), {
+    message: 'a writable dir must be "~", start with "~/" or be absolute',
+  });
+
 export type MountConfig = {
   readonly hide?: readonly string[];
   readonly hideExtra?: readonly string[];
@@ -364,6 +372,13 @@ const settingsShape = {
       execution: z.enum(["sequential", "read-only", "parallel"]).optional(),
       /** At most this many calls of a round at once (`1` = sequential). Default 8. */
       maxParallel: z.number().int().positive().optional(),
+      /**
+       * Where `fs_write`/`fs_edit`/`fs_multi_edit` may write besides the project
+       * (docs/feat/write-tmpdir.md). REPLACES the default (the system temp dir
+       * and `/tmp`); `[]` = the project only. `/` is dropped. Matched by
+       * realpath, on the daemon's host; NOT carried to a pod (its own default).
+       */
+      writableDirs: z.array(WritableDirSchema).optional(),
     })
     .strict()
     .optional(),

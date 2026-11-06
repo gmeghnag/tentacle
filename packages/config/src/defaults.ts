@@ -55,6 +55,20 @@ export const DEFAULT_TABULATE_JSON = false;
 export const DEFAULT_TOOL_EXECUTION = "read-only";
 /** At most this many calls of a round at once. */
 export const DEFAULT_TOOL_MAX_PARALLEL = 8;
+/**
+ * Where `fs_write` may write besides the project, by default
+ * (docs/feat/write-tmpdir.md): the system temp dir — `os.tmpdir()`'s POSIX rule
+ * (`TMPDIR` | `TMP` | `TEMP` | `/tmp`, trailing slash trimmed), read from the
+ * given env so it stays pure — and `/tmp`, de-duplicated. Runtime state, so
+ * computed at resolve time, not a constant.
+ */
+export function defaultWritableDirs(env: Readonly<Record<string, string | undefined>>): string[] {
+  let tmp = env.TMPDIR || env.TMP || env.TEMP || "/tmp";
+  if (tmp.length > 1 && tmp.endsWith("/")) {
+    tmp = tmp.slice(0, -1);
+  }
+  return tmp === "/tmp" ? ["/tmp"] : [tmp, "/tmp"];
+}
 export const PROMPT_FILENAME = "PROMPT.md";
 export const CONFIG_FILENAME = "config.jsonc";
 /**
@@ -214,6 +228,12 @@ export const DEFAULT_CONFIG_JSONC = `{
   //    shell one at a time) or "parallel" (any calls on different files/resources).
   //    Env: TENTACLE_TOOL_EXECUTION. maxParallel: at most this many at once
   //    (env TENTACLE_TOOL_MAX_PARALLEL; 1 = sequential).
+  //  - writableDirs: where fs_write/fs_edit may write besides this project (absolute
+  //    or "~/…"). Default: the system temp dir ($TMPDIR) and /tmp. A list REPLACES
+  //    that default; [] = this project only. "/" is ignored. Env
+  //    TENTACLE_WRITABLE_DIRS (":"-separated, empty = []). Not carried to a pod
+  //    (run/attach): there the pod's own temp dirs apply. The shell is not confined.
+  //    e.g. "tools": { "writableDirs": ["/tmp", "~/scratch"] }
   // "tools": { "maxInlineOutputChars": ${DEFAULT_MAX_INLINE_OUTPUT_CHARS}, "outputRetentionDays": ${DEFAULT_TOOL_OUTPUT_RETENTION_DAYS}, "redactSecrets": ${DEFAULT_REDACT_SECRETS}, "summarizeLargeOutput": ${DEFAULT_SUMMARIZE_LARGE_OUTPUT}, "dedupOutput": ${DEFAULT_DEDUP_OUTPUT}, "tabulateJson": ${DEFAULT_TABULATE_JSON}, "execution": "${DEFAULT_TOOL_EXECUTION}", "maxParallel": ${DEFAULT_TOOL_MAX_PARALLEL} },
 
   // Named profiles, applied with \`--profile <name>\` on the command that starts the

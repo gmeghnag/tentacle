@@ -6,14 +6,16 @@
  * `exec` combines an optional caller `signal` with an optional `timeoutMs` into a
  * single abort signal so a runaway command is always killed.
  *
- * Writes are confined to the workspace `root` (the launch directory by default):
- * `writeFile` refuses any path that resolves — after following symlinks — outside
- * it. Reads are intentionally unconfined. The shell (`exec`) cannot be confined at
+ * Writes are confined to the workspace `root` (the launch directory by default)
+ * plus any `writableDirs` (absolute; the config gives the system temp dirs by
+ * default, docs/feat/write-tmpdir.md): `writeFile` refuses any path that
+ * resolves — after following symlinks, dangling ones included — outside all of
+ * them. Reads are intentionally unconfined. The shell (`exec`) cannot be confined at
  * the filesystem level on the host; that is gated by the permission engine instead
  * (and fully sandboxed once the container environment lands).
  */
-import { existsSync, realpathSync } from "node:fs";
-import { basename, dirname, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
 import { scrubSensitiveEnv } from "@tentacle/core";
 import type {
   BackgroundHandle,
@@ -41,6 +43,13 @@ export interface HostExecutionConfig {
    * output that was removed with its session). `undefined` → the OS error.
    */
   readonly readHint?: (absPath: string) => string | undefined;
+  /**
+   * Directories writable besides `root` (docs/feat/write-tmpdir.md): absolute
+   * paths, matched by realpath. An entry that is not absolute (`~` must be
+   * expanded by the caller) or that resolves to the filesystem root is dropped
+   * and listed in `droppedWritableDirs`. Absent → `root` only.
+   */
+  readonly writableDirs?: readonly string[];
 }
 
 /** Thrown when a write would escape the workspace root. */
@@ -57,15 +66,31 @@ function safeRealpath(p: string): string {
   }
 }
 
+/** Whether `p` exists as a directory entry — a dangling symlink counts (no follow). */
+function entryExists(p: string): boolean {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Symlink hops followed before giving up (the kernel's own limit is ~40). */
+const MAX_LINK_HOPS = 40;
+
 /**
  * Resolve `abs` to its real location, following symlinks on the deepest existing
  * ancestor and re-appending the not-yet-existing tail (which, having been through
- * `path.resolve`, contains no `..`). This catches symlink-based escapes.
+ * `path.resolve`, contains no `..`). This catches symlink-based escapes —
+ * including a DANGLING link (`existsSync` would call it absent, and the write
+ * would then create its target wherever it points): its target is resolved in
+ * turn. Too many hops (a loop) → `undefined`, which the caller refuses.
  */
-function realTarget(abs: string): string {
+function realTarget(abs: string, hops = 0): string | undefined {
   let existing = abs;
   const tail: string[] = [];
-  while (!existsSync(existing)) {
+  while (!entryExists(existing)) {
     const parent = dirname(existing);
     if (parent === existing) {
       break;
@@ -73,14 +98,70 @@ function realTarget(abs: string): string {
     tail.unshift(basename(existing));
     existing = parent;
   }
+  if (!existsSync(existing) && entryExists(existing)) {
+    // A dangling symlink (or a loop): follow it by hand.
+    if (hops >= MAX_LINK_HOPS) {
+      return undefined;
+    }
+    let link: string;
+    try {
+      link = readlinkSync(existing);
+    } catch {
+      return undefined;
+    }
+    return realTarget(resolve(dirname(existing), link, ...tail), hops + 1);
+  }
   const real = safeRealpath(existing);
   return tail.length > 0 ? resolve(real, ...tail) : real;
+}
+
+/**
+ * Whether `target` is `root` or inside it (`/tmpfoo` is not inside `/tmp`). A
+ * root of `/` matches only itself (`"//"` prefix), as before: a writable `/` is
+ * dropped at construction, and a project at `/` stays as confined as it was.
+ */
+function within(root: string, target: string): boolean {
+  return target === root || target.startsWith(root + sep);
+}
+
+/**
+ * The extra writable roots, realpath'd and de-duplicated; an entry that is not
+ * absolute, that resolves to the filesystem root (it would make "confined"
+ * meaningless) or through a symlink loop, is dropped and reported.
+ */
+function writableRootsOf(dirs: readonly string[]): {
+  readonly roots: readonly string[];
+  readonly dropped: readonly string[];
+} {
+  const roots: string[] = [];
+  const dropped: string[] = [];
+  for (const dir of dirs) {
+    if (!isAbsolute(dir)) {
+      dropped.push(dir);
+      continue;
+    }
+    // Canonicalised like a target: a dir that does not exist yet still gets its
+    // existing ancestors realpath'd (`/var/…` → `/private/var/…` on macOS).
+    const real = realTarget(resolve(dir));
+    if (real === undefined || dirname(real) === real) {
+      dropped.push(dir);
+      continue;
+    }
+    if (!roots.includes(real)) {
+      roots.push(real);
+    }
+  }
+  return { roots, dropped };
 }
 
 export class HostExecution implements ExecutionEnvironment {
   readonly id: string;
   private readonly defaultCwd: string;
   private readonly root: string;
+  /** Writable besides `root`: realpaths (docs/feat/write-tmpdir.md). */
+  private readonly writableRoots: readonly string[];
+  /** `writableDirs` entries refused at construction (not absolute, or `/`): for a daemon log. */
+  readonly droppedWritableDirs: readonly string[];
   private readonly killGraceMs: number;
   private readonly readHint: ((absPath: string) => string | undefined) | undefined;
   /** Commands whose leader exited (their group was handed to `releaseGroup`). */
@@ -92,6 +173,9 @@ export class HostExecution implements ExecutionEnvironment {
     this.readHint = config?.readHint;
     this.defaultCwd = resolve(config?.cwd ?? process.cwd());
     this.root = safeRealpath(resolve(config?.root ?? this.defaultCwd));
+    const writable = writableRootsOf(config?.writableDirs ?? []);
+    this.writableRoots = writable.roots.filter((r) => r !== this.root);
+    this.droppedWritableDirs = writable.dropped;
   }
 
   async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
@@ -235,13 +319,18 @@ export class HostExecution implements ExecutionEnvironment {
     await Bun.write(this.confineWrite(path), contents);
   }
 
-  /** Absolute write path, or throw if it escapes the workspace root. */
+  /** Absolute write path, or throw if it escapes the workspace root and every writable dir. */
   private confineWrite(path: string): string {
     const abs = resolve(this.defaultCwd, path);
     const target = realTarget(abs);
-    if (target !== this.root && !target.startsWith(this.root + sep)) {
+    if (
+      target === undefined ||
+      ![this.root, ...this.writableRoots].some((root) => within(root, target))
+    ) {
+      const allowed =
+        this.writableRoots.length > 0 ? `; writable dirs: ${this.writableRoots.join(", ")}` : "";
       throw new WorkspaceWriteError(
-        `refusing to write outside the workspace (${this.root}): ${path}`,
+        `refusing to write outside the workspace (${this.root}${allowed}): ${path}`,
       );
     }
     return abs;

@@ -8,6 +8,23 @@ those.
 
 ## [Unreleased]
 
+### Added
+
+- **`fs_write` and `fs_edit` may write to the system temp dir.** A scratch file in
+  `/tmp` (or macOS's `/var/folders/…/T`) no longer fails with "refusing to write
+  outside the workspace"; each write still asks as before. Set the list with
+  `"tools": { "writableDirs": [...] }` (absolute or `~/…`; env
+  `TENTACLE_WRITABLE_DIRS`, `:`-separated): it **replaces** the default, and `[]`
+  keeps writes in the project only. Paths are matched by real path, so a symlink
+  out of a temp dir is still refused. Not carried to a pod: a container keeps
+  writing its own `/tmp`.
+
+### Fixed
+
+- A file write through a **dangling** symlink inside the workspace was allowed and
+  created the link's target wherever it pointed; it is now refused like any other
+  link out.
+
 ## [0.3.0] - 2026-11-06
 
 ### Added
