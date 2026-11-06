@@ -475,3 +475,8 @@ Honest. It disclosed the hand-edited schema, the weaker T3, the tests with no re
 4. Q4: **B** — other attached terminals get a live notice now (e.g. `Session settings changed by another terminal: { … }`, same one-line JSON format and notice palette); a display-class update per AGENTS §7 (free to add), wired both ends + `client/mapping.ts`. Add it to S2.
 5. Q5: **A** — drift hint `(/settings apply, or /clear)`, confirmation `Session settings applied.`, other terminals `Session settings changed by another terminal: { … }`.
 6. (new, owner 2026-11-06) **`/settings` alone shows the settings**: always ALL the session's settings (one-line JSON, container-set keys marked `(container)`), then, only when this terminal differs, `This terminal differs: { … } (/settings apply)`; with no difference `This terminal matches.` Pure view-model module + test; add to S2.
+
+### Owner answers on the Review (2026-11-06)
+
+1. F1: **A — re-arm** the 30 s deadline on every sign of progress (the open answered, each snapshot page); a daemon that never answers and a link that never returns still fail at 30 s. Tests: a progressing attach survives past 30 s, a stalled one fails.
+2. F2–F5: **B — fix all four now**, each with a red-first test (F2 newer report not overwritten by an older apply response; F3 no false "starts with this terminal's settings" after a timed-out plain attach; F4 a visible pending state for `/settings apply` during an outage and its lines bound to the session it was issued on; F5 cap the pod error text length like `mcp/src/status.ts:39`).
