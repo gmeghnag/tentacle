@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PermissionBroker, type PermissionRequest } from "@tentacle/core";
 import { render } from "ink-testing-library";
 import { App, type SessionController } from "../src/App.tsx";
+import { cellWidth } from "../src/cells.ts";
 import { PermissionPrompt, permissionPromptRows } from "../src/components/PermissionPrompt.tsx";
 import { permissionAgentLine } from "../src/permission-ui.ts";
 
@@ -57,6 +58,32 @@ describe("the dialog's agent row", () => {
     expect(frame.split("\n")[1]).toBe(" bun test");
     expect(frame.split("\n").length).toBe(permissionPromptRows(2));
     own.unmount();
+  });
+});
+
+// docs/fix/parallel-agents-followups.md (1): cut by terminal cells, not UTF-16 length.
+describe("wide labels are cut by cells", () => {
+  test("permissionAgentLine never exceeds the width in cells", () => {
+    const line = permissionAgentLine({ type: "explore", description: "查找调用者".repeat(40) }, 40);
+    expect(cellWidth(line)).toBeLessThanOrEqual(37);
+    expect(line.endsWith("…")).toBe(true);
+  });
+
+  test("a CJK detail, cwd and agent row keep the dialog at permissionPromptRows", () => {
+    const wide = "漢字検索".repeat(60);
+    const agentLine = permissionAgentLine({ type: "explore", description: wide }, 80);
+    const view = render(
+      <PermissionPrompt
+        req={{ ...REQ, detail: wide }}
+        options={["Yes", "No"]}
+        selected={0}
+        cwd={`/tmp/${wide}`}
+        agentLine={agentLine}
+      />,
+    );
+    const rows = (view.lastFrame() ?? "").split("\n");
+    expect(rows.length).toBe(permissionPromptRows(2, 1, true, undefined, true));
+    view.unmount();
   });
 });
 

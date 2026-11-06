@@ -34,6 +34,14 @@ export function headCells(s: string, max: number): string {
   return out;
 }
 
+/** `s` cut to at most `max` cells, with a trailing `…` when it was cut. */
+export function truncateCells(s: string, max: number): string {
+  if (stringWidth(s) <= max) {
+    return s;
+  }
+  return max <= 1 ? "…".slice(0, max) : `${headCells(s, max - 1)}…`;
+}
+
 /** The longest suffix of `s` that takes at most `max` cells. */
 export function tailCells(s: string, max: number): string {
   let out = "";

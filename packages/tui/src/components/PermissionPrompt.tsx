@@ -1,16 +1,13 @@
 import type { PermissionRequest } from "@tentacle/core";
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
+import { truncateCells as truncate } from "../cells.ts";
 import { MENU_FOOTER, MENU_FOOTER_REPLY, type ReplyView } from "../permission-reply.ts";
 import { permissionDetailLines, permissionShowsCwd } from "../permission-ui.ts";
 import { accentHex } from "../theme.ts";
 
 // Brand accent (matches the theme's `accent`), used for the frame + selection.
 const ACCENT = accentHex;
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
 
 /**
  * Fixed row count of the dialog for a given option / detail-row count (App
