@@ -52,7 +52,14 @@ const REFUSALS: readonly string[] = [
 ] satisfies readonly ControlRefusal[];
 
 export type ControlReply =
-  | { readonly ok: true; readonly appVersion?: string }
+  | {
+      readonly ok: true;
+      readonly appVersion?: string;
+      /** `prepare`: the relay's current turn, the one the attacher adopts. */
+      readonly turnId?: string;
+      /** `commit`: a job's exit no turn has flushed; the TUI's to wake on. */
+      readonly wakePending?: boolean;
+    }
   | { readonly ok: false; readonly reason: ControlRefusal };
 
 export type ControlParse =
@@ -103,6 +110,8 @@ export function parseReply(line: string): ControlReply | null {
       // No `autoAccept`: the run's bit is the laptop's owner.json, never a
       // second carrier (docs/fix/detach-live.md B1).
       ...(typeof r.appVersion === "string" ? { appVersion: r.appVersion } : {}),
+      ...(typeof r.turnId === "string" ? { turnId: r.turnId } : {}),
+      ...(typeof r.wakePending === "boolean" ? { wakePending: r.wakePending } : {}),
     };
   }
   if (r.ok === false && typeof r.reason === "string" && REFUSALS.includes(r.reason)) {

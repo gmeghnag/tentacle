@@ -480,6 +480,19 @@ export function statusOf(
   }
 }
 
+/**
+ * The detached run is over: no relay, no TUI on it, and its record says how it
+ * ended (a `… lost` owner went mid-run: that is not this). What the engine still
+ * reports is the WORKLOAD, not the run (docs/fix/detached-autowake.md).
+ */
+export function runFinished(read: OwnerRead, alive: boolean, attached: number): boolean {
+  if (alive || attached > 0 || read.kind !== "owner") {
+    return false;
+  }
+  const { state } = read.owner;
+  return state === "idle" || state === "failed" || state === "interrupted";
+}
+
 /** What `attach` needs to know of a live relay. */
 export interface RelayHolder {
   readonly pid: number;

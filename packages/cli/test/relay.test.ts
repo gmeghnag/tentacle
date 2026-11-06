@@ -12,7 +12,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, JsonSessionStore, projectKey } from "@tentacle/agent";
-import type { ChatRequest, ExecutionEnvironment, ModelProvider, StreamEvent } from "@tentacle/core";
+import type {
+  BackgroundJob,
+  ChatRequest,
+  ExecutionEnvironment,
+  JobController,
+  ModelProvider,
+  StreamEvent,
+} from "@tentacle/core";
 import { DISMISSED, PermissionBroker } from "@tentacle/core";
 import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
@@ -109,6 +116,8 @@ function resident(
     latency?: number;
     /** Each laptop peer's non-fatal errors. */
     errors?: string[];
+    /** The daemon-side jobs: a test's exits cross the real wire. */
+    jobs?: JobController;
   } = {},
 ) {
   const execs: string[] = [];
@@ -153,8 +162,9 @@ function resident(
         tools,
         env,
         requestPermission: (req, opts) => permissions.request(req, opts),
+        ...(options.jobs ? { jobs: options.jobs } : {}),
       });
-      return { agent, permissions };
+      return { agent, permissions, ...(options.jobs ? { jobs: options.jobs } : {}) };
     },
   });
   const frames: string[] = [];
@@ -245,7 +255,11 @@ function rig(
 const KEPT_LABELS = { "tentacle.managed": "true", "tentacle.kept": "true" };
 
 /** A keep=false relay: its entry in the index, an engine that records, a net that counts. */
-function removing(more: Partial<RelayDeps> = {}, over: Partial<RelaySpec> = {}) {
+function removing(
+  more: Partial<RelayDeps> = {},
+  over: Partial<RelaySpec> = {},
+  settings: Partial<TentacleConfig> = {},
+) {
   const calls: string[] = [];
   const net: {
     armed: number;
@@ -292,6 +306,7 @@ function removing(more: Partial<RelayDeps> = {}, over: Partial<RelaySpec> = {}) 
       },
       ...more,
     },
+    settings,
   );
   const index = keptDir(box.configDir);
   recordKept(index, entry);
@@ -1318,7 +1333,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
     await waitFor(() => relayModel.started === 1, "the relay's model call");
     const { conn, reply } = await prepare(path);
     // D24: no `autoAccept` on the wire: the bit is the laptop's owner.json (B1).
-    expect(reply).toEqual({ ok: true, appVersion: APP_VERSION });
+    expect(reply).toEqual({ ok: true, appVersion: APP_VERSION, turnId: owner(r.dir)?.runTurnId });
     const tuiModel = new Scripted([[{ type: "text", delta: "from the tui" }, { type: "done" }]]);
     const tui = await tuiOf(pod, tuiModel);
     expect(await tui.runtime.attachTo(UID, null)).toBe(true);
@@ -2182,5 +2197,348 @@ describe("launchRelay", () => {
     const code = await launch(dir, { spawnRelay: () => ({ exited: () => false }) }, out, false, 5);
     expect(code).toBe(0);
     expect(out.join("")).toContain("relay.log");
+  });
+});
+
+describe("the wake on a job exit, no TUI (docs/fix/detached-autowake.md)", () => {
+  /** Daemon-side jobs: an exit fired here crosses the real wire to the relay. */
+  class FakeJobs implements JobController {
+    private readonly listeners = new Set<(job: BackgroundJob) => void>();
+    start(): BackgroundJob {
+      throw new Error("unused");
+    }
+    read(): undefined {
+      return undefined;
+    }
+    kill(): boolean {
+      return false;
+    }
+    list(): readonly BackgroundJob[] {
+      return [];
+    }
+    dispose(): void {}
+    onExit(listener: (job: BackgroundJob) => void): () => void {
+      this.listeners.add(listener);
+      return () => this.listeners.delete(listener);
+    }
+    fire(id = "j1"): void {
+      for (const listener of this.listeners) {
+        listener({ id, command: "sleep 20", startedAt: 0, status: "exited", exitCode: 0 });
+      }
+    }
+  }
+  /** Counts the model calls, keeps their requests, and holds the ones asked for. */
+  class Waking implements ModelProvider {
+    readonly id = "waking";
+    calls = 0;
+    readonly requests: ChatRequest[] = [];
+    private readonly gates = new Map<number, () => void>();
+    private readonly waits = new Map<number, Promise<void>>();
+    constructor(
+      private readonly script: readonly (readonly StreamEvent[])[],
+      held: readonly number[] = [],
+    ) {
+      for (const n of held) {
+        this.waits.set(
+          n,
+          new Promise<void>((r) => {
+            this.gates.set(n, r);
+          }),
+        );
+      }
+    }
+    open(n: number): void {
+      this.gates.get(n)?.();
+    }
+    async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+      const n = this.calls++;
+      this.requests.push(request);
+      await this.waits.get(n);
+      for (const event of this.script[n] ?? [{ type: "done" }]) {
+        yield event;
+      }
+    }
+  }
+  const say = (text: string): readonly StreamEvent[] => [
+    { type: "text", delta: text },
+    { type: "done" },
+  ];
+  const ON = { autoWake: true };
+  const short = () => join(mkdtempSync(join(tmpdir(), "ctl-")), "c.sock");
+  async function prepareAt(path: string) {
+    await waitFor(() => existsSync(path), "the control socket");
+    const conn = await dialControl(path);
+    if (!conn) throw new Error("no control socket");
+    return { conn, reply: await conn.send({ op: "prepare", sessionId: UID }) };
+  }
+  const contents = async (store: JsonSessionStore): Promise<unknown[]> =>
+    (await store.list()).records[0]?.messages.map((m) => m.content) ?? [];
+  const logOf = (dir: string): string => readFileSync(relayLogPath(dir), "utf8");
+
+  test("R-W1 THE bug: idle, one exit → one continuation, saved, with the state going running → idle", async () => {
+    // Mutations: drop the `onExit` subscription; reuse the run's turn id (the
+    // daemon answers from its cache, no second model call).
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("woke")]);
+    const pod = resident(model, { jobs });
+    const { dir, store, start } = rig({}, {}, ON);
+    const exit = start(pod.attach);
+    await waitFor(() => owner(dir)?.state === "idle", "the run's turn");
+    const firstId = owner(dir)?.runTurnId;
+    jobs.fire();
+    await waitFor(() => model.calls === 2, "the wake");
+    await waitFor(() => owner(dir)?.state === "idle", "the wake's end");
+    expect(owner(dir)?.runTurnId).not.toBe(firstId);
+    const last = model.requests[1]?.messages.at(-1);
+    expect(String(last?.content)).toContain("[background] job j1");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(model.calls).toBe(2);
+    expect(await contents(store)).toContain("woke");
+    const log = logOf(dir);
+    expect(log).toContain("wake: background job exit");
+    expect(log.indexOf("state: running", log.indexOf("wake:"))).toBeGreaterThan(0);
+    // No pod-supplied command text in the log.
+    expect(log).not.toContain("sleep 20");
+  });
+
+  test("R-W2 an exit during the run's turn: exactly one wake after it", async () => {
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("woke")], [0]);
+    const pod = resident(model, { jobs });
+    const { dir, start } = rig({}, {}, ON);
+    const exit = start(pod.attach);
+    await waitFor(() => model.calls === 1, "the run's model call");
+    jobs.fire();
+    await tick(20);
+    expect(model.calls).toBe(1);
+    model.open(0);
+    await waitFor(() => model.calls === 2, "the wake");
+    await waitFor(() => owner(dir)?.state === "idle", "the wake's end");
+    await tick(20);
+    expect(model.calls).toBe(2);
+    await afterGrace(exit);
+  });
+
+  test("R-W3 three exits are one wake; one more during that wake is exactly one more", async () => {
+    // Mutation: `turn_started` does not clear `pending` → wakes without end.
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("woke"), say("again")], [0, 1]);
+    const pod = resident(model, { jobs });
+    const { dir, start } = rig({}, {}, ON);
+    const exit = start(pod.attach);
+    await waitFor(() => model.calls === 1, "the run's model call");
+    jobs.fire("j1");
+    jobs.fire("j2");
+    jobs.fire("j3");
+    model.open(0);
+    await waitFor(() => model.calls === 2, "the wake");
+    await tick(20);
+    expect(model.calls).toBe(2);
+    jobs.fire("j4");
+    await tick(20);
+    expect(model.calls).toBe(2);
+    model.open(1);
+    await waitFor(() => model.calls === 3, "the second wake");
+    await waitFor(() => owner(dir)?.state === "idle", "its end");
+    await tick(20);
+    expect(model.calls).toBe(3);
+    await afterGrace(exit);
+  });
+
+  test("R-W4 `autoWake: false`: no wake, the relay leaves after the grace as before", async () => {
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("woke")]);
+    const pod = resident(model, { jobs });
+    const { dir, start } = rig({}, {}, { autoWake: false });
+    const exit = start(pod.attach);
+    await waitFor(() => owner(dir)?.state === "idle", "the run's turn");
+    jobs.fire();
+    await tick(20);
+    expect(model.calls).toBe(1);
+    expect(await afterGrace(exit)).toBe(0);
+    expect(model.calls).toBe(1);
+  });
+
+  test("R-W5 a stop during the wake: keep=false, cancelled, saved, removed", async () => {
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), SHELL_CALL, say("after")]);
+    const pod = resident(model, { jobs, hangExec: true });
+    const box = removing({}, { autoAccept: true }, ON);
+    const exit = box.start(reading(pod, async () => null));
+    await waitFor(() => owner(box.dir)?.state === "idle", "the run's turn");
+    jobs.fire();
+    await waitFor(() => pod.execs.length === 1, "the wake's tool");
+    box.stopRef.stop?.();
+    await exit;
+    expect(box.calls).toContain("remove:box");
+    expect(await contents(box.store)).toContain("started");
+    expect(box.net.disarmed).toBe(1);
+  });
+
+  test("R-W5b a stop with a stuck wake turn: not removed, and `not saved` is said", async () => {
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), SHELL_CALL, say("after")]);
+    const pod = resident(model, { jobs, stuckExec: true });
+    const box = removing({}, { autoAccept: true }, ON);
+    const exit = box.start(reading(pod, async () => null));
+    await waitFor(() => owner(box.dir)?.state === "idle", "the run's turn");
+    jobs.fire();
+    await waitFor(() => pod.execs.length === 1, "the wake's tool");
+    box.stopRef.stop?.();
+    expect(box.net.saved?.()).toBe(false);
+    await afterGrace(exit);
+    expect(box.calls).not.toContain("remove:box");
+    expect(owner(box.dir)?.detail).toContain("not saved — workload kept: tentacle rm box");
+  });
+
+  test("R-W6 keep=false: the wake's reply is on the laptop before the removal; the net waits for it", async () => {
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("woke")], [1]);
+    const pod = resident(model, { jobs });
+    const box = removing({}, {}, ON);
+    let savedAtRemoval = false;
+    box.engine.onRemove = () => {
+      const at = join(box.configDir, "sessions", projectKey("/work"));
+      savedAtRemoval = readdirSync(at).some((f) =>
+        readFileSync(join(at, f), "utf8").includes("woke"),
+      );
+    };
+    const exit = box.start(reading(pod, async () => ({ jobs: 0, running: false, others: 0 })));
+    await waitFor(() => owner(box.dir)?.state === "idle", "the run's turn");
+    jobs.fire();
+    await waitFor(() => model.calls === 2, "the wake");
+    expect(box.net.saved?.()).toBe(false);
+    clock.t += 120_000;
+    await tick(20);
+    expect(box.calls).not.toContain("remove:box"); // the wake holds it past the grace
+    model.open(1);
+    await afterGrace(exit);
+    expect(box.calls).toContain("remove:box");
+    expect(savedAtRemoval).toBe(true);
+    expect(model.calls).toBe(2);
+  });
+
+  test("R-W7 prepared: no wake; the `commit` ack hands it over", async () => {
+    // Mutations: drop the hand-over's gate leg; omit `wakePending` from the ack.
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("woke")]);
+    const pod = resident(model, { jobs });
+    const path = short();
+    const { dir, start } = rig({}, { controlPath: () => path, drainMs: 1 }, ON);
+    const exit = start(pod.attach);
+    await waitFor(() => owner(dir)?.state === "idle", "the run's turn");
+    const { conn } = await prepareAt(path);
+    jobs.fire();
+    await tick(30);
+    expect(model.calls).toBe(1);
+    expect(await conn.send({ op: "commit" })).toEqual({ ok: true, wakePending: true });
+    conn.close();
+    expect(await exit).toBe(0);
+    expect(model.calls).toBe(1); // the relay never wakes after it
+  });
+
+  test("R-W7b nothing pending: the `commit` ack says nothing", async () => {
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started")]);
+    const pod = resident(model, { jobs });
+    const path = short();
+    const { dir, start } = rig({}, { controlPath: () => path, drainMs: 1 }, ON);
+    const exit = start(pod.attach);
+    await waitFor(() => owner(dir)?.state === "idle", "the run's turn");
+    const { conn } = await prepareAt(path);
+    expect(await conn.send({ op: "commit" })).toEqual({ ok: true });
+    conn.close();
+    await exit;
+  });
+
+  test("R-W7c a hand-over aborted: the relay owns the wake again, and fires it", async () => {
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("woke")]);
+    const pod = resident(model, { jobs });
+    const path = short();
+    const { dir, start } = rig({}, { controlPath: () => path }, ON);
+    const exit = start(pod.attach);
+    await waitFor(() => owner(dir)?.state === "idle", "the run's turn");
+    const { conn } = await prepareAt(path);
+    jobs.fire();
+    await tick(20);
+    expect(model.calls).toBe(1);
+    conn.close();
+    await waitFor(() => model.calls === 2, "the wake after the abort");
+    await waitFor(() => owner(dir)?.state === "idle", "its end");
+    await afterGrace(exit);
+    expect(model.calls).toBe(2);
+  });
+
+  test("R-W8 `prepare` during a wake: the ack names the wake's turn, not the run's", async () => {
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("woke")], [1]);
+    const pod = resident(model, { jobs });
+    const path = short();
+    const { dir, start } = rig({}, { controlPath: () => path }, ON);
+    const exit = start(pod.attach);
+    await waitFor(() => owner(dir)?.state === "idle", "the run's turn");
+    const firstId = owner(dir)?.runTurnId;
+    jobs.fire();
+    await waitFor(() => model.calls === 2, "the wake");
+    const { conn, reply } = await prepareAt(path);
+    const turnId = reply.ok ? reply.turnId : undefined;
+    expect(turnId).toBeDefined();
+    expect(turnId).not.toBe(firstId);
+    expect(turnId).toBe(owner(dir)?.runTurnId ?? "");
+    conn.close(); // aborted: the relay carries on
+    model.open(1);
+    await waitFor(() => owner(dir)?.state === "idle", "the wake's end");
+    await afterGrace(exit);
+  });
+
+  test("R-W9 another client's turn holds the slot: no failure, one log line, the wake runs after it", async () => {
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("foreign"), say("woke")], [1]);
+    const pod = resident(model, { jobs });
+    const { dir, store, start } = rig({}, {}, ON);
+    const exit = start(pod.attach);
+    await waitFor(() => owner(dir)?.state === "idle", "the run's turn");
+    // A second laptop client, serving the same model: it takes the slot.
+    const [daemonCh, clientCh] = createChannelPair();
+    const connection = new Connection(daemonCh, pod.host, () => {}, { servesModel: true });
+    const other = await createLocalRuntime({
+      channel: clientCh,
+      disposeTransport: () => connection.close(),
+      permissions: new PermissionBroker(),
+      saver: new SessionSaver(new JsonSessionStore(mkdtempSync(join(tmpdir(), "s-"))), () => {}),
+      cwd: "/work",
+      model: "m",
+      resume: null,
+      modelProvider: model,
+      sessionId: UID,
+      shared: true,
+    });
+    await other.attachTo(UID, null);
+    const session = other.createSession();
+    const consumed = (async () => {
+      for await (const _event of session.send("hello", undefined)) {
+        // Only its end matters.
+      }
+    })();
+    await waitFor(() => model.calls === 2, "the other client's turn");
+    jobs.fire();
+    await waitFor(() => logOf(dir).includes("wake refused"), "the refusal");
+    await tick(20);
+    expect(model.calls).toBe(2);
+    // A retry per tick (2 ms here), never a tight loop of prompts against the pod.
+    expect(pod.frames.filter((f) => f.includes('"session/prompt"')).length).toBeLessThan(40);
+    expect(owner(dir)?.state).not.toBe("failed");
+    model.open(1);
+    await consumed;
+    await waitFor(() => model.calls === 3, "the wake, after that turn");
+    await other.release();
+    await waitFor(() => owner(dir)?.state === "idle", "the wake's end");
+    await tick(20);
+    expect(await afterGrace(exit)).toBe(0);
+    expect(model.calls).toBe(3);
+    expect(owner(dir)?.state).toBe("idle");
+    expect(logOf(dir).split("wake refused").length - 1).toBe(1);
+    expect(await contents(store)).toContain("woke");
   });
 });

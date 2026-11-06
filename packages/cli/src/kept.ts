@@ -320,6 +320,8 @@ export interface KeptRelay {
   readonly log: string;
   /** False: this relay removes the workload when the run ends. */
   readonly keep: boolean;
+  /** The run is over (`runFinished`): the engine's `running` is only the workload. */
+  readonly finished?: boolean;
 }
 
 export interface KeptRow {
@@ -372,7 +374,12 @@ export function statusCell(row: KeptRow): string {
   if (!row.relay || row.status.kind !== "state") {
     return engine;
   }
-  return row.relay.pid !== undefined ? row.relay.text : `${engine} · ${row.relay.text}`;
+  if (row.relay.pid !== undefined) {
+    return row.relay.text;
+  }
+  // `running · idle` reads as a run still running: it is the container that is up.
+  const word = row.relay.finished && row.status.state === "running" ? "up" : engine;
+  return `${word} · ${row.relay.text}`;
 }
 
 const HEADER = ["NAME", "ENGINE", "WHERE", "MOUNT", "MODEL", "AGE", "STATUS"] as const;
@@ -484,9 +491,16 @@ export function ambiguousMessage(
   ].join("\n");
 }
 
-/** `rm`'s confirmation for a running workload (a session may be attached). */
-export function removeConfirmation(entry: KeptEntry, kube?: Kubeconfig): string {
-  return `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry, kube))}) is running — a session may be attached. Remove it? [y/N] `;
+/** Why `rm` asks about a running workload. Finished: what the laptop knows of its detached run; else a guess. */
+export function runningReason(finished: boolean): string {
+  return finished
+    ? "is still up — its detached run has ended and no terminal of it is attached"
+    : "is running — a session may be attached";
+}
+
+/** `rm`'s confirmation for a running workload. */
+export function removeConfirmation(entry: KeptEntry, kube?: Kubeconfig, finished = false): string {
+  return `${untrustedText(entry.name)} (${entry.engine}, ${untrustedText(whereOf(entry, kube))}) ${runningReason(finished)}. Remove it? [y/N] `;
 }
 
 /** `rm`'s confirmation with a live relay: `state` is `statusOf`'s, already sanitised. */

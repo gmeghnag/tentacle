@@ -660,6 +660,68 @@ describe("D23 auto-accept on attach: the bit is owner.json's only (docs/fix/deta
     joined.autoAccept.stop();
   });
 
+  test("the hand-over: the `prepare` ack's turn is adopted and recorded; the `commit` ack's wake is returned", async () => {
+    // docs/fix/detached-autowake.md. Mutation: `joinRun` ignores `wakePending` → it is lost.
+    const adopted: (string | undefined)[] = [];
+    const r = await rig({ owner: { runTurnId: RUN_TURN } });
+    const lock = acquireResidentLock(r.dir, laptopProc);
+    const replies = [
+      { ok: true, turnId: "WAKE-TURN" },
+      { ok: true, wakePending: true },
+    ];
+    const joined = await r.join({
+      plan: { kind: "run", sessionId: UID, handover: true, keep: true },
+      dial: async () => ({
+        closed: new Promise(() => {}),
+        close: () => {},
+        send: async () => replies.shift() as ControlReply,
+      }),
+      attach: async () =>
+        ({
+          attachTo: async (_id: string, _rec: unknown, opts?: { adoptTurn?: string }) => {
+            adopted.push(opts?.adoptTurn);
+            return true;
+          },
+          createSession: () => ({ sessionId: UID }),
+          release: async () => {},
+        }) as unknown as LocalRuntime,
+    });
+    expect(adopted).toEqual(["WAKE-TURN"]);
+    expect(joined.wakePending).toBe(true);
+    const read = readOwner(r.dir);
+    expect(read.kind === "owner" && read.owner.runTurnId).toBe("WAKE-TURN");
+    joined.autoAccept.stop();
+    lock.release();
+  });
+
+  test("an older relay's acks say neither: the record's turn, nothing pending", async () => {
+    const adopted: (string | undefined)[] = [];
+    const r = await rig({ owner: { runTurnId: RUN_TURN } });
+    const lock = acquireResidentLock(r.dir, laptopProc);
+    const replies = [{ ok: true }, { ok: true }];
+    const joined = await r.join({
+      plan: { kind: "run", sessionId: UID, handover: true, keep: true },
+      dial: async () => ({
+        closed: new Promise(() => {}),
+        close: () => {},
+        send: async () => replies.shift() as ControlReply,
+      }),
+      attach: async () =>
+        ({
+          attachTo: async (_id: string, _rec: unknown, opts?: { adoptTurn?: string }) => {
+            adopted.push(opts?.adoptTurn);
+            return true;
+          },
+          createSession: () => ({ sessionId: UID }),
+          release: async () => {},
+        }) as unknown as LocalRuntime,
+    });
+    expect(adopted).toEqual([RUN_TURN]);
+    expect(joined.wakePending).toBe(false);
+    joined.autoAccept.stop();
+    lock.release();
+  });
+
   test("`/clear` moves the shared state's key: a flip there writes the fresh session's file, never the run's", async () => {
     const r = await rig({ owner: { autoAccept: true }, sessionIds: ["FRESH-2"] });
     const joined = await r.join();

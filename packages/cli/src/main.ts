@@ -826,7 +826,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     runtime: Awaited<ReturnType<typeof startEngineRuntime>>,
     permissions: PermissionBroker,
     sessions: TuiSessions,
-    run?: Pick<Joined, "finish" | "runQuit" | "createSession" | "autoAccept">,
+    run?: Pick<Joined, "finish" | "runQuit" | "createSession" | "autoAccept" | "wakePending">,
     // `run "<prompt>"`: the TUI sends it once, as its first message, raw text.
     initialPrompt?: string,
     // `run --auto-accept`: the TUI's auto-accept state, started ON.
@@ -854,6 +854,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             createSession: run?.createSession ?? runtime.createSession,
             ...(localAutoAcceptFeed ? { autoAccept: localAutoAcceptFeed } : {}),
             ...(run ? { runQuit: run.runQuit, autoAccept: run.autoAccept } : {}),
+            // A job's exit its relay handed over; the TUI decides by its `autoWake`.
+            ...(run?.wakePending ? { wakePending: true } : {}),
             ...(initialPrompt !== undefined ? { initialPrompt } : {}),
             link: runtime.link,
             mcpStatus: runtime.mcpStatus,

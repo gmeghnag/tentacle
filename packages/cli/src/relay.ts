@@ -11,6 +11,8 @@
  * that outlives the bound is not, and the workload is then kept) or when
  * the link stops. It only ever DETACHES: a `dispose` would close the session.
  * Its exit net (a crash, a second signal) deletes only a confirmed save (R6).
+ * A background job's exit starts a continuation turn, per the laptop's `autoWake`
+ * (docs/fix/detached-autowake.md).
  *
  * `--keep=false` (docs/feat/detached-relay-lifecycle.md): on a normal exit the
  * relay removes the workload, `exitPlan` alone deciding. The order is the safety
@@ -24,6 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "@tentacle/config";
 import { PermissionBroker } from "@tentacle/core";
+import { DomainErrorCode } from "@tentacle/protocol";
 import {
   type ControlPeer,
   type ControlReply,
@@ -54,6 +57,7 @@ import {
   relayExits,
   relayStep,
   relayView,
+  relayWakeDue,
   wantsAwake,
 } from "./relay-state.ts";
 import {
@@ -94,6 +98,12 @@ const HANDOVER_LEASE_MS = 30_000;
 const HANDOVER_SAVE_MS = 10_000;
 /** After the ack, how long the model calls the relay serves may still run. */
 const HANDOVER_DRAIN_MS = 5 * 60_000;
+
+/** The daemon refused the turn before it ran: another's holds the slot. By the code, never its text. */
+function slotTaken(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === DomainErrorCode.TurnInProgress || code === DomainErrorCode.CompactInProgress;
+}
 
 /** SIGTERM/SIGINT stop the relay; a second one exits at once. */
 function stopOnSignals(stop: () => void): () => void {
@@ -189,20 +199,28 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   )(dir, spec.stem);
   let model = initialRelay;
   let written = "";
-  // The run's turn's id, minted here and in every record from the first: a
-  // TUI that takes the run over owns that turn (docs/fix/detach-live.md B2).
-  const runTurnId = crypto.randomUUID();
+  // The current turn's id, minted here and in every record from the first: a
+  // TUI that takes the run over owns that turn (docs/fix/detach-live.md B2). A
+  // wake has its own: the daemon never runs a second turn for a known id.
+  let runTurnId = crypto.randomUUID();
+  // Refused wakes are retried each tick: one line for the whole wait.
+  let wakeRefused = false;
+  // Set before the exit plan is read, and stays set once it is final: a wake
+  // never starts under a removal.
+  let exiting = false;
   const record = (view: RelayView): void => {
     // Handed over: the run's record is the TUIs' now (never two writers).
     if (model.handover === "done") {
       return;
     }
-    const key = JSON.stringify(view);
+    const key = JSON.stringify({ view, runTurnId });
     if (key === written) {
       return;
     }
     written = key;
-    log(`state: ${view.state}${view.tool ? ` (${view.tool})` : ""} ${view.detail ?? ""}`);
+    if (!wakeRefused || model.stopping || exiting) {
+      log(`state: ${view.state}${view.tool ? ` (${view.tool})` : ""} ${view.detail ?? ""}`);
+    }
     try {
       writeOwner(dir, {
         schemaVersion: RUN_STATE_VERSION,
@@ -225,10 +243,16 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       log(`owner.json not written: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
+  /** Start the wake if it is due. Set once the session exists; nothing is due before. */
+  let maybeWake = (): void => {};
   const emit = (event: RelayEvent): void => {
     model = relayStep(model, event);
     record(relayView(model));
     awake.set(wantsAwake(model));
+    // A refusal waits for a tick: never a tight loop of prompts against a pod.
+    if (event.type !== "wake_refused") {
+      maybeWake();
+    }
   };
   record(relayView(model));
 
@@ -354,13 +378,18 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
 
   const session = runtime.createSession();
   policy.bindOwnsTurn((turnId) => session.ownsTurn(turnId));
-  const drive = async (): Promise<void> => {
+  const drive = async (text: string): Promise<void> => {
     emit({ type: "turn_started" });
     let reason = "end_turn";
+    let streamed = false;
     try {
-      for await (const event of session.send(spec.prompt, stopSignal.signal, {
+      for await (const event of session.send(text, stopSignal.signal, {
         turnId: runTurnId,
       })) {
+        if (!streamed) {
+          streamed = true;
+          wakeRefused = false; // it runs: its state lines count again
+        }
         if (event.type === "turn_end") {
           reason = event.reason;
         } else if (event.type === "tool_start") {
@@ -370,14 +399,39 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       log(`turn end: ${reason}`);
       emit({ type: "turn_ended", reason });
     } catch (error) {
+      // A wake that lost the slot never ran: it is still owed, and no failure.
+      if (text === "" && !streamed && slotTaken(error)) {
+        if (!wakeRefused) {
+          log("wake refused: another client's turn is running; retrying");
+          wakeRefused = true;
+        }
+        emit({ type: "wake_refused" });
+        return;
+      }
+      wakeRefused = false;
       emit({
         type: "turn_failed",
         message: untrustedText(error instanceof Error ? error.message : String(error)),
       });
     }
   };
+  // The laptop's setting, read from this relay's own config (no spec field, and
+  // never carried to the pod); the decision stays here, not in the daemon.
+  const offExit = config.autoWake
+    ? runtime.jobs.onExit(() => emit({ type: "job_exit" }))
+    : () => {};
+  maybeWake = () => {
+    if (!relayWakeDue(model, exiting)) {
+      return;
+    }
+    runTurnId = crypto.randomUUID();
+    if (!wakeRefused) {
+      log("wake: background job exit");
+    }
+    void drive(""); // an empty prompt: the agent continues over its history
+  };
   if (!stopSignal.signal.aborted) {
-    void drive();
+    void drive(spec.prompt);
   }
 
   abortHandover = (why) => {
@@ -423,7 +477,8 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
         deps.leaseMs ?? HANDOVER_LEASE_MS,
       );
       log("hand-over prepared");
-      return { ok: true, appVersion: APP_VERSION };
+      // Final: a prepared relay starts no wake, so this is the turn to adopt.
+      return { ok: true, appVersion: APP_VERSION, turnId: runTurnId };
     }
     if (peer !== preparer || committing || model.handover !== "prepared") {
       return { ok: false, reason: "invalid" };
@@ -446,7 +501,8 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
     if (stopAfterCommit) {
       emit({ type: "drained" });
     }
-    return { ok: true };
+    // An exit no turn flushed is the TUI's to wake on: not lost, not doubled.
+    return { ok: true, ...(model.wake.pending ? { wakePending: true } : {}) };
   };
   if (controlAt !== null && !stopSignal.signal.aborted) {
     try {
@@ -493,15 +549,17 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       }
       await new Promise((resolve) => setTimeout(resolve, tickMs));
     }
+    exiting = true;
     const use = model.handover === "none" && needsUse(model, spec.keep) ? await readUse() : null;
-    // On the state after the read: a stop, or a `prepare`, may have landed during it.
+    // On the state after the read: a stop, a `prepare` or a job's exit may have landed during it.
     plan = exitPlan(model, spec.keep, use);
     if (plan.kind !== "hold") {
       // In the same tick as the final plan: a `prepare` from here is `leaving`.
       leaving = true;
       break;
     }
-    if (model.handover === "none") {
+    exiting = false;
+    if (model.handover === "none" && !model.wake.pending) {
       log("still in use: not removed yet");
       emit({ type: "jobs", n: use?.jobs ?? 0 });
     }
@@ -522,6 +580,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       () => false,
     ));
   offLink();
+  offExit();
   await runtime.release();
   const unsaved = await saver.drain();
   for (const line of unsaved) {

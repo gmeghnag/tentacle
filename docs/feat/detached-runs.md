@@ -232,6 +232,7 @@ open and the Mac awake. v1 does **not** auto-wake on a background-job exit (F8:
 the logic is in the TUI); the relay simply stays while a job runs, and the
 turn-end status says "background job still running". Revisit once auto-wake moves
 to a pure module (AGENTS §7 "logic lives in pure modules").
+*Superseded: the relay now wakes too (`docs/fix/detached-autowake.md`).*
 
 ### DR-5 — `--keep=false` with a detached run
 

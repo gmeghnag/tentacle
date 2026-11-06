@@ -114,6 +114,8 @@
 | Situazione | Cosa vedi | Il pod/container | Cosa resta salvato | Stato |
 |---|---|---|---|---|
 | Stati in `ps` | `running · attached` / `attached (N)` · `detached · running <N>m`, `detached · idle`, `detached · waiting: permission (<tool>)` · `· auto` · `closing` · `idle (<nota>)` · `interrupted (<nota>)` · `failed: <causa>` | — | — | ✅ |
+| Run detached finita (nessun relay, nessuna TUI) | `up · idle` / `up · failed: <causa>` / `up · interrupted`: `up` è il container, non la run | Resta | — | ✅ |
+| Un job in background finisce, nessuna TUI (`run --detach`) | Il relay avvia da solo un turno di continuazione (`detached · running`), poi `detached · idle`. Con `autoWake: false` nessun turno. Una run `failed` o `interrupted` non si sveglia | Resta; con keep=false rimosso solo a fine turno, salvataggio confermato | Il relay salva anche quel turno | ✅ |
 | Colonna WHERE su kubernetes | `<cluster>/<namespace>`, ricavato dal kubeconfig del laptop solo per la vista. Indice, `attach` e `rm` non cambiano | — | — | ✅ |
 | Engine non raggiungibile | La riga resta; su stderr una nota breve `not reachable (skipped) — …`. Exit 0 | — | — | ✅ |
 | Proprietario sparito a metà run | `relay lost` / `tui lost`; con keep=false anche `· not saved` | Resta finché c'è | — | ✅ |
@@ -122,6 +124,7 @@
 | `ps -q` | Elenca anche le righe `gone`: non interroga l'engine | — | — | ❓ (buco 5) |
 | `ps -v` senza righe | Non stampa niente, nemmeno l'intestazione | — | — | ❓ (buco 6) |
 | `rm <name>` su un workload in esecuzione | `… is running — a session may be attached. Remove it? [y/N]` (`-f` non chiede). Ferma il relay, poi cancella | Rimosso solo se ha le etichette di tentacle | Le sessioni sul laptop restano | ✅ |
+| … di una run detached finita (nessun relay, nessuna TUI) | `… is still up — its detached run has ended and no terminal of it is attached. Remove it? [y/N]` | Come sopra | Come sopra | ✅ |
 | … senza terminale | Errore: `… Pass -f to remove it without asking.` | Resta | — | ✅ |
 | `rm a b c` | Più nomi, `y/N` per ciascuno, prosegue anche se uno fallisce, exit 1 se anche uno solo è fallito | — | — | ✅ |
 | File `.aside` (copie vecchie messe da parte) | Se ne vanno con la loro sessione | — | — | ✅ |

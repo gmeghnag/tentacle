@@ -10,6 +10,10 @@ those.
 
 ### Changed
 
+- **`ps` and `rm` no longer make a finished detached run look alive.** With no relay
+  and no terminal left, `ps` shows `up · idle` (or `up · failed: …`, `up ·
+  interrupted`) instead of `running · idle`, and `rm` says the run has ended
+  instead of guessing that a session may be attached. It still asks.
 - **Esc / Ctrl+C in the `--resume` session picker now exits silently**, with no
   `[resume] cancelled` line (local and `connect --resume`). The exit code is
   unchanged.
@@ -51,6 +55,10 @@ those.
 
 ### Fixed
 
+- **A `run --detach` with no terminal attached now reacts when a background job
+  ends:** the relay starts the follow-up turn itself, as the TUI does (`autoWake`,
+  default on). Attaching mid-way never wakes the agent twice. A failed or
+  interrupted run does not wake.
 - A `model.apiKeyCommand` in a container's own config no longer runs there, and
   can no longer stop the daemon from starting. The container never uses that key.
 - `tentacle attach` no longer reuses an older tentacle binary in a pod or

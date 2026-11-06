@@ -9,6 +9,7 @@ export * from "./model.ts";
 export * from "./env.ts";
 export * from "./execution.ts";
 export * from "./jobs.ts";
+export * from "./auto-wake.ts";
 export * from "./path-locks.ts";
 export * from "./tool.ts";
 export * from "./permission.ts";

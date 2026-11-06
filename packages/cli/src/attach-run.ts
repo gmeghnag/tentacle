@@ -145,7 +145,7 @@ const HANDOVER_TIMES = {
 };
 
 type Prepared =
-  | { readonly kind: "prepared"; readonly conn: ControlConn }
+  | { readonly kind: "prepared"; readonly conn: ControlConn; readonly turnId?: string }
   /** Handed over already, or the relay died: a plain join. */
   | { readonly kind: "join" }
   | { readonly kind: "closing" }
@@ -203,7 +203,11 @@ async function prepareHandover(
       .send({ op: "prepare", sessionId: deps.plan.sessionId }, times.ackMs)
       .catch(() => null);
     if (reply?.ok) {
-      return { kind: "prepared", conn };
+      return {
+        kind: "prepared",
+        conn,
+        ...(reply.turnId !== undefined ? { turnId: reply.turnId } : {}),
+      };
     }
     conn.close();
     if (reply === null) {
@@ -250,6 +254,8 @@ export interface Joined {
   readonly createSession: LocalRuntime["createSession"];
   /** The TUI's auto-accept: its session's, shared by its TUIs, laptop-side (B3). */
   readonly autoAccept: SharedAutoAccept;
+  /** The relay handed over a job's exit no turn has flushed: the TUI's to wake on. */
+  readonly wakePending: boolean;
 }
 
 export type JoinResult =
@@ -332,6 +338,9 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
   }
   // 6. A live relay: `prepare` (it freezes BEFORE this client opens, D5).
   let conn: ControlConn | null = null;
+  // The turn to adopt: the record's, read before the dial, unless the relay names
+  // a newer one (a wake started since; once prepared it starts none).
+  let runTurnId = deps.owner.runTurnId;
   if (plan.handover) {
     const prepared = await prepareHandover(deps, lockOf);
     if (prepared.kind !== "prepared" && prepared.kind !== "join") {
@@ -345,6 +354,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     }
     if (prepared.kind === "prepared") {
       conn = prepared.conn;
+      runTurnId = prepared.turnId ?? runTurnId;
     }
   }
   // 7. The live session, eagerly (the runtime is lazy otherwise).
@@ -355,7 +365,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     attached = await runtime.attachTo(
       plan.sessionId,
       sessions.resume,
-      deps.owner.runTurnId !== undefined ? { adoptTurn: deps.owner.runTurnId } : {},
+      runTurnId !== undefined ? { adoptTurn: runTurnId } : {},
     );
   } catch (error) {
     conn?.close(); // the relay aborts
@@ -373,12 +383,12 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     return { kind: "exit", code: 1 };
   }
   // 8. `commit`: irrevocable on the relay's side; its last save is done at the ack.
+  let wakePending = false;
   if (conn !== null) {
     const times = { ...HANDOVER_TIMES, ...deps.handoverTimes };
-    const acked = await conn
-      .send({ op: "commit" }, times.ackMs)
-      .then((reply) => reply.ok)
-      .catch(() => false);
+    const ack = await conn.send({ op: "commit" }, times.ackMs).catch(() => null);
+    const acked = ack?.ok === true;
+    wakePending = ack?.ok === true && ack.wakePending === true;
     conn.close();
     if (!acked && lockOf(dir) !== null) {
       await runtime.release();
@@ -432,7 +442,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     created: deps.entry.created,
     // A later terminal finds a draining relay by it.
     ...(deps.owner.control !== undefined ? { control: deps.owner.control } : {}),
-    ...(deps.owner.runTurnId !== undefined ? { runTurnId: deps.owner.runTurnId } : {}),
+    ...(runTurnId !== undefined ? { runTurnId } : {}),
   });
   const writeRecord = (state: "attached" | "idle", detail?: string): boolean => {
     try {
@@ -720,6 +730,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     runQuit,
     createSession,
     autoAccept,
+    wakePending,
   };
 }
 
