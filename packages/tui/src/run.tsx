@@ -31,6 +31,8 @@ export interface TuiOptions {
   readonly jobs?: JobController;
   /** Auto-wake on a background-job exit (default true in the App). */
   readonly autoWakeOnJobExit?: boolean;
+  /** A detached run's relay handed over a job's exit no turn has flushed. */
+  readonly wakePending?: boolean;
   /** Session factory (e.g. a remote session); overrides the local `agent`. */
   readonly createSession?: () => SessionController;
   /** Prior conversation to show on start (a resumed session's history). */
@@ -96,6 +98,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
       {...(options.autoWakeOnJobExit !== undefined
         ? { autoWakeOnJobExit: options.autoWakeOnJobExit }
         : {})}
+      {...(options.wakePending ? { wakePending: true } : {})}
       {...(initialItems ? { initialItems } : {})}
       {...(options.notices ? { notices: options.notices } : {})}
       {...(options.link ? { link: options.link } : {})}

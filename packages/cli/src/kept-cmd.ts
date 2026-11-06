@@ -28,6 +28,7 @@ import {
   renderTable,
   renderVerbose,
   resolveByName,
+  runningReason,
   shownInPs,
   sortKept,
   unreachableNote,
@@ -42,6 +43,7 @@ import {
   readOwner,
   relayLogPath,
   runDirIn,
+  runFinished,
   statusOf,
 } from "./run-state.ts";
 import { untrustedText } from "./untrusted-text.ts";
@@ -220,6 +222,7 @@ function relayRow(entry: KeptEntry, deps: KeptDeps, now: number): KeptRelay | un
     ...(known ? { sessionId: known.sessionId } : {}),
     log: relayLogPath(dir),
     keep: known ? ownerKeeps(known) : true,
+    ...(tied && runFinished(read, holder !== null, tuis.length) ? { finished: true } : {}),
   };
 }
 
@@ -386,11 +389,17 @@ async function rmOne(
   }
   const running = first.status.kind === "state" && first.status.state === "running";
   if ((running || holder) && !options.force) {
+    // Said only of THIS workload's run (R4): a reused name's record proves nothing.
+    const read = readOwner(runDir);
+    const finished =
+      read.kind === "owner" &&
+      read.owner.created === entry.created &&
+      runFinished(read, holder !== null, attachers(runDir, procOf).length);
     if (!deps.ask) {
       deps.err(
         holder
           ? `[error] ${label} is owned by a detached run (pid ${holder.pid}). Pass -f to stop it and remove it without asking.\n`
-          : `[error] ${label} is running — a session may be attached. Pass -f to remove it without asking.\n`,
+          : `[error] ${label} ${runningReason(finished)}. Pass -f to remove it without asking.\n`,
       );
       return 1;
     }
@@ -401,7 +410,7 @@ async function rmOne(
           statusOf(readOwner(runDir), true, deps.now()) ?? "unknown owner",
           kube,
         )
-      : removeConfirmation(entry, kube);
+      : removeConfirmation(entry, kube, finished);
     if (!isYes(await deps.ask(prompt))) {
       deps.err("Not removed.\n");
       return 1;

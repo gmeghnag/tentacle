@@ -3,6 +3,7 @@ import type { SessionListEntry } from "@tentacle/protocol";
 import {
   RELAY_IDLE_GRACE_MS,
   RELAY_STOP_BOUND_MS,
+  RELAY_WAKE_LIMIT,
   type RelayEvent,
   type RelayModel,
   type ResidentUse,
@@ -13,6 +14,8 @@ import {
   relayExits,
   relayStep,
   relayView,
+  relayWakeCapped,
+  relayWakeDue,
   residentUseOf,
   wantsAwake,
 } from "../src/relay-state.ts";
@@ -20,6 +23,114 @@ import {
 const run = (events: readonly RelayEvent[], from: RelayModel = initialRelay): RelayModel =>
   events.reduce(relayStep, from);
 const over = run([{ type: "turn_started" }, { type: "turn_ended", reason: "end_turn" }]);
+
+describe("the wake on a job exit (docs/fix/detached-autowake.md)", () => {
+  const exit: RelayEvent = { type: "job_exit" };
+  const free: ResidentUse = { jobs: 0, running: false, others: 0 };
+  const pendingIdle = run([exit], over);
+
+  test("an exit while idle is due; a turn's start clears it, and its deadline at once", () => {
+    expect(relayWakeDue(over, false)).toBe(false);
+    expect(relayWakeDue(pendingIdle, false)).toBe(true);
+    const graced = run([{ type: "tick", now: 1000 }], pendingIdle);
+    expect(graced.exitAt).toBeDefined();
+    const started = run([{ type: "turn_started" }], graced);
+    expect(relayWakeDue(started, false)).toBe(false);
+    expect(started.wake.pending).toBe(false);
+    // Without this a wake started at the deadline's last moment is left behind.
+    expect(relayExits(started, Number.MAX_SAFE_INTEGER)).toBe(false);
+  });
+
+  test("an exit during a turn waits for its end", () => {
+    const running = run([{ type: "turn_started" }, exit]);
+    expect(relayWakeDue(running, false)).toBe(false);
+    expect(relayWakeDue(run([{ type: "turn_ended", reason: "end_turn" }], running), false)).toBe(
+      true,
+    );
+  });
+
+  test("each block alone says no: an ask, a hand-over, a stop, a stopped link, the exit plan", () => {
+    const ask: RelayEvent = { type: "ask_raised", tool: "shell" };
+    expect(relayWakeDue(run([ask], pendingIdle), false)).toBe(false);
+    const prepared = run([{ type: "handover_prepared" }], pendingIdle);
+    expect(relayWakeDue(prepared, false)).toBe(false);
+    expect(relayWakeDue(run([{ type: "handed_over" }], prepared), false)).toBe(false);
+    expect(relayWakeDue(run([{ type: "stop" }], pendingIdle), false)).toBe(false);
+    const link: RelayEvent = { type: "link", status: { state: "stopped", reason: "gone" } };
+    expect(relayWakeDue(run([link], pendingIdle), false)).toBe(false);
+    expect(relayWakeDue(pendingIdle, true)).toBe(false);
+    // Aborted: the relay decides again.
+    expect(relayWakeDue(run([{ type: "handover_aborted" }], prepared), false)).toBe(true);
+  });
+
+  test("a failed or cut run does not wake, and holds nothing: its reason stays", () => {
+    const failed = run([{ type: "turn_started" }, { type: "turn_failed", message: "boom" }, exit]);
+    expect(relayWakeDue(failed, false)).toBe(false);
+    expect(exitPlan(failed, true, free)).toEqual({ kind: "leave" });
+    const cut = run([{ type: "turn_started" }, { type: "turn_ended", reason: "cancelled" }, exit]);
+    expect(relayWakeDue(cut, false)).toBe(false);
+    expect(exitPlan(cut, false, free)).toEqual({ kind: "leave" });
+  });
+
+  test("a refused wake is no failure: the turn is over, the wake pends, the rest is untouched", () => {
+    const refused = run([{ type: "turn_started" }, { type: "wake_refused" }], pendingIdle);
+    expect(refused.turn).toBe("over");
+    expect(refused.rest).toBe("idle");
+    expect(refused.detail).toBeUndefined();
+    expect(relayWakeDue(refused, false)).toBe(true);
+  });
+
+  test("the cap: past the limit a pending wake is not due, is said, and holds nothing", () => {
+    // Mutation: drop the cap from `relayWakeDue` → the loop has no end (REVIEW-A).
+    const started = (n: number): RelayModel => {
+      let model = over;
+      for (let i = 0; i < n; i++) {
+        model = run(
+          [
+            { type: "turn_started", wake: true },
+            { type: "turn_ended", reason: "end_turn" },
+          ],
+          model,
+        );
+      }
+      return model;
+    };
+    const below = run([exit], started(RELAY_WAKE_LIMIT - 1));
+    expect(relayWakeDue(below, false)).toBe(true);
+    expect(relayWakeCapped(below, false)).toBe(false);
+    const nothingOwed = started(RELAY_WAKE_LIMIT);
+    expect(relayWakeCapped(nothingOwed, false)).toBe(false);
+    // Nothing was cut off: a keep=false run ends as usual.
+    expect(exitPlan(nothingOwed, false, free)).toEqual({ kind: "remove" });
+    const capped = run([exit], nothingOwed);
+    expect(relayWakeDue(capped, false)).toBe(false);
+    expect(relayWakeCapped(capped, false)).toBe(true);
+    // The grace runs, and keep=false keeps: the agent was cut off mid-work.
+    expect(run([{ type: "tick", now: 1000 }], capped).exitAt).toBeDefined();
+    expect(exitPlan(capped, true, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(capped, false, free)).toEqual({ kind: "leave" });
+    // A stop still removes; a blocked wake is not a capped one.
+    expect(exitPlan(run([{ type: "stop" }], capped), false, free)).toEqual({ kind: "remove" });
+    expect(relayWakeCapped(run([{ type: "stop" }], capped), false)).toBe(false);
+    expect(relayWakeCapped(capped, true)).toBe(false);
+  });
+
+  test("the cap counts wakes that ran: the run's own turn and a refusal are free", () => {
+    expect(over.wakes).toBe(0);
+    const once = run([{ type: "turn_started", wake: true }], pendingIdle);
+    expect(once.wakes).toBe(1);
+    expect(run([{ type: "wake_refused" }], once).wakes).toBe(0);
+  });
+
+  test("exitPlan: a pending wake holds, keep or not; a stop or a stopped link still exits", () => {
+    expect(exitPlan(pendingIdle, true, free)).toEqual({ kind: "hold" });
+    expect(exitPlan(pendingIdle, false, free)).toEqual({ kind: "hold" });
+    expect(exitPlan(run([{ type: "stop" }], pendingIdle), false, free)).toEqual({ kind: "remove" });
+    expect(exitPlan(run([{ type: "stop" }], pendingIdle), true, free)).toEqual({ kind: "leave" });
+    const link: RelayEvent = { type: "link", status: { state: "stopped", reason: "gone" } };
+    expect(exitPlan(run([link], pendingIdle), false, free)).toEqual({ kind: "leave" });
+  });
+});
 
 describe("relay state (docs/feat/detached-relay.md R4)", () => {
   test("starts `starting`, a turn is `running`, nothing exits before the turn ended", () => {

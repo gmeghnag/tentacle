@@ -54,6 +54,18 @@ describe("H24 parseControl: newline JSON, 4 KiB, strict (docs/feat/detached-hand
     expect(parseReply(JSON.stringify({ ...V, ok: false, reason: "pwned" }))).toBeNull();
     expect(parseReply(JSON.stringify({ schemaVersion: 9, ok: true }))).toBeNull();
   });
+
+  test("replies: the hand-over's `turnId` and `wakePending` kept when well-typed, else dropped", () => {
+    expect(parseReply(JSON.stringify({ ...V, ok: true, turnId: "t", wakePending: true }))).toEqual({
+      ok: true,
+      turnId: "t",
+      wakePending: true,
+    });
+    expect(parseReply(JSON.stringify({ ...V, ok: true, turnId: 7, wakePending: "yes" }))).toEqual({
+      ok: true,
+    });
+    expect(parseReply(JSON.stringify({ ...V, ok: true }))).toEqual({ ok: true });
+  });
 });
 
 describe("H24 controlSocketPath", () => {

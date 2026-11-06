@@ -485,6 +485,38 @@ describe("tentacle ps: detached runs (docs/feat/detached-relay-lifecycle.md L28)
     expect(text).not.toContain("\u001b");
   });
 
+  test("a finished run (no relay, no TUI): the engine's `running` does not read as the run running", async () => {
+    // docs/fix/detached-autowake.md (owner Q1). Mutation: keep the engine's word.
+    for (const state of ["idle", "failed", "interrupted"] as const) {
+      const text = await rows((dir) => writeOwner(dir, ownerOf(state)));
+      expect(text).toContain(`up · ${state}`);
+      expect(text).not.toContain(`running · ${state}`);
+    }
+    // A TUI on it: the run is not over.
+    const attached = await rows((dir) => {
+      writeOwner(dir, ownerOf("idle"));
+      writePresence(dir, process.pid, procOf, "u1");
+    });
+    expect(attached).toContain("running · attached");
+    // Lost mid-run: not finished, and the engine's word is what `attach` needs.
+    const lost = await rows((dir) => writeOwner(dir, ownerOf("running")));
+    expect(lost).toContain("running · relay lost");
+  });
+
+  test("a TUI that only detached is no finished run: `running · idle` stays", async () => {
+    // The review's F2. Mutation: `runFinished` ignores the record's kind.
+    const text = await rows((dir) => writeOwner(dir, { ...ownerOf("idle"), kind: "tui" }));
+    expect(text).toContain("running · idle");
+    expect(text).not.toContain("up · idle");
+  });
+
+  test("R4 a record of an EARLIER workload of a reused name: the run is not this workload's", async () => {
+    // The review's F5. Mutation: no tie in `relayRow`.
+    const text = await rows((dir) => writeOwner(dir, ownerOf("idle", "2001-01-01T00:00:00.000Z")));
+    expect(text).toContain("running · idle");
+    expect(text).not.toContain("up · idle");
+  });
+
   test("-v: pid, session, log, removal", async () => {
     let log = "";
     const text = await rows((dir) => {
@@ -589,6 +621,48 @@ describe("tentacle rm", () => {
       expect(docker.calls.includes("remove:a")).toBe(removed);
       expect(readKept(s.dir).entries).toHaveLength(removed ? 0 : 1);
     }
+  });
+
+  test("a finished detached run: `rm` says so instead of guessing a session; it still asks", async () => {
+    // docs/fix/detached-autowake.md (owner Q1). Mutation: always the old guess.
+    const procOf: ProcOf = () => ({ state: "S", start: "1" });
+    const FINISHED = "is still up — its detached run has ended and no terminal of it is attached";
+    const prepared = (write: (dir: string) => void) => {
+      const docker = new FakeEngine();
+      docker.set("a", running());
+      const e = entry("a");
+      const s = setup([e], { [key]: docker });
+      write(ensureRunDir(runDirIn(s.dir, e)));
+      return { docker, s };
+    };
+    const idle = prepared((dir) => writeOwner(dir, ownerOf("idle")));
+    idle.s.interactive("n");
+    expect(await rmCommand("a", {}, idle.s.deps({ procOf }))).toBe(1);
+    expect(idle.s.asked).toEqual([`a (docker, local) ${FINISHED}. Remove it? [y/N] `]);
+    expect(idle.docker.calls).not.toContain("remove:a");
+
+    const noTty = prepared((dir) => writeOwner(dir, ownerOf("failed")));
+    expect(await rmCommand("a", {}, noTty.s.deps({ procOf }))).toBe(1);
+    expect(noTty.s.errText()).toContain(`${FINISHED}. Pass -f to remove it without asking.`);
+
+    // A terminal on it, or a record of an earlier workload of a reused name: still the guess.
+    const guess = "a (docker, local) is running — a session may be attached. Remove it? [y/N] ";
+    const tui = prepared((dir) => {
+      writeOwner(dir, ownerOf("idle"));
+      writePresence(dir, process.pid, procOf, "u1");
+    });
+    tui.s.interactive("n");
+    await rmCommand("a", {}, tui.s.deps({ procOf }));
+    expect(tui.s.asked).toEqual([guess]);
+    const reused = prepared((dir) => writeOwner(dir, ownerOf("idle", "2001-01-01T00:00:00.000Z")));
+    reused.s.interactive("n");
+    await rmCommand("a", {}, reused.s.deps({ procOf }));
+    expect(reused.s.asked).toEqual([guess]);
+    // A TUI only detached (the review's F2): jobs may still run in the pod.
+    const detached = prepared((dir) => writeOwner(dir, { ...ownerOf("idle"), kind: "tui" }));
+    detached.s.interactive("n");
+    await rmCommand("a", {}, detached.s.deps({ procOf }));
+    expect(detached.s.asked).toEqual([guess]);
   });
 
   test("running with no terminal → refused (pass -f); -f → no question, removed", async () => {

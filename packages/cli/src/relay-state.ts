@@ -2,9 +2,11 @@
  * The relay's state, pure (docs/feat/detached-relay.md): events in, what to
  * record and when to exit out. Idle = the turn is over, no ask pending, no job
  * running; 60 s of it exits (DR-4). A stopped link exits at once. A stop waits
- * for the turn to settle, bounded.
+ * for the turn to settle, bounded. A background job's exit wakes the agent, as
+ * in a TUI (docs/fix/detached-autowake.md).
  */
 import type { LinkStatus } from "@tentacle/client";
+import { type WakeModel, initialWake, wakeDue, wakeStep } from "@tentacle/core";
 import type { SessionListResult } from "@tentacle/protocol";
 import type { OwnerState } from "./run-state.ts";
 import { untrustedText } from "./untrusted-text.ts";
@@ -13,9 +15,16 @@ import { untrustedText } from "./untrusted-text.ts";
 export const RELAY_IDLE_GRACE_MS = 60_000;
 /** How long a stop waits for the turn to settle. */
 export const RELAY_STOP_BOUND_MS = 5_000;
+/**
+ * How many wakes one relay may start. Nobody watches a detached run and the
+ * laptop's key pays, so a turn that keeps ending jobs must stop somewhere. An
+ * estimate, not a measurement; `attach` resumes the run.
+ */
+export const RELAY_WAKE_LIMIT = 20;
 
 export type RelayEvent =
-  | { readonly type: "turn_started" }
+  /** `wake`: it counts against `RELAY_WAKE_LIMIT`. */
+  | { readonly type: "turn_started"; readonly wake?: boolean }
   | { readonly type: "turn_ended"; readonly reason: string }
   | { readonly type: "turn_failed"; readonly message: string }
   | { readonly type: "ask_raised"; readonly tool: string }
@@ -35,7 +44,11 @@ export type RelayEvent =
   /** Committed: the TUIs own the session; the relay drains and leaves, removing nothing. */
   | { readonly type: "handed_over" }
   /** The model calls the relay served are over (or past their bound): leave. */
-  | { readonly type: "drained" };
+  | { readonly type: "drained" }
+  /** A background job of the session exited. */
+  | { readonly type: "job_exit" }
+  /** The wake was refused before it ran (another client's turn): tried again at a tick. */
+  | { readonly type: "wake_refused" };
 
 export interface RelayModel {
   readonly turn: "none" | "running" | "over";
@@ -55,6 +68,10 @@ export interface RelayModel {
   readonly exitAt?: number;
   /** The hand-over to a TUI: `prepared` holds any idle exit, `done` leaves through the drain. */
   readonly handover: "none" | "prepared" | "done";
+  /** A job exit no turn has flushed yet. */
+  readonly wake: WakeModel;
+  /** The wakes started so far; a refused one does not count. */
+  readonly wakes: number;
 }
 
 export interface RelayView {
@@ -72,6 +89,8 @@ export const initialRelay: RelayModel = {
   rest: "idle",
   exitNow: false,
   handover: "none",
+  wake: initialWake,
+  wakes: 0,
 };
 
 /** `model` with an optional field gone. */
@@ -85,7 +104,26 @@ export function relayStep(model: RelayModel, event: RelayEvent): RelayModel {
   const linkLost = model.linkStopped;
   switch (event.type) {
     case "turn_started":
-      return { ...model, turn: "running" };
+      // The deadline goes now, not at the next tick: the loop looks at it first,
+      // so a wake started at its last moment would be left behind.
+      return without(
+        {
+          ...model,
+          turn: "running",
+          wake: wakeStep(model.wake, { type: "turn_started" }),
+          wakes: model.wakes + (event.wake ? 1 : 0),
+        },
+        "exitAt",
+      );
+    case "job_exit":
+      return { ...model, wake: wakeStep(model.wake, { type: "exit" }) };
+    case "wake_refused":
+      return {
+        ...model,
+        turn: "over",
+        wake: wakeStep(model.wake, { type: "refused" }),
+        wakes: Math.max(0, model.wakes - 1),
+      };
     case "turn_ended": {
       if (linkLost) {
         return { ...model, turn: "over" };
@@ -164,6 +202,35 @@ export function relayStep(model: RelayModel, event: RelayEvent): RelayModel {
 
 export function relayExits(model: RelayModel, now: number): boolean {
   return model.exitNow || (model.exitAt !== undefined && now >= model.exitAt);
+}
+
+/**
+ * Is a wake owed now, the limit aside? `enabled` is the relay's subscription
+ * (`autoWake`). A failed or cut run stays that: a wake would overwrite its
+ * reason, and with keep=false turn the workload a failed run keeps into one it
+ * removes. `exiting`: the exit plan is being read, or is final.
+ */
+function wakeOwed(model: RelayModel, exiting: boolean): boolean {
+  return wakeDue(model.wake, {
+    enabled: true,
+    idle: model.turn === "over" && model.asks === 0,
+    blocked:
+      model.rest !== "idle" ||
+      model.handover !== "none" ||
+      model.stopping ||
+      model.linkStopped ||
+      exiting,
+  });
+}
+
+/** May the wake start now? */
+export function relayWakeDue(model: RelayModel, exiting: boolean): boolean {
+  return wakeOwed(model, exiting) && model.wakes < RELAY_WAKE_LIMIT;
+}
+
+/** A wake is owed and the limit forbids it: the run stops here, and says so. */
+export function relayWakeCapped(model: RelayModel, exiting: boolean): boolean {
+  return wakeOwed(model, exiting) && model.wakes >= RELAY_WAKE_LIMIT;
 }
 
 export function relayView(model: RelayModel): RelayView {
@@ -258,6 +325,12 @@ export function exitPlan(model: RelayModel, keep: boolean, use: ResidentUse | nu
   // A hand-over in flight never meets a removal; a stop or a stopped link still exits.
   if (model.handover === "prepared" && !model.stopping && !model.linkStopped) {
     return { kind: "hold" };
+  }
+  if (model.wake.pending && model.rest === "idle" && !model.stopping && !model.linkStopped) {
+    // A job's exit landed during the read: back to the ticks, where the wake
+    // fires. Past the limit none will: leave, and never remove, since the agent
+    // was cut off mid-work.
+    return model.wakes < RELAY_WAKE_LIMIT ? { kind: "hold" } : { kind: "leave" };
   }
   if (keep || model.linkStopped) {
     return { kind: "leave" };

@@ -1,5 +1,13 @@
 import { type Agent, Session } from "@tentacle/agent";
-import { DISMISSED, type JobController, type PermissionBroker } from "@tentacle/core";
+import {
+  DISMISSED,
+  type JobController,
+  type PermissionBroker,
+  type WakeModel,
+  initialWake,
+  wakeDue,
+  wakeStep,
+} from "@tentacle/core";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -317,6 +325,8 @@ export interface AppProps {
    * so the agent reacts to it without a user prompt. Default: true.
    */
   readonly autoWakeOnJobExit?: boolean;
+  /** A detached run's relay handed over a job's exit no turn has flushed (docs/fix/detached-autowake.md). */
+  readonly wakePending?: boolean;
   /** Host notices to surface live (never a raw terminal write while Ink owns it). */
   readonly notices?: NoticeFeed;
   /** The runtime's link status, shown in the StatusBar while it is not up. */
@@ -415,6 +425,7 @@ export function App({
   permissions,
   jobs,
   autoWakeOnJobExit = true,
+  wakePending = false,
   notices,
   link,
   mcpStatus,
@@ -595,7 +606,11 @@ export function App({
   // Autonomous wake on a background-job exit: a job that finishes while a turn
   // is running sets this, so the wake fires once the current turn settles (the
   // running turn won't see the exit — the agent flushes exits at turn START).
-  const wakePendingRef = useRef(false);
+  // The decision is `@tentacle/core`'s, shared with a detached run's relay.
+  const wakeRef = useRef<WakeModel>(wakePending ? { pending: true } : initialWake);
+  // The relay's wake, handed over: this TUI is its only owner, so if it loses
+  // the slot to the adopted turn (not seen here yet) it is owed once more.
+  const handedWakeRef = useRef(wakePending);
   // Latest `run`, so the jobs subscription and the post-turn check can start a
   // continuation turn without re-subscribing or a circular callback dependency.
   const runRef = useRef<
@@ -656,12 +671,14 @@ export function App({
       // running, defer to its post-turn check (it flushes exits at the next
       // start); if idle, start a continuation turn now. Multiple exits coalesce
       // — the agent drains all pending exits at the next turn's start.
-      if (!autoWakeOnJobExit) {
-        return;
-      }
-      if (stateRef.current.running) {
-        wakePendingRef.current = true;
-      } else {
+      wakeRef.current = wakeStep(wakeRef.current, { type: "exit" });
+      const gate = {
+        enabled: autoWakeOnJobExit,
+        idle: !stateRef.current.running,
+        blocked: false,
+      };
+      if (wakeDue(wakeRef.current, gate)) {
+        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
         runRef.current?.("", { continuation: true });
       }
     });
@@ -991,16 +1008,22 @@ export function App({
    * continuation so the agent reacts to it.
    */
   const wakeIfPending = useCallback(() => {
-    if (!wakePendingRef.current) {
+    if (!wakeRef.current.pending) {
       return;
     }
-    wakePendingRef.current = false;
     setTimeout(() => {
-      if (!stateRef.current.running) {
+      // A turn running by now keeps it pending: that turn's end asks again.
+      const gate = {
+        enabled: autoWakeOnJobExit,
+        idle: !stateRef.current.running,
+        blocked: false,
+      };
+      if (wakeDue(wakeRef.current, gate)) {
+        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
         runRef.current?.("", { continuation: true });
       }
     }, 0);
-  }, []);
+  }, [autoWakeOnJobExit]);
 
   // `streamTurn`, through a ref: it and `settleSendNow` call each other.
   const streamTurnRef = useRef<
@@ -1100,7 +1123,7 @@ export function App({
         const events = p.successor;
         if (events && p.next) {
           sendNowRef.current = null;
-          wakePendingRef.current = false; // the new turn flushes the job exits at its start
+          wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // the new turn flushes the job exits at its start
           void streamTurnRef.current?.(() => events, p.next, { successor: true });
         }
         return true;
@@ -1110,7 +1133,7 @@ export function App({
       setRows(() => []);
       const step = afterOldTurn({ text, resetSeen: p.resetSeen });
       if (step === "send") {
-        wakePendingRef.current = false;
+        wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" });
         runRef.current?.(text, { fallback: true });
         return true;
       }
@@ -1150,6 +1173,7 @@ export function App({
         for await (const event of open()) {
           if (event.type !== "unsupported") {
             streamed = true;
+            handedWakeRef.current = false; // a turn ran: any later refusal is an ordinary one
           }
           if (event.type === "context_reset") {
             reset = true;
@@ -1194,6 +1218,10 @@ export function App({
           stateRef.current = withdrawUserTurn(stateRef.current, opts.own.item);
           if (opts.own.text !== "") {
             restoreInput(opts.own.text, SLOT_LOST_NOTICE);
+          } else if (handedWakeRef.current) {
+            // Once: `wakeIfPending` below fires it when the turn that won ends.
+            handedWakeRef.current = false;
+            wakeRef.current = wakeStep(wakeRef.current, { type: "refused" });
           }
         } else if (failed.kind === "restore") {
           for (const id of failed.ids) restoredRef.current.add(id);
@@ -1271,7 +1299,7 @@ export function App({
       // compaction-time rows. A wake waits for the compaction's end.
       const start = planTurnStart({ compacting: compactingRef.current, continuation });
       if (start === "defer") {
-        wakePendingRef.current = true;
+        wakeRef.current = wakeStep(wakeRef.current, { type: "refused" });
         return;
       }
       if (start === "refuse") {
@@ -1314,6 +1342,11 @@ export function App({
     sentFirstRef.current = true;
     void runRef.current?.(initialPrompt);
   }, [initialPrompt]);
+
+  // A wake handed over by the relay: now if idle, else at the adopted turn's end.
+  useEffect(() => {
+    wakeIfPending();
+  }, [wakeIfPending]);
 
   /**
    * One activity of the session that this TUI did not start (C1/C2/C6): the
@@ -1477,7 +1510,8 @@ export function App({
       fallbackNoticedRef.current = false;
       // A wake deferred during the old session's compaction is that
       // session's: it must not fire in the new one.
-      wakePendingRef.current = false;
+      wakeRef.current = wakeStep(wakeRef.current, { type: "reset" });
+      handedWakeRef.current = false;
       if (opts.keepTranscript !== true) {
         stateRef.current = initialState;
         setExpandAll(false);
@@ -1601,7 +1635,7 @@ export function App({
           drainHeld();
           pushNotice(compactionWaitNotice("daemon"));
           if (after.send !== null) {
-            wakePendingRef.current = false; // its turn flushes the job exits at its start
+            wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
             void runRef.current?.(after.send, { fallback: true });
           } else {
             wakeIfPending(); // while still compacting, `run` defers it again
@@ -1804,7 +1838,7 @@ export function App({
             pushNotice(out.notice);
             if (out.send !== null) {
               setRows(() => []);
-              wakePendingRef.current = false; // its turn flushes the job exits at its start
+              wakeRef.current = wakeStep(wakeRef.current, { type: "turn_started" }); // its turn flushes the job exits at its start
               // As a fallback send: restored if another client's prompt won the slot.
               void run(out.send, { fallback: true });
               return;
