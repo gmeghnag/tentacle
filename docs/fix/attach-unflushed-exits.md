@@ -151,9 +151,49 @@ As built, in plan order (red first on each slice, then green):
 
 ## Review
 
-*— claude-sonnet-5-5, 2026-11-06*
+*— claude-opus-5-5, 2026-11-06* (fresh context, different model from the executor)
 
-(empty until Execution)
+**Verdict: REQUEST-CHANGES**, for one MEDIUM finding (R1). Everything else holds or is LOW.
+
+**Gate (run by me):** `bunx tsc --noEmit` clean · `bunx biome check .` clean (692 files) · `bun test packages`: **5096 pass, 3 skip (opt-in), 0 fail** (5099 tests, 347 files). `protocol.json` is regenerated: the drift test is green.
+
+### Findings
+
+1. **R1 — MEDIUM: two terminals attaching at once get two wake turns (Q1 = A broken).** `main.ts:863` maps "the open reported exits" onto the same `wakePending` prop as the relay hand-over. `App.tsx:631` seeds `handedWakeRef` from that prop, and the lost-slot branch (`App.tsx:1239-1243`) re-pends a refused continuation **once** when the ref is set. T-TUI-4 (`tui/test/auto-wake.test.tsx:211`) pins that mechanism: `wakePending` + a lost slot → `sends === 2`. Scenario: an idle session has `n > 0` unflushed exits and terminals A and B attach together. Both see `unflushedExits() > 0`, so both seed. A's continuation wins and its start flushes all `n`. B's is refused (`TurnInProgress`, nothing streamed), so B re-pends. When A's turn ends, `wakeIfPending` (`App.tsx:1284`) fires B's second continuation. That is an empty autonomous model turn over an unchanged history, paid with the laptop's key. This breaks the owner's Q1 = A ("no retry"), the failure-mode row "boolean pending: no double", and the brief's "exactly one wake". The retry was right for the relay hand-over, where the TUI is the only owner of the wake. It is wrong for a count-seeded wake, which another TUI may already be serving. **Fix:** arm the retry only from the relay flag. That needs one TUI change, which the plan said it would not need: a separate prop, or `wakePending: "handed" | "owed"`, with `handedWakeRef` seeded only by `"handed"`. Add a TUI test, T-TUI-4's twin with the count-seeded variant, that expects `sends === 1`. Then fix the plan's "Unchanged: `App.tsx`" line and the P2 precondition.
+2. **R2 — LOW, test gap: the count is never shown to be replaced on a re-open.** Plan C-1 promised "resets on a re-open without the field". C-1e (`client/test/unflushed-exits.test.ts:164`) uses three separate clients and never re-opens one entry. **Mutation (mine):** `entry.unflushedExits = result.unflushedExits ?? 0` → `+=` (`remote-client.ts:1738`). The client test and `local-runtime.test.ts` both stay green (60/60), so the mutation **survived**. No user impact today: the count is read once, at `startTui`. Add the same-client re-open leg.
+3. **R3 — LOW: with `autoWake` off, exits that are only counted are not shown.** An exit before the cut that is not in the replay (hole 2) only feeds the wake boolean. With the switch off, the attach shows nothing, and the exit surfaces at the next user prompt through the agent's `[background]` note. Nothing is dropped: it is flushed honestly, as on `main`, so this is no regression. But the user is not told that something is waiting. See owner question 3.
+
+### Premise table
+
+| Premise | Verdict |
+|---|---|
+| Context symptom: no listener ⇒ a replayed `background_exit` is dropped (`remote-client.ts` exit loop, pre-diff) | TRUE (diff hunk at `:1970`) |
+| `pendingExits` drained only by `flushBackgroundExits` (`agent.ts` `splice(0)`) | TRUE |
+| `Connection.open` reads the count in the replay's synchronous segment (`connection.ts:445`) | TRUE |
+| P1 `OpenResultSchema` is a strip schema; optional field, no bump | TRUE. Honest under v10: a response field, absent or stripped on either old side, meaning unchanged |
+| P2 "the TUI already accepts a seed wake → no TUI change" | **PARTLY FALSE.** The seed also arms the hand-over retry (R1) |
+| P3 only `runEngineTui` needs seeding | TRUE (`main.ts:1638/1688` start fresh daemons with no earlier exits) |
+| Executor: relay subscribes before its first `drive`, so R-U4 is moot | TRUE (`relay.ts:422-433`). With `autoWake` off the relay never subscribes, so its backlog just fills to the 64 cap, which is bounded and harmless |
+
+### Attacks tried
+
+- **Two terminals at once** → R1: a double turn.
+- **Pod lies** (`unflushedExits: 10^6`, or 1 with no job): only `> 0` is read, and it becomes one boolean. The gate is `config.autoWake` from the laptop's config/env (`main.ts:854`), never from the pod. The effect is at most one empty continuation per attach, with no pod text shown and no approval created. A malformed value (negative or non-integer) fails the open's parse, which is loud. **Holds.**
+- **Attach mid-turn / permission pending / wake already running:** the count is read after that turn's start flushed, so the wake is deferred to the turn's end. The attacher streams the foreign turn, which clears `handedWakeRef` (`App.tsx:1194`), so there is no retry. **Holds.**
+- **Exit during the handshake:** a replayed exit is counted and also backlogged; the notice shows once (jobId dedupe), with one boolean wake. An exit after the open reply and before the mount reaches the backlog and then the first `onExit`. `runRef` is assigned in the render body (`App.tsx:1350`), before the effects, so draining the backlog synchronously at subscribe cannot lose the run. **Holds.**
+- **Attach then immediate detach:** the wake is TUI-local, and a refused or aborted continuation leaves the exits in `pendingExits` for the next attach. **Holds.**
+- **Relay alive:** its wake already flushed them (count 0), or it is pending and handed over: `run?.wakePending ||` the count gives one boolean. **Holds.**
+- **§7 checks:** no new RPC, no new wake logic, the peer is not serialized, the broker is untouched, nothing is persisted. **Hold.**
+
+### Executor behaviour
+
+The executor was disciplined: red first, a mutation per slice, and the plan drift (P3, R-U4) recorded honestly. It missed that the reused prop carried the hand-over retry semantics, and its C-1e did not match the plan's re-open leg.
+
+### Owner questions
+
+1. **R1 fix shape:** split the prop (`wakePending` vs a relay-only `wakeHanded`)? *Recommendation: yes.* It is the smallest change that keeps Q1 = A.
+2. **Multi-session seed on `/sessions` switch** (Notes): leave it as a follow-up? *Recommendation: yes.*
+3. **R3:** a laptop-rendered one-line notice on attach ("n background job(s) ended while you were away") when the count is > 0, so that `autoWake` off is visible too? *Recommendation: yes, as a follow-up.* It is a count, not pod text.
 
 ## Owner questions
 
