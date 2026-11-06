@@ -489,3 +489,86 @@ REVIEW-F calls: 2 removed: false detail: the relay was stopped before the turn e
 - **F7, F8:** left as debt (TODO), no change this round.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-06*
+
+## Review — round 2
+
+*— claude-opus-5-5, 2026-11-06*
+
+**Verdict: PASS (APPROVE-WITH-NITS).** 0 MEDIUM, 4 LOW. Every decision is implemented, and the cap could not be bypassed in any path I tried. Scope: `git diff a5d519c..HEAD`.
+
+Same model as the executor and the first review, fresh context only: shared blind spots may survive (AGENTS §10). Nothing was run live, and the Execution section's headless checklist is still owed before merge.
+
+### Findings (all LOW)
+
+1. **R2-1: a crash during the capped grace still deletes a keep=false workload** (`relay.ts:380`). `netSaved` ignores the cap. ZZ3 read `net.saved() = true` with the net armed (`disarmed 0`) while `ps` already said `wake limit reached`. `armExitNet` removes when that returns true (`engine-runtime.ts:316-319`). So an uncaught crash in those 60 s removes what the decision says to keep. I read `saved()` and the net's code; I did not run a real crash. The laptop copy is confirmed saved, so §7's net rule holds. A signal is not this case: a stop removes anyway (DR-5). Fix if wanted: `netSaved` also requires `!relayWakeCapped(model, false)`.
+2. **R2-2: no test pins that the count survives an aborted hand-over.** The code is correct (`handover_aborted` does not touch `wakes`, and ZZ1 is green), but the mutation below survives the suite. Adding ZZ1 closes the gap.
+3. **R2-3: the cap's note can be overwritten** (`relay.ts:616-625`). With keep=true and a failed last save, `not saved — the laptop copy lacks the last turn` replaces `wake limit reached` in the record, so `ps` no longer gives the way on. The log keeps the line. Read, not run.
+4. **R2-4: F7 and F8 are not in `TODO.md`.** The decision says "left as debt (TODO)"; Execution put them under Notes/debt and left `TODO.md` untouched. The content is recorded, only not in the index. The orchestrator can add them directly (AGENTS §10 carve-out).
+
+### Decisions checked
+
+| Decision | Result | Evidence |
+|---|---|---|
+| Q-R1: cap of 20, pure, not configurable | Holds | `relay-state.ts:23`, `:227-234`. R-W10 asserts 21 model calls and 20 wake log lines. M-E, M-D and the executor's red run cover the count |
+| Q-R1: no `exitPlan` hold at the limit, keep=false keeps | Holds | `relay-state.ts:329-334`; `leave()` disarms the net before exit (`relay.ts:307`); R-W10b, M-B. Exception during the grace: R2-1 |
+| Q-R1: note in the record and the log, once, then the grace | Holds | `sayCapped` (`relay.ts:428-436`); R-W10 counts the log lines; R-W10c covers an exit during the last read. `emit` re-enters `maybeWake`, and `cappedSaid` is set before the nested `emit`, so it cannot recurse |
+| Q-R2: relay-only `runFinished` | Holds | `run-state.ts:491`; a `kept-cmd` test each for `ps` and `rm`. After a commit the relay writes no record (`relay.ts:214`), so it cannot overwrite a TUI's |
+| F3: REVIEW-F and the exit after the final plan | Holds | R-W11, R-W11b; killed by M-A per Execution. Not re-run by me: the test bodies drive the windows named, by reading |
+| F4: no wake after a stop in a prepared hand-over | Holds | `relay.ts:285-286`. `stopping` is set before the abort's `maybeWake`. The order swap adds no await, so the exit path is unchanged. R-W12 covers keep=true and keep=false; red per Execution, not re-run by me |
+| F5: `ps` tie | Holds | `kept-cmd.ts:225`, same tie as `rm` (`:396`); R4 test |
+| F6, F7, F8 | Recorded | Notes/debt; see R2-4 |
+
+### The narrow reading: "keep only when a wake is owed"
+
+**Agree.** If the 20th wake ends with nothing pending, no agent work was cut off, and the removal still needs the same clean idle and fresh read as any other run. Keeping the workload there would leak it for no reason, and saying `wake limit reached` would be false, since no wake was withheld. An exit during that turn leaves `pending` set, because only a turn's start clears it, so it is capped and kept (R-W10b). An exit after the final plan goes the same way as below the limit (R-W11b).
+
+### Attacks tried
+
+| Attack | Result |
+|---|---|
+| Refusal give-back | **No bypass.** The give-back happens only for `text === "" && !streamed && slotTaken` (`relay.ts:406`), where the daemon's slot check refused the turn before it ran. One wake is in flight at a time, because `turn === "over"` is required. A lying pod gains nothing: it can already call `model/stream` uncapped (§7, Review premise) |
+| Prepared hand-over aborted at the cap | **No bypass.** ZZ1: 21 calls before and after, and the note stays |
+| Hand-over committed at the cap, keep=false | **Holds.** ZZ2: ack `{"ok":true,"wakePending":true}`, 21 calls, no removal. The TUI wakes it, with a person present, as the decision's "attach" intends |
+| TUI hand-back or a relay restart resetting the count | **No such path.** `launchRelay` has one caller, `run --detach` (`main.ts:1086`); a TUI never starts a relay. A new `run` is the user's own act |
+| Capped with `jobs > 0` | **Safe.** The polled count holds the grace until the jobs end. With a stale poll of 0 and a fresh read above 0, `exitPlan` leaves before looking at `use`: the workload stays, but the record says `idle` with a job alive. That needs an unreadable poll, so it is not raised as a finding |
+| Stop past the limit | Removes, as DR-5 requires; unit-tested, no relay-level test |
+| A `run --detach` whose own prompt is `""` | It would count as a wake (`relay.ts:385`), so 19 are left. Harmless |
+| Crash during the capped grace | R2-1 |
+
+### Mutation
+
+One mutation: `handover_aborted` also sets `wakes: 0` (`relay-state.ts:182`), the hand-over bypass asked about. Restored from a `git show HEAD:` copy; `shasum` `95d07270…` is the same before and after, and `git status` is clean.
+
+| Run on the mutant | Result |
+|---|---|
+| `relay.test.ts` + `relay-state.test.ts` | **Survived:** 132 pass, 0 fail (R2-2) |
+| Scratch ZZ1 | **Killed:** `Expected: 21, Received: 41`. Green on the restored code |
+
+### Scratch tests (temporary copy of `relay.test.ts`, inside its `describe`, removed)
+
+```ts
+// ZZ1 (ZZ2 is the same with `removing`, then conn.send({ op: "commit" }) and no remove:box)
+const jobs = new FakeJobs();
+const { counter, model } = looping(jobs);
+const pod = resident(model, { jobs });
+const path = short();
+const box = rig({}, { controlPath: () => path }, ON);
+const exit = box.start(pod.attach);
+await waitFor(() => owner(box.dir)?.detail === CAPPED, "cap");
+const { conn } = await prepareAt(path);
+conn.close();
+await waitFor(() => logOf(box.dir).includes("hand-over aborted"), "abort");
+await tick(60);
+expect(counter.calls).toBe(21);
+// ZZ3: `removing({}, {}, ON)`, wait for CAPPED, tick(30), print box.net.saved?.()
+```
+
+Output on the real code: 3 pass. `ZZ2 ack {"ok":true,"wakePending":true}`, `ZZ3 net.saved() while capped = true disarmed 0`.
+
+### Gate
+
+`bunx tsc --noEmit`: clean. `bunx biome check .`: clean (668 files). `bun test packages/cli packages/core packages/tui`: **2952 pass, 0 fail**; the reaper flake did not appear. This is the narrow gate requested, not the full `bun run check`.
+
+### Executor behaviour
+
+Honest. Its drift list (R-W10c, the narrow reading, a stop past the limit) matches the code, and it marked the cap's value as an estimate. Its one miss: it reported `TODO.md` untouched without flagging that against the decision (R2-4).
