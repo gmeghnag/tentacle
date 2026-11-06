@@ -258,7 +258,150 @@ The `toBeLessThan(40)` bound in R-W9 was never seen failing: under M10 the proce
 
 ## Review
 
-*(empty — plan only)*
+*— claude-opus-5-5, 2026-11-06*
+
+**Verdict: REQUEST-CHANGES.** 3 MEDIUM, 5 LOW. The core of the fix holds: one driver at a time, the hand-over carry, `saveConfirmed`, `autoWake: false`, a `failed` run stays failed. What blocks it: nothing limits unattended wakes (F1), `rm` can say a run has ended when it has not (F2), and the guard against a wake under a removal has no test (F3).
+
+Same model as the executor, fresh context only: shared blind spots may survive both passes (AGENTS §10).
+
+### Findings
+
+**MEDIUM**
+
+1. **F1: no bound on wakes in a run, and no test for one** (`relay.ts:248-256`, `:423-432`; `relay-state.ts:193-204`). The plan's "≤ 1 wake per turn end" limits the rate per turn, not the total. If each woken turn starts a job that ends, the loop runs until a stop, a hand-over or a failed turn. REVIEW-A below reached 300 wakes in 646 ms with an instant model. Nobody is watching, the laptop's key pays, and `wantsAwake` keeps the Mac awake during each turn. A shell job needs `--auto-accept` or an allowlisted command to restart without an ask. The TUI has the same logic, but there a person sees it and can stop it. Executor mutations M5 and M10 hung rather than failed, which fits: no outer bound exists. Decision: Q-R1.
+2. **F2: `rm` says "its detached run has ended" after a TUI only detached** (`run-state.ts:488-494`, `attach-run.ts:539-544`, `kept.ts` `runningReason`). `runFinished` does not check the record's `kind`. `lastOut` writes `idle` when the last TUI of a keep=true run leaves, whether or not jobs or a turn are alive in the pod (REVIEW-C: `true` for a `tui` record). AGENTS §7 says that close only detaches. So the destructive prompt can say the run has ended while a background job is running, and the old cautious wording is gone. `rm` still asks. `up · idle` itself stays literally true. Recommended fix: require `owner.kind === "relay"`; a relay's `idle` means it read 0 jobs before leaving. That is a small change plus one test. Decision: Q-R2.
+3. **F3: the guard against a wake under a removal has no relay test** (`relay.ts:552`). See Mutation below: the suite stays green without `exiting = true`. The Execution section's "pure tests only" understates this, because only `relayWakeDue`'s parameter is tested, not the wiring. REVIEW-F is the missing test: green on the real code, red on the mutant. Add it. Also add a case for an exit after the final plan, which I reasoned about but did not run.
+
+**LOW**
+
+4. **F4: a stop during a prepared hand-over with a wake pending starts that wake** (`relay.ts:282-284`, `:437-451`). `abortHandover` emits `handover_aborted` before `stop` is emitted, so `maybeWake` still sees `stopping: false`. REVIEW-B: prompts 1 → 2 and model calls 2, after the stop. The turn is cancelled and the stop path converges (not run for keep=false), but one prompt and one billed model call follow a stop. Fix: emit `stop` first, or block the wake in that step.
+5. **F5: `ps` does not apply the R4 tie that `rm` does** (`kept-cmd.ts:225`; compare `kept-cmd.ts:392-397`). A record from an earlier workload of a reused name yields `up · idle`. The `idle` was already shown before this task, so only the word changes. Fix: `tied && runFinished(...)`.
+6. **F6: a refused streak keeps the relay alive with no limit** (`relay.ts:423-432`). Each tick sets `exitAt`, then the retry's `turn_started` clears it, so the 60 s grace never elapses while the slot is held. It also writes `owner.json` each tick. This costs no model calls, and a hostile pod can already pin the relay with `jobs > 0`, but Q3's answer did not mention it. A shared bound from Q-R1 could cover it; otherwise record it as accepted.
+7. **F7: test bounds that prove little.** `relay.test.ts:2530` (`toBeLessThan(40)`) was never seen failing, as Execution says. R-W4 (`autoWake: false`) has no mutation aimed at it; the check is simple and the test reads correct, but I did not mutate it either.
+8. **F8: a logic decision in a component** (`App.tsx:1221-1225`, `handedWakeRef`; also `relay.ts:403`, `text === "" && !streamed && slotTaken`). AGENTS §7 wants tested branching in the pure module. The core wake decision is correctly in `core/auto-wake.ts` and `relay-state.ts`. Separately, if the adopted turn is still not visible at the one retry, the wake is dropped; the next turn flushes that exit. I read this path but did not run it.
+
+**Not a finding, but needed before merge:** nothing has been run live. Run the Execution section's headless checklist. I did not re-run the owner's Repro (docker + local model).
+
+### Gate
+
+`bunx tsc --noEmit`: clean. `bunx biome check .`: clean (668 files). `bun test packages/core packages/cli packages/tui`: **2942 pass, 0 fail**; the reaper flake did not appear. This is the narrow gate requested, not the full `bun run check`.
+
+### Mutation
+
+One mutation, on `exiting = true` (`relay.ts:552`), the guard that keeps a wake from starting under a removal. `cp` backup, restored, `shasum -c` OK, `git status` clean.
+
+| Run on the mutant | Result |
+|---|---|
+| `relay.test.ts` + `relay-state.test.ts` | **Survived:** 124 pass, 0 fail (F3) |
+| REVIEW-E (the wake ends inside the read) | Survived; it does not reach the property |
+| REVIEW-F (the wake outlasts the read) | **Killed:** `removed: false`, `the relay was stopped before the turn ended; not saved — workload kept`. Green on the restored code |
+
+The mutant ends on the safe side here: the `settled` veto keeps the workload. After the final plan the veto has already been computed, so I expect a wake in that window to reach the delete. That part is reasoned, not run.
+
+### Premise table
+
+| Premise | Result |
+|---|---|
+| Symptom: the relay never subscribes to exits on `main` | TRUE from code (`git show main:…/relay.ts`: 0 `onExit`). The live Repro was not re-run |
+| Daemon emits `background_exit` outside turns (`hosted-session.ts:453`) | TRUE |
+| Listeners fire whatever the turn state (`remote-client.ts:1750-1756`) | TRUE |
+| The agent flushes at turn start (`agent.ts:786`, `:1812-1832`) | TRUE |
+| `""` is a continuation (`agent/src/session.ts:89-92`) | TRUE |
+| `assertIdle` guards the slot (`hosted-session.ts:1377`) | TRUE by location and R-W9; body not reread |
+| A reused turn id never runs twice (P3) | Not opened; R-W1 asserts a fresh id, and executor's M7 covers it |
+| `autoWake` defaults on, laptop-side (`config/src/resolve.ts:430`) | TRUE |
+| `parseReply` drops unknown fields, copies the new two (`control-socket.ts`) | TRUE |
+| A pod can already drive `model/stream` (`remote-client.ts:1951`) | TRUE, no cap |
+| "Bounded: ≤ 1 wake per turn end" | TRUE per turn, misleading as a bound (F1) |
+
+### Attacks tried
+
+| Attack | Result |
+|---|---|
+| Wake loop: each woken turn ends a job | **Unbounded** (F1) |
+| Hostile pod: spoofed or flooded `background_exit` | No new exposure. N exits are one `pending`, nothing per exit is logged, and pod text stays out of the log. The pod can already call `model/stream` uncapped while the link is up, so the spoof gains nothing. The wake's real risk is F1, with an honest pod and a looping model |
+| The single retry (`handedWakeRef`) | Once only, cannot loop, pinned by T-TUI-4. A possible drop is in F8 |
+| Refusal retry | One attempt per tick, no tight loop (`emit` skips `maybeWake` on `wake_refused`; M10). Liveness cost is F6 |
+| Two drivers: `prepare`/`commit` | Held. The gate blocks while `prepared` and `done`; the ack carries `turnId` and `wakePending`. No socket → `refuse` (`attach-run.ts:193-197`), never a blind join |
+| Stop during a prepared hand-over | Stray wake (F4) |
+| Wake with a turn running or an ask pending | Blocked by `idle` (`turn === "over" && asks === 0`); fires on the emit that frees it |
+| Wake at `exitAt` | `turn_started` clears the deadline at once. With keep=true, plan and `leaving` are in the same tick. No endless hold: anything that sets `exitNow` also leads to an exit row |
+| keep=false save | Held. `turn_started` is synchronous, so the net reads `running` for the whole wake; R-W5b and R-W6 pin it |
+| `exiting` wiring | Correct by reading, untested (F3) |
+| `autoWake: false` | No subscription, so never pending, so no wake and no `wakePending`. TUI side: the `enabled` leg and T-TUI-3 |
+| `failed` / `interrupted` | Blocked by `rest !== "idle"`; no hold in `exitPlan`; M9 |
+| `ps` / `rm` wording | `up` only with the engine at `running`, no relay, no TUI. Live relay states and `… lost` are unchanged. False claim in `rm` (F2); missing tie in `ps` (F5) |
+| Logic placement | Decisions are pure, except F8 |
+
+### What holds
+
+The single broker is untouched: wake turns use the relay's one session and `policy`. No new secret or model path reaches the pod, and `PROTOCOL_VERSION` is unchanged. The fresh `turnId` is the only new value on the wire. No lock was added to the peer. `autoWake` stays on the laptop.
+
+### Executor behaviour
+
+Honest. Its "Red/green" and "Unverified" lists match what I found, including the tests it never saw red and the hanging mutations. It called its own drift out, and its added `rest !== "idle"` guard is the right call. Its miss: it listed the hanging mutants as a test nuisance without asking what they implied, which is F1.
+
+### Questions for the orchestrator
+
+- **Q-R1 (F1): add a cap on wakes per relay? Recommendation: yes, before merge.** A pure limit in `relay-state.ts`, e.g. 20 wakes per relay, not configurable for now. At the limit: no more wakes, the pending wake no longer holds `exitPlan`, a `wake limit reached — tentacle attach <name>` note goes into the record and the log, and the normal grace runs. With keep=false, keep the workload, since the agent was cut off mid-work. Turn REVIEW-A into its test. The trade-off: a legitimate long poll loop would stop at the cap, and `attach` resumes it. The cap value is my estimate, not measured.
+- **Q-R2 (F2): narrow `runFinished` to relay records? Recommendation: yes.** After a TUI detach, `ps` and `rm` keep today's wording (`running · idle`, "a session may be attached"), which is cautious and true.
+
+### Repro (scratch, `.tentacle/tmp/autowake-review/`, removed)
+
+`relay.test.ts` lines 1–2276 with absolute imports, plus these tests inside the wake `describe`:
+
+```ts
+test("REVIEW-A", async () => {
+  const jobs = new FakeJobs();
+  let calls = 0;
+  const model = { id: "loop", async *stream() {
+    calls++;
+    setTimeout(() => jobs.fire(`j${calls}`), 0);
+    yield { type: "text", delta: "again" } as StreamEvent;
+    yield { type: "done" } as StreamEvent;
+  } } as unknown as ModelProvider;
+  const pod = resident(model, { jobs });
+  const { start, stopRef } = rig({}, {}, ON);
+  const exit = start(pod.attach);
+  const t0 = Date.now();
+  while (calls < 300 && Date.now() - t0 < 20000) await tick(5);
+  stopRef.stop?.();
+  await afterGrace(exit);
+  expect(calls).toBeGreaterThanOrEqual(300);
+});
+
+test("REVIEW-F", async () => {
+  const jobs = new FakeJobs();
+  const model = new Waking([say("started"), say("woke")], [1]);
+  const pod = resident(model, { jobs });
+  const box = removing({}, {}, ON);
+  let fired = false;
+  const exit = box.start(reading(pod, async () => {
+    if (!fired) {
+      fired = true;
+      jobs.fire();
+      await tick(20);
+      setTimeout(() => model.open(1), 40);
+    }
+    return { jobs: 0, running: false, others: 0 };
+  }));
+  await waitFor(() => owner(box.dir)?.state === "idle", "the run's turn");
+  await afterGrace(exit);
+  expect(model.calls).toBe(2);
+  expect(box.calls).toContain("remove:box");
+});
+```
+
+REVIEW-B: `prepareAt`, `jobs.fire()`, `stopRef.stop()`, then count the `session/prompt` frames. REVIEW-C: `runFinished({ kind: "owner", owner: { kind: "tui", state: "idle" } }, false, 0)`.
+
+```
+REVIEW-A model calls: 301 wake log lines: 300 ms: 646
+REVIEW-B prompts before stop: 1 after: 2 model calls: 2 wake logged: true
+REVIEW-C finished after a TUI detach: true
+REVIEW-E calls: 2 removed: true saved: true detail: undefined
+REVIEW-F calls: 2 removed: true detail: undefined        (real code)
+REVIEW-F calls: 2 removed: false detail: the relay was stopped before the turn ended; not saved — workload kept: tentacle rm box        (mutant)
+```
 
 ## Owner questions
 
@@ -281,3 +424,15 @@ The `toBeLessThan(40)` bound in R-W9 was never seen failing: under M10 the proce
 - Q5: **A — the relay reads `autoWake` from its own loaded laptop config** (`relay.ts:604-608`), no spec change.
 - Q6: **A — TODO entry only** for the pre-existing attach gap (daemon reports unflushed exits at attach).
 - Q7: **A — Opus executes, fresh-context Opus review; branch only after feat/config-carry merges.** Note for the executor: Q1=B adds the `rm`/`ps` wording fix (diagnosis above) to this task — update Files/Tests/CHANGELOG first.
+
+### Orchestrator decisions on the Review (owner delegation 2026-11-06)
+
+- **Q-R1 → yes, before merge:** a pure cap of 20 wakes per relay in `relay-state.ts`, as the review proposes: not configurable, at the limit no more wakes and no `exitPlan` hold, note `wake limit reached — tentacle attach <name>` in the record and the log, then the normal grace; keep=false keeps the workload. REVIEW-A becomes its test (red without the cap).
+- **Q-R2 → yes:** `runFinished` requires `owner.kind === "relay"`; plus one test.
+- **F3:** add REVIEW-F as a relay test (red on the `exiting = true` mutant), plus the exit-after-final-plan case if it can be driven.
+- **F4:** fix: a stop during a prepared hand-over must not start the pending wake (emit `stop` first or block the wake), with a test.
+- **F5:** fix: `ps` applies the R4 tie (`tied && runFinished(...)`), with a test.
+- **F6:** accepted (no model calls; a pod can already pin the relay with `jobs > 0`); note it under Notes/debt.
+- **F7, F8:** left as debt (TODO), no change this round.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-06*
