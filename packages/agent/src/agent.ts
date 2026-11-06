@@ -548,6 +548,11 @@ export class Agent {
     return this.pendingExits.splice(0);
   }
 
+  /** Job exits no turn has surfaced yet: what the next turn's start will flush. */
+  get pendingExitCount(): number {
+    return this.pendingExits.length;
+  }
+
   /** Job exits a retired agent had not surfaced: told at this agent's next turn. */
   adoptExits(exits: readonly BackgroundJob[]): void {
     this.pendingExits.unshift(...exits);

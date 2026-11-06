@@ -874,6 +874,10 @@
         },
         "settings": {
           "$ref": "#/$defs/SessionSettingsReport"
+        },
+        "unflushedExits": {
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "required": ["created", "epoch", "resync", "sessionId"],

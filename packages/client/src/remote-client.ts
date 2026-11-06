@@ -150,6 +150,9 @@ export interface SessionStreamListener {
   readonly shared?: boolean;
 }
 
+/** Exits kept for a first `onBackgroundExit` subscriber (the count in the open result still says more are owed). */
+const EXIT_BACKLOG_MAX = 64;
+
 /** A background-job exit surfaced by the daemon, outside any turn. */
 export interface BackgroundExitNotice {
   readonly jobId: string;
@@ -317,6 +320,8 @@ interface SessionEntry {
   queued: QueueState | undefined;
   /** The session's newest settings report (an open's, an own sync's, a `session_settings`). */
   settings: SessionSettingsReport | undefined;
+  /** The exits no turn had flushed when the newest open answered (an older daemon: 0). */
+  unflushedExits: number;
   /** How far the attach got: 1 once an open answered, 1 + n once a read reached page n. */
   attachMark: number;
   /** When `attachMark` last rose: the attach bound counts from it. */
@@ -403,6 +408,8 @@ export class RemoteClient {
   private readonly sessions = new Map<string, SessionEntry>();
   /** Session-independent listeners for background-job exits (idle or mid-turn). */
   private readonly exitListeners = new Set<(notice: BackgroundExitNotice) => void>();
+  /** Exits that arrived while `exitListeners` was empty: the first subscriber gets them. */
+  private readonly exitBacklog: BackgroundExitNotice[] = [];
   /** Session-independent listeners for title changes (idle or mid-turn). */
   private readonly titleListeners = new Set<(notice: SessionTitleNotice) => void>();
   /** Session-independent listeners for queue changes (idle or mid-turn). */
@@ -1198,8 +1205,26 @@ export class RemoteClient {
 
   /** Subscribe to background-job exits across all sessions; returns an unsubscribe. */
   onBackgroundExit(listener: (notice: BackgroundExitNotice) => void): () => void {
+    // Exits nobody was listening to (a replay on open, a live one before the
+    // TUI mounted) go to the first subscriber, once.
+    const owed = this.exitBacklog.splice(0);
     this.exitListeners.add(listener);
+    for (const notice of owed) {
+      listener(notice);
+    }
     return () => this.exitListeners.delete(listener);
+  }
+
+  /**
+   * Exits no turn has flushed, summed over the open sessions, as the newest
+   * opens reported them: the TUI starts a wake turn for them (`wakePending`).
+   */
+  unflushedExits(): number {
+    let total = 0;
+    for (const entry of this.sessions.values()) {
+      total += entry.unflushedExits;
+    }
+    return total;
   }
 
   /** Close the link for good: no reconnect, every wait rejects. */
@@ -1565,6 +1590,7 @@ export class RemoteClient {
       title,
       queued: undefined,
       settings: undefined,
+      unflushedExits: 0,
       attachMark: 0,
       attachProgressAt: 0,
       attach: undefined,
@@ -1709,6 +1735,7 @@ export class RemoteClient {
       return;
     }
     this.noteAttachProgress(entry, 1);
+    entry.unflushedExits = result.unflushedExits ?? 0;
     this.noteSettings(entry, result);
     this.step(entry, {
       kind: "open_result",
@@ -1943,8 +1970,18 @@ export class RemoteClient {
         // Not turn-scoped: the dedicated listeners fire even when no turn is
         // streaming (`RemoteSession` leaves it to them).
         const { jobId, command, status, exitCode } = update;
+        const notice = { jobId, command, status, exitCode };
+        if (this.exitListeners.size === 0) {
+          // Kept for the first subscriber: one per job, the newest 64.
+          if (!this.exitBacklog.some((n) => n.jobId === jobId)) {
+            this.exitBacklog.push(notice);
+            if (this.exitBacklog.length > EXIT_BACKLOG_MAX) {
+              this.exitBacklog.shift();
+            }
+          }
+        }
         for (const listener of this.exitListeners) {
-          listener({ jobId, command, status, exitCode });
+          listener(notice);
         }
       } else if (update.type === "session_title") {
         // Not turn-scoped either: the title listeners fire while idle too.

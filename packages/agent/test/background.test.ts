@@ -108,4 +108,19 @@ describe("background-job exit trigger", () => {
     }
     expect(second.some((e) => e.type === "background_exit")).toBe(false);
   });
+
+  test("A-1 pendingExitCount rises per exit, back to 0 once a turn has flushed them", async () => {
+    // Mutation: `flushBackgroundExits` stops splicing → the "back to 0" leg fails.
+    const model = new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const jobs = controllableJobs();
+    const agent = new Agent({ model, tools: new ToolRegistry(), env: noopEnv, jobs });
+    expect(agent.pendingExitCount).toBe(0);
+    jobs.fireExit({ id: "a", command: "x", startedAt: 0, status: "exited", exitCode: 0 });
+    jobs.fireExit({ id: "b", command: "x", startedAt: 0, status: "exited", exitCode: 0 });
+    expect(agent.pendingExitCount).toBe(2);
+    for await (const _ of agent.runMessages([{ role: "user", content: "hi" }], "s1")) {
+      // drain
+    }
+    expect(agent.pendingExitCount).toBe(0);
+  });
 });

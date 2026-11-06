@@ -1015,6 +1015,7 @@ describe("cli main: --engine", () => {
           jobs: {},
           link: { onLinkStatus: () => () => {} },
           mcpStatus: async () => [],
+          unflushedExits: () => 0,
           dispose: async () => {},
           markFault: () => {
             seen.faulted = true;
@@ -1417,6 +1418,7 @@ describe("cli main: --engine", () => {
       tty = true,
       plainSeam = false,
       attachResult: () => Promise<boolean> = async () => true,
+      unflushed = 0,
     ) => {
       const out: string[] = [];
       const seen: {
@@ -1429,6 +1431,9 @@ describe("cli main: --engine", () => {
         runQuit?: unknown;
         createSession?: unknown;
         autoAccept?: unknown;
+        wakePending?: unknown;
+        wakeHanded?: unknown;
+        tuiOptionKeys?: string[];
         confirmed?: boolean;
         config?: { model?: string; baseURL?: string; cwd?: string };
         tuiModel?: string;
@@ -1443,6 +1448,7 @@ describe("cli main: --engine", () => {
         jobs: {},
         link: { onLinkStatus: () => () => {} },
         mcpStatus: async () => [],
+        unflushedExits: () => unflushed,
         attachTo: async (id: string) => {
           seen.attachTo = id;
           return attachResult();
@@ -1487,6 +1493,8 @@ describe("cli main: --engine", () => {
             runQuit?: unknown;
             createSession?: unknown;
             autoAccept?: unknown;
+            wakePending?: unknown;
+            wakeHanded?: unknown;
             model?: string;
             resumeMessages?: unknown;
             notices?: { onNotice: (listener: (text: string) => void) => unknown };
@@ -1499,6 +1507,9 @@ describe("cli main: --engine", () => {
           seen.runQuit = options.runQuit;
           seen.createSession = options.createSession;
           seen.autoAccept = options.autoAccept;
+          seen.wakePending = options.wakePending;
+          seen.wakeHanded = options.wakeHanded;
+          seen.tuiOptionKeys = Object.keys(options);
         }) as never,
       });
       return { code, text: out.join(""), seen, runtime };
@@ -1548,6 +1559,31 @@ describe("cli main: --engine", () => {
         // B3. Mutation: drop `autoAccept` → every TUI's toggle stays local, OFF.
         const feed = r.seen.autoAccept as { current?: unknown } | undefined;
         expect(typeof feed?.current).toBe("function");
+      });
+      rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
+    });
+
+    test("M-1 exits no turn has flushed (the open's count) seed the TUI's `wakePending`; none: no key", async () => {
+      // docs/fix/attach-unflushed-exits.md. Mutation: drop the count term → the first leg fails.
+      setup(`${2 ** 30} 1`);
+      await withEnv(unreachable, async () => {
+        const some = await attached(["attach", "box"], true, false, async () => true, 2);
+        expect(some.code).toBe(0);
+        expect(some.seen.wakePending).toBe(true);
+        // R1: a count-seeded wake is never the relay's hand-over (no retry).
+        expect(some.seen.tuiOptionKeys).not.toContain("wakeHanded");
+        // R3: one laptop-rendered line, the count only; plural / singular.
+        expect(some.seen.notices).toEqual(["2 background jobs ended while you were away."]);
+        const one = await attached(["attach", "box"], true, false, async () => true, 1);
+        expect(one.seen.notices).toEqual(["1 background job ended while you were away."]);
+        // ... and also with `autoWake` off.
+        await withEnv({ TENTACLE_AUTO_WAKE: "0" }, async () => {
+          const off = await attached(["attach", "box"], true, false, async () => true, 2);
+          expect(off.seen.notices).toEqual(["2 background jobs ended while you were away."]);
+        });
+        const none = await attached(["attach", "box"]);
+        expect(none.seen.tuiOptionKeys).not.toContain("wakePending");
+        expect(none.seen.notices).toEqual([]);
       });
       rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
     });
