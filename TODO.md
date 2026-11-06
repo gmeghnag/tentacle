@@ -48,7 +48,7 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       explicitly, `k8s/src/pod-cleanup.ts:173-186`). Red-first + mutation-checked
       tests in `core/test/env.test.ts`. **Fix:** `docs/fix/pod-tls-env-scrub.md`
       (promoted from the eval on the owner's OK).
-- [ ] 🔵 **Flaky GC test (test-only, low priority — after protocol v2):**
+- [x] 🔵 **Flaky GC test** — DONE, merged 5d1ef0e (2026-11-06; reproduced 4/50; deterministic `openSessionIds` assertion, red without `dropStale()`, 50/50):
       `daemon/test/session-reaper.test.ts` "a connection forgets a session
       another client closed" fails ~1 in 8 full-suite runs. Root cause
       (2026-10-20, heap snapshot): a conservative-GC stack root delays the
