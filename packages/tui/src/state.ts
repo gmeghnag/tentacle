@@ -151,11 +151,27 @@ export function appendNotice(
   return { ...state, items: append(state.items, item) };
 }
 
-/** Take back an item this exact object still is in the transcript (gone already: a no-op). */
-export function withdrawItem(state: DisplayState, item: DisplayItem): DisplayState {
-  return state.items.includes(item)
-    ? { ...state, items: state.items.filter((i) => i !== item) }
-    : state;
+/**
+ * A pending entry becomes its outcome: `lines` take its place in the transcript
+ * (none: it just goes). Found by identity. If a history reset already took it,
+ * the lines are appended, never lost.
+ */
+export function replaceWithNotices(
+  state: DisplayState,
+  item: DisplayItem,
+  lines: readonly { readonly text: string; readonly hint?: string }[],
+): DisplayState {
+  const notices = lines.map(
+    ({ text, hint }): NoticeItem => ({ kind: "notice", text, ...(hint ? { hint } : {}) }),
+  );
+  const at = state.items.indexOf(item);
+  return {
+    ...state,
+    items:
+      at < 0
+        ? [...state.items, ...notices]
+        : [...state.items.slice(0, at), ...notices, ...state.items.slice(at + 1)],
+  };
 }
 
 /**

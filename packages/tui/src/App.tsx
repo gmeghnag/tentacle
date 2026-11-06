@@ -153,10 +153,10 @@ import {
   failTurn,
   initialState,
   pushNoticeItem,
+  replaceWithNotices,
   resetHistory,
   startContinuation,
   startTurn,
-  withdrawItem,
   withdrawUserTurn,
 } from "./state.ts";
 import { modelBorder } from "./status-line.ts";
@@ -1907,18 +1907,22 @@ export function App({
                 syncingRef.current = null;
               }
               // Moved to another session meanwhile: not that session's news
-              // (`/settings` on this one tells the truth when you are back).
-              // A swap that kept the transcript still shows the pending line.
-              if (sessionRef.current !== session) {
-                if (pending !== undefined) {
-                  stateRef.current = withdrawItem(stateRef.current, pending);
-                  flushNow();
-                }
-                return;
+              // (`/settings` on this one tells the truth when you are back), so
+              // the pending line just goes, where a swap kept the transcript.
+              const moved = sessionRef.current !== session;
+              if (pending !== undefined) {
+                stateRef.current = replaceWithNotices(
+                  stateRef.current,
+                  pending,
+                  moved ? [] : outcome,
+                );
               }
-              lines(outcome);
-              // The prompt or tools may have changed: the open figure is stale.
-              askContext(session);
+              flushNow();
+              if (!moved) {
+                setScrollOffset(0);
+                // The prompt or tools may have changed: the open figure is stale.
+                askContext(session);
+              }
             };
             void session
               .updateSettings()

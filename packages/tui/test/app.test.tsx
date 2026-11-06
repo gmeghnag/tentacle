@@ -671,6 +671,47 @@ describe("App", () => {
     unmount();
   });
 
+  for (const [name, outcome] of [
+    ["success", "Session settings synced."],
+    ["failure", "Can't sync settings while a turn is running."],
+  ] as const) {
+    test(`item 3: the pending line becomes its outcome in the same entry (${name})`, async () => {
+      // Round 3: the outcome is a second entry below, the pending line stays.
+      let finish: (lines: readonly { text: string }[]) => void = () => {};
+      const createSession = () => ({
+        async *send() {
+          // no model turn needed for this test
+        },
+        settings: () => [{ text: "SHOWN MEANWHILE" }],
+        updateSettings() {
+          return new Promise<readonly { text: string }[]>((resolve) => {
+            finish = resolve;
+          });
+        },
+      });
+      const { stdin, lastFrame, unmount } = render(
+        <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+      );
+      await delay(30);
+      stdin.write("/settings sync");
+      await delay(30);
+      stdin.write("\r");
+      await delay(60);
+      stdin.write("/settings");
+      await delay(30);
+      stdin.write("\r");
+      await delay(60);
+      finish([{ text: outcome }]);
+      await delay(60);
+      const frame = stripAnsi(lastFrame() ?? "");
+      expect(frame).not.toContain("Syncing this terminal's settings…");
+      expect(frame.match(/⏺/g)).toHaveLength(3); // ready, the outcome, the show
+      expect(frame.indexOf(`⏺ ${outcome}`)).toBeGreaterThan(-1);
+      expect(frame.indexOf(`⏺ ${outcome}`)).toBeLessThan(frame.indexOf("⏺ SHOWN MEANWHILE"));
+      unmount();
+    });
+  }
+
   test("R2-3 a pending line never outlives its sync when the transcript stays (a session closed elsewhere)", async () => {
     // Round 2: "Syncing…" stays on screen for ever, with no outcome.
     const finish: ((lines: readonly { text: string }[]) => void)[] = [];
