@@ -2492,6 +2492,186 @@ describe("the wake on a job exit, no TUI (docs/fix/detached-autowake.md)", () =>
     await afterGrace(exit);
   });
 
+  /** Each model call ends a job: a loop nothing but the cap stops (the review's REVIEW-A). */
+  const looping = (jobs: FakeJobs) => {
+    const counter = { calls: 0 };
+    const model: ModelProvider = {
+      id: "loop",
+      async *stream() {
+        counter.calls += 1;
+        const n = counter.calls;
+        setTimeout(() => jobs.fire(`j${n}`), 0);
+        yield { type: "text", delta: "again" };
+        yield { type: "done" };
+      },
+    };
+    return { counter, model };
+  };
+  const CAPPED = "wake limit reached — tentacle attach box";
+
+  test("R-W10 the cap: a loop of wakes stops at the limit, says so once, and the relay leaves", async () => {
+    // Mutation: drop the cap → past 21 calls here, the 300 of the review's run.
+    const jobs = new FakeJobs();
+    const { counter, model } = looping(jobs);
+    const pod = resident(model, { jobs });
+    const { dir, start, stopRef } = rig({}, {}, ON);
+    const exit = start(pod.attach);
+    const t0 = Date.now();
+    while (counter.calls <= 21 && owner(dir)?.detail !== CAPPED && Date.now() - t0 < 2000) {
+      await tick(5);
+    }
+    if (counter.calls > 21) {
+      stopRef.stop?.(); // no cap: end the loop before saying so
+    }
+    expect(counter.calls).toBe(21); // the run's turn + 20 wakes
+    await tick(30);
+    expect(counter.calls).toBe(21);
+    expect(owner(dir)).toMatchObject({ state: "idle", detail: CAPPED });
+    expect(await afterGrace(exit)).toBe(0);
+    expect(owner(dir)).toMatchObject({ state: "idle", detail: CAPPED });
+    const log = logOf(dir);
+    expect(log.split("wake limit reached").length - 1).toBe(2); // the line + the state's detail
+    expect(log.split("wake: background job exit").length - 1).toBe(20);
+  });
+
+  test("R-W10b the cap with keep=false: the agent was cut off, so the workload stays", async () => {
+    // Mutation: the capped row of `exitPlan` falls through → it is removed mid-work.
+    const jobs = new FakeJobs();
+    const { counter, model } = looping(jobs);
+    const pod = resident(model, { jobs });
+    const box = removing({}, {}, ON);
+    const exit = box.start(reading(pod, async () => ({ jobs: 0, running: false, others: 0 })));
+    const t0 = Date.now();
+    while (counter.calls <= 21 && owner(box.dir)?.detail !== CAPPED && Date.now() - t0 < 2000) {
+      await tick(5);
+    }
+    if (counter.calls > 21) {
+      box.stopRef.stop?.();
+    }
+    expect(counter.calls).toBe(21);
+    expect(await afterGrace(exit)).toBe(0);
+    expect(box.calls).not.toContain("remove:box");
+    expect(owner(box.dir)?.detail).toBe(CAPPED);
+    expect(box.entries()).toHaveLength(1);
+  });
+
+  test("R-W10c past the limit, an exit during the removal's read: kept, and said", async () => {
+    // Mutation: no `sayCapped` after the loop → the workload stays with no reason given.
+    const jobs = new FakeJobs();
+    let calls = 0;
+    const model: ModelProvider = {
+      id: "twenty",
+      async *stream() {
+        calls += 1;
+        const n = calls;
+        if (n <= 20) {
+          setTimeout(() => jobs.fire(`j${n}`), 0); // the 21st call, the last wake, ends no job
+        }
+        yield { type: "text", delta: "again" };
+        yield { type: "done" };
+      },
+    };
+    const pod = resident(model, { jobs });
+    const box = removing({}, {}, ON);
+    let fired = false;
+    const exit = box.start(
+      reading(pod, async () => {
+        if (!fired) {
+          fired = true;
+          jobs.fire("late");
+          await tick(20);
+        }
+        return { jobs: 0, running: false, others: 0 };
+      }),
+    );
+    await waitFor(() => calls === 21 && owner(box.dir)?.state === "idle", "the last wake's end");
+    expect(owner(box.dir)?.detail).toBeUndefined();
+    expect(await afterGrace(exit)).toBe(0);
+    expect(calls).toBe(21);
+    expect(box.calls).not.toContain("remove:box");
+    expect(owner(box.dir)?.detail).toBe(CAPPED);
+  });
+
+  test("R-W11 an exit during the removal's read: no wake under it; the wake runs, then the removal", async () => {
+    // The review's REVIEW-F. Mutation: no `exiting = true` → the wake starts during
+    // the read, the plan removes, and the veto keeps the workload.
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("woke")], [1]);
+    const pod = resident(model, { jobs });
+    const box = removing({}, {}, ON);
+    let fired = false;
+    const exit = box.start(
+      reading(pod, async () => {
+        if (!fired) {
+          fired = true;
+          jobs.fire();
+          await tick(20);
+          setTimeout(() => model.open(1), 40);
+        }
+        return { jobs: 0, running: false, others: 0 };
+      }),
+    );
+    await waitFor(() => owner(box.dir)?.state === "idle", "the run's turn");
+    await afterGrace(exit);
+    expect(model.calls).toBe(2);
+    expect(box.calls).toContain("remove:box");
+    expect(await contents(box.store)).toContain("woke");
+  });
+
+  test("R-W11b an exit after the final plan: no wake, the removal goes on", async () => {
+    // Mutation: no `exiting = true` → a wake starts under the delete.
+    const jobs = new FakeJobs();
+    const model = new Waking([say("started"), say("woke")]);
+    const pod = resident(model, { jobs });
+    const box = removing({}, {}, ON);
+    const free = reading(pod, async () => ({ jobs: 0, running: false, others: 0 }));
+    const exit = box.start(async (config, deps) => {
+      const runtime = await free(config, deps);
+      return {
+        ...runtime,
+        // The first thing after the plan is final: the session's flush.
+        createSession: () => {
+          const session = runtime.createSession();
+          const flushed = session.flushed.bind(session);
+          session.flushed = async () => {
+            jobs.fire();
+            await tick(20);
+            await flushed();
+          };
+          return session;
+        },
+      };
+    });
+    await waitFor(() => owner(box.dir)?.state === "idle", "the run's turn");
+    await afterGrace(exit);
+    expect(model.calls).toBe(1);
+    expect(box.calls).toContain("remove:box");
+  });
+
+  test("R-W12 a stop during a prepared hand-over: the pending wake does not start", async () => {
+    // The review's F4. One prompt and one billed model call followed the stop.
+    for (const keep of [true, false]) {
+      const jobs = new FakeJobs();
+      const model = new Waking([say("started"), say("woke")]);
+      const pod = resident(model, { jobs });
+      const path = short();
+      const box = keep
+        ? rig({}, { controlPath: () => path }, ON)
+        : removing({ controlPath: () => path }, {}, ON);
+      const exit = box.start(pod.attach);
+      await waitFor(() => owner(box.dir)?.state === "idle", "the run's turn");
+      const { conn } = await prepareAt(path);
+      jobs.fire();
+      await tick(20);
+      expect(model.calls).toBe(1);
+      box.stopRef.stop?.();
+      await afterGrace(exit);
+      conn.close();
+      expect(model.calls).toBe(1);
+      expect(pod.frames.filter((f) => f.includes('"session/prompt"'))).toHaveLength(1);
+    }
+  });
+
   test("R-W9 another client's turn holds the slot: no failure, one log line, the wake runs after it", async () => {
     const jobs = new FakeJobs();
     const model = new Waking([say("started"), say("foreign"), say("woke")], [1]);

@@ -186,6 +186,9 @@ Gate before done: `bun test` (baseline: all pass except the three opt-in skips),
 ### Notes / debt
 
 - Pre-existing, unchanged: a TUI whose continuation loses the slot drops its wake (`App.tsx:1185-1192`); a TUI misses exits between its runtime's `attachTo` and the App's `onExit` subscription. A daemon-side "unflushed exits" count in `session/list`/open (additive field) would close both for every attach — a follow-up if wanted (Q6).
+- **Review F6, accepted:** a refused streak keeps the relay alive with no limit, since each retry clears the grace, and writes `owner.json` each tick. It costs no model calls, and a pod can already pin the relay with `jobs > 0`. A refusal does not count against the wake limit.
+- **Review F7:** `relay.test.ts` R-W9's `toBeLessThan(40)` was never seen failing (the mutant hangs first), and R-W4 (`autoWake: false`) has no mutation aimed at it.
+- **Review F8:** logic in a component and in the driver: `App.tsx` `handedWakeRef`, `relay.ts` `text === "" && !streamed && slotTaken`. If the adopted turn is still not visible at the one retry, the wake is dropped and the next turn flushes that exit (read, not run).
 
 ## Execution
 
@@ -255,6 +258,56 @@ The `toBeLessThan(40)` bound in R-W9 was never seen failing: under M10 the proce
 1. `run --detach` with the background `sleep 20; echo WAKE-DONE`: within about 30 s `relay.log` shows `wake: background job exit`, then a `state: running` with no TUI; the session record ends with `woke: WAKE-DONE`; `ps` shows `detached · running`, then `detached · idle`.
 2. `autoWake: false` in the laptop config, same run: no `wake:` line, the record ends at `started`, the relay leaves after the grace as before.
 3. After the relay leaves (up to about 30 s poll + 60 s grace): `ps` shows `up · idle`; `rm aw-test` with no `-f` and no terminal says `is still up — its detached run has ended and no terminal of it is attached. Pass -f …`; `rm -f aw-test` removes it.
+
+### Execution — round 2
+
+*— claude-opus-5-5, 2026-11-06*
+
+The orchestrator's decisions on the Review, all implemented. Not committed.
+
+**What changed.**
+- **Q-R1, the cap:** `RELAY_WAKE_LIMIT = 20`, `RelayModel.wakes`, `relayWakeCapped` in `relay-state.ts`. Only a wake counts (`turn_started{wake}`), and a refusal gives its count back. Past the limit a pending wake is not due and `exitPlan` no longer holds on it: it returns `leave`, so keep=false keeps the workload. `relay.ts` `sayCapped` writes `wake limit reached — tentacle attach <name>` to the log and the record, once. The normal grace then runs.
+- **Q-R2:** `runFinished` requires `owner.kind === "relay"`. After a TUI only detached, `ps` says `running · idle` and `rm` keeps "a session may be attached".
+- **F3:** R-W11 (the review's REVIEW-F) and R-W11b (exit after the final plan; it could be driven, by firing inside the session's flush).
+- **F4:** the stop handler emits `stop` before `abortHandover`.
+- **F5:** `relayRow` uses `tied && runFinished(...)`.
+- **F6, F7, F8:** Notes/debt only. `TODO.md` untouched.
+
+**Drift.**
+- **Added beyond the decisions:** R-W10c and a `sayCapped` call after the exit loop. An exit landing during the final read, past the limit, otherwise left a keep=false workload with no reason given.
+- **The cap's keep=false rule applies only when a wake is owed.** If the 20th wake ends with nothing pending, nothing was cut off, so the normal removal runs (pinned in the `relay-state` cap test). This reads the decision narrowly: "the agent was cut off mid-work".
+- **A stop past the limit still removes** (DR-5): the user asked for it.
+- **Corrects round 1:** the "finished" rule above narrows that section's `ps`/`rm` bullet, and the "no bound" reading of "≤ 1 wake per turn end" is gone.
+
+**Red first.**
+
+| Fix | Test | Red on round 1's code |
+|---|---|---|
+| Q-R1 | R-W10, R-W10b | `Expected: 21`, received 22 and 23 |
+| Q-R1 | `relay-state` cap tests | `RELAY_WAKE_LIMIT` not exported (module error, not an assertion); their property is shown by M-B, M-D, M-E |
+| Q-R2 | `kept-cmd` detached TUI (`ps`, `rm`) | the `ps` test failed; the `rm` case received the "has ended" wording |
+| F4 | R-W12 | `Expected: 1`, received 2 model calls |
+| F5 | `kept-cmd` R4 | received `up · idle` |
+
+R-W11, R-W11b and R-W10c are green by nature on the code they guard, so their red is on the mutants below.
+
+**Mutations** (`cp` backup, `shasum -c` identical after each group, backups removed):
+
+| Mutation | Killed by |
+|---|---|
+| M-A no `exiting = true` | R-W11 (not removed), R-W11b (`Expected: 1`, received 2: a wake started after the final plan) |
+| M-B capped row of `exitPlan` falls through | R-W10b, `relay-state` cap test |
+| M-C no `sayCapped` after the loop | R-W10c |
+| M-D a refusal keeps its count | `relay-state` count test |
+| M-E the run's own turn counts as a wake | R-W10, `relay-state` count test |
+
+M-A and M-B ran in one group, as did M-C and M-D: each pair touches different code and is read through its own tests. M-A's R-W11b confirms what the Review only reasoned: without the guard, a wake starts in that window. I did not assert whether it reaches the delete.
+
+**Gate (foreground, final code).** `bunx tsc --noEmit`: clean. `bunx biome check .`: clean, after formatting `kept-cmd.test.ts`. `bun test packages`: 4899 pass, 3 skip (opt-in), 0 fail; the reaper flake did not appear. Only `CHANGELOG.md` and docs changed after that run.
+
+**Unverified.**
+- **Still nothing run live.** The checklist above stands. New step: a turn that keeps ending jobs should stop at 21 model calls, with `ps` showing `idle (wake limit reached — tentacle attach <name>)`.
+- **The cap's value is the Review's estimate, not a measurement.** A legitimate long poll loop stops at 20; `attach` resumes it. If the relay has already left, the owed exit reaches the agent only at the next turn's flush; the attaching TUI gets no `wakePending`.
 
 ## Review
 

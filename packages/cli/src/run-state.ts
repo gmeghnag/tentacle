@@ -486,7 +486,9 @@ export function statusOf(
  * reports is the WORKLOAD, not the run (docs/fix/detached-autowake.md).
  */
 export function runFinished(read: OwnerRead, alive: boolean, attached: number): boolean {
-  if (alive || attached > 0 || read.kind !== "owner") {
+  // A TUI record only says its last terminal left: that detaches, and jobs or a
+  // turn may be alive in the pod. A relay's `idle` read 0 jobs before it left.
+  if (alive || attached > 0 || read.kind !== "owner" || read.owner.kind !== "relay") {
     return false;
   }
   const { state } = read.owner;

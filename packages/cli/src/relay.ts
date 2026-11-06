@@ -57,6 +57,7 @@ import {
   relayExits,
   relayStep,
   relayView,
+  relayWakeCapped,
   relayWakeDue,
   wantsAwake,
 } from "./relay-state.ts";
@@ -279,8 +280,10 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       }
       return;
     }
-    abortHandover("the relay was stopped");
+    // The stop first: the abort gives the relay back its wake, and a stop must
+    // not start one.
     emit({ type: "stop" });
+    abortHandover("the relay was stopped");
     stopSignal.abort();
   });
   let disarmNet = (): void => {};
@@ -379,7 +382,7 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   const session = runtime.createSession();
   policy.bindOwnsTurn((turnId) => session.ownsTurn(turnId));
   const drive = async (text: string): Promise<void> => {
-    emit({ type: "turn_started" });
+    emit({ type: "turn_started", ...(text === "" ? { wake: true } : {}) });
     let reason = "end_turn";
     let streamed = false;
     try {
@@ -420,7 +423,22 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   const offExit = config.autoWake
     ? runtime.jobs.onExit(() => emit({ type: "job_exit" }))
     : () => {};
+  let cappedSaid = false;
+  /** Once, in the record (`ps`) and the log: the run stopped short, and how to go on. */
+  const sayCapped = (): void => {
+    if (cappedSaid) {
+      return;
+    }
+    cappedSaid = true;
+    const note = `wake limit reached — tentacle attach ${entry.name}`;
+    log(note);
+    emit({ type: "note", detail: note });
+  };
   maybeWake = () => {
+    if (relayWakeCapped(model, exiting)) {
+      sayCapped();
+      return;
+    }
     if (!relayWakeDue(model, exiting)) {
       return;
     }
@@ -564,6 +582,10 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
       emit({ type: "jobs", n: use?.jobs ?? 0 });
     }
     emit({ type: "busy" });
+  }
+  // An exit that landed during the last read, past the limit: said here.
+  if (relayWakeCapped(model, false)) {
+    sayCapped();
   }
   if (plan.kind === "leave" && plan.why !== undefined) {
     log(`workload kept: ${plan.why}`);

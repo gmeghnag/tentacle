@@ -503,6 +503,20 @@ describe("tentacle ps: detached runs (docs/feat/detached-relay-lifecycle.md L28)
     expect(lost).toContain("running · relay lost");
   });
 
+  test("a TUI that only detached is no finished run: `running · idle` stays", async () => {
+    // The review's F2. Mutation: `runFinished` ignores the record's kind.
+    const text = await rows((dir) => writeOwner(dir, { ...ownerOf("idle"), kind: "tui" }));
+    expect(text).toContain("running · idle");
+    expect(text).not.toContain("up · idle");
+  });
+
+  test("R4 a record of an EARLIER workload of a reused name: the run is not this workload's", async () => {
+    // The review's F5. Mutation: no tie in `relayRow`.
+    const text = await rows((dir) => writeOwner(dir, ownerOf("idle", "2001-01-01T00:00:00.000Z")));
+    expect(text).toContain("running · idle");
+    expect(text).not.toContain("up · idle");
+  });
+
   test("-v: pid, session, log, removal", async () => {
     let log = "";
     const text = await rows((dir) => {
@@ -644,6 +658,11 @@ describe("tentacle rm", () => {
     reused.s.interactive("n");
     await rmCommand("a", {}, reused.s.deps({ procOf }));
     expect(reused.s.asked).toEqual([guess]);
+    // A TUI only detached (the review's F2): jobs may still run in the pod.
+    const detached = prepared((dir) => writeOwner(dir, { ...ownerOf("idle"), kind: "tui" }));
+    detached.s.interactive("n");
+    await rmCommand("a", {}, detached.s.deps({ procOf }));
+    expect(detached.s.asked).toEqual([guess]);
   });
 
   test("running with no terminal → refused (pass -f); -f → no question, removed", async () => {

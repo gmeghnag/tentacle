@@ -222,7 +222,7 @@ function relayRow(entry: KeptEntry, deps: KeptDeps, now: number): KeptRelay | un
     ...(known ? { sessionId: known.sessionId } : {}),
     log: relayLogPath(dir),
     keep: known ? ownerKeeps(known) : true,
-    ...(runFinished(read, holder !== null, tuis.length) ? { finished: true } : {}),
+    ...(tied && runFinished(read, holder !== null, tuis.length) ? { finished: true } : {}),
   };
 }
 

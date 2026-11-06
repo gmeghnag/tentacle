@@ -3,6 +3,7 @@ import type { SessionListEntry } from "@tentacle/protocol";
 import {
   RELAY_IDLE_GRACE_MS,
   RELAY_STOP_BOUND_MS,
+  RELAY_WAKE_LIMIT,
   type RelayEvent,
   type RelayModel,
   type ResidentUse,
@@ -13,6 +14,7 @@ import {
   relayExits,
   relayStep,
   relayView,
+  relayWakeCapped,
   relayWakeDue,
   residentUseOf,
   wantsAwake,
@@ -76,6 +78,48 @@ describe("the wake on a job exit (docs/fix/detached-autowake.md)", () => {
     expect(refused.rest).toBe("idle");
     expect(refused.detail).toBeUndefined();
     expect(relayWakeDue(refused, false)).toBe(true);
+  });
+
+  test("the cap: past the limit a pending wake is not due, is said, and holds nothing", () => {
+    // Mutation: drop the cap from `relayWakeDue` → the loop has no end (REVIEW-A).
+    const started = (n: number): RelayModel => {
+      let model = over;
+      for (let i = 0; i < n; i++) {
+        model = run(
+          [
+            { type: "turn_started", wake: true },
+            { type: "turn_ended", reason: "end_turn" },
+          ],
+          model,
+        );
+      }
+      return model;
+    };
+    const below = run([exit], started(RELAY_WAKE_LIMIT - 1));
+    expect(relayWakeDue(below, false)).toBe(true);
+    expect(relayWakeCapped(below, false)).toBe(false);
+    const nothingOwed = started(RELAY_WAKE_LIMIT);
+    expect(relayWakeCapped(nothingOwed, false)).toBe(false);
+    // Nothing was cut off: a keep=false run ends as usual.
+    expect(exitPlan(nothingOwed, false, free)).toEqual({ kind: "remove" });
+    const capped = run([exit], nothingOwed);
+    expect(relayWakeDue(capped, false)).toBe(false);
+    expect(relayWakeCapped(capped, false)).toBe(true);
+    // The grace runs, and keep=false keeps: the agent was cut off mid-work.
+    expect(run([{ type: "tick", now: 1000 }], capped).exitAt).toBeDefined();
+    expect(exitPlan(capped, true, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(capped, false, free)).toEqual({ kind: "leave" });
+    // A stop still removes; a blocked wake is not a capped one.
+    expect(exitPlan(run([{ type: "stop" }], capped), false, free)).toEqual({ kind: "remove" });
+    expect(relayWakeCapped(run([{ type: "stop" }], capped), false)).toBe(false);
+    expect(relayWakeCapped(capped, true)).toBe(false);
+  });
+
+  test("the cap counts wakes that ran: the run's own turn and a refusal are free", () => {
+    expect(over.wakes).toBe(0);
+    const once = run([{ type: "turn_started", wake: true }], pendingIdle);
+    expect(once.wakes).toBe(1);
+    expect(run([{ type: "wake_refused" }], once).wakes).toBe(0);
   });
 
   test("exitPlan: a pending wake holds, keep or not; a stop or a stopped link still exits", () => {
