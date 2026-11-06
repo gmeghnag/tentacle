@@ -39,7 +39,14 @@
  * epoch (the agent's one `pop` is never behind a marker; a replacement starts
  * a new epoch).
  */
-import type { AgentEvent, AskHooksTrust, BeforeRun, Session } from "@tentacle/agent";
+import type {
+  Agent,
+  AgentEvent,
+  AskHooksTrust,
+  BeforeRun,
+  Session,
+  SessionGrants,
+} from "@tentacle/agent";
 import type {
   ChatMessage,
   JobController,
@@ -277,7 +284,11 @@ export class HostedSession {
   readonly id: string;
   /** What the factory did with `session/open.settings`; told to whoever attaches. */
   settingsReport: SessionSettingsReport | undefined;
+  /** The session's approvals (the factory's), handed to the next agent on a settings sync. */
+  grants: SessionGrants | undefined;
   private readonly session: Session;
+  /** The factory's broker: its requester is this session's (installed once, below). */
+  private readonly permissions: PermissionBroker;
   /** The busy slot: the active turn's OR compaction's controller (`cancel` aborts it). */
   private controller: AbortController | null = null;
   /** Which operation holds the slot: true for a compaction. */
@@ -368,7 +379,8 @@ export class HostedSession {
   private lastChangeAt: number;
   /** The title, one truth (`session-title.ts`). */
   private title: TitleState;
-  private readonly titleModel: ModelProvider | undefined;
+  /** Replaced with the agent by a settings sync (`autoTitle` is the laptop's to toggle). */
+  private titleModel: ModelProvider | undefined;
   private readonly titleTimeoutMs: number;
   /** The title request in flight; aborted by whatever takes the slot (never in the user's way). */
   private titleJob: AbortController | null = null;
@@ -417,6 +429,7 @@ export class HostedSession {
       }
     }
     this.session = session;
+    this.permissions = permissions;
     this.jobs = jobs;
     this.errorPolicy = errorPolicy;
     this.ring = new SessionRing(ringBytes);
@@ -1369,12 +1382,52 @@ export class HostedSession {
     this.persist();
   }
 
+  /** What a rebuilt agent takes over (`AgentContext.reuse`, docs/feat/session-settings-apply.md). */
+  reusable(): {
+    readonly permissions: PermissionBroker;
+    readonly jobs?: JobController;
+    readonly grants?: SessionGrants;
+  } {
+    return {
+      permissions: this.permissions,
+      ...(this.jobs ? { jobs: this.jobs } : {}),
+      ...(this.grants ? { grants: this.grants } : {}),
+    };
+  }
+
+  /**
+   * Run the next turns on `next` (a settings sync). The caller checked
+   * `assertIdle` in the same synchronous stretch and built `next` on this
+   * session's broker and jobs: the old agent's undrained job exits move to it,
+   * and the old one stops collecting. Then every attached client is told
+   * (`session_settings`, display). Not a conversation change: `lastChangeAt`
+   * stays (the system head, replaced in place, is not a turn).
+   */
+  swapAgent(
+    next: Agent,
+    state: {
+      readonly settingsReport: SessionSettingsReport;
+      readonly titleModel?: ModelProvider;
+      readonly grants?: SessionGrants;
+      readonly id: string;
+    },
+  ): void {
+    const previous = this.session.replaceAgent(next);
+    next.adoptExits(previous.retire());
+    this.titleModel = state.titleModel;
+    this.grants = state.grants;
+    this.settingsReport = state.settingsReport;
+    this.persist();
+    this.emit({ type: "session_settings", settings: state.settingsReport, id: state.id });
+  }
+
   /**
    * Refuse a new operation while the busy slot is held. Every taker of the slot
    * calls this and takes it in the same synchronous stretch, so two concurrent
-   * requests can never both pass.
+   * requests can never both pass. Package-visible for `SessionHost.updateSettings`,
+   * which checks it and swaps the agent in the same synchronous stretch.
    */
-  private assertIdle(): void {
+  assertIdle(): void {
     if (this.controller) {
       throw this.compacting
         ? new RpcError(DomainErrorCode.CompactInProgress, "a compaction is running")

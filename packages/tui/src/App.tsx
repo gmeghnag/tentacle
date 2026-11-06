@@ -138,6 +138,7 @@ import {
   switchRefusedNotice,
   switchingRefusal,
 } from "./sessions-panel.ts";
+import { SETTINGS_SYNCING, settingsCommand } from "./settings-command.ts";
 import { type SessionSkillsView, SkillsSync } from "./skills-sync.ts";
 import {
   type DisplayItem,
@@ -152,6 +153,7 @@ import {
   failTurn,
   initialState,
   pushNoticeItem,
+  replaceWithNotices,
   resetHistory,
   startContinuation,
   startTurn,
@@ -182,6 +184,12 @@ import {
  * remote `RemoteSession` satisfy it, so the TUI renders a local or remote
  * session identically.
  */
+/** One `/settings` line: blue notice text, and a hint drawn grey after it. */
+export interface SettingsNoticeLine {
+  readonly text: string;
+  readonly hint?: string;
+}
+
 export interface SessionController {
   /**
    * A remote session also yields the reconnect events (`history_reset`,
@@ -194,6 +202,14 @@ export interface SessionController {
   ): AsyncIterable<SessionEvent>;
   /** Compact the conversation (summarise + replace history); optional. */
   compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
+  /**
+   * `/settings` (docs/feat/session-settings-apply.md): the session's settings
+   * vs this terminal's, as lines the host built. Optional: absent where this
+   * terminal carries no settings (the worker, `connect`).
+   */
+  settings?(): readonly SettingsNoticeLine[];
+  /** `/settings sync`: the outcome as lines (never rejects). Present with `settings`. */
+  updateSettings?(): Promise<readonly SettingsNoticeLine[]>;
   /**
    * Queue a message mid-turn (steering); optional. Local is sync, remote a
    * Promise. `id`: the TUI's key for the text, which a `sendNow` cites.
@@ -485,6 +501,8 @@ export function App({
   // is the truth; the state renders the rows. `compactionOwnedRef`: a send-now
   // of ours took it — the rows are the send-now's, not the settle hook's.
   const compactingRef = useRef(false);
+  /** The session a `/settings sync` is in flight on (docs/feat/session-settings-apply.md F4). */
+  const syncingRef = useRef<SessionController | null>(null);
   const [compacting, setCompactingState] = useState(false);
   const setCompacting = useCallback((on: boolean) => {
     compactingRef.current = on;
@@ -1859,6 +1877,59 @@ export function App({
           );
           return;
         }
+        case "/settings": {
+          // docs/feat/session-settings-apply.md: the host builds the lines.
+          const session = sessionRef.current;
+          const lines = (shown: readonly SettingsNoticeLine[]) => {
+            for (const { text, hint } of shown) {
+              stateRef.current = appendNotice(stateRef.current, text, hint ? { hint } : {});
+            }
+            setScrollOffset(0);
+            flushNow();
+          };
+          const step = settingsCommand(raw, {
+            running: stateRef.current.running,
+            compacting: compactingRef.current,
+            available: session?.settings !== undefined && session.updateSettings !== undefined,
+            syncing: session !== null && syncingRef.current === session,
+          });
+          if (step.kind === "notice") {
+            lines([{ text: step.text }]);
+          } else if (step.kind === "show") {
+            lines(session?.settings?.() ?? []);
+          } else if (session?.updateSettings) {
+            // During an outage it waits for the link: never nothing on screen.
+            syncingRef.current = session;
+            lines([{ text: SETTINGS_SYNCING }]);
+            const pending = stateRef.current.items.at(-1);
+            const settled = (outcome: readonly SettingsNoticeLine[]) => {
+              if (syncingRef.current === session) {
+                syncingRef.current = null;
+              }
+              // Moved to another session meanwhile: not that session's news
+              // (`/settings` on this one tells the truth when you are back), so
+              // the pending line just goes, where a swap kept the transcript.
+              const moved = sessionRef.current !== session;
+              if (pending !== undefined) {
+                stateRef.current = replaceWithNotices(
+                  stateRef.current,
+                  pending,
+                  moved ? [] : outcome,
+                );
+              }
+              flushNow();
+              if (!moved) {
+                setScrollOffset(0);
+                // The prompt or tools may have changed: the open figure is stale.
+                askContext(session);
+              }
+            };
+            void session
+              .updateSettings()
+              .then(settled, () => settled([{ text: "Could not sync the settings." }]));
+          }
+          return;
+        }
         case "/rename": {
           const session = sessionRef.current;
           if (!session?.rename) {
@@ -1969,6 +2040,7 @@ export function App({
       sessions,
       skillsSync,
       askContext,
+      flushNow,
       model,
       pushNotice,
       requestQuit,

@@ -58,7 +58,8 @@ export class Session {
   readonly id: string;
   /** The running conversation history (read-only view for callers). */
   readonly messages: ChatMessage[];
-  private readonly agent: Agent;
+  /** Read at call time only: `replaceAgent` swaps it between turns. */
+  private agent: Agent;
   private readonly onPersist?: (snapshot: SessionSnapshot) => void;
   /** User messages queued mid-turn, drained into the loop at each boundary. */
   private steering: string[] = [];
@@ -72,6 +73,25 @@ export class Session {
         ? [...options.messages]
         : agent.startConversation();
     this.onPersist = options.onPersist;
+  }
+
+  /**
+   * Run the next turns on `next` (docs/feat/session-settings-apply.md): the
+   * caller swaps it BETWEEN turns, in one synchronous stretch, and hands over
+   * what it owns (job exits: `Agent.retire` / `adoptExits`). The history is
+   * kept; a system head is replaced IN PLACE by `next`'s prompt (same length:
+   * no index of the history moves). A history whose head is not a system
+   * message, or a `next` with no prompt, keeps its head. Returns the agent it
+   * replaced (the caller retires it).
+   */
+  replaceAgent(next: Agent): Agent {
+    const previous = this.agent;
+    this.agent = next;
+    const head = next.startConversation()[0];
+    if (this.messages[0]?.role === "system" && head?.role === "system") {
+      this.messages[0] = head;
+    }
+    return previous;
   }
 
   /** A snapshot of durable state, for persisting or inspecting the session. */

@@ -13,6 +13,8 @@ import { ToolRegistry, shellTool } from "@tentacle/tools";
 import chalk from "chalk";
 import { render } from "ink-testing-library";
 import stringWidth from "string-width";
+// A test only: the TUI's package never depends on the cli's.
+import { settingsShowLines } from "../../cli/src/settings-view.ts";
 import { App } from "../src/App.tsx";
 import { BLINK_HALF_MS } from "../src/blink.ts";
 import * as format from "../src/format.ts";
@@ -21,6 +23,7 @@ import { IDLE_WARM_DELAY_MS, type IdleWarmState } from "../src/idle-warm.ts";
 import type { LinkStatusView } from "../src/link-status.ts";
 import * as renderLines from "../src/render-lines.ts";
 import { messagesToItems } from "../src/resume.ts";
+import type { SessionActivity } from "../src/turn-feed.ts";
 import * as turnFeed from "../src/turn-feed.ts";
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -530,6 +533,278 @@ describe("App", () => {
     await delay(80);
     expect(compacted).toBe(1);
     expect(lastFrame() ?? "").toContain("8 → 2 messages");
+    unmount();
+  });
+
+  test("/settings shows the host's lines; /settings sync applies and shows its outcome (docs/feat/session-settings-apply.md)", async () => {
+    // Mutation: remove the App's `/settings` case → nothing is shown, nothing synced.
+    let synced = 0;
+    const createSession = () => ({
+      async *send() {
+        // no model turn needed for this test
+      },
+      settings: () => [
+        { text: '{\n  "maxIterations": 5 // this terminal: 3\n}' },
+        {
+          text: "1 differs from this terminal",
+          hint: "(/settings sync to use this terminal's values)",
+        },
+      ],
+      async updateSettings() {
+        synced += 1;
+        return [{ text: "Session settings synced." }];
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/settings");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    const shown = stripAnsi(lastFrame() ?? "");
+    expect(shown).toContain('"maxIterations": 5 // this terminal: 3');
+    expect(shown).toContain(
+      "⏺ 1 differs from this terminal (/settings sync to use this terminal's values)",
+    );
+    expect(synced).toBe(0);
+    stdin.write("/settings sync");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(synced).toBe(1);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Session settings synced.");
+    unmount();
+  });
+
+  test("F4 /settings sync shows it is pending, refuses a second one, then its outcome", async () => {
+    // Mutation: no pending line → an outage looks like nothing happened.
+    let synced = 0;
+    let finish: (lines: readonly { text: string }[]) => void = () => {};
+    const createSession = () => ({
+      async *send() {
+        // no model turn needed for this test
+      },
+      settings: () => [],
+      updateSettings() {
+        synced += 1;
+        return new Promise<readonly { text: string }[]>((resolve) => {
+          finish = resolve;
+        });
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/settings sync");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Syncing this terminal's settings…");
+    stdin.write("/settings sync");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(synced).toBe(1);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Already syncing this terminal's settings…");
+    finish([{ text: "Session settings synced." }]);
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Session settings synced.");
+    // Settled: another apply goes through.
+    stdin.write("/settings sync");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(synced).toBe(2);
+    finish([]);
+    unmount();
+  });
+
+  test("/settings is ONE entry: title, block with its indentation, the count as its last line", async () => {
+    // Drawn from the real view-model. Mutation: trim the rows → the nesting is gone.
+    const createSession = () => ({
+      async *send() {
+        // no model turn needed for this test
+      },
+      settings: () =>
+        settingsShowLines(
+          { contextWindow: 2000, maxIterations: 3 },
+          {
+            carried: { contextWindow: 1000, maxIterations: 7 },
+            overridden: {},
+            containerKeys: ["maxIterations"],
+          },
+        ),
+      async updateSettings() {
+        return [];
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/settings");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    const rows = stripAnsi(lastFrame() ?? "").split("\n");
+    const start = rows.findIndex((row) => row.startsWith("⏺ Session settings:"));
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(rows.slice(start, start + 8).map((row) => row.trimEnd())).toEqual([
+      "⏺ Session settings:",
+      "  {",
+      '    "model": {',
+      '      "contextWindow": 1000 // this terminal: 2000',
+      "    },",
+      '    "maxIterations": 7 // (container) this terminal: 3',
+      "  }",
+      "  1 differs from this terminal (/settings sync to use this terminal's values)",
+    ]);
+    unmount();
+  });
+
+  for (const [name, outcome] of [
+    ["success", "Session settings synced."],
+    ["failure", "Can't sync settings while a turn is running."],
+  ] as const) {
+    test(`item 3: the pending line becomes its outcome in the same entry (${name})`, async () => {
+      // Round 3: the outcome is a second entry below, the pending line stays.
+      let finish: (lines: readonly { text: string }[]) => void = () => {};
+      const createSession = () => ({
+        async *send() {
+          // no model turn needed for this test
+        },
+        settings: () => [{ text: "SHOWN MEANWHILE" }],
+        updateSettings() {
+          return new Promise<readonly { text: string }[]>((resolve) => {
+            finish = resolve;
+          });
+        },
+      });
+      const { stdin, lastFrame, unmount } = render(
+        <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+      );
+      await delay(30);
+      stdin.write("/settings sync");
+      await delay(30);
+      stdin.write("\r");
+      await delay(60);
+      stdin.write("/settings");
+      await delay(30);
+      stdin.write("\r");
+      await delay(60);
+      finish([{ text: outcome }]);
+      await delay(60);
+      const frame = stripAnsi(lastFrame() ?? "");
+      expect(frame).not.toContain("Syncing this terminal's settings…");
+      expect(frame.match(/⏺/g)).toHaveLength(3); // ready, the outcome, the show
+      expect(frame.indexOf(`⏺ ${outcome}`)).toBeGreaterThan(-1);
+      expect(frame.indexOf(`⏺ ${outcome}`)).toBeLessThan(frame.indexOf("⏺ SHOWN MEANWHILE"));
+      unmount();
+    });
+  }
+
+  test("R2-3 a pending line never outlives its sync when the transcript stays (a session closed elsewhere)", async () => {
+    // Round 2: "Syncing…" stays on screen for ever, with no outcome.
+    const finish: ((lines: readonly { text: string }[]) => void)[] = [];
+    let raise: (activity: SessionActivity) => void = () => {};
+    const createSession = () => ({
+      async *send() {
+        yield { type: "turn_end" as const, reason: "end_turn" as const };
+      },
+      settings: () => [],
+      updateSettings() {
+        return new Promise<readonly { text: string }[]>((resolve) => {
+          finish.push(resolve);
+        });
+      },
+      watch(listener: (activity: SessionActivity) => void) {
+        raise = listener;
+        return () => {};
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("hello");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    stdin.write("/settings sync");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("Syncing this terminal's settings…");
+    raise({ kind: "closed", reason: "closed" });
+    await delay(60);
+    finish[0]?.([{ text: "OUTCOME OF THE OLD SESSION" }]);
+    await delay(60);
+    const frame = stripAnsi(lastFrame() ?? "");
+    expect(frame).not.toContain("Syncing this terminal's settings…");
+    expect(frame).not.toContain("OUTCOME OF THE OLD SESSION");
+    expect(frame).toContain("hello"); // the transcript stayed
+    unmount();
+  });
+
+  test("F4 an apply's outcome stays with the session it was issued on", async () => {
+    // Mutation: drop the session check → the old session's outcome lands on the new one.
+    const finish: ((lines: readonly { text: string }[]) => void)[] = [];
+    const createSession = () => ({
+      async *send() {
+        // no model turn needed for this test
+      },
+      settings: () => [],
+      updateSettings() {
+        return new Promise<readonly { text: string }[]>((resolve) => {
+          finish.push(resolve);
+        });
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/settings sync");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    stdin.write("/clear");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    finish[0]?.([{ text: "OUTCOME OF THE OLD SESSION" }]);
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).not.toContain("OUTCOME OF THE OLD SESSION");
+    // The new session is not held by the old one's apply.
+    stdin.write("/settings sync");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(finish).toHaveLength(2);
+    finish[1]?.([{ text: "OUTCOME OF THE NEW SESSION" }]);
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("OUTCOME OF THE NEW SESSION");
+    unmount();
+  });
+
+  test("/settings on a session that carries nothing: not available, nothing called", async () => {
+    const createSession = () => ({
+      async *send() {
+        // no model turn needed for this test
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/settings sync");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("/settings isn't available for this session.");
     unmount();
   });
 

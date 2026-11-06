@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, JsonSessionStore, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import {
+  type AgentReuse,
   Connection,
   DEFAULT_MAX_DETACHED_SESSIONS,
   DEFAULT_MAX_SESSIONS,
@@ -385,6 +386,8 @@ export function tunnelledAgent(
     readonly log?: (line: string) => void;
     /** The pod daemon's shared skill scan (docs/feat/skills-hot-reload.md). */
     readonly skillScan?: SkillScan;
+    /** A live session's broker, jobs and approvals: a settings sync rebuilds its agent on them. */
+    readonly reuse?: AgentReuse;
   } = {},
 ): WiredAgent & {
   readonly settingsReport?: SessionSettingsReport;
@@ -426,6 +429,13 @@ export function tunnelledAgent(
     ...(options.skillScan && config.skillsEnabled ? { skillScan: options.skillScan } : {}),
     modelOverride: tunnelFor(),
     ...(config.autoTitle ? { titleModelOverride: tunnelFor("title") } : {}),
+    ...(options.reuse
+      ? {
+          permissions: options.reuse.permissions,
+          ...(options.reuse.jobs ? { jobs: options.reuse.jobs } : {}),
+          ...(options.reuse.grants ? { grants: options.reuse.grants } : {}),
+        }
+      : {}),
   });
   return { ...wired, ...(report ? { settingsReport: report } : {}), pinnedOver };
 }
@@ -475,14 +485,16 @@ export function podSessionHost(
     // than it needs, and stays symmetric with `serve`); the real one goes to
     // the daemon's stderr log (piped + routed by the laptop, never inherited).
     ...(log ? { onTurnError: (error: Error) => log(`error: ${error.message}`) } : {}),
-    createAgent: (cwd, { modelLink, settings }) => {
+    createAgent: (cwd, { modelLink, settings, reuse }) => {
       if (!options.modelProxy) {
+        // It reports nothing: a settings sync answers `applied: false`.
         return buildAgent({ ...config, cwd }, { ...(log ? { log, notice: log } : {}), skillScan });
       }
       const wired = tunnelledAgent({ ...config, cwd }, modelLink, {
         ...(settings ? { settings } : {}),
         ...(log ? { log } : {}),
         skillScan,
+        ...(reuse ? { reuse } : {}),
       });
       logPins(wired.pinnedOver);
       return wired;

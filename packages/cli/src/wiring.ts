@@ -240,6 +240,8 @@ export interface WiredAgent {
   readonly jobs: JobController;
   /** The tool registry — MCP tools are registered into it after connecting. */
   readonly tools: ToolRegistry;
+  /** The session's approvals (one store for its whole tree); handed over on a rebuild. */
+  readonly grants: SessionGrants;
   /** The provider a daemon asks for the session's title (`AgentFactory.titleModel`); absent with `autoTitle` off. */
   readonly titleModel?: ModelProvider;
 }
@@ -295,6 +297,13 @@ export interface BuildAgentOptions {
    * installs its prompt on — two brokers silently decouple (AGENTS §7).
    */
   readonly permissions?: PermissionBroker;
+  /**
+   * A live session's jobs and approvals, instead of fresh ones: its agent is
+   * REBUILT by a settings sync (docs/feat/session-settings-apply.md), and its
+   * running jobs and the approvals the user gave must carry over.
+   */
+  readonly jobs?: JobController;
+  readonly grants?: SessionGrants;
   /**
    * Daemon-side log for hook failures (`onFailure: "ignore"`). Never the
    * terminal while Ink owns it (AGENTS §7): a log file / the piped stderr.
@@ -358,7 +367,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   const permissions = options.permissions ?? new PermissionBroker();
   // Background jobs let the shell tools launch long-running processes (servers,
   // watchers) without blocking the turn; their exits surface on the next turn.
-  const jobs = new BackgroundJobs(env);
+  const jobs = options.jobs ?? new BackgroundJobs(env);
   // The harness's value-add layer over raw tool output. Order matters: redact
   // secrets FIRST (so they never reach the context or the spilled file), then
   // handle large output — either an LLM summary (opt-in, costs a model call) or
@@ -447,7 +456,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // One store of approvals and one ask at a time for this session's whole tree
   // (docs/feat/parallel-agents.md, Design 3). The ONE broker is still the only
   // requester: the lane only orders calls to it.
-  const grants = new SessionGrants();
+  const grants = options.grants ?? new SessionGrants();
 
   // Sub-agents: when enabled, register the `agent_task` delegation tool. Children
   // inherit the same confined env + permission requester; the runner filters
@@ -551,7 +560,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         ? configuredModelProvider(config, config.titleModel)
         : model))
     : undefined;
-  return { agent, permissions, jobs, tools, ...(titleModel ? { titleModel } : {}) };
+  return { agent, permissions, jobs, tools, grants, ...(titleModel ? { titleModel } : {}) };
 }
 
 /**

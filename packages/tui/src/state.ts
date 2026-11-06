@@ -42,7 +42,7 @@ export interface AssistantItem {
 export interface NoticeItem {
   readonly kind: "notice";
   readonly text: string;
-  /** A grey aside after the text (`(/clear to reset)`): its own field, never parsed from `text`. */
+  /** A grey aside after the text (`(/settings sync to use this terminal's values, or /clear)`): its own field, never parsed from `text`. */
   readonly hint?: string;
   /** Identifies a background-job notice so the live + event paths dedupe. */
   readonly jobId?: string;
@@ -149,6 +149,29 @@ export function appendNotice(
     ...(opts.host ? { host: true as const } : {}),
   };
   return { ...state, items: append(state.items, item) };
+}
+
+/**
+ * A pending entry becomes its outcome: `lines` take its place in the transcript
+ * (none: it just goes). Found by identity. If a history reset already took it,
+ * the lines are appended, never lost.
+ */
+export function replaceWithNotices(
+  state: DisplayState,
+  item: DisplayItem,
+  lines: readonly { readonly text: string; readonly hint?: string }[],
+): DisplayState {
+  const notices = lines.map(
+    ({ text, hint }): NoticeItem => ({ kind: "notice", text, ...(hint ? { hint } : {}) }),
+  );
+  const at = state.items.indexOf(item);
+  return {
+    ...state,
+    items:
+      at < 0
+        ? [...state.items, ...notices]
+        : [...state.items.slice(0, at), ...notices, ...state.items.slice(at + 1)],
+  };
 }
 
 /**

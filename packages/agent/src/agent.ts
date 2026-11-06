@@ -505,6 +505,8 @@ export class Agent {
   private rescan: Promise<SkillListing> | null = null;
   /** Background jobs that finished since the last turn, awaiting surfacing. */
   private readonly pendingExits: BackgroundJob[] = [];
+  /** Leaves the jobs' exit stream (`retire`). */
+  private unsubscribeExits: (() => void) | undefined;
   /**
    * The provider's last measure of each history (keyed by the array a Session
    * keeps for its life), so a turn's first request counts from real numbers.
@@ -532,7 +534,23 @@ export class Agent {
     );
     // Collect background-job exits as they happen; they are flushed into the
     // conversation (and event stream) at the top of the next turn.
-    config.jobs?.onExit((job) => this.pendingExits.push(job));
+    this.unsubscribeExits = config.jobs?.onExit((job) => this.pendingExits.push(job));
+  }
+
+  /**
+   * This agent is replaced (docs/feat/session-settings-apply.md): it stops
+   * collecting job exits and hands back the ones no turn has surfaced yet, for
+   * the next agent's `adoptExits`. Idempotent.
+   */
+  retire(): BackgroundJob[] {
+    this.unsubscribeExits?.();
+    this.unsubscribeExits = undefined;
+    return this.pendingExits.splice(0);
+  }
+
+  /** Job exits a retired agent had not surfaced: told at this agent's next turn. */
+  adoptExits(exits: readonly BackgroundJob[]): void {
+    this.pendingExits.unshift(...exits);
   }
 
   /** Whether the user may activate `name` (`/name`) in this agent. */

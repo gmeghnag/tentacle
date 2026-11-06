@@ -8,8 +8,25 @@ those.
 
 ## [Unreleased]
 
+### Added
+
+- **`/settings` and `/settings sync`.** `/settings` shows all the settings of the
+  running session as one indented JSON block, nested as in `config.jsonc`, with
+  comments for the values the container sets (`// (container)`) and those that differ
+  from this terminal (`// this terminal: …`). `/settings sync` applies this terminal's
+  settings to the live session, between turns: the conversation, background jobs, your
+  approvals and other terminals stay, and those terminals see `Session settings changed
+  by another terminal: { … }`. Values the container's own config sets still win. A
+  project-hooks trust you gave is asked again after a sync. Not available on `connect`
+  or a local session.
+
 ### Changed
 
+- **Attaching to a session is now bounded.** A daemon that makes no progress for 30
+  seconds (no answer, no new page of the history) no longer leaves the terminal
+  waiting for ever; a long history on a slow link still loads. `attach` says so and
+  opens the session at your first prompt; attaching to a detached run, and `connect`,
+  fail with `no answer from the daemon within 30s`, so you can retry.
 - **`tentacle run --rm` replaces `--keep`, as in docker and kubectl.** A run still
   keeps its pod or container by default; `--rm` removes it when the run ends
   (`--detach --rm`: when the run goes idle or is stopped), and `--rm=false`
@@ -44,7 +61,7 @@ those.
   unchanged.
 - **Notices are soft blue, their hint grey.** Every notice line in the TUI
   (`Session settings: …`, `Container config: …`, `auto-accept on`, …) now has
-  one colour instead of dim grey, and its hint (`(/clear to reset)`,
+  one colour instead of dim grey, and its hint (`(/settings sync to use this terminal's values, or /clear)`,
   `(Shift+Tab to turn it off)`) stays grey beside it. Separator rules are
   unchanged; `relay.log` still prints each notice as one plain line.
 - **"Yes, always" now covers the whole session,** the main agent and all its
@@ -66,7 +83,7 @@ those.
 - **`attach --profile <name>` now applies to the new sessions it opens.** A
   session already running keeps the settings it was created with, and shows those
   that differ from yours as soon as you attach, as one line:
-  `Session settings: { "maxIterations": 3 } (/clear to reset)`. The container's
+  `Session settings: { "maxIterations": 3 } (/settings sync to use this terminal's values, or /clear)`. The container's
   winning values read `Container config: { "maxIterations": 7 }`, and only those
   that differ from yours.
 - The protocol is now version 16. A daemon left running by an older tentacle is

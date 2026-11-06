@@ -21,6 +21,8 @@ import {
   recordTitleState,
 } from "@tentacle/agent";
 import {
+  AttachTimeoutError,
+  type Clock,
   type DaemonKind,
   type LinkStatus,
   RemoteClient,
@@ -56,6 +58,13 @@ import { logDaemonError } from "./daemon-log.ts";
 import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
 import { type ResidentUse, residentUseOf } from "./relay-state.ts";
 import type { SessionSaver } from "./session-saver.ts";
+import {
+  type SettingsLine,
+  changedNotice,
+  settingsCommandLines,
+  syncedLines,
+  updateFailureLine,
+} from "./settings-view.ts";
 import { APP_VERSION, CLIENT_INFO } from "./version.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 
@@ -235,6 +244,20 @@ export interface PersistingController extends SessionController {
   openSeeded: RemoteSession["openSeeded"];
   ownsTurn: RemoteSession["ownsTurn"];
   onQueued: RemoteSession["onQueued"];
+  /** `/settings` (present only where this laptop carries settings: `run`/`attach`). */
+  settings?(): readonly SettingsLine[];
+  /** `/settings sync`: the outcome as lines, never a rejection; a success is saved at once. */
+  updateSettings?(): Promise<readonly SettingsLine[]>;
+}
+
+/** What a `run`/`attach` controller needs for `/settings` (docs/feat/session-settings-apply.md). */
+export interface ControllerSettings {
+  /** This terminal's carried settings (the runtime's, from its start). */
+  readonly mine: SessionSettings;
+  /** An own sync landed on `sessionId`: a later drift is news again. */
+  readonly applied?: (sessionId: string) => void;
+  /** Its eager attach timed out: until it opens, it may be live with other values (F3). */
+  readonly unconfirmed?: boolean;
 }
 
 /**
@@ -302,6 +325,8 @@ export function persistingController(
   initialTitle: TitleState = { source: "auto" },
   /** A turn this client did not mint but owns: a detached run's (B2). */
   adoptedTurn?: string,
+  /** Present → `/settings` and `/settings sync` (docs/feat/session-settings-apply.md). */
+  carried?: ControllerSettings,
 ): PersistingController {
   let running: Promise<void> | null = null;
   let again = false;
@@ -487,6 +512,37 @@ export function persistingController(
     get sessionId() {
       return inner.sessionId;
     },
+    ...(carried
+      ? {
+          settings: () =>
+            settingsCommandLines(carried.mine, {
+              ...inner.settingsState(),
+              ...(carried.unconfirmed === true ? { unconfirmed: true } : {}),
+            }),
+          // The sync recomposes the system head: saved at once, like a compaction.
+          async updateSettings(): Promise<readonly SettingsLine[]> {
+            try {
+              const result = await inner.applySettings();
+              if (result === null) {
+                return settingsCommandLines(carried.mine, {
+                  open: false,
+                  ...(carried.unconfirmed === true ? { unconfirmed: true } : {}),
+                });
+              }
+              if (result.applied) {
+                const id = inner.sessionId;
+                if (id !== null) {
+                  carried.applied?.(id);
+                }
+                flush();
+              }
+              return syncedLines(carried.mine, result);
+            } catch (error) {
+              return [updateFailureLine(error)];
+            }
+          },
+        }
+      : {}),
   };
 }
 
@@ -498,6 +554,8 @@ export interface LocalRuntimeDeps {
    * (the worker) → a drop is terminal.
    */
   readonly channelFactory?: () => Promise<DuplexChannel>;
+  /** The client's clock (tests); default the system's. */
+  readonly clock?: Clock;
   /** Called to tear down the daemon side (terminate the worker / close the pipe). */
   readonly disposeTransport: () => void;
   readonly permissions: PermissionBroker;
@@ -565,6 +623,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
   const client = new RemoteClient(deps.channel, deps.permissions, deps.modelProvider, {
     ...(deps.onPeerError ? { onError: deps.onPeerError } : {}),
     ...(deps.channelFactory ? { channelFactory: deps.channelFactory } : {}),
+    ...(deps.clock ? { clock: deps.clock } : {}),
     hooksTrust,
     clientInfo: CLIENT_INFO,
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
@@ -573,9 +632,25 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
   });
   await client.initialize();
   // A pod's report of what it did with them: through `notify`, never a raw write.
+  // Another terminal's sync is told the same way (docs/feat/session-settings-apply.md).
+  let forgetDrift: ((sessionId: string) => void) | undefined;
   if (deps.sessionSettings && deps.notify) {
-    client.onSessionSettings(createSettingsNotifier(deps.sessionSettings, deps.notify));
+    const mine = deps.sessionSettings;
+    const notify = deps.notify;
+    const notifier = createSettingsNotifier(mine, notify);
+    forgetDrift = notifier.forget;
+    client.onSessionSettings(notifier);
+    client.onSessionSettingsChanged(({ sessionId, previous, report }) => {
+      notifier.forget(sessionId);
+      const text = changedNotice(mine, previous, report);
+      if (text !== null) {
+        notify(text);
+      }
+    });
   }
+  const carried: ControllerSettings | undefined = deps.sessionSettings
+    ? { mine: deps.sessionSettings, ...(forgetDrift ? { applied: forgetDrift } : {}) }
+    : undefined;
   client.onHistoryLost(({ turns }) => {
     deps.notify?.(
       `⚠ The daemon lost the session while the link was down; it was restored without your last ${
@@ -598,6 +673,8 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
   let attached: PersistingController | null = null;
   const closeIfLast = deps.shared === true;
   let saving = true;
+  /** Ids whose eager attach timed out: they may be live, with values nobody here has read. */
+  const attachTimedOut = new Set<string>();
   const build = (
     uid: string,
     record: SessionRecord | null,
@@ -638,6 +715,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       (error) => deps.saver.failed(uid, `could not read the history back: ${error.message}`),
       title,
       adoptTurn,
+      carried && attachTimedOut.has(uid) ? { ...carried, unconfirmed: true } : carried,
     );
     controllers.add(controller);
     return controller;
@@ -713,6 +791,9 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
         // By the CODE, never the text.
         if ((error as { code?: unknown } | null)?.code === DomainErrorCode.UnknownSession) {
           return false;
+        }
+        if (error instanceof AttachTimeoutError) {
+          attachTimedOut.add(id);
         }
         throw error;
       }

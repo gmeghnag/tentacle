@@ -67,10 +67,12 @@ import {
   type SessionTtlResult,
   type SessionUpdateParams,
   type SnapshotResult,
+  type UpdateSettingsResult,
   type WireStreamEvent,
   text,
 } from "@tentacle/protocol";
 import { type DuplexChannel, type RequestContext, RpcError, RpcPeer } from "@tentacle/transport";
+import { ATTACH_TIMEOUT_MS } from "./constants.ts";
 import {
   ChannelError,
   LIVENESS_MS,
@@ -98,6 +100,18 @@ import {
   sinceOf,
 } from "./session-reducer.ts";
 import { type DaemonKind, explainVersionMismatch } from "./version-mismatch.ts";
+
+/** A `once` session command whose link dropped before the daemon answered (its outcome is unknown). */
+export const DROPPED_NOT_RETRIED = "the connection dropped before the daemon answered; not retried";
+
+/** A daemon's refusal of a `session/update_settings`: it emitted no update. */
+const REFUSALS: ReadonlySet<number> = new Set([
+  DomainErrorCode.TurnInProgress,
+  DomainErrorCode.CompactInProgress,
+  DomainErrorCode.UnknownSession,
+  JsonRpcErrorCode.MethodNotFound,
+  JsonRpcErrorCode.InvalidParams,
+]);
 
 /** How long the exit path waits for the daemon to acknowledge `session/close`s. */
 export const CLOSE_SESSIONS_TIMEOUT_MS = 1000;
@@ -230,6 +244,26 @@ export interface SessionSettingsNotice {
   readonly report: SessionSettingsReport;
 }
 
+/**
+ * Another client applied its settings to a session this client has open
+ * (`session_settings`, docs/feat/session-settings-apply.md). `previous`: the
+ * report this client knew before (absent: none yet). From the daemon, which
+ * may be a pod (not trusted): a frontend filters and never prints it raw.
+ */
+export interface SessionSettingsChange {
+  readonly sessionId: string;
+  readonly previous?: SessionSettingsReport;
+  readonly report: SessionSettingsReport;
+}
+
+/** The daemon answered no attach in `ATTACH_TIMEOUT_MS` (docs/feat/session-settings-apply.md S3). */
+export class AttachTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`no answer from the daemon within ${Math.round(ms / 1000)}s (session/open)`);
+    this.name = "AttachTimeoutError";
+  }
+}
+
 /** A snapshot read in full: the history, the cut and turn of its first page, the title. */
 interface Snap {
   readonly messages: readonly ChatMessage[];
@@ -281,6 +315,12 @@ interface SessionEntry {
   title: SeedTitle | undefined;
   /** The daemon's last reported queue; undefined until it reports one (an older daemon never does). */
   queued: QueueState | undefined;
+  /** The session's newest settings report (an open's, an own sync's, a `session_settings`). */
+  settings: SessionSettingsReport | undefined;
+  /** How far the attach got: 1 once an open answered, 1 + n once a read reached page n. */
+  attachMark: number;
+  /** When `attachMark` last rose: the attach bound counts from it. */
+  attachProgressAt: number;
   /**
    * Opened by `attachSession`: an existing session, never created. Until it
    * is live once, a recovery re-sends the attach (no `create`), and an
@@ -389,6 +429,13 @@ export class RemoteClient {
   /** `{ settings }`, or nothing: spread into each frame that may create a session. */
   private readonly carried: { readonly settings?: SessionSettings };
   private readonly settingsListeners = new Set<(notice: SessionSettingsNotice) => void>();
+  private readonly settingsChangeListeners = new Set<(change: SessionSettingsChange) => void>();
+  /**
+   * The ids of this client's own `session/update_settings`: its `session_settings`
+   * update is not "another terminal". Removed when that update arrives or the
+   * daemon refuses; a drop keeps it (the update may still come).
+   */
+  private readonly ownSettingsIds = new Set<string>();
   private readonly onError?: (error: Error) => void;
   private readonly channelFactory?: () => Promise<DuplexChannel>;
   private readonly clock: Clock;
@@ -576,7 +623,11 @@ export class RemoteClient {
    * arrives as the listener's first `reset` (a paged snapshot). Rejects —
    * creating nothing — on `SessionArchived` (unless `reopen`),
    * `SessionDeleted` (`onSessionDeleted` fires) or `UnknownSession`
-   * (docs/feat/tui-foreign-turns.md B7).
+   * (docs/feat/tui-foreign-turns.md B7). Bounded: no progress for
+   * `ATTACH_TIMEOUT_MS` (`noteAttachProgress`: no answer, a link that never comes
+   * back) → `AttachTimeoutError`. The never-live entry is forgotten, so a late
+   * answer is ignored, and nothing is sent to the daemon
+   * (docs/feat/session-settings-apply.md S3).
    */
   async attachSession(
     sessionId: string,
@@ -585,17 +636,51 @@ export class RemoteClient {
   ): Promise<string> {
     const entry = this.register(sessionId, [], listener);
     entry.attach ??= { reopen: opts.reopen === true };
-    try {
+    const forget = (): void => {
+      if (!entry.everLive && this.sessions.get(sessionId) === entry) {
+        this.sessions.delete(sessionId);
+        entry.listener = null;
+      }
+    };
+    // Waits for an answer, not for the transfer: the bound counts from the
+    // attach's last progress (`noteAttachProgress`).
+    entry.attachMark = 0;
+    entry.attachProgressAt = this.clock.now();
+    let timer: unknown = null;
+    const deadline = new Promise<never>((_, reject) => {
+      const arm = (ms: number): void => {
+        timer = this.clock.setTimeout(() => {
+          timer = null;
+          const left = entry.attachProgressAt + ATTACH_TIMEOUT_MS - this.clock.now();
+          if (left > 0) {
+            arm(left);
+            return;
+          }
+          forget();
+          reject(new AttachTimeoutError(ATTACH_TIMEOUT_MS));
+        }, ms);
+      };
+      arm(ATTACH_TIMEOUT_MS);
+    });
+    const attached = (async () => {
       await this.openOn(entry, this.gen, {
         sessionId,
         ...(opts.reopen === true ? { reopen: true } : {}),
       });
       await this.whenLive(entry);
+    })();
+    try {
+      await Promise.race([attached, deadline]);
     } catch (error) {
-      if (!entry.everLive && this.sessions.get(sessionId) === entry) {
-        this.sessions.delete(sessionId);
-      }
+      forget();
       throw error;
+    } finally {
+      if (timer !== null) {
+        this.clock.clearTimeout(timer);
+      }
+      // The loser of the race settles unobserved: never an unhandled rejection.
+      attached.catch(() => {});
+      deadline.catch(() => {});
     }
     return sessionId;
   }
@@ -646,6 +731,72 @@ export class RemoteClient {
   onSessionSettings(listener: (notice: SessionSettingsNotice) => void): () => void {
     this.settingsListeners.add(listener);
     return () => this.settingsListeners.delete(listener);
+  }
+
+  /**
+   * Subscribe to "another client applied its settings to a session open here"
+   * (see `SessionSettingsChange`); this client's own applies are not told.
+   * Returns an unsubscribe.
+   */
+  onSessionSettingsChanged(listener: (change: SessionSettingsChange) => void): () => void {
+    this.settingsChangeListeners.add(listener);
+    return () => this.settingsChangeListeners.delete(listener);
+  }
+
+  /** The session's newest settings report; undefined before one (or from a daemon that sends none). */
+  settingsOf(sessionId: string): SessionSettingsReport | undefined {
+    return this.sessions.get(sessionId)?.settings;
+  }
+
+  /**
+   * `session/update_settings` (docs/feat/session-settings-apply.md): apply the
+   * settings this client carries (`RemoteClientOptions.sessionSettings`, the
+   * same values the drift notice compares) to the live session. Not re-sent
+   * after a drop (`once`): the result of a dropped call is unknown, and the
+   * call is idempotent by value, so the user runs it again. Rejects locally,
+   * sending nothing, when this client carries nothing (`connect`, the worker).
+   * An older daemon → `MethodNotFound`, worded.
+   */
+  updateSettings(sessionId: string): Promise<UpdateSettingsResult> {
+    const settings = this.carried.settings;
+    if (!settings) {
+      return Promise.reject(new Error("this client carries no settings to apply"));
+    }
+    const id = crypto.randomUUID();
+    this.ownSettingsIds.add(id);
+    return this.sessionCall(
+      sessionId,
+      Method.UpdateSettings,
+      { sessionId, id, settings },
+      "once",
+    ).then(
+      (raw) => {
+        const result = raw as UpdateSettingsResult;
+        const entry = this.sessions.get(sessionId);
+        // Its update arrived already (the id left the set): the stream, which
+        // may hold a newer sync by now, is the truth.
+        if (entry && result.settings && this.ownSettingsIds.has(id)) {
+          entry.settings = result.settings;
+        }
+        if (!result.applied) {
+          this.ownSettingsIds.delete(id); // nothing was emitted
+        }
+        return result;
+      },
+      (error: unknown) => {
+        // The daemon's own refusal: no update will carry this id.
+        if (error instanceof RpcError && REFUSALS.has(error.code)) {
+          this.ownSettingsIds.delete(id);
+        }
+        if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
+          throw new RpcError(
+            JsonRpcErrorCode.MethodNotFound,
+            "this container's tentacle predates /settings sync: quit and attach again to update it",
+          );
+        }
+        throw error;
+      },
+    );
   }
 
   /**
@@ -1413,6 +1564,9 @@ export class RemoteClient {
       turnEndsInHistory: 0,
       title,
       queued: undefined,
+      settings: undefined,
+      attachMark: 0,
+      attachProgressAt: 0,
       attach: undefined,
     };
     this.sessions.set(id, entry);
@@ -1447,6 +1601,22 @@ export class RemoteClient {
     entry.queued = state;
     for (const listener of this.queueListeners) {
       listener({ sessionId: entry.id, state });
+    }
+  }
+
+  /** A `session_settings` in seq order: the newest report; told unless the sync was this client's. */
+  private settingsChanged(
+    entry: SessionEntry,
+    report: SessionSettingsReport,
+    id: string | undefined,
+  ): void {
+    const previous = entry.settings;
+    entry.settings = report;
+    if (id !== undefined && this.ownSettingsIds.delete(id)) {
+      return;
+    }
+    for (const listener of this.settingsChangeListeners) {
+      listener({ sessionId: entry.id, ...(previous ? { previous } : {}), report });
     }
   }
 
@@ -1522,10 +1692,23 @@ export class RemoteClient {
     this.applyOpenResult(entry, gen, result);
   }
 
+  /**
+   * The attach got further than ever: the bound restarts. A high-water mark, not
+   * "any answer": after a drop the open and the first pages are served again, and
+   * a daemon or link that repeats them for ever must still hit the bound.
+   */
+  private noteAttachProgress(entry: SessionEntry, mark: number): void {
+    if (mark > entry.attachMark) {
+      entry.attachMark = mark;
+      entry.attachProgressAt = this.clock.now();
+    }
+  }
+
   private applyOpenResult(entry: SessionEntry, gen: number, result: OpenResult): void {
     if (gen !== this.gen || this.sessions.get(entry.id) !== entry) {
       return;
     }
+    this.noteAttachProgress(entry, 1);
     this.noteSettings(entry, result);
     this.step(entry, {
       kind: "open_result",
@@ -1541,6 +1724,7 @@ export class RemoteClient {
     if (!result.settings) {
       return;
     }
+    entry.settings = result.settings;
     for (const listener of this.settingsListeners) {
       listener({ sessionId: entry.id, report: result.settings });
     }
@@ -1768,6 +1952,9 @@ export class RemoteClient {
       } else if (update.type === "queued") {
         // Not turn-scoped: the queue listeners fire while idle too.
         this.queuedChanged(entry, { entries: update.entries, returned: update.returned });
+      } else if (update.type === "session_settings") {
+        // Not turn-scoped: another client's sync is told while idle too.
+        this.settingsChanged(entry, update.settings, update.id);
       }
       // Closed daemon-side (by any client): nothing left to close at exit,
       // nothing left to answer.
@@ -1866,10 +2053,7 @@ export class RemoteClient {
           throw error; // the daemon's own answer
         }
         if (policy === "once") {
-          throw new RpcError(
-            JsonRpcErrorCode.InternalError,
-            "the connection dropped before the daemon answered; not retried",
-          );
+          throw new RpcError(JsonRpcErrorCode.InternalError, DROPPED_NOT_RETRIED);
         }
       }
     }
@@ -1909,6 +2093,10 @@ export class RemoteClient {
         throw new RpcError(JsonRpcErrorCode.InternalError, "snapshot: cursor made no progress");
       }
       pages.push(result.messages as readonly ChatMessage[]);
+      const entry = this.sessions.get(sessionId);
+      if (entry) {
+        this.noteAttachProgress(entry, 1 + pages.length);
+      }
     } while (cursor !== undefined);
     return {
       messages: pages.reverse().flat(),

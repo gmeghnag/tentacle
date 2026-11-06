@@ -274,9 +274,11 @@ export function updateToEvent(
     // is consumed by `RemoteClient`/`RemoteSession` (it ends the session). The
     // permission events are consumed by `RemoteClient`'s `PermissionRouter`;
     // `session_title` by its title listeners (it is not turn-scoped), and
-    // `queued` by its queue listeners (`RemoteClient`, not turn-scoped either).
+    // `queued` by its queue listeners (`RemoteClient`, not turn-scoped either),
+    // `session_settings` by its settings-change listeners (likewise).
     case "session_title":
     case "queued":
+    case "session_settings":
     case "plan":
     case "turn_start":
     case "turn_end":

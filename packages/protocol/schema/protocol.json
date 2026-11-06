@@ -1655,12 +1655,41 @@
         "carried": {
           "$ref": "#/$defs/SessionSettings"
         },
+        "containerKeys": {
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
         "overridden": {
           "$ref": "#/$defs/SessionSettings"
         }
       },
       "required": ["carried", "overridden"],
       "type": "object"
+    },
+    "SessionSettingsUpdate": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/$defs/SessionSettingsReport"
+        },
+        "type": {
+          "const": "session_settings",
+          "type": "string"
+        }
+      },
+      "required": ["settings", "type"],
+      "type": "object",
+      "x-event-class": "display"
     },
     "SessionSkillsParams": {
       "additionalProperties": true,
@@ -1804,6 +1833,7 @@
           "plan": "#/$defs/Plan",
           "queued": "#/$defs/QueuedUpdate",
           "session_closed": "#/$defs/SessionClosed",
+          "session_settings": "#/$defs/SessionSettingsUpdate",
           "session_title": "#/$defs/SessionTitleUpdate",
           "steer": "#/$defs/Steer",
           "tool_call": "#/$defs/ToolCall",
@@ -1872,6 +1902,9 @@
         },
         {
           "$ref": "#/$defs/QueuedUpdate"
+        },
+        {
+          "$ref": "#/$defs/SessionSettingsUpdate"
         }
       ]
     },
@@ -2305,6 +2338,37 @@
       "required": ["type"],
       "type": "object"
     },
+    "UpdateSettingsParams": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "settings": {
+          "$ref": "#/$defs/SessionSettings"
+        }
+      },
+      "required": ["id", "sessionId", "settings"],
+      "type": "object"
+    },
+    "UpdateSettingsResult": {
+      "additionalProperties": true,
+      "properties": {
+        "applied": {
+          "type": "boolean"
+        },
+        "settings": {
+          "$ref": "#/$defs/SessionSettingsReport"
+        }
+      },
+      "required": ["applied"],
+      "type": "object"
+    },
     "VersionMismatchData": {
       "additionalProperties": true,
       "properties": {
@@ -2724,6 +2788,14 @@
       },
       "result": {
         "$ref": "#/$defs/SnapshotResult"
+      }
+    },
+    "session/update_settings": {
+      "params": {
+        "$ref": "#/$defs/UpdateSettingsParams"
+      },
+      "result": {
+        "$ref": "#/$defs/UpdateSettingsResult"
       }
     }
   },
