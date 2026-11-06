@@ -1,6 +1,6 @@
 # feat/session-settings-apply — apply the laptop's settings to a live pod session, between turns
 
-> **Status:** context · implementation (approved, extended for the owner answers) · execution done · review pending (mandatory fresh context)
+> **Status:** context · implementation (approved, extended for the owner answers) · execution done · review: REQUEST-CHANGES (F1, MEDIUM)
 > **Branch:** `feat/session-settings-apply` (off `main` @ `c42cb43`)
 > **Type:** feat · **Size:** L · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review that red-teams the §7 invariants (one session path, pod not trusted, don't serialize the peer, protocol) and the agent-swap seam. TODO.md says M; this plan finds L (see "Size and blast").
 
@@ -371,7 +371,91 @@ Some ran in batches of 2 to 6, on files with independent tests; the table's attr
 
 ## Review
 
-*— (empty until the executor finishes; mandatory fresh context)*
+*— claude-opus-5-5, 2026-11-06*
+
+Fresh context, but the **same model as the executor** (`claude-opus-5-5`): shared blind spots can survive both passes. This is a load-bearing task, so a different model is worth a second look if the owner wants one (AGENTS §10).
+
+**Verdict: REQUEST-CHANGES.** One MEDIUM finding (F1, in S3). The agent swap, the §7 invariants and the protocol hold; everything else is LOW.
+
+### Findings
+
+**F1 — MEDIUM: the attach bound kills a slow but progressing attach, and on two of the three callers a retry cannot succeed.** `packages/client/src/remote-client.ts:656` races one fixed 30 s deadline against the whole attach, snapshot paging included (`ATTACH_TIMEOUT_MS`, `client/src/constants.ts`).
+- **Reproduced** (real `RemoteClient`, manual clock, open answered at once, one snapshot page every 10 s):
+  ```
+  t=10s pages served=1 outcome=pending
+  t=20s pages served=2 outcome=pending
+  t=30s pages served=3 outcome=AttachTimeoutError
+  ```
+- **The plan's premise is false.** It says the bound "covers every caller (both paths above)" and analyses `main.ts` and `attach-run.ts`. There is a third caller: `connect.ts:252` (`await session.open()`), which has no lazy fallback and throws `openError`. Neither the failure table nor the CHANGELOG mentions it.
+- **"Join: exit 1, retry" does not converge.** The history is the same size on every retry, so the same link times out again. On `main` these attaches were slow but finished. Now a long enough history on a slow enough link (about 4 MB at 1 Mbit/s) cannot be opened on `connect` or a detached-run join, and nothing can raise the bound. The plain `attach` is fine (lazy fallback).
+- **Fix (owner question 1):** bound the wait for an answer, not the transfer. Re-arm the deadline whenever this attach makes progress (the open answered, each snapshot page). A daemon that never answers and a link that never returns still fail at 30 s.
+
+**F2 — LOW: an applier's response can overwrite a newer report.** `remote-client.ts:760` writes `entry.settings = result.settings` unconditionally. Two clients on an in-memory channel pair, `Promise.all` of both applies: the session ran `maxIterations: 4`, while A's `settingsOf` stayed at 3, so A's `/settings` would claim the old value until a re-open. **Not reproduced on a real transport:** it needs B's handler to run between A's handler and A's response, which are separated only by microtasks (`peer.ts:351-356`), so separate sockets should keep the order. Fix: skip the write when the own update already arrived (its id has left `ownSettingsIds`).
+
+**F3 — LOW: `NOT_OPEN` can be false.** After a timed-out plain attach the controller has no id, so `/settings` and `/settings apply` say "it starts with this terminal's settings" (`settings-view.ts:32`, `local-runtime.ts:520`). The session may be live with other values, and the first prompt attaches to it and keeps them. The drift notice then corrects this. From reading the code, not run.
+
+**F4 — LOW: `/settings apply` has no pending state and no session check.** `App.tsx:1897` waits unbounded in `whenLive` during an outage with nothing on screen, and its lines land on whichever session is current when it returns. It is never lost: the outcome is told, or the drop line. From reading the code, not run.
+
+**F5 — LOW: a pod's error text is printed with no length bound.** `updateFailureLine` strips control characters, so nothing can drive the terminal (`\u001b[2J` printed as `[2J`), but the words are the pod's and the length is unlimited. Display only. Fix: cap it, as `mcp/src/status.ts:39` does.
+
+**Known and confirmed from Execution (no new finding):** noisy stale `changed` lines for a terminal away during two or more applies; project-hook trust asked again; no context anchor on the first request after an apply.
+
+### Gate
+
+| Check | Result |
+|---|---|
+| `bunx tsc --noEmit` | clean |
+| `bunx biome check .` | `Checked 689 files`, no fixes |
+| `bun test packages` | **5060 pass, 3 skip, 0 fail**, 344 files (no flake this run) |
+| `tsc -p apps/mobile` | **not run**; `apps/mobile` has no `SessionUpdate`, `session_title`, `UPDATE_CLASS` or `MethodName` reference (`rg`) |
+| `protocol.json` regenerated | **not verified byte for byte**: `bun run schema:export` needs an approval this session did not have. The drift test (`json-schema.test.ts`, re-run alone: pass) and Biome pass, so its content matches the generated document. The orchestrator's regeneration claim rests on that. |
+
+### Mutation
+
+`foreign = false` in `SessionHost.updateSettings` (`session-host.ts`). This is the guard that stops an agent on another broker being adopted, which would silently auto-approve (§7 single broker); the executor's table did not mutate it. **Red:** "a factory that ignores the reuse is refused" received `{ applied: true }`; 12 pass, 1 fail. Restored from the backup; `shasum` identical before and after (`cda189eb…`); tree clean.
+
+### Premise table
+
+| Premise | Status |
+|---|---|
+| Feature absent on `main` (`git grep update_settings main -- packages`: no match) | TRUE |
+| `Session` reads its agent at call time, and `HostedSession` holds no `Agent` | TRUE |
+| The factory and the swap are synchronous, from `assertIdle` to `swapAgent` | TRUE (`session-host.ts`, no `await`) |
+| Requests are dispatched concurrently; the new handler holds no lock | TRUE (`peer.ts`, `connection.ts` case) |
+| Only the model-proxy branch honours `settings`; a pod host has no persister | TRUE (`serve.ts:473-501`) |
+| `sessionSettings` is set only for `run`/`attach` | TRUE (`engine-runtime.ts:615, :1011` are the only sites) |
+| A pod's request toward the laptop → `MethodNotFound` | TRUE (`remote-client.ts:1271`; the plan's line number is older) |
+| The attach bound "covers every caller (both paths above)" | **FALSE**: `connect.ts:252` (F1) |
+| "Join: exit 1, retry" converges | **FALSE** (F1) |
+
+### Attacks tried
+
+| Attack | Result |
+|---|---|
+| Apply while a permission is pending (real pod host, from inside the requester) | Refused, `-32004` "a turn is already running" |
+| Apply during a turn or a compaction, and the same-tick race | Holds: `TurnInProgress` / `CompactInProgress`, nothing built (T6, T10) |
+| "Yes, always" across an apply, **by behaviour** (real `podSessionHost`, same `shell` call after the swap) | 1 ask only. Closes the gap of Execution's drift 3 (T3 was identity only) |
+| Two terminals applying at once | Agent and notices right: A told of B's value, B told nothing. A's cached report stale (F2) |
+| Apply during a reconnect or a drop | Holds: `once`, never re-sent, the drop line, idempotent re-run (F4 for the wait) |
+| `connect` session | Sends nothing: no `sessionSettings`, `RemoteSession` has no `settings` method, and `updateSettings` rejects locally |
+| Container W key | Still wins: `applyCarried` always starts from the pod's own config, so a rebuild cannot stack. Marked `(container)`, excluded from "differs" |
+| Pod makes the laptop apply | Impossible: the method is laptop → daemon only (`MethodNotFound` the other way) |
+| Pod forges `session_settings` (ESC text, unknown key names) | Display only. Output: `{ "subagents.agentTaskDescription": "(text differs)", "maxIterations": 3 }`. Text and unknown names dropped; no approval or effect. It can mislead `/settings`, which §7 accepts for a pod's own values |
+| Persistence | **No record-version bump was missed.** A pod stores nothing and `serve` answers `applied: false`, so no record shape changes; the system head is an ordinary message. A live re-attach gets the new report (T8). After a pod daemon restart the session is recreated with the attaching laptop's carried settings: an apply from *another* terminal does not survive that, by design (pod daemons store nothing) |
+| Silent state loss in the rebuild (`Agent`, gate, `HostExecution`) | Nothing else lost: the gate's only state is `grants`, the env keeps no state, skills come from the shared scan, the TUI's skill list refreshes on each `/` |
+| A summary mistaken for the system head | Safe: the compaction summary has role `user` (`compact.ts:246`), so only a real system head is replaced |
+| `PROTOCOL_VERSION` kept at 16 | Honest: new method, display update, optional field; no field changes meaning; a v16 daemon answers `MethodNotFound`, worded |
+| Attach that times out: orphaned session? | None: no close sent, entry forgotten, late answer ignored (T17). A late daemon attach is the same connection's and ends with it |
+| `/settings` view | `settings-view.ts` is pure and tested; Q5 texts match; one line; blue with grey hint via `appendNotice` |
+
+### How the executor behaved
+
+Honest. It disclosed the hand-edited schema, the weaker T3, the tests with no red run and the unverified paths, and those disclosures check out. Its one miss is F1: the plan's scope of callers was never re-checked with a grep of `attachSession` / `.open()`.
+
+### Owner questions
+
+1. **F1: re-arm the deadline on progress, or accept the fixed 30 s?** Recommendation: **re-arm** (a small change in `attachSession`, plus a test that a progressing attach survives past 30 s and a stalled one still fails). Accepting it would mean sessions that `connect` and detached-run joins can never open on a slow link.
+2. **F2–F5: fix now or list as debt?** Recommendation: fix F2 and F5 with F1 (a few lines each), and leave F3 and F4 as debt.
 
 ## Owner questions
 
