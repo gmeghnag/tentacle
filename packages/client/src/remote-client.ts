@@ -331,6 +331,14 @@ export const MODEL_STREAM_COALESCE_MS = 30;
  */
 export const MODEL_STREAM_BATCH_MAX_CHARS = 64 * 1024;
 
+/** Reason words for the statuses a user can act on: ours, never the response's. */
+const MODEL_STATUS_REASON: Record<number, string> = {
+  401: "unauthorized",
+  403: "forbidden",
+  404: "not found",
+  429: "rate limited",
+};
+
 export class RemoteClient {
   /** The current generation's peer. */
   private peer: RpcPeer;
@@ -1970,7 +1978,15 @@ export class RemoteClient {
    * any other error, left to the peer's opaque default.
    */
   private connectionLost(error: unknown): RpcError | null {
-    const e = error as { name?: unknown; code?: unknown; phase?: unknown } | null;
+    const e = error as {
+      name?: unknown;
+      code?: unknown;
+      phase?: unknown;
+      status?: unknown;
+    } | null;
+    if (error instanceof Error && e?.name === "ModelRequestError") {
+      return this.modelRequestFailed(error, e.status);
+    }
     if (
       !(error instanceof Error) ||
       (e?.name !== "ModelConnectionError" && e?.name !== "ModelUnreachableError") ||
@@ -1995,6 +2011,23 @@ export class RemoteClient {
       // Kept ON THE LAPTOP only: `laptopText` swaps it back in when the turn's
       // error is shown here, so a pod run reads like a local run.
       this.laptopTexts.set(text, error.message);
+    }
+    return new RpcError(JsonRpcErrorCode.InternalError, text);
+  }
+
+  /**
+   * An HTTP error answered by the LOCAL model (`ModelRequestError`) as an
+   * `RpcError` the pod may see (docs/fix/detached-model-error-reason.md). The
+   * text is built from the integer status and OUR OWN reason table only, never
+   * from the error's message (it can carry the endpoint or a key; AGENTS §7).
+   * The full error still goes to `onError`.
+   */
+  private modelRequestFailed(error: Error, status: unknown): RpcError {
+    this.onError?.(error);
+    let text = "the model endpoint reported an error";
+    if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) {
+      const reason = MODEL_STATUS_REASON[status];
+      text = `the model endpoint answered ${status}${reason ? ` (${reason})` : ""}`;
     }
     return new RpcError(JsonRpcErrorCode.InternalError, text);
   }
@@ -2122,7 +2155,8 @@ export class RemoteClient {
       // the laptop and answers the pod with an opaque "internal error", like
       // `model/stream`. A provider message can carry the endpoint or key
       // material, and the pod is not trusted (AGENTS §7). Except a lost model
-      // connection: its cause in the laptop's own words (`connectionLost`).
+      // connection or an HTTP error: a text built from code/status only
+      // (`connectionLost`).
       throw this.connectionLost(error) ?? error;
     }
     // Flush the tail synchronously so the last events precede the result frame.

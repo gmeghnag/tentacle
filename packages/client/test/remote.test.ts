@@ -2636,3 +2636,132 @@ describe("blocking updates are gated by the initialize list (docs/feat/protocol-
     daemon.close();
   });
 });
+
+describe("a model HTTP error on a pod run (docs/fix/detached-model-error-reason.md)", () => {
+  // Mutations: drop the arm → "internal error"; put `error.message` in the
+  // text → the secret assertions fail; widen the 100–599 range → 99/600 fail;
+  // drop `this.onError?.(error)` → the log assertion fails.
+  const SECRET = "sk-LEAKED-KEY";
+  const HOST = "10.0.0.5";
+
+  function rig(thrown: unknown) {
+    const [daemonCh, clientCh] = createChannelPair();
+    const wire: string[] = [];
+    const sendOrig = clientCh.send.bind(clientCh);
+    clientCh.send = (data: string) => {
+      wire.push(data);
+      sendOrig(data);
+    };
+    // biome-ignore lint/style/useConst: assigned after the closure that references it
+    let connection: Connection;
+    const model: ModelProvider = {
+      id: "http-error",
+      // biome-ignore lint/correctness/useYield: fails before any event
+      async *stream(): AsyncIterable<StreamEvent> {
+        throw thrown;
+      },
+    };
+    const host = new SessionHost({
+      defaultCwd: "/pod/work",
+      createAgent: () => {
+        const agent = new Agent({
+          model: new ProxyModelProvider(
+            (r) => connection.requestModelStream(r),
+            (r, h) => connection.requestModelStreamChunked(r, h),
+          ),
+          tools: new ToolRegistry(),
+          env: noopEnv,
+        });
+        return { agent, permissions: new PermissionBroker() };
+      },
+    });
+    connection = new Connection(daemonCh, host);
+    const seen: unknown[] = [];
+    const client = new RemoteClient(clientCh, new PermissionBroker(), model, {
+      onError: (e) => seen.push(e),
+    });
+    return { client, connection, wire, seen };
+  }
+
+  const httpError = (status: unknown) =>
+    Object.assign(
+      new Error(
+        `model request failed with status ${String(status)}: key ${SECRET} at http://${HOST}`,
+      ),
+      { name: "ModelRequestError", status },
+    );
+
+  async function turnFailure(thrown: unknown) {
+    const r = rig(thrown);
+    await r.client.initialize();
+    const session = r.client.newSession();
+    let failure = "";
+    try {
+      for await (const _ of session.send("ciao")) {
+        // drained
+      }
+    } catch (error) {
+      failure = (error as Error).message;
+    }
+    const history = JSON.stringify((await session.snapshot()) ?? []);
+    r.connection.close();
+    r.client.close();
+    return { ...r, failure, history };
+  }
+
+  test("a 401 names its cause; no provider text (key, endpoint) reaches the pod", async () => {
+    const r = await turnFailure(httpError(401));
+    expect(r.failure).toBe("the model endpoint answered 401 (unauthorized)");
+    expect(r.wire.length).toBeGreaterThan(0);
+    for (const frame of r.wire) {
+      expect(frame).not.toContain(SECRET);
+      expect(frame).not.toContain(HOST);
+    }
+    expect(r.history).not.toContain(SECRET);
+    expect(r.history).not.toContain(HOST);
+    // The laptop keeps the full error for its own log.
+    expect(r.seen.some((e) => (e as Error).message.includes(SECRET))).toBe(true);
+  });
+
+  test.each([
+    [401, "the model endpoint answered 401 (unauthorized)"],
+    [403, "the model endpoint answered 403 (forbidden)"],
+    [404, "the model endpoint answered 404 (not found)"],
+    [429, "the model endpoint answered 429 (rate limited)"],
+    [500, "the model endpoint answered 500"],
+    [503, "the model endpoint answered 503"],
+    [529, "the model endpoint answered 529"],
+    [0, "the model endpoint reported an error"],
+    ["401", "the model endpoint reported an error"],
+    [Number.NaN, "the model endpoint reported an error"],
+    [99, "the model endpoint reported an error"],
+    [600, "the model endpoint reported an error"],
+    [401.5, "the model endpoint reported an error"],
+  ])("status %p → %p, never the provider text", async (status, text) => {
+    const r = await turnFailure(httpError(status));
+    expect(r.failure).toBe(text);
+    expect(r.wire.join("")).not.toContain(SECRET);
+    expect(r.wire.join("")).not.toContain(HOST);
+  });
+
+  test("an unrelated error stays opaque", async () => {
+    const r = await turnFailure(new Error(`boom ${SECRET}`));
+    expect(r.failure).toBe("internal error");
+  });
+
+  test("the unchunked model/stream call site gets the same text", async () => {
+    const r = rig(httpError(404));
+    await r.client.initialize();
+    r.client.newSession();
+    let failure = "";
+    try {
+      await r.connection.requestModelStream({ messages: [] } as never);
+    } catch (error) {
+      failure = (error as Error).message;
+    }
+    expect(failure).toBe("the model endpoint answered 404 (not found)");
+    expect(failure).not.toContain(SECRET);
+    r.connection.close();
+    r.client.close();
+  });
+});

@@ -51,6 +51,10 @@ those.
 
 ### Fixed
 
+- A model HTTP error on a pod run (`run`, `attach`, `run --detach`) now names its
+  cause (`the model endpoint answered 401 (unauthorized)`) in the TUI, `relay.log`
+  and `tentacle ps`, instead of `internal error`. Only the status reaches the pod,
+  never the provider's message; the full error stays in the run's `daemon.log`.
 - A `model.apiKeyCommand` in a container's own config no longer runs there, and
   can no longer stop the daemon from starting. The container never uses that key.
 - `tentacle attach` no longer reuses an older tentacle binary in a pod or
