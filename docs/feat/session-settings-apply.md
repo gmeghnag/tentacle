@@ -529,3 +529,79 @@ Honest. It disclosed the hand-edited schema, the weaker T3, the tests with no re
 
 1. F1: **A — re-arm** the 30 s deadline on every sign of progress (the open answered, each snapshot page); a daemon that never answers and a link that never returns still fail at 30 s. Tests: a progressing attach survives past 30 s, a stalled one fails.
 2. F2–F5: **B — fix all four now**, each with a red-first test (F2 newer report not overwritten by an older apply response; F3 no false "starts with this terminal's settings" after a timed-out plain attach; F4 a visible pending state for `/settings apply` during an outage and its lines bound to the session it was issued on; F5 cap the pod error text length like `mcp/src/status.ts:39`).
+
+## Review — round 2
+
+*— claude-opus-5-5, 2026-11-06*
+
+Fresh context, **same model as the executor**: shared blind spots can survive both passes. Scope: `git diff 98fdb94..HEAD`.
+
+**Verdict: PASS (LOW only).** F1–F5 are fixed. Four LOW findings, none blocking.
+
+### Findings
+
+**R2-1 — LOW (test gap): the high-water mark is proven against re-opens, not against re-served pages.** Execution's drift rests on "the open and the first pages are served again". Mutation at `remote-client.ts:2098`, `entry.attachMark = 0` before `noteAttachProgress`, so a re-served page counts as progress: **7 pass, 0 fail, still green**. The code is right by reading (`pages` restarts, the mark does not). No test pins it: `attach-timeout.test.ts` needs a daemon that serves page 1 on each re-open.
+
+**R2-2 — LOW: a hostile pod can stretch the attach to about 83 hours.** Junk and keepalives do not count (below), but a fabricated page does. A page with one message and a fresh cursor every 29 s passes the checks at `remote-client.ts:2092` and rises the mark each time, up to `SNAPSHOT_MAX_PAGES` = 10,000 (`:127`): finite, about 83 h, not forever. From reading, **not run** (see Limits). Accepted by the owner's "each snapshot page" and inside §7: no effect on the laptop beyond a waiting terminal, and a pod can already deny its own session. A tighter cap is the owner's choice, and would have to fit real long histories.
+
+**R2-3 — LOW: an orphaned `Applying…` line on a swap that keeps the transcript.** `App.tsx:1909` drops the outcome once the view has moved. Most swaps reset the transcript, but `keepTranscript: true` (a session closed elsewhere, a failed switch, `App.tsx:2075, :2082`) leaves `Applying this terminal's settings…` on screen with no outcome. A **failed** apply after a switch is also told nowhere. Execution declares that as a reading of the owner's "bound to the session", and `/settings` on that session tells the truth. From reading, not run.
+
+**R2-4 — LOW (cosmetic): garbled doc comment.** `remote-client.ts:626-628` reads "not live within `ATTACH_TIMEOUT_MS` (no answer, a link that never comes back) → since its last progress (`noteAttachProgress`) → `AttachTimeoutError`": a merge of the old and the new sentence.
+
+### F1–F5 against the code
+
+| Finding | Status | Evidence |
+|---|---|---|
+| F1 what counts as progress | **Holds** | Only two sites call `noteAttachProgress`: an answered open on the current generation (`applyOpenResult`, mark 1) and a snapshot page further than any before (mark `1 + pages.length`). Inbound chatter reaches neither: the "open answered, then no page" and "some pages, then a stall" tests send `$/progress` throughout and still fail at the bound |
+| F1 a stall fails at 30 s | **Holds** | The tests fail one bound after the answer or the last page; the re-open daemon fails between t=29 and t=32 |
+| F1 no timer leak | **Holds, by reading** | `timer` always holds the latest arm; `finally` clears it on success and on rejection; a fired timer with no progress does not re-arm. `attachSession` takes no abort signal. After `close()` at most one timer remains, and it ends the chain when it fires |
+| F2 ordering key | **Sound** | The key is the stream position: `settingsChanged` deletes the id in seq order, on the same FIFO channel as the response. Own update first: the stream wins. Response first: it writes, and the update then applies in order. Updates buffered during a resync still apply after it, so it converges |
+| F3 | **Holds** | `unconfirmed` is read only in the `!open` branch, so it ends at the first prompt. A new id keeps `NOT_OPEN`. The line is a hedge, so it stays true on a later controller for the same id |
+| F4 pending + session binding | **Holds** | Pending line at once; refusal keyed on the controller. `applyingRef` is one slot: going back to a session through `/sessions` builds a new controller, so a second apply is allowed while the first is pending, harmless because the call is idempotent by value. Orphan line: R2-3 |
+| F5 | **Holds** | `oneLine` caps at 500 after stripping, the same value as `mcp/src/status.ts:31` |
+| §7 don't serialize the peer | **Holds** | The round adds no lock and no await to a handler; the timer is client-side |
+| §7 pod not trusted | **Holds** | A pod's frames can only move the attach's deadline (R2-2) and display text. No new effect on the laptop, no approval |
+| Protocol | **Holds** | No schema or `PROTOCOL_VERSION` change in the diff |
+
+### Gate
+
+| Check | Result |
+|---|---|
+| `bunx tsc --noEmit` | clean |
+| `bunx biome check .` | `Checked 689 files`, no fixes |
+| `bun test packages/client packages/cli packages/tui packages/daemon` | **3510 pass, 1 skip, 0 fail**, 204 files |
+
+Scoped as asked, so not the full `bun test`. The skip was not identified by name; the only skips the repo allows are the opt-in ones.
+
+### Mutation
+
+Backup with `cp`, restored after each run. `shasum` of `remote-client.ts` before and after all three: `d0ce06fa…`, identical. The gate ran on that restored tree, with `git status` clean.
+
+| Mutation | Result |
+|---|---|
+| F1's guard: `mark > entry.attachMark` → `mark > 0` | **Red**: "a daemon that answers every re-open…" stayed pending at t=32; 6 pass, 1 fail |
+| Re-served pages count as progress (`attachMark = 0` before the note) | **Green: test gap**, R2-1 |
+| F2's guard: no `ownSettingsIds.has(id)` | **Red**: "own update, then another terminal's…" got 3, expected 4; 6 pass, 1 fail |
+
+### Limits of this review
+
+- **The red-first runs were not repeated.** Execution's table of 9 tests stands on its word, plus the mutations above. By reading, each test does pin behaviour absent at `98fdb94`.
+- **The end-to-end probe was not run.** A scratch script with a hostile daemon (R2-2, junk frames, timers across `close()`) needed an approval for `bun run` that this session did not have, and it was not worked around. Those attacks are from reading the code and the existing tests.
+- Mutation "the response ahead of its update" (Execution's open gap) was not run either.
+- No live run, so Execution's checklist stands.
+
+### Attacks tried
+
+| Attack | Result |
+|---|---|
+| `$/progress` chatter holds the attach open | No: tests run with chatter and fail at the bound |
+| A daemon answering every re-open, never a page | No: fails by t=32; mutation-proven |
+| Re-served pages after a drop | No, by reading; not pinned by a test (R2-1) |
+| Fabricated pages with fresh cursors | About 83 h, by reading (R2-2) |
+| `StaleCursor` restarts the paging | No extra rise: `pages` restarts, the mark holds |
+| B's update between A's own update and A's response | Newer report stands; mutation-proven |
+| Switch session mid-apply | Outcome not drawn on the new session (test); orphan line only on a kept transcript (R2-3) |
+
+### How the executor behaved
+
+Honest. The drift from the owner's wording is declared, and it is the better design: "every answer" would have kept the hang alive. Its disclosures (the F3 slip, the unrun mutation, the narrow error text) check out. Its one overstatement is small: the high-water property is claimed against re-served pages, but only re-opens are tested (R2-1).
