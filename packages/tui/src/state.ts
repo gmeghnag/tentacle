@@ -42,7 +42,7 @@ export interface AssistantItem {
 export interface NoticeItem {
   readonly kind: "notice";
   readonly text: string;
-  /** A grey aside after the text (`(/settings apply, or /clear)`): its own field, never parsed from `text`. */
+  /** A grey aside after the text (`(/settings sync to use this terminal's values, or /clear)`): its own field, never parsed from `text`. */
   readonly hint?: string;
   /** Identifies a background-job notice so the live + event paths dedupe. */
   readonly jobId?: string;
@@ -149,6 +149,13 @@ export function appendNotice(
     ...(opts.host ? { host: true as const } : {}),
   };
   return { ...state, items: append(state.items, item) };
+}
+
+/** Take back an item this exact object still is in the transcript (gone already: a no-op). */
+export function withdrawItem(state: DisplayState, item: DisplayItem): DisplayState {
+  return state.items.includes(item)
+    ? { ...state, items: state.items.filter((i) => i !== item) }
+    : state;
 }
 
 /**

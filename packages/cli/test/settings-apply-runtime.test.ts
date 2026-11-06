@@ -171,10 +171,7 @@ describe("/settings through the runtime", () => {
       { text: "The session is not open yet: it starts with this terminal's settings." },
     ]);
     await drain(sessionA.send("hi"));
-    expect(sessionA.settings?.()).toEqual([
-      { text: 'Session settings: { "maxIterations": 1 }' },
-      { text: "This terminal matches." },
-    ]);
+    expect(sessionA.settings?.()).toEqual([{ text: '{\n  "maxIterations": 1\n}' }]);
 
     const b = await terminal(host, { maxIterations: 3 });
     expect(await b.runtime.attachTo("S", null)).toBe(true);
@@ -183,18 +180,18 @@ describe("/settings through the runtime", () => {
     expect(b.notices).toEqual([
       {
         text: 'Session settings: { "maxIterations": 1 }',
-        hint: "(/settings apply, or /clear)",
+        hint: "(/settings sync to use this terminal's values, or /clear)",
       },
     ]);
     expect(sessionB.settings?.()).toEqual([
-      { text: 'Session settings: { "maxIterations": 1 }' },
-      { text: 'This terminal differs: { "maxIterations": 3 }', hint: "(/settings apply)" },
+      { text: '{\n  "maxIterations": 1 // this terminal: 3\n}' },
+      {
+        text: "1 differs from this terminal",
+        hint: "(/settings sync to use this terminal's values)",
+      },
     ]);
-    expect(await sessionB.updateSettings?.()).toEqual([{ text: "Session settings applied." }]);
-    expect(sessionB.settings?.()).toEqual([
-      { text: 'Session settings: { "maxIterations": 3 }' },
-      { text: "This terminal matches." },
-    ]);
+    expect(await sessionB.updateSettings?.()).toEqual([{ text: "Session settings synced." }]);
+    expect(sessionB.settings?.()).toEqual([{ text: '{\n  "maxIterations": 3\n}' }]);
     await until(() => a.notices.length > 0);
     expect(a.notices).toEqual([
       { text: 'Session settings changed by another terminal: { "maxIterations": 3 }' },
@@ -203,8 +200,11 @@ describe("/settings through the runtime", () => {
     expect(b.notices).toHaveLength(1);
     // And the first terminal's /settings follows.
     expect(sessionA.settings?.()).toEqual([
-      { text: 'Session settings: { "maxIterations": 3 }' },
-      { text: 'This terminal differs: { "maxIterations": 1 }', hint: "(/settings apply)" },
+      { text: '{\n  "maxIterations": 3 // this terminal: 1\n}' },
+      {
+        text: "1 differs from this terminal",
+        hint: "(/settings sync to use this terminal's values)",
+      },
     ]);
     a.runtime.dispose();
     b.runtime.dispose();

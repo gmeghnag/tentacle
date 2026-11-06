@@ -549,8 +549,8 @@ and `load.ts` from its file list unless something else needs them.
 
 ### Notes and debt
 
-- **Later:** `docs/feat/session-settings-apply.md` adds `/settings` and `/settings apply`,
-  and the drift hint is now `(/settings apply, or /clear)`; this document's `(/clear to
+- **Later:** `docs/feat/session-settings-apply.md` adds `/settings` and `/settings sync`,
+  and the drift hint is now `(/settings sync to use this terminal's values, or /clear)`; this document's `(/clear to
   reset)` is the text as of this task.
 - **The TUI's `ctx` meter uses this laptop's `contextWindow`** (`main.ts:829`), so on a
   live session with drift its max is not the agent's window. The drift notice names the

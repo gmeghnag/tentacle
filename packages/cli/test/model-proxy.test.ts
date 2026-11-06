@@ -533,7 +533,7 @@ describe("the laptop's settings reach the pod's agents, per session", () => {
     await say(b, "S", "again");
     expect(toolsOf(modelB.seen[0])).not.toContain("agent_task");
     expect(said).toEqual([
-      'Session settings: { "subagents.enabled": false, "maxIterations": 4 } (/settings apply, or /clear)',
+      `Session settings: { "subagents.enabled": false, "maxIterations": 4 } (/settings sync to use this terminal's values, or /clear)`,
     ]);
     conn1.close();
     conn2.close();
@@ -597,7 +597,7 @@ describe("the laptop's settings reach the pod's agents, per session", () => {
     client.close();
   });
 
-  describe("/settings apply on a real pod host (docs/feat/session-settings-apply.md)", () => {
+  describe("/settings sync on a real pod host (docs/feat/session-settings-apply.md)", () => {
     /** A second laptop on the same host. */
     async function another(
       host: SessionHost,
@@ -701,7 +701,7 @@ describe("the laptop's settings reach the pod's agents, per session", () => {
   });
 });
 
-describe("/settings apply on a daemon that decides by its own config", () => {
+describe("/settings sync on a daemon that decides by its own config", () => {
   test("T16 a plain pod host answers applied:false and keeps its agent", async () => {
     const dir = await mkdtemp(join(tmpdir(), "settings-apply-plain-"));
     const config = await loadConfig({

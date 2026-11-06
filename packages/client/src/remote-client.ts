@@ -315,7 +315,7 @@ interface SessionEntry {
   title: SeedTitle | undefined;
   /** The daemon's last reported queue; undefined until it reports one (an older daemon never does). */
   queued: QueueState | undefined;
-  /** The session's newest settings report (an open's, an own apply's, a `session_settings`). */
+  /** The session's newest settings report (an open's, an own sync's, a `session_settings`). */
   settings: SessionSettingsReport | undefined;
   /** How far the attach got: 1 once an open answered, 1 + n once a read reached page n. */
   attachMark: number;
@@ -623,11 +623,11 @@ export class RemoteClient {
    * arrives as the listener's first `reset` (a paged snapshot). Rejects —
    * creating nothing — on `SessionArchived` (unless `reopen`),
    * `SessionDeleted` (`onSessionDeleted` fires) or `UnknownSession`
-   * (docs/feat/tui-foreign-turns.md B7). Bounded: not live within
-   * `ATTACH_TIMEOUT_MS` (no answer, a link that never comes back) →
-   * since its last progress (`noteAttachProgress`) → `AttachTimeoutError`, the
-   * never-live entry is forgotten (a late answer is
-   * ignored) and nothing is sent to the daemon (docs/feat/session-settings-apply.md S3).
+   * (docs/feat/tui-foreign-turns.md B7). Bounded: no progress for
+   * `ATTACH_TIMEOUT_MS` (`noteAttachProgress`: no answer, a link that never comes
+   * back) → `AttachTimeoutError`. The never-live entry is forgotten, so a late
+   * answer is ignored, and nothing is sent to the daemon
+   * (docs/feat/session-settings-apply.md S3).
    */
   async attachSession(
     sessionId: string,
@@ -774,7 +774,7 @@ export class RemoteClient {
         const result = raw as UpdateSettingsResult;
         const entry = this.sessions.get(sessionId);
         // Its update arrived already (the id left the set): the stream, which
-        // may hold a newer apply by now, is the truth.
+        // may hold a newer sync by now, is the truth.
         if (entry && result.settings && this.ownSettingsIds.has(id)) {
           entry.settings = result.settings;
         }
@@ -791,7 +791,7 @@ export class RemoteClient {
         if (error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound) {
           throw new RpcError(
             JsonRpcErrorCode.MethodNotFound,
-            "this container's tentacle predates /settings apply: quit and attach again to update it",
+            "this container's tentacle predates /settings sync: quit and attach again to update it",
           );
         }
         throw error;
@@ -1604,7 +1604,7 @@ export class RemoteClient {
     }
   }
 
-  /** A `session_settings` in seq order: the newest report; told unless the apply was this client's. */
+  /** A `session_settings` in seq order: the newest report; told unless the sync was this client's. */
   private settingsChanged(
     entry: SessionEntry,
     report: SessionSettingsReport,
@@ -1953,7 +1953,7 @@ export class RemoteClient {
         // Not turn-scoped: the queue listeners fire while idle too.
         this.queuedChanged(entry, { entries: update.entries, returned: update.returned });
       } else if (update.type === "session_settings") {
-        // Not turn-scoped: another client's apply is told while idle too.
+        // Not turn-scoped: another client's sync is told while idle too.
         this.settingsChanged(entry, update.settings, update.id);
       }
       // Closed daemon-side (by any client): nothing left to close at exit,

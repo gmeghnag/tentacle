@@ -284,7 +284,7 @@ export class HostedSession {
   readonly id: string;
   /** What the factory did with `session/open.settings`; told to whoever attaches. */
   settingsReport: SessionSettingsReport | undefined;
-  /** The session's approvals (the factory's), handed to the next agent on a settings apply. */
+  /** The session's approvals (the factory's), handed to the next agent on a settings sync. */
   grants: SessionGrants | undefined;
   private readonly session: Session;
   /** The factory's broker: its requester is this session's (installed once, below). */
@@ -379,7 +379,7 @@ export class HostedSession {
   private lastChangeAt: number;
   /** The title, one truth (`session-title.ts`). */
   private title: TitleState;
-  /** Replaced with the agent by a settings apply (`autoTitle` is the laptop's to toggle). */
+  /** Replaced with the agent by a settings sync (`autoTitle` is the laptop's to toggle). */
   private titleModel: ModelProvider | undefined;
   private readonly titleTimeoutMs: number;
   /** The title request in flight; aborted by whatever takes the slot (never in the user's way). */
@@ -1396,7 +1396,7 @@ export class HostedSession {
   }
 
   /**
-   * Run the next turns on `next` (a settings apply). The caller checked
+   * Run the next turns on `next` (a settings sync). The caller checked
    * `assertIdle` in the same synchronous stretch and built `next` on this
    * session's broker and jobs: the old agent's undrained job exits move to it,
    * and the old one stops collecting. Then every attached client is told

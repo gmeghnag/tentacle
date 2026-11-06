@@ -539,14 +539,14 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
   const mine: SessionSettings = { maxIterations: 9, agentTaskDescription: "my secret plan" };
   const WINS = "Container config: ";
   const KEEPS = "Session settings: ";
-  const CLEAR = " (/settings apply, or /clear)";
+  const CLEAR = " (/settings sync to use this terminal's values, or /clear)";
   // The plain-text view (what `relay.log` prints): text, a space, the hint.
   const joined = (...a: Parameters<typeof settingsNotices>): string[] =>
     settingsNotices(...a).map((n) => (n.hint ? `${n.text} ${n.hint}` : n.text));
 
   test("the hint is its own field, never inside the text", () => {
     const [n] = settingsNotices(mine, { carried: { maxIterations: 1 }, overridden: {} });
-    expect(n?.hint).toBe("(/settings apply, or /clear)");
+    expect(n?.hint).toBe("(/settings sync to use this terminal's values, or /clear)");
     expect(n?.text).not.toContain("clear");
     const [c] = settingsNotices(mine, { carried: mine, overridden: { dedupOutput: false } });
     expect(c?.hint).toBeUndefined();

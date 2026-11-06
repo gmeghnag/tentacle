@@ -60,9 +60,9 @@ import { type ResidentUse, residentUseOf } from "./relay-state.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import {
   type SettingsLine,
-  appliedLines,
   changedNotice,
   settingsCommandLines,
+  syncedLines,
   updateFailureLine,
 } from "./settings-view.ts";
 import { APP_VERSION, CLIENT_INFO } from "./version.ts";
@@ -246,7 +246,7 @@ export interface PersistingController extends SessionController {
   onQueued: RemoteSession["onQueued"];
   /** `/settings` (present only where this laptop carries settings: `run`/`attach`). */
   settings?(): readonly SettingsLine[];
-  /** `/settings apply`: the outcome as lines, never a rejection; a success is saved at once. */
+  /** `/settings sync`: the outcome as lines, never a rejection; a success is saved at once. */
   updateSettings?(): Promise<readonly SettingsLine[]>;
 }
 
@@ -254,7 +254,7 @@ export interface PersistingController extends SessionController {
 export interface ControllerSettings {
   /** This terminal's carried settings (the runtime's, from its start). */
   readonly mine: SessionSettings;
-  /** An own apply landed on `sessionId`: a later drift is news again. */
+  /** An own sync landed on `sessionId`: a later drift is news again. */
   readonly applied?: (sessionId: string) => void;
   /** Its eager attach timed out: until it opens, it may be live with other values (F3). */
   readonly unconfirmed?: boolean;
@@ -325,7 +325,7 @@ export function persistingController(
   initialTitle: TitleState = { source: "auto" },
   /** A turn this client did not mint but owns: a detached run's (B2). */
   adoptedTurn?: string,
-  /** Present → `/settings` and `/settings apply` (docs/feat/session-settings-apply.md). */
+  /** Present → `/settings` and `/settings sync` (docs/feat/session-settings-apply.md). */
   carried?: ControllerSettings,
 ): PersistingController {
   let running: Promise<void> | null = null;
@@ -519,7 +519,7 @@ export function persistingController(
               ...inner.settingsState(),
               ...(carried.unconfirmed === true ? { unconfirmed: true } : {}),
             }),
-          // The apply recomposes the system head: saved at once, like a compaction.
+          // The sync recomposes the system head: saved at once, like a compaction.
           async updateSettings(): Promise<readonly SettingsLine[]> {
             try {
               const result = await inner.applySettings();
@@ -536,7 +536,7 @@ export function persistingController(
                 }
                 flush();
               }
-              return appliedLines(carried.mine, result);
+              return syncedLines(carried.mine, result);
             } catch (error) {
               return [updateFailureLine(error)];
             }
@@ -632,7 +632,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
   });
   await client.initialize();
   // A pod's report of what it did with them: through `notify`, never a raw write.
-  // Another terminal's apply is told the same way (docs/feat/session-settings-apply.md).
+  // Another terminal's sync is told the same way (docs/feat/session-settings-apply.md).
   let forgetDrift: ((sessionId: string) => void) | undefined;
   if (deps.sessionSettings && deps.notify) {
     const mine = deps.sessionSettings;

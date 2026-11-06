@@ -606,7 +606,7 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
-   * Apply this client's carried settings to the session (`/settings apply`,
+   * Apply this client's carried settings to the session (`/settings sync`,
    * docs/feat/session-settings-apply.md). Null when no session is open yet: a
    * session opened later is created from these settings anyway.
    */

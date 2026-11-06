@@ -610,3 +610,54 @@ Honest. The drift from the owner's wording is declared, and it is the better des
 
 1. **`/settings` format: A.** One indented JSON block (2 spaces, like `jq`), keys NESTED by section as in `config.jsonc` (`model`, `subagents`, `tools`, …, not dotted), differences as an end-of-line comment `// this terminal: <value>`, container-set keys as `// (container)` (with `this terminal: …` too when they differ; those do not count as appliable). No `This terminal matches.` line; when something is appliable, one final line `N differs from this terminal (/settings apply)` (wording/command name per answer 2). The one-line attach notice and the "changed by another terminal" notice stay one-line (only the differing keys). Pure view-model + tests.
 2. **Command renamed `/settings apply` → `/settings sync`** (owner: "apply" not intuitive). Texts (owner A): final line of `/settings` `N differs from this terminal (/settings sync to use this terminal's values)`; attach drift hint `(/settings sync to use this terminal's values, or /clear)`; pending `Syncing this terminal's settings…`; confirmation `Session settings synced.`; other terminals unchanged `Session settings changed by another terminal: { … }`. Rename everywhere (command list/help, slash-command completion, docs, CHANGELOG, tests). Decide whether the protocol method name `session/update_settings` stays (it may: internal) — say so.
+3. **Pending → outcome in place** (owner, 2026-11-06): `Syncing this terminal's settings…` must be REPLACED by its outcome (`Session settings synced.` or the failure line) in the SAME transcript entry (same ⏺ bullet), not a second entry below. Same for a dropped outcome (session switched): the pending entry must not stay orphaned. Pure state/test + frame test.
+
+### Execution — round 3
+
+*— claude-opus-5-5, 2026-11-06*
+
+Items 1 and 2 of the owner's feedback, plus R2-3 and R2-4. **The protocol was not touched:** no schema, no `protocol.json`, `PROTOCOL_VERSION` stays 16. R2-1 and R2-2 go to the TODO, as asked.
+
+**Not done: item 3 (pending replaced in place).** It appeared in this doc during the round, uncommitted, and this round's brief covers items 1 and 2 only. Today the pending line and the outcome are two entries. Its orphan clause is already covered by R2-3 below. Decision needed: run it as a further step.
+
+**Item 1, the block (`settings-view.ts`).** `settingsShowLines` returns one notice with the whole block (`blockRow`, `blockText`, both pure), then the final line only when a sync would change something:
+
+```
+{
+  "maxIterations": 7, // (container) this terminal: 3
+  "tools": {
+    "dedupOutput": false, // this terminal: true
+    "execution": "parallel"
+  }
+}
+1 differs from this terminal (/settings sync to use this terminal's values)
+```
+
+- Nesting comes from the table's dotted `configKey`, in table order. With the comments removed, the block parses as JSON (pinned by a test).
+- `N differs` is the owner's literal text, so it also reads `2 differs`. The command is in the grey hint field.
+- **Decided here, not specified:** the two comment parts read `// (container) this terminal: 3`. A key only the session has reads `// this terminal: (default)`. A key only this terminal has is shown as `"(default)"` with its comment, and counts: round 1 counted it but never showed it. A container-set key this terminal leaves out gets only the mark. An empty report is `{}`.
+- `changedNotice` and the attach notices stay one-line, under dotted names.
+
+**Item 2, the rename.** `/settings sync` is the command in the TUI, the texts, the help, the README, the CHANGELOG and the code comments. `/settings apply` is now the usage line: there is no alias, since this feature was never released. Also new, by the same rule: `Can't sync settings…`, `Already syncing…`, `Could not sync the settings…`, `… nothing to sync.`, `predates /settings sync`.
+- **`session/update_settings` stays** (the owner asked for a decision). It is an internal wire name that no user sees, and renaming it would be a protocol change for no benefit. The wire field `applied`, the task's slug and `settings-apply-runtime.test.ts` stay too. `TODO.md:437` is the original item, left for the merge.
+- The `/settings` line in the command list reads `the session's settings vs this terminal's (/settings sync to use yours)`: the owner's long hint made the row too long.
+
+**R2-3 (`App.tsx`, `state.ts`).** When the view has moved on, the pending line is withdrawn (`withdrawItem`, by identity; a no-op if a reset already took it). A failed sync after a switch is still told nowhere: `/settings` on that session tells the truth.
+
+**R2-4.** The `attachSession` doc comment is rewritten as one sentence.
+
+**Red first (round 2's code).** Non-App files: 12 named tests red, and `settings-view.test.ts` failed to load, which hid its block tests from the red run (`syncedLines` was not exported). App: 4 of 6 red. Two caveats:
+- The block's frame test **passed on round 2**: the renderer already kept the rows' indentation. It is a guard, proven by mutation only.
+- R2-3's red run was **for the wrong reason**: its fake `send` left the turn open, so it got `Can't sync settings…`. I fixed the fake after the code, so its proof is the mutation below.
+
+**Mutations (one batch of three on independent tests, all red; restored, `shasum` identical).**
+
+| Mutation | Red test |
+|---|---|
+| No `withdrawItem` in `App.tsx` | R2-3 |
+| `noticeLines` trims each row (`render-lines.ts`) | "/settings draws the block…" |
+| No container exclusion in `differing` | "a container-set key is marked…" |
+
+**Gate (final run, after the last code edit).** `bunx tsc --noEmit`: clean. `bunx biome check .`: `Checked 689 files`, no findings. `bun test packages`: 5078 pass, 3 skip (the opt-in ones), 0 fail, 344 files.
+
+**Unverified.** No live run: the block on a narrow terminal (a long comment wraps) and the checklist above with `/settings sync`. The block's real text reaches the App frame only as a literal copy: the TUI cannot import the cli, so the view-model and the frame are tested apart.

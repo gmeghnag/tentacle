@@ -230,7 +230,7 @@ export function applyCarried(
   let next = config;
   const stamped: Partial<Record<SourceKey, "carried">> = {};
   const overridden: Record<string, unknown> = {};
-  /** Carried W keys the pod sets itself, whatever the value: an apply cannot change them. */
+  /** Carried W keys the pod sets itself, whatever the value: a sync cannot change them. */
   const containerKeys: Key[] = [];
   const pinnedOver: string[] = [];
   const overlay = <K extends Key>(key: K): void => {
@@ -328,7 +328,7 @@ function valuesLine(keys: readonly Key[], values: SessionSettings): string {
 
 /**
  * What the laptop tells the user about a session's report: ONE line each, only
- * what differs, for keys of THIS table. The `(/settings apply, or /clear)` hint is its own
+ * what differs, for keys of THIS table. The `(/settings sync to use this terminal's values, or /clear)` hint is its own
  * field, so the TUI draws it grey beside the blue text.
  */
 export interface SettingsNotice {
@@ -337,7 +337,7 @@ export interface SettingsNotice {
 }
 
 /** The drift notice's way out (docs/feat/session-settings-apply.md). */
-export const DRIFT_HINT = "(/settings apply, or /clear)";
+export const DRIFT_HINT = "(/settings sync to use this terminal's values, or /clear)";
 
 export function settingsNotices(
   mine: SessionSettings,
@@ -370,7 +370,7 @@ export function settingsNotices(
 
 /**
  * Sends each notice once per session and text, since a reconnect opens the
- * session again. `forget(sessionId)`: the session's settings changed (an apply,
+ * session again. `forget(sessionId)`: the session's settings changed (a sync,
  * docs/feat/session-settings-apply.md), so a later drift is news again.
  */
 export function createSettingsNotifier(

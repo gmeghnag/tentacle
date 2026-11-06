@@ -101,7 +101,7 @@ export type AgentFactory = (
   titleModel?: ModelProvider;
   /** What it did with `context.settings`: `session/open`'s result reports it. */
   settingsReport?: SessionSettingsReport;
-  /** The session's approvals store, handed to the next agent on a settings apply (`AgentReuse.grants`). */
+  /** The session's approvals store, handed to the next agent on a settings sync (`AgentReuse.grants`). */
   grants?: SessionGrants;
 };
 

@@ -386,7 +386,7 @@ export function tunnelledAgent(
     readonly log?: (line: string) => void;
     /** The pod daemon's shared skill scan (docs/feat/skills-hot-reload.md). */
     readonly skillScan?: SkillScan;
-    /** A live session's broker, jobs and approvals: a settings apply rebuilds its agent on them. */
+    /** A live session's broker, jobs and approvals: a settings sync rebuilds its agent on them. */
     readonly reuse?: AgentReuse;
   } = {},
 ): WiredAgent & {
@@ -487,7 +487,7 @@ export function podSessionHost(
     ...(log ? { onTurnError: (error: Error) => log(`error: ${error.message}`) } : {}),
     createAgent: (cwd, { modelLink, settings, reuse }) => {
       if (!options.modelProxy) {
-        // It reports nothing: a settings apply answers `applied: false`.
+        // It reports nothing: a settings sync answers `applied: false`.
         return buildAgent({ ...config, cwd }, { ...(log ? { log, notice: log } : {}), skillScan });
       }
       const wired = tunnelledAgent({ ...config, cwd }, modelLink, {

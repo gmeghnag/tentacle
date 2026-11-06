@@ -39,7 +39,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "/skills", description: "every skill found: who can use it, and any problems" },
   {
     name: "/settings",
-    description: "the session's settings vs this terminal's (/settings apply to apply them)",
+    description: "the session's settings vs this terminal's (/settings sync to use yours)",
   },
   { name: "/exit", description: "quit (also /quit)" },
 ];

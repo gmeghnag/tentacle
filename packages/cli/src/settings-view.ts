@@ -1,7 +1,7 @@
 import { DROPPED_NOT_RETRIED } from "@tentacle/client";
 /**
  * The `/settings` texts (docs/feat/session-settings-apply.md): what a session's
- * settings are, how this terminal differs, an apply's outcome, another
+ * settings are, how this terminal differs, a sync's outcome, another
  * terminal's change. Pure: the TUI only draws these lines (blue text, grey hint).
  *
  * A report may come from a pod (not trusted, AGENTS §7): only names of the
@@ -34,8 +34,8 @@ export const NOT_OPEN = "The session is not open yet: it starts with this termin
 export const UNCONFIRMED =
   "The session is not attached yet: it may be running with other settings, shown after your first prompt.";
 export const OWN_CONFIG = "This session takes its settings from the container's own config.";
-export const APPLIED = "Session settings applied.";
-export const APPLY_HINT = "(/settings apply)";
+export const SYNCED = "Session settings synced.";
+export const SYNC_HINT = "(/settings sync to use this terminal's values)";
 
 /** The keys the container decides: `containerKeys` ∪ `overridden`, names of the table only. */
 function containerSet(report: SessionSettingsReport): ReadonlySet<Key> {
@@ -48,17 +48,21 @@ function running(report: SessionSettingsReport, key: Key): unknown {
   return report.overridden[key] ?? report.carried[key];
 }
 
-/** One `"name": value` entry; text is never printed, a missing value reads `(default)`. */
-function entry(key: Key, value: unknown, mine: SessionSettings, container: boolean): string {
-  let show: string | number | boolean;
+/** A session's value as printed: text never, a missing value reads `(default)`. */
+function sessionShown(key: Key, value: unknown, mine: SessionSettings): string | number | boolean {
   if (value === undefined) {
-    show = DEFAULT;
-  } else if (key === DESCRIPTION) {
-    show = value === mine[DESCRIPTION] ? SAME_TEXT : TEXT_DIFFERS;
-  } else {
-    show = shown(key, value);
+    return DEFAULT;
   }
+  if (key === DESCRIPTION) {
+    return value === mine[DESCRIPTION] ? SAME_TEXT : TEXT_DIFFERS;
+  }
+  return shown(key, value);
+}
+
+/** One `"name": value` entry of a one-line notice, under the config's dotted name. */
+function entry(key: Key, value: unknown, mine: SessionSettings, container: boolean): string {
   const mark = container ? " (container)" : "";
+  const show = sessionShown(key, value, mine);
   return `${JSON.stringify(CARRIED[key].configKey)}: ${JSON.stringify(show)}${mark}`;
 }
 
@@ -66,7 +70,7 @@ function braces(entries: readonly string[]): string {
   return entries.length === 0 ? "{}" : `{ ${entries.join(", ")} }`;
 }
 
-/** The keys an apply of `mine` would change: they differ, and the container does not decide them. */
+/** The keys a sync of `mine` would change: they differ, and the container does not decide them. */
 function differing(
   mine: SessionSettings,
   report: SessionSettingsReport,
@@ -80,32 +84,95 @@ function differing(
   );
 }
 
+/** This terminal's value in a comment. Its own text is not shown either: one rule for every text. */
+function mineShown(key: Key, mine: SessionSettings): string {
+  if (mine[key] === undefined) {
+    return DEFAULT;
+  }
+  return key === DESCRIPTION ? TEXT_DIFFERS : JSON.stringify(shown(key, mine[key]));
+}
+
+/** One setting of the block: where it nests, its JSON value, its end-of-line comment. */
+interface BlockRow {
+  readonly section: string | null;
+  readonly name: string;
+  readonly value: string;
+  readonly comment: string;
+}
+
+function blockRow(
+  key: Key,
+  report: SessionSettingsReport,
+  mine: SessionSettings,
+  container: ReadonlySet<Key>,
+  syncable: ReadonlySet<Key>,
+): BlockRow {
+  const { configKey } = CARRIED[key];
+  const dot = configKey.indexOf(".");
+  const value = running(report, key);
+  const isContainer = container.has(key);
+  // A container-set key mine leaves out: nothing to compare (the pod's value stands).
+  const differs = isContainer ? mine[key] !== undefined && mine[key] !== value : syncable.has(key);
+  return {
+    section: dot < 0 ? null : configKey.slice(0, dot),
+    name: dot < 0 ? configKey : configKey.slice(dot + 1),
+    value: JSON.stringify(sessionShown(key, value, mine)),
+    comment: [
+      ...(isContainer ? ["(container)"] : []),
+      ...(differs ? [`this terminal: ${mineShown(key, mine)}`] : []),
+    ].join(" "),
+  };
+}
+
+/** The rows as indented JSON (2 spaces), nested by section, comments at the end of the line. */
+function blockText(rows: readonly BlockRow[]): string {
+  if (rows.length === 0) {
+    return "{}";
+  }
+  const leaf = (indent: string, row: BlockRow, more: boolean): string =>
+    `${indent}${JSON.stringify(row.name)}: ${row.value}${more ? "," : ""}${
+      row.comment === "" ? "" : ` // ${row.comment}`
+    }`;
+  const lines = ["{"];
+  rows.forEach((row, i) => {
+    const next = rows[i + 1];
+    if (row.section === null) {
+      lines.push(leaf("  ", row, next !== undefined));
+      return;
+    }
+    if (rows[i - 1]?.section !== row.section) {
+      lines.push(`  ${JSON.stringify(row.section)}: {`);
+    }
+    const last = next?.section !== row.section;
+    lines.push(leaf("    ", row, !last));
+    if (last) {
+      lines.push(`  }${next !== undefined ? "," : ""}`);
+    }
+  });
+  lines.push("}");
+  return lines.join("\n");
+}
+
 /**
- * `/settings` alone: ALL the session's settings (container-set keys marked),
- * then `This terminal differs: { … }` (this terminal's values of the keys an
- * apply would change, hint `(/settings apply)`) or `This terminal matches.`
+ * `/settings` alone: ALL the session's settings as one JSON block, nested by
+ * section as in `config.jsonc`, with `// this terminal: <value>` and
+ * `// (container)` comments. Then, only when a sync would change something,
+ * `N differs from this terminal` with its hint. A container-set key is never
+ * counted: a sync cannot change it.
  */
 export function settingsShowLines(
   mine: SessionSettings,
   report: SessionSettingsReport,
 ): SettingsLine[] {
   const container = containerSet(report);
-  const all = KEYS.filter((key) => running(report, key) !== undefined).map((key) =>
-    entry(key, running(report, key), mine, container.has(key)),
+  const syncable = new Set(differing(mine, report, container));
+  const rows = KEYS.filter((key) => running(report, key) !== undefined || syncable.has(key)).map(
+    (key) => blockRow(key, report, mine, container, syncable),
   );
-  const lines: SettingsLine[] = [{ text: `Session settings: ${braces(all)}` }];
-  const differs = differing(mine, report, container);
-  if (differs.length === 0) {
-    lines.push({ text: "This terminal matches." });
-    return lines;
+  const lines: SettingsLine[] = [{ text: blockText(rows) }];
+  if (syncable.size > 0) {
+    lines.push({ text: `${syncable.size} differs from this terminal`, hint: SYNC_HINT });
   }
-  const values = differs.map((key) =>
-    // This terminal's own text is not shown either: one rule for every text.
-    key === DESCRIPTION
-      ? `${JSON.stringify(CARRIED[key].configKey)}: ${JSON.stringify(TEXT_DIFFERS)}`
-      : entry(key, mine[key], mine, false),
-  );
-  lines.push({ text: `This terminal differs: ${braces(values)}`, hint: APPLY_HINT });
   return lines;
 }
 
@@ -131,7 +198,7 @@ export function settingsCommandLines(
 }
 
 /**
- * Another terminal applied its settings: the keys whose running value (or
+ * Another terminal synced its settings: the keys whose running value (or
  * container mark) changed, with the NEW values. `previous` absent → every key.
  * Nothing changed → null (no notice).
  */
@@ -154,12 +221,12 @@ export function changedNotice(
   return `Session settings changed by another terminal: ${braces(values)}`;
 }
 
-/** An own apply's outcome: the confirmation, then what the container keeps (the drift notice's lines). */
-export function appliedLines(mine: SessionSettings, result: UpdateSettingsResult): SettingsLine[] {
+/** An own sync's outcome: the confirmation, then what the container keeps (the drift notice's lines). */
+export function syncedLines(mine: SessionSettings, result: UpdateSettingsResult): SettingsLine[] {
   if (!result.applied || !result.settings) {
-    return [{ text: `${OWN_CONFIG.slice(0, -1)}: nothing to apply.` }];
+    return [{ text: `${OWN_CONFIG.slice(0, -1)}: nothing to sync.` }];
   }
-  return [{ text: APPLIED }, ...settingsNotices(mine, result.settings)];
+  return [{ text: SYNCED }, ...settingsNotices(mine, result.settings)];
 }
 
 /** Max length of a reported error, as `mcp/src/status.ts`. */
@@ -176,25 +243,25 @@ function oneLine(text: string): string {
   );
 }
 
-/** A failed apply, told by its CODE (the drop is this client's own marker). */
+/** A failed sync, told by its CODE (the drop is this client's own marker). */
 export function updateFailureLine(error: unknown): SettingsLine {
   const code = (error as { code?: unknown } | null)?.code;
   if (code === DomainErrorCode.TurnInProgress) {
-    return { text: "Can't apply settings while a turn is running." };
+    return { text: "Can't sync settings while a turn is running." };
   }
   if (code === DomainErrorCode.CompactInProgress) {
-    return { text: "Can't apply settings while a compaction is running." };
+    return { text: "Can't sync settings while a compaction is running." };
   }
   if (code === JsonRpcErrorCode.MethodNotFound) {
     return {
-      text: "This container's tentacle predates /settings apply: quit and attach again to update it.",
+      text: "This container's tentacle predates /settings sync: quit and attach again to update it.",
     };
   }
   const message = error instanceof Error ? error.message : String(error);
   if (code === JsonRpcErrorCode.InternalError && message === DROPPED_NOT_RETRIED) {
     return {
-      text: "The connection dropped before the daemon answered: run /settings apply again.",
+      text: "The connection dropped before the daemon answered: run /settings sync again.",
     };
   }
-  return { text: `Could not apply the settings: ${oneLine(message)}` };
+  return { text: `Could not sync the settings: ${oneLine(message)}` };
 }

@@ -21,6 +21,7 @@ import { IDLE_WARM_DELAY_MS, type IdleWarmState } from "../src/idle-warm.ts";
 import type { LinkStatusView } from "../src/link-status.ts";
 import * as renderLines from "../src/render-lines.ts";
 import { messagesToItems } from "../src/resume.ts";
+import type { SessionActivity } from "../src/turn-feed.ts";
 import * as turnFeed from "../src/turn-feed.ts";
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -533,20 +534,23 @@ describe("App", () => {
     unmount();
   });
 
-  test("/settings shows the host's lines; /settings apply applies and shows its outcome (docs/feat/session-settings-apply.md)", async () => {
-    // Mutation: remove the App's `/settings` case → nothing is shown, nothing applied.
-    let applied = 0;
+  test("/settings shows the host's lines; /settings sync applies and shows its outcome (docs/feat/session-settings-apply.md)", async () => {
+    // Mutation: remove the App's `/settings` case → nothing is shown, nothing synced.
+    let synced = 0;
     const createSession = () => ({
       async *send() {
         // no model turn needed for this test
       },
       settings: () => [
-        { text: 'Session settings: { "maxIterations": 5 }' },
-        { text: 'This terminal differs: { "maxIterations": 3 }', hint: "(/settings apply)" },
+        { text: '{\n  "maxIterations": 5 // this terminal: 3\n}' },
+        {
+          text: "1 differs from this terminal",
+          hint: "(/settings sync to use this terminal's values)",
+        },
       ],
       async updateSettings() {
-        applied += 1;
-        return [{ text: "Session settings applied." }];
+        synced += 1;
+        return [{ text: "Session settings synced." }];
       },
     });
     const { stdin, lastFrame, unmount } = render(
@@ -558,21 +562,23 @@ describe("App", () => {
     stdin.write("\r");
     await delay(60);
     const shown = stripAnsi(lastFrame() ?? "");
-    expect(shown).toContain('⏺ Session settings: { "maxIterations": 5 }');
-    expect(shown).toContain('⏺ This terminal differs: { "maxIterations": 3 } (/settings apply)');
-    expect(applied).toBe(0);
-    stdin.write("/settings apply");
+    expect(shown).toContain('"maxIterations": 5 // this terminal: 3');
+    expect(shown).toContain(
+      "⏺ 1 differs from this terminal (/settings sync to use this terminal's values)",
+    );
+    expect(synced).toBe(0);
+    stdin.write("/settings sync");
     await delay(30);
     stdin.write("\r");
     await delay(60);
-    expect(applied).toBe(1);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Session settings applied.");
+    expect(synced).toBe(1);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Session settings synced.");
     unmount();
   });
 
-  test("F4 /settings apply shows it is pending, refuses a second one, then its outcome", async () => {
+  test("F4 /settings sync shows it is pending, refuses a second one, then its outcome", async () => {
     // Mutation: no pending line → an outage looks like nothing happened.
-    let applied = 0;
+    let synced = 0;
     let finish: (lines: readonly { text: string }[]) => void = () => {};
     const createSession = () => ({
       async *send() {
@@ -580,7 +586,7 @@ describe("App", () => {
       },
       settings: () => [],
       updateSettings() {
-        applied += 1;
+        synced += 1;
         return new Promise<readonly { text: string }[]>((resolve) => {
           finish = resolve;
         });
@@ -590,27 +596,121 @@ describe("App", () => {
       <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
     );
     await delay(30);
-    stdin.write("/settings apply");
+    stdin.write("/settings sync");
     await delay(30);
     stdin.write("\r");
     await delay(60);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Applying this terminal's settings…");
-    stdin.write("/settings apply");
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Syncing this terminal's settings…");
+    stdin.write("/settings sync");
     await delay(30);
     stdin.write("\r");
     await delay(60);
-    expect(applied).toBe(1);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Already applying this terminal's settings…");
-    finish([{ text: "Session settings applied." }]);
+    expect(synced).toBe(1);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Already syncing this terminal's settings…");
+    finish([{ text: "Session settings synced." }]);
     await delay(60);
-    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Session settings applied.");
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Session settings synced.");
     // Settled: another apply goes through.
-    stdin.write("/settings apply");
+    stdin.write("/settings sync");
     await delay(30);
     stdin.write("\r");
     await delay(60);
-    expect(applied).toBe(2);
+    expect(synced).toBe(2);
     finish([]);
+    unmount();
+  });
+
+  test("/settings draws the block: every row keeps its indentation, comments at the end, the final line after it", async () => {
+    // Mutation: collapse or trim the rows (a per-line notice) → the nesting is gone.
+    const createSession = () => ({
+      async *send() {
+        // no model turn needed for this test
+      },
+      settings: () => [
+        {
+          text: [
+            "{",
+            '  "model": {',
+            '    "contextWindow": 1000 // this terminal: 2000',
+            "  },",
+            '  "maxIterations": 7 // (container)',
+            "}",
+          ].join("\n"),
+        },
+        {
+          text: "1 differs from this terminal",
+          hint: "(/settings sync to use this terminal's values)",
+        },
+      ],
+      async updateSettings() {
+        return [];
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/settings");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    const rows = stripAnsi(lastFrame() ?? "").split("\n");
+    const start = rows.findIndex((row) => row.startsWith("⏺ {"));
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(rows.slice(start, start + 6).map((row) => row.trimEnd())).toEqual([
+      "⏺ {",
+      '    "model": {',
+      '      "contextWindow": 1000 // this terminal: 2000',
+      "    },",
+      '    "maxIterations": 7 // (container)',
+      "  }",
+    ]);
+    expect(rows.join("\n")).toContain(
+      "⏺ 1 differs from this terminal (/settings sync to use this terminal's values)",
+    );
+    unmount();
+  });
+
+  test("R2-3 a pending line never outlives its sync when the transcript stays (a session closed elsewhere)", async () => {
+    // Round 2: "Syncing…" stays on screen for ever, with no outcome.
+    const finish: ((lines: readonly { text: string }[]) => void)[] = [];
+    let raise: (activity: SessionActivity) => void = () => {};
+    const createSession = () => ({
+      async *send() {
+        yield { type: "turn_end" as const, reason: "end_turn" as const };
+      },
+      settings: () => [],
+      updateSettings() {
+        return new Promise<readonly { text: string }[]>((resolve) => {
+          finish.push(resolve);
+        });
+      },
+      watch(listener: (activity: SessionActivity) => void) {
+        raise = listener;
+        return () => {};
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("hello");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    stdin.write("/settings sync");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("Syncing this terminal's settings…");
+    raise({ kind: "closed", reason: "closed" });
+    await delay(60);
+    finish[0]?.([{ text: "OUTCOME OF THE OLD SESSION" }]);
+    await delay(60);
+    const frame = stripAnsi(lastFrame() ?? "");
+    expect(frame).not.toContain("Syncing this terminal's settings…");
+    expect(frame).not.toContain("OUTCOME OF THE OLD SESSION");
+    expect(frame).toContain("hello"); // the transcript stayed
     unmount();
   });
 
@@ -632,7 +732,7 @@ describe("App", () => {
       <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
     );
     await delay(30);
-    stdin.write("/settings apply");
+    stdin.write("/settings sync");
     await delay(30);
     stdin.write("\r");
     await delay(60);
@@ -644,7 +744,7 @@ describe("App", () => {
     await delay(60);
     expect(stripAnsi(lastFrame() ?? "")).not.toContain("OUTCOME OF THE OLD SESSION");
     // The new session is not held by the old one's apply.
-    stdin.write("/settings apply");
+    stdin.write("/settings sync");
     await delay(30);
     stdin.write("\r");
     await delay(60);
@@ -665,7 +765,7 @@ describe("App", () => {
       <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
     );
     await delay(30);
-    stdin.write("/settings apply");
+    stdin.write("/settings sync");
     await delay(30);
     stdin.write("\r");
     await delay(60);

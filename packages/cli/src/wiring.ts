@@ -299,7 +299,7 @@ export interface BuildAgentOptions {
   readonly permissions?: PermissionBroker;
   /**
    * A live session's jobs and approvals, instead of fresh ones: its agent is
-   * REBUILT by a settings apply (docs/feat/session-settings-apply.md), and its
+   * REBUILT by a settings sync (docs/feat/session-settings-apply.md), and its
    * running jobs and the approvals the user gave must carry over.
    */
   readonly jobs?: JobController;

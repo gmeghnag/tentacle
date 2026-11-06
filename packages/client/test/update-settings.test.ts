@@ -153,7 +153,7 @@ describe("RemoteClient.updateSettings (docs/feat/session-settings-apply.md)", ()
     c.close();
   });
 
-  test("T11 an older daemon (MethodNotFound) is worded: it predates /settings apply", async () => {
+  test("T11 an older daemon (MethodNotFound) is worded: it predates /settings sync", async () => {
     const d = dialer(makeHost(), (frame) =>
       frame.method === "session/update_settings"
         ? { error: { code: JsonRpcErrorCode.MethodNotFound, message: "Method not found" } }
@@ -164,7 +164,7 @@ describe("RemoteClient.updateSettings (docs/feat/session-settings-apply.md)", ()
     await c.openSession(undefined, undefined, "S");
     const error = await c.updateSettings("S").catch((e: unknown) => e);
     expect(error instanceof RpcError && error.code).toBe(JsonRpcErrorCode.MethodNotFound);
-    expect((error as Error).message).toMatch(/predates \/settings apply/);
+    expect((error as Error).message).toMatch(/predates \/settings sync/);
     c.close();
   });
 

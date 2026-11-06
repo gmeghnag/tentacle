@@ -12,10 +12,10 @@ import {
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import {
-  appliedLines,
   changedNotice,
   settingsCommandLines,
   settingsShowLines,
+  syncedLines,
   updateFailureLine,
 } from "../src/settings-view.ts";
 
@@ -29,29 +29,99 @@ const report = (r: Partial<SessionSettingsReport>): SessionSettingsReport => ({
 });
 
 describe("settingsShowLines: /settings alone", () => {
-  test("ALL the session's settings in the table's order, then 'matches'", () => {
-    const mine: SessionSettings = { maxIterations: 3, dedupOutput: true, contextWindow: 1000 };
-    expect(plain(settingsShowLines(mine, report({ carried: mine })))).toEqual([
-      'Session settings: { "model.contextWindow": 1000, "maxIterations": 3, "tools.dedupOutput": true }',
-      "This terminal matches.",
+  /** The block as the user reads it, one array item per row. */
+  const block = (lines: readonly { text: string }[]): string[] =>
+    (lines[0]?.text ?? "").split("\n");
+
+  test("ALL the session's settings, one block, nested by section, in the table's order; no final line when it matches", () => {
+    const mine: SessionSettings = {
+      contextWindow: 1000,
+      subagentsEnabled: true,
+      subagentMaxParallel: 4,
+      maxIterations: 3,
+      dedupOutput: true,
+      toolExecution: "parallel",
+    };
+    const lines = settingsShowLines(mine, report({ carried: mine }));
+    expect(block(lines)).toEqual([
+      "{",
+      '  "model": {',
+      '    "contextWindow": 1000',
+      "  },",
+      '  "subagents": {',
+      '    "enabled": true,',
+      '    "maxParallel": 4',
+      "  },",
+      '  "maxIterations": 3,',
+      '  "tools": {',
+      '    "dedupOutput": true,',
+      '    "execution": "parallel"',
+      "  }",
+      "}",
     ]);
+    expect(lines).toHaveLength(1);
   });
 
-  test("a container-set key shows the value that runs, marked, and is never 'differs'", () => {
-    // Mutation: drop the container exclusion from "differs" → maxIterations is promised a change.
-    const mine: SessionSettings = { maxIterations: 3, dedupOutput: false };
+  test("the block is JSON once the comments are gone", () => {
+    const mine: SessionSettings = { maxIterations: 3, dedupOutput: true, contextWindow: 1 };
+    const lines = settingsShowLines(mine, report({ carried: { ...mine, maxIterations: 5 } }));
+    const json = block(lines)
+      .map((row) => row.replace(/ \/\/ .*$/, ""))
+      .join("\n");
+    expect(JSON.parse(json)).toEqual({
+      model: { contextWindow: 1 },
+      maxIterations: 5,
+      tools: { dedupOutput: true },
+    });
+  });
+
+  test("a difference is an end-of-line comment after the comma; the final line counts them, its command in the hint", () => {
     const lines = settingsShowLines(
-      mine,
+      { maxIterations: 3, dedupOutput: true, toolExecution: "sequential" },
+      report({ carried: { maxIterations: 5, dedupOutput: true, toolExecution: "parallel" } }),
+    );
+    expect(block(lines)).toEqual([
+      "{",
+      '  "maxIterations": 5, // this terminal: 3',
+      '  "tools": {',
+      '    "dedupOutput": true,',
+      '    "execution": "parallel" // this terminal: "sequential"',
+      "  }",
+      "}",
+    ]);
+    expect(lines[1]).toEqual({
+      text: "2 differs from this terminal",
+      hint: "(/settings sync to use this terminal's values)",
+    });
+    expect(lines).toHaveLength(2);
+  });
+
+  test("a container-set key is marked, with this terminal's value when it differs, and is never counted", () => {
+    // Mutation: drop the container exclusion → "1 differs" promises a change a sync cannot make.
+    const lines = settingsShowLines(
+      { maxIterations: 3, dedupOutput: false },
       report({
         carried: { maxIterations: 7, dedupOutput: false },
-        overridden: {},
         containerKeys: ["maxIterations"],
       }),
     );
-    expect(plain(lines)).toEqual([
-      'Session settings: { "maxIterations": 7 (container), "tools.dedupOutput": false }',
-      "This terminal matches.",
+    expect(block(lines)).toEqual([
+      "{",
+      '  "maxIterations": 7, // (container) this terminal: 3',
+      '  "tools": {',
+      '    "dedupOutput": false',
+      "  }",
+      "}",
     ]);
+    expect(lines).toHaveLength(1);
+  });
+
+  test("a container-set key equal to this terminal's: only the mark", () => {
+    const lines = settingsShowLines(
+      { maxIterations: 7 },
+      report({ carried: { maxIterations: 7 }, containerKeys: ["maxIterations"] }),
+    );
+    expect(block(lines)).toEqual(["{", '  "maxIterations": 7 // (container)', "}"]);
   });
 
   test("an overridden key is container-set too, with the container's value", () => {
@@ -59,22 +129,37 @@ describe("settingsShowLines: /settings alone", () => {
       { maxIterations: 3 },
       report({ carried: { maxIterations: 3 }, overridden: { maxIterations: 9 } }),
     );
-    expect(plain(lines)).toEqual([
-      'Session settings: { "maxIterations": 9 (container) }',
-      "This terminal matches.",
+    expect(block(lines)).toEqual([
+      "{",
+      '  "maxIterations": 9 // (container) this terminal: 3',
+      "}",
     ]);
+    expect(lines).toHaveLength(1);
   });
 
-  test("this terminal differs: its values of the keys an apply would change, with the grey hint", () => {
-    const lines = settingsShowLines(
-      { maxIterations: 3, dedupOutput: true },
-      report({ carried: { maxIterations: 5, dedupOutput: true, contextWindow: 9000 } }),
-    );
-    expect(lines[1]).toEqual({
-      text: 'This terminal differs: { "model.contextWindow": "(default)", "maxIterations": 3 }',
-      hint: "(/settings apply)",
-    });
-    expect(lines).toHaveLength(2);
+  test("a value only one side has: (default) on the other, and it counts", () => {
+    const onlySession = settingsShowLines({}, report({ carried: { contextWindow: 9000 } }));
+    expect(block(onlySession)).toEqual([
+      "{",
+      '  "model": {',
+      '    "contextWindow": 9000 // this terminal: (default)',
+      "  }",
+      "}",
+    ]);
+    expect(onlySession[1]?.text).toBe("1 differs from this terminal");
+    const onlyMine = settingsShowLines({ contextWindow: 9000 }, report({}));
+    expect(block(onlyMine)).toEqual([
+      "{",
+      '  "model": {',
+      '    "contextWindow": "(default)" // this terminal: 9000',
+      "  }",
+      "}",
+    ]);
+    expect(onlyMine[1]?.text).toBe("1 differs from this terminal");
+  });
+
+  test("nothing at all: an empty block", () => {
+    expect(settingsShowLines({}, report({}))).toEqual([{ text: "{}" }]);
   });
 
   test("names the laptop does not know are dropped; any text is hidden", () => {
@@ -90,18 +175,22 @@ describe("settingsShowLines: /settings alone", () => {
     expect(lines.join("\n")).not.toContain("pod words");
     expect(lines.join("\n")).not.toContain("my plan");
     expect(lines.join("\n")).not.toContain("evil");
-    expect(lines[0]).toBe(
-      'Session settings: { "subagents.agentTaskDescription": "(text differs)" }',
-    );
+    expect(lines[0]?.split("\n")).toEqual([
+      "{",
+      '  "subagents": {',
+      '    "agentTaskDescription": "(text differs)" // this terminal: (text differs)',
+      "  }",
+      "}",
+    ]);
     expect(lines[1]).toBe(
-      'This terminal differs: { "subagents.agentTaskDescription": "(text differs)" } (/settings apply)',
+      "1 differs from this terminal (/settings sync to use this terminal's values)",
     );
   });
 
-  test("the same description text reads '(same text)'", () => {
+  test("the same description text reads '(same text)', with no comment", () => {
     const mine = { agentTaskDescription: "x" };
-    expect(plain(settingsShowLines(mine, report({ carried: mine })))[0]).toBe(
-      'Session settings: { "subagents.agentTaskDescription": "(same text)" }',
+    expect(block(settingsShowLines(mine, report({ carried: mine })))).toContain(
+      '    "agentTaskDescription": "(same text)"',
     );
   });
 });
@@ -114,7 +203,7 @@ describe("settingsCommandLines: the states around a report", () => {
     expect(plain(settingsCommandLines({}, { open: true }))).toEqual([
       "This session takes its settings from the container's own config.",
     ]);
-    expect(settingsCommandLines({}, { open: true, report: report({}) })).toHaveLength(2);
+    expect(settingsCommandLines({}, { open: true, report: report({}) })).toEqual([{ text: "{}" }]);
   });
 });
 
@@ -157,38 +246,38 @@ describe("changedNotice: another terminal's apply", () => {
   });
 });
 
-describe("appliedLines and updateFailureLine: the apply's outcome", () => {
+describe("syncedLines and updateFailureLine: the sync's outcome", () => {
   test("applied: the confirmation, then what the container keeps", () => {
     const mine: SessionSettings = { maxIterations: 3 };
     expect(
       plain(
-        appliedLines(mine, {
+        syncedLines(mine, {
           applied: true,
           settings: { carried: mine, overridden: { maxIterations: 9 } },
         }),
       ),
-    ).toEqual(["Session settings applied.", 'Container config: { "maxIterations": 9 }']);
+    ).toEqual(["Session settings synced.", 'Container config: { "maxIterations": 9 }']);
     expect(
-      plain(appliedLines(mine, { applied: true, settings: { carried: mine, overridden: {} } })),
-    ).toEqual(["Session settings applied."]);
+      plain(syncedLines(mine, { applied: true, settings: { carried: mine, overridden: {} } })),
+    ).toEqual(["Session settings synced."]);
   });
 
   test("not applied: the daemon decides by its own config", () => {
-    expect(plain(appliedLines({}, { applied: false }))).toEqual([
-      "This session takes its settings from the container's own config: nothing to apply.",
+    expect(plain(syncedLines({}, { applied: false }))).toEqual([
+      "This session takes its settings from the container's own config: nothing to sync.",
     ]);
   });
 
   test("each refusal by its code, never by its text", () => {
     const line = (error: unknown) => updateFailureLine(error).text;
     expect(line(new RpcError(DomainErrorCode.TurnInProgress, "x"))).toBe(
-      "Can't apply settings while a turn is running.",
+      "Can't sync settings while a turn is running.",
     );
     expect(line(new RpcError(DomainErrorCode.CompactInProgress, "x"))).toBe(
-      "Can't apply settings while a compaction is running.",
+      "Can't sync settings while a compaction is running.",
     );
     expect(line(new RpcError(JsonRpcErrorCode.MethodNotFound, "x"))).toBe(
-      "This container's tentacle predates /settings apply: quit and attach again to update it.",
+      "This container's tentacle predates /settings sync: quit and attach again to update it.",
     );
     expect(
       line(
@@ -197,15 +286,15 @@ describe("appliedLines and updateFailureLine: the apply's outcome", () => {
           "the connection dropped before the daemon answered; not retried",
         ),
       ),
-    ).toBe("The connection dropped before the daemon answered: run /settings apply again.");
-    expect(line(new Error("boom\u001b[31m"))).toBe("Could not apply the settings: boom[31m");
+    ).toBe("The connection dropped before the daemon answered: run /settings sync again.");
+    expect(line(new Error("boom\u001b[31m"))).toBe("Could not sync the settings: boom[31m");
   });
 
   test("F5 a pod's error text is capped, one line", () => {
     // Round 1: 5000 characters of the pod's words on the screen.
     const { text } = updateFailureLine(new Error(`a\nb${"x".repeat(5000)}`));
-    expect(text.startsWith("Could not apply the settings: ab")).toBe(true);
-    expect(text.length).toBeLessThanOrEqual("Could not apply the settings: ".length + 500);
+    expect(text.startsWith("Could not sync the settings: ab")).toBe(true);
+    expect(text.length).toBeLessThanOrEqual("Could not sync the settings: ".length + 500);
   });
 });
 
