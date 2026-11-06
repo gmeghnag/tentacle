@@ -1,8 +1,8 @@
-# eval/reaper-gc-flaky-test — pin "a connection forgets a closed session" deterministically, not through the GC
+# fix/reaper-gc-flaky-test — pin "a connection forgets a closed session" deterministically, not through the GC
 
-> **Status:** DEFERRED, low priority (owner, 2026-10-20) — a test-only defect: the production code is correct (see Context). Revisit at the end of the protocol v2 migration; then promote to `docs/fix/reaper-gc-flaky-test.md` and open the branch. The Implementation below is a ready draft, not yet approved.
-> **Branch:** none until promoted (then `fix/reaper-gc-flaky-test`)
-> **Type:** eval → fix · **Size:** S · **Blast:** contained (a read-only getter on `Connection` + one test; no protocol, persistence or IO change) · **Suited:** any model executes; standard in-context Review
+> **Status:** execution (promoted 2026-11-06)
+> **Branch:** `fix/reaper-gc-flaky-test`
+> **Type:** fix · **Size:** S · **Blast:** contained (a read-only getter on `Connection` + one test; no protocol, persistence or IO change) · **Suited:** any model executes; standard in-context Review
 
 ## Context
 
@@ -117,6 +117,19 @@ mutations: drop `dropStale()` from `open` → red; no-op `dropStale` body → re
 Stability: the test alone 40×, the full suite 8× → 0 failures of it.
 
 ## Execution
+
+*— claude-sonnet-5-5, 2026-11-06*
+
+**Repro (main 6af6562):** `bun test --rerun-each 50 packages/daemon/test/session-reaper.test.ts -t "forgets a session"` → 4/50 failures (`expect(ref.deref()).toBeUndefined()`, session-reaper.test.ts:530). It also fails alone on this build (the 2026-10-20 evidence said 0/40).
+
+**Plan re-verified:** `Connection.attached` is `private` (connection.ts:105); `dropStale()` (:443) is the prune called from `open`. No drift.
+
+**Done:**
+1. `connection.ts`: `get openSessionIds(): readonly string[]` (copy of `attached` keys), read-only.
+2. Test rewritten: no WeakRef/GC; asserts `openSessionIds` is `["X"]` after A opens X, and `["Y"]` after B closed X and A opened Y.
+3. **Red:** with the `this.dropStale()` calls commented out → test fails (`Expected - 0 / Received + 1`, X still listed). Restored → green.
+
+**Gate:** rerun-each 50 of the test: 0 fail / 50; `bun test --rerun-each 3 packages/daemon`: 1506 pass, 3 skip, 0 fail; `bun test packages/daemon`: 502 pass, 1 skip (opt-in), 0 fail; `bunx tsc --noEmit` and `bunx biome check .` clean. No CHANGELOG: the only production change is a read-only getter, no behaviour change.
 
 ## Review
 
