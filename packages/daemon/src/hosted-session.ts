@@ -242,10 +242,11 @@ export interface SessionPersistence {
 
 /**
  * `serve` only (docs/feat/serve-autowake.md): the session starts a
- * continuation turn by itself when a background job exits while NOBODY is
- * attached — idle, after a normal end. Present = on (the `serve` host's own
- * `autoWake`); absent on a pod daemon and the in-process worker — structurally
- * off. An attached client wakes by its own rule instead.
+ * continuation turn by itself when a background job exits — idle, after a
+ * normal end, attached clients or not: the daemon is the ONLY waker (a client
+ * watches the wake turn live and may cancel it). Present = on (the `serve`
+ * host's own `autoWake`); absent on a pod daemon and the in-process worker —
+ * structurally off (there a TUI or the relay wakes).
  */
 export interface SessionWake {
   /** One line per wake started (the session id only — never a job's command). */
@@ -504,7 +505,7 @@ export class HostedSession {
         status: job.status,
         exitCode: job.exitCode,
       });
-      // Nobody attached: the daemon may wake (re-checked on the macrotask).
+      // The daemon may wake (re-checked on the macrotask).
       this.kickWake();
     });
     // A turn suspended at the restart is running again (it holds the slot)
@@ -1637,8 +1638,8 @@ export class HostedSession {
       this.publishQueue();
       // Only SCHEDULES (a macrotask): no work in the steering window.
       this.kickTitle();
-      // An exit the turn's start did not flush (it came later): nobody
-      // attached → the daemon wakes for it. Scheduled too.
+      // An exit the turn's start did not flush (it came later): the daemon
+      // wakes for it. Scheduled too.
       this.kickWake();
     }
   }
@@ -1659,8 +1660,9 @@ export class HostedSession {
   }
 
   /**
-   * Start ONE continuation turn if an exit is unflushed, nobody is attached,
-   * the slot is free and the last turn ended normally (`daemonWakeGate`). The
+   * Start ONE continuation turn if an exit is unflushed, the slot is free and
+   * the last turn ended normally (`daemonWakeGate`) — attached clients or not:
+   * on `serve` the daemon is the only waker (they watch it live). The
    * agent's own count decides — a turn that flushed leaves 0, so a wake never
    * repeats for the same exit; one refused leaves it, so the next check retries.
    */
@@ -1669,7 +1671,6 @@ export class HostedSession {
       { pending: this.session.pendingExitCount > 0 },
       daemonWakeGate({
         enabled: this.wake !== undefined,
-        attached: this.attachments.size,
         busy: this.running,
         lastEndBad: this.lastEndBad,
         closed: this.closed,

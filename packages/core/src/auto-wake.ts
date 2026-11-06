@@ -1,8 +1,8 @@
 /**
  * One session's autonomous wake on a background-job exit, pure: the TUI and a
  * detached run's relay decide it here, each with its own turn driver
- * (docs/fix/detached-autowake.md), and a `serve` daemon for a session nobody
- * is attached to (`daemonWakeGate`). The agent flushes every pending exit at a
+ * (docs/fix/detached-autowake.md), and a `serve` daemon for its own sessions,
+ * attached or not (`daemonWakeGate`). The agent flushes every pending exit at a
  * turn's START, so N exits before the next start are one wake.
  */
 export interface WakeModel {
@@ -40,8 +40,6 @@ export function wakeDue(model: WakeModel, gate: WakeGate): boolean {
 export interface DaemonWakeState {
   /** The daemon host's own `autoWake` (never a carried setting). */
   readonly enabled: boolean;
-  /** Clients attached: any one of them wakes by its own rule instead. */
-  readonly attached: number;
   /** A turn or a compaction holds the slot. */
   readonly busy: boolean;
   /** The last turn ended `error` or `cancelled`: the chain stops there. */
@@ -50,14 +48,15 @@ export interface DaemonWakeState {
 }
 
 /**
- * The third user (docs/feat/serve-autowake.md): a `serve` daemon wakes its
- * session only while nobody is attached, idle, after a normal end. Its
- * `pending` is the agent's own count of unflushed exits, not `wakeStep`.
+ * The third user (docs/feat/serve-autowake.md): a `serve` daemon is the ONLY
+ * waker of its sessions — attached clients or not (they watch the wake turn
+ * live and may cancel it) — when idle, after a normal end. Its `pending` is
+ * the agent's own count of unflushed exits, not `wakeStep`.
  */
 export function daemonWakeGate(s: DaemonWakeState): WakeGate {
   return {
     enabled: s.enabled,
     idle: !s.busy,
-    blocked: s.attached > 0 || s.lastEndBad || s.closed,
+    blocked: s.lastEndBad || s.closed,
   };
 }

@@ -236,8 +236,9 @@ describe("a serve daemon wakes a session nobody is attached to", () => {
     expect((await b.open()).unflushedExits).toBe(1);
   });
 
-  test("W-3 a client attached: the daemon never wakes — not on the exit, not on its detach", async () => {
-    // Mutation: ignore `attached` in `daemonWakeGate` → a wake while attached.
+  test("W-3 a client attached: the DAEMON wakes (the only waker), once, live to the client", async () => {
+    // Owner answer (fix round 2): attached or not, the serve daemon wakes.
+    // Mutation: block the gate on `attached > 0` (the old defer rule) → no wake (the live bug).
     const r = rig();
     const a = await r.connect();
     await a.open({ create: true });
@@ -245,19 +246,61 @@ describe("a serve daemon wakes a session nobody is attached to", () => {
     await settle();
     r.jobs.fire("j1");
     await settle();
-    expect(r.model.seen.length).toBe(1);
-    // The client saw the exit live (its TUI decides the wake).
+    expect(r.model.seen.length).toBe(2);
+    expect(r.model.wokeFor("j1")).toBe(1);
+    expect(r.hosted().unflushedExits).toBe(0);
+    // The client watched it live: the exit, then the wake turn (an empty prompt) to its end.
     expect(a.of("background_exit").map((u) => u.jobId)).toEqual(["j1"]);
-    // Its detach is not a trigger (owner Q2): the exit waits for the next attach.
+    const starts = a.of("turn_start");
+    expect(starts.map((u) => u.prompt)).toEqual(["go", ""]);
+    expect(starts[1]?.turnId.startsWith("wake-")).toBe(true);
+    expect(a.of("turn_end").length).toBe(2);
+    // Its detach is not a trigger and starts nothing more.
     await a.detach();
     await settle();
-    expect(r.model.seen.length).toBe(1);
-    expect(r.hosted().unflushedExits).toBe(1);
-    // An exit AFTER the detach wakes per the daemon's config — flushing both.
-    r.jobs.fire("j2");
-    await settle();
     expect(r.model.seen.length).toBe(2);
-    expect(r.hosted().unflushedExits).toBe(0);
+  });
+
+  test("W-3b a prompt typed during the daemon's wake is enqueued and steers it, as for any turn", async () => {
+    // Mutation: none needed in this task's code — pins that a wake is an ordinary turn
+    // for the attached client: `session/prompt` → TurnInProgress, `session/enqueue` → steered.
+    const r = rig();
+    const a = await r.connect();
+    await a.open({ create: true });
+    await a.prompt("t1");
+    await settle();
+    const { step, release } = gated([shell("c1", "make"), done]);
+    r.model.steps.push(step);
+    r.jobs.fire("j1");
+    await settle();
+    expect(r.hosted().running).toBe(true);
+    const wakeId = a.of("turn_start")[1]?.turnId ?? "";
+    expect(wakeId.startsWith("wake-")).toBe(true);
+    let refused: number | undefined;
+    try {
+      await a.prompt("t2", "also check lint");
+    } catch (error) {
+      refused = (error as { code?: number }).code;
+    }
+    expect(refused).toBe(DomainErrorCode.TurnInProgress);
+    await a.client.request("session/enqueue", {
+      sessionId: "S",
+      id: "e1",
+      turnId: wakeId,
+      text: "also check lint",
+    });
+    release();
+    await settle();
+    // Approve the shell call: the steer is drained at the round boundary.
+    const ask = a.of("permission_request")[0];
+    if (ask) await a.resolve(ask.requestId, "allow_once");
+    await settle();
+    expect(r.hosted().running).toBe(false);
+    expect(a.of("steer").map((u) => u.id)).toEqual(["e1"]);
+    const sawSteer = r.model.seen.some((req) =>
+      req.messages.some((m) => m.role === "user" && m.content === "also check lint"),
+    );
+    expect(sawSteer).toBe(true);
   });
 
   test("W-4 no limit: every job end wakes once", async () => {
@@ -353,9 +396,9 @@ describe("a serve daemon wakes a session nobody is attached to", () => {
     expect(r.hosted().unflushedExits).toBe(0);
   });
 
-  test("W-7 attach while the wake turn runs (past its flush): no unflushed exits, no second wake", async () => {
-    // Mutation: ignore `attached` in the daemon's gate → a daemon wake on j2 while
-    // a client is attached (whose TUI wakes for it too). The pre-flush window: W-7b.
+  test("W-7 attach while the wake turn runs (past its flush): no unflushed exits; a later exit wakes the daemon once", async () => {
+    // Mutation: block the gate on `attached > 0` → no daemon wake on j2 while attached.
+    // The pre-flush window: W-7b.
     const r = rig();
     await r.detachedAfterTurn();
     const { step, release } = gated();
@@ -369,11 +412,12 @@ describe("a serve daemon wakes a session nobody is attached to", () => {
     release();
     await settle();
     expect(r.model.seen.length).toBe(2);
-    // Attached at its end: no further daemon wake.
+    // Attached: the next exit is the daemon's to wake too — exactly one more turn, seen live.
     r.jobs.fire("j2");
     await settle();
-    expect(r.model.seen.length).toBe(2);
-    expect(b.of("turn_end").length).toBe(1);
+    expect(r.model.seen.length).toBe(3);
+    expect(r.model.wokeFor("j2")).toBe(1);
+    expect(b.of("turn_end").length).toBe(2);
   });
 
   test("W-7b attach while the wake turn's start has NOT flushed yet (project-hook trust pending): 0", async () => {
@@ -409,11 +453,12 @@ describe("a serve daemon wakes a session nobody is attached to", () => {
     await settle();
     expect(r.hosted().running).toBe(false);
     expect(r.model.wokeFor("j1")).toBe(1);
-    // After the flush the count is the truth again: a later exit (attached) is counted.
+    // After the flush the mark is gone: a later exit (attached) is woken by the daemon, once.
     r.jobs.fire("j2");
     await settle();
-    expect(r.hosted().unflushedExits).toBe(1);
-    expect(r.model.seen.length).toBe(2);
+    expect(r.hosted().unflushedExits).toBe(0);
+    expect(r.model.seen.length).toBe(3);
+    expect(r.model.wokeFor("j2")).toBe(1);
   });
 
   test("W-8 a wake turn needing a permission holds the slot until an attaching client answers", async () => {

@@ -56,6 +56,8 @@ export function daemonWakeGate(s: {
 ```
 `HostedSession.maybeWake()` = `wakeDue({pending: session.pendingExitCount > 0}, daemonWakeGate({...}))`. Unit-tested alone (core, no I/O): each flag blocks; `enabled:false` blocks; `pending:false` blocks.
 
+**[as-built, fix round 2 — owner answer B: on `serve` the DAEMON is the only waker, attached clients or not.]** `DaemonWakeState` has no `attached` field and the gate is `blocked: lastEndBad || closed`. An attached client watches the wake turn live and may cancel it (Esc → `lastEndBad`, D6). A `connect` TUI is given no wake input (`jobs`, `autoWakeOnJobExit`, `wakePending`, `wakeHanded`; pinned in `connect.test.ts`), so a second waker cannot exist. The rows of §6 that say "the TUI wakes" / "daemon gate `attached > 0`" are superseded (see the table note below).
+
 **2. Triggers (two, both in `hosted-session.ts`).**
 - (a) **The exit callback** (`:451`): after emitting `background_exit`, `this.maybeWake()`. Idle + nobody attached → `startWake()` synchronously (no macrotask needed: not inside a steering window). **[as-built: scheduled on a macrotask too (`kickWake`) — after a settings sync the new agent's exit listener is registered AFTER the session's, so a synchronous check reads count 0; Drift D2, test W-12.]**
 - (b) **A turn's end with nobody attached** — an exit that landed after the turn's start flushed it (or one that arrived during the turn). `finishTurn` is synchronous and must not do work in the steering window (`:1486-1495`, `drive` INVARIANT `:1389-1396`), so it only SCHEDULES, like `kickTitle` (`:1539-1554`): `this.wakeKick = setTimeout(() => { this.wakeKick = null; this.maybeWake(); }, 0)`; cleared in `close` (`:1820-1823` pattern). The macrotask re-checks everything (slot may be taken, a client may have attached, closed).
@@ -76,6 +78,8 @@ export function daemonWakeGate(s: {
 | TUI attaches while a daemon wake turn runs | nobody extra: the TUI replays the running turn | **see refinement below** |
 | TUI attaches later to unflushed exits (bad end, `autoWake` off on the daemon, daemon wake lost the slot) | the TUI, from the open reply's `unflushedExits` | daemon gate `attached > 0` |
 | two clients attached | neither daemon; each TUI's own rule | unchanged |
+
+**[as-built, fix round 2]** Superseded by owner answer B. The daemon wakes in EVERY row above, attached clients or not. No client of a `serve` daemon wakes: `connect` passes no wake input to its TUI, and the mobile app has none. The live failure this fixes: `connect` was attached, the job ended, the daemon deferred to the client, the client never wakes, so nobody woke. The no-double-wake guarantees still hold. One daemon turn per exit (count-driven). A user turn running at the exit → the wake waits for it (busy slot) and runs at its end only if its start did not flush the exit. A prompt typed during a wake gets `TurnInProgress` and the TUI enqueues it, so it steers the wake turn (W-3b). The cut is moved before the wake's prompt. `unflushedExits` reads 0 while the wake's start has not flushed yet.
 
 *Refinement (small, load-bearing for "no double wake").* The agent's flush happens inside the turn's first `next()` but after a possible `await runner.resolveProjectTrust(...)` (`agent.ts:760-766`, only when project hooks need trust), so right after `prompt()` returns the count may still be > 0. A TUI that attaches in that window would read `unflushedExits > 0` (attach plan, `HostedSession.unflushedExits`), pend a wake, and fire an empty continuation when the daemon's turn ends. Fix on the seam that plan adds: `HostedSession.unflushedExits` returns **0 while the active turn is a daemon wake that has not flushed yet** (`wakeTurnId === activeTurnId`) — the turn's start will flush them, by construction (`agent.ts:795`); an exit arriving after that flush reaches the attached TUI through its live listener/backlog (that plan's seam B). One line + one test (W-7). If `fix/attach-unflushed-exits` is not merged, this refinement is skipped and the rule "attach test W-7" waits for it.
 
@@ -137,7 +141,9 @@ Gate before done: `bun test`, `bun run typecheck`, `bun run lint` (clean baselin
 ### Notes / debt
 
 - Per-session carried `autoWake` (Q1 option B) is a follow-up if connecting laptops need their own switch: a settings key, a `CARRIED` row, persisted on the record (version bump).
-- A compaction's end and a last-detach are not triggers (gap/Q2).
+- A last-detach is not a trigger (Q2). A compaction's end IS one (as-built, D3).
+- (fix round 2) On `serve` the daemon is the only waker. The laptop's own `autoWake` has no effect on a `serve` session: only the `serve` host's config decides. A connecting laptop that wants its own switch is the Q1-B follow-up above.
+- (fix round 2) With `"autoWake": false` on the `serve` host, an attaching `connect` TUI never wakes. It also shows no `ended while you were away` notice: `connect.ts` does not read `unflushedExits`, only `runEngineTui` does. It sees the live `background_exit` notices while attached, and the exits flush at the user's next message. A `connect` away-notice is a possible follow-up (display only).
 - `/sessions` could show "waiting jobs"/"woken" later; no reader today.
 - The model's `[background]` note and the replayed `turn_start{prompt:""}` make a wake visible on attach; a dedicated "woken by job exit" notice is a possible later display-class update (free to add, `UPDATE_CLASS`), not needed now.
 
@@ -211,7 +217,7 @@ Not mutated: W-4 (no cap exists to remove), W-8 (pins the pre-existing ask-with-
 2. Wait ~30 s → the daemon runs one wake turn (`serve` log: `wake: background job exit <id>` if audit is on) and persists it.
 3. `tentacle connect --resume` → the history shows the `[background]` note and the agent's reply; no `ended while you were away` notice, no second turn.
 4. Put `"autoWake": false` in the `serve` host's config, restart `serve`, repeat 1–2 → no turn; `connect --resume` shows `1 background job(s) ended while you were away` (and the laptop's own `autoWake` decides whether the TUI wakes).
-5. Stay attached with `connect` while the job ends → exactly one wake turn (the TUI's), none from the daemon.
+5. Stay attached with `connect` while the job ends → exactly one wake turn, the DAEMON's (fix round 2), shown live in the TUI; Esc stops it.
 6. (fix round 1) Start a long job, quit `connect`, and reconnect with `connect --resume` WHILE the daemon's wake turn is still answering → that turn finishes, and no second, empty turn follows it.
 
 ### Fix round 1
@@ -239,6 +245,38 @@ Owner answer R-Q1 = (a), daemon-side; it is recorded under the Review's "Owner q
 | `session-reaper.ts` `expiry`: the idle TTL ignores `busy` | W-8 (`reapExpired` → `[{id:"S", reason:"idle_ttl"}]`) |
 
 Gate: `bunx tsc --noEmit` clean · `bunx biome check .` `Checked 711 files … No fixes applied.` · `bun test packages` **5268 pass · 3 skip · 0 fail**.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-06*
+
+Owner answer B (recorded under the Review): on `serve` the daemon is the only waker, attached clients or not.
+
+- **Root cause (live):** the gate blocked on `attached > 0`, deferring to a client that never wakes (`connect` gives its TUI no wake input), so with `connect` attached nobody woke.
+- **Change:**
+  - `packages/core/src/auto-wake.ts`: `DaemonWakeState` loses `attached`; `daemonWakeGate` is `blocked: lastEndBad || closed`.
+  - `packages/daemon/src/hosted-session.ts` `maybeWake`: no `attached` passed. Comments are updated; the `SessionWake` doc now says the daemon is the only waker.
+  - Everything else is kept: one wake per exit (count-driven), no limit, a bad end stops the chain, the busy slot, the cut moved before the wake prompt, `unflushedExits` 0 while the wake's start has not flushed.
+  - Pods, the worker and `run --detach` are untouched (no option there).
+- **Tests (red-first: 4 daemon cases red on their assertions before the change):**
+  - `packages/daemon/test/serve-autowake.test.ts`:
+    - W-3 rewritten: attached client + exit → exactly one daemon wake. The client sees `background_exit`, `turn_start` `["go", ""]` (a `wake-` id) and two `turn_end`. A detach starts nothing more.
+    - W-3b new: a prompt typed during the wake → `TurnInProgress`; `session/enqueue` → a `steer{id:"e1"}` in the wake turn, and the model sees the text.
+    - W-7 / W-7b: their attached-exit legs now expect one daemon wake.
+  - `packages/core/test/auto-wake.test.ts`: the `attached` cases are removed; the open-gate case is renamed.
+  - `packages/cli/test/serve-autowake.test.ts` (this task's file): new E2E leg "a client STAYS attached" — the live failure, over the real `startDaemon` and a real `sleep`. Exactly 3 model requests; the client sees the empty-prompt wake turn live.
+  - `packages/cli/test/connect.test.ts` (extended, not overwritten): the connect TUI gets no `jobs` / `autoWakeOnJobExit` / `wakePending` / `wakeHanded`, so it cannot be a second waker.
+  - `packages/client/test/serve-autowake.test.ts` (fix round 1): still green.
+
+| Mutation (cp backup → edit → narrow test → cp restore → `shasum -c` OK) | Red test |
+|---|---|
+| daemon gate defers again (`busy: running \|\| attachments.size > 0`) | W-3, W-3b, W-7, W-7b (daemon) |
+| same mutation | cli E2E "STAYS attached" (timed out waiting for request 3) |
+| `connect.ts` passes `autoWakeOnJobExit: true` | connect "only waker" pin |
+
+W-3b has no own mutation: it pins pre-existing enqueue/steer behaviour for a wake turn. It was red only through the defer mutation, since the wake never started.
+
+Gate: `bunx tsc --noEmit` clean · `bunx biome check .` `Checked 711 files … No fixes applied.` · `bun test packages` **5271 pass · 3 skip · 0 fail**.
 
 ## Review
 
@@ -354,6 +392,13 @@ What it missed: it reasoned about the attach only through seam A (`unflushedExit
 - **R-Q1 — where to fix finding 1?** *Recommendation: (a), daemon-side.* Commit the cut before the wake's `prompt()` so that a mid-wake attach never replays the exit as a live `background_exit`. It keeps the TUI unchanged and stays inside this task's files. (b), filtering in `RemoteClient`, also helps two-TUI cases but widens the blast to the client.
 
 **Owner answer (fix round 1, 2026-11-06):** R-Q1 = **(a), daemon-side**. In `maybeWake`, commit/move the cut before the wake's `prompt()`. A TUI attaching mid-wake then gets the exit through the snapshot plus the turn's own flush note, never as a live `background_exit`, so it never fires a second continuation. No TUI or client change. LOW 2: make W-8 run the reaper. LOW 3: no code. It stays owner-visible behaviour: Esc on any turn pauses daemon wakes until a turn ends normally.
+
+**Owner answer (fix round 2, 2026-11-06):** **B — on a `serve` daemon the DAEMON is the only waker, attached clients or not.** Found by the orchestrator's live check (installed binary, f74aa82, `serve` + `connect`, Qwen): with `connect` attached a job ended and NOBODY woke (> 60 s). The daemon deferred to the attached client, but a `connect` TUI never wakes (`connect.ts` passes it no `jobs` / `autoWakeOnJobExit`, on main too). Reasons for B:
+- one owner of the wake: no double wake, and no "nobody wakes";
+- it works for every client (connect, the mobile app, future ones) without each implementing a wake;
+- it matches Q1 (serve follows its own config, not the laptop switch).
+
+An attached client watches the wake turn live and can cancel it (Esc → the D6 bad-end rule). Pods, the local worker and `run --detach` are untouched.
 
 ### Review round 2
 

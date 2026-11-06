@@ -721,4 +721,30 @@ describe("connect: TLS trust passthrough + insecure warning (docs/feat/client-tl
     });
     expect(inPod).toBeUndefined();
   });
+
+  test("a `serve` daemon is the only waker: the connect TUI gets no wake input (no double wake)", async () => {
+    // docs/feat/serve-autowake.md (owner answer, fix round 2): the daemon wakes its
+    // session on a job exit, attached clients or not. A TUI with `jobs` /
+    // `autoWakeOnJobExit` / `wakePending` would start a second continuation.
+    // Mutation: pass `jobs`, `autoWakeOnJobExit: true` or `wakePending` from connect → fails.
+    const { dial } = capturingDial();
+    let seen: Record<string, unknown> = { called: false };
+    await connectTui({ url: "wss://fake" }, () => {}, {
+      dial,
+      startTui: async (_agent, options) => {
+        seen = {
+          jobs: options.jobs,
+          autoWakeOnJobExit: options.autoWakeOnJobExit,
+          wakePending: options.wakePending,
+          wakeHanded: options.wakeHanded,
+        };
+      },
+    });
+    expect(seen).toEqual({
+      jobs: undefined,
+      autoWakeOnJobExit: undefined,
+      wakePending: undefined,
+      wakeHanded: undefined,
+    });
+  });
 });

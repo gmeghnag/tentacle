@@ -133,6 +133,13 @@ describe("serve: the daemon wakes a detached session on a job exit (its own auto
 
   /** A turn that starts `sleep 0.3` in the background (approved), ended; then the client detaches. */
   async function startJobAndDetach(url: string, sessionId: string): Promise<void> {
+    const c = await jobTurn(url, sessionId);
+    await c.request("session/detach", { sessionId });
+    c.ws.close();
+  }
+
+  /** The same turn, the client still attached. */
+  async function jobTurn(url: string, sessionId: string) {
     const c = await client(url);
     await c.request("session/open", { sessionId, create: true });
     await c.request("session/prompt", {
@@ -148,9 +155,29 @@ describe("serve: the daemon wakes a detached session on a job exit (its own auto
       optionId: "allow_once",
     });
     await until(() => c.updates.some((u) => u.type === "turn_end"));
-    await c.request("session/detach", { sessionId });
-    c.ws.close();
+    return c;
   }
+
+  test("a client STAYS attached (connect, which never wakes): the daemon wakes once, live", async () => {
+    // The orchestrator's live failure (fix round 2): nobody woke while `connect` was attached.
+    // Mutation: block the daemon's gate while a client is attached → no third request.
+    requests = [];
+    const handle = await startDaemon(await project("attached"), { host: "127.0.0.1", port: 0 });
+    try {
+      const c = await jobTurn(handle.url, "attached");
+      await until(() => requests.length >= 3, 4000);
+      expect(String(requests[2]?.at(-1)?.content)).toStartWith("[background] job ");
+      // The client watched the wake live: a second turn_start (empty prompt), then its end.
+      await until(() => c.updates.filter((u) => u.type === "turn_end").length >= 2);
+      const starts = c.updates.filter((u) => u.type === "turn_start");
+      expect(starts.map((u) => u.prompt)).toEqual(["start the job", ""]);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(requests.length).toBe(3);
+      c.ws.close();
+    } finally {
+      await handle.stop();
+    }
+  }, 15_000);
 
   test("autoWake on (the default): one wake turn after the job ends; a re-attach sees it", async () => {
     requests = [];

@@ -39,17 +39,15 @@ describe("wakeDue", () => {
 });
 
 describe("daemonWakeGate (a serve daemon, docs/feat/serve-autowake.md)", () => {
-  const free = { enabled: true, attached: 0, busy: false, lastEndBad: false, closed: false };
+  const free = { enabled: true, busy: false, lastEndBad: false, closed: false };
 
-  test("open only for an idle session nobody watches, after a normal end", () => {
+  test("open for an idle session after a normal end — attached clients or not (the only waker)", () => {
     expect(daemonWakeGate(free)).toEqual(open);
     expect(wakeDue(pending, daemonWakeGate(free))).toBe(true);
   });
 
   test("each condition alone says no", () => {
     expect(wakeDue(pending, daemonWakeGate({ ...free, enabled: false }))).toBe(false);
-    expect(wakeDue(pending, daemonWakeGate({ ...free, attached: 1 }))).toBe(false);
-    expect(wakeDue(pending, daemonWakeGate({ ...free, attached: 2 }))).toBe(false);
     expect(wakeDue(pending, daemonWakeGate({ ...free, busy: true }))).toBe(false);
     expect(wakeDue(pending, daemonWakeGate({ ...free, lastEndBad: true }))).toBe(false);
     expect(wakeDue(pending, daemonWakeGate({ ...free, closed: true }))).toBe(false);
