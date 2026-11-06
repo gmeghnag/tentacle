@@ -4,7 +4,7 @@
  * more client (a stale owner, an ended run and a join are one path); `finish`
  * is its quit (docs/fix/detach-live.md A5): a confirmed `/quit` closes the
  * session for every TUI on it, a quit alone on it ends it (`ifLast`), a TUI
- * whose session another one closed just leaves; on keep=false the TUI whose
+ * whose session another one closed just leaves; on an `--rm` run the TUI whose
  * quit ends the session does the delete, under the run's lock, once its
  * session's other TUIs left and no other session is in use.
  *
@@ -437,7 +437,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     // The run's `--auto-accept` and its turn, carried on: a later terminal
     // (the relay gone) starts from them (D2, B2).
     autoAccept: deps.owner.autoAccept,
-    keep: plan.keep,
+    rm: plan.rm,
     cwd: deps.owner.cwd ?? deps.cwd,
     created: deps.entry.created,
     // A later terminal finds a draining relay by it.
@@ -462,7 +462,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
   // R6 (owner, 2026-11-02): a SIGTERM / SIGHUP / crash of the last TUI deletes
   // only a session confirmed saved on the laptop; else it stays, and the record
   // says so (`ps`).
-  const disarm = plan.keep
+  const disarm = !plan.rm
     ? () => {}
     : deps.armNet(
         host,
@@ -470,7 +470,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
         () => runtime.saveConfirmed(),
         () => void writeRecord("idle", `not saved — workload kept: tentacle rm ${name}`),
       );
-  if (!plan.keep) {
+  if (plan.rm) {
     sessions.notices.notify(
       `Quitting removes the ${noun} if no other session is in use, a running turn stops.`,
     );
@@ -530,15 +530,15 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
   };
 
   /**
-   * keep: the run's last state, read AFTER this TUI's presence went, so of two
+   * No `--rm`: the run's last state, read AFTER this TUI's presence went, so of two
    * leaving together one always sees nobody (S3: the last one out writes it,
-   * `ps` never says `tui lost` after a clean quit). keep=false has no such
+   * `ps` never says `tui lost` after a clean quit). An `--rm` run has no such
    * step: the dir may be under the closer's delete. Only over a record still
    * `attached`: a closer's noted `idle` (its save not confirmed) stands.
    */
   const lastOut = (): void => {
     const read = readOwner(dir);
-    if (plan.keep && others() === 0 && read.kind === "owner" && read.owner.state === "attached") {
+    if (!plan.rm && others() === 0 && read.kind === "owner" && read.owner.state === "attached") {
       writeRecord("idle");
     }
   };
@@ -577,7 +577,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     // lock, so a TUI leaving others on its session never stops a draining
     // relay. My presence stays until the end: gone first, another TUI's exit
     // net could fire under this save.
-    let deleting = !plan.keep && (closeForAll || runQuit.othersOnSession() === 0);
+    let deleting = plan.rm && (closeForAll || runQuit.othersOnSession() === 0);
     /** A relay left draining for a TUI on another session: no lock tried, `quitPlan` says why. */
     let spared = false;
     // 4. The run's lock through the delete, exactly the relay's rule. Taken
@@ -646,8 +646,8 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     if (lost && existsSync(dir)) {
       write(`[${noun}] ${shown}: another terminal is closing the run\n`);
     }
-    // R2: never a silent detach. An unconfirmed save is said for keep=false AND
-    // keep=true; "still in the workload" only when the daemon kept it.
+    // R2: never a silent detach. An unconfirmed save is said with `--rm` AND
+    // without; "still in the workload" only when the daemon kept it.
     if (!saved) {
       const where =
         quit.sessionsKept > 0
@@ -659,7 +659,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
     const decided: QuitPlan =
       lock || spared
         ? quitPlan({
-            keep: plan.keep,
+            rm: plan.rm,
             othersAttached: others(),
             othersOnSession: runQuit.othersOnSession(),
             saved,
@@ -673,7 +673,7 @@ export async function joinRun(deps: JoinDeps): Promise<JoinResult> {
         write(`[${noun}] ${shown} ${detail}\n`);
         writeRecord("idle", detail);
       } else if (!saved) {
-        // keep=true has no delete to hold, and `quitPlan` gives no `why`: the
+        // No `--rm`: no delete to hold, and `quitPlan` gives no `why`: the
         // record still says the run did not end, so `ps` agrees with the line.
         writeRecord("idle", UNSAVED_NOTE);
       }

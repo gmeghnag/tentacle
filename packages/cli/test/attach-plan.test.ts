@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { type AttachInput, planAttach, quitPlan } from "../src/attach-plan.ts";
-import type { OwnerRecord } from "../src/run-state.ts";
+import { type OwnerRecord, RUN_STATE_VERSION } from "../src/run-state.ts";
 
 const UID = "11111111-1111-4111-8111-111111111111";
 const CREATED = "2026-10-27T10:00:00.000Z";
 const owner = (over: Partial<OwnerRecord> = {}): OwnerRecord => ({
-  schemaVersion: 1,
+  schemaVersion: RUN_STATE_VERSION,
   kind: "relay",
   pid: 42,
   appVersion: "1",
@@ -13,7 +13,7 @@ const owner = (over: Partial<OwnerRecord> = {}): OwnerRecord => ({
   state: "idle",
   lastActivityAt: 1,
   autoAccept: false,
-  keep: true,
+  rm: false,
   cwd: "/work",
   created: CREATED,
   ...over,
@@ -54,9 +54,9 @@ describe("H10 planAttach (docs/feat/detached-handover.md), first match wins", ()
   });
 
   test("H35 a record of an earlier workload of that name (a reused name): never the run's identity, nor its delete", () => {
-    // Mutation: drop the `created` tie → the new workload gets `keep:false` and the old uid.
+    // Mutation: drop the `created` tie → the new workload gets `rm:true` and the old uid.
     const reused = { entryCreated: "2026-10-30T10:00:00.000Z" };
-    const stale = { kind: "owner" as const, owner: owner({ keep: false, state: "failed" }) };
+    const stale = { kind: "owner" as const, owner: owner({ rm: true, state: "failed" }) };
     expect(planAttach(input({ owner: stale, ...reused }))).toEqual({ kind: "plain" });
     // Not even its folder refuses: it says nothing about this workload.
     expect(planAttach(input({ owner: stale, tty: false, ...reused }))).toEqual({
@@ -68,7 +68,7 @@ describe("H10 planAttach (docs/feat/detached-handover.md), first match wins", ()
       why: "relay",
     });
     // Tied to nothing (a record from before `created`): a doubt, so no delete.
-    const { created: _created, ...old } = owner({ keep: false });
+    const { created: _created, ...old } = owner({ rm: true });
     expect(planAttach(input({ owner: { kind: "owner", owner: old } }))).toEqual({ kind: "plain" });
   });
 
@@ -104,12 +104,12 @@ describe("H10 planAttach (docs/feat/detached-handover.md), first match wins", ()
       kind: "run",
       sessionId: UID,
       handover: true,
-      keep: true,
+      rm: false,
     });
     for (const o of [
       owner({ state: "running" }),
       owner({ state: "failed" }),
-      owner({ kind: "tui", state: "attached", keep: false }),
+      owner({ kind: "tui", state: "attached", rm: true }),
       owner({ kind: "tui", state: "idle" }),
     ]) {
       expect(planAttach(input({ owner: { kind: "owner", owner: o } }))).toEqual({
@@ -117,7 +117,7 @@ describe("H10 planAttach (docs/feat/detached-handover.md), first match wins", ()
         cwd: "/work",
         sessionId: UID,
         handover: false,
-        keep: o.keep !== false,
+        rm: o.rm === true,
       });
     }
   });
@@ -126,7 +126,7 @@ describe("H10 planAttach (docs/feat/detached-handover.md), first match wins", ()
 describe("H11 quitPlan: the only place a TUI's removal is decided", () => {
   const use = { jobs: 0, running: false, others: 0 };
   const base = {
-    keep: false,
+    rm: true,
     othersAttached: 0,
     othersOnSession: 0,
     saved: true,
@@ -137,7 +137,7 @@ describe("H11 quitPlan: the only place a TUI's removal is decided", () => {
   test("D9 every row, in order (docs/fix/detach-live.md A5)", () => {
     // Mutations: drop `othersAttached`; drop `use.others`; swap `saved` and
     // `othersAttached`; drop `sessionsKept`; count `running` as a hold.
-    expect(quitPlan({ ...base, keep: true, othersAttached: 1, saved: false })).toEqual({
+    expect(quitPlan({ ...base, rm: false, othersAttached: 1, saved: false })).toEqual({
       kind: "stay",
     });
     expect(quitPlan({ ...base, saved: false, othersAttached: 1, sessionsKept: 1 })).toEqual({
@@ -175,8 +175,8 @@ describe("H11 quitPlan: the only place a TUI's removal is decided", () => {
     });
   });
 
-  test("keep wins over everything; an unconfirmed save is said before another terminal", () => {
-    expect(quitPlan({ ...base, keep: true, saved: false })).toEqual({ kind: "stay" });
+  test("no `rm` (kept) wins over everything; an unconfirmed save is said before another terminal", () => {
+    expect(quitPlan({ ...base, rm: false, saved: false })).toEqual({ kind: "stay" });
     expect(
       quitPlan({ ...base, othersAttached: 2, saved: false, sessionsKept: 1, use: null }),
     ).toEqual({ kind: "stay", why: "the last save was not confirmed" });

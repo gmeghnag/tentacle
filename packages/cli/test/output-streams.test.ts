@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { EngineHost } from "../src/engine-host.ts";
 import { provisionWorkload } from "../src/engine-runtime.ts";
 import { main } from "../src/index.ts";
-import { type OwnerRecord, readSpec, writeOwner } from "../src/run-state.ts";
+import { type OwnerRecord, RUN_STATE_VERSION, readSpec, writeOwner } from "../src/run-state.ts";
 import { simulateSilentTerminal } from "./silent-terminal.ts";
 
 /** A docker host whose workload never gets ready: setup fails after its first phase. */
@@ -224,7 +224,7 @@ describe("serve (D2): every line is a log, on stderr", () => {
 describe("run --detach (D1): the name on stdout only when stdout is not a terminal", () => {
   const base = ["run", "--engine", "docker", "--no-mount", "--image", "x"];
   const owned = (sessionId: string): OwnerRecord => ({
-    schemaVersion: 1,
+    schemaVersion: RUN_STATE_VERSION,
     kind: "relay",
     pid: 9,
     appVersion: "1",

@@ -40,6 +40,7 @@ import { type RelayDeps, launchRelay, relayMain, runRelay } from "../src/relay.t
 import {
   type OwnerRecord,
   RELAY_SPEC_ENV,
+  RUN_STATE_VERSION,
   type RelaySpec,
   ensureRunDir,
   logTail,
@@ -64,13 +65,13 @@ const entry: KeptEntry = {
   created: "2026-10-27T10:00:00.000Z",
 };
 const spec = (over: Partial<RelaySpec> = {}): RelaySpec => ({
-  schemaVersion: 1,
+  schemaVersion: RUN_STATE_VERSION,
   mode: "start",
   stem: "0123456789abcdef",
   sessionId: UID,
   prompt: "go",
   autoAccept: false,
-  keep: true,
+  rm: false,
   cwd: "/work",
   ...over,
 });
@@ -254,7 +255,7 @@ function rig(
 
 const KEPT_LABELS = { "tentacle.managed": "true", "tentacle.kept": "true" };
 
-/** A keep=false relay: its entry in the index, an engine that records, a net that counts. */
+/** A rm=true relay: its entry in the index, an engine that records, a net that counts. */
 function removing(
   more: Partial<RelayDeps> = {},
   over: Partial<RelaySpec> = {},
@@ -292,7 +293,7 @@ function removing(
     },
   } as unknown as EngineHost;
   const box = rig(
-    { keep: false, ...over },
+    { rm: true, ...over },
     {
       hostFor: () => host,
       armNet: (_host, _name, saved?: () => boolean, kept?: () => void) => {
@@ -425,7 +426,7 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
     }
     expect(await exit).toBe(1);
     // Q13 (docs/fix/detach-live-followups.md F6): the turn was still running,
-    // so the laptop copy lacks it, and a failed keep=true run says so too.
+    // so the laptop copy lacks it, and a failed rm=false run says so too.
     expect(owner(dir)).toMatchObject({
       state: "failed",
       detail: "the container is gone · not saved — the laptop copy lacks the last turn",
@@ -483,7 +484,7 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
     ensureRunDir(dir);
     writeFileSync(join(dir, ".lock.1"), `${process.pid} 1`);
     const first: OwnerRecord = {
-      schemaVersion: 1,
+      schemaVersion: RUN_STATE_VERSION,
       kind: "relay",
       pid: process.pid,
       appVersion: "1",
@@ -507,7 +508,21 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
     // Mutation: drop the refusal → the first `record` overwrites the file.
     const { dir, start } = rig();
     ensureRunDir(dir);
-    for (const text of ['{"schemaVersion":99,"future":true}', "{not json"]) {
+    // fix/run-rm-flag: a previous build's record (v1, `keep:false`, otherwise valid) too.
+    const v1 = JSON.stringify({
+      schemaVersion: 1,
+      kind: "relay",
+      pid: 9,
+      appVersion: "1",
+      sessionId: UID,
+      state: "idle",
+      lastActivityAt: 1,
+      autoAccept: false,
+      keep: false,
+      cwd: "/work",
+      created: entry.created,
+    });
+    for (const text of ['{"schemaVersion":99,"future":true}', "{not json", v1]) {
       writeFileSync(ownerPath(dir), text);
       let dialled = false;
       const code = await start(async () => {
@@ -577,7 +592,7 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
   });
 });
 
-describe("keep=false: the relay removes the workload (docs/feat/detached-relay-lifecycle.md)", () => {
+describe("rm=true: the relay removes the workload (docs/feat/detached-relay-lifecycle.md)", () => {
   const DONE: readonly StreamEvent[] = [{ type: "text", delta: "done" }, { type: "done" }];
 
   test("L13 at idle: detached, saved, removed under the lock; then the entry and the run dir are gone", async () => {
@@ -606,12 +621,12 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
     expect(pod.frames.some((f) => f.includes('"session/close"'))).toBe(false);
   });
 
-  test("keep=true: no read, no delete, the run dir stays", async () => {
-    // Mutation: drop the `keep` row of `exitPlan`.
+  test("rm=false: no read, no delete, the run dir stays", async () => {
+    // Mutation: drop the `rm` row of `exitPlan`.
     const pod = resident(new Scripted([DONE]));
     const r = removing();
     let reads = 0;
-    const kept = rig({ keep: true }, { hostFor: () => r.host });
+    const kept = rig({ rm: false }, { hostFor: () => r.host });
     const exit = kept.start(
       reading(pod, async () => {
         reads += 1;
@@ -626,11 +641,11 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
     expect(owner(kept.dir)?.detail).toBeUndefined();
   });
 
-  test("keep=true: a stop removes nothing either", async () => {
-    // Mutation: drop the `keep` row of `exitPlan` → `kill <pid>` deletes a kept workload.
+  test("rm=false: a stop removes nothing either", async () => {
+    // Mutation: drop the `rm` row of `exitPlan` → `kill <pid>` deletes a kept workload.
     const pod = resident(new Scripted([DONE]));
     const r = removing();
-    const kept = rig({ keep: true }, { hostFor: () => r.host });
+    const kept = rig({ rm: false }, { hostFor: () => r.host });
     const exit = kept.start(pod.attach);
     await waitFor(() => owner(kept.dir)?.state === "idle", "idle");
     kept.stopRef.stop?.();
@@ -770,7 +785,7 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
     expect(lost.entries()).toHaveLength(1);
   });
 
-  test("a failed attach, keep=false: nothing removed, the net disarmed, the run dir stays", async () => {
+  test("a failed attach, rm=true: nothing removed, the net disarmed, the run dir stays", async () => {
     const r = removing();
     expect(await r.start(resident(new Scripted([]), { fail: "no daemon" }).attach)).toBe(1);
     expect(r.calls).toEqual([]);
@@ -829,11 +844,11 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
     expect(lockHolder(r.dir, procOf)).toBeNull();
   });
 
-  test("Q3 keep=true, a stop whose turn outlives the bound: `ps` says `not saved` (informational — nothing is deleted either way)", async () => {
+  test("Q3 rm=false, a stop whose turn outlives the bound: `ps` says `not saved` (informational — nothing is deleted either way)", async () => {
     // docs/fix/detach-live.md fix round 7 (owner Q3=a). Mutation: no note for
-    // keep=true → the record says only `the relay was stopped…`.
+    // rm=false → the record says only `the relay was stopped…`.
     const pod = resident(new Scripted([SHELL_CALL, DONE]), { stuckExec: true });
-    const r = rig({ keep: true, autoAccept: true });
+    const r = rig({ rm: false, autoAccept: true });
     const exit = r.start(pod.attach);
     await waitFor(() => pod.execs.length === 1, "the tool");
     r.stopRef.stop?.();
@@ -841,11 +856,11 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
     const detail = owner(r.dir)?.detail ?? "";
     expect(detail).toContain("the relay was stopped before the turn ended");
     expect(detail).toContain("not saved");
-    expect(detail).not.toContain("tentacle rm"); // keep=true: nothing to remove
+    expect(detail).not.toContain("tentacle rm"); // rm=false: nothing to remove
     expect(statusOf(readOwner(r.dir), false, clock.now())).toContain("not saved");
   });
 
-  test("F6 / Q13 keep=true, a FAILED run whose save did not land: its reason AND `not saved`", async () => {
+  test("F6 / Q13 rm=false, a FAILED run whose save did not land: its reason AND `not saved`", async () => {
     // docs/fix/detach-live-followups.md F6 (owner OQ12). Mutation: the old
     // `state !== "failed"` guard → only `internal error`, no `not saved`.
     const model: ModelProvider = {
@@ -857,7 +872,7 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
       },
     };
     const pod = resident(model);
-    const r = rig({ keep: true });
+    const r = rig({ rm: false });
     // The laptop store cannot be written: its directory's place is a file.
     writeFileSync(join(r.configDir, "sessions"), "");
     const exit = r.start(pod.attach);
@@ -886,16 +901,16 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
       },
     };
     const pod = resident(model);
-    const r = rig({ keep: true });
+    const r = rig({ rm: false });
     const exit = r.start(pod.attach);
     await waitFor(() => owner(r.dir)?.state === "failed", "failed");
     expect(await afterGrace(exit)).toBe(1);
     expect(owner(r.dir)?.detail).toBe("internal error");
   });
 
-  test("Q3 keep=true, the turn ended and its save landed: no `not saved`", async () => {
+  test("Q3 rm=false, the turn ended and its save landed: no `not saved`", async () => {
     const pod = resident(new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]));
-    const r = rig({ keep: true });
+    const r = rig({ rm: false });
     const exit = r.start(pod.attach);
     await waitFor(() => owner(r.dir)?.state === "idle", "idle");
     r.stopRef.stop?.();
@@ -1075,7 +1090,7 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
       remove: () => new Promise(() => {}),
     } as unknown as EngineHost;
     const b = rig(
-      { keep: false },
+      { rm: true },
       { hostFor: () => hung, removeTimeoutMs: 5, armNet: () => () => {} },
     );
     recordKept(keptDir(b.configDir), entry);
@@ -1097,7 +1112,7 @@ describe("keep=false: the relay removes the workload (docs/feat/detached-relay-l
     expect(r.net.disarmed).toBe(1);
   });
 
-  test("L21 keep=true never arms it", async () => {
+  test("L21 rm=false never arms it", async () => {
     const pod = resident(new Scripted([DONE]));
     let armed = 0;
     const { dir, start } = rig(
@@ -1464,7 +1479,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
     conn.close();
   });
 
-  test("H26 keep=false, handed over at idle: no remove, the net disarmed, the run dir and the entry stay", async () => {
+  test("H26 rm=true, handed over at idle: no remove, the net disarmed, the run dir and the entry stay", async () => {
     // Mutation: drop `exitPlan`'s `done` row (the repro's line).
     const pod = resident(new Scripted([DONE]));
     const path = short();
@@ -1549,7 +1564,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
     conn.close();
   });
 
-  test("H39 `planAttach` + `joinRun` over the relay's REAL socket, keep=false mid model call: A takes over, B joins during the drain, the relay removes nothing, the LAST quit does", async () => {
+  test("H39 `planAttach` + `joinRun` over the relay's REAL socket, rm=true mid model call: A takes over, B joins during the drain, the relay removes nothing, the LAST quit does", async () => {
     // Mutation: `joinRun` without the drain probe → B exits "still closing".
     const model = new Gated([DONE], [0]);
     const pod = resident(model);
@@ -1568,7 +1583,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
         tty: true,
       });
       if (plan.kind !== "run" || read.kind !== "owner") throw new Error(plan.kind);
-      expect(plan).toMatchObject({ sessionId: UID, handover: true, keep: false });
+      expect(plan).toMatchObject({ sessionId: UID, handover: true, rm: true });
       const joined = await joinRun({
         name: "box",
         noun: "container",
@@ -1744,7 +1759,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
     });
     return { log, quit, quitting: () => quitting };
   };
-  /** A keep=false `--auto-accept` relay whose turn is in a long tool. */
+  /** A rm=true `--auto-accept` relay whose turn is in a long tool. */
   const inTool = async () => {
     const pod = resident(new Gated([SHELL_CALL, DONE]), { hangExec: true, latency: 2 });
     const path = short();
@@ -1756,7 +1771,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
   };
   const NOT_SAVED = /not saved|not confirmed|not removed/;
 
-  test("D13 FAIL 39: keep=false, one TUI, the run's turn in a tool, quit: removed, the run dir gone, the net last, the record on the laptop", async () => {
+  test("D13 FAIL 39: rm=true, one TUI, the run's turn in a tool, quit: removed, the run dir gone, the net last, the record on the laptop", async () => {
     // Mutations: `seal` a no-op (the late read: "not confirmed", kept); `othersAttached` hard-coded 0 (below).
     const { pod, r, exit } = await inTool();
     const out: string[] = [];
@@ -1885,7 +1900,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
     const model = new Gated([SHELL_CALL, DONE], [0]);
     const pod = resident(model);
     const path = short();
-    const r = removing({ controlPath: () => path }, { autoAccept: true, keep: true });
+    const r = removing({ controlPath: () => path }, { autoAccept: true, rm: false });
     const exit = r.start(pod.attach);
     await waitFor(() => model.started === 1, "the relay's model call");
     await waitFor(() => existsSync(path), "the control socket");
@@ -1930,7 +1945,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
     const model = new Gated([SHELL_CALL, DONE], [0]);
     const pod = resident(model, { errors });
     const path = short();
-    const r = removing({ controlPath: () => path }, { autoAccept: true, keep: true });
+    const r = removing({ controlPath: () => path }, { autoAccept: true, rm: false });
     const exit = r.start(pod.attach);
     await waitFor(() => model.started === 1, "the relay's model call");
     await waitFor(() => existsSync(path), "the control socket");
@@ -2054,7 +2069,7 @@ describe("launchRelay", () => {
       timeoutMs,
     });
   const running: OwnerRecord = {
-    schemaVersion: 1,
+    schemaVersion: RUN_STATE_VERSION,
     kind: "relay",
     pid: 9,
     appVersion: "1",
@@ -2067,14 +2082,14 @@ describe("launchRelay", () => {
 
   test("a successful launch prints NOTHING (the dim `still running` line is the provisioner's); the spec reached the relay", async () => {
     // Mutation: print a `detached run started …` line again → `out` is not empty.
-    for (const [keep, autoAccept] of [
+    for (const [rm, autoAccept] of [
       [true, false],
       [false, true],
     ] as const) {
       const dir = fresh();
       const out: string[] = [];
       let specText = "";
-      const code = await launchRelay(dir, spec({ keep, autoAccept }), {
+      const code = await launchRelay(dir, spec({ rm, autoAccept }), {
         write: (t) => out.push(t),
         noun: "container",
         name: "box",
@@ -2090,6 +2105,7 @@ describe("launchRelay", () => {
       expect(code).toBe(0);
       expect(out).toEqual([]);
       expect(JSON.parse(specText).autoAccept).toBe(autoAccept);
+      expect(JSON.parse(specText).rm).toBe(rm);
     }
   });
 
@@ -2359,7 +2375,7 @@ describe("the wake on a job exit, no TUI (docs/fix/detached-autowake.md)", () =>
     expect(model.calls).toBe(1);
   });
 
-  test("R-W5 a stop during the wake: keep=false, cancelled, saved, removed", async () => {
+  test("R-W5 a stop during the wake: rm=true, cancelled, saved, removed", async () => {
     const jobs = new FakeJobs();
     const model = new Waking([say("started"), SHELL_CALL, say("after")]);
     const pod = resident(model, { jobs, hangExec: true });
@@ -2391,7 +2407,7 @@ describe("the wake on a job exit, no TUI (docs/fix/detached-autowake.md)", () =>
     expect(owner(box.dir)?.detail).toContain("not saved — workload kept: tentacle rm box");
   });
 
-  test("R-W6 keep=false: the wake's reply is on the laptop before the removal; the net waits for it", async () => {
+  test("R-W6 rm=true: the wake's reply is on the laptop before the removal; the net waits for it", async () => {
     const jobs = new FakeJobs();
     const model = new Waking([say("started"), say("woke")], [1]);
     const pod = resident(model, { jobs });
@@ -2577,12 +2593,12 @@ describe("the wake on a job exit, no TUI (docs/fix/detached-autowake.md)", () =>
 
   test("R-W12 a stop during a prepared hand-over: the pending wake does not start", async () => {
     // The review's F4. One prompt and one billed model call followed the stop.
-    for (const keep of [true, false]) {
+    for (const kept of [true, false]) {
       const jobs = new FakeJobs();
       const model = new Waking([say("started"), say("woke")]);
       const pod = resident(model, { jobs });
       const path = short();
-      const box = keep
+      const box = kept
         ? rig({}, { controlPath: () => path }, ON)
         : removing({ controlPath: () => path }, {}, ON);
       const exit = box.start(pod.attach);

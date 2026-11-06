@@ -155,9 +155,10 @@ export const DEFAULT_CONFIG_JSONC = `{
   // "docker" or "podman" (a container). --engine and TENTACLE_ENGINE win.
   // "engine": "kubernetes",
 
-  // Whether \`tentacle run\` leaves its pod/container up on exit (and prints how to
-  // re-attach). Default true; --keep=false deletes it. The flag wins, then a profile.
-  // "keep": true,
+  // Whether \`tentacle run\` removes its pod/container when the run ends. Default
+  // false: it is kept and the re-attach command printed; true removes it.
+  // --rm[=true|false] wins, then a profile.
+  // "rm": false,
 
   // \`tentacle run --detach\`: on macOS, hold a sleep assertion (caffeinate) while a
   // turn runs, so the Mac does not idle-sleep under it. Closing the lid still sleeps it.

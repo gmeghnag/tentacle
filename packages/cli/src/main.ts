@@ -52,7 +52,7 @@ import {
   hostOptionsFor,
   keptLocation,
   laptopWorkspaceInput,
-  resolveKeep,
+  resolveRm,
   setupFailureLine,
 } from "./engine-select.ts";
 import {
@@ -140,14 +140,14 @@ Usage:
   tentacle --resume [uid]  resume a saved session of this folder (pick one if no uid)
   tentacle --continue      resume this folder's most recent session
   tentacle -i --in-process run the agent on the render thread (opt out of the worker)
-  tentacle run --image <ref> [--engine kubernetes|docker|podman] [--keep[=true|false]] [--no-mount] [--confirm-mount] [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [--name <n>] [--auto-accept[=true|false]] ["<prompt>" | --prompt <text>]
+  tentacle run --image <ref> [--engine kubernetes|docker|podman] [--rm[=true|false]] [--no-mount] [--confirm-mount] [-n|--namespace <ns>] [--bin-dir <dir>] [--resume [uid]|--continue] [--name <n>] [--auto-accept[=true|false]] ["<prompt>" | --prompt <text>]
                                 run the agent inside a new Kubernetes pod or Docker/Podman
                                 container (sandbox), local TUI (--name is its name; random
                                 when omitted; "<prompt>" is sent at once as the first
                                 message, raw text; not with --resume/--continue; --auto-accept starts the TUI with auto-accept on (Shift+Tab turns it off); sessions
                                 persist on the laptop, so --resume works); kept on exit by
-                                default (--keep=false deletes)
-  tentacle run --detach ("<prompt>" | --prompt <text|->) [--auto-accept[=true|false]] --image <ref> [...] [--name <n>]
+                                default (--rm removes it when the run ends)
+  tentacle run -d|--detach ("<prompt>" | --prompt <text|->) [--auto-accept[=true|false]] --image <ref> [...] [--name <n>]
                                 the same with no TUI (--prompt - reads the prompt from stdin,
                                 only here): a background laptop process runs the
                                 turn, serves the model and saves it, then leaves once the
@@ -156,7 +156,7 @@ Usage:
                                 logged; on for the terminals that attach, Shift+Tab in
                                 any of them flips it for all on the session).
                                 kill <pid> stops it; attach <name> takes it over, mid-turn.
-                                --keep=false removes the workload when the run goes idle
+                                --rm removes the workload when the run goes idle
                                 or is stopped (a failed or interrupted run keeps it). On
                                 macOS it stays awake during a turn (detach.keepAwake)
   tentacle attach <name> [--engine kubernetes|docker|podman] [-n|--namespace <ns>] [-c|--container <c>] [--bin-dir <dir>] [--resume [uid]|--continue]
@@ -170,7 +170,7 @@ Usage:
                                 terminal, in the folder it ran in); more terminals
                                 join it. /quit closes the session for every terminal
                                 on it (y/N when others are attached), a running turn
-                                stops; with --keep=false it removes the workload if
+                                stops; on a run made with --rm it removes the workload if
                                 no other session is in use. Ctrl+C idle leaves alone
   tentacle ps [--engine <e>] [-q] [-v]
                                 list the pods/containers run kept, checked against
@@ -266,11 +266,13 @@ Engines (tentacle run / attach --engine kubernetes|docker|podman):
            overrides it; DOCKER_HOST is ignored. --context <ctx> uses a docker context.
   --insecure-docker-tcp   allow a plaintext tcp:// engine (unauthenticated root on
                           that host; refused by default — use TLS or ssh://)
-  --keep[=true|false] (run only)
-                          DEFAULT true: the pod/container is NOT deleted on exit or
+  --rm[=true|false] (run only)
+                          DEFAULT false: the pod/container is NOT deleted on exit or
                           Ctrl+C; tentacle prints the "tentacle attach --engine …" to
-                          resume. --keep=false (or --keep false) deletes it. Config: "keep:" (user config
-                          or profile); flag > profile > user config > true
+                          resume. --rm (or --rm=true) deletes it when the run ends;
+                          --rm=false overrides a configured "rm": true. Config: "rm:" (user
+                          config or profile); flag > profile > user config > false
+  -d, --detach (run only) run with no TUI (see "tentacle run -d|--detach" above)
   Workspace (docker/podman run): a local engine bind-mounts the cwd read-write
   at the same path (the agent works in it); secrets inside it are hidden
   (config "mount.hide"/"mount.hideExtra"; tentacle's config dir and the
@@ -325,7 +327,7 @@ export interface CliIO {
   err?: (text: string) => void;
   /** Test seam: stdout is a terminal (`run --detach` prints its name only when not). Default: a real TTY stdout, `false` with an injected `out`. */
   outTty?: boolean;
-  /** Test seam: replaces the `run` engine runtime (pins the flag/config → `keepHint` wiring). */
+  /** Test seam: replaces the `run` engine runtime (pins the flag/config → `resumeHint` wiring). */
   startEngineRuntime?: typeof startEngineRuntime;
   /** Test seam: `attach <name>` of a detached run's engine runtime (docs/feat/detached-handover.md). */
   attachEngineRuntime?: typeof attachEngineRuntime;
@@ -885,7 +887,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   // images cannot run the injected glibc binary). kubernetes: `--namespace`
   // defaults to the kubeconfig context's namespace; a missing namespace fails
   // with a clear error (it is NOT created). `--resume` works because sessions
-  // persist on the laptop (the workload is stateless). `--keep` leaves the
+  // persist on the laptop (the workload is stateless). Without `--rm` the run keeps the
   // workload up on exit (and Ctrl+C) and prints how to re-attach. ONE runtime
   // for every engine (`startEngineRuntime`); no in-process fallback.
   if (mode === "run") {
@@ -895,13 +897,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return 1;
     }
     const noun = engineNoun(engine);
-    const kept = resolveKeep({
-      bare: runBools.has("keep"),
-      value: runFlags.get("keep"),
-      configured: config.keep,
+    const rm = resolveRm({
+      bare: runBools.has("rm"),
+      value: runFlags.get("rm"),
+      configured: config.rm,
     });
-    if (!kept.ok) {
-      err(`[${noun}] ${kept.error}\n`);
+    if (!rm.ok) {
+      err(`[${noun}] ${rm.error}\n`);
       return 1;
     }
     // `run --detach --prompt` (docs/feat/detached-relay.md): no TUI, its session
@@ -1004,10 +1006,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     }
     // Slice E: a kept workload carries its metadata and goes in the laptop
     // index (`tentacle ps`) at the location it was really created on. So does a
-    // detached run, whatever `keep` says: `ps`, `rm` and `attach` reach it while
-    // it lives, and with keep=false its relay removes it, under those labels.
+    // detached run, with or without `--rm`: `ps`, `rm` and `attach` reach it while
+    // it lives, and with `--rm` its relay removes it, under those labels.
     const created = new Date().toISOString();
-    const listed = kept.keep || detach;
+    const listed = !rm.rm || detach;
     const keptMeta = listed ? keptMetadata({ engine, model: config.model, created }) : undefined;
     const insecureTcp = runBools.has("insecure-docker-tcp");
     const keptEntryFor = (keptName: string): KeptEntry => ({
@@ -1039,7 +1041,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       ...(wsPlan.kind === "mount" ? { workspace: wsPlan.mount } : {}),
       ...(listed
         ? {
-            keepHint: (name: string) =>
+            resumeHint: (name: string) =>
               attachCommand(engine, name, {
                 namespace: built.namespace,
                 context,
@@ -1068,7 +1070,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       try {
         workload = await (io.provisionWorkload ?? provisionWorkload)(config, {
           ...workloadDeps,
-          ...(kept.keep ? {} : { removedAtEnd: true }),
+          ...(rm.rm ? { removedAtEnd: true } : {}),
           recordKept: (keptName) => {
             const undo = recordKeptEntry(keptName);
             recorded = keptEntryFor(keptName);
@@ -1092,7 +1094,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           sessionId,
           prompt,
           autoAccept: runBools.has("auto-accept") || runFlags.get("auto-accept") === "true",
-          keep: kept.keep,
+          rm: rm.rm,
           cwd: config.cwd,
           ...(profileFlag !== undefined ? { profile: profileFlag } : {}),
         },
@@ -1100,7 +1102,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           write: err,
           noun,
           name: workload.name,
-          attachHint: workloadDeps.keepHint?.(workload.name) ?? "",
+          attachHint: workloadDeps.resumeHint?.(workload.name) ?? "",
           ...(io.spawnRelay ? { spawnRelay: io.spawnRelay } : {}),
         },
       );
@@ -1348,7 +1350,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         break;
       }
       if (run.elsewhere) {
-        // R1: NOT S2's text. `kill` would stop the run and, on keep=false,
+        // R1: NOT S2's text. `kill` would stop the run and, on an `--rm` run,
         // remove a workload in ANOTHER place than the flags name. The run is
         // elsewhere by definition here, so `askedWhere` is not null.
         const at = askedWhere(run.entry.engine);
@@ -1449,7 +1451,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       }
       if (joined.kind === "closing") {
         if (attempt === 0) {
-          continue; // planned again, once: keep=false now meets the ordinary "gone"
+          continue; // planned again, once: an `--rm` run now meets the ordinary "gone"
         }
         err(`[error] ${untrustedText(name)}: the run is still closing; retry in a moment\n`);
         return 1;

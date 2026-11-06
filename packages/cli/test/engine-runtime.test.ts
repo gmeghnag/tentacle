@@ -363,7 +363,7 @@ describe("startPodRuntime", () => {
       host: kubeEngineHost(kube, "dev"),
       image: "repo/img:tag",
       name: "box",
-      keepHint: (name) => `tentacle attach ${name}`,
+      resumeHint: (name) => `tentacle attach ${name}`,
       log: (line) => lines.push(line),
     });
     expect(provisioned.name).toBe("box");
@@ -669,9 +669,9 @@ describe("startPodRuntime", () => {
     expect(kube.calls).toContain(`besteffort:${podName}`);
   });
 
-  // `run --keep` (owner, 2026-10-27): the workload is never removed — no exit
+  // A kept run (no `run --rm`; owner, 2026-10-27): the workload is never removed — no exit
   // net (Ctrl+C), no delete on dispose — and the resume command is printed.
-  test("--keep: no exit net, no delete on dispose, the resume hint is printed", async () => {
+  test("kept (no --rm): no exit net, no delete on dispose, the resume hint is printed", async () => {
     const model = new ScriptedProvider([[{ type: "done" }]]);
     const kube = new FakeCluster(model);
     const logs: string[] = [];
@@ -690,7 +690,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         name: "keeper",
-        keepHint: (name) => `tentacle attach --engine kubernetes -n dev ${name}`,
+        resumeHint: (name) => `tentacle attach --engine kubernetes -n dev ${name}`,
         permissions: new PermissionBroker(),
         saver: new SessionSaver(new JsonSessionStore(join(dir, "keep")), () => {}),
         resume: null,
@@ -967,7 +967,7 @@ describe("startPodRuntime", () => {
         host: kubeEngineHost(kube, "dev"),
         image: "img",
         name: "box",
-        keepHint: (n) => `tentacle attach ${n}`,
+        resumeHint: (n) => `tentacle attach ${n}`,
         recordKept: () => {
           throw new Error("disk full");
         },
@@ -1046,7 +1046,7 @@ describe("startPodRuntime", () => {
           host,
           image: "img",
           name: "box",
-          keepHint: (n) => `tentacle attach ${n}`,
+          resumeHint: (n) => `tentacle attach ${n}`,
           permissions: new PermissionBroker(),
           saver: new SessionSaver(
             new JsonSessionStore(join(dir, `keptline-${path.length}`)),
@@ -1144,7 +1144,7 @@ describe("startPodRuntime", () => {
     });
   });
 
-  test("--keep: a startup failure leaves the pod up (to inspect) and prints no `still running`", async () => {
+  test("kept (no --rm): a startup failure leaves the pod up (to inspect) and prints no `still running`", async () => {
     const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
     const original = kube.runExec.bind(kube);
     kube.runExec = (target, input, options) =>
@@ -1158,7 +1158,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         name: "broken",
-        keepHint: (name) => `tentacle attach --engine kubernetes -n dev ${name}`,
+        resumeHint: (name) => `tentacle attach --engine kubernetes -n dev ${name}`,
         permissions: new PermissionBroker(),
         saver: new SessionSaver(new JsonSessionStore(join(dir, "keep-fail")), () => {}),
         resume: null,
@@ -1195,18 +1195,18 @@ describe("startPodRuntime", () => {
 
     test("kept: the error carries the workload's name; not kept / removed at the end / never created: it does not", async () => {
       // Mutation: tag unconditionally → the 3 negative cases fail.
-      const keepHint = (n: string) => `tentacle attach ${n}`;
-      expect(stillUp(await attempt(failing(), { keepHint }))).toBe("box");
+      const resumeHint = (n: string) => `tentacle attach ${n}`;
+      expect(stillUp(await attempt(failing(), { resumeHint }))).toBe("box");
       expect(stillUp(await attempt(failing(), {}))).toBeUndefined();
-      expect(stillUp(await attempt(failing(), { keepHint, removedAtEnd: true }))).toBeUndefined();
+      expect(stillUp(await attempt(failing(), { resumeHint, removedAtEnd: true }))).toBeUndefined();
       const kube = failing();
       kube.createPod = () => Promise.reject(new Error("quota exceeded"));
-      expect(stillUp(await attempt(kube, { keepHint }))).toBeUndefined();
+      expect(stillUp(await attempt(kube, { resumeHint }))).toBeUndefined();
     });
 
     test("the index write failed: no `tentacle rm` promise (the warning already says it)", async () => {
       const e = await attempt(failing(), {
-        keepHint: (n: string) => `tentacle attach ${n}`,
+        resumeHint: (n: string) => `tentacle attach ${n}`,
         recordKept: () => {
           throw new Error("disk full");
         },
@@ -1223,7 +1223,7 @@ describe("startPodRuntime", () => {
         host: kubeEngineHost(kube, "dev"),
         image: "img",
         name,
-        keepHint: (n) => `tentacle attach ${n}`,
+        resumeHint: (n) => `tentacle attach ${n}`,
         removedAtEnd: true,
         log: (line) => logs.push(line),
       });
@@ -1251,7 +1251,7 @@ describe("startPodRuntime", () => {
 
   // Slice E (docs/feat/engine-ps-rm.md): a kept workload carries its metadata
   // and is recorded in the laptop index right after it exists.
-  test("--keep: labels + annotations reach the create; recorded once, after the create", async () => {
+  test("kept (no --rm): labels + annotations reach the create; recorded once, after the create", async () => {
     const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
     const pods: Pod[] = [];
     const create = kube.createPod.bind(kube);
@@ -1265,7 +1265,7 @@ describe("startPodRuntime", () => {
       namespace: "dev",
       image: "img",
       name: "keeper",
-      keepHint: (name) => `tentacle attach ${name}`,
+      resumeHint: (name) => `tentacle attach ${name}`,
       labels: { "tentacle.kept": "true" },
       annotations: { "tentacle.model": "m" },
       recordKept: (name) => {
@@ -1283,7 +1283,7 @@ describe("startPodRuntime", () => {
     expect(pods[0]?.metadata?.annotations).toEqual({ "tentacle.model": "m" });
   });
 
-  test("--keep: the entry is forgotten when the host already removed the workload", async () => {
+  test("kept (no --rm): the entry is forgotten when the host already removed the workload", async () => {
     const kube = new FakeCluster(new ScriptedProvider([]));
     kube.waitForReady = () => Promise.reject(new WorkloadRemovedError("mask visible. removed."));
     const recorded: string[] = [];
@@ -1293,7 +1293,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         name: "gone1",
-        keepHint: (name) => `tentacle attach ${name}`,
+        resumeHint: (name) => `tentacle attach ${name}`,
         recordKept: (name) => {
           recorded.push(name);
           return () => recorded.push(`forgot:${name}`);
@@ -1307,7 +1307,7 @@ describe("startPodRuntime", () => {
     expect(recorded).toEqual(["gone1", "forgot:gone1"]);
   });
 
-  test("--keep: an index write failure is SAID (with the manual cleanup), never swallowed", async () => {
+  test("kept (no --rm): an index write failure is SAID (with the manual cleanup), never swallowed", async () => {
     const kube = new FakeCluster(new ScriptedProvider([[{ type: "done" }]]));
     const logs: string[] = [];
     const runtime = await startPodRuntime(baseConfig("/pod/work"), {
@@ -1315,7 +1315,7 @@ describe("startPodRuntime", () => {
       namespace: "dev",
       image: "img",
       name: "k2",
-      keepHint: (name) => `tentacle attach ${name}`,
+      resumeHint: (name) => `tentacle attach ${name}`,
       recordKept: () => {
         throw new Error("EACCES");
       },

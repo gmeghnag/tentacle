@@ -10,7 +10,7 @@
  *   binary, verify with --version) → openExec(`tentacle serve --bridge`, a pipe
  *   to the pod's resident daemon — `pod-resident.ts`) →
  *   createLocalRuntime(handshake + persisting sessions) → …use… → remove
- *   (unless `run --keep`).
+ *   (only with `run --rm`).
  *
  * The injection (F4.e) means the image no longer needs to contain the tool —
  * any Linux **glibc** image with `sh` + `head` works; see `pod-binary.ts`.
@@ -191,14 +191,14 @@ export interface EngineRuntimeDeps {
   /** Workload name (optional; a random one is generated when omitted). */
   readonly name?: string;
   /**
-   * `run --keep` (owner, 2026-10-27): present → the workload is NEVER removed
+   * A kept run (no `run --rm`; owner, 2026-10-27): present → the workload is NEVER removed
    * by this runtime (no exit net, no remove on dispose or on a startup
-   * failure), and `[<noun>] kept <name> — resume with: <keepHint(name)>` is
+   * failure), and `[<noun>] kept <name> — resume with: <resumeHint(name)>` is
    * logged. Returns the re-attach command for `name`.
    */
-  readonly keepHint?: (name: string) => string;
+  readonly resumeHint?: (name: string) => string;
   /**
-   * `run --detach --keep=false`, with `keepHint`: this runtime still never
+   * `run --detach --rm`, with `resumeHint`: this runtime still never
    * removes it, the relay does when the run ends. Changes only the kept line.
    */
   readonly removedAtEnd?: boolean;
@@ -212,7 +212,7 @@ export interface EngineRuntimeDeps {
   /** Workload annotations (slice E: engine, model, created; docker writes them as labels). */
   readonly annotations?: Readonly<Record<string, string>>;
   /**
-   * With `keepHint` (slice E): record `name` in the laptop's kept index right
+   * With `resumeHint` (slice E): record `name` in the laptop's kept index right
    * after the create; returns the undo, run if the host removed it anyway.
    * A throw is reported (the workload is then not in `tentacle ps`).
    */
@@ -325,7 +325,7 @@ export function armExitNet(
 }
 
 /**
- * `armExitNet` for a TUI of a keep=false detached run (docs/feat/detached-handover.md):
+ * `armExitNet` for a TUI of an `--rm` detached run (docs/feat/detached-handover.md):
  * every TUI of the run arms it, since any may be the last; it fires only when
  * `othersAlive()` (asked synchronously, at exit: the presence files) says no
  * other TUI of the run lives AND `saved()` confirms its laptop copy (D4/R6). So
@@ -446,13 +446,13 @@ async function provisionNamed(
     throw error;
   }
 
-  // `run --keep`: tentacle never removes this workload (owner, 2026-10-27).
-  const { keepHint } = deps;
+  // A kept run (no `--rm`): tentacle never removes this workload (owner, 2026-10-27).
+  const { resumeHint } = deps;
   // Slice E: a kept workload goes in the laptop index (`tentacle ps`) as soon as
   // it exists. A failed write is said with the kept line — never swallowed.
   let forgetKept: (() => void) | undefined;
   let notRecorded = "";
-  if (keepHint && deps.recordKept) {
+  if (resumeHint && deps.recordKept) {
     try {
       forgetKept = deps.recordKept(name);
     } catch (error) {
@@ -464,8 +464,8 @@ async function provisionNamed(
   // ONE short line (docs/feat/run-prompt.md): `attach <name>` finds the engine
   // and place in the index, so the command is just the name — unless the index
   // write failed, when only the full command (engine, place) can reach it.
-  const attachText = notRecorded && keepHint ? keepHint(name) : `tentacle attach ${name}`;
-  const keptLine = keepHint
+  const attachText = notRecorded && resumeHint ? resumeHint(name) : `tentacle attach ${name}`;
+  const keptLine = resumeHint
     ? `[${host.noun}] ${name} still running · ${deps.removedAtEnd ? "removed when the run ends · " : ""}${attachText}\n`
     : undefined;
   // Said once, right before the TUI opens (and never before a failure): the line
@@ -517,7 +517,7 @@ async function provisionNamed(
   // Safety net: if the process exits before `dispose()` (Ctrl+C → process.exit
   // in the terminal code, a crash, or a kill), the workload is still deleted by
   // a detached child. Registered right after it exists, so it covers
-  // pre-ready failures too. Not armed with `--keep`: Ctrl+C keeps it too.
+  // pre-ready failures too. Not armed for a kept run (no `--rm`): Ctrl+C keeps it too.
   if (!keptLine) {
     armExitNet(host, name, () => true);
   }
@@ -571,7 +571,7 @@ async function provisionNamed(
     return { name, binPath, removeUnlessKept, announce };
   } catch (error) {
     // The workload was created but never became usable — delete it before
-    // surfacing (kept with `--keep`: left to inspect).
+    // surfacing (a kept run, no `--rm`: left to inspect).
     status?.finish();
     warnNotRecorded();
     removeUnlessKept(error);
@@ -583,7 +583,7 @@ async function provisionNamed(
  * `run` on any engine: create an ephemeral workload (pod / container), connect
  * the daemon over its exec channel, and build a persisting local runtime
  * against it. The returned runtime's `dispose` closes the exec channel and
- * removes the workload (kept with `keepHint`). Throws (after cleaning up any
+ * removes the workload (kept with `resumeHint`). Throws (after cleaning up any
  * created workload, unless kept) on failure — there is no in-process fallback.
  */
 export async function startEngineRuntime(

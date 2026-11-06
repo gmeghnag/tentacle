@@ -38,8 +38,8 @@ import { type ProcOf, lockHolder, residentStop } from "./pod-resident.ts";
 import {
   attachers,
   laptopProc,
-  ownerKeeps,
   ownerPath,
+  ownerRemoves,
   readOwner,
   relayLogPath,
   runDirIn,
@@ -221,7 +221,7 @@ function relayRow(entry: KeptEntry, deps: KeptDeps, now: number): KeptRelay | un
     ...(holder ? { pid: holder.pid } : {}),
     ...(known ? { sessionId: known.sessionId } : {}),
     log: relayLogPath(dir),
-    keep: known ? ownerKeeps(known) : true,
+    rm: known ? ownerRemoves(known) : false,
     ...(tied && runFinished(read, holder !== null, tuis.length) ? { finished: true } : {}),
   };
 }
@@ -271,7 +271,7 @@ function forget(file: string): { readonly forgetError?: string } {
 }
 
 /**
- * The ONE path that deletes a kept workload (`rm` and a keep=false relay):
+ * The ONE path that deletes a kept workload (`rm` and an `--rm` relay):
  * what the engine says NOW, right before the delete, closes the list → delete
  * race and the k8s gap (`deletePod` itself checks no label). AGENTS §7: a
  * foreign workload that took the name is never touched.
@@ -293,7 +293,7 @@ export async function removeVerifiedKept(
   }
   // R3: the labels say tentacle AND kept — but WHICH workload? Its own `created`
   // is the answer: a kept workload re-created at this place outside this index
-  // (`run --keep --name box` on another laptop or config dir) carries the same
+  // (`run --name box` on another laptop or config dir) carries the same
   // labels, and its entry lives elsewhere. Deleting it would be a stranger's
   // workload; the stale entry here is dropped instead (nothing is deleted).
   if (createdVerdict(entry, status) === "other") {
@@ -417,7 +417,7 @@ async function rmOne(
     }
   }
   // After the answer: a "no" must cost the run nothing. SIGTERM: the relay
-  // cancels the turn, saves and leaves, removing the workload itself on keep=false.
+  // cancels the turn, saves and leaves, removing the workload itself on an `--rm` run.
   if (holder) {
     deps.err(`stopping the detached run (pid ${holder.pid})…\n`);
     try {
@@ -459,7 +459,7 @@ async function rmOne(
       dropRunDir(runDir, deps.err);
       return 1;
     case "gone":
-      // After a stop it is the relay's own keep=false removal: the same result.
+      // After a stop it is the relay's own `--rm` removal: the same result.
       // The line names the WORKLOAD's fate only: on a failed forget the entry
       // is still there, so it must not claim it went (the `[warn]` below says it).
       deps.err(

@@ -115,8 +115,8 @@ export interface ResolvedConfig {
    * the CLI, which refuses an unknown value instead of falling through.
    */
   readonly engine?: "kubernetes" | "docker" | "podman";
-  /** The configured `run` keep-on-exit default (file or profile); absent = the CLI default (true). */
-  readonly keep?: boolean;
+  /** The configured `run --rm` default (file or profile); absent = the CLI default (false: kept). */
+  readonly rm?: boolean;
   /** `run --detach`'s settings (file or profile); absent = the relay's defaults. */
   readonly detach?: { readonly keepAwake?: boolean | undefined };
   /** The configured workspace-mount hide list (file or profile); absent = the CLI default list. */
@@ -510,7 +510,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     autoWake: autoWake.value,
     toolExecution: { mode: toolExecution.value, maxParallel: toolMaxParallel.value },
     ...(fileConfig.engine !== undefined ? { engine: fileConfig.engine } : {}),
-    ...(fileConfig.keep !== undefined ? { keep: fileConfig.keep } : {}),
+    ...(fileConfig.rm !== undefined ? { rm: fileConfig.rm } : {}),
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
     ...(fileConfig.mount !== undefined ? { mount: fileConfig.mount } : {}),
     hooks: fileConfig.hooks ?? [],

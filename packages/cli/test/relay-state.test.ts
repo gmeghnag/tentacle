@@ -64,10 +64,10 @@ describe("the wake on a job exit (docs/fix/detached-autowake.md)", () => {
   test("a failed or cut run does not wake, and holds nothing: its reason stays", () => {
     const failed = run([{ type: "turn_started" }, { type: "turn_failed", message: "boom" }, exit]);
     expect(relayWakeDue(failed, false)).toBe(false);
-    expect(exitPlan(failed, true, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(failed, false, free)).toEqual({ kind: "leave" });
     const cut = run([{ type: "turn_started" }, { type: "turn_ended", reason: "cancelled" }, exit]);
     expect(relayWakeDue(cut, false)).toBe(false);
-    expect(exitPlan(cut, false, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(cut, true, free)).toEqual({ kind: "leave" });
   });
 
   test("a refused wake is no failure: the turn is over, the wake pends, the rest is untouched", () => {
@@ -78,13 +78,13 @@ describe("the wake on a job exit (docs/fix/detached-autowake.md)", () => {
     expect(relayWakeDue(refused, false)).toBe(true);
   });
 
-  test("exitPlan: a pending wake holds, keep or not; a stop or a stopped link still exits", () => {
-    expect(exitPlan(pendingIdle, true, free)).toEqual({ kind: "hold" });
+  test("exitPlan: a pending wake holds, rm or not; a stop or a stopped link still exits", () => {
     expect(exitPlan(pendingIdle, false, free)).toEqual({ kind: "hold" });
-    expect(exitPlan(run([{ type: "stop" }], pendingIdle), false, free)).toEqual({ kind: "remove" });
-    expect(exitPlan(run([{ type: "stop" }], pendingIdle), true, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(pendingIdle, true, free)).toEqual({ kind: "hold" });
+    expect(exitPlan(run([{ type: "stop" }], pendingIdle), true, free)).toEqual({ kind: "remove" });
+    expect(exitPlan(run([{ type: "stop" }], pendingIdle), false, free)).toEqual({ kind: "leave" });
     const link: RelayEvent = { type: "link", status: { state: "stopped", reason: "gone" } };
-    expect(exitPlan(run([link], pendingIdle), false, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(run([link], pendingIdle), true, free)).toEqual({ kind: "leave" });
   });
 });
 
@@ -237,71 +237,71 @@ describe("exitPlan: the only place removal is decided (docs/feat/detached-relay-
   const cut = run([{ type: "turn_started" }, { type: "turn_ended", reason: "cancelled" }]);
   const failed = run([{ type: "turn_started" }, { type: "turn_failed", message: "down" }]);
 
-  test("keep wins over everything", () => {
+  test("no `rm` (kept) wins over everything", () => {
     for (const model of [over, cut, failed, run([{ type: "stop" }], over), run([lost], over)]) {
-      expect(exitPlan(model, true, free)).toEqual({ kind: "leave" });
+      expect(exitPlan(model, false, free)).toEqual({ kind: "leave" });
     }
   });
 
   test("a stopped link leaves, before a stop: the name may no longer be ours", () => {
-    expect(exitPlan(run([lost], over), false, free).kind).toBe("leave");
-    expect(exitPlan(run([lost, { type: "stop" }], over), false, free).kind).toBe("leave");
-    expect(exitPlan(run([{ type: "stop" }, lost], over), false, free).kind).toBe("leave");
+    expect(exitPlan(run([lost], over), true, free).kind).toBe("leave");
+    expect(exitPlan(run([lost, { type: "stop" }], over), true, free).kind).toBe("leave");
+    expect(exitPlan(run([{ type: "stop" }, lost], over), true, free).kind).toBe("leave");
   });
 
   test("a stop removes with no read, whatever the rest and the use", () => {
     const stop: RelayEvent = { type: "stop" };
-    expect(exitPlan(run([stop], over), false, null)).toEqual({ kind: "remove" });
-    expect(exitPlan(run([stop], cut), false, null).kind).toBe("remove");
-    expect(exitPlan(run([stop], failed), false, null).kind).toBe("remove");
+    expect(exitPlan(run([stop], over), true, null)).toEqual({ kind: "remove" });
+    expect(exitPlan(run([stop], cut), true, null).kind).toBe("remove");
+    expect(exitPlan(run([stop], failed), true, null).kind).toBe("remove");
     // A turn that failed BECAUSE of the stop is not a stopped link.
     const stopped = run(
       [{ type: "turn_started" }, stop, { type: "turn_failed", message: "aborted" }],
       initialRelay,
     );
-    expect(exitPlan(stopped, false, null).kind).toBe("remove");
+    expect(exitPlan(stopped, true, null).kind).toBe("remove");
     const busy: ResidentUse = { jobs: 3, running: true, others: 2 };
-    expect(exitPlan(run([{ type: "ask_raised", tool: "x" }, stop], over), false, busy).kind).toBe(
+    expect(exitPlan(run([{ type: "ask_raised", tool: "x" }, stop], over), true, busy).kind).toBe(
       "remove",
     );
   });
 
   test("`failed` and `interrupted` keep the workload (Q2), the read says nothing", () => {
     // Mutation: remove on any `relayExits`.
-    expect(exitPlan(cut, false, free).kind).toBe("leave");
-    expect(exitPlan(failed, false, free).kind).toBe("leave");
-    expect(exitPlan(cut, false, null).kind).toBe("leave");
+    expect(exitPlan(cut, true, free).kind).toBe("leave");
+    expect(exitPlan(failed, true, free).kind).toBe("leave");
+    expect(exitPlan(cut, true, null).kind).toBe("leave");
   });
 
   test("an unreadable use leaves, saying so", () => {
     // Mutation: drop the `use === null` row → a job running is deleted on a stale 0.
-    expect(exitPlan(over, false, null)).toEqual({
+    expect(exitPlan(over, true, null)).toEqual({
       kind: "leave",
       why: "could not tell whether it is in use",
     });
   });
 
   test("its own job or turn holds", () => {
-    expect(exitPlan(over, false, { ...free, jobs: 1 })).toEqual({ kind: "hold" });
-    expect(exitPlan(over, false, { ...free, running: true })).toEqual({ kind: "hold" });
-    expect(exitPlan(over, false, { jobs: 1, running: false, others: 1 }).kind).toBe("hold");
+    expect(exitPlan(over, true, { ...free, jobs: 1 })).toEqual({ kind: "hold" });
+    expect(exitPlan(over, true, { ...free, running: true })).toEqual({ kind: "hold" });
+    expect(exitPlan(over, true, { jobs: 1, running: false, others: 1 }).kind).toBe("hold");
   });
 
   test("another client leaves, saying so; nobody removes", () => {
-    expect(exitPlan(over, false, { ...free, others: 1 })).toEqual({
+    expect(exitPlan(over, true, { ...free, others: 1 })).toEqual({
       kind: "leave",
       why: "another client is using it",
     });
-    expect(exitPlan(over, false, free)).toEqual({ kind: "remove" });
+    expect(exitPlan(over, true, free)).toEqual({ kind: "remove" });
   });
 
   test("needsUse: the read happens only where its answer can change the plan", () => {
-    expect(needsUse(over, false)).toBe(true);
-    expect(needsUse(over, true)).toBe(false);
-    expect(needsUse(cut, false)).toBe(false);
-    expect(needsUse(failed, false)).toBe(false);
-    expect(needsUse(run([{ type: "stop" }], over), false)).toBe(false);
-    expect(needsUse(run([lost], over), false)).toBe(false);
+    expect(needsUse(over, true)).toBe(true);
+    expect(needsUse(over, false)).toBe(false);
+    expect(needsUse(cut, true)).toBe(false);
+    expect(needsUse(failed, true)).toBe(false);
+    expect(needsUse(run([{ type: "stop" }], over), true)).toBe(false);
+    expect(needsUse(run([lost], over), true)).toBe(false);
   });
 });
 
@@ -417,24 +417,24 @@ describe("H23 the hand-over (docs/feat/detached-handover.md)", () => {
   const free: ResidentUse = { jobs: 0, running: false, others: 0 };
   const prepared: RelayEvent = { type: "handover_prepared" };
 
-  test("exitPlan: handed over leaves, before keep=false or a stop removes anything", () => {
+  test("exitPlan: handed over leaves, before `rm` or a stop removes anything", () => {
     // Mutation: drop the `done` row → the relay deletes the workload under the TUI (the repro).
     const done = run([prepared, { type: "handed_over" }], over);
-    expect(exitPlan(done, false, free)).toEqual({ kind: "leave" });
-    expect(exitPlan(run([{ type: "stop" }], done), false, free)).toEqual({ kind: "leave" });
     expect(exitPlan(done, true, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(run([{ type: "stop" }], done), true, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(done, false, free)).toEqual({ kind: "leave" });
   });
 
   test("exitPlan: prepared holds a due exit; a stop, or a stopped link, still exits", () => {
     // Mutation: drop the `prepared` row → a `prepare` landing during the use read meets a removal.
     const ready = run([prepared], over);
-    expect(exitPlan(ready, false, free)).toEqual({ kind: "hold" });
     expect(exitPlan(ready, true, free)).toEqual({ kind: "hold" });
-    expect(exitPlan(run([{ type: "stop" }], ready), false, free)).toEqual({ kind: "remove" });
+    expect(exitPlan(ready, false, free)).toEqual({ kind: "hold" });
+    expect(exitPlan(run([{ type: "stop" }], ready), true, free)).toEqual({ kind: "remove" });
     const lost = run([{ type: "link", status: { state: "stopped", reason: "gone" } }], ready);
-    expect(exitPlan(lost, false, free)).toEqual({ kind: "leave" });
+    expect(exitPlan(lost, true, free)).toEqual({ kind: "leave" });
     // Aborted: back to the plain rows.
-    expect(exitPlan(run([{ type: "handover_aborted" }], ready), false, free)).toEqual({
+    expect(exitPlan(run([{ type: "handover_aborted" }], ready), true, free)).toEqual({
       kind: "remove",
     });
   });

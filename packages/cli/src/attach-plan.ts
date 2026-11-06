@@ -9,7 +9,7 @@
  * the LAST client's only (Q1), never on a doubt.
  */
 import type { ResidentUse } from "./relay-state.ts";
-import { type OwnerRead, ownerKeeps } from "./run-state.ts";
+import { type OwnerRead, ownerRemoves } from "./run-state.ts";
 
 export interface AttachInput {
   readonly owner: OwnerRead;
@@ -40,7 +40,7 @@ export type AttachPlan =
       readonly cwd?: string;
       readonly sessionId: string;
       readonly handover: boolean;
-      readonly keep: boolean;
+      readonly rm: boolean;
     };
 
 export function planAttach(input: AttachInput): AttachPlan {
@@ -72,12 +72,12 @@ export function planAttach(input: AttachInput): AttachPlan {
     ...(record.cwd !== undefined ? { cwd: record.cwd } : {}),
     sessionId: record.sessionId,
     handover: relayAlive,
-    keep: ownerKeeps(record),
+    rm: ownerRemoves(record),
   };
 }
 
 export interface QuitInput {
-  readonly keep: boolean;
+  readonly rm: boolean;
   /**
    * Other TUIs of the run alive (presence files), mine excluded, read after
    * this quit's close (and, for a `/quit` closing for all, after its session's
@@ -99,14 +99,14 @@ export type QuitPlan =
   | { readonly kind: "remove" };
 
 /**
- * What a TUI's quit does with a keep=false run's workload: the ONLY place it
+ * What a TUI's quit does with an `--rm` run's workload: the ONLY place it
  * is decided. Every doubt keeps it (a leftover is one `rm` away; deleted files
  * are gone). Its own running turn and jobs do not hold it: the quit is the
  * explicit stop that ends them (Q6). Pod-supplied `use` and the daemon's
  * `closed` steer only the removal of that same workload.
  */
 export function quitPlan(input: QuitInput): QuitPlan {
-  if (input.keep) {
+  if (!input.rm) {
     return { kind: "stay" };
   }
   if (!input.saved) {

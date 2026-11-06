@@ -236,6 +236,8 @@ to a pure module (AGENTS §7 "logic lives in pure modules").
 
 ### DR-5 — `--keep=false` with a detached run
 
+*Renamed by `fix/run-rm-flag` (2026-11-06): the flag is now `--rm` (`--keep=false` ≡ `--rm`), the config key `rm:`, and the record/spec field `rm` (polarity reversed, `RUN_STATE_VERSION` 2). The text below keeps the old names as history.*
+
 **Owner decision (2026-10-27): recommendation ACCEPTED** — (B): with `--keep=false` the relay removes the workload when it exits normally; exit net for crashes; a pending ask keeps it alive.
 
 Options: (A) refuse the combination; (B) delete when the relay ends; (C) ignore.
@@ -505,7 +507,7 @@ the kept entry's file stem):
   reported and treated as "unknown owner", never overwritten. Fields:
   `schemaVersion`, `kind`, `pid`, `appVersion`, `sessionId`, `state`
   (`starting|running|waiting-permission|idle|interrupted|failed`), `tool?`,
-  `detail?`, `lastActivityAt`, `autoAccept`, `keep`.
+  `detail?`, `lastActivityAt`, `autoAccept`, `keep` (now `rm`, version 2: `fix/run-rm-flag`).
 - `control.sock` (S3): newline JSON `{schemaVersion, op: status|handover|stop}`.
   It carries no session protocol. A path over 103 bytes (macOS `sun_path`)
   falls back to `$TMPDIR/tentacle-<uid>/<hash>.sock`, and that path is written

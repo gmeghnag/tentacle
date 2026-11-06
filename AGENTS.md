@@ -263,11 +263,11 @@ assume.
   path; MCP server stderr is piped+routed, never `inherit`. A stray
   `process.stdout.write` mid-session corrupts the render.
 - **Pod/container lifecycle** (every engine: `EngineHost`). `run` creates AND
-  KEEPS its pod/container by default (`--keep`, `keep:` config; `--keep=false` =
+  KEEPS its pod/container by default (`--rm[=false]`, `rm:` config; `--rm` =
   create+delete); when deleting, the delete-on-exit net (`removeBestEffort`) survives
   `process.exit`/Ctrl+C via a detached child (`exit` handlers still fire; SIGINT
-  routes through it). With keep (the default): no net, no delete, and the
-  re-attach command is printed. A `run --detach --keep=false` is another
+  routes through it). Without `--rm` (the default): no net, no delete, and the
+  re-attach command is printed. A `run --detach --rm` is another
   owner of that net and of a delete: its launcher never arms or deletes, its
   relay arms the net under its lock, and removes it only through `exitPlan` (a
   stop, or a clean idle that one fresh read shows nobody else uses), and only
@@ -280,20 +280,20 @@ assume.
   pending or failed: `saveConfirmed`); else, and on any crash it cannot tell,
   the workload stays and the net writes `not saved — workload kept: tentacle
   rm <name>` into the run's record; with no handler run (SIGKILL), `ps` shows a
-  keep=false run lost mid-run as `… lost · not saved`. Either stays until
-  `tentacle rm` (docs/fix/detach-live.md D4/R6). A plain `run --keep=false` is
+  `--rm` run lost mid-run as `… lost · not saved`. Either stays until
+  `tentacle rm` (docs/fix/detach-live.md D4/R6). A plain `run --rm` is
   in no index, so its net still deletes unconditionally. `attach` is
   user-owned: never create, start or delete, no exit net (`attach <name>`'s
   kept-index lookup only picks the engine/location) — with ONE exception, a TUI
-  attached to a detached run of `keep=false`: it inherits the relay's ownership,
+  attached to a detached run of `--rm` (record `rm: true`): it inherits the relay's ownership,
   at the hand-over of a live relay (the relay disarms at `prepare`, and after
   `commit` removes nothing) or, with no relay left (an ended or stale run, Q5),
   at the attach itself. A run's record counts only for the workload its
   `created` matches and, under explicit flags, at the place they name. Every TUI
   of that run arms the net, which fires only if no other TUI of the run is
   alive and its save is confirmed (above). So closing the window, SIGHUP or a
-  crash of a TUI of a detached run ONLY DETACHES it with `keep=true` (no net is
-  armed: the workload and the session stay), and with `keep=false` it detaches
+  crash of a TUI of a detached run ONLY DETACHES it without `--rm` (no net is
+  armed: the workload and the session stay), and with `--rm` it detaches
   too unless it was the run's last TUI: that one deletes after a confirmed save,
   else keeps and says `not saved` (docs/fix/detach-live.md D1/R6, Q7); the TUI whose quit closes the session (a confirmed /quit closes it for
   every TUI on it) removes the workload, through `quitPlan`

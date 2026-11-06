@@ -12,7 +12,7 @@
 1. **Il laptop è l'identità:** il modello (endpoint e chiave), le decisioni di permesso e la cronologia salvata stanno sul laptop. Il pod/container è solo lo spazio di lavoro (codice, shell, build): non riceve mai credenziali e non decide nulla per il laptop.
 2. **Un turno concluso non si perde mai in silenzio:** o è nel record del laptop, o un messaggio visibile (`not saved …`) dice dove si trova.
 3. **Si cancella un workload solo dopo un salvataggio confermato.** Nel dubbio resta, e `tentacle rm` chiude la questione.
-4. **`keep=true` (predefinito):** uscire stacca soltanto, il container resta. **`keep=false`:** il container se ne va quando la sessione finisce davvero, mai sotto un altro terminale o un'altra sessione in uso.
+4. **`keep=true` (predefinito, senza `--rm`):** uscire stacca soltanto, il container resta. **`keep=false` (`run --rm`):** il container se ne va quando la sessione finisce davvero, mai sotto un altro terminale o un'altra sessione in uso. Nelle tabelle `keep=true/false` è lo stato del run, cioè "senza / con `--rm`"; nel record su disco il campo ora si chiama `rm`, con la polarità invertita (`rm: true` = `keep=false`).
 5. **Una sessione, più terminali:** tutti vedono la stessa cosa. `/quit` confermato chiude la sessione per tutti; Ctrl+C a riposo, la chiusura della finestra o un crash staccano solo quel terminale.
 6. **Un run staccato vive in un relay sul laptop:** se il laptop dorme, il modello non risponde.
 7. **Ogni fine ha la sua causa vera, scritta:** nella cronologia (`Interrupted: …`, `Failed: <causa>`) e in `ps`. Mai `internal error` quando la causa è nota.
@@ -23,21 +23,21 @@
 
 | Situazione | Cosa vedi | Il pod/container | Cosa resta salvato | Stato |
 |---|---|---|---|---|
-| `tentacle run` (keep predefinito) | Prima della TUI: `[container] <name> still running · tentacle attach <name>`; la riga resta visibile dopo l'uscita | Resta | Record del laptop dopo ogni turno | ✅ |
-| `run --keep=false` (senza `--detach`) | La TUI; all'uscita viene rimosso | Cancellato all'uscita, anche con Ctrl+C o un crash (rete di sicurezza incondizionata: non è in nessun indice) | Record del laptop | ✅ (decisione owner) |
+| `tentacle run` (senza `--rm`, predefinito) | Prima della TUI: `[container] <name> still running · tentacle attach <name>`; la riga resta visibile dopo l'uscita | Resta | Record del laptop dopo ogni turno | ✅ |
+| `run --rm` (senza `--detach`) | La TUI; all'uscita viene rimosso | Cancellato all'uscita, anche con Ctrl+C o un crash (rete di sicurezza incondizionata: non è in nessun indice) | Record del laptop | ✅ (decisione owner) |
 | `run … "<prompt>"` | L'ultima parola è il primo messaggio: la TUI lo manda una volta sola, come testo grezzo (anche se inizia con `/`) | Come `run` | Come `run` | ✅ |
 | `run --name <n>` | Dà il nome al workload; senza, nome automatico. `run mypod` è il prompt `mypod`, senza avviso | — | — | ✅ |
 | Prompt non valido | Errore prima di creare qualcosa: posizionale e `--prompt` insieme; prompt vuoto; prompt con `--resume`/`--continue`; `--prompt -` senza `--detach` | Non creato | — | ✅ |
-| `run --detach "<prompt>"` o `--prompt <testo\|->` | Solo la riga `[container] <name> still running · tentacle attach <name>`, poi la shell. Se stdout non è un terminale, stampa lì il nome | Resta. Un relay sul laptop guida il turno | Il relay salva dopo ogni turno | ✅ |
+| `run -d\|--detach "<prompt>"` o `--prompt <testo\|->` | Solo la riga `[container] <name> still running · tentacle attach <name>`, poi la shell. Se stdout non è un terminale, stampa lì il nome | Resta. Un relay sul laptop guida il turno | Il relay salva dopo ogni turno | ✅ |
 | `run --detach` senza prompt | Errore `--detach needs a prompt: "<prompt>", --prompt <text>, or --prompt - for stdin` | Non creato | — | ✅ |
-| `run --detach --keep=false` | La riga dice anche `removed when the run ends` | Rimosso quando il relay esce pulito (60 s a riposo, nessun altro uso), solo dopo un salvataggio confermato | Relay | ✅ |
+| `run --detach --rm` | La riga dice anche `removed when the run ends` | Rimosso quando il relay esce pulito (60 s a riposo, nessun altro uso), solo dopo un salvataggio confermato | Relay | ✅ |
 | `run --detach --auto-accept` | Il relay approva da solo i tool del run; `ps` mostra `· auto` | — | — | ✅ |
 | `run --auto-accept` senza `--detach` | La TUI parte con auto-accept attivo; Shift+Tab lo spegne | — | — | ✅ |
 | Il Mac a riposo durante un turno | `caffeinate -i` lo tiene sveglio; chiudere il coperchio lo addormenta comunque | — | — | ✅ |
 | `--model <id>` su `run` (e sulla TUI semplice) | Usa quel modello, sull'endpoint del profilo attivo; l'indice e `ps` lo registrano, il relay lo usa | — | — | ✅ |
 | Avvio fallito | Una riga: `[container] failed: <causa> · log: <path>`, con ` · still up: tentacle rm <name>` se il workload è rimasto | Tenuto: resta. Altrimenti rimosso | — | ✅ |
 | Stderr del daemon | Mai a schermo: va in `daemon.log`. Un guasto vero stampa una riga: `daemon stopped unexpectedly · log: <path>` | — | `daemon.log` | ✅ |
-| `--rm` al posto di `--keep`, `-d` per `--detach` | Oggi sono `unknown option`. Deciso: `--rm` rimuove a fine run, predefinito tiene | — | — | 🔜 `fix/run-rm-flag` |
+| `--rm` al posto di `--keep`, `-d` per `--detach` | `--rm[=true\|false]` rimuove a fine run, predefinito tiene; config `rm:`. `--keep` e la chiave `keep:` ora sono errori (`unknown option --keep`, chiave sconosciuta). I run staccati di una build precedente appaiono come `unknown owner`: solo `tentacle rm` | — | — | ✅ `fix/run-rm-flag` |
 | `run` one-shot in streaming, stdin non terminale | Oggi `--prompt -` richiede `--detach` | — | — | 🔜 `feat/run-oneshot` |
 | Immagine di un'altra architettura (amd64 su arm64) | Oggi: binario sotto qemu, `MemoryExhaustion`. Deciso: immagine nativa, e rifiuto prima di copiare il binario | — | — | 🔜 fix in `TODO.md` |
 

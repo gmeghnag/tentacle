@@ -15,6 +15,7 @@ import type { KeptEntry } from "../src/kept.ts";
 import {
   type OwnerRecord,
   RELAY_SUBCOMMAND,
+  RUN_STATE_VERSION,
   type RelaySpec,
   ensureRunDir,
   laptopProc,
@@ -495,10 +496,10 @@ describe("cli main: --engine", () => {
     });
   });
 
-  // `run --keep[=bool]` → `keepHint` (owner 2026-10-27): the `startEngineRuntime`
-  // seam captures the deps `main` built; present `keepHint` = the workload is kept.
-  describe("--keep wiring (flag > profile > user config > true)", () => {
-    const keepHintFor = async (
+  // `run --rm[=bool]` → `resumeHint` (fix/run-rm-flag; was `--keep`, owner 2026-10-27): the
+  // `startEngineRuntime` seam captures the deps `main` built; present `resumeHint` = kept.
+  describe("--rm wiring (flag > profile > user config > false)", () => {
+    const resumeHintFor = async (
       args: string[],
       config?: Record<string, unknown>,
       env: Record<string, string | undefined> = unreachable,
@@ -509,7 +510,7 @@ describe("cli main: --engine", () => {
       await writeFile(path, JSON.stringify(config ?? {}));
       let seen:
         | {
-            keepHint?: (name: string) => string;
+            resumeHint?: (name: string) => string;
             labels?: Readonly<Record<string, string>>;
             annotations?: Readonly<Record<string, string>>;
             recordKept?: (name: string) => () => void;
@@ -533,56 +534,68 @@ describe("cli main: --engine", () => {
       }
       return {
         reached: seen !== undefined,
-        hint: seen?.keepHint?.("c1"),
+        hint: seen?.resumeHint?.("c1"),
         deps: seen,
         text: out.join(""),
       };
     };
     const base = ["run", "--engine", "docker", "--image", "x"];
 
-    test("default is keep: a hint is built, naming the engine and the workload", async () => {
-      const r = await keepHintFor(base);
+    test("default keeps: a hint is built, naming the engine and the workload", async () => {
+      const r = await resumeHintFor(base);
       expect(r.hint).toBe("tentacle attach --engine docker c1");
     });
 
-    test("--keep and --keep=true keep; --keep=false deletes (no hint)", async () => {
-      expect((await keepHintFor([...base, "--keep"], { keep: false })).hint).toContain("attach");
-      expect((await keepHintFor([...base, "--keep=true"], { keep: false })).hint).toContain(
-        "attach",
-      );
-      const off = await keepHintFor([...base, "--keep=false"]);
-      expect(off.reached).toBe(true);
-      expect(off.hint).toBeUndefined();
+    test("--rm and --rm=true remove (no hint); --rm=false keeps", async () => {
+      // Mutation: invert `!rm.rm` in `listed` → a default run gets no hint, an `--rm` one does.
+      const bare = await resumeHintFor([...base, "--rm"]);
+      expect(bare.reached).toBe(true);
+      expect(bare.hint).toBeUndefined();
+      expect((await resumeHintFor([...base, "--rm=true"])).hint).toBeUndefined();
+      expect((await resumeHintFor([...base, "--rm=false"], { rm: true })).hint).toContain("attach");
     });
 
-    test("--keep before the name leaves the name positional", async () => {
-      const r = await keepHintFor(["run", "--engine", "docker", "--image", "x", "--keep", "box"]);
-      expect(r.hint).toContain("attach");
+    test("--rm before the name leaves the name positional", async () => {
+      const r = await resumeHintFor(["run", "--engine", "docker", "--image", "x", "--rm", "box"]);
+      expect(r.reached).toBe(true);
+      expect(r.hint).toBeUndefined();
     });
 
-    test("user config keep:false turns it off; the flag beats it", async () => {
-      expect((await keepHintFor(base, { keep: false })).hint).toBeUndefined();
-      expect((await keepHintFor([...base, "--keep"], { keep: false })).hint).toContain("attach");
-      expect((await keepHintFor([...base, "--keep=false"], { keep: true })).hint).toBeUndefined();
+    test("user config rm:true turns removal on; the flag beats it", async () => {
+      expect((await resumeHintFor(base, { rm: true })).hint).toBeUndefined();
+      expect((await resumeHintFor([...base, "--rm=false"], { rm: true })).hint).toContain("attach");
+      expect((await resumeHintFor([...base, "--rm"], { rm: false })).hint).toBeUndefined();
     });
 
-    test("a profile's keep beats the user config", async () => {
-      const profiles = { profiles: { p: { keep: true } } };
-      const on = await keepHintFor([...base, "--profile", "p"], { keep: false, ...profiles });
+    test("a profile's rm beats the user config", async () => {
+      const profiles = { profiles: { p: { rm: false } } };
+      const on = await resumeHintFor([...base, "--profile", "p"], { rm: true, ...profiles });
       expect(on.hint).toContain("attach");
-      const offProfiles = { profiles: { p: { keep: false } } };
-      const off = await keepHintFor([...base, "--profile", "p"], { keep: true, ...offProfiles });
+      const offProfiles = { profiles: { p: { rm: true } } };
+      const off = await resumeHintFor([...base, "--profile", "p"], { rm: false, ...offProfiles });
       expect(off.hint).toBeUndefined();
     });
 
-    test("any other --keep value is a usage error, nothing started", async () => {
-      const r = await keepHintFor([...base, "--keep=maybe"]);
+    test("any other --rm value is a usage error, nothing started", async () => {
+      const r = await resumeHintFor([...base, "--rm=maybe"]);
       expect(r.reached).toBe(false);
-      expect(r.text).toContain('--keep takes true or false, got "maybe"');
+      expect(r.text).toContain('--rm takes true or false, got "maybe"');
+    });
+
+    test("--keep is gone: an unknown option, nothing started", async () => {
+      const r = await resumeHintFor([...base, "--keep=false"]);
+      expect(r.reached).toBe(false);
+      expect(r.text).toContain("unknown option --keep");
+    });
+
+    test("an old `keep:` config key is refused loudly, nothing started", async () => {
+      const r = await resumeHintFor(base, { keep: false });
+      expect(r.reached).toBe(false);
+      expect(r.text).toContain("keep");
     });
 
     test("the hint repeats --insecure-docker-tcp so the re-attach is accepted", async () => {
-      const r = await keepHintFor([...base, "--insecure-docker-tcp"], undefined, {
+      const r = await resumeHintFor([...base, "--insecure-docker-tcp"], undefined, {
         ...unreachable,
         DOCKER_HOST: "tcp://127.0.0.1:9",
       });
@@ -590,14 +603,14 @@ describe("cli main: --engine", () => {
     });
 
     test("the hint repeats --bin-dir so a read-only rootfs re-attach finds the binary", async () => {
-      const r = await keepHintFor([...base, "--bin-dir", "/tmp"]);
+      const r = await resumeHintFor([...base, "--bin-dir", "/tmp"]);
       expect(r.hint).toBe("tentacle attach --engine docker --bin-dir /tmp c1");
     });
 
     // Slice E (docs/feat/engine-ps-rm.md): a kept run is labelled and indexed;
     // a not-kept one is byte-identical to before (no label, no record).
-    test("kept → kept label + metadata + an index record at the REAL endpoint; --keep=false → none", async () => {
-      const kept = await keepHintFor([...base, "--bin-dir", "/tmp"]);
+    test("kept → kept label + metadata + an index record at the REAL endpoint; --rm → none", async () => {
+      const kept = await resumeHintFor([...base, "--bin-dir", "/tmp"]);
       expect(kept.deps?.labels).toEqual({ "tentacle.kept": "true" });
       expect(kept.deps?.annotations).toMatchObject({
         "tentacle.engine": "docker",
@@ -620,7 +633,7 @@ describe("cli main: --engine", () => {
       forget?.();
       expect(readdirSync(keptDir)).toEqual([]);
 
-      const off = await keepHintFor([...base, "--keep=false"]);
+      const off = await resumeHintFor([...base, "--rm"]);
       expect(off.reached).toBe(true);
       expect(off.deps?.labels).toBeUndefined();
       expect(off.deps?.annotations).toBeUndefined();
@@ -631,7 +644,7 @@ describe("cli main: --engine", () => {
   describe("run --detach (docs/feat/detached-relay.md R12)", () => {
     const base = ["run", "--engine", "docker", "--no-mount", "--image", "x"];
     const owned = (sessionId: string): OwnerRecord => ({
-      schemaVersion: 1,
+      schemaVersion: RUN_STATE_VERSION,
       kind: "relay",
       pid: 9,
       appVersion: "1",
@@ -646,7 +659,7 @@ describe("cli main: --engine", () => {
       over: {
         stdin?: string;
         record?: boolean;
-        keep?: boolean;
+        rm?: boolean;
         config?: Record<string, unknown>;
         colour?: boolean;
       } = {},
@@ -661,7 +674,7 @@ describe("cli main: --engine", () => {
       await mkdir(join(dir, "config"), { recursive: true });
       await writeFile(
         path,
-        JSON.stringify({ ...over.config, ...(over.keep === undefined ? {} : { keep: over.keep }) }),
+        JSON.stringify({ ...over.config, ...(over.rm === undefined ? {} : { rm: over.rm }) }),
       );
       const code = await main(["bun", "cli", ...args], {
         out: (t) => out.push(t),
@@ -674,10 +687,10 @@ describe("cli main: --engine", () => {
         },
         provisionWorkload: async (_config, deps) => {
           calls.provision += 1;
-          hint = deps.keepHint?.("c1");
+          hint = deps.resumeHint?.("c1");
           removedAtEnd = deps.removedAtEnd;
-          // The real gate: no `keepHint`, no index entry (and the exit net armed).
-          if (over.record !== false && deps.keepHint) {
+          // The real gate: no `resumeHint`, no index entry (and the exit net armed).
+          if (over.record !== false && deps.resumeHint) {
             deps.recordKept?.("c1");
           }
           return {
@@ -725,31 +738,39 @@ describe("cli main: --engine", () => {
       });
     }
 
-    test("L12 --keep=false, or `keep: false` in the config: the spec says so, and the launch line", async () => {
+    test("L12 --rm, or `rm: true` in the config: the spec says so, and the launch line", async () => {
       await withEnv(unreachable, async () => {
         for (const r of [
-          await detached([...base, "--detach", "--prompt", "hi", "--keep=false"]),
-          await detached([...base, "--detach", "--prompt", "hi"], { keep: false }),
+          await detached([...base, "--detach", "--prompt", "hi", "--rm"]),
+          await detached([...base, "-d", "--prompt", "hi", "--rm"]),
+          await detached([...base, "--detach", "--prompt", "hi"], { rm: true }),
         ]) {
           expect(r.code).toBe(0);
           expect(r.calls).toEqual({ provision: 1, spawn: 1, runtime: 0 });
-          expect(r.spec?.keep).toBe(false);
+          expect(r.spec?.rm).toBe(true);
           // Round 6: a successful `run --detach` prints no launch line of its own.
           expect(r.text).not.toContain("detached run started");
           expect(r.text).not.toContain("Attach any time");
           expect(r.text).not.toContain("undefined");
           expect(r.removedAtEnd).toBe(true);
         }
-        const kept = await detached([...base, "--detach", "--prompt", "hi"]);
-        expect(kept.spec?.keep).toBe(true);
-        expect(kept.removedAtEnd).toBeUndefined();
-        expect(kept.text).not.toContain("detached run started");
+        // The default, and `--rm=false` over a configured `rm: true`, keep.
+        for (const kept of [
+          await detached([...base, "--detach", "--prompt", "hi"]),
+          await detached([...base, "-d", "hi"]),
+          await detached([...base, "--detach", "--prompt", "hi", "--rm=false"], { rm: true }),
+        ]) {
+          expect(kept.code).toBe(0);
+          expect(kept.spec?.rm).toBe(false);
+          expect(kept.removedAtEnd).toBeUndefined();
+          expect(kept.text).not.toContain("detached run started");
+        }
       });
       rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
     });
 
-    test("L12 --keep=false through the REAL provisionWorkload: labelled, recorded, no net, the line", async () => {
-      // Mutation: drop `kept.keep || detach` → no labels, no entry, the F8 `undefined --resume`.
+    test("L12 --rm through the REAL provisionWorkload: labelled, recorded, no net, the line", async () => {
+      // Mutation: drop `|| detach` from `listed` → no labels, no entry, the F8 `undefined --resume`.
       // Mutation: no hint for this run → the REAL `provisionWorkload` arms the exit net.
       await withEnv(unreachable, async () => {
         const fake = {
@@ -774,7 +795,7 @@ describe("cli main: --engine", () => {
         const before = process.listeners("exit");
         const out: string[] = [];
         const code = await main(
-          ["bun", "cli", ...base, "--detach", "--prompt", "hi", "--keep=false", "--name", "box"],
+          ["bun", "cli", ...base, "--detach", "--prompt", "hi", "--rm", "--name", "box"],
           {
             err: (t) => out.push(t),
             out: (t) => strayStdout.push(t),
@@ -801,14 +822,14 @@ describe("cli main: --engine", () => {
       rmSync(join(dir, "config", "kept"), { recursive: true, force: true });
     });
 
-    test("--keep=false with no --detach is unchanged: no labels, no index, the net", async () => {
+    test("--rm with no --detach is unchanged: no labels, no index, the net", async () => {
       await withEnv(unreachable, async () => {
         const hints: (string | undefined)[] = [];
-        await main(["bun", "cli", ...base, "--keep=false"], {
+        await main(["bun", "cli", ...base, "--rm"], {
           out: (t) => strayStdout.push(t),
           err: () => {},
           startEngineRuntime: async (_config, deps) => {
-            hints.push(deps.keepHint?.("c1"), deps.labels?.["tentacle.kept"]);
+            hints.push(deps.resumeHint?.("c1"), deps.labels?.["tentacle.kept"]);
             throw new Error("stop here");
           },
         });
@@ -853,7 +874,7 @@ describe("cli main: --engine", () => {
     });
 
     test("the launcher never arms the exit net: its own exit must not delete the workload", async () => {
-      // Mutation: `keepHint: undefined` in the detach call → the REAL
+      // Mutation: `resumeHint: undefined` in the detach call → the REAL
       // `provisionWorkload` arms `armExitNet` and removes on failure.
       await withEnv(unreachable, async () => {
         const removed: string[] = [];
@@ -1227,7 +1248,7 @@ describe("cli main: --engine", () => {
           // A setup that fails before the index record leaves no run dir behind.
           // Mutation: use the run dir before the record → this fails.
           expect(kept.seen.earlyLogPath).toBe(join(dir, "config", "logs", "box", "daemon.log"));
-          const unkept = await interactive([...base, "--keep=false"]);
+          const unkept = await interactive([...base, "--rm"]);
           expect(unkept.seen.logPath).toBe(join(dir, "config", "logs", "box", "daemon.log"));
         });
       });
@@ -1259,8 +1280,8 @@ describe("cli main: --engine", () => {
           // No save (quit before a turn): no id, today's entry.
           const none = await interactive([...base, "--name", "box"]);
           expect(none.seen.kept?.map((e) => e.sessionId)).toEqual([undefined]);
-          // keep=false is in no index: nothing to write, nothing thrown.
-          const gone = await interactive([...base, "--name", "box", "--keep=false"], {
+          // an `--rm` run is in no index: nothing to write, nothing thrown.
+          const gone = await interactive([...base, "--name", "box", "--rm"], {
             saves: [A],
           });
           expect(gone.code).toBe(0);
@@ -1304,7 +1325,7 @@ describe("cli main: --engine", () => {
       const runDir = ensureRunDir(runDirFor(config, entry));
       writeFileSync(join(runDir, ".lock.1"), holder);
       writeOwner(runDir, {
-        schemaVersion: 1,
+        schemaVersion: RUN_STATE_VERSION,
         kind: "relay",
         pid: process.pid,
         appVersion: "1",
@@ -1657,12 +1678,12 @@ describe("cli main: --engine", () => {
       rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
     }, 15_000);
 
-    /** A dead run of `at`, keep=false: the delete a redirect would inherit. */
+    /** A dead run of `at`, rm=true: the delete a redirect would inherit. */
     const deadRun = (at: KeptEntry, sessionId: string): void => {
       const config = join(dir, "config");
       recordKept(keptIndexDir(config), at);
       writeOwner(ensureRunDir(runDirFor(config, at)), {
-        schemaVersion: 1,
+        schemaVersion: RUN_STATE_VERSION,
         kind: "relay",
         pid: 2 ** 30,
         appVersion: "1",
@@ -1670,7 +1691,7 @@ describe("cli main: --engine", () => {
         state: "failed",
         lastActivityAt: 1,
         autoAccept: false,
-        keep: false,
+        rm: true,
         created: at.created,
       });
     };
@@ -1719,7 +1740,7 @@ describe("cli main: --engine", () => {
       const runDir = ensureRunDir(runDirFor(join(dir, "config"), at));
       writeFileSync(join(runDir, ".lock.1"), live());
       writeOwner(runDir, {
-        schemaVersion: 1,
+        schemaVersion: RUN_STATE_VERSION,
         kind: "relay",
         pid: process.pid,
         appVersion: "1",
@@ -1727,7 +1748,7 @@ describe("cli main: --engine", () => {
         state: "waiting-permission",
         lastActivityAt: 1,
         autoAccept: false,
-        keep: false,
+        rm: true,
         created: at.created,
       });
       await withEnv(unreachable, async () => {
@@ -1783,7 +1804,7 @@ describe("cli main: --engine", () => {
     });
 
     test("H35 a record of an earlier workload of that name: today's attach, not the run", async () => {
-      // Mutation: `main` does not pass the entry's `created` → the old uid and keep=false.
+      // Mutation: `main` does not pass the entry's `created` → the old uid and rm=true.
       clean();
       deadRun(
         { ...entry, created: "2026-10-30T10:00:00.000Z" },
@@ -1798,7 +1819,7 @@ describe("cli main: --engine", () => {
       clean();
     });
 
-    test("R6/N1 a keep=false run's TUI exit net asks THE RUNTIME's `saveConfirmed`: unconfirmed keeps the workload, confirmed deletes", async () => {
+    test("R6/N1 an rm=true run's TUI exit net asks THE RUNTIME's `saveConfirmed`: unconfirmed keeps the workload, confirmed deletes", async () => {
       // Mutation: `armNet` in main.ts wiring `() => saved() || true` (or `() => true`) →
       // the net deletes with the save unconfirmed.
       clean();
@@ -1844,7 +1865,7 @@ describe("cli main: --engine", () => {
 
     const ownerIn = (cwd: string) =>
       writeOwner(runDirFor(join(dir, "config"), entry), {
-        schemaVersion: 1,
+        schemaVersion: RUN_STATE_VERSION,
         kind: "relay",
         pid: 1,
         appVersion: "1",
@@ -2663,11 +2684,13 @@ describe("cli main: --engine", () => {
     );
   });
 
-  test("help and usage document --engine and --keep", async () => {
+  test("help and usage document --engine, --rm and -d, never --keep", async () => {
     const help = await run(["--help"]);
     // An explicit --help is data: stdout.
     expect(help.stdout).toContain("--engine kubernetes|docker|podman");
-    expect(help.stdout).toContain("--keep[=true|false]");
+    expect(help.stdout).toContain("--rm[=true|false]");
+    expect(help.stdout).toContain("-d|--detach");
+    expect(help.stdout).not.toContain("--keep");
     expect(help.stdout).toContain("TENTACLE_ENGINE");
     expect(help.text).toBe("");
   });

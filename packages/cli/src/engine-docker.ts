@@ -242,7 +242,7 @@ export function dockerEngineHost(options: DockerEngineHostOptions): EngineHost {
       }
       // M5b: before the daemon (or the binary) goes in, prove the mount is
       // usable and every mask hides its secret. A miss removes the container
-      // HERE, `--keep` or not: it must never stay up with unverified masks —
+      // HERE, `--rm` or not: it must never stay up with unverified masks —
       // and a probe that cannot run (timeout, dropped exec) is a miss too.
       let problem: string | null;
       try {
