@@ -145,6 +145,13 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    */
   readonly toolsReady?: () => boolean;
   /**
+   * Called once when a session is removed for good (`delete`, live or
+   * archived; never on close/archive): the cli drops the session's spilled
+   * tool output (docs/fix/tool-output-location.md). Synchronous and
+   * fire-and-forget; a throw never reaches `delete`.
+   */
+  readonly onSessionDeleted?: (id: string) => void;
+  /**
    * This daemon's tentacle version and kind, injected by the cli (the daemon
    * cannot import `APP_VERSION`): it words a `VersionMismatch`. Absent → the
    * refusal names only the protocol on the daemon side.
@@ -486,14 +493,24 @@ export class SessionHost {
       hosted.close("deleted");
       // After `close`: the session writes nothing more, so nothing can recreate the file.
       this.opts.persister?.remove(id);
+      this.notifyDeleted(id);
       return true;
     }
     if (this.archived.delete(id)) {
       this.deleted.add(id);
       this.opts.persister?.remove(id);
+      this.notifyDeleted(id);
       return true;
     }
     return false;
+  }
+
+  private notifyDeleted(id: string): void {
+    try {
+      this.opts.onSessionDeleted?.(id);
+    } catch {
+      // Cleanup of a side file never fails a delete.
+    }
   }
 
   /**

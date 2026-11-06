@@ -1,0 +1,331 @@
+# fix/tool-output-location — Large tool output leaves the project
+
+> **Status:** implementation (plan, awaiting approval)
+> **Branch:** `fix/tool-output-location` (off `main` AFTER `feat/tui-target-badge` and `fix/stale-pod-binary` merge)
+> **Type:** fix · **Size:** M · **Blast:** cross-module · **Suited:** a strong model for the `agent.ts`/`session-host.ts` edits (or Sonnet executes, Opus fresh-context Review — the change sits next to the agent loop and `SessionHost.delete`)
+
+Planned on top of the two pending branches. Files shared with them (all
+different regions, so only adjacent-hunk conflicts are possible):
+`CHANGELOG.md` (both add under `[Unreleased]`), `packages/agent/src/agent.ts`
+(badge adds `contextUsage` ~L1094 and imports; we touch L330 and L1721-1756),
+`packages/daemon/src/session-host.ts` (badge adds `toolsReady` in the options
+interface ~L127 and `newSessionContext` ~L236; we add one more option beside
+it and edit `delete`), `packages/cli/src/worker.ts` and `serve.ts` (badge edits
+inside the same `SessionHost({…})` literal in `worker.ts` ~L101 and
+`tunnelledAgent` ~L389; we add one property to each literal). No overlap with
+`fix/stale-pod-binary` besides `CHANGELOG.md`. Line numbers below are on
+`main`; re-anchor after the merges.
+
+## Context
+
+*— claude-sonnet-5-5, 2026-11-05*
+
+**Problem.** A tool result longer than `tools.maxInlineOutputChars` is written
+to `<cwd>/.tentacle/tool-output/<tool>-<id>.txt` (`packages/agent/src/agent.ts:1739`,
+written at `:1747-1754`). That puts model-run output — possibly holding secrets
+the redactor missed — inside the user's project: a repo (the `.gitignore:25`
+entry only covers tentacle's own repo), a Docker/Podman mount (so the pod writes
+into the laptop folder; `docs/container-config-sources.md:194-197`, `:257-260`),
+never cleaned up, shared by every session (names are `<tool>-<callId>`; two
+sessions with the same call id overwrite each other).
+
+**Owner decisions (2026-11-05, FINAL — `TODO.md:428`).** The daemon picks ONE
+dir at start: `$XDG_CACHE_HOME` or `~/.cache` →
+`…/tentacle/tool-output/<project-key>/<session>/<tool>-<id>.txt` if writable,
+else `os.tmpdir()/tentacle-<uid>/tool-output/…`. Files `0600`. Deleted with the
+session; files older than `tools.outputRetentionDays` (default 30) removed
+silently at daemon start; a missing file reads as "no longer available". Old
+`.tentacle/tool-output/` files are NOT touched (CHANGELOG line). Comparison:
+Claude Code `~/.claude/projects/<p>/<s>/tool-results/`, opencode
+`~/.local/share/opencode/tool-output/` (7 days), pi `os.tmpdir()`.
+
+**Repro (feature gap, to re-run on `main` before any edit):** a fake `Agent`
+whose tool returns 5 000 lines, `spillLargeOutput({maxInlineChars: 500})`, a
+`HostExecution({cwd: tmp, root: tmp})`: after the turn, `tmp/.tentacle/tool-output/noisy-c1.txt`
+exists. Pinned today by `packages/agent/test/agent-spill.test.ts:67-75`.
+
+## Implementation
+
+*— claude-sonnet-5-5, 2026-11-05*
+
+### Load-bearing assumption
+
+**The spill cannot be written through `env.writeFile`, but can still be read
+by the model through `fs_read`.** Writes are confined to the workspace root —
+`HostExecution.writeFile` → `confineWrite` throws `WorkspaceWriteError` for any
+path resolving outside `root` (`packages/exec/src/host-execution.ts:215-227`,
+class at `:40`) — while reads are explicitly unconfined (`:211-213`) and
+`fs_read` has `permission: "none"` and goes straight to `ctx.env.readFile`
+(`packages/tools/src/builtins.ts:79-84`, `:94`). Today's `writeSpill` uses
+`this.config.env.writeFile(path, …)` (`agent.ts:1749`) and swallows the throw
+into `null` (`:1751`) — so merely changing `path` to an absolute cache path
+would make EVERY spill silently fail into the "could not be saved" truncation
+(`result-pipeline.ts:93-96`). The confinement must NOT be loosened (it is the
+workspace guarantee the model's `fs_write`/`fs_edit` rely on): the spill gets
+its own writer, outside `env`. Reading it back needs no change.
+
+### Preconditions
+
+- The pod/container daemon is the same code: `buildAgent` makes a
+  `HostExecution` in whichever process runs it (`packages/cli/src/wiring.ts:280`),
+  used by `serve`, the in-process worker (`worker.ts:112`), `podSessionHost`
+  (`serve.ts:452`) and the tunnelled pod agent (`serve.ts:393`). So the spill
+  directory is "the daemon's host's cache" everywhere, and a pod's lives in the
+  pod — consistent with §7 "compute next to the code" (the pod's output stays in
+  the pod; nothing is written on the laptop for a pod session, nothing new
+  crosses the wire). No protocol field changes.
+- `ToolResultSpill.path` is an opaque string, max 4096 (`protocol/src/spill.ts:14`,
+  mirrored `agent/src/session-store.ts:236`); the TUI only prints it
+  (`tui/src/spill-view.ts:38-44`). An absolute cache path fits, no schema or
+  `PROTOCOL_VERSION` change, and records already on disk with the old relative
+  path stay valid (they just point at a file that is still there).
+- `agent.ts:1727-1756` gets `sessionId` for every call (`extra.sessionId`), and
+  `projectKey(cwd)` exists (`agent/src/session-store.ts:164`) with a safe-id
+  rule `SAFE_ID` (`:153`).
+- Config resolution pattern: env → file → default via `pick`
+  (`config/src/resolve.ts:352-356`), schema `config/src/schema.ts:303`, load
+  `config/src/load.ts:546`, template `config/src/defaults.ts:185-197`; config
+  dir logic to mirror for the cache dir: `config/src/load.ts:370-383`.
+- `SessionHost.delete(id)` is the one place a session is removed for good
+  (`daemon/src/session-host.ts:423-440`, live and archived branches);
+  archive/close keep the record (`:411`), so keep the files too (a reopen needs
+  them). Remote deletion arrives there via `RemoteClient.deleteSession`
+  (`client/src/remote-client.ts:667`, `connect.ts:179`).
+- The TUI has **no** local-session delete: `SessionDirectory.remove` is only
+  built for `connect` (`tui/src/App.tsx:267`, `connect.ts:179`); laptop
+  in-process sessions are never deleted in-app. So for those the 30-day sweep is
+  the only cleanup (stated in the CHANGELOG/docs; see Owner questions).
+- Test isolation: `scripts/test-env-guard.ts` points `HOME` at a temp dir and
+  strips `TENTACLE_*` (AGENTS §6), so a test that resolves the real cache dir
+  stays in a sandbox; tests pass an explicit root anyway.
+
+### Design
+
+**New pure-ish module `packages/agent/src/tool-output.ts`** (agent already owns
+`projectKey` and the session store; no new dependency), exported from
+`packages/agent/src/index.ts`:
+
+```ts
+interface ToolOutputSink {            // what Agent needs
+  write(sessionId: string, tool: string, callId: string, contents: string): Promise<string | null>;
+}
+interface ToolOutputStore extends ToolOutputSink {
+  readonly root: string;
+  forProject(cwd: string): ToolOutputSink;         // binds <project-key>
+  removeSession(sessionId: string): Promise<void>; // rm -rf <root>/*/<sid>
+  sweep(retentionDays: number, now?: number): Promise<void>;
+}
+function resolveToolOutputRoot(opts?: {env?, home?, uid?, tmp?}): string; // sync, probes
+function createToolOutputStore(root: string): ToolOutputStore;
+```
+
+- **Root, chosen once per process** (`resolveToolOutputRoot`, called once and
+  cached by a lazy `toolOutputStore()` in `cli/src/wiring.ts`, so every session
+  and every sub-agent of this daemon shares the one answer): first candidate
+  `join(XDG_CACHE_HOME || join(HOME || homedir(), ".cache"), "tentacle", "tool-output")`.
+  Probe = `mkdir -p` (mode `0700`) + create/unlink a probe file; any failure →
+  second candidate `join(os.tmpdir(), "tentacle-" + (process.getuid?.() ?? 0), "tool-output")`
+  with the same probe. The second candidate's parent `tentacle-<uid>` is accepted
+  only if `lstat` says: a real directory (not a symlink), owned by this uid, and
+  mode forced to `0700` (the shared `/tmp` squat/symlink attack). Neither usable
+  → `null` root: `write` returns `null` → existing "could not be saved"
+  truncation path (`result-pipeline.ts:93-96`) — no new failure UX.
+  A `config.cacheDir`-style helper `cacheDirFromEnv(env)` is added beside
+  `configDirFromEnv` (`config/src/load.ts:370`) so the XDG rule lives in
+  `@tentacle/config`, not duplicated.
+- **Layout** `<root>/<projectKey(cwd)>/<safeSession>/<safeTool>-<safeId>.txt`.
+  Every path segment passes one `segment()` sanitizer: `[^A-Za-z0-9_.-]`→`_`,
+  max 60, and a segment that is empty or only dots becomes `_` (the existing
+  `safe()` at `agent.ts:1738` lets `..` through; session ids are client-supplied
+  over RPC, so this is a path-traversal guard, not cosmetics). Directories
+  `0700`, files `0600` (create with `mode`, then `chmod` — an overwritten file
+  keeps its old mode otherwise).
+- **Agent seam.** `AgentConfig` (`agent.ts:330` area) gains
+  `toolOutput?: ToolOutputSink`. `transformResult` (`agent.ts:1727-1756`): when
+  set, `writeSpill` = `config.toolOutput.write(extra.sessionId, call.name, call.id, contents)`
+  in the same try/catch → `null`; when absent, today's `env.writeFile`
+  behaviour is kept (library use and the ~12 existing tests that fake `env`).
+  This is a deliberate dual path in `Agent` only; production (`buildAgent`)
+  always sets the sink. Update the doc comment at `agent.ts:1721-1726`.
+- **Wiring** (`wiring.ts:279-425`): `buildAgent` passes
+  `toolOutput: toolOutputStore().forProject(config.cwd)` to the main `Agent`
+  (`:390`) and to `createSubagentRunner` deps (`:361`); `BuildAgentOptions`
+  gets an optional `toolOutput` override for tests. The cwd is the session's
+  cwd (`buildAgent({...config, cwd})`, `serve.ts:169`, `worker.ts:112`).
+- **Sub-agents.** The child `Agent` runs under `crypto.randomUUID()`
+  (`subagent.ts:232-233`) — its spill would land in a session dir nothing ever
+  deletes. Fix: `agent_task` already knows the parent session (`ToolContext.sessionId`,
+  `core/src/tool.ts:90`; it forwards `toolCallId`/`signal`/`onEvent` into
+  `SubagentRunControls`, `tools/src/task.ts:57-62`) — add `sessionId` to
+  `SubagentRunControls` (`subagent.ts:~89`) and give the child a sink that
+  writes under the PARENT's session with the call id prefixed by the
+  `agent_task` call id (`<taskCallId>.<childCallId>`, so a child's `call_1`
+  cannot overwrite the parent's `call_1`). Absent `sessionId` (a direct runner
+  call) → the random id, as today.
+- **Deletion with the session.** `SessionHostOptions` (`session-host.ts`, the
+  options interface where the badge branch adds `toolsReady`) gets
+  `onSessionDeleted?: (id: string) => void`, called from `delete()` in both
+  branches (live `:424-431`, archived `:433-436`) after the tombstone is added;
+  never throws into `delete` (wrapped, errors → `onTurnError`-style log is not
+  needed: `removeSession` swallows). The three construction sites pass
+  `(id) => void toolOutputStore().removeSession(id)`: `serve.ts:162`
+  (`startDaemon`), `serve.ts:430` (`podSessionHost`), `worker.ts:98`.
+  `removeSession` validates the id with the same rule as `SAFE_ID`
+  (`session-store.ts:153`) and `rm -rf`s `<root>/<each project dir>/<id>` — it
+  scans the (few) project dirs rather than needing the cwd, so an archived
+  session whose cwd is gone is still cleaned.
+- **Sweep at daemon start.** `sweep(days)` (no-op for `days <= 0`): walk
+  `<root>/*/*/*`, `lstat` (never follow a symlink, never descend one), unlink
+  regular files whose `mtime` is older than `days × 86 400 000` ms, then remove
+  now-empty session and project dirs; every error ignored; silent (no output —
+  Ink may own the terminal, AGENTS §7). Called, not awaited, at the three
+  daemon starts: `startDaemon` (after the lock, `serve.ts:~112`),
+  `startStdioDaemon`/`podSessionHost` (`serve.ts:466/422`), and the worker's
+  start (`worker.ts:~98`). Not run by one-shot/plain REPL (short-lived; the
+  next daemon start sweeps).
+  A session older than the retention that is later resumed has lost its files
+  → the next item.
+- **"No longer available".** `HostExecutionConfig` (`host-execution.ts:30-38`)
+  gains `readHint?: (absPath: string) => string | undefined`; `readFile`
+  (`:210-213`) catches `ENOENT` and, when the hint returns text, throws
+  `Error("<path>: <hint>")`. `buildAgent` sets it for paths under the store root:
+  `tool output no longer available (it is removed with its session and after N
+  days) — re-run the command if you still need it`. `fs_read` surfaces the
+  message as an error result as today. The same-uid shell `cat`/`grep` is
+  unchanged (the OS message).
+- **Config.** `tools.outputRetentionDays` (non-negative int, default 30, `0` =
+  keep forever, symmetric with `maxInlineOutputChars: 0` = off); env
+  `TENTACLE_TOOL_OUTPUT_RETENTION_DAYS` (same `pick(env, file, default)` pattern
+  as `TENTACLE_MAX_OUTPUT_CHARS`, `resolve.ts:352`). Wired
+  schema → resolve (value + source map, `:83`, `:130`, `:428`, `:457`) → load
+  (`:546`) → `TentacleConfig` → sweep call. Default constant beside
+  `DEFAULT_MAX_INLINE_OUTPUT_CHARS` in `defaults.ts`.
+- **Old files.** Not touched, not migrated, not swept (owner). The
+  `.gitignore:25` comment keeps its meaning for them.
+
+### Files (dependency order)
+
+1. `packages/config/src/defaults.ts` — `DEFAULT_TOOL_OUTPUT_RETENTION_DAYS = 30`; template comment (`:185-197`): spill goes to the cache dir, add `outputRetentionDays` to the `"tools"` example line and its doc bullet.
+2. `packages/config/src/schema.ts` (`:303`), `resolve.ts` (`:83,:130,:352,:428,:457`), `load.ts` (`:82,:546`, + `cacheDirFromEnv` near `:370`) — option + env + cache-dir helper.
+3. `packages/exec/src/host-execution.ts` — `readHint` + ENOENT rethrow.
+4. `packages/agent/src/tool-output.ts` (new), `agent/src/index.ts` export.
+5. `packages/agent/src/agent.ts` — `toolOutput` config, `transformResult`, doc comment.
+6. `packages/agent/src/subagent.ts`, `packages/tools/src/task.ts` — parent session + prefixed call id for a child's sink.
+7. `packages/daemon/src/session-host.ts` — `onSessionDeleted`.
+8. `packages/cli/src/wiring.ts` — lazy `toolOutputStore()`, `buildAgent` wiring, `readHint`; `serve.ts`, `worker.ts` — hook + sweep at start.
+9. Docs: `CHANGELOG.md`; `docs/container-config-sources.md` (`:194-197` replace the "Cambio pianificato" sentence with the as-built location; `:257-260` item 7 closed: the pod's cache is not the mounted folder unless the pod's `$HOME` is inside it); `TODO.md:428` → done line; this doc's Execution/Review.
+   Help text: there is no CLI `--help` line for this option (grep of `main.ts` usage: none); the only user-facing config text is the `defaults.ts` template comment (item 1) and the CHANGELOG.
+
+Tests move/updated: `packages/agent/test/agent-spill.test.ts:67-75` keeps
+passing on the fallback; new tests below.
+
+### CHANGELOG `[Unreleased]` (user-visible)
+
+Under `### Changed` (the badge branch has added `### Added`, stale-pod `### Fixed`; keep Keep-a-Changelog order):
+
+- **Large tool output no longer lands in your project.** Output too big for the
+  context used to be saved in `.tentacle/tool-output/` inside the project (and
+  in the mounted folder, for a Docker/Podman run). It now goes to your cache
+  folder — `$XDG_CACHE_HOME/tentacle/tool-output/` or
+  `~/.cache/tentacle/tool-output/`, or the system temp folder where that is not
+  writable (e.g. a container running as a random user id) — readable only by
+  you. A session's files are deleted with the session, and files older than
+  `tools.outputRetentionDays` (default 30; `0` keeps them) are removed silently
+  when the daemon starts; reading a removed one says it is no longer available.
+  Files already in `.tentacle/tool-output/` are left alone: delete them by hand.
+
+Under `### Added`: `tools.outputRetentionDays` / `TENTACLE_TOOL_OUTPUT_RETENTION_DAYS` — how long large tool outputs are kept (days, default 30, 0 = forever).
+
+### Failure modes
+
+| Case | Convergence |
+|---|---|
+| Neither candidate dir writable | `write` → `null` → existing truncation banner `could not be saved` (`result-pipeline.ts:93-96`); logged nowhere new; turn unaffected. |
+| `/tmp/tentacle-<uid>` pre-exists as symlink / other owner / loose mode | rejected by the `lstat` check → store unusable → as above (never write through someone else's link). |
+| Session id `..`, `a/b`, empty (client-supplied) | `segment()`/`SAFE_ID` rule: never leaves `<root>`; `removeSession` refuses an unsafe id. |
+| Disk full / write error mid-spill | `try/catch` → `null` → truncation path (same as today). |
+| Two sessions, same `callId` | separate session dirs; no overwrite (a bug today). |
+| Sub-agent spill | under the parent session, call id prefixed → deleted with it, no collision. |
+| Race: `delete` while a late spill write lands | `hosted.close("deleted")` runs first (`session-host.ts:428`); a write already in flight can recreate the dir for one file → swept by retention. Accepted; stated in Review. |
+| Daemon restart | root re-resolved; existing files readable; sweep runs; `HOME` change between runs just means an orphan dir → retention. |
+| Session resumed after retention removed its files | banner still in history; `fs_read` returns the "no longer available" error; the model re-runs the command. TUI row unaffected (shows `head`/`tail`, `spill-view.ts`). |
+| `outputRetentionDays` 0 / negative | `0` = never sweep; negative rejected by the schema (non-negative int). |
+| Pod session | files in the pod's cache/tmp; die with the pod or retention; never written on the laptop; the laptop's history keeps only the path string (§7: pod output is pod-supplied, only displayed). |
+| Archived session (close/TTL) | files kept (reopen needs them); removed on `session/delete`. |
+| Local in-process session (no delete in the TUI) | only the sweep removes them. |
+| Windows / no `getuid` | uid `0` in the temp name; acceptable (Bun targets here are macOS/Linux). |
+| Sweep walking a huge cache | `lstat` per entry, async, not awaited by startup; errors ignored. |
+
+### Tests
+
+Red first (each shown failing on `main`, then green), double quotes, no `!`.
+
+1. `packages/agent/test/tool-output.test.ts` (new, temp-dir roots, fake clock):
+   - layout `<root>/<key>/<sid>/<tool>-<id>.txt`, contents exact, file mode `0600`, dir `0700`;
+   - `segment()` hardening: session `..`, `../x`, `a/b`, `` → stays inside root (assert `resolve(path)` startsWith root);
+   - `removeSession` removes `<root>/*/<sid>`, leaves other sessions, refuses an unsafe id, idempotent on a missing dir;
+   - `sweep`: file at 31 d removed, 29 d kept, empty session/project dirs pruned, `0` days = no-op, a symlink inside is neither followed nor its target removed;
+   - `resolveToolOutputRoot`: XDG set → used; unset → `~/.cache`; first unwritable (point it at a path under a regular file) → `tmp/tentacle-<uid>/…`; tmp parent is a symlink / wrong mode → `null`.
+2. `packages/agent/test/agent-spill.test.ts` (extend): with `toolOutput` set, `env.writeFile` is NOT called (spy) and the banner/`spill.path` carry the sink's path; sink rejecting → "could not be saved" banner (truncation), turn completes. **Red:** on `main` the config key doesn't exist (type/behaviour fails). Mutation: make `transformResult` ignore the sink → test fails.
+3. `packages/exec/test/host-execution.test.ts` (extend): `writeFile` outside root STILL throws (guards against "fixing" the spill by loosening confinement); `readHint` turns an ENOENT under the hinted prefix into the hint message, other ENOENT unchanged, other errors unchanged.
+4. Sub-agent: `packages/agent/test/subagent.test.ts` (extend, existing fakes): a child spill goes to the parent session with prefixed call id; with no parent id → random (old behaviour). Mutation: drop the prefix → collision test fails.
+5. `packages/daemon/test/session-host.test.ts` (extend): `delete(live)` and `delete(archived)` each call `onSessionDeleted(id)` once; `close`/archive do not; unknown id → not called; a throwing hook does not break `delete`.
+6. `packages/cli/test/wiring.test.ts` (extend `:246` area, which asserts `saved to .tentacle/tool-output/fs_read-r1.txt`): through `buildAgent` with an injected temp root, a big `fs_read` result is saved under the root, NOT under `cwd/.tentacle`; assert `existsSync(cwd/.tentacle/tool-output)` is false (the exact property the owner asked for); and the model can `fs_read` the path back (the load-bearing assumption, end to end). Mutation: pass no sink → falls back to `.tentacle` → fails.
+7. Config: `packages/config/test` resolve/load — default 30, file value, env override beats file, negative rejected, source map reports it; template parses.
+8. `packages/cli/test` serve/worker: with a persisting daemon (`startDaemon` fake store), a `session/delete` removes the session's spill dir; startup sweep removes an aged file (inject store root + clock).
+9. Existing tests that hard-code `.tentacle/tool-output/…` paths as DATA (`tui`, `protocol`, `client`, `daemon` mapping tests, `result-pipeline.test.ts`) need no change: they feed literal strings. Only the two asserting real writes (`agent-spill.test.ts`, `cli/test/wiring.test.ts:246`) change.
+
+Gate before done: `bun test` (narrow files while iterating), `bun run typecheck`,
+`bun run lint` (baseline clean), `bun run check`. Mandatory fresh-context Review
+that red-teams: (a) §7 "Never write raw to the terminal" (sweep prints nothing),
+(b) "Don't serialize the RPC peer" (the `delete` hook is sync/fire-and-forget),
+(c) pod-not-trusted (nothing from the pod reaches the laptop's disk or
+approval), (d) `/tmp` squat.
+
+## Execution
+
+*— claude-sonnet-5-5, 2026-11-06*
+
+**As built, in plan order** (all `file:line` re-verified against main 8139e78 first):
+
+1. Config: `tools.outputRetentionDays` (schema `z.number().int()` — negatives allowed per the owner answer), env `TENTACLE_TOOL_OUTPUT_RETENTION_DAYS` via a new `parseInteger`, source map, `TentacleConfig.toolOutputRetentionDays`, `cacheDirFromEnv`, template text. Test: `config/test/tool-output-retention.test.ts`.
+2. `exec/host-execution.ts`: `readHint` + ENOENT rethrow; confinement untouched (test pins it). Test: `exec/test/read-hint.test.ts`.
+3. `agent/src/tool-output.ts` (new): `segment`, `resolveToolOutputRoot` (sync, probes; `/tmp/tentacle-<uid>` accepted only as a real dir, ours, mode 0700), `createToolOutputStore` (`write`, `forProject`, `owns`, `removeSession`, `sweep`; `<= 0` = no sweep, lstat only, symlinks never followed). Test: `agent/test/tool-output.test.ts`.
+4. `agent.ts`: `toolOutput` config + sink path in `transformResult`; env fallback kept for library use.
+5. Sub-agents: `SubagentDeps.toolOutput`, `SubagentRunControls.sessionId` (+ `TaskRunControls.sessionId`, `task.ts` forwards `ctx.sessionId`). The child's sink writes under the PARENT's session.
+6. `session-host.ts`: `onSessionDeleted`, called in both `delete` branches, throw-guarded.
+7. `cli/wiring.ts`: lazy `toolOutputStore()`, `sweepToolOutput`, `toolOutputGoneHint`, `BuildAgentOptions.toolOutput`; `serve.ts` (`reloadedHost`, `podSessionHost`) and `worker.ts`: sweep at start + delete hook.
+8. Docs: CHANGELOG (Changed/Added/Fixed), `container-config-sources.md`, TODO line.
+
+**Drift from the plan (and why)**
+- **Sub-agent call-id prefix:** task 7 already gave each child a random `spillScope`, so the plan's `<taskCallId>.<childCallId>` prefix is not needed; the scope is passed to the sink as `<scope>-<callId>`. Only the parent session id was added.
+- **NIT 5:** giving the parent a random scope would NOT fix it (two same-id calls in one Agent share the scope). Fix = `Agent.spillId`: the first use of (session, scope, tool, id) keeps the plain name, a repeat gets `~2`, `~3`…; the check+claim is synchronous so parallel calls cannot both take a name. It also covers an id reused across turns. Applies to the sink path and the env fallback.
+- `resolveToolOutputRoot` is synchronous (plan said "sync, probes"; kept so `toolOutputStore()` is a plain lazy singleton).
+- Loose-mode `/tmp/tentacle-<uid>` is REJECTED (→ null root), not chmod'ed: the plan's text said both; the failure table says rejected, the safer one. *orchestrator decision (owner delegation 2026-11-06)*
+- `outputRetentionDays` is not in the carried-settings table (a daemon-local sweep setting, nothing for the pod to receive).
+- Red-first: the sink/NIT-5 tests were run red on the unmodified `agent.ts` (5/5 fail on assertions); `readHint` red on assertion; `onSessionDeleted` red on assertion. The store module's tests were written with the module (no pre-existing code to be red against); they were validated by mutation instead.
+
+**Mutations (cp backup, shasum identical after each)** — all red then restored:
+sink ignored (4 fail) · dedupe disabled (2 fail) · child ignores parent session (1) · `delete` live branch without hook (2) · `readHint` ignored (1) · sweep ignores mtime (1) · sweep ignores `<= 0` (1) · `removeSession` without id guard (1) · wiring without `toolOutput` (1) · `serve.ts` without sweep/hook (2) · `task.ts` without `sessionId` (1). **Not mutated:** the "symlink never followed" guard (lstat-based; only asserted by test, mutation not done).
+
+**Gate (once, at the end):** `bunx tsc --noEmit` clean · `bunx biome check .` clean · `bun test packages`: 4916 pass, 3 skip (opt-in), 0 fail.
+
+**Unverified:** a live run in a real pod/container (HOME unwritable → tmp fallback) and on Windows; verify by `tentacle run` with a random uid and a large `fs_read`.
+
+## Review
+
+*— (to be filled by the reviewer)*
+
+## Owner questions
+
+*— claude-sonnet-5-5, 2026-11-05*
+
+The entry answers nearly everything; two points it leaves open, neither blocking:
+
+1. **`outputRetentionDays: 0` = keep forever?** The entry gives only the default (30). I planned `0` = never sweep (same convention as `maxInlineOutputChars: 0`). **Recommend:** yes.
+2. **Laptop in-process sessions are never deleted in-app** (the TUI has delete only for `connect`), so for them the 30-day sweep is the only cleanup — "deleted with the session" holds for `serve`/`connect`/pod daemons only. **Recommend:** accept (no new delete UI in this task); a local-session delete, if wanted later, is a separate `feat`.
+
+### Owner answers (2026-11-05)
+
+1. `tools.outputRetentionDays`: `0` **or any negative value** (e.g. `-1`) = never sweep. The schema accepts negative integers (not "non-negative").
+2. Local in-process sessions have no in-app delete: only the age sweep cleans their files. Accepted; no local-session delete in this task (a separate `feat` if ever wanted).

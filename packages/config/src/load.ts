@@ -99,6 +99,8 @@ export interface TentacleConfig {
   /** A custom `agent_task` description, resolved (read by `feat/parallel-agents`; on a pod the laptop's, carried). */
   readonly agentTaskDescription?: string;
   readonly maxInlineOutputChars: number;
+  /** Days a spilled tool output is kept; `<= 0` = never swept. */
+  readonly toolOutputRetentionDays: number;
   readonly redactSecrets: boolean;
   readonly summarizeLargeOutput: boolean;
   readonly dedupOutput: boolean;
@@ -390,6 +392,18 @@ export function configDirFromEnv(env: Env = process.env): string {
   return resolveConfigDir(undefined, env, env.HOME ?? homedir());
 }
 
+/**
+ * The user's cache dir for tentacle (`$XDG_CACHE_HOME/tentacle` or
+ * `~/.cache/tentacle`), without creating it. `HOME` falls back to `os.homedir()`.
+ */
+export function cacheDirFromEnv(env: Env = process.env, home?: string): string {
+  const h = home ?? env.HOME ?? homedir();
+  if (env.XDG_CACHE_HOME) {
+    return resolvePath(expandTilde(env.XDG_CACHE_HOME, h), "tentacle");
+  }
+  return join(h, ".cache", "tentacle");
+}
+
 function resolveConfigDir(override: string | undefined, env: Env, home: string): string {
   if (override) {
     return resolvePath(expandTilde(override, home));
@@ -627,6 +641,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
       ? { agentTaskDescription: resolved.agentTaskDescription }
       : {}),
     maxInlineOutputChars: resolved.maxInlineOutputChars,
+    toolOutputRetentionDays: resolved.toolOutputRetentionDays,
     redactSecrets: resolved.redactSecrets,
     summarizeLargeOutput: resolved.summarizeLargeOutput,
     dedupOutput: resolved.dedupOutput,

@@ -199,10 +199,13 @@ Glossario breve:
   `session/open.settings`. Idem `maxIterations`, `contextAwareness`,
   `contextReset`, `loadAgentsMd`, `loadSkills`. `subagents.*` è sempre del laptop.
   `autoWake` non viaggia: lo legge solo la TUI del laptop.
-- Output grande: spill in `.tentacle/tool-output/<tool>-<id>.txt` **relativo
-  al workspace della sessione** (`packages/agent/src/agent.ts:1722-1739`):
-  nel FS del pod; con mount Docker/Podman finisce nella cartella del laptop.
-  Cambio pianificato in `TODO.md:428` (fix/tool-output-location).
+- Output grande (`fix/tool-output-location`, as-built): spill nella cache
+  dell'host del daemon — `$XDG_CACHE_HOME` o `~/.cache`, poi
+  `tentacle/tool-output/<project-key>/<sessione>/<tool>-<id>.txt`, altrimenti
+  `os.tmpdir()/tentacle-<uid>/tool-output` (`packages/agent/src/tool-output.ts`).
+  Nel pod resta nel pod (cache/tmp del pod), mai sul laptop né nel mount a meno
+  che l'`$HOME` del pod sia dentro il mount. File `0600`; cancellati con la
+  sessione e dopo `tools.outputRetentionDays` (default 30; ≤ 0 = mai).
 - `summarizeLargeOutput` nel pod usa il modello del tunnel (`wiring.ts:291-295`).
 
 ### 2.10 Binario nel pod
@@ -267,10 +270,9 @@ Glossario breve:
    diagnostiche del pod vanno nel log, non a terminale (`main.ts:615-619`).
    → Mostrare all'avvio il conteggio skill/agent del pod (`session/skills`
    esiste già).
-7. **Spill dei tool output nel mount.** Con Docker/Podman e mount, il pod
-   scrive `.tentacle/tool-output/` dentro la cartella del laptop. → Già
-   coperto da fix/tool-output-location: verificare che la nuova cartella
-   (`~/.cache` del *container*) non finisca nel mount.
+7. **(Fatto: `fix/tool-output-location`.)** **Spill dei tool output nel
+   mount.** Ora la cache del *container* (`~/.cache` o tmp), non il workspace:
+   finisce nel mount solo se l'`$HOME` del pod è dentro il mount.
 8. **`apiKeyCommand` / env del laptop non vanno nel pod — bene — ma
    neanche `TENTACLE_SYSTEM_PROMPT`, `TENTACLE_NO_AGENTS_MD`, ecc.** Le env
    `TENTACLE_*` del laptop valgono solo lato laptop. → Documentarlo in

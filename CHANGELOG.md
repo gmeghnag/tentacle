@@ -10,6 +10,18 @@ those.
 
 ### Changed
 
+- **Large tool output no longer lands in your project.** Output too big for the
+  context used to be saved in `.tentacle/tool-output/` inside the project (and
+  in the mounted folder, for a Docker/Podman run). It now goes to your cache
+  folder — `$XDG_CACHE_HOME/tentacle/tool-output/` or
+  `~/.cache/tentacle/tool-output/`, or the system temp folder where that is not
+  writable (e.g. a container running as a random user id) — readable only by
+  you. A session's files are deleted with the session (`session/delete`), and
+  files older than `tools.outputRetentionDays` (default 30; `0` or a negative
+  number keeps them) are removed silently when the daemon starts; a local
+  in-process session has no in-app delete, so only that age sweep cleans its
+  files. Reading a removed file says it is no longer available. Files already
+  in `.tentacle/tool-output/` are left alone: delete them by hand.
 - **Esc / Ctrl+C in the `--resume` session picker now exits silently**, with no
   `[resume] cancelled` line (local and `connect --resume`). The exit code is
   unchanged.
@@ -51,6 +63,8 @@ those.
 
 ### Fixed
 
+- Two tool calls that share a call id (a server may reuse them, e.g. two `agent_task`
+  calls in one message) no longer overwrite each other's saved large output.
 - A model HTTP error on a pod run (`run`, `attach`, `run --detach`) now names its
   cause (`the model endpoint answered 401 (unauthorized)`) in the TUI, `relay.log`
   and `tentacle ps`, instead of `internal error`. Only the status reaches the pod,
@@ -65,6 +79,8 @@ those.
   <name>, then run again`.
 ### Added
 
+- `tools.outputRetentionDays` / `TENTACLE_TOOL_OUTPUT_RETENTION_DAYS`: how long large
+  tool outputs are kept (days, default 30; `0` or negative = forever).
 - **Sub-agents run in parallel.** Several `agent_task` calls in one message now run at
   the same time, in a shared workspace. `subagents.execution` chooses: `parallel` (the
   default), `read-only` (only sub-agents that cannot write) or `sequential`.

@@ -1,10 +1,12 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, utimesSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DomainErrorCode, PROTOCOL_VERSION, SessionListResultSchema } from "@tentacle/protocol";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { daemonStoreDir, startDaemon } from "../src/serve.ts";
+import { toolOutputStore } from "../src/wiring.ts";
 
 // `serve` persists its sessions on its own host and reloads them on start
 // (docs/feat/daemon-side-persistence.md), over a REAL disk under a temp
@@ -409,6 +411,41 @@ describe("serve persistence (end to end, real disk)", () => {
     await writeFile(join(daemonStoreDir(config), ".lock"), String(dead));
     const takeover = await serve();
     await takeover.stop();
+  });
+
+  test("a session/delete removes that session's spilled tool output (live and archived), not another's; close keeps it", async () => {
+    // Mutation: drop `onSessionDeleted` from the daemon's SessionHost → the files stay.
+    const first = await serve();
+    const sink = toolOutputStore().forProject(config.cwd);
+    const live = await sink.write("s-spill-live", "t", "1", "x");
+    const arch = await sink.write("s-spill-arch", "t", "1", "x");
+    const other = await sink.write("s-spill-other", "t", "1", "x");
+    const a = await client(first.url);
+    for (const id of ["s-spill-live", "s-spill-arch", "s-spill-other"]) {
+      await a.request("session/open", { sessionId: id, messages: seed });
+    }
+    await a.request("session/close", { sessionId: "s-spill-arch" });
+    expect(existsSync(arch ?? "")).toBe(true); // archived keeps its files (a reopen needs them)
+    await a.request("session/delete", { sessionId: "s-spill-live" });
+    await a.request("session/delete", { sessionId: "s-spill-arch" });
+    await until(() => !existsSync(live ?? "") && !existsSync(arch ?? ""));
+    expect(existsSync(other ?? "")).toBe(true);
+    a.ws.close();
+    await first.stop();
+  });
+
+  test("a daemon start sweeps spilled files past tools.outputRetentionDays, and keeps them for 0", async () => {
+    // Mutation: drop `sweepToolOutput` from `reloadedHost` → the aged file stays.
+    const sink = toolOutputStore().forProject(config.cwd);
+    const aged = await sink.write("s-aged", "t", "1", "x");
+    const old = new Date(Date.now() - 40 * 86_400_000);
+    utimesSync(aged ?? "", old, old);
+    const keep = await serve({ ...config, toolOutputRetentionDays: 0 });
+    await keep.stop();
+    expect(existsSync(aged ?? "")).toBe(true);
+    const sweeper = await serve();
+    await sweeper.stop();
+    await until(() => !existsSync(aged ?? ""));
   });
 
   test("F1 a deleted session is never revived: its tombstone survives a restart (the Review's repro)", async () => {

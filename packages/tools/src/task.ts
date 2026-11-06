@@ -20,6 +20,8 @@ export interface TaskRunControls {
   readonly onEvent?: (event: ToolProgressEvent) => void;
   /** This `agent_task` call's id: the sub-agent's permission asks are attributed to it. */
   readonly toolCallId?: string;
+  /** The calling session's id: the sub-agent's spilled output is filed under it. */
+  readonly sessionId?: string;
 }
 
 export type TaskRunner = (
@@ -110,6 +112,7 @@ export function createTaskTool(
           signal: ctx.signal,
           ...(ctx.emitProgress ? { onEvent: ctx.emitProgress } : {}),
           ...(ctx.toolCallId !== undefined ? { toolCallId: ctx.toolCallId } : {}),
+          sessionId: ctx.sessionId,
         },
       );
       const note =

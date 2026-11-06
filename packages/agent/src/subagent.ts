@@ -89,6 +89,12 @@ export interface SubagentRunControls {
   readonly onEvent?: (event: ToolProgressEvent) => void;
   /** The parent's `agent_task` call id: the child's permission asks are attributed to it. */
   readonly toolCallId?: string;
+  /**
+   * The parent's session id: the child's spilled output is filed under it, so
+   * it goes with the session (docs/fix/tool-output-location.md). Absent → the
+   * child's throwaway id.
+   */
+  readonly sessionId?: string;
 }
 
 /**
@@ -180,6 +186,8 @@ export interface SubagentDeps {
    * Design 5). Absent → sequential.
    */
   readonly toolExecution?: AgentConfig["toolExecution"];
+  /** Where a child's large output is spilled (the parent's sink). Absent → the child's `env`. */
+  readonly toolOutput?: AgentConfig["toolOutput"];
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
@@ -240,6 +248,16 @@ export function createSubagentRunner(deps: SubagentDeps): {
       grants,
       // A server may reuse call ids: two children must not share a spill file.
       spillScope: crypto.randomUUID().slice(0, 8),
+      ...(deps.toolOutput
+        ? {
+            toolOutput: {
+              // Under the PARENT's session when known: deleting it deletes this.
+              write: (sid: string, tool: string, id: string, contents: string) =>
+                deps.toolOutput?.write(controls?.sessionId ?? sid, tool, id, contents) ??
+                Promise.resolve(null),
+            },
+          }
+        : {}),
       ...(deps.toolExecution ? { toolExecution: deps.toolExecution } : {}),
       ...(deps.resultTransforms ? { resultTransforms: deps.resultTransforms } : {}),
       ...(contextAwareness ? { contextAwareness } : {}),
