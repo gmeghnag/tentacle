@@ -442,6 +442,8 @@ export class Connection {
       created,
       resync,
       ...(hosted.settingsReport ? { settings: hosted.settingsReport } : {}),
+      // Read in this same synchronous segment as the replay: omitted when 0.
+      ...(hosted.unflushedExits > 0 ? { unflushedExits: hosted.unflushedExits } : {}),
     };
   }
 

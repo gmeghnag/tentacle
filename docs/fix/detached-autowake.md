@@ -185,7 +185,7 @@ Gate before done: `bun test` (baseline: all pass except the three opt-in skips),
 
 ### Notes / debt
 
-- Pre-existing, unchanged: a TUI whose continuation loses the slot drops its wake (`App.tsx:1185-1192`); a TUI misses exits between its runtime's `attachTo` and the App's `onExit` subscription. A daemon-side "unflushed exits" count in `session/list`/open (additive field) would close both for every attach — a follow-up if wanted (Q6).
+- Pre-existing, unchanged: a TUI whose continuation loses the slot drops its wake (`App.tsx:1185-1192`); a TUI misses exits between its runtime's `attachTo` and the App's `onExit` subscription. A daemon-side "unflushed exits" count in `session/list`/open (additive field) would close both for every attach — a follow-up if wanted (Q6). **Closed by `fix/attach-unflushed-exits`** (the missed-exits half; the lost-slot withdrawal stays on purpose, its Q1).
 - **Review F6, accepted:** a refused streak keeps the relay alive with no limit, since each retry clears the grace, and writes `owner.json` each tick. It costs no model calls, and a pod can already pin the relay with `jobs > 0`. A refusal does not count against the wake limit.
 - **Review F7:** `relay.test.ts` R-W9's `toBeLessThan(40)` was never seen failing (the mutant hangs first), and R-W4 (`autoWake: false`) has no mutation aimed at it.
 - **Review F8:** logic in a component and in the driver: `App.tsx` `handedWakeRef`, `relay.ts` `text === "" && !streamed && slotTaken`. If the adopted turn is still not visible at the one retry, the wake is dropped and the next turn flushes that exit (read, not run).

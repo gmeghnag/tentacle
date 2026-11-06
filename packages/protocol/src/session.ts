@@ -523,6 +523,11 @@ export const OpenResultSchema = z.object({
   resync: z.boolean(),
   /** Present iff the session was created from `settings`; also on a later attach. */
   settings: SessionSettingsReportSchema.optional(),
+  /**
+   * Background-job exits no turn has flushed into the history yet (docs/fix/
+   * attach-unflushed-exits.md). Omitted when 0, and by an older daemon.
+   */
+  unflushedExits: z.number().int().nonnegative().optional(),
 });
 export type OpenResult = z.infer<typeof OpenResultSchema>;
 

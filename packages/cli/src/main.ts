@@ -857,8 +857,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             createSession: run?.createSession ?? runtime.createSession,
             ...(localAutoAcceptFeed ? { autoAccept: localAutoAcceptFeed } : {}),
             ...(run ? { runQuit: run.runQuit, autoAccept: run.autoAccept } : {}),
-            // A job's exit its relay handed over; the TUI decides by its `autoWake`.
-            ...(run?.wakePending ? { wakePending: true } : {}),
+            // A job's exit its relay handed over, or one the session's open
+            // reported no turn has flushed (docs/fix/attach-unflushed-exits.md);
+            // ONE boolean (never two wakes). The TUI decides by its `autoWake`.
+            ...(run?.wakePending || runtime.unflushedExits() > 0 ? { wakePending: true } : {}),
             ...(initialPrompt !== undefined ? { initialPrompt } : {}),
             link: runtime.link,
             mcpStatus: runtime.mcpStatus,

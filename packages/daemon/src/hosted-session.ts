@@ -897,6 +897,11 @@ export class HostedSession {
     return { epoch: this.cut.epoch, seq: this.cut.seq };
   }
 
+  /** Background-job exits no turn has flushed yet (`session/open`'s `unflushedExits`). */
+  get unflushedExits(): number {
+    return this.session.pendingExitCount;
+  }
+
   /** Number of attached clients. */
   get attachedCount(): number {
     return this.attachments.size;
