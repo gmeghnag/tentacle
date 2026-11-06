@@ -22,7 +22,7 @@ import {
   writeFile as writeFileFs,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { projectKey } from "./session-store.ts";
 
 /** What an `Agent` needs to spill a result. Resolves to the saved path, or `null`. */
@@ -167,18 +167,28 @@ async function children(path: string): Promise<string[]> {
   }
 }
 
+/** realpath of the nearest existing ancestor + the rest (a not-yet-created dir still resolves, e.g. macOS /var → /private/var). */
 function real(path: string): string {
+  const abs = resolve(path);
   try {
-    return realpathSync(path);
+    return realpathSync(abs);
   } catch {
-    return resolve(path);
+    const parent = dirname(abs);
+    return parent === abs ? abs : join(real(parent), basename(abs));
   }
 }
 
-/** Whether `inner` is `outer` or lies under it (both resolved through symlinks). */
+/**
+ * Whether `inner` is `outer` or lies under it (both resolved through
+ * symlinks). A cwd of `/` contains no root: it is not a project (a pod with
+ * WORKDIR `/`), and "inside /" would lose every spill.
+ */
 function lies(inner: string, outer: string): boolean {
   const i = real(inner);
   const o = real(outer);
+  if (o === "/") {
+    return false;
+  }
   return i === o || i.startsWith(o.endsWith("/") ? o : `${o}/`);
 }
 

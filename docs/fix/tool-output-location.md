@@ -480,3 +480,13 @@ Live, test binary main(afe15b5)+this branch(7974867), `run --engine docker --det
 - Findings 3–6: debt (TODO), no change.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-06*
+
+### Execution — round 3
+
+*— claude-sonnet-5-5, 2026-11-06*
+
+- **Finding 1** (`tool-output.ts` `lies`): a cwd that resolves to `/` contains no root (a `--no-mount` pod, WORKDIR `/`, keeps its spills under the normal root). Red first: both `/` tests failed on the round-2 code (the spill returned `null`).
+- **Bug found by the (a) test:** `real()` fell back to the *unresolved* path for a directory that does not exist yet, so on macOS (`/var` → `/private/var`) an alternative root not yet created was never seen as "inside the cwd" — the round-2 `!lies(other, cwd)` guard did not hold for it. `real()` now resolves the nearest existing ancestor and appends the rest.
+- **Finding 2 tests:** (a) alternative also inside the cwd → `null`, nothing written; (b) the alternative root is swept; (c) `cli/test/tool-output-wiring.test.ts`: the real `toolOutputStore()` with cwd = `HOME` spills outside it, not `null`. Files: `agent/test/tool-output-round3.test.ts`, `cli/test/tool-output-wiring.test.ts`.
+- **Mutations (cp backup, shasum identical):** `/` rule dropped (2 red) · `!lies(other, cwd)` dropped (1) · `roots()` without the alternative (1) · wiring without the 2nd argument (1). (The first wiring mutation attempt by `sed` did not match the reformatted line and showed 0 red; redone with an exact edit: 1 red.)
+- **Gate:** `bunx tsc --noEmit` clean · `bunx biome check .` clean (675 files) · `bun test packages`: 4936 pass, 3 skip, 0 fail. Findings 3–6 untouched (debt). No CHANGELOG change.
