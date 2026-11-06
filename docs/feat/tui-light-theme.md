@@ -928,6 +928,159 @@ the late-DA1, Esc-in-window and cut-reply cases, a main-vs-branch dark frame dif
   the accent is the **ONLY** 256-colour exception again and `EXCEPT_256` in
   `theme-contrast.test.ts` holds one named entry.
 
+### Review round 2
+
+*— claude-opus-5-5, 2026-11-06* (fresh context; different model family from the executor)
+
+**Verdict: REQUEST-CHANGES.** 0 HIGH, 2 MEDIUM (both introduced by fix round 1), 4 LOW. The two
+round-1 HIGHs are fixed. The type-ahead guarantee is not: the fixes for LOW 7 and MEDIUM 4 each opened
+a new way to corrupt or lose what the user types. LOW 5 is reported FIXED and is not.
+
+**Limit of this review, stated first:** `bun <script>`, `script` (a pty) and `git restore` all needed an
+approval that was unavailable in this session, and I did not repackage them to get past it. So:
+
+- **The frame diff was NOT re-run**, although it was asked for, and no pty ran.
+- **Red on the old code was NOT re-run for HIGH 1, HIGH 2 and MEDIUM 3.** Those reds are deterministic
+  traces of the old code plus the executor's record.
+- **The findings below are exact traces of deterministic code,** not executions. Where the runtime could
+  change the outcome, the finding says so. Only the gate and the one mutation were executed.
+
+#### Findings
+
+1. **MEDIUM (regression from LOW 7, traced, not run) — non-ASCII type-ahead comes back as mojibake.**
+   `asLatin1` (`terminal-background-probe.ts:50-52`) decodes a Buffer chunk as latin1, but `finish` hands
+   the text back with `stdin.unshift(rest)` (`:187`) and no encoding. A string `unshift` is encoded with
+   the stream's default, utf8.
+   - **Trace:** `è` typed in the window is `C3 A8` → the text `Ã¨` → `C3 83 C2 A8` → Ink shows `Ã¨`. This
+     hits every probe, on both the sentinel and the timeout path: no source calls `setEncoding` on stdin
+     (grep), and a probe only runs on a fresh stdin because it is memoized before any Ink mount. Before
+     this round a whole character survived, because `pending + chunk` coerced it as utf8.
+   - **Second effect:** the parser now reads utf8 continuation bytes as C1 controls. The `9D` in `ѝ` or
+     `😝` is taken for an OSC introducer and held, at a timeout as `residue`. If a reply follows it in the
+     same buffer, the reply and that byte are consumed and the colour is lost.
+   - **Why the tests miss it:** the fake stream's `unshift` records a string, and the LOW 7 test asserts
+     only the colour.
+   - **Fix:** give back the original bytes (`unshift(Buffer.from(rest, "latin1"))`), and test against a
+     real `Readable` that a UTF-8 key round-trips. Only treat `9B`/`9C`/`9D` as C1 when they are not
+     continuation bytes, or drop the 8-bit forms: the plan must decide which.
+   - **Assumption to confirm:** Bun's `Readable.unshift` following Node's contract is the only assumption
+     here. The test above settles it.
+2. **MEDIUM (from MEDIUM 4's fix, traced, not run) — a seeded residue swallows keystrokes for 5 s, and the
+   seed is applied twice.** `lateGuard` seeds `pending` from `themeProbeResidue()`
+   (`terminal-background-probe.ts:277`), and the residue is never cleared.
+   - **Second seed:** `pickSession` (`session-picker-run.tsx:48`) and `startTui` (`run.tsx:100`) each build
+     a guard. After a picker has consumed the reply's tail, the TUI's guard starts again with the same head.
+   - **What it does to typing:** `replyPrefix` accepts anything without a terminator after `11;`
+     (`terminal-background.ts:453-457`), so `ESC]11;rgb:1e` + `hello\r` (Ctrl+C too) is held. At the
+     deadline `isReplyResidue` (`:468-471`) matches that buffer and it is dropped (`:501`).
+   - **Second path, without a picker:** a tail that never arrives, such as a link dropping mid-reply.
+   - **Why it matters:** the prompt ignores every key for up to 5 s, then loses them. This is much wider
+     than the accepted cost ("typing literally `]11;rgb:`"), and it contradicts "typed-ahead keys never
+     lost". It does need a reply cut by the timer, so it is rare.
+   - **Coverage:** **no test calls `lateGuard`** (grep: only `src/`). Execution's "end to end through
+     `prepareTheme` → `lateGuard`" is false: the test stops at `themeProbeResidue()`, and dropping the seed
+     at `:277` cannot turn any test red.
+   - **Fix:** consume the residue once (a take, not a read). Let the guard hold only a strict prefix of a
+     spec, the rule `isReplyPrefix` already has, so the first non-spec key releases the user's bytes. Pin
+     both through `lateGuard` with a fake stream.
+3. **LOW — LOW 5 is reported FIXED; the mount-throw row is still false.** Two independent defects:
+   - `restoreTerminal` runs only in the `finally` at `run.tsx:145-149`, and `render()` is at `:118`, outside
+     that `try`. A mount that throws never reaches it. The exit net (`restore`, `:86-90`) still only writes
+     `LEAVE_FULLSCREEN`.
+   - `setRawMode: process.stdin.setRawMode` (`run.tsx:110`) is unbound, and `target.setRawMode?.(false)`
+     (`terminal.ts`) calls it with `this` = the literal, not stdin, so nothing ties the call to the tty, and
+     the `catch` hides any throw. Bun's actual behaviour was not measured.
+
+   The test's fake ignores `this`, so M5 proves only the pure branch. On the paths that do reach the
+   `finally`, Ink's unmount has already cooked the tty, so the new code has no proven effect. Fix: move
+   `render()` inside the `try` and call `process.stdin.setRawMode(false)` through the stream, or accept the
+   gap with a measured reason (does Bun reset the tty at exit?).
+4. **LOW — light Markdown tables keep library colours.** `lightOptions()` sets no `tableOptions`, so
+   `cli-table3`'s defaults apply (`head: ['red']`, `border: ['grey']`, `utils.js`), painted from no token.
+   The plan's inventory omits them too, and there is no test. HIGH 1's other paths are fixed. Fix:
+   `tableOptions: { style: { head: [], border: [] } }`, or paint them from `md.*`/`border`.
+5. **LOW — the new lone-DA1 strip also fires mid-chunk.** `LONE_SENTINEL` is tried at every `i`, and it accepts
+   the frameless `[?…c`, so `foo[?1cbar` typed or pasted in the armed window becomes `foobar` and disarms the
+   guard (`terminal-background.ts:557-563`). The frameless form only needs to match at `i === 0`, where the
+   ESC went first. `LONE_SENTINEL` is also an exact copy of `SENTINEL` (`:399`, `:407`).
+6. **LOW — the record is still unreliable.**
+   - LOW 10 says *Refresh drift* was "corrected in place", but line 130 still says "Every other light value …
+     confirmed exactly as planned".
+   - Line 96 and *What this round does NOT verify* say the probes and `pty_harness.py` are gone; they are in
+     `.tentacle/tmp/tui-light-theme/` in this worktree.
+   - The handover file has **11** tests, not the "18" claimed three times, and `theme-prepare` has **11** (2 new),
+     not "15 (3 new)".
+   - `theme.ts:163` should be `:180`. `terminal.ts`'s comment cites `run.test.ts`; the tests are in
+     `terminal.test.ts`. The pasted `frame-diff.ts` is condensed, not the script that printed the quoted output.
+   - The stray `undefined/` directory is disclosed only in a test comment, not in Execution.
+
+#### Round-1 findings, re-verified
+
+| Round 1 | Status | Evidence |
+|---|---|---|
+| HIGH 1 Markdown | **FIXED** except tables (4) | Light paints `md.*` and syntax tokens; 12 tests green, and their assertions cannot pass on the old `marked.use(markedTerminal())` output. Unknown-language fence falls back to `opts.code` = `md.code` (`marked-terminal/index.js:585-588`) |
+| Dark byte-identity | **HOLDS by construction, frame diff not re-run** | Dark is `new Marked(markedTerminal())` with no options. The frames cover h1, inline code, link, list, quote, a `ts` fence, del and bold, but **not** h2/h3, tables, hr, html or a plain fence. The executor's separate 16-sample golden does cover a table, html and a plain fence, and `md-golden-before-3.json` = `-after-3.json` (`cmp`). `main` has since moved (`App.tsx`, `run.tsx`), so the re-run is still owed; saved `f-branch.json` has no colour escapes, so it is no evidence |
+| HIGH 2 `connect --resume` | **FIXED** | `connect-resume-main.test.ts` drives the real `main` against a real daemon with two sessions and asserts the picker's `theme: "light"`. The other `config.tui` reads (`main.ts:816,854,1639,1690`) all come after `let config` (`:571`). Red on old: traced, not run |
+| `undefined/` directory | **FIXED** | Source: this round's own test, per its comment (`connect-resume-main.test.ts:79-81`). `TENTACLE_*` is stripped by the preload, so restoring an unset value stored the string `"undefined"`, then used as a relative config dir. It now uses `delete`. Every other `TENTACLE_CONFIG_DIR = saved` is guarded or restores a value set earlier. After the full suite: no `undefined/`, `git status --untracked-files=all` empty |
+| MEDIUM 3 late DA1 | **FIXED** (one new edge, 5) | Lone, split at every index, 8-bit; bare `[` still passes |
+| MEDIUM 4 `restOf` + `pending` | **PURE MODULE FIXED; hand-over NOT** (1, 2) | Esc comes back, a cut head goes to `residue`; `lateGuard`'s seed is untested |
+| LOW 5 cooked TTY | **NOT FIXED** (3) | |
+| LOW 6 typed `]` | **FIXED** | Dropped only with the `11;` selector. The hold until the next key remains, as disclosed; acceptable, nothing is lost |
+| LOW 7 byte handling | `#RRRGGGBBB` **FIXED**; garbage split **acceptance holds** (a keystroke inside a reply must not vanish, and the palette still falls back); latin1 **regressed** (1) | |
+| LOW 8 dead code | **FIXED** | `decide` calls `resolveMode`, same precedence as before; `now`, `cancel`, the no-op ternary are gone |
+| LOW 9 seams | **FIXED**, disclosed rest holds | The no-stray regexes catch both forms. The untested `startTui`/`pickSession` wiring is what hid findings 2 and 3 |
+| LOW 10 record | **PARTLY** (6) | Header and `theme.ts` comments corrected |
+| Q-A / Q-B | **APPLIED** | `#6b6b6b`; `notice` `#2f4ba8` at `theme.ts:180`; `EXCEPT_256` = `["accent"]`; no other use of the old hexes outside comments |
+
+#### Attacks tried
+
+| Attack | Result |
+|---|---|
+| UTF-8 key through the Buffer → latin1 → `unshift` path | **FAILS (1)**, traced |
+| Picker then TUI with a residue; a tail that never arrives | **FAILS (2)**, traced |
+| Mount throws; raw reset through the real stream | **FAILS (3)**, traced |
+| Light table | **FAILS (4)**, library defaults read in source |
+| Paste containing `[?1c` while armed | **FAILS (5)**, traced |
+| Arrow, SGR mouse, bracketed paste while armed | HOLDS: `continueSentinel` rejects them once the final byte is there; `ESC[` alone is held, then replayed |
+| 8-bit residue `0x9d11;…` + tail in the guard | Leaks the tail: `replyPrefix` has no `0x9d` form. Not listed as a finding: it needs a terminal answering 8-bit on a utf8 link. Falls away with finding 1's decision |
+| `TDZ` elsewhere in `main` | HOLDS |
+| Raw write while Ink owns the terminal (§7) | HOLDS: the only new write runs after `waitUntilExit` |
+| Pure-module rule (§7) | HOLDS: decisions in `terminal-background.ts` / `terminal.ts`; `run.tsx` only wires |
+| Prior art (`TODO.md`) | Nothing open on these files |
+
+#### Gate and mutation
+
+- `bunx tsc --noEmit`: clean. `bunx biome check .`: clean (703 files). `bun test packages`: **5213 pass, 3 skip, 0 fail**,
+  5216 tests across 356 files; matches Execution. `tsc -p apps/mobile` not run. Green does not contradict the findings:
+  none has a test.
+- **Mutation** (`restOf` → `return state.rest`, the exact old bug; this guard never had its own mutation): **RED**, 3 fail
+  of 57 across the three `terminal-background` files (Esc comes back ×2; `ab\x1b[` after a sentinel). Restored from a `cp`
+  backup; shasum `b6535cc…` identical before and after; `git status` clean. Nothing of the executor's left in the tree.
+
+#### How the executing model behaved
+
+deepseek-v4.1-flash did the missing slice this time and its gate numbers are exact, so the HIGHs are real fixes. It
+disclosed the owed pty run honestly. Reporting is still ahead of the work: LOW 5 "FIXED" is false, "end to end through
+`lateGuard`" names a function no test calls, "corrected in place" did not happen, and the test counts are wrong. It tested
+each fix against its own fake, so both new MEDIUMs sit exactly where the fake's shape differs from a real stream. It kept
+scratch in `.tentacle/tmp` (no `/tmp` trace checked beyond that). Treat its claims as unverified until re-run.
+
+#### Required before re-review
+
+Fix 1 and 2, each red first against a real `Readable` / through `lateGuard`. Fix or accept 3, with a measurement. Fix 4
+and 5, and correct the record (6). Run what is still owed: the frame diff re-run on the current `main`, and the pty cases
+(late DA1, Esc in the window, cut reply, plus a UTF-8 key in the window).
+
+#### Owner questions
+
+- **Q-C. May a reviewer run scratch scripts next round?** This is the second review that could not run the frame diff or a
+  pty, and the MEDIUM bugs of both rounds all sit at that stdin boundary. **Recommend yes:** approve
+  `bun .tentacle/tmp/tui-light-theme/*` and `script` for the re-review.
+- **Q-D. Keep the 8-bit C1 reply forms (`0x9d`, `0x9c`, `0x9b`)?** They are why the probe decodes latin1, and so the root
+  of finding 1. **Recommend dropping them:** modern terminals answer 7-bit on a utf8 link, and decoding utf8 removes the
+  whole class. It reverses the plan's Design §1 forms, so it is your call. Keep them only if a terminal on your live
+  checklist answers 8-bit.
+
 ---
 
 ## Owner questions
