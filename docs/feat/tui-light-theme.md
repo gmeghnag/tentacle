@@ -1104,6 +1104,106 @@ and 5, and correct the record (6). Run what is still owed: the frame diff re-run
   updated to match and marks the change as **owner-decided 2026-11-06**. This is what removes MEDIUM 1's whole class:
   a UTF-8 continuation byte can no longer be read as a C1 control.
 
+### Review round 3
+
+*— claude-opus-5-5, 2026-11-06* (fresh context; adversarial re-review of `c70031c..HEAD`)
+
+**Verdict: PASS.** 0 HIGH, 0 MEDIUM, 2 LOW (new), 1 LOW accepted earlier and still standing. Both
+round-2 MEDIUMs are fixed, and I confirmed it by running them on real `node:stream` `Readable`s.
+
+**Limit of this review, stated first.** Q-C granted `bun ./.tentacle/tmp/…` and `script`, but in this
+session the harness still asked for approval on both, and no approval came. I did not get past it
+another way, for example by spawning them from inside `bun test`. So:
+
+- **The dark frame diff (`frame-diff.ts`, `frame-assert.ts`) was NOT re-run by me.** I read both
+  scripts. Their design is sound: each side renders with its own React/Ink, `FORCE_COLOR=3`, there is
+  one frame per Markdown form (h1–h3, inline code, `ts` and plain fences, a table, link and quote,
+  del/bold/em), and each form's SGR is checked inside its own frame. The quoted output is the
+  executor's.
+- **No pty ran.** `bun packages/cli/src/main.ts --version` did run (`tentacle dev`).
+- **What I ran instead** was the `bun test` channel, with a scratch file
+  (`.tentacle/tmp/tui-light-theme/r3-attacks.test.ts`). It drives the REAL `probeBackground` over a
+  real `Readable` that receives Buffer chunks **one byte at a time**, as a tty `read()` may deliver
+  them. It also drives the real `lateGuard` over a real utf8 `Readable`.
+
+#### Attacks run (scratch file, output quoted)
+
+| # | Attack | Result |
+|---|---|---|
+| A1 | Mute terminal; `è😝ѝabc\r` typed byte by byte in the window | **HOLDS**: back byte-identical, `late: true`, `wait=47ms` on a 60 ms timeout (no 5 s stall), raw left on (`[true]`, by design) |
+| A2 | Answering terminal: `è` + OSC reply (ST) + `😝` + DA1 + `z`, byte by byte | **HOLDS**: `"è😝z"`, colour `[255,255,255]`, raw `[true,false]` |
+| A3 | Cut reply `ESC]11;rgb:1e`, then `hi\r` INSIDE the window | `"\u001b]11;rgb:1ehi\r"` reaches Ink, a garbage line with no loss. This is the LOW 7 trade-off accepted in round 2, still standing |
+| A4 | Same cut reply at the timeout → residue → TUI guard, then `hello\r` | **HOLDS**: residue `"\u001b]11;rgb:1e"`, first `read()` = `"hello\r"`, `themeProbeResidue()` empty afterwards (a take) |
+| A5 | Residue, then the user types `add\r`, one key per chunk | **LOSES `ad`**: Ink sees `"d\r"` → LOW 2 |
+| A6 | Residue, then `è😝` | **HOLDS**: `"è😝"` |
+| A7 | Residue, then the reply tail byte by byte, then `typed` | **HOLDS**: `"typed"` |
+| A8 | `foo[?1cbar` pasted while armed; a lone Esc | **HOLDS**: both pass unchanged (round-2 LOW 5 fixed) |
+| A9 | Mute terminal; only `C3` (half of `è`) arrives before the timeout | **HOLDS**: `[195]` handed back. This is the `carry` path; see the mutation |
+
+#### Findings
+
+1. **LOW (test gap) — the timeout hand-over of a cut character has no repo test.** The mutation below
+   (dropping `carry` from `finish`'s `unshift`) loses the byte (A9 red), yet all 35 tests in the four
+   `terminal-background*` files stay green. The bytes suite's "SPLIT across two chunks" test completes
+   the character before the probe ends, so it never reaches `carry` at `finish`. The code is correct
+   today. Fix: move A9 into `terminal-background-bytes.test.ts` (5 lines).
+2. **LOW — after a seeded residue, hex keys typed first are dropped.**
+   - **What happens:** `stepLateFilter` (`terminal-background.ts:516-524`) clears the whole held
+     `pending` once it stops being completable. By then, `pending` holds the user's keys too, whenever
+     those keys (`0-9a-fA-F/`) extended the spec: `add\r` → `d\r` (A5). The deadline path has the same
+     effect (`isReplyResidue`).
+   - **Why it is LOW:** the case needs a reply cut by the 200 ms timer and then a hex first key, so it
+     is rare, and at most a few characters are lost. It is far narrower than round 2's MEDIUM 2 (every
+     key for 5 s).
+   - **Why it stays a finding:** it still contradicts "typed-ahead keys never lost". It also goes
+     against the rule the code applies everywhere else (LOW 7: a garbage line beats a lost key).
+   - **Cheap alternative:** on release, drop only the original residue and re-read the bytes that
+     followed it. A late partial tail would then show as garbage instead of a key vanishing. → Q-E.
+3. **Accepted, unchanged — A3** (above).
+
+#### Round-2 findings, re-verified
+
+| Round 2 | Status | Evidence |
+|---|---|---|
+| MEDIUM 1 mojibake | **FIXED** | A1, A2, A6, A9 on a real `Readable`; 8-bit forms gone from `terminal-background.ts` (only `\x1b` forms remain) |
+| MEDIUM 2 residue swallow / double seed | **FIXED** (narrow residual, LOW 2) | A4, A7; `themeProbeResidue` is a take (`theme.ts`); `lateguard` suite calls the real `lateGuard` (6 tests, read) |
+| LOW 3 mount-throw raw tty | **Code fixed, pty measurement NOT re-run by me** | `render()` and `messagesToItems` are inside the `try`; `setRawMode` goes through an arrow bound to stdin (`run.tsx:117`). The executor's before/after `icanon` output is quoted, not reproduced |
+| LOW 4 light tables | **FIXED** | `markdown-tables.test.ts` green (4 tests); dark table SGR pinned in the same file |
+| LOW 5 mid-chunk DA1 | **FIXED** | A8; `i === 0 ? LONE_SENTINEL : FRAMED_SENTINEL` (`:579`) |
+| LOW 6 record | **CORRECTED** | Counts check out: handover 14, lateguard 6, bytes 5 (3 `test(` + a 3-key loop), tables 4. Line 130 is annotated in place. No `undefined/` at the root after the full suite |
+| Dark frame diff | **Script sound, not re-run by me** | See the limit above |
+| `connect --resume` | **HOLDS** | `connect-resume-main.test.ts` green through the real `main` |
+
+#### Gate and mutation
+
+- `bunx tsc --noEmit`: clean, run before and after the mutation. `bunx biome check .`: `Checked 706 files … No fixes
+  applied.` `bun test packages`: **5231 pass, 3 skip, 0 fail**, 5234 tests across 359 files. This matches Execution
+  exactly.
+- **Mutation** on the most load-bearing guard, the byte hand-over that runs at every mute-terminal launch:
+  `finish`'s `unshift(Buffer.from(joinBytes(…, carry)))` → `unshift(Buffer.from(rest, "utf8"))`. Repo tests: **35/35
+  GREEN, so the mutation survives** (finding 1). Scratch A9: **RED** (`[]` vs `[195]`). Restored from a `cp` backup.
+  shasum `233b6274393b…` identical before and after, and equal to the executor's recorded value.
+- After the gate: `git status --short --untracked-files=all` was empty, there was no stray directory at the repo root,
+  and no mutation was left. The only addition is this section.
+
+#### How the executing model behaved
+
+deepseek-v4.1-flash's round-2 record is, this time, true wherever I could check it: gate numbers, test counts,
+shasums, the take and the strict prefix, the fixes it claims for M1/M2/L4/L5/L6. It also cut claims it could not back:
+it deleted the vacuous "is a Buffer" test, and it disclosed its broken mutation helper and its own `cut_reply`
+harness slip. Remaining weakness: it pinned each fix where it was looking, so a path one step away (`carry` at the
+timeout) went untested, and so did an edge of its own fix (hex keys after a seed).
+
+#### Owner questions
+
+- **Q-E. After a cut reply, should a hex key typed first be kept, at the cost of possibly showing a late partial tail
+  as garbage?** **Recommend yes.** It matches the LOW 7 rule, and the change is small (drop only the residue's own
+  bytes). It can go in a follow-up `fix`, since it does not block the merge.
+- **Q-F. Run the frame diff and a pty case yourself before the merge, or grant the approval in the reviewer's
+  session?** Both were authorised but blocked by the harness here. **Recommend:** run
+  `bun ./.tentacle/tmp/tui-light-theme/frame-diff.ts` once (≈10 s). It is the only dark byte-identity evidence I did
+  not reproduce.
+
 ---
 
 ## Owner questions
