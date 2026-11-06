@@ -17,9 +17,11 @@ import {
   type SeedTitle,
   type SendNowMessage,
   type SendNowTarget,
+  type SessionSettingsReport,
   type SessionSkillsResult,
   type SessionUpdate,
   type TurnEnd,
+  type UpdateSettingsResult,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import { type ReturnedRow, handBack, restoredByRefusal, stayingRows } from "./hand-back.ts";
@@ -601,6 +603,27 @@ export class RemoteSession implements SessionStreamListener {
       return { before: 0, after: 0 };
     }
     return this.client.compact(this.id);
+  }
+
+  /**
+   * Apply this client's carried settings to the session (`/settings apply`,
+   * docs/feat/session-settings-apply.md). Null when no session is open yet: a
+   * session opened later is created from these settings anyway.
+   */
+  async applySettings(): Promise<UpdateSettingsResult | null> {
+    if (!this.id) {
+      return null;
+    }
+    return this.client.updateSettings(this.id);
+  }
+
+  /** The session's settings as last reported: `open` false before it is opened. */
+  settingsState(): { readonly open: boolean; readonly report?: SessionSettingsReport } {
+    if (!this.id) {
+      return { open: false };
+    }
+    const report = this.client.settingsOf(this.id);
+    return { open: true, ...(report ? { report } : {}) };
   }
 
   /** The remote session's current history, or null if none was opened yet. */

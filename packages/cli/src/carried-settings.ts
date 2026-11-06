@@ -230,6 +230,8 @@ export function applyCarried(
   let next = config;
   const stamped: Partial<Record<SourceKey, "carried">> = {};
   const overridden: Record<string, unknown> = {};
+  /** Carried W keys the pod sets itself, whatever the value: an apply cannot change them. */
+  const containerKeys: Key[] = [];
   const pinnedOver: string[] = [];
   const overlay = <K extends Key>(key: K): void => {
     const row: Row<K> = CARRIED[key];
@@ -240,6 +242,7 @@ export function applyCarried(
         return;
       }
       if (set) {
+        containerKeys.push(key);
         if (row.read(config) !== carried) {
           overridden[key] = row.read(config);
         }
@@ -262,7 +265,11 @@ export function applyCarried(
   }
   return {
     config: recomposed({ ...next, sources: { ...next.sources, ...stamped } }, config),
-    report: { carried: settings, overridden: overridden as SessionSettings },
+    report: {
+      carried: settings,
+      overridden: overridden as SessionSettings,
+      ...(containerKeys.length > 0 ? { containerKeys } : {}),
+    },
     pinnedOver,
   };
 }
@@ -296,10 +303,10 @@ function recomposed(next: TentacleConfig, loaded: TentacleConfig): TentacleConfi
   };
 }
 
-const TEXT_DIFFERS = "(text differs)";
+export const TEXT_DIFFERS = "(text differs)";
 
 /** A value a notice may print. Any text is hidden: it could be the pod's (AGENTS §7). */
-function shown(key: Key, value: unknown): string | number | boolean {
+export function shown(key: Key, value: unknown): string | number | boolean {
   if (key === "agentTaskDescription") {
     return TEXT_DIFFERS;
   }
@@ -321,13 +328,16 @@ function valuesLine(keys: readonly Key[], values: SessionSettings): string {
 
 /**
  * What the laptop tells the user about a session's report: ONE line each, only
- * what differs, for keys of THIS table. The `(/clear to reset)` hint is its own
+ * what differs, for keys of THIS table. The `(/settings apply, or /clear)` hint is its own
  * field, so the TUI draws it grey beside the blue text.
  */
 export interface SettingsNotice {
   readonly text: string;
   readonly hint?: string;
 }
+
+/** The drift notice's way out (docs/feat/session-settings-apply.md). */
+export const DRIFT_HINT = "(/settings apply, or /clear)";
 
 export function settingsNotices(
   mine: SessionSettings,
@@ -352,19 +362,31 @@ export function settingsNotices(
   if (differing.length > 0) {
     lines.push({
       text: `Session settings: ${valuesLine(differing, report.carried)}`,
-      hint: "(/clear to reset)",
+      hint: DRIFT_HINT,
     });
   }
   return lines;
 }
 
-/** Sends each notice once per session and text, since a reconnect opens the session again. */
+/**
+ * Sends each notice once per session and text, since a reconnect opens the
+ * session again. `forget(sessionId)`: the session's settings changed (an apply,
+ * docs/feat/session-settings-apply.md), so a later drift is news again.
+ */
 export function createSettingsNotifier(
   mine: SessionSettings,
   notify: (text: string, hint?: string) => void,
-): (notice: { readonly sessionId: string; readonly report: SessionSettingsReport }) => void {
+): ((notice: { readonly sessionId: string; readonly report: SessionSettingsReport }) => void) & {
+  forget(sessionId: string): void;
+} {
   const said = new Set<string>();
-  return ({ sessionId, report }) => {
+  const notice = ({
+    sessionId,
+    report,
+  }: {
+    readonly sessionId: string;
+    readonly report: SessionSettingsReport;
+  }): void => {
     for (const { text, hint } of settingsNotices(mine, report)) {
       const key = `${sessionId}\n${text}`;
       if (!said.has(key)) {
@@ -373,4 +395,12 @@ export function createSettingsNotifier(
       }
     }
   };
+  const forget = (sessionId: string): void => {
+    for (const key of [...said]) {
+      if (key.startsWith(`${sessionId}\n`)) {
+        said.delete(key);
+      }
+    }
+  };
+  return Object.assign(notice, { forget });
 }

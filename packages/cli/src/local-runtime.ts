@@ -56,6 +56,14 @@ import { logDaemonError } from "./daemon-log.ts";
 import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
 import { type ResidentUse, residentUseOf } from "./relay-state.ts";
 import type { SessionSaver } from "./session-saver.ts";
+import {
+  NOT_OPEN,
+  type SettingsLine,
+  appliedLines,
+  changedNotice,
+  settingsCommandLines,
+  updateFailureLine,
+} from "./settings-view.ts";
 import { APP_VERSION, CLIENT_INFO } from "./version.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 
@@ -235,6 +243,18 @@ export interface PersistingController extends SessionController {
   openSeeded: RemoteSession["openSeeded"];
   ownsTurn: RemoteSession["ownsTurn"];
   onQueued: RemoteSession["onQueued"];
+  /** `/settings` (present only where this laptop carries settings: `run`/`attach`). */
+  settings?(): readonly SettingsLine[];
+  /** `/settings apply`: the outcome as lines, never a rejection; a success is saved at once. */
+  updateSettings?(): Promise<readonly SettingsLine[]>;
+}
+
+/** What a `run`/`attach` controller needs for `/settings` (docs/feat/session-settings-apply.md). */
+export interface ControllerSettings {
+  /** This terminal's carried settings (the runtime's, from its start). */
+  readonly mine: SessionSettings;
+  /** An own apply landed on `sessionId`: a later drift is news again. */
+  readonly applied?: (sessionId: string) => void;
 }
 
 /**
@@ -302,6 +322,8 @@ export function persistingController(
   initialTitle: TitleState = { source: "auto" },
   /** A turn this client did not mint but owns: a detached run's (B2). */
   adoptedTurn?: string,
+  /** Present → `/settings` and `/settings apply` (docs/feat/session-settings-apply.md). */
+  carried?: ControllerSettings,
 ): PersistingController {
   let running: Promise<void> | null = null;
   let again = false;
@@ -487,6 +509,30 @@ export function persistingController(
     get sessionId() {
       return inner.sessionId;
     },
+    ...(carried
+      ? {
+          settings: () => settingsCommandLines(carried.mine, inner.settingsState()),
+          // The apply recomposes the system head: saved at once, like a compaction.
+          async updateSettings(): Promise<readonly SettingsLine[]> {
+            try {
+              const result = await inner.applySettings();
+              if (result === null) {
+                return [{ text: NOT_OPEN }];
+              }
+              if (result.applied) {
+                const id = inner.sessionId;
+                if (id !== null) {
+                  carried.applied?.(id);
+                }
+                flush();
+              }
+              return appliedLines(carried.mine, result);
+            } catch (error) {
+              return [updateFailureLine(error)];
+            }
+          },
+        }
+      : {}),
   };
 }
 
@@ -573,9 +619,25 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
   });
   await client.initialize();
   // A pod's report of what it did with them: through `notify`, never a raw write.
+  // Another terminal's apply is told the same way (docs/feat/session-settings-apply.md).
+  let forgetDrift: ((sessionId: string) => void) | undefined;
   if (deps.sessionSettings && deps.notify) {
-    client.onSessionSettings(createSettingsNotifier(deps.sessionSettings, deps.notify));
+    const mine = deps.sessionSettings;
+    const notify = deps.notify;
+    const notifier = createSettingsNotifier(mine, notify);
+    forgetDrift = notifier.forget;
+    client.onSessionSettings(notifier);
+    client.onSessionSettingsChanged(({ sessionId, previous, report }) => {
+      notifier.forget(sessionId);
+      const text = changedNotice(mine, previous, report);
+      if (text !== null) {
+        notify(text);
+      }
+    });
   }
+  const carried: ControllerSettings | undefined = deps.sessionSettings
+    ? { mine: deps.sessionSettings, ...(forgetDrift ? { applied: forgetDrift } : {}) }
+    : undefined;
   client.onHistoryLost(({ turns }) => {
     deps.notify?.(
       `⚠ The daemon lost the session while the link was down; it was restored without your last ${
@@ -638,6 +700,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       (error) => deps.saver.failed(uid, `could not read the history back: ${error.message}`),
       title,
       adoptTurn,
+      carried,
     );
     controllers.add(controller);
     return controller;

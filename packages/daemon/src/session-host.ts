@@ -11,6 +11,7 @@ import {
   EMPTY_SKILL_LISTING,
   type RecordTitle,
   Session,
+  type SessionGrants,
   type SkillListing,
   recordTitleText,
 } from "@tentacle/agent";
@@ -28,6 +29,7 @@ import {
   type SessionTitle,
   type SessionTtlParams,
   type SessionTtlResult,
+  type UpdateSettingsResult,
 } from "@tentacle/protocol";
 import { DomainErrorCode, RpcError } from "@tentacle/transport";
 import type { ModelLink } from "./connection.ts";
@@ -67,6 +69,20 @@ export interface AgentContext {
    * (`serve`, the worker) ignores it by construction.
    */
   readonly settings?: SessionSettings;
+  /**
+   * A LIVE session's state the new agent must take over instead of building
+   * its own (`session/update_settings`, docs/feat/session-settings-apply.md):
+   * its broker (the requester is installed on it), its jobs (their exits are
+   * streamed from them) and its approvals. Absent at a create. Opaque here.
+   */
+  readonly reuse?: AgentReuse;
+}
+
+/** What a rebuilt agent takes over from the session it replaces the agent of. */
+export interface AgentReuse {
+  readonly permissions: PermissionBroker;
+  readonly jobs?: JobController;
+  readonly grants?: SessionGrants;
 }
 
 export type AgentFactory = (
@@ -85,6 +101,8 @@ export type AgentFactory = (
   titleModel?: ModelProvider;
   /** What it did with `context.settings`: `session/open`'s result reports it. */
   settingsReport?: SessionSettingsReport;
+  /** The session's approvals store, handed to the next agent on a settings apply (`AgentReuse.grants`). */
+  grants?: SessionGrants;
 };
 
 /**
@@ -844,7 +862,7 @@ export class SessionHost {
     // The agent exists before its session (P4): its link is bound late, and a
     // session is only reachable (hence prompted) once built.
     const bound: { hosted?: HostedSession } = {};
-    const { agent, permissions, jobs, titleModel, settingsReport } = this.opts.createAgent(
+    const { agent, permissions, jobs, titleModel, settingsReport, grants } = this.opts.createAgent(
       this.opts.defaultCwd,
       {
         modelLink: () => bound.hosted?.modelLink() ?? null,
@@ -877,6 +895,54 @@ export class SessionHost {
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;
+    hosted.grants = grants;
     return hosted;
+  }
+
+  /**
+   * `session/update_settings` (docs/feat/session-settings-apply.md): rebuild
+   * the session's agent with the same factory from `settings`, handing it the
+   * session's broker, jobs and approvals, and swap it in. SYNCHRONOUS on
+   * purpose, from the idle check to the swap: no turn or compaction can take
+   * the slot in between (JS is single-threaded), so a turn never runs on half
+   * a swap. Anything that throws before the swap leaves the old agent as it
+   * was. A factory that reports nothing decides by its own config: the
+   * throw-away agent is retired, `applied: false`.
+   */
+  updateSettings(
+    hosted: HostedSession,
+    id: string,
+    settings: SessionSettings,
+  ): UpdateSettingsResult {
+    hosted.assertIdle();
+    const reuse = hosted.reusable();
+    const next = this.opts.createAgent(this.opts.defaultCwd, {
+      modelLink: () => hosted.modelLink(),
+      settings,
+      reuse,
+    });
+    const foreign = next.permissions !== reuse.permissions || next.jobs !== reuse.jobs;
+    if (!next.settingsReport || foreign) {
+      // It leaves the session's jobs; jobs of its own (a factory that ignored
+      // `reuse`) go with it.
+      next.agent.retire();
+      if (next.jobs && next.jobs !== reuse.jobs) {
+        next.jobs.dispose();
+      }
+      if (!next.settingsReport) {
+        return { applied: false };
+      }
+      throw new RpcError(
+        JsonRpcErrorCode.InternalError,
+        "the agent factory did not reuse the session's broker and jobs",
+      );
+    }
+    hosted.swapAgent(next.agent, {
+      settingsReport: next.settingsReport,
+      ...(next.titleModel ? { titleModel: next.titleModel } : {}),
+      ...((next.grants ?? reuse.grants) ? { grants: next.grants ?? reuse.grants } : {}),
+      id,
+    });
+    return { applied: true, settings: next.settingsReport };
   }
 }

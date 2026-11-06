@@ -113,6 +113,20 @@ const FIXTURES: Record<string, Json[]> = {
   ],
   "methods/session~1compact/params": [{ sessionId: "s" }],
   "methods/session~1compact/result": [{ before: 10, after: 2 }],
+  "methods/session~1update_settings/params": [
+    { sessionId: "s", id: "a1", settings: { maxIterations: 3, toolExecution: "parallel" } },
+  ],
+  "methods/session~1update_settings/result": [
+    { applied: false },
+    {
+      applied: true,
+      settings: {
+        carried: { maxIterations: 3 },
+        overridden: { dedupOutput: true },
+        containerKeys: ["dedupOutput"],
+      },
+    },
+  ],
   "methods/session~1snapshot/params": [{ sessionId: "s" }],
   "methods/session~1snapshot/result": [
     { messages: [{ role: "user", content: "q" }] },
@@ -300,6 +314,11 @@ const FIXTURES: Record<string, Json[]> = {
     update({ type: "session_closed", reason: "deleted" }),
     update({ type: "session_title", title: "Fix the login bug", source: "model" }),
     update({ type: "session_title", title: "Mine", source: "user" }),
+    update({
+      type: "session_settings",
+      settings: { carried: { maxIterations: 3 }, overridden: {} },
+      id: "a1",
+    }),
     update({ type: "queued", entries: [], returned: [] }),
     update({
       type: "queued",

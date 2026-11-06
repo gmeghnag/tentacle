@@ -52,6 +52,7 @@ import {
   type SessionTtlParams,
   type SnapshotParams,
   type SnapshotResult,
+  type UpdateSettingsParams,
   type WireChatRequest,
 } from "@tentacle/protocol";
 import {
@@ -232,6 +233,11 @@ export class Connection {
         return this.prompt(params as PromptParams);
       case Method.Compact:
         return this.compact(params as CompactParams, context?.signal);
+      // Synchronous from the idle check to the agent swap; holds no lock (AGENTS §7).
+      case Method.UpdateSettings: {
+        const { sessionId, id, settings } = params as UpdateSettingsParams;
+        return this.host.updateSettings(this.lookup(sessionId), id, settings);
+      }
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);
       case Method.Enqueue:

@@ -482,6 +482,14 @@ export const SessionSettingsReportSchema = z.object({
   carried: SessionSettingsSchema,
   /** The carried keys the pod's own env or file kept, with the pod's different value. */
   overridden: SessionSettingsSchema,
+  /**
+   * The carried keys whose value comes from the pod's own env or file, WHATEVER
+   * that value (docs/feat/session-settings-apply.md): an apply cannot change
+   * them. Names, never an enum: a newer daemon's key must not reject the report;
+   * a laptop keeps only the names it knows. Absent (an older daemon) → only
+   * `overridden` tells.
+   */
+  containerKeys: z.array(z.string().min(1).max(64)).max(64).optional(),
 });
 export type SessionSettingsReport = z.infer<typeof SessionSettingsReportSchema>;
 
@@ -517,6 +525,37 @@ export const OpenResultSchema = z.object({
   settings: SessionSettingsReportSchema.optional(),
 });
 export type OpenResult = z.infer<typeof OpenResultSchema>;
+
+// --- session/update_settings --------------------------------------------
+// Apply a laptop's settings to a LIVE session, between turns
+// (docs/feat/session-settings-apply.md): the daemon rebuilds the session's
+// agent from them, as at a create, and keeps the conversation, the background
+// jobs, the session's approvals and every attachment. Honoured only by an IDLE
+// session: a running turn → `TurnInProgress`, a compaction →
+// `CompactInProgress`, nothing built. A W key the pod's own config sets still
+// wins (in the report's `overridden` / `containerKeys`). A daemon that decides
+// by its own config (`serve`, the worker) answers `applied: false`: nothing
+// changed, not an error. On success every attached client gets a
+// `session_settings` update carrying `id`, so the applier knows its own. The
+// call is idempotent by value; the daemon does not dedupe `id`. Additive: an
+// older daemon answers `MethodNotFound`. From a pod (not trusted, AGENTS §7) the
+// result can only make a laptop print a notice.
+
+export const UpdateSettingsParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  /** Client-chosen; echoed in the `session_settings` update. */
+  id: z.string().min(1).max(128),
+  settings: SessionSettingsSchema,
+});
+export type UpdateSettingsParams = z.infer<typeof UpdateSettingsParamsSchema>;
+
+export const UpdateSettingsResultSchema = z.object({
+  /** False: this daemon takes its settings from its own config; nothing changed. */
+  applied: z.boolean(),
+  /** The session's report now (present iff `applied`). */
+  settings: SessionSettingsReportSchema.optional(),
+});
+export type UpdateSettingsResult = z.infer<typeof UpdateSettingsResultSchema>;
 
 // --- session/close ------------------------------------------------------
 // End the session for everyone: abort its turn, stop its background jobs, tell

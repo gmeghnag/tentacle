@@ -196,7 +196,7 @@ session already running keeps the settings it was created with, and shows you th
 that differ from yours:
 
 ```
-Session settings: { "maxIterations": 3, "tools.dedupOutput": false } (/clear to reset)
+Session settings: { "maxIterations": 3, "tools.dedupOutput": false } (/settings apply, or /clear)
 ```
 
 The values that win from the container's own config are shown the same way:
@@ -204,6 +204,18 @@ The values that win from the container's own config are shown the same way:
 ```
 Container config: { "maxIterations": 7 }
 ```
+
+`/settings` shows all the session's settings and how this terminal differs:
+
+```
+Session settings: { "maxIterations": 7 (container), "tools.dedupOutput": false }
+This terminal differs: { "tools.dedupOutput": true } (/settings apply)
+```
+
+`/settings apply` applies this terminal's settings (as they were when it started) to
+the running session, between turns. The conversation, background jobs, your approvals
+and other attached terminals stay; those terminals are told what changed. Values the
+container's own config sets still win.
 
 ```sh
 tentacle attach <pod> [-n <namespace>] [-c <container>]

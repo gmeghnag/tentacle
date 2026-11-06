@@ -533,6 +533,61 @@ describe("App", () => {
     unmount();
   });
 
+  test("/settings shows the host's lines; /settings apply applies and shows its outcome (docs/feat/session-settings-apply.md)", async () => {
+    // Mutation: remove the App's `/settings` case → nothing is shown, nothing applied.
+    let applied = 0;
+    const createSession = () => ({
+      async *send() {
+        // no model turn needed for this test
+      },
+      settings: () => [
+        { text: 'Session settings: { "maxIterations": 5 }' },
+        { text: 'This terminal differs: { "maxIterations": 3 }', hint: "(/settings apply)" },
+      ],
+      async updateSettings() {
+        applied += 1;
+        return [{ text: "Session settings applied." }];
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/settings");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    const shown = stripAnsi(lastFrame() ?? "");
+    expect(shown).toContain('⏺ Session settings: { "maxIterations": 5 }');
+    expect(shown).toContain('⏺ This terminal differs: { "maxIterations": 3 } (/settings apply)');
+    expect(applied).toBe(0);
+    stdin.write("/settings apply");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(applied).toBe(1);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Session settings applied.");
+    unmount();
+  });
+
+  test("/settings on a session that carries nothing: not available, nothing called", async () => {
+    const createSession = () => ({
+      async *send() {
+        // no model turn needed for this test
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/settings apply");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("/settings isn't available for this session.");
+    unmount();
+  });
+
   test("coalesced wheel reports in one chunk scroll without leaking into the input", async () => {
     const longReply = Array.from({ length: 60 }, (_, i) => `line-${i + 1}`).join("\n");
     const model = new ScriptedProvider([[{ type: "text", delta: longReply }, { type: "done" }]]);

@@ -266,6 +266,7 @@ describe("toUpdateParams (the session/update frame)", () => {
     },
     { type: "permission_resolved", requestId: "r", outcome: { outcome: "cancelled" } },
     { type: "session_title", title: "Fix login", source: "model" },
+    { type: "session_settings", settings: { carried: {}, overridden: {} }, id: "a1" },
     { type: "tool_call_phase", toolCallId: "t", phase: "running" },
     {
       type: "queued",

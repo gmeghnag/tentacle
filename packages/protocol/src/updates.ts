@@ -15,6 +15,7 @@ import {
   QueuedEntrySchema,
   ReturnedEntrySchema,
   SessionIdSchema,
+  SessionSettingsReportSchema,
   StopReasonSchema,
   TurnErrorSchema,
   TurnIdSchema,
@@ -227,6 +228,20 @@ export const QueuedUpdateSchema = z.object({
   returned: z.array(ReturnedEntrySchema),
 });
 
+/**
+ * The session's settings changed (`session/update_settings`,
+ * docs/feat/session-settings-apply.md): its report now, and the applier's
+ * request `id`, so that client knows its own and every other one can tell its
+ * user. Not turn-scoped; every attached client gets it, while idle. Display
+ * only: the report also rides every `OpenResult`, and nothing waits on it.
+ * From a pod (not trusted): a laptop filters it and only prints a notice.
+ */
+export const SessionSettingsUpdateSchema = z.object({
+  type: z.literal("session_settings"),
+  settings: SessionSettingsReportSchema,
+  id: z.string().min(1).max(128).optional(),
+});
+
 export const SessionUpdateSchema = z.discriminatedUnion("type", [
   AgentMessageChunkSchema,
   AgentThoughtChunkSchema,
@@ -247,6 +262,7 @@ export const SessionUpdateSchema = z.discriminatedUnion("type", [
   PermissionResolvedUpdateSchema,
   SessionTitleUpdateSchema,
   QueuedUpdateSchema,
+  SessionSettingsUpdateSchema,
 ]);
 export type SessionUpdate = z.infer<typeof SessionUpdateSchema>;
 
@@ -292,6 +308,8 @@ export const UPDATE_CLASS: Readonly<Record<SessionUpdate["type"], UpdateClass>> 
   session_title: "display",
   // Full state, also in the snapshot; returned rows wait for a reclaim (nothing hangs).
   queued: "display",
+  // A notice; the report also rides every OpenResult (nothing hangs).
+  session_settings: "display",
 };
 
 /** Every update type this build knows — what a client declares at `initialize`. */

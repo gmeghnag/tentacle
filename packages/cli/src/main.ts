@@ -26,6 +26,7 @@ import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/d
 import { DELETE_POD_SUBCOMMAND, deletePodFromEnv, readKubeconfig } from "@tentacle/k8s";
 import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import { type AutoAcceptFeed, type SessionController, pickSession, startTui } from "@tentacle/tui";
+import { attachFailureNotice } from "./attach-notice.ts";
 import { type AttachPlan, plainResumeUid, planAttach } from "./attach-plan.ts";
 import { type Joined, joinRun } from "./attach-run.ts";
 import {
@@ -1569,10 +1570,18 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     // A session still live on the daemon is attached now, not at the first prompt:
     // its report says what it keeps (the settings notice), and its `history`
     // activity draws the screen. Not there, or any failure: lazy, from the record;
-    // the first send reports a link that is really down.
+    // the first send reports a link that is really down. The attach is bounded
+    // (ATTACH_TIMEOUT_MS): that failure is told, buffered until Ink mounts
+    // (docs/feat/session-settings-apply.md S3).
     const live =
       sessions.resume !== null &&
-      (await runtime.attachTo(sessions.resume.id, sessions.resume).catch(() => false));
+      (await runtime.attachTo(sessions.resume.id, sessions.resume).catch((error: unknown) => {
+        const notice = attachFailureNotice(error);
+        if (notice !== null) {
+          sessions.notices.notify(notice);
+        }
+        return false;
+      }));
     return await runEngineTui(
       runtime,
       permissions,

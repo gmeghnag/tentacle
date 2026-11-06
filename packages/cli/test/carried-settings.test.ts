@@ -335,6 +335,16 @@ describe("W: the laptop's value is the lowest layer", () => {
     expect(report?.overridden).toEqual({});
   });
 
+  test("containerKeys: every carried W key the pod sets, whatever its value (docs/feat/session-settings-apply.md)", async () => {
+    // Mutation: list only the overridden ones → maxIterations (same value) is missing.
+    const explicit = await pod({ maxIterations: 40, tools: { dedupOutput: false } });
+    const { report } = applyCarried(explicit, { maxIterations: 40, dedupOutput: true });
+    expect(report?.containerKeys).toEqual(["maxIterations", "dedupOutput"]);
+    expect(applyCarried(UNSET, { maxIterations: 40 }).report?.containerKeys).toBeUndefined();
+    // A key the laptop did not carry is not reported.
+    expect(applyCarried(explicit, {}).report?.containerKeys).toBeUndefined();
+  });
+
   test("a key the laptop did not send: the pod's value stands", () => {
     const { config } = applyCarried(UNSET, {});
     expect(config.maxIterations).toBe(UNSET.maxIterations);
@@ -529,14 +539,14 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
   const mine: SessionSettings = { maxIterations: 9, agentTaskDescription: "my secret plan" };
   const WINS = "Container config: ";
   const KEEPS = "Session settings: ";
-  const CLEAR = " (/clear to reset)";
+  const CLEAR = " (/settings apply, or /clear)";
   // The plain-text view (what `relay.log` prints): text, a space, the hint.
   const joined = (...a: Parameters<typeof settingsNotices>): string[] =>
     settingsNotices(...a).map((n) => (n.hint ? `${n.text} ${n.hint}` : n.text));
 
   test("the hint is its own field, never inside the text", () => {
     const [n] = settingsNotices(mine, { carried: { maxIterations: 1 }, overridden: {} });
-    expect(n?.hint).toBe("(/clear to reset)");
+    expect(n?.hint).toBe("(/settings apply, or /clear)");
     expect(n?.text).not.toContain("clear");
     const [c] = settingsNotices(mine, { carried: mine, overridden: { dedupOutput: false } });
     expect(c?.hint).toBeUndefined();
@@ -653,5 +663,18 @@ describe("settingsNotices: only what differs, as one line of JSON under the conf
     notify({ sessionId: "a", report: { carried: { maxIterations: 1 }, overridden: {} } });
     expect(said).toHaveLength(3);
     expect(said[2]).toContain("Session settings:");
+  });
+
+  test("forget(session): after an apply, the same drift is news again (that session only)", () => {
+    // Mutation: forget nothing → the second "a" notice is swallowed.
+    const said: string[] = [];
+    const notify = createSettingsNotifier(mine, (text) => said.push(text));
+    const report = { carried: { maxIterations: 1 }, overridden: {} };
+    notify({ sessionId: "a", report });
+    notify({ sessionId: "b", report });
+    notify.forget("a");
+    notify({ sessionId: "a", report });
+    notify({ sessionId: "b", report });
+    expect(said).toHaveLength(3);
   });
 });

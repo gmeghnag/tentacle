@@ -10,7 +10,7 @@ import { type AgentFactory, Connection, ProxyModelProvider, SessionHost } from "
 import type { SessionSettings } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
-import { createSettingsNotifier } from "../src/carried-settings.ts";
+import { createSettingsNotifier, settingsNotices } from "../src/carried-settings.ts";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import * as serve from "../src/serve.ts";
 
@@ -533,7 +533,7 @@ describe("the laptop's settings reach the pod's agents, per session", () => {
     await say(b, "S", "again");
     expect(toolsOf(modelB.seen[0])).not.toContain("agent_task");
     expect(said).toEqual([
-      'Session settings: { "subagents.enabled": false, "maxIterations": 4 } (/clear to reset)',
+      'Session settings: { "subagents.enabled": false, "maxIterations": 4 } (/settings apply, or /clear)',
     ]);
     conn1.close();
     conn2.close();
@@ -595,6 +595,133 @@ describe("the laptop's settings reach the pod's agents, per session", () => {
     expect(hostile.get("S")?.summary("/pod").title).toBe("hello");
     connection.close();
     client.close();
+  });
+
+  describe("/settings apply on a real pod host (docs/feat/session-settings-apply.md)", () => {
+    /** A second laptop on the same host. */
+    async function another(
+      host: SessionHost,
+      settings: SessionSettings,
+      script: readonly (readonly StreamEvent[])[] = [done, done, done],
+    ) {
+      const [daemonCh, clientCh] = createChannelPair();
+      const connection = new Connection(daemonCh, host, undefined, { servesModel: true });
+      const laptop = new ScriptedProvider(script);
+      const client = new RemoteClient(clientCh, new PermissionBroker(), laptop, {
+        sessionSettings: settings,
+      });
+      await client.initialize();
+      const session = client.newSession(undefined, "S", undefined, { attach: {} });
+      await session.open();
+      const finish = (): void => {
+        connection.close();
+        client.close();
+      };
+      return { client, laptop, session, finish };
+    }
+    const drain = async (events: AsyncIterable<unknown>): Promise<void> => {
+      for await (const _event of events) {
+        // drain
+      }
+    };
+
+    test("T15 the live session's agent runs with the applied values; a later attach has no drift", async () => {
+      // Mutation: don't forward `reuse` in `podSessionHost` → the swap is refused.
+      const script = [
+        toolCall("no_such_tool", "{}"),
+        toolCall("no_such_tool", "{}"),
+        toolCall("no_such_tool", "{}"),
+        toolCall("no_such_tool", "{}"),
+        done,
+      ];
+      const first = await linked(await podConfig(), { maxIterations: 1 }, script);
+      await say(first.client, "S");
+      const before = first.laptop.seen.length; // stopped by maxIterations: 1
+      expect(before).toBeLessThan(script.length);
+      const mine: SessionSettings = { maxIterations: 2 };
+      const said: string[] = [];
+      const second = await another(first.host, mine, script);
+      expect(second.client.settingsOf("S")?.carried).toEqual({ maxIterations: 1 });
+      const result = await second.client.updateSettings("S");
+      expect(result.applied).toBe(true);
+      expect(result.settings?.carried).toEqual(mine);
+      await drain(second.session.send("go on"));
+      // One round more than the old limit allowed, and still stopped by the new one.
+      expect(second.laptop.seen).toHaveLength(before + 1);
+      // A fresh attach with the same settings has nothing to report.
+      const third = await another(first.host, mine);
+      third.client.onSessionSettings(createSettingsNotifier(mine, (text) => said.push(text)));
+      expect(
+        settingsNotices(mine, third.client.settingsOf("S") ?? { carried: {}, overridden: {} }),
+      ).toEqual([]);
+      expect(said).toEqual([]);
+      third.finish();
+      second.finish();
+      first.finish();
+    });
+
+    test("T7 flipping loadAgentsMd recomposes the running prompt in place; a W key the pod sets still wins", async () => {
+      // Mutation: swap the agent without replacing the head → the AGENTS.md text stays.
+      const cwd = await folder({ "AGENTS.md": "POD-RULES-TEXT\n" });
+      const config = await podConfig({ maxIterations: 7 }, cwd);
+      const first = await linked(config, { loadAgentsMd: true, maxIterations: 3 }, [done]);
+      await say(first.client, "S");
+      expect(systemOf(first.laptop.seen[0])).toContain("POD-RULES-TEXT");
+      const second = await another(first.host, { loadAgentsMd: false, maxIterations: 3 }, [done]);
+      const result = await second.client.updateSettings("S");
+      expect(result.settings?.overridden).toEqual({ maxIterations: 7 });
+      expect(result.settings?.containerKeys).toEqual(["maxIterations"]);
+      await drain(second.session.send("again"));
+      const request = second.laptop.seen[0];
+      expect(systemOf(request)).not.toContain("POD-RULES-TEXT");
+      // user, assistant from the first turn and the new prompt: the same head, nothing moved.
+      expect(request?.messages.filter((m) => m.role === "system")).toHaveLength(1);
+      expect(request?.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
+      second.finish();
+      first.finish();
+    });
+
+    test("T3 tunnelledAgent takes over the session's broker, jobs and approvals", async () => {
+      // Mutation: `new SessionGrants()` in `buildAgent` regardless of the option.
+      const config = await podConfig();
+      const before = serve.tunnelledAgent(config, () => null, { settings: {} });
+      const after = serve.tunnelledAgent(config, () => null, {
+        settings: { maxIterations: 2 },
+        reuse: {
+          permissions: before.permissions,
+          jobs: before.jobs,
+          grants: before.grants,
+        },
+      });
+      expect(after.permissions).toBe(before.permissions);
+      expect(after.jobs).toBe(before.jobs);
+      expect(after.grants).toBe(before.grants);
+      before.jobs.dispose();
+    });
+  });
+});
+
+describe("/settings apply on a daemon that decides by its own config", () => {
+  test("T16 a plain pod host answers applied:false and keeps its agent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "settings-apply-plain-"));
+    const config = await loadConfig({
+      configDir: dir,
+      cwd: dir,
+      scaffold: false,
+      env: { HOME: dir, TENTACLE_MODEL_API_KEY: "k" },
+    });
+    const [daemonCh, clientCh] = createChannelPair();
+    const connection = new Connection(daemonCh, serve.podSessionHost(config, undefined, {}));
+    const client = new RemoteClient(clientCh, new PermissionBroker(), undefined, {
+      sessionSettings: { maxIterations: 2 },
+    });
+    await client.initialize();
+    await client.openSession(undefined, undefined, "S");
+    expect(await client.updateSettings("S")).toEqual({ applied: false });
+    expect(client.settingsOf("S")).toBeUndefined();
+    connection.close();
+    client.close();
+    await rm(dir, { recursive: true, force: true });
   });
 });
 

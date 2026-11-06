@@ -138,6 +138,7 @@ import {
   switchRefusedNotice,
   switchingRefusal,
 } from "./sessions-panel.ts";
+import { settingsCommand } from "./settings-command.ts";
 import { type SessionSkillsView, SkillsSync } from "./skills-sync.ts";
 import {
   type DisplayItem,
@@ -182,6 +183,12 @@ import {
  * remote `RemoteSession` satisfy it, so the TUI renders a local or remote
  * session identically.
  */
+/** One `/settings` line: blue notice text, and a hint drawn grey after it. */
+export interface SettingsNoticeLine {
+  readonly text: string;
+  readonly hint?: string;
+}
+
 export interface SessionController {
   /**
    * A remote session also yields the reconnect events (`history_reset`,
@@ -194,6 +201,14 @@ export interface SessionController {
   ): AsyncIterable<SessionEvent>;
   /** Compact the conversation (summarise + replace history); optional. */
   compact?(signal?: AbortSignal): Promise<{ before: number; after: number }>;
+  /**
+   * `/settings` (docs/feat/session-settings-apply.md): the session's settings
+   * vs this terminal's, as lines the host built. Optional: absent where this
+   * terminal carries no settings (the worker, `connect`).
+   */
+  settings?(): readonly SettingsNoticeLine[];
+  /** `/settings apply`: the outcome as lines (never rejects). Present with `settings`. */
+  updateSettings?(): Promise<readonly SettingsNoticeLine[]>;
   /**
    * Queue a message mid-turn (steering); optional. Local is sync, remote a
    * Promise. `id`: the TUI's key for the text, which a `sendNow` cites.
@@ -1859,6 +1874,34 @@ export function App({
           );
           return;
         }
+        case "/settings": {
+          // docs/feat/session-settings-apply.md: the host builds the lines.
+          const session = sessionRef.current;
+          const lines = (shown: readonly SettingsNoticeLine[]) => {
+            for (const { text, hint } of shown) {
+              stateRef.current = appendNotice(stateRef.current, text, hint ? { hint } : {});
+            }
+            setScrollOffset(0);
+            flushNow();
+          };
+          const step = settingsCommand(raw, {
+            running: stateRef.current.running,
+            compacting: compactingRef.current,
+            available: session?.settings !== undefined && session.updateSettings !== undefined,
+          });
+          if (step.kind === "notice") {
+            lines([{ text: step.text }]);
+          } else if (step.kind === "show") {
+            lines(session?.settings?.() ?? []);
+          } else {
+            void session?.updateSettings?.().then((outcome) => {
+              lines(outcome);
+              // The prompt or tools may have changed: the open figure is stale.
+              askContext(session);
+            });
+          }
+          return;
+        }
         case "/rename": {
           const session = sessionRef.current;
           if (!session?.rename) {
@@ -1969,6 +2012,7 @@ export function App({
       sessions,
       skillsSync,
       askContext,
+      flushNow,
       model,
       pushNotice,
       requestQuit,

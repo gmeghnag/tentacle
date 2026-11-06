@@ -1,0 +1,180 @@
+/**
+ * `/settings` through the real runtime (docs/feat/session-settings-apply.md):
+ * `createLocalRuntime` over a channel pair on a real `SessionHost`. The apply is
+ * saved at once (the laptop's copy takes the new system head); other terminals
+ * get their notice; a runtime that carries nothing offers no command.
+ */
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Agent, JsonSessionStore, SessionGrants } from "@tentacle/agent";
+import {
+  type ExecutionEnvironment,
+  type ModelProvider,
+  PermissionBroker,
+  type StreamEvent,
+} from "@tentacle/core";
+import { Connection, SessionHost } from "@tentacle/daemon";
+import type { SessionSettings } from "@tentacle/protocol";
+import { ToolRegistry } from "@tentacle/tools";
+import { createChannelPair } from "@tentacle/transport";
+import { createLocalRuntime } from "../src/local-runtime.ts";
+import { SessionSaver } from "../src/session-saver.ts";
+
+const made: string[] = [];
+function dir(): string {
+  const d = mkdtempSync(join(tmpdir(), "settings-apply-"));
+  made.push(d);
+  return d;
+}
+afterAll(() => {
+  for (const d of made) rmSync(d, { recursive: true, force: true });
+});
+
+const env = { id: "noop" } as unknown as ExecutionEnvironment;
+const quiet: ModelProvider = {
+  id: "quiet",
+  async *stream(): AsyncIterable<StreamEvent> {
+    yield { type: "text", delta: "ok" };
+    yield { type: "done" };
+  },
+};
+
+function makeHost(): SessionHost {
+  return new SessionHost({
+    defaultCwd: "/tmp/w",
+    createAgent: (_cwd, context) => ({
+      agent: new Agent({
+        model: quiet,
+        tools: new ToolRegistry(),
+        env,
+        systemPrompt: `prompt ${context.settings?.maxIterations ?? "-"}`,
+      }),
+      permissions: context.reuse?.permissions ?? new PermissionBroker(),
+      grants: context.reuse?.grants ?? new SessionGrants(),
+      ...(context.settings
+        ? { settingsReport: { carried: context.settings, overridden: {} } }
+        : {}),
+    }),
+  });
+}
+
+async function terminal(host: SessionHost, sessionSettings?: SessionSettings) {
+  const [daemonCh, clientCh] = createChannelPair();
+  new Connection(daemonCh, host);
+  const notices: { text: string; hint?: string }[] = [];
+  const store = new JsonSessionStore(dir());
+  const runtime = await createLocalRuntime({
+    channel: clientCh,
+    disposeTransport: () => {},
+    permissions: new PermissionBroker(),
+    saver: new SessionSaver(store, () => {}),
+    cwd: "/tmp/w",
+    model: "m",
+    resume: null,
+    sessionId: "S",
+    notify: (text, hint) => notices.push({ text, ...(hint ? { hint } : {}) }),
+    ...(sessionSettings ? { sessionSettings } : {}),
+  });
+  return { runtime, notices, store };
+}
+
+const drain = async (events: AsyncIterable<unknown>): Promise<void> => {
+  for await (const _event of events) {
+    // drain
+  }
+};
+const until = async (pred: () => boolean): Promise<void> => {
+  const deadline = Date.now() + 2000;
+  while (!pred() && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  expect(pred()).toBe(true);
+};
+
+describe("/settings through the runtime", () => {
+  test("not open yet; then the lines; a second terminal applies; the first one is told, in the one-line format", async () => {
+    const host = makeHost();
+    const a = await terminal(host, { maxIterations: 1 });
+    const sessionA = a.runtime.createSession();
+    expect(sessionA.settings?.()).toEqual([
+      { text: "The session is not open yet: it starts with this terminal's settings." },
+    ]);
+    expect(await sessionA.updateSettings?.()).toEqual([
+      { text: "The session is not open yet: it starts with this terminal's settings." },
+    ]);
+    await drain(sessionA.send("hi"));
+    expect(sessionA.settings?.()).toEqual([
+      { text: 'Session settings: { "maxIterations": 1 }' },
+      { text: "This terminal matches." },
+    ]);
+
+    const b = await terminal(host, { maxIterations: 3 });
+    expect(await b.runtime.attachTo("S", null)).toBe(true);
+    const sessionB = b.runtime.createSession();
+    // The drift notice, with the new way out.
+    expect(b.notices).toEqual([
+      {
+        text: 'Session settings: { "maxIterations": 1 }',
+        hint: "(/settings apply, or /clear)",
+      },
+    ]);
+    expect(sessionB.settings?.()).toEqual([
+      { text: 'Session settings: { "maxIterations": 1 }' },
+      { text: 'This terminal differs: { "maxIterations": 3 }', hint: "(/settings apply)" },
+    ]);
+    expect(await sessionB.updateSettings?.()).toEqual([{ text: "Session settings applied." }]);
+    expect(sessionB.settings?.()).toEqual([
+      { text: 'Session settings: { "maxIterations": 3 }' },
+      { text: "This terminal matches." },
+    ]);
+    await until(() => a.notices.length > 0);
+    expect(a.notices).toEqual([
+      { text: 'Session settings changed by another terminal: { "maxIterations": 3 }' },
+    ]);
+    // The applier hears only its own confirmation.
+    expect(b.notices).toHaveLength(1);
+    // And the first terminal's /settings follows.
+    expect(sessionA.settings?.()).toEqual([
+      { text: 'Session settings: { "maxIterations": 3 }' },
+      { text: 'This terminal differs: { "maxIterations": 1 }', hint: "(/settings apply)" },
+    ]);
+    a.runtime.dispose();
+    b.runtime.dispose();
+  });
+
+  test("T12 an apply is saved at once: the laptop's copy has the new head", async () => {
+    // Mutation: skip `flush()` after the apply → the record keeps "prompt 1".
+    const host = makeHost();
+    const a = await terminal(host, { maxIterations: 1 });
+    await drain(a.runtime.createSession().send("hi"));
+    const b = await terminal(host, { maxIterations: 3 });
+    await b.runtime.attachTo("S", null);
+    const session = b.runtime.createSession();
+    await session.flushed();
+    await session.updateSettings?.();
+    await session.flushed();
+    await until(() => host.get("S") !== undefined);
+    const deadline = Date.now() + 2000;
+    let head: unknown;
+    while (Date.now() < deadline) {
+      const loaded = await b.store.load("S");
+      head = loaded.status === "ok" ? loaded.record.messages[0]?.content : undefined;
+      if (head === "prompt 3") break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(head).toBe("prompt 3");
+    a.runtime.dispose();
+    b.runtime.dispose();
+  });
+
+  test("T12/T16 a runtime that carries nothing (the worker) offers no command", async () => {
+    // Mutation: pass `carried` whatever `deps.sessionSettings` says.
+    const { runtime } = await terminal(makeHost());
+    const session = runtime.createSession();
+    expect(session.settings).toBeUndefined();
+    expect(session.updateSettings).toBeUndefined();
+    runtime.dispose();
+  });
+});
