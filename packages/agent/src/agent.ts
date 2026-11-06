@@ -79,6 +79,7 @@ import {
 } from "./round-plan.ts";
 import type { SessionGrants } from "./session-grants.ts";
 import { EMPTY_SKILL_LISTING, type SkillListing, userRescanListing } from "./session-skills.ts";
+import type { ToolOutputSink } from "./tool-output.ts";
 
 export type AgentStopReason = "end_turn" | "cancelled" | "max_iterations";
 
@@ -413,6 +414,12 @@ export interface AgentConfig {
    * built from a call id the server chose, which two children may share.
    */
   readonly spillScope?: string;
+  /**
+   * Where a large output is spilled (docs/fix/tool-output-location.md): the
+   * daemon host's cache, outside the workspace-confined `env`. Absent → the
+   * library fallback: `.tentacle/tool-output/` through `env.writeFile`.
+   */
+  readonly toolOutput?: ToolOutputSink;
 }
 
 /** What `runToolCalls` reports to the loop: an accepted context reset ran. */
@@ -504,6 +511,8 @@ export class Agent {
    * Memory only: a reload starts from the estimate.
    */
   private readonly anchors = new WeakMap<ChatMessage[], ContextAnchor>();
+  /** Spill names already used on the env fallback path: see `spillId`. Memory only. */
+  private readonly spillNames = new Set<string>();
   /**
    * The context-reset guard (one agent per session): accepted resets since
    * the last user message, and whether the model made another tool call since
@@ -1833,9 +1842,10 @@ export class Agent {
 
   /**
    * Run a tool result through the configured transforms. Large output is spilled
-   * to `.tentacle/tool-output/<tool>-<id>.txt` in the workspace (written via the
-   * confined env, so it is portable to the container environment later) and
-   * replaced in-context with a preview + pointer.
+   * and replaced in-context with a preview + pointer. With `config.toolOutput`
+   * it goes to the daemon host's cache (never the project, never through the
+   * confined `env`); without one, to `.tentacle/tool-output/<tool>-<id>.txt` via
+   * `env.writeFile` (the library fallback).
    */
   private async transformResult(
     call: ToolCall,
@@ -1850,7 +1860,9 @@ export class Agent {
     const hooks = this.config.hooks;
     const safe = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 60);
     const scope = this.config.spillScope;
-    const path = `.tentacle/tool-output/${scope !== undefined ? `${safe(scope)}-` : ""}${safe(call.name)}-${safe(call.id)}.txt`;
+    const callId = this.spillId(extra.sessionId, scope, call);
+    const path = `.tentacle/tool-output/${scope !== undefined ? `${safe(scope)}-` : ""}${safe(call.name)}-${safe(callId)}.txt`;
+    const sink = this.config.toolOutput;
     return applyResultTransforms(result, transforms, {
       toolName: call.name,
       toolCallId: call.id,
@@ -1860,6 +1872,14 @@ export class Agent {
       ...(hooks ? { hooks } : {}),
       writeSpill: async (contents) => {
         try {
+          if (sink) {
+            return await sink.write(
+              extra.sessionId,
+              call.name,
+              scope !== undefined ? `${scope}-${callId}` : callId,
+              contents,
+            );
+          }
           await this.config.env.writeFile(path, contents);
           return path;
         } catch {
@@ -1867,6 +1887,28 @@ export class Agent {
         }
       },
     });
+  }
+
+  /**
+   * The env FALLBACK path only (no `toolOutput` sink; the sink's store creates
+   * files exclusively and is the truth on names): a call id unique within this
+   * agent, since a server may reuse one (two `agent_task` calls of one message).
+   * The first use keeps the id as is. The check and the claim are synchronous,
+   * so parallel calls cannot both take a name.
+   */
+  private spillId(sessionId: string, scope: string | undefined, call: ToolCall): string {
+    if (this.config.toolOutput) {
+      return call.id;
+    }
+    let id = call.id;
+    for (let n = 2; ; n += 1) {
+      const key = `${sessionId}\0${scope ?? ""}\0${call.name}\0${id}`;
+      if (!this.spillNames.has(key)) {
+        this.spillNames.add(key);
+        return id;
+      }
+      id = `${call.id}~${n}`;
+    }
   }
 
   /**

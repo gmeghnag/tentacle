@@ -329,6 +329,11 @@ const settingsShape = {
        * to a file the model reads selectively. 0 disables spilling.
        */
       maxInlineOutputChars: z.number().int().nonnegative().optional(),
+      /**
+       * Days a spilled tool output is kept (swept when the daemon starts).
+       * 0 or negative: never swept. Default: 30.
+       */
+      outputRetentionDays: z.number().int().optional(),
       /** Mask secrets (keys, tokens, …) in tool output. Default: enabled. */
       redactSecrets: z.boolean().optional(),
       /** Collapse runs of identical consecutive output lines. Default: enabled. */

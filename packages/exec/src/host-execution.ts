@@ -35,6 +35,12 @@ export interface HostExecutionConfig {
   readonly id?: string;
   /** SIGTERM → SIGKILL grace when killing a command (default `KILL_GRACE_MS`). */
   readonly killGraceMs?: number;
+  /**
+   * Explains a missing file: given the absolute path of a read that hit
+   * `ENOENT`, text to say instead of the bare OS error (e.g. a spilled tool
+   * output that was removed with its session). `undefined` → the OS error.
+   */
+  readonly readHint?: (absPath: string) => string | undefined;
 }
 
 /** Thrown when a write would escape the workspace root. */
@@ -76,12 +82,14 @@ export class HostExecution implements ExecutionEnvironment {
   private readonly defaultCwd: string;
   private readonly root: string;
   private readonly killGraceMs: number;
+  private readonly readHint: ((absPath: string) => string | undefined) | undefined;
   /** Commands whose leader exited (their group was handed to `releaseGroup`). */
   private readonly released = new WeakSet<Subprocess>();
 
   constructor(config?: HostExecutionConfig) {
     this.id = config?.id ?? "host";
     this.killGraceMs = config?.killGraceMs ?? KILL_GRACE_MS;
+    this.readHint = config?.readHint;
     this.defaultCwd = resolve(config?.cwd ?? process.cwd());
     this.root = safeRealpath(resolve(config?.root ?? this.defaultCwd));
   }
@@ -209,7 +217,18 @@ export class HostExecution implements ExecutionEnvironment {
 
   async readFile(path: string): Promise<string> {
     // Reads are unconfined (by design).
-    return await Bun.file(resolve(this.defaultCwd, path)).text();
+    const abs = resolve(this.defaultCwd, path);
+    try {
+      return await Bun.file(abs).text();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        const hint = this.readHint?.(abs);
+        if (hint !== undefined) {
+          throw new Error(`${abs}: ${hint}`);
+        }
+      }
+      throw error;
+    }
   }
 
   async writeFile(path: string, contents: string): Promise<void> {

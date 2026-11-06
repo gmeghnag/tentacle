@@ -41,6 +41,8 @@ export const DEFAULT_CONTEXT_RESET_ENABLED = true;
 export const DEFAULT_CONTEXT_RESET_MAX_PER_MESSAGE = -1;
 /** Max characters of a tool result kept inline before it is spilled to a file. */
 export const DEFAULT_MAX_INLINE_OUTPUT_CHARS = 16000;
+/** Days a spilled tool output is kept before the daemon's start-up sweep removes it; `0` or negative = never. */
+export const DEFAULT_TOOL_OUTPUT_RETENTION_DAYS = 30;
 /** Secret redaction of tool output is on by default (security). */
 export const DEFAULT_REDACT_SECRETS = false;
 /** LLM summarisation of large output is off by default (costs a model call). */
@@ -190,8 +192,12 @@ export const DEFAULT_CONFIG_JSONC = `{
   // },
 
   // Tool-output handling.
-  //  - maxInlineOutputChars: a result longer than this is spilled to a file under
-  //    .tentacle/tool-output/ and the model is told to read it selectively (0 = off).
+  //  - maxInlineOutputChars: a result longer than this is spilled to a file in your
+  //    cache folder ($XDG_CACHE_HOME or ~/.cache, then tentacle/tool-output/; the system
+  //    temp folder if that is not writable) and the model is told to read it selectively (0 = off).
+  //  - outputRetentionDays: spilled files older than this are removed when the daemon
+  //    starts (env TENTACLE_TOOL_OUTPUT_RETENTION_DAYS; 0 or negative = keep forever).
+  //    They are also deleted with their session.
   //  - redactSecrets: mask keys/tokens/credentials in tool output. Off by default.
   //  - summarizeLargeOutput: replace large output with an LLM summary instead of a
   //    preview (full output still spilled to a file). Costs a model call; off by default.
@@ -202,7 +208,7 @@ export const DEFAULT_CONFIG_JSONC = `{
   //    shell one at a time) or "parallel" (any calls on different files/resources).
   //    Env: TENTACLE_TOOL_EXECUTION. maxParallel: at most this many at once
   //    (env TENTACLE_TOOL_MAX_PARALLEL; 1 = sequential).
-  // "tools": { "maxInlineOutputChars": ${DEFAULT_MAX_INLINE_OUTPUT_CHARS}, "redactSecrets": ${DEFAULT_REDACT_SECRETS}, "summarizeLargeOutput": ${DEFAULT_SUMMARIZE_LARGE_OUTPUT}, "dedupOutput": ${DEFAULT_DEDUP_OUTPUT}, "tabulateJson": ${DEFAULT_TABULATE_JSON}, "execution": "${DEFAULT_TOOL_EXECUTION}", "maxParallel": ${DEFAULT_TOOL_MAX_PARALLEL} },
+  // "tools": { "maxInlineOutputChars": ${DEFAULT_MAX_INLINE_OUTPUT_CHARS}, "outputRetentionDays": ${DEFAULT_TOOL_OUTPUT_RETENTION_DAYS}, "redactSecrets": ${DEFAULT_REDACT_SECRETS}, "summarizeLargeOutput": ${DEFAULT_SUMMARIZE_LARGE_OUTPUT}, "dedupOutput": ${DEFAULT_DEDUP_OUTPUT}, "tabulateJson": ${DEFAULT_TABULATE_JSON}, "execution": "${DEFAULT_TOOL_EXECUTION}", "maxParallel": ${DEFAULT_TOOL_MAX_PARALLEL} },
 
   // Named profiles, applied with \`--profile <name>\` on the command that starts the
   // session (\`tentacle --profile <name>\`, \`tentacle run … --profile <name>\`,

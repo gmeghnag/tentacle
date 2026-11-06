@@ -23,7 +23,7 @@ import { McpStatusTracker, connectMcpServers } from "@tentacle/mcp";
 import type { ToolRegistry } from "@tentacle/tools";
 import { type MessageEndpoint, messagePortChannel } from "@tentacle/transport";
 import { logDaemonError } from "./daemon-log.ts";
-import { buildAgent, createSkillScan } from "./wiring.ts";
+import { buildAgent, createSkillScan, sweepToolOutput, toolOutputStore } from "./wiring.ts";
 import type { WorkerBootstrap } from "./worker-bootstrap.ts";
 
 // `globalThis` in a worker exposes postMessage/addEventListener at runtime; the
@@ -95,8 +95,10 @@ port.addEventListener("message", (event: { data: unknown }) => {
   // One skill scan for every session and for the `/name` list of a session
   // not created yet (docs/feat/skills-hot-reload.md).
   const skillScan = createSkillScan(config);
+  sweepToolOutput(config);
   const host = new SessionHost({
     defaultCwd: config.cwd,
+    onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
     // The client's own build: no skew possible, named for completeness.
     identity: { tentacle: version, kind: "worker" },
     newSessionSkills: () => skillScan.newSession(),

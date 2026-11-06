@@ -18,12 +18,16 @@ import {
   SessionGrants,
   type SessionSkills,
   type SkillListing,
+  type ToolOutputStore,
   collapseRepeatedLines,
   createSubagentRunner,
+  createToolOutputStore,
   exemptTools,
   mergeAgentTypes,
   parseAgentDefinition,
   redactSecrets,
+  resolveToolOutputRoot,
+  resolveToolOutputTmpRoot,
   runResultHooks,
   spillLargeOutput,
   summarizeLargeOutput,
@@ -240,7 +244,44 @@ export interface WiredAgent {
   readonly titleModel?: ModelProvider;
 }
 
+let sharedToolOutput: ToolOutputStore | undefined;
+
+/**
+ * This process's ONE spill store (docs/fix/tool-output-location.md): the root
+ * is probed once, so every session and sub-agent of this daemon shares the
+ * answer. The cache of THIS host: a pod daemon's lives in the pod.
+ */
+export function toolOutputStore(): ToolOutputStore {
+  sharedToolOutput ??= createToolOutputStore(resolveToolOutputRoot(), () =>
+    resolveToolOutputTmpRoot(),
+  );
+  return sharedToolOutput;
+}
+
+/**
+ * Daemon start: drop spilled files older than `tools.outputRetentionDays`.
+ * Fire-and-forget and silent (Ink may own the terminal, AGENTS §7); `<= 0` =
+ * never sweep.
+ */
+export function sweepToolOutput(
+  config: Pick<TentacleConfig, "toolOutputRetentionDays">,
+  store: ToolOutputStore = toolOutputStore(),
+): void {
+  void store.sweep(config.toolOutputRetentionDays).catch(() => undefined);
+}
+
+/** What `fs_read` says for a spilled file that is gone. */
+export function toolOutputGoneHint(retentionDays: number): string {
+  const when =
+    retentionDays > 0
+      ? `it is removed with its session and after ${retentionDays} days`
+      : "it is removed with its session";
+  return `tool output no longer available (${when}) — re-run the command if you still need it`;
+}
+
 export interface BuildAgentOptions {
+  /** The spill store; default: this process's `toolOutputStore()`. Tests inject a temp root. */
+  readonly toolOutput?: ToolOutputStore;
   /** Replace the configured provider — e.g. a proxy that tunnels model calls
    *  to a remote client (the pod reverse-tunnel, F4.d). Used for the main model
    *  and for sub-agents (per-type model overrides are ignored over the
@@ -299,7 +340,14 @@ function slotsReader(
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
   const model = options.modelOverride ?? configuredModelProvider(config);
-  const env = new HostExecution({ cwd: config.cwd, root: config.cwd });
+  const outputs = options.toolOutput ?? toolOutputStore();
+  const toolOutput = outputs.forProject(config.cwd);
+  const env = new HostExecution({
+    cwd: config.cwd,
+    root: config.cwd,
+    readHint: (abs) =>
+      outputs.owns(abs) ? toolOutputGoneHint(config.toolOutputRetentionDays) : undefined,
+  });
   const tools = new ToolRegistry().registerAll(builtinTools);
   const permissions = options.permissions ?? new PermissionBroker();
   // Background jobs let the shell tools launch long-running processes (servers,
@@ -419,6 +467,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       grants,
       // A child's own rounds follow `tools.*` (task 7, owner decision 4).
       toolExecution: config.toolExecution,
+      toolOutput,
     });
     tools.register(
       createTaskTool((opts, controls) => run(opts, controls), types, {
@@ -458,6 +507,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     env,
     jobs,
     resultTransforms,
+    toolOutput,
     systemPrompt: config.systemPrompt,
     maxIterations: config.maxIterations,
     requestPermission: (req, options) => permissions.request(req, options),

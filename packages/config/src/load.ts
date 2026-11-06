@@ -99,6 +99,8 @@ export interface TentacleConfig {
   /** A custom `agent_task` description, resolved (read by `feat/parallel-agents`; on a pod the laptop's, carried). */
   readonly agentTaskDescription?: string;
   readonly maxInlineOutputChars: number;
+  /** Days a spilled tool output is kept; `<= 0` = never swept. */
+  readonly toolOutputRetentionDays: number;
   readonly redactSecrets: boolean;
   readonly summarizeLargeOutput: boolean;
   readonly dedupOutput: boolean;
@@ -627,6 +629,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
       ? { agentTaskDescription: resolved.agentTaskDescription }
       : {}),
     maxInlineOutputChars: resolved.maxInlineOutputChars,
+    toolOutputRetentionDays: resolved.toolOutputRetentionDays,
     redactSecrets: resolved.redactSecrets,
     summarizeLargeOutput: resolved.summarizeLargeOutput,
     dedupOutput: resolved.dedupOutput,

@@ -32,6 +32,7 @@ import {
   DEFAULT_TABULATE_JSON,
   DEFAULT_TOOL_EXECUTION,
   DEFAULT_TOOL_MAX_PARALLEL,
+  DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
 } from "./defaults.ts";
 import type { FileConfig, HookSpecConfig, McpServerConfig, MountConfig } from "./schema.ts";
 import { type SkillInfo, renderSkillsCatalog } from "./skills.ts";
@@ -94,6 +95,8 @@ export interface ResolvedConfig {
   readonly agentTaskDescription?: string;
   /** Max characters of a tool result kept inline before spilling to a file. */
   readonly maxInlineOutputChars: number;
+  /** Days a spilled tool output is kept; `<= 0` = never swept. */
+  readonly toolOutputRetentionDays: number;
   /** Whether to mask secrets in tool output. */
   readonly redactSecrets: boolean;
   /** Whether to summarise large tool output with the model (vs a preview). */
@@ -149,6 +152,7 @@ export interface ResolvedConfig {
     readonly contextResetEnabled: Source;
     readonly contextResetMaxPerMessage: Source;
     readonly maxInlineOutputChars: Source;
+    readonly toolOutputRetentionDays: Source;
     readonly redactSecrets: Source;
     readonly summarizeLargeOutput: Source;
     readonly dedupOutput: Source;
@@ -205,6 +209,15 @@ function parsePositiveInt(raw: string | undefined): number | undefined {
   }
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/** Any integer (a negative one means "never" for the retention). Else undefined. */
+function parseInteger(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") {
+    return undefined;
+  }
+  const n = Number(raw);
+  return Number.isInteger(n) ? n : undefined;
 }
 
 function parseNonNegativeInt(raw: string | undefined): number | undefined {
@@ -407,6 +420,11 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.tools?.maxInlineOutputChars,
     DEFAULT_MAX_INLINE_OUTPUT_CHARS,
   );
+  const toolOutputRetentionDays = pick(
+    parseInteger(env.TENTACLE_TOOL_OUTPUT_RETENTION_DAYS),
+    fileConfig.tools?.outputRetentionDays,
+    DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
+  );
   const redactSecrets = pick(
     parseBool(env.TENTACLE_REDACT_SECRETS),
     fileConfig.tools?.redactSecrets,
@@ -484,6 +502,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       ? { agentTaskDescription: ctx.agentTaskDescription }
       : {}),
     maxInlineOutputChars: maxInlineOutputChars.value,
+    toolOutputRetentionDays: toolOutputRetentionDays.value,
     redactSecrets: redactSecrets.value,
     summarizeLargeOutput: summarizeLargeOutput.value,
     dedupOutput: dedupOutput.value,
@@ -521,6 +540,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       contextResetEnabled: contextResetEnabled.source,
       contextResetMaxPerMessage: contextResetMaxPerMessage.source,
       maxInlineOutputChars: maxInlineOutputChars.source,
+      toolOutputRetentionDays: toolOutputRetentionDays.source,
       redactSecrets: redactSecrets.source,
       summarizeLargeOutput: summarizeLargeOutput.source,
       dedupOutput: dedupOutput.source,

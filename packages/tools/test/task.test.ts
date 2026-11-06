@@ -29,6 +29,17 @@ describe("createTaskTool", () => {
     expect(result.isError).toBeUndefined();
   });
 
+  test("hands the calling session's id to the runner (the child's spill is filed under it)", async () => {
+    // Mutation: drop `sessionId` from the controls → undefined.
+    const seen: (string | undefined)[] = [];
+    const tool = createTaskTool(async (_opts, controls) => {
+      seen.push(controls?.sessionId);
+      return { report: "x", toolUses: 0, stopReason: "end_turn" };
+    }, TYPES);
+    await tool.execute({ description: "d", prompt: "p" }, ctx);
+    expect(seen).toEqual(["s"]);
+  });
+
   test("defaults the type to the first and corrects an invalid one", async () => {
     const { run, calls } = runnerReturning({ report: "x", toolUses: 0, stopReason: "end_turn" });
     const tool = createTaskTool(run, TYPES);

@@ -30,7 +30,14 @@ import { type NodeReadableLike, type NodeWritableLike, streamChannel } from "@te
 import { applyCarried } from "./carried-settings.ts";
 import type { ServeLimits } from "./flags.ts";
 import { APP_VERSION } from "./version.ts";
-import { type SkillScan, type WiredAgent, buildAgent, createSkillScan } from "./wiring.ts";
+import {
+  type SkillScan,
+  type WiredAgent,
+  buildAgent,
+  createSkillScan,
+  sweepToolOutput,
+  toolOutputStore,
+} from "./wiring.ts";
 
 /**
  * The host takes its `SessionTtlControl` at construction, before `listen`
@@ -160,8 +167,12 @@ async function reloadedHost(
   // One skill scan for every session and for a session not created yet
   // (docs/feat/skills-hot-reload.md).
   const skillScan = createSkillScan(config);
+  // The lock is held: this is THE daemon of the store. Silent, not awaited.
+  sweepToolOutput(config);
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
+    // A deleted session takes its spilled tool output with it.
+    onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
     maxSessions: options.maxSessions ?? DEFAULT_MAX_SESSIONS,
     maxDetachedSessions: options.maxDetachedSessions ?? DEFAULT_MAX_DETACHED_SESSIONS,
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
@@ -448,8 +459,10 @@ export function podSessionHost(
       log?.(line);
     }
   };
+  sweepToolOutput(config);
   return new SessionHost({
     defaultCwd: config.cwd,
+    onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
     // `run`/`attach`'s daemon: a skew is fixed by attaching again (it replaces it).
     identity: { tentacle: APP_VERSION, kind: "container" },
     // Only the model-proxy branch honours `settings`: a daemon the laptop does

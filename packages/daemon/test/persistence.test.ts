@@ -1823,6 +1823,59 @@ describe("session archive: the host (close keeps, reopen reloads, delete removes
     }
   });
 
+  // docs/fix/tool-output-location.md: a session's spilled tool output goes with it.
+  describe("onSessionDeleted", () => {
+    const hooked = (hook: (id: string) => void) =>
+      rig([[{ type: "done" }]], () => [], new SpyStore(), Date.now, { onSessionDeleted: hook });
+
+    test("delete of a LIVE session calls it once with the id; close alone does not", () => {
+      // Mutation: drop the call in the live branch of `delete` → red.
+      const seen: string[] = [];
+      const r = hooked((id) => seen.push(id));
+      const { hosted } = r.host.open({ create: true }, client().attachment);
+      expect(seen).toEqual([]);
+      expect(r.host.delete(hosted.id)).toBe(true);
+      expect(seen).toEqual([hosted.id]);
+    });
+
+    test("delete of an ARCHIVED session calls it once; the archiving does not", async () => {
+      // Mutation: drop the call in the archived branch of `delete` → red.
+      const seen: string[] = [];
+      const r = hooked((id) => seen.push(id));
+      const { hosted } = r.host.open(
+        { create: true, messages: [{ role: "user", content: "x" }] },
+        client().attachment,
+      );
+      r.host.close(hosted.id);
+      await tick(5);
+      expect(seen).toEqual([]);
+      expect(r.host.delete(hosted.id)).toBe(true);
+      expect(seen).toEqual([hosted.id]);
+    });
+
+    test("an unknown id (and a second delete) does not call it", () => {
+      const seen: string[] = [];
+      const r = hooked((id) => seen.push(id));
+      expect(r.host.delete("never-existed")).toBe(false);
+      const { hosted } = r.host.open({ create: true }, client().attachment);
+      r.host.delete(hosted.id);
+      r.host.delete(hosted.id);
+      expect(seen).toEqual([hosted.id]);
+    });
+
+    test("a throwing hook does not break delete (the session is still gone and tombstoned)", () => {
+      // Mutation: call the hook unguarded → delete throws → red.
+      const r = hooked(() => {
+        throw new Error("disk on fire");
+      });
+      const { hosted } = r.host.open({ create: true }, client().attachment);
+      expect(r.host.delete(hosted.id)).toBe(true);
+      expect(codeOf(() => r.host.open({ sessionId: hosted.id }, client().attachment))).toBe(
+        DomainErrorCode.SessionDeleted,
+      );
+    });
+  });
+
   test("F1 the tombstone is recorded BEFORE the file is removed; a failed one is reported and the file still goes", async () => {
     // Mutation: remove the file without waiting for the tombstone → `removed` before `added`.
     const order: string[] = [];

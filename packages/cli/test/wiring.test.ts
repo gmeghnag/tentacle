@@ -1,8 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type AskHooksTrust, type HookRunner, Session } from "@tentacle/agent";
+import {
+  type AskHooksTrust,
+  type HookRunner,
+  Session,
+  createToolOutputStore,
+  projectKey,
+} from "@tentacle/agent";
 import {
   type ChatRequest,
   type ModelProvider,
@@ -236,15 +243,64 @@ describe("buildAgent skills (docs/feat/skills-core.md)", () => {
       ],
       [{ type: "text", delta: "ok" }, { type: "done" }],
     ]);
-    const { agent } = buildAgent({ ...cfg, cwd: dir }, { modelOverride: model });
+    const root = await mkdtemp(join(tmpdir(), "harness-spill-root-"));
+    const toolOutput = createToolOutputStore(root);
+    const { agent } = buildAgent({ ...cfg, cwd: dir }, { modelOverride: model, toolOutput });
     let content = "";
     for await (const event of agent.run("s", [{ role: "user", content: "go" }])) {
       if (event.type === "tool_result") {
         content = event.result.content;
       }
     }
-    expect(content).toContain("saved to .tentacle/tool-output/fs_read-r1.txt");
+    // docs/fix/tool-output-location.md: in the cache root, never in the project.
+    const expected = join(root, projectKey(dir), "s", "fs_read-r1.txt");
+    expect(content).toContain(`saved to ${expected}`);
     expect(content).not.toContain("step 500:");
+    expect(existsSync(join(dir, ".tentacle", "tool-output"))).toBe(false);
+    expect(existsSync(join(cfg.cwd, ".tentacle", "tool-output"))).toBe(false);
+    // The load-bearing assumption, end to end: the model can read it back
+    // (reads are unconfined) although env writes outside the root are refused.
+    const back = new ScriptedModel([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "r2", name: "fs_read", arguments: JSON.stringify({ path: expected }) },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const second = buildAgent({ ...cfg, cwd: dir }, { modelOverride: back, toolOutput });
+    let readBack = "";
+    for await (const event of second.agent.run("s2", [{ role: "user", content: "go" }])) {
+      if (event.type === "tool_result") {
+        readBack = event.result.content;
+      }
+    }
+    // (it is big, so it comes back as a preview: head and tail of the file)
+    expect(readBack).toContain("END-OF-SKILL");
+    expect(readBack).not.toContain("no longer available");
+    // A removed file reads as "no longer available".
+    await toolOutput.removeSession("s");
+    const gone = new ScriptedModel([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "r3", name: "fs_read", arguments: JSON.stringify({ path: expected }) },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const third = buildAgent({ ...cfg, cwd: dir }, { modelOverride: gone, toolOutput });
+    let missing = "";
+    for await (const event of third.agent.run("s3", [{ role: "user", content: "go" }])) {
+      if (event.type === "tool_result") {
+        missing = event.result.content;
+      }
+    }
+    expect(missing).toContain("no longer available");
+    await rm(root, { recursive: true, force: true });
   });
 
   test("the tool is registered only when a skill is offered; the catalog is in the prompt", async () => {
