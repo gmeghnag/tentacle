@@ -23,8 +23,38 @@ those.
   (or a profile): `dark`/`light` skip the query entirely. `connect` honours it too; an
   unreadable config there warns once and connects anyway. A display setting only — it
   is never carried to a pod.
+- `tools.outputRetentionDays` / `TENTACLE_TOOL_OUTPUT_RETENTION_DAYS`: how long large
+  tool outputs are kept (days, default 30; `0` or negative = forever).
+- **Sub-agents run in parallel.** Several `agent_task` calls in one message now run at
+  the same time, in a shared workspace. `subagents.execution` chooses: `parallel` (the
+  default), `read-only` (only sub-agents that cannot write) or `sequential`.
+  `subagents.maxParallel` (default 4; env `TENTACLE_SUBAGENT_EXECUTION`,
+  `TENTACLE_SUBAGENT_MAX_PARALLEL`) is the ceiling, and a llama.cpp server with fewer
+  slots lowers it on its own. In a pod or container these are your laptop's values.
+- **`subagents.agentTaskDescription` or `agentTaskDescriptionFile`** (at most 4096 bytes;
+  setting both is a config error) replaces the `agent_task` description; the list of
+  sub-agent types is still appended.
+- **The permission dialog names the sub-agent that asks**, for example
+  `explore · "find callers"`.
+- **The status bar names where the agent runs.** In a container or pod the
+  left of the bar shows a badge: `docker:<name>`, `podman:<name>`,
+  `kubernetes:<pod>/<container>` (the container is always shown); the prefix
+  is grey and the name keeps the accent colour. A local session shows nothing.
+  The bar stays one row: on a narrow terminal the path shrinks first, then
+  `kubernetes:` becomes `k8s:`, then the badge name is cut in the middle. The
+  scroll hint and `expanded` never cut the name (they are left out instead),
+  and the `ctx` meter always keeps its max.
+- **Context at open.** `ctx` is shown with its max from the start, before any
+  turn: the exact count where the provider can count without generating
+  (Anthropic `count_tokens`; llama.cpp `/apply-template` + `/tokenize`), else
+  an estimate marked `~` (`ctx █░░░░░░░░░ ~7% (~9k/128k)`). It covers the real
+  history on `attach` and `--resume`, refreshes after `/compact`, and the first
+  turn replaces it with the measured figure. `↑ ↓` token totals are hidden until
+  measured. The count is capped at 2 s and falls back to the estimate silently;
+  in a pod run it is made by your laptop, so the model key never leaves it.
 
 ### Changed
+
 - **`/settings` and `/settings sync`.** `/settings` shows all the settings of the
   running session as one indented JSON block, nested as in `config.jsonc`, with
   comments for the values the container sets (`// (container)`) and those that differ
@@ -34,9 +64,6 @@ those.
   by another terminal: { … }`. Values the container's own config sets still win. A
   project-hooks trust you gave is asked again after a sync. Not available on `connect`
   or a local session.
-
-### Changed
-
 - **Attaching to a session is now bounded.** A daemon that makes no progress for 30
   seconds (no answer, no new page of the history) no longer leaves the terminal
   waiting for ever; a long history on a slow link still loads. `attach` says so and
@@ -104,6 +131,15 @@ those.
 - The protocol is now version 16. A daemon left running by an older tentacle is
   refused at connect; attach again to replace it, or `tentacle rm <name>` if a
   detached run still uses it.
+- The model name moved from the status bar to the top border of the input
+  field, right-aligned (cut on the left with `…` when too long).
+- `⏵⏵ auto-accept on` in the status bar is now golden yellow (`#fec20a`)
+  instead of cyan; `off` stays grey.
+- A line break in the link-status text no longer gives the status bar a second
+  row, and a cut no longer shows a doubled `…`.
+- A model endpoint answering HTTP 500, 502 or 503 before any output is now
+  retried like a rate limit (up to 3 attempts, honouring `retry-after`). A 504
+  and other errors still surface at once.
 
 ### Removed
 
@@ -141,50 +177,6 @@ those.
   `connection closed`). A binary with a live detached run is never replaced:
   attach says `<name> runs an older tentacle build than this one · tentacle rm
   <name>, then run again`.
-### Added
-
-- `tools.outputRetentionDays` / `TENTACLE_TOOL_OUTPUT_RETENTION_DAYS`: how long large
-  tool outputs are kept (days, default 30; `0` or negative = forever).
-- **Sub-agents run in parallel.** Several `agent_task` calls in one message now run at
-  the same time, in a shared workspace. `subagents.execution` chooses: `parallel` (the
-  default), `read-only` (only sub-agents that cannot write) or `sequential`.
-  `subagents.maxParallel` (default 4; env `TENTACLE_SUBAGENT_EXECUTION`,
-  `TENTACLE_SUBAGENT_MAX_PARALLEL`) is the ceiling, and a llama.cpp server with fewer
-  slots lowers it on its own. In a pod or container these are your laptop's values.
-- **`subagents.agentTaskDescription` or `agentTaskDescriptionFile`** (at most 4096 bytes;
-  setting both is a config error) replaces the `agent_task` description; the list of
-  sub-agent types is still appended.
-- **The permission dialog names the sub-agent that asks**, for example
-  `explore · "find callers"`.
-- **The status bar names where the agent runs.** In a container or pod the
-  left of the bar shows a badge: `docker:<name>`, `podman:<name>`,
-  `kubernetes:<pod>/<container>` (the container is always shown); the prefix
-  is grey and the name keeps the accent colour. A local session shows nothing.
-  The bar stays one row: on a narrow terminal the path shrinks first, then
-  `kubernetes:` becomes `k8s:`, then the badge name is cut in the middle. The
-  scroll hint and `expanded` never cut the name (they are left out instead),
-  and the `ctx` meter always keeps its max.
-- **Context at open.** `ctx` is shown with its max from the start, before any
-  turn: the exact count where the provider can count without generating
-  (Anthropic `count_tokens`; llama.cpp `/apply-template` + `/tokenize`), else
-  an estimate marked `~` (`ctx █░░░░░░░░░ ~7% (~9k/128k)`). It covers the real
-  history on `attach` and `--resume`, refreshes after `/compact`, and the first
-  turn replaces it with the measured figure. `↑ ↓` token totals are hidden until
-  measured. The count is capped at 2 s and falls back to the estimate silently;
-  in a pod run it is made by your laptop, so the model key never leaves it.
-
-### Changed
-
-- The model name moved from the status bar to the top border of the input
-  field, right-aligned (cut on the left with `…` when too long).
-- `⏵⏵ auto-accept on` in the status bar is now golden yellow (`#fec20a`)
-  instead of cyan; `off` stays grey.
-- A line break in the link-status text no longer gives the status bar a second
-  row, and a cut no longer shows a doubled `…`.
-
-- A model endpoint answering HTTP 500, 502 or 503 before any output is now
-  retried like a rate limit (up to 3 attempts, honouring `retry-after`). A 504
-  and other errors still surface at once.
 
 ## [0.2.0] - 2026-10-27
 
