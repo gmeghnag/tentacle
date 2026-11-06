@@ -56,7 +56,9 @@ Follow-ups (1) and (3) of the TODO entry "feat/parallel-agents follow-ups" (task
 4. CHANGELOG: two `### Fixed` lines.
 5. Gate (2026-11-06): `bunx tsc --noEmit` clean; `bunx biome check .` clean (after `biome check --write packages` fixed import order); `bun test packages` 4983 pass / 3 skip (opt-in) / 0 fail.
 
-No drift from Implementation.
+No drift from Implementation, except the round-2 fix below.
+
+**Round 2 (orchestrator review, MEDIUM):** `worker.ts` (in-process TUI) and `wiring.ts` (nested build) pass only `log`, so `agentsNotice ?? notice` silently dropped the cap line there. Fallback is now `agentsNotice ?? notice ?? log`. Test extended (buildAgent with only `log` → the line arrives): RED first (received length 0), then green. Stray blank line after the CHANGELOG entries removed. Gate re-run: see result in the final report (tsc, biome clean; `bun test packages` all pass).
 
 ## Review
 

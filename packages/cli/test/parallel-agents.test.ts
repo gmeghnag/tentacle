@@ -214,6 +214,10 @@ describe("buildAgent reads subagents.* (T-W)", () => {
     const notices: string[] = [];
     await run({ notice: (l) => notices.push(l) });
     expect(notices.filter((l) => l.includes("capped at 1"))).toHaveLength(1);
+    // The in-process worker passes only `log`: the line must still arrive.
+    const logged: string[] = [];
+    await run({ log: (l) => logged.push(l) });
+    expect(logged.filter((l) => l.includes("capped at 1"))).toHaveLength(1);
   });
 
   test("a child's rounds inherit tools.*", async () => {

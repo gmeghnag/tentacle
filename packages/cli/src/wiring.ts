@@ -534,7 +534,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
             slots: slotsReader(
               model,
               config.subagentMaxParallel,
-              options.agentsNotice ?? options.notice,
+              options.agentsNotice ?? options.notice ?? options.log,
             ),
           }
         : {}),
