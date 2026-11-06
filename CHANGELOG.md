@@ -80,9 +80,8 @@ those.
 - **A `run --detach` with no terminal attached now reacts when a background job
   ends:** the relay starts the follow-up turn itself, as the TUI does (`autoWake`,
   default on). Attaching mid-way never wakes the agent twice. A failed or
-  interrupted run does not wake. One relay starts at most 20 such turns: past that
-  `ps` says `wake limit reached — tentacle attach <name>`, and a `--keep=false`
-  workload stays.
+  interrupted run does not wake. There is no limit, as in the TUI: stop a runaway
+  with `tentacle stop` or `attach`.
 - A `model.apiKeyCommand` in a container's own config no longer runs there, and
   can no longer stop the daemon from starting. The container never uses that key.
 - `tentacle attach` no longer reuses an older tentacle binary in a pod or
