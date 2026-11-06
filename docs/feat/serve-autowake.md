@@ -355,6 +355,57 @@ What it missed: it reasoned about the attach only through seam A (`unflushedExit
 
 **Owner answer (fix round 1, 2026-11-06):** R-Q1 = **(a), daemon-side**. In `maybeWake`, commit/move the cut before the wake's `prompt()`. A TUI attaching mid-wake then gets the exit through the snapshot plus the turn's own flush note, never as a live `background_exit`, so it never fires a second continuation. No TUI or client change. LOW 2: make W-8 run the reaper. LOW 3: no code. It stays owner-visible behaviour: Esc on any turn pauses daemon wakes until a turn ends normally.
 
+### Review round 2
+
+*— claude-opus-5-5, 2026-11-06* — fresh context, adversarial re-review of `f74aa82` only. Same model as the executor (the caveat above still applies).
+
+**Verdict: PASS.** Finding 1 is closed daemon-side, and no exit can be lost. Two LOW notes remain, neither needs code.
+
+**Finding 1 closed.**
+- `maybeWake` runs `recordCut(null)` (`hosted-session.ts:1687`) only after `daemonWakeGate` has passed in the same synchronous stretch. So the session is idle, nobody is attached, and the history reflects every emit. This is the precondition `recordCut` requires (`:1120`).
+- The wake's `turn_start` and its flush (a `context_note` on the wire) come after the new cut. A mid-wake attach therefore replays only those two, never the session-level `background_exit`.
+- *Model-bound:* the client test is red without the line and green with it (my mutation, below).
+- *Tool-bound:* this case was already safe. The tool round's `history_commit` (`:1520`) moves the cut before `exec` runs.
+
+**Can moving the cut lose an exit? No.** The cut is a replay/snapshot boundary only. The exit's truth is the agent's `pendingExitCount`, and `session/open`'s `unflushedExits` reads that count (`connection.ts:446`, getter `:942`), not the ring.
+- *`prompt()` throws* (any cause, including `assertIdle` at `:1201` for a busy slot): the `catch` resets `wakeUnflushed`. `activeTurnId` was never set to the wake's id, so the getter returns the real count. The next attach gets `unflushedExits ≥ 1` and its TUI wakes. Nothing was flushed.
+- *The gate's busy check races the prompt:* this cannot happen. Gate and `prompt` run in one synchronous stretch with no await. A refusal would still land in the throw path above.
+- *The daemon restarts right after the cut moved:* `recordCut` writes nothing (no `persist`, no `schedule`). The cut is per-incarnation (a new epoch on reload), so the on-disk record is exactly what it would be without the line. Exit accounting across a restart is unchanged from before the fix.
+- *An older `since` after the eviction* (`ring.evict`): the client resyncs (snapshot plus replay from the cut). That path is complete by design, and no client was attached to lose a frame.
+
+**Held-ask path and seams still hold.**
+- W-7, W-7b and W-8 are green.
+- A held ask's `permission_request` is emitted after the moved cut, and `recheckAsks` replays it.
+- W-7b's trust window: `turn_start` is emitted synchronously in `prompt`, so it falls after the cut, and the later flush is a turn-scoped `context_note`, not a backlog exit.
+- W-8 now runs `host.reapExpired({ idleTtlMs: 60_000 })` 10 h past the TTL with nobody attached and asserts `[]`. That is non-vacuous given `session-reaper.ts:99` (`!s.busy`). The executor's mutation of `:99` reportedly turned it red. I did not re-run that one.
+
+**§7 invariants.**
+- No new await: the peer is not serialised.
+- `SessionPersister.schedule` is untouched, and `recordCut` never awaits.
+- No protocol change, no record change, no TUI or client change.
+
+**Findings (LOW only):**
+1. **LOW — the tool-bound client test is not a regression test for this guard.** With `recordCut(null)` dropped it stays green, because the tool round's commit already moves the cut. The executor said so in Fix round 1. The file header ("Model-bound and tool-bound wakes both. Mutation: drop the `recordCut` …") reads as if both cases catch the mutation, which only the model-bound one does. Keep it as a guard, and optionally reword the header.
+2. **LOW — a wake that fails before its flush, with a client attached meanwhile.** Example: the turn errors during the project-hook trust await. The client's open read 0 (`wakeUnflushed`), and now gets no live notice, so its TUI arms nothing. The exit is still counted (`pendingExitCount`): it flushes at the next prompt and reappears in the next open's `unflushedExits`. This matches D6: a bad end stops the chain. Behaviour only, no code.
+
+**Mutation (mine).** I removed `this.recordCut(null);` from `maybeWake`. Steps: cp backup to `.tentacle/tmp/serve-autowake-r2/hs.bak` → Edit → narrow tests → cp restore. `shasum` was `75a3bf16…` before and after, and `git status` was clean.
+
+| Test | Result |
+|---|---|
+| client "model-bound wake" | **red**: `notices` = `[{jobId:"j1",…}]` (the old-code backlog) |
+| client "tool-bound wake" | green (LOW 1) |
+| daemon `serve-autowake.test.ts` (15) | green |
+
+The red is also the "red on the old code" proof: `f74aa82`'s only src change is that line.
+
+**Gate (once, from the repo root):**
+- `bunx tsc --noEmit`: clean.
+- `bunx biome check .`: `Checked 711 files … No fixes applied.`
+- `bun test packages`: **5268 pass · 3 skip · 0 fail**, matching Execution.
+- Run from `packages/` instead, the suite skips `bunfig.toml`'s preload and 4 env-guard tests fail. That is a harness artifact, not a regression.
+
+**How the executor behaved.** It made a minimal, correctly placed fix with an accurate safety comment. It disclosed honestly that the tool-bound test was green before the fix. It added the W-8 reaper gap with a mutation. I saw no overclaim in Fix round 1 beyond the test-header wording (LOW 1).
+
 ## Owner questions
 
 1. **Which `autoWake` does a `serve` daemon read?** The TODO says "carried to the daemon", but `serve` ignores `session/open.settings` and `autoWake` is not a settings key; carrying it per session means a settings key, a `CARRIED` row, and a persisted field (daemon-record version bump). *Recommendation: A — the `serve` host's own `config.autoWake`* (default on; attached TUIs still use their laptop switch). B (carry per session) later if a laptop needs its own switch for a shared daemon.
