@@ -218,6 +218,32 @@ The executor was disciplined: red first, a mutation per slice, and the plan drif
 3. R3: **build it now** — with the count > 0 on attach, a one-line laptop-rendered notice `n background job(s) ended while you were away` (count only, never pod text; singular/plural; through the existing notice palette), with `autoWake` on AND off.
 Also fix R2 (re-open of one entry shows the count replaced).
 
+### Review round 2
+
+*— claude-opus-5-5, 2026-11-06* (fresh context; scope `git diff 0749e63..HEAD`)
+
+**Verdict: REQUEST-CHANGES**, for one MEDIUM finding (F1). R1, R2 and R3 are fixed as the owner asked.
+
+**Gate (run by me):** `bunx tsc --noEmit` clean · `bunx biome check .` clean (692 files) · `bun test packages`: **5097 pass, 3 skip (opt-in), 0 fail** (5100 tests, 347 files). Round 1 had 5099 tests. This round added 3 (C-1f, T-TUI-5, `unflushedExitsNotice`) and removed 2, which gives 5100. The 2 removed tests are F1.
+
+#### Findings
+
+1. **F1 — MEDIUM: the fix commit deleted the `attachFailureNotice` regression tests.** `packages/cli/test/attach-notice.test.ts` was overwritten rather than extended. Both tests from feat/session-settings-apply S3 are gone: the attach-bound notice text, and "any other failure → `null`". No other test pins it (`rg attachFailureNotice packages/*/test` finds nothing). The behaviour itself is unchanged, but the S3 mutation ("return null → the plain path falls back silently") now survives. **Fix:** restore the `describe("attachFailureNotice", …)` block and its imports next to the new `describe`.
+2. **F2 — LOW, residual race (accepted).** A count-seeded TUI B fires its continuation at mount. If that send reaches the daemon only *after* A's wake turn has fully ended, it starts a second, empty turn. The window is the gap between B's open and B's send, against the length of A's whole turn, so it is negligible. Closing it fully needs a daemon-side check (refuse a continuation when nothing is unflushed), which is out of scope. No action needed.
+3. **F3 — LOW: the count's width is unbounded.** The schema caps nothing beyond a non-negative integer, so a pod can send e.g. `9007199254740991`. That is 16 digits on one notice line. The notice wraps like any other and cannot inject text (it is a number, rendered by the laptop). Harmless. No action needed.
+
+#### Verified
+
+- **R1:** `handedWakeRef` is seeded only from `wakeHanded` (`App.tsx:634`). `main.ts` sets `wakeHanded` only from `run?.wakePending` (the relay), and the count only seeds `wakePending`. The relay path still passes both, so the single-TUI hand-over keeps its once-only retry: T-TUI-4 now uses `wakeHanded`, `sends === 2`. The count-seeded twin T-TUI-5 expects `sends === 1`. The main test pins that a count-seeded attach has no `wakeHanded` key. **Mutation (mine):** `useRef(wakeHanded)` → `useRef(wakePending || wakeHanded)`. T-TUI-5 failed (`Expected 1, Received 2`), so the mutation was **killed**. Restored from a `cp` backup; the `shasum` matched before and after (`43ff56ed…`).
+- **R3:** `unflushedExitsNotice` builds the line from the number alone: `null` for 0, singular for 1, plural otherwise, never pod text. It goes through `sessions.notices.notify` → `NoticeHub`, which buffers until Ink subscribes (no raw write, §7). It is computed once in `runEngineTui`, before `runSessionTui`, so a link reconnect does not repeat it. It shows with `autoWake` on and off (main test, `TENTACLE_AUTO_WAKE=0` leg).
+- **R2:** C-1f re-opens one entry. **Mutation (mine):** `=` → `+=` (`remote-client.ts:1738`). C-1f failed, so the mutation was **killed**. Restored; `git status` clean.
+- **TODO.md:** the `/sessions` switch multi-session seed follow-up is on the entry.
+- **§7:** no raw terminal write, no pod text rendered, logic in a pure module (`attach-notice.ts`), peer and broker untouched.
+
+#### Executor behaviour
+
+The executor matched the owner's answers precisely, and each new test carries its mutation note. But it clobbered an existing test file, a §9 slip: a deleted regression test is a silent loss.
+
 ## Owner questions
 
 1. **Lost-slot wake (the TODO's second half).** Generalise the once-only re-pend (`handedWakeRef`) to every TUI continuation that loses the slot? *Recommendation: no.* A refused continuation usually lost to a turn that started after the exit, but a blanket retry costs an extra empty model call whenever the winner did flush, and two TUIs would chase each other. This fix also covers the exit the next time anyone attaches. Leave it and drop that half from the TODO entry.
