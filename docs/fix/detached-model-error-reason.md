@@ -112,7 +112,31 @@ Drift: plan test 5 (relay detail guard) not added: `relay.ts` forwards the RpcEr
 
 ## Review
 
-*— (empty)*
+**Verdict: PASS (LOW-only).** Reviewer is the same model family as the executor (claude-sonnet-5-5, fresh context): shared blind spots survive; the task is cross-module, not load-bearing, but sits on the §7 pod-trust path.
+
+**Gate (narrow, once):** `bunx tsc --noEmit` clean · `bunx biome check .` 666 files, no fixes · `bun test packages/client packages/cli packages/transport` 2036 pass / 0 fail (110 files). Full `bun run check` not re-run.
+
+**Mutation (one):** removed `this.onError?.(error)` in `modelRequestFailed` → `a 401 names its cause…` FAILS (95 pass / 1 fail); restored; `shasum` of `remote-client.ts` equals the pre-mutation `d4946c42…`, tree clean. (Process slip: my `cp` backup failed, so I restored by hand-editing the same line; the shasum proves it is byte-identical.)
+
+**Premise table:** `connectionLost` returns null for ModelRequestError today and rethrows (`remote-client.ts` catch sites) TRUE · `peer.ts` answers non-RpcError as "internal error" TRUE (per Execution red: every row gave "internal error") · `laptopText` swap only touches texts in `laptopTexts`; the new text is not registered, so it passes unchanged TRUE · `engine-runtime.ts` comment was false, now corrected TRUE.
+
+**Attacks tried:**
+1. *Provider text in the pod text:* text = integer status (100–599, `typeof number` + `isInteger`) + our own 4-entry table; `error.message`/body/URL/header never read. Boxed `Number`, string, NaN, float, 0, 99, 600 all fall to the number-free text (tests cover them). Nothing found.
+2. *Spoofing / subclass:* the duck-type is `instanceof Error` + `name === "ModelRequestError"`. A subclass with another name, or a plain Error with a `status` field and another name, stays opaque ("internal error"). A plain Error that sets `name` falls into the status-only arm, which prints nothing but the integer. Only the laptop's own provider can throw it, the pod cannot trigger it. Nothing found.
+3. *Streaming vs non-streaming:* both `onModelStream` and `onModelStreamChunked` end in `throw this.connectionLost(error) ?? error`; both tested (`requestModelStream` and a full turn). `countTokens`/`slots` swallow errors by design (bounded helpers), nothing crosses.
+4. *`onError` sinks:* `modelRequestFailed` sends the full error to the laptop `onError` only: `onPeerError` → run `daemon.log` via `stderr.onStderr` in `engine-runtime.ts` (laptop file), `connect` sink prints locally. No pod-side sink found. Nothing found.
+5. *Visibility:* the same `RpcError` text is what `remote-session` hands back (`laptopText` is identity for it), so relay `turn_failed` → `state: failed … answered 401 (unauthorized)`, `ps` and the attached TUI show it; the relay detail is covered only transitively (plan test 5 dropped, see finding 2).
+6. *Retry layer:* exhausted 429/5xx surface as `ModelRequestError` (`retry.ts:17`) and get the arm. Nothing found.
+
+**Findings (all LOW):**
+1. `remote-client.ts` `modelRequestFailed`: `onError` fires for every title-call failure too (`purpose: "title"`), adding a `daemon.log` line the title path previously did not produce. Log noise only; the pod and TUI see nothing new from a failed title (daemon swallows it). Verify live, not blocking.
+2. Execution dropped plan test 5 (relay `failed` detail) as "covered by the end-to-end send text". True by construction (`relay.ts` forwards the message through `untrustedText`), but `untrustedText` on a text containing `(` / digits is not pinned by any test. A one-row guard in the relay test would close it. Optional.
+3. The `ModelRequestError` arm sits inside `connectionLost`, whose doc comment (above it) still says "any other error, left to the peer's opaque default" and describes only connection loss. Doc nit; rename to `modelCallFailed` was optional in the plan.
+4. Unverified, as the Execution says: a live `run --detach` with no apiKey. The Repro was written to run on main but the red is documented only in Execution prose, not pasted.
+
+**Questions (recommendation):** none for the owner. Decisions 1–3 as the orchestrator set them are implemented as stated.
+
+**What holds:** the redaction is by construction (no message read), the §7 half is pinned by tests asserting the secret and host are absent from every frame the laptop sent and from the pod history, and the `onError` half is non-vacuous (my mutation). **Executor behaviour:** stayed in scope, small diff, honest about the dropped test and the unverified live part.
 
 ## Owner questions
 
@@ -126,3 +150,7 @@ Drift: plan test 5 (relay detail guard) not added: `relay.ts` forwards the RpcEr
 2. No apiKey hint in this task (recommendation); follow-up only if wanted.
 3. `connect` left out (recommendation).
 Start after feat/parallel-agents merges (shared `packages/client/src/remote-client.ts`).
+
+### Orchestrator live check + decisions (2026-11-06, owner delegation)
+
+Binary = main + this branch (gate 4871 pass, 3 skip, 0 fail), installed. `run --detach --engine docker` with a config copy whose top `model` block has no `apiKey` (owner's local endpoint answers 401): `relay.log` now ends `state: failed the model endpoint answered 401 (unauthorized)` (before: `failed internal error`). Review LOWs (title-log noise, no relay-level test) accepted as is — cosmetic / covered at the client boundary. Merged under the owner's one-night delegation.
