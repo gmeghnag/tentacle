@@ -8,6 +8,16 @@ those.
 
 ## [Unreleased]
 
+### Added
+
+- **A `tentacle serve` session reacts when a background job ends with nobody connected.**
+  After `connect` quits (it only detaches), the daemon starts the follow-up turn itself and
+  saves it; `connect --resume` shows it. The `serve` host's own `autoWake` decides (default
+  on; `"autoWake": false` in its config: no turn, the exit is shown at the next attach). With
+  a client attached, that client wakes, never the daemon too: one turn per job end. A turn
+  that ended in an error or was cancelled stops the chain until a normal turn. No limit, as
+  in the TUI. Pod runs, the local worker and `run --detach` are unchanged.
+
 ## [0.3.0] - 2026-11-06
 
 ### Added

@@ -198,7 +198,8 @@ Glossario breve:
 - Run/attach: env e file del pod, altrimenti il valore del laptop portato in
   `session/open.settings`. Idem `maxIterations`, `contextAwareness`,
   `contextReset`, `loadAgentsMd`, `loadSkills`. `subagents.*` è sempre del laptop.
-  `autoWake` non viaggia: lo legge solo la TUI del laptop.
+  `autoWake` non viaggia: lo legge solo la TUI del laptop (e un daemon `serve`
+  il proprio, per le sessioni senza client: `docs/feat/serve-autowake.md`).
 - Output grande (`fix/tool-output-location`, as-built): spill nella cache
   dell'host del daemon — `$XDG_CACHE_HOME` o `~/.cache`, poi
   `tentacle/tool-output/<project-key>/<sessione>/<tool>-<id>.txt`, altrimenti
