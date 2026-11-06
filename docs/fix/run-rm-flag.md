@@ -705,14 +705,62 @@ of the typecheck. **Owner live checklist:**
 
 ## Review
 
-*— (empty; blast is LOAD-BEARING: Review is mandatory in a fresh context
-(sub-agent or `/code-review`). The reviewer must red-team: (a) every consumer of
-`rm` in Design 7 has the right sense, none doubly inverted (the delete decision
-of a detached run and of a TUI quit, AGENTS §7 pod lifecycle), including the
-wake-cap row and both exit-net arming sites, (b) the v1-record
-paths in Failure modes behave as stated and never rewrite or delete a v1 file,
-(c) the old-`keep:` config error, (d) help/README have no leftover `--keep`,
-(e) `tentacle.kept` label and `rm <name>` untouched.)*
+**Verdict: PASS (APPROVE-WITH-NITS)** — one LOW finding, no code change required.
+
+**Gate** (worktree, HEAD 104c797): `bunx tsc --noEmit` clean · `bunx biome check .`
+677 files, no fixes · `bun test packages/cli packages/config packages/docker
+packages/k8s` → **2396 pass, 2 skip (opt-in), 0 fail**, 2398 tests / 140 files.
+
+**Attacks tried (the DELETE decision):**
+1. *Every `keep`→`rm` flip, once.* Read each site in `git diff main...HEAD`:
+   `resolveRm` default `configured ?? false` (`engine-select.ts:145`, `run` keeps
+   by default) · `listed = !rm.rm || detach` (`main.ts:1009`) → `resumeHint`
+   only when listed → launcher exit net armed only when `!keptLine`
+   (`engine-runtime.ts:330`): plain `run --rm` = unconditional net, `run -d --rm`
+   = no launcher net · `removedAtEnd` only on `rm.rm` · relay net arming both
+   sites `if (spec.rm)` (`relay.ts:777,786`) · `needsUse`/`exitPlan` `rm &&` /
+   `!rm ||` (`relay-state.ts:726,746`) · relay "not saved" note `!spec.rm`
+   (`relay.ts:812`) · `quitPlan` `!input.rm` → stay (`attach-plan.ts:119`) ·
+   `joinRun` disarm/notice/lastOut/deleting (`attach-run.ts:150,159,178,187`) ·
+   `ownerRemoves = rm === true` (absent ⇒ keep) · `statusOf` lost · `relayBlockingMessage`
+   · `kept-cmd` relayRow `rm: known ? … : false` · `renderVerbose` removal line.
+   **No double or missed inversion found.**
+2. *v1 records.* `readOwner` refuses `schemaVersion !== 2` → `unknown`
+   (`run-state.ts:183`); `readSpec` throws (`:342`). `planAttach` on `unknown`:
+   live relay → refuse, dead → `plain` (user-owned, no net, no delete);
+   `relayRow` → `rm:false`. Nothing deletes on an unreadable record; tests at
+   `run-state.test.ts:131,358,366` pin the exact v1 shape `keep:false`. Holds.
+3. *Flags/config.* `--keep` → `unknown option --keep` (`main.test.ts:585`);
+   `keep:` refused at top level and in profiles (`keep.test.ts:20-22`, and
+   `main.test.ts:591` nothing started); `--rm name` leaves `name` positional;
+   `-d` is the only `short: "d"` in `flags.ts`; help/usage pinned without
+   `--keep` (`main.test.ts:2687`). No env var involved. Holds.
+4. *AGENTS.md §7 edit*: names only (`--keep`→`--rm[=false]`, `keep=false`→`--rm`);
+   the invariant (default keeps, net rules, `saveConfirmed`, `quitPlan`) unchanged.
+   `tentacle.kept` label and `KEPT_SCHEMA_VERSION` untouched (no grep hit).
+
+**Mutation (§9):** `resolveRm` default `?? false` → `?? true` (the run-keeps-by-default
+flip, the most load-bearing). `main` + `engine-select` + `engine-keep` tests:
+**9 fail / 136 pass**. Restored from backup; `shasum -c` OK (byte-identical).
+
+**Findings:**
+1. **LOW** — `CHANGELOG.md` (and this doc's CHANGELOG text, l.352) says a
+   previous-build run "cannot attach": true only while its relay lives; with the
+   relay gone `planAttach` gives `plain` (`attach-plan.ts:51-53`), i.e. a
+   user-owned attach without its session/`--rm` ownership. Safe direction
+   (keeps), but the sentence overstates. Recommend: "cannot take it over while
+   its relay runs; afterwards `attach` is a plain one (no delete)". The manual
+   check l.704 already says it correctly.
+
+**Owner question:** none blocking. Optional: fix finding 1's wording before merge
+(recommended, docs-only on this branch).
+
+**Executor behaviour:** claude-sonnet-5-5; diff is a disciplined mechanical rename
+with comments rewritten to the new sense rather than search-replaced, v1 refusal
+pinned with the real old shape. Reviewer is claude-opus-5-5 — same Claude family,
+different model, fresh context: shared blind spots possible.
+
+*— claude-opus-5-5, 2026-11-06*
 
 ## Owner questions
 
