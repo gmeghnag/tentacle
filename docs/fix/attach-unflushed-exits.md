@@ -163,6 +163,14 @@ Protocol schema: **not touched this round** (`protocol.json` unchanged beyond th
 
 **Gate:** see the final report below.
 
+### Fix round 2
+
+*— claude-sonnet-5-5, 2026-11-06*
+
+- **F1** — my round-1 `Write` of `packages/cli/test/attach-notice.test.ts` had overwritten the file and deleted the two `attachFailureNotice` tests of feat/session-settings-apply S3. Restored verbatim from `git show main:…` (imports included), next to the `unflushedExitsNotice` test, in the same file. Mutations on `attachFailureNotice` (backup, restore, `shasum -c` OK): the bound case returning `null` → "the attach bound" red; any error answered with the notice → "any other failure keeps today's quiet lazy fallback" red.
+- F2/F3: accepted LOW, no code. Protocol schema: not touched.
+- **Gate:** `bunx tsc --noEmit` clean; `bunx biome check .` clean; `bun test packages`: 5099 pass, 3 skip (opt-in), 0 fail.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-06* (fresh context, different model from the executor)
