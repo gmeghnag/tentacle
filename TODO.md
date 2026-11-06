@@ -54,7 +54,7 @@ here as we go; fixes applied in a batch at the end. Severity: 🔴 blocker ·
       (2026-10-20, heap snapshot): a conservative-GC stack root delays the
       collection its `WeakRef` + 5 × `Bun.gc(true)` assertion demands; the
       production code is correct (the session is unreachable). Plan ready:
-      **Eval:** `docs/eval/reaper-gc-flaky-test.md` (getter + deterministic
+      **Eval:** `docs/fix/reaper-gc-flaky-test.md` (getter + deterministic
       assertion).
 - [ ] 🔵 **Timing flake, not investigated:** `tui/test/queue.test.tsx` "a task
       typed while running is shown queued…" — a spinner-glyph regex timed out
@@ -761,7 +761,7 @@ trusted"). Do them in order. `docs/fix/steering-over-rpc.md` goes right after 1.
         + Live Activity in v1. 21 owner decisions; 19 tasks + TestFlight in 7 phases (decision 21). Task 0 DONE
         2026-10-23 (`feat/mobile-spike`, `docs/feat/mobile-spike.md`); task 1 (`feat/session-list`) executing;
         plans ready: 1, 8; planning: 4. Absorbs the open questions of 9. Type: eval → feat · Size: L → split · Blast: load-bearing
-      — **Eval (deferred, low):** `docs/eval/reaper-gc-flaky-test.md` — test-only flake, at the end of v2
+      — **Eval (deferred, low):** `docs/fix/reaper-gc-flaky-test.md` — test-only flake, at the end of v2
 
 - [x] **`connect` cannot trust a self-signed daemon** (`serve --tls-cert/--tls-key`
       gives `wss://`, but `connect` had no `--ca-cert` / `--insecure-skip-tls-verify`).

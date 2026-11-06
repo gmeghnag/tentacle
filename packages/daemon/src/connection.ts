@@ -439,6 +439,11 @@ export class Connection {
     };
   }
 
+  /** The ids of the sessions this connection holds open (a copy; read-only, for tests/diagnostics). */
+  get openSessionIds(): readonly string[] {
+    return [...this.attached.keys()];
+  }
+
   /** Forget every attachment whose session is no longer the live one under its id. */
   private dropStale(): void {
     for (const [id, entry] of this.attached) {

@@ -513,21 +513,17 @@ describe("daemon-wide limits (admission only: never close a session)", () => {
   });
 
   test("a connection forgets a session another client closed (no stale reference kept)", async () => {
-    // Mutation: drop `dropStale()` in `Connection.open` → A keeps the closed
-    // session reachable and it is never collected.
+    // Mutation: drop `dropStale()` in `Connection.open` (or no-op its body) →
+    // A still lists X. Deterministic: no GC (a conservative GC does not
+    // guarantee collection, which made the old WeakRef version flaky).
     const d = daemon();
     const a = await d.connect();
     const b = await d.connect();
     await a.open({ sessionId: "X", create: true });
-    const ref = new WeakRef(d.host.get("X") as object);
+    expect(a.connection.openSessionIds).toEqual(["X"]);
     await b.client.request("session/close", { sessionId: "X" });
     await a.open({ sessionId: "Y", create: true });
-    d.jobs.length = 0; // the test's own reference to X's jobs
-    for (let i = 0; i < 5 && ref.deref() !== undefined; i++) {
-      Bun.gc(true);
-      await tick(5);
-    }
-    expect(ref.deref()).toBeUndefined();
+    expect(a.connection.openSessionIds).toEqual(["Y"]);
   });
 
   test("no limits configured → none enforced (in-process worker, stdio)", async () => {
