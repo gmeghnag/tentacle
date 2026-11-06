@@ -4,12 +4,16 @@
  * only be checked in a process that starts with colour on. Prints JSON.
  */
 import { itemLines } from "../src/render-lines.ts";
-import { noticeHex, noticeHexLight, theme } from "../src/theme.ts";
+import { theme, tokens } from "../src/theme.ts";
 
 const opts = { expandAll: false };
 console.log(
   JSON.stringify({
-    tokens: { noticeHex, noticeHexLight, notice: typeof theme.notice },
+    tokens: {
+      noticeHex: tokens.dark.notice,
+      noticeHexLight: tokens.light.notice,
+      notice: typeof theme.notice,
+    },
     hinted: itemLines(
       { kind: "notice", text: "Session settings: {}", hint: "(/clear to reset)" },
       opts,

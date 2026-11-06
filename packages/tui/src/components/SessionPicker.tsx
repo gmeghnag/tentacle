@@ -12,7 +12,7 @@ import {
   pickerKey,
   pickerView,
 } from "../session-picker.ts";
-import { accentHex } from "../theme.ts";
+import { dimProps, palette } from "../theme.ts";
 
 const HINT = "↑↓ choose · Enter resume · Esc cancel";
 
@@ -28,31 +28,33 @@ export function SessionPicker({
   const longest = view.rows.reduce((w, r) => Math.max(w, r.title.length), 0);
   // "❯ " + title + "  " + meta must fit the terminal; the title gives way.
   const titleWidth = Math.max(1, Math.min(longest, columns - metaWidth - 4));
+  const accent = palette().accent;
+  const dim = dimProps();
   return (
     <Box flexDirection="column" width={columns}>
       <Text wrap="truncate">
         <Text bold>Resume a session</Text>
-        <Text dimColor> ({HINT})</Text>
+        <Text {...dim}> ({HINT})</Text>
       </Text>
-      {view.above > 0 ? <Text dimColor>{`  ↑ ${view.above} more`}</Text> : null}
+      {view.above > 0 ? <Text {...dim}>{`  ↑ ${view.above} more`}</Text> : null}
       {view.rows.map((row, i) => (
         <Box key={row.id}>
-          <Text color={row.selected ? accentHex : undefined} dimColor={!row.selected}>
+          <Text color={row.selected ? accent : undefined} {...(row.selected ? {} : dim)}>
             {row.selected ? "❯ " : "  "}
           </Text>
           <Box width={titleWidth} flexShrink={0}>
             <Text
-              color={row.selected ? accentHex : undefined}
-              dimColor={!row.selected}
+              color={row.selected ? accent : undefined}
+              {...(row.selected ? {} : dim)}
               wrap="truncate"
             >
               {row.title}
             </Text>
           </Box>
-          <Text dimColor>{`  ${metas[i]}`}</Text>
+          <Text {...dim}>{`  ${metas[i]}`}</Text>
         </Box>
       ))}
-      {view.below > 0 ? <Text dimColor>{`  ↓ ${view.below} more`}</Text> : null}
+      {view.below > 0 ? <Text {...dim}>{`  ↓ ${view.below} more`}</Text> : null}
     </Box>
   );
 }

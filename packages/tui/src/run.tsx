@@ -13,12 +13,15 @@ import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
 import { messagesToItems } from "./resume.ts";
 import type { TargetBadge } from "./target-view.ts";
+import { lateGuard, readThemeSetting } from "./terminal-background-probe.ts";
 import {
   ENTER_FULLSCREEN,
   LEAVE_FULLSCREEN,
   type ProcessLike,
   installTerminalRestore,
+  restoreTerminalOnExit,
 } from "./terminal.ts";
+import { type ThemeSetting, themeProbeWasLate } from "./theme.ts";
 
 export interface TuiOptions {
   readonly model: string;
@@ -57,6 +60,12 @@ export interface TuiOptions {
   readonly autoAccept?: AutoAcceptFeed;
   /** `run "<prompt>"`: sent once at mount as the first message, raw text (never a `/command`). */
   readonly initialPrompt?: string;
+  /**
+   * The palette (`tui.theme`): `auto` (default) reads the terminal's background
+   * before Ink mounts, `dark`/`light` force one. Decided once per process, so the
+   * `--resume` picker and the runtime share the answer.
+   */
+  readonly theme?: ThemeSetting;
 }
 
 /**
@@ -70,6 +79,11 @@ export interface TuiOptions {
  * transcript.
  */
 export async function startTui(agent: Agent | null, options: TuiOptions): Promise<void> {
+  // The palette, FIRST: before ENTER_FULLSCREEN and before Ink owns anything
+  // (docs/feat/tui-light-theme.md). A forced setting never queries; `auto` may
+  // spend up to 200 ms on a mute terminal. Memoized, so a picker that already
+  // decided shares this launch's answer.
+  await readThemeSetting(options.theme ?? "auto");
   const fullscreen = Boolean(process.stdout.isTTY);
   const restore = (): void => {
     if (fullscreen) {
@@ -83,42 +97,70 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
   // signal kill never fires "exit", which would otherwise leave the alt-screen
   // and mouse reporting on). Removed in the `finally` below.
   const uninstallRestore = installTerminalRestore(process as unknown as ProcessLike, restore);
-  const initialItems =
-    options.resumeMessages && options.resumeMessages.length > 0
-      ? messagesToItems(options.resumeMessages)
-      : undefined;
-  const instance = render(
-    <App
-      {...(agent ? { agent } : {})}
-      {...(options.createSession ? { createSession: options.createSession } : {})}
-      model={options.model}
-      cwd={options.cwd}
-      {...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {})}
-      {...(options.target ? { target: options.target } : {})}
-      {...(options.permissions ? { permissions: options.permissions } : {})}
-      {...(options.jobs ? { jobs: options.jobs } : {})}
-      {...(options.autoWakeOnJobExit !== undefined
-        ? { autoWakeOnJobExit: options.autoWakeOnJobExit }
-        : {})}
-      {...(options.wakePending ? { wakePending: true } : {})}
-      {...(options.wakeHanded ? { wakeHanded: true } : {})}
-      {...(initialItems ? { initialItems } : {})}
-      {...(options.notices ? { notices: options.notices } : {})}
-      {...(options.link ? { link: options.link } : {})}
-      {...(options.mcpStatus ? { mcpStatus: options.mcpStatus } : {})}
-      {...(options.daemonInPod ? { daemonInPod: true } : {})}
-      {...(options.detachOnQuit ? { detachOnQuit: true } : {})}
-      {...(options.sessions ? { sessions: options.sessions } : {})}
-      {...(options.runQuit ? { runQuit: options.runQuit } : {})}
-      {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
-      {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
-    />,
-    { exitOnCtrlC: false },
-  );
+  // A timed-out probe left the tty raw and a reply may still arrive: guard Ink's
+  // input, or the reply is parsed as keystrokes. Otherwise Ink gets the real stdin.
+  const stdin = themeProbeWasLate() ? lateGuard(process.stdin) : process.stdin;
+  /**
+   * The terminal, usable again: the alt-screen off and, after a timed-out probe,
+   * the tty COOKED (the probe deliberately stays raw so a late reply is not
+   * echoed, and a mount that throws never reaches Ink's own unmount). The
+   * decision itself is pure and tested in `terminal.ts` (Review LOW 5).
+   */
+  const restoreTerminal = (): void => {
+    uninstallRestore();
+    restoreTerminalOnExit(
+      {
+        write: (text) => void process.stdout.write(text),
+        // BOUND, not `process.stdin.setRawMode`: the unbound extractor loses `this`,
+        // and Bun's `setRawMode` throws `Cannot access property of undefined or
+        // null` when called unbound (measured on a real pty, docs §Fix round 2
+        // LOW 3) — silently, because `restoreTerminalOnExit` catches it, so the tty
+        // stayed RAW.
+        setRawMode: (enabled: boolean) => process.stdin.setRawMode?.(enabled),
+      },
+      { fullscreen, probeWasLate: themeProbeWasLate() },
+    );
+  };
+  // `render()` is INSIDE the try on purpose: Ink reconciles synchronously, so a
+  // component that throws throws HERE, before any `waitUntilExit` — with the call
+  // outside, the `finally` never ran and the tty stayed raw (measured on a real
+  // pty, docs §Fix round 2 LOW 3). `messagesToItems` is inside it for the same
+  // reason: a malformed resumed transcript throws before Ink is even called.
   try {
+    const initialItems =
+      options.resumeMessages && options.resumeMessages.length > 0
+        ? messagesToItems(options.resumeMessages)
+        : undefined;
+    const instance = render(
+      <App
+        {...(agent ? { agent } : {})}
+        {...(options.createSession ? { createSession: options.createSession } : {})}
+        model={options.model}
+        cwd={options.cwd}
+        {...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {})}
+        {...(options.target ? { target: options.target } : {})}
+        {...(options.permissions ? { permissions: options.permissions } : {})}
+        {...(options.jobs ? { jobs: options.jobs } : {})}
+        {...(options.autoWakeOnJobExit !== undefined
+          ? { autoWakeOnJobExit: options.autoWakeOnJobExit }
+          : {})}
+        {...(options.wakePending ? { wakePending: true } : {})}
+        {...(options.wakeHanded ? { wakeHanded: true } : {})}
+        {...(initialItems ? { initialItems } : {})}
+        {...(options.notices ? { notices: options.notices } : {})}
+        {...(options.link ? { link: options.link } : {})}
+        {...(options.mcpStatus ? { mcpStatus: options.mcpStatus } : {})}
+        {...(options.daemonInPod ? { daemonInPod: true } : {})}
+        {...(options.detachOnQuit ? { detachOnQuit: true } : {})}
+        {...(options.sessions ? { sessions: options.sessions } : {})}
+        {...(options.runQuit ? { runQuit: options.runQuit } : {})}
+        {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
+        {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
+      />,
+      { stdin, exitOnCtrlC: false },
+    );
     await instance.waitUntilExit();
   } finally {
-    restore();
-    uninstallRestore();
+    restoreTerminal();
   }
 }

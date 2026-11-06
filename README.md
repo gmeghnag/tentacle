@@ -320,6 +320,7 @@ Precedence: **environment variables › `config.jsonc` › built-in defaults**.
 | `tools.maxParallel` | `TENTACLE_TOOL_MAX_PARALLEL` | At most this many calls of a round at once (default `8`; `1` = sequential) |
 | `mcpServers.<name>.readOnlyTools` | — | Which of a server's tools count as reads: `"hint"` (default: those it marks `readOnlyHint`), `"none"`, or a list of its tool names |
 | `engine` | `TENTACLE_ENGINE` | Default engine of `run`/`attach`: `kubernetes` (default), `docker` or `podman`; `--engine` wins. An unknown value is an error |
+| `tui.theme` | — | The TUI's palette: `auto` (default) reads the terminal's background colour before the first frame and picks a light or dark palette; `dark`/`light` force one and skip that query. A display setting of this laptop only — never carried to a pod |
 
 **`--model <id>` and `--profile <name>`** are flags of the commands that start a
 session, written **after** the command: `tentacle run --image x --model m`,

@@ -40,7 +40,11 @@ export function choiceMeta(c: SessionChoice): string {
 }
 
 /** The picker as the CLI uses it: the chosen id, or null when cancelled. */
-export type SessionPick = (choices: readonly SessionChoice[]) => Promise<string | null>;
+export type SessionPick = (
+  choices: readonly SessionChoice[],
+  /** The palette to paint (`tui.theme`); `auto` probes the terminal first. */
+  options?: { readonly theme?: "auto" | "dark" | "light" },
+) => Promise<string | null>;
 
 export interface PickerRow {
   readonly id: string;

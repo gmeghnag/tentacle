@@ -4,7 +4,7 @@
  * failure into a `ConfigError`.
  *
  * Rules: a top-level setting in the profile wins; `subagents`/`tools`/
- * `contextAwareness`/`contextReset`/`mount`/`detach` merge per key; `model` merges per key EXCEPT the connection group (provider, baseURL,
+ * `contextAwareness`/`contextReset`/`mount`/`detach`/`tui` merge per key; `model` merges per key EXCEPT the connection group (provider, baseURL,
  * apiKey, apiKeyCommand), which moves as a unit, so a key is never sent to an
  * endpoint it was not configured for; `mcpServers` merge by name (a definition
  * is replaced whole, `null` removes it). The result never carries `profiles`.
@@ -67,6 +67,7 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
     mcpServers,
     mount,
     detach,
+    tui,
     ...scalars
   } = profile;
   const config: FileConfig = { ...base, ...scalars };
@@ -75,6 +76,9 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
   }
   if (detach) {
     config.detach = { ...base.detach, ...detach };
+  }
+  if (tui) {
+    config.tui = { ...base.tui, ...tui };
   }
   if (model) {
     config.model = mergeModel(base.model, model);

@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 import { inputRender } from "../input-view.ts";
-import { accentHex } from "../theme.ts";
+import { dimProps, palette } from "../theme.ts";
 
 /**
  * The prompt input renderer: a dumb view over the rows computed by
@@ -11,8 +11,6 @@ import { accentHex } from "../theme.ts";
  * All editing lives in `App`'s key handler, so no control key (Ctrl+O, mouse
  * reports, …) can ever be echoed into the buffer.
  */
-const CLAUDE = accentHex;
-
 export function LineInput({
   value,
   cursor,
@@ -32,13 +30,14 @@ export function LineInput({
 }): ReactElement {
   const { rows } = inputRender(value, cursor, anchor, maxRows, width);
   const empty = value === "";
+  const t = palette();
   return (
     <Box flexDirection="column">
       {rows.map((row, r) => {
         const key = `${r}`;
         return (
           <Box key={key}>
-            <Text color={row.gutter ? "gray" : CLAUDE} dimColor={row.gutter}>
+            <Text color={row.gutter ? t.gutter : t.accent} {...(row.gutter ? dimProps() : {})}>
               {row.prefix}
             </Text>
             {row.segments.map((seg, s) => (
@@ -46,7 +45,7 @@ export function LineInput({
                 {seg.text}
               </Text>
             ))}
-            {empty && r === 0 ? <Text dimColor>{placeholder}</Text> : null}
+            {empty && r === 0 ? <Text {...dimProps()}>{placeholder}</Text> : null}
           </Box>
         );
       })}

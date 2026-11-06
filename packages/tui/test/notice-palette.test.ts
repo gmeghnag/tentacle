@@ -28,10 +28,14 @@ beforeAll(async () => {
 });
 
 describe("notice colours: one soft blue, the hint grey", () => {
-  test("tokens: dark in use, light kept for the light-theme task", () => {
+  test("tokens: dark in use, the light value now owned by the token table", () => {
+    // `feat/tui-notice-palette` pre-chose `#3b5bdb` for a task that had not run;
+    // that task moved the token into the table and the owner answered Q-B there
+    // (fix round 1): `#2f4ba8`, which clears the 256 gate (5.61) where `#3b5bdb`
+    // measured 3.54. Dark keeps the soft blue, byte-identical.
     expect(probe.tokens).toEqual({
       noticeHex: "#8caaee",
-      noticeHexLight: "#3b5bdb",
+      noticeHexLight: "#2f4ba8",
       notice: "function",
     });
   });

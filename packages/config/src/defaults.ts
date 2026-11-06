@@ -164,6 +164,11 @@ export const DEFAULT_CONFIG_JSONC = `{
   // turn runs, so the Mac does not idle-sleep under it. Closing the lid still sleeps it.
   // "detach": { "keepAwake": true },
 
+  // The TUI's palette: "auto" (default) reads the terminal's background before the
+  // first frame and picks a light or dark palette; "dark"/"light" force one and skip
+  // that query (useful on a slow link, or when the guess is wrong).
+  // "tui": { "theme": "auto" },
+
   // \`tentacle run --engine docker|podman\` mounts the current folder into the
   // container; these paths (dirs or files, "~/…" or absolute) are hidden when
   // inside it. "hide" REPLACES the default list (~/.ssh, ~/.aws, ~/.kube,

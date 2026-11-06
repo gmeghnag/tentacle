@@ -45,6 +45,53 @@ export class ConfigError extends Error {
 /** Runs a shell command and returns its stdout. Injectable for tests. */
 export type CommandRunner = (command: string) => Promise<string>;
 
+/**
+ * The user's config file, parsed, validated and with the selected profile folded
+ * over it — and NOTHING else: no scaffold, no prompt file, no key command
+ * (docs/feat/tui-light-theme.md Q6). `loadConfig` calls this, so the parse stays
+ * in one place; `connect` calls it alone, because it needs `tui.theme` and has no
+ * model config to build.
+ */
+export async function readFileConfig(options: {
+  readonly env?: Env;
+  readonly configDir?: string;
+  readonly profile?: string;
+}): Promise<FileConfig> {
+  const env = options.env ?? process.env;
+  const home = env.HOME ?? homedir();
+  const configDir = resolveConfigDir(options.configDir, env, home);
+  const configPath = join(configDir, CONFIG_FILENAME);
+  const parsedFile = await readAndValidateConfigFile(configPath);
+  const profile = options.profile ?? (env.TENTACLE_PROFILE || undefined);
+  const applied = applyProfile(parsedFile, profile);
+  if (!applied.ok) {
+    throw new ConfigError(`${configPath}: ${applied.reason}`);
+  }
+  return applied.config;
+}
+
+/**
+ * Read + JSONC-parse + validate the config file at `configPath`. A missing file is
+ * `{}`; anything unreadable is a `ConfigError` naming the file and the first
+ * issue. Shared by `loadConfig` and `readFileConfig`.
+ */
+async function readAndValidateConfigFile(configPath: string): Promise<FileConfig> {
+  if (!(await pathExists(configPath))) {
+    return {};
+  }
+  const raw = parseConfigFile(await readFile(configPath, "utf8"), configPath);
+  const parsed = FileConfigSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const removedCwd =
+      issue?.code === "unrecognized_keys" && issue.keys.includes("cwd")
+        ? " — `cwd` was removed: tentacle works in the folder it is launched from"
+        : "";
+    throw new ConfigError(`Invalid ${configPath}: ${issue?.message ?? "unknown"}${removedCwd}`);
+  }
+  return parsed.data;
+}
+
 export interface LoadConfigOptions {
   readonly env?: Env;
   /** Explicit config directory (overrides env / XDG / `~/.config`). */
@@ -116,6 +163,8 @@ export interface TentacleConfig {
   readonly detach?: ResolvedConfig["detach"];
   /** The configured workspace-mount hide list (file/profile); absent = the CLI default list. */
   readonly mount?: ResolvedConfig["mount"];
+  /** The configured TUI palette (file or profile); absent = `auto` (the TUI probes). */
+  readonly tui?: ResolvedConfig["tui"];
   /**
    * The configured `apiKeyCommand` (the command, never its output): the CLI
    * hides the key FILE it reads from a workspace mount.
@@ -508,22 +557,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     }
   }
 
-  let parsedFile: FileConfig;
-  if (await pathExists(configPath)) {
-    const raw = parseConfigFile(await readFile(configPath, "utf8"), configPath);
-    const parsed = FileConfigSchema.safeParse(raw);
-    if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      const removedCwd =
-        issue?.code === "unrecognized_keys" && issue.keys.includes("cwd")
-          ? " — `cwd` was removed: tentacle works in the folder it is launched from"
-          : "";
-      throw new ConfigError(`Invalid ${configPath}: ${issue?.message ?? "unknown"}${removedCwd}`);
-    }
-    parsedFile = parsed.data;
-  } else {
-    parsedFile = {};
-  }
+  const parsedFile = await readAndValidateConfigFile(configPath);
 
   // Fold the selected profile over the base BEFORE anything reads the file
   // config (prompt file, key command, MCP servers downstream).
@@ -640,6 +674,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.rm !== undefined ? { rm: resolved.rm } : {}),
     ...(resolved.detach !== undefined ? { detach: resolved.detach } : {}),
     ...(resolved.mount !== undefined ? { mount: resolved.mount } : {}),
+    ...(resolved.tui !== undefined ? { tui: resolved.tui } : {}),
     ...(resolved.apiKeyCommand !== undefined ? { apiKeyCommand: resolved.apiKeyCommand } : {}),
     hooks: contributed.hooks,
     mcpServers: contributed.mcpServers,

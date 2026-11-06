@@ -513,6 +513,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       await connectTui(
         {
           url,
+          configDir: configDirFromEnv(),
           ...(token ? { token } : {}),
           ...(tls ? { tls } : {}),
           ...(resume ? { resume } : {}),
@@ -522,7 +523,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           dial: webSocketChannelFactory,
           startTui,
           // The pre-mount picker, on a terminal only (as the local `--resume`).
-          ...(pick ? { pick: (choices: Parameters<typeof pickSession>[0]) => pick(choices) } : {}),
+          // The PALETTE is not passed here: `connect` loads no config, so
+          // `connectTui` hands its `connectTheme` result to this picker (HIGH 2
+          // — reading `config` here was a use before its `let`, a ReferenceError
+          // at the first multi-session `--resume`).
+          ...(pick ? { pick } : {}),
         },
       );
       return 0;
@@ -808,7 +813,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         latest: bools.has("continue"),
       },
       err,
-      pick ? (choices) => pick(choices) : undefined,
+      pick ? (choices) => pick(choices, { theme: config.tui?.theme ?? "auto" }) : undefined,
       // This laptop's config decides titles in every TUI runtime (worker, pod
       // `run`/`attach`): a `titleModel` that does nothing is said once, in the TUI.
       [titleConfigNotice(config)].filter((text): text is string => text !== null),
@@ -852,6 +857,8 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           runtime.announce?.();
           await (io.startTui ?? startTui)(null, {
             model: config.model,
+            // The palette (`tui.theme`): a LAPTOP-ONLY display setting.
+            theme: config.tui?.theme ?? "auto",
             cwd: config.cwd,
             contextWindow: config.contextWindow,
             // The status bar's badge: from this laptop's engine host, never the pod.
@@ -1642,6 +1649,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           start: (sessionOptions) =>
             startTui(null, {
               model: config.model,
+              theme: config.tui?.theme ?? "auto",
               cwd: config.cwd,
               contextWindow: config.contextWindow,
               permissions,
@@ -1692,6 +1700,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       start: (sessionOptions) =>
         startTui(null, {
           model: config.model,
+          theme: config.tui?.theme ?? "auto",
           cwd: config.cwd,
           contextWindow: config.contextWindow,
           permissions,

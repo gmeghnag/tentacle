@@ -10,6 +10,21 @@ those.
 
 ### Added
 
+- **A light palette, chosen from the terminal's own background.** On startup, before
+  the first frame, the TUI asks the terminal for its background colour (`OSC 11`, with
+  a 200 ms cap — a terminal that does not answer costs one round trip, not the timeout)
+  and paints the matching palette: a dark-green/red diff tint with dark text on a light
+  terminal instead of the near-white on dark tints that were unreadable there. Every
+  colour — accent, auto-accept, the dim greys, the context meter, syntax highlighting
+  in `fs_read`, Markdown and fenced code, the notice blue — has a light value, gated at
+  4.5:1 contrast (3:1 for borders) on white, on Solarized Light, and after the
+  downgrade to a 256-colour terminal. Dark output is byte-for-byte unchanged.
+  **Override with `"tui": { "theme": "auto" | "dark" | "light" }`** in `config.jsonc`
+  (or a profile): `dark`/`light` skip the query entirely. `connect` honours it too; an
+  unreadable config there warns once and connects anyway. A display setting only — it
+  is never carried to a pod.
+
+### Changed
 - **`/settings` and `/settings sync`.** `/settings` shows all the settings of the
   running session as one indented JSON block, nested as in `config.jsonc`, with
   comments for the values the container sets (`// (container)`) and those that differ

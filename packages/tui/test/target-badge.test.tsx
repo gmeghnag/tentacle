@@ -6,7 +6,7 @@ import { App, type SessionController } from "../src/App.tsx";
 import { StatusBar } from "../src/components/StatusBar.tsx";
 import type { ContextOpen } from "../src/status-view.ts";
 import type { TargetBadge } from "../src/target-view.ts";
-import { accentHex, autoAcceptHex } from "../src/theme.ts";
+import { tokens } from "../src/theme.ts";
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -144,8 +144,8 @@ describe("target badge (left of the status bar)", () => {
       expect(on).not.toContain(`${ACCENT} ⏵⏵ auto-accept on `);
       const off = render(<StatusBar {...bar} columns={120} />).lastFrame() ?? "";
       expect(off).toContain(`${DIM} ⏵⏵ auto-accept off (shift+tab) `);
-      expect(autoAcceptHex).toBe("#fec20a");
-      expect(autoAcceptHex).not.toBe(accentHex);
+      expect(tokens.dark.autoAccept).toBe("#fec20a");
+      expect(tokens.dark.autoAccept).not.toBe(tokens.dark.accent);
     } finally {
       chalk.level = level;
     }

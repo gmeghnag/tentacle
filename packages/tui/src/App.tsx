@@ -162,6 +162,7 @@ import {
 import { modelBorder } from "./status-line.ts";
 import { type ContextOpen, contextShown, statusTokens } from "./status-view.ts";
 import type { TargetBadge } from "./target-view.ts";
+import { dimProps, palette } from "./theme.ts";
 import { CLICK_IDLE, type ClickState, nextClick, toggleExpanded } from "./tool-expand.ts";
 import { toolCallAtViewport } from "./tool-hit.ts";
 import { panelHeight, panelMaxBody, treeKey } from "./tree-panel.ts";
@@ -2799,7 +2800,7 @@ export function App({
             {/* One blank row between the send-now hint and the thinking line. */}
             {st.running && shown.length > 0 ? <Text> </Text> : null}
             {loading ? (
-              <Text dimColor>{loadingLabel(loading.done, loading.total)}</Text>
+              <Text {...dimProps()}>{loadingLabel(loading.done, loading.total)}</Text>
             ) : st.running ? (
               <Thinking
                 since={
@@ -2823,11 +2824,11 @@ export function App({
                 ) : null}
                 {/* The top border carries the model name, right-aligned
                     (`modelBorder`, pure): Ink's own border has no title. */}
-                <Text color="gray">{modelBorder(model, columns)}</Text>
+                <Text color={palette().border}>{modelBorder(model, columns)}</Text>
                 <Box
                   width={columns}
                   borderStyle="round"
-                  borderColor="gray"
+                  borderColor={palette().border}
                   borderTop={false}
                   borderLeft={false}
                   borderRight={false}
