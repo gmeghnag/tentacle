@@ -6,6 +6,7 @@ import {
   resetThemeForTest,
   setThemeMode,
   themeMode,
+  themeProbeResidue,
 } from "../src/theme.ts";
 
 /**
@@ -91,6 +92,28 @@ describe("auto", () => {
     // reply lands in the prompt as junk.
     const result = await prepareTheme("auto", fakeIo({ late: true }));
     expect(result.late).toBe(true);
+  });
+
+  test("a reply the timeout cut in half is carried to the guard (MEDIUM 4)", async () => {
+    // The probe's residual head must reach `lateGuard` as its `pending`, or the
+    // reply's TAIL (`e/1e/1e\x07`) no longer matches a reply and is typed into
+    // the prompt.
+    // Mutation: drop `residue` from the result → the guard starts empty and the
+    // tail leaks.
+    const io: ThemeIo = {
+      canProbe: true,
+      probe: () => Promise.resolve({ color: null, late: true, residue: "\x1b]11;rgb:1e" }),
+      colorFgBg: undefined,
+    };
+    const result = await prepareTheme("auto", io);
+    expect(result.residue).toBe("\x1b]11;rgb:1e");
+    expect(themeProbeResidue()).toBe("\x1b]11;rgb:1e");
+  });
+
+  test("the normal path carries no residue", async () => {
+    const result = await prepareTheme("auto", fakeIo({ probed: [255, 255, 255] }));
+    expect(result.residue).toBe("");
+    expect(themeProbeResidue()).toBe("");
   });
 });
 

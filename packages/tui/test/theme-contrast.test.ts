@@ -17,11 +17,12 @@ import { tokens } from "../src/theme.ts";
  *   - 256 colours, by ASKING CHALK what it will actually paint at level 2 —
  *     not by re-deriving its palette — because that is the code path that runs.
  *
- * Bars: 4.5:1 for text, 3:1 for non-text (borders). Two tokens cannot meet 4.5
- * at 256 and are NAMED exceptions, both owner decisions:
- * `accent` (Q3: no cyan-like bucket reaches 4.5; navy would lose the brand) and
- * `notice` (`feat/tui-notice-palette`'s owner-chosen light blue). Anything else
- * must clear the bar, so a future edit cannot quietly make a token unreadable.
+ * Bars: 4.5:1 for text, 3:1 for non-text (borders). ONE token cannot meet 4.5
+ * at 256 and is a NAMED exception, an owner decision: `accent` (Q3: no cyan-like
+ * bucket reaches 4.5; navy would lose the brand). `notice` was a second one for
+ * a round; the owner's fix-round answer moved it to `#2f4ba8` (5.61 at 256), so
+ * the gate is the owner's "all but the accent" again. Anything else must clear
+ * the bar, so a future edit cannot quietly make a token unreadable.
  */
 
 type Rgb = readonly [number, number, number];
@@ -102,10 +103,9 @@ const painted256 = (hex: string, background = false): Rgb => {
 const WHITE = hexToRgb("#ffffff");
 const SOLARIZED_LIGHT = hexToRgb("#fdf6e3");
 
-/** The two named 256-colour exceptions, with the reason each is allowed. */
+/** The named 256-colour exception, with the reason it is allowed. */
 const EXCEPT_256: Readonly<Record<string, string>> = {
   accent: "Q3: no cyan-like 256 bucket reaches 4.5; navy would lose the brand",
-  notice: "owner-chosen #3b5bdb in feat/tui-notice-palette",
 };
 
 /** One text token and the background it is painted on. */
@@ -208,9 +208,10 @@ describe("the light palette is readable", () => {
     expect(failures).toEqual([]);
   });
 
-  test("the named 256 exceptions are only the two documented ones", () => {
-    // A third exception would silently weaken the gate; this pins the list.
-    expect(Object.keys(EXCEPT_256).sort()).toEqual(["accent", "notice"]);
+  test("the named 256 exception is only the accent", () => {
+    // A second exception silently weakens an owner gate; this pins the list.
+    // Mutation: re-add `notice` (e.g. back to #3b5bdb at 3.54) → one element here.
+    expect(Object.keys(EXCEPT_256).sort()).toEqual(["accent"]);
   });
 
   test("non-text colours clear 3:1", () => {

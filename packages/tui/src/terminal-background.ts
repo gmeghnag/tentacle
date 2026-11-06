@@ -71,8 +71,10 @@ function parseHash(spec: string): Rgb | null {
   if (!/^[0-9a-f]+$/i.test(hex)) {
     return null;
   }
-  // `#RGB` (1 each), `#RRGGBB` (2 each) and `#RRRRGGGGBBBB` (4 each).
-  const perChannel = hex.length === 3 ? 1 : hex.length === 6 ? 2 : hex.length === 12 ? 4 : 0;
+  // `#RGB` (1 each), `#RRGGBB` (2 each), `#RRRGGGBBB` (3 each) and
+  // `#RRRRGGGGBBBB` (4 each).
+  const perChannel =
+    hex.length === 3 ? 1 : hex.length === 6 ? 2 : hex.length === 9 ? 3 : hex.length === 12 ? 4 : 0;
   if (perChannel === 0) {
     return null;
   }
@@ -189,6 +191,12 @@ const DA1 = /^(?:\x1b\[|\x9b)\?[\d;]*c/;
  * during the read can land between two of the reply's bytes. Holding blindly
  * would swallow the keystroke and corrupt the reply; recognising that the tail
  * can no longer be a reply means both are handled honestly.
+ *
+ * The spec is checked as a PREFIX of a valid one, which is also what makes a
+ * GARBAGE spec split across chunks come back as a garbage line rather than being
+ * swallowed — accepted (Review LOW 7): a garbage line in the editor beats losing
+ * what the user typed (`parseColorSpec` still answers `null`, so the palette
+ * falls back).
  */
 function isReplyPrefix(text: string): boolean {
   // A DA1 in progress (`ESC [` / `ESC [?1;` …): the sentinel must survive a split.
@@ -326,9 +334,32 @@ export function stepProbe(state: ProbeState, chunk: string): ProbeState {
   return { rest, pending, color, sentinel };
 }
 
-/** Every byte that is not part of a reply, in the order it arrived. */
+/**
+ * Every byte that is not part of a reply, in the order it arrived, and that can
+ * be the user's: `rest`, plus the held tail when it is NOT reply residue.
+ *
+ * At a SENTINEL nothing more can come (replies are ordered), so the whole held
+ * tail is the user's. At a TIMEOUT a reply may still arrive, so the held tail is
+ * handed to the late guard (`residueOf`) instead of to Ink — EXCEPT a lone `ESC`,
+ * which is the Esc key and is never dropped (Design §2, Review MEDIUM 4).
+ */
 export function restOf(state: ProbeState): string {
-  return state.rest;
+  if (state.sentinel) {
+    return state.rest + state.pending;
+  }
+  return state.rest + (state.pending === "\x1b" ? state.pending : "");
+}
+
+/**
+ * The held tail that may be the HEAD of a reply cut by the timeout: it must
+ * reach the late guard as its `pending`, so the reply's tail is stripped with it
+ * rather than landing in the prompt as typed text (Review MEDIUM 4).
+ */
+export function residueOf(state: ProbeState): string {
+  if (state.sentinel || state.pending === "\x1b") {
+    return "";
+  }
+  return state.pending;
 }
 
 // ── The late-reply guard ────────────────────────────────────────────────────
@@ -360,37 +391,29 @@ export function initialLateFilter(now = 0): LateFilter {
 // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
 const FULL_REPLY = /^(?:\x1b)?\]11;[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)/;
 
-/** The DA1 sentinel, with or without its own ESC (it may have passed already). */
+/**
+ * The DA1 sentinel, with or without its own ESC (it may have passed
+ * already).
+ */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
 const SENTINEL = /^(?:(?:\x1b\[|\x9b)\?[\d;]*c|\[\?[\d;]*c)/;
 
 /**
- * Could `text` still become a complete reply? Then holding it is honest. Checked
- * stage by stage, because a chunk may end anywhere: a lone ESC, `ESC]`, `]11;`,
- * `]11;rgb:1e`, `…ESC` (half an ST), …
+ * A DA1 sentinel with NO OSC before it, with or without its own ESC: a terminal
+ * that ignores OSC 11 answers the sentinel alone, and on a slow link it can land
+ * after the deadline's mount. It is still OUR reply, so it must not reach Ink.
  */
-function replyPrefix(text: string): boolean {
+// biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
+const LONE_SENTINEL = /^(?:(?:\x1b\[|\x9b)\?[\d;]*c|\[\?[\d;]*c)/;
+
+/**
+ * Could `text` still become the DA1 sentinel, with enough framing to be worth
+ * HOLDING? A bare `[` is far more often typed than half a sentinel, so it passes
+ * at once; `ESC[`, the 8-bit CSI and the `[?…` forms are held (Review MEDIUM 3).
+ */
+function continueSentinel(text: string): boolean {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-  const intro = /^(?:\x1b)?\]/.exec(text);
-  if (!intro) {
-    // Only a LONE ESC can still become an introducer: `ESC q` is the Esc key then
-    // the letter q, never a reply.
-    return text === "\x1b";
-  }
-  const body = text.slice(intro[0].length);
-  if (body === "") {
-    return true;
-  }
-  // `11;` then the colour spec, then half a terminator at the very end.
-  const spec = body.endsWith("\x1b") ? body.slice(0, -1) : body;
-  if (spec === "" || "11;".startsWith(spec)) {
-    return true;
-  }
-  if (!spec.startsWith("11;")) {
-    return false;
-  }
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-  return /^[^\x07\x1b\x9c]*$/.test(spec.slice(3));
+  return /^(?:\x1b\[|\x9b|\x1b?\[\?)[\d;]{0,8}$/.test(text);
 }
 
 /** Could `text` still become the DA1 sentinel (`[`, `[?1;`, `ESC[?2`, …)? */
@@ -404,6 +427,47 @@ function isSentinelPrefix(text: string): boolean {
     // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
     /^(?:\x1b\[|\[|\x9b)\??[\d;]{0,8}$/.test(text)
   );
+}
+
+/**
+ * Could `text` still become a complete reply once its ESC has been consumed? The
+ * introducer's ESC is OPTIONAL here on purpose: the Esc key passes at once (it
+ * must), so a reply split right after its ESC arrives as `]11;…`, and it must
+ * still be recognised and stripped.
+ */
+function replyPrefix(text: string): boolean {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
+  const intro = /^(?:\x1b)?\]/.exec(text);
+  if (!intro) {
+    return text === "\x1b";
+  }
+  const body = text.slice(intro[0].length);
+  if (body === "") {
+    return true;
+  }
+  // A trailing ESC may be the first half of an ST terminator.
+  const spec = body.endsWith("\x1b") ? body.slice(0, -1) : body;
+  if (spec === "" || "11;".startsWith(spec)) {
+    return true;
+  }
+  if (!spec.startsWith("11;")) {
+    return false;
+  }
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
+  return /^[^\x07\x1b\x9c]*$/.test(spec.slice(3));
+}
+
+/**
+ * Is a held candidate certainly REPLY RESIDUE, and therefore the only kind of
+ * buffer allowed to be dropped at the deadline? It must carry the reply's `11;`
+ * selector behind an OSC introducer — `ESC]11;`, `]11;` (the ESC already passed
+ * as the Esc key) or the 8-bit `0x9d11;`. A bare `]` or `]1` is far more likely a
+ * typed key (a regex, an index), so it is handed to the user instead of vanishing
+ * (Review LOW 6).
+ */
+function isReplyResidue(text: string): boolean {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
+  return /^(?:\x1b\]|\x9d|\])11;/.test(text);
 }
 
 /**
@@ -430,10 +494,11 @@ export function stepLateFilter(
   }
   if (now > filter.deadline) {
     // Too late to be the reply we were waiting for: everything passes again. A
-    // held candidate can only be residue, so it is dropped, not replayed.
+    // held candidate is dropped only when it can ONLY be reply residue — a `]` the
+    // user typed must not vanish (Review LOW 6).
     return {
       filter: { ...filter, armed: false, awaitingSentinel: false, pending: "" },
-      pass: chunk,
+      pass: (isReplyResidue(filter.pending) ? "" : filter.pending) + chunk,
     };
   }
 
@@ -486,6 +551,20 @@ export function stepLateFilter(
         filter: { ...filter, armed: false, awaitingSentinel: false, pending: "" },
         pass: out + after,
       };
+    }
+    // A DA1 with NO OSC before it (Review MEDIUM 3): strip it, and disarm — with
+    // the sentinel seen, nothing more can come.
+    const lone = LONE_SENTINEL.exec(rest);
+    if (lone) {
+      return {
+        filter: { ...filter, armed: false, awaitingSentinel: false, pending: "" },
+        pass: out + rest.slice(lone[0].length),
+      };
+    }
+    if (continueSentinel(rest)) {
+      // Half a sentinel: held for the next chunk (an arrow key's `ESC[` included —
+      // it resolves as soon as its letter arrives, or at the deadline).
+      return { filter: { ...filter, pending: rest }, pass: out };
     }
     if (replyPrefix(rest)) {
       if (rest === "\x1b") {

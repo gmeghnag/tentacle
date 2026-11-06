@@ -56,7 +56,15 @@ describe("no colour outside the token table", () => {
 
   test("no `color=`/`borderColor=` string literal", () => {
     // The `"gray"`/`"yellow"` props Ink accepts: dark-only, invisible to the table.
-    expect(offenders(/\b(color|borderColor)=\s*"/)).toEqual([]);
+    // Both forms count: `color="gray"` and `color={"gray"}`; `{palette().accent}`
+    // is a token read, not a literal.
+    // Mutation: `color={"gray"}` in a component → one line here.
+    expect(offenders(/\b(color|borderColor)=\s*\{?\s*["'`]/)).toEqual([]);
+  });
+
+  test('no `color: "x"` object literal (a palette passed by hand)', () => {
+    // Mutation: `{ color: "yellow" }` in a style object → one line here.
+    expect(offenders(/\b(color|borderColor|backgroundColor):\s*["'`]/)).toEqual([]);
   });
 
   test("no bare `dimColor` prop (light needs a measurable grey there)", () => {

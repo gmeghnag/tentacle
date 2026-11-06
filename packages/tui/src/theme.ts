@@ -10,8 +10,8 @@
  * light one: diff lines use tinted backgrounds with a near-white foreground, and
  * `subtle` is a mid grey. `dark` is the original palette, byte for byte; `light`
  * is a darker-on-white set whose WCAG ratios (truecolor AND after chalk's 256
- * downgrade) are pinned by `test/theme.test.ts`. The mode is decided once per
- * launch, before the first row exists.
+ * downgrade) are pinned by `test/theme-contrast.test.ts`. The mode is decided
+ * once per launch, before the first row exists.
  *
  * Light tokens are hexes, not RGB triples, for one measured reason: chalk's 256
  * downgrade (`rgbToAnsi256`) uses the 24-step grey ramp only when r=g=b and the
@@ -20,12 +20,7 @@
  * greys exactly grey.
  */
 import chalk from "chalk";
-import {
-  type Rgb,
-  type ThemeSetting,
-  modeOfBackground,
-  modeOfColorFgBg,
-} from "./terminal-background.ts";
+import { type Rgb, type ThemeSetting, resolveMode } from "./terminal-background.ts";
 
 export type { ThemeSetting };
 
@@ -170,8 +165,10 @@ const DARK: Tokens = {
 
 /**
  * The light palette: darker-on-white, 4.5:1 on white AND Solarized Light `#fdf6e3`,
- * AND after chalk's real 256 downgrade — except `accent` (Q3) and `notice`, the two
- * named exceptions the owner accepted (`theme.test.ts` holds the gate).
+ * AND after chalk's real 256 downgrade — except `accent`, the ONE named exception
+ * the owner accepted (Q3: no cyan-like 256 bucket reaches 4.5). `notice` was a
+ * second for one round; the owner's fix-round answer settled it at `#2f4ba8`
+ * (7.80 / 7.23 / 5.61), so the gate is "all but the accent" again.
  */
 const LIGHT: Tokens = {
   accent: "#0e7490",
@@ -180,7 +177,7 @@ const LIGHT: Tokens = {
   dim: "#6b6b6b",
   dimIsAttribute: false,
   gutter: "#6b6b6b",
-  notice: "#3b5bdb",
+  notice: "#2f4ba8",
   hidden: "hidden",
   success: "#084718",
   error: "#b21428",
@@ -363,7 +360,12 @@ export function dashedRule(width: number): string {
 export interface ThemeIo {
   /** Whether a query is worth sending (`canProbe` in `terminal-background.ts`). */
   readonly canProbe: boolean;
-  readonly probe: () => Promise<{ readonly color: Rgb | null; readonly late: boolean }>;
+  readonly probe: () => Promise<{
+    readonly color: Rgb | null;
+    readonly late: boolean;
+    /** The head of a reply the timeout cut in half, for the late guard. */
+    readonly residue?: string;
+  }>;
   /** `process.env.COLORFGBG`: the fallback a terminal exports for exactly this. */
   readonly colorFgBg: string | undefined;
 }
@@ -376,10 +378,16 @@ export interface PreparedTheme {
    * prompt as junk.
    */
   readonly late: boolean;
+  /**
+   * A reply the timeout cut in half, as the guard's starting `pending`. Empty on
+   * the normal path, so nothing changes there.
+   */
+  readonly residue: string;
 }
 
 let prepared: Promise<PreparedTheme> | null = null;
 let preparedLate = false;
+let preparedResidue = "";
 
 /**
  * Decide and APPLY the palette. The first call does the work; every later call in
@@ -395,6 +403,7 @@ export async function prepareTheme(setting: ThemeSetting, io: ThemeIo): Promise<
     prepared = decide(setting, io).then((result) => {
       setThemeMode(result.mode);
       preparedLate = result.late;
+      preparedResidue = result.residue;
       return result;
     });
   }
@@ -403,19 +412,22 @@ export async function prepareTheme(setting: ThemeSetting, io: ThemeIo): Promise<
 
 async function decide(setting: ThemeSetting, io: ThemeIo): Promise<PreparedTheme> {
   if (setting !== "auto") {
-    // A forced setting never queries: the user already answered.
-    return { mode: setting, late: false };
+    // A forced setting never queries: the user already answered. `resolveMode` is
+    // the ONE place the precedence lives (it is what `theme-prepare.test.ts` pins
+    // through this function, so the two cannot drift).
+    return { mode: resolveMode(setting, null, undefined), late: false, residue: "" };
   }
   if (io.canProbe) {
-    const { color, late } = await io.probe();
-    if (color !== null) {
-      return { mode: modeOfBackground(color), late };
-    }
+    const { color, late, residue } = await io.probe();
     // No colour: a sentinel means nothing more is coming; a timeout means a late
     // reply still might, so `late` drives the guard either way.
-    return { mode: modeOfColorFgBg(io.colorFgBg) ?? "dark", late };
+    return {
+      mode: resolveMode("auto", color, io.colorFgBg),
+      late,
+      residue: residue ?? "",
+    };
   }
-  return { mode: modeOfColorFgBg(io.colorFgBg) ?? "dark", late: false };
+  return { mode: resolveMode("auto", null, io.colorFgBg), late: false, residue: "" };
 }
 
 /** Whether the settled mode is waiting on a reply that may still arrive. */
@@ -423,8 +435,17 @@ export function themeProbeWasLate(): boolean {
   return preparedLate;
 }
 
+/**
+ * The head of a reply the timeout cut in half: the late guard's starting
+ * `pending`, so the tail that arrives after the mount is stripped with it.
+ */
+export function themeProbeResidue(): string {
+  return preparedResidue;
+}
+
 /** Test-only: forget the memo, so a suite can decide again. */
 export function resetThemeForTest(): void {
   prepared = null;
   preparedLate = false;
+  preparedResidue = "";
 }

@@ -103,7 +103,12 @@ type Styler = (s: string) => string;
 
 const rgb = (color: string): Styler => colorStyler(color);
 
-function highlightTheme(mode: SyntaxMode): Record<string, Styler> {
+/**
+ * The cli-highlight theme for a mode: every token class mapped to that mode's
+ * `syntax.*` colour. Exported for `markdown.ts`, whose fenced blocks are
+ * highlighted by the same library, so the two paths cannot drift.
+ */
+export function highlightTheme(mode: SyntaxMode): Record<string, Styler> {
   // The MODE's tokens, not the active ones: `themeFor` caches per mode.
   const c = tokens[mode].syntax;
   const keyword = rgb(c.keyword);

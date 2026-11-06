@@ -38,12 +38,13 @@ import {
   canProbe as canProbeNow,
   initialLateFilter,
   initialProbe,
+  residueOf,
   restOf,
   stepLateFilter,
   stepProbe,
 } from "./terminal-background.ts";
 import { type ProcessLike, installTerminalRestore } from "./terminal.ts";
-import { type ThemeSetting, prepareTheme } from "./theme.ts";
+import { type ThemeSetting, prepareTheme, themeProbeResidue, themeProbeWasLate } from "./theme.ts";
 
 /** The slice of `process.stdin` the probe needs; a fake stands in for it in tests. */
 export interface ProbeStream {
@@ -51,8 +52,20 @@ export interface ProbeStream {
   setRawMode(enabled: boolean): unknown;
   on(event: string, listener: () => void): unknown;
   off(event: string, listener: () => void): unknown;
-  read(): string | null;
+  /** A fresh tty yields Buffers (no previous Ink mount set an encoding). */
+  read(): string | Buffer | null;
   unshift(chunk: string): unknown;
+}
+
+/**
+ * One chunk as LATIN1 text, which is what the parser needs (Review LOW 7): the
+ * 8-bit forms (`0x9d` OSC, `0x9c` ST, `0x9b` CSI) are single BYTES, and a utf8
+ * decode turns `0x9d` into a replacement character — losing the reply, or worse,
+ * splitting a multi-byte key. Latin1 maps every byte to one code unit, so the
+ * parser sees exactly what the terminal sent.
+ */
+function asLatin1(chunk: string | Buffer): string {
+  return typeof chunk === "string" ? chunk : chunk.toString("latin1");
 }
 
 /** The slice of the timer API the probe needs (a manual clock in tests). */
@@ -65,6 +78,12 @@ export interface ProbeTimer {
 export interface ProbeResult {
   readonly color: Rgb | null;
   readonly late: boolean;
+  /**
+   * The HEAD of a reply the timeout cut in half, for `stepLateFilter`'s
+   * `pending`: its tail arrives after the mount and must be stripped with it.
+   * `""` when nothing was held (or the sentinel settled the reply).
+   */
+  readonly residue?: string;
 }
 
 export interface ProbeOptions {
@@ -74,7 +93,6 @@ export interface ProbeOptions {
   /** `canProbe`'s verdict, computed by the caller (pure, in the other module). */
   readonly canProbe: boolean;
   readonly timer: ProbeTimer;
-  readonly now: () => number;
   /** For `installTerminalRestore`; `process` in production. */
   readonly proc?: ProcessLike;
   readonly timeoutMs?: number;
@@ -83,8 +101,6 @@ export interface ProbeOptions {
 export interface ProbeHandle {
   /** Resolves when the probe is over: the sentinel, the timeout, or not probing. */
   wait(): Promise<ProbeResult>;
-  /** Stop early (the caller needs the terminal): the TTY is restored first. */
-  cancel(): void;
 }
 
 /**
@@ -92,7 +108,7 @@ export interface ProbeHandle {
  * pointless. The returned handle settles exactly once.
  */
 export function probeBackground(options: ProbeOptions): ProbeHandle {
-  const { stdin, write, timer, now } = options;
+  const { stdin, write, timer } = options;
   const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
 
   if (!options.canProbe) {
@@ -101,7 +117,6 @@ export function probeBackground(options: ProbeOptions): ProbeHandle {
     // bytes land in whatever is reading stdout.
     return {
       wait: () => Promise.resolve({ color: null, late: false }),
-      cancel: () => {},
     };
   }
 
@@ -121,7 +136,7 @@ export function probeBackground(options: ProbeOptions): ProbeHandle {
       if (chunk === null) {
         break;
       }
-      state = stepProbe(state, chunk);
+      state = stepProbe(state, asLatin1(chunk));
     }
     if (state.sentinel) {
       finish(false);
@@ -152,7 +167,7 @@ export function probeBackground(options: ProbeOptions): ProbeHandle {
     uninstall();
     settled = true;
     resolve({ color: null, late: false });
-    return { wait: () => done, cancel: () => {} };
+    return { wait: () => done };
   }
   stdin.on("readable", onReadable);
   write(BACKGROUND_QUERY);
@@ -165,8 +180,8 @@ export function probeBackground(options: ProbeOptions): ProbeHandle {
     timer.clear(handle);
     stdin.off("readable", onReadable);
     uninstall();
-    // Every byte that was not part of a reply, in order — including a held prefix
-    // that turned out to be type-ahead (the pure module gives it back).
+    // Every byte that was not part of a reply, in order — a held prefix that
+    // turned out to be type-ahead is given back by the pure module.
     const rest = restOf(state);
     if (rest !== "") {
       stdin.unshift(rest);
@@ -180,13 +195,14 @@ export function probeBackground(options: ProbeOptions): ProbeHandle {
       }
     }
     // A TIMEOUT deliberately stays raw (step 5): dropping to cooked would make the
-    // tty echo a late reply, and `stepLateFilter` handles it instead.
-    resolve({ color: state.color, late: timedOut });
+    // tty echo a late reply, and `stepLateFilter` handles it instead. A reply cut
+    // by the timer is handed to that guard as its `pending`, so its tail is
+    // stripped with it rather than landing in the prompt (MEDIUM 4).
+    resolve({ color: state.color, late: timedOut, residue: timedOut ? residueOf(state) : "" });
   }
 
   return {
     wait: () => done,
-    cancel: () => finish(false),
   };
 }
 
@@ -207,7 +223,6 @@ export async function readThemeSetting(
         write: io.write,
         canProbe: io.canProbe,
         timer: io.timer,
-        now: io.now,
         proc: io.proc,
       });
       return handle.wait();
@@ -222,7 +237,6 @@ export interface ThemeProcessIo {
   readonly write: (text: string) => void;
   readonly canProbe: boolean;
   readonly timer: ProbeTimer;
-  readonly now: () => number;
   readonly proc: ProcessLike;
   readonly colorFgBg: string | undefined;
 }
@@ -244,7 +258,6 @@ export function processIo(): ThemeProcessIo {
       set: (callback, ms) => setTimeout(callback, ms),
       clear: (handle) => clearTimeout(handle),
     },
-    now: () => Date.now(),
     proc: process as unknown as ProcessLike,
     colorFgBg: process.env.COLORFGBG,
   };
@@ -259,7 +272,9 @@ export function processIo(): ThemeProcessIo {
  * way of any launch that got an answer.
  */
 export function lateGuard(stdin: NodeJS.ReadStream): NodeJS.ReadStream {
-  let filter = initialLateFilter(Date.now());
+  // Seeded with the HEAD of a reply the timeout cut in half (MEDIUM 4): its tail
+  // arrives after the mount, and only this seed makes it the same reply.
+  let filter = { ...initialLateFilter(Date.now()), pending: themeProbeResidue() };
   return new Proxy(stdin, {
     get(target, property, receiver) {
       if (property === "read") {
@@ -274,7 +289,7 @@ export function lateGuard(stdin: NodeJS.ReadStream): NodeJS.ReadStream {
             const step = stepLateFilter(filter, chunk, Date.now());
             filter = step.filter;
             if (step.pass !== "") {
-              return args.length > 0 ? step.pass : step.pass;
+              return step.pass;
             }
           }
         };

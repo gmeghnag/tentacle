@@ -291,6 +291,43 @@ describe("stepLateFilter", () => {
     expect(step.filter.pending).toBe("");
   });
 
+  test("a typed `]` held at the deadline reaches the prompt (LOW 6)", () => {
+    // A bare `]` is a key a person types (a regex, an index). Holding it while it
+    // could still become a reply is right, but the deadline used to DROP it
+    // silently; only reply RESIDUE may be dropped.
+    // Mutation: drop `pending` unconditionally at the deadline → "" here.
+    const held = stepLateFilter(initialLateFilter(), "]", 0);
+    expect(held.pass).toBe("");
+    const late = stepLateFilter(held.filter, "", LATE_GUARD_MS + 1);
+    expect(late.pass).toBe("]");
+    expect(late.filter.armed).toBe(false);
+  });
+
+  test("reply residue held at the deadline is still DROPPED (it is not the user's)", () => {
+    // The other side of the rule: a half reply can only be residue, whichever way
+    // its ESC went.
+    for (const residue of ["\x1b]11;rgb:1e", "]11;rgb:1e", "\x9d11;rgb:1e"]) {
+      const held = stepLateFilter(initialLateFilter(), residue, 0);
+      expect({ residue, pass: stepLateFilter(held.filter, "x", LATE_GUARD_MS + 1).pass }).toEqual({
+        residue,
+        pass: "x",
+      });
+    }
+  });
+
+  test("the residue rule needs the `11;` selector — a held `]` or `]1` is typing", () => {
+    // Mutation: loosen `isReplyResidue` to a bare introducer → these vanish.
+    for (const typed of ["]", "]1"]) {
+      const held = stepLateFilter(initialLateFilter(), typed, 0);
+      expect({ typed, held: held.filter.pending }).toEqual({ typed, held: typed });
+      // The deadline hands it back instead of dropping it.
+      expect({ typed, pass: stepLateFilter(held.filter, "", LATE_GUARD_MS + 1).pass }).toEqual({
+        typed,
+        pass: typed,
+      });
+    }
+  });
+
   test("normal typing while armed is untouched", () => {
     // Mutation: strip anything ESC-ish → "hello" would lose nothing, but "a]b" must survive.
     const step = stepLateFilter(initialLateFilter(), "hello a]b 11; rgb:", 0);

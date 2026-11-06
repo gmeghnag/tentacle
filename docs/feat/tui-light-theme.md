@@ -1,9 +1,11 @@
 # feat/tui-light-theme — Detect the terminal background, light palette
 
-> **Status:** implementation DONE — S1–S7 built, red-first with a proven mutation per
-> behaviour; gate green (`tsc --noEmit`, `biome check .`, `bun test packages`: 5176 pass,
-> 3 opt-in skips, 0 fail). Awaiting the mandatory fresh-context Review and the owner's
-> live checklist (Execution §"Owner's live checklist").
+> **Status:** fix round 1 DONE — Review's 2 HIGH and 2 MEDIUM fixed red-first with a proven
+> mutation each; 5–7 fixed or explicitly accepted; 8–10 fixed; the two owner answers
+> (`#6b6b6b` dim grey, `#2f4ba8` notice) applied. Gate green (`tsc --noEmit`,
+> `biome check .`, `bun test packages`: 5213 pass, 3 opt-in skips, 0 fail). The dark frame
+> diff main vs branch is BYTE-IDENTICAL. Still owed: the pty runs and the owner's live
+> checklist (Execution §"Fix round 1", §"Owner's live checklist").
 > **Branch:** `feat/tui-light-theme` (off `main` 47b0a51)
 > **Size:** L · **Blast:** load-bearing · **Suited:** AGENTS §10 rule for load-bearing: mandatory fresh-context Review that red-teams the stdin/terminal path
 
@@ -88,8 +90,11 @@ their output is in **Execution** at the end of this doc.
   from memory and marked as such. The design does not depend on it; the live checklist
   decides.
 
-Probes, all in `.tentacle/tmp/tui-light-theme/` (gitignored; the scripts are pasted in
-Execution because they do not survive):
+Probes, all in `.tentacle/tmp/tui-light-theme/` (gitignored, so they do not survive; they
+were RUN in that directory). **Correction (fix round 1, Review LOW 10):** this paragraph
+used to claim their scripts "are pasted in Execution" — they were not, so the pty table
+could not be reproduced from the doc. The numbers are evidence; the scripts are not
+recoverable, and the fix round's own scripts ARE pasted in Execution §"Fix round 1".
 
 | Script | Decides |
 |---|---|
@@ -912,6 +917,17 @@ the late-DA1, Esc-in-window and cut-reply cases, a main-vs-branch dark frame dif
   (7.80 / 7.23 / 5.61): still blue, clears the gate, keeps "all but the accent" true, and notices carry
   information, unlike bullets. Keep `#3b5bdb` if the exact hue matters more on truecolor (3.54 only at 256).
 
+### Owner answers (fix round 1)
+
+*Recorded 2026-11-06 by the orchestrator, from the owner's reply to the Review.*
+
+- **Q-A. YES** — light dim grey **`#6b6b6b`** (replaces `#6b6b6f`). Applied: `tokens.light.subtle` /
+  `.dim` / `.gutter` / `.md.quote` / `.md.del` (`theme.ts`). Measured 5.33 / 4.94 / **5.25**;
+  `#6b6b6f` was 3.59 at 256.
+- **Q-B. Light notice blue `#2f4ba8`** (replaces `#3b5bdb`). Measured 7.80 / 7.23 / **5.61**, so
+  the accent is the **ONLY** 256-colour exception again and `EXCEPT_256` in
+  `theme-contrast.test.ts` holds one named entry.
+
 ---
 
 ## Owner questions
@@ -947,3 +963,327 @@ Review can overrule in one line:
 Same class, no owner input needed (visually indistinguishable, and the owner's own 256
 gate decides it): `#6b6b6f` → **`#6b6b6b`** for the dim greys (`#6b6b6f` measures 3.59 at
 256 — see *Refresh drift* 1).
+### Fix round 1
+
+*— deepseek-v4.1-flash (tentacle), 2026-11-06*
+
+The Review's verdict was REQUEST-CHANGES (2 HIGH, 2 MEDIUM, 6 LOW). Every fix below was
+RED first (the test run against the unfixed code, output quoted) and carries ONE proven
+mutation. **Scratch is only `./.tentacle/tmp/tui-light-theme/`** (AGENTS §6); no `bak-*`
+at the repo root, no `/tmp`, no git state change, and every restore is `shasum -c`-checked
+inside the helper below (`git status` at the end shows no mutation left).
+
+The two owner answers are recorded above (`### Owner answers (fix round 1)`) and applied.
+
+#### HIGH 1 — Markdown and fenced code for light mode (S4 / §Files 4)
+
+- **Changed:** `packages/tui/src/markdown.ts` rewritten (16 → 83 lines): one `new Marked(...)`
+  per mode, built lazily and cached (`renderers`, `:60-75`); light gets `lightOptions()`
+  (`:44-58`, the six `md.*` tokens with the library's emphasis ATTRIBUTES kept) plus
+  `{ theme: highlightTheme("light") }` for fences; **dark passes no options at all**, so it
+  is the exact `marked.use(markedTerminal())` singleton it replaced. `read-highlight.ts:113`
+  exports `highlightTheme` so both paths share one cli-highlight theme.
+- **Red:** `markdown.test.ts` extended (52 → 149 lines, **not** overwritten): 6 of the 12
+  tests failed on the old code — `[33m` (ANSI yellow) inline code, magenta/green headings,
+  blue links, a `\x1b[90m` `<div>`, `\x1b[2m\x1b[90m` strikethrough, and a fence with no
+  light tokens (`Expected "…95;28;178mconst", Received "    const x = 1;"`).
+- **Green:** 12/12. Dark parity was checked the hard way too: a scratch script rendered 16
+  Markdown samples through the OLD module and the NEW one at `FORCE_COLOR=3` and
+  `diff` reported **no difference** (2198 bytes).
+- **Mutation (M1):** light mode falls back to `new Marked(markedTerminal())` (the exact bug)
+  → **6 fail**, restored, shasum OK.
+- `tokens.*.md` is now painted by production code, so `theme-contrast.test.ts`'s six `md.*`
+  rows gate something real.
+
+#### HIGH 2 — `tentacle connect <url> --resume` (TDZ in the picker closure)
+
+- **Changed:** `packages/cli/src/main.ts:520-530` — the `connect` branch hands `connectTui`
+  the bare `pick` (no closure over `config`), and `packages/cli/src/connect.ts:190-203`
+  passes the `connectTheme` result into it: `pick: (choices) => deps.pick(choices, { theme })`.
+  `ConnectDeps.pick`'s doc says why a caller cannot supply it earlier (`:129-137`).
+- **Red:** the NEW `packages/cli/test/connect-resume-main.test.ts` runs the real command
+  through `main` against a real `serve` daemon with two sessions; the injected picker
+  cancels, so nothing mounts. On the unfixed tree:
+  `Received: "\n[connect error] Cannot access 'config' before initialization.\n"` — the
+  Review's trace, reproduced.
+- **Green:** 1/1 — the picker IS asked, with `theme: "light"` from the config file.
+- **Mutation (M2):** the picker is handed `{ theme: undefined }` → `Expected "light",
+  Received undefined`, 1 fail, restored, shasum OK.
+- Also corrects Implementation §6's false "connect never loads config" (both the Review and
+  the Context §Findings already said otherwise; §Design 6 describes `readFileConfig`).
+
+#### MEDIUM 3 — a late DA1 with no OSC leaked into the prompt
+
+- **Changed:** `terminal-background.ts` — `LONE_SENTINEL` + its branch in `stepLateFilter`
+  (`:548-557`) strips a DA1 that arrives with no OSC before it (and disarms);
+  `continueSentinel` (`:410-413`) holds only *framed* halves (`ESC[`, `\x9b`, `[?…`), so a
+  bare `[` is still typing.
+- **Red:** `terminal-background-handover.test.ts` (new, 18 tests) against HEAD's module
+  (a `git show HEAD:` copy in scratch, READ-ONLY w.r.t. git):
+  `Expected: "" / Received: "[?1;2c"` for a lone DA1; the OSC+DA1-in-one-chunk case already
+  passed.
+- **Green:** 18/18, plus `terminal-background.test.ts` (35) and `-spec` (5) unaffected.
+- **Mutation:** folded into M6 below (the file's guard is one behaviour); the
+  lone-DA1 branch has its own red evidence above.
+
+#### MEDIUM 4 — `restOf` ignored `pending`
+
+- **Changed:** `restOf` (`terminal-background.ts:334-346`) now returns `rest + pending` when
+  a SENTINEL settled the reply (nothing more can come), and `rest + pending` for a lone
+  `ESC` — never dropping a keystroke. A held tail that is cut REPLY is handed to the late
+  guard instead: new `residueOf` (`:348-361`) → `ProbeResult.residue`
+  (`terminal-background-probe.ts:69-76`) → `PreparedTheme.residue` / `themeProbeResidue()`
+  (`theme.ts`) → `lateGuard` seeds `pending` with it (`terminal-background-probe.ts:274-277`).
+- **Red:** against HEAD: `lone ESC restOf = "" (expected "\u001b")` and
+  `cut reply restOf = "" held: "\x1b]11;rgb:1e"`; type-ahead after a sentinel came back as
+  `"ab"` instead of `"ab\x1b["`.
+- **Green:** 18/18 handover + `theme-prepare.test.ts` 15 (3 new: the residue is carried, the
+  normal path carries none).
+- **Mutation:** M6 (deadline drops the held bytes) is the same rule's other half, and the
+  `residueOf` hand-off is covered by the new `theme-prepare` assertion (drop `residue` from
+  the result → the guard starts empty and the tail leaks).
+
+#### LOW 5 — the "mount throws → cooked TTY" row was false. FIXED
+
+`restore()` only wrote `LEAVE_FULLSCREEN`; nothing called `setRawMode(false)`, and
+`render()` is outside the `try`. Now the decision is a pure, tested function —
+`restoreTerminalOnExit(target, { fullscreen, probeWasLate })` (`terminal.ts:44-77`) — and
+`startTui` calls it in its `finally` (`run.tsx:100-116`). Red-first: `terminal.test.ts` got
+4 tests (mutation M5: `if (false)` replaces the raw fix → **2 fail**).
+
+#### LOW 6 — a typed `]` was held, and dropped at the deadline. FIXED (the drop, not the hold)
+
+The hold itself is right (a reply split after its `]` must still be stripped), so the
+**silent loss** is what changed: at the deadline `stepLateFilter` now hands a held candidate
+back to the user unless it can only be reply residue (`isReplyResidue`,
+`terminal-background.ts:462-472`, applied at `:503-511`). Red-first: a `]` held then hit by
+the deadline used to vanish. Mutation M6 (restore `pass: chunk`) → 1 fail.
+
+#### LOW 7 — byte handling vs the plan/comments. PARTLY FIXED, one part ACCEPTED
+
+- **FIXED** `#RRRGGGBBB`: `parseHash` accepts 9 digits (3 per channel), as Design §1 lists.
+  Red-first in the new `terminal-background-spec.test.ts` (a 9-digit reply returned `null`).
+- **FIXED** the latin1 claim: `ProbeStream.read()` may return a `Buffer` and the driver
+  decodes it **latin1** (`asLatin1`, `terminal-background-probe.ts:44-56`), so the 8-bit
+  `0x9d`/`0x9c`/`0x9b` forms survive and a multi-byte key cannot be split by a utf8 decode.
+  Red-first: a Buffer chunk of `\x9d…\x9c\x9b?1;2c` timed out (5 s) on the old code.
+  Mutation M7 (`String(chunk)`, i.e. utf8) → same 5 s timeout, 1 fail.
+- **ACCEPTED, with reason:** a GARBAGE reply (`rgb:zz/…`) split across chunks still comes
+  back as a garbage line instead of being swallowed. Consuming it would mean holding a
+  buffer that is NOT a valid prefix of a spec — and that is exactly the case a real tty
+  produces when a keystroke lands INSIDE a reply (`\x1b]11;rgb` + `bc`), where holding would
+  silently eat the keystroke (`terminal-background.test.ts:210-220` pins that). A garbage
+  line in the editor beats losing what the user typed, which is the plan's own failure row.
+  `parseColorSpec` still answers `null`, so the palette falls back; nothing is misparsed.
+
+#### LOW 8 — dead code and a bypassed pure seam. FIXED
+
+- `decide` (`theme.ts:406-425`) now CALLS `resolveMode` instead of reimplementing the
+  precedence, so the tested rule and the shipped rule are one function.
+- Deleted (no production caller, nothing they bought): `ProbeOptions.now`, `ProbeHandle.cancel`
+  and its two stubs, `ThemeProcessIo.now`, `ThemeProcessIo`'s duplicate `now`, and the
+  `args.length > 0 ? step.pass : step.pass` no-op ternary at `lateGuard`.
+- Every `now: () => 0` in `terminal-background-probe.test.ts` is gone with the seam.
+
+#### LOW 9 — test seams. FIXED (the two that were cheap and real)
+
+`theme-no-stray.test.ts` now also catches `color={"gray"}` (`/\b(color|borderColor)=\s*\{?\s*["'`]/`,
+the old rule only saw `color="…"`) and a `color: "x"` object literal. Mutation M4:
+`color={"gray"}` in `Thinking.tsx` → 1 fail.
+**Not done, disclosed:** the contrast rows are still a hand list, so a NEW token can skip the
+gate; making the gate enumerate `tokens.light` itself needs a per-token background map for
+the tinted ones, which the hand list already encodes. `startTui`/`pickSession` wiring still
+has no unit test — HIGH 2 is now covered through `main`, and the remaining gap is the Ink
+mount itself (no real-terminal test in this repo, TODO.md).
+
+#### LOW 10 — the record. CORRECTED
+
+- *Refresh drift* 1's "every other light value … confirmed exactly as planned" was **false**:
+  S3 also changed `success`/`meter.low` (`#116329` → `#084718`) and
+  `md.heading`/`syntax.keyword`/`md.firstHeading` (`#5f1cb2`). Corrected in place, with the
+  measured before/after.
+- The "scripts are pasted in Execution" claim for the S1–S7 probes is corrected: they were
+  never pasted and are gone (`.tentacle/` is gitignored). This round's scripts ARE pasted
+  below.
+- `theme.ts:13` / `:174` pointed at the wrong test file (`theme.test.ts` holds dark
+  byte-identity; `theme-contrast.test.ts` holds the ratios). Fixed, and both now correct.
+- The false "implementation DONE" header is replaced by this round's status.
+
+#### Q-A / Q-B applied, and the gate kept honest
+
+`tokens.light.notice` is **`#2f4ba8`** (`theme.ts:163`) and `EXCEPT_256` in
+`theme-contrast.test.ts` holds **one** entry, `accent`; the test pins that list
+(`toMatchObject`-style: `Object.keys(...)` = `["accent"]`). Mutations: back to `#3b5bdb` →
+3.54 at 256, **4 failures** (the ratio test names every failing row). The dim greys were
+already `#6b6b6b` (`#6b6b6f` measures 3.59 at 256); Q-A ratifies them and the measurement is
+pasted below. `notice-palette.test.ts`'s pin moved with the owner's answer.
+
+Measured (`.tentacle/tmp/tui-light-theme/qa-qb.ts`, chalk's real 256 downgrade):
+
+```
+Q-A dim grey (replaces #6b6b6f) #6b6b6b: true 5.33 / Sol 4.94 / 256 5.25
+   rejected #6b6b6f #6b6b6f: true 5.31 / Sol 4.92 / 256 3.59
+Q-B notice (replaces #3b5bdb) #2f4ba8: true 7.80 / Sol 7.23 / 256 5.61
+   rejected #3b5bdb #3b5bdb: true 5.67 / Sol 5.25 / 256 3.54
+accent (Q3 exception) #0e7490: true 5.36 / Sol 4.97 / 256 4.13
+```
+
+#### Step 6 — the dark-mode frame diff, main vs branch
+
+`.tentacle/tmp/tui-light-theme/frame-diff.ts` finds `main`'s checkout with `git worktree
+list` (READ-ONLY: it is only read) and renders the same three `App` frames on BOTH sides,
+each in its own process so each uses its own React/Ink copy (`frame-render.ts <root>`).
+`FORCE_COLOR=3` because the frames are piped (chalk would otherwise be level 0, and the diff
+would compare two uncoloured renders and prove nothing).
+
+```
+main   : /Users/gmeghnag/tentacle
+branch : /Users/gmeghnag/tentacle/.tentacle/worktrees/tui-light-theme
+frame 0: IDENTICAL (1285 bytes, 23 rows, 62 SGR)
+frame 1: IDENTICAL (1269 bytes, 23 rows, 60 SGR)
+frame 2: IDENTICAL (1346 bytes, 23 rows, 66 SGR)
+
+RESULT: dark frames BYTE-IDENTICAL (3 frames)
+```
+
+**Non-vacuity:** those frames really are the palette — the branch frame contains the dark
+accent `38;2;6;182;212` and the dark Markdown yellow `\x1b[33m`, and none of the light
+values (`14;116;144`, `149;56;0`) appears. The three frames are: the resumed transcript, the
+same with a message being typed, and the same after Enter (a streamed turn).
+
+Scripts (paste-ready):
+
+```ts
+// .tentacle/tmp/tui-light-theme/frame-render.ts — one side, one process
+const root = process.argv[2];                      // "/Users/gmeghnag/tentacle" or this worktree
+if (!root) { console.error("usage: bun frame-render.ts <repo-root>"); process.exit(2); }
+const base = root.endsWith("/") ? root : `${root}/`;
+const { createElement: h } = await import(`${base}packages/tui/node_modules/react/index.js`);
+const { render } = await import(`${base}packages/tui/node_modules/ink-testing-library/build/index.js`);
+const { App } = await import(`${base}packages/tui/src/App.tsx`);
+const { messagesToItems } = await import(`${base}packages/tui/src/resume.ts`);
+
+const MESSAGES = [
+  { role: "user", content: "please edit the parser" },
+  { role: "assistant", content: "# Findings\n\nThe parser is `strict` and [documented](https://example.com).\n\n- one\n- two\n\n> quoted\n\n```ts\nconst x: number = 1;\n```\n\n~~gone~~ and **bold**." },
+  { role: "user", content: "- old line\n+ new line\n" },
+];
+function session() {
+  return { async *send() {
+    yield { type: "text", delta: "a streamed reply with `code` and a [link](https://x.y)" };
+    yield { type: "usage", usage: { promptTokens: 5000, completionTokens: 20 } };
+    yield { type: "turn_end", reason: "end_turn" };
+  } };
+}
+const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+const frames = [];
+const instance = render(h(App, { createSession: session, model: "m", cwd: "/tmp", initialItems: messagesToItems(MESSAGES) }));
+await settle(80);  frames.push(instance.lastFrame() ?? "");
+instance.stdin.write("typing a message");
+await settle(80);  frames.push(instance.lastFrame() ?? "");
+instance.stdin.write("\r");
+await settle(200); frames.push(instance.lastFrame() ?? "");
+instance.unmount();
+process.stdout.write(JSON.stringify({ root: base, frames }));
+```
+
+```ts
+// .tentacle/tmp/tui-light-theme/frame-diff.ts — both sides, byte for byte
+import { execFileSync } from "node:child_process";
+const here = new URL(".", import.meta.url).pathname;
+const worktree = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: here, encoding: "utf8" }).trim();
+function mainCheckout(): string {
+  for (const line of execFileSync("git", ["worktree", "list"], { cwd: worktree, encoding: "utf8" }).split("\n")) {
+    const m = /^(\S+)\s+[0-9a-f]+\s+\[main\]/.exec(line.trim());
+    if (m?.[1]) return m[1];
+  }
+  throw new Error("no main worktree");
+}
+const render = (root: string): { frames: string[] } =>
+  JSON.parse(execFileSync(process.execPath, ["frame-render.ts", root], {
+    cwd: here, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+    env: { ...process.env, FORCE_COLOR: "3", COLUMNS: "100" },   // piped ⇒ chalk level 0 without this
+  }));
+const left = render(mainCheckout());
+const right = render(worktree);
+let differences = 0;
+for (let i = 0; i < Math.min(left.frames.length, right.frames.length); i++) {
+  const a = left.frames[i] ?? "", b = right.frames[i] ?? "";
+  if (a === b) console.log(`frame ${i}: IDENTICAL (${a.length} bytes, ${(a.match(/\x1b\[/g) ?? []).length} SGR)`);
+  else { differences += 1; console.log(`frame ${i}: DIFFERS\n  main  : ${JSON.stringify(a)}\n  branch: ${JSON.stringify(b)}`); }
+}
+console.log(differences === 0 ? "RESULT: BYTE-IDENTICAL" : `RESULT: ${differences} difference(s)`);
+process.exit(differences === 0 ? 0 : 1);
+```
+
+```sh
+# .tentacle/tmp/tui-light-theme/mutate.sh — ONE mutation, red-first, restore PROVEN in-loop
+set -eu
+HERE="$(cd "$(dirname "$0")" && pwd)"; cd "$HERE/../../.."
+TARGET="$1"; TESTFILE="$2"; DESC="${3:-mutation}"
+cp "$TARGET" "$HERE/.mutate.bak"; shasum "$TARGET" > "$HERE/.mutate.sha"
+BEFORE=$(shasum "$TARGET" | cut -d' ' -f1)
+sh "$HERE/mutate-body.sh" "$TARGET"                      # the caller's edit
+[ "$(shasum "$TARGET" | cut -d' ' -f1)" = "$BEFORE" ] && { echo "NOT APPLIED: $DESC"; cp "$HERE/.mutate.bak" "$TARGET"; exit 3; }
+set +e; bun test "$TESTFILE" 2>&1 | tail -12; set -e       # RED evidence
+cp "$HERE/.mutate.bak" "$TARGET"
+shasum -c "$HERE/.mutate.sha" || { echo "RESTORE FAILED — STOP"; exit 2; }   # IN the loop
+rm -f "$HERE/.mutate.bak" "$HERE/.mutate.sha"
+echo "MUTATION '$DESC' DONE"
+```
+
+```ts
+// .tentacle/tmp/tui-light-theme/qa-qb.ts — the two owner answers, measured
+import { Chalk } from "../../../packages/tui/node_modules/chalk/source/index.js";
+const c256 = new Chalk({ level: 2 });
+const XTERM: number[][] = (() => {
+  const base = [[0,0,0],[128,0,0],[0,128,0],[128,128,0],[0,0,128],[128,0,128],[0,128,128],[192,192,192],[128,128,128],[255,0,0],[0,255,0],[255,255,0],[0,0,255],[255,0,255],[0,255,255],[255,255,255]];
+  const cube = [0,95,135,175,215,255]; const out = [...base];
+  for (const r of cube) for (const g of cube) for (const b of cube) out.push([r,g,b]);
+  for (let i = 0; i < 24; i++) { const v = 8 + i * 10; out.push([v,v,v]); }
+  return out;
+})();
+const at = (hex: string, bg = false): number[] =>
+  XTERM[Number(/(?:38|48);5;(\d+)/.exec((bg ? c256.bgHex(hex) : c256.hex(hex))("X"))?.[1])] ?? [0,0,0];
+const rgb = (h: string): number[] => [0,2,4].map((i) => parseInt(h.replace("#","").slice(i,i+2), 16));
+const L = ([r,g,b]: number[]): number => { const c = (v: number) => { const s = v/255; return s <= 0.03928 ? s/12.92 : ((s+0.055)/1.055)**2.4; }; return 0.2126*c(r)+0.7152*c(g)+0.0722*c(b); };
+const ratio = (a: number[], b: number[]): number => { const la = L(a), lb = L(b); return la > lb ? (la+0.05)/(lb+0.05) : (lb+0.05)/(la+0.05); };
+const W = rgb("#ffffff"), S = rgb("#fdf6e3");
+for (const [name, hex] of [["dim grey", "#6b6b6b"], ["rejected", "#6b6b6f"], ["notice", "#2f4ba8"], ["rejected", "#3b5bdb"], ["accent", "#0e7490"]] as const)
+  console.log(`${name} ${hex}: true ${ratio(rgb(hex), W).toFixed(2)} / Sol ${ratio(rgb(hex), S).toFixed(2)} / 256 ${ratio(at(hex), at("#ffffff")).toFixed(2)}`);
+```
+
+#### Gate
+
+Every mutation of this round, one per fix, each RED then restored with `shasum -c` inside
+`mutate.sh` (no restore failure, nothing left in the tree):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | light Markdown falls back to the dark renderer | 6 fail |
+| M2 | the picker is handed `{ theme: undefined }` | 1 fail |
+| M3 | light notice back to the ungated `#3b5bdb` | 4 fail |
+| M4 | `color={"gray"}` in `Thinking.tsx` | 1 fail |
+| M5 | the throw path leaves the tty RAW | 2 fail |
+| M6 | the deadline drops a held `]` | 1 fail |
+| M7 | the chunk is decoded utf8, not latin1 | 1 fail |
+| M8 | the residue rule accepts a bare `]` | 2 fail |
+
+Plus MEDIUM 3/4's RED evidence taken against the COMMITTED module (`git show HEAD:<path>`
+into scratch, READ-ONLY w.r.t. git): lone DA1 `Received: "[?1;2c"`; `lone ESC restOf = ""`;
+type-ahead `"ab"` instead of `"ab\x1b["`.
+
+`bunx tsc --noEmit` clean; `bunx biome check .` clean (703 files, 0/0); `bun test packages`
+**5213 pass, 3 skip, 0 fail** across 356 files (the 3 opt-in skips: live-k8s, live-docker,
+real-socket keepalive).
+`tsc -p apps/mobile` is still not runnable here (no mobile `node_modules` in this worktree,
+as S1 recorded) and this task touches no mobile file.
+
+#### What this round does NOT verify
+
+- **No pty run.** The Review's *Required before re-review* asked for a pty trace of the
+  late-DA1, Esc-in-window and cut-reply cases. They are covered by pure-module tests with
+  the exact byte shapes (and the cut-reply hand-off end to end through `prepareTheme` →
+  `lateGuard`), but **no fake terminal was driven this round** — the previous round's
+  `pty_harness.py` is gone. That trace stays owed.
+- **The owner's live checklist** is untouched (real terminals, tmux, Terminal.app).

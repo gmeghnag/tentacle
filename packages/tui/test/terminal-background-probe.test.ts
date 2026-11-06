@@ -58,8 +58,8 @@ function fakeStream(options: { readable?: boolean } = {}) {
     stream,
     log,
     /** Feed a chunk as the terminal would, then run the readable listener. */
-    feed(chunk: string): void {
-      queue.push(chunk);
+    feed(chunk: string | Buffer): void {
+      queue.push(chunk as string);
       for (const listener of [...listeners]) {
         listener();
       }
@@ -116,13 +116,35 @@ describe("raw mode is ON before the query is written", () => {
       write: (s) => written.push(s),
       canProbe: canProbeNow(ok),
       timer: timer.timer,
-      now: () => 0,
     });
     // Mutation: write before setRawMode → the log starts with the write instead,
     // and a fast reply would be ECHOED by the tty (measured on a real pty).
     expect(stdin.log[0]).toBe("raw:true");
     expect(stdin.log[1]).toBe("on:readable");
     expect(written).toEqual([BACKGROUND_QUERY]);
+  });
+});
+
+describe("the chunk is read as LATIN1 (Review LOW 7)", () => {
+  test("a Buffer chunk's 8-bit OSC/ST are seen as bytes, not replacement chars", () => {
+    // A fresh tty yields Buffers, and `0x9d`/`0x9c` are single BYTES. Decoded as
+    // utf8 they become U+FFFD, so the 8-bit reply would be lost (and a multi-byte
+    // key split across chunks corrupted).
+    // Mutation: read the Buffer as a string (`String(chunk)`) → colour null here.
+    const stdin = fakeStream();
+    const timer = fakeTimer();
+    const handle = probeBackground({
+      stdin: stdin.stream,
+      write: () => {},
+      canProbe: canProbeNow(ok),
+      timer: timer.timer,
+    });
+    const bytes = Buffer.from("\x9d11;rgb:1e1e/1e1e/1e1e\x9c\x9b?1;2c", "latin1");
+    stdin.feed(bytes);
+    return handle.wait().then((result) => {
+      expect(result.color).toEqual([30, 30, 30]);
+      expect(result.late).toBe(false);
+    });
   });
 });
 
@@ -135,7 +157,6 @@ describe("a terminal that answers", () => {
       write: () => {},
       canProbe: canProbeNow(ok),
       timer: timer.timer,
-      now: () => 0,
     });
     stdin.feed("\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\\x1b[?1;2c");
     const done = await result.wait();
@@ -153,7 +174,6 @@ describe("a terminal that answers", () => {
       write: () => {},
       canProbe: canProbeNow(ok),
       timer: fakeTimer().timer,
-      now: () => 0,
     });
     stdin.feed("ab\x1b]11;rgb:ffff/ffff/ffff\x1b\\c\x1b[?1;2c");
     const done = await result.wait();
@@ -172,7 +192,6 @@ describe("a terminal that stays silent", () => {
       write: () => {},
       canProbe: canProbeNow(ok),
       timer: timer.timer,
-      now: () => 0,
     });
     expect(timer.ms).toBe(PROBE_TIMEOUT_MS);
     timer.fire();
@@ -194,7 +213,6 @@ describe("a terminal that stays silent", () => {
       write: () => {},
       canProbe: canProbeNow(ok),
       timer: timer.timer,
-      now: () => 0,
     });
     // Mutation: no timer at all → this hangs, and the assertion never runs.
     expect(timer.armed).toBe(true);
@@ -211,7 +229,6 @@ describe("when there is nothing to probe", () => {
       write: (s) => written.push(s),
       canProbe: canProbeNow({ ...ok, stdinTty: false }),
       timer: fakeTimer().timer,
-      now: () => 0,
     });
     const done = await result.wait();
     expect(written).toEqual([]);
@@ -227,7 +244,6 @@ describe("when there is nothing to probe", () => {
       write: () => {},
       canProbe: canProbeNow(ok),
       timer: fakeTimer().timer,
-      now: () => 0,
     });
     stdin.feed("\x1b]11;rgb:zz/00/00\x1b\\\x1b[?1;2c");
     const done = await result.wait();
@@ -260,7 +276,6 @@ describe("a signal in the raw window", () => {
       write: () => {},
       canProbe: canProbeNow(ok),
       timer: fakeTimer().timer,
-      now: () => 0,
       proc,
     });
     void result;
@@ -277,7 +292,6 @@ describe("the hand-over leaves stdin clean for Ink", () => {
       write: () => {},
       canProbe: canProbeNow(ok),
       timer: fakeTimer().timer,
-      now: () => 0,
     });
     // The sentinel is what ends the probe; a reply without it would wait out the
     // timeout, which is the next test's subject.

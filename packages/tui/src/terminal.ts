@@ -31,6 +31,39 @@ export interface ProcessLike {
 const SIGNAL_EXIT: Readonly<Record<string, number>> = { SIGINT: 130, SIGTERM: 143 };
 
 /**
+ * Put the terminal back the way a TUI found it (docs/feat/tui-light-theme.md,
+ * Review LOW 5). Pure of Ink: every effect is injected, so the "what" is tested
+ * without a TTY (`run.test.ts`), and `startTui` only calls it.
+ *
+ * Two independent things can be left on:
+ *   - the alternate screen / mouse reporting / bracketed paste, when the TUI ran
+ *     fullscreen (`LEAVE_FULLSCREEN` is the exact inverse of `ENTER_FULLSCREEN`);
+ *   - RAW mode, when the background probe timed out — it deliberately stays raw so
+ *     a late reply is never echoed, and Ink's own unmount normally turns it off.
+ *     A mount that throws never gets there, so this path must cook the tty itself.
+ */
+export interface RestoreTarget {
+  readonly write: (text: string) => void;
+  readonly setRawMode?: ((enabled: boolean) => unknown) | undefined;
+}
+
+export function restoreTerminalOnExit(
+  target: RestoreTarget,
+  state: { readonly fullscreen: boolean; readonly probeWasLate: boolean },
+): void {
+  if (state.fullscreen) {
+    target.write(LEAVE_FULLSCREEN);
+  }
+  if (state.probeWasLate) {
+    try {
+      target.setRawMode?.(false);
+    } catch {
+      // Already gone (a closed pty): nothing left to restore.
+    }
+  }
+}
+
+/**
  * Wire `restore` to normal exit and to SIGINT/SIGTERM. `restore` runs at most
  * once however the process ends. On a signal it runs, then the process exits
  * `128 + signum`. Returns a teardown that removes every listener this installed.

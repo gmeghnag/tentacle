@@ -130,7 +130,12 @@ export interface ConnectDeps {
   /** A channel factory for the daemon at `url` (rejects with a `ChannelError`). */
   readonly dial: (url: string, options: ClientConnectOptions) => () => Promise<DuplexChannel>;
   readonly startTui: typeof startTui;
-  /** The pre-mount `--resume` picker (a terminal only); absent → the newest resumes. */
+  /**
+   * The pre-mount `--resume` picker (a terminal only); absent → the newest resumes.
+   * `options.theme` is the palette `connectTheme` settled — the picker must paint
+   * the same one the TUI that follows will (a caller cannot supply it earlier: the
+   * setting comes from the config FILE, which only `connectTui` reads).
+   */
   readonly pick?: SessionPick;
 }
 
@@ -184,8 +189,21 @@ export async function connectTui(
   };
   try {
     await client.initialize();
-    // Before Ink mounts (AGENTS §7): the list, the picker, the eager attach.
-    const first = await resumeFirst(client, options, deps, write);
+    // Before Ink mounts (AGENTS §7): the list, the picker, the eager attach. The
+    // picker is handed the palette `connectTheme` settled (HIGH 2: the caller
+    // CANNOT know it — `connect` loads no config — and a closure over its own
+    // `config` was read before that `let` existed).
+    const first = await resumeFirst(
+      client,
+      options,
+      deps.pick === undefined
+        ? deps
+        : {
+            ...deps,
+            pick: (choices) => (deps.pick as SessionPick)(choices, { theme }),
+          },
+      write,
+    );
     if (first === "cancelled") {
       return;
     }

@@ -19,6 +19,7 @@ import {
   LEAVE_FULLSCREEN,
   type ProcessLike,
   installTerminalRestore,
+  restoreTerminalOnExit,
 } from "./terminal.ts";
 import { type ThemeSetting, themeProbeWasLate } from "./theme.ts";
 
@@ -97,6 +98,19 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
   // A timed-out probe left the tty raw and a reply may still arrive: guard Ink's
   // input, or the reply is parsed as keystrokes. Otherwise Ink gets the real stdin.
   const stdin = themeProbeWasLate() ? lateGuard(process.stdin) : process.stdin;
+  /**
+   * The terminal, usable again: the alt-screen off and, after a timed-out probe,
+   * the tty COOKED (the probe deliberately stays raw so a late reply is not
+   * echoed, and a mount that throws never reaches Ink's own unmount). The
+   * decision itself is pure and tested in `terminal.ts` (Review LOW 5).
+   */
+  const restoreTerminal = (): void => {
+    uninstallRestore();
+    restoreTerminalOnExit(
+      { write: (text) => void process.stdout.write(text), setRawMode: process.stdin.setRawMode },
+      { fullscreen, probeWasLate: themeProbeWasLate() },
+    );
+  };
   const initialItems =
     options.resumeMessages && options.resumeMessages.length > 0
       ? messagesToItems(options.resumeMessages)
@@ -131,7 +145,6 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
   try {
     await instance.waitUntilExit();
   } finally {
-    restore();
-    uninstallRestore();
+    restoreTerminal();
   }
 }

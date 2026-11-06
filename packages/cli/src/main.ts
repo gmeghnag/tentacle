@@ -523,12 +523,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
           dial: webSocketChannelFactory,
           startTui,
           // The pre-mount picker, on a terminal only (as the local `--resume`).
-          ...(pick
-            ? {
-                pick: (choices: Parameters<typeof pickSession>[0]) =>
-                  pick(choices, { theme: config.tui?.theme ?? "auto" }),
-              }
-            : {}),
+          // The PALETTE is not passed here: `connect` loads no config, so
+          // `connectTui` hands its `connectTheme` result to this picker (HIGH 2
+          // — reading `config` here was a use before its `let`, a ReferenceError
+          // at the first multi-session `--resume`).
+          ...(pick ? { pick } : {}),
         },
       );
       return 0;
