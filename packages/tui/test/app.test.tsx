@@ -13,6 +13,8 @@ import { ToolRegistry, shellTool } from "@tentacle/tools";
 import chalk from "chalk";
 import { render } from "ink-testing-library";
 import stringWidth from "string-width";
+// A test only: the TUI's package never depends on the cli's.
+import { settingsShowLines } from "../../cli/src/settings-view.ts";
 import { App } from "../src/App.tsx";
 import { BLINK_HALF_MS } from "../src/blink.ts";
 import * as format from "../src/format.ts";
@@ -620,28 +622,21 @@ describe("App", () => {
     unmount();
   });
 
-  test("/settings draws the block: every row keeps its indentation, comments at the end, the final line after it", async () => {
-    // Mutation: collapse or trim the rows (a per-line notice) → the nesting is gone.
+  test("/settings is ONE entry: title, block with its indentation, the count as its last line", async () => {
+    // Drawn from the real view-model. Mutation: trim the rows → the nesting is gone.
     const createSession = () => ({
       async *send() {
         // no model turn needed for this test
       },
-      settings: () => [
-        {
-          text: [
-            "{",
-            '  "model": {',
-            '    "contextWindow": 1000 // this terminal: 2000',
-            "  },",
-            '  "maxIterations": 7 // (container)',
-            "}",
-          ].join("\n"),
-        },
-        {
-          text: "1 differs from this terminal",
-          hint: "(/settings sync to use this terminal's values)",
-        },
-      ],
+      settings: () =>
+        settingsShowLines(
+          { contextWindow: 2000, maxIterations: 3 },
+          {
+            carried: { contextWindow: 1000, maxIterations: 7 },
+            overridden: {},
+            containerKeys: ["maxIterations"],
+          },
+        ),
       async updateSettings() {
         return [];
       },
@@ -655,19 +650,18 @@ describe("App", () => {
     stdin.write("\r");
     await delay(60);
     const rows = stripAnsi(lastFrame() ?? "").split("\n");
-    const start = rows.findIndex((row) => row.startsWith("⏺ {"));
+    const start = rows.findIndex((row) => row.startsWith("⏺ Session settings:"));
     expect(start).toBeGreaterThanOrEqual(0);
-    expect(rows.slice(start, start + 6).map((row) => row.trimEnd())).toEqual([
-      "⏺ {",
+    expect(rows.slice(start, start + 8).map((row) => row.trimEnd())).toEqual([
+      "⏺ Session settings:",
+      "  {",
       '    "model": {',
       '      "contextWindow": 1000 // this terminal: 2000',
       "    },",
-      '    "maxIterations": 7 // (container)',
+      '    "maxIterations": 7 // (container) this terminal: 3',
       "  }",
+      "  1 differs from this terminal (/settings sync to use this terminal's values)",
     ]);
-    expect(rows.join("\n")).toContain(
-      "⏺ 1 differs from this terminal (/settings sync to use this terminal's values)",
-    );
     unmount();
   });
 

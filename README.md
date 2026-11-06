@@ -208,6 +208,7 @@ Container config: { "maxIterations": 7 }
 `/settings` shows all the session's settings and how this terminal differs:
 
 ```
+Session settings:
 {
   "maxIterations": 7, // (container) this terminal: 3
   "tools": {

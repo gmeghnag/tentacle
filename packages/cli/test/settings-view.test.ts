@@ -29,9 +29,34 @@ const report = (r: Partial<SessionSettingsReport>): SessionSettingsReport => ({
 });
 
 describe("settingsShowLines: /settings alone", () => {
-  /** The block as the user reads it, one array item per row. */
-  const block = (lines: readonly { text: string }[]): string[] =>
-    (lines[0]?.text ?? "").split("\n");
+  /** The one entry's rows. */
+  const rows = (lines: readonly { text: string }[]): string[] => (lines[0]?.text ?? "").split("\n");
+  /** The JSON block as the user reads it, one array item per row: after the title, up to its `}`. */
+  const block = (lines: readonly { text: string }[]): string[] => {
+    const all = rows(lines);
+    return all.slice(1, all.lastIndexOf("}") + 1);
+  };
+  const SYNC_HINT = "(/settings sync to use this terminal's values)";
+
+  test("ONE entry: the title, the block, and the count as its last line, its command in the hint", () => {
+    // Mutation: the count as a second line → a second ⏺ bullet below the block.
+    const lines = settingsShowLines(
+      { maxIterations: 3 },
+      report({ carried: { maxIterations: 5 } }),
+    );
+    expect(lines).toEqual([
+      {
+        text: 'Session settings:\n{\n  "maxIterations": 5 // this terminal: 3\n}\n1 differs from this terminal',
+        hint: SYNC_HINT,
+      },
+    ]);
+  });
+
+  test("nothing to sync: the title and the block, no count and no hint", () => {
+    expect(
+      settingsShowLines({ maxIterations: 5 }, report({ carried: { maxIterations: 5 } })),
+    ).toEqual([{ text: 'Session settings:\n{\n  "maxIterations": 5\n}' }]);
+  });
 
   test("ALL the session's settings, one block, nested by section, in the table's order; no final line when it matches", () => {
     const mine: SessionSettings = {
@@ -89,11 +114,9 @@ describe("settingsShowLines: /settings alone", () => {
       "  }",
       "}",
     ]);
-    expect(lines[1]).toEqual({
-      text: "2 differs from this terminal",
-      hint: "(/settings sync to use this terminal's values)",
-    });
-    expect(lines).toHaveLength(2);
+    expect(rows(lines).at(-1)).toBe("2 differs from this terminal");
+    expect(lines[0]?.hint).toBe(SYNC_HINT);
+    expect(lines).toHaveLength(1);
   });
 
   test("a container-set key is marked, with this terminal's value when it differs, and is never counted", () => {
@@ -113,7 +136,8 @@ describe("settingsShowLines: /settings alone", () => {
       "  }",
       "}",
     ]);
-    expect(lines).toHaveLength(1);
+    expect(rows(lines).at(-1)).toBe("}");
+    expect(lines[0]?.hint).toBeUndefined();
   });
 
   test("a container-set key equal to this terminal's: only the mark", () => {
@@ -134,7 +158,7 @@ describe("settingsShowLines: /settings alone", () => {
       '  "maxIterations": 9 // (container) this terminal: 3',
       "}",
     ]);
-    expect(lines).toHaveLength(1);
+    expect(rows(lines).at(-1)).toBe("}");
   });
 
   test("a value only one side has: (default) on the other, and it counts", () => {
@@ -146,7 +170,7 @@ describe("settingsShowLines: /settings alone", () => {
       "  }",
       "}",
     ]);
-    expect(onlySession[1]?.text).toBe("1 differs from this terminal");
+    expect(rows(onlySession).at(-1)).toBe("1 differs from this terminal");
     const onlyMine = settingsShowLines({ contextWindow: 9000 }, report({}));
     expect(block(onlyMine)).toEqual([
       "{",
@@ -155,11 +179,11 @@ describe("settingsShowLines: /settings alone", () => {
       "  }",
       "}",
     ]);
-    expect(onlyMine[1]?.text).toBe("1 differs from this terminal");
+    expect(rows(onlyMine).at(-1)).toBe("1 differs from this terminal");
   });
 
   test("nothing at all: an empty block", () => {
-    expect(settingsShowLines({}, report({}))).toEqual([{ text: "{}" }]);
+    expect(settingsShowLines({}, report({}))).toEqual([{ text: "Session settings:\n{}" }]);
   });
 
   test("names the laptop does not know are dropped; any text is hidden", () => {
@@ -175,16 +199,16 @@ describe("settingsShowLines: /settings alone", () => {
     expect(lines.join("\n")).not.toContain("pod words");
     expect(lines.join("\n")).not.toContain("my plan");
     expect(lines.join("\n")).not.toContain("evil");
+    expect(lines).toHaveLength(1);
     expect(lines[0]?.split("\n")).toEqual([
+      "Session settings:",
       "{",
       '  "subagents": {',
       '    "agentTaskDescription": "(text differs)" // this terminal: (text differs)',
       "  }",
       "}",
-    ]);
-    expect(lines[1]).toBe(
       "1 differs from this terminal (/settings sync to use this terminal's values)",
-    );
+    ]);
   });
 
   test("the same description text reads '(same text)', with no comment", () => {
@@ -203,7 +227,9 @@ describe("settingsCommandLines: the states around a report", () => {
     expect(plain(settingsCommandLines({}, { open: true }))).toEqual([
       "This session takes its settings from the container's own config.",
     ]);
-    expect(settingsCommandLines({}, { open: true, report: report({}) })).toEqual([{ text: "{}" }]);
+    expect(settingsCommandLines({}, { open: true, report: report({}) })).toEqual([
+      { text: "Session settings:\n{}" },
+    ]);
   });
 });
 

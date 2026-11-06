@@ -154,11 +154,11 @@ function blockText(rows: readonly BlockRow[]): string {
 }
 
 /**
- * `/settings` alone: ALL the session's settings as one JSON block, nested by
- * section as in `config.jsonc`, with `// this terminal: <value>` and
- * `// (container)` comments. Then, only when a sync would change something,
- * `N differs from this terminal` with its hint. A container-set key is never
- * counted: a sync cannot change it.
+ * `/settings` alone, ONE transcript entry: the title, then ALL the session's
+ * settings as a JSON block, nested by section as in `config.jsonc`, with
+ * `// this terminal: <value>` and `// (container)` comments. Then, only when a
+ * sync would change something, `N differs from this terminal` as its last line,
+ * with the hint. A container-set key is never counted: a sync cannot change it.
  */
 export function settingsShowLines(
   mine: SessionSettings,
@@ -169,11 +169,12 @@ export function settingsShowLines(
   const rows = KEYS.filter((key) => running(report, key) !== undefined || syncable.has(key)).map(
     (key) => blockRow(key, report, mine, container, syncable),
   );
-  const lines: SettingsLine[] = [{ text: blockText(rows) }];
-  if (syncable.size > 0) {
-    lines.push({ text: `${syncable.size} differs from this terminal`, hint: SYNC_HINT });
-  }
-  return lines;
+  const text = `Session settings:\n${blockText(rows)}`;
+  return [
+    syncable.size > 0
+      ? { text: `${text}\n${syncable.size} differs from this terminal`, hint: SYNC_HINT }
+      : { text },
+  ];
 }
 
 /**
