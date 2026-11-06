@@ -447,7 +447,7 @@ Daily-driver work (done 2026-10-14):
       tools are parallel-safe to evaluate; setting `sequential` | `parallel`,
       default to recommend (owner's first idea: sequential). AFTER task 7
       and `context-reset`. Type: eval → feat · Blast: load-bearing.
-- [ ] **Parallel sub-agents** ([`docs/eval/parallel-agents.md`](docs/eval/parallel-agents.md);
+- [x] **Parallel sub-agents** — DONE as `feat/parallel-agents`, merged 745cf13 (2026-11-06; doc `docs/feat/parallel-agents.md`, follow-ups above) ([`docs/eval/parallel-agents.md`](docs/eval/parallel-agents.md);
       owner, 2026-10-25) — run several `agent_task` calls in parallel;
       setting `sequential` | `parallel`, default to recommend (owner's first
       idea: parallel). Separate task from parallel tools, evaluated
