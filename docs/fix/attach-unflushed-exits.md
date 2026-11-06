@@ -268,6 +268,40 @@ Also fix R2 (re-open of one entry shows the count replaced).
 
 The executor matched the owner's answers precisely, and each new test carries its mutation note. But it clobbered an existing test file, a §9 slip: a deleted regression test is a silent loss.
 
+### Review round 3
+
+*— claude-opus-5-5, 2026-11-06* (fresh context; scope `git show 748613e`)
+
+**Verdict: PASS** (LOW only).
+
+**Gate (run by me):** `bunx tsc --noEmit` clean · `bunx biome check .` clean (692 files) · `bun test packages`: **5101 pass, 3 skip (opt-in), 0 fail** (5104 tests, 347 files).
+
+#### Root cause — holds
+
+React runs one component's effects in declaration order: the `jobs.onExit` effect (`App.tsx:685`) runs before the `watchSession` effect (`App.tsx:1513`). `RemoteClient.onBackgroundExit` hands its backlog to the listener synchronously, so the old code called `runRef` inside the first effect. The send started before `watch` was subscribed. `RemoteSession.watch` (`remote-session.ts:243`) then replayed the buffered `history`, and the reset wiped the rows the turn had already shown. The fix removes that ordering itself (no wake before the watch). It is not a symptom patch: the history is still replayed in full, and the wake starts after it.
+
+#### Mutation (mine)
+
+`if (!watchedRef.current)` → `if (false && !watchedRef.current)`. T-TUI-6 failed: `order` was `["send","watch"]`, expected `["watch","send"]`. The mutation was **killed**. I restored App.tsx from a `cp` backup in `.tentacle/tmp`, and the `shasum` matched before and after (`af320692…`).
+
+#### Attacks tried
+
+- **Lost wake.** The deferred path does not touch `pending`. It calls `wakeIfPending`, which uses `setTimeout(0)`, so it runs after every mount effect and re-reads the gate. `wakeIfPendingRef` is assigned during render (`App.tsx:1062`), so it is non-null before any effect runs. `watch` is synchronous and cannot "fail" or "never resolve". Only `open()` is async, and the wake does not wait on it. If an open result lands after the wake has started, the reset takes the "own prompt not started at the cut" branch (`remote-session.ts:1118`). That rebuilds the turn instead of raising `history`, so the rows survive (not tested here; see L2). A turn already running at the timeout keeps the wake `pending`, and its end asks again.
+- **Double wake.** At mount, two `setTimeout`s fire: the backlog path and the mount effect (`App.tsx:1383`). The first one steps to `turn_started`, and the second then sees `wakeDue` false. T-TUI-6 pins exactly one `send`. Neither `wakeHanded` (T-TUI-3/4/6b) nor two terminals (T-TUI-5, the daemon slot) touch the guard.
+- **Exit after the watch.** `watchedRef` is true, so the inline path runs unchanged. The idle-exit test (`auto-wake.test.tsx:103`) and T-TUI-1/2 are green.
+- **Session switch / re-watch.** `swapSession` calls `watchSession` directly, and `watchedRef` stays true, which is correct because a subscription is live. If the effect re-runs on a dep change, cleanup and re-subscribe happen synchronously, so no exit is handled between them.
+- **§7.** No raw terminal write. The new branching is a one-line guard on a lifecycle ref (an effect-ordering fact, not view logic), so it is acceptable to keep it in the component.
+
+#### Findings
+
+1. **L1 — LOW: T-TUI-6b does not exercise the guard.** It stays green under my mutation, because `wakeHanded` was already deferred through the mount effect's `setTimeout`. It is coverage, not a round-3 regression test. Its name ("renders its wake live over the same replayed history") is accurate, so no action is needed.
+2. **L2 — LOW: the late-`open` ordering is untested.** An `open` result that arrives after the deferred wake has started relies on `remote-session.ts:1118`. That is pre-existing client behaviour, and live attach resolves `open` before Ink mounts. Follow-up only.
+3. **L3 — LOW: an unmount before the timeout.** The deferred `setTimeout` can still call `runRef` after an unmount within the same tick. This is the pre-existing `wakeIfPending` pattern, not new to this round.
+
+#### Executor behaviour
+
+The executor matched the root cause to the live repro, kept the fix minimal (two refs and one guard), and shipped a red-on-old test with a mutation note. That test is T-TUI-6, confirmed red above. This round has no §9 slips.
+
 ## Owner questions
 
 1. **Lost-slot wake (the TODO's second half).** Generalise the once-only re-pend (`handedWakeRef`) to every TUI continuation that loses the slot? *Recommendation: no.* A refused continuation usually lost to a turn that started after the exit, but a blanket retry costs an extra empty model call whenever the winner did flush, and two TUIs would chase each other. This fix also covers the exit the next time anyone attaches. Leave it and drop that half from the TODO entry.
