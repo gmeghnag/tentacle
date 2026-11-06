@@ -215,9 +215,116 @@ Not mutated: W-4 (no cap exists to remove), W-8 (pins the pre-existing ask-with-
 
 ## Review
 
-*— claude-sonnet-5-5, 2026-11-06*
+*— claude-opus-5-5, 2026-11-06* — fresh context, but the **same model as the executor** (Opus executed): blind spots we share could get past both passes.
 
-(empty until Execution)
+**Verdict: REQUEST-CHANGES.** There is one MEDIUM finding: a double wake when a TUI attaches during the daemon's wake. The daemon side holds. The double wake comes from where this feature meets `fix/attach-unflushed-exits` seam B (the client backlog), and the refinement does not cover that path.
+
+### Findings
+
+1. **MEDIUM — a TUI that attaches while the daemon's wake turn runs fires a second, empty continuation when that turn ends.** The refinement (`hosted-session.ts` `unflushedExits` → 0 while `wakeUnflushed === activeTurnId`) only closes seam **A** (the open reply's count). Seam **B** is still open.
+   - **The replay carries the exit.** When the session is detached, the session-level `background_exit` update (the exit callback, `hosted-session.ts:~500`) lands after the old cut and before the wake's `turn_start`. So an open during a wake turn that has not committed yet replays it.
+   - **The client queues it for the TUI.** `RemoteClient.deliver` (`remote-client.ts:1969-1984`) puts it in `exitBacklog`.
+   - **The TUI arms a wake from it.** The TUI's `jobs.onExit` (`App.tsx:~701`) steps `wakeStep exit`, so the wake is pending.
+   - **Nothing clears it.** A foreign turn (`onActivity`, `App.tsx:~1395-1445`) never steps `turn_started`. When the daemon's wake ends, `streamTurn`'s `finally` calls `wakeIfPending()` (`App.tsx:1303`), which sends `""` as a continuation. The agent's count is already 0, so that is an extra model turn with no new input.
+
+   This breaks the owner's "no double wake" rule. It also contradicts the Failure-modes row "Attach during a wake → no TUI wake, no empty continuation".
+
+   **Evidence:**
+   - *Daemon repro* (copy of the rig with absolute imports, `.tentacle/tmp/serve-autowake-review/repro.test.ts`): wake turn gated in the model, then a client opens.
+     ```
+     REPRO gated open {"sessionId":"S",…,"created":false,"resync":true}      ← no unflushedExits (seam A OK)
+     REPRO gated replay ["background_exit","turn_start","context_note"]     ← seam B: the exit is replayed
+     REPRO ask   replay ["tool_call","permission_request"]                   ← a held ask moved the cut: no exit
+     ```
+   - *TUI repro* (`tui-repro.test.ts`, ink-testing-library): `jobs.onExit` hands the backlog over synchronously, as `RemoteClient.onBackgroundExit` does. `watch` raises the running foreign wake turn, which is then ended.
+     ```
+     REPRO sends while wake runs: 0
+     REPRO sends after the daemon's wake ended: 1     ← the second wake
+     ```
+   - The control run (empty backlog) was **not run**: the permission sandbox refused the env var. From the code, nothing else sets `pending`.
+
+   **When it happens:** the window is the whole wake turn while it is model- or tool-bound, not a held ask. Reconnecting during a long auto-approved tool call is a plausible user path.
+
+   **Fix (executor's choice, red test first):**
+   - (a) **Recommended, daemon-side, no TUI change:** in `maybeWake`, commit/move the cut before `prompt()`. A mid-wake attach then gets the exit through the snapshot plus the turn's own flush note, not as a live `background_exit`. That is what a held ask already does by accident.
+   - (b) Client-side: drop backlog exits that a replayed `turn_start` follows in the same open.
+
+   Either way, add a test that drives `RemoteClient` (or the TUI) through an attach mid-wake and pins "one model call" end to end. W-7 asserts only seam A.
+2. **LOW — W-8 does not pin the reaper.** The plan's W-8 says "`reapExpired` past the TTL does not close it". The test checks `liveness().busy` but never runs the reaper. The property holds by code (`session-reaper.ts:65,99` skip `busy`), so this is a test gap only.
+3. **LOW — a user's Esc on any turn stops the daemon's wakes** until a later turn ends normally (`lastEndBad` on `cancelled`). This follows the rule as designed (D6) and the exits flush at the next prompt/attach. It is noted so the owner knows "cancel" covers the TUI's own turns too.
+
+### Gate (re-run by me, once)
+
+- `bunx tsc --noEmit`: clean.
+- `bunx biome check .`: `Checked 710 files … No fixes applied.` (the baseline).
+- `bun test packages`: **5266 pass · 3 skip · 0 fail** (the three opt-in skips). Same as Execution.
+
+### Mutation (mine, on the most load-bearing guard)
+
+`maybeWake`'s gate `attached: this.attachments.size` → `attached: 0` (cp backup → edit → test → cp restore → `shasum -c` **OK**, `git status` clean).
+
+| Test | Result |
+|---|---|
+| W-3 | red |
+| W-7 | red (3 model calls ≠ 2) |
+| W-7b | red |
+| others (14) | green |
+
+The guard is not vacuous. The executor's M1–M9 table is consistent with what the tests assert (not re-run one by one).
+
+### Premise table
+
+| Premise | Verdict |
+|---|---|
+| P1: job listeners fire in registration order; a swap registers after → D2 macrotask | TRUE (W-12 / M8) |
+| P2: `pendingExitCount` = unflushed exits; merged | TRUE |
+| P4: an ask with nobody attached is held and persisted; busy ⇒ not reaped (`session-reaper.ts:65,99`) | TRUE |
+| P5: no new persisted state, `DAEMON_RECORD_VERSION` unchanged | TRUE (diff touches no record code) |
+| P8: `serve` ignores carried settings; `config.autoWake` wired only in `reloadedHost` (`serve.ts:198`); `serve --stdio` / worker untouched | TRUE |
+| Design §6 row "TUI attaches while a daemon wake turn runs → nobody extra" | **FALSE** (finding 1) |
+
+### Attacks tried
+
+1. **Attach mid-wake (double wake):** FOUND (finding 1). Seam A holds (W-7/W-7b). Seam B leaks when the wake is model- or tool-bound. A held ask does not leak (the cut moved).
+2. **TUI attached when the job ends:** holds. The daemon's macrotask sees `attached > 0` (W-3, my mutation). The TUI wakes alone.
+3. **Attach after the wake ended:** holds. The cut is past the wake turn and the count is 0, so nothing is replayed and nothing is owed.
+4. **Ask with nobody attached:**
+   - holds the slot, persisted;
+   - the reaper skips busy, so no TTL or archive while it waits; only the opt-in admin cap closes it;
+   - the ask is replayed on attach and answering completes the turn (W-8);
+   - a restart re-asks it (existing rule, unchanged path).
+5. **`autoWake: false` on the host:** no turn, and the next `open` says `unflushedExits: 1` (cli E2E).
+6. **Bad end:** `error`/`cancelled` stops the chain (W-5/W-5b). One wake per job end and no cap (W-4).
+7. **Close during a pending check:** `close` sets `closed` BEFORE `finishTurn(cancelled)`, so that turn end's `kickWake` is a no-op and no timer leaks (`hosted-session.ts:1987-2000`). An archived session has no `HostedSession` and nothing to wake. A wake poll loop resets the idle clock: owner-accepted, bounded by close / admin cap.
+8. **Pod / worker / `run --detach`:** the option is absent there (`podDaemonHost` and `worker.ts` not in the diff), so wake is off. The relay is unchanged.
+9. **§7:**
+   - the peer is not serialised (the wake is a daemon-internal synchronous `prompt`, no new await in a handler);
+   - single broker unchanged (the wake asks through the session's hosted requester);
+   - protocol untouched;
+   - persistence via the unchanged `prompt`/`finishTurn` → `schedule` path.
+
+### What holds
+
+The daemon-side design is sound:
+- the count-driven gate in the pure core module;
+- the macrotask trigger (D2 is a real catch);
+- the compaction trigger (D3);
+- `lastEndBad`;
+- the close ordering;
+- the serve-only wiring.
+
+### How the executor behaved
+
+Disciplined:
+- re-verified the plan on the new base;
+- caught the swap-order hazard (D2) and the vacuous W-7 (D4) itself, with mutations;
+- reported drift honestly.
+
+What it missed: it reasoned about the attach only through seam A (`unflushedExits`), not the client backlog that the same merged fix added. That is the layer finding 1 lives in.
+
+### Owner question (review)
+
+- **R-Q1 — where to fix finding 1?** *Recommendation: (a), daemon-side.* Commit the cut before the wake's `prompt()` so that a mid-wake attach never replays the exit as a live `background_exit`. It keeps the TUI unchanged and stays inside this task's files. (b), filtering in `RemoteClient`, also helps two-TUI cases but widens the blast to the client.
 
 ## Owner questions
 
