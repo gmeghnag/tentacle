@@ -17,6 +17,7 @@
  */
 import type { PermissionRequest, PermissionResponse } from "@tentacle/core";
 import type { PermissionRequestUpdate } from "@tentacle/protocol";
+import { progressText } from "./mapping.ts";
 import { normalizePermissionReply, responseToOutcome } from "./permission-map.ts";
 
 export type RouterAction =
@@ -253,9 +254,10 @@ export class PermissionRouter {
         ...(entry.turnId !== null ? { turnId: entry.turnId } : {}),
         ...(entry.update.agent
           ? {
+              // Forgeable by a pod: bounded, stripped, display only.
               agent: {
-                type: entry.update.agent.type,
-                description: entry.update.agent.description,
+                type: progressText(entry.update.agent.type),
+                description: progressText(entry.update.agent.description),
               },
             }
           : {}),

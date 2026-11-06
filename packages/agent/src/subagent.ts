@@ -22,6 +22,8 @@ import { CONTEXT_RESET_TOOL_NAME, ToolRegistry } from "@tentacle/tools";
 import { Agent, type AgentConfig, type AgentStopReason } from "./agent.ts";
 import type { HookRunner } from "./hooks.ts";
 import type { ResultTransform } from "./result-pipeline.ts";
+import { classOf, isReadClass } from "./round-plan.ts";
+import { SessionGrants } from "./session-grants.ts";
 
 /** A kind of sub-agent: its system prompt and the tools it may use. */
 export interface AgentType {
@@ -165,15 +167,34 @@ export interface SubagentDeps {
   readonly hooks?: HookRunner;
   /** Each child's own context lines over its own history (the parent's window). */
   readonly contextAwareness?: AgentConfig["contextAwareness"];
+  /**
+   * The session tree's approvals and ask lane: one "always" covers the parent
+   * and every child (docs/feat/parallel-agents.md, Design 3). Absent → one
+   * store shared by this runner's children.
+   */
+  readonly grants?: SessionGrants;
+  /**
+   * `tools.execution` / `tools.maxParallel` for each child's own rounds. Safe:
+   * a child's asks stay in its own phase 1 and it never reaches a `beforeRun`;
+   * the parent's `inFlight` already covers it (docs/feat/parallel-agents.md,
+   * Design 5). Absent → sequential.
+   */
+  readonly toolExecution?: AgentConfig["toolExecution"];
 }
 
 /** Build a sub-agent runner plus the agent types it exposes. */
 export function createSubagentRunner(deps: SubagentDeps): {
   run: SubagentRunner;
   types: readonly AgentType[];
+  /**
+   * Whether a type only reads: a closed list, every tool the registry has is
+   * read-class. Asked live: MCP tools register after the runner is built.
+   */
+  readOnlyType(name: string): boolean;
 } {
   const types = deps.types && deps.types.length > 0 ? deps.types : BUILTIN_AGENT_TYPES;
   const spawnToolName = deps.spawnToolName ?? "agent_task";
+  const grants = deps.grants ?? new SessionGrants();
 
   const run: SubagentRunner = async (opts, controls) => {
     const type = types.find((t) => t.name === opts.type) ?? types[0];
@@ -216,6 +237,10 @@ export function createSubagentRunner(deps: SubagentDeps): {
             }),
           }
         : {}),
+      grants,
+      // A server may reuse call ids: two children must not share a spill file.
+      spillScope: crypto.randomUUID().slice(0, 8),
+      ...(deps.toolExecution ? { toolExecution: deps.toolExecution } : {}),
       ...(deps.resultTransforms ? { resultTransforms: deps.resultTransforms } : {}),
       ...(contextAwareness ? { contextAwareness } : {}),
       ...(deps.hooks
@@ -231,25 +256,31 @@ export function createSubagentRunner(deps: SubagentDeps): {
     let report = "";
     let toolUses = 0;
     let stopReason: AgentStopReason = "end_turn";
-    for await (const event of child.run(
-      crypto.randomUUID(),
-      [{ role: "user", content: opts.prompt }],
-      controls?.signal,
-    )) {
-      if (event.type === "text") {
-        report += event.delta;
-      } else if (event.type === "tool_start") {
-        toolUses += 1;
-        onEvent?.({ kind: "subagent_tool", label: childToolLabel(event.name, event.arguments) });
-      } else if (event.type === "usage") {
-        onEvent?.({
-          kind: "subagent_usage",
-          promptTokens: event.usage.promptTokens,
-          completionTokens: event.usage.completionTokens,
-        });
-      } else if (event.type === "turn_end") {
-        stopReason = event.reason;
+    try {
+      for await (const event of child.run(
+        crypto.randomUUID(),
+        [{ role: "user", content: opts.prompt }],
+        controls?.signal,
+      )) {
+        if (event.type === "text") {
+          report += event.delta;
+        } else if (event.type === "tool_start") {
+          toolUses += 1;
+          onEvent?.({ kind: "subagent_tool", label: childToolLabel(event.name, event.arguments) });
+        } else if (event.type === "usage") {
+          onEvent?.({
+            kind: "subagent_usage",
+            promptTokens: event.usage.promptTokens,
+            completionTokens: event.usage.completionTokens,
+          });
+        } else if (event.type === "turn_end") {
+          stopReason = event.reason;
+        }
       }
+    } catch (error) {
+      // The tree must not keep its live row beside the call's error.
+      onEvent?.({ kind: "subagent_end", toolUses, stopReason: "error" });
+      throw error;
     }
     onEvent?.({ kind: "subagent_end", toolUses, stopReason });
     // Never hand the parent an empty report (the agent loop forces a final
@@ -263,5 +294,21 @@ export function createSubagentRunner(deps: SubagentDeps): {
     return { report: finalReport, toolUses, stopReason };
   };
 
-  return { run, types };
+  const readOnlyType = (name: string): boolean => {
+    const type = types.find((t) => t.name === name);
+    if (!type || type.tools === "all") {
+      return false;
+    }
+    return type.tools.every((toolName) => {
+      // Never given to a child, so they make it no less read-only.
+      if (toolName === spawnToolName || toolName === CONTEXT_RESET_TOOL_NAME) {
+        return true;
+      }
+      const tool = deps.tools.get(toolName);
+      // The probe gives a path-keyed tool its key; other tools ignore it.
+      return tool === undefined || isReadClass(classOf(tool, { path: "_" }));
+    });
+  };
+
+  return { run, types, readOnlyType };
 }

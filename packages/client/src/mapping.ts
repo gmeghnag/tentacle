@@ -87,7 +87,7 @@ const PROGRESS_TEXT_MAX = 200;
  * Text from a daemon that may be a pod (not trusted): control characters
  * (terminal escapes, newlines) become spaces and the length is capped.
  */
-function progressText(value: string): string {
+export function progressText(value: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
   const clean = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
   return clean.length > PROGRESS_TEXT_MAX ? `${clean.slice(0, PROGRESS_TEXT_MAX - 1)}…` : clean;

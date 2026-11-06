@@ -18,6 +18,13 @@ those.
   one colour instead of dim grey, and its hint (`(/clear to reset)`,
   `(Shift+Tab to turn it off)`) stays grey beside it. Separator rules are
   unchanged; `relay.log` still prints each notice as one plain line.
+- **"Yes, always" now covers the whole session,** the main agent and all its
+  sub-agents; before, it held only for the agent that asked. A request it does not
+  cover is still asked, one at a time.
+- **A sub-agent's rounds now follow `tools.execution` and `tools.maxParallel`,** so its
+  reads overlap as the main agent's do.
+- **A rate-limited request waits a little longer than `retry-after`,** with some random
+  extra, so sub-agents limited together do not all retry on the same tick.
 
 - **Your config now reaches a pod or container.** `run` and `attach` carry your
   `maxIterations`, `tools.*`, `contextAwareness`, `contextReset`, `loadAgentsMd`
@@ -54,12 +61,17 @@ those.
   <name>, then run again`.
 ### Added
 
-- **New `subagents` settings, reserved for parallel sub-agents.** `subagents.execution`
-  (default `parallel`), `subagents.maxParallel` (default 4; env
-  `TENTACLE_SUBAGENT_EXECUTION`, `TENTACLE_SUBAGENT_MAX_PARALLEL`) and
-  `subagents.agentTaskDescription` or `agentTaskDescriptionFile` (at most 4096 bytes;
-  setting both is a config error). They are accepted, checked and carried into a pod,
-  but nothing reads them yet.
+- **Sub-agents run in parallel.** Several `agent_task` calls in one message now run at
+  the same time, in a shared workspace. `subagents.execution` chooses: `parallel` (the
+  default), `read-only` (only sub-agents that cannot write) or `sequential`.
+  `subagents.maxParallel` (default 4; env `TENTACLE_SUBAGENT_EXECUTION`,
+  `TENTACLE_SUBAGENT_MAX_PARALLEL`) is the ceiling, and a llama.cpp server with fewer
+  slots lowers it on its own. In a pod or container these are your laptop's values.
+- **`subagents.agentTaskDescription` or `agentTaskDescriptionFile`** (at most 4096 bytes;
+  setting both is a config error) replaces the `agent_task` description; the list of
+  sub-agent types is still appended.
+- **The permission dialog names the sub-agent that asks**, for example
+  `explore · "find callers"`.
 - **The status bar names where the agent runs.** In a container or pod the
   left of the bar shows a badge: `docker:<name>`, `podman:<name>`,
   `kubernetes:<pod>/<container>` (the container is always shown); the prefix

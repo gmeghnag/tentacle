@@ -400,6 +400,14 @@ export function tunnelledAgent(
         }
         return connection.requestModelCountTokens(request, signal);
       },
+      // The slots are the LAPTOP's endpoint's; an older link without it → no cap.
+      (signal) => {
+        const connection = ready();
+        if (!connection.requestModelSlots) {
+          return Promise.resolve({});
+        }
+        return connection.requestModelSlots(signal);
+      },
     );
   const wired = buildAgent(config, {
     ...(options.log ? { log: options.log, notice: options.log } : {}),

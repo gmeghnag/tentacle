@@ -734,6 +734,21 @@
       "enum": ["title"],
       "type": "string"
     },
+    "ModelSlotsParams": {
+      "additionalProperties": true,
+      "properties": {},
+      "type": "object"
+    },
+    "ModelSlotsResult": {
+      "additionalProperties": true,
+      "properties": {
+        "slots": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ModelStreamChunkedParams": {
       "additionalProperties": true,
       "properties": {
@@ -2565,6 +2580,14 @@
       },
       "result": {
         "$ref": "#/$defs/ModelCountTokensResult"
+      }
+    },
+    "model/slots": {
+      "params": {
+        "$ref": "#/$defs/ModelSlotsParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ModelSlotsResult"
       }
     },
     "model/stream": {

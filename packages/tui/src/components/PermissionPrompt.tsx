@@ -15,17 +15,19 @@ function truncate(text: string, max: number): string {
 /**
  * Fixed row count of the dialog for a given option / detail-row count (App
  * sizes the viewport). `replyRows`: the reply field is open with that many
- * field rows — its prompt row + the field replace the options.
+ * field rows — its prompt row + the field replace the options. `agentRow`: a
+ * sub-agent asks, so its row is drawn.
  */
 export function permissionPromptRows(
   optionCount: number,
   detailRows = 1,
   cwdRow = true,
   replyRows?: number,
+  agentRow = false,
 ): number {
-  // title + subject rows + cwd (tool calls only) + options (or prompt + field) + footer
+  // title + agent (a sub-agent's ask) + subject rows + cwd (tool calls only) + options (or prompt + field) + footer
   const body = replyRows === undefined ? optionCount : 1 + replyRows;
-  return 2 + detailRows + (cwdRow ? 1 : 0) + body;
+  return 2 + (agentRow ? 1 : 0) + detailRows + (cwdRow ? 1 : 0) + body;
 }
 
 /**
@@ -42,6 +44,7 @@ export function PermissionPrompt({
   columns = 80,
   reply,
   replyable = false,
+  agentLine,
 }: {
   req: PermissionRequest;
   options: readonly string[];
@@ -50,6 +53,8 @@ export function PermissionPrompt({
   columns?: number;
   reply?: ReplyView;
   replyable?: boolean;
+  /** The asking sub-agent's row (`permissionAgentLine`); absent for a call's own ask. */
+  agentLine?: string;
 }): ReactElement {
   const titlePrefix = `╭─ ${req.title} `;
   const dashes = Math.max(0, columns - titlePrefix.length - 1);
@@ -60,6 +65,7 @@ export function PermissionPrompt({
         {titlePrefix}
         {"─".repeat(dashes)}
       </Text>
+      {agentLine !== undefined ? <Text dimColor> {agentLine}</Text> : null}
       {permissionDetailLines(req).map((line, i) => (
         <Text key={i} dimColor>
           {" "}

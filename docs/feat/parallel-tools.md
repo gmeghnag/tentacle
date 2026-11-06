@@ -519,6 +519,7 @@ Dependency order, about 22 source files in 9 packages.
   change only regroups the resumed calls, all asked again or cleared (Design 5).
 - **Sub-agent tool (task 7):** alone; its children stay sequential; their `tool_phase`
   events stop at `subagent.ts:241`. No two asks are live at once in this task.
+  (Superseded by `docs/feat/parallel-agents.md`: spawns have their own lane, and children follow `tools.*`.)
 - **Empty / single-call rounds:** a group of one.
 
 ### Tests

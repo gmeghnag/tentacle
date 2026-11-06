@@ -32,6 +32,8 @@ export interface OpenAIProviderConfig {
   readonly id?: string;
   /** Injectable fetch, for tests. Defaults to the global `fetch`. */
   readonly fetch?: typeof fetch;
+  /** A slot probe's bound (ms), for tests. Default 1.5 s. */
+  readonly slotsTimeoutMs?: number;
 }
 
 /** Thrown when the endpoint returns a non-2xx response. */
@@ -122,15 +124,79 @@ class ToolCallAssembler {
   }
 }
 
+/** A slot probe's own bound: a dead host costs this much, once per fan-out at most. */
+const SLOTS_TIMEOUT_MS = 1500;
+const MAX_SLOTS = 1024;
+
+/** `total_slots` when it is a positive integer within bounds, else no answer. */
+function parseSlots(props: unknown): number | undefined {
+  const value =
+    props && typeof props === "object" ? (props as Record<string, unknown>).total_slots : undefined;
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= MAX_SLOTS
+    ? value
+    : undefined;
+}
+
 export class OpenAIProvider implements ModelProvider {
   readonly id: string;
   private readonly config: OpenAIProviderConfig;
   private readonly doFetch: typeof fetch;
+  /** The server's answer on slots, once it gave one (`{ value: undefined }`: it has none). */
+  private knownSlots: { readonly value: number | undefined } | undefined;
 
   constructor(config: OpenAIProviderConfig) {
     this.config = config;
     this.id = config.id ?? `openai:${config.model}`;
     this.doFetch = config.fetch ?? fetch;
+  }
+
+  /**
+   * llama.cpp's parallel slots, from `GET <root>/props` (`total_slots`), for the
+   * sub-agents' cap (docs/feat/parallel-agents.md, Design 6). Only a successful
+   * answer (a number, or a well-formed one without `total_slots`) and a 404
+   * (another server) are kept for this instance; any other non-2xx (401, 403,
+   * 408, 429, 5xx), a timeout or a network failure is retried next time. Never
+   * rejects: no answer is `undefined`.
+   */
+  async slots(signal?: AbortSignal): Promise<number | undefined> {
+    if (this.knownSlots) {
+      return this.knownSlots.value;
+    }
+    const headers: Record<string, string> = {};
+    if (this.config.apiKey) {
+      headers.authorization = `Bearer ${this.config.apiKey}`;
+    }
+    const root = this.config.baseURL.replace(/\/v1\/?$/, "");
+    const deadline = new AbortController();
+    const stop = (): void => deadline.abort();
+    const timer = setTimeout(stop, this.config.slotsTimeoutMs ?? SLOTS_TIMEOUT_MS);
+    if (signal?.aborted) {
+      stop();
+    }
+    signal?.addEventListener("abort", stop, { once: true });
+    try {
+      const res = await this.doFetch(`${root}/props`, {
+        method: "GET",
+        headers,
+        redirect: "error",
+        signal: deadline.signal,
+      });
+      if (res.status === 404) {
+        this.knownSlots = { value: undefined };
+        return undefined;
+      }
+      if (!res.ok) {
+        return undefined;
+      }
+      const value = parseSlots(await res.json().catch(() => null));
+      this.knownSlots = { value };
+      return value;
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
+    }
   }
 
   /**

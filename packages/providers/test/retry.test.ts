@@ -227,7 +227,7 @@ describe("RetryingModelProvider", () => {
 
       await drain(p);
 
-      expect(waits).toEqual([3000]);
+      expect(waits).toEqual([3250]);
     });
 
     test("an exhausted 5xx rethrows the original error after maxAttempts", async () => {
@@ -261,7 +261,7 @@ describe("RetryingModelProvider", () => {
 
       await drain(p);
 
-      expect(waits).toEqual([2000]);
+      expect(waits).toEqual([2250]);
     });
 
     test("a retry-after shorter than the backoff does not shorten it", async () => {
@@ -272,7 +272,20 @@ describe("RetryingModelProvider", () => {
 
       await drain(p);
 
-      expect(waits).toEqual([250]);
+      expect(waits).toEqual([260]);
+    });
+
+    test("sub-agents limited together do not wake together: the jitter rides on the retry-after (T-R)", async () => {
+      const delays: number[] = [];
+      for (const value of [0, 1]) {
+        const limited = new ModelRequestError(429, "slow down", undefined, 2000);
+        const inner = scripted([[{ throw: limited }], OK]);
+        const { waits, sleep } = fakeSleep();
+        await drain(new RetryingModelProvider(inner, { sleep, random: () => value }));
+        delays.push(...waits);
+      }
+      expect(delays.every((d) => d >= 2000)).toBe(true);
+      expect(delays[0]).not.toBe(delays[1]);
     });
 
     test("a retry-after beyond maxRetryAfterMs is not waited for: the error surfaces at once", async () => {

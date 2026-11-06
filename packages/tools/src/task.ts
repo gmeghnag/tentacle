@@ -6,7 +6,7 @@
  * `@tentacle/agent`. The tool itself needs no permission — spawning is
  * safe; the child's own tools enforce their permissions and confinement.
  */
-import type { Tool, ToolProgressEvent, ToolResult } from "@tentacle/core";
+import type { SpawnKind, Tool, ToolProgressEvent, ToolResult } from "@tentacle/core";
 import { z } from "zod";
 
 export interface TaskRunResult {
@@ -32,11 +32,55 @@ export interface TaskAgentType {
   readonly description: string;
 }
 
+/** `subagents.execution`: how a round's `agent_task` calls may overlap. */
+export type TaskExecutionMode = "sequential" | "read-only" | "parallel";
+
+export interface TaskToolOptions {
+  /** Whether a sub-agent type only reads (asked live). Absent → every type is a writer. */
+  readonly readOnlyType?: (name: string) => boolean;
+  /** `subagents.agentTaskDescription`: used as is, in every mode. Absent → the neutral text. */
+  readonly description?: string | undefined;
+  /** What the neutral text states about overlap. Absent → nothing, as `sequential`. */
+  readonly mode?: TaskExecutionMode;
+}
+
+const NEUTRAL_DESCRIPTION =
+  "Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so use it to explore or offload work without filling your own context. Prefer it for open-ended search and read-heavy investigation.";
+
+const OVERLAP_NOTE: Record<TaskExecutionMode, string> = {
+  parallel:
+    " Several agent_task calls in one message may run at the same time. They share one workspace: give each its own files, and do not have two of them commit, or run builds or tests that could overlap.",
+  "read-only": " Read-only sub-agents in one message may run at the same time.",
+  sequential: "",
+};
+
+/**
+ * The tool's description: the custom text, or the neutral one, which states the
+ * facts of `mode` and never asks for fan-out. The list of types always follows:
+ * `subagent_type` is unusable without it.
+ */
+export function taskToolDescription(
+  custom: string | undefined,
+  mode: TaskExecutionMode,
+  typeList: string,
+): string {
+  const text = custom ?? `${NEUTRAL_DESCRIPTION}${OVERLAP_NOTE[mode]}`;
+  return `${text}\n\nAvailable sub-agent types:\n${typeList}`;
+}
+
 /** Build the `agent_task` tool for the given runner and available sub-agent types. */
-export function createTaskTool(run: TaskRunner, types: readonly TaskAgentType[]): Tool {
+export function createTaskTool(
+  run: TaskRunner,
+  types: readonly TaskAgentType[],
+  options: TaskToolOptions = {},
+): Tool {
   const names = types.map((t) => t.name);
   const defaultType = names[0] ?? "general-purpose";
   const typeList = types.map((t) => `- ${t.name}: ${t.description}`).join("\n");
+  const resolveType = (requested: string | undefined): string => {
+    const name = requested ?? defaultType;
+    return names.includes(name) ? name : defaultType;
+  };
 
   const inputSchema = z.object({
     description: z.string().min(1).describe("A short (3-5 word) description of the task"),
@@ -49,13 +93,17 @@ export function createTaskTool(run: TaskRunner, types: readonly TaskAgentType[])
 
   return {
     name: "agent_task",
-    description: `Delegate a self-contained task to a sub-agent that runs in its own isolated context and returns a final report. You do NOT see its intermediate steps, so use it to explore or offload work without filling your own context. Prefer it for open-ended search and read-heavy investigation.\n\nAvailable sub-agent types:\n${typeList}`,
+    description: taskToolDescription(options.description, options.mode ?? "sequential", typeList),
     inputSchema,
     permission: "none",
+    // Resolved as `execute` does. Bad input throws: not groupable.
+    spawnKind(input): SpawnKind {
+      const type = resolveType(inputSchema.parse(input).subagent_type);
+      return options.readOnlyType?.(type) ? "read-only" : "writer";
+    },
     async execute(input, ctx): Promise<ToolResult> {
       const args = input as z.infer<typeof inputSchema>;
-      const requested = args.subagent_type ?? defaultType;
-      const type = names.includes(requested) ? requested : defaultType;
+      const type = resolveType(args.subagent_type);
       const result = await run(
         { description: args.description, prompt: args.prompt, type },
         {

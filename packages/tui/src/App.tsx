@@ -63,6 +63,7 @@ import { insertReply, orphanNotice, replyView, stepPermissionKey } from "./permi
 import {
   type AutoAcceptFeed,
   type DraftBack,
+  permissionAgentLine,
   permissionDetailLines,
   permissionShowsCwd,
   usePermissionBroker,
@@ -808,6 +809,7 @@ export function App({
             permissionDetailLines(permission.pending).length,
             permissionShowsCwd(permission.pending),
             replyShown?.rows.length,
+            permission.pendingAgent !== null,
           )
         : runningRows + (listView ? panelHeight(listView) : inputBoxRows + paletteRows.length);
   const viewport = Math.max(3, termRows - (RESERVED_ROWS - 1 + activeRows));
@@ -2657,6 +2659,9 @@ export function App({
             columns={columns}
             {...(replyShown ? { reply: replyShown } : {})}
             replyable={permission.choices.some((c) => c.reply === true)}
+            {...(permission.pendingAgent
+              ? { agentLine: permissionAgentLine(permission.pendingAgent, columns) }
+              : {})}
           />
         ) : (
           <Box flexDirection="column" width={columns}>

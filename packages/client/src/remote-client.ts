@@ -25,6 +25,7 @@ import {
   type ModelProvider,
   type PermissionBroker,
   countTokensBounded,
+  slotsBounded,
 } from "@tentacle/core";
 import {
   type ClientInfo,
@@ -42,6 +43,7 @@ import {
   type ModelCountTokensParams,
   type ModelCountTokensResult,
   type ModelPurpose,
+  type ModelSlotsResult,
   type ModelStreamChunkedParams,
   type ModelStreamChunkedResult,
   type ModelStreamParams,
@@ -1120,6 +1122,9 @@ export class RemoteClient {
             this.onModelCountTokens(params as ModelCountTokensParams, context?.signal),
           );
         }
+        if (method === Method.ModelSlots) {
+          return this.servingCall(() => this.onModelSlots(context?.signal));
+        }
         if (method === Method.HooksTrust) {
           return this.onHooksTrust(params as HooksTrustParams, context?.signal);
         }
@@ -1925,6 +1930,16 @@ export class RemoteClient {
       signal,
     );
     return tokens === undefined ? {} : { tokens };
+  }
+
+  /**
+   * Serve `model/slots` (docs/feat/parallel-agents.md, Design 6): the LOCAL
+   * provider's parallel slots. One integer or nothing: no endpoint and no error
+   * text ever crosses to the pod, and the bound holds the pod's request short.
+   */
+  private async onModelSlots(signal?: AbortSignal): Promise<ModelSlotsResult> {
+    const slots = await slotsBounded(this.servingModel(Method.ModelSlots, undefined), signal);
+    return slots === undefined ? {} : { slots };
   }
 
   /**
