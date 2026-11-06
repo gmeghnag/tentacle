@@ -20,8 +20,9 @@ those.
 - **Detached-run state files change format (version 2).** `owner.json` and
   `spec.json` now carry `rm` instead of `keep`. Runs started by a previous build
   keep running and keep their workload, but this build lists them as `unknown
-  owner`, cannot attach to them, and leaves their `owner.json` for you to delete;
-  `tentacle rm <name>` still removes them.
+  owner`, cannot take them over while their relay runs (afterwards `attach` is a
+  plain one, which never deletes), and leaves their `owner.json` for you to
+  delete; `tentacle rm <name>` still removes them.
 - **`ps` and `rm` no longer make a finished detached run look alive.** Once its relay
   has finished and no terminal is on it, `ps` shows `up · idle` (or `up · failed: …`, `up ·
   interrupted`) instead of `running · idle`, and `rm` says the run has ended
