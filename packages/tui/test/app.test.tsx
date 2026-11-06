@@ -570,6 +570,91 @@ describe("App", () => {
     unmount();
   });
 
+  test("F4 /settings apply shows it is pending, refuses a second one, then its outcome", async () => {
+    // Mutation: no pending line → an outage looks like nothing happened.
+    let applied = 0;
+    let finish: (lines: readonly { text: string }[]) => void = () => {};
+    const createSession = () => ({
+      async *send() {
+        // no model turn needed for this test
+      },
+      settings: () => [],
+      updateSettings() {
+        applied += 1;
+        return new Promise<readonly { text: string }[]>((resolve) => {
+          finish = resolve;
+        });
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/settings apply");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Applying this terminal's settings…");
+    stdin.write("/settings apply");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(applied).toBe(1);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Already applying this terminal's settings…");
+    finish([{ text: "Session settings applied." }]);
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("⏺ Session settings applied.");
+    // Settled: another apply goes through.
+    stdin.write("/settings apply");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(applied).toBe(2);
+    finish([]);
+    unmount();
+  });
+
+  test("F4 an apply's outcome stays with the session it was issued on", async () => {
+    // Mutation: drop the session check → the old session's outcome lands on the new one.
+    const finish: ((lines: readonly { text: string }[]) => void)[] = [];
+    const createSession = () => ({
+      async *send() {
+        // no model turn needed for this test
+      },
+      settings: () => [],
+      updateSettings() {
+        return new Promise<readonly { text: string }[]>((resolve) => {
+          finish.push(resolve);
+        });
+      },
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App createSession={createSession} model="qwen3" cwd="/tmp/work" />,
+    );
+    await delay(30);
+    stdin.write("/settings apply");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    stdin.write("/clear");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    finish[0]?.([{ text: "OUTCOME OF THE OLD SESSION" }]);
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).not.toContain("OUTCOME OF THE OLD SESSION");
+    // The new session is not held by the old one's apply.
+    stdin.write("/settings apply");
+    await delay(30);
+    stdin.write("\r");
+    await delay(60);
+    expect(finish).toHaveLength(2);
+    finish[1]?.([{ text: "OUTCOME OF THE NEW SESSION" }]);
+    await delay(60);
+    expect(stripAnsi(lastFrame() ?? "")).toContain("OUTCOME OF THE NEW SESSION");
+    unmount();
+  });
+
   test("/settings on a session that carries nothing: not available, nothing called", async () => {
     const createSession = () => ({
       async *send() {

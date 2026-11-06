@@ -21,10 +21,11 @@ those.
 
 ### Changed
 
-- **Attaching to a session is now bounded.** A container that does not answer within
-  30 seconds no longer leaves the terminal waiting for ever: `attach` says so and
-  opens the session at your first prompt; attaching to a detached run fails with
-  `no answer from the daemon within 30s`, so you can retry.
+- **Attaching to a session is now bounded.** A daemon that makes no progress for 30
+  seconds (no answer, no new page of the history) no longer leaves the terminal
+  waiting for ever; a long history on a slow link still loads. `attach` says so and
+  opens the session at your first prompt; attaching to a detached run, and `connect`,
+  fail with `no answer from the daemon within 30s`, so you can retry.
 - **`tentacle run --rm` replaces `--keep`, as in docker and kubectl.** A run still
   keeps its pod or container by default; `--rm` removes it when the run ends
   (`--detach --rm`: when the run goes idle or is stopped), and `--rm=false`

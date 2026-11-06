@@ -21,6 +21,8 @@ import {
   recordTitleState,
 } from "@tentacle/agent";
 import {
+  AttachTimeoutError,
+  type Clock,
   type DaemonKind,
   type LinkStatus,
   RemoteClient,
@@ -57,7 +59,6 @@ import { type HooksTrustStore, createHooksTrustResolver, fileTrustStore } from "
 import { type ResidentUse, residentUseOf } from "./relay-state.ts";
 import type { SessionSaver } from "./session-saver.ts";
 import {
-  NOT_OPEN,
   type SettingsLine,
   appliedLines,
   changedNotice,
@@ -255,6 +256,8 @@ export interface ControllerSettings {
   readonly mine: SessionSettings;
   /** An own apply landed on `sessionId`: a later drift is news again. */
   readonly applied?: (sessionId: string) => void;
+  /** Its eager attach timed out: until it opens, it may be live with other values (F3). */
+  readonly unconfirmed?: boolean;
 }
 
 /**
@@ -511,13 +514,20 @@ export function persistingController(
     },
     ...(carried
       ? {
-          settings: () => settingsCommandLines(carried.mine, inner.settingsState()),
+          settings: () =>
+            settingsCommandLines(carried.mine, {
+              ...inner.settingsState(),
+              ...(carried.unconfirmed === true ? { unconfirmed: true } : {}),
+            }),
           // The apply recomposes the system head: saved at once, like a compaction.
           async updateSettings(): Promise<readonly SettingsLine[]> {
             try {
               const result = await inner.applySettings();
               if (result === null) {
-                return [{ text: NOT_OPEN }];
+                return settingsCommandLines(carried.mine, {
+                  open: false,
+                  ...(carried.unconfirmed === true ? { unconfirmed: true } : {}),
+                });
               }
               if (result.applied) {
                 const id = inner.sessionId;
@@ -544,6 +554,8 @@ export interface LocalRuntimeDeps {
    * (the worker) → a drop is terminal.
    */
   readonly channelFactory?: () => Promise<DuplexChannel>;
+  /** The client's clock (tests); default the system's. */
+  readonly clock?: Clock;
   /** Called to tear down the daemon side (terminate the worker / close the pipe). */
   readonly disposeTransport: () => void;
   readonly permissions: PermissionBroker;
@@ -611,6 +623,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
   const client = new RemoteClient(deps.channel, deps.permissions, deps.modelProvider, {
     ...(deps.onPeerError ? { onError: deps.onPeerError } : {}),
     ...(deps.channelFactory ? { channelFactory: deps.channelFactory } : {}),
+    ...(deps.clock ? { clock: deps.clock } : {}),
     hooksTrust,
     clientInfo: CLIENT_INFO,
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
@@ -660,6 +673,8 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
   let attached: PersistingController | null = null;
   const closeIfLast = deps.shared === true;
   let saving = true;
+  /** Ids whose eager attach timed out: they may be live, with values nobody here has read. */
+  const attachTimedOut = new Set<string>();
   const build = (
     uid: string,
     record: SessionRecord | null,
@@ -700,7 +715,7 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       (error) => deps.saver.failed(uid, `could not read the history back: ${error.message}`),
       title,
       adoptTurn,
-      carried,
+      carried && attachTimedOut.has(uid) ? { ...carried, unconfirmed: true } : carried,
     );
     controllers.add(controller);
     return controller;
@@ -776,6 +791,9 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
         // By the CODE, never the text.
         if ((error as { code?: unknown } | null)?.code === DomainErrorCode.UnknownSession) {
           return false;
+        }
+        if (error instanceof AttachTimeoutError) {
+          attachTimedOut.add(id);
         }
         throw error;
       }

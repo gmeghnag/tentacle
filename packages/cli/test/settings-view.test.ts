@@ -200,4 +200,21 @@ describe("appliedLines and updateFailureLine: the apply's outcome", () => {
     ).toBe("The connection dropped before the daemon answered: run /settings apply again.");
     expect(line(new Error("boom\u001b[31m"))).toBe("Could not apply the settings: boom[31m");
   });
+
+  test("F5 a pod's error text is capped, one line", () => {
+    // Round 1: 5000 characters of the pod's words on the screen.
+    const { text } = updateFailureLine(new Error(`a\nb${"x".repeat(5000)}`));
+    expect(text.startsWith("Could not apply the settings: ab")).toBe(true);
+    expect(text.length).toBeLessThanOrEqual("Could not apply the settings: ".length + 500);
+  });
+});
+
+describe("settingsCommandLines after an attach that timed out (F3)", () => {
+  test("no claim about the settings the session runs", () => {
+    // Round 1: "it starts with this terminal's settings", which may be false.
+    const lines = plain(settingsCommandLines({}, { open: false, unconfirmed: true }));
+    expect(lines).toEqual([
+      "The session is not attached yet: it may be running with other settings, shown after your first prompt.",
+    ]);
+  });
 });

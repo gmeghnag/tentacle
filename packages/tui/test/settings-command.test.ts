@@ -3,7 +3,7 @@ import { SETTINGS_USAGE, settingsCommand } from "../src/settings-command.ts";
 
 // docs/feat/session-settings-apply.md: the routing of /settings, pure.
 describe("settingsCommand", () => {
-  const idle = { running: false, compacting: false, available: true };
+  const idle = { running: false, compacting: false, available: true, applying: false };
 
   test("no argument: show", () => {
     expect(settingsCommand("/settings", idle)).toEqual({ kind: "show" });
@@ -41,5 +41,13 @@ describe("settingsCommand", () => {
         text: "/settings isn't available for this session.",
       });
     }
+  });
+
+  test("F4 an apply in flight: a second one is told, /settings still shows", () => {
+    expect(settingsCommand("/settings apply", { ...idle, applying: true })).toEqual({
+      kind: "notice",
+      text: "Already applying this terminal's settings…",
+    });
+    expect(settingsCommand("/settings", { ...idle, applying: true })).toEqual({ kind: "show" });
   });
 });

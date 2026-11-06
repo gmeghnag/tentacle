@@ -138,7 +138,7 @@ import {
   switchRefusedNotice,
   switchingRefusal,
 } from "./sessions-panel.ts";
-import { settingsCommand } from "./settings-command.ts";
+import { SETTINGS_APPLYING, settingsCommand } from "./settings-command.ts";
 import { type SessionSkillsView, SkillsSync } from "./skills-sync.ts";
 import {
   type DisplayItem,
@@ -500,6 +500,8 @@ export function App({
   // is the truth; the state renders the rows. `compactionOwnedRef`: a send-now
   // of ours took it — the rows are the send-now's, not the settle hook's.
   const compactingRef = useRef(false);
+  /** The session a `/settings apply` is in flight on (docs/feat/session-settings-apply.md F4). */
+  const applyingRef = useRef<SessionController | null>(null);
   const [compacting, setCompactingState] = useState(false);
   const setCompacting = useCallback((on: boolean) => {
     compactingRef.current = on;
@@ -1888,17 +1890,32 @@ export function App({
             running: stateRef.current.running,
             compacting: compactingRef.current,
             available: session?.settings !== undefined && session.updateSettings !== undefined,
+            applying: session !== null && applyingRef.current === session,
           });
           if (step.kind === "notice") {
             lines([{ text: step.text }]);
           } else if (step.kind === "show") {
             lines(session?.settings?.() ?? []);
-          } else {
-            void session?.updateSettings?.().then((outcome) => {
+          } else if (session?.updateSettings) {
+            // During an outage it waits for the link: never nothing on screen.
+            applyingRef.current = session;
+            lines([{ text: SETTINGS_APPLYING }]);
+            const settled = (outcome: readonly SettingsNoticeLine[]) => {
+              if (applyingRef.current === session) {
+                applyingRef.current = null;
+              }
+              // Moved to another session meanwhile: not that session's news
+              // (`/settings` on this one tells the truth when you are back).
+              if (sessionRef.current !== session) {
+                return;
+              }
               lines(outcome);
               // The prompt or tools may have changed: the open figure is stale.
               askContext(session);
-            });
+            };
+            void session
+              .updateSettings()
+              .then(settled, () => settled([{ text: "Could not apply the settings." }]));
           }
           return;
         }

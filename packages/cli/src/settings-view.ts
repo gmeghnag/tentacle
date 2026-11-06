@@ -30,6 +30,9 @@ const SAME_TEXT = "(same text)";
 const DEFAULT = "(default)";
 
 export const NOT_OPEN = "The session is not open yet: it starts with this terminal's settings.";
+/** After an attach that timed out: the session may be live, with values nobody here has read. */
+export const UNCONFIRMED =
+  "The session is not attached yet: it may be running with other settings, shown after your first prompt.";
 export const OWN_CONFIG = "This session takes its settings from the container's own config.";
 export const APPLIED = "Session settings applied.";
 export const APPLY_HINT = "(/settings apply)";
@@ -106,13 +109,20 @@ export function settingsShowLines(
   return lines;
 }
 
-/** `/settings` in each state: not open yet, no report (a daemon with its own config), a report. */
+/**
+ * `/settings` in each state: not open yet (`unconfirmed`: its attach timed out,
+ * so it may be live), no report (a daemon with its own config), a report.
+ */
 export function settingsCommandLines(
   mine: SessionSettings,
-  state: { readonly open: boolean; readonly report?: SessionSettingsReport },
+  state: {
+    readonly open: boolean;
+    readonly report?: SessionSettingsReport;
+    readonly unconfirmed?: boolean;
+  },
 ): SettingsLine[] {
   if (!state.open) {
-    return [{ text: NOT_OPEN }];
+    return [{ text: state.unconfirmed === true ? UNCONFIRMED : NOT_OPEN }];
   }
   if (!state.report) {
     return [{ text: OWN_CONFIG }];
@@ -152,10 +162,18 @@ export function appliedLines(mine: SessionSettings, result: UpdateSettingsResult
   return [{ text: APPLIED }, ...settingsNotices(mine, result.settings)];
 }
 
-/** One line, no control characters (an error's text may be the pod's). */
+/** Max length of a reported error, as `mcp/src/status.ts`. */
+const MAX_ERROR_LENGTH = 500;
+
+/** One bounded line, no control characters (an error's text may be the pod's). */
 function oneLine(text: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: removing them is the point
-  return text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, "").trim();
+  return (
+    text
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: removing them is the point
+      .replace(/[\u0000-\u001f\u007f-\u009f]+/g, "")
+      .trim()
+      .slice(0, MAX_ERROR_LENGTH)
+  );
 }
 
 /** A failed apply, told by its CODE (the drop is this client's own marker). */

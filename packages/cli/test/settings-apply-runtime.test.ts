@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, JsonSessionStore, SessionGrants } from "@tentacle/agent";
+import { ATTACH_TIMEOUT_MS, AttachTimeoutError } from "@tentacle/client";
 import {
   type ExecutionEnvironment,
   type ModelProvider,
@@ -16,9 +17,9 @@ import {
   type StreamEvent,
 } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
-import type { SessionSettings } from "@tentacle/protocol";
+import { Method, PROTOCOL_VERSION, type SessionSettings } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
-import { createChannelPair } from "@tentacle/transport";
+import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 
@@ -92,6 +93,71 @@ const until = async (pred: () => boolean): Promise<void> => {
   }
   expect(pred()).toBe(true);
 };
+
+describe("/settings after a timed-out attach (F3)", () => {
+  test("no false claim on that session; a fresh one after it keeps the plain line", async () => {
+    // Mutation: drop `unconfirmed` in `build` → "it starts with this terminal's settings".
+    const [daemonCh, clientCh] = createChannelPair();
+    const frames: string[] = [];
+    const daemon = new RpcPeer(daemonCh, {
+      onRequest: (method) => {
+        frames.push(method);
+        if (method === Method.Open) {
+          return new Promise(() => {}); // never answers
+        }
+        return {
+          protocolVersion: PROTOCOL_VERSION,
+          agentCapabilities: { tools: true, permissions: true },
+        };
+      },
+    });
+    let now = 0;
+    let fire: () => void = () => {};
+    const runtime = await createLocalRuntime({
+      channel: clientCh,
+      disposeTransport: () => daemon.close(),
+      permissions: new PermissionBroker(),
+      saver: new SessionSaver(new JsonSessionStore(dir()), () => {}),
+      cwd: "/tmp/w",
+      model: "m",
+      resume: {
+        id: "S",
+        createdAt: 1,
+        updatedAt: 1,
+        cwd: "/tmp/w",
+        model: "m",
+        title: { source: "auto" },
+        messages: [{ role: "user", content: "hi" }],
+      } as never,
+      sessionSettings: { maxIterations: 3 },
+      clock: {
+        now: () => now,
+        setTimeout: (fn: () => void, ms: number) => {
+          if (ms === ATTACH_TIMEOUT_MS) fire = fn;
+          return ms;
+        },
+        clearTimeout: () => {},
+      },
+    });
+    const failed = runtime.attachTo("S", null).catch((e: unknown) => e);
+    await until(() => frames.includes(Method.Open));
+    now = ATTACH_TIMEOUT_MS;
+    fire();
+    expect(await failed).toBeInstanceOf(AttachTimeoutError);
+    const session = runtime.createSession();
+    const line = {
+      text: "The session is not attached yet: it may be running with other settings, shown after your first prompt.",
+    };
+    expect(session.settings?.()).toEqual([line]);
+    expect(await session.updateSettings?.()).toEqual([line]);
+    expect(frames).not.toContain(Method.UpdateSettings);
+    // `/clear`: a new id nobody else can hold.
+    expect(runtime.createSession().settings?.()).toEqual([
+      { text: "The session is not open yet: it starts with this terminal's settings." },
+    ]);
+    runtime.dispose();
+  });
+});
 
 describe("/settings through the runtime", () => {
   test("not open yet; then the lines; a second terminal applies; the first one is told, in the one-line format", async () => {

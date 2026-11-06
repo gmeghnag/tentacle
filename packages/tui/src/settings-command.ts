@@ -5,6 +5,8 @@
  */
 
 export const SETTINGS_USAGE = "Usage: /settings (show) · /settings apply";
+/** Shown as soon as an apply is issued: during an outage it waits for the link. */
+export const SETTINGS_APPLYING = "Applying this terminal's settings…";
 
 export type SettingsCommand =
   | { readonly kind: "show" }
@@ -13,7 +15,13 @@ export type SettingsCommand =
 
 export function settingsCommand(
   raw: string,
-  state: { readonly running: boolean; readonly compacting: boolean; readonly available: boolean },
+  state: {
+    readonly running: boolean;
+    readonly compacting: boolean;
+    readonly available: boolean;
+    /** An apply issued on this session has not settled. */
+    readonly applying: boolean;
+  },
 ): SettingsCommand {
   const args = raw.trim().split(/\s+/).slice(1);
   if (!state.available) {
@@ -24,6 +32,9 @@ export function settingsCommand(
   }
   if (args.length !== 1 || args[0] !== "apply") {
     return { kind: "notice", text: SETTINGS_USAGE };
+  }
+  if (state.applying) {
+    return { kind: "notice", text: "Already applying this terminal's settings…" };
   }
   if (state.running) {
     return { kind: "notice", text: "Can't apply settings while a turn is running." };

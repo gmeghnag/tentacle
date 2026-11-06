@@ -369,6 +369,55 @@ Some ran in batches of 2 to 6, on files with independent tests; the table's attr
 7. `/settings apply` during a turn: `Can't apply settings while a turn is running.`
 8. A pod that never answers `session/open` (for example, `kill -STOP` the resident daemon): a plain `attach` reaches the TUI after 30 s with `Could not attach to the session: no answer from the container within 30s. It opens at your first prompt.`; attaching to a detached run prints `[attach] failed: no answer from the daemon within 30s (session/open)` and exits 1.
 
+### Execution — round 2
+
+*— claude-opus-5-5, 2026-11-06*
+
+The Review's F1–F5, per the owner's answers. **The protocol was not touched** (no schema, no `protocol.json`, `PROTOCOL_VERSION` stays 16).
+
+**F1, the attach bound (`remote-client.ts`, `attachSession`).** The 30 s now counts from the attach's last progress: the first answered open, and each snapshot page further than any before. The timer re-checks `entry.attachProgressAt` when it fires and re-arms for what is left. All three callers benefit: the plain `attach`, the detached-run join and `connect.ts:252`. The CHANGELOG now names `connect` and the progress rule.
+
+**Drift from the owner's wording, on purpose.** Progress is a high-water mark (`noteAttachProgress`), not "every answer". After a drop the open and the first pages are served again. With "every answer", a daemon that answers each re-open but never a page would re-arm for ever: liveness closes the silent link at 15 s and the redial answers again, which is the silent hang this slice exists to end. With the mark, that case fails at 30 s (test below). A transfer that keeps being cut before reaching a new page also ends at the bound; `SNAPSHOT_MAX_PAGES` already caps the number of rises.
+
+**F2 (`updateSettings`).** The response writes the report only while its id is still in `ownSettingsIds`. Once the own update has arrived the stream is the truth, and may hold a newer apply.
+
+**F3.** `attachTo` records an `AttachTimeoutError`'s id. A controller later built for that id gets `unconfirmed`, and `/settings` and `/settings apply` then say `The session is not attached yet: it may be running with other settings, shown after your first prompt.` A new id (`/clear`) keeps the plain line. After the first prompt the session has an id and the normal view applies. New test seam: `LocalRuntimeDeps.clock`.
+
+**F4 (`App.tsx`, `settings-command.ts`).** An apply shows `Applying this terminal's settings…` at once. A second apply on the same session while it is in flight is told `Already applying this terminal's settings…` and sends nothing. The outcome is drawn only if the view is still on the session it was issued on. After a switch it is not shown anywhere, by decision of the owner's "bound to the session": `/settings` on that session tells the truth when you return.
+
+**F5 (`settings-view.ts`).** `updateFailureLine` caps the error text at 500, like `mcp/src/status.ts`.
+
+**Red first (run on round 1's code, before any fix): 9 tests red.**
+
+| Finding | Red test |
+|---|---|
+| F1 | "a slow attach that keeps getting pages survives…"; "some pages, then a stall…" |
+| F2 | "own update, then another terminal's, then the own response…" |
+| F3 | `settingsCommandLines` "no claim…"; runtime "no false claim on that session…" |
+| F4 | `settingsCommand` "an apply in flight"; App "shows it is pending…"; App "an apply's outcome stays with the session…" |
+| F5 | "a pod's error text is capped" |
+
+Two guards passed on round 1 by construction and are proven by mutation only: "the open answered, then no page" and "a daemon that answers every re-open…". "The response ahead of its update" is proven only as a regression guard: a mutation to skip that write was not run.
+
+**Mutations (all red; each restored, `shasum` identical).**
+
+| Mutation | Red test |
+|---|---|
+| Every answered open counts as progress (`>=` in `noteAttachProgress`) | "a daemon that answers every re-open…" |
+| `unconfirmed` not passed in `build` | runtime F3 |
+| No pending line, and no session check (one batch) | App F4 (both) |
+| No cap in `oneLine` | F5 |
+
+One honest slip: the first F3 mutation run was not proof, because the test was failing on a malformed test record at the time. The record was fixed and that mutation re-run alone, red on the assertion path.
+
+**Gate (final run, after the last code edit).** `bunx tsc --noEmit`: clean. `bunx biome check .`: `Checked 689 files`, no findings. `bun test packages`: 5072 pass, 3 skip (the opt-in ones), 0 fail, 344 files, no flake.
+
+**Unverified.**
+
+- No live run; the checklist above stands. Item 8 still holds for a daemon that never answers. New live item: `connect` or a join on a long history over a slow link goes past 30 s and opens.
+- The error's `(session/open)` is now slightly narrow, since a stall during the snapshot reports it too. Text left as it is, because the join line and the docs quote it.
+- From round 1, confirmed unchanged: noisy stale `changed` lines for a terminal away during two or more applies.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-06*

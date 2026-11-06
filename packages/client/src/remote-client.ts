@@ -317,6 +317,10 @@ interface SessionEntry {
   queued: QueueState | undefined;
   /** The session's newest settings report (an open's, an own apply's, a `session_settings`). */
   settings: SessionSettingsReport | undefined;
+  /** How far the attach got: 1 once an open answered, 1 + n once a read reached page n. */
+  attachMark: number;
+  /** When `attachMark` last rose: the attach bound counts from it. */
+  attachProgressAt: number;
   /**
    * Opened by `attachSession`: an existing session, never created. Until it
    * is live once, a recovery re-sends the attach (no `create`), and an
@@ -621,7 +625,8 @@ export class RemoteClient {
    * `SessionDeleted` (`onSessionDeleted` fires) or `UnknownSession`
    * (docs/feat/tui-foreign-turns.md B7). Bounded: not live within
    * `ATTACH_TIMEOUT_MS` (no answer, a link that never comes back) →
-   * `AttachTimeoutError`, the never-live entry is forgotten (a late answer is
+   * since its last progress (`noteAttachProgress`) → `AttachTimeoutError`, the
+   * never-live entry is forgotten (a late answer is
    * ignored) and nothing is sent to the daemon (docs/feat/session-settings-apply.md S3).
    */
   async attachSession(
@@ -637,13 +642,25 @@ export class RemoteClient {
         entry.listener = null;
       }
     };
+    // Waits for an answer, not for the transfer: the bound counts from the
+    // attach's last progress (`noteAttachProgress`).
+    entry.attachMark = 0;
+    entry.attachProgressAt = this.clock.now();
     let timer: unknown = null;
     const deadline = new Promise<never>((_, reject) => {
-      timer = this.clock.setTimeout(() => {
-        timer = null;
-        forget();
-        reject(new AttachTimeoutError(ATTACH_TIMEOUT_MS));
-      }, ATTACH_TIMEOUT_MS);
+      const arm = (ms: number): void => {
+        timer = this.clock.setTimeout(() => {
+          timer = null;
+          const left = entry.attachProgressAt + ATTACH_TIMEOUT_MS - this.clock.now();
+          if (left > 0) {
+            arm(left);
+            return;
+          }
+          forget();
+          reject(new AttachTimeoutError(ATTACH_TIMEOUT_MS));
+        }, ms);
+      };
+      arm(ATTACH_TIMEOUT_MS);
     });
     const attached = (async () => {
       await this.openOn(entry, this.gen, {
@@ -756,7 +773,9 @@ export class RemoteClient {
       (raw) => {
         const result = raw as UpdateSettingsResult;
         const entry = this.sessions.get(sessionId);
-        if (entry && result.settings) {
+        // Its update arrived already (the id left the set): the stream, which
+        // may hold a newer apply by now, is the truth.
+        if (entry && result.settings && this.ownSettingsIds.has(id)) {
           entry.settings = result.settings;
         }
         if (!result.applied) {
@@ -1546,6 +1565,8 @@ export class RemoteClient {
       title,
       queued: undefined,
       settings: undefined,
+      attachMark: 0,
+      attachProgressAt: 0,
       attach: undefined,
     };
     this.sessions.set(id, entry);
@@ -1671,10 +1692,23 @@ export class RemoteClient {
     this.applyOpenResult(entry, gen, result);
   }
 
+  /**
+   * The attach got further than ever: the bound restarts. A high-water mark, not
+   * "any answer": after a drop the open and the first pages are served again, and
+   * a daemon or link that repeats them for ever must still hit the bound.
+   */
+  private noteAttachProgress(entry: SessionEntry, mark: number): void {
+    if (mark > entry.attachMark) {
+      entry.attachMark = mark;
+      entry.attachProgressAt = this.clock.now();
+    }
+  }
+
   private applyOpenResult(entry: SessionEntry, gen: number, result: OpenResult): void {
     if (gen !== this.gen || this.sessions.get(entry.id) !== entry) {
       return;
     }
+    this.noteAttachProgress(entry, 1);
     this.noteSettings(entry, result);
     this.step(entry, {
       kind: "open_result",
@@ -2059,6 +2093,10 @@ export class RemoteClient {
         throw new RpcError(JsonRpcErrorCode.InternalError, "snapshot: cursor made no progress");
       }
       pages.push(result.messages as readonly ChatMessage[]);
+      const entry = this.sessions.get(sessionId);
+      if (entry) {
+        this.noteAttachProgress(entry, 1 + pages.length);
+      }
     } while (cursor !== undefined);
     return {
       messages: pages.reverse().flat(),

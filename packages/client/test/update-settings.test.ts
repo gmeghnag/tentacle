@@ -13,7 +13,7 @@ import {
   type StreamEvent,
 } from "@tentacle/core";
 import { Connection, SessionHost } from "@tentacle/daemon";
-import { JsonRpcErrorCode, type SessionSettings } from "@tentacle/protocol";
+import { JsonRpcErrorCode, PROTOCOL_VERSION, type SessionSettings } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { type DuplexChannel, RpcError, createChannelPair } from "@tentacle/transport";
 import {
@@ -217,5 +217,68 @@ describe("the session_settings update: other terminals are told, the applier is 
     expect(b.settingsOf("S")?.carried).toEqual({ maxIterations: 3 });
     a.close();
     b.close();
+  });
+});
+
+describe("an applier's response never overwrites a newer report (F2)", () => {
+  const report = (maxIterations: number) => ({ carried: { maxIterations }, overridden: {} });
+  /** A daemon that opens S, and answers an apply through `onApply`. */
+  async function applier(
+    onApply: (send: (frame: object) => void, id: number, applyId: string) => void,
+  ) {
+    const [d, c] = createChannelPair();
+    const send = (frame: object): void => d.send(JSON.stringify({ jsonrpc: "2.0", ...frame }));
+    d.setOnMessage((data: string) => {
+      const frame = JSON.parse(data) as { id: number; method?: string; params?: { id?: string } };
+      if (frame.method === "initialize") {
+        send({
+          id: frame.id,
+          result: {
+            protocolVersion: PROTOCOL_VERSION,
+            agentCapabilities: { tools: true, permissions: true },
+          },
+        });
+      } else if (frame.method === "session/open") {
+        send({
+          id: frame.id,
+          result: { sessionId: "S", epoch: "e", created: true, resync: false, settings: report(1) },
+        });
+      } else if (frame.method === "session/update_settings") {
+        onApply(send, frame.id, frame.params?.id ?? "");
+      }
+    });
+    d.setOnClose(() => {});
+    const a = new RemoteClient(c, new PermissionBroker(), undefined, {
+      sessionSettings: { maxIterations: 3 },
+    });
+    await a.initialize();
+    await a.openSession(undefined, undefined, "S");
+    return a;
+  }
+  const update = (seq: number, settings: unknown, id: string) => ({
+    method: "session/update",
+    params: { sessionId: "S", seq, update: { type: "session_settings", settings, id } },
+  });
+
+  test("own update, then another terminal's, then the own response: the newer report stands", async () => {
+    // Round 1 writes the response unconditionally: the session reads 3 while 4 runs.
+    const a = await applier((send, id, applyId) => {
+      send(update(1, report(3), applyId));
+      send(update(2, report(4), "another-terminal"));
+      send({ id, result: { applied: true, settings: report(3) } });
+    });
+    expect(await a.updateSettings("S")).toEqual({ applied: true, settings: report(3) });
+    expect(a.settingsOf("S")?.carried).toEqual({ maxIterations: 4 });
+    a.close();
+  });
+
+  test("the response ahead of its update still updates the report", async () => {
+    // Mutation: never write on the response → `settingsOf` lags until the update.
+    const a = await applier((send, id) => {
+      send({ id, result: { applied: true, settings: report(3) } });
+    });
+    await a.updateSettings("S");
+    expect(a.settingsOf("S")?.carried).toEqual({ maxIterations: 3 });
+    a.close();
   });
 });
