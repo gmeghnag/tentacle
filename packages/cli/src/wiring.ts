@@ -306,6 +306,12 @@ export interface BuildAgentOptions {
    */
   readonly notice?: (line: string) => void;
   /**
+   * The sub-agents' own daemon-side notice (the server's slots lowered the
+   * cap): the caller gives it its own prefix. Absent → `notice`. Never the
+   * hook `log`.
+   */
+  readonly agentsNotice?: (line: string) => void;
+  /**
    * Asks whether to run the project's hooks when a turn brings no asker (the
    * in-process TUI, which has no RPC). Absent → project hooks are declined.
    */
@@ -325,14 +331,14 @@ export interface BuildAgentOptions {
 function slotsReader(
   model: ModelProvider,
   maxParallel: number,
-  log: ((line: string) => void) | undefined,
+  notice: ((line: string) => void) | undefined,
 ): (signal?: AbortSignal) => Promise<number | undefined> {
   let said = false;
   return async (signal) => {
     const slots = await model.slots?.(signal);
     if (!said && slots !== undefined && slots < maxParallel) {
       said = true;
-      log?.(`sub-agents capped at ${slots} at once: the model server's slots`);
+      notice?.(`sub-agents capped at ${slots} at once: the model server's slots`);
     }
     return slots;
   };
@@ -524,7 +530,13 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       mode: config.subagentExecution,
       maxParallel: config.subagentMaxParallel,
       ...(model.slots
-        ? { slots: slotsReader(model, config.subagentMaxParallel, options.log) }
+        ? {
+            slots: slotsReader(
+              model,
+              config.subagentMaxParallel,
+              options.agentsNotice ?? options.notice ?? options.log,
+            ),
+          }
         : {}),
     },
   });

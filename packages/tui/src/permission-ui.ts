@@ -26,6 +26,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { truncateCells } from "./cells.ts";
 import { MENU, type OrphanCause, type ReplyMode, draftOf } from "./permission-reply.ts";
 
 /** The sub-agent a request comes from. */
@@ -77,8 +78,7 @@ export function permissionShowsCwd(req: PermissionRequest): boolean {
  */
 export function permissionAgentLine(agent: PermissionAgent, columns: number): string {
   const line = `${agent.type} · "${agent.description}"`;
-  const max = Math.max(10, columns - 3);
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+  return truncateCells(line, Math.max(10, columns - 3));
 }
 
 /** At most this many detail rows in the dialog (a hooks trust request lists several). */

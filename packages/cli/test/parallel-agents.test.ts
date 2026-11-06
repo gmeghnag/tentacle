@@ -190,11 +190,34 @@ describe("buildAgent reads subagents.* (T-W)", () => {
     const lines: string[] = [];
     const { agent } = buildAgent(
       { ...config, subagentExecution: "parallel", subagentMaxParallel: 4 },
-      { modelOverride: model, log: (line) => lines.push(line) },
+      { modelOverride: model, notice: (line) => lines.push(line) },
     );
     await expectOneAtATime(model, () => runLocal(agent));
     expect(model.slotCalls).toBe(1);
     expect(lines.filter((l) => l.includes("capped at 1"))).toHaveLength(1);
+  });
+
+  test("the cap line goes to agentsNotice, not the hook log; notice is the fallback", async () => {
+    const run = async (extra: Record<string, (line: string) => void>) => {
+      const model = new GatedModel(two, 1);
+      const { agent } = buildAgent(
+        { ...config, subagentExecution: "parallel", subagentMaxParallel: 4 },
+        { modelOverride: model, ...extra },
+      );
+      await expectOneAtATime(model, () => runLocal(agent));
+    };
+    const hook: string[] = [];
+    const agents: string[] = [];
+    await run({ log: (l) => hook.push(l), agentsNotice: (l) => agents.push(l) });
+    expect(hook).toEqual([]);
+    expect(agents.filter((l) => l.includes("capped at 1"))).toHaveLength(1);
+    const notices: string[] = [];
+    await run({ notice: (l) => notices.push(l) });
+    expect(notices.filter((l) => l.includes("capped at 1"))).toHaveLength(1);
+    // The in-process worker passes only `log`: the line must still arrive.
+    const logged: string[] = [];
+    await run({ log: (l) => logged.push(l) });
+    expect(logged.filter((l) => l.includes("capped at 1"))).toHaveLength(1);
   });
 
   test("a child's rounds inherit tools.*", async () => {

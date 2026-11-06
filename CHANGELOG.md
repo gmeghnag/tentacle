@@ -67,6 +67,10 @@ those.
 
 ### Fixed
 
+- **A permission dialog with a wide label (Chinese/Japanese, emoji) no longer grows a row.**
+  The sub-agent, detail and folder rows are now cut by terminal cells, not characters.
+- **The "sub-agents capped at N at once" line no longer carries a `[hook]` prefix**
+  in the plain / one-shot modes; it is now `[agents]`.
 - Two tool calls that share a call id (a server may reuse them, e.g. two `agent_task`
   calls in one message) no longer overwrite each other's saved large output.
 - A model HTTP error on a pod run (`run`, `attach`, `run --detach`) now names its

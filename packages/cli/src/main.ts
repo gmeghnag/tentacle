@@ -1586,6 +1586,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       buildAgent(config, {
         log: (l) => process.stderr.write(`[hook] ${l}\n`),
         notice: (l) => process.stderr.write(`[context] ${l}\n`),
+        agentsNotice: (l) => process.stderr.write(`[agents] ${l}\n`),
       }).agent,
     );
   }
@@ -1694,6 +1695,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const { agent, tools } = buildAgent(config, {
     log: (l) => err(`[hook] ${l}\n`),
     notice: (l) => err(`[context] ${l}\n`),
+    agentsNotice: (l) => err(`[agents] ${l}\n`),
   });
   const mcp = await connectConfiguredMcp(config, tools);
   for (const [name, message] of Object.entries(mcp.errors)) {
