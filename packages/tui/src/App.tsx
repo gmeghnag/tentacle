@@ -343,6 +343,8 @@ export interface AppProps {
   readonly autoWakeOnJobExit?: boolean;
   /** A detached run's relay handed over a job's exit no turn has flushed (docs/fix/detached-autowake.md). */
   readonly wakePending?: boolean;
+  /** The wake was HANDED OVER by a relay (it owns it): a refused continuation is retried once. wakePending alone (the open reported unflushed exits) is never retried: another TUI may serve it. */
+  readonly wakeHanded?: boolean;
   /** Host notices to surface live (never a raw terminal write while Ink owns it). */
   readonly notices?: NoticeFeed;
   /** The runtime's link status, shown in the StatusBar while it is not up. */
@@ -442,6 +444,7 @@ export function App({
   jobs,
   autoWakeOnJobExit = true,
   wakePending = false,
+  wakeHanded = false,
   notices,
   link,
   mcpStatus,
@@ -625,10 +628,10 @@ export function App({
   // is running sets this, so the wake fires once the current turn settles (the
   // running turn won't see the exit — the agent flushes exits at turn START).
   // The decision is `@tentacle/core`'s, shared with a detached run's relay.
-  const wakeRef = useRef<WakeModel>(wakePending ? { pending: true } : initialWake);
+  const wakeRef = useRef<WakeModel>(wakePending || wakeHanded ? { pending: true } : initialWake);
   // The relay's wake, handed over: this TUI is its only owner, so if it loses
   // the slot to the adopted turn (not seen here yet) it is owed once more.
-  const handedWakeRef = useRef(wakePending);
+  const handedWakeRef = useRef(wakeHanded);
   // Latest `run`, so the jobs subscription and the post-turn check can start a
   // continuation turn without re-subscribing or a circular callback dependency.
   const runRef = useRef<

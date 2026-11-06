@@ -101,7 +101,8 @@ those.
   `session/open` reports how many job exits no turn has flushed (`unflushedExits`, an optional
   field, no protocol bump); with `autoWake` on, the attaching TUI starts a continuation turn by
   itself (`autoWake: false`: none). Exits that reach the client before the TUI subscribes are
-  no longer dropped.
+  no longer dropped. The attach also says `n background job(s) ended while you were away`
+  (with `autoWake` on or off); two terminals attaching at once start exactly one wake turn.
 - **A permission dialog with a wide label (Chinese/Japanese, emoji) no longer grows a row.**
   The sub-agent, detail and folder rows are now cut by terminal cells, not characters.
 - **The "sub-agents capped at N at once" line no longer carries a `[hook]` prefix**

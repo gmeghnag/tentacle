@@ -41,7 +41,7 @@ Proof:
 ### Preconditions
 
 - **P1 — `OpenResultSchema` is a strip schema** (`protocol/src/session.ts:508-519`, no `.strict()`): a new optional field is dropped by an older client and omitted by an older daemon. No `PROTOCOL_VERSION` bump (AGENTS §7).
-- **P2 — the TUI already accepts a seed wake.** `startTui({wakePending})` → `run.tsx:35,101` → `App.tsx:329,428`: `wakeRef` starts pending (`:610`) and a mount effect calls `wakeIfPending`. The TUI decides by its own `autoWake` (`autoWakeOnJobExit`, `App.tsx:427`). A running turn defers the wake to its end. → **no TUI change**.
+- **P2 — the TUI already accepts a seed wake.** `startTui({wakePending})` → `run.tsx:35,101` → `App.tsx:329,428`: `wakeRef` starts pending (`:610`) and a mount effect calls `wakeIfPending`. The TUI decides by its own `autoWake` (`autoWakeOnJobExit`, `App.tsx:427`). A running turn defers the wake to its end. → ~~no TUI change~~ *(wrong, Review R1: the seed also armed the hand-over retry; split into `wakePending` / `wakeHanded`)*.
 - **P3 — every engine/connect TUI start goes through ONE `startTui` call, `runEngineTui` (`main.ts:~851`), with the runtime in hand and the session already open:** `main.ts:~1573` (`runtime.attachTo(sessions.resume.id, …)`, `--resume`/connect → `runEngineTui` `:~1585`) and `attach-run.ts` (`run`/`attach` → `:~1462`). *(Corrected at execution: the plan also listed `main.ts:1625`, the local worker-thread path. It owns a fresh in-process daemon with no earlier session and no exits to owe, so it is NOT touched, like the in-process path.)*
 - **P4 — every open result passes `RemoteClient.applyOpenResult`** (`remote-client.ts:1525-1536`; callers `:693-696`, `:1500-1522`, `:1576-1609`): the one place to record a count.
 - **P5 — a TUI subscribes once but may re-subscribe** (effect deps `[jobs, flushNow, autoWakeOnJobExit]`, `App.tsx:684`). A backlog drained at the first subscribe is emptied once; what the TUI got stays in its state.
@@ -76,7 +76,7 @@ Dependency order (protocol → agent → daemon → client → cli), smallest di
 5. `packages/cli/src/local-runtime.ts`, `packages/cli/src/main.ts` (**shared file**: check open branches first).
 6. Docs: `docs/fix/detached-autowake.md` Notes/debt one line ("closed by fix/attach-unflushed-exits"); `docs/attach-detach-behaviour.md` one row; `CHANGELOG.md` `### Fixed`; `TODO.md` at merge.
 
-Unchanged: `App.tsx`, `run.tsx`, `relay*.ts`, `attach-run.ts`, `@tentacle/core`, `PROTOCOL_VERSION`.
+*(Corrected after Review R1: `App.tsx` and `run.tsx` DO change — a separate `wakeHanded` prop arms the lost-slot retry; `wakePending` alone only seeds.)* Unchanged: `relay*.ts`, `attach-run.ts`, `@tentacle/core`, `PROTOCOL_VERSION`.
 
 ### Failure modes
 
@@ -149,6 +149,20 @@ As built, in plan order (red first on each slice, then green):
 2. `TENTACLE_AUTO_WAKE=0` (or `autoWake: false`) → no turn on attach; the notice still shows.
 3. A job that ends in the first second of an attach (between the open and the mount) is not lost: its notice shows and the wake fires.
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-06*
+
+Protocol schema: **not touched this round** (`protocol.json` unchanged beyond the first round's `unflushedExits`).
+
+- **R1** — `App.tsx`/`run.tsx`: new prop `wakeHanded`; `wakePending || wakeHanded` seeds `wakeRef`, only `wakeHanded` seeds `handedWakeRef` (the lost-slot retry). `main.ts`: `wakePending` = relay flag OR count > 0; `wakeHanded` = relay flag only. T-TUI-4 now uses `wakeHanded`; new T-TUI-5 (`wakePending` alone + lost slot → `sends === 1`). Mutation `useRef(wakeHanded || wakePending)` → T-TUI-5 red.
+- **R3** — pure `unflushedExitsNotice(count)` in `cli/src/attach-notice.ts` (null for 0, singular/plural, count only); `runEngineTui` calls `sessions.notices.notify` once before `runSessionTui` (buffered until Ink mounts; no raw write). M-1 extended: plural, singular, `TENTACLE_AUTO_WAKE=0` still shows it, none → no notice and no `wakePending`/`wakeHanded` key; new `attach-notice.test.ts`. Mutations: notify disabled → M-1 red; `wakeHanded` also from the count → M-1 red; singular check broken → notice test red.
+- **R2** — C-1f re-attaches ONE entry (same count twice, then 0 after a flush). Mutation `=` → `+=` → C-1f red.
+- Follow-up recorded in `TODO.md` (multi-session seed). Plan lines corrected (P2, "Unchanged").
+- All mutations: backup, restore, `shasum -c` OK per file.
+
+**Gate:** see the final report below.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-06* (fresh context, different model from the executor)
@@ -194,6 +208,15 @@ The executor was disciplined: red first, a mutation per slice, and the plan drif
 1. **R1 fix shape:** split the prop (`wakePending` vs a relay-only `wakeHanded`)? *Recommendation: yes.* It is the smallest change that keeps Q1 = A.
 2. **Multi-session seed on `/sessions` switch** (Notes): leave it as a follow-up? *Recommendation: yes.*
 3. **R3:** a laptop-rendered one-line notice on attach ("n background job(s) ended while you were away") when the count is > 0, so that `autoWake` off is visible too? *Recommendation: yes, as a follow-up.* It is a count, not pod text.
+
+### Owner answers (fix round 1)
+
+*— 2026-11-06*
+
+1. R1 fix shape: **yes** — split the prop: `wakePending` (the open reported unflushed exits) vs a relay-only `wakeHanded` (hand-over retry semantics). Two terminals attaching at once must give exactly ONE wake turn.
+2. Multi-session seed on `/sessions` switch: **follow-up** — added to the `TODO.md` entry, not built.
+3. R3: **build it now** — with the count > 0 on attach, a one-line laptop-rendered notice `n background job(s) ended while you were away` (count only, never pod text; singular/plural; through the existing notice palette), with `autoWake` on AND off.
+Also fix R2 (re-open of one entry shows the count replaced).
 
 ## Owner questions
 

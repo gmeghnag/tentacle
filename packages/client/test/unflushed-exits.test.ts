@@ -178,4 +178,24 @@ describe("unflushedExits()", () => {
     expect(c.unflushedExits()).toBe(0);
     r.close();
   });
+
+  test("C-1f a re-open of ONE entry replaces the count (never adds to it)", async () => {
+    // R2. Mutation: `entry.unflushedExits = …` → `+=` in applyOpenResult.
+    const r = rig();
+    const a = await r.dial();
+    await a.openSession(undefined, undefined, "S");
+    r.jobs.fire("j1");
+    r.jobs.fire("j2");
+    const b = await r.dial();
+    const listener = { output: () => {}, linkClosed: () => {} } as never;
+    await b.attachSession("S", listener);
+    expect(b.unflushedExits()).toBe(2);
+    // The same entry opens again (a recovery re-attach): the daemon says 2 still.
+    await b.attachSession("S", listener);
+    expect(b.unflushedExits()).toBe(2);
+    await drain(a.newSession(undefined, "S").send(""));
+    await b.attachSession("S", listener);
+    expect(b.unflushedExits()).toBe(0);
+    r.close();
+  });
 });

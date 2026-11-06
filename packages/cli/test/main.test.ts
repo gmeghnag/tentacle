@@ -1432,6 +1432,7 @@ describe("cli main: --engine", () => {
         createSession?: unknown;
         autoAccept?: unknown;
         wakePending?: unknown;
+        wakeHanded?: unknown;
         tuiOptionKeys?: string[];
         confirmed?: boolean;
         config?: { model?: string; baseURL?: string; cwd?: string };
@@ -1493,6 +1494,7 @@ describe("cli main: --engine", () => {
             createSession?: unknown;
             autoAccept?: unknown;
             wakePending?: unknown;
+            wakeHanded?: unknown;
             model?: string;
             resumeMessages?: unknown;
             notices?: { onNotice: (listener: (text: string) => void) => unknown };
@@ -1506,6 +1508,7 @@ describe("cli main: --engine", () => {
           seen.createSession = options.createSession;
           seen.autoAccept = options.autoAccept;
           seen.wakePending = options.wakePending;
+          seen.wakeHanded = options.wakeHanded;
           seen.tuiOptionKeys = Object.keys(options);
         }) as never,
       });
@@ -1567,8 +1570,20 @@ describe("cli main: --engine", () => {
         const some = await attached(["attach", "box"], true, false, async () => true, 2);
         expect(some.code).toBe(0);
         expect(some.seen.wakePending).toBe(true);
+        // R1: a count-seeded wake is never the relay's hand-over (no retry).
+        expect(some.seen.tuiOptionKeys).not.toContain("wakeHanded");
+        // R3: one laptop-rendered line, the count only; plural / singular.
+        expect(some.seen.notices).toEqual(["2 background jobs ended while you were away."]);
+        const one = await attached(["attach", "box"], true, false, async () => true, 1);
+        expect(one.seen.notices).toEqual(["1 background job ended while you were away."]);
+        // ... and also with `autoWake` off.
+        await withEnv({ TENTACLE_AUTO_WAKE: "0" }, async () => {
+          const off = await attached(["attach", "box"], true, false, async () => true, 2);
+          expect(off.seen.notices).toEqual(["2 background jobs ended while you were away."]);
+        });
         const none = await attached(["attach", "box"]);
         expect(none.seen.tuiOptionKeys).not.toContain("wakePending");
+        expect(none.seen.notices).toEqual([]);
       });
       rmSync(keptIndexDir(join(dir, "config")), { recursive: true, force: true });
     });

@@ -233,11 +233,38 @@ describe("autonomous wake on job-exit", () => {
       snapshot: () => ({ messages: [] }),
     } as unknown as SessionController;
     const { unmount } = render(
-      <App createSession={() => session} model="q" cwd="/tmp/work" wakePending />,
+      <App createSession={() => session} model="q" cwd="/tmp/work" wakeHanded />,
     );
     await delay(100);
     expect(sends).toBe(2);
     expect(turns).toBe(1);
+    unmount();
+  });
+
+  test("T-TUI-5 a count-seeded wake (wakePending alone) that loses the slot is NOT retried: another TUI serves it", async () => {
+    // docs/fix/attach-unflushed-exits.md R1. Mutation: seed `handedWakeRef` from `wakePending` too → sends === 2.
+    let sends = 0;
+    let raise: (activity: SessionActivity) => void = () => {};
+    const session = {
+      async *send() {
+        sends += 1;
+        raise(foreignTurn());
+        yield* [] as never[];
+        throw Object.assign(new Error("a turn is already running"), {
+          code: SendNowErrorCode.TurnInProgress,
+        });
+      },
+      watch(listener: (activity: SessionActivity) => void) {
+        raise = listener;
+        return () => {};
+      },
+      snapshot: () => ({ messages: [] }),
+    } as unknown as SessionController;
+    const { unmount } = render(
+      <App createSession={() => session} model="q" cwd="/tmp/work" wakePending />,
+    );
+    await delay(100);
+    expect(sends).toBe(1);
     unmount();
   });
 });
