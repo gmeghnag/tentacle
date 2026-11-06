@@ -410,3 +410,64 @@ The entry answers nearly everything; two points it leaves open, neither blocking
 - Run the reviewer's scratch repro (`.tentacle/tmp/tool-output-location/repro.ts`) and paste its output in Execution.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-06*
+
+## Review — round 2
+
+*— claude-opus-5-5, 2026-11-06*
+
+**Verdict: PASS.** 6 LOW, no MEDIUM or higher. Every decision (F1-F6, Q1, Q2) is implemented. One orchestrator step is still open: the scratch repro has not been run (finding 6). Scope: `git diff e297947..HEAD`.
+
+**Evidence limits.** Only the gate and the mutation below were executed. `bun <script>` needed an approval that was not available here, so neither `repro.ts` nor my `attack2.ts` (same scratch dir, attacks A-M, including the real wiring with `HOME` = the project) ran. So the findings and every "holds" below come from reading the code, unless the row cites a test. The reviewer and the executor are different models of the same vendor family, so they may share blind spots.
+
+### Decisions
+
+| Decision | Implemented | Evidence |
+|---|---|---|
+| F1 exclusive create + retry | Yes: `flag: "wx"`, retry only on `EEXIST` (`tool-output.ts:242-253`) | `wx`→`w` mutation by the executor (4 red); tests with two stores, two Agents, 8 parallel writes |
+| F1 bounded | Yes: `MAX_ATTEMPTS` 1000, then `null`, which gives the "could not be saved" banner | Reading only; no test reaches the limit (acceptable) |
+| F1 concurrent writers | Yes: `O_EXCL` decides each name, across stores and processes. A dangling symlink at a name gives `EEXIST` and is not followed | 8-parallel test |
+| F2 suffix survives `segment` | Yes: the suffix is added after `segment` (`:241-243`), and `segment` turns `~` into `_`, so a stem never contains `~` | My mutation below |
+| F3 absolute bases only | Yes (`:139-142`); `HOME=""` falls to tmp | Executor's mutation on the XDG check; the `HOME` check was not mutated, but its test pins the exact root |
+| F4 project-level symlink check | Yes (`:274`) | Executor's mutation (1 red) |
+| F5 one session dir name | Yes: `write` and `removeSession` both use `sessionDirName` (`:239`, `:270`). `sweep` and `owns` do not use the name, and need not: they walk dirs or compare the root prefix. See finding 3 | Executor's mutation (3 red) |
+| F5 old round-1 dirs | Moot: round 1 is not on `main` (`git merge-base` checked). A leftover dev dir would age out through `sweep` | Reading |
+| F6 `cacheDirFromEnv` removed | Yes: no match in the repo outside this doc; header updated | Grep, `tsc` |
+| Q1 root inside cwd | Yes (`:215-224`). The one-line `wiring.ts:255` is right: both resolvers use the same defaults, and `alt` is lazy and memoised | Store-level tests. The wiring line has no test (finding 2) |
+| Q2 doc line | Yes, plus the tmp-root rule (`container-config-sources.md`, section 2.9 area) | Read |
+| `Set` kept | Justified: `spillId` returns early with a sink (`agent.ts:1900`), and the library env path has no store. Production always passes a sink (`wiring.ts:470,510`), and the child wraps the parent's (`subagent.ts:251`) | Reading |
+| Run the repro, paste its output | **No** | Finding 6 |
+
+### Findings
+
+1. **LOW: `cwd=/` loses every spill.** `tool-output.ts:219-223`: both roots lie inside `/`, so `rootFor` returns `null`. Each large output is then cut to the preview with a "could not be saved" banner. Reachable with `cd / && tentacle`, or `attach` to an image whose WORKDIR is `/`. It fails loud, and "never the project" is the decided rule, but `/` is not really a project and the model loses the output. **Option:** treat `cwd=/` as containing no root.
+2. **LOW: three parts of Q1 have no test that pins them.** (a) `!lies(other, cwd)` (`:223`): no test has the alternative inside the cwd, and the `null` test passes `() => null`. So dropping that check would land spills in the project with every test green. (b) Sweeping the alternative root: the comment at `tool-output-round2.test.ts:172` says "swept", but the test never sweeps. (c) `wiring.ts:255`: removing the second argument fails no test, since a Q1 write would then just return `null`. **Fix:** three cheap tests. (c) can use `toolOutputStore().forProject(process.env.HOME)`, because the test guard already makes `HOME` a temp dir.
+3. **LOW: "collision-free" does not hold on a case-insensitive filesystem.** `tool-output.ts:60-65`: `AB` and `ab` are both safe names, so on default APFS they are one directory, and deleting one removes the spills of the other. The doc comment "Two different ids never share a directory" is false there. It needs client-chosen ids that differ only in case.
+4. **LOW: a swept name can be reused.** `tool-output.ts:243`: once `t-1.txt` ages out while its banner is still in history, the next write with a reused id takes that name again. That banner now reads different content with no error, and no "gone" hint. The header's "no spill ever replaces another" (`:9-11`) is not quite true over time. It needs a resumed session older than the retention period and a server that reuses ids.
+5. **LOW: a cwd below the root's parent still writes into the mount.** `HOME=/w`, `cwd=/w/sub`: the root does not lie inside the cwd, so the spill lands in `/w/.cache`, in the laptop's folder if `/w` is mounted. Q1 was decided as "inside the session's cwd", and the code matches that. The original complaint survives only in this rarer shape.
+6. **LOW: process and tidiness.** The orchestrator's repro step is unmet by both the executor and this review, and needs one approved run: `bun .tentacle/tmp/tool-output-location/repro.ts`, then `attack2.ts`, with `HOME` and `TMPDIR` set to scratch dirs. `repro.ts` was written against round 1, so its section 2 pokes at internals and may need adjusting. The two new tests in `agent-spill-sink.test.ts` remove `root` but leave `project` in tmp. `roots()` (`:202-213`) also creates the tmp root at every daemon start, and tests that use the real `toolOutputStore()` (`serve-persistence.test.ts:419,439`) now reach the real `$TMPDIR/tentacle-<uid>/tool-output`, outside the test env guard.
+
+### Attacks tried
+
+| Attack | Result |
+|---|---|
+| Retry loop with a non-`EEXIST` error | Stops at once: the outer catch returns `null`. Holds |
+| Partial write on a full disk | The name stays taken, the banner is honest, and retention removes the file. Holds |
+| Child scope plus a long id | `segment` cuts the stem, and the suffix still applies after the cut. Holds |
+| Hashed name equal to a plain one | Not possible: `~` is outside `SAFE_SESSION`. Holds, except finding 3 on case |
+| Hostile ids in `removeSession` | Hashed, so they reach only that id's own dir (test at `round2.test.ts:139`). Holds |
+| Sibling prefix (`/x/proj` vs `/x/proj-cache`) | `lies` compares with a trailing `/`. Holds |
+| Symlinked cwd or root | Both sides go through `realpath`. Holds |
+| Root equal to the alternative (the root already fell to tmp) | Listed once by `roots()`, and `rootFor` returns `null` if it lies in the cwd. Holds |
+| Root `null` with an alternative | `null`: the tmp root was already tried during resolution. Holds |
+| `sweep` racing `writeIn` | `ENOENT` gives `null` and the banner. Loud, and rare |
+| Pod not trusted, persistence, protocol (§7) | No wire or record change in this diff, and the spill path stays only printed. Holds |
+
+### Gate and mutation
+
+- `bunx tsc --noEmit`: clean. `bunx biome check .`: clean, 673 files.
+- `bun test packages/agent packages/config packages/cli`: 2617 pass, 0 fail, 157 files. The reaper flake did not fire.
+- **Mutation:** the suffix passed through `segment` (`tool-output.ts:243`): `a 60+ character id repeated still gets distinct files` went RED (1 fail, 14 pass). This site was not among the executor's mutations. Restored; shasum identical (`14667f20…`).
+
+### How the executor behaved
+
+Honest: it reported both the unrun repro and the missing wiring test as drift, and it showed five mutations. Two claims go too far: "the same properties are covered by the new tests" (finding 2), and the test comment that says "swept". It should have stopped and flagged the blocked repro as an open step rather than treating the tests as equivalent, though it did disclose it.
