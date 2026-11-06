@@ -107,42 +107,55 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
   const restoreTerminal = (): void => {
     uninstallRestore();
     restoreTerminalOnExit(
-      { write: (text) => void process.stdout.write(text), setRawMode: process.stdin.setRawMode },
+      {
+        write: (text) => void process.stdout.write(text),
+        // BOUND, not `process.stdin.setRawMode`: the unbound extractor loses `this`,
+        // and Bun's `setRawMode` throws `Cannot access property of undefined or
+        // null` when called unbound (measured on a real pty, docs §Fix round 2
+        // LOW 3) — silently, because `restoreTerminalOnExit` catches it, so the tty
+        // stayed RAW.
+        setRawMode: (enabled: boolean) => process.stdin.setRawMode?.(enabled),
+      },
       { fullscreen, probeWasLate: themeProbeWasLate() },
     );
   };
-  const initialItems =
-    options.resumeMessages && options.resumeMessages.length > 0
-      ? messagesToItems(options.resumeMessages)
-      : undefined;
-  const instance = render(
-    <App
-      {...(agent ? { agent } : {})}
-      {...(options.createSession ? { createSession: options.createSession } : {})}
-      model={options.model}
-      cwd={options.cwd}
-      {...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {})}
-      {...(options.target ? { target: options.target } : {})}
-      {...(options.permissions ? { permissions: options.permissions } : {})}
-      {...(options.jobs ? { jobs: options.jobs } : {})}
-      {...(options.autoWakeOnJobExit !== undefined
-        ? { autoWakeOnJobExit: options.autoWakeOnJobExit }
-        : {})}
-      {...(options.wakePending ? { wakePending: true } : {})}
-      {...(initialItems ? { initialItems } : {})}
-      {...(options.notices ? { notices: options.notices } : {})}
-      {...(options.link ? { link: options.link } : {})}
-      {...(options.mcpStatus ? { mcpStatus: options.mcpStatus } : {})}
-      {...(options.daemonInPod ? { daemonInPod: true } : {})}
-      {...(options.detachOnQuit ? { detachOnQuit: true } : {})}
-      {...(options.sessions ? { sessions: options.sessions } : {})}
-      {...(options.runQuit ? { runQuit: options.runQuit } : {})}
-      {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
-      {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
-    />,
-    { stdin, exitOnCtrlC: false },
-  );
+  // `render()` is INSIDE the try on purpose: Ink reconciles synchronously, so a
+  // component that throws throws HERE, before any `waitUntilExit` — with the call
+  // outside, the `finally` never ran and the tty stayed raw (measured on a real
+  // pty, docs §Fix round 2 LOW 3). `messagesToItems` is inside it for the same
+  // reason: a malformed resumed transcript throws before Ink is even called.
   try {
+    const initialItems =
+      options.resumeMessages && options.resumeMessages.length > 0
+        ? messagesToItems(options.resumeMessages)
+        : undefined;
+    const instance = render(
+      <App
+        {...(agent ? { agent } : {})}
+        {...(options.createSession ? { createSession: options.createSession } : {})}
+        model={options.model}
+        cwd={options.cwd}
+        {...(options.contextWindow !== undefined ? { contextWindow: options.contextWindow } : {})}
+        {...(options.target ? { target: options.target } : {})}
+        {...(options.permissions ? { permissions: options.permissions } : {})}
+        {...(options.jobs ? { jobs: options.jobs } : {})}
+        {...(options.autoWakeOnJobExit !== undefined
+          ? { autoWakeOnJobExit: options.autoWakeOnJobExit }
+          : {})}
+        {...(options.wakePending ? { wakePending: true } : {})}
+        {...(initialItems ? { initialItems } : {})}
+        {...(options.notices ? { notices: options.notices } : {})}
+        {...(options.link ? { link: options.link } : {})}
+        {...(options.mcpStatus ? { mcpStatus: options.mcpStatus } : {})}
+        {...(options.daemonInPod ? { daemonInPod: true } : {})}
+        {...(options.detachOnQuit ? { detachOnQuit: true } : {})}
+        {...(options.sessions ? { sessions: options.sessions } : {})}
+        {...(options.runQuit ? { runQuit: options.runQuit } : {})}
+        {...(options.autoAccept ? { autoAccept: options.autoAccept } : {})}
+        {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
+      />,
+      { stdin, exitOnCtrlC: false },
+    );
     await instance.waitUntilExit();
   } finally {
     restoreTerminal();

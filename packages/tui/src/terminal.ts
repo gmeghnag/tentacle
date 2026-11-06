@@ -33,7 +33,8 @@ const SIGNAL_EXIT: Readonly<Record<string, number>> = { SIGINT: 130, SIGTERM: 14
 /**
  * Put the terminal back the way a TUI found it (docs/feat/tui-light-theme.md,
  * Review LOW 5). Pure of Ink: every effect is injected, so the "what" is tested
- * without a TTY (`run.test.ts`), and `startTui` only calls it.
+ * without a TTY (`terminal.test.ts` — fix round 2 corrected the stale `run.test.ts`,
+ * Review round 2 LOW 6), and `startTui` only calls it.
  *
  * Two independent things can be left on:
  *   - the alternate screen / mouse reporting / bracketed paste, when the TUI ran

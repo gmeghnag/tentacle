@@ -52,20 +52,59 @@ export interface ProbeStream {
   setRawMode(enabled: boolean): unknown;
   on(event: string, listener: () => void): unknown;
   off(event: string, listener: () => void): unknown;
-  /** A fresh tty yields Buffers (no previous Ink mount set an encoding). */
+  /** A fresh tty yields bytes (no previous Ink mount set an encoding). */
   read(): string | Buffer | null;
-  unshift(chunk: string): unknown;
+  /** Bytes, never a re-encoded string (Review fix round 2, MEDIUM 1). */
+  unshift(chunk: string | Buffer): unknown;
 }
 
 /**
- * One chunk as LATIN1 text, which is what the parser needs (Review LOW 7): the
- * 8-bit forms (`0x9d` OSC, `0x9c` ST, `0x9b` CSI) are single BYTES, and a utf8
- * decode turns `0x9d` into a replacement character — losing the reply, or worse,
- * splitting a multi-byte key. Latin1 maps every byte to one code unit, so the
- * parser sees exactly what the terminal sent.
+ * Bytes decoded as UTF-8, which is what stdin IS (owner decision Q-D, 2026-11-06;
+ * Review fix round 2, MEDIUM 1).
+ *
+ * Fix round 1 decoded latin1 to keep the 8-bit C1 reply forms (`0x9d` OSC,
+ * `0x9c` ST, `0x9b` CSI) as single bytes — but that made every typed non-ASCII
+ * key mojibake, and it read a UTF-8 continuation byte (`0x9D` inside `😝`) as an
+ * OSC introducer. Those forms are dropped, so the decode is the terminal's own.
+ *
+ * A chunk may END in the middle of a character: a tty `read()` returns whatever is
+ * buffered, which can be one byte. Decoding such a chunk on its own yields a
+ * replacement char and loses the continuation byte, so the incomplete tail is
+ * carried into the next chunk — and handed back as BYTES if the probe ends first.
+ * Valid UTF-8 then round-trips exactly, which is all a keyboard on a UTF-8 link
+ * can produce.
  */
-function asLatin1(chunk: string | Buffer): string {
-  return typeof chunk === "string" ? chunk : chunk.toString("latin1");
+function splitUtf8(bytes: ArrayLike<number>): {
+  readonly text: string;
+  readonly carry: Uint8Array;
+} {
+  const buffer = new Uint8Array(bytes);
+  // Find the start of a trailing INCOMPLETE sequence (at most 3 bytes back).
+  let cut = buffer.length;
+  for (let back = 1; back <= Math.min(3, buffer.length); back++) {
+    const byte = buffer[buffer.length - back];
+    if (byte === undefined || (byte & 0xc0) !== 0x80) {
+      // A lead byte (or ASCII): does it announce more bytes than are here?
+      const need = byte === undefined || byte < 0xc0 ? 0 : byte < 0xe0 ? 2 : byte < 0xf0 ? 3 : 4;
+      if (need > back) {
+        cut = buffer.length - back;
+      }
+      break;
+    }
+  }
+  const decoder = new TextDecoder("utf-8");
+  return {
+    text: decoder.decode(buffer.subarray(0, cut)),
+    carry: buffer.slice(cut),
+  };
+}
+
+/** Two byte runs as one, without caring which `Uint8Array` flavour (`Buffer` is one). */
+function joinBytes(head: ArrayLike<number>, tail: ArrayLike<number>): Uint8Array {
+  const out = new Uint8Array(head.length + tail.length);
+  out.set(head, 0);
+  out.set(tail, head.length);
+  return out;
 }
 
 /** The slice of the timer API the probe needs (a manual clock in tests). */
@@ -121,6 +160,8 @@ export function probeBackground(options: ProbeOptions): ProbeHandle {
   }
 
   let state: ProbeState = initialProbe();
+  /** Bytes of a character cut by a chunk boundary, decoded with the next chunk. */
+  let carry: Uint8Array = new Uint8Array(0);
   let settled = false;
   let resolve: (result: ProbeResult) => void = () => {};
   const done = new Promise<ProbeResult>((r) => {
@@ -136,7 +177,15 @@ export function probeBackground(options: ProbeOptions): ProbeHandle {
       if (chunk === null) {
         break;
       }
-      state = stepProbe(state, asLatin1(chunk));
+      if (typeof chunk === "string") {
+        state = stepProbe(state, chunk);
+        continue;
+      }
+      const split = splitUtf8(carry.length > 0 ? joinBytes(carry, chunk) : chunk);
+      carry = split.carry;
+      if (split.text !== "") {
+        state = stepProbe(state, split.text);
+      }
     }
     if (state.sentinel) {
       finish(false);
@@ -181,10 +230,14 @@ export function probeBackground(options: ProbeOptions): ProbeHandle {
     stdin.off("readable", onReadable);
     uninstall();
     // Every byte that was not part of a reply, in order — a held prefix that
-    // turned out to be type-ahead is given back by the pure module.
+    // turned out to be type-ahead is given back by the pure module. Handed back as
+    // BYTES, never as a re-encoded string: a `unshift("Ã¨")` on a stream with no
+    // encoding set is written back as `C3 83 C2 A8`, so `è` reaches Ink as `Ã¨`
+    // (Review fix round 2, MEDIUM 1). Valid UTF-8 round-trips exactly, which is
+    // what a keyboard on a UTF-8 link produces.
     const rest = restOf(state);
-    if (rest !== "") {
-      stdin.unshift(rest);
+    if (rest !== "" || carry.length > 0) {
+      stdin.unshift(Buffer.from(joinBytes(Buffer.from(rest, "utf8"), carry)));
     }
     if (!timedOut) {
       // Replies are ordered, so the sentinel means nothing more can come.

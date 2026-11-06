@@ -13,13 +13,15 @@
  * can follow, which ends the wait in one round trip instead of the whole timeout
  * on a terminal that ignores OSC 11.
  *
- * Byte forms: the introducer is `ESC ]` or `0x9d`, the terminator BEL, `ESC \` or
- * `0x9c`. The 8-bit forms only survive a latin1 read, which is why the driver
- * reads the stream as latin1 for the probe's duration (a stdin a previous Ink
- * mount left in utf8 yields strings, where they simply do not occur).
+ * Byte forms: 7-bit ONLY — the introducer is `ESC ]`, the terminator BEL or
+ * `ESC \`, and the sentinel `ESC [ ? … c` (owner decision Q-D, 2026-11-06). The
+ * 8-bit C1 forms (`0x9d`, `0x9c`, `0x9b`) are NOT recognised: they are the only
+ * reason the driver ever decoded the stream as latin1, and that decode is what
+ * turned a UTF-8 key typed during the window into mojibake (Review MEDIUM 1).
+ * stdin is decoded as UTF-8, so a C1 byte cannot even reach this parser.
  *
  * The control characters in the patterns below ARE the subject: this file parses
- * terminal escape sequences, so `\x07`, `\x1b`, `\x9c` are expected bytes, not
+ * terminal escape sequences, so `\x07` and `\x1b` are expected bytes, not
  * accidents (the same reason `render-lines.ts` ignores the rule for SGR).
  */
 
@@ -176,12 +178,12 @@ export function initialProbe(): ProbeState {
   return { rest: "", pending: "", color: null, sentinel: false };
 }
 
-/** A reply's introducer: `ESC ]` (two bytes) or the 8-bit `0x9d`. */
+/** A reply's introducer: `ESC ]` (two bytes). */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-const OSC_INTRO = /^(?:\x1b\]|\x9d)/;
-/** A DA1 sentinel (`ESC [ ? … c` or the 8-bit CSI form). */
+const OSC_INTRO = /^\x1b\]/;
+/** A DA1 sentinel (`ESC [ ? … c`). */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-const DA1 = /^(?:\x1b\[|\x9b)\?[\d;]*c/;
+const DA1 = /^\x1b\[\?[\d;]*c/;
 
 /**
  * Could `text` still become a background reply? Used to decide whether an
@@ -201,11 +203,11 @@ const DA1 = /^(?:\x1b\[|\x9b)\?[\d;]*c/;
 function isReplyPrefix(text: string): boolean {
   // A DA1 in progress (`ESC [` / `ESC [?1;` …): the sentinel must survive a split.
   // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-  if (/^(?:\x1b\[|\x9b)\?[\d;]{0,8}$/.test(text) || /^(?:\x1b\[|\x9b)$/.test(text)) {
+  if (/^\x1b\[\?[\d;]{0,8}$/.test(text) || /^\x1b\[$/.test(text)) {
     return true;
   }
   // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-  const intro = /^(?:\x1b\]|\x9d)/.exec(text);
+  const intro = /^\x1b\]/.exec(text);
   if (!intro) {
     // Only a LONE ESC can still become an introducer — `ESC q` is the Esc key
     // followed by the letter q, never a reply.
@@ -286,13 +288,12 @@ export function stepProbe(state: ProbeState, chunk: string): ProbeState {
       buffer = buffer.slice(1);
       continue;
     }
-    // A reply starts here: find its terminator (BEL, ST or the 8-bit ST).
+    // A reply starts here: find its terminator (BEL or ST).
     // `ESC \` is EITHER an ST terminator or the start of a DA1: look for the
     // whole ST (`\x1b\\`) rather than a bare ESC, or a following `[?…c` would be
     // mistaken for the end of the OSC.
     // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-    const terminator = /\x07|\x1b\\|\x9c/.exec(buffer.slice(osc[0].length));
+    const terminator = /\x07|\x1b\\/.exec(buffer.slice(osc[0].length));
     if (!terminator) {
       if (buffer.length > MAX_REPLY_BYTES) {
         // Never terminated and too long to be one: it is the user's input after
@@ -321,7 +322,7 @@ export function stepProbe(state: ProbeState, chunk: string): ProbeState {
     // The introducer already consumed `ESC ]`, so the body is `11;rgb:…`.
     // A bare `11;?` is the QUERY, which we never answer ourselves.
     // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-    const payload = /^11;([^\x07\x1b\x9c]*)$/.exec(body);
+    const payload = /^11;([^\x07\x1b]*)$/.exec(body);
     if (payload) {
       const parsed = parseColorSpec(payload[1] ?? "");
       if (parsed !== null) {
@@ -389,31 +390,43 @@ export function initialLateFilter(now = 0): LateFilter {
  * as the Esc key, in which case only `]11;…` remains.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-const FULL_REPLY = /^(?:\x1b)?\]11;[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)/;
+const FULL_REPLY = /^(?:\x1b)?\]11;[^\x07\x1b]*(?:\x07|\x1b\\)/;
 
 /**
- * The DA1 sentinel, with or without its own ESC (it may have passed
- * already).
+ * A DA1 sentinel at a REPLY BOUNDARY (the start of the text), where its ESC may
+ * already have passed as the Esc key: `ESC[?1;2c` or the frameless `[?1;2c`.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-const SENTINEL = /^(?:(?:\x1b\[|\x9b)\?[\d;]*c|\[\?[\d;]*c)/;
+const LONE_SENTINEL = /^(?:\x1b\[\?[\d;]*c|\[\?[\d;]*c)/;
 
 /**
- * A DA1 sentinel with NO OSC before it, with or without its own ESC: a terminal
- * that ignores OSC 11 answers the sentinel alone, and on a slow link it can land
- * after the deadline's mount. It is still OUR reply, so it must not reach Ink.
+ * The same DA1, but MID-CHUNK, where it must carry its own ESC: a frameless
+ * `[?1c` in the middle of typed text is typing (`foo[?1cbar`), and eating it also
+ * disarmed the guard (Review fix round 2, LOW 5).
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-const LONE_SENTINEL = /^(?:(?:\x1b\[|\x9b)\?[\d;]*c|\[\?[\d;]*c)/;
+const FRAMED_SENTINEL = /^\x1b\[\?[\d;]*c/;
+
+/**
+ * A DA1 sentinel still owed from an OSC that was already stripped: it follows a
+ * reply, so it is at a boundary too (`filter.awaitingSentinel` is only set when
+ * the rest of the buffer starts a fresh reply's tail).
+ */
+const SENTINEL = LONE_SENTINEL;
 
 /**
  * Could `text` still become the DA1 sentinel, with enough framing to be worth
  * HOLDING? A bare `[` is far more often typed than half a sentinel, so it passes
- * at once; `ESC[`, the 8-bit CSI and the `[?…` forms are held (Review MEDIUM 3).
+ * at once; `ESC[` and `ESC[?…` are held anywhere (Review MEDIUM 3), and the
+ * frameless `[?…` only at a reply boundary, where its ESC went first (LOW 5).
  */
-function continueSentinel(text: string): boolean {
+function continueSentinel(text: string, boundary: boolean): boolean {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-  return /^(?:\x1b\[|\x9b|\x1b?\[\?)[\d;]{0,8}$/.test(text);
+  if (/^\x1b\[(?:\?[\d;]{0,8})?$/.test(text)) {
+    return true;
+  }
+  // The frameless `[?…` is only a candidate where its ESC may have passed.
+  return boundary && /^\[\?[\d;]{0,8}$/.test(text);
 }
 
 /** Could `text` still become the DA1 sentinel (`[`, `[?1;`, `ESC[?2`, …)? */
@@ -423,51 +436,43 @@ function isSentinelPrefix(text: string): boolean {
     text === "" ||
     // A lone ESC: the sentinel's own introducer.
     text === "\x1b" ||
-    // `[`, `[?1;`, `ESC[`, `ESC[?2`, the 8-bit CSI form, …
+    // `[`, `[?1;`, `ESC[`, `ESC[?2`, …
     // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-    /^(?:\x1b\[|\[|\x9b)\??[\d;]{0,8}$/.test(text)
+    /^(?:\x1b\[|\[)\??[\d;]{0,8}$/.test(text)
   );
 }
 
 /**
- * Could `text` still become a complete reply once its ESC has been consumed? The
- * introducer's ESC is OPTIONAL here on purpose: the Esc key passes at once (it
+ * Could `text` still become a complete reply once its ESC has been consumed? This
+ * is the STRICT prefix rule `stepProbe` uses (`isReplyPrefix`), not a loose
+ * "anything after `11;`": the guard holds a candidate only while it is still a
+ * prefix of a real reply, so the first key that cannot be part of one releases
+ * the user's bytes AT ONCE instead of holding them to the deadline (Review fix
+ * round 2, MEDIUM 2).
+ *
+ * The introducer's ESC is OPTIONAL here on purpose: the Esc key passes at once (it
  * must), so a reply split right after its ESC arrives as `]11;…`, and it must
  * still be recognised and stripped.
  */
 function replyPrefix(text: string): boolean {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-  const intro = /^(?:\x1b)?\]/.exec(text);
-  if (!intro) {
-    return text === "\x1b";
-  }
-  const body = text.slice(intro[0].length);
-  if (body === "") {
+  if (isReplyPrefix(text)) {
     return true;
   }
-  // A trailing ESC may be the first half of an ST terminator.
-  const spec = body.endsWith("\x1b") ? body.slice(0, -1) : body;
-  if (spec === "" || "11;".startsWith(spec)) {
-    return true;
-  }
-  if (!spec.startsWith("11;")) {
-    return false;
-  }
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-  return /^[^\x07\x1b\x9c]*$/.test(spec.slice(3));
+  // The ESC-optional form applies to the OSC reply ONLY: prefixing a `[?1` with
+  // an ESC would make any half-typed DA1 look like a held reply.
+  return text.startsWith("]") && isReplyPrefix(`\x1b${text}`);
 }
 
 /**
  * Is a held candidate certainly REPLY RESIDUE, and therefore the only kind of
  * buffer allowed to be dropped at the deadline? It must carry the reply's `11;`
  * selector behind an OSC introducer — `ESC]11;`, `]11;` (the ESC already passed
- * as the Esc key) or the 8-bit `0x9d11;`. A bare `]` or `]1` is far more likely a
- * typed key (a regex, an index), so it is handed to the user instead of vanishing
- * (Review LOW 6).
+ * as the Esc key). A bare `]` or `]1` is far more likely a typed key (a regex, an
+ * index), so it is handed to the user instead of vanishing (Review LOW 6).
  */
 function isReplyResidue(text: string): boolean {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal escape sequence
-  return /^(?:\x1b\]|\x9d|\])11;/.test(text);
+  return /^(?:\x1b\]|\])11;/.test(text);
 }
 
 /**
@@ -502,7 +507,22 @@ export function stepLateFilter(
     };
   }
 
-  const text = filter.pending + chunk;
+  // A held RESIDUE — the cut head of a reply the timeout already gave up on —
+  // can only be the terminal's, never the user's. If this chunk neither finishes
+  // it nor leaves it completable, drop it and read the chunk on its own, so the
+  // first key that cannot be part of a reply releases the user's bytes AT ONCE
+  // instead of holding them to the deadline and then losing them (Review fix
+  // round 2, MEDIUM 2).
+  let pending = filter.pending;
+  if (
+    pending !== "" &&
+    isReplyResidue(pending) &&
+    !FULL_REPLY.test(pending + chunk) &&
+    !replyPrefix(pending + chunk)
+  ) {
+    pending = "";
+  }
+  const text = pending + chunk;
   let out = "";
   let i = 0;
 
@@ -553,15 +573,17 @@ export function stepLateFilter(
       };
     }
     // A DA1 with NO OSC before it (Review MEDIUM 3): strip it, and disarm — with
-    // the sentinel seen, nothing more can come.
-    const lone = LONE_SENTINEL.exec(rest);
+    // the sentinel seen, nothing more can come. A FRAMELESS `[?1c` is only
+    // recognised at a reply boundary (`i === 0`, where its ESC may have passed as
+    // the Esc key); mid-chunk it is typing (LOW 5).
+    const lone = (i === 0 ? LONE_SENTINEL : FRAMED_SENTINEL).exec(rest);
     if (lone) {
       return {
         filter: { ...filter, armed: false, awaitingSentinel: false, pending: "" },
         pass: out + rest.slice(lone[0].length),
       };
     }
-    if (continueSentinel(rest)) {
+    if (continueSentinel(rest, i === 0)) {
       // Half a sentinel: held for the next chunk (an arrow key's `ESC[` included —
       // it resolves as soon as its letter arrives, or at the deadline).
       return { filter: { ...filter, pending: rest }, pass: out };

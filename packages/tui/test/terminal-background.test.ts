@@ -196,9 +196,12 @@ describe("stepProbe", () => {
     expect(state.sentinel).toBe(true);
   });
 
-  test("the BEL terminator and the 8-bit forms are replies too", () => {
+  test("the BEL terminator is a reply too — but the 8-bit C1 forms are NOT (Q-D)", () => {
     expect(probe([OSC_BEL]).color).toEqual([30, 30, 30]);
-    expect(probe(["\x9d11;rgb:1e1e/1e1e/1e1e\x9c"]).color).toEqual([30, 30, 30]);
+    // Owner decision Q-D (2026-11-06): only 7-bit replies are recognised; stdin is
+    // decoded as UTF-8. `0x9d`/`0x9c` are not introducer/terminator bytes, so this
+    // is a stray byte plus a never-terminated OSC — no colour, nothing swallowed.
+    expect(probe(["\x9d11;rgb:1e1e/1e1e/1e1e\x9c"]).color).toBeNull();
   });
 
   test("type-ahead before and after the reply is preserved in order", () => {

@@ -21,7 +21,7 @@ import { canProbe as canProbeNow } from "../src/terminal-background.ts";
 /** A fake `process.stdin`-like stream: the listeners and raw-mode calls as data. */
 function fakeStream(options: { readable?: boolean } = {}) {
   const listeners = new Set<() => void>();
-  const queue: string[] = [];
+  const queue: (string | Buffer)[] = [];
   const log: string[] = [];
   let raw = false;
   const stream: ProbeStream = {
@@ -49,8 +49,8 @@ function fakeStream(options: { readable?: boolean } = {}) {
       const next = queue.shift();
       return next === undefined ? null : next;
     },
-    unshift(chunk: string) {
-      log.push(`unshift:${JSON.stringify(chunk)}`);
+    unshift(chunk: string | Buffer) {
+      log.push(`unshift:${JSON.stringify(String(chunk))}`);
       queue.unshift(chunk);
     },
   };
@@ -59,7 +59,7 @@ function fakeStream(options: { readable?: boolean } = {}) {
     log,
     /** Feed a chunk as the terminal would, then run the readable listener. */
     feed(chunk: string | Buffer): void {
-      queue.push(chunk as string);
+      queue.push(chunk);
       for (const listener of [...listeners]) {
         listener();
       }
@@ -70,7 +70,7 @@ function fakeStream(options: { readable?: boolean } = {}) {
     get listenerCount(): number {
       return listeners.size;
     },
-    get queued(): string[] {
+    get queued(): (string | Buffer)[] {
       return [...queue];
     },
   };
@@ -125,12 +125,14 @@ describe("raw mode is ON before the query is written", () => {
   });
 });
 
-describe("the chunk is read as LATIN1 (Review LOW 7)", () => {
-  test("a Buffer chunk's 8-bit OSC/ST are seen as bytes, not replacement chars", () => {
-    // A fresh tty yields Buffers, and `0x9d`/`0x9c` are single BYTES. Decoded as
-    // utf8 they become U+FFFD, so the 8-bit reply would be lost (and a multi-byte
-    // key split across chunks corrupted).
-    // Mutation: read the Buffer as a string (`String(chunk)`) → colour null here.
+describe("the chunk is decoded as UTF-8 (owner decision Q-D, Review fix round 2 MEDIUM 1)", () => {
+  test("a Buffer chunk's bytes are the terminal's UTF-8, not latin1", () => {
+    // Owner decision Q-D (2026-11-06): the 8-bit C1 forms are DROPPED, so the
+    // stream is decoded the way the terminal encodes it. A latin1 read turned a
+    // typed `è` into mojibake and took a UTF-8 continuation byte for an OSC —
+    // both are pinned in `terminal-background-bytes.test.ts` against a real
+    // `Readable`; this is the decode itself.
+    // Mutation: `chunk.toString("latin1")` → the bytes below become `Ã¨`.
     const stdin = fakeStream();
     const timer = fakeTimer();
     const handle = probeBackground({
@@ -139,11 +141,11 @@ describe("the chunk is read as LATIN1 (Review LOW 7)", () => {
       canProbe: canProbeNow(ok),
       timer: timer.timer,
     });
-    const bytes = Buffer.from("\x9d11;rgb:1e1e/1e1e/1e1e\x9c\x9b?1;2c", "latin1");
-    stdin.feed(bytes);
+    stdin.feed(Buffer.from("è\x1b]11;rgb:1e1e/1e1e/1e1e\x07\x1b[?1;2c", "utf8"));
     return handle.wait().then((result) => {
       expect(result.color).toEqual([30, 30, 30]);
       expect(result.late).toBe(false);
+      expect(stdin.queued).toEqual([Buffer.from("è", "utf8")]);
     });
   });
 });
@@ -179,7 +181,7 @@ describe("a terminal that answers", () => {
     const done = await result.wait();
     expect(done.color).toEqual([255, 255, 255]);
     // Mutation: unshift the raw buffer instead of `restOf` → the reply comes back.
-    expect(stdin.queued).toEqual(["abc"]);
+    expect(stdin.queued).toEqual([Buffer.from("abc", "utf8")]);
   });
 });
 

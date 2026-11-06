@@ -438,9 +438,17 @@ export function themeProbeWasLate(): boolean {
 /**
  * The head of a reply the timeout cut in half: the late guard's starting
  * `pending`, so the tail that arrives after the mount is stripped with it.
+ *
+ * This is a TAKE, not a read (Review fix round 2, MEDIUM 2): the `--resume`
+ * picker's guard and the TUI's guard that follows it are two guards in one
+ * process, and only ONE of them may start with the same half reply — the second
+ * would otherwise hold the user's first keystrokes waiting for a tail the first
+ * already consumed.
  */
 export function themeProbeResidue(): string {
-  return preparedResidue;
+  const residue = preparedResidue;
+  preparedResidue = "";
+  return residue;
 }
 
 /** Test-only: forget the memo, so a suite can decide again. */

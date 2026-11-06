@@ -28,9 +28,20 @@ type Styler = (s: string) => string;
  * kept, because those are emphasis, not colour — only the colour moves. The
  * mode's OWN tokens are read, not the active palette's, so the renderer for a
  * mode never paints another mode's values.
+ *
+ * Tables get their own treatment (Review fix round 2, LOW 4). `marked-terminal`
+ * hands `tableOptions` to `cli-table3`, whose `style.head`/`style.border` are
+ * resolved through `@colors/colors` (`cell.js:218-222`) — NAMED colours only, no
+ * hex, so no token can be passed that way and the library's defaults
+ * (`head: ['red']`, `border: ['grey']`, `utils.js:234-235`) are DARK-only paint.
+ * Light therefore drops both to the terminal's own foreground, keeps the head's
+ * BOLD (emphasis, as dark's is), and paints the frame from the `border` token in
+ * the `table` styler — which runs on the finished, already-measured string, so
+ * adding SGR there cannot disturb cli-table3's column widths.
  */
-function lightOptions(): Record<string, Styler> {
+function lightOptions(): Record<string, unknown> {
   const md = tokens.light.md;
+  const border = tokens.light.border;
   const fg = (color: string): Styler => chalk.hex(color) as unknown as Styler;
   const plain: Styler = (s) => s;
   return {
@@ -46,7 +57,11 @@ function lightOptions(): Record<string, Styler> {
     // Not colours: kept from the defaults so the two modes differ only in hue.
     hr: chalk.reset,
     listitem: plain,
-    table: chalk.reset,
+    // The FRAME is the light `border` token; the cells stay the terminal's own
+    // foreground (their content is already styled by `codespan`, `strong`, …).
+    table: ((s: string) =>
+      s.replace(/[│─┌┐└┘├┤┬┴┼]+/gu, (frame) => chalk.hex(border)(frame))) as Styler,
+    tableOptions: { style: { head: ["bold"], border: [] } },
     paragraph: chalk.reset,
     strong: chalk.bold,
     em: chalk.italic,

@@ -52,8 +52,10 @@ describe("MEDIUM 3: a DA1 with no OSC before it never reaches the prompt", () =>
     expect(stepLateFilter(initialLateFilter(), `${REPLY}${DA1}`, 0).pass).toBe("");
   });
 
-  test("the 8-bit CSI form of a lone DA1 is removed too", () => {
-    expect(stepLateFilter(initialLateFilter(), "\x9b?1;2c", 0).pass).toBe("");
+  test("the 8-bit CSI form of a lone DA1 is not a form any more (Q-D)", () => {
+    // Owner decision Q-D (2026-11-06): 7-bit replies only. A `0x9b` cannot arrive
+    // from a UTF-8 stdin as a control at all, so it is ordinary input here.
+    expect(stepLateFilter(initialLateFilter(), "\x9b?1;2c", 0).pass).toBe("\x9b?1;2c");
   });
 
   test("typing that merely contains brackets is untouched", () => {
@@ -115,5 +117,24 @@ describe("MEDIUM 4: held bytes are not lost at the hand-over", () => {
   test("a lone ESC is the only held prefix given back to the terminal", () => {
     expect(restOf(held("\x1b"))).toBe("\x1b");
     expect(restOf(held("\x1b]11;"))).toBe("");
+  });
+});
+
+describe("fix round 2, LOW 5: the lone-DA1 strip only fires at a reply boundary", () => {
+  test("a `[?1c` INSIDE typed text is not eaten", () => {
+    // The frameless form exists only because the ESC may already have passed as
+    // the Esc key — i.e. at index 0. Matching it mid-chunk ate a pasted
+    // `foo[?1cbar` and disarmed the guard.
+    // Mutation: run `LONE_SENTINEL` at every index → `foobar` here.
+    const step = stepLateFilter(initialLateFilter(), "foo[?1cbar", 0);
+    expect(step.pass).toBe("foo[?1cbar");
+  });
+
+  test("a lone frameless DA1 at index 0 is still stripped", () => {
+    expect(stepLateFilter(initialLateFilter(), "[?1;2c", 0).pass).toBe("");
+  });
+
+  test("typing that ENDS in a half sentinel is passed on, mid-chunk", () => {
+    expect(stepLateFilter(initialLateFilter(), "a[?1", 0).pass).toBe("a[?1");
   });
 });
