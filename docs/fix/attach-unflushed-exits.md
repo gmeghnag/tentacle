@@ -171,6 +171,22 @@ Protocol schema: **not touched this round** (`protocol.json` unchanged beyond th
 - F2/F3: accepted LOW, no code. Protocol schema: not touched.
 - **Gate:** `bunx tsc --noEmit` clean; `bunx biome check .` clean; `bun test packages`: 5099 pass, 3 skip (opt-in), 0 fail.
 
+### Fix round 3
+
+*— claude-sonnet-5-5, 2026-11-06*
+
+**Symptom (orchestrator, live):** the attach-time wake turn runs and is saved, but the attaching TUI renders none of it.
+
+**Repro:** a scratch test over the real stack (SessionHost + Connection + `createLocalRuntime` `attachTo`, then `App` with `wakePending`, `jobs: runtime.jobs`, frames captured; scratch deleted). Frames at +20…+400 ms showed only `› go / ⏺ STARTED`, while the model had been called twice. A stack trace at `session.send("")` showed it called from `RemoteClient.onBackgroundExit` → the `App.tsx` jobs-`onExit` handler, i.e. BEFORE the `watch` effect (`WATCH` was logged after `SEND`).
+
+**Root cause (one sentence):** round 1's backlog is delivered synchronously inside the `onBackgroundExit` subscribe, so the `App` jobs effect (declared before the session-`watch` effect) started the wake turn before the session was watched, and the attach history the watch then replayed (the pre-wake snapshot) replaced the transcript and wiped the turn's rows.
+
+**Fix:** `App.tsx` — a `watchedRef` (set right after `watchSession` in its mount effect); the exit handler no longer runs the turn inline until the session is watched but defers to `wakeIfPending` (via `wakeIfPendingRef`: `setTimeout 0`, after all mount effects, re-reading the gate). After mount, live exits keep the inline path (T-TUI-2 unchanged). The relay hand-over (`wakeHanded`/`wakePending` mount effect) already went through `wakeIfPending`.
+
+**Tests (extended `tui/test/auto-wake.test.tsx`, no file overwritten):** T-TUI-6 (backlog at subscribe + synchronously replayed history → `watch` before `send`, and the frame holds both `STARTED` and the wake reply); T-TUI-6b (`wakeHanded` over the same replayed history renders live: no regression). Mutation `if (!watchedRef.current)` → `if (false)`: T-TUI-6 red; restored, `shasum -c` OK. Protocol: not touched.
+
+**Gate:** `bunx tsc --noEmit` clean; `bunx biome check .` clean; `bun test packages`: 5101 pass, 3 skip (opt-in), 0 fail.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-06* (fresh context, different model from the executor)

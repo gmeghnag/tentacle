@@ -241,6 +241,81 @@ describe("autonomous wake on job-exit", () => {
     unmount();
   });
 
+  test("T-TUI-6 an exit backlog delivered at subscribe: the wake renders live, after the attach history (round 3)", async () => {
+    // The attach's buffered `history` is replayed by `watch`, a mount effect AFTER the
+    // jobs subscription. Mutation: run the wake inline in the `onExit` handler → the
+    // turn starts before the watch and the replayed (pre-wake) history wipes its rows.
+    const order: string[] = [];
+    const session = {
+      async *send() {
+        order.push("send");
+        yield { type: "text", delta: "WOKE-REPLY" } as const;
+        yield { type: "turn_end", reason: "end_turn" } as const;
+      },
+      watch(listener: (activity: SessionActivity) => void) {
+        order.push("watch");
+        // As RemoteSession.watch: the activities buffered before it, synchronously.
+        listener({
+          kind: "history",
+          reason: null,
+          messages: [
+            { role: "user", content: "go" },
+            { role: "assistant", content: "STARTED" },
+          ],
+        });
+        return () => {};
+      },
+      snapshot: () => ({ messages: [] }),
+    } as unknown as SessionController;
+    // As RemoteClient.onBackgroundExit: the backlog goes to the new listener at once.
+    const jobs = {
+      start: () => exited,
+      read: () => undefined,
+      kill: () => false,
+      list: () => [],
+      dispose: () => {},
+      onExit: (listener: (job: BackgroundJob) => void) => {
+        listener(exited);
+        return () => {};
+      },
+    } as unknown as JobController;
+    const { lastFrame, unmount } = render(
+      <App createSession={() => session} jobs={jobs} model="q" cwd="/tmp/work" wakePending />,
+    );
+    await delay(150);
+    expect(order).toEqual(["watch", "send"]);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("STARTED");
+    expect(frame).toContain("WOKE-REPLY");
+    unmount();
+  });
+
+  test("T-TUI-6b the relay hand-over (wakeHanded) renders its wake live over the same replayed history", async () => {
+    const session = {
+      async *send() {
+        yield { type: "text", delta: "HANDED-REPLY" } as const;
+        yield { type: "turn_end", reason: "end_turn" } as const;
+      },
+      watch(listener: (activity: SessionActivity) => void) {
+        listener({
+          kind: "history",
+          reason: null,
+          messages: [{ role: "assistant", content: "STARTED" }],
+        });
+        return () => {};
+      },
+      snapshot: () => ({ messages: [] }),
+    } as unknown as SessionController;
+    const { lastFrame, unmount } = render(
+      <App createSession={() => session} model="q" cwd="/tmp/work" wakeHanded />,
+    );
+    await delay(150);
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("STARTED");
+    expect(frame).toContain("HANDED-REPLY");
+    unmount();
+  });
+
   test("T-TUI-5 a count-seeded wake (wakePending alone) that loses the slot is NOT retried: another TUI serves it", async () => {
     // docs/fix/attach-unflushed-exits.md R1. Mutation: seed `handedWakeRef` from `wakePending` too → sends === 2.
     let sends = 0;

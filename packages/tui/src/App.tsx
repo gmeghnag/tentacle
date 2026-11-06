@@ -673,6 +673,11 @@ export function App({
   const { scheduleFlush, flushNow } = usePaintScheduler(FRAME_MS);
   const linkView = useLinkIndicator(link);
 
+  // `wakeIfPending`, through a ref: the exit handler below is declared first.
+  const wakeIfPendingRef = useRef<(() => void) | null>(null);
+  // The mount effect that watches the session has run (set by it, below).
+  const watchedRef = useRef(false);
+
   // --- live background-job exits -------------------------------------------
   // Surface a finished background job the instant it exits, even while idle.
   // The agent also emits a `background_exit` event at the next turn; the shared
@@ -693,6 +698,15 @@ export function App({
       // start); if idle, start a continuation turn now. Multiple exits coalesce
       // — the agent drains all pending exits at the next turn's start.
       wakeRef.current = wakeStep(wakeRef.current, { type: "exit" });
+      // Before the session is watched (a subscriber's backlog — exits that arrived
+      // before the TUI mounted — is delivered inside THIS effect, ahead of the
+      // watch effect): never start the turn here. The history the watch replays
+      // next would wipe its rows (docs/fix/attach-unflushed-exits.md, round 3).
+      // The deferred check runs after every mount effect, re-reading the gate.
+      if (!watchedRef.current) {
+        wakeIfPendingRef.current?.();
+        return;
+      }
       const gate = {
         enabled: autoWakeOnJobExit,
         idle: !stateRef.current.running,
@@ -1045,6 +1059,7 @@ export function App({
       }
     }, 0);
   }, [autoWakeOnJobExit]);
+  wakeIfPendingRef.current = wakeIfPending;
 
   // `streamTurn`, through a ref: it and `settleSendNow` call each other.
   const streamTurnRef = useRef<
@@ -1497,6 +1512,7 @@ export function App({
   );
   useEffect(() => {
     watchSession(sessionRef.current);
+    watchedRef.current = true;
     return () => {
       activitySubRef.current?.();
       activitySubRef.current = null;
