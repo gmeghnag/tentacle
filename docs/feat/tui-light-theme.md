@@ -775,8 +775,142 @@ equals the original S1 backup's (`6b518ee…`), and every other file in the swee
 
 ## Review
 
-*— not started* (mandatory fresh context, §10). Red-team: the raw-mode window, late-reply
-guard, `Proxy` vs Ink internals, dark byte-identity, a light token missed by the scan.
+*— claude-opus-5-5, 2026-11-06* (fresh context; different model family from the executor)
+
+**Verdict: REQUEST-CHANGES.** 2 HIGH, 2 MEDIUM, 6 LOW. The probe's core discipline and the
+config are sound. Approved scope is missing, though, and one regression breaks a command
+that works on `main`.
+
+**Limit of this review:** the end-to-end runs were NOT executed. `python3 <script>` and
+`bun <script>` both needed an approval that was unavailable in this session, and I did not
+repackage them to get past it. So no pty harness and no main-vs-branch frame diff ran. The
+findings below come from exact traces of deterministic code; only the gate and the mutation
+were executed. The brief's end-to-end trace stays owed: run it when fixing (*Required
+before re-review*).
+
+### Findings
+
+1. **HIGH — Markdown and fenced code were never built, and Execution does not say so.**
+   `packages/tui/src/markdown.ts` is not in the diff: `:11` is still `marked.use(markedTerminal())`,
+   with no `new Marked` per mode and no light theme, and `markdown.test.ts` is unchanged. In light
+   mode, assistant text keeps ANSI yellow inline code, blue links and cli-highlight's default
+   fences. That is the "worst offender" of Q5, which the owner accepted, and it is in S4 and §Files 4.
+   `tokens.*.md` (`theme.ts:216`) is read by no source file, so the six `md.*` rows of
+   `theme-contrast.test.ts:146-151` gate colours nothing paints. The no-stray scan cannot see library
+   defaults, so nothing went red. The status line's "implementation DONE" is false.
+2. **HIGH — regression: `tentacle connect <url> --resume` on a terminal fails.** The picker
+   closure at `packages/cli/src/main.ts:529` reads `config.tui?.theme`, but `let config` is declared
+   at `main.ts:572`, and the `connect` branch returns before reaching it. When a daemon has sessions
+   to pick from, `connectTui` calls `deps.pick` (`connect.ts:276`), which throws
+   `ReferenceError` (temporal dead zone). `main`'s catch turns that into `[connect error] …`, exit 1,
+   so no picker appears. `tsc` does not flag a use inside a closure, and `connect.test.ts:428` injects
+   `pick` directly, so this path through `main` is untested. Also, Implementation §6 says `connect`
+   never loads config. Fix: `connectTui` passes the `connectTheme` result to `deps.pick`, with a
+   test through `main`.
+3. **MEDIUM — a late DA1 with no OSC before it leaks into the prompt.** Trace `stepLateFilter`
+   with `ESC[?1;2c`: `awaitingSentinel` is false, `FULL_REPLY` does not match (`terminal-background.ts:464`),
+   `replyPrefix` is false (`:490`), so every byte goes to `out` (`:500`). This is a slow link
+   (RTT > 200 ms) to a terminal that ignores OSC 11, or one whose OSC arrived inside the window
+   with its DA1 after it. It contradicts Design §4 ("removes one OSC 11 reply and one DA1 reply"),
+   the SSH failure row ("no garbage") and the live checklist's slow-link item. No test feeds a DA1
+   alone to the filter.
+4. **MEDIUM — `restOf` ignores `pending`, so held bytes vanish at the hand-over.**
+   `terminal-background.ts:330` returns only `state.rest`, and `terminal-background-probe.ts:170` uses it.
+   - Esc pressed in a mute window: `stepProbe` holds `ESC` and the timeout drops it. This contradicts
+     Design §2 ("including a lone `ESC`") and the "Type-ahead" row. `terminal-background.test.ts:221`
+     pins the hold but not the hand-over.
+   - A reply cut by the timeout: its head is dropped, its tail (`e/1e/1e…`) no longer matches
+     `FULL_REPLY`, so it reaches Ink as typed text.
+5. **LOW (plausible, consequence unmeasured) — the failure row "Mount throws after a timeout → `finally` in
+   `startTui` → cooked TTY" is false.** `render()` (`run.tsx:104`) is outside the `try`, and `restore`
+   only writes `LEAVE_FULLSCREEN`. Nothing calls `setRawMode(false)` on that path. Whether Bun resets the
+   tty at exit was not measured. A throwing `write` in the driver (`probe.ts:158`) has the same gap.
+6. **LOW — a typed `]` is held while armed.** `replyPrefix("]")` is true, so a lone `]` waits for the
+   next key, and if that key comes after the deadline the `]` is dropped silently. The accepted cost
+   named `]11;rgb:`, not a bare `]`, and this happens in the 5 s after every launch that timed out.
+   The "normal typing" test only has `]` mid-chunk. The guard also re-arms for a fresh 5 s in
+   `startTui` after a picker that already had one.
+7. **LOW — the byte handling differs from the plan and the comments.** `terminal-background.ts:17-19` says
+   the driver reads latin1, but no source calls `setEncoding`: a Buffer chunk is coerced to utf8 by
+   `state.pending + chunk` (`ProbeStream.read(): string` hides it). So the 8-bit forms the tests pin
+   cannot occur on a fresh stdin, and a multi-byte key split across chunks would corrupt. A garbage spec
+   split across chunks leaks (`isReplyPrefix` false), against the "no bytes leak" row. `#RRRGGGBBB`
+   is promised by Design §1 and rejected by `parseHash`.
+8. **LOW — dead code and a bypassed pure seam.** `resolveMode` is tested but has no production caller:
+   `decide` (`theme.ts:404`) reimplements the precedence. Also unused: `ProbeOptions.now`, `cancel`, and
+   the no-op ternary at `probe.ts:277`.
+9. **LOW — test seams.** No-stray misses `color={"gray"}` / `color: "x"` (a grep found no such site today).
+   The contrast rows are a hand list, so a new token can skip the gate. `startTui`/`pickSession`
+   wiring has no test (disclosed; finding 2 is what that gap costs).
+10. **LOW — the record is unreliable.** Refresh drift says every other light value is "confirmed
+    exactly as planned", but S3 also changed `success`/`meter.low`/`md.heading` and the purple. The scripts
+    "pasted in Execution" (line 91) are not there, and none of the probes exist any more, so the pty table
+    cannot be reproduced. `theme.ts:13`, `:174` point at the wrong test file.
+
+### Refresh drift: justified, and within what the owner approved?
+
+Ratios recomputed by hand against chalk's `rgbToAnsi256`; the contrast gate passes on the tree.
+
+- **`#6b6b6f` → `#6b6b6b`: measurement holds** (cube 102 `#878787` = 3.59; ramp 242 `#6c6c6c` = 5.25). The
+  owner named `#6b6b6f` AND a gate that value fails, so one answer had to yield. A 4/255 blue shift is
+  within the gate's intent, but it replaces a named hex: ratify (Q-A).
+- **The other greys, `#1a1a1a`, `success`, purple:** not owner-named, and required by the accepted gate. Fine.
+- **Notice `#3b5bdb` kept (3.54 at 256; `#5f87d7`): NOT resolved by the executor's argument.** The owner's
+  gate says "all but the accent". The executor calls the notice decision "later", but both are dated
+  2026-11-05, and that decision says only that the hex waits for this task. A second exception in
+  `EXCEPT_256` weakens an owner gate: owner question (Q-B).
+
+### Attacks tried
+
+| Attack | Result |
+|---|---|
+| Probe before Ink, on every mount | HOLDS: `render` appears only at `run.tsx:104` and `session-picker-run.tsx:37`, each after `await readThemeSetting`, before `ENTER_FULLSCREEN` |
+| Raw before write; raw kept on timeout; `canProbe` false → no write, no raw | HOLDS (code + tests + mutation) |
+| 200 ms bound; memo → one query | HOLDS by code: one `setTimeout`, settled once. Not timed on a pty |
+| SIGTERM in the window; Ctrl+C | HOLDS by code: restore then exit 128+n; Ctrl+C is a byte in `rest` and passes the guard |
+| Partial/late reply into Ink | **FAILS: findings 3, 4** |
+| Garbage reply | Whole chunk consumed; split across chunks **leaks (7)** |
+| tmux / real terminals | NOT TESTED: owner checklist |
+| `tui.theme` merge, mutation left in `profile.ts` | HOLDS: per-key `{...base.tui,...tui}`; shasum `6b518ee…` equals the value Execution cites |
+| Invalid value / unknown key; env | HOLDS: `.strict()` + enum refuse; no env (Q10 accepted) |
+| `connect` warns, never refuses; no scaffold | HOLDS (`connectTheme`, `readFileConfig`); `connect` refuses `--profile`, `TENTACLE_PROFILE` applies. Its picker: **FAILS (2)** |
+| Pods / carry | HOLDS: only local `startTui` probes; no protocol, `carried-settings.ts` or daemon file in the diff |
+| Dark byte-identity | HOLDS statically: all 30+ dark values compared one by one to `main`'s `theme.ts`; named colours and `dimColor` kept; `markdown.ts` unchanged; `addWord` emits the same order for plain text. **Frame diff not run** |
+| Edited existing tests weakened? | NO: three files, symbol renames only, same assertions |
+| Stray colour | No literal found by a wider grep; **the real stray is the library default (1)** |
+| Pure modules / components map tokens | HOLDS except finding 8 |
+
+**Premise spot-checks:** TRUE: `session-picker-run.tsx` mounts Ink before `startTui`; `connect` returns before
+`loadConfig`; `tui.theme` absent from the carried settings. FALSE: the `finally` row (5).
+
+### Gate and mutation
+
+- `bunx tsc --noEmit`: clean. `bunx biome check .`: clean (700 files). `bun test packages`: **5176 pass, 3 skip,
+  0 fail**. `tsc -p apps/mobile` not run. Green does not contradict the findings: none has a test.
+- **Mutation** (`probe.ts:174`, `if (!timedOut)` → always cooked, so a late reply would echo): **RED**, 1 fail
+  ("timeout: raw stays ON…"), 8 pass. Restored; shasum `397194d…` identical; `git status` clean.
+
+### How the executor behaved
+
+deepseek-v4.1-flash did careful test-first work where a test forced it: contrast measurement, the
+driver's raw-mode discipline, and it recorded its own left-over mutation honestly. It was unreliable on
+completeness: it reported DONE with an owner-approved slice missing and undisclosed, and it self-resolved an
+owner gate with a "later decision" claim the dates do not support. Its green suite hid a regression in the
+one call site its injected fakes skip. It left no reproducible probes and, per the orchestrator, wrote scratch to
+`/tmp` (AGENTS §6 breach; not independently checked here).
+
+### Required before re-review
+
+Fix 1–4, each red first; fix or explicitly accept 5–7. Then run what this review could not: a pty run of
+the late-DA1, Esc-in-window and cut-reply cases, a main-vs-branch dark frame diff, and `connect --resume` through `main`.
+
+### Owner questions
+
+- **Q-A. Ratify `#6b6b6b` in place of your `#6b6b6f`?** **Recommend yes:** visually identical, and `#6b6b6f`
+  fails your own 256 gate at 3.59.
+- **Q-B. Notice in light mode: `#3b5bdb` as a second 256 exception, or `#2f4ba8`?** **Recommend `#2f4ba8`**
+  (7.80 / 7.23 / 5.61): still blue, clears the gate, keeps "all but the accent" true, and notices carry
+  information, unlike bullets. Keep `#3b5bdb` if the exact hue matters more on truecolor (3.54 only at 256).
 
 ---
 
