@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, JsonSessionStore, type SessionRecord } from "@tentacle/agent";
@@ -1388,7 +1388,8 @@ describe("N clients of one session (detached-handover)", () => {
     expect(sessionsKept).toBe(1); // the relay is still attached: only a detach
     expect(confirmed).toBe(true);
     const sent = methods(tui.frames);
-    const read = sent.indexOf("session/snapshot");
+    // The persistence read-back is `session/log` (docs/feat/session-log.md).
+    const read = sent.indexOf("session/log");
     const close = sent.indexOf("session/close");
     expect(read).toBeGreaterThan(-1);
     expect(close).toBeGreaterThan(read);
@@ -1422,7 +1423,8 @@ describe("N clients of one session (detached-handover)", () => {
       const { pod, tui } = await alone({});
       const session = pod.host.get(UID);
       if (!session) throw new Error("no session");
-      session.snapshotPage = () => {
+      // The read-back is `session/log` (docs/feat/session-log.md).
+      session.logRead = () => {
         throw new Error("the pod's disk is gone");
       };
       expect(await tui.runtime.quit()).toEqual({ sessionsKept: 1, saved: false });
@@ -1435,7 +1437,7 @@ describe("N clients of one session (detached-handover)", () => {
       // Mutation: the bound resolves `saved` true.
       let stopped = false;
       const { pod, tui } = await alone({
-        lose: (f) => stopped && f.includes('"session/snapshot"'),
+        lose: (f) => stopped && f.includes('"session/log"'),
       });
       stopped = true;
       expect(await tui.runtime.quit()).toEqual({ sessionsKept: 1, saved: false });
@@ -2308,5 +2310,184 @@ describe("per-round save inside a turn", () => {
     await ctl.flushed();
     await saver.drain();
     expect(asides).toEqual([]);
+  });
+});
+
+describe("session/log on the laptop (docs/feat/session-log.md)", () => {
+  /** A pod whose daemon can be swapped under a connected runtime (a restart). */
+  function pod(model: ModelProvider) {
+    const at = { host: hostFor(model) };
+    const links: ReturnType<typeof createChannelPair>[1][] = [];
+    const dial = () => {
+      const [d, c] = createChannelPair();
+      new Connection(d, at.host);
+      links.push(c);
+      return c;
+    };
+    return {
+      at,
+      dial,
+      restart: (next: SessionHost) => {
+        at.host = next;
+        for (const link of links.splice(0)) link.close();
+      },
+    };
+  }
+  function hostFor(model: ModelProvider): SessionHost {
+    return new SessionHost({
+      defaultCwd: "/tmp/work",
+      createAgent: () => ({
+        agent: new Agent({ model, tools: new ToolRegistry(), env: noopEnv }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+  }
+  const UID = "22222222-2222-4222-8222-222222222222";
+
+  test("R2 a FORK is set aside, never lost: the daemon's lineage is adopted, the laptop's copy goes to an .aside file, with a notice", async () => {
+    // RED on main: the session file is silently replaced by the daemon's
+    // divergent history (no aside, no notice) — F1's silent drop.
+    const p = pod(new ScriptedProvider([[{ type: "text", delta: "A-answer" }, { type: "done" }]]));
+    const store = new JsonSessionStore(join(dir, "fork"));
+    const notices: string[] = [];
+    const saver = new SessionSaver(store, (text) => notices.push(text));
+    const runtime = await createLocalRuntime({
+      channel: p.dial(),
+      channelFactory: async () => p.dial(),
+      disposeTransport: () => {},
+      permissions: new PermissionBroker(),
+      saver,
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: null,
+      sessionId: UID,
+    });
+    const session = runtime.createSession();
+    await drain(session.send("A-question"));
+    await session.flushed?.();
+    await saver.drain();
+    const mine = (await store.load(UID)).status === "ok";
+    expect(mine).toBe(true);
+    // The pod restarts; ANOTHER terminal (B) reseeded the new daemon from its
+    // own, different copy before this one came back (the F1 scenario).
+    const d2 = hostFor(
+      new ScriptedProvider([[{ type: "text", delta: "after" }, { type: "done" }]]),
+    );
+    d2.open(
+      { sessionId: UID, messages: [{ role: "user", content: "B's own history" }] },
+      { send: () => {} },
+    );
+    p.restart(d2);
+    await drain(session.send("next"));
+    await session.flushed?.();
+    await saver.drain();
+    const files = await readdir(join(dir, "fork"));
+    const asides = files.filter((f) => f.startsWith(`${UID}.stale-`) && f.endsWith(".aside"));
+    expect(asides).toHaveLength(1);
+    const aside = JSON.parse(
+      await readFile(join(dir, "fork", asides[0] ?? ""), "utf8"),
+    ) as SessionRecord;
+    expect(aside.messages.map((m) => m.content)).toEqual(["A-question", "A-answer"]);
+    const main = await store.load(UID);
+    const kept = main.status === "ok" ? main.record.messages.map((m) => m.content) : [];
+    expect(kept).toEqual(["B's own history", "next", "after"]);
+    expect(notices.some((n) => n.includes("diverged") && n.includes(asides[0] ?? "?"))).toBe(true);
+    runtime.dispose();
+  });
+
+  test("the aside lands BEFORE the session file is replaced; a failed aside keeps the file and is retried at the next save", async () => {
+    // Mutation: persist before `setAside` (or drop `pendingAside`) → the first
+    // round writes the daemon's copy over a file whose old copy is nowhere.
+    const mine = [{ role: "user", content: "mine" }] as const;
+    const theirs = [{ role: "user", content: "theirs" }] as const;
+    const reads = [
+      { messages: theirs, entries: [], aside: mine },
+      { messages: theirs, entries: [] },
+    ];
+    const inner = {
+      async *send() {},
+      readBack: async () => reads.shift() ?? { messages: theirs, entries: [] },
+      runningCalls: () => new Set<string>(),
+      onTitle: () => () => {},
+      close: () => {},
+    } as unknown as RemoteSession;
+    const log: string[] = [];
+    const errors: string[] = [];
+    let failAside = true;
+    const ctl = persistingController(
+      inner,
+      (messages) => log.push(`persist:${messages.map((m) => m.content).join()}`),
+      (error) => errors.push(error.message),
+      undefined,
+      undefined,
+      undefined,
+      async (messages) => {
+        if (failAside) throw new Error("disk full");
+        log.push(`aside:${messages.map((m) => m.content).join()}`);
+      },
+    );
+    await drain(ctl.send("one"));
+    await ctl.flushed();
+    expect(log).toEqual([]); // the aside failed: the session file was NOT replaced
+    expect(errors).toEqual(["disk full"]);
+    failAside = false;
+    await drain(ctl.send("two"));
+    await ctl.flushed();
+    expect(log).toEqual(["aside:mine", "persist:theirs"]); // retried first, then the file
+  });
+
+  test("I5 the saved JSON record after each round is today's (a mid-turn copy closed by `cutHistory`, the end raw)", async () => {
+    // A two-round turn: the mid-turn save (at the tool result) is closed, the
+    // turn-end save is the real history — the disk format is unchanged.
+    const model = new ScriptedProvider([
+      [
+        { type: "tool_call", toolCall: { id: "c1", name: "shell", arguments: '{"command":"ls"}' } },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "listed" }, { type: "done" }],
+    ]);
+    const host = new SessionHost({
+      defaultCwd: "/tmp/work",
+      createAgent: () => {
+        const permissions = new PermissionBroker();
+        permissions.setRequester(async () => ({ kind: "allow_once" }) as never);
+        return {
+          agent: new Agent({
+            model,
+            tools: new ToolRegistry().register(shellTool),
+            env: noopEnv,
+            requestPermission: async () => ({ outcome: "allow_once" }) as never,
+          }),
+          permissions,
+        };
+      },
+    });
+    const [d, c] = createChannelPair();
+    new Connection(d, host);
+    const store = new JsonSessionStore(join(dir, "i5"));
+    const saved: SessionRecord[] = [];
+    const saver = new SessionSaver(store, () => {});
+    saver.observe((record) => saved.push(record));
+    const runtime = await createLocalRuntime({
+      channel: c,
+      disposeTransport: () => {},
+      permissions: new PermissionBroker(),
+      saver,
+      cwd: "/tmp/work",
+      model: "qwen3",
+      resume: null,
+      sessionId: UID,
+    });
+    const session = runtime.createSession();
+    await drain(session.send("list"));
+    await session.flushed?.();
+    await saver.drain();
+    const last = saved.at(-1);
+    expect(last?.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect(last?.messages.at(-1)?.content).toBe("listed");
+    expect(last?.messages).toEqual(
+      host.get(UID)?.snapshotPage().messages as SessionRecord["messages"],
+    );
+    runtime.dispose();
   });
 });

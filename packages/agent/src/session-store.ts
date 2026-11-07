@@ -450,6 +450,31 @@ export class JsonSessionStore {
     return this.enqueue(record.id, record);
   }
 
+  /**
+   * Write `record` to a NEW aside file next to its session file —
+   * `<uid>.stale-<ms>-<hex>.aside`, the Q6 name no listing or load takes for a
+   * session — and resolve with its path. Never touches `<uid>.json`. Used when
+   * the daemon's history diverged from this copy (docs/feat/session-log.md
+   * F1): the copy is kept, never lost. Rejects when the write fails.
+   */
+  async saveAside(record: SessionRecord): Promise<string> {
+    if (!SAFE_ID.test(record.id)) {
+      throw new Error(`invalid session id ${JSON.stringify(record.id)}`);
+    }
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const temp = join(this.dir, `.${record.id}.json.tmp-${process.pid}-${suffix}`);
+    const destination = join(this.dir, `${record.id}.stale-${Date.now()}-${suffix}.aside`);
+    try {
+      await mkdir(this.dir, { recursive: true });
+      await this.io.writeDurable(temp, `${JSON.stringify(record, null, 2)}\n`);
+      await rename(temp, destination);
+      return destination;
+    } catch (error) {
+      await rm(temp, { force: true }).catch(() => {});
+      throw new Error(`couldn't write ${destination}: ${describeFsError(error)}`, { cause: error });
+    }
+  }
+
   /** Queue `op` for `id` (replacing a queued one) and start the pump if idle. */
   private enqueue(id: string, op: SessionRecord | typeof REMOVE): Promise<void> {
     let slot = this.slots.get(id);

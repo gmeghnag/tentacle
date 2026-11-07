@@ -510,6 +510,15 @@ export const OpenParamsSchema = z.object({
   title: SeedTitleSchema.optional(),
   /** The laptop's settings, for a session this open CREATES (ignored otherwise; see above). */
   settings: SessionSettingsSchema.optional(),
+  /**
+   * The head of the `session/log` the client holds for `messages` (protocol
+   * 17): a session this open CREATES from `messages` continues that lineage
+   * (its first `base` links to it). Numbering only — it grants nothing;
+   * ignored in every other case.
+   */
+  logBase: z
+    .object({ seq: z.number().int().positive(), id: z.string().min(1).max(256) })
+    .optional(),
 });
 export type OpenParams = z.infer<typeof OpenParamsSchema>;
 

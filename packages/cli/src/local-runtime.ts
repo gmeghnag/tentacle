@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * The local session runtime built on the RPC stack — the same `RemoteClient` ↔
  * `Connection` path used for remote daemons, but with the daemon in-process
@@ -333,6 +334,13 @@ export function persistingController(
   adoptedTurn?: string,
   /** Present → `/settings` and `/settings sync` (docs/feat/session-settings-apply.md). */
   carried?: ControllerSettings,
+  /**
+   * Keep the copy this client held when the daemon's history FORKED from it
+   * (docs/feat/session-log.md F1: a restarted daemon reseeded from another
+   * copy). Awaited BEFORE the session file is replaced; a rejection leaves the
+   * file as it is and is retried at the next save.
+   */
+  setAside?: (messages: readonly ChatMessage[], title: TitleState) => Promise<void>,
 ): PersistingController {
   let running: Promise<void> | null = null;
   let again = false;
@@ -346,12 +354,22 @@ export function persistingController(
   let confirmed = true;
   /** The message count of the last mid-turn read (persisted cut); -1 once a turn-end read replaced it. */
   let lastMidTurnCount = -1;
+  /** A forked-from copy not yet durable aside (F1): kept until it is, before any later write. */
+  let pendingAside: readonly ChatMessage[] | null = null;
   const run = async (): Promise<void> => {
     do {
       again = false;
       confirmed = false;
       try {
         const back = await inner.readBack();
+        if (back?.aside && setAside) {
+          pendingAside = back.aside;
+        }
+        if (pendingAside && setAside) {
+          // Aside FIRST: the file still holds that copy until this lands.
+          await setAside(pendingAside, lastTitle);
+          pendingAside = null;
+        }
         if (back && back.messages.length > 0) {
           if (back.title) {
             lastTitle = titleState(back.title);
@@ -658,6 +676,8 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     ...(deps.daemonKind ? { daemonKind: deps.daemonKind } : {}),
     ...(deps.titleModelProvider ? { titleModelProvider: deps.titleModelProvider } : {}),
     ...(deps.sessionSettings ? { sessionSettings: deps.sessionSettings } : {}),
+    // `session/log` checkpoints (docs/feat/session-log.md): the daemon hashes the same way.
+    sha256: (text) => createHash("sha256").update(text).digest("hex"),
   });
   await client.initialize();
   // A pod's report of what it did with them: through `notify`, never a raw write.
@@ -747,6 +767,19 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       title,
       adoptTurn,
       carried && attachTimedOut.has(uid) ? { ...carried, unconfirmed: true } : carried,
+      // F1: the copy the daemon forked from goes aside (a record like `persist`'s).
+      (messages, latest) =>
+        deps.saver.saveAside(
+          recordFromSnapshot(
+            { id: uid, messages },
+            {
+              cwd: deps.cwd,
+              model: deps.model,
+              title: latest,
+              ...(createdAt !== undefined ? { createdAt } : {}),
+            },
+          ),
+        ),
     );
     controllers.add(controller);
     return controller;

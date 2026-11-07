@@ -142,9 +142,34 @@ describe("client titles", () => {
       if (m === "session/rename") {
         return { error: { code: JsonRpcErrorCode.MethodNotFound, message: "Method not found" } };
       }
-      if (m === "session/snapshot") {
+      // The read-back is `session/log` since protocol 17: a log with no `title` entry.
+      if (m === "session/log") {
         return {
-          result: { messages: [{ role: "user", content: "q" }], since: { epoch: "e", seq: 0 } },
+          result: {
+            entries: [
+              {
+                type: "base",
+                seq: 1,
+                id: "i/1",
+                ts: 1,
+                critical: true,
+                inc: "i",
+                reason: "create",
+                count: 1,
+              },
+              {
+                type: "message",
+                seq: 2,
+                id: "i/2",
+                prev: "i/1",
+                ts: 1,
+                critical: true,
+                message: { role: "user", content: "q" },
+              },
+            ],
+            more: false,
+            tip: { seq: 2, id: "i/2" },
+          },
         };
       }
       return { result: {} };

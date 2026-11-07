@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * A single hosted conversation on the daemon: wraps the agent `Session`, drives
  * one turn at a time, fans every `session/update` out to the attached clients,
@@ -62,7 +63,11 @@ import {
   BLOCKING_UPDATE_TYPES,
   type HistoryCut,
   JsonRpcErrorCode,
+  type KnownLogEntry,
   type KnownSessionUpdateParams,
+  LOG_PAGE_MAX_CHARS,
+  type LogCursor,
+  type LogResult,
   MAX_SESSION_TITLE,
   type PermissionOutcome,
   type PromptResult,
@@ -77,6 +82,7 @@ import {
   type SessionSkillsResult,
   type SessionTitle,
   type SessionUpdate,
+  type Sha256,
   type SnapshotResult,
   type TurnEnd,
   type TurnError,
@@ -106,6 +112,7 @@ import {
 import { EMPTY_QUEUE, leftovers, queueView, returnCause, sameState } from "./queue-view.ts";
 import { SessionRing } from "./ring.ts";
 import type { SessionSummary } from "./session-list.ts";
+import { type LogBase, SessionLog, replayFromBase } from "./session-log.ts";
 import type { SessionPersister } from "./session-persister.ts";
 import type { SessionLiveness } from "./session-reaper.ts";
 import {
@@ -121,6 +128,22 @@ import {
   titleText,
 } from "./session-title.ts";
 import { SettledAnswers } from "./settled-answers.ts";
+
+const nodeSha256: Sha256 = (text) => createHash("sha256").update(text).digest("hex");
+
+/**
+ * The session's `session/log` (docs/feat/session-log.md). `base`: the client's
+ * head for the messages it seeded (`open{logBase}`, a create only) — numbering,
+ * it grants nothing. `reason`: why this incarnation's first segment starts
+ * (default `create`; a reload is always `reload`). `verify` (tests, D1): told
+ * after every derivation the log's replay and the committed prefix it must equal.
+ */
+export interface SessionLogOptions {
+  readonly base?: LogBase;
+  readonly reason?: "create" | "seed";
+  readonly sha256?: Sha256;
+  readonly verify?: (replayed: readonly ChatMessage[], committed: readonly ChatMessage[]) => void;
+}
 
 /** Receives each streamed `session/update` (one per emitted update). Synchronous; never awaited. */
 export type UpdateSink = (params: KnownSessionUpdateParams) => void;
@@ -422,6 +445,10 @@ export class HostedSession {
    * client must not wake for them too).
    */
   private wakeUnflushed: string | null = null;
+  /** The committed history as a typed log (`session/log`), derived at the cut's own points. */
+  private readonly log: SessionLog;
+  private readonly logSha256: Sha256;
+  private readonly logVerify: SessionLogOptions["verify"];
 
   constructor(
     id: string,
@@ -434,6 +461,7 @@ export class HostedSession {
     persistence?: SessionPersistence,
     titling: SessionTitling = {},
     wake?: SessionWake,
+    logOptions: SessionLogOptions = {},
   ) {
     this.id = id;
     this.now = now;
@@ -482,6 +510,19 @@ export class HostedSession {
       turnId: resume?.turnId ?? null,
       queued: EMPTY_QUEUE,
     };
+    // The log's first segment: this incarnation's history at the cut (a
+    // reload's after its repair; a resumed turn is open at it).
+    this.logSha256 = logOptions.sha256 ?? nodeSha256;
+    this.logVerify = logOptions.verify;
+    this.log = new SessionLog(crypto.randomUUID(), now);
+    this.log.start(
+      session.messages,
+      restored ? "reload" : (logOptions.reason ?? "create"),
+      restored ? undefined : logOptions.base,
+      resume?.turnId,
+    );
+    this.log.title(this.wireTitle());
+    this.verifyLog();
     this.returned = (restored?.returned ?? []).map((r) => ({ ...r }));
     // A returned row's text is with its writer, not in the history: never
     // "delivered", so a send-now citing it sends it (a crash-cut turn's steers
@@ -1128,6 +1169,37 @@ export class HostedSession {
       queued: this.lastQueued,
     };
     this.ring.evict(this.seq);
+    // The committed prefix moved: its changes join the log (pointer compares only).
+    this.log.commit(this.session.messages, this.cut.length);
+    this.log.title(this.wireTitle());
+    this.verifyLog();
+  }
+
+  /**
+   * `session/log`: one page of the committed log after `after` (see
+   * `SessionLog.read`). Synchronous, served from derived entries only — never
+   * from the live history — so it is exact at any microtask (AGENTS §7: the
+   * peer dispatches requests concurrently; no lock here).
+   */
+  logRead(after?: LogCursor, maxChars: number = LOG_PAGE_MAX_CHARS): LogResult {
+    return this.log.read(after, maxChars, this.logSha256);
+  }
+
+  /** D1 (tests): the log's replay equals the committed prefix, after every derivation. */
+  private verifyLog(): void {
+    if (this.logVerify === undefined) {
+      return;
+    }
+    const all: KnownLogEntry[] = [];
+    let after: LogCursor | undefined;
+    for (;;) {
+      const page = this.log.read(after, LOG_PAGE_MAX_CHARS, this.logSha256);
+      all.push(...(page.entries as KnownLogEntry[]));
+      const last = page.entries.at(-1);
+      if (!page.more || last === undefined) break;
+      after = { seq: last.seq, id: last.id };
+    }
+    this.logVerify(replayFromBase(all), this.session.messages.slice(0, this.cut.length));
   }
 
   /**
@@ -1211,6 +1283,8 @@ export class HostedSession {
     // running session's `session/list` key — stable for the whole turn (the
     // keyset cursor needs that), and never above the stamp its end will set.
     this.lastChangeAt = this.now();
+    // Before the turn's messages (they join the log at its first commit).
+    this.log.turnStart(turnId);
     try {
       this.emit({ type: "turn_start", turnId, prompt: text });
     } catch (error) {
@@ -1397,6 +1471,7 @@ export class HostedSession {
     this.lastChangeAt = this.now();
     // "" when every text was injected meanwhile: a continuation turn answers them.
     const prompt = remaining.map((m) => m.text).join("\n\n");
+    this.log.turnStart(next.turnId);
     try {
       this.emit({ type: "turn_start", turnId: next.turnId, prompt });
     } catch (error) {
@@ -1463,6 +1538,10 @@ export class HostedSession {
     },
   ): void {
     const previous = this.session.replaceAgent(next);
+    // The system head was replaced IN PLACE behind the cut (same length): the
+    // one change no cut follows — derived here, or the log would miss it.
+    this.log.commit(this.session.messages, this.cut.length);
+    this.verifyLog();
     next.adoptExits(previous.retire());
     this.titleModel = state.titleModel;
     this.grants = state.grants;
@@ -1547,6 +1626,11 @@ export class HostedSession {
             named = { ...event, id: row.id };
           }
         }
+        // The agent's "about to start" signal (the call starts on the next
+        // pull): the log says it may have run — "interrupted", never "not run".
+        if (event.type === "tool_phase" && event.phase === "running") {
+          this.log.callStarted(event.id);
+        }
         const update = eventToUpdate(named);
         if (update) {
           this.emit(update);
@@ -1626,6 +1710,10 @@ export class HostedSession {
       this.emit({ type: "turn_end", turnId, ...end });
     } finally {
       this.recordCut(this.activeTurnId);
+      // After the turn's last message (derived just above); the checkpoint's
+      // digest is lazy (the first read hashes, never this window).
+      this.log.turnEnd(turnId, end.stopReason);
+      this.log.checkpoint();
       // Inside the steering window, and safe there: this method cannot await,
       // and `persist` only captures — the I/O starts after the window.
       this.carried = [];
@@ -1809,6 +1897,7 @@ export class HostedSession {
   /** A chosen title is now the session's: on disk (a capture), then to every client. */
   private setTitle(next: Extract<TitleState, { readonly text: string }>): void {
     this.title = next;
+    this.log.title(this.wireTitle());
     this.persist();
     try {
       this.emit({ type: "session_title", title: next.text, source: next.source });
@@ -1913,6 +2002,8 @@ export class HostedSession {
       // The compaction's write (history replaced, or untouched on a failure)
       // with its clock: after the slot is free, so the record has no `turn`.
       this.persist();
+      // The projection after it (replaced or untouched), digest lazy.
+      this.log.checkpoint();
       // Last, in the same stretch: a reserved send-now takes the slot now.
       this.settleSuccessor();
       this.publishQueue();
@@ -1948,6 +2039,11 @@ export class HostedSession {
       // the returned rows stay).
       queued: this.lastQueued,
     };
+    // A new log segment: the SAME array was replaced in place, so it is never
+    // diffed — the reference copy is reset (F3). Before the emit, like the cut.
+    this.log.replaced(this.session.messages, reason, this.cut.turnId);
+    this.log.title(this.wireTitle());
+    this.verifyLog();
     try {
       this.emit({ type: "history_replaced", reason });
     } catch (error) {

@@ -32,6 +32,20 @@ those.
 ### Changed
 
 - The TUI's turn indicator reads `Working…` / `Thinking…` (capitalised), the word in the accent colour with the spinner; the timer and hint stay grey.
+- **Saving a session after each round moves only what changed.** The laptop
+  used to read the WHOLE history back from the daemon after every committed
+  round (about 2 MB and 9 round trips for a long session, ~2.3 s on a pod's
+  link, ahead of the streamed reply). It now reads the daemon's session log
+  after the last entry it holds: about 1 KB and one round trip (~0.1 s on the
+  same simulated link), and a reply streamed meanwhile is no longer queued
+  behind it. The session file on disk is unchanged.
+- **A history that diverged is kept, never silently replaced.** If a restarted
+  pod daemon was reseeded from another terminal's copy, this terminal's copy is
+  saved next to the session file (`<id>.stale-….aside`) with a notice, and the
+  daemon's history is adopted.
+- Protocol 17: a laptop and a pod daemon of different builds refuse each other
+  at connect with the usual "update" message (`tentacle update`, or re-run with
+  the same build).
 
 ### Fixed
 

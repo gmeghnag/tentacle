@@ -16,3 +16,4 @@ export * from "./connection.ts";
 export * from "./proxy-model.ts";
 export * from "./ws-server.ts";
 export * from "./version-mismatch.ts";
+export { SessionLog, replayFromBase, type LogBase } from "./session-log.ts";
