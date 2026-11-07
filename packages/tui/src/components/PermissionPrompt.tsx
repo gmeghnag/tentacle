@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import type { ReactElement } from "react";
 import { truncateCells as truncate } from "../cells.ts";
 import { MENU_FOOTER, MENU_FOOTER_REPLY, type ReplyView } from "../permission-reply.ts";
-import { permissionDetailLines, permissionShowsCwd } from "../permission-ui.ts";
+import { permissionCwdLine, permissionDetailLines, permissionShowsCwd } from "../permission-ui.ts";
 import { dimProps, palette } from "../theme.ts";
 
 /**
@@ -68,9 +68,7 @@ export function PermissionPrompt({
           {truncate(line, Math.max(10, columns - 3))}
         </Text>
       ))}
-      {permissionShowsCwd(req) ? (
-        <Text {...dim}> {truncate(cwd, Math.max(10, columns - 24))} · writes confined here</Text>
-      ) : null}
+      {permissionShowsCwd(req) ? <Text {...dim}> {permissionCwdLine(cwd, columns)}</Text> : null}
       {reply ? (
         <>
           <Text color={accent}> {reply.prompt}</Text>

@@ -176,6 +176,11 @@ Proof:
    `:1644`). No daemon or agent code reads it. The laptop's value already applies in
    a pod, so the eval's W row (`docs/eval/project-config.md:117`) is wrong in effect.
    It is not carried (Q2).
+4. **`tools.writableDirs` is not carried either** (docs/feat/write-tmpdir.md, owner
+   2026-11-06). It holds laptop paths, and it only widens writes on the daemon's own
+   filesystem; a pod follows its own config (normally none → its own temp dirs). So
+   `[]` on the laptop does not confine a pod's `/tmp` writes. No wire key, no
+   `CARRIED` row.
 
 One more non-session read: `session/context` and `session/skills` with no session
 describe "a session created now" (`packages/daemon/src/connection.ts:270-272`,

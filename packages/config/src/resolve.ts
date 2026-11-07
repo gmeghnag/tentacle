@@ -33,6 +33,7 @@ import {
   DEFAULT_TOOL_EXECUTION,
   DEFAULT_TOOL_MAX_PARALLEL,
   DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
+  defaultWritableDirs,
 } from "./defaults.ts";
 import type { FileConfig, HookSpecConfig, McpServerConfig, MountConfig } from "./schema.ts";
 import { type SkillInfo, renderSkillsCatalog } from "./skills.ts";
@@ -110,6 +111,11 @@ export interface ResolvedConfig {
   /** How a round's tool calls may overlap (`tools.execution` / `tools.maxParallel`). */
   readonly toolExecution: { readonly mode: ToolExecutionMode; readonly maxParallel: number };
   /**
+   * Where `fs_write` may write besides the project (docs/feat/write-tmpdir.md):
+   * env > file > the system temp dirs. Entries as given (`~` expanded by load.ts).
+   */
+  readonly writableDirs: readonly string[];
+  /**
    * The configured default engine of `run`/`attach` (file or profile); absent
    * when unset. Its env form (`TENTACLE_ENGINE`) and the flag are layered by
    * the CLI, which refuses an unknown value instead of falling through.
@@ -162,6 +168,7 @@ export interface ResolvedConfig {
     readonly autoWake: Source;
     readonly toolExecution: Source;
     readonly toolMaxParallel: Source;
+    readonly writableDirs: Source;
   };
 }
 
@@ -171,6 +178,22 @@ export type ToolExecutionMode = "sequential" | "read-only" | "parallel";
 function parseToolExecution(raw: string | undefined): ToolExecutionMode | undefined {
   const v = raw?.trim().toLowerCase();
   return v === "sequential" || v === "read-only" || v === "parallel" ? v : undefined;
+}
+
+/**
+ * `TENTACLE_WRITABLE_DIRS`: `:`-separated; unset → undefined (fall through);
+ * empty → `[]` (project only). Blank entries are skipped. An entry that is not
+ * `~`, `~/…` or absolute is KEPT: `HostExecution` drops it (no anchor) and
+ * `buildAgent` logs the drop, so it is never silent (review LOW 6).
+ */
+function parseDirList(raw: string | undefined): string[] | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  return raw
+    .split(":")
+    .map((d) => d.trim())
+    .filter((d) => d !== "");
 }
 
 export interface ResolveContext {
@@ -458,6 +481,12 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.tools?.maxParallel,
     DEFAULT_TOOL_MAX_PARALLEL,
   );
+  // The list REPLACES the default: `[]` = project only (docs/feat/write-tmpdir.md).
+  const writableDirs = pick<readonly string[]>(
+    parseDirList(env.TENTACLE_WRITABLE_DIRS),
+    fileConfig.tools?.writableDirs,
+    defaultWritableDirs(env),
+  );
 
   // API key precedence: env var > file `apiKey` > file `apiKeyCommand`.
   let apiKey: string | undefined;
@@ -511,6 +540,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     tabulateJson: tabulateJson.value,
     autoWake: autoWake.value,
     toolExecution: { mode: toolExecution.value, maxParallel: toolMaxParallel.value },
+    writableDirs: writableDirs.value,
     ...(fileConfig.engine !== undefined ? { engine: fileConfig.engine } : {}),
     ...(fileConfig.rm !== undefined ? { rm: fileConfig.rm } : {}),
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
@@ -551,6 +581,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       autoWake: autoWake.source,
       toolExecution: toolExecution.source,
       toolMaxParallel: toolMaxParallel.source,
+      writableDirs: writableDirs.source,
     },
   };
 }

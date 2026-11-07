@@ -19,6 +19,54 @@ those.
   attach and flushed by your next message). A turn that ended in an error or was cancelled
   stops the chain until a normal turn. No limit, as in the TUI. Pod runs, the local worker
   and `run --detach` are unchanged.
+- **`fs_write` and `fs_edit` may write to the system temp dir.** A scratch file in
+  `/tmp` (or macOS's `/var/folders/…/T`) no longer fails with "refusing to write
+  outside the workspace"; each write still asks as before (unless auto-accept is
+  on, as for any write). Set the list with `"tools": { "writableDirs": [...] }`
+  (absolute or `~/…`; env `TENTACLE_WRITABLE_DIRS`, `:`-separated): it
+  **replaces** the default, and `[]` keeps writes in the project only; an entry
+  that is ignored (`/`, a relative path) is logged. Paths are matched by real
+  path, so a symlink out of a temp dir is still refused. Not carried to a pod: a
+  container keeps writing its own `/tmp`.
+
+### Fixed
+
+- File writes (`fs_write`, `fs_edit`, `fs_multi_edit`) are harder to steer
+  outside the workspace with links, in the project as in the temp dirs:
+  - a write through a **dangling** symlink is refused ("refused: dangling
+    symlink"), and a symlink loop says so — before, a dangling link could create
+    its target outside;
+  - a file is now **replaced atomically**: the new content goes to a fresh temp
+    file in the same directory (mode `0600` while it is written), which then gets
+    the target's permission bits (or `0666` minus your umask for a new file) and
+    is renamed over the target. An existing file is not written in place
+    (except in a read-only directory, below), so a hard link planted at the path
+    only loses that name; the file it shares an inode with keeps its bytes. Like
+    an editor's atomic save, this **breaks hard
+    links** (a hard-linked project file, e.g. a `file:` dependency after `bun
+    install`, stays writable and loses its link) and **does not keep the file's
+    owner, group, ACLs or extended attributes** (macOS tags and quarantine
+    included), nor setuid/setgid/sticky bits;
+  - a file you could not write in place is still refused: a read-only file or
+    another user's file without write permission for you fails with `EACCES`,
+    unchanged;
+  - in a directory you cannot create files in, an **existing** writable file is
+    still written, in place, as before (opened without following a symlink and
+    without creating; refused if it has more than one hard link or is no longer
+    the file that was checked). A **new** file there is refused, with an error
+    naming the directory;
+  - a symlink, FIFO or other non-regular file at the path is refused, and a
+    directory swapped for a symlink between the check and the rename is
+    detected in most cases (the path is re-checked after the temp file is made
+    and before the rename).
+  A write through an existing symlink to a file inside the workspace still works.
+  **Known limit (hosts shared with other users only):** another local user who
+  can write a directory on the path — e.g. one they created in `/tmp` — can win
+  the race by swapping it for a symlink at the right moment. Your content can
+  then land outside, in a new hidden file (`.tt-<random>.tentacle-tmp`) in
+  any directory you can write; an existing file there is never written in
+  place by this race. Not covered either: a process running as you, and the `shell` tool,
+  which is not confined.
 
 ## [0.3.0] - 2026-11-06
 

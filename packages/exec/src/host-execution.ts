@@ -6,14 +6,27 @@
  * `exec` combines an optional caller `signal` with an optional `timeoutMs` into a
  * single abort signal so a runaway command is always killed.
  *
- * Writes are confined to the workspace `root` (the launch directory by default):
- * `writeFile` refuses any path that resolves — after following symlinks — outside
- * it. Reads are intentionally unconfined. The shell (`exec`) cannot be confined at
+ * Writes are confined to the workspace `root` (the launch directory by default)
+ * plus any `writableDirs` (absolute; the config gives the system temp dirs by
+ * default, docs/feat/write-tmpdir.md): `writeFile` refuses any path that
+ * resolves — after following symlinks — outside all of them, and any dangling
+ * or looping link. It replaces the file atomically (temp + rename, never a
+ * write through an existing inode). Reads are intentionally unconfined. The shell (`exec`) cannot be confined at
  * the filesystem level on the host; that is gated by the permission engine instead
  * (and fully sandboxed once the container environment lands).
  */
-import { existsSync, realpathSync } from "node:fs";
-import { basename, dirname, resolve, sep } from "node:path";
+import { randomBytes } from "node:crypto";
+import {
+  accessSync,
+  existsSync,
+  constants as fsConstants,
+  lstatSync,
+  mkdirSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
+import { type FileHandle, open, rename, unlink } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { scrubSensitiveEnv } from "@tentacle/core";
 import type {
   BackgroundHandle,
@@ -41,11 +54,36 @@ export interface HostExecutionConfig {
    * output that was removed with its session). `undefined` → the OS error.
    */
   readonly readHint?: (absPath: string) => string | undefined;
+  /**
+   * Directories writable besides `root` (docs/feat/write-tmpdir.md): absolute
+   * paths, matched by realpath. An entry that is not absolute (`~` must be
+   * expanded by the caller) or that resolves to the filesystem root is dropped
+   * and listed in `droppedWritableDirs`. Absent → `root` only.
+   */
+  readonly writableDirs?: readonly string[];
+  /**
+   * TEST SEAM ONLY: runs between the confinement check and the `open` of a
+   * write, with the checked real path — where a race test swaps in a link.
+   */
+  readonly beforeOpen?: (realPath: string) => void | Promise<void>;
+  /**
+   * TEST SEAM ONLY: runs after the temp file is written and chmodded and the
+   * last re-checks passed — immediately before the `rename`.
+   */
+  readonly beforeRename?: (realPath: string) => void | Promise<void>;
+  /** TEST SEAM ONLY: runs right before the in-place fallback opens the target. */
+  readonly beforeInPlaceOpen?: (realPath: string) => void | Promise<void>;
 }
 
 /** Thrown when a write would escape the workspace root. */
 export class WorkspaceWriteError extends Error {
   override readonly name = "WorkspaceWriteError";
+  /** The OS errno behind a permission refusal (`EACCES`, `EPERM`), as an in-place write reported it. */
+  readonly code: string | undefined;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.code = code;
+  }
 }
 
 /** Realpath `p` if it exists, else return it unchanged (normalized by caller). */
@@ -57,15 +95,34 @@ function safeRealpath(p: string): string {
   }
 }
 
+/** Whether `p` exists as a directory entry — a dangling symlink counts (no follow). */
+function entryExists(p: string): boolean {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A path's real location, or the dangling link that stops it (docs/feat/write-tmpdir.md F1). */
+type RealTarget =
+  | { readonly ok: true; readonly path: string }
+  | { readonly ok: false; readonly dangling: string; readonly loop: boolean };
+
 /**
  * Resolve `abs` to its real location, following symlinks on the deepest existing
- * ancestor and re-appending the not-yet-existing tail (which, having been through
- * `path.resolve`, contains no `..`). This catches symlink-based escapes.
+ * entry (the kernel's realpath: physical, never lexical) and re-appending the
+ * not-yet-existing tail (which, having been through `path.resolve`, contains no
+ * `..`). A DANGLING link at that entry (or a loop — `lstat` finds it, `stat`
+ * does not) is NOT resolved: the write would create its target wherever the
+ * kernel takes it, which only the kernel can say. It is refused, whatever it
+ * points at (review F1: a hand-written `readlink` walk got `..` wrong).
  */
-function realTarget(abs: string): string {
+function realTarget(abs: string): RealTarget {
   let existing = abs;
   const tail: string[] = [];
-  while (!existsSync(existing)) {
+  while (!entryExists(existing)) {
     const parent = dirname(existing);
     if (parent === existing) {
       break;
@@ -73,16 +130,94 @@ function realTarget(abs: string): string {
     tail.unshift(basename(existing));
     existing = parent;
   }
+  if (entryExists(existing) && !existsSync(existing)) {
+    let loop = false;
+    try {
+      statSync(existing);
+    } catch (error) {
+      loop = errnoOf(error) === "ELOOP";
+    }
+    return { ok: false, dangling: existing, loop };
+  }
   const real = safeRealpath(existing);
-  return tail.length > 0 ? resolve(real, ...tail) : real;
+  return { ok: true, path: tail.length > 0 ? resolve(real, ...tail) : real };
+}
+
+/**
+ * `open(2)` flags of the temp file a confined write creates (see
+ * `HostExecution.writeFile`): a NEW file only, never a link.
+ */
+const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fsConstants;
+const OPEN_TEMP = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+/** The in-place fallback's open: an existing file only, never a link, never blocking on a FIFO. */
+const OPEN_IN_PLACE = O_WRONLY | O_NOFOLLOW | fsConstants.O_NONBLOCK;
+/** Temp-create errors after which an EXISTING writable target is written in place (fix round 5). */
+const IN_PLACE_FALLBACK = new Set(["EACCES", "EPERM", "EROFS"]);
+
+/** What `finalNameMode` saw of an existing target: its permission bits and its inode. */
+interface CheckedTarget {
+  readonly mode: number;
+  readonly dev: number;
+  readonly ino: number;
+}
+
+function errnoOf(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException | undefined)?.code;
+}
+
+/**
+ * Whether `target` is `root` or inside it (`/tmpfoo` is not inside `/tmp`). A
+ * root of `/` matches only itself (`"//"` prefix), as before: a writable `/` is
+ * dropped at construction, and a project at `/` stays as confined as it was.
+ */
+function within(root: string, target: string): boolean {
+  return target === root || target.startsWith(root + sep);
+}
+
+/**
+ * The extra writable roots, realpath'd and de-duplicated; an entry that is not
+ * absolute, that resolves to the filesystem root (it would make "confined"
+ * meaningless), or that is a dangling link or a loop, is dropped and reported.
+ */
+function writableRootsOf(dirs: readonly string[]): {
+  readonly roots: readonly string[];
+  readonly dropped: readonly string[];
+} {
+  const roots: string[] = [];
+  const dropped: string[] = [];
+  for (const dir of dirs) {
+    if (!isAbsolute(dir)) {
+      dropped.push(dir);
+      continue;
+    }
+    // Canonicalised like a target: a dir that does not exist yet still gets its
+    // existing ancestors realpath'd (`/var/…` → `/private/var/…` on macOS).
+    const resolved = realTarget(resolve(dir));
+    const real = resolved.ok ? resolved.path : undefined;
+    if (real === undefined || dirname(real) === real) {
+      dropped.push(dir);
+      continue;
+    }
+    if (!roots.includes(real)) {
+      roots.push(real);
+    }
+  }
+  return { roots, dropped };
 }
 
 export class HostExecution implements ExecutionEnvironment {
   readonly id: string;
   private readonly defaultCwd: string;
   private readonly root: string;
+  /** Writable besides `root`: realpaths (docs/feat/write-tmpdir.md). */
+  private readonly writableRoots: readonly string[];
+  /** `writableDirs` entries refused at construction (not absolute, or `/`): for a daemon log. */
+  readonly droppedWritableDirs: readonly string[];
   private readonly killGraceMs: number;
   private readonly readHint: ((absPath: string) => string | undefined) | undefined;
+  private readonly beforeOpen: ((realPath: string) => void | Promise<void>) | undefined;
+  private readonly beforeRename: ((realPath: string) => void | Promise<void>) | undefined;
+  private readonly beforeInPlaceOpen: ((realPath: string) => void | Promise<void>) | undefined;
   /** Commands whose leader exited (their group was handed to `releaseGroup`). */
   private readonly released = new WeakSet<Subprocess>();
 
@@ -90,8 +225,14 @@ export class HostExecution implements ExecutionEnvironment {
     this.id = config?.id ?? "host";
     this.killGraceMs = config?.killGraceMs ?? KILL_GRACE_MS;
     this.readHint = config?.readHint;
+    this.beforeOpen = config?.beforeOpen;
+    this.beforeRename = config?.beforeRename;
+    this.beforeInPlaceOpen = config?.beforeInPlaceOpen;
     this.defaultCwd = resolve(config?.cwd ?? process.cwd());
     this.root = safeRealpath(resolve(config?.root ?? this.defaultCwd));
+    const writable = writableRootsOf(config?.writableDirs ?? []);
+    this.writableRoots = writable.roots.filter((r) => r !== this.root);
+    this.droppedWritableDirs = writable.dropped;
   }
 
   async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
@@ -231,19 +372,310 @@ export class HostExecution implements ExecutionEnvironment {
     }
   }
 
+  /**
+   * A confined write (docs/feat/write-tmpdir.md, fix round 2): an atomic
+   * replace, never a write through an existing inode.
+   * 1. The CHECKED REAL path (`confineWrite`; links present at check time are
+   *    already followed, so in-root links keep working).
+   * 2. `dirChain`: every directory below the containing root, down to the
+   *    parent, is a real directory (missing ones created, umask-respecting).
+   * 3. The final name, if present, must be a regular file we could write in
+   *    place (`access(W_OK)`: a read-only or another user's file is refused, as
+   *    an in-place write was); a symlink there appeared after the check:
+   *    refused, never replaced. Its permission bits are kept.
+   * 4. A temp file `.tt-<hex>.tentacle-tmp` (short, not from the basename) is
+   *    created in the parent with mode `0600` (`O_CREAT|O_EXCL|O_NOFOLLOW`), the
+   *    chain and the parent's realpath re-checked, the content written and
+   *    `fsync`ed, THEN `fchmod`ed to the final bits (the target's, or `0666`
+   *    minus the umask), re-checked again with the final name, then `rename`d
+   *    over the target. A hard link at the target only loses this name; its
+   *    other names keep the old bytes. Owner, group, ACLs and xattrs are not
+   *    kept (as in an editor's atomic save). `EACCES`/`EPERM` on the create or
+   *    the rename is a refusal naming the directory — except that when the
+   *    directory takes no new file (`EACCES`/`EPERM`/`EROFS` on the temp) and
+   *    the target EXISTS, it is written in place instead (`writeInPlace`, fix
+   *    round 5). Any failure unlinks the temp; if even that fails, the error
+   *    says where it was left.
+   * Residual (fix round 3): the re-checks narrow but cannot close a race by a
+   * user who can write a directory on the path (e.g. one they made in `/tmp`):
+   * docs/feat/write-tmpdir.md "Fix round 3".
+   */
   async writeFile(path: string, contents: string): Promise<void> {
-    await Bun.write(this.confineWrite(path), contents);
+    const target = this.confineWrite(path);
+    const root = this.rootOf(target);
+    if (target === root) {
+      throw new WorkspaceWriteError(`refused: not a regular file: ${path}`);
+    }
+    const parent = dirname(target);
+    if (!entryExists(root)) {
+      // A configured writable dir that does not exist yet (its realpath'd
+      // ancestors were pinned at construction; if it is later created as a
+      // link outward, `confineWrite` resolves through it and refuses).
+      mkdirSync(root, { recursive: true });
+    }
+    this.dirChain(path, root, parent, "create");
+    await this.beforeOpen?.(target);
+    this.dirChain(path, root, parent, "recheck");
+    const existing = this.finalNameMode(path, target);
+    const mode = existing?.mode;
+    // Short and never derived from the basename: a name near NAME_MAX still works.
+    const temp = join(parent, `.tt-${randomBytes(8).toString("hex")}.tentacle-tmp`);
+    let fd: FileHandle | undefined;
+    try {
+      try {
+        // 0600 while the content is written: never more readable than the target.
+        fd = await open(temp, OPEN_TEMP, 0o600);
+      } catch (error) {
+        if (existing !== undefined && IN_PLACE_FALLBACK.has(errnoOf(error) ?? "")) {
+          // Fix round 5 (owner A): the directory takes no new file, but the
+          // EXISTING target is writable — write it in place, as `main` did.
+          await this.writeInPlace(path, root, parent, target, existing, contents);
+          return;
+        }
+        throw this.dirError(error, path, parent, "cannot create a file in");
+      }
+      this.dirChain(path, root, parent, "recheck");
+      await fd.writeFile(contents);
+      await fd.sync();
+      // The final permission bits only now: the target's, or a new file's default.
+      await fd.chmod(mode ?? 0o666 & ~process.umask());
+      await fd.close();
+      fd = undefined;
+      this.dirChain(path, root, parent, "recheck");
+      this.finalNameMode(path, target);
+      await this.beforeRename?.(target);
+      try {
+        await rename(temp, target);
+      } catch (error) {
+        throw this.dirError(error, path, parent, "cannot replace the file in");
+      }
+    } catch (error) {
+      await fd?.close().catch(() => undefined);
+      const left = await unlink(temp).then(
+        () => undefined,
+        (e: unknown) => (errnoOf(e) === "ENOENT" ? undefined : e),
+      );
+      if (left !== undefined) {
+        const why = errnoOf(left) ?? String(left);
+        const message = `${error instanceof Error ? error.message : String(error)} (temp file left at ${temp}: ${why})`;
+        throw error instanceof WorkspaceWriteError
+          ? new WorkspaceWriteError(message, error.code)
+          : Object.assign(new Error(message), { code: errnoOf(error) });
+      }
+      throw error;
+    }
   }
 
-  /** Absolute write path, or throw if it escapes the workspace root. */
+  /**
+   * The in-place fallback (fix round 5, owner A): only for an EXISTING file whose
+   * directory refused the temp. `O_WRONLY|O_NOFOLLOW|O_NONBLOCK` — no `O_CREAT`
+   * (it never creates), no `O_TRUNC` (nothing is cut before the checks), a
+   * symlink at the final name is refused by the kernel, a FIFO fails at once.
+   * On the descriptor: a regular file, `nlink === 1` (a hard link's other name
+   * may be outside every root — written in place it would change), and the very
+   * inode `finalNameMode` checked (dev + ino); the chain and the name are
+   * re-checked. Only then truncate and write through the descriptor.
+   */
+  private async writeInPlace(
+    path: string,
+    root: string,
+    parent: string,
+    target: string,
+    checked: CheckedTarget,
+    contents: string,
+  ): Promise<void> {
+    await this.beforeInPlaceOpen?.(target);
+    let fd: FileHandle;
+    try {
+      fd = await open(target, OPEN_IN_PLACE);
+    } catch (error) {
+      const code = errnoOf(error);
+      if (code === "ELOOP" || code === "EMLINK") {
+        // EMLINK: FreeBSD's O_NOFOLLOW errno; Linux and macOS say ELOOP.
+        throw new WorkspaceWriteError(
+          `refused: a symlink at the final path (it appeared after the check): ${path}`,
+        );
+      }
+      if (code === "ENXIO") {
+        throw new WorkspaceWriteError(`refused: not a regular file: ${path}`);
+      }
+      if (code === "ENOENT") {
+        throw new WorkspaceWriteError(
+          `refused: the path moved during the write (${target} is gone): ${path}`,
+        );
+      }
+      throw error;
+    }
+    try {
+      const st = await fd.stat();
+      if (!st.isFile()) {
+        throw new WorkspaceWriteError(`refused: not a regular file: ${path}`);
+      }
+      if (st.nlink !== 1) {
+        throw new WorkspaceWriteError(
+          `refused: hard link (${st.nlink} names; its directory takes no new file, so it could only be written in place, through every name): ${path}`,
+        );
+      }
+      if (st.dev !== checked.dev || st.ino !== checked.ino) {
+        throw new WorkspaceWriteError(
+          `refused: the path moved during the write (another file is at ${target}): ${path}`,
+        );
+      }
+      this.dirChain(path, root, parent, "recheck");
+      const named = lstatSync(target);
+      if (named.dev !== st.dev || named.ino !== st.ino) {
+        throw new WorkspaceWriteError(
+          `refused: the path moved during the write (another file is at ${target}): ${path}`,
+        );
+      }
+      await fd.truncate(0);
+      await fd.writeFile(contents);
+      await fd.sync();
+    } finally {
+      await fd.close();
+    }
+  }
+
+  /**
+   * `EACCES`/`EPERM` from the temp create or the `rename` → a refusal naming
+   * the directory (not the hidden temp). Other errors pass through.
+   */
+  private dirError(error: unknown, path: string, parent: string, what: string): unknown {
+    const code = errnoOf(error);
+    if (code !== "EACCES" && code !== "EPERM") {
+      return error;
+    }
+    return new WorkspaceWriteError(
+      `refused: ${what} ${parent} (${code}: the directory is not writable for you, or it is sticky and the file is another user's): ${path}`,
+      code,
+    );
+  }
+
+  /**
+   * The permission bits (`0o777`; no setuid/setgid/sticky) to keep from an
+   * existing target, `undefined` when there is none. Refuses a non-regular file,
+   * a symlink (the checked real path had none: it appeared after the check), and
+   * a file we could not write in place (`access(W_OK)`: read-only, or another
+   * user's) — a `rename` would replace it anyway, so parity with an in-place
+   * write is enforced here (review round 3 F2).
+   */
+  private finalNameMode(path: string, target: string): CheckedTarget | undefined {
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(target);
+    } catch (error) {
+      if (errnoOf(error) === "ENOENT") {
+        return undefined;
+      }
+      throw error;
+    }
+    if (st.isSymbolicLink()) {
+      throw new WorkspaceWriteError(
+        `refused: a symlink at the final path (it appeared after the check): ${path}`,
+      );
+    }
+    if (!st.isFile()) {
+      throw new WorkspaceWriteError(`refused: not a regular file: ${path}`);
+    }
+    try {
+      accessSync(target, fsConstants.W_OK);
+    } catch (error) {
+      const code = errnoOf(error) ?? "EACCES";
+      throw new WorkspaceWriteError(
+        `refused: read-only file (${code}: permission denied; it is read-only or another user's): ${path}`,
+        code,
+      );
+    }
+    return { mode: st.mode & 0o777, dev: st.dev, ino: st.ino };
+  }
+
+  /**
+   * Every directory strictly below `root`, down to `parent` (see `writeFile`),
+   * must be a real directory (not a symlink). `create`: a missing one is made
+   * (default mode: `0777` minus the umask). `recheck` (after the check): every one must exist, and
+   * the parent's realpath must still be `parent` — any failure is "moved".
+   * No owner/mode rule (fix round 3, owner): `umask 002` and pod `fsGroup`
+   * make group-writable project dirs normal.
+   */
+  private dirChain(path: string, root: string, parent: string, phase: "create" | "recheck"): void {
+    const rel = relative(root, parent);
+    const parts = rel === "" ? [] : rel.split(sep);
+    let dir = root;
+    const moved = (why: string): WorkspaceWriteError =>
+      new WorkspaceWriteError(`refused: the path moved during the write (${why}): ${path}`);
+    const refused = (why: string): WorkspaceWriteError =>
+      phase === "recheck" ? moved(why) : new WorkspaceWriteError(`refused: ${why}: ${path}`);
+    for (const part of parts) {
+      dir = join(dir, part);
+      let st: ReturnType<typeof lstatSync>;
+      try {
+        st = lstatSync(dir);
+      } catch (error) {
+        if (errnoOf(error) !== "ENOENT" || phase === "recheck") {
+          throw moved(`${dir} is gone`);
+        }
+        try {
+          mkdirSync(dir);
+        } catch (mkdirError) {
+          if (errnoOf(mkdirError) !== "EEXIST") {
+            throw mkdirError;
+          }
+        }
+        st = lstatSync(dir);
+      }
+      if (!st.isDirectory()) {
+        throw refused(`${dir} is not a directory (a symlink or a file)`);
+      }
+    }
+    if (phase === "recheck") {
+      let real: string;
+      try {
+        real = realpathSync(parent);
+      } catch {
+        throw moved(`${parent} is gone`);
+      }
+      if (real !== parent) {
+        throw moved(`${parent} now resolves to ${real}`);
+      }
+    }
+  }
+
+  /** The most specific root (project or writable dir) that holds the real path `target`. */
+  private rootOf(target: string): string {
+    let best = this.root;
+    let found = within(this.root, target);
+    for (const root of this.writableRoots) {
+      if (within(root, target) && (!found || root.length > best.length)) {
+        best = root;
+        found = true;
+      }
+    }
+    return best;
+  }
+
+  /** Whether the real path `target` is inside the project or a writable dir. */
+  private isAllowed(target: string): boolean {
+    return [this.root, ...this.writableRoots].some((root) => within(root, target));
+  }
+
+  /** The checked REAL write path, or throw if it escapes the workspace root and every writable dir. */
   private confineWrite(path: string): string {
     const abs = resolve(this.defaultCwd, path);
     const target = realTarget(abs);
-    if (target !== this.root && !target.startsWith(this.root + sep)) {
+    if (!target.ok) {
       throw new WorkspaceWriteError(
-        `refusing to write outside the workspace (${this.root}): ${path}`,
+        target.loop
+          ? `refused: symlink loop at ${target.dangling}: ${path}`
+          : `refused: dangling symlink ${target.dangling} (its target does not exist; create it first): ${path}`,
       );
     }
-    return abs;
+    if (!this.isAllowed(target.path)) {
+      const allowed =
+        this.writableRoots.length > 0 ? `; writable dirs: ${this.writableRoots.join(", ")}` : "";
+      throw new WorkspaceWriteError(
+        `refusing to write outside the workspace (${this.root}${allowed}): ${path}`,
+      );
+    }
+    return target.path;
   }
 }

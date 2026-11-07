@@ -972,3 +972,82 @@ describe("tools.execution wiring (docs/feat/parallel-tools.md)", () => {
     ).toEqual({ mode: "parallel", maxParallel: 2 });
   });
 });
+
+describe("tools.writableDirs wiring (docs/feat/write-tmpdir.md)", () => {
+  /** One `fs_write` of `path` through the wired agent; the tool result's text. */
+  async function write(cfg: TentacleConfig, path: string, notice?: (l: string) => void) {
+    const model = new ScriptedModel([
+      [
+        {
+          type: "tool_call",
+          toolCall: {
+            id: "w1",
+            name: "fs_write",
+            arguments: JSON.stringify({ path, content: "{}" }),
+          },
+        },
+        { type: "done" },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const { agent } = buildAgent(cfg, { modelOverride: model, ...(notice ? { notice } : {}) });
+    let result = "";
+    for await (const event of agent.run("w", [{ role: "user", content: "go" }])) {
+      if (event.type === "tool_result") {
+        result = event.result.content;
+      }
+    }
+    return result;
+  }
+
+  test("loadConfig's default makes the system temp dir writable", () => {
+    expect(config.writableDirs).toContain("/tmp");
+  });
+
+  test("the configured dirs reach the agent's fs_write; [] = project only; outside stays refused", async () => {
+    // Mutation: drop `writableDirs` from `new HostExecution` in buildAgent → red.
+    const project = await mkdtemp(join(tmpdir(), "harness-wd-project-"));
+    const scratch = await mkdtemp(join(tmpdir(), "harness-wd-scratch-"));
+    const elsewhere = await mkdtemp(join(tmpdir(), "harness-wd-elsewhere-"));
+    try {
+      const cfg = { ...config, cwd: project, writableDirs: [scratch] };
+      expect(await write(cfg, join(scratch, "a.json"))).toContain("wrote 2 bytes");
+      expect(existsSync(join(scratch, "a.json"))).toBe(true);
+      expect(await write(cfg, join(elsewhere, "b.json"))).toContain("refusing to write outside");
+      expect(existsSync(join(elsewhere, "b.json"))).toBe(false);
+      const none = { ...config, cwd: project, writableDirs: [] };
+      expect(await write(none, join(scratch, "c.json"))).toContain("refusing to write outside");
+      expect(existsSync(join(scratch, "c.json"))).toBe(false);
+    } finally {
+      for (const d of [project, scratch, elsewhere]) {
+        await rm(d, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test('a dropped entry ("/") is a daemon-side notice, never a widening', async () => {
+    const project = await mkdtemp(join(tmpdir(), "harness-wd-root-"));
+    const elsewhere = await mkdtemp(join(tmpdir(), "harness-wd-root-out-"));
+    try {
+      const notices: string[] = [];
+      const cfg = { ...config, cwd: project, writableDirs: ["/"] };
+      const result = await write(cfg, join(elsewhere, "x.json"), (l) => notices.push(l));
+      expect(result).toContain("refusing to write outside");
+      expect(notices.some((n) => n.includes("writableDirs") && n.includes('"/"'))).toBe(true);
+      // Review round 1, LOW 6: an env entry that is not absolute reaches the same notice.
+      const fromEnv = await loadConfig({
+        cwd: project,
+        env: { ...process.env, TENTACLE_WRITABLE_DIRS: "rel/dir:./y" },
+      });
+      const envNotices: string[] = [];
+      await write(fromEnv, join(elsewhere, "y.json"), (l) => envNotices.push(l));
+      expect(envNotices.filter((n) => n.includes("tools.writableDirs: ignored"))).toEqual([
+        'tools.writableDirs: ignored "rel/dir" (not an absolute dir, or the filesystem root)',
+        'tools.writableDirs: ignored "./y" (not an absolute dir, or the filesystem root)',
+      ]);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+});

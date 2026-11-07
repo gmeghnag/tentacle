@@ -14,7 +14,7 @@ A coding agent that runs next to your code and keeps your identity on your machi
 - **Private by design:** the model key, your permission decisions and your session history stay on your laptop, even when the agent runs in a container or pod
 - **Any engine:** local · Docker · Podman · Kubernetes · a remote daemon (`serve` / `connect`), with the same commands and the same session
 - **Any model:** local models (any OpenAI-compatible endpoint) are first-class; the Anthropic Messages API works too
-- **Safe by default:** writes confined to the workspace; shell commands go through a permission prompt
+- **Safe by default:** file writes confined to the workspace and the system temp dir (`tools.writableDirs`); shell commands go through a permission prompt
 
 ## Why tentacle
 
@@ -318,6 +318,7 @@ Precedence: **environment variables › `config.jsonc` › built-in defaults**.
 | `loadSkills` | `TENTACLE_NO_SKILLS` (truthy disables) | Agent Skills discovery (default on) |
 | `tools.execution` | `TENTACLE_TOOL_EXECUTION` | How a round's tool calls overlap: `read-only` (default: reads — `fs_read`, read-only MCP tools — run together; writes and `shell` one at a time), `sequential`, or `parallel` (any calls on different files/resources) |
 | `tools.maxParallel` | `TENTACLE_TOOL_MAX_PARALLEL` | At most this many calls of a round at once (default `8`; `1` = sequential) |
+| `tools.writableDirs` | `TENTACLE_WRITABLE_DIRS` (`:`-separated; empty = `[]`) | Where `fs_write`/`fs_edit`/`fs_multi_edit` may write besides the project: absolute or `~/…` dirs, matched by real path (a symlink out of one stays refused; a dangling or looping symlink, or a FIFO, is refused everywhere). Files are replaced atomically (a `0600` temp file, then the target's permission bits, then rename), so a planted hard link never gets written through. Like an editor's atomic save, this breaks hard links and does not keep owner, group, ACLs or extended attributes. A file you could not write in place (read-only, or another user's) is still refused with `EACCES`. In a directory you cannot create files in, an existing writable file is written in place (no symlink followed, refused if hard-linked); a new file there is refused. Limit, on hosts shared with other users only: another user who controls a directory on the path (e.g. one they made in `/tmp`) can race a swap and make the content land in a new hidden file elsewhere; an existing file there is never written in place. Default: the system temp dir (`$TMPDIR`) and `/tmp`. A list **replaces** that default; `[]` = the project only; `/` and relative entries are ignored (and logged). Each write still asks (unless auto-accept is on). Not carried to a pod: there the pod's own temp dirs apply. The `shell` tool is not confined |
 | `mcpServers.<name>.readOnlyTools` | — | Which of a server's tools count as reads: `"hint"` (default: those it marks `readOnlyHint`), `"none"`, or a list of its tool names |
 | `engine` | `TENTACLE_ENGINE` | Default engine of `run`/`attach`: `kubernetes` (default), `docker` or `podman`; `--engine` wins. An unknown value is an error |
 | `tui.theme` | — | The TUI's palette: `auto` (default) reads the terminal's background colour before the first frame and picks a light or dark palette; `dark`/`light` force one and skip that query. A display setting of this laptop only — never carried to a pod |

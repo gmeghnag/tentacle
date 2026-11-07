@@ -67,9 +67,26 @@ export function ownRequest(
   return turnId !== undefined && owns(turnId);
 }
 
-/** Whether the dialog shows the "writes confined here" row: tool calls only, not a trust request. */
+/** Whether the dialog shows the cwd row (`permissionCwdLine`): tool calls only, not a trust request. */
 export function permissionShowsCwd(req: PermissionRequest): boolean {
   return req.kind !== "hooks_trust";
+}
+
+/**
+ * The cwd row's note (docs/feat/write-tmpdir.md). Static: the TUI does not know
+ * the daemon's `tools.writableDirs` (no wire field for a label); the detail row
+ * above already shows the concrete path.
+ */
+export const WRITES_NOTE = "writes limited to here + allowed dirs";
+
+/** The dialog's cwd row: the cwd cut to fit, then the note — one row at `columns`. */
+export function permissionCwdLine(cwd: string, columns: number): string {
+  // The row's leading space + " · " + the note, and one spare cell.
+  const reserved = 1 + 3 + WRITES_NOTE.length + 1;
+  const line = `${truncateCells(cwd, Math.max(10, columns - reserved))} · ${WRITES_NOTE}`;
+  // Too narrow for both: cut the whole row (the note's end first), so it never
+  // wraps and `permissionPromptRows` stays true (review LOW 3).
+  return truncateCells(line, Math.max(1, columns - 2));
 }
 
 /**

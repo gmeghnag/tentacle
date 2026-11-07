@@ -1,7 +1,7 @@
 /**
  * Builds a fully-wired `Agent` from a resolved `TentacleConfig`: the configured
  * model provider (OpenAI-compatible or native Anthropic), host execution
- * (writes confined to the workspace), the built-in tool-set, and a
+ * (writes confined to the workspace + `tools.writableDirs`), the built-in tool-set, and a
  * `PermissionBroker` whose requester the frontend can attach at runtime.
  * Shared by the one-shot and interactive entry points.
  */
@@ -362,7 +362,15 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     root: config.cwd,
     readHint: (abs) =>
       outputs.owns(abs) ? toolOutputGoneHint(config.toolOutputRetentionDays) : undefined,
+    // docs/feat/write-tmpdir.md: this daemon's own config (never carried to a pod).
+    writableDirs: config.writableDirs ?? [],
   });
+  for (const dropped of env.droppedWritableDirs) {
+    // Daemon-side, never the terminal while Ink owns it (AGENTS §7).
+    (options.notice ?? options.log)?.(
+      `tools.writableDirs: ignored ${JSON.stringify(dropped)} (not an absolute dir, or the filesystem root)`,
+    );
+  }
   const tools = new ToolRegistry().registerAll(builtinTools);
   const permissions = options.permissions ?? new PermissionBroker();
   // Background jobs let the shell tools launch long-running processes (servers,
