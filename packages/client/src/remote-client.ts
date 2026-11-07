@@ -93,7 +93,7 @@ import {
 import { answerLostCause, normalizePermissionReply } from "./permission-map.ts";
 import { PermissionRouter, type RouterAction } from "./permission-router.ts";
 import { RemoteSession } from "./remote-session.ts";
-import { type LogState, applyLogRead } from "./session-log-reader.ts";
+import { type LogOutcome, type LogState, applyLogRead } from "./session-log-reader.ts";
 import { SessionLostError } from "./session-lost.ts";
 import {
   type StreamEffect,
@@ -204,6 +204,17 @@ export interface ReadBack {
   readonly aside?: readonly ChatMessage[];
   /** Entries between this client's head and the daemon's last `base` were not available. */
   readonly gap?: true;
+  /**
+   * Where this read stood (docs/feat/session-log-laptop-store.md): `from` = the
+   * head the read continued (absent: a cold read, or a refused one retried
+   * cold), `head` = this client's head after it, `outcome` its classification.
+   * The disk writer appends only when a read continues exactly what it wrote.
+   */
+  readonly read: {
+    readonly from?: LogCursor;
+    readonly head: LogCursor;
+    readonly outcome: LogOutcome;
+  };
 }
 
 /** Timers, injectable so tests drive reconnects deterministically. */
@@ -1258,9 +1269,15 @@ export class RemoteClient {
         this.titleRead(entry, entry.logTitle);
       }
       const title = entry ? entry.logTitle : applied.title;
+      const from = cold ? undefined : held?.head;
       return {
         messages: applied.state.messages,
         entries: applied.entries,
+        read: {
+          ...(from ? { from } : {}),
+          head: applied.state.head,
+          outcome: applied.outcome,
+        },
         ...(title ? { title } : {}),
         ...(applied.aside ? { aside: applied.aside } : {}),
         ...(applied.gap ? { gap: true as const } : {}),

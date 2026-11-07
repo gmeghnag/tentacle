@@ -190,6 +190,44 @@ export const LOG_ENTRY_CRITICAL: Readonly<Record<LogEntryType, boolean>> = {
   call_started: false,
 };
 
+/**
+ * The projection step of ONE entry — the shared fold: the client's reader and
+ * the laptop's disk log (docs/feat/session-log-laptop-store.md) both apply it,
+ * so the two cannot drift. `base` empties the projection (its `count` messages
+ * follow), `message` appends, `replace` sets an index, `truncate` shortens;
+ * every other type leaves it as it is. `item` maps a message to what `list`
+ * holds (the message itself, or its digest). Mutates `list`; returns why the
+ * entry does not fit it (out of range), else `null`.
+ */
+export function projectEntry<T>(
+  list: T[],
+  entry: KnownLogEntry,
+  item: (message: WireChatMessage) => T,
+): string | null {
+  switch (entry.type) {
+    case "base":
+      list.length = 0;
+      return null;
+    case "message":
+      list.push(item(entry.message));
+      return null;
+    case "replace":
+      if (entry.index >= list.length) {
+        return `replace at ${entry.index} past the end (${list.length})`;
+      }
+      list[entry.index] = item(entry.message);
+      return null;
+    case "truncate":
+      if (entry.length > list.length) {
+        return `truncate to ${entry.length} grows the history (${list.length})`;
+      }
+      list.length = entry.length;
+      return null;
+    default:
+      return null; // title, checkpoint, turn markers: not part of the projection
+  }
+}
+
 export const LogParamsSchema = z.object({
   sessionId: SessionIdSchema,
   /** The last entry this reader holds. Absent → a cold read from the last `base` (F5). */

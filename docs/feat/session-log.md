@@ -572,6 +572,8 @@ fields passes the RESULT schema (P3 — one unknown entry must not reject the re
 ### Notes / debt (deliberate)
 
 - The JSON record, the Q6 guard and `cutHistory` stay (task 2 removes them).
+  → Done in `feat/session-log-laptop-store` (the disk reader of these entries:
+  `<uid>.jsonl`, `cutHistory` at load; docs/feat/session-log-laptop-store.md).
 - `session/snapshot` stays for the display resync (Q1); attach still costs one full snapshot
   (display) + one cold log read (persistence), as today's two full reads.
 - `serve` lineage across reloads: task 3 (Q12).

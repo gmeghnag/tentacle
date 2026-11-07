@@ -7,9 +7,9 @@ import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { JsonSessionStore } from "@tentacle/agent";
 import { refreshSessionContext } from "@tentacle/config";
 import { PermissionBroker } from "@tentacle/core";
+import { LogSessionStore } from "@tentacle/daemon";
 import {
   Method,
   PROTOCOL_VERSION,
@@ -491,7 +491,7 @@ describe("createLocalRuntime: the report reaches the user through `notify`", () 
       channel: clientCh,
       disposeTransport: () => daemon.close(),
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(dir()), () => {}),
+      saver: new SessionSaver(new LogSessionStore(dir()), () => {}),
       cwd: "/tmp/work",
       model: "m",
       resume: null,

@@ -6,26 +6,23 @@ import { createHash } from "node:crypto";
  * over RPC" lever: the agent loop + tool execution run on the daemon side, so
  * the render thread never janks, and the main thread owns persistence.
  *
- * The daemon owns the live conversation but NOT the on-disk store: after each
- * turn/compaction we read the history back via `snapshot` and write the JSON
- * record here. The main also owns the session uid (passed into `session/open`),
- * so a resumed session keeps its file.
+ * The daemon owns the live conversation but NOT the on-disk store: at each
+ * committed round, turn end and compaction we read its log back
+ * (`session/log`) and write the entries to the session's `<uid>.jsonl` here
+ * (docs/feat/session-log-laptop-store.md). The main also owns the session uid
+ * (passed into `session/open`), so a resumed session keeps its file.
  *
  * Sessions outlive connections daemon-side, so this runtime closes what it
  * opened: the previous session on `/clear` (`SessionController.close`), every
  * session still open on `dispose` — the same on every runtime (AGENTS §7).
  */
-import {
-  type SessionRecord,
-  type TitleState,
-  recordFromSnapshot,
-  recordTitleState,
-} from "@tentacle/agent";
+import { type SessionRecord, type TitleState, recordTitleState } from "@tentacle/agent";
 import {
   AttachTimeoutError,
   type Clock,
   type DaemonKind,
   type LinkStatus,
+  type ReadBack,
   RemoteClient,
   type RemoteSession,
   type SessionEvent,
@@ -38,13 +35,6 @@ import type {
   ModelProvider,
   PermissionBroker,
 } from "@tentacle/core";
-import {
-  ENDED_INTERRUPTED_NOTE,
-  ENDED_NOT_RUN_NOTE,
-  ENDED_TURN_NOTE,
-  answerUnansweredCalls,
-  labelUnansweredCalls,
-} from "@tentacle/daemon";
 import { applyGroupMessage } from "@tentacle/exec";
 import {
   DomainErrorCode,
@@ -235,12 +225,6 @@ export interface PersistingController extends SessionController {
    * fails reports nothing (the quit took the last save; the close ends it).
    */
   seal(): void;
-  /**
-   * The session is about to end under its running turn (a `/quit` for all):
-   * every save from now on closes a history that stops on unanswered tool
-   * calls, as the daemon's reload does (docs/fix/detach-live.md Q2).
-   */
-  cutTurn(): void;
   /** `RemoteSession.sessionId`. */
   readonly sessionId: string | null;
   /** `RemoteSession.watch`; a foreign turn is saved at its end, a `history` at once. */
@@ -267,36 +251,6 @@ export interface ControllerSettings {
   readonly unconfirmed?: boolean;
 }
 
-/**
- * `messages` as a session ended mid-turn keeps them, so the resumed history
- * never stops on a call nobody answered. `started`: the calls the daemon said
- * START (`RemoteSession.runningCalls`, docs/feat/parallel-tools.md decision 6)
- * — each reads "Interrupted", every other unanswered call (queued, asking,
- * not reached) "Not run". `null` (a session that keeps no such record): the
- * daemon reload's rule for an ended session (`answerUnansweredCalls`: only the
- * first unanswered call may have started).
- */
-export function cutHistory(
-  messages: readonly ChatMessage[],
-  started: ReadonlySet<string> | null,
-): readonly ChatMessage[] {
-  const closed = [...messages];
-  if (started === null) {
-    answerUnansweredCalls(closed, ENDED_NOT_RUN_NOTE, () => ENDED_INTERRUPTED_NOTE);
-  } else {
-    labelUnansweredCalls(closed, (callId) =>
-      started.has(callId) ? ENDED_INTERRUPTED_NOTE : ENDED_NOT_RUN_NOTE,
-    );
-  }
-  // A cut before the model answered (live item 6): the tail is the prompt or a
-  // tool result. A finished turn ends on an assistant message.
-  const last = closed.at(-1)?.role;
-  if (last === "user" || last === "tool") {
-    closed.push({ role: "assistant", content: ENDED_TURN_NOTE });
-  }
-  return closed;
-}
-
 /** A read that failed because the session no longer exists daemon-side (by code). */
 const ended = (error: unknown): boolean =>
   (error as { code?: unknown } | null)?.code === DomainErrorCode.UnknownSession;
@@ -307,9 +261,9 @@ function titleState(title: SessionTitle): TitleState {
 }
 
 /**
- * Wrap a remote session so its history is persisted after each turn/compaction.
- * Reads the authoritative history back from the daemon (`snapshot`) rather than
- * reconstructing it from the update stream.
+ * Wrap a remote session so its history is persisted after each committed
+ * round, turn end and compaction. Reads the authoritative log back from the
+ * daemon (`session/log`) rather than reconstructing it from the update stream.
  *
  * The save is DETACHED from the turn (docs/feat/client-reattach-frontends.md
  * §6): with a reconnecting client the read waits out a dropped link, and the
@@ -327,7 +281,8 @@ function titleState(title: SessionTitle): TitleState {
  */
 export function persistingController(
   inner: RemoteSession,
-  persist: (messages: readonly ChatMessage[], title: TitleState) => void,
+  /** Every non-empty read (raw, mid-turn too), its title, and the read itself (for the log store). */
+  persist: (messages: readonly ChatMessage[], title: TitleState, back: ReadBack) => void,
   onFlushError: (error: Error) => void = () => {},
   initialTitle: TitleState = { source: "auto" },
   /** A turn this client did not mint but owns: a detached run's (B2). */
@@ -346,14 +301,10 @@ export function persistingController(
   let again = false;
   let closed = false;
   let sealed = false;
-  /** The session is being ended under any turn it runs: the saved history is closed honestly (Q2). */
-  let cut = false;
   let lastTitle = initialTitle;
   /** `saveConfirmed`'s two facts: turns in flight, and the last read-back answered since the last change. */
   let turns = 0;
   let confirmed = true;
-  /** The message count of the last mid-turn read (persisted cut); -1 once a turn-end read replaced it. */
-  let lastMidTurnCount = -1;
   /** A forked-from copy not yet durable aside (F1): kept until it is, before any later write. */
   let pendingAside: readonly ChatMessage[] | null = null;
   const run = async (): Promise<void> => {
@@ -370,29 +321,18 @@ export function persistingController(
           await setAside(pendingAside, lastTitle);
           pendingAside = null;
         }
-        if (back && back.messages.length > 0) {
+        if (back) {
           if (back.title) {
             lastTitle = titleState(back.title);
           }
           // The start record is read AFTER the read-back resolved: every frame
           // that preceded its reply on the ordered channel is recorded (P14).
-          // A read while a turn runs (a round's save) is cut too: a resume of
-          // that record never stops on a call nobody answered. ALWAYS cut then
-          // (same input → same output), so two mid-turn copies are never a strict
-          // prefix of each other (the store's Q6 guard). The turn-end read, with
-          // `turns` back at 0, replaces it with the real history.
-          // A turn-end read that did not grow past the last mid-turn copy (a turn
-          // cancelled right after a result) would be a strict prefix of that
-          // copy's closing tail: keep it closed the same way, never set aside.
-          const midTurn = turns > 0;
-          const closed = cut || midTurn || back.messages.length === lastMidTurnCount;
-          // Remember the length of EVERY closed copy on disk (not only mid-turn
-          // ones): a later equal-length raw read would be its strict prefix.
-          lastMidTurnCount = closed ? back.messages.length : -1;
-          persist(
-            closed ? cutHistory(back.messages, inner.runningCalls?.() ?? null) : back.messages,
-            lastTitle,
-          );
+          // EVERY read is handed on — mid-turn ones, RAW, and empty ones too
+          // (the log store's segment must follow every read; it writes no file
+          // for an empty history). A turn still open at the file's end (no
+          // `turn_end`) is closed when the file is LOADED
+          // (docs/feat/session-log-laptop-store.md Q11).
+          persist(back.messages, lastTitle, back);
         }
         confirmed = !again;
       } catch (error) {
@@ -552,9 +492,6 @@ export function persistingController(
     saveConfirmed: () => turns === 0 && running === null && confirmed && !inner.busy,
     seal() {
       sealed = true;
-    },
-    cutTurn() {
-      cut = true;
     },
     get sessionId() {
       return inner.sessionId;
@@ -747,39 +684,35 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
         );
     const controller = persistingController(
       session,
-      (messages, latest) => {
+      (_messages, _latest, back) => {
         if (!saving) {
           return; // handed over: the TUIs save it now
         }
-        const next = recordFromSnapshot(
-          { id: uid, messages },
-          {
-            cwd: deps.cwd,
-            model: deps.model,
-            title: latest,
-            ...(createdAt !== undefined ? { createdAt } : {}),
-          },
-        );
-        createdAt = next.createdAt;
-        deps.saver.save(next);
+        // The read's validated entries go to the log as they are (F4); the
+        // title is in them (`title` entries).
+        createdAt ??= Date.now();
+        deps.saver.write({
+          id: uid,
+          meta: { cwd: deps.cwd, model: deps.model, createdAt },
+          entries: back.entries,
+          messages: back.messages,
+          read: back.read,
+        });
       },
       (error) => deps.saver.failed(uid, `could not read the history back: ${error.message}`),
       title,
       adoptTurn,
       carried && attachTimedOut.has(uid) ? { ...carried, unconfirmed: true } : carried,
-      // F1: the copy the daemon forked from goes aside (a record like `persist`'s).
-      (messages, latest) =>
-        deps.saver.saveAside(
-          recordFromSnapshot(
-            { id: uid, messages },
-            {
-              cwd: deps.cwd,
-              model: deps.model,
-              title: latest,
-              ...(createdAt !== undefined ? { createdAt } : {}),
-            },
-          ),
-        ),
+      // F1: the copy the daemon forked from goes aside (a log file too).
+      (messages, latest) => {
+        createdAt ??= Date.now();
+        return deps.saver.saveAside(
+          uid,
+          { cwd: deps.cwd, model: deps.model, createdAt },
+          messages,
+          latest,
+        );
+      },
     );
     controllers.add(controller);
     return controller;
@@ -884,12 +817,9 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
       await written();
     },
     quit: async (opts = {}) => {
-      if (opts.closeForAll === true || opts.ending === true) {
-        // The close ends every turn: the copy saved now says so (Q2).
-        for (const controller of controllers) {
-          controller.cutTurn();
-        }
-      }
+      // A close that ends a running turn needs nothing more here: that turn has
+      // no `turn_end` in the saved log, so it is closed when the file is loaded
+      // (docs/feat/session-log-laptop-store.md Q11; was the save-time cut, Q2).
       // A foreign turn is saved only at its end: the last read-back is what
       // puts a running first turn's transcript on the laptop.
       const answered = await withTimeout(

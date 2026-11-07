@@ -8,7 +8,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, JsonSessionStore, SessionGrants } from "@tentacle/agent";
+import { Agent, SessionGrants } from "@tentacle/agent";
 import { ATTACH_TIMEOUT_MS, AttachTimeoutError } from "@tentacle/client";
 import {
   type ExecutionEnvironment,
@@ -16,7 +16,7 @@ import {
   PermissionBroker,
   type StreamEvent,
 } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import { Method, PROTOCOL_VERSION, type SessionSettings } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
@@ -65,7 +65,7 @@ async function terminal(host: SessionHost, sessionSettings?: SessionSettings) {
   const [daemonCh, clientCh] = createChannelPair();
   new Connection(daemonCh, host);
   const notices: { text: string; hint?: string }[] = [];
-  const store = new JsonSessionStore(dir());
+  const store = new LogSessionStore(dir());
   const runtime = await createLocalRuntime({
     channel: clientCh,
     disposeTransport: () => {},
@@ -117,7 +117,7 @@ describe("/settings after a timed-out attach (F3)", () => {
       channel: clientCh,
       disposeTransport: () => daemon.close(),
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(dir()), () => {}),
+      saver: new SessionSaver(new LogSessionStore(dir()), () => {}),
       cwd: "/tmp/w",
       model: "m",
       resume: {

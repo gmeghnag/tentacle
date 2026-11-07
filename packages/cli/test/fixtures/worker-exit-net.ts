@@ -12,8 +12,8 @@
  * (the worker must forward the `remove`).
  */
 import { join } from "node:path";
-import { JsonSessionStore } from "@tentacle/agent";
 import { PermissionBroker } from "@tentacle/core";
+import { LogSessionStore } from "@tentacle/daemon";
 import { trackedGroups } from "@tentacle/exec";
 import { loadConfig } from "../../src/config.ts";
 import { startWorkerRuntime } from "../../src/local-runtime.ts";
@@ -78,7 +78,7 @@ const runtime = await startWorkerRuntime(
   config,
   {
     permissions: new PermissionBroker(),
-    saver: new SessionSaver(new JsonSessionStore(join(dir, "sessions")), () => {}),
+    saver: new SessionSaver(new LogSessionStore(join(dir, "sessions")), () => {}),
     resume: null,
   },
   (line) => process.stderr.write(line),

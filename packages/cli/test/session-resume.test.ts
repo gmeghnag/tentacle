@@ -2,10 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonSessionStore, type SessionRecord, parseSessionRecord } from "@tentacle/agent";
+import { type SessionRecord, parseSessionRecord } from "@tentacle/agent";
+import { LogSessionStore } from "@tentacle/daemon";
 import { ChatMessageSchema } from "@tentacle/protocol";
 import type { SessionChoice } from "@tentacle/tui";
 import { resolveResume } from "../src/session-resume.ts";
+import { saveFixture } from "./session-fixture.ts";
 
 let dir: string;
 beforeAll(async () => {
@@ -22,13 +24,14 @@ const rec = (id: string, updatedAt: number): SessionRecord => ({
   createdAt: 1,
   updatedAt,
   title: `title ${id}`,
-  messages: [{ role: "user", content: "hi" }],
+  // A string title is the derived (auto) one: a log derives it from the first user message.
+  messages: [{ role: "user", content: `title ${id}` }],
 });
 
 describe("resolveResume", () => {
   test("explicit uid: ok resumes, absent starts fresh", async () => {
-    const store = new JsonSessionStore(join(dir, "explicit"));
-    await store.save(rec("s1", 1));
+    const store = new LogSessionStore(join(dir, "explicit"));
+    await saveFixture(store, rec("s1", 1));
     const ok = await resolveResume(store, "s1");
     expect(ok.record?.id).toBe("s1");
     expect(ok.lines).toEqual(["[resume] s1 — title s1\n"]);
@@ -44,18 +47,18 @@ describe("resolveResume", () => {
 
   test("explicit uid that is unreadable is fatal and names the file", async () => {
     const d = join(dir, "corrupt");
-    const store = new JsonSessionStore(d);
-    await store.save(rec("bad", 1));
-    await writeFile(join(d, "bad.json"), '{"id": "bad", "messa');
+    const store = new LogSessionStore(d);
+    await saveFixture(store, rec("bad", 1));
+    await writeFile(join(d, "bad.jsonl"), '{"id": "bad", "messa\n');
     const result = await resolveResume(store, "bad");
     expect(result.fatal).toBe(true);
     expect(result.record).toBeNull();
-    expect(result.lines[0]).toContain('session "bad" is unreadable: invalid JSON');
-    expect(result.lines[0]).toContain(join(d, "bad.json"));
+    expect(result.lines[0]).toContain('session "bad" is unreadable: line 1 is not JSON');
+    expect(result.lines[0]).toContain(join(d, "bad.jsonl"));
   });
 
   test("an invalid uid is fatal without naming a (normalized, misleading) path", async () => {
-    const result = await resolveResume(new JsonSessionStore(join(dir, "invalid")), "../etc");
+    const result = await resolveResume(new LogSessionStore(join(dir, "invalid")), "../etc");
     expect(result).toEqual({
       record: null,
       lines: ['[resume] "../etc" is not a valid session id; not starting\n'],
@@ -66,22 +69,22 @@ describe("resolveResume", () => {
 
   test("no uid: the newest valid session resumes and skipped files are reported in and out of the TUI", async () => {
     const d = join(dir, "latest");
-    const store = new JsonSessionStore(d);
-    await store.save(rec("old", 1000));
-    await writeFile(join(d, "newer.json"), "{trunc");
+    const store = new LogSessionStore(d);
+    await saveFixture(store, rec("old", 1000));
+    await writeFile(join(d, "newer.jsonl"), "{trunc");
     const result = await resolveResume(store, undefined);
     expect(result.record?.id).toBe("old");
     expect(result.notices).toHaveLength(1);
     expect(result.notices[0]).toContain("Skipped 1 unreadable session file(s)");
-    expect(result.notices[0]).toContain("newer.json");
+    expect(result.notices[0]).toContain("newer.jsonl");
     expect(result.lines).toEqual([`[resume] ${result.notices[0]}\n`, "[resume] old — title old\n"]);
   });
 
   test("no uid, nothing valid: starts fresh but still reports what was skipped", async () => {
     const d = join(dir, "only-bad");
-    await new JsonSessionStore(d).save(rec("x", 1));
-    await writeFile(join(d, "x.json"), "[]");
-    const result = await resolveResume(new JsonSessionStore(d), undefined);
+    await saveFixture(new LogSessionStore(d), rec("x", 1));
+    await writeFile(join(d, "x.jsonl"), "[]\n");
+    const result = await resolveResume(new LogSessionStore(d), undefined);
     expect(result.record).toBeNull();
     expect(result.fatal).toBe(false);
     expect(result.notices).toHaveLength(1);
@@ -102,10 +105,10 @@ describe("resolveResume with a picker", () => {
     return { pick, offered };
   }
 
-  async function storeWith(name: string, ...records: SessionRecord[]): Promise<JsonSessionStore> {
-    const store = new JsonSessionStore(join(dir, name));
+  async function storeWith(name: string, ...records: SessionRecord[]): Promise<LogSessionStore> {
+    const store = new LogSessionStore(join(dir, name));
     for (const r of records) {
-      await store.save(r);
+      await saveFixture(store, r);
     }
     await store.drain();
     return store;
@@ -128,7 +131,7 @@ describe("resolveResume with a picker", () => {
       ...rec("s1", 1000),
       messages: [
         { role: "system", content: "sys" },
-        { role: "user", content: "hi" },
+        { role: "user", content: "title s1" },
         { role: "assistant", content: "hello" },
       ],
     };
@@ -163,7 +166,7 @@ describe("resolveResume with a picker", () => {
     const spy = spyPick(() => "only");
     expect((await resolveResume(one, undefined, undefined, spy.pick)).record?.id).toBe("only");
     const none = await resolveResume(
-      new JsonSessionStore(join(dir, "none")),
+      new LogSessionStore(join(dir, "none")),
       undefined,
       undefined,
       spy.pick,
@@ -188,11 +191,11 @@ describe("resolveResume with a picker", () => {
 
   test("skipped files are still reported when the user picks", async () => {
     const store = await storeWith("pick-skipped", rec("s1", 1000), rec("s2", 2000));
-    await writeFile(join(dir, "pick-skipped", "bad.json"), "{trunc");
+    await writeFile(join(dir, "pick-skipped", "bad.jsonl"), "{trunc");
     const result = await resolveResume(store, undefined, undefined, spyPick(() => "s1").pick);
     expect(result.record?.id).toBe("s1");
     expect(result.notices).toHaveLength(1);
-    expect(result.notices[0]).toContain("bad.json");
+    expect(result.notices[0]).toContain("bad.jsonl");
   });
 });
 

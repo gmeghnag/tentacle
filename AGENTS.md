@@ -170,11 +170,23 @@ assume.
   (`cli/main.ts`) and its regression test (a *separate* daemon-side broker spy).
 - **Persistence lives on the laptop/main thread — and, where the daemon is
   trusted (`serve` on the user's own host), the daemon also persists.** The
-  daemon owns the live conversation; the main thread owns its on-disk JSON
-  store and always persists its own copy from `snapshot` after each
-  turn/compaction (offline viewing, `open{messages}` recovery). The main owns
-  the session uid (passed into `session/open`) so `--resume` keeps the file.
-  Persist only `ChatMessage`s — never rendering-only events (e.g. `steer`). A
+  daemon owns the live conversation; the main thread owns its on-disk store —
+  one typed event log per session, `<uid>.jsonl` (a file header line, then
+  `session/log` entries) — and persists its own copy from `session/log` reads
+  at every committed round, turn end and compaction (offline viewing,
+  `open{messages}` recovery). It writes only the entries the client VALIDATED
+  and re-serialized (known types; a pod's unknown entries are dropped, never
+  written). Every write holds the session's lock file. A write that does not
+  continue the file's last entry rewrites the current segment atomically, and
+  any content it would drop that its own copy does not contain is set aside
+  first (never spliced, never silently lost). A session cut mid-turn is closed
+  when it is LOADED (from the log's turn markers), not when it is saved.
+  Superseded history (compaction, `context_reset`) is kept only with
+  `sessions.keepSuperseded` (default off). The main owns the session uid
+  (passed into `session/open`) so `--resume` keeps the file. Persist only the
+  conversation — `ChatMessage`s and the log's typed facts about them
+  (turn/call markers, title, checkpoints) — never rendering-only events (e.g.
+  `steer`). A
   `serve` daemon additionally writes each live session to
   `<configDir>/daemon/<projectKey(cwd)>/` at every committed boundary and
   reloads it on start (one daemon per store: a lock); on re-attach the daemon's
@@ -248,9 +260,12 @@ assume.
       bump `PROTOCOL_VERSION`.
     - **On-disk records are versioned separately from the wire.** A daemon
       record carries `schemaVersion` (`DAEMON_RECORD_VERSION`), and an unknown
-      one is refused and left untouched. The laptop's session store parser is
-      strict. A newer build's record is rejected loudly by an older one, never
-      half-loaded.
+      one is refused and left untouched. The laptop's log carries a header
+      `schemaVersion` (an unknown one is refused, and the file is set aside,
+      never overwritten). Inside it, an entry of an unknown type is refused if
+      `critical` and skipped if not; its line is kept on append and set aside,
+      never dropped, by a rewrite. What an older build cannot project, it
+      refuses loudly; it never half-loads it.
 - **Don't serialize the RPC peer.** `transport/peer.ts` dispatches inbound
   requests concurrently (`void handleRequest`, no per-connection mutex) on
   purpose: a long-running `session/prompt` must not block a short
