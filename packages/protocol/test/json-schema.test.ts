@@ -173,6 +173,13 @@ const FIXTURES: Record<string, Json[]> = {
       tip: { seq: 3, id: "i/3" },
     },
     { entries: [], more: false, tip: { seq: 9, id: "i/9" }, rebased: true },
+    {
+      entries: [],
+      more: false,
+      tip: { seq: 9, id: "i/9" },
+      rebased: true,
+      root: { seq: 4, id: "old/4" },
+    },
   ],
   "methods/session~1reclaim/params": [{ sessionId: "s", ids: ["a", "b"] }],
   "methods/session~1reclaim/result": [{}],

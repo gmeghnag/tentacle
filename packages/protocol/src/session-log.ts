@@ -211,6 +211,13 @@ export const LogResultSchema = z.object({
    * unknown id, evicted): the entries start at the last `base` instead.
    */
   rebased: z.boolean().optional(),
+  /**
+   * Present when the entries start at a `base` (a cold or rebased read) AND this
+   * daemon incarnation was reseeded from a client's head (`open{logBase}`): that
+   * head. A reader that holds exactly it knows this incarnation continues its
+   * copy even when the seed segment is no longer retained (a compaction since).
+   */
+  root: LogCursorSchema.optional(),
 });
 export type LogResult = z.infer<typeof LogResultSchema>;
 

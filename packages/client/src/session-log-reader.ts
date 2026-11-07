@@ -142,6 +142,8 @@ export function applyLogRead(
   let digests: string[] = linear && held !== null ? [...held.digests] : [];
   let inc = held?.inc ?? "";
   let firstBase: Extract<KnownLogEntry, { type: "base" }> | undefined;
+  /** The digests of the FIRST segment's messages, as the next `base` starts (else the final ones). */
+  let firstSegment: string[] | undefined;
   let expect = 0; // message entries a base still owes
   let title: SessionTitle | undefined;
   let drift: { seq: number } | undefined;
@@ -151,6 +153,7 @@ export function applyLogRead(
     }
     switch (e.type) {
       case "base":
+        if (firstBase !== undefined) firstSegment ??= digests;
         firstBase ??= e;
         inc = e.inc;
         messages = [];
@@ -199,14 +202,29 @@ export function applyLogRead(
   // Classify.
   let outcome: LogOutcome;
   let aside: readonly ChatMessage[] | undefined;
+  let gap = false;
   if (held === null) {
     outcome = "cold";
   } else if (!fromBase) {
     outcome = "linear";
   } else if (firstBase !== undefined && firstBase.inc === held.inc) {
     outcome = "rebased";
+    gap = rebased;
   } else if (firstBase?.prev !== undefined && firstBase.prev === held.head.id) {
+    // A reseed from THIS head carries this copy (an honest one always does; the
+    // seed may already have grown by commits before the read). A seed that
+    // does not is a forged or confused claim: a fork, set aside (L1).
+    if (extends_(held.digests, firstSegment ?? digests)) {
+      outcome = "reseed";
+    } else {
+      outcome = "fork";
+      aside = held.messages;
+    }
+  } else if (pages[0]?.root?.id === held.head.id && pages[0]?.root?.seq === held.head.seq) {
+    // The incarnation was reseeded from this head, but its seed segment is not
+    // retained any more (compactions since): a true gap, not a fork (M1).
     outcome = "reseed";
+    gap = true;
   } else if (extends_(held.digests, digests)) {
     outcome = "adopt";
   } else {
@@ -219,7 +237,7 @@ export function applyLogRead(
     entries,
     ...(title ? { title } : {}),
     ...(aside ? { aside } : {}),
-    ...(rebased && outcome === "rebased" ? { gap: true as const } : {}),
+    ...(gap ? { gap: true as const } : {}),
     ...(drift ? { drift } : {}),
   };
 }

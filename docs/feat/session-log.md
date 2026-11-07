@@ -455,7 +455,7 @@ No TUI change (the notice rides `NoticeHub`).
 | 15 | **Oversized frames** | pages are bounded by `LOG_PAGE_MAX_CHARS`; a single entry larger than the budget travels alone (as today a message larger than a page does); a single message > `maxFrameBytes` fails the read exactly as the snapshot does today (`oversize-frame-hang` behaviour unchanged) |
 | 16 | **Hostile pod** | malformed / out-of-order / dangling `prev` / out-of-range `replace`/`truncate` / wrong `count` → read refused, nothing committed, retried once cold, reported via `onFlushError`; the held copy is untouched. A pod can still feed a different history (true today); it can no longer make the laptop silently LOSE its copy (fork ⇒ aside). Unknown types never reach the laptop's state (F4). `logBase` sent TO a pod grants nothing |
 | 17 | **Empty / fresh session** | `base{create}` + the system message; the read before the first send returns `null` as today (`remote-session.ts:479-480`) |
-| 18 | **Derivation bug** | caught by the `checkpoint` digest in production (one cold read, then a reported mismatch) and by test D1 in CI |
+| 18 | **Derivation bug** | the `checkpoint` digest is over the derivation's OWN reference copy (`ref`), which every `checkpoint()` follows a full-range `commit` for: it catches an emit-side diff bug and any daemon→laptop transport/reader divergence (one cold read, then a reported mismatch). It does NOT catch a missing derivation CALL (the `swapAgent` class: `ref` is stale too, and the next full diff heals it). That class is caught by D1's read-point check in CI (fix round 1, L4) |
 | 19 | **Daemon memory** | two segments of entry envelopes referencing live message objects; the superseded segment is freed at the next `base` |
 
 ### Tests (red first; fakes and seams that exist)
@@ -723,15 +723,18 @@ vs the snapshot (entry envelopes, +14 % bytes) — paid once per attach / cold s
 
 ### Real-cluster run (Review)
 
+**Corrected in fix round 1 (L5; the round-1 command did not run: the scratch lives in the main
+checkout, and a compiled `./dist/tentacle` takes the release path of `resolvePodBinary`
+instead of injecting the branch binary).** Pin the pod binary with `TENTACLE_POD_BIN`:
+
 ```sh
-# laptop, this branch
-bun run compile                                    # → dist/tentacle (protocol 17)
-./dist/tentacle run --image <image> --engine kubernetes -n <ns> --name sl-measure
-#   in the TUI: /quit at once — the pod is KEPT (no --rm) with the branch binary injected
-bun .tentacle/tmp/session-log/pod-measure-k8s.ts "$PWD" <ns> sl-measure [/usr/local/bin]
-#   prints: daemon protocol 17, (a) cold, (b) after one round, (b') nothing new,
-#   each with frames / KiB and the update's head-of-line delay vs an idle rename
-./dist/tentacle rm sl-measure
+cd /Users/gmeghnag/tentacle/.tentacle/worktrees/session-log
+TARGET=bun-linux-x64 bun run compile && mv dist/tentacle dist/tentacle-pod   # arm64 nodes: bun-linux-arm64
+TENTACLE_POD_BIN=$PWD/dist/tentacle-pod bun packages/cli/src/main.ts run --image <image> --engine kubernetes -n <ns> --name sl-measure
+#   /quit at once (kept, no --rm)
+bun /Users/gmeghnag/tentacle/.tentacle/tmp/session-log/pod-measure-k8s.ts "$PWD" <ns> sl-measure
+#   must print "daemon protocol 17"; gates: (b) ≤ RTT+50 ms and < 16 KB, update delay ≤ RTT+100 ms
+bun packages/cli/src/main.ts rm sl-measure
 ```
 (`pod-measure-k8s.ts` is gitignored scratch: it opens `serve --bridge --model-proxy` on the
 pod through `buildEngineHost("kubernetes")` + `openExec`, with kubeconfig or
@@ -980,11 +983,239 @@ process.exit(0);
 (b) 1 frame 1.2 KiB · (b') 1 frame 0.3 KiB.
 </details>
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-07*
+
+Review verdict was REQUEST-CHANGES (1 MEDIUM + 5 LOW); owner answers recorded under "Owner
+answers (fix round 1)". Still protocol 17 (unreleased). No `critical` value touched.
+Gate (once): `bunx tsc --noEmit` clean · `bunx biome check .` 0/0 · `bun test packages`
+**5387 pass, 3 skip (opt-in), 0 fail**. `bun run schema:export` run (`LogResult.root`).
+
+| Finding | Change | Evidence |
+|---|---|---|
+| **M1** honest reseed + compaction = false fork | `LogResult.root?: LogCursor` (`protocol/src/session-log.ts`); `SessionLog` keeps the `open{logBase}` link (`root`) and returns it on every read that starts at a base (`daemon/src/session-log.ts`); the reader classifies `root` = held head as `reseed` + `gap` (`client/src/session-log-reader.ts`) | tests red first: "I3 + compaction before the read → no aside" (`Expected "reseed", Received "fork"`), the two-compactions case, a foreign `root` stays a fork; over the wire `I3b`; daemon `D9`; schema fixture. Mutation (root branch → `false`): the two M1 tests fail; restored, `shasum -c` OK |
+| **L1** forged `base.prev` = held head | `reseed` requires the FIRST segment's digests to extend the held digests, else `fork` + aside | red first: forged shape 2 was `reseed` with no aside. Mutation (check → `true`): that test fails; restored, `shasum -c` OK. An honest reseed (equal, or already grown) stays `reseed` |
+| **L2** kept `entries` are not a closed chain | recorded as a constraint of `feat/session-log-laptop-store` in `TODO.md` | doc only |
+| **L3** persistent drift = a cold re-read per save | the cold retry runs only while `driftReported` is false; a clean read re-arms it | new test "L3 …" (1 read per save once reported; re-armed after a clean read). Mutation (retry unconditional): `Expected 1, Received 2`; restored, `shasum -c` OK |
+| **L4** checkpoint scope overstated | failure mode 18 reworded (own-`ref` digest: emit-side bugs and transport divergence, not a missing derivation call; that is D1's read-point check) | doc only |
+| **L5** cluster command | replaced by the reviewer's corrected one (above, "Real-cluster run"): `TENTACLE_POD_BIN` pin, run from the worktree | not run here (no cluster) — the orchestrator runs it (Q10) |
+
+Remaining caveats (unchanged): a hostile pod can still forge `base.inc` (same-inc `rebased`) or
+a chained foreign `base` inside a linear read, or a `root` equal to the held head, and replace
+the copy without an aside — owner Q-R1 left those as they are (an honest compaction cannot be
+told apart; not a regression vs `main`). A `root`-matched `reseed` after a compaction cannot be
+content-checked (the seed segment is gone).
+
 ## Review
 
-*— <reviewer model-id>, <date>*
+*— claude-opus-5-5, 2026-11-07 (fresh context; SAME model as the executor — shared blind spots can survive both passes; a different-model pass is advisable for a load-bearing L)*
 
-(empty)
+### Verdict: **REQUEST-CHANGES** (1 MEDIUM, 5 LOW; no HIGH)
+
+The design holds against F1–F5 on every attack I ran, the critical table is
+item 14 exactly, and the gate is green. One MEDIUM: in an HONEST path (this
+client's own reseed, then a compaction), the lineage check reports a false
+fork. That is a wrong user-facing claim plus an aside file. Nothing is lost,
+but it is not LOW-only, so the verdict is not PASS. Q10 (owner): the
+real-cluster run is still REQUIRED for sign-off and was not run (no cluster
+here). The command below is corrected (L5).
+
+### Gate (re-run by the reviewer)
+
+- `bunx tsc --noEmit`: clean. `bunx biome check .`: 720 files, 0 errors/warnings.
+- `bun test packages`, 3 sequential full runs: **5379 pass · 3 skip (opt-in) · 0 fail** each
+  (161.2 s / 161.7 s / 161.6 s).
+- Simulated link re-run (`pod-measure.ts`, branch): (a) 2581 ms · 10 frames · 2348.9 KiB · chunk
+  +223 ms; (b) **100 ms · 1 frame · 1.2 KiB · +50 ms**; (b′) 95 ms · 1 frame · 0.3 KiB · +48 ms.
+  This matches Execution to within 1 %. What it measures: link occupancy per save (2.3 s →
+  0.1 s) and how long an update waits behind ONE read page. On `main` that wait is already one
+  page (+218 ms), not the whole 2.3 s, because pages interleave with the stream. So the
+  user-visible gain is 218 → 50 ms of head-of-line delay, plus 9 → 1 round trips. The
+  CHANGELOG's "no longer queued behind it" is fair. The doc's M1/M2 framing of a 1.1–1.7 s
+  stall is about occupancy, not about a single chunk's delay.
+
+### Findings
+
+**M1 (MEDIUM) — an honest reseed followed by a segment start is classified as a FORK.**
+`packages/daemon/src/session-log.ts:163-171`: `read` matches `after` only against its own
+entry ids, so `after` = the client's head (the incarnation's `from` link, `:83-87`) is never a
+position. The read therefore comes back `rebased` from the LAST base.
+`packages/client/src/session-log-reader.ts:206-215` then looks only at that base. After a
+compaction or context reset, that base is `base{compact}` (inc D2, prev D2/…), neither the held
+inc nor linked to the held head. Content compare fails → `fork`. Scenario: the pod daemon is
+lost; THIS client recreates it with `logBase` (I3); the next prompt auto-compacts (or
+`/compact`, or a mid-turn `context_reset`); the flush after the compaction
+(`local-runtime.ts` "after a compaction") reads → the "⚠ … diverged … reseeded from another
+copy" notice plus a `.aside`. Repro (`review/reseed-compact.ts`):
+```
+reseed, read at once           : reseed aside=no
+reseed, then a compaction, read: fork aside=YES rebased=true
+```
+Fix (executor's choice, plus a test "I3 + compaction before the read → no aside"):
+(a) daemon-side, while the root segment is retained, treat `after` equal to `from` as the
+position just before the root base. The read is then linear and crosses the bases normally.
+(b) Or `LogResult.root?: LogCursor` (the incarnation's link), with the reader classifying
+`rebased && root.id === held.head.id` as `reseed` + `gap`. (a) needs no wire change. Once both
+retained segments are gone (two compactions), it is a true gap, and (b) still classifies it
+right, so (b) is the more complete fix.
+
+**L1 (LOW, owner Q-R1) — forged lineage claims replace the copy without an aside.**
+`review/attacks.ts`: a pod forging `base.prev = held head` → `reseed`; forging
+`base.inc = held inc` → `rebased`+`gap`; a CHAINED `base` of another inc inside a linear read
+→ `linear`. Each replaces the held projection, with no aside. The third is not in Execution's
+"Unverified" list. This is not a regression (`main`'s snapshot replaces silently), and a pod can
+always feed any history (§7: no laptop-side effect beyond today's). Cheap hardening: for
+`reseed`, require the base's seed messages' digests to EQUAL `held.digests`. An honest reseed
+always passes (`logBaseOf` sends `logBase` only when `entry.history === log.messages`).
+
+**L2 (LOW, task-2 constraint) — the kept `entries` are not a closed chain.** F4 drops unknown
+entries, but the next kept entry's `prev` still names the dropped one. Attack 4a: kept
+`D1/6.prev = "D1/5"`, and `D1/5` was dropped. When task 2 appends `entries` to disk, its loader
+must not re-verify `prev` adjacency on that subset (or the laptop must re-link). Record this in
+`feat/session-log-laptop-store`.
+
+**L3 (LOW) — persistent checkpoint drift means every save does a full cold re-read.**
+`remote-client.ts` `readLog`: `drift && !cold → cold` runs on every read, but only the
+REPORT is once (`driftReported`). The loop is bounded (3 attempts), so this is not a loop. But
+a daemon whose checkpoints keep failing makes every save cost at least today's snapshot,
+silently after the first notice. Suggest: after a reported drift, skip the cold retry, or
+re-report.
+
+**L4 (LOW, doc accuracy) — what the checkpoint can see.** The digest is over the derivation's
+own reference copy (`session-log.ts:145`, `this.ref`). It equals the committed prefix because
+every `checkpoint()` follows a full-range `commit`. So it catches emit-side diff bugs and any
+reader/transport divergence. It does NOT catch a missing derivation CALL (the `swapAgent`
+class). There, `ref` is stale too, and the next full diff heals it anyway. That case is caught
+by D1's read-point check, as Execution says. Failure mode 18 ("caught by the checkpoint in
+production") overstates it.
+
+**L5 (LOW) — the real-cluster command, as written, will not run, or may inject the wrong
+binary.** (i) It runs `bun .tentacle/tmp/session-log/pod-measure-k8s.ts "$PWD"` from the
+worktree, which has no `.tentacle/` (the scratch is in the main checkout). (ii) A compiled
+`./dist/tentacle` carries a version marker (`version.ts:53` ≠ `"dev"`), so `resolvePodBinary`
+takes the release path (`pod-binary-build.ts:302-311`): `<configDir>/bin/tentacle-<target>` at
+exactly this version, else an error. From source, too, `<configDir>/bin` is preferred over the
+repo cache (`:316-320`), so a main (protocol 16) binary could be injected. That one fails
+loudly with `VersionMismatch`. Corrected, pinning the pod binary (`TENTACLE_POD_BIN`, `:8`):
+```sh
+cd /Users/gmeghnag/tentacle/.tentacle/worktrees/session-log
+TARGET=bun-linux-x64 bun run compile && mv dist/tentacle dist/tentacle-pod   # arm64 nodes: bun-linux-arm64
+TENTACLE_POD_BIN=$PWD/dist/tentacle-pod bun packages/cli/src/main.ts run --image <image> --engine kubernetes -n <ns> --name sl-measure
+#   /quit at once (kept, no --rm)
+bun /Users/gmeghnag/tentacle/.tentacle/tmp/session-log/pod-measure-k8s.ts "$PWD" <ns> sl-measure
+#   must print "daemon protocol 17"; gates: (b) ≤ RTT+50 ms and < 16 KB, update delay ≤ RTT+100 ms
+bun packages/cli/src/main.ts rm sl-measure
+```
+The script itself checks out: `buildEngineHost("kubernetes",{namespace})`, `host.openExec`,
+`defaultContainer`, `podDaemonCommand`, `client.rename` all exist with those shapes. Its (c) is
+the update delay against an idle rename baseline, which is the right property.
+
+### F1–F5 attacked (all with repros in `.tentacle/tmp/session-log/review/`)
+
+| Req | Attack | Result |
+|---|---|---|
+| F1 | D2 reseeded from an older head, divergent (`attacks.ts` 1) | `fork`, aside = held copy, never spliced ✔ |
+| F1 | late entries from another incarnation: forged `prev`, seq skip (4e, 4f) | refused, state untouched ✔ |
+| F1 | daemon cursor match by `seq` only (my mutation, below) | caught by D4/C3/C4; the reader's chain check alone still refuses the splice ✔ |
+| F1 | honest reseed + compaction | **false fork (M1)** |
+| F2 | head swap + shrink in place, then a checkpoint (5) | `replace[0]` + `truncate`, checkpoint passes ✔ (see L4 for its scope) |
+| F3 | shrink behind the cut (4i, 5) | `truncate` applied; a growing truncate is refused (4h) ✔ |
+| F4 | unknown non-critical + extra fields on a known entry (4a) | dropped; the kept JSON has only known fields ✔ |
+| F4 | unknown critical (4b) | refused with "update tentacle" ✔ |
+| F4 | known type with the wrong `critical` (4c, 4d), wrong content type (4j), replace past the end (4g) | refused ✔ |
+| F4 | `critical: "yes"` on an unknown type (4k) | the reader would skip it; in production the envelope's `z.boolean()` rejects the whole result at the peer (P3) ✔ |
+| F5 | cold read after two compactions (6b) | starts at the last `base{compact}`, 2 entries ✔; two behind → `rebased` + `gap`, no aside (6) ✔ |
+| — | huge entry / endless pages | bounded by the frame cap + `LOG_MAX_PAGES` (as the snapshot's `SNAPSHOT_MAX_PAGES`) ✔ |
+
+### Turn markers (owner Q5), end to end (`review/markers.ts`, real `HostedSession`)
+
+A cancel mid-tool, a steer enqueued during a tool, then a send-now interrupting that turn:
+```
+turn_start(t1) msg(user) msg(assistant) title call_started(k1) msg(tool) turn_end(t1,cancelled) checkpoint
+turn_start(t2) msg(user) msg(assistant) call_started(k2) msg(tool) turn_end(t2,cancelled) checkpoint
+turn_start(t3) msg(user:send now!) msg(user:a steer) msg(assistant) turn_end(t3,end_turn) checkpoint
+problems: []   replay == committed: true
+```
+They pair, never nest, and `call_started` precedes its result. D1 covers the parallel group
+(`c1, c2`), the failed turn and `base.turn` at a mid-turn reset; D1b covers sub-agents.
+
+### Protocol
+
+`PROTOCOL_VERSION` 16 → 17 (`version.ts:7`). `version-mismatch.test.ts` adds 16↔17, so a mixed
+pair is refused at `initialize`. `Method.Log` is wired on both ends (`methods.ts`,
+`connection.ts`, `remote-client.ts`), and `schema/protocol.json` is current (the drift test is
+green). No `session/update` kind was added: `UPDATE_CLASS` and `client/mapping.ts` are
+untouched, which is justified (P11). `Connection`'s `Method.Log` is synchronous with no lock
+(D8 ✔). The lazy digest hashes inside the read handler: synchronous, once per message object
+(WeakMap), off the steering window (D7 ✔).
+
+### Critical table
+
+It equals owner item 14 exactly: `protocol/src/session-log.ts:181-191` and the schema literals
+(`critical()` / `skippable()`). The only other `critical: true` writers are
+`daemon/src/session-log.ts` for base/message/replace/truncate. No other value exists anywhere.
+
+### Persistence invariant
+
+I5 (the record after each round = today's, `cutHistory` mid-turn) and the
+`fix/run-session-never-saved` tests on `main` all pass. The existing tests edited are only
+re-pointed (`session/snapshot` → `session/log` in H35 ×3, the titles fake daemon), not
+weakened. `sessionId` is kept. A failed aside keeps the file and is retried
+(`pendingAside`, test "aside lands BEFORE…"). No new await on the daemon's turn path. The
+laptop's `setAside` await is in the controller, not the peer.
+
+### Mutations (each restored from a `cp` backup; `shasum -c`: 3× OK; `git status` clean)
+
+| Mutation | Result |
+|---|---|
+| (executor's) no `commit` in `swapAgent` | D1 FAILS: 2 drifts (`SYS-1` vs `SYS-2`, and at the read) ✔ |
+| (executor's) unknown non-critical entries kept in `entries` | C5 FAILS (`pod_note` present) ✔ |
+| (mine, the F1 line) `SessionLog.read` matches `after` by seq only, not id (`session-log.ts:166`) | D4, C3, C4 FAIL (3/93) ✔. The integration tests stay green: the reader's chain check alone refuses the splice (defence in depth) |
+
+### Flake
+
+3/3 full runs: 0 fail (overall 1 fail in 12 runs: the orchestrator's 1/9 plus my 0/3). I did NOT reproduce the orchestrator's 1-in-5
+failure. The test is not identified. The repo has known timing flakes under load
+(`TODO.md` engine-runtime-stderr, reaper GC). Nothing in this branch's new tests uses wall-clock
+thresholds except R1 (bytes/frames, not time) and D8 (a turn in flight).
+
+### Premise table (spot-checked, all TRUE)
+
+`peer.ts:322` `void this.handleRequest` · `agent.ts:1156` `messages[target] = {...}` ·
+`agent.ts:1009` `messages.pop()` · `session.ts:92` `this.messages[0] = head` ·
+`session.ts:239-242` `length = 0; push; onReplaced` · `agent.ts:1763-1764` the same for a
+reset · `closeFailedTurn` = `daemon/src/persisted-session.ts:537` (the doc omits the package) ·
+the constructor's cut `length = session.messages.length`, so `start` logs exactly the cut.
+
+### How the executor behaved
+
+Strong. The plan was re-verified before coding. The D1 drift test came first, and its
+read-point check was added when the derivation-only check missed a mutation. That was honest
+and correct. Drift is documented, the scripts are pasted, and the numbers reproduce to within
+1 %. The hostile-pod forgeries were surfaced unprompted. Misses: the reseed + segment-start
+false fork (M1), the third forgery shape (L1), and a cluster command never dry-run (L5).
+
+### Owner questions (all at once; each with a recommendation)
+
+1. **Q-R1 (L1): harden `reseed` by requiring the seed segment to equal the held copy (digests),
+   else `fork` + aside?** — **Yes.** It is cheap, and an honest reseed always passes. Leave the
+   same-inc `rebased` and the linear `base` as they are: an honest compaction is not
+   distinguishable from them, and they are no regression.
+2. **M1 fix shape: (a) daemon-side `from` as a read position (no wire change) or (b) `root` in
+   `LogResult` (also classifies the two-compactions case)?** — **(b)**, still protocol 17 (not
+   released), with a test for each.
+3. **Q10 stands: the real-cluster run is required before merge.** Run it with the corrected
+   command in L5 (the doc's version will not run as written).
+
+### Owner answers (fix round 1)
+
+*— recorded by the executor (claude-sonnet-5-5) on the orchestrator's instruction, 2026-11-07*
+
+1. **M1 → shape (b)**: `LogResult.root?: LogCursor` (the incarnation's link); the reader classifies `rebased && root.id === held.head.id` as `reseed` + `gap` (not fork), the two-compactions case included. Still protocol 17 (unreleased): no bump.
+2. **Q-R1 (L1) → YES**: harden `reseed` — the seed segment must equal (extend) the held copy by digests, else `fork` + aside.
+3. **Q10 stands**: the real-cluster run is required before merge; the orchestrator runs it after this round, with the L5-corrected command (now in Execution).
+4. L2, L3, L4 as the reviewer describes. No `critical` value was added or changed (item 14 untouched).
 
 ### Owner answers (2026-11-07) — plan APPROVED
 

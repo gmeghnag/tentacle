@@ -1233,9 +1233,15 @@ export class RemoteClient {
         cold = true;
         continue;
       }
-      if (applied.drift && !cold) {
-        cold = true; // one cold read: the daemon's derivation from its last base
+      // One cold read the FIRST time a session drifts (the daemon's derivation
+      // from its last base); once reported, a persistently drifting daemon does
+      // not turn every save into a full read (L3). A clean read re-arms it.
+      if (applied.drift && !cold && !entry?.driftReported) {
+        cold = true;
         continue;
+      }
+      if (entry && !applied.drift) {
+        entry.driftReported = false;
       }
       if (applied.drift && entry && !entry.driftReported) {
         entry.driftReported = true;

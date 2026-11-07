@@ -322,3 +322,77 @@ describe("C8 — a checkpoint that disagrees is reported as drift (F2)", () => {
     expect(ok(applyLogRead(null, [short], sha256)).drift).toBeDefined();
   });
 });
+
+describe("fix round 1 — M1 (root) and L1 (a reseed must carry the held copy)", () => {
+  function heldOf(): { held: LogState; h: ChatMessage[] } {
+    const d1 = new SessionLog("D1");
+    const h = history(3);
+    d1.start(h, "create");
+    return { held: cold(d1), h };
+  }
+
+  test("I3 + compaction before the read → no aside: an honest reseed whose seed segment was compacted away is a `reseed` + `gap`", () => {
+    // RED before the fix: the read is rebased from `base{compact}` (inc D2, not
+    // linked to the held head) → classified `fork` with an aside.
+    const { held, h } = heldOf();
+    const d2 = new SessionLog("D2");
+    d2.start(h, "seed", held.head);
+    d2.replaced([m("system", "S"), m("user", "SUMMARY")], "compact");
+    const read = pages(d2, held.head);
+    expect(read[0]?.rebased).toBe(true);
+    const applied = ok(applyLogRead(held, read, sha256));
+    expect(applied.outcome).toBe("reseed");
+    expect(applied.aside).toBeUndefined();
+    expect(applied.gap).toBe(true);
+    expect(applied.state.messages.map((x) => x.content)).toEqual(["S", "SUMMARY"]);
+  });
+
+  test("two compactions after the reseed (both retained segments gone): still a `reseed` + `gap`, no aside", () => {
+    const { held, h } = heldOf();
+    const d2 = new SessionLog("D2");
+    d2.start(h, "seed", held.head);
+    d2.replaced([m("system", "S"), m("user", "SUMMARY 1")], "compact");
+    d2.replaced([m("system", "S"), m("user", "SUMMARY 2")], "compact");
+    const read = pages(d2, held.head);
+    expect(read[0]?.rebased).toBe(true);
+    expect(read[0]?.root).toEqual(held.head);
+    const applied = ok(applyLogRead(held, read, sha256));
+    expect(applied.outcome).toBe("reseed");
+    expect(applied.aside).toBeUndefined();
+    expect(applied.gap).toBe(true);
+  });
+
+  test("a daemon that never linked to our head has another `root`: a compacted new lineage stays a fork", () => {
+    const { held, h } = heldOf();
+    const other = new SessionLog("DX");
+    other.start(h, "seed", { seq: held.head.seq - 1, id: "elsewhere/1" });
+    other.replaced([m("system", "S"), m("user", "SUMMARY")], "compact");
+    const applied = ok(applyLogRead(held, pages(other, held.head), sha256));
+    expect(applied.outcome).toBe("fork");
+    expect(applied.aside).toEqual(held.messages);
+  });
+
+  test("L1 a forged `base.prev` = our head with other content is a fork (the seed segment must equal the held copy)", () => {
+    // RED before the fix: classified `reseed`, the held copy replaced with no aside.
+    const { held } = heldOf();
+    const forged = new SessionLog("EVIL");
+    forged.start([m("user", "forged")], "seed", held.head);
+    const applied = ok(applyLogRead(held, pages(forged, held.head), sha256));
+    expect(applied.outcome).toBe("fork");
+    expect(applied.aside).toEqual(held.messages);
+    expect(applied.state.messages.map((x) => x.content)).toEqual(["forged"]);
+  });
+
+  test("an honest reseed (seed segment = held copy) stays `reseed`, also when it already grew", () => {
+    const { held, h } = heldOf();
+    const same = new SessionLog("D2");
+    same.start(h, "seed", held.head);
+    expect(ok(applyLogRead(held, pages(same, held.head), sha256)).outcome).toBe("reseed");
+    const plus = new SessionLog("D3");
+    plus.start(h, "seed", held.head);
+    plus.commit([...h, m("user", "next")], h.length + 1);
+    const applied = ok(applyLogRead(held, pages(plus, held.head), sha256));
+    expect(applied.outcome).toBe("reseed");
+    expect(applied.state.messages).toHaveLength(h.length + 1);
+  });
+});

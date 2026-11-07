@@ -67,6 +67,8 @@ export class SessionLog {
   private readonly digests = new WeakMap<object, string>();
   private nextSeq = 1;
   private lastId: string | null = null;
+  /** The client head this incarnation was reseeded from (`open{logBase}`), if any. */
+  private root: LogCursor | undefined;
 
   constructor(
     readonly inc: string,
@@ -81,6 +83,7 @@ export class SessionLog {
     turn?: string | null,
   ): void {
     if (from) {
+      this.root = { seq: from.seq, id: from.id };
       this.firstSeq = from.seq + 1;
       this.nextSeq = from.seq + 1;
       this.lastId = from.id;
@@ -188,6 +191,8 @@ export class SessionLog {
       more: end < this.slots.length,
       tip: this.tip,
       ...(rebased ? { rebased: true } : {}),
+      // Entries from a base (cold or rebased): the head this incarnation was reseeded from.
+      ...(start === this.current && this.root ? { root: this.root } : {}),
     };
   }
 

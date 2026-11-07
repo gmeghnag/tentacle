@@ -484,6 +484,26 @@ describe("D2–D5 — the pure derivation and its reads", () => {
   });
 });
 
+describe("D9 — `root`: the head an incarnation was reseeded from", () => {
+  test("reported on reads that start at a base (cold, rebased), never on a linear tail; absent without a reseed", () => {
+    const { log } = pureLog();
+    const link = { seq: 7, id: "old/7" };
+    log.start([m("system", "S"), m("user", "u")], "seed", link);
+    expect(log.read(undefined, 1 << 20, sha256).root).toEqual(link);
+    const tip = log.tip;
+    log.commit([m("system", "S"), m("user", "u"), m("assistant", "a")], 3);
+    expect(log.read(tip, 1 << 20, sha256).root).toBeUndefined(); // linear tail
+    log.replaced([m("system", "S"), m("user", "SUMMARY")], "compact");
+    log.replaced([m("system", "S"), m("user", "SUMMARY 2")], "compact");
+    const rebased = log.read({ seq: 7, id: "old/7" }, 1 << 20, sha256);
+    expect(rebased.rebased).toBe(true);
+    expect(rebased.root).toEqual(link); // kept after the seed segment was evicted
+    const fresh = pureLog().log;
+    fresh.start([m("system", "S")], "create");
+    expect(fresh.read(undefined, 1 << 20, sha256).root).toBeUndefined();
+  });
+});
+
 describe("D6–D8 — the session's log over the host and the wire", () => {
   function makeHost(model: ModelProvider): SessionHost {
     return new SessionHost({

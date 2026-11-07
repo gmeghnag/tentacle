@@ -242,6 +242,23 @@ describe("I1–I4 — failure modes over the real stack", () => {
     });
   });
 
+  test("I3b a pod daemon lost, recreated with `logBase`, then COMPACTED before the next read: no aside (M1)", async () => {
+    const host = { current: makeHost() };
+    const s = stack(host);
+    await s.client.initialize();
+    const session = s.client.newSession(bigHistory(50_000), "S");
+    await session.openSeeded();
+    await session.readBack();
+    host.current = makeHost([[t("SUMMARY"), done]]);
+    s.cut();
+    await until(() => host.current.get("S") !== undefined);
+    await host.current.get("S")?.compact();
+    const back = await session.readBack();
+    expect(back?.aside).toBeUndefined();
+    expect(back?.messages.some((x) => x.content.includes("SUMMARY"))).toBe(true);
+    expect(back?.gap).toBe(true);
+  });
+
   test("I4 two clients on one session each converge to the same projection", async () => {
     const host = { current: makeHost([[t("one"), done]]) };
     const a = stack(host);
@@ -293,5 +310,45 @@ describe("F2 over the wire — a drifting checkpoint: one cold read, then report
     await session.readBack();
     expect(s.wire.reads).toBeLessThanOrEqual(2);
     expect(errors.filter((e) => e.message.includes("failed its checkpoint"))).toHaveLength(1);
+  });
+
+  test("L3 a persistently drifting daemon costs ONE read per save once reported (no cold re-read every time); a clean read re-arms the cold retry", async () => {
+    // Mutation: drop `!entry?.driftReported` from the cold-retry condition → 2 reads per save.
+    const errors: Error[] = [];
+    const host = {
+      current: makeHost([
+        [t("a"), done],
+        [t("b"), done],
+        [t("c"), done],
+      ]),
+    };
+    const s = stack(host, { onError: (e) => errors.push(e) });
+    await s.client.initialize();
+    const session = s.client.newSession(bigHistory(10_000), "S");
+    await session.openSeeded();
+    const lie = (result: Record<string, unknown>): void => {
+      for (const e of (result.entries ?? []) as Record<string, unknown>[]) {
+        if (e.type === "checkpoint") e.digest = "0".repeat(64);
+      }
+    };
+    s.wire.rewrite = lie;
+    await drain(session.send("one"));
+    await session.readBack(); // first drift: cold re-read, reported
+    for (const text of ["two", "three"]) {
+      await drain(session.send(text));
+      s.reset();
+      await session.readBack();
+      expect(s.wire.reads).toBe(1);
+    }
+    expect(errors.filter((e) => e.message.includes("failed its checkpoint"))).toHaveLength(1);
+    // Honest again: a clean read re-arms; a later drift is cold-read and reported again.
+    s.wire.rewrite = undefined;
+    await session.readBack(); // no checkpoint in it, no drift: re-armed
+    s.wire.rewrite = lie;
+    await drain(session.send("four"));
+    s.reset();
+    await session.readBack();
+    expect(s.wire.reads).toBe(2); // cold retry again
+    expect(errors.filter((e) => e.message.includes("failed its checkpoint"))).toHaveLength(2);
   });
 });

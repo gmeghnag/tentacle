@@ -973,6 +973,9 @@
         "rebased": {
           "type": "boolean"
         },
+        "root": {
+          "$ref": "#/$defs/LogCursor"
+        },
         "tip": {
           "$ref": "#/$defs/LogCursor"
         }
