@@ -701,3 +701,121 @@ await env.writeFile(name, "PWNED");                  // WROTE; outside/victim3 =
 2. **The hard-link refusal hits this repo's own `stubs/` (R2-4).** Recommendation: accept it for now. If question 1 goes the `rename` way, it goes away. Otherwise, document it in the README row ("a hard-linked file, e.g. a `file:` dependency after `bun install`").
 
 *— claude-opus-5-5, 2026-11-07*
+
+### Review round 3
+
+*— claude-opus-5-5, 2026-11-07*
+
+**Scope:** `git diff 18129c0..8d25f56` (fix rounds 2 and 3). **Independence:** fresh context, but the same model as the executor, so shared blind spots are possible. A pass by a different model is still worth having on this load-bearing path. Following the owner's decisions, the shared-root directory-swap residual is accepted, and no ownership rule is asked for.
+
+**Verdict: REQUEST-CHANGES.** 0 HIGH, 2 MEDIUM, 3 LOW. The atomic write is correct for ordinary use, cleans up after itself, and is mutation-pinned. But it drops three properties that the in-place write on `main` had, and the docs mention none of them:
+- the confidentiality of a restrictive file during the write;
+- the refusal to write a read-only or foreign file;
+- writes into a directory we can't create files in, and long names.
+
+#### Findings
+
+1. **MEDIUM: a `0600` target's new content passes through a `0644` temp file.**
+   - **Where.** `packages/exec/src/host-execution.ts:393` creates the temp with `open(temp, OPEN_TEMP, 0o666)`, so its mode is `0666 & ~umask` = `0644`. The kept mode is applied only afterwards by `fd.chmod(mode)` at `:396`.
+   - **Measured.** A real `secret.env` at `0600` in the project. A wrapper on `FileHandle.prototype.chmod` saw the temp at mode `644`. A descriptor opened in that window read `"TOP-SECRET"` after the write finished, while the final file is `600`.
+   - **Who can exploit it.** Any user who can traverse the directory and is polling it can open the temp in that window. The descriptor survives the `fchmod` and the rename.
+   - **Regression.** `main` writes in place into the existing `0600` inode and has no such window.
+   - **Fix (cheap).** Create the temp with `0o600`. Then `fchmod` to the kept mode, or for a new file to `0o666 & ~umask`. Add a test that the temp is never more permissive than the target.
+   - **Scope.** This is a confidentiality leak, not the documented "content lands outside" residual.
+2. **MEDIUM: a read-only (`0444`) or foreign-owned target is now silently replaced. A writable file in a non-writable directory now fails with a raw error.**
+   - **Read-only target.** `rename` needs write permission only on the directory (`:405`).
+     - Measured, branch: a `0444` `ro.txt` is replaced with the new content and keeps mode `444`.
+     - Measured, `main`: `EACCES`, file untouched.
+   - **Foreign-owned target.** By the same POSIX rule, a file owned by another user (e.g. root) in a directory we own is replaced by one we own. Not measured: that needs a second uid. In a sticky root such as `/tmp`, the `rename` fails with a raw `EPERM` instead.
+   - **Writable file in a `0555` directory.** The reverse case fails.
+     - Measured, branch: a `0666` file in a `0555` dir gives `Error: EACCES: permission denied, open '…/rodir/.f.txt.<hex>.tentacle-tmp'`. That is a raw Node error naming a hidden file the user never asked for.
+     - Measured, `main`: written.
+   - **Docs.** Fix round 2's "(c)" mentions only the foreign-owner case, and only in the Execution section. The CHANGELOG and the README say none of this.
+   - **Fix.** Refuse a target we could not write in place: `access(target, W_OK)`, or mode/owner bits, refused as `refused: read-only file`. Map `EACCES`/`EPERM` on the temp create or on the `rename` to a `WorkspaceWriteError` that names the directory and the reason.
+   - **Owner question.** Should a writable file in a non-writable directory fall back to an in-place write, or be refused clearly? Either way, document it.
+3. **LOW: a basename longer than 224 bytes can no longer be written.**
+   - The temp name adds 31 bytes: `.` + `.<16 hex>` + `.tentacle-tmp` (`:388`).
+   - Measured: a 254-byte name (250 `L` + `.txt`, under `NAME_MAX` 255) gives a raw `ENAMETOOLONG` naming the temp file. `main` writes it.
+   - Fix: truncate the basename part of the temp name, e.g. to 64 bytes. The name only has to be unique, and the random suffix makes it so.
+4. **LOW: a `rename` that fails because the parent became non-writable leaves the temp.**
+   - Measured: `beforeRename` runs `chmod 0555` on the parent. The result is `EACCES` on the `rename`, and `.x.txt.<hex>.tentacle-tmp` stays behind, because the `unlink` at `:410` fails for the same reason.
+   - This can't be fixed: the temp can't be removed without write permission on the directory. Since the error is swallowed, at least say so in the error.
+   - It is contrived and listed for completeness.
+5. **LOW: the replace doesn't keep metadata.** This is an expected property of temp + rename, but undocumented:
+   - setuid/setgid/sticky are dropped (`:438`; measured `4755` → `755`; `main` also loses setuid on write, so this is not a regression);
+   - ACLs and xattrs are lost (macOS Finder tags, quarantine, Linux ACLs);
+   - the owner and group become ours.
+
+   A clause in the CHANGELOG bullet ("like an editor's atomic save: ownership, ACLs and xattrs are not kept") is enough.
+
+#### Attacks tried
+
+The script ran on the branch and on `main`'s `host-execution.ts`, with real files in `.tentacle/tmp/write-tmpdir/r3review/`. That folder is deleted.
+
+| Attack | Branch | `main` |
+|---|---|---|
+| `0755` script rewritten | OK, mode `755` | same |
+| 100 KB file rewritten to `"short"` | content exactly `"short"` | same |
+| empty content | OK, size 0 | same |
+| new file in `a/b/c/` | OK, dirs `755` (umask 022) | same |
+| hard link `h1`/`h2` in the project, write `h1` | `h1=new`, `h2=old` | `h2=new` (by design now) |
+| in-root symlink `link.txt → real.txt` | `real.txt` replaced, the link still a link | same |
+| `0444` target | **replaced** (F2) | `EACCES` |
+| `0666` file in a `0555` dir | **raw `EACCES` on the temp** (F2) | written |
+| 254-byte basename | **`ENAMETOOLONG`** (F3) | written |
+| file `644` in a `0775` dir | OK, `644` kept | same |
+| setuid `4755` file | `755` | `755` |
+| simulated `ENOSPC` (`FileHandle.prototype.writeFile` throws) | error, target `old`, no temp left | — |
+| `beforeRename` throws | error, no target, no temp left | — |
+| a non-empty dir appears at the target before `rename` | `refused: not a regular file`, no temp left | — |
+| parent `chmod 0555` before `rename` | raw `EACCES`, **temp left** (F4) | — |
+| 20 MB content | OK, no temp left | — |
+| 50 concurrent writes to one file, 200 KB each | 0 rejected, the final file is exactly one whole payload, no temp left | — |
+| `0600` target: temp mode before `fchmod` | **`644`; an early fd reads the new content** (F1) | n/a (in place) |
+
+**Write paths (item 1).**
+- `rg` for `Bun.write|writeFile|open(` in `packages/{tools,exec,agent,daemon}/src`: `fs_write`, `fs_edit` and `fs_multi_edit` (`packages/tools/src/builtins.ts:128,201,249`) and the tool-output fallback (`packages/agent/src/agent.ts:1906`) all go through `ExecutionEnvironment.writeFile`. The only implementation is `HostExecution.writeFile`.
+- The other writes on that list are laptop-side stores, outside this task: `tool-output.ts`, `session-store.ts`, `session-tombstones.ts`.
+
+#### Mutations
+
+Each mutation: backup, then Edit, then `bun test packages/exec/test/confinement.test.ts`, then restore. `git status --porcelain` was empty after each.
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | the `finally` never unlinks the temp | **killed**: "a failing write leaves no temp file behind" (`confinement.test.ts:497`) |
+| 2 | `rename` replaced by an in-place `Bun.write(target)` | **killed**: 3 fail, incl. the R2-4 in-root hard link (`:473`) |
+
+No test pins F1, F2 or F3. They are the gaps: the suite tests the boundary, not file-permission semantics.
+
+#### Docs vs code (item 5)
+
+- **What matches the code:**
+  - CHANGELOG "Fixed": atomic replace, mode kept, the hard link loses only this name, a symlink/FIFO at the path refused, "detected in most cases";
+  - the "Known limit" paragraph (content in a new hidden `.tentacle-tmp` file, an existing file never written in place, a same-uid process and `shell` not covered);
+  - the README `tools.writableDirs` row;
+  - the `writeFile` doc comment (`:351-367`), which names the residual;
+  - fix round 3's citations (`:369`, `:380`, `:449`, `:467`, test `:452`), all verified.
+- **What is missing:** F1, F2 and F5.
+- **Nit:** "its mode bits are kept" should say "permission bits" (setuid/setgid/sticky are dropped, `:438`).
+- **Stale but superseded:** fix round 2's line numbers.
+
+#### Gate (on the restored tree)
+
+- `bunx tsc --noEmit`: clean.
+- `bunx biome check .`: 710 files, no fixes.
+- `bun test packages`: **5295 pass, 3 skip (opt-in), 0 fail** (5298 tests, 363 files). This matches fix round 3's count.
+
+#### What holds
+
+- No confined write goes through an existing inode.
+- Temps are cleaned on every failure except F4.
+- No leftovers in normal or concurrent use. Last write wins, with no torn content.
+- In-root symlinks and hard links behave as documented.
+- Ordinary project edits match `main`: big files, `0775` dirs, git-tracked modes.
+- The round-2 race tests still pass without the ownership rule.
+
+#### How the executor behaved
+
+- Fix round 3 did exactly what the owner asked: three tests removed, one red→green test added. It measured the residual with a real concurrent attacker and reported it honestly, including the "not excluded" three-flip case, instead of claiming it closed.
+- The blind spot: it attacked the new write only as a *confinement* boundary. It never checked which ordinary file-permission semantics the in-place write had and the rename drops: the temp's open mode, read-only targets, directory write permission, name length.
