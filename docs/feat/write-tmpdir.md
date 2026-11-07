@@ -924,3 +924,108 @@ No test pins F1, F2 or F3. They are the gaps: the suite tests the boundary, not 
 
 - Fix round 3 did exactly what the owner asked: three tests removed, one red→green test added. It measured the residual with a real concurrent attacker and reported it honestly, including the "not excluded" three-flip case, instead of claiming it closed.
 - The blind spot: it attacked the new write only as a *confinement* boundary. It never checked which ordinary file-permission semantics the in-place write had and the rename drops: the temp's open mode, read-only targets, directory write permission, name length.
+
+### Review round 4
+
+*— claude-opus-5-5, 2026-11-07*
+
+**Scope:** `git diff bea50f8..HEAD` (fix rounds 4 and 5). **Independence:** fresh context, but the same model as the executor, so they may share blind spots. Owner decisions taken as given: no directory owner/mode rule, atomic temp+rename, the shared-`/tmp` race residual accepted, and an in-place fallback for an existing file in a non-writable dir.
+
+**Verdict: PASS.** No HIGH or MEDIUM findings. There are 2 LOW findings, both about wording or messages, and neither blocks the merge. All five round-3 findings are fixed, and I measured each one on real files. The fallback does exactly what the owner decided and nothing more.
+
+#### Findings
+
+1. **LOW, docs: "an existing file there is never written in place" is no longer strictly true under the accepted race.**
+   - **Where:** `README.md:321` (the "Limit" sentence) and `CHANGELOG.md:58-59` ("…never written in place by this race").
+   - **What changed:** since round 5, a temp create that fails with `EACCES` is followed by `writeInPlace`.
+   - **The race:** an attacker who controls a directory on the path could do this three-flip sequence:
+     1. put a symlink there when `finalNameMode` and the open run;
+     2. put the real directory back for the `dirChain` recheck;
+     3. put the symlink back for the `lstat` at `host-execution.ts:~537`.
+   - **What it gives them:** an in-place write into an existing file that the user can write, with `nlink == 1`, inside a directory the user cannot write.
+   - **Status:** this is the same three-flip class as the round-3 residual, and Fix round 5 "Open" admits it. I did not run it as a live race. The precondition comes from reading the code.
+   - **The gap:** the user-facing docs still say "never". Suggested wording: "…is not written in place, except a writable file in a directory you cannot write".
+2. **LOW, message, Linux only, not verified here: the cleanup can claim "temp file left at …" when no temp was ever created.**
+   - **Where:** `host-execution.ts:454`. The `catch` always tries `unlink(temp)`, even when the `open` of the temp failed.
+   - **Linux behaviour:** `do_unlinkat` calls `mnt_want_write` before the lookup. So on a read-only mount, unlinking a name that does not exist returns `EROFS`, not `ENOENT`.
+   - **Result:** writing a NEW file on a read-only mount would give `EROFS … (temp file left at …: EROFS)`. That is false.
+   - **macOS:** measured on the sealed system volume (`/usr/share`). The unlink returns `ENOENT` and the error is correct (`EPERM`, naming the dir). So this cannot be reproduced on this host.
+   - **Fix:** a `created` flag set after the `open`, and unlink only when it is set.
+   - **Related nit:** `EROFS` in `IN_PLACE_FALLBACK` (`:155`) is practically dead code. `access(W_OK)` in `finalNameMode` already returns `EROFS` on a read-only filesystem, so that case is refused as "read-only file" before any temp is tried. It is harmless.
+
+#### Item 1: round-3 findings, measured
+
+I ran a script in `.tentacle/tmp/write-tmpdir/r4review/` on the branch code. It ran through `bun test <path>`. Real files were used, modes were restored, and the folder was deleted afterwards.
+
+| Check | Result |
+|---|---|
+| `0600` target: temp mode at `writeFile` time (wrapped `FileHandle.prototype.writeFile` → `fstat`) | `600`; final `600` |
+| new file | temp `600` during the write; final `644` (umask 022) |
+| `0444` target | `refused: read-only file (EACCES …)`, `code: "EACCES"`, content `orig`, no temp |
+| 250-byte name and 255-byte name (= `NAME_MAX`) | both written |
+| `rename` fails (a non-empty dir appears at the target via `beforeRename`) | raw `EISDIR` passes through; no temp left |
+| CHANGELOG / README: owner, group, ACLs, xattrs, setuid, hard links broken | present (`CHANGELOG.md:36-41`, `README.md:321`) |
+
+#### Item 2: the in-place fallback
+
+**What triggers it.** `host-execution.ts:429-435`: the temp `open` fails, AND `existing !== undefined`, AND the errno is in `{EACCES, EPERM, EROFS}`. Every other case goes to `dirError` or passes through unchanged.
+
+**What the code guarantees:**
+- **No `O_CREAT`, no `O_TRUNC`:** `OPEN_IN_PLACE` at `:153`.
+- **Truncation comes last:** `ftruncate(0)` runs only after these checks: `fstat` shows a regular file, `nlink === 1`, the `dev`/`ino` match, the `dirChain` recheck passes, and `lstat` still shows the same inode.
+
+Measured on real files in a `0555` directory:
+
+| Case | Result |
+|---|---|
+| existing `0644` file, longer content → `"new"` | content exactly `new` (truncation correct) |
+| new file | `refused: cannot create a file in <dir> (EACCES …)`, nothing created |
+| hard link (`h.txt` + a second name outside the root) | `refused: hard link (2 names …)`, both `orig` |
+| in-root symlink → a file in the same read-only dir | written through the link, as on `main` |
+| outward symlink | refused by `confineWrite`, victim `orig` |
+| `0444` file in the read-only dir | `refused: read-only file` (the `access` check runs first) |
+| at `beforeInPlaceOpen`, the target swapped for a hard link to an outside victim | `refused: hard link`, victim still `"orig"` (proves no truncation before the checks) |
+| no temp left in the read-only dir | `[]` |
+
+#### Item 3: the inverted test, and whether any test was weakened
+
+- **The inverted test** (`confinement.test.ts:625`): round 4 had "refused clearly"; round 5 has "written in place, as on main". It asserts content `new` over a longer original, mode `666` kept, and no temp. This is exactly owner decision A. It also has a guard for the "new file" half: the test at `:802` expects a refusal and that nothing is created.
+- **No weakening:** `git diff bea50f8..HEAD -- '*.test.ts'` contains only additions, apart from the import lines. No pre-existing test was changed or removed.
+
+#### Item 4: docs vs code
+
+- **What matches the code:**
+  - the `writeFile` doc comment (`:382-398`): 0600 temp, `fchmod` after `fsync`, the metadata that is not kept, `dirError`, the fallback;
+  - `writeInPlace`'s doc comment;
+  - CHANGELOG "Fixed" bullets 3–5;
+  - the README row;
+  - Fix round 5's citations (`:153`, `:155`, `:158`, `:429`, `:479`, `:514`, `:519`, `:589`).
+- **The exception:** finding 1.
+
+#### Item 5: mutation
+
+| Mutation | Result |
+|---|---|
+| `O_TRUNC` added to `OPEN_IN_PLACE` (truncate before the checks) | **killed**: 2 fail: the hard-linked target (`:741`, `""` instead of `orig`) and the different-file swap (`:799`, `""` instead of `other`) |
+
+The tree was restored from a backup. `shasum -c` OK, and `git status --porcelain` is empty.
+
+#### Item 6: gate (on the restored tree)
+
+- `bunx tsc --noEmit`: clean.
+- `bunx biome check .`: 710 files, no fixes.
+- `bun test packages`: **5307 pass, 3 skip (opt-in), 0 fail** (5310 tests, 363 files). This matches Fix round 5.
+
+#### What holds
+
+- The temp is never more permissive than `0600` before its content is final.
+- Permission parity with `main` holds for read-only and foreign files.
+- Long names work.
+- Cleanup on failure works.
+- The fallback is narrow: existing file only, never a link, never created, nothing truncated before the checks. Its guards are mutation-pinned (executor mutations 1–3, plus mine).
+
+#### How the executor behaved
+
+- **Round 4** fixed each round-3 finding with a test that was red on the old code.
+- **Round 5** kept to the owner's decision. It flipped exactly one test and said so openly. It added guards for the cases the owner excluded, and in "Open" it named the reduced race class the fallback brings back.
+- **Remaining blind spot:** that admission reached the Execution section but not the user-facing "never written in place" wording (finding 1).
