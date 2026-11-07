@@ -20,6 +20,16 @@ those.
   stops the chain until a normal turn. No limit, as in the TUI. Pod runs, the local worker
   and `run --detach` are unchanged.
 
+### Fixed
+
+- **A long `run` turn is saved on your laptop after every finished round, not only when
+  the turn ends.** Before, a pod or container lost mid-turn (`docker stop`, OOM, node
+  loss) took the whole conversation with it: nothing had been written yet, so there was
+  nothing to resume. Now the session file grows during the turn and you lose at most the
+  round in progress; a resume closes the unfinished call honestly. A session's creation
+  time also stays fixed across saves (it was reset at every save, so it always equalled
+  the last-updated time).
+
 ## [0.3.0] - 2026-11-06
 
 ### Added

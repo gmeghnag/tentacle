@@ -344,6 +344,8 @@ export function persistingController(
   /** `saveConfirmed`'s two facts: turns in flight, and the last read-back answered since the last change. */
   let turns = 0;
   let confirmed = true;
+  /** The message count of the last mid-turn read (persisted cut); -1 once a turn-end read replaced it. */
+  let lastMidTurnCount = -1;
   const run = async (): Promise<void> => {
     do {
       again = false;
@@ -356,8 +358,21 @@ export function persistingController(
           }
           // The start record is read AFTER the read-back resolved: every frame
           // that preceded its reply on the ordered channel is recorded (P14).
+          // A read while a turn runs (a round's save) is cut too: a resume of
+          // that record never stops on a call nobody answered. ALWAYS cut then
+          // (same input → same output), so two mid-turn copies are never a strict
+          // prefix of each other (the store's Q6 guard). The turn-end read, with
+          // `turns` back at 0, replaces it with the real history.
+          // A turn-end read that did not grow past the last mid-turn copy (a turn
+          // cancelled right after a result) would be a strict prefix of that
+          // copy's closing tail: keep it closed the same way, never set aside.
+          const midTurn = turns > 0;
+          const closed = cut || midTurn || back.messages.length === lastMidTurnCount;
+          // Remember the length of EVERY closed copy on disk (not only mid-turn
+          // ones): a later equal-length raw read would be its strict prefix.
+          lastMidTurnCount = closed ? back.messages.length : -1;
           persist(
-            cut ? cutHistory(back.messages, inner.runningCalls?.() ?? null) : back.messages,
+            closed ? cutHistory(back.messages, inner.runningCalls?.() ?? null) : back.messages,
             lastTitle,
           );
         }
@@ -422,6 +437,14 @@ export function persistingController(
       for await (const event of events) {
         changed = true;
         confirmed = false;
+        // A call's result is a committed round (the daemon commits it at its
+        // `history_commit`): save it now, not at the turn's end. In a pod `run`
+        // the laptop holds the only copy, and a pod lost mid-turn would take a
+        // never-saved conversation with it. Coalesced by `flush` (one read in
+        // flight, the rest collapse into one more); no timer.
+        if (event.type === "tool_result") {
+          flush();
+        }
         yield event;
       }
       changed = true;
@@ -687,7 +710,9 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
     attach: boolean,
     adoptTurn?: string,
   ): PersistingController => {
-    const createdAt = record?.createdAt;
+    // The first save's stamp, kept by every later one (a fresh session has no
+    // record: recordFromSnapshot stamps "now", and that value is then reused).
+    let createdAt = record?.createdAt;
     // A resumed record's chosen title seeds the open that recreates it (pod,
     // worker: they keep nothing), so it is never regenerated over a rename.
     const title = record ? recordTitleState(record) : ({ source: "auto" } as const);
@@ -706,17 +731,17 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
         if (!saving) {
           return; // handed over: the TUIs save it now
         }
-        deps.saver.save(
-          recordFromSnapshot(
-            { id: uid, messages },
-            {
-              cwd: deps.cwd,
-              model: deps.model,
-              title: latest,
-              ...(createdAt !== undefined ? { createdAt } : {}),
-            },
-          ),
+        const next = recordFromSnapshot(
+          { id: uid, messages },
+          {
+            cwd: deps.cwd,
+            model: deps.model,
+            title: latest,
+            ...(createdAt !== undefined ? { createdAt } : {}),
+          },
         );
+        createdAt = next.createdAt;
+        deps.saver.save(next);
       },
       (error) => deps.saver.failed(uid, `could not read the history back: ${error.message}`),
       title,

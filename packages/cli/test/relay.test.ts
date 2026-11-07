@@ -1421,9 +1421,15 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
       await waitFor(() => pod.execs.length === 1, "the thawed auto-accept");
       await waitFor(() => owner(r.dir)?.state === "idle", "the turn's end, recorded");
       let last: unknown;
-      for (let i = 0; i < 200 && last === undefined; i++) {
+      // Wait for the turn's END record: a mid-turn round save (docs/fix/run-session-never-saved.md)
+      // may already be on disk, closed by a cut tail.
+      for (
+        let i = 0;
+        i < 200 && (last as { content?: string } | undefined)?.content !== "ok";
+        i++
+      ) {
         last = (await r.store.list()).records[0]?.messages.at(-1);
-        if (last === undefined) await tick(5);
+        if ((last as { content?: string } | undefined)?.content !== "ok") await tick(5);
       }
       expect(last).toMatchObject({ role: "assistant", content: "ok" });
       expect(pod.frames.some((f) => f.includes('"session/detach"'))).toBe(false); // no release
