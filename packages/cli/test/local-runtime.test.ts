@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, JsonSessionStore, type SessionRecord } from "@tentacle/agent";
-import type { RemoteSession } from "@tentacle/client";
+import { ChannelError, type RemoteSession } from "@tentacle/client";
 import type {
   BackgroundJob,
   ChatRequest,
@@ -1866,4 +1866,447 @@ describe("N clients of one session (detached-handover)", () => {
       "assistant", // the cut turn's tail note (fix round 8)
     ]);
   }, 15_000);
+});
+
+// docs/fix/run-session-never-saved.md: a long turn is saved on the laptop after
+// every committed round (owner Q2), so a pod lost mid-turn loses at most the
+// round in progress; the mid-turn record is always closed (cut).
+describe("per-round save inside a turn", () => {
+  const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
+  const until = async (check: () => boolean | Promise<boolean>, what: string): Promise<void> => {
+    for (let i = 0; i < 400; i++) {
+      if (await check()) {
+        return;
+      }
+      await tick();
+    }
+    throw new Error(`timed out waiting for: ${what}`);
+  };
+  const result = (id: string) => ({
+    type: "tool_result",
+    id,
+    name: "shell",
+    result: { content: "ok" },
+  });
+  const user = (content: string) => ({ role: "user" as const, content });
+  const asst = (content: string, ids: string[] = []) => ({
+    role: "assistant" as const,
+    content,
+    ...(ids.length > 0
+      ? { toolCalls: ids.map((id) => ({ id, name: "shell", arguments: "{}" })) }
+      : {}),
+  });
+  const tool = (toolCallId: string) => ({ role: "tool" as const, content: "ok", toolCallId });
+
+  /** A fake session: events are pushed by the test, each snapshot is held until resolved. */
+  function liveInner() {
+    const queue: (Record<string, unknown> | null)[] = [];
+    let wake: (() => void) | null = null;
+    const held: { resolve: (m: unknown[]) => void; reject: (e: Error) => void }[] = [];
+    const push = (event: Record<string, unknown> | null) => {
+      queue.push(event);
+      wake?.();
+    };
+    const inner = {
+      async *send() {
+        for (;;) {
+          while (queue.length === 0) {
+            await new Promise<void>((r) => {
+              wake = r;
+            });
+          }
+          const event = queue.shift();
+          if (event === null || event === undefined) {
+            return;
+          }
+          yield event;
+        }
+      },
+      readBack: () =>
+        new Promise((resolve, reject) => {
+          held.push({ resolve: (messages) => resolve({ messages }), reject });
+        }),
+      runningCalls: () => new Set<string>(),
+      onTitle: () => () => {},
+      enqueue: async () => {},
+      close: () => {},
+    } as unknown as RemoteSession;
+    return { inner, held, push };
+  }
+
+  test("a committed round (tool_result) reads the history back while the turn still runs; the record is cut, saveConfirmed stays false", async () => {
+    // Mutation: drop the tool_result flush in `saved()` → held stays empty (red on main).
+    const { inner, held, push } = liveInner();
+    const saved: (readonly { role: string; content: unknown }[])[] = [];
+    const ctl = persistingController(inner, (m) => saved.push(m));
+    const turn = drain(ctl.send("go"));
+    push({ type: "tool_start", id: "c1", name: "shell", arguments: "{}" });
+    await tick();
+    expect(held).toHaveLength(0); // a start commits nothing
+    push(result("c1"));
+    await until(() => held.length === 1, "mid-turn read-back");
+    held[0]?.resolve([user("go"), asst("", ["c1"]), tool("c1")]);
+    await ctl.flushed();
+    expect(saved).toHaveLength(1);
+    // Cut: the tail is a tool result, so the closing note ends it (never a dangling call).
+    expect(saved[0]?.at(-1)).toEqual({ role: "assistant", content: ENDED_TURN_NOTE });
+    expect(saved[0]).toHaveLength(4);
+    expect(ctl.saveConfirmed()).toBe(false); // R9 unchanged: a turn runs
+    push(null);
+    await turn;
+  });
+
+  test("an unanswered call in a mid-turn read is closed (Not run), never left dangling", async () => {
+    // Mutation: persist `back.messages` uncut while a turn runs → 1 answered, not 2.
+    const { inner, held, push } = liveInner();
+    const saved: { role: string; content: unknown }[][] = [];
+    const ctl = persistingController(inner, (m) => saved.push([...m]));
+    const turn = drain(ctl.send("go"));
+    push(result("c1"));
+    await until(() => held.length === 1, "read-back");
+    held[0]?.resolve([user("go"), asst("", ["c1", "c2"]), tool("c1")]);
+    await ctl.flushed();
+    const answered = saved[0]?.filter((m) => m.role === "tool").length;
+    expect(answered).toBe(2); // c2 got a synthetic answer
+    push(null);
+    await turn;
+  });
+
+  test("rounds committing while a read is in flight collapse into ONE more read; the last state wins", async () => {
+    const { inner, held, push } = liveInner();
+    const saved: number[] = [];
+    const ctl = persistingController(inner, (m) => saved.push(m.length));
+    const turn = drain(ctl.send("go"));
+    push(result("c1"));
+    await until(() => held.length === 1, "first read");
+    push(result("c2"));
+    push(result("c3"));
+    await tick(20);
+    expect(held).toHaveLength(1); // one in flight, the rest collapsed behind it
+    held[0]?.resolve([user("go"), asst("", ["c1"]), tool("c1")]);
+    await until(() => held.length === 2, "the collapsed read");
+    held[1]?.resolve([
+      user("go"),
+      asst("", ["c1"]),
+      tool("c1"),
+      asst("", ["c2"]),
+      tool("c2"),
+      asst("", ["c3"]),
+      tool("c3"),
+    ]);
+    await ctl.flushed();
+    expect(held).toHaveLength(2);
+    expect(saved).toEqual([4, 8]); // 3 + note, 7 + note: the newest state is what is on disk
+    push(null);
+    await turn;
+  });
+
+  test("a failed mid-turn read is reported once and does not stop the turn; the next round saves again", async () => {
+    const { inner, held, push } = liveInner();
+    const errors: string[] = [];
+    const saved: number[] = [];
+    const ctl = persistingController(
+      inner,
+      (m) => saved.push(m.length),
+      (e) => errors.push(e.message),
+    );
+    const turn = drain(ctl.send("go"));
+    push(result("c1"));
+    await until(() => held.length === 1, "first read");
+    held[0]?.reject(new Error("link down"));
+    await ctl.flushed();
+    expect(errors).toEqual(["link down"]);
+    expect(saved).toEqual([]);
+    push(result("c2"));
+    await until(() => held.length === 2, "retry on the next round");
+    held[1]?.resolve([user("go"), asst("", ["c1"]), tool("c1"), asst("", ["c2"]), tool("c2")]);
+    await ctl.flushed();
+    expect(saved).toEqual([6]);
+    push(null);
+    await turn;
+  });
+
+  test("compaction mid-turn: the rewritten (shorter) history is what the next round saves", async () => {
+    const { inner, held, push } = liveInner();
+    const saved: { role: string; content: unknown }[][] = [];
+    const ctl = persistingController(inner, (m) => saved.push([...m]));
+    const turn = drain(ctl.send("go"));
+    push(result("c1"));
+    await until(() => held.length === 1, "first read");
+    held[0]?.resolve([user("a"), asst("b"), user("go"), asst("", ["c1"]), tool("c1")]);
+    await ctl.flushed();
+    push(result("c2"));
+    await until(() => held.length === 2, "second read");
+    held[1]?.resolve([user("summary"), asst("", ["c2"]), tool("c2")]);
+    await ctl.flushed();
+    expect(saved[1]?.[0]).toEqual(user("summary"));
+    expect(saved[1]).toHaveLength(4);
+    push(null);
+    await turn;
+  });
+
+  // ---- integration: a pod-like daemon whose tool rounds are released by the test.
+  function podLike(rounds: number) {
+    const gates: (() => void)[] = [];
+    class Looping implements ModelProvider {
+      readonly id = "looping";
+      private n = 0;
+      async *stream(): AsyncIterable<StreamEvent> {
+        const i = ++this.n;
+        if (i <= rounds) {
+          yield {
+            type: "tool_call",
+            toolCall: { id: `c${i}`, name: "shell", arguments: '{"command":"x"}' },
+          } as StreamEvent;
+        } else {
+          yield { type: "text", delta: "all done" };
+        }
+        yield { type: "done" };
+      }
+    }
+    const host = new SessionHost({
+      defaultCwd: "/tmp/work",
+      createAgent: () => ({
+        agent: new Agent({
+          model: new Looping(),
+          tools: new ToolRegistry().register(shellTool),
+          env: {
+            ...noopEnv,
+            exec: () =>
+              new Promise((res) =>
+                gates.push(() => res({ stdout: "ok", stderr: "", exitCode: 0 })),
+              ),
+          },
+        }),
+        permissions: new PermissionBroker(),
+      }),
+    });
+    let current: ReturnType<typeof createChannelPair>[1] | null = null;
+    let gone = false;
+    const link = () => {
+      const [daemonCh, clientCh] = createChannelPair();
+      new Connection(daemonCh, host);
+      current = clientCh;
+      return clientCh;
+    };
+    return {
+      gates,
+      link,
+      stop: () => {
+        gone = true;
+        current?.close();
+      },
+      factory: async () => {
+        if (gone) {
+          throw new ChannelError("gone", 'the connection target is gone: container "x" is exited');
+        }
+        return link();
+      },
+    };
+  }
+
+  async function podRuntime(name: string, rounds: number) {
+    const pod = podLike(rounds);
+    const store = new JsonSessionStore(join(dir, name));
+    const notices: string[] = [];
+    const saver = new SessionSaver(store, (t) => notices.push(t));
+    const observed: string[] = [];
+    saver.observe((record) => observed.push(record.id));
+    const runtime = await createLocalRuntime({
+      channel: pod.link(),
+      channelFactory: pod.factory,
+      disposeTransport: () => {},
+      permissions: new PermissionBroker(),
+      saver,
+      cwd: "/tmp/work",
+      model: "m",
+      resume: null,
+      daemonKind: "container",
+    });
+    const records = async () => (await store.list()).records;
+    return { pod, store, saver, notices, observed, runtime, records };
+  }
+
+  test("a pod lost mid-turn: the rounds already committed are on disk, closed; the first save names the session (kept sessionId)", async () => {
+    // Red on main: no file at all (the owner's lost session).
+    const { pod, saver, notices, observed, runtime, records } = await podRuntime("gone", 5);
+    const session = runtime.createSession();
+    const turn = drain(session.send("big task")).catch(() => {});
+    await until(() => pod.gates.length === 1, "round 1 running");
+    pod.gates[0]?.();
+    await until(() => pod.gates.length === 2, "round 2 running");
+    pod.gates[1]?.();
+    await until(() => pod.gates.length === 3, "round 3 running");
+    // Rounds 1 and 2 are committed; round 3 is in progress. The pod dies now.
+    await until(async () => ((await records())[0]?.messages.length ?? 0) >= 5, "mid-turn save");
+    // The kept index (`trackKeptSession`, driven by `observe`) learns the uid on the first mid-turn save.
+    expect(observed.length).toBeGreaterThan(0);
+    expect(new Set(observed).size).toBe(1);
+    pod.stop();
+    await turn;
+    await saver.drain();
+    const rec = (await records())[0];
+    expect(rec?.messages[0]?.content).toBe("big task");
+    const calls = rec?.messages.flatMap((m) => m.toolCalls?.map((c) => c.id) ?? []) ?? [];
+    const answered = rec?.messages.filter((m) => m.role === "tool").map((m) => m.toolCallId) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect([...answered].sort()).toEqual([...calls].sort()); // never a dangling call
+    expect(rec?.messages.at(-1)?.role).toBe("assistant");
+    // Only chat messages: no rendering-only event (tool_phase, usage, ...) is persisted (§7).
+    for (const m of rec?.messages ?? []) {
+      expect(["user", "assistant", "tool"]).toContain(m.role);
+      expect(Object.keys(m)).not.toContain("type");
+    }
+    // The turn-end read fails (the pod is gone) and says so once; the file above is what survives.
+    expect(notices.filter((n) => n.includes("not saved"))).toHaveLength(1);
+    void runtime.dispose();
+  }, 15_000);
+
+  test("a long turn that completes: the mid-turn record grows during the turn, the final one is the real history", async () => {
+    const { pod, saver, runtime, records } = await podRuntime("long", 3);
+    const session = runtime.createSession();
+    const turn = drain(session.send("big task"));
+    await until(() => pod.gates.length === 1, "round 1");
+    pod.gates[0]?.();
+    await until(() => pod.gates.length === 2, "round 2");
+    await until(
+      async () => ((await records())[0]?.messages.length ?? 0) >= 3,
+      "save after round 1",
+    );
+    const mid = (await records())[0];
+    expect(mid?.messages.map((m) => m.content)).not.toContain("all done");
+    expect(session.saveConfirmed()).toBe(false);
+    pod.gates[1]?.();
+    await until(() => pod.gates.length === 3, "round 3");
+    pod.gates[2]?.();
+    await turn;
+    await session.flushed();
+    await saver.drain();
+    const rec = (await records())[0];
+    expect(rec?.messages.at(-1)?.content).toBe("all done");
+    expect(rec?.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+      "tool",
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+    expect(session.saveConfirmed()).toBe(true);
+    void runtime.dispose();
+  }, 15_000);
+
+  test("a steered message committed mid-turn is in the next mid-turn record", async () => {
+    const { pod, runtime, records } = await podRuntime("steer", 3);
+    const session = runtime.createSession();
+    const turn = drain(session.send("big task")).catch(() => {});
+    await until(() => pod.gates.length === 1, "round 1");
+    await session.enqueue("also X", "q1");
+    pod.gates[0]?.();
+    await until(() => pod.gates.length === 2, "round 2");
+    pod.gates[1]?.();
+    await until(() => pod.gates.length === 3, "round 3");
+    await until(
+      async () => (await records())[0]?.messages.some((m) => m.content === "also X") ?? false,
+      "the steered message on disk before the turn ends",
+    );
+    pod.stop();
+    await turn;
+    void runtime.dispose();
+  }, 15_000);
+
+  test("createdAt is the first save's, kept by later saves of a fresh session (updatedAt moves)", async () => {
+    // Red on main: build() takes createdAt only from a resumed record → re-stamped each save.
+    const { saver, runtime, records } = await podRuntime("created", 0);
+    const session = runtime.createSession();
+    await drain(session.send("one"));
+    await session.flushed();
+    await saver.drain();
+    const first = (await records())[0];
+    await tick(15);
+    await drain(session.send("two"));
+    await session.flushed();
+    await saver.drain();
+    const second = (await records())[0];
+    expect(second?.messages.length).toBeGreaterThan(first?.messages.length ?? 0);
+    expect(first?.createdAt).toBeGreaterThan(0);
+    expect(second?.createdAt === first?.createdAt).toBe(true);
+    expect(second?.updatedAt).toBeGreaterThan(second?.createdAt ?? 0);
+    void runtime.dispose();
+  });
+
+  test("Q6: a turn-end read equal to the last mid-turn copy's raw history is not set aside", async () => {
+    // Cancelled-turn shape: the final raw history == the last mid-turn raw read.
+    const { inner, held, push } = liveInner();
+    const asides: string[] = [];
+    const store = new JsonSessionStore(join(dir, "q6"), undefined, (info) =>
+      asides.push(info.file),
+    );
+    const saver = new SessionSaver(store, () => {});
+    const ctl = persistingController(inner, (messages) =>
+      saver.save({
+        id: "u1",
+        cwd: "/",
+        model: "m",
+        createdAt: 1,
+        updatedAt: 1,
+        title: "t",
+        messages: [...messages],
+      }),
+    );
+    const turn = drain(ctl.send("go"));
+    const raw = [user("go"), asst("", ["c1"]), tool("c1")];
+    push(result("c1"));
+    await until(() => held.length === 1, "mid-turn read");
+    held[0]?.resolve(raw);
+    await ctl.flushed();
+    await saver.drain();
+    push(null);
+    await turn;
+    await until(() => held.length === 2, "turn-end read");
+    held[1]?.resolve(raw);
+    await ctl.flushed();
+    await saver.drain();
+    expect(asides).toEqual([]);
+  });
+
+  test("L1: a no-growth round signal, then a turn end with a read in flight: no spurious .aside (the closed copy's length is remembered)", async () => {
+    // Mutation: `lastMidTurnCount = midTurn ? … : -1` (the old line) → the 3rd read is raw and set aside.
+    const { inner, held, push } = liveInner();
+    const asides: string[] = [];
+    const store = new JsonSessionStore(join(dir, "l1"), undefined, (info) =>
+      asides.push(info.file),
+    );
+    const saver = new SessionSaver(store, () => {});
+    const ctl = persistingController(inner, (messages) =>
+      saver.save({
+        id: "u1",
+        cwd: "/",
+        model: "m",
+        createdAt: 1,
+        updatedAt: 1,
+        title: "t",
+        messages: [...messages],
+      }),
+    );
+    const turn = drain(ctl.send("go"));
+    const raw = [user("go"), asst("", ["c1"]), tool("c1")];
+    push(result("c1"));
+    await until(() => held.length === 1, "R1");
+    held[0]?.resolve(raw); // persisted cut (4 messages)
+    await ctl.flushed();
+    await saver.drain();
+    push(result("c1b")); // same round: no committed growth, R2 starts
+    await until(() => held.length === 2, "R2");
+    push(null); // the turn ends while R2 is in flight → `again`
+    await turn;
+    held[1]?.resolve(raw); // closed through the equality branch
+    await until(() => held.length === 3, "R3");
+    held[2]?.resolve(raw); // must still be closed, not a strict prefix of the 4-message copy
+    await ctl.flushed();
+    await saver.drain();
+    expect(asides).toEqual([]);
+  });
 });
