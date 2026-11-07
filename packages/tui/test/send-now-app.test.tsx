@@ -167,7 +167,7 @@ describe("Ctrl+X Ctrl+S — send the queued messages now", () => {
     expect(log.sendNows).toHaveLength(0);
     expect(log.aborted).toEqual([]);
     expect(lastFrame() ?? "").not.toContain("send-now");
-    expect(lastFrame() ?? "").toContain("working…"); // the turn still runs
+    expect(lastFrame() ?? "").toContain("Working…"); // the turn still runs
     unmount();
   });
 
@@ -543,7 +543,7 @@ describe("Ctrl+X Ctrl+S — send the queued messages now", () => {
     const { stdin, lastFrame, unmount } = await startWithRows(ctrl, ["alpha"]);
     await chord(stdin);
     // The old turn is over, the ack is not here: still shown running, the row up.
-    expect(lastFrame() ?? "").toContain("working…");
+    expect(lastFrame() ?? "").toContain("Working…");
     expect(lastFrame() ?? "").toMatch(queuedRow("alpha"));
     stdin.write("charlie");
     await delay(20);
@@ -615,7 +615,7 @@ describe("Ctrl+X Ctrl+S — send the queued messages now", () => {
     await chord(stdin);
     await delay(60);
     const frame = lastFrame() ?? "";
-    expect(frame).not.toContain("working…");
+    expect(frame).not.toContain("Working…");
     expect(frame).not.toMatch(queuedRow("alpha"));
     expect(frame).toContain("nothing to send");
     stdin.write("\r");

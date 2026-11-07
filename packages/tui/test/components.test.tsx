@@ -86,7 +86,7 @@ describe("StatusBar", () => {
 
 describe("Thinking", () => {
   test("renders the label", () => {
-    const frame = render(<Thinking since={Date.now()} label="working…" />).lastFrame() ?? "";
-    expect(frame).toContain("working");
+    const frame = render(<Thinking since={Date.now()} label="Working…" />).lastFrame() ?? "";
+    expect(frame).toContain("Working");
   });
 });

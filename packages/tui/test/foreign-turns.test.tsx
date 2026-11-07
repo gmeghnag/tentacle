@@ -165,11 +165,11 @@ describe("foreign turns in the TUI", () => {
     const frame = app.lastFrame() ?? "";
     expect(frame).toContain("› theirs");
     expect(frame).toContain("streamed by them");
-    expect(frame).toContain("working…");
+    expect(frame).toContain("Working…");
     f.push({ type: "turn_end", reason: "end_turn" });
     f.end();
     await delay(60);
-    expect(app.lastFrame() ?? "").not.toContain("working…");
+    expect(app.lastFrame() ?? "").not.toContain("Working…");
     app.unmount();
   });
 
@@ -410,10 +410,10 @@ describe("foreign turns in the TUI", () => {
     s.raise(f.activity);
     f.push({ type: "user_message", text: "theirs" });
     await delay(40);
-    expect(app.lastFrame() ?? "").toContain("working…");
+    expect(app.lastFrame() ?? "").toContain("Working…");
     f.end();
     await delay(40);
-    expect(app.lastFrame() ?? "").not.toContain("working…");
+    expect(app.lastFrame() ?? "").not.toContain("Working…");
     app.unmount();
   });
 

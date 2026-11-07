@@ -141,7 +141,7 @@ describe("connect: quit detaches", () => {
     const a = fake("A", journal);
     const { app, exits } = await mount([a], { detachOnQuit: true });
     await type(app.stdin, "hang");
-    expect(app.lastFrame() ?? "").toContain("working…");
+    expect(app.lastFrame() ?? "").toContain("Working…");
     await type(app.stdin, "/exit");
     await delay(30);
     expect(exits).toEqual(["unmounted"]);

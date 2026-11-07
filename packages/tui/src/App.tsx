@@ -2808,7 +2808,7 @@ export function App({
                     ? st.reasoningStartedAt
                     : (st.turnStartedAt ?? Date.now())
                 }
-                label={st.reasoning ? "thinking…" : "working…"}
+                label={st.reasoning ? "Thinking…" : "Working…"}
               />
             ) : null}
             {listView ? (
