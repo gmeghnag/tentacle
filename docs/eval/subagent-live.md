@@ -466,3 +466,10 @@ quit silently, and the "lost" note covers it on resume.
 - **Q6: (a).** The key shape is `subagents.types.<type>`.
 - **Q7: (a).** The quit confirm lists the running background subagents ("2 sub-agents running will be lost").
 - **Added by the owner:** the agent may also launch a subagent straight into the background, with an `agent_task` field (e.g. `background: true`). This is on top of the detach triggered by the user writing. It belongs to `feat/subagent-background`.
+- **Added by the owner (2026-11-08): the agent may choose a subagent's model.**
+  - It is opt-in and gated by `subagents.selectableModels: ["<models name>", …]`. Absent or empty means off.
+  - Each `models` entry gets an optional `description`. Those descriptions are listed in the `agent_task` tool description, so the agent knows when to pick which.
+  - `agent_task` gets an optional `model` argument that accepts only a listed name. Any other name is an error result and no child starts.
+  - Precedence: the call's `model`, then `subagents.types.<t>.model`, then the `agents/*.md` `model`, then the top-level `model`.
+  - In a pod the laptop checks the name against the same list before using a key (the task 4 allowlist).
+  - It belongs to `feat/models-map` (task 3). Split it out only if that task grows past M.
