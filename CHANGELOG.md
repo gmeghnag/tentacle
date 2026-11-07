@@ -28,12 +28,20 @@ those.
     symlink"), and a symlink loop says so — before, a dangling link could create
     its target outside;
   - a file is now **replaced atomically**: the new content goes to a fresh temp
-    file in the same directory, which is then renamed over the target (its mode
-    bits are kept). An existing file is never written in place, so a hard link
-    planted at the path only loses that name; the file it shares an inode with
-    keeps its bytes. A hard-linked file inside the project (e.g. a `file:`
-    dependency after `bun install`) stays writable; its link is broken, as an
-    editor's save does;
+    file in the same directory (mode `0600` while it is written), which then gets
+    the target's permission bits (or `0666` minus your umask for a new file) and
+    is renamed over the target. An existing file is never written in place, so a
+    hard link planted at the path only loses that name; the file it shares an
+    inode with keeps its bytes. Like an editor's atomic save, this **breaks hard
+    links** (a hard-linked project file, e.g. a `file:` dependency after `bun
+    install`, stays writable and loses its link) and **does not keep the file's
+    owner, group, ACLs or extended attributes** (macOS tags and quarantine
+    included), nor setuid/setgid/sticky bits;
+  - a file you could not write in place is still refused: a read-only file or
+    another user's file without write permission for you fails with `EACCES`,
+    unchanged. A file in a directory you cannot create files in is refused too,
+    with an error naming the directory (it used to be written in place; an
+    atomic replace needs to create a file there);
   - a symlink, FIFO or other non-regular file at the path is refused, and a
     directory swapped for a symlink between the check and the rename is
     detected in most cases (the path is re-checked after the temp file is made
@@ -42,7 +50,7 @@ those.
   **Known limit (hosts shared with other users only):** another local user who
   can write a directory on the path — e.g. one they created in `/tmp` — can win
   the race by swapping it for a symlink at the right moment. Your content can
-  then land outside, in a new hidden file (`.<name>.<random>.tentacle-tmp`) in
+  then land outside, in a new hidden file (`.tt-<random>.tentacle-tmp`) in
   any directory you can write; an existing file there is never written in
   place. Not covered either: a process running as you, and the `shell` tool,
   which is not confined.

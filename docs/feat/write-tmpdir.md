@@ -449,6 +449,63 @@ A 6 s run gave the same picture: 354 stray temps, 111 with content, the victim f
 - same-uid processes are out of scope;
 - the dropped-entry notice is still per `buildAgent` (LOW 6, first half).
 
+### Fix round 4
+
+*— claude-opus-5-5, 2026-11-07*
+
+This round answers Review round 3 (bea50f8): F1–F5, all fixed in this branch.
+
+**What changed** (`packages/exec/src/host-execution.ts`):
+
+- **F1, temp mode.** The temp is created with mode `0600` (`:408`). The final bits are set by `fchmod` only after the content is written and `fsync`ed (`:416`): the target's `mode & 0o777`, or `0666 & ~umask` for a new file. That matches what `open(…, 0o666)` gave before, so a new file's mode is unchanged.
+- **F2, permission parity with `main`.**
+  - `finalNameMode` (`:467`) now calls `accessSync(target, W_OK)` (`:486`). It runs before the temp is created and again before the `rename`.
+  - A read-only file, or another user's file we may not write, is refused: `refused: read-only file (EACCES: permission denied; it is read-only or another user's)`. The error carries `code: "EACCES"`, like the errno an in-place write threw: `WorkspaceWriteError` gained an optional `code` (`:80`).
+  - The directory owner/mode rule is NOT back; only the target file's own write permission is checked.
+  - `dirError` (`:448`) maps `EACCES`/`EPERM` on the temp create or the `rename` to a `WorkspaceWriteError` that names the directory, not the hidden temp. Example: a `0666` file in a `0555` dir, or a sticky dir where the target is another user's.
+  - **Choice made:** such a file is **refused clearly, with no in-place fallback**. A fallback would bring back writes through an existing inode, which is what round 2 removed. This differs from `main`, which wrote it. **Open for the owner**, and documented in the CHANGELOG and the README.
+- **F3, temp name.** The name is now `.tt-<16 hex>.tentacle-tmp` (`:403`), 33 bytes, never derived from the basename. It keeps the `tentacle-tmp` suffix, so the existing `leftovers()` helper and the documented residual name stay meaningful.
+- **F4, temp cleanup.**
+  - The cleanup is now a `catch` that unlinks the temp on ANY failure, including a failed `rename`.
+  - If the unlink itself fails (e.g. the parent became read-only), the thrown error says `(temp file left at <path>: <errno>)` and keeps its type and `code`.
+  - The `beforeRename` seam moved to just before the `rename`, after the last re-checks, so a test can make the `rename` itself fail.
+- **F5 + nit, docs.**
+  - CHANGELOG "Fixed": the `0600` temp; that the replace breaks hard links and does not keep owner, group, ACLs, xattrs, or setuid/setgid/sticky ("like an editor's atomic save"); the `EACCES` parity; the non-writable-dir refusal; "permission bits"; the residual temp name updated to `.tt-<random>.tentacle-tmp`.
+  - The README row says the same.
+  - `writeFile`'s doc comment is rewritten to match.
+
+**Tests** (`packages/exec/test/confinement.test.ts:525`, new `describe("permission parity and temp hygiene (fix round 4)")`; each case runs in the writable dir AND in the project; the permission tests are skipped when running as root, where permission bits do not apply):
+
+| Test | Round 3 code |
+|---|---|
+| F1: the temp's mode while the content is written (seen via a wrapped `FileHandle.prototype.writeFile` → `fstat`) is `[0600]` for `0600` and `0644` targets; at `beforeRename` and at the end it is the target's | **red** (`644`) |
+| F1: a new file gets `0666 & ~umask` under umask `022` and `002` | green: guard, the behaviour is unchanged |
+| F2: `0444` refused with `EACCES` (message and `code`), content `orig`, no temp left; once made `0644` it is replaced | **red** (replaced) |
+| F2: a real root-owned file (`/etc/hosts` with `writableDirs: ["/etc"]`) is refused with `EACCES`, unchanged | **red** (raw rename error) |
+| F2: a `0666` file in a `0555` dir is refused, naming the dir and not the temp; content unchanged | **red** (raw `EACCES` on the temp) |
+| F3: a 250-byte name is written, no temp left | **red** (`ENAMETOOLONG`) |
+| F4: `rename` fails (a non-empty dir appears at the target via the moved seam) → temp unlinked | green before only because the old seam ran before the final-name re-check. Pinned by mutation 3 below |
+| F4: the parent made `0555` before the `rename` → the error names the `.tt-…` temp left behind | **red** |
+
+**Mutations** (backup → Edit → narrow test → restore → `shasum -c` OK):
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 (F1) | temp opened with `0o666` | killed: the F1 temp-mode test |
+| 2 (F2) | `access(W_OK)` → `F_OK` | killed: the `0444` test. The root-owned `/etc/hosts` case still refused, because the `rename` into the root-owned `/private/etc` fails and is mapped, so that test pins the outcome, not this guard alone |
+| 3 | the temp never unlinked on failure | killed: the round-2 "no temp left", F4 rename-fails, F4 temp-left message |
+| 4 | `EACCES`/`EPERM` not mapped | killed: the non-writable dir, F4 temp-left message |
+
+**Gate:** `bunx tsc --noEmit` clean. `bunx biome check .` clean (710 files). `bun test packages`: **5303 pass, 3 skip (opt-in), 0 fail** (5306 total; +8 tests).
+
+**Open:**
+
+- A writable file in a non-writable directory is refused, while `main` wrote it. This is the owner question from Review round 3 F2.
+- The foreign-owner case is covered by `access(W_OK)` and by one real root-owned file. A second uid owning a file in a directory WE own was not available here; by POSIX, `access` refuses it the same way.
+- On a filesystem whose permission model `access` does not reflect (e.g. some network mounts), the result follows `access`.
+- Unchanged from round 3: the shared-root race residual, `shell` unconfined, same-uid processes out of scope, and the per-`buildAgent` dropped-entry notice.
+- Scratch: this round's backups were removed; `.tentacle/tmp/write-tmpdir/` holds only the plan and the reviewer's `review/`.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-07*

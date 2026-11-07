@@ -4,6 +4,7 @@ import {
   existsSync,
   linkSync,
   lstatSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -11,10 +12,11 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { link, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { HostExecution, type HostExecutionConfig, WorkspaceWriteError } from "../src/index.ts";
 
 let root: string;
@@ -512,4 +514,178 @@ describe("atomic replace and the directory rule (fix round 2)", () => {
       expect(err?.message, name).not.toContain("create it first");
     }
   });
+});
+
+/** Running as root defeats permission bits: the permission tests below need a normal user. */
+const isRoot = process.getuid?.() === 0;
+
+// Review round 3 of docs/feat/write-tmpdir.md: the atomic replace must keep the
+// in-place write's file-permission semantics (F1 temp mode, F2 parity with
+// `main`) and handle long names and failed renames (F3, F4).
+describe("permission parity and temp hygiene (fix round 4)", () => {
+  let extra: string;
+  let arenas: { name: string; dir: string }[];
+
+  beforeEach(async () => {
+    extra = join(root, "..", "scratch4");
+    await mkdir(extra, { recursive: true });
+    arenas = [
+      { name: "writable dir", dir: extra },
+      { name: "project", dir: root },
+    ];
+  });
+
+  const mk = (over: Partial<HostExecutionConfig> = {}) =>
+    new HostExecution({ cwd: root, writableDirs: [extra], ...over });
+
+  test("F1: the temp is 0600 while the content is written; fchmod to the final mode only after", async () => {
+    const proto = (await fileHandleProto()) as unknown as {
+      writeFile: (...a: unknown[]) => Promise<void>;
+      stat: () => Promise<{ mode: number }>;
+    };
+    const realWrite = proto.writeFile;
+    const seen: number[] = [];
+    proto.writeFile = async function (this: typeof proto, ...a: unknown[]) {
+      seen.push((await this.stat()).mode & 0o777);
+      return realWrite.apply(this, a);
+    };
+    try {
+      for (const { name, dir } of arenas) {
+        for (const mode of [0o600, 0o644]) {
+          const f = join(dir, `secret-${mode.toString(8)}.env`);
+          await writeFile(f, "old");
+          chmodSync(f, mode);
+          seen.length = 0;
+          let atRename = -1;
+          await mk({
+            beforeRename: () => {
+              const temp = leftovers(dir)[0];
+              atRename = temp === undefined ? -1 : statSync(join(dir, temp)).mode & 0o777;
+            },
+          }).writeFile(f, "TOP-SECRET");
+          expect(seen, `${name} ${mode.toString(8)}`).toEqual([0o600]);
+          expect(atRename, `${name} ${mode.toString(8)}`).toBe(mode);
+          expect(statSync(f).mode & 0o777, `${name} ${mode.toString(8)}`).toBe(mode);
+        }
+      }
+    } finally {
+      proto.writeFile = realWrite;
+    }
+  });
+
+  test("F1: a new file gets 0666 minus the umask (after the write), as before", async () => {
+    for (const umask of [0o022, 0o002]) {
+      const old = process.umask(umask);
+      try {
+        for (const { name, dir } of arenas) {
+          const f = join(dir, `new-${umask.toString(8)}.txt`);
+          await mk().writeFile(f, "n");
+          expect(statSync(f).mode & 0o777, `${name} ${umask.toString(8)}`).toBe(0o666 & ~umask);
+        }
+      } finally {
+        process.umask(old);
+      }
+    }
+  });
+
+  test.skipIf(isRoot)(
+    "F2: a read-only (0444) file is refused with EACCES; its content is unchanged",
+    async () => {
+      for (const { name, dir } of arenas) {
+        const f = join(dir, "ro.txt");
+        await writeFile(f, "orig");
+        chmodSync(f, 0o444);
+        const err = await refusal(mk().writeFile(f, "new"));
+        expect(err?.message, name).toContain("read-only");
+        expect(err?.message, name).toContain("EACCES");
+        expect((err as NodeJS.ErrnoException | undefined)?.code, name).toBe("EACCES");
+        expect(readFileSync(f, "utf8"), name).toBe("orig");
+        expect(leftovers(dir), name).toEqual([]);
+        // The same file made writable is replaced.
+        chmodSync(f, 0o644);
+        await mk().writeFile(f, "new");
+        expect(readFileSync(f, "utf8"), name).toBe("new");
+      }
+    },
+  );
+
+  test.skipIf(isRoot)(
+    "F2: a file owned by another user that we cannot write is refused (a real root-owned file)",
+    async () => {
+      const hosts = realpathSync("/etc/hosts");
+      const before = readFileSync(hosts, "utf8");
+      const e = new HostExecution({ cwd: root, writableDirs: [dirname(hosts)] });
+      const err = await refusal(e.writeFile(hosts, "pwned"));
+      expect(err?.message).toContain("EACCES");
+      expect(readFileSync(hosts, "utf8")).toBe(before);
+    },
+  );
+
+  test.skipIf(isRoot)(
+    "F2: a writable file in a directory we cannot write is refused clearly (no raw temp error)",
+    async () => {
+      for (const { name, dir } of arenas) {
+        const ro = join(dir, "rodir");
+        await mkdir(ro, { recursive: true });
+        await writeFile(join(ro, "f.txt"), "orig");
+        chmodSync(join(ro, "f.txt"), 0o666);
+        chmodSync(ro, 0o555);
+        try {
+          const err = await refusal(mk().writeFile(join(ro, "f.txt"), "new"));
+          expect(err?.message, name).toContain("not writable");
+          expect(err?.message, name).toContain(realpathSync(ro));
+          expect(err?.message, name).not.toContain("tentacle-tmp");
+          expect(readFileSync(join(ro, "f.txt"), "utf8"), name).toBe("orig");
+        } finally {
+          chmodSync(ro, 0o755);
+        }
+      }
+    },
+  );
+
+  test("F3: a 250-byte name is writable (the temp name does not grow with it)", async () => {
+    for (const { name, dir } of arenas) {
+      const f = join(dir, "n".repeat(250));
+      await mk().writeFile(f, "long");
+      expect(readFileSync(f, "utf8"), name).toBe("long");
+      expect(leftovers(dir), name).toEqual([]);
+    }
+  });
+
+  test("F4: a rename that fails (a non-empty dir appears at the target) unlinks the temp", async () => {
+    for (const { name, dir } of arenas) {
+      const f = join(dir, "becomes-dir");
+      const e = mk({
+        beforeRename: () => {
+          mkdirSync(f);
+          writeFileSync(join(f, "inside"), "x");
+        },
+      });
+      await expect(e.writeFile(f, "x"), name).rejects.toThrow();
+      expect(leftovers(dir), name).toEqual([]);
+      expect(readdirSync(f), name).toEqual(["inside"]);
+    }
+  });
+
+  test.skipIf(isRoot)(
+    "F4: when the temp cannot be removed (parent made read-only), the error says where it was left",
+    async () => {
+      for (const { name, dir } of arenas) {
+        const sub = join(dir, "lock");
+        await mkdir(sub, { recursive: true });
+        const e = mk({
+          beforeRename: () => {
+            chmodSync(sub, 0o555);
+          },
+        });
+        try {
+          const err = await refusal(e.writeFile(join(sub, "x.txt"), "x"));
+          expect(err?.message, name).toContain("temp file left at");
+          expect(err?.message, name).toContain(".tt-");
+        } finally {
+          chmodSync(sub, 0o755);
+        }
+      }
+    },
+  );
 });

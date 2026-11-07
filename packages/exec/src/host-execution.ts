@@ -17,6 +17,7 @@
  */
 import { randomBytes } from "node:crypto";
 import {
+  accessSync,
   existsSync,
   constants as fsConstants,
   lstatSync,
@@ -65,13 +66,22 @@ export interface HostExecutionConfig {
    * write, with the checked real path — where a race test swaps in a link.
    */
   readonly beforeOpen?: (realPath: string) => void | Promise<void>;
-  /** TEST SEAM ONLY: runs after the temp file is written, just before the `rename`. */
+  /**
+   * TEST SEAM ONLY: runs after the temp file is written and chmodded and the
+   * last re-checks passed — immediately before the `rename`.
+   */
   readonly beforeRename?: (realPath: string) => void | Promise<void>;
 }
 
 /** Thrown when a write would escape the workspace root. */
 export class WorkspaceWriteError extends Error {
   override readonly name = "WorkspaceWriteError";
+  /** The OS errno behind a permission refusal (`EACCES`, `EPERM`), as an in-place write reported it. */
+  readonly code: string | undefined;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.code = code;
+  }
 }
 
 /** Realpath `p` if it exists, else return it unchanged (normalized by caller). */
@@ -354,14 +364,20 @@ export class HostExecution implements ExecutionEnvironment {
    *    already followed, so in-root links keep working).
    * 2. `dirChain`: every directory below the containing root, down to the
    *    parent, is a real directory (missing ones created, umask-respecting).
-   * 3. The final name, if present, must be a regular file (a symlink there now
-   *    appeared after the check: refused, never replaced); its mode is kept.
-   * 4. A temp file with a random name is created in the parent
-   *    (`O_CREAT|O_EXCL|O_NOFOLLOW`), the chain and the parent's realpath
-   *    re-checked, the content written and `fsync`ed, re-checked again with the
-   *    final name, then `rename`d over the target. A hard link at the target
-   *    only loses this name; its other names keep the old bytes. Any failure
-   *    unlinks the temp.
+   * 3. The final name, if present, must be a regular file we could write in
+   *    place (`access(W_OK)`: a read-only or another user's file is refused, as
+   *    an in-place write was); a symlink there appeared after the check:
+   *    refused, never replaced. Its permission bits are kept.
+   * 4. A temp file `.tt-<hex>.tentacle-tmp` (short, not from the basename) is
+   *    created in the parent with mode `0600` (`O_CREAT|O_EXCL|O_NOFOLLOW`), the
+   *    chain and the parent's realpath re-checked, the content written and
+   *    `fsync`ed, THEN `fchmod`ed to the final bits (the target's, or `0666`
+   *    minus the umask), re-checked again with the final name, then `rename`d
+   *    over the target. A hard link at the target only loses this name; its
+   *    other names keep the old bytes. Owner, group, ACLs and xattrs are not
+   *    kept (as in an editor's atomic save). `EACCES`/`EPERM` on the create or
+   *    the rename is a refusal naming the directory. Any failure unlinks the
+   *    temp; if even that fails, the error says where it was left.
    * Residual (fix round 3): the re-checks narrow but cannot close a race by a
    * user who can write a directory on the path (e.g. one they made in `/tmp`):
    * docs/feat/write-tmpdir.md "Fix round 3".
@@ -383,39 +399,70 @@ export class HostExecution implements ExecutionEnvironment {
     await this.beforeOpen?.(target);
     this.dirChain(path, root, parent, "recheck");
     const mode = this.finalNameMode(path, target);
-    const temp = join(
-      parent,
-      `.${basename(target)}.${randomBytes(8).toString("hex")}.tentacle-tmp`,
-    );
+    // Short and never derived from the basename: a name near NAME_MAX still works.
+    const temp = join(parent, `.tt-${randomBytes(8).toString("hex")}.tentacle-tmp`);
     let fd: FileHandle | undefined;
-    let renamed = false;
     try {
-      fd = await open(temp, OPEN_TEMP, 0o666);
-      this.dirChain(path, root, parent, "recheck");
-      if (mode !== undefined) {
-        await fd.chmod(mode);
+      try {
+        // 0600 while the content is written: never more readable than the target.
+        fd = await open(temp, OPEN_TEMP, 0o600);
+      } catch (error) {
+        throw this.dirError(error, path, parent, "cannot create a file in");
       }
+      this.dirChain(path, root, parent, "recheck");
       await fd.writeFile(contents);
       await fd.sync();
+      // The final permission bits only now: the target's, or a new file's default.
+      await fd.chmod(mode ?? 0o666 & ~process.umask());
       await fd.close();
       fd = undefined;
-      await this.beforeRename?.(target);
       this.dirChain(path, root, parent, "recheck");
       this.finalNameMode(path, target);
-      await rename(temp, target);
-      renamed = true;
-    } finally {
-      await fd?.close().catch(() => undefined);
-      if (!renamed) {
-        await unlink(temp).catch(() => undefined);
+      await this.beforeRename?.(target);
+      try {
+        await rename(temp, target);
+      } catch (error) {
+        throw this.dirError(error, path, parent, "cannot replace the file in");
       }
+    } catch (error) {
+      await fd?.close().catch(() => undefined);
+      const left = await unlink(temp).then(
+        () => undefined,
+        (e: unknown) => (errnoOf(e) === "ENOENT" ? undefined : e),
+      );
+      if (left !== undefined) {
+        const why = errnoOf(left) ?? String(left);
+        const message = `${error instanceof Error ? error.message : String(error)} (temp file left at ${temp}: ${why})`;
+        throw error instanceof WorkspaceWriteError
+          ? new WorkspaceWriteError(message, error.code)
+          : Object.assign(new Error(message), { code: errnoOf(error) });
+      }
+      throw error;
     }
   }
 
   /**
-   * The mode bits (`0o777`; no setuid/setgid/sticky) to keep from an existing
-   * target, `undefined` when there is none; refuses a non-regular file, and a
-   * symlink (the checked real path had none: it appeared after the check).
+   * `EACCES`/`EPERM` from the temp create or the `rename` → a refusal naming
+   * the directory (not the hidden temp). Other errors pass through.
+   */
+  private dirError(error: unknown, path: string, parent: string, what: string): unknown {
+    const code = errnoOf(error);
+    if (code !== "EACCES" && code !== "EPERM") {
+      return error;
+    }
+    return new WorkspaceWriteError(
+      `refused: ${what} ${parent} (${code}: the directory is not writable for you, or it is sticky and the file is another user's; a file there is never rewritten in place): ${path}`,
+      code,
+    );
+  }
+
+  /**
+   * The permission bits (`0o777`; no setuid/setgid/sticky) to keep from an
+   * existing target, `undefined` when there is none. Refuses a non-regular file,
+   * a symlink (the checked real path had none: it appeared after the check), and
+   * a file we could not write in place (`access(W_OK)`: read-only, or another
+   * user's) — a `rename` would replace it anyway, so parity with an in-place
+   * write is enforced here (review round 3 F2).
    */
   private finalNameMode(path: string, target: string): number | undefined {
     let st: ReturnType<typeof lstatSync>;
@@ -434,6 +481,15 @@ export class HostExecution implements ExecutionEnvironment {
     }
     if (!st.isFile()) {
       throw new WorkspaceWriteError(`refused: not a regular file: ${path}`);
+    }
+    try {
+      accessSync(target, fsConstants.W_OK);
+    } catch (error) {
+      const code = errnoOf(error) ?? "EACCES";
+      throw new WorkspaceWriteError(
+        `refused: read-only file (${code}: permission denied; it is read-only or another user's): ${path}`,
+        code,
+      );
     }
     return st.mode & 0o777;
   }
