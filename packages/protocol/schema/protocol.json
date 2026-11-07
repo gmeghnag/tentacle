@@ -648,6 +648,478 @@
       "required": ["id", "jsonrpc"],
       "type": "object"
     },
+    "KnownLogEntry": {
+      "discriminator": {
+        "mapping": {
+          "base": "#/$defs/LogBaseEntry",
+          "call_started": "#/$defs/LogCallStartedEntry",
+          "checkpoint": "#/$defs/LogCheckpointEntry",
+          "message": "#/$defs/LogMessageEntry",
+          "replace": "#/$defs/LogReplaceEntry",
+          "title": "#/$defs/LogTitleEntry",
+          "truncate": "#/$defs/LogTruncateEntry",
+          "turn_end": "#/$defs/LogTurnEndEntry",
+          "turn_start": "#/$defs/LogTurnStartEntry"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/LogBaseEntry"
+        },
+        {
+          "$ref": "#/$defs/LogMessageEntry"
+        },
+        {
+          "$ref": "#/$defs/LogReplaceEntry"
+        },
+        {
+          "$ref": "#/$defs/LogTruncateEntry"
+        },
+        {
+          "$ref": "#/$defs/LogTitleEntry"
+        },
+        {
+          "$ref": "#/$defs/LogCheckpointEntry"
+        },
+        {
+          "$ref": "#/$defs/LogTurnStartEntry"
+        },
+        {
+          "$ref": "#/$defs/LogTurnEndEntry"
+        },
+        {
+          "$ref": "#/$defs/LogCallStartedEntry"
+        }
+      ]
+    },
+    "LogBaseEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "critical": {
+          "const": true,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "inc": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/LogBaseReason"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turn": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "const": "base",
+          "type": "string"
+        }
+      },
+      "required": ["count", "critical", "id", "inc", "reason", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogBaseReason": {
+      "enum": ["create", "seed", "reload", "compact", "context_reset"],
+      "type": "string"
+    },
+    "LogCallStartedEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "callId": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "call_started",
+          "type": "string"
+        }
+      },
+      "required": ["callId", "id", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogCheckpointEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "checkpoint",
+          "type": "string"
+        }
+      },
+      "required": ["count", "digest", "id", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogCursor": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["id", "seq"],
+      "type": "object"
+    },
+    "LogEntryEnvelope": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "type": "string"
+        }
+      },
+      "required": ["id", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogEntryId": {
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "LogMessageEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": true,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "message": {
+          "$ref": "#/$defs/ChatMessage"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "message",
+          "type": "string"
+        }
+      },
+      "required": ["critical", "id", "message", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogParams": {
+      "additionalProperties": true,
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/LogCursor"
+        },
+        "maxChars": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["sessionId"],
+      "type": "object"
+    },
+    "LogReplaceEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": true,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "index": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "$ref": "#/$defs/ChatMessage"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "replace",
+          "type": "string"
+        }
+      },
+      "required": ["critical", "id", "index", "message", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogResult": {
+      "additionalProperties": true,
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/LogEntryEnvelope"
+          },
+          "type": "array"
+        },
+        "more": {
+          "type": "boolean"
+        },
+        "rebased": {
+          "type": "boolean"
+        },
+        "tip": {
+          "$ref": "#/$defs/LogCursor"
+        }
+      },
+      "required": ["entries", "more", "tip"],
+      "type": "object"
+    },
+    "LogTitleEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "$ref": "#/$defs/SessionTitle"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "title",
+          "type": "string"
+        }
+      },
+      "required": ["id", "seq", "title", "ts", "type"],
+      "type": "object"
+    },
+    "LogTruncateEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": true,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "length": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "truncate",
+          "type": "string"
+        }
+      },
+      "required": ["critical", "id", "length", "seq", "ts", "type"],
+      "type": "object"
+    },
+    "LogTurnEndEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "stopReason": {
+          "$ref": "#/$defs/StopReason"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "const": "turn_end",
+          "type": "string"
+        }
+      },
+      "required": ["id", "seq", "stopReason", "ts", "turnId", "type"],
+      "type": "object"
+    },
+    "LogTurnStartEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "critical": {
+          "const": false,
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/LogEntryId"
+        },
+        "prev": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "seq": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "ts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "const": "turn_start",
+          "type": "string"
+        }
+      },
+      "required": ["id", "seq", "ts", "turnId", "type"],
+      "type": "object"
+    },
     "McpServerState": {
       "enum": ["connecting", "connected", "unresponsive", "closed", "failed"],
       "type": "string"
@@ -830,6 +1302,22 @@
         },
         "cwd": {
           "type": "string"
+        },
+        "logBase": {
+          "additionalProperties": true,
+          "properties": {
+            "id": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "seq": {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["id", "seq"],
+          "type": "object"
         },
         "messages": {
           "items": {
@@ -2730,6 +3218,14 @@
         "$ref": "#/$defs/SessionListResult"
       }
     },
+    "session/log": {
+      "params": {
+        "$ref": "#/$defs/LogParams"
+      },
+      "result": {
+        "$ref": "#/$defs/LogResult"
+      }
+    },
     "session/open": {
       "params": {
         "$ref": "#/$defs/OpenParams"
@@ -2826,5 +3322,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 16
+  "x-protocol-version": 17
 }

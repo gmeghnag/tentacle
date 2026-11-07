@@ -24,6 +24,7 @@ import {
   type HooksTrustResult,
   type InitializeParams,
   type InitializeResult,
+  type LogParams,
   type McpStatusResult,
   Method,
   type ModelCountTokensResult,
@@ -240,6 +241,11 @@ export class Connection {
       }
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);
+      // Synchronous, served from the derived log: no lock, no await (AGENTS §7).
+      case Method.Log: {
+        const { sessionId, after, maxChars } = params as LogParams;
+        return this.lookup(sessionId).logRead(after, maxChars);
+      }
       case Method.Enqueue:
         return this.enqueue(params as EnqueueParams);
       case Method.SendNow:

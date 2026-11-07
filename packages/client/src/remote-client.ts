@@ -37,6 +37,9 @@ import {
   type InitializeResult,
   JsonRpcErrorCode,
   KNOWN_UPDATE_TYPES,
+  type KnownLogEntry,
+  type LogCursor,
+  type LogResult,
   type McpServerStatus,
   type McpStatusResult,
   Method,
@@ -66,6 +69,7 @@ import {
   type SessionTitle,
   type SessionTtlResult,
   type SessionUpdateParams,
+  type Sha256,
   type SnapshotResult,
   type UpdateSettingsResult,
   type WireStreamEvent,
@@ -89,6 +93,7 @@ import {
 import { answerLostCause, normalizePermissionReply } from "./permission-map.ts";
 import { PermissionRouter, type RouterAction } from "./permission-router.ts";
 import { RemoteSession } from "./remote-session.ts";
+import { type LogState, applyLogRead } from "./session-log-reader.ts";
 import { SessionLostError } from "./session-lost.ts";
 import {
   type StreamEffect,
@@ -182,10 +187,23 @@ export interface SessionQueueNotice {
   readonly state: QueueState;
 }
 
-/** A session's history read back, with the daemon's title (absent: an older daemon has none). */
+/**
+ * A session's history read back through `session/log` (docs/feat/session-log.md),
+ * with the daemon's title (absent: none logged in this read nor before).
+ */
 export interface ReadBack {
   readonly messages: readonly ChatMessage[];
   readonly title?: SessionTitle;
+  /** The validated, re-serialized known entries of this read (F4): what the disk log appends (task 2). */
+  readonly entries: readonly KnownLogEntry[];
+  /**
+   * The daemon's lineage diverged from this client's (F1: a restarted daemon
+   * reseeded from another copy): the copy this client held, to be SET ASIDE —
+   * `messages` is the daemon's.
+   */
+  readonly aside?: readonly ChatMessage[];
+  /** Entries between this client's head and the daemon's last `base` were not available. */
+  readonly gap?: true;
 }
 
 /** Timers, injectable so tests drive reconnects deterministically. */
@@ -238,7 +256,39 @@ export interface RemoteClientOptions {
    * never sent: `connect` and the worker do not carry anything.
    */
   readonly sessionSettings?: SessionSettings;
+  /**
+   * SHA-256 (hex) for the `session/log` checkpoints `readBack` verifies.
+   * Absent → `Bun.CryptoHasher` when running on Bun; elsewhere (mobile, which
+   * never reads back) `readBack` refuses. Injected: this package stays node-free.
+   */
+  readonly sha256?: Sha256;
 }
+
+/** A sha-256 hex hasher from Bun's runtime, when there is one. */
+function bunSha256(): Sha256 | undefined {
+  const bun = (
+    globalThis as {
+      Bun?: {
+        CryptoHasher: new (
+          algorithm: string,
+        ) => { update(text: string): unknown; digest(encoding: "hex"): string };
+      };
+    }
+  ).Bun;
+  if (bun === undefined) {
+    return undefined;
+  }
+  return (text) => {
+    const hasher = new bun.CryptoHasher("sha256");
+    hasher.update(text);
+    return hasher.digest("hex");
+  };
+}
+
+/** Restarts of one `readBack` (a rebase between pages, a refused read retried cold, a drifted checkpoint re-read cold). */
+const LOG_ATTEMPTS = 3;
+/** Pages one `readBack` may read: a daemon (a pod is not trusted) that never ends fails loudly. */
+const LOG_MAX_PAGES = 10_000;
 
 /** What a session did with the settings it was created from (`onSessionSettings`). */
 export interface SessionSettingsNotice {
@@ -290,6 +340,12 @@ interface SessionEntry {
   listener: SessionStreamListener | null;
   /** The newest history this client read: what a recreate seeds the daemon with. */
   history: readonly ChatMessage[];
+  /** The `session/log` this client holds (its last committed `readBack`); null before the first. */
+  log: LogState | null;
+  /** The newest title a `session/log` read carried (a title entry comes only when it changes). */
+  logTitle: SessionTitle | undefined;
+  /** A checkpoint drift was reported for this session (once; never a loop). */
+  driftReported: boolean;
   /** It was live once: a recovery re-attaches (vs. creates). */
   everLive: boolean;
   /** Times the daemon lost it and it was recreated; keyed commands never cross one. */
@@ -452,6 +508,8 @@ export class RemoteClient {
   private readonly daemonKind: DaemonKind;
   /** Sessions with a `hooks/trust` prompt in flight (at most one each). */
   private readonly trustAsking = new Set<string>();
+  /** Hashes `session/log` checkpoints (`readBack`); absent → `readBack` refuses. */
+  private readonly sha256: Sha256 | undefined;
 
   constructor(
     channel: DuplexChannel,
@@ -482,6 +540,7 @@ export class RemoteClient {
       this.titleModelProvider = options.titleModelProvider;
     }
     this.carried = options.sessionSettings ? { settings: options.sessionSettings } : {};
+    this.sha256 = options.sha256 ?? bunSha256();
     this.link = { ...initialLink, upSince: this.clock.now() };
     this.lastInboundAt = this.clock.now();
     this.peer = this.makePeer(channel, 0);
@@ -1083,18 +1142,10 @@ export class RemoteClient {
    * factory it waits out a drop (read-only: safe to repeat).
    */
   async snapshot(sessionId: string): Promise<readonly ChatMessage[]> {
-    return (await this.readBack(sessionId)).messages;
-  }
-
-  /**
-   * `snapshot`, with the daemon's title as of the same read (absent: an older
-   * daemon sends none — the caller keeps what it had, never derives one).
-   */
-  async readBack(sessionId: string): Promise<ReadBack> {
     const entry = this.sessions.get(sessionId);
-    const result = (snap: Snap): ReadBack => {
+    const result = (snap: Snap): readonly ChatMessage[] => {
       if (entry) this.titleRead(entry, snap.title);
-      return { messages: snap.messages, ...(snap.title ? { title: snap.title } : {}) };
+      return snap.messages;
     };
     if (!this.channelFactory || !entry) {
       const mark = entry?.turnEndsApplied ?? 0;
@@ -1113,6 +1164,106 @@ export class RemoteClient {
         if (gen === this.gen && this.up) throw error;
       }
     }
+  }
+
+  /**
+   * The session's committed history for the main thread to persist, read
+   * through `session/log` (docs/feat/session-log.md): only the entries after
+   * the last one this client holds, validated (a pod is not trusted) and
+   * projected onto its copy. Committed only once the whole read is in and
+   * valid (a drop or a refusal mid-read leaves the held copy as it was). With
+   * a factory it waits out a drop and reads again (read-only: safe to repeat).
+   * The title is the daemon's, as last logged (absent: none known yet).
+   */
+  async readBack(sessionId: string): Promise<ReadBack> {
+    const entry = this.sessions.get(sessionId);
+    if (!this.channelFactory || !entry) {
+      return this.readLog(sessionId, this.peer, entry);
+    }
+    for (;;) {
+      const gen = await this.whenLive(entry);
+      try {
+        return await this.readLog(sessionId, this.peer, entry);
+      } catch (error) {
+        if (gen === this.gen && this.up) throw error;
+      }
+    }
+  }
+
+  /**
+   * One `readBack` on `peer`: page `session/log` into a staging list, apply it
+   * (`applyLogRead`), commit. A rebase between two pages restarts the read; a
+   * refused read is retried once COLD (from the daemon's last base, classified
+   * against the held copy); a drifted checkpoint is re-read cold once, then the
+   * cold projection is kept and the drift reported once — never a loop.
+   */
+  private async readLog(
+    sessionId: string,
+    peer: RpcPeer,
+    entry: SessionEntry | undefined,
+  ): Promise<ReadBack> {
+    const sha256 = this.sha256;
+    if (sha256 === undefined) {
+      throw new Error("readBack needs a sha256 hasher (RemoteClientOptions.sha256)");
+    }
+    const mark = entry?.turnEndsApplied ?? 0;
+    const held = entry?.log ?? null;
+    let cold = false;
+    let lastError = "";
+    for (let attempt = 1; attempt <= LOG_ATTEMPTS; attempt++) {
+      const pages: LogResult[] = [];
+      let after = cold ? undefined : held?.head;
+      for (;;) {
+        if (pages.length >= LOG_MAX_PAGES) {
+          throw new RpcError(JsonRpcErrorCode.InternalError, "session/log: too many pages");
+        }
+        const page = (await this.call(peer, Method.Log, {
+          sessionId,
+          ...(after ? { after } : {}),
+        })) as LogResult;
+        pages.push(page);
+        const last = page.entries.at(-1);
+        if (!page.more) break;
+        if (last === undefined || (page.rebased === true && pages.length > 1)) break;
+        after = { seq: last.seq, id: last.id };
+      }
+      const applied = applyLogRead(held, pages, sha256);
+      if ("error" in applied) {
+        lastError = applied.error;
+        cold = true;
+        continue;
+      }
+      if (applied.drift && !cold) {
+        cold = true; // one cold read: the daemon's derivation from its last base
+        continue;
+      }
+      if (applied.drift && entry && !entry.driftReported) {
+        entry.driftReported = true;
+        this.onError?.(
+          new Error(
+            `session ${sessionId}: the daemon's log failed its checkpoint at entry ${applied.drift.seq} (kept the daemon's projection)`,
+          ),
+        );
+      }
+      if (entry) {
+        entry.log = applied.state;
+        if (applied.title) entry.logTitle = applied.title;
+        this.historyRead(entry, applied.state.messages, mark);
+        this.titleRead(entry, entry.logTitle);
+      }
+      const title = entry ? entry.logTitle : applied.title;
+      return {
+        messages: applied.state.messages,
+        entries: applied.entries,
+        ...(title ? { title } : {}),
+        ...(applied.aside ? { aside: applied.aside } : {}),
+        ...(applied.gap ? { gap: true as const } : {}),
+      };
+    }
+    throw new RpcError(
+      JsonRpcErrorCode.InternalError,
+      `session/log: the daemon's log was refused: ${lastError}`,
+    );
   }
 
   /**
@@ -1578,6 +1729,9 @@ export class RemoteClient {
       state: initialStream,
       listener: listener ?? null,
       history: seed,
+      log: null,
+      logTitle: undefined,
+      driftReported: false,
       everLive: false,
       recreates: 0,
       noticedRecreates: 0,
@@ -1667,6 +1821,7 @@ export class RemoteClient {
                 sessionId: entry.id,
                 create: true,
                 ...(entry.history.length > 0 ? { messages: entry.history } : {}),
+                ...this.logBaseOf(entry),
                 ...(entry.title ? { title: entry.title } : {}),
                 ...this.carried,
               },
@@ -1788,7 +1943,7 @@ export class RemoteClient {
     try {
       result = (await this.call(this.peer, Method.Open, {
         sessionId: entry.id,
-        ...(messages.length > 0 ? { messages } : { create: true }),
+        ...(messages.length > 0 ? { messages, ...this.logBaseOf(entry) } : { create: true }),
         // Our copy of its chosen title: a recreate is never regenerated over a rename.
         ...(entry.title ? { title: entry.title } : {}),
         // Nothing was persisted: the laptop that recreates it decides.
@@ -1853,6 +2008,19 @@ export class RemoteClient {
       turn: snap.turn ?? null,
       now: this.clock.now(),
     });
+  }
+
+  /**
+   * `{logBase}` for a recreate seeded with `entry.history`, only when that
+   * history IS the held log's projection (a display resync may have replaced
+   * it): the new daemon's first `base` then links to our head (a reseed, not a
+   * fork). Numbering only — it grants nothing.
+   */
+  private logBaseOf(entry: SessionEntry): { logBase?: LogCursor } {
+    const log = entry.log;
+    return log !== null && log.messages === entry.history && entry.history.length > 0
+      ? { logBase: log.head }
+      : {};
   }
 
   /** `messages` is the daemon's history as of a read issued when `mark` turn ends were applied. */

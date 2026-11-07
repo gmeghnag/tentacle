@@ -37,6 +37,7 @@ import {
   type Attachment,
   HostedSession,
   type RestoredSessionState,
+  type SessionLogOptions,
   type TurnErrorPolicy,
 } from "./hosted-session.ts";
 import { toSessionSkills } from "./mapping.ts";
@@ -487,6 +488,11 @@ export class SessionHost {
       undefined,
       seedState(params.title),
       params.settings,
+      // `session/log` lineage: only a session created FROM the client's messages
+      // continues the client's head (numbering only; it grants nothing).
+      seeded
+        ? { reason: "seed", ...(params.logBase ? { base: params.logBase } : {}) }
+        : { reason: "create" },
     );
     // Registered BEFORE attaching: nothing can observe the id half-built.
     this.sessions.set(id, hosted);
@@ -865,6 +871,7 @@ export class SessionHost {
     restored?: RestoredSessionState,
     seed?: TitleState,
     settings?: SessionSettings,
+    log?: SessionLogOptions,
   ): HostedSession {
     // The agent exists before its session (P4): its link is bound late, and a
     // session is only reachable (hence prompted) once built.
@@ -902,6 +909,7 @@ export class SessionHost {
       this.opts.wakeOnJobExit
         ? { ...(this.opts.onAudit ? { onAudit: this.opts.onAudit } : {}) }
         : undefined,
+      log,
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;

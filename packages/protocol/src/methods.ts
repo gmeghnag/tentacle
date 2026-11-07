@@ -21,6 +21,7 @@ import {
   ProgressParamsSchema,
 } from "./model.ts";
 import { ResolvePermissionParamsSchema, ResolvePermissionResultSchema } from "./permission.ts";
+import { LogParamsSchema, LogResultSchema } from "./session-log.ts";
 import {
   CancelParamsSchema,
   CloseParamsSchema,
@@ -68,6 +69,8 @@ export const Method = {
   /** Apply a laptop's settings to a live session, between turns (docs/feat/session-settings-apply.md). */
   UpdateSettings: "session/update_settings",
   Snapshot: "session/snapshot",
+  /** The session's committed history as a typed event log, after a position (docs/feat/session-log.md). */
+  Log: "session/log",
   Enqueue: "session/enqueue",
   SendNow: "session/send_now",
   SessionList: "session/list",
@@ -119,6 +122,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     result: UpdateSettingsResultSchema,
   },
   [Method.Snapshot]: { params: SnapshotParamsSchema, result: SnapshotResultSchema },
+  [Method.Log]: { params: LogParamsSchema, result: LogResultSchema },
   [Method.Enqueue]: { params: EnqueueParamsSchema, result: EnqueueResultSchema },
   [Method.SendNow]: { params: SendNowParamsSchema, result: PromptResultSchema },
   [Method.SessionList]: { params: SessionListParamsSchema, result: SessionListResultSchema },

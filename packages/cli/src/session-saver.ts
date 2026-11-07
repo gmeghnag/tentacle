@@ -9,8 +9,12 @@
  */
 import type { JsonSessionStore, SessionRecord } from "@tentacle/agent";
 
-/** All the saver needs from a store: a `save` whose promise settles with the write, and `remove`. */
-export type SaveTarget = Pick<JsonSessionStore, "save" | "remove">;
+/**
+ * All the saver needs from a store: a `save` whose promise settles with the
+ * write, and `remove`; `saveAside` when the store can keep a diverged copy.
+ */
+export type SaveTarget = Pick<JsonSessionStore, "save" | "remove"> &
+  Partial<Pick<JsonSessionStore, "saveAside">>;
 
 /** A uid's last save outcome: fine, or failing with the latest error. */
 export type SaveState =
@@ -98,6 +102,26 @@ export class SessionSaver {
     );
     this.pending.set(settled, record.id);
     void settled.finally(() => this.pending.delete(settled));
+  }
+
+  /**
+   * Keep a copy the daemon's history diverged from (docs/feat/session-log.md
+   * F1) in its own aside file, and say so in the TUI. Resolves once it is
+   * durable; REJECTS when it is not (the caller then keeps the session file as
+   * it is, and tries again at the next save) — never a silent loss.
+   */
+  async saveAside(record: SessionRecord): Promise<void> {
+    if (!this.target.saveAside) {
+      throw new Error("this store cannot keep a copy aside");
+    }
+    const file = await this.target.saveAside(record);
+    try {
+      this.notify(
+        `⚠ Session ${record.id.slice(0, 8)}: the daemon's history diverged from this copy (a restarted daemon was reseeded from another copy) — this copy saved aside in ${file}`,
+      );
+    } catch {
+      // A broken listener must not undo a write that landed.
+    }
   }
 
   /**

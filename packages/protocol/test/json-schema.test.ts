@@ -140,6 +140,40 @@ const FIXTURES: Record<string, Json[]> = {
       },
     },
   ],
+  "methods/session~1log/params": [
+    { sessionId: "s" },
+    { sessionId: "s", after: { seq: 3, id: "i/3" }, maxChars: 1024 },
+  ],
+  "methods/session~1log/result": [
+    {
+      entries: [
+        {
+          type: "base",
+          seq: 1,
+          id: "i/1",
+          ts: 1,
+          critical: true,
+          inc: "i",
+          reason: "create",
+          count: 1,
+        },
+        {
+          type: "message",
+          seq: 2,
+          id: "i/2",
+          prev: "i/1",
+          ts: 1,
+          critical: true,
+          message: { role: "user", content: "q" },
+        },
+        // A type this version does not know: the open envelope keeps it for the reader.
+        { type: "from_the_future", seq: 3, id: "i/3", prev: "i/2", ts: 2, extra: { any: 1 } },
+      ],
+      more: false,
+      tip: { seq: 3, id: "i/3" },
+    },
+    { entries: [], more: false, tip: { seq: 9, id: "i/9" }, rebased: true },
+  ],
   "methods/session~1reclaim/params": [{ sessionId: "s", ids: ["a", "b"] }],
   "methods/session~1reclaim/result": [{}],
   "methods/session~1rename/params": [{ sessionId: "s", title: " Fix\tlogin " }],
@@ -449,7 +483,8 @@ describe("tagged-union shape (what codegen needs)", () => {
         expect(typeof ref === "string" && isRecord(defs[ref.replace("#/$defs/", "")])).toBe(true);
       }
     }
-    expect(unions).toBe(5);
+    // +1: `KnownLogEntry` (session/log, protocol 17).
+    expect(unions).toBe(6);
   });
 
   test("every $ref names a $def", () => {
