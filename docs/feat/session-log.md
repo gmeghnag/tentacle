@@ -1007,6 +1007,29 @@ the copy without an aside — owner Q-R1 left those as they are (an honest compa
 told apart; not a regression vs `main`). A `root`-matched `reseed` after a compaction cannot be
 content-checked (the seed segment is gone).
 
+### Fix round 2
+
+*— claude-sonnet-5-5, 2026-11-07*
+
+**M2** (an honest reseed + a `replace` before the read, e.g. a `/settings` head swap, was a
+false fork): the `reseed` branch of `client/src/session-log-reader.ts` now takes the digests of
+the first base's `count` seed messages at the moment its `expect` reaches 0 (`seed`) and
+requires them to EQUAL `held.digests` (`sameDigests`); commits after the seed (appends,
+replaces) are irrelevant to the lineage check. A missing seed (no complete first base) is a
+fork. Red first (2 new unit tests in `client/test/session-log-reader.test.ts`):
+head swap after a reseed → `Expected "reseed", Received "fork"`; a forged seed made to look like
+the held copy by a LATER replace → `Expected "fork", Received "reseed"` (the old end-of-read
+compare was fooled both ways). `review/round2.ts` now: A `reseed` no aside · A2 `reseed` no
+aside (gap) · B `reseed` gap · C `reseed` no aside · D (forged `root`) unchanged · E root
+present. Mutation (compare the held digests with the END-of-read `digests` again): the two new
+tests and "an honest reseed … also when it already grew" fail; restored, `shasum -c` OK.
+Gate: `bunx tsc --noEmit` clean · `bunx biome check .` 0/0 · `bun test packages` **5389 pass,
+3 skip (opt-in), 0 fail**. No `critical` value touched; no schema change.
+
+Notes/debt: **L6** (a forged `root` equal to the held head is `reseed` + `gap` with no content
+check) is accepted by owner Q-R1 — the seed segment is gone, so there is nothing to compare; a
+pod can feed any history anyway (no regression vs `main`'s snapshot).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-07 (fresh context; SAME model as the executor — shared blind spots can survive both passes; a different-model pass is advisable for a load-bearing L)*
@@ -1207,6 +1230,116 @@ false fork (M1), the third forgery shape (L1), and a cluster command never dry-r
    released), with a test for each.
 3. **Q10 stands: the real-cluster run is required before merge.** Run it with the corrected
    command in L5 (the doc's version will not run as written).
+
+### Review round 2
+
+*— claude-opus-5-5, 2026-11-07 (resumed)*
+
+#### Verdict: **REQUEST-CHANGES** (1 new MEDIUM, introduced by the L1 hardening; everything else passes)
+
+The real-cluster run (Q10) is done and passes every gate. M1, L2, L3, L4 and L5 are fixed. L1
+is fixed as the owner decided. The new digest check on `reseed` gives a false fork in another
+honest path (M2), so the branch is not LOW-only yet.
+
+#### Real cluster (OCP, context `test00/api-sharedocp419-…:6443/kube:admin`, ns `test00`, amd64)
+
+The pod binary was pinned (`TARGET=bun-linux-x64 bun run compile` → `dist/tentacle-pod`,
+`TENTACLE_POD_BIN`). `run --image registry.access.redhat.com/ubi9/ubi`: the pod was Running
+in about 14 s, 89.8 MB were injected, and the TUI was ready. OCP's random UID/SCC blocked
+nothing. I sent `/quit` and the pod was kept. `pod-measure-k8s.ts`, two runs:
+
+```
+daemon protocol 17
+seeded 1663 messages (~2.0 MB); idle rename→session_title 44 ms
+(a) cold: read-back 969 ms, 10 frame(s), 2349.5 KiB, messages=1663; update delayed +5 ms vs idle
+(b) steady, after one round: read-back 62 ms, 1 frame(s), 1.2 KiB, messages=1665; update delayed +17 ms vs idle
+(b') steady, nothing new: read-back 44 ms, 1 frame(s), 0.3 KiB, messages=1665; update delayed +1 ms vs idle
+--- run 2: idle 44 ms · (a) 1000 ms / 10 / 2349.5 KiB / +4 ms · (b) 62 ms / 1 / 1.2 KiB / +18 ms · (b') 45 ms / 1 / 0.3 KiB / +2 ms
+```
+
+| Gate (measured RTT = 44 ms, the idle rename round trip) | Limit | Measured | |
+|---|---|---|---|
+| (b) read-back time | ≤ RTT + 50 = 94 ms | 62 ms | ✔ |
+| (b) bytes | < 16 KB | 1.2 KiB | ✔ |
+| update delay during a steady read | ≤ RTT + 100 = 144 ms | 44 + 17–18 = 61–62 ms (+17–18 over idle) | ✔ |
+| (a) cold | reported, not gated | ~1.0 s, 2.35 MiB, 10 frames; update +4–5 ms | — |
+
+This link is much faster than the simulated 12 Mbit/s one (a cold read of 2.35 MiB in about
+1 s). Even the cold read barely delays an update, because pages interleave with the stream.
+Per save, the gain on this cluster is about 1 s → about 60 ms of link time, and 10 → 1 round
+trips. No `main` baseline was taken on the cluster: that would need a protocol-16 pod binary.
+The simulated `main` row stands in for it.
+
+Cleanup: `bun packages/cli/src/main.ts rm sl-measure` refused at first ("is running — a session
+may be attached"; stdin is not a TTY). Both the TUI and the script had closed, so I ran
+`rm -f sl-measure` → "Removed sl-measure". `oc get pods -n test00` then showed "No resources
+found". The tmux session is killed and `dist/tentacle-pod` is removed. Nothing else in the
+cluster was touched; all other cluster commands were read-only `oc get`.
+
+#### Findings, round 2
+
+**M2 (MEDIUM, new) — an honest reseed followed by a `replace` before the read is a false fork.**
+`client/src/session-log-reader.ts`, `reseed` branch:
+`extends_(held.digests, firstSegment ?? digests)`. With no second base in the read,
+`digests` is the segment's state at the END of the read, after every `replace`. A `/settings`
+head swap (`replace[0]`, `swapAgent`), or any annotation or replacement of a seeded message
+between the recreate and the next save, then fails the check. Repro
+(`review/round2.ts`):
+```
+A  honest reseed + head swap, read           outcome=fork   aside=YES
+A2 honest reseed + head swap + compaction    outcome=reseed aside=no gap
+C  honest reseed + a turn, read              outcome=reseed aside=no
+```
+A and A2 are the same honest history and get opposite verdicts. Fix: check the SEED itself.
+Take the digests of the first base's `count` messages at the moment its `expect` reaches 0,
+and require them to EQUAL `held.digests`. `logBaseOf` sends `logBase` only when
+`entry.history === log.messages`, so an honest seed is exactly the held copy. Commits made
+after the seed (appends, replaces) are then irrelevant to the lineage check. Test: A → `reseed`,
+no aside.
+
+**L6 (LOW, accepted class) — a forged `root` equal to the held head is `reseed` + `gap` with
+no aside** (`round2.ts` D). It cannot be content-checked, because the seed segment is gone by
+construction. It belongs to the same class as the same-inc `rebased` and the chained foreign
+`base` (attack 4l, still `linear`), which the owner left as they are (Q-R1). It is not a
+regression against `main`. It is listed in the fix round's "Remaining caveats"; no action.
+
+#### Round-1 findings re-checked
+
+| | Status | Evidence |
+|---|---|---|
+| M1 | **fixed** | `reseed-compact.ts`: `reseed, then a compaction → reseed aside=no` (it was `fork`). Two compactions → `reseed` + `gap` (`round2.ts` B): a loud gap, not a silent adopt |
+| L1 | fixed as decided | forged `base.prev` = held head → `fork` + aside (`attacks.ts` 2). The same-inc forgery (3) and the chained foreign base (4l) remain accepted, as recommended |
+| L2 | fixed | constraint recorded on `feat/session-log-laptop-store` in `TODO.md` |
+| L3 | fixed | the cold retry runs only before a report, and a clean read re-arms it (diff `remote-client.ts`). The new "L3" test passes |
+| L4 | fixed | failure mode 18 reworded correctly |
+| L5 | fixed and used | the corrected command ran end to end (above) |
+| Critical table | unchanged | the diff touches no `LOG_ENTRY_CRITICAL` or schema literal; still owner item 14 |
+
+The other repros, re-run: `attacks.ts` has the same results as round 1 except 2 (now `fork`).
+`markers.ts` was not affected by the diff (no daemon hook changed).
+
+#### Gate (once)
+
+`bunx tsc --noEmit` is clean. `bunx biome check .` checks 720 files with 0 errors and 0
+warnings. `bun test packages` gives **5387 pass · 3 skip (opt-in) · 0 fail** (156.6 s).
+
+#### Mutation (mine, on the new `root` classification)
+
+`session-log-reader.ts` `root` branch: `root?.id === head.id && root?.seq === head.seq` →
+`root !== undefined` (accept any root). Result: **2 FAIL**. C3 (the F1 fork became `reseed`)
+and "a daemon that never linked to our head has another `root` … stays a fork". The file was
+restored from a `cp` backup: `shasum -c` OK, `git status` clean.
+
+#### How the executor (Sonnet, resumed) behaved
+
+The round was precise and well evidenced. Each fix was red first and has a mutation with
+`shasum -c`. The remaining forgery caveats were stated honestly and unprompted. The miss was
+that the L1 check was tested only with appends after the seed (`C`). It was never tested with
+a `replace`, the one honest shape that breaks it.
+
+#### Owner questions
+
+None new. M2's fix follows from the owner's Q-R1 answer ("the seed must equal the held copy").
 
 ### Owner answers (fix round 1)
 

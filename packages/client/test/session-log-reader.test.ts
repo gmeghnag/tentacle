@@ -383,6 +383,42 @@ describe("fix round 1 — M1 (root) and L1 (a reseed must carry the held copy)",
     expect(applied.state.messages.map((x) => x.content)).toEqual(["forged"]);
   });
 
+  test("M2 an honest reseed followed by a head swap (replace[0]) before the read is a `reseed`, no aside; commits after the seed are irrelevant to the lineage check", () => {
+    // RED before the fix: the check compared the held digests with the segment state at
+    // the END of the read (the swapped head) → `fork` + aside.
+    const { held, h } = heldOf();
+    const live = [...h];
+    const d = new SessionLog("DA");
+    d.start(live, "seed", held.head);
+    live[0] = m("system", "S-new");
+    d.commit(live, live.length);
+    const applied = ok(applyLogRead(held, pages(d, held.head), sha256));
+    expect(applied.outcome).toBe("reseed");
+    expect(applied.aside).toBeUndefined();
+    expect(applied.state.messages[0]?.content).toBe("S-new");
+    // + a compaction after it (the seed segment retained as the previous one): same.
+    const d2 = new SessionLog("DA2");
+    const live2 = [...h];
+    d2.start(live2, "seed", held.head);
+    live2[0] = m("system", "S-new");
+    d2.commit(live2, live2.length);
+    d2.replaced([m("user", "SUM")], "compact");
+    expect(ok(applyLogRead(held, pages(d2, held.head), sha256)).outcome).toBe("reseed");
+  });
+
+  test("M2 a forged seed is still refused even when followed by a replace that would make it look like the held copy", () => {
+    const { held, h } = heldOf();
+    const forged = new SessionLog("EVIL");
+    const live = [m("system", "S"), m("user", "forged"), m("user", "forged")];
+    forged.start(live, "seed", held.head);
+    live[1] = h[1] as ChatMessage;
+    live[2] = h[2] as ChatMessage;
+    forged.commit(live, live.length);
+    const applied = ok(applyLogRead(held, pages(forged, held.head), sha256));
+    expect(applied.outcome).toBe("fork");
+    expect(applied.aside).toEqual(held.messages);
+  });
+
   test("an honest reseed (seed segment = held copy) stays `reseed`, also when it already grew", () => {
     const { held, h } = heldOf();
     const same = new SessionLog("D2");

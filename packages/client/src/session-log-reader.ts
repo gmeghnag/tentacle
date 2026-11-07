@@ -142,8 +142,12 @@ export function applyLogRead(
   let digests: string[] = linear && held !== null ? [...held.digests] : [];
   let inc = held?.inc ?? "";
   let firstBase: Extract<KnownLogEntry, { type: "base" }> | undefined;
-  /** The digests of the FIRST segment's messages, as the next `base` starts (else the final ones). */
-  let firstSegment: string[] | undefined;
+  /**
+   * The digests of the first base's `count` seed messages, taken the moment its
+   * `expect` reaches 0: commits after the seed (appends, replaces such as a head
+   * swap) are not part of the lineage check (M2).
+   */
+  let seed: string[] | undefined;
   let expect = 0; // message entries a base still owes
   let title: SessionTitle | undefined;
   let drift: { seq: number } | undefined;
@@ -153,17 +157,19 @@ export function applyLogRead(
     }
     switch (e.type) {
       case "base":
-        if (firstBase !== undefined) firstSegment ??= digests;
         firstBase ??= e;
         inc = e.inc;
         messages = [];
         digests = [];
         expect = e.count;
+        if (e === firstBase && expect === 0) seed = [];
         break;
       case "message":
         messages.push(e.message as ChatMessage);
         digests.push(messageDigest(e.message, sha256));
-        if (expect > 0) expect--;
+        if (expect > 0 && --expect === 0 && seed === undefined && firstBase !== undefined) {
+          seed = [...digests];
+        }
         break;
       case "replace":
         if (e.index >= messages.length) {
@@ -211,10 +217,10 @@ export function applyLogRead(
     outcome = "rebased";
     gap = rebased;
   } else if (firstBase?.prev !== undefined && firstBase.prev === held.head.id) {
-    // A reseed from THIS head carries this copy (an honest one always does; the
-    // seed may already have grown by commits before the read). A seed that
-    // does not is a forged or confused claim: a fork, set aside (L1).
-    if (extends_(held.digests, firstSegment ?? digests)) {
+    // A reseed from THIS head carries exactly this copy as its seed (an honest
+    // one always does; later commits are not the seed). A seed that does not is
+    // a forged or confused claim: a fork, set aside (L1, M2).
+    if (seed !== undefined && sameDigests(held.digests, seed)) {
       outcome = "reseed";
     } else {
       outcome = "fork";
@@ -240,6 +246,11 @@ export function applyLogRead(
     ...(gap ? { gap: true as const } : {}),
     ...(drift ? { drift } : {}),
   };
+}
+
+/** Equal digest lists. */
+function sameDigests(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((d, i) => b[i] === d);
 }
 
 /** `next` equals `held` or extends it (by per-message digests). */
