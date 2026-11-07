@@ -182,8 +182,9 @@ function parseToolExecution(raw: string | undefined): ToolExecutionMode | undefi
 
 /**
  * `TENTACLE_WRITABLE_DIRS`: `:`-separated; unset → undefined (fall through);
- * empty → `[]` (project only). An entry that is not `~`, `~/…` or absolute is
- * dropped (it would have no anchor; dropping only narrows what is writable).
+ * empty → `[]` (project only). Blank entries are skipped. An entry that is not
+ * `~`, `~/…` or absolute is KEPT: `HostExecution` drops it (no anchor) and
+ * `buildAgent` logs the drop, so it is never silent (review LOW 6).
  */
 function parseDirList(raw: string | undefined): string[] | undefined {
   if (raw === undefined) {
@@ -192,7 +193,7 @@ function parseDirList(raw: string | undefined): string[] | undefined {
   return raw
     .split(":")
     .map((d) => d.trim())
-    .filter((d) => d === "~" || d.startsWith("~/") || d.startsWith("/"));
+    .filter((d) => d !== "");
 }
 
 export interface ResolveContext {

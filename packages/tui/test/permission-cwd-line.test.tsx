@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { PermissionRequest } from "@tentacle/core";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { cellWidth } from "../src/cells.ts";
 import { PermissionPrompt, permissionPromptRows } from "../src/components/PermissionPrompt.tsx";
@@ -48,4 +49,35 @@ describe("the dialog's cwd row", () => {
     expect(frame.split("\n").length).toBe(permissionPromptRows(2));
     view.unmount();
   });
+
+  // Review round 1, LOW 3: below 51 columns the row wrapped (7 rows vs 6).
+  for (const columns of [30, 40, 45, 50]) {
+    test(`the cwd row fits ${columns} columns`, () => {
+      expect(cellWidth(permissionCwdLine("/w", columns))).toBeLessThanOrEqual(columns - 2);
+      expect(cellWidth(permissionCwdLine(`/${"d".repeat(80)}`, columns))).toBeLessThanOrEqual(
+        columns - 2,
+      );
+    });
+  }
+
+  // The frame from 45 up (below ~46 the pre-existing key-hint footer wraps on its own).
+  for (const columns of [45, 50]) {
+    test(`never wraps at ${columns} columns: the frame keeps permissionPromptRows`, () => {
+      // ink-testing-library's stdout is 100 columns wide: a Box gives Ink the
+      // terminal's width, so a too-long row wraps as it would on screen.
+      const view = render(
+        <Box width={columns} flexDirection="column">
+          <PermissionPrompt
+            req={REQ}
+            options={["Yes", "No"]}
+            selected={0}
+            cwd="/Users/someone/projects/tentacle"
+            columns={columns}
+          />
+        </Box>,
+      );
+      expect((view.lastFrame() ?? "").split("\n").length).toBe(permissionPromptRows(2));
+      view.unmount();
+    });
+  }
 });

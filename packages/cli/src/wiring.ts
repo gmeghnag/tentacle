@@ -1,7 +1,7 @@
 /**
  * Builds a fully-wired `Agent` from a resolved `TentacleConfig`: the configured
  * model provider (OpenAI-compatible or native Anthropic), host execution
- * (writes confined to the workspace), the built-in tool-set, and a
+ * (writes confined to the workspace + `tools.writableDirs`), the built-in tool-set, and a
  * `PermissionBroker` whose requester the frontend can attach at runtime.
  * Shared by the one-shot and interactive entry points.
  */

@@ -2,9 +2,11 @@
  * Where a large tool output is spilled (docs/fix/tool-output-location.md): the
  * daemon host's cache dir, never the user's project. Layout
  * `<root>/<project-key>/<session>/<tool>-<call>.txt`, dirs `0700`, files `0600`.
- * Written outside the workspace-confined `env` on purpose: the model reads the
- * file back with `fs_read` (reads are unconfined), but its `fs_write` stays
- * confined to the workspace.
+ * Written outside the write-confined `env` on purpose: the model reads the
+ * file back with `fs_read` (reads are unconfined). Its `fs_write` reaches the
+ * project and `tools.writableDirs` (docs/feat/write-tmpdir.md) — so the cache
+ * dir is normally not writable for it, but the `os.tmpdir()` fallback root IS inside the
+ * default writable dirs (still behind the `fs_write` ask).
  *
  * The store is the one truth on names: a file is created exclusively and a
  * taken name gets a `~N` suffix, so no spill ever replaces another (a server

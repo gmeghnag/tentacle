@@ -221,6 +221,77 @@ Mutation 3 replaced the plan's "`abs` instead of `realTarget(abs)`". On macOS th
 3. Set `"tools": { "writableDirs": [] }` in `config.jsonc`, then repeat 1. Expected: refused.
 4. Run `tentacle run --engine docker …` with that same laptop config and have the model write `/tmp/y.txt`. Expected: it asks and writes inside the container (not carried; the container's own default applies).
 
+### Fix round 1
+
+*— claude-opus-5-5, 2026-11-07*
+
+This round answers Review round 1 (905ce30). The owner chose: F1 refuse every dangling link; F2 fix TOCTOU and hard links in this branch; and fix LOW 3, 4 and 6 too.
+
+**What changed:**
+
+- **F1** `packages/exec/src/host-execution.ts:99` `realTarget`. It now returns `{ok:false, dangling}` as soon as the deepest existing entry passes `lstat` and fails `stat` (a dangling link or a loop). The `readlink` recursion and `MAX_LINK_HOPS` are gone. `confineWrite` (`:420`) throws `refused: dangling symlink <entry> (its target does not exist; create it first): <path>` (`:425`). It returns the checked REAL path, which is what gets opened.
+  - A writable dir that is a dangling link at startup is dropped and reported (LOW 5).
+  - Behaviour change: a dangling link that points INSIDE a root is refused too (accepted by the owner). The existing test "a symlink inside a writable dir pointing into the project or itself is fine" therefore creates `real.txt` first. That is its only change; its assertions are unchanged.
+- **F2** `writeFile` (`:344`), `openConfined` (`:386`), flags at `:119`. The write never goes through `Bun.write(path)` again. It works like this:
+  1. `mkdir -p` the parent of the checked real path.
+  2. `open(real, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK, 0o666)`. On `EEXIST`, reopen with `O_WRONLY|O_NOFOLLOW|O_NONBLOCK`. **No `O_TRUNC`**, so nothing is truncated before the checks pass.
+  3. On the descriptor: it must be a regular file, and `nlink === 1` (else `refused: hard link …`).
+  4. The parent's `realpath` is re-read AFTER the open. It must be inside a root, and the name there must be this very inode (`dev` + `ino` from `lstat` vs `fstat`); else `refused: the path moved during the write …`.
+  5. Then `ftruncate(0)` and write through the descriptor.
+  - `ELOOP` (or `EMLINK`) gives `refused: a symlink at the final path …`. `ENXIO` (a FIFO with no reader) gives `refused: not a regular file`.
+  - Because the checked real path is opened (links present at check time are already followed), a write through an EXISTING in-root symlink keeps working. Opening the model's path with `O_NOFOLLOW` would have refused every symlinked project file.
+  - Test seam: `HostExecutionConfig.beforeOpen` (`:58`, documented TEST SEAM ONLY). It runs between the check and the open.
+  - **Coverage** (`rg 'env\.writeFile\('`): `fs_write`, `fs_edit`, `fs_multi_edit` (`tools/src/builtins.ts:128, 201, 249`) and the spill fallback (`agent/src/agent.ts:1906`). All go through `HostExecution.writeFile`, the only `ExecutionEnvironment` implementation. So all of it holds in the project and in the writable dirs alike.
+- **LOW 3** `packages/tui/src/permission-ui.ts:89`. As a last resort the whole row is cut to `columns - 2`, so it never wraps.
+- **LOW 4.** The comments are now true: `packages/agent/src/tool-output.ts:5-9` (the `os.tmpdir()` fallback IS inside the default writable dirs, still behind the ask) and `packages/cli/src/wiring.ts:4`.
+- **LOW 6** `packages/config/src/resolve.ts:189` `parseDirList`. It keeps a non-absolute env entry (only blank ones are skipped). `HostExecution` drops it and `buildAgent` sends the same `tools.writableDirs: ignored "<entry>" …` notice.
+- **Docs.** CHANGELOG `[Unreleased]`: "Fixed" is rewritten (dangling links, hard links, the `O_NOFOLLOW` race, FIFO; in-root links still work), and "Added" now says ignored entries are logged and that auto-accept skips the ask. The README row is updated to match.
+
+**Red → green.** Every test below was run on the round-0 code first.
+
+- `packages/exec/test/confinement.test.ts`, new `describe("dangling links, hard links and races (fix round 1)")`. Each case runs in a writable dir AND in the project. All 8 were RED on the round-0 code, on the property: the write went through, with `refusal()` → `undefined`, or for the FIFO a non-`WorkspaceWriteError`:
+  1. F1, the review's lexical form `d → outside/sub`, `lexbad → d/../created-outside`.
+  2. F1, the regression form `outside/sub/up → ../up-out` through `d/up`.
+  3. F1, dangling inside a root → `refused: dangling symlink`.
+  4. F1/LOW 5, a dangling root is dropped.
+  5. F2, a hard link to an outside file → refused; the outside file stays `orig`.
+  6. F2, a symlink swapped in at the final path (via `beforeOpen`) → `symlink at the final path`; the outside file stays `orig`.
+  7. F2, the parent dir swapped for a link outward (via `beforeOpen`) → `moved during the write`. An existing outside file keeps `orig`; a new one is at most empty.
+  8. F2, a FIFO → refused, no hang.
+  - A 9th test, "ordinary writes still work", covers create, overwrite (truncated) and through an in-root link. It was green before and is green after, so it shows nothing regressed.
+- `packages/tui/test/permission-cwd-line.test.tsx`, added cases. The 45- and 50-column frames were RED (7 rows vs `permissionPromptRows(2)` = 6, the review's number). They need a `<Box width>` because ink-testing-library's stdout is fixed at 100 columns. The pure no-wrap check at 30/40/45/50 was RED at 30/40 and is green after.
+  - Not fixed: below about 46 columns the pre-existing key-hint footer (`↑↓ choose · enter confirm · y/a/n · esc deny`) wraps on its own. That is not this task's row, so the frame check stops at 45.
+- LOW 6: the `writable-dirs.test.ts` env assertion changed from `["/ok"]` to `["rel","/ok"]` (a behaviour change). `wiring.test.ts` gained an env case asserting both notices. Both were RED before the `parseDirList` change.
+
+**Mutations** (cp backup → Edit → narrow test → cp restore → `shasum -c` OK, every time):
+
+| # | Mutation | Result |
+|---|---|---|
+| A | no dangling refusal in `realTarget` | killed: F1 lexical form, F1 inside-root message, dangling root dropped. The absolute-target dangling cases still refused, via `O_NOFOLLOW` at the open (defence in depth) |
+| B | drop `O_NOFOLLOW` | killed: the final-path race test. Even then the post-open inode check refused (`moved during the write`) and the outside file kept its bytes |
+| C | `nlink` check disabled | killed: hard link |
+| D | post-open parent/inode re-check disabled | killed: parent swap |
+| E | add `O_TRUNC` to the reopen | killed: hard link + parent swap (the outside bytes are lost before the refusal) |
+| F | drop `O_NONBLOCK` | the FIFO test HANGS: `open` blocks, the 2 s test timeout cannot interrupt it, and the outer `timeout 60` killed the run. Not a pass |
+
+LOW 3's red was the pre-fix code itself.
+
+**Gate:** `bunx tsc --noEmit` clean. `bunx biome check .` clean (after `biome check --write` reformatted the test's import). `bun test packages`: **5287 pass, 3 skip (opt-in), 0 fail** (5290 total).
+
+**What remains open:**
+
+- **Under an active race, a parent swap can leave empty traces outside.** If a directory on the path is swapped for a link outward between the check and the open:
+  - `mkdir -p` may create empty directories outside.
+  - `O_CREAT|O_EXCL` may create one EMPTY file outside before the post-open check refuses it. It is not unlinked, because unlinking by name would be racy too.
+  - No content is ever written, and no existing file is truncated (mutation E proves the order).
+  - The full fix is an `openat`/`O_NOFOLLOW` walk from a root fd, component by component, which Node/Bun does not expose. Left open.
+- **After the post-open check, the fd is pinned to a verified inode.** Later renames or new hard links of that inode by an attacker only move OUR bytes; they cannot redirect the write to a victim inode.
+- **A hard-linked file inside the project is now unwritable by the tools** (`nlink > 1`), even when every name is inside. That is the price of not being able to see the other names. The error says so. The model can still use `shell`.
+- **A dangling link that points inside a root is refused**, by owner choice.
+- **The race tests run on one uid with the `beforeOpen` seam**, not a true concurrent cross-user attacker.
+- **The `/tmp/wt-repro*.txt` files from round 0 are still there.** Deleting outside the worktree needs an approval this session did not have. All of this round's scratch files in `.tentacle/tmp/write-tmpdir/` were removed. The plan and the reviewer's `review/` folder were kept.
+- **LOW 6, first half, not addressed:** the dropped-entry notice still fires once per `buildAgent` (once per session on `serve`).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-07*

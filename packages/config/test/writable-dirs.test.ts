@@ -42,7 +42,7 @@ describe("tools.writableDirs", () => {
     ]);
   });
 
-  test("env wins: ':'-separated; empty = []; a relative entry is dropped", () => {
+  test("env wins: ':'-separated; empty = []; a relative entry is KEPT so the daemon reports its drop", () => {
     const fileConfig = FileConfigSchema.parse({ tools: { writableDirs: ["/data"] } });
     const env = { TENTACLE_WRITABLE_DIRS: "/a:~/b" };
     const c = resolveConfig(ctx({ fileConfig, env }));
@@ -53,7 +53,9 @@ describe("tools.writableDirs", () => {
     ).toEqual([]);
     expect(
       resolveConfig(ctx({ env: { TENTACLE_WRITABLE_DIRS: "rel:/ok::" } })).writableDirs,
-    ).toEqual(["/ok"]);
+    ).toEqual(["rel", "/ok"]);
+    // Review round 1, LOW 6: it was dropped here silently; now `HostExecution`
+    // drops it (not absolute) and `buildAgent` logs it, like any other bad entry.
   });
 
   test("the schema takes ~, ~/… and absolute entries; a relative or empty one is an error", () => {

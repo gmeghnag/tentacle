@@ -1034,6 +1034,17 @@ describe("tools.writableDirs wiring (docs/feat/write-tmpdir.md)", () => {
       const result = await write(cfg, join(elsewhere, "x.json"), (l) => notices.push(l));
       expect(result).toContain("refusing to write outside");
       expect(notices.some((n) => n.includes("writableDirs") && n.includes('"/"'))).toBe(true);
+      // Review round 1, LOW 6: an env entry that is not absolute reaches the same notice.
+      const fromEnv = await loadConfig({
+        cwd: project,
+        env: { ...process.env, TENTACLE_WRITABLE_DIRS: "rel/dir:./y" },
+      });
+      const envNotices: string[] = [];
+      await write(fromEnv, join(elsewhere, "y.json"), (l) => envNotices.push(l));
+      expect(envNotices.filter((n) => n.includes("tools.writableDirs: ignored"))).toEqual([
+        'tools.writableDirs: ignored "rel/dir" (not an absolute dir, or the filesystem root)',
+        'tools.writableDirs: ignored "./y" (not an absolute dir, or the filesystem root)',
+      ]);
     } finally {
       await rm(project, { recursive: true, force: true });
       await rm(elsewhere, { recursive: true, force: true });
