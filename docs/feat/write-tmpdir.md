@@ -1,6 +1,6 @@
 # feat/write-tmpdir — `fs_write` may write to the system temp dir
 
-> **Status:** executed, awaiting fresh-context Review
+> **Status:** reviewed: REQUEST-CHANGES (one HIGH confinement escape, see Review)
 > **Branch:** `feat/write-tmpdir` (off `main` 70ec587 = v0.3.0)
 > **Type:** feat · **Size:** M · **Blast:** load-bearing (widens a write boundary; the confinement check is the one thing `fs_write`/`fs_edit`/`fs_multi_edit` rely on) · **Suited:** a strong model executes; Review is mandatory and in a fresh context, red-teaming confinement escapes (symlinks, `..`, case, prefix collisions). The code is small (S-sized diff), but a hole here is silent file corruption outside the project.
 
@@ -223,4 +223,115 @@ Mutation 3 replaced the plan's "`abs` instead of `realTarget(abs)`". On macOS th
 
 ## Review
 
-*— (empty; mandatory fresh-context review for a load-bearing change)*
+*— claude-opus-5-5, 2026-11-07*
+
+**Verdict: REQUEST-CHANGES.** The dangling-symlink fix is incomplete: a link planted in `/tmp` still makes `fs_write` create a file outside every root, and one variant is a regression (`main` refuses it). Everything else in the boundary held.
+
+**Independence.** Fresh context, but the same model as the executor (`claude-opus-5-5`), so shared blind spots are possible. This task is load-bearing: a pass by a different model is worth having after the fix.
+
+### Findings
+
+1. **HIGH: a dangling link's target is resolved lexically, and the kernel resolves it physically** (`packages/exec/src/host-execution.ts:112`, `resolve(dirname(existing), link, ...tail)`). `path.resolve` collapses `..` as text and does not realpath `dirname(existing)`. `Bun.write` then follows the link for real. Two forms, both measured on macOS with real files:
+   - **Everything planted in `/tmp` (no write access outside needed):** `/tmp/a/d → <outside>/sub` and `/tmp/a/lexbad → d/../created-outside`. Through the wired agent (`loadConfig` default → `buildAgent` → `fs_write`), the result is `wrote 5 bytes to /tmp/…/lexbad` and `<outside>/created-outside` **exists**. The ask shows only `/tmp/…/lexbad`, so the user approves a path that looks harmless. It creates new files only (a dangling target does not exist yet), but that is enough for e.g. a missing `~/.zshenv`. `/tmp` is world-writable, so another local user could plant this, which is the threat Execution itself names as the reason for the fix (not run across two uids here). On `main` the same link inside the project also escapes, so the bug is old; this branch exposes it in a shared dir.
+   - **Regression against `main`:** `<outside>/sub/up → ../up-out`, written through `/tmp/a/d/up`. Branch: `WROTE`, `<outside>/up-out` created. `main`, same layout inside the project: `REFUSED`, because the old walk judged the realpath'd parent.
+   - **Fix (recommended, see Owner question 1):** refuse any dangling link (`realTarget` returns `undefined` as soon as `lstat` finds the entry and `stat` does not), and drop the `readlink` recursion. This closes both forms, the loop case and F5. Add both forms above as tests, shown red first.
+   - **False claims while this stands:** `CHANGELOG.md:18-19` ("a symlink out of a temp dir is still refused") and the README table row ("a symlink out of one stays refused").
+2. **MEDIUM (accepted debt, no worse than `main` in kind, wider exposure): TOCTOU and hard links.** Both escape on `main` (in the project) and on the branch (in `/tmp` and `os.tmpdir()`).
+   - Swapping the path for a link between check and write (forced by wrapping `Bun.write`): the file lands outside on both.
+   - A hard link to an outside file: its content is overwritten on both, and realpath cannot see it. Execution does not mention this one. Cross-user planting was not tested (one uid here).
+   - On `main` an attacker needed write access to the project. `/tmp` is world-writable, so this matters only on a multi-user host; a same-uid attacker gains nothing. See Owner question 2.
+3. **LOW: the cwd row wraps below 51 columns.** `packages/tui/src/permission-ui.ts:83-87`. At 50 and 45 columns the frame has 7 rows against `permissionPromptRows(2)` = 6; at 51+ it matches. By arithmetic, the old 20-cell note fitted down to 34 columns. `App` sizes the viewport from that count. The new test pins 60 columns only.
+4. **LOW: stale comments saying writes are confined to the workspace.** `packages/agent/src/tool-output.ts:6-7` ("its `fs_write` stays confined to the workspace") is now false: the spill store's fallback is `os.tmpdir()/tentacle-<uid>/tool-output`, which is inside the default writable dirs, so `fs_write` can reach it there (it still asks). Also `packages/cli/src/wiring.ts:4`.
+5. **LOW: a listed dir that is a dangling link at startup moves the root to the link's target.** `["/tmp/x/dangling"]` gave `roots=[<outside>/dang1]`. It needs the user to list a path in a shared dir, and an existing symlink behaves the same by design (the alias test). F1's fix drops the dangling case.
+6. **LOW: repeated and silent drops.** The dropped-entry notice fires once per `buildAgent`, so once per session on `serve` (by reading, `cli/src/serve.ts:182`). An env entry that is not absolute (`rel`, `./y`) is dropped with no log, while the file form is a load error; this is stated in Execution and only narrows.
+
+### Gate (run once, on the restored tree)
+
+`bunx tsc --noEmit`: clean. `bunx biome check .`: 710 files, no fixes. `bun test packages`: **5272 pass, 3 skip (opt-in), 0 fail, 5275 total.** The gate is green because no test covers F1.
+
+### Mutation
+
+`within`: `target.startsWith(root + sep)` → `target.startsWith(root)`. Killed by `writable dirs > a prefix sibling of a writable dir is refused` (16 pass, 1 fail). Restored with `cp` from the backup; `shasum` before and after: `32da63ced5bfd5d8599bd57c2712015a15e7510e`. `git status` was clean. The executor's nine mutations were not re-run.
+
+### Attacks tried
+
+Run with real files through `HostExecution` with `writableDirs: [os.tmpdir(), "/tmp"]`, in three arenas: inside the project, `/tmp`, `os.tmpdir()`. "Outside" was a dir under `.tentacle/tmp/write-tmpdir/review/`. The result is the same in all three arenas unless noted.
+
+| Attack | Branch | `main` (project arena) |
+|---|---|---|
+| File symlink → existing outside file | refused, unchanged | refused |
+| Dir symlink → outside, write inside it | refused | refused |
+| Dangling link → outside | **refused** | **ESCAPE** (the executor's claim: red on `main`, green here) |
+| Dangling chain `c1→c2→c3→outside` | **refused** | **ESCAPE** |
+| Chain to an existing dir | refused | refused |
+| Dangling dir, write beneath it | refused | ENOENT |
+| Symlink loop (via the self-pointing `d-sub/../lex1`) | refused | **ESCAPE** (there it is not a loop) |
+| Dangling `d/../created-outside` (`/tmp`, via `fs_write`) | **ESCAPE (F1)** | ESCAPE in the project (`d-sub/../lex1`) |
+| Dangling `../lex2` through a dir link | **ESCAPE (F1, regression)** | refused |
+| Hard link to an outside file | ESCAPE (F2) | ESCAPE |
+| TOCTOU swap | ESCAPE (F2) | ESCAPE |
+| NUL byte after a dangling link | `ERR_INVALID_ARG_VALUE`, nothing written | same |
+| `..` out of the arena; `/tmp/../etc/x` | refused | refused |
+| `/tmpfoo/x`, `/private/tmpfoo/x`, `/private/tmpx`, `/varfolders/x`, `/etc/x` | refused | refused |
+| `/tmp/…`, `/private/tmp/…`, `/TMP/…`, `/Private/Tmp/…`, `$TMPDIR/…` | written (the same real dir; APFS canonicalises case) | refused (Context repro below) |
+| Model path `~/x` | literal `<project>/~/x`, no expansion | not run |
+
+`writableDirs` entries:
+
+| Entry | Result |
+|---|---|
+| `/`, `//`, `/tmp/..`, `/./`, a symlink to `/` | dropped and reported, outside refused |
+| `relative`, `""`, unexpanded `~`, `~/x` | dropped and reported, outside refused |
+| `/does/not/exist` | root kept literal, outside refused |
+| A missing root later replaced by a link outward | refused (roots are pinned, targets re-checked) |
+| `/Users` | accepted, wide open under it: only `/` is dropped, as the owner decided |
+
+Env through the real `loadConfig` (`HOME=/home/u`): `""`, `::`, `" : "` → `[]`. `/a/b::/c` → both dirs. `" /a : rel :~/x:~:~root:./y"` → `["/a","/home/u/x","/home/u"]`. `/` → kept by the loader, then dropped with a notice by the primitive. `TMPDIR=/` or `rel` gives a default that the primitive also drops.
+
+### Other checks
+
+- **Context repro on `main`:** both lines `REFUSED … WorkspaceWriteError`. TRUE.
+- **Worker path:** `startWorkerRuntime` structured-clones the whole `config` (`local-runtime.ts:951`), so `writableDirs` reaches the real TUI's agent. The end-to-end trace above used `loadConfig` → `buildAgent` → `fs_write`. The live TUI and a real pod were not run.
+- **Explore:** tools are `["fs_read"]` (`agent/src/subagent.ts:65-69`), the filter is untouched (no diff in `packages/agent`), and `parallel-agents.test.ts:597` is green. It still cannot write.
+- **Ask:** no diff in `permission-gate.ts`; the ask's title and detail are unchanged; only the row text changed. Auto-accept (`permission-ui.ts:51`) was already by tool, not by path, so under Shift+Tab a `/tmp` write is not asked, as with the project and with `shell`. This is not a regression, but "each write still asks" (README, CHANGELOG) is true only outside auto-accept.
+- **Pod:** `writableDirs` appears in none of `packages/protocol`, `client`, `daemon`, `docker`, `k8s`, `transport`; `carried-settings.ts` has no row; and no `TENTACLE_WRITABLE_DIRS` forwarding exists. No RPC makes the laptop write a file, and `engine-runtime` never calls `buildAgent`. So a pod's config widens writes only on the pod. By reading, not by a live pod.
+- **Config source:** only the user's `configDir` file is read, no project-level config, so a cloned repo cannot widen the list.
+
+### Premise table
+
+| Premise | Result |
+|---|---|
+| Write tools call `ctx.env.writeFile` (`builtins.ts:128, 201, 249`) | TRUE |
+| Only other caller is the spill fallback (`agent.ts:1906`) | TRUE |
+| One production `new HostExecution` (`wiring.ts:360`) | TRUE |
+| `buildAgent` serves worker, `serve`, pod (`worker.ts:117`, `serve.ts:182, 426, 491`) | TRUE |
+| `explore` read-only by tool set | TRUE |
+| Spill store writes outside `env` (`tool-output.ts:5-8`) | TRUE for the write; the "`fs_write` stays confined" half is now FALSE (F4) |
+| `realTarget` "catches symlink escapes" (Preconditions) | FALSE on `main` for dangling links (found by the executor); still FALSE on the branch (F1) |
+| A missing root stays literal (Design §7) | FALSE on macOS; corrected in Execution |
+
+### What holds
+
+Prefix rule, `..` on the model's path, macOS `/private` aliases, case on APFS (canonical strings, no case-insensitive match added), `/` and relative entries, env parsing, `[]` = project only, replace semantics, not carried, the project-only default of the primitive, non-dangling symlinks.
+
+### How the executor behaved
+
+Good on the whole, and honest. It found a real old hole beyond the plan, showed it red, corrected Design §7 against the code and recorded the drift. It kept TOCTOU visible as debt. The weakness is the fix: it re-implemented link resolution by hand with `path.resolve`, and tested only absolute targets, so it declared the class closed. The fix also moved the check from a realpath'd parent to a lexical one, which created the regression.
+
+### Review method note
+
+`bun <script>` needs an approval this session did not have, so the attack scripts ran as `bun test <file>` from `.tentacle/tmp/write-tmpdir/review/` (`attack.ts`, `e2e.test.ts`, `misc.test.ts`; gitignored). Minimal repro of F1:
+
+```ts
+symlinkSync(join(outside, "sub"), join(arena, "d"));          // arena under /tmp
+symlinkSync("d/../created-outside", join(arena, "lexbad"));
+await new HostExecution({ cwd: project, writableDirs: ["/tmp"] }).writeFile(join(arena, "lexbad"), "x");
+existsSync(join(outside, "created-outside")); // true: should have been refused
+```
+
+### Owner questions
+
+1. **How should F1 be fixed?** Recommendation: **refuse every dangling symlink**. It is a few lines, fails closed, and removes the hand-written resolver. The only cost is that a write through a dangling link that points inside a root gets refused, which is rare and has a clear error. The alternative is a component-by-component physical walk: it keeps that case working, but it re-implements the kernel's resolution in the one place where a mistake is silent.
+2. **TOCTOU and hard links: in this branch or later?** Recommendation: **a separate follow-up task**, listed in `TODO.md`: open with `O_NOFOLLOW` and check `nlink` on the descriptor. It is no worse than `main` in kind, and `shell` is unconfined anyway. If you run `serve` on hosts shared with other users, I would do it before merging.
+
+*— claude-opus-5-5, 2026-11-07*
