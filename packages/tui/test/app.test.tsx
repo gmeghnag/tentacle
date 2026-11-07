@@ -1107,7 +1107,7 @@ describe("App", () => {
     const frame = lastFrame() ?? "";
     expect(frame).toContain("pre hello world");
     expect(frame).not.toContain("Clipboard unavailable");
-    expect(frame).not.toContain("working…");
+    expect(frame).not.toContain("Working…");
     unmount();
   });
 
@@ -1129,7 +1129,7 @@ describe("App", () => {
     expect(frame).toContain("line one");
     expect(frame).toContain("line two");
     expect(frame).not.toContain("line one line two"); // no longer flattened
-    expect(frame).not.toContain("working…"); // paste must not start a turn
+    expect(frame).not.toContain("Working…"); // paste must not start a turn
     unmount();
   });
 
@@ -1151,7 +1151,7 @@ describe("App", () => {
     expect(frame).toContain("ab");
     expect(frame).toContain("cd");
     expect(frame).not.toContain("ab cd"); // preserved, not flattened to one line
-    expect(frame).not.toContain("working…");
+    expect(frame).not.toContain("Working…");
     unmount();
   });
 
@@ -1174,7 +1174,7 @@ describe("App", () => {
     const frame = lastFrame() ?? "";
     expect(frame).toContain("pre pasted text");
     expect(frame).not.toContain("200~");
-    expect(frame).not.toContain("working…"); // a paste must not start a turn
+    expect(frame).not.toContain("Working…"); // a paste must not start a turn
     unmount();
   });
 
@@ -1366,7 +1366,7 @@ describe("App robustness", () => {
     const frame = lastFrame() ?? "";
     expect(frame).toContain("a"); // first line
     expect(frame).toContain("b"); // second line (after the inserted newline)
-    expect(frame).not.toContain("working…"); // the turn did NOT start
+    expect(frame).not.toContain("Working…"); // the turn did NOT start
     expect(frame).not.toContain("⏺ ok"); // and nothing was submitted
     unmount();
   });
@@ -1867,7 +1867,7 @@ describe("/mcp panel (docs/feat/mcp-tools-panel.md)", () => {
     stdin.write("\r");
     await delay(40);
     let frame = lastFrame() ?? "";
-    expect(frame).toContain("working…");
+    expect(frame).toContain("Working…");
     expect(frame).toContain("▸ github");
     const y = rowOf(frame, "▸ db");
     stdin.write(press(5, y));

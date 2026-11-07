@@ -56,7 +56,7 @@ describe("mid-turn task queue (steering)", () => {
     // The queue sits where a sent message would; the working line is UNDER it,
     // right above the input, one blank row below the hint (owner, 2026-10-25).
     expect(lastFrame() ?? "").toMatch(
-      /› also do X\n {2}ctrl\+x ctrl\+s to send now\n\n[^\n]*working…[^\n]*\n─/,
+      /› also do X\n {2}ctrl\+x ctrl\+s to send now\n\n[^\n]*Working…[^\n]*\n─/,
     );
 
     await delay(300); // let the turn end, steer, and run the injected round

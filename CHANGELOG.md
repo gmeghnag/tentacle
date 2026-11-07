@@ -29,6 +29,10 @@ those.
   path, so a symlink out of a temp dir is still refused. Not carried to a pod: a
   container keeps writing its own `/tmp`.
 
+### Changed
+
+- The TUI's turn indicator reads `Working…` / `Thinking…` (capitalised).
+
 ### Fixed
 
 - File writes (`fs_write`, `fs_edit`, `fs_multi_edit`) are harder to steer

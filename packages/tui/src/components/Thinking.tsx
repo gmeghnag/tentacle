@@ -12,7 +12,7 @@ const FRAME_MS = 80;
 
 export function Thinking({
   since,
-  label = "thinking…",
+  label = "Thinking…",
 }: { since: number; label?: string }): ReactElement {
   const seconds = useElapsed(since);
   const [frame, setFrame] = useState(0);
