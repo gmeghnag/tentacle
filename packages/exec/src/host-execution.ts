@@ -11,8 +11,7 @@
  * default, docs/feat/write-tmpdir.md): `writeFile` refuses any path that
  * resolves — after following symlinks — outside all of them, and any dangling
  * or looping link. It replaces the file atomically (temp + rename, never a
- * write through an existing inode) and needs every directory below the root to
- * be the user's and not group/other-writable. Reads are intentionally unconfined. The shell (`exec`) cannot be confined at
+ * write through an existing inode). Reads are intentionally unconfined. The shell (`exec`) cannot be confined at
  * the filesystem level on the host; that is gated by the permission engine instead
  * (and fully sandboxed once the container environment lands).
  */
@@ -68,11 +67,6 @@ export interface HostExecutionConfig {
   readonly beforeOpen?: (realPath: string) => void | Promise<void>;
   /** TEST SEAM ONLY: runs after the temp file is written, just before the `rename`. */
   readonly beforeRename?: (realPath: string) => void | Promise<void>;
-  /**
-   * TEST SEAM ONLY: the uid every directory below a root must belong to
-   * (default `process.getuid()`; no check where the platform has none).
-   */
-  readonly currentUid?: number;
 }
 
 /** Thrown when a write would escape the workspace root. */
@@ -143,11 +137,6 @@ function realTarget(abs: string): RealTarget {
  */
 const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fsConstants;
 const OPEN_TEMP = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
-/**
- * Mode of a directory a write creates: `0755`, then the umask — which can only
- * remove bits, so it is never group- or other-writable (the directory rule).
- */
-const NEW_DIR_MODE = 0o755;
 
 function errnoOf(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | undefined)?.code;
@@ -205,8 +194,6 @@ export class HostExecution implements ExecutionEnvironment {
   private readonly readHint: ((absPath: string) => string | undefined) | undefined;
   private readonly beforeOpen: ((realPath: string) => void | Promise<void>) | undefined;
   private readonly beforeRename: ((realPath: string) => void | Promise<void>) | undefined;
-  /** The owner every directory below a root must have; `undefined` = no uids here. */
-  private readonly uid: number | undefined;
   /** Commands whose leader exited (their group was handed to `releaseGroup`). */
   private readonly released = new WeakSet<Subprocess>();
 
@@ -216,7 +203,6 @@ export class HostExecution implements ExecutionEnvironment {
     this.readHint = config?.readHint;
     this.beforeOpen = config?.beforeOpen;
     this.beforeRename = config?.beforeRename;
-    this.uid = config?.currentUid ?? process.getuid?.();
     this.defaultCwd = resolve(config?.cwd ?? process.cwd());
     this.root = safeRealpath(resolve(config?.root ?? this.defaultCwd));
     const writable = writableRootsOf(config?.writableDirs ?? []);
@@ -366,18 +352,19 @@ export class HostExecution implements ExecutionEnvironment {
    * replace, never a write through an existing inode.
    * 1. The CHECKED REAL path (`confineWrite`; links present at check time are
    *    already followed, so in-root links keep working).
-   * 2. The directory rule (`dirChain`): every directory strictly below the
-   *    containing root, down to the parent, is a real directory owned by this
-   *    uid and not writable by group or others — so no other user can rename,
-   *    swap or plant entries in them. The root itself is exempt (`/tmp` is
-   *    sticky and world-writable). Missing ones are created `NEW_DIR_MODE`.
+   * 2. `dirChain`: every directory below the containing root, down to the
+   *    parent, is a real directory (missing ones created, umask-respecting).
    * 3. The final name, if present, must be a regular file (a symlink there now
    *    appeared after the check: refused, never replaced); its mode is kept.
-   * 4. A temp file with a random name is created in the verified parent
-   *    (`O_CREAT|O_EXCL|O_NOFOLLOW`), the rule re-checked, the content written
-   *    and `fsync`ed, the rule and the final name re-checked, then `rename`d
-   *    over the target. A hard link at the target only loses this name; its
-   *    other names keep the old bytes. Any failure unlinks the temp.
+   * 4. A temp file with a random name is created in the parent
+   *    (`O_CREAT|O_EXCL|O_NOFOLLOW`), the chain and the parent's realpath
+   *    re-checked, the content written and `fsync`ed, re-checked again with the
+   *    final name, then `rename`d over the target. A hard link at the target
+   *    only loses this name; its other names keep the old bytes. Any failure
+   *    unlinks the temp.
+   * Residual (fix round 3): the re-checks narrow but cannot close a race by a
+   * user who can write a directory on the path (e.g. one they made in `/tmp`):
+   * docs/feat/write-tmpdir.md "Fix round 3".
    */
   async writeFile(path: string, contents: string): Promise<void> {
     const target = this.confineWrite(path);
@@ -390,7 +377,7 @@ export class HostExecution implements ExecutionEnvironment {
       // A configured writable dir that does not exist yet (its realpath'd
       // ancestors were pinned at construction; if it is later created as a
       // link outward, `confineWrite` resolves through it and refuses).
-      mkdirSync(root, { recursive: true, mode: NEW_DIR_MODE });
+      mkdirSync(root, { recursive: true });
     }
     this.dirChain(path, root, parent, "create");
     await this.beforeOpen?.(target);
@@ -452,10 +439,12 @@ export class HostExecution implements ExecutionEnvironment {
   }
 
   /**
-   * The directory rule over every directory strictly below `root`, down to
-   * `parent` (see `writeFile`). `create`: a missing one is made (`NEW_DIR_MODE`)
-   * and judged. `recheck` (after the check): every one must exist, and the
-   * parent's realpath must still be `parent` — any failure is "moved".
+   * Every directory strictly below `root`, down to `parent` (see `writeFile`),
+   * must be a real directory (not a symlink). `create`: a missing one is made
+   * (default mode: `0777` minus the umask). `recheck` (after the check): every one must exist, and
+   * the parent's realpath must still be `parent` — any failure is "moved".
+   * No owner/mode rule (fix round 3, owner): `umask 002` and pod `fsGroup`
+   * make group-writable project dirs normal.
    */
   private dirChain(path: string, root: string, parent: string, phase: "create" | "recheck"): void {
     const rel = relative(root, parent);
@@ -475,7 +464,7 @@ export class HostExecution implements ExecutionEnvironment {
           throw moved(`${dir} is gone`);
         }
         try {
-          mkdirSync(dir, NEW_DIR_MODE);
+          mkdirSync(dir);
         } catch (mkdirError) {
           if (errnoOf(mkdirError) !== "EEXIST") {
             throw mkdirError;
@@ -485,14 +474,6 @@ export class HostExecution implements ExecutionEnvironment {
       }
       if (!st.isDirectory()) {
         throw refused(`${dir} is not a directory (a symlink or a file)`);
-      }
-      if (this.uid !== undefined && st.uid !== this.uid) {
-        throw refused(`${dir} is owned by another user (uid ${st.uid})`);
-      }
-      if ((st.mode & 0o022) !== 0) {
-        throw refused(
-          `${dir} is writable by group or others (mode ${(st.mode & 0o777).toString(8)})`,
-        );
       }
     }
     if (phase === "recheck") {

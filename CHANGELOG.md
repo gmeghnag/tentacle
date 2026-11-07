@@ -22,9 +22,8 @@ those.
 
 ### Fixed
 
-- File writes (`fs_write`, `fs_edit`, `fs_multi_edit`) can no longer be steered
-  outside the workspace by another local user's links, in the project as in the
-  temp dirs:
+- File writes (`fs_write`, `fs_edit`, `fs_multi_edit`) are harder to steer
+  outside the workspace with links, in the project as in the temp dirs:
   - a write through a **dangling** symlink is refused ("refused: dangling
     symlink"), and a symlink loop says so — before, a dangling link could create
     its target outside;
@@ -35,15 +34,18 @@ those.
     keeps its bytes. A hard-linked file inside the project (e.g. a `file:`
     dependency after `bun install`) stays writable; its link is broken, as an
     editor's save does;
-  - every directory **between the workspace (or writable dir) and the file**
-    must belong to you and not be writable by group or others, or the write is
-    refused; directories the write creates are made `0755` minus your umask. The
-    workspace or temp dir itself is exempt (`/tmp` is world-writable by design).
-    So another user cannot swap a directory under the write;
-  - a symlink, FIFO or other non-regular file at the path is refused.
+  - a symlink, FIFO or other non-regular file at the path is refused, and a
+    directory swapped for a symlink between the check and the rename is
+    detected in most cases (the path is re-checked after the temp file is made
+    and before the rename).
   A write through an existing symlink to a file inside the workspace still works.
-  Not covered: a process running as YOU (it can do anything you can), and the
-  `shell` tool, which is not confined.
+  **Known limit (hosts shared with other users only):** another local user who
+  can write a directory on the path — e.g. one they created in `/tmp` — can win
+  the race by swapping it for a symlink at the right moment. Your content can
+  then land outside, in a new hidden file (`.<name>.<random>.tentacle-tmp`) in
+  any directory you can write; an existing file there is never written in
+  place. Not covered either: a process running as you, and the `shell` tool,
+  which is not confined.
 
 ## [0.3.0] - 2026-11-06
 

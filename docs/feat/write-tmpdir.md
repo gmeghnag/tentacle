@@ -380,6 +380,75 @@ After the mutations, Biome's `noVoidTypeReturn` made me turn `dirChain`'s `retur
 - **The dropped-entry notice is still per `buildAgent`** (LOW 6, first half).
 - **Scratch:** this round's backups were removed from `.tentacle/tmp/write-tmpdir/`; the plan and the reviewer's `review/` folder remain.
 
+> **Superseded by Fix round 3:** the directory owner/mode rule above, its `currentUid` seam, `NEW_DIR_MODE` and the claim "another user cannot swap a directory under the write" are removed.
+
+### Fix round 3
+
+*— claude-opus-5-5, 2026-11-07*
+
+**Owner decision:** REMOVE the directory owner/mode rule entirely. It is too rigid: `umask 002` and pods with `fsGroup` would block project writes, and `/tmp` must always be writable. Everything else from round 2 is kept.
+
+**What changed** (`packages/exec/src/host-execution.ts`):
+
+- **`dirChain`** (`:449`): the `uid` and `mode & 0o022` checks are deleted, so is the `currentUid` seam with its field. What stays does not depend on ownership:
+  - every directory below the root is a real directory, not a symlink (`lstat`);
+  - in the recheck phases, every one must still exist and `realpath(parent)` must still equal the checked parent.
+- **`mkdir -p` is back to the default mode** (`mkdirSync(dir)` at `:467`, and `mkdirSync(root, { recursive: true })` at `:380`): `0777` minus the umask. `NEW_DIR_MODE` is deleted.
+- **Kept, unchanged:**
+  - the `O_CREAT|O_EXCL|O_NOFOLLOW` temp + `fsync` + `rename` (`writeFile`, `:369`);
+  - the mode bits kept;
+  - no `nlink` refusal;
+  - the dangling and loop refusal and the loop message;
+  - a symlink at the final real path refused (round-1 semantics);
+  - the post-create and pre-rename parent `realpath` re-checks;
+  - the temp unlinked on failure.
+- The comments are updated. The header no longer claims the rule. `writeFile`'s doc names the residual and points here.
+
+**Tests** (`packages/exec/test/confinement.test.ts`):
+
+- **Removed:** exactly the three tests that pinned the rule: "a group- or other-writable directory below the root is refused", "a directory below the root owned by another uid is refused (injected uid)", "directories created for a write are never group/other-writable, even under umask 000".
+- **Added** (`:452`): "fix round 3: a group-writable (0775) subdirectory is writable, in the project and in a temp root" (both arenas; plus a `1777` sticky root).
+- **RED on the round-2 code:** I put e3444b0's `host-execution.ts` in place temporarily (backup + `shasum -c` OK after the restore). Result: 1 fail, `refused: … is writable by group or others`. GREEN on this round's code.
+- Every other test is untouched and green (80 in `packages/exec`). That includes the round-2 FLIP/TWO-STEP/R2-3 tests, which hold through the remaining `realpath`/symlink re-checks (seam-driven).
+
+**The residual, measured with a real concurrent attacker.** The repro (`.tentacle/tmp/write-tmpdir/r3/`, deleted after the run) worked like this:
+
+- A separate `bun` process flips `<arena>/a-real` as fast as it can: rename the dir aside, put a symlink to `<victim>` in its place, remove it, rename the dir back. `<arena>` stands for `/tmp`, `<victim>` for e.g. `~/.ssh`, which holds an existing `authorized_keys` = `orig`.
+- The writer loops `HostExecution{writableDirs:[arena]}.writeFile(<arena>/a-real/authorized_keys, "PWNED-<i>")`.
+- Same uid. Only directory renames and symlinks are used, which a different user owning `a-real` in `/tmp` could equally do.
+
+Result over 20 s (86,488 flips, 135,530 writes):
+
+| Outcome | Count |
+|---|---|
+| Written | 1,041 |
+| `moved during the write` | 52,280 |
+| Outside the workspace | 34,591 |
+| Not a directory | 23,752 |
+| `ENOENT` | 18,506 |
+| Dangling symlink | 3,622 |
+| `EINVAL` | 1,738 |
+| **Existing `<victim>/authorized_keys`** | **still `orig`: never written in place, never replaced** |
+| **New files in `<victim>`** | **1,443 `.authorized_keys.<hex>.tentacle-tmp`, 380 holding our content** |
+
+A 6 s run gave the same picture: 354 stray temps, 111 with content, the victim file untouched.
+
+**So the exact residual is:**
+
+- **What happens.** Another local user who can write a directory on the path can race directory↔symlink swaps. A directory they can write is one they created in a shared root such as `/tmp`, or a group/other-writable directory in a project. Winning the race makes our write create NEW hidden files named `.<basename>.<random>.tentacle-tmp` in ANY directory the tentacle user can write. Some of them hold the model's content, and they are left behind (the cleanup `unlink` resolves the path again and misses them).
+- **What did not happen.** An existing outside file was never written in place: no write goes through an existing inode.
+- **Not excluded.** It is not excluded by reasoning that our temp gets `rename`d over an existing outside file with the same basename. That needs three aligned flips: link at the temp create, real dir at both re-checks, link again at the `rename`. Not observed in 135,530 writes, so it is stated, not claimed impossible.
+- **Who is affected.** This matters only on hosts shared with other users (and in a project only if another user can write one of its directories). A same-uid process can do anything anyway, and `shell` is unconfined.
+- **Where it is written down.** CHANGELOG "Fixed" ("Known limit…") and the README `tools.writableDirs` row state this. The CHANGELOG no longer claims "another user cannot swap a directory".
+
+**Gate:** `bunx tsc --noEmit` clean. `bunx biome check .` clean (710 files). `bun test packages`: **5295 pass, 3 skip (opt-in), 0 fail** (5298 total; round 2 had 5297, minus 3 removed, plus 1 added).
+
+**Still open:**
+- the residual above;
+- `shell` is unconfined;
+- same-uid processes are out of scope;
+- the dropped-entry notice is still per `buildAgent` (LOW 6, first half).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-07*

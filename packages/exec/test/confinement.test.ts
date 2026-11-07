@@ -449,52 +449,19 @@ describe("atomic replace and the directory rule (fix round 2)", () => {
     }
   });
 
-  test("a group- or other-writable directory below the root is refused (the root itself is exempt)", async () => {
+  test("fix round 3: a group-writable (0775) subdirectory is writable, in the project and in a temp root", async () => {
+    // umask 002 (user-private groups) and pod fsGroup make 0775 dirs normal.
     for (const { name, dir } of arenas) {
-      for (const [sub, mode] of [
-        ["gw", 0o775],
-        ["ow", 0o757],
-      ] as const) {
-        await mkdir(join(dir, sub), { recursive: true });
-        chmodSync(join(dir, sub), mode);
-        const err = await refusal(mk().writeFile(join(dir, sub, "deep", "x.txt"), "x"));
-        expect(err?.message, `${name} ${sub}`).toContain("writable by group or others");
-        expect(existsSync(join(dir, sub, "deep")), `${name} ${sub}`).toBe(false);
-      }
+      await mkdir(join(dir, "gw"), { recursive: true });
+      chmodSync(join(dir, "gw"), 0o775);
+      await mk().writeFile(join(dir, "gw", "deep", "x.txt"), "x");
+      expect(readFileSync(join(dir, "gw", "deep", "x.txt"), "utf8"), name).toBe("x");
     }
-    // The root may be world-writable (like /tmp): writes directly in it work.
+    // A world-writable sticky root (like /tmp) too.
     chmodSync(extra, 0o1777);
     await mk().writeFile(join(extra, "in-root.txt"), "ok");
     expect(readFileSync(join(extra, "in-root.txt"), "utf8")).toBe("ok");
     chmodSync(extra, 0o755);
-  });
-
-  test("a directory below the root owned by another uid is refused (injected uid)", async () => {
-    const other = (process.getuid?.() ?? 0) + 1;
-    for (const { name, dir } of arenas) {
-      await mkdir(join(dir, "theirs"), { recursive: true });
-      const err = await refusal(
-        mk({ currentUid: other }).writeFile(join(dir, "theirs", "x.txt"), "x"),
-      );
-      expect(err?.message, name).toContain("owned by another user");
-      expect(existsSync(join(dir, "theirs", "x.txt")), name).toBe(false);
-      // Directly in the root: no directory below it to judge.
-      await mk({ currentUid: other }).writeFile(join(dir, "top.txt"), "t");
-    }
-  });
-
-  test("directories created for a write are never group/other-writable, even under umask 000", async () => {
-    const old = process.umask(0);
-    try {
-      for (const { name, dir } of arenas) {
-        await mk().writeFile(join(dir, "made", "deeper", "f.txt"), "f");
-        for (const d of [join(dir, "made"), join(dir, "made", "deeper")]) {
-          expect(statSync(d).mode & 0o022, `${name} ${d}`).toBe(0);
-        }
-      }
-    } finally {
-      process.umask(old);
-    }
   });
 
   test("R2-4: a hard-linked file INSIDE the root is writable again (the link loses this name)", async () => {
