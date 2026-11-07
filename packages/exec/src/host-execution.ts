@@ -71,6 +71,8 @@ export interface HostExecutionConfig {
    * last re-checks passed — immediately before the `rename`.
    */
   readonly beforeRename?: (realPath: string) => void | Promise<void>;
+  /** TEST SEAM ONLY: runs right before the in-place fallback opens the target. */
+  readonly beforeInPlaceOpen?: (realPath: string) => void | Promise<void>;
 }
 
 /** Thrown when a write would escape the workspace root. */
@@ -147,6 +149,17 @@ function realTarget(abs: string): RealTarget {
  */
 const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fsConstants;
 const OPEN_TEMP = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+/** The in-place fallback's open: an existing file only, never a link, never blocking on a FIFO. */
+const OPEN_IN_PLACE = O_WRONLY | O_NOFOLLOW | fsConstants.O_NONBLOCK;
+/** Temp-create errors after which an EXISTING writable target is written in place (fix round 5). */
+const IN_PLACE_FALLBACK = new Set(["EACCES", "EPERM", "EROFS"]);
+
+/** What `finalNameMode` saw of an existing target: its permission bits and its inode. */
+interface CheckedTarget {
+  readonly mode: number;
+  readonly dev: number;
+  readonly ino: number;
+}
 
 function errnoOf(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException | undefined)?.code;
@@ -204,6 +217,7 @@ export class HostExecution implements ExecutionEnvironment {
   private readonly readHint: ((absPath: string) => string | undefined) | undefined;
   private readonly beforeOpen: ((realPath: string) => void | Promise<void>) | undefined;
   private readonly beforeRename: ((realPath: string) => void | Promise<void>) | undefined;
+  private readonly beforeInPlaceOpen: ((realPath: string) => void | Promise<void>) | undefined;
   /** Commands whose leader exited (their group was handed to `releaseGroup`). */
   private readonly released = new WeakSet<Subprocess>();
 
@@ -213,6 +227,7 @@ export class HostExecution implements ExecutionEnvironment {
     this.readHint = config?.readHint;
     this.beforeOpen = config?.beforeOpen;
     this.beforeRename = config?.beforeRename;
+    this.beforeInPlaceOpen = config?.beforeInPlaceOpen;
     this.defaultCwd = resolve(config?.cwd ?? process.cwd());
     this.root = safeRealpath(resolve(config?.root ?? this.defaultCwd));
     const writable = writableRootsOf(config?.writableDirs ?? []);
@@ -376,8 +391,11 @@ export class HostExecution implements ExecutionEnvironment {
    *    over the target. A hard link at the target only loses this name; its
    *    other names keep the old bytes. Owner, group, ACLs and xattrs are not
    *    kept (as in an editor's atomic save). `EACCES`/`EPERM` on the create or
-   *    the rename is a refusal naming the directory. Any failure unlinks the
-   *    temp; if even that fails, the error says where it was left.
+   *    the rename is a refusal naming the directory — except that when the
+   *    directory takes no new file (`EACCES`/`EPERM`/`EROFS` on the temp) and
+   *    the target EXISTS, it is written in place instead (`writeInPlace`, fix
+   *    round 5). Any failure unlinks the temp; if even that fails, the error
+   *    says where it was left.
    * Residual (fix round 3): the re-checks narrow but cannot close a race by a
    * user who can write a directory on the path (e.g. one they made in `/tmp`):
    * docs/feat/write-tmpdir.md "Fix round 3".
@@ -398,7 +416,8 @@ export class HostExecution implements ExecutionEnvironment {
     this.dirChain(path, root, parent, "create");
     await this.beforeOpen?.(target);
     this.dirChain(path, root, parent, "recheck");
-    const mode = this.finalNameMode(path, target);
+    const existing = this.finalNameMode(path, target);
+    const mode = existing?.mode;
     // Short and never derived from the basename: a name near NAME_MAX still works.
     const temp = join(parent, `.tt-${randomBytes(8).toString("hex")}.tentacle-tmp`);
     let fd: FileHandle | undefined;
@@ -407,6 +426,12 @@ export class HostExecution implements ExecutionEnvironment {
         // 0600 while the content is written: never more readable than the target.
         fd = await open(temp, OPEN_TEMP, 0o600);
       } catch (error) {
+        if (existing !== undefined && IN_PLACE_FALLBACK.has(errnoOf(error) ?? "")) {
+          // Fix round 5 (owner A): the directory takes no new file, but the
+          // EXISTING target is writable — write it in place, as `main` did.
+          await this.writeInPlace(path, root, parent, target, existing, contents);
+          return;
+        }
         throw this.dirError(error, path, parent, "cannot create a file in");
       }
       this.dirChain(path, root, parent, "recheck");
@@ -442,6 +467,76 @@ export class HostExecution implements ExecutionEnvironment {
   }
 
   /**
+   * The in-place fallback (fix round 5, owner A): only for an EXISTING file whose
+   * directory refused the temp. `O_WRONLY|O_NOFOLLOW|O_NONBLOCK` — no `O_CREAT`
+   * (it never creates), no `O_TRUNC` (nothing is cut before the checks), a
+   * symlink at the final name is refused by the kernel, a FIFO fails at once.
+   * On the descriptor: a regular file, `nlink === 1` (a hard link's other name
+   * may be outside every root — written in place it would change), and the very
+   * inode `finalNameMode` checked (dev + ino); the chain and the name are
+   * re-checked. Only then truncate and write through the descriptor.
+   */
+  private async writeInPlace(
+    path: string,
+    root: string,
+    parent: string,
+    target: string,
+    checked: CheckedTarget,
+    contents: string,
+  ): Promise<void> {
+    await this.beforeInPlaceOpen?.(target);
+    let fd: FileHandle;
+    try {
+      fd = await open(target, OPEN_IN_PLACE);
+    } catch (error) {
+      const code = errnoOf(error);
+      if (code === "ELOOP" || code === "EMLINK") {
+        // EMLINK: FreeBSD's O_NOFOLLOW errno; Linux and macOS say ELOOP.
+        throw new WorkspaceWriteError(
+          `refused: a symlink at the final path (it appeared after the check): ${path}`,
+        );
+      }
+      if (code === "ENXIO") {
+        throw new WorkspaceWriteError(`refused: not a regular file: ${path}`);
+      }
+      if (code === "ENOENT") {
+        throw new WorkspaceWriteError(
+          `refused: the path moved during the write (${target} is gone): ${path}`,
+        );
+      }
+      throw error;
+    }
+    try {
+      const st = await fd.stat();
+      if (!st.isFile()) {
+        throw new WorkspaceWriteError(`refused: not a regular file: ${path}`);
+      }
+      if (st.nlink !== 1) {
+        throw new WorkspaceWriteError(
+          `refused: hard link (${st.nlink} names; its directory takes no new file, so it could only be written in place, through every name): ${path}`,
+        );
+      }
+      if (st.dev !== checked.dev || st.ino !== checked.ino) {
+        throw new WorkspaceWriteError(
+          `refused: the path moved during the write (another file is at ${target}): ${path}`,
+        );
+      }
+      this.dirChain(path, root, parent, "recheck");
+      const named = lstatSync(target);
+      if (named.dev !== st.dev || named.ino !== st.ino) {
+        throw new WorkspaceWriteError(
+          `refused: the path moved during the write (another file is at ${target}): ${path}`,
+        );
+      }
+      await fd.truncate(0);
+      await fd.writeFile(contents);
+      await fd.sync();
+    } finally {
+      await fd.close();
+    }
+  }
+
+  /**
    * `EACCES`/`EPERM` from the temp create or the `rename` → a refusal naming
    * the directory (not the hidden temp). Other errors pass through.
    */
@@ -451,7 +546,7 @@ export class HostExecution implements ExecutionEnvironment {
       return error;
     }
     return new WorkspaceWriteError(
-      `refused: ${what} ${parent} (${code}: the directory is not writable for you, or it is sticky and the file is another user's; a file there is never rewritten in place): ${path}`,
+      `refused: ${what} ${parent} (${code}: the directory is not writable for you, or it is sticky and the file is another user's): ${path}`,
       code,
     );
   }
@@ -464,7 +559,7 @@ export class HostExecution implements ExecutionEnvironment {
    * user's) — a `rename` would replace it anyway, so parity with an in-place
    * write is enforced here (review round 3 F2).
    */
-  private finalNameMode(path: string, target: string): number | undefined {
+  private finalNameMode(path: string, target: string): CheckedTarget | undefined {
     let st: ReturnType<typeof lstatSync>;
     try {
       st = lstatSync(target);
@@ -491,7 +586,7 @@ export class HostExecution implements ExecutionEnvironment {
         code,
       );
     }
-    return st.mode & 0o777;
+    return { mode: st.mode & 0o777, dev: st.dev, ino: st.ino };
   }
 
   /**

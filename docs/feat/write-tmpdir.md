@@ -506,6 +506,54 @@ This round answers Review round 3 (bea50f8): F1–F5, all fixed in this branch.
 - Unchanged from round 3: the shared-root race residual, `shell` unconfined, same-uid processes out of scope, and the per-`buildAgent` dropped-entry notice.
 - Scratch: this round's backups were removed; `.tentacle/tmp/write-tmpdir/` holds only the plan and the reviewer's `review/`.
 
+### Fix round 5
+
+*— claude-opus-5-5, 2026-11-07*
+
+**Owner decision on round 4's open point: A, fall back to an in-place write.** It applies when the target file is writable but its directory is not, i.e. the temp `open` fails with `EACCES`, `EPERM` or `EROFS`. This matches `main`.
+
+**What changed** (`packages/exec/src/host-execution.ts`):
+
+- `finalNameMode` (`:589`) now returns what it checked: `CheckedTarget { mode, dev, ino }` (`:158`). Before, it returned only the mode.
+- In `writeFile` (`:429`), when the temp `open` fails with a code in `IN_PLACE_FALLBACK` (`:155`) **and the target existed at the check**, it calls `writeInPlace` (`:479`). It never falls back for a new file or for any other error: those still go through `dirError`, the clear refusal naming the directory.
+- **`writeInPlace`:**
+  1. The test seam `beforeInPlaceOpen` (`:75`) runs.
+  2. `open(target, O_WRONLY|O_NOFOLLOW|O_NONBLOCK)` (`:153`): no `O_CREAT`, no `O_TRUNC`. `ELOOP`/`EMLINK` → `a symlink at the final path`. `ENXIO` → not a regular file. `ENOENT` → moved.
+  3. Then `fstat` on the descriptor: it must be a regular file, with `nlink === 1` (`:514`, else `refused: hard link …`), and the same `dev`+`ino` as checked (`:519`, else `moved`).
+  4. Then a `dirChain` recheck, plus `lstat(target)` must still be that inode.
+  5. Only then `ftruncate(0)`, write, `fsync`, close.
+  - The mode and owner are untouched (it is the same inode).
+- `dirError`'s message no longer claims "a file there is never rewritten in place".
+- The `writeFile` doc comment, the CHANGELOG ("in a directory you cannot create files in, an **existing** writable file is still written, in place, as before … a **new** file there is refused") and the README row describe the fallback.
+
+**Tests** (`packages/exec/test/confinement.test.ts`; both arenas; skipped as root; every read-only dir is restored to `0755` in a `finally`):
+
+- **Flipped by owner decision:** the round-4 test at `:625`, "a writable file in a directory we cannot write is refused clearly", became "… is written in place, as on main". It checks the content `"new"` replacing a longer original (so the truncation is correct), the mode `666` kept and no temp left. It was **red** on round 4 (refused).
+- **New `describe` at `:695`:**
+
+| Test | Round 4 code |
+|---|---|
+| A hard-linked target in a read-only dir is refused with `hard link`; both names keep `orig` | **red**: refused, but by the directory error, not the hard-link guard |
+| A symlink swapped in at the final path before the in-place open (seam) is refused with `symlink at the final path`; the outside victim keeps `orig` | **red**: no seam, the dir error |
+| A different file swapped in before the in-place open is refused (`moved`); both files keep their bytes | **red** |
+| A NEW file in a read-only dir is still refused with the clear error naming the dir; nothing is created | green: a guard for the "never for a new file" rule |
+
+**Mutations** (backup → Edit → narrow test → restore → `shasum -c` OK):
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | the fallback's `nlink` check dropped (as asked) | killed: the hard-linked-target test |
+| 2 | `O_NOFOLLOW` dropped from the in-place open | killed, on the message. The same-inode check still refused it (`moved`), and the victim was untouched: defence in depth |
+| 3 | the checked-inode comparison dropped | killed: the different-file swap test |
+
+**Gate:** `bunx tsc --noEmit` clean. `bunx biome check .` clean (710 files). `bun test packages`: **5307 pass, 3 skip (opt-in), 0 fail** (5310 total; +4).
+
+**Open:**
+
+- **The fallback writes through an existing inode in a non-writable directory.** In that one case, the pre-round-2 race class comes back in a reduced form: a symlink at the final name is refused by `O_NOFOLLOW`, and a hard link by `nlink`. A two-flip race on the name (the R2-1 FLIP) needs whoever controls the directory to change names in it. In a directory that WE cannot write, that is another user who CAN write it. This is the owner's accepted trade-off for parity with `main`.
+- Unchanged: the shared-root race residual, `shell` unconfined, same-uid processes out of scope, the per-`buildAgent` dropped-entry notice.
+- Scratch: this round's backups were removed.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-07*

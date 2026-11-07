@@ -622,20 +622,19 @@ describe("permission parity and temp hygiene (fix round 4)", () => {
   );
 
   test.skipIf(isRoot)(
-    "F2: a writable file in a directory we cannot write is refused clearly (no raw temp error)",
+    "F2 (fix round 5, owner A): a writable file in a directory we cannot write is written in place, as on main",
     async () => {
       for (const { name, dir } of arenas) {
         const ro = join(dir, "rodir");
         await mkdir(ro, { recursive: true });
-        await writeFile(join(ro, "f.txt"), "orig");
+        await writeFile(join(ro, "f.txt"), "a longer original content");
         chmodSync(join(ro, "f.txt"), 0o666);
         chmodSync(ro, 0o555);
         try {
-          const err = await refusal(mk().writeFile(join(ro, "f.txt"), "new"));
-          expect(err?.message, name).toContain("not writable");
-          expect(err?.message, name).toContain(realpathSync(ro));
-          expect(err?.message, name).not.toContain("tentacle-tmp");
-          expect(readFileSync(join(ro, "f.txt"), "utf8"), name).toBe("orig");
+          await mk().writeFile(join(ro, "f.txt"), "new");
+          expect(readFileSync(join(ro, "f.txt"), "utf8"), name).toBe("new");
+          expect(statSync(join(ro, "f.txt")).mode & 0o777, name).toBe(0o666);
+          expect(leftovers(ro), name).toEqual([]);
         } finally {
           chmodSync(ro, 0o755);
         }
@@ -685,6 +684,141 @@ describe("permission parity and temp hygiene (fix round 4)", () => {
         } finally {
           chmodSync(sub, 0o755);
         }
+      }
+    },
+  );
+});
+
+// Fix round 5 (owner A): when the temp cannot be created (a non-writable dir), an
+// EXISTING writable file is written in place — O_WRONLY|O_NOFOLLOW, no O_CREAT,
+// fstat: regular, nlink 1, the checked inode — then truncated and written.
+describe("in-place fallback for a non-writable directory (fix round 5)", () => {
+  let extra: string;
+  let arenas: { name: string; dir: string }[];
+
+  beforeEach(async () => {
+    extra = join(root, "..", "scratch5");
+    await mkdir(extra, { recursive: true });
+    arenas = [
+      { name: "writable dir", dir: extra },
+      { name: "project", dir: root },
+    ];
+  });
+
+  const mk = (over: Partial<HostExecutionConfig> = {}) =>
+    new HostExecution({ cwd: root, writableDirs: [extra], ...over });
+
+  /** `<dir>/ro5` made read-only around `fn`, always restored. */
+  async function inReadOnlyDir(
+    dir: string,
+    setup: (ro: string) => Promise<void>,
+    fn: (ro: string) => Promise<void>,
+  ) {
+    const ro = join(dir, "ro5");
+    await mkdir(ro, { recursive: true });
+    await setup(ro);
+    chmodSync(ro, 0o555);
+    try {
+      await fn(ro);
+    } finally {
+      chmodSync(ro, 0o755);
+    }
+  }
+
+  test.skipIf(isRoot)(
+    "a hard-linked target in a read-only dir is refused; both names keep their bytes",
+    async () => {
+      for (const { name, dir } of arenas) {
+        await inReadOnlyDir(
+          dir,
+          async (ro) => {
+            await writeFile(join(ro, "a.txt"), "orig");
+            await link(join(ro, "a.txt"), join(outside, `hl-${name.length}`));
+          },
+          async (ro) => {
+            const err = await refusal(mk().writeFile(join(ro, "a.txt"), "pwned"));
+            expect(err?.message, name).toContain("hard link");
+            expect(readFileSync(join(ro, "a.txt"), "utf8"), name).toBe("orig");
+            expect(readFileSync(join(outside, `hl-${name.length}`), "utf8"), name).toBe("orig");
+          },
+        );
+      }
+    },
+  );
+
+  test.skipIf(isRoot)(
+    "a symlink swapped in at the final path before the in-place open is refused by O_NOFOLLOW",
+    async () => {
+      await writeFile(join(outside, "victim5"), "orig");
+      for (const { name, dir } of arenas) {
+        await inReadOnlyDir(
+          dir,
+          async (ro) => {
+            await writeFile(join(ro, "f.txt"), "mine");
+          },
+          async (ro) => {
+            const e = mk({
+              beforeInPlaceOpen: (p) => {
+                chmodSync(ro, 0o755);
+                rmSync(p);
+                symlinkSync(join(outside, "victim5"), p);
+                chmodSync(ro, 0o555);
+              },
+            });
+            const err = await refusal(e.writeFile(join(ro, "f.txt"), "pwned"));
+            expect(err?.message, name).toContain("symlink at the final path");
+            expect(readFileSync(join(outside, "victim5"), "utf8"), name).toBe("orig");
+            chmodSync(ro, 0o755);
+            rmSync(join(ro, "f.txt"));
+          },
+        );
+      }
+    },
+  );
+
+  test.skipIf(isRoot)(
+    "a different file swapped in before the in-place open is refused (not the checked inode)",
+    async () => {
+      for (const { name, dir } of arenas) {
+        await inReadOnlyDir(
+          dir,
+          async (ro) => {
+            await writeFile(join(ro, "f.txt"), "checked");
+          },
+          async (ro) => {
+            const e = mk({
+              beforeInPlaceOpen: (p) => {
+                chmodSync(ro, 0o755);
+                renameSync(p, `${p}.moved`);
+                writeFileSync(p, "other");
+                chmodSync(ro, 0o555);
+              },
+            });
+            const err = await refusal(e.writeFile(join(ro, "f.txt"), "pwned"));
+            expect(err?.message, name).toContain("moved during the write");
+            expect(readFileSync(join(ro, "f.txt"), "utf8"), name).toBe("other");
+            expect(readFileSync(join(ro, "f.txt.moved"), "utf8"), name).toBe("checked");
+          },
+        );
+      }
+    },
+  );
+
+  test.skipIf(isRoot)(
+    "a NEW file in a read-only dir is still refused with the clear error (no fallback)",
+    async () => {
+      for (const { name, dir } of arenas) {
+        await inReadOnlyDir(
+          dir,
+          async () => undefined,
+          async (ro) => {
+            const err = await refusal(mk().writeFile(join(ro, "new.txt"), "x"));
+            expect(err?.message, name).toContain("not writable");
+            expect(err?.message, name).toContain(realpathSync(ro));
+            expect(err?.message, name).not.toContain("tentacle-tmp");
+            expect(existsSync(join(ro, "new.txt")), name).toBe(false);
+          },
+        );
       }
     },
   );
