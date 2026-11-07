@@ -177,6 +177,13 @@ export interface SessionHostOptions extends TurnErrorPolicy {
   readonly identity?: DaemonIdentity;
   /** The bound on one title request (default `TITLE_TIMEOUT_MS`; tests shorten it). */
   readonly titleTimeoutMs?: number;
+  /**
+   * `serve` only, from ITS host's `autoWake` (never a carried setting): a
+   * session nobody is attached to starts a continuation turn by itself when a
+   * background job exits (`SessionWake`, docs/feat/serve-autowake.md). Pod
+   * daemons and the worker never pass it: off.
+   */
+  readonly wakeOnJobExit?: boolean;
 }
 
 /** What `open` did: the session, whether it was built now, and the replay verdict. */
@@ -892,6 +899,9 @@ export class SessionHost {
         ...((seed ?? restored?.title) ? { seed: seed ?? restored?.title } : {}),
         ...(this.opts.titleTimeoutMs !== undefined ? { timeoutMs: this.opts.titleTimeoutMs } : {}),
       },
+      this.opts.wakeOnJobExit
+        ? { ...(this.opts.onAudit ? { onAudit: this.opts.onAudit } : {}) }
+        : undefined,
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;

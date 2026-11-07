@@ -47,14 +47,16 @@ import type {
   Session,
   SessionGrants,
 } from "@tentacle/agent";
-import type {
-  ChatMessage,
-  JobController,
-  ModelProvider,
-  PermissionBroker,
-  PermissionRequest,
-  PermissionRequestOptions,
-  PermissionResponse,
+import {
+  type ChatMessage,
+  type JobController,
+  type ModelProvider,
+  type PermissionBroker,
+  type PermissionRequest,
+  type PermissionRequestOptions,
+  type PermissionResponse,
+  daemonWakeGate,
+  wakeDue,
 } from "@tentacle/core";
 import {
   BLOCKING_UPDATE_TYPES,
@@ -238,6 +240,19 @@ export interface SessionPersistence {
   readonly restored?: RestoredSessionState;
 }
 
+/**
+ * `serve` only (docs/feat/serve-autowake.md): the session starts a
+ * continuation turn by itself when a background job exits — idle, after a
+ * normal end, attached clients or not: the daemon is the ONLY waker (a client
+ * watches the wake turn live and may cancel it). Present = on (the `serve`
+ * host's own `autoWake`); absent on a pod daemon and the in-process worker —
+ * structurally off (there a TUI or the relay wakes).
+ */
+export interface SessionWake {
+  /** One line per wake started (the session id only — never a job's command). */
+  readonly onAudit?: (line: string) => void;
+}
+
 /** How a failed turn's error leaves the daemon (see `redactTurnError`). */
 export interface TurnErrorPolicy {
   /**
@@ -388,6 +403,25 @@ export class HostedSession {
   private titleKick: ReturnType<typeof setTimeout> | null = null;
   /** Failed title requests in this incarnation (an abort by the slot is not one). */
   private titleFailures = 0;
+  /** The autonomous wake (`SessionWake`); absent = never. */
+  private readonly wake: SessionWake | undefined;
+  /**
+   * A wake check scheduled (a macrotask): after a turn's end — outside the
+   * steering window — and after a job exit (so every agent listener, including
+   * one a settings sync registered after ours, has counted it first).
+   */
+  private wakeKick: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The last turn ended `error` or `cancelled` (memory only): no wake until a
+   * turn ends normally — a failing model or a user's stop ends the chain.
+   */
+  private lastEndBad = false;
+  /**
+   * The wake turn whose start has not flushed the exits yet: its start WILL
+   * flush every pending one, so `unflushedExits` says 0 meanwhile (an attaching
+   * client must not wake for them too).
+   */
+  private wakeUnflushed: string | null = null;
 
   constructor(
     id: string,
@@ -399,9 +433,11 @@ export class HostedSession {
     now: () => number = Date.now,
     persistence?: SessionPersistence,
     titling: SessionTitling = {},
+    wake?: SessionWake,
   ) {
     this.id = id;
     this.now = now;
+    this.wake = wake;
     const restored = persistence?.restored;
     this.persister = persistence?.persister ?? null;
     this.title = restored?.title ?? titling.seed ?? { source: "auto" };
@@ -469,6 +505,8 @@ export class HostedSession {
         status: job.status,
         exitCode: job.exitCode,
       });
+      // The daemon may wake (re-checked on the macrotask).
+      this.kickWake();
     });
     // A turn suspended at the restart is running again (it holds the slot)
     // BEFORE the first write below, with its steers queued and its old pending
@@ -897,8 +935,15 @@ export class HostedSession {
     return { epoch: this.cut.epoch, seq: this.cut.seq };
   }
 
-  /** Background-job exits no turn has flushed yet (`session/open`'s `unflushedExits`). */
+  /**
+   * Background-job exits no turn has flushed yet (`session/open`'s
+   * `unflushedExits`) — 0 while this daemon's own wake turn is about to flush
+   * them (its start does, by construction): one wake per exit, never two.
+   */
   get unflushedExits(): number {
+    if (this.wakeUnflushed !== null && this.wakeUnflushed === this.activeTurnId) {
+      return 0;
+    }
     return this.session.pendingExitCount;
   }
 
@@ -1488,6 +1533,10 @@ export class HostedSession {
           this.persist();
           continue;
         }
+        // The wake turn's start flushed the exits: the agent's count is the truth again.
+        if (event.type === "background_exit" && this.wakeUnflushed === turnId) {
+          this.wakeUnflushed = null;
+        }
         let named: AgentEvent = event;
         if (event.type === "steer") {
           // One per drained text, in queue order: the mirror's head is its id
@@ -1553,9 +1602,13 @@ export class HostedSession {
     // A send-now turn that reached here started: its texts are in the history.
     const end = this.sendNowTurns.has(turnId) ? { ...outcome, delivered: true } : outcome;
     record.end = end;
+    if (this.wakeUnflushed === turnId) {
+      this.wakeUnflushed = null;
+    }
     if (this.activeTurnId === turnId) {
       this.controller = null;
       this.activeTurnId = null;
+      this.lastEndBad = end.stopReason === "error" || end.stopReason === "cancelled";
       this.lastActiveAt = this.now();
       this.lastChangeAt = this.lastActiveAt;
       // The rows it left undrained: carried by a live send-now (D4), else
@@ -1585,6 +1638,70 @@ export class HostedSession {
       this.publishQueue();
       // Only SCHEDULES (a macrotask): no work in the steering window.
       this.kickTitle();
+      // An exit the turn's start did not flush (it came later): the daemon
+      // wakes for it. Scheduled too.
+      this.kickWake();
+    }
+  }
+
+  /**
+   * Check the autonomous wake on the next macrotask (`SessionWake`): outside
+   * the steering window, after every exit listener ran. One pending check at a
+   * time; the macrotask re-checks everything (`maybeWake`).
+   */
+  private kickWake(): void {
+    if (!this.wake || this.closed || this.wakeKick !== null) {
+      return;
+    }
+    this.wakeKick = setTimeout(() => {
+      this.wakeKick = null;
+      this.maybeWake();
+    }, 0);
+  }
+
+  /**
+   * Start ONE continuation turn if an exit is unflushed, the slot is free and
+   * the last turn ended normally (`daemonWakeGate`) — attached clients or not:
+   * on `serve` the daemon is the only waker (they watch it live). The
+   * agent's own count decides — a turn that flushed leaves 0, so a wake never
+   * repeats for the same exit; one refused leaves it, so the next check retries.
+   */
+  private maybeWake(): void {
+    const due = wakeDue(
+      { pending: this.session.pendingExitCount > 0 },
+      daemonWakeGate({
+        enabled: this.wake !== undefined,
+        busy: this.running,
+        lastEndBad: this.lastEndBad,
+        closed: this.closed,
+      }),
+    );
+    if (!due) {
+      return;
+    }
+    const turnId = `wake-${crypto.randomUUID()}`;
+    // Idle: the history reflects every emit, so the cut may move to "now". It
+    // leaves the session-level `background_exit` frames of the exits this turn
+    // will flush BEFORE the cut: a client attaching mid-wake gets them through
+    // the snapshot plus the turn's own flush note, never as a live exit notice
+    // that would arm its own wake — one turn per exit (Review finding 1).
+    this.recordCut(null);
+    // Before `prompt`: its turn's start may flush synchronously, or after an
+    // await (project-hook trust) — either way an attach meanwhile reads 0.
+    this.wakeUnflushed = turnId;
+    try {
+      // An empty prompt is a continuation: the start injects the exit notes.
+      this.prompt(turnId, []);
+    } catch (error) {
+      this.wakeUnflushed = null;
+      // The gate checked the slot in this same stretch: a throw is unexpected.
+      this.reportTurnError(error);
+      return;
+    }
+    try {
+      this.wake?.onAudit?.(`wake: background job exit ${this.id}`);
+    } catch {
+      // The audit sink failed: the turn runs regardless.
     }
   }
 
@@ -1799,6 +1916,8 @@ export class HostedSession {
       // Last, in the same stretch: a reserved send-now takes the slot now.
       this.settleSuccessor();
       this.publishQueue();
+      // An exit that came while the slot was the compaction's (scheduled).
+      this.kickWake();
     }
   }
 
@@ -1878,6 +1997,10 @@ export class HostedSession {
     if (this.titleKick !== null) {
       clearTimeout(this.titleKick);
       this.titleKick = null;
+    }
+    if (this.wakeKick !== null) {
+      clearTimeout(this.wakeKick);
+      this.wakeKick = null;
     }
     if (this.activeTurnId !== null) {
       try {

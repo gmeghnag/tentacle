@@ -195,6 +195,10 @@ async function reloadedHost(
     persister,
     sessionTtl,
     identity: { tentacle: APP_VERSION, kind: "serve" },
+    // This host's own `autoWake` (never a carried setting): a session nobody
+    // is attached to wakes on a job exit (docs/feat/serve-autowake.md). The
+    // stdio (pod) daemon and the worker never set it.
+    wakeOnJobExit: config.autoWake,
   });
   const notice = options.onNotice ?? (() => {});
   let restored = 0;
