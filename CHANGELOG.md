@@ -31,7 +31,7 @@ those.
 
 ### Changed
 
-- The TUI's turn indicator reads `Working…` / `Thinking…` (capitalised).
+- The TUI's turn indicator reads `Working…` / `Thinking…` (capitalised), the word in the accent colour with the spinner; the timer and hint stay grey.
 
 ### Fixed
 
