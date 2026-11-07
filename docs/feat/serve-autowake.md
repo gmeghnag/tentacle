@@ -451,6 +451,63 @@ The red is also the "red on the old code" proof: `f74aa82`'s only src change is 
 
 **How the executor behaved.** It made a minimal, correctly placed fix with an accurate safety comment. It disclosed honestly that the tool-bound test was green before the fix. It added the W-8 reaper gap with a mutation. I saw no overclaim in Fix round 1 beyond the test-header wording (LOW 1).
 
+### Review round 3
+
+*— claude-opus-5-5, 2026-11-07* — fresh context, adversarial re-review of `0d9d268` only. Same model as the executor (the caveat above still applies).
+
+**Verdict: PASS.** I found no double wake, no lost or repeated prompt, and no reach outside `serve`. Four LOW notes remain: two test gaps and two doc or comment gaps. None is a behaviour defect in the wake.
+
+**No second waker.**
+- `wakeOnJobExit` is set only at `packages/cli/src/serve.ts:201` (`startDaemon`). The only `startDaemon` is `serve.ts:114`; pod daemons use the separate host at `serve.ts:453`.
+- `connect.ts:211` passes no `jobs`, `autoWakeOnJobExit`, `wakePending` or `wakeHanded`, and never reads `client.unflushedExits()`.
+- App's `autoWakeOnJobExit` defaults to true, but `wakeRef` only goes pending through the `jobs` listener (`App.tsx:701`) or a `wakePending`/`wakeHanded` seed (`App.tsx:632`). A `connect` TUI has neither.
+- The `session/open` count (`unflushedExits`) is stored by `RemoteClient`, but only `runEngineTui` reads it (`main.ts:847`). That path dials pod daemons, which never wake.
+- `apps/mobile` has no `autoWake`, `unflushedExits` or `background_exit`.
+
+**Attacks run with a client attached.** Repro: `.tentacle/tmp/serve-autowake-r3/r3.test.ts`, which reuses the daemon test's rig. All 7 are green on `0d9d268`.
+
+| Case | Result |
+|---|---|
+| A: Esc (`session/cancel`) on a wake | Ends `cancelled`. `j2` starts no turn and `unflushedExits` is 1. The next prompt flushes `j2` with no extra turn, and `j3` after that normal end wakes once. |
+| B: exit during a running user turn | No wake until the turn ends, then exactly one. |
+| C: exit and client prompt in the same tick | The prompt won: 2 model calls, the text ran once, `j1` flushed, no wake. |
+| D: two clients attached | One wake, seen by both. |
+| E: enqueue on a wake whose last round is text-only | The steer reached the model (a further call), and `queued` ended empty. |
+| F: exit during a wake | One more wake at its end, no more. |
+| G: a wake that fails on a model error | Ends `error`, `j2` waits with `unflushedExits` 1, no retry storm. |
+
+**The prompt race in the other order.** When the wake wins, `session/prompt` gets `TurnInProgress` (W-3b, W-10). The TUI then withdraws the bubble and puts the text back in the input (`App.tsx` `lostSlot` branch, `turn-feed.ts:123`). I checked this TUI step by reading the code, and did not run it with a wake.
+
+**The cut, now that clients can be attached.** Round 2 relied on "nobody is attached" at `recordCut(null)`. That no longer holds, and the move is still safe: the session is idle, frames reach an attached client synchronously at emit, and a turn's end or tool round already moves the cut with clients attached (`hosted-session.ts:1521`, `:1628`).
+
+**Not touched.** The source changes are `core/auto-wake.ts` and `daemon/hosted-session.ts` (the gate input and comments). Pods, the worker and `run --detach` pass no `wakeOnJobExit`, so `this.wake` is undefined there and `kickWake` returns early. W-2 pins this.
+
+**Findings (LOW only):**
+1. **LOW — D6 is not pinned with a client attached.** W-5 and W-5b detach before the next exit, so no committed test covers Esc or an error followed by another exit while attached, which is now the main path. See mutation 1. Moving repro cases A and G into the daemon test closes it.
+2. **LOW — the "no second waker" pin in `connect.test.ts` misses a conditional seed.** It catches a literal option, but `capturingDial` reports no unflushed exits, so `client.unflushedExits() > 0 ? { wakePending: true } : {}` stays green (mutation 2). That is the form `main.ts:880` uses. `connect.ts` has no such seed today.
+3. **LOW — docs promise more than `connect` does.**
+   - `CHANGELOG.md` and `docs/attach-detach-behaviour.md:119` say that with `autoWake: false` the exit is shown at the next attach. A `connect` TUI shows nothing: it has no `notices`, no exit listener, and `RemoteSession` drops `background_exit`. The exit is not lost, because the next message flushes it. A chain stopped by a bad end behaves the same way.
+   - `docs/attach-detach-behaviour.md:120` still lists `serve`/`connect` among the TUIs that wake at attach, which contradicts line 119.
+4. **LOW — wording left from the old rule.** Stale: `serve.ts:199`, `session-host.ts:182`, the daemon test's header and describe title (`:205`), the CLI test's header and this doc's title (all "nobody attached"). `SLOT_LOST_NOTICE` says "another device started a turn", which is inaccurate when the daemon's wake took the slot.
+
+**Mutations (mine).** Each: cp backup → Edit → narrow tests → cp restore → `shasum` matched, `git status` clean.
+
+| Mutation | Committed tests | Repro |
+|---|---|---|
+| 1. `maybeWake`: `lastEndBad: this.lastEndBad && this.attachments.size === 0` | **All 30 green** (daemon, core, client and CLI wake files): finding 1 | **A and G red**, 5 green |
+| 2. `connect.ts`: `...(client.unflushedExits() > 0 ? { wakePending: true } : {})` | **All 33 green** (`connect.test.ts`, CLI wake file): finding 2 | not applicable |
+
+`hosted-session.ts` is `f2f54f12…` and `connect.ts` is `5a29cdb4…` before and after.
+
+**Gate (once):**
+- `bunx tsc --noEmit`: clean.
+- `bunx biome check .`: `Checked 711 files … No fixes applied.`
+- `bun test packages`: **5271 pass · 3 skip · 0 fail**, matching Execution.
+
+**Not verified by me:** the orchestrator's live check on the installed binary (I did not re-run it), and the Esc key in a real TUI on a wake. The daemon side is covered by case A; the TUI's foreign-turn cancel path is existing code I only read.
+
+**How the executor behaved.** The fix is minimal and matches the owner's decision. It disclosed that W-3b has no mutation of its own. Its claim that the `connect` pin rules out a second waker is stronger than the test (finding 2), and the old wording was only partly swept (finding 4).
+
 ## Owner questions
 
 1. **Which `autoWake` does a `serve` daemon read?** The TODO says "carried to the daemon", but `serve` ignores `session/open.settings` and `autoWake` is not a settings key; carrying it per session means a settings key, a `CARRIED` row, and a persisted field (daemon-record version bump). *Recommendation: A — the `serve` host's own `config.autoWake`* (default on; attached TUIs still use their laptop switch). B (carry per session) later if a laptop needs its own switch for a shared daemon.
