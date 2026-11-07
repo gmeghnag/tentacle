@@ -23,11 +23,10 @@ export function Thinking({
   const glyph = FRAMES[frame % FRAMES.length];
   return (
     <Box>
-      <Text color={palette().accent}>{glyph}</Text>
-      <Text {...dimProps()}>
-        {" "}
-        {label} {formatDuration(seconds)} · esc/ctrl+c to stop
+      <Text color={palette().accent}>
+        {glyph} {label}
       </Text>
+      <Text {...dimProps()}> {formatDuration(seconds)} · esc/ctrl+c to stop</Text>
     </Box>
   );
 }
