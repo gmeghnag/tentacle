@@ -1341,6 +1341,48 @@ a `replace`, the one honest shape that breaks it.
 
 None new. M2's fix follows from the owner's Q-R1 answer ("the seed must equal the held copy").
 
+### Review round 3
+
+*— claude-opus-5-5, 2026-11-07 (resumed)*
+
+#### Verdict: **PASS** (LOW only)
+
+**M2 is fixed, and it is fixed by checking the right property.** The `reseed` check now compares
+the digests of the first base's own `count` seed messages, captured when `expect` reaches 0,
+for EQUALITY with `held.digests` (`sameDigests`). This is the exact lineage property: an honest
+reseed is seeded with exactly the held copy (`logBaseOf`). Commits after the seed (appends,
+`replace`) no longer take part in the check. It is not a weaker correlate: a seed that merely
+looks like the held copy at the end of the read, after a `replace`, is refused. That case is
+pinned by the new test "a forged seed is still refused even when followed by a replace". A
+count-0 first base gives `seed = []`, which matches only an empty held copy.
+
+**Repros re-run:**
+- `round2.ts`: A `reseed`/no aside (was `fork`), A2 `reseed`+`gap`, B `reseed`+`gap`, C `reseed`,
+  D `reseed`+`gap` (L6, accepted).
+- `reseed-compact.ts`: both cases are `reseed`, no aside.
+- `attacks.ts`: the true fork (1) is still `fork` + aside, and the forged `base.prev` (2) is still
+  `fork` + aside. Every other row is unchanged from round 2.
+
+**Mutations (reader restored from a `cp` backup; `shasum -c` OK; `git status` clean):**
+
+| Mutation of the new comparison | Result |
+|---|---|
+| compare the read's FINAL `digests` instead of `seed` (the M2 regression) | **2 FAIL**: "M2 honest reseed + head swap" (`fork`) and "M2 forged seed … followed by a replace" (`reseed`) ✔ |
+| `sameDigests` → `extends_` (accept a seed that EXTENDS the held copy) | **survives** (24/24 green) → L7 |
+
+**L7 (LOW, test gap):** nothing pins "the seed must EQUAL the held copy, not extend it". Impact
+is nil, because the held copy is a prefix: nothing is lost. The generic new-lineage rule
+(`adopt`) accepts an extension the same way. Optional: a test where a seed of held + 1 extra
+message → `fork`.
+
+**Cluster:** I agree that no re-run is needed. The change is client-side classification only. It
+is not on the steady-state path the cluster gates measure (a `linear` read never reaches the
+`reseed` branch), and the daemon and wire are byte-identical since round 2.
+
+**Left (all LOW, accepted or deferred):** L6 / the forged same-inc / chained-foreign-base class
+(owner Q-R1, no regression against `main`); L7 (optional test); L2 (constraint on task 2).
+The flake (1 in 12 runs) was never reproduced and is not attributed to this branch.
+
 ### Owner answers (fix round 1)
 
 *— recorded by the executor (claude-sonnet-5-5) on the orchestrator's instruction, 2026-11-07*
