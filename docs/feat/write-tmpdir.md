@@ -406,3 +406,141 @@ existsSync(join(outside, "created-outside")); // true: should have been refused
 2. **TOCTOU and hard links: in this branch or later?** Recommendation: **a separate follow-up task**, listed in `TODO.md`: open with `O_NOFOLLOW` and check `nlink` on the descriptor. It is no worse than `main` in kind, and `shell` is unconfined anyway. If you run `serve` on hosts shared with other users, I would do it before merging.
 
 *— claude-opus-5-5, 2026-11-07*
+
+### Review round 2
+
+*— claude-opus-5-5, 2026-11-07*
+
+**Verdict: REQUEST-CHANGES (0 HIGH, 1 MEDIUM, 3 LOW).**
+- F1 is closed: every escape form is refused, in every arena.
+- The hard-link refusal, `O_NOFOLLOW` and the post-open check close the *single-step* forms of F2.
+- A *two-step* race still overwrites an existing outside file with content. The Execution and the CHANGELOG say this cannot happen. The minimum change is to make those claims true and record the residual. Whether to close it is Owner question 1.
+
+**Independence.** Fresh context, same model as the executor and as round 1 (`claude-opus-5-5`). This task is load-bearing, so a pass by a different model is still worth having.
+
+#### Findings
+
+Numbered R2-1 to R2-4, so they don't clash with round 1's F1 to F6.
+
+1. **R2-1 MEDIUM: a two-flip race defeats the post-open checks, and a victim's existing file gets the model's content.** The checks on the descriptor are a sequence, not one atomic step:
+   - the `fstat` at `packages/exec/src/host-execution.ts:350`;
+   - the `nlink` check at `:354`;
+   - the name check at `:362-372`;
+   - the truncate and write at `:378`.
+
+   An attacker who changes names between them passes every check, and `:378` then writes the victim's inode. Measured with real files, in the project, in `/tmp` and in `os.tmpdir()`. The attacker's steps are injected by wrapping `FileHandle.prototype.stat`, which is deterministic and on one uid. Both forms:
+   - **FLIP** (no directory needed). The attacker plants `<arena>/flip` as a hard link to `outside/victim3`. The attacker removes that name just before the `fstat` (so `nlink` is 1) and puts it back just after (so the name check matches dev and ino). Result: `WROTE`, and `outside/victim3` = `PWNED` in all 3 arenas.
+   - **TWO-STEP.** The attacker swaps `<arena>/q` for a link to `outside/sub` before the open. After the `fstat`, the attacker swaps a real `q` back, holding a hard link to the opened inode. Result: `WROTE`, `outside/sub/victim2` = `PWNED` in all 3 arenas.
+
+   Cross-uid precondition: macOS lets a user hard-link a file it does not own. `ln /private/etc/hosts <scratch>/hosts-link` succeeded: `nlink 2`, owner `root`, link removed afterwards. So on a shared macOS host another user can plant the FLIP link in `/tmp`, pointing at the victim's own file. Linux with `fs.protected_hardlinks=1` (the common distro default) forbids that hard link; that is from knowledge, not measured.
+
+   Practical bar: a different local user, a write the user approves to a name the attacker predicted, and a window of a few syscalls won twice. It is rare, but it is a content overwrite outside, not an empty trace.
+
+   - **False claims while this stands:**
+     - Execution "What remains open": "No content is ever written".
+     - Execution: "After the post-open check, the fd is pinned to a verified inode" (the verification is by name, so it is racy).
+     - `CHANGELOG.md:32-34`: "a symlink or a swapped directory slipped in between the check and the write is refused".
+     - README row: "a hard-linked file … is refused everywhere" (true only without a race).
+   - **Re-ordering the checks does not fix it.** Moving the `nlink` check after the name check only adds a third flip. This is reasoning, not run. Name-based checks cannot pin an inode.
+   - **Required (minimum):**
+     - Reword those claims: single-step swaps are refused; a racing local attacker can still win.
+     - Add the residual to `TODO.md` as a follow-up.
+   - **A real fix** is Owner question 1.
+2. **R2-2 LOW: a symlink loop is reported as a missing target.** `:425` prints `refused: dangling symlink <A>/l1 (its target does not exist; create it first)` for `l1 ↔ l2` and for `self → self`. Following "create it first" is impossible for a loop. Something like "dangling or looping symlink" would fix it. Fails closed, so the cost is cosmetic.
+3. **R2-3 LOW: an empty file (and empty dirs) can be left outside after a single parent swap.** This is as the executor disclosed, and verified: a swapped parent plus a new name leaves `outside/sub/g` with 0 bytes. An existing outside file keeps `ORIG` (no truncation). Empty files created outside under directories named by `mkdir -p` (`:346`) follow from the code; that part was read, not run.
+   - Acceptable on its own: no content, no truncation, and only with an active attacker.
+   - One caveat: an empty file can matter by existing (e.g. `~/.hushlogin`).
+4. **R2-4 LOW (behaviour change, for the owner, not to fix here): hard-linked project files are now unwritable by the tools.** Measured on this machine:
+   - **This repo:** 2 of the tracked files have `nlink > 1`: `stubs/react-devtools-core/index.js` and `package.json`. `bun install` hard-links the `file:` dependency into `node_modules/.bun/…`. So `fs_write`/`fs_edit` on those two source files now fails with `refused: hard link (2 names …)`. It is a real hit in this repo.
+   - **Git worktrees:** this worktree has no other tracked file with `nlink > 1`. Git checks out new inodes; a local `git clone` hard-links only `.git/objects`.
+   - **Registry packages on macOS:** 0 of the 4179 files in `node_modules` that came from the registry have `nlink > 1`. Bun clones them (`clonefile`), and a clone is a new inode.
+   - **Linux:** `node_modules` from pnpm, or from bun's default `hardlink` backend, has `nlink > 1` on essentially every file. That is from knowledge, not measured. Writing there is rare.
+   - The error says why, and the model can fall back to `shell` (unconfined).
+
+#### Attacks tried
+
+Real files under `.tentacle/tmp/write-tmpdir/review2/`, `writableDirs: [os.tmpdir(), "/tmp"]`. There are three arenas: in the project, `/tmp/wt-r2-*` and `$TMPDIR/wt-r2-*`, each with its own `outside` dir. The results are the same in all three arenas.
+
+| Attack | Result |
+|---|---|
+| R1 lexical `d → outside/sub`, `lexbad → d/../created-outside` | refused: dangling symlink, nothing outside |
+| R1 regression `outside/sub/up → ../up-out` via `d/up` | refused: dangling symlink |
+| Dangling link at the final path | refused |
+| Dangling link as an intermediate dir (`ddir/deep/x`) | refused (names `ddir`) |
+| Dangling chain `c1 → c2 → c3 → outside` | refused |
+| Chain to an EXISTING outside file | refused: outside the workspace |
+| Loop `l1 ↔ l2`, at the final path and as `l1/x`; self-loop | refused (message: R2-2) |
+| Hard link to an outside file: `fs_write`, `fs_edit`, `fs_multi_edit` (real tools) | refused, outside `ORIG hello` unchanged |
+| New file; new file under new subdirs; overwrite longer → shorter; `fs_edit`; `fs_multi_edit` | written; truncation correct; `nlink` 1 |
+| Final path swapped for a link to an existing outside file (`beforeOpen`) | refused by `O_NOFOLLOW`, outside unchanged |
+| A new final path swapped for a dangling link outward | refused (`EEXIST` → `ELOOP`), nothing created |
+| Parent swapped, the target exists outside | refused ("moved during the write"), outside `ORIG`: not truncated |
+| Parent swapped, new target | refused, a 0-byte file left outside (R2-3) |
+| **TWO-STEP**: parent swap + swap back with a hard link after `fstat` | **WROTE, outside overwritten (R2-1)** |
+| **FLIP**: hard link unlinked around `fstat` | **WROTE, outside overwritten (R2-1)** |
+
+**Coverage.** `rg 'Bun\.write|writeFile\(|writeFileSync'` over `exec/src`, `tools/src` and `agent/src`:
+- `fs_write`, `fs_edit` and `fs_multi_edit` (`tools/src/builtins.ts:128, 201, 249`) and the spill fallback (`agent/src/agent.ts:1906`) all call `env.writeFile`. `HostExecution` (`:166`) is its only implementation, and it writes only through the descriptor (`:379`).
+- The other hits are not model-steered: `tool-output.ts:81` is the spill store's own `0600` create, and `session-store.ts:144` is the session store.
+- `Bun.write` no longer appears in the tool paths.
+
+#### LOW 3, 4, 6 from round 1
+
+- **LOW 3: fixed.** `permission-ui.ts:86-89` cuts the whole row to `columns - 2`. The pure check at 30/40/45/50 columns and the `<Box width>` frame at 45/50 pass. Below about 46 columns the pre-existing key-hint footer wraps, as the executor disclosed; that is not this row.
+- **LOW 4: fixed.** `tool-output.ts:5-9` and `wiring.ts:4` now match the behaviour.
+- **LOW 6: fixed for the env.** `parseDirList` keeps `rel/dir` and `./y`. The `wiring.test.ts:1040-1045` notice is asserted, and 54/54 pass across the three files. The first half, a notice once per `buildAgent`, is still open, as disclosed.
+
+#### Mutations
+
+`cp` backup, edit, narrow test (`confinement.test.ts`), `cp` restore. `shasum` before and after: `738485b1ef1a235a326ce1a0fa8194ba11e07954`. `git status` was clean.
+
+| Mutation | Result |
+|---|---|
+| M1: drop `O_NOFOLLOW` from `OPEN_EXISTING` | killed (25 pass, 1 fail), on the MESSAGE only: the post-open inode check still refused and the outside file was untouched. The test pins the defence in depth, not `O_NOFOLLOW` alone |
+| M2: `st.nlink > 1` → `> 2` | killed (25 pass, 1 fail): `a hard link to a file outside every root is refused` |
+
+#### Gate
+
+Run once, on the restored tree:
+- `bunx tsc --noEmit`: clean.
+- `bunx biome check .`: 710 files, no fixes.
+- `bun test packages`: **5287 pass, 3 skip (opt-in), 0 fail; 5290 total.** It matches the executor's count.
+
+#### What holds
+
+- F1 entirely: refusing every dangling link removed the hand-written resolver, and with it both round 1 forms and the loop case.
+- The open order: `O_EXCL`, then a reopen without `O_TRUNC`, then the checks, then `ftruncate`. No refused write truncated anything, in any test.
+- In-root links still work.
+- FIFOs are refused (by the executor's test, not re-run).
+- All write tools are covered, and `Bun.write` is gone from the tool paths.
+- LOW 3, 4 and 6.
+
+#### How the executor behaved
+
+Good and honest:
+- It did what the owner chose, showed every new test red, and ran six mutations.
+- It disclosed the empty-trace residual and LOW 6's open half.
+- Its blind spot is the same in kind as round 1: it treated a check that reads names as pinning an inode, and it tested only one swap per race. So "no content is ever written" went into the doc and the CHANGELOG without a test that a second flip could break.
+
+#### Scratch
+
+The round 2 scripts (`review2/attack2.test.ts`, `leftover.test.ts`, the `.bak`) were deleted after this review. A check from inside Bun found no `wt-r*` entries left in `/tmp` or `os.tmpdir()`; round 0's `/tmp/wt-repro*.txt` are also gone. The core of the FLIP race:
+
+```ts
+linkSync(join(outside, "victim3"), name);           // planted hard link in the arena
+proto.stat = async function (...a) {                 // FileHandle.prototype.stat
+  rmSync(name); const st = await realStat.apply(this, a); linkSync(join(outside, "victim3"), name); return st;
+};
+await env.writeFile(name, "PWNED");                  // WROTE; outside/victim3 === "PWNED"
+```
+
+#### Owner questions
+
+1. **Close the two-flip race in this branch, or record it as a follow-up?** **Recommendation: follow-up**, with this branch's claims reworded now (R2-1, required). A real fix needs a different write strategy, not more checks:
+   - **Hard links:** write a new file with `O_EXCL` in the verified parent, then `rename` it over the target. This never writes through an existing inode, so a hard link only loses its in-root name and the victim stays intact. It also removes the `nlink` refusal (R2-4): `stubs/…` becomes writable again, at the cost of breaking the link, as an editor's atomic save does.
+   - **Directory swaps:** additionally require every directory below the writable root to be owned by the user and not writable by group or others. Then another user cannot rename them.
+
+   The bar is high: a different local uid, a shared macOS host, and two won windows. `shell` is unconfined anyway. If you run `serve` on hosts shared with other users, do it before merging.
+2. **The hard-link refusal hits this repo's own `stubs/` (R2-4).** Recommendation: accept it for now. If question 1 goes the `rename` way, it goes away. Otherwise, document it in the README row ("a hard-linked file, e.g. a `file:` dependency after `bun install`").
+
+*— claude-opus-5-5, 2026-11-07*
