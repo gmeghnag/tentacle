@@ -1,6 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
-import { link, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmodSync,
+  existsSync,
+  linkSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from "node:fs";
+import { link, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostExecution, type HostExecutionConfig, WorkspaceWriteError } from "../src/index.ts";
@@ -246,13 +258,16 @@ describe("dangling links, hard links and races (fix round 1)", () => {
     expect(mk({ writableDirs: [dangling] }).droppedWritableDirs).toEqual([dangling]);
   });
 
-  test("F2: a hard link to a file outside every root is refused; the outside file is untouched", async () => {
+  test("F2: a hard link to a file outside every root never changes the outside file", async () => {
+    // Fix round 2 (owner A): no longer refused — the write REPLACES the in-root
+    // name (temp + rename), so the link just loses that name; the outside inode
+    // is never written.
     await writeFile(join(outside, "victim.txt"), "orig");
     for (const { name, dir } of arenas) {
       await link(join(outside, "victim.txt"), join(dir, "hl"));
-      const err = await refusal(mk().writeFile(join(dir, "hl"), "pwned"));
-      expect(err?.message, name).toContain("hard link");
+      await mk().writeFile(join(dir, "hl"), "pwned");
       expect(readFileSync(join(outside, "victim.txt"), "utf8"), name).toBe("orig");
+      expect(readFileSync(join(dir, "hl"), "utf8"), name).toBe("pwned");
     }
   });
 
@@ -323,4 +338,211 @@ describe("dangling links, hard links and races (fix round 1)", () => {
       expect(await refusal(mk().writeFile(fifo, "x")), name).toBeDefined();
     }
   }, 2000);
+});
+
+/** `FileHandle.prototype`, to inject an attacker's steps around `fstat` (review R2-1). */
+async function fileHandleProto(): Promise<{ stat: (...a: unknown[]) => Promise<unknown> }> {
+  const fh = await open(join(root, ".."), "r");
+  const proto = Object.getPrototypeOf(fh);
+  await fh.close();
+  return proto;
+}
+
+/** Temp files a write left in `dir` (it must leave none). */
+const leftovers = (dir: string) => readdirSync(dir).filter((n) => n.includes("tentacle-tmp"));
+
+// Review round 2 of docs/feat/write-tmpdir.md (owner answer A): atomic temp +
+// rename (R2-1 hard links, R2-4), the directory ownership rule (R2-1 swaps, R2-3)
+// and the loop message (R2-2). Every case in a writable dir AND in the project.
+describe("atomic replace and the directory rule (fix round 2)", () => {
+  let extra: string;
+  let arenas: { name: string; dir: string }[];
+
+  beforeEach(async () => {
+    extra = join(root, "..", "scratch2");
+    await mkdir(extra, { recursive: true });
+    arenas = [
+      { name: "writable dir", dir: extra },
+      { name: "project", dir: root },
+    ];
+  });
+
+  const mk = (over: Partial<HostExecutionConfig> = {}) =>
+    new HostExecution({ cwd: root, writableDirs: [extra], ...over });
+
+  test("R2-1 FLIP: a hard link removed around fstat and put back cannot get the outside file written", async () => {
+    await writeFile(join(outside, "victim3"), "orig");
+    const proto = await fileHandleProto();
+    const realStat = proto.stat;
+    for (const { name, dir } of arenas) {
+      const flip = join(dir, "flip");
+      linkSync(join(outside, "victim3"), flip);
+      proto.stat = async function (this: unknown, ...a: unknown[]) {
+        rmSync(flip, { force: true });
+        const st = await realStat.apply(this, a);
+        linkSync(join(outside, "victim3"), flip);
+        return st;
+      };
+      try {
+        await mk()
+          .writeFile(flip, "PWNED")
+          .catch(() => undefined);
+      } finally {
+        proto.stat = realStat;
+      }
+      expect(readFileSync(join(outside, "victim3"), "utf8"), name).toBe("orig");
+      rmSync(flip, { force: true });
+    }
+  });
+
+  test("R2-1 TWO-STEP: a parent swapped outward then back (holding a hard link) cannot get the outside file written", async () => {
+    await mkdir(join(outside, "sub"), { recursive: true });
+    await writeFile(join(outside, "sub", "victim2"), "orig");
+    const proto = await fileHandleProto();
+    const realStat = proto.stat;
+    for (const { name, dir } of arenas) {
+      const q = join(dir, "q");
+      await mkdir(q, { recursive: true });
+      const e = mk({
+        beforeOpen: () => {
+          renameSync(q, `${q}-real`);
+          symlinkSync(join(outside, "sub"), q);
+        },
+      });
+      proto.stat = async function (this: unknown, ...a: unknown[]) {
+        const st = await realStat.apply(this, a);
+        if (lstatSync(q).isSymbolicLink()) {
+          rmSync(q);
+          renameSync(`${q}-real`, q);
+          linkSync(join(outside, "sub", "victim2"), join(q, "victim2"));
+        }
+        return st;
+      };
+      try {
+        await e.writeFile(join(q, "victim2"), "PWNED").catch(() => undefined);
+      } finally {
+        proto.stat = realStat;
+      }
+      expect(readFileSync(join(outside, "sub", "victim2"), "utf8"), name).toBe("orig");
+      expect(readdirSync(join(outside, "sub")).sort(), name).toEqual(["victim2"]);
+      rmSync(q, { recursive: true, force: true });
+      rmSync(`${q}-real`, { recursive: true, force: true });
+    }
+  });
+
+  test("R2-3: a parent swapped outward after the check leaves NOTHING outside (no empty file, no temp)", async () => {
+    await mkdir(join(outside, "swap3"), { recursive: true });
+    for (const { name, dir } of arenas) {
+      const sub = join(dir, "s3");
+      await mkdir(sub, { recursive: true });
+      const e = mk({
+        beforeOpen: () => {
+          renameSync(sub, `${sub}-moved`);
+          symlinkSync(join(outside, "swap3"), sub);
+        },
+      });
+      const err = await refusal(e.writeFile(join(sub, "new.txt"), "pwned"));
+      expect(err?.message, name).toContain("moved during the write");
+      expect(readdirSync(join(outside, "swap3")), name).toEqual([]);
+      rmSync(sub);
+      rmSync(`${sub}-moved`, { recursive: true });
+    }
+  });
+
+  test("a group- or other-writable directory below the root is refused (the root itself is exempt)", async () => {
+    for (const { name, dir } of arenas) {
+      for (const [sub, mode] of [
+        ["gw", 0o775],
+        ["ow", 0o757],
+      ] as const) {
+        await mkdir(join(dir, sub), { recursive: true });
+        chmodSync(join(dir, sub), mode);
+        const err = await refusal(mk().writeFile(join(dir, sub, "deep", "x.txt"), "x"));
+        expect(err?.message, `${name} ${sub}`).toContain("writable by group or others");
+        expect(existsSync(join(dir, sub, "deep")), `${name} ${sub}`).toBe(false);
+      }
+    }
+    // The root may be world-writable (like /tmp): writes directly in it work.
+    chmodSync(extra, 0o1777);
+    await mk().writeFile(join(extra, "in-root.txt"), "ok");
+    expect(readFileSync(join(extra, "in-root.txt"), "utf8")).toBe("ok");
+    chmodSync(extra, 0o755);
+  });
+
+  test("a directory below the root owned by another uid is refused (injected uid)", async () => {
+    const other = (process.getuid?.() ?? 0) + 1;
+    for (const { name, dir } of arenas) {
+      await mkdir(join(dir, "theirs"), { recursive: true });
+      const err = await refusal(
+        mk({ currentUid: other }).writeFile(join(dir, "theirs", "x.txt"), "x"),
+      );
+      expect(err?.message, name).toContain("owned by another user");
+      expect(existsSync(join(dir, "theirs", "x.txt")), name).toBe(false);
+      // Directly in the root: no directory below it to judge.
+      await mk({ currentUid: other }).writeFile(join(dir, "top.txt"), "t");
+    }
+  });
+
+  test("directories created for a write are never group/other-writable, even under umask 000", async () => {
+    const old = process.umask(0);
+    try {
+      for (const { name, dir } of arenas) {
+        await mk().writeFile(join(dir, "made", "deeper", "f.txt"), "f");
+        for (const d of [join(dir, "made"), join(dir, "made", "deeper")]) {
+          expect(statSync(d).mode & 0o022, `${name} ${d}`).toBe(0);
+        }
+      }
+    } finally {
+      process.umask(old);
+    }
+  });
+
+  test("R2-4: a hard-linked file INSIDE the root is writable again (the link loses this name)", async () => {
+    for (const { name, dir } of arenas) {
+      await writeFile(join(dir, "a.js"), "old");
+      await link(join(dir, "a.js"), join(dir, "b.js"));
+      await mk().writeFile(join(dir, "b.js"), "new");
+      expect(readFileSync(join(dir, "b.js"), "utf8"), name).toBe("new");
+      expect(readFileSync(join(dir, "a.js"), "utf8"), name).toBe("old");
+    }
+  });
+
+  test("an existing file's mode bits are kept by the replace", async () => {
+    for (const { name, dir } of arenas) {
+      for (const mode of [0o640, 0o755, 0o600]) {
+        const f = join(dir, `m${mode.toString(8)}`);
+        await writeFile(f, "x");
+        chmodSync(f, mode);
+        await mk().writeFile(f, "y");
+        expect(statSync(f).mode & 0o777, `${name} ${mode.toString(8)}`).toBe(mode);
+      }
+    }
+  });
+
+  test("a failing write leaves no temp file behind", async () => {
+    for (const { name, dir } of arenas) {
+      const e = mk({
+        beforeRename: () => {
+          throw new Error("boom");
+        },
+      });
+      await expect(e.writeFile(join(dir, "fails.txt"), "x"), name).rejects.toThrow("boom");
+      expect(leftovers(dir), name).toEqual([]);
+      expect(existsSync(join(dir, "fails.txt")), name).toBe(false);
+      // A refused write too (a directory at the path).
+      await mkdir(join(dir, "adir"), { recursive: true });
+      expect(await refusal(mk().writeFile(join(dir, "adir"), "x")), name).toBeDefined();
+      expect(leftovers(dir), name).toEqual([]);
+    }
+  });
+
+  test("R2-2: a symlink loop says so (not 'create it first')", async () => {
+    for (const { name, dir } of arenas) {
+      symlinkSync(join(dir, "l2"), join(dir, "l1"));
+      symlinkSync(join(dir, "l1"), join(dir, "l2"));
+      const err = await refusal(mk().writeFile(join(dir, "l1"), "x"));
+      expect(err?.message, name).toContain("symlink loop");
+      expect(err?.message, name).not.toContain("create it first");
+    }
+  });
 });

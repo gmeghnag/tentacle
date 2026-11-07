@@ -23,17 +23,27 @@ those.
 ### Fixed
 
 - File writes (`fs_write`, `fs_edit`, `fs_multi_edit`) can no longer be steered
-  outside the workspace by links, in the project as in the temp dirs:
+  outside the workspace by another local user's links, in the project as in the
+  temp dirs:
   - a write through a **dangling** symlink is refused ("refused: dangling
-    symlink"), wherever it points — before, it could create the link's target
-    outside;
-  - a file with **more than one hard link** is refused, since another of its
-    names may be outside;
-  - the file is opened at its checked real path with `O_NOFOLLOW` and re-checked
-    on the open descriptor, so a symlink or a swapped directory slipped in
-    between the check and the write is refused, and nothing is truncated first;
-  - a FIFO or another non-regular file is refused instead of hanging the write.
+    symlink"), and a symlink loop says so — before, a dangling link could create
+    its target outside;
+  - a file is now **replaced atomically**: the new content goes to a fresh temp
+    file in the same directory, which is then renamed over the target (its mode
+    bits are kept). An existing file is never written in place, so a hard link
+    planted at the path only loses that name; the file it shares an inode with
+    keeps its bytes. A hard-linked file inside the project (e.g. a `file:`
+    dependency after `bun install`) stays writable; its link is broken, as an
+    editor's save does;
+  - every directory **between the workspace (or writable dir) and the file**
+    must belong to you and not be writable by group or others, or the write is
+    refused; directories the write creates are made `0755` minus your umask. The
+    workspace or temp dir itself is exempt (`/tmp` is world-writable by design).
+    So another user cannot swap a directory under the write;
+  - a symlink, FIFO or other non-regular file at the path is refused.
   A write through an existing symlink to a file inside the workspace still works.
+  Not covered: a process running as YOU (it can do anything you can), and the
+  `shell` tool, which is not confined.
 
 ## [0.3.0] - 2026-11-06
 

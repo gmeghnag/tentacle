@@ -292,6 +292,94 @@ LOW 3's red was the pre-fix code itself.
 - **The `/tmp/wt-repro*.txt` files from round 0 are still there.** Deleting outside the worktree needs an approval this session did not have. All of this round's scratch files in `.tentacle/tmp/write-tmpdir/` were removed. The plan and the reviewer's `review/` folder were kept.
 - **LOW 6, first half, not addressed:** the dropped-entry notice still fires once per `buildAgent` (once per session on `serve`).
 
+> **Superseded by Fix round 2:** this round's "What remains open" claims are false under a two-flip race (review R2-1): "No content is ever written" and "the fd is pinned to a verified inode". The `nlink` refusal and the post-open name check described above are removed in round 2.
+
+### Fix round 2
+
+*— claude-opus-5-5, 2026-11-07*
+
+This round answers Review round 2 (18129c0). The owner answered **A: close it all in this branch.**
+
+**What changed** (`packages/exec/src/host-execution.ts`):
+
+- **Atomic replace** (`writeFile`, `:382`). No write ever goes through an existing inode. In order:
+  1. The checked real path comes from `confineWrite`, as in round 1.
+  2. The directory rule runs (below).
+  3. The `beforeOpen` seam runs, then the rule is re-checked.
+  4. The final name is judged (`finalNameMode`, `:433`):
+     - absent: a new file, mode `0666` minus the umask;
+     - a symlink: refused as `a symlink at the final path`, never replaced;
+     - not a regular file (FIFO, dir): refused;
+     - else its `mode & 0o777` is kept (setuid/setgid/sticky dropped).
+  5. A temp file `.<name>.<16 hex>.tentacle-tmp` is created in the verified parent with `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` (`:145`).
+  6. The rule is re-checked, `fchmod` restores the kept mode, the content is written, `fsync`ed and the file closed.
+  7. The `beforeRename` seam runs (`:70`), then the rule and the final name are re-checked.
+  8. `rename(temp, target)`.
+  - A `finally` unlinks the temp on every failure. The `nlink` refusal, `O_NONBLOCK` and the reopen path are gone (a FIFO is refused by `lstat` before any open).
+- **The final-name semantics are round 1's.** A link that existed at check time was followed by `confineWrite`, so the real path, not the link, is replaced, and in-root links keep working. A link at the real path now means one appeared after the check: refused, not replaced.
+- **The directory rule** (`dirChain`, `:460`; `rootOf`, `:512`, picks the most specific root that holds the target). Every directory strictly below that root, down to the parent, must be:
+  - a real directory (`lstat`: not a symlink);
+  - owned by `process.getuid()` (test seam `currentUid`, `:75`; skipped where the platform has no uid);
+  - `mode & 0o022 === 0` (not writable by group or others).
+  - The root itself is exempt (`/tmp`: sticky, `1777`).
+  - Missing directories are created with `mkdirSync(dir, 0o755)` (`NEW_DIR_MODE`, `:150`). That respects the umask, which can only remove bits, so they are never group/other-writable even under `umask 000` (tested). They are then judged the same way.
+  - A configured writable dir that does not exist yet is created (`mkdir -p`, `0755`), as `Bun.write` used to do.
+  - In the recheck phase, every failure is `refused: the path moved during the write (…)`, and `realpath(parent)` must still equal the checked parent.
+- **R2-2** (`realTarget` `:132`, `confineWrite` `:536`). A link whose `stat` fails with `ELOOP` gives `refused: symlink loop at <entry>` (no "create it first").
+- **Docs.**
+  - CHANGELOG "Fixed" is rewritten to the actual guarantees: atomic replace, the directory rule, `0755` minus umask, and that a same-uid process and `shell` are not covered.
+  - The README row is updated. No TODO follow-up is needed (R2-1 is closed here).
+
+**Red → green** (`packages/exec/test/confinement.test.ts`, new `describe("atomic replace and the directory rule (fix round 2)")`; each case runs in a writable dir AND in the project). Ten were RED on the round-1 code:
+
+| # | Test | Why it was red on round 1 |
+|---|---|---|
+| 1 | R2-1 FLIP: the reviewer's form, by wrapping `FileHandle.prototype.stat` | outside overwritten |
+| 2 | R2-1 TWO-STEP: `beforeOpen` swaps `q` outward; the `stat` wrapper swaps it back holding a hard link | outside overwritten |
+| 3 | R2-3: a parent swapped outward leaves NOTHING outside | an empty file was left |
+| 4 | group- (`775`) and other-writable (`757`) intermediate dirs are refused; a `1777` root is accepted | written |
+| 5 | another uid's dir is refused (`currentUid` seam) | written |
+| 6 | created dirs are never `g/o+w` under `umask 0` | created `777` |
+| 7 | R2-4: a hard-linked file inside the root is writable and its link is broken | refused |
+| 8 | no temp left on failure (`beforeRename` throws; a dir at the path) | the seam was ignored |
+| 9 | R2-2: the loop message | it said "create it first" |
+| 10 | the round-1 test "a hard link to a file outside every root never changes the outside file" | refused |
+
+- Test 10 was **changed by owner decision**: it asserted `refused: hard link` and now asserts the write succeeds, the outside file keeps `orig` and the in-root name has the new bytes.
+- "An existing file's mode bits are kept" was green before (an in-place write keeps the mode). It is a guard for the rename, and mutation 5 shows it is not vacuous.
+- The round-1 tests (final-path link race, parent swap, FIFO, ordinary writes) pass unchanged.
+- Real files in this repo: `stubs/react-devtools-core/index.js` has `nlink 2` (`package.json` has 1 here, after a reinstall). `find` shows no group/other-writable directory in the worktree outside `node_modules`/`.git`.
+
+**Mutations** (cp backup → Edit → `confinement.test.ts` → cp restore → `shasum -c` OK, every time):
+
+| # | Mutation | Killed by |
+|---|---|---|
+| 1 | drop the ownership check | another-uid dir |
+| 2 | `rename` replaced by an in-place `Bun.write(target)` | outside hard link, FLIP, in-root hard link |
+| 3 | drop the `0o022` check | group/other-writable dir |
+| 4 | the rechecks become no-ops | parent swap (round 1), TWO-STEP, R2-3 |
+| 5 | drop the `fchmod` | mode bits kept |
+| 6 | the temp is not unlinked on failure | no temp left |
+
+After the mutations, Biome's `noVoidTypeReturn` made me turn `dirChain`'s `return moved(…)` into `throw moved(…)` (same branches, same messages), and the narrow test file was re-run green.
+
+**Gate:** `bunx tsc --noEmit` clean. `bunx biome check .` clean (710 files). `bun test packages`: **5297 pass, 3 skip (opt-in), 0 fail** (5300 total).
+
+**What remains open, honestly:**
+
+- **A process running as the same uid is not stopped.** It can rename the user's own directories, chmod them, or write anywhere the user can. The rule only stops OTHER users. That is not this boundary's job.
+- **`shell` is unconfined.**
+- **A world-writable root WITHOUT the sticky bit** (e.g. a `TMPDIR` set to a `777` dir) is exempt as the owner specified. There, another user could rename our temp or our subdirectory entries in the root itself. A sticky requirement would be one cheap check; not done, owner decision.
+- **Behaviour changes to weigh:**
+  - **(a) A user with `umask 002` (user-private groups, common on Ubuntu)** has group-writable project directories (`775`). Every write BELOW the project root is then refused with `writable by group or others`. This follows the rule as specified; it may need an exception (e.g. accept `g+w` when the dir's group is the user's private group). **Owner question.**
+  - **(b)** A project directory owned by another uid (e.g. created with `sudo`) is now refused.
+  - **(c)** A hard-linked file loses its link when written, like an editor's atomic save. A file owned by another user in one of our directories is replaced by one we own.
+  - **(d)** Directories the tools create are `0755` minus the umask, not `0777` minus the umask.
+- **Same-uid race tests.** The race tests run on one uid through seams (`beforeOpen`, `beforeRename`, a wrapped `FileHandle.prototype.stat`). The cross-uid guarantee rests on POSIX semantics, by reasoning, not measured with two users: a non-owner cannot rename entries in a directory it cannot write, and in a sticky root it cannot remove our entries.
+- **TOCTOU on the rule itself.** Between the last recheck and `rename` there is a window of a few syscalls. Only a principal that can write those directories could use it, and by the rule that is the user or root.
+- **The dropped-entry notice is still per `buildAgent`** (LOW 6, first half).
+- **Scratch:** this round's backups were removed from `.tentacle/tmp/write-tmpdir/`; the plan and the reviewer's `review/` folder remain.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-07*
