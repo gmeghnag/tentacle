@@ -539,3 +539,9 @@ All nine follow the recommendation:
 - **Q7: (a).** `explain` + `config set/unset/get/list/path` + the short form `config key=value`; `show --origin` is task 5. The owner likes the `set`/`unset` pair.
 - **Q8: (a).** `explain` stays static; the effective value and its origin go to `config show --origin`.
 - **Q9: (a).** Comments, layout and key order are preserved (jsonc `modify`).
+- **Added by the owner (2026-11-08): `explain` navigates by level.**
+  - `tentacle explain`: the top-level keys only, one line each, with a count of sub-keys for a section (`subagents … (7 sub-keys)`).
+  - `tentacle explain <section>` (e.g. `subagents`, `model`): the section's summary and its DIRECT sub-keys, one line each, with the default when short. A map is shown as `types.*`.
+  - `tentacle explain <leaf>` (e.g. `subagents.maxParallel`): the full card (meaning, type, allowed values, default, env, flag, carried, scope, example).
+  - `tentacle explain --all`: the flat list of every leaf, for grep.
+  - The registry needs a summary for section nodes too, not only leaves; T1 also pins that every section has one. Part of `feat/explain-cmd` (task 2), with the section summaries in task 1.
