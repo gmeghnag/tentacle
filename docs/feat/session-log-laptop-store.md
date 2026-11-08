@@ -426,9 +426,11 @@ Replace, in the persistence bullet, from "The daemon owns the live conversation;
 > persists its own copy from `session/log` reads at every committed round, turn end and
 > compaction (offline viewing, `open{messages}` recovery). It writes only the entries the
 > client VALIDATED and re-serialized (known types; a pod's unknown entries are dropped, never
-> written). Every write holds the session's lock file. A write that does not continue the
-> file's last entry rewrites the current segment atomically, and any content it would drop
-> that its own copy does not contain is set aside first (never spliced, never silently lost).
+> written). Every write to `<uid>.jsonl` holds the session's lock file (an aside is a new
+> file, written outside it). A write that does not continue the file's last entry rewrites
+> the current segment atomically, and any content it would drop that its own copy does not
+> contain is set aside first (never spliced, never silently lost); a writer of the same
+> segment appends only what the file lacks, or skips when the file is already ahead.
 > A session cut mid-turn is closed when it is LOADED (from the log's turn markers), not when
 > it is saved. Superseded history (compaction, `context_reset`) is kept only with
 > `sessions.keepSuperseded` (default off). The main owns the session uid (passed into
@@ -751,6 +753,65 @@ untouched (no entry type added, no `critical` value changed).
 5. With `"sessions": {"keepSuperseded": true}`: `/compact` → the file holds two `"type":"base"`
    lines; resume shows the compacted context.
 6. `/clear` → a second `.jsonl`; the first is unchanged.
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-08*
+
+Fixes the review's findings (REQUEST-CHANGES, HEAD `e1af680`) under the orchestrator answers.
+Only `packages/daemon/src/session-log-store.ts` changed in `src/` (plus AGENTS §7 and this
+doc). No `critical` value or `LOG_ENTRY_CRITICAL` touched, `PROTOCOL_VERSION` untouched.
+
+**As built**
+- **M1** (`replace`): the file's last segment of the SAME daemon (`inc`) with a larger
+  `base.seq` than this writer's → skip ("file ahead"), like the same-`base` case; the writer
+  forgets its remembered pair so a later read is matched by id.
+- **M2**: the torn-tail truncate on the "unknown lines after the last known one" append path
+  uses BYTE offsets (`Buffer.byteLength`), like the `readTail` paths.
+- **Answer 3 / L3b**: `replace` and `saveSnapshot` always carry the segments before the file's
+  last one (kept earlier with `keepSuperseded: true`) over, whatever the option says now.
+- **L3a**: the continuing compaction/reset rewrite (option off) now goes through `replace`
+  (it reads the file) instead of writing blind; `settleLast` sets the superseded segment's
+  bytes aside when it holds unknown non-critical lines (with the option on the segment is
+  kept as it is). `saveSnapshot` also sets aside its own earlier segment if it holds unknown
+  lines.
+- **L1**: an empty/unparsable lock body is LIVE until the lock's mtime is older than
+  `lockStaleMs`; the busy message omits the pid then.
+- **L2**: AGENTS §7 and the §7 text above: "every write to `<uid>.jsonl` holds the lock (an
+  aside is a new file, written outside it)" and "a writer of the same segment appends only
+  what the file lacks, or skips when the file is already ahead".
+- L4 / answer 4: accepted as is (no change).
+
+**Tests** (extending `packages/daemon/test/session-log-store.test.ts`, `describe("fix round 1")`,
+7 tests). **Red on `e1af680`**, each on its property: M1 ×2 (keepSuperseded false/true: the
+file regressed to "first prompt"), M2 (`line 4 is not JSON`), L3 kept-segments (a segment
+missing), L3 snapshot (1 segment, expected 2), L3a (0 asides, expected 1), L1 (the save did
+not fail on an empty/garbage lock). Green after: store + file tests 40/40.
+
+**Mutations** (cp backup → mutate → test → restore; `shasum -c` OK), one per behaviour, all
+KILLED: F1 no "ahead" skip (M1 ×2) · F2 char offsets (M2) · F3 replace drops kept segments ·
+F4 saveSnapshot drops kept segments · F5 no aside for unknown lines of a superseded segment ·
+F6 unparsable lock body stale at once. Driver: `mutate-fix1.ts` (scratch).
+
+**Reviewer repros, new output** — `r1-utf8-torn.ts`:
+```
+parse after write: ok, 2 messages, unknown=1
+load: "ok"
+aside files: 0
+```
+`r2-older-writer.ts` (option off, and `keep`; both identical):
+```
+after A: [{"role":"user","content":"SUMMARY"},{"role":"user","content":"prompt AFTER compaction"}]
+after B: [{"role":"user","content":"SUMMARY"},{"role":"user","content":"prompt AFTER compaction"}]
+asides: 0
+```
+
+**Gate** (once, at the end): `bunx tsc --noEmit` clean · `bunx biome check .` 730 files, 0/0 ·
+`bun test packages` **5431 pass, 3 skip (the opt-in ones), 0 fail**. `tsc -p apps/mobile` not run.
+
+**Unverified**: M1's skip assumes a larger `base.seq` of the same `inc` means a newer segment
+(true for one daemon's monotonic seq); a pod forging `inc` and `seq` can only make a writer
+skip a save, not lose file content (the next honest read replaces from its own segment).
 
 ## Review
 

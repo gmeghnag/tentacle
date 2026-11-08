@@ -495,6 +495,166 @@ describe("listing, legacy files, remove", () => {
   });
 });
 
+// Fix round 1 (docs/feat/session-log-laptop-store.md "### Fix round 1"): the review's
+// M1 / M2 / L1 / L3 — "never silently lost" on the several-writers, forward-compat and
+// kept-history paths.
+describe("fix round 1", () => {
+  for (const keep of [false, true]) {
+    test(`M1 keepSuperseded ${keep}: an OLDER writer of the same daemon landing after a compaction save never regresses the file (no aside)`, async () => {
+      // RED on e1af680: B's older save replaced the post-compaction file ("first prompt").
+      const where = fresh();
+      const asides: LogAsideInfo[] = [];
+      const opts = { keepSuperseded: keep, onAside: (i: LogAsideInfo) => asides.push(i) };
+      const a = new LogSessionStore(where, opts);
+      const b = new LogSessionStore(where, opts);
+      const log = new FakeLog("D1");
+      const ra = new FakeReader("s");
+      const rb = new FakeReader("s");
+      const first = log.base([user("first prompt")]);
+      await a.write(ra.read(first, "cold"));
+      await b.write(rb.read(first, "cold"));
+      const round = [log.msg(asst("first answer"))];
+      const compaction = [
+        ...log.base([user("SUMMARY")], "compact"),
+        log.msg(user("prompt AFTER compaction")),
+      ];
+      await a.write(ra.read([...round, ...compaction])); // A is ahead: the compaction is in
+      await b.write(rb.read(round)); // B's OLDER read lands last
+      expect(await load(a, "s")).toEqual([user("SUMMARY"), user("prompt AFTER compaction")]);
+      expect(asides).toEqual([]);
+      const file = await parse(a, "s");
+      expect(file.segments.map((s) => s.base.reason)).toEqual(
+        keep ? ["create", "compact"] : ["compact"],
+      );
+      expect(file.duplicates).toBe(0);
+    });
+  }
+
+  test("M2 a torn tail after an unknown non-critical last line, with NON-ASCII content: the append truncates at the right BYTE", async () => {
+    // RED on e1af680: truncated at a char offset → the newer build's line was cut in half.
+    const where = fresh();
+    await mkdir(where, { recursive: true });
+    const store = new LogSessionStore(where);
+    const log = new FakeLog("A");
+    const accented = user("perché è così? ".repeat(20));
+    const entries = log.base([accented]);
+    const line = (o: unknown) => `${JSON.stringify(o)}\n`;
+    const future = { type: "future_note", seq: 9, id: "A/x", ts: 1, note: "newer build" };
+    await writeFile(
+      store.file("s"),
+      `${
+        headerLine({ id: "s", ...META }) + entries.map(line).join("") + line(future)
+      }{"type":"message","seq":3,"id":"to`,
+    );
+    const reader = new FakeReader("s");
+    await store.write(reader.read([...entries, log.msg(asst("ok"))], "cold"));
+    const file = await parse(store, "s"); // refused (a half line) before the fix
+    expect(file.torn).toBe(0);
+    expect(file.skipped).toBe(1); // the newer build's line is kept
+    expect(currentSegment(file).messages).toEqual([accented, asst("ok")]);
+    expect(await asidesIn(where, "s")).toEqual([]);
+  });
+
+  test("L3 segments already kept (keepSuperseded true) survive a later replace with the option OFF", async () => {
+    const where = fresh();
+    const asides: LogAsideInfo[] = [];
+    const kept = new LogSessionStore(where, { keepSuperseded: true });
+    const log = new FakeLog("D1");
+    const reader = new FakeReader("s");
+    await kept.write(reader.read(log.base([user("a"), asst("b")]), "cold"));
+    await kept.write(reader.read(log.base([user("summary")], "compact")));
+    expect((await parse(kept, "s")).segments).toHaveLength(2);
+    // Another run, option off: a reseed (a restatement, contained) replaces the last segment.
+    const off = new LogSessionStore(where, {
+      keepSuperseded: false,
+      onAside: (i) => asides.push(i),
+    });
+    await off.write(
+      new FakeReader("s").read(
+        new FakeLog("D2").base([user("summary"), asst("more")], "seed"),
+        "cold",
+      ),
+    );
+    const file = await parse(off, "s");
+    expect(file.segments.map((s) => s.base.reason)).toEqual(["create", "seed"]);
+    expect(file.segments[0]?.messages).toEqual([user("a"), asst("b")]);
+    expect(asides).toEqual([]);
+    // …and a compaction rewrite with the option off keeps them too.
+    const r2 = new FakeReader("s");
+    const d3 = new FakeLog("D3");
+    await off.write(r2.read(d3.base([user("summary"), asst("more")], "seed"), "cold"));
+    await off.write(r2.read(d3.base([user("S2")], "compact")));
+    const after = await parse(off, "s");
+    expect(after.segments.map((s) => s.base.reason)).toEqual(["create", "compact"]);
+    expect(after.segments[0]?.messages).toEqual([user("a"), asst("b")]);
+  });
+
+  test("L3 an in-process saveSnapshot carries the kept segments over", async () => {
+    const where = fresh();
+    const kept = new LogSessionStore(where, { keepSuperseded: true });
+    const log = new FakeLog("D1");
+    const reader = new FakeReader("s");
+    await kept.write(reader.read(log.base([user("a"), asst("b")]), "cold"));
+    await kept.write(reader.read(log.base([user("summary")], "compact")));
+    const snap = new LogSessionStore(where);
+    await snap.saveSnapshot({
+      id: "s",
+      cwd: "/w",
+      model: "m",
+      createdAt: 1,
+      updatedAt: 1,
+      title: "t",
+      messages: [user("summary"), asst("more")],
+    });
+    const file = await parse(snap, "s");
+    expect(file.segments).toHaveLength(2);
+    expect(file.segments[0]?.messages).toEqual([user("a"), asst("b")]);
+    expect(currentSegment(file).messages).toEqual([user("summary"), asst("more")]);
+  });
+
+  test("L3 the continuing compaction rewrite (option off) sets aside the unknown lines of the segment it supersedes", async () => {
+    // RED on e1af680: the fast path rewrote the file without reading it → the line was dropped.
+    const where = fresh();
+    const asides: LogAsideInfo[] = [];
+    const store = new LogSessionStore(where, { onAside: (i) => asides.push(i) });
+    const log = new FakeLog("D1");
+    const reader = new FakeReader("s");
+    await store.write(reader.read(log.base([user("a")]), "cold"));
+    const line = (o: unknown) => `${JSON.stringify(o)}\n`;
+    const future = { type: "usage_total", seq: 90, id: "D1/x", ts: 1, n: 3 };
+    const next = log.msg(asst("b"));
+    // Another writer's lines: an unknown one (a newer build), then the known one this reader holds.
+    await appendFile(store.file("s"), line(future) + line(next));
+    reader.read([next]); // this reader's head is `next`, which is the file's last line
+    await store.write(reader.read(log.base([user("summary")], "compact")));
+    expect(asides).toHaveLength(1);
+    expect(await readFile(asides[0]?.file ?? "", "utf8")).toContain('"usage_total"');
+    expect(await load(store, "s")).toEqual([user("summary")]);
+    expect(await readFile(store.file("s"), "utf8")).not.toContain('"usage_total"');
+  });
+
+  test("L1 an empty or unparsable lock body counts as LIVE until the lock's mtime is older than lockStaleMs", async () => {
+    // RED on e1af680: an empty body (a holder between open(wx) and writeFile) read as stale → taken.
+    for (const body of ["", "garbage"]) {
+      const where = fresh();
+      await mkdir(where, { recursive: true });
+      const store = new LogSessionStore(where, { lockWaitMs: 80, lockStaleMs: 30_000 });
+      const log = new FakeLog("D1");
+      const reader = new FakeReader("s");
+      const lock = join(where, ".s.lock");
+      await writeFile(lock, body);
+      await expect(store.write(reader.read(log.base([user("a")]), "cold"))).rejects.toThrow(
+        /another tentacle/,
+      );
+      expect(await readFile(lock, "utf8")).toBe(body); // left alone
+      const old = new Date(Date.now() - 60_000);
+      await utimes(lock, old, old);
+      await store.write(reader.read([log.msg(asst("b"))]));
+      expect(await load(store, "s")).toEqual([user("a"), asst("b")]);
+    }
+  });
+});
+
 /** What a load gives for `messages` ending in an open turn's unanswered state (closed). */
 function cutLoad(messages: ChatMessage[]): ChatMessage[] {
   return [...messages, { role: "assistant", content: expect.any(String) as unknown as string }];

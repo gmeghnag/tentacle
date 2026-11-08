@@ -447,10 +447,19 @@ export class LogSessionStore {
           return;
         }
         if (hasBase && !this.keepSuperseded) {
-          // A compaction / reset with keepSuperseded off: the new segment only
-          // (the old one is superseded by design: today's behaviour).
-          await this.writeWhole(path, headerLine({ id, ...update.meta }) + entryLines(segment));
-          this.remember(state, segment.at(-1)?.id, update.read.head);
+          // A compaction / reset with keepSuperseded off: the new segment replaces
+          // the superseded one (today's behaviour). Through `replace`, which reads
+          // the file: segments kept earlier are carried over, and unknown lines of
+          // the superseded segment are set aside, never dropped.
+          await this.replace(
+            id,
+            update.meta,
+            update.messages,
+            segment,
+            state,
+            update.read.head,
+            tail,
+          );
           return;
         }
         await this.appendLines(path, tail, update.entries);
@@ -524,8 +533,12 @@ export class LogSessionStore {
           createdAt: parsed.header.createdAt,
         };
         const last = currentSegment(parsed);
+        // Same daemon, the file's last segment NEWER than this writer's (a
+        // compaction/reset another writer already saved): the file is ahead.
+        const ahead =
+          last.base.inc === mine.inc && last.base.id !== mine.id && last.base.seq > mine.seq;
         // Same segment, file AHEAD (another writer appended more): skip.
-        if (last.base.id === mine.id && fileHolds(last, segment)) {
+        if (ahead || (last.base.id === mine.id && fileHolds(last, segment))) {
           // The file's end is NOT this writer's head: forget the pair, so a
           // later read is matched by id (or by its segment), never re-appended.
           state.lastDiskHead = undefined;
@@ -540,9 +553,14 @@ export class LogSessionStore {
           if (at >= 0) {
             const missing = segment.slice(at + 1);
             if (missing.length > 0) {
+              // BYTE offsets (the file is truncated by bytes; `text` is decoded).
               await this.appendLines(
                 path,
-                { kind: "line", size: text.length, contentEnd: parsed.contentEnd },
+                {
+                  kind: "line",
+                  size: Buffer.byteLength(text),
+                  contentEnd: Buffer.byteLength(text.slice(0, parsed.contentEnd)),
+                },
                 missing,
               );
             }
@@ -550,9 +568,9 @@ export class LogSessionStore {
             return;
           }
         }
-        const carried = this.keepSuperseded
-          ? parsed.segments.slice(0, -1).map((s) => text.slice(s.start, s.end))
-          : [];
+        // Segments kept earlier survive whatever the option says now: switching
+        // it off stops keeping NEW superseded history, it never erases the old.
+        const carried = parsed.segments.slice(0, -1).map((s) => text.slice(s.start, s.end));
         kept =
           carried.join("") + (await this.settleLast(id, text, parsed, last, mine, messages, state));
       }
@@ -577,16 +595,23 @@ export class LogSessionStore {
   ): Promise<string> {
     const sameInc = last.base.inc === mine.inc && last.base.id !== mine.id;
     const superseding = mine.reason === "compact" || mine.reason === "context_reset";
-    if (last.unknown === 0 && sameInc && superseding) {
+    if (sameInc && superseding) {
       // Superseded in the same incarnation (one writer): kept or dropped by config.
-      if (!this.keepSuperseded) return "";
-      const previous = state.previous;
-      if (previous !== undefined && previous[0]?.id === last.base.id && fileHolds(last, previous)) {
-        return text.slice(last.start, last.end) + entryLines(previous.slice(last.entries.length));
+      if (this.keepSuperseded) {
+        const previous = state.previous;
+        if (
+          previous !== undefined &&
+          previous[0]?.id === last.base.id &&
+          fileHolds(last, previous)
+        ) {
+          return text.slice(last.start, last.end) + entryLines(previous.slice(last.entries.length));
+        }
+        return text.slice(last.start, last.end);
       }
-      return text.slice(last.start, last.end);
-    }
-    if (last.unknown === 0 && (sameInc || isPrefix(last.messages, messages))) {
+      if (last.unknown === 0) return "";
+      // Dropped by config, but it holds lines this build does not know (a newer
+      // build's): set aside, never dropped silently (falls through).
+    } else if (last.unknown === 0 && (sameInc || isPrefix(last.messages, messages))) {
       return ""; // contained: a restatement (seed/reload/create) or the same lineage
     }
     if (last.unknown === 0 && state.asided && isPrefix(last.messages, state.asided)) {
@@ -624,6 +649,7 @@ export class LogSessionStore {
       text = null;
     }
     let headerMeta = meta;
+    let carried = "";
     if (text !== null && text !== "") {
       const parsed = parseLogFile(text, id);
       if (!parsed.ok) {
@@ -634,9 +660,14 @@ export class LogSessionStore {
           model: parsed.header.model,
           createdAt: parsed.header.createdAt,
         };
+        // Segments kept earlier (keepSuperseded) survive this save.
+        carried = parsed.segments
+          .slice(0, -1)
+          .map((s) => text.slice(s.start, s.end))
+          .join("");
         const last = currentSegment(parsed);
         const mine = last.base.inc === state.snapshotInc; // this writer's own earlier save
-        if (!mine && (last.unknown > 0 || !isPrefix(last.messages, record.messages))) {
+        if (last.unknown > 0 || (!mine && !isPrefix(last.messages, record.messages))) {
           await this.asideRaw(
             id,
             headerLine(parsed.header) + text.slice(last.start, last.end),
@@ -645,7 +676,7 @@ export class LogSessionStore {
         }
       }
     }
-    await this.writeWhole(path, headerLine({ id, ...headerMeta }) + entryLines(segment));
+    await this.writeWhole(path, headerLine({ id, ...headerMeta }) + carried + entryLines(segment));
   }
 
   private async removeLocked(id: string): Promise<void> {
@@ -736,25 +767,29 @@ export class LogSessionStore {
         if ((error as { code?: unknown }).code !== "EEXIST") throw error;
       }
       let holder: { pid: number; stamp: number } | null = null;
+      let mtime = 0;
       try {
         const [pid, , stamp] = (await readFile(path, "utf8")).trim().split(" ");
         holder = { pid: Number(pid), stamp: Number(stamp) };
+        mtime = (await stat(path)).mtimeMs;
       } catch {
         continue; // vanished between the two calls: try again at once
       }
-      const stale =
-        !Number.isSafeInteger(holder.pid) ||
-        holder.pid <= 0 ||
-        !processAlive(holder.pid) ||
-        !Number.isFinite(holder.stamp) ||
-        Date.now() - holder.stamp > this.lockStaleMs;
+      // A body that is empty or unparsable is a holder between `open(wx)` and its
+      // write (or a foreign file): LIVE until the lock's mtime is older than the
+      // stale age, never taken at once.
+      const readable =
+        Number.isSafeInteger(holder.pid) && holder.pid > 0 && Number.isFinite(holder.stamp);
+      const stale = readable
+        ? !processAlive(holder.pid) || Date.now() - holder.stamp > this.lockStaleMs
+        : Date.now() - mtime > this.lockStaleMs;
       if (stale) {
         await rm(path, { force: true }).catch(() => {});
         continue;
       }
       if (Date.now() >= deadline) {
         throw new LockBusyError(
-          `the session file is being written by another tentacle (pid ${holder.pid}); not saved this time`,
+          `the session file is being written by another tentacle${readable ? ` (pid ${holder.pid})` : ""}; not saved this time`,
         );
       }
       await sleep(delay);

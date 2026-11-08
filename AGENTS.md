@@ -176,10 +176,12 @@ assume.
   at every committed round, turn end and compaction (offline viewing,
   `open{messages}` recovery). It writes only the entries the client VALIDATED
   and re-serialized (known types; a pod's unknown entries are dropped, never
-  written). Every write holds the session's lock file. A write that does not
-  continue the file's last entry rewrites the current segment atomically, and
-  any content it would drop that its own copy does not contain is set aside
-  first (never spliced, never silently lost). A session cut mid-turn is closed
+  written). Every write to `<uid>.jsonl` holds the session's lock file (an
+  aside is a new file, written outside it). A write that does not continue the
+  file's last entry rewrites the current segment atomically, and any content
+  it would drop that its own copy does not contain is set aside first (never
+  spliced, never silently lost); a writer of the same segment appends only
+  what the file lacks, or skips when the file is already ahead. A session cut mid-turn is closed
   when it is LOADED (from the log's turn markers), not when it is saved.
   Superseded history (compaction, `context_reset`) is kept only with
   `sessions.keepSuperseded` (default off). The main owns the session uid
