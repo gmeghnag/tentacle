@@ -880,7 +880,7 @@ outlives a round. And the limiter must live outside `buildAgent`, which a settin
 (inject it like `jobs`, `wiring.ts:300-306`). **Change:** task 3 keeps per-endpoint slot SIZING
 for foreground rounds (the type's endpoint, not the agent's). A new small task
 **`feat/subagent-slots`** (M, cross-module), after 6a, adds the session-level per-endpoint
-limiter that background children hold, with the reservation from Q14.
+limiter that background children hold (no reservation for the agent: owner Q14 (b)).
 
 #### LOW
 
@@ -921,7 +921,7 @@ limiter that background children hold, with the reservation from Q14.
 | Quit with children | in-process / plain `run`: confirm (M7), then the lost note at resume. `serve`/`connect`/`--detach`: detaches, the child runs on, the session stays alive (H2). |
 | Detach the TUI on `serve`, a second TUI attaches | The snapshot carries the `subagents` list WITH its tail (H1). The exit wakes via `daemonWakeGate`. The ask goes to an attached client; with none attached it is held (`blockingUnsupported` keeps today's "held for a client to attach"). |
 | Pod `run`/`attach` | The child's model goes through the tunnel by name (task 4). A relay stays while children run (H2). The undelivered report reaches the laptop (M5). |
-| llama.cpp slots, several endpoints | Foreground rounds: per-endpoint sizing (task 3). Background children: session limiter + reservation (`feat/subagent-slots`, Q14). Until that lands, oversubscription only QUEUES on the server, so it is slow but correct. |
+| llama.cpp slots, several endpoints | Foreground rounds: per-endpoint sizing (task 3). Background children: session limiter, no reservation (`feat/subagent-slots`, owner Q14 (b)). Until that lands, oversubscription only QUEUES on the server, so it is slow but correct. |
 | Two-way ping-pong | B3's budget (3 child wakes per user message) + coalescing + a per-child cap. Child text is never a user row (M2). A user → child note never wakes (M2). |
 
 ### UI/UX
@@ -1074,3 +1074,13 @@ task);
 **Q17. How many recent steps a foreground subagent shows (A5, never confirmed).**
 (a) 5; (b) 3; (c) 8.
 **Recommend (a).** The list/focus view shows more.
+
+### Owner answers — round 3 (2026-11-08)
+
+*— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-08*
+
+- **Q13: (a).** Send-now while a foreground subagent runs first moves it to background, then sends; its work is kept (task 6b).
+- **Q14: (b), against the recommendation.** No slot reserved for the agent: the agent and background subagents share the endpoint's slots. Task 6c keeps the session-level per-endpoint limiter for background children (M8) but drops the reservation; a busy background may make a chat round wait for a slot.
+- **Q15: (a).** One "background" list under the footbar: subagents and running shell jobs (the shell rows are a small follow-up task).
+- **Q16: (b).** `/agents` and Ctrl+T open the list.
+- **Q17: (a).** 5 recent steps, as built and live-tested in `feat/subagent-tail-view` (merged 2026-11-08).
