@@ -13,6 +13,7 @@ import chalk from "chalk";
 import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import { BULLET, blinkOn, hiddenBullet } from "./blink.ts";
+import { truncateCells } from "./cells.ts";
 import { formatDurationMs, formatTokens } from "./format.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
@@ -21,6 +22,7 @@ import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
+import { subAgentView } from "./subagent-view.ts";
 import { dashedRule, theme, themeMode } from "./theme.ts";
 import { fitSubtitle, isExpanded } from "./tool-expand.ts";
 import { queuedRow } from "./tool-phase-view.ts";
@@ -264,24 +266,39 @@ function diffBody(detail: Extract<ToolResultDetail, { kind: "diff" }>, width: nu
   return out;
 }
 
-/** The nested progress tree for a sub-agent (`agent_task`) call. */
-function subAgentLines(tool: ToolItem): string[] {
+/**
+ * The nested progress block for a sub-agent (`agent_task`) call: the head, how
+ * many earlier steps are not shown, then a ROLLING TAIL of its latest steps
+ * (docs/feat/subagent-tail-view.md — eval A5, the owner's 2026-11-07 decision,
+ * Opus mockup 1). `width` is the body's, so a long label is cut by CELLS here
+ * rather than wrapped into an extra row. Ctrl+O (`expanded`) keeps the whole
+ * kept trail.
+ */
+function subAgentLines(tool: ToolItem, width: number, expanded: boolean): string[] {
   const sub = tool.sub;
   if (!sub) {
     return [];
   }
-  const uses = `${sub.toolUses} tool ${sub.toolUses === 1 ? "use" : "uses"}`;
+  const view = subAgentView(sub, expanded ? { maxRows: Number.POSITIVE_INFINITY } : {});
+  const uses = `${view.head.toolUses} tool ${view.head.toolUses === 1 ? "use" : "uses"}`;
   // Its own tokens, a bare number like the session total's (owner 2026-10-26).
-  const tokens = sub.tokens > 0 ? ` · ${formatTokens(sub.tokens)}` : "";
-  const head = theme.subtle(`${theme.accent("◆")} ${sub.agentType} · ${uses}${tokens}`);
-  const rows = sub.activities.map((label, i) => {
-    const last = i === sub.activities.length - 1 && sub.done;
-    return theme.subtle(`${last ? "└─" : "├─"} ${label}`);
-  });
-  if (!sub.done) {
-    rows.push(theme.subtle("└─ …"));
+  const tokens = view.head.tokens > 0 ? ` · ${formatTokens(view.head.tokens)}` : "";
+  // `◆ ` takes 2 cells of the body's width.
+  const headText = truncateCells(`${view.head.agentType} · ${uses}${tokens}`, width - 2);
+  const out = [theme.subtle(`${theme.accent("◆")} ${headText}`)];
+  if (view.hidden > 0) {
+    // The existing ellipsis grammar, pointed at the past instead of the future.
+    out.push(theme.subtle(truncateCells(`… +${view.hidden} earlier`, width)));
   }
-  return [head, ...rows];
+  view.rows.forEach((label, i) => {
+    // `├─ `/`└─ ` take 3 cells; the last row closes the block once it is done.
+    const last = i === view.rows.length - 1 && view.done !== null;
+    out.push(theme.subtle(`${last ? "└─" : "├─"} ${truncateCells(label, width - 3)}`));
+  });
+  if (view.done === null) {
+    out.push(theme.subtle("└─ …"));
+  }
+  return out;
 }
 
 /**
@@ -401,9 +418,9 @@ function plainToolBody(
   }
   // `headLimit` is undefined exactly when expanded (Ctrl+O): `toolLines`.
   const expanded = headLimit === undefined;
-  // Sub-agent (`agent_task`): show the nested activity tree, then its report (when done).
+  // Sub-agent (`agent_task`): the rolling tail, then its report (when done).
   if (tool.sub) {
-    const tree = subAgentLines(tool);
+    const tree = subAgentLines(tool, width, expanded);
     if (tool.status === "running") {
       return tree;
     }

@@ -10,6 +10,7 @@ those.
 
 ### Changed
 
+- **A running sub-agent shows its latest steps.** The `agent_task` block lists the last 5 tool calls of the sub-agent, under `… +N earlier`, instead of its first ones, so you see what it is doing now; Ctrl+O still expands the whole trail. Long rows are cut to the terminal width.
 - **The built-in sub-agent type `general-purpose` is now called `general`.** `agent_task` lists `general` and `explore`. An old session that names `general-purpose` still runs, on the default type. A user `agents/general-purpose.md` no longer replaces the built-in: it becomes an extra type, and the default type (used when a call names none) is now the built-in `general`, with all its tools. To keep your override, rename the file to `agents/general.md` (and its `name:` line, if it has one). A hook script that matches `agent.type == "general-purpose"` must now match `general`.
 - **`tentacle serve` now stores its sessions as a session log, like the laptop.** Each session
   in `<configDir>/daemon/<project>/` is `<id>.jsonl` (the same log format as your local

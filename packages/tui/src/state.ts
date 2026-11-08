@@ -69,6 +69,11 @@ export interface SubAgentProgress {
    */
   readonly tokens: number;
   readonly done: boolean;
+  /**
+   * Why it stopped (`end_turn`, `error`, `cancelled`, …): set with `done` by
+   * `subagent_end`. Absent while it runs, and on an older daemon's frame.
+   */
+  readonly stopReason?: string;
 }
 
 export interface ToolItem {
@@ -428,7 +433,12 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     case "subagent_end":
       return updateTool(state, event.id, (t) => ({
         ...t,
-        sub: { ...(t.sub ?? EMPTY_SUB), toolUses: event.toolUses, done: true },
+        sub: {
+          ...(t.sub ?? EMPTY_SUB),
+          toolUses: event.toolUses,
+          done: true,
+          stopReason: event.stopReason,
+        },
       }));
 
     case "background_exit":

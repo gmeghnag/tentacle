@@ -155,6 +155,152 @@ describe("itemLines", () => {
     expect(text).toContain("The bug is in auth.ts"); // report after the tree
   });
 
+  // docs/feat/subagent-tail-view.md (eval A5, Opus L4 + mockup 1): a foreground
+  // sub-agent shows the LAST steps, not the first ones. Mutation: render the whole
+  // kept list (or `slice(0, n)`) → `step 1` reappears / `step 12` disappears.
+  const STEPS_12 = Array.from({ length: 12 }, (_, i) => `Read f${i + 1}.ts`);
+  const runningSub = (over: Partial<ToolItem> = {}): ToolItem => ({
+    kind: "tool",
+    id: "t",
+    name: "agent_task",
+    args: '{"description":"find callers of parseConfig","subagent_type":"explore"}',
+    status: "running",
+    sub: {
+      agentType: "explore",
+      description: "find callers of parseConfig",
+      activities: STEPS_12,
+      toolUses: 12,
+      tokens: 12_400,
+      done: false,
+    },
+    ...over,
+  });
+  const bodyOfWidth = (width: number, over: Partial<ToolItem> = {}): string[] =>
+    itemLines(runningSub(over), { expandAll: false, width }).map((l) => strip(l).trimEnd());
+
+  test("a running sub-agent at 80 columns shows its LAST five steps, and how many earlier", () => {
+    const rows = bodyOfWidth(80);
+    const joined = rows.join("\n");
+    expect(joined).not.toContain("Read f1.ts"); // the first steps are the ones cut
+    expect(joined).not.toContain("Read f7.ts");
+    for (const i of [8, 9, 10, 11, 12]) {
+      expect(joined).toContain(`Read f${i}.ts`);
+    }
+    expect(joined).toContain("… +7 earlier");
+    expect(joined).not.toContain("ctrl+o to expand"); // a tail, not a top-collapse
+    // The head grammar is unchanged (type · uses · tokens).
+    expect(joined).toContain("explore · 12 tool uses · 12k");
+    // Running: it still closes with the bare ellipsis row (2-space body indent).
+    expect(rows.at(-1)?.trim()).toBe("└─ …");
+    // Newest LAST: the tail keeps the chronological order.
+    const idx = (s: string): number => rows.findIndex((r) => r.includes(s));
+    expect(idx("Read f8.ts")).toBeLessThan(idx("Read f12.ts"));
+  });
+
+  test("a finished sub-agent's tail closes on its last step instead of the ellipsis row", () => {
+    const rows = itemLines(
+      runningSub({
+        status: "ok",
+        durationMs: 5,
+        sub: {
+          ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+          done: true,
+          stopReason: "end_turn",
+        },
+      }),
+      { expandAll: false, width: 80 },
+    ).map((l) => strip(l).trimEnd());
+    expect(rows.join("\n")).toContain("explore · 12 tool uses · 12k");
+    expect(rows.at(-1)?.trim()).toBe("└─ Read f12.ts");
+    expect(rows.map((r) => r.trim())).not.toContain("└─ …");
+    expect(rows.join("\n")).toContain("… +7 earlier");
+  });
+
+  test("at 46 columns a long step is truncated by CELLS, never wrapped: no row over the width", () => {
+    const WIDTH = 46;
+    const long = runningSub({
+      sub: {
+        ...runningSub().sub,
+        activities: [
+          ...STEPS_12.slice(0, 11),
+          "Read packages/config/src/a-very-long-directory-name/parse-config-schema.ts",
+        ],
+      } as NonNullable<ToolItem["sub"]>,
+    });
+    const rows = itemLines(long, { expandAll: false, width: WIDTH }).map((l) => strip(l).trimEnd());
+    const joined = rows.join("\n");
+    // The cut marker sits before the whole 3-cell prefix math can overflow.
+    expect(joined).toContain("…");
+    expect(joined).toContain("Read packages/config/src/a-very-long-di"); // kept up to the budget
+    for (const row of rows) {
+      expect(stringWidth(row)).toBeLessThanOrEqual(WIDTH);
+    }
+    // Every one of the last five steps is still on its own row (the tail did not collapse).
+    for (const i of [8, 9, 10, 11]) {
+      expect(joined).toContain(`Read f${i}.ts`);
+    }
+    expect(joined).toContain("… +7 earlier");
+    expect(joined).not.toContain("Read f7.ts");
+  });
+
+  test("the head row is cut to the width too, at 46 columns", () => {
+    const wide = runningSub({
+      sub: {
+        ...runningSub().sub,
+        agentType: "a-sub-agent-type-name-far-too-long-for-forty-six-columns",
+        activities: STEPS_12,
+      } as NonNullable<ToolItem["sub"]>,
+    });
+    const rows = itemLines(wide, { expandAll: false, width: 46 }).map((l) => strip(l).trimEnd());
+    for (const row of rows) {
+      expect(stringWidth(row)).toBeLessThanOrEqual(46);
+    }
+    // Cut with the ellipsis, on the one row the head owns (never a wrapped second).
+    expect(rows).toContain("⎿ ◆ a-sub-agent-type-name-far-too-long-for-f…");
+    expect(rows.filter((r) => r.includes("a-sub-agent-type"))).toHaveLength(1);
+  });
+
+  test("a child with no step yet: the head and the `└─ …`, never a `… +0 earlier`", () => {
+    const rows = itemLines(
+      runningSub({
+        sub: {
+          ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+          activities: [],
+          toolUses: 0,
+        },
+      }),
+      { expandAll: false, width: 80 },
+    ).map((l) => strip(l).trimEnd());
+    expect(rows.join("\n")).not.toContain("earlier");
+    expect(rows.at(-1)?.trim()).toBe("└─ …");
+    expect(rows.some((r) => r.includes("◆ explore · 0 tool uses"))).toBe(true);
+  });
+
+  test("fewer steps than the tail: all of them, no cut row", () => {
+    const rows = itemLines(
+      runningSub({
+        sub: {
+          ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+          activities: ["Read a.ts", "Read b.ts"],
+          toolUses: 2,
+        },
+      }),
+      { expandAll: false, width: 80 },
+    ).map((l) => strip(l).trimEnd());
+    expect(rows.join("\n")).not.toContain("earlier");
+    expect(rows.join("\n")).toContain("Read a.ts");
+    expect(rows.join("\n")).toContain("Read b.ts");
+  });
+
+  test("Ctrl+O keeps the whole kept trail, for the one place that wants it", () => {
+    const joined = itemLines(runningSub(), { expandAll: true, width: 80 })
+      .map((l) => strip(l))
+      .join("\n");
+    expect(joined).toContain("Read f1.ts");
+    expect(joined).toContain("Read f12.ts");
+    expect(joined).not.toContain("earlier");
+  });
+
   test("tool header shows a friendly action label per tool", () => {
     const base = { kind: "tool" as const, status: "ok" as const, durationMs: 1 };
     const read = itemLines({ ...base, id: "r", name: "fs_read", args: '{"path":"x.ts"}' }, opts)[0];
