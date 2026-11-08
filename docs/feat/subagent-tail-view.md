@@ -610,7 +610,7 @@ positive row budget, and task 7 will want an explicit cap anyway); the backgroun
 
 ### Round 3 (review round-2 fixes)
 
-*— claude-opus-5-5, 2026-11-08 — fixes the review's round-2 REQUEST-CHANGES: N1 (MEDIUM) and
+*— deepseek-v4.1-flash (tentacle), 2026-11-08 (signature corrected by the orchestrator: the executor had signed claude-opus-5-5) — fixes the review's round-2 REQUEST-CHANGES: N1 (MEDIUM) and
 every nit in it (N2–N5), plus the owner-question default for a `max_iterations` end.*
 
 **What was fixed, and where the decision lives.** Every branch stays in the pure modules
@@ -1860,5 +1860,329 @@ or more. The title lists the widths that gave identical frames.
 - **`✗ max_iterations` is a raw identifier beside a prose note.** Your Q2 default named only `cancelled`
   and `error`. Recommend `✗ iteration cap`, mapped in `closingRow`, and leaving the `_(…)_` note to
   the report, since the model reads that text too.
+
+### Round 3 (re-review of 51a5fa8)
+
+*— claude-opus-5-5, 2026-11-08 — adversarial re-review of commit 51a5fa8. Same model and same session
+as the two earlier review rounds, so a fresh model, not a fresh context; the code under review is
+the executor's (the commit says deepseek).*
+
+#### Verdict: **PASS with nits**
+
+No MEDIUM or higher is open. N1 is fixed in real frames at every width, N2–N4 are fixed, and the
+model still receives the note. The six nits below are all LOW and none blocks the merge.
+
+#### Gate (this worktree, 51a5fa8)
+
+- `bunx tsc --noEmit` → exit 0.
+- `bunx biome check .` → 757 files, no fixes.
+- `bun test packages` → **5735 pass, 0 fail, 3 skip** (the opt-in baseline), 63015 `expect()`,
+  5738 tests, 388 files.
+
+#### N1–N5
+
+| Finding | Status | Evidence |
+|---|---|---|
+| N1 prose report not cut | **Fixed** | 16 rows at 80, 60 and 46, with 8 or 12 paragraphs (was 81 at 46); `render-lines.ts:485-486` |
+| N2 Ctrl+O wrap loses the tree | **Fixed** | "long labels, Ctrl+O": continuations under the label; `render-lines.ts:325-342` |
+| N3 outcome said twice | **Fixed** where the report has text; see nit 1 for the no-report case | "cancelled" and "iteration cap" frames; `subagent-view.ts:144-151`, `render-lines.ts:419` |
+| N4 "never two" | **Fixed** | Execution → Round 3; the sentence is gone from the H1 row and both test comments |
+| N5 wrong signature | **Fixed for Round 2, repeated for Round 3** (nit 2) | Lines 295 and 1403 now say deepseek; line 613 says `claude-opus-5-5`, commit 51a5fa8 says deepseek |
+| Owner default | **Applied** | `└─ ✗ iteration cap`; `subagent-view.ts:104-108,126` |
+
+Nothing regressed. **A correction to my Round 2 text:** I wrote that a finished block is at most 16
+rows (17 with `✗`). The worst case is a report that fits exactly: 17 rows, and 18 with `✗`
+("exactly 8 short rows" below). The executor's bound of 17 is the right one for a clean end.
+
+#### Red-team
+
+**Does the model still see the note? Yes, proven end to end.** The real `App`, `Agent` and
+`createTaskTool` (fake runner only) ran two concurrent children (`peak concurrent children: 2`). The
+frames drop the note; the model's next request carries it:
+
+```
+model's next request, tool results:
+"found half of it\n\n_(sub-agent cancelled)_"
+"ran out of steps\n\n_(sub-agent hit its iteration cap)_"
+```
+
+`state.resultText` keeps it too (`"partial\n\n_(sub-agent cancelled)_"`), so the drop is at render only.
+
+**A report that IS only the note: two blank rows, and not reachable.** See nit 3. It cannot come from
+the real tool: `subagent.ts:304-312` never returns an empty report, and `task.ts:124` has its own
+fallback. What a childless-text cancel really shows is nit 1.
+
+| Attack | Result |
+|---|---|
+| Wrap-before-cut: exactly 8 rows, 9 rows, one paragraph wrapping to 9 | Right: 8 whole, 9 → 6 + `… +3 more lines`, the same for the single paragraph |
+| CJK prose, code fence, a tab in the report | Right: cut by cells, tab expanded, no row over the width |
+| Ctrl+O on the report | Whole, and continuation rows now keep the body indent (an improvement) |
+| Plain tool bodies | Untouched: `spillBody`'s new argument is optional, and the fold is inside the `tool.sub` branch |
+| Note kept when the reason differs (`end_turn`) | Right: shown, nothing dropped |
+| Note in the middle of a report | Right: `subagent-view.test.ts`, trailing match only |
+| `subagent_end` lost, so no `stopReason` | Right by construction: no note is dropped |
+
+#### Mutation (N1)
+
+`render-lines.ts:485-486`, the original defect in a form the executor did not try: cut first, then
+wrap (`collapsedBody(report, fit).flatMap(wrap)`). `bun test packages/tui/test/render-lines.test.ts`
+→ **93 pass, 1 fail**: "a prose report is wrapped before it is cut…" (`Expected: <= 8, Received: 16`).
+Restored by `cp`; `shasum` unchanged: `render-lines.ts 4794fab0…`, `subagent-view.ts e21a7b6c…`.
+
+#### Nits (LOW, none blocking)
+
+1. **A cancelled child with no text still says it twice.** Below `✗ cancelled` comes `(The explore
+   sub-agent finished (cancelled) after 3 tool use(s) without producing a report. Try a narrower task
+   or a higher step limit.)`, and that advice is written for the model. It is likely the commonest
+   cancel. Drop it at render as the note is, keyed on the same reason.
+2. **Round 3's signature repeats N5.** Line 613 says `claude-opus-5-5`; commit 51a5fa8 says deepseek.
+3. **An empty report draws two blank rows** (`render-lines.ts:486`): `"".split("\n")` is `[""]`.
+   Unreachable today; `folded.some((l) => l !== "")` closes it.
+4. **A spilled report keeps a blank row where the note was** (`render-lines.ts:419`): the note goes,
+   the blank line before it stays. Trim trailing blanks there as `subAgentReport` does.
+5. **A wrapped row can start with a space** (the rows reading ` on change, so…` in the prose frames),
+   since `wrapLines` uses `trim: false`. It is existing behaviour, but the report now reaches it often.
+6. **A stop reason named like an `Object` member prints garbage** (`subagent-view.ts:126,136`):
+   `✗ function Object() { [native code] }`, `✗ [object Object]`. The reason comes from the daemon,
+   which in a pod is untrusted, but the effect is display only and nothing throws. Use
+   `Object.hasOwn` or a `Map`.
+
+#### Real frames
+
+`.tentacle/tmp/subagent-tail-view/review-frames-r3.ts` (gitignored). Block frames: real `applyEvent` →
+`itemLines` → `wrapLines` → Ink, at 80/60/46. App frames: the real `App`, `Agent` and `agent_task`
+with a fake runner, at 80/60/46; between widths only the rules and the footer differ. SGR is stripped,
+so colours are not evidenced. No row was flagged over the width.
+
+```
+=== prose report, 8 paragraphs, done @80 (rows 16; 12 paragraphs: same rows, +54) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  Paragraph 1: the parser reads the config once at startup and the watcher
+|  re-reads it on change, so the parser reads the config once at startup and the
+|   watcher re-reads it on change, so the parser reads the config once at
+|  startup and the watcher re-reads it on change, so the parser reads the config
+|   once at startup and the watcher re-reads it on change, so
+|  Paragraph 2: the parser reads the config once at startup and the watcher
+|  … +34 more lines · ctrl+o to expand
+
+=== prose report, 8 paragraphs, done @60 (rows 16; tree rows as above) ===
+|  Paragraph 1: the parser reads the config once at startup
+|  and the watcher re-reads it on change, so the parser
+|  reads the config once at startup and the watcher re-reads
+|   it on change, so the parser reads the config once at
+|  startup and the watcher re-reads it on change, so the
+|  parser reads the config once at startup and the watcher
+|  … +50 more lines · ctrl+o to expand
+
+=== prose report, 8 paragraphs, done @46 (rows 16; 12 paragraphs: same rows, +102) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  Paragraph 1: the parser reads the config
+|  once at startup and the watcher re-reads it
+|   on change, so the parser reads the config
+|  once at startup and the watcher re-reads it
+|   on change, so the parser reads the config
+|  once at startup and the watcher re-reads it
+|  … +66 more lines · ctrl+o to expand
+
+=== long labels, Ctrl+O @80 (rows 11) ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 3 tool uses
+|  ├─ $ bun test
+|     packages/config/src/a-very-long-directory-name/packages/config/src/a-very-
+|     long-directory-name/packages/config/src/a-very-long-directory-name/
+|  ├─ $ grep -rn callers of the parser in every package under packages/agent and
+|      packages/cli and then some more words
+|  ├─ Read 日本語のとても長いファイル名がここに続いています/設定スキーマ定義ファ
+|     イル.ts
+|  └─ …
+
+=== long labels, Ctrl+O @60 (rows 12) ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 3 tool uses
+|  ├─ $ bun test packages/config/src/a-very-long-directory-n
+|     ame/packages/config/src/a-very-long-directory-name/pac
+|     kages/config/src/a-very-long-directory-name/
+|  ├─ $ grep -rn callers of the parser in every package
+|     under packages/agent and packages/cli and then some
+|     more words
+|  ├─ Read 日本語のとても長いファイル名がここに続いています/
+|     設定スキーマ定義ファイル.ts
+|  └─ …
+
+=== long labels, Ctrl+O @46 (rows 14) ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 3 tool uses
+|  ├─ $ bun test packages/config/src/a-very-lo
+|     ng-directory-name/packages/config/src/a-
+|     very-long-directory-name/packages/config
+|     /src/a-very-long-directory-name/
+|  ├─ $ grep -rn callers of the parser in
+|     every package under packages/agent and
+|     packages/cli and then some more words
+|  ├─ Read
+|     日本語のとても長いファイル名がここに続い
+|     ています/設定スキーマ定義ファイル.ts
+|  └─ …
+
+=== cancelled, partial report @80/60/46 (rows 11) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ cancelled
+|
+|  partial findings
+
+=== iteration cap, partial report @80/60/46 (rows 11) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ iteration cap
+|
+|  ran out of steps
+
+=== report IS only the cancel note @46 (rows 8; unreachable, nit 3) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 3 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ Read packages/f2.ts
+|  ├─ Read packages/f3.ts
+|  └─ ✗ cancelled
+|
+|
+
+=== real empty cancelled child @46 (rows 11; nit 1) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 3 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ Read packages/f2.ts
+|  ├─ Read packages/f3.ts
+|  └─ ✗ cancelled
+|
+|  (The explore sub-agent finished (cancelled)
+|   after 3 tool use(s) without producing a
+|  report. Try a narrower task or a higher
+|  step limit.)
+
+=== spilled + note, collapsed @46 (rows 12; nit 4) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ Read packages/f2.ts
+|  └─ ✗ cancelled
+|
+|  40.8k chars · too large, the model reads it
+|   in parts
+|  partial findings
+|  … 39.6k chars omitted …
+|  last line
+|
+
+=== exactly 8 short rows, cancelled (worst case) @46 (rows 18) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ cancelled
+|
+|  row 1
+|  row 2
+|  row 3
+|  row 4
+|  row 5
+|  row 6
+|  row 7
+|  row 8
+
+=== reason = constructor @46 (rows 6; nit 6) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ Read packages/f1.ts
+|  └─ ✗ function Object() { [native code] }
+|
+|  x
+
+=== APP two running @46 (viewport, rows 23) ===
+|  … +3 earlier · ctrl+o to expand
+|  ├─ Read a4.ts
+|  ├─ Read a5.ts
+|  ├─ Read a6.ts
+|  ├─ Read a7.ts
+|  ├─ Read a8.ts
+|  └─ …
+|
+|⏺ Agent migrate tests
+|⎿ ◆ general · 8 tool uses
+|  … +3 earlier · ctrl+o to expand
+|  ├─ Read b4.ts
+|  ├─ Read b5.ts
+|  ├─ Read b6.ts
+|  ├─ Read b7.ts
+|  ├─ Read b8.ts
+|  └─ …
+|
+|⠴ Working… 0s · esc/ctrl+c to stop
+|────────────────────────────────────── qwen3 ─
+|❯  Queue a task…
+|──────────────────────────────────────────────
+|/tmp/work · ↑7 ↓3 · ctx ░░░░░░░░░░ 0% (7/128k)
+
+=== APP two ended (cancelled, cap) @46 (viewport, rows 23) ===
+|  ├─ Read a8.ts
+|  └─ ✗ cancelled
+|
+|  found half of it
+|
+|⏺ Agent migrate tests 0.4s
+|⎿ ◆ general · 8 tool uses
+|  … +3 earlier · ctrl+o to expand
+|  ├─ Read b4.ts
+|  ├─ Read b5.ts
+|  ├─ Read b6.ts
+|  ├─ Read b7.ts
+|  ├─ Read b8.ts
+|  └─ ✗ iteration cap
+|
+|  ran out of steps
+|
+|⏺ done.
+|
+|────────────────────────────────────── qwen3 ─
+|❯  Type a task or /command
+|──────────────────────────────────────────────
+|/tmp/work · ↑7 ↓3 · ctx ░░░░░░░░░░ 0% (7/128k)
+```
 
 
