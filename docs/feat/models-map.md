@@ -1070,3 +1070,76 @@ weaker than described (F-3): the tests were present but did not separate the beh
 - **R-Q2. `TODO.md` task 6c (`feat/subagent-slots`)** contradicts the 2026-11-08 rule. (a) Drop
   it; (b) re-scope it to a limit the user sets. **Recommend (a):** `subagents.maxParallel` is
   now the only limit you asked for.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-08*
+
+**Verdict: PASS with nits.** No MEDIUM or higher finding remains, on `574e197`. Merge still
+needs the owner's confirmation of R-Q1 (a), applied here as a default. R-Q2 is moot. Same model
+as the executor, fresh context only, as in round 1.
+
+**Gate (re-run):** `bunx tsc --noEmit` clean · `bunx biome check .` 763 files, no findings ·
+`bun test packages` **5778 pass, 3 skip, 0 fail** (63142 expects, 393 files).
+
+| Finding | Status | Evidence |
+|---|---|---|
+| F-1 section `details` | **fixed** | `explain.ts:403`. Live `explain models` prints summary, details, children. N7 killed. |
+| F-2 relay and entry commands | **fixed** (R-Q1 a) | `relay.ts:673`, `load.ts:723`. `relay-repro.ts` now ends `[relay] kept entry 0123456789abcdef not found` for both configs: past the load. N1, N4 killed. |
+| F-3 weak tests | **fixed** | M19a, M26, M16, M25, M17: all now fail (table below). |
+| F-4 call-site notices | **fixed** | `main.test.ts` drives the real `main`. M20, M21 killed. |
+| F-5 warning names the owner | **fixed** | `workspace-mount.ts:96,761`, `main.ts:1167`. Live: `["model","models.b"]`, an entry with a `cat` file not named. N8, N9 killed. |
+| F-6 stale plan text | **mostly fixed; nit 3** | `:152-153`, F6, F15 and test item 2 corrected. |
+| F-7 `__proto__` text | **fixed; nits 1, 2** | `schema.ts:75,230`. Load says `a model cannot be named "__proto__"…` for object, empty, null, array, beside a real entry and in a profile. |
+| F-8 mobile typecheck | **not fixed** (needs a full install; nit 4) | `tsc -p apps/mobile` still not run. |
+| Regressions | **none found** | `attack-config.ts` (masking, argv refusal, config errors) and `e2e.ts` (20 routing scenarios) give the same results as round 1, except S19's now clearer text. The `z.preprocess` on `models` did not disturb the key registry. |
+
+**Mutations (now required to fail):** `cp` backup of the 9 source files, then `mutate.ts`. All
+16 failed their tests. `shasum -a 256` of the 9 files is identical before and after;
+`git status --short` empty.
+
+| Mutation | Test that fails |
+|---|---|
+| M16, M25 hooks get `type.model` | "hooks get the CHOSEN model's id…" |
+| M17 `has` uses `in` | "a name like __proto__ or constructor…", "a frontmatter `constructor`…" |
+| M19a, M26 inherited id from the file | "env overrides of the main model…", "--model reaches an inheriting entry…" |
+| M20, M21 notices off at the call site | "cli main: the models-map notices" |
+| N1 relay omits the option · N4 `load` ignores it | `relay.test.ts`; "skipModelsKeyCommands runs the main command and no entry's" |
+| N2 relay loads as a pod daemon (no main key) · N3 option also skips the main key | "the main key command still runs in a relay"; "skipModelsKeyCommands runs the main command…" |
+| N5 prototype-swap check off · N6 own-key check off | `models-load.test.ts`; `models.test.ts` |
+| N7 details off · N8 owners main only · N9 `main.ts` passes none | `explain.test.ts`; `workspace-mount.test.ts`; `main.test.ts` |
+
+**Red team of the new code:**
+
+- **Can the option skip the MAIN key? No.** It gates only the runner given to `resolveModelKeys`
+  (`load.ts:723`); the main block above it tests `podDaemon` alone. Live with the option: main
+  command runs once and its key is present; a failing main command throws `apiKeyCommand exited
+  with code 4: boom`; an empty one throws; with `TENTACLE_MODEL_API_KEY`, the env key is used and
+  no command runs. N2 and N3 pin it.
+- **Can an entry key reach the relay's env or argv? No.** Under the option no entry command runs
+  and a command-keyed entry holds no key (`own: command:-`). A literal or inherited key stays in
+  memory, as with any load, and the relay reads none of them: its only uses of `config` are
+  `model`, `configDir`, `cwd`, `detach`, `sessions` and `autoWake`, and `configuredModelProvider`
+  takes the main fields. Its one spawn passes `process.env` plus the spec path (`relay.ts:705`);
+  `RelaySpec` has no key field. No key appeared in `process.env` after a load.
+- **Reserved name.** Refused in every form that could name an entry. `constructor`, `toString`,
+  `prototype`, `hasOwnProperty` and `__PROTO__` stay ordinary names and load as own keys.
+  `selectableModels: ["__proto__"]` is refused as not an entry. Empty map, array, null and string
+  behave as before.
+- **`explain` at 80 and 46 columns** (25 sections, by a walk of the tree): no line from any
+  `details` exceeds the width. Over-width lines (1 at 80, 4 at 46) are single unbreakable tokens
+  in child rows, already there before this change. A section with no details has no stray blank.
+
+**Nits (none blocks):**
+
+1. `config set models.__proto__.model x` prints 7 issues: `refuseProtoName` returns `{}`
+   (`schema.ts:75`), so the reference check also reports every name as undefined. The first line
+   is the right one, and a load prints only that one.
+2. `{"models":{"__proto__":5}}` (or a string) loads as an empty map, because the parser ignores a
+   primitive prototype. Harmless: no entry could have been meant.
+3. `apiKeyFileUnknown` still appears unannotated in the plan at `:601,608,610,665`, the header
+   (`:3`) still says Review pending, and `TODO.md:456` still lists `slots`.
+4. F-8: run `bun run typecheck` on a full install before the merge.
+
+**Still unexercised:** a live docker/podman/k8s run and a pair of real llama.cpp servers; the
+`[models]` notice is covered by the `main` test, not observed against an engine.
