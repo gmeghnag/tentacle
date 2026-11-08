@@ -303,3 +303,146 @@ built-in-list line; I did not additionally mutate `task.ts:80` (its test was red
 in step 1 on that literal, which is the same evidence). Verifying the second
 mutation is one command: `sed -i '' '80s/"general"/"general-purpose"/' packages/tools/src/task.ts && bun test packages/tools/test/task.test.ts`.
 
+## Review
+
+*— claude-opus-5-5, 2026-11-08 (fresh context; a different model family from the executor)*
+
+### Verdict: PASS
+
+The code change is correct and complete. F1 and F2 are text fixes to make before
+merge; they change no code and need no new Review. F3–F5 are optional.
+
+### Findings
+
+**MEDIUM**
+
+- **F1. A user's `general-purpose.md` silently stops being the default type, and
+  this doc says the opposite.** Failure-modes row 2 (`:144`) says "the DEFAULT type
+  does not change under them". It does. On `main` the file replaced index 0
+  (`repro-before`: `[["general-purpose","mine"],…]`), so it WAS the default. Now
+  index 0 is the built-in `general` (`repro-after` line 7). A user who restricted
+  that file (`tools: [fs_read]`) gets a full-tool default for every call with no
+  `subagent_type`. Nothing reports it. The child's permission gate still applies.
+  **Fix:** correct the row, and add to `CHANGELOG.md:13` that the default type is
+  now the built-in `general` until the file is renamed.
+
+**LOW**
+
+- **F2. The CHANGELOG's migration step is incomplete.** "rename it to
+  `agents/general.md`" (`CHANGELOG.md:13`) does nothing if the file has a
+  `name: general-purpose` line, because frontmatter wins over the file name
+  (`packages/agent/src/agent-defs.ts:87`). The type stays an extra one, with no
+  diagnostic. **Fix:** "rename it (and its `name:`, if it has one)".
+- **F3. The old-history test was never red, and Execution does not say so.**
+  Implementation Test 2 (`:158-162`) claims "Red today". The test is absent from
+  the seven failures in `red.txt`, and passes on either source: it runs on the
+  fixture at `packages/tools/test/task.test.ts:6-9`, so it cannot see the built-in
+  list. It is not vacuous (mutation 2 below), and C2 property 1 holds by
+  composition with `packages/agent/test/parallel-agents.test.ts:598`. **Fix:**
+  correct the doc's claim. Optional: one wiring-level test over the real built-ins.
+- **F4. The load-bearing assumption is overstated** (`:62-72`, and Context `:23`).
+  "Nothing persists the type name" is false: an old `agent_task` call's arguments
+  sit in the persisted `ChatMessage`s, which is C2's own second fact. "No consumer
+  keys off the string" misses user hook scripts, which get `agent.type`
+  (`packages/agent/src/hooks.ts:514`, `docs/feat/hooks-core.md:296`). A hook that
+  matches `"general-purpose"` silently stops matching. No effect on the code.
+  **Fix:** correct the text; add the hook case to the CHANGELOG entry.
+- **F5. Citations.** `docs/eval/subagent-live.md:650` (`:20`) is Q2; Q6 is `:654`.
+  The built-in list (`:76`) ends at `subagent.ts:71`, not `:73`.
+
+### The checks
+
+1. **References.** `rg "general-purpose" packages apps scripts README.md` hits only
+   tests (5 in `task.test.ts`, 4 in `wiring.test.ts`, 2 in `parallel-agents.test.ts`,
+   4 in `agent-defs.test.ts`), all pinning the fallback or the extra-type behaviour.
+   Zero in `src`. On `main`: 2 source and 29 test hits, as claimed. **The text the
+   model sees** (`task.ts:70,81,93` with `subagent.ts:58-60`) is "- general: General
+   autonomous agent for multi-step tasks and open-ended work. Has the full tool-set."
+   and "Which sub-agent to use (default general)". It reads well. The repeated
+   word is harmless.
+2. **C2.** All three properties hold and are pinned: fallback
+   (`task.test.ts:51-64`), override and extra type (`agent-defs.test.ts:120-137`,
+   `wiring.test.ts:621-645`). **How the fallback shows:** the TUI and permission row
+   show the RESOLVED type, `general` (`subagent.ts:213`, `render-lines.ts:276`,
+   `permission-ui.ts:97`). The model gets no signal: the tool_result is the report
+   plus only a cancelled/capped note (`task.ts:118-125`). **Judgement: acceptable
+   for this rename.** `general-purpose` meant the type it now resolves to, the tool
+   description lists `general` every turn, and a past call is never re-run (an
+   interrupted one gets `SUBAGENT_INTERRUPTED_NOTE`, `persisted-session.ts:186-188`).
+   The general case is weaker: see owner Q1.
+3. **Other surfaces.** None is affected.
+   - *TUI:* the label is dynamic. `subagent-label-rename` concerns the tool label
+     "Agent" (`core/src/tool-labels.ts:15`), not the type. `render-lines.ts:511`
+     prefers `description`, which the schema requires.
+   - *Resume/log:* the old string stays as inert history, and no code reads it.
+   - *Wire and pods:* the name travels only as a free string
+     (`protocol/src/updates.ts:138`, `protocol/src/permission.ts:79`), with no enum
+     and no `src` branch on it. Types resolve daemon-side against that daemon's own
+     list, so an older pod with a newer laptop just shows `general-purpose` and
+     works. No `PROTOCOL_VERSION` bump is needed.
+4. **Tests.** Non-vacuous, on my own mutations (`cp` backup, narrow test, restore):
+   - Mutation 1, `task.ts:80` back to `"general-purpose"` (the one Execution left
+     unverified): 1 fail, "with no types at all…".
+   - Mutation 2, an alias `general-purpose → explore` at `task.ts:84`: 1 fail,
+     "an old history's…".
+   - After restore, `shasum`: `subagent.ts` `45a935f2…`, `task.ts` `791f9b31…`,
+     identical to before; `git status` clean.
+5. **CHANGELOG.** Right section, and what it says is true. Incomplete: F1, F2, and
+   the hook case in F4.
+6. **Gate.** `bunx tsc --noEmit` clean. `bunx biome check .`: 755 files, no fixes.
+   `bun test packages`: **5671 pass, 3 skip, 0 fail** (62590 expects, 387 files).
+   The 3 skips are the opt-in ones. Not re-run: `tsc -p apps/mobile` (nothing there
+   changed).
+
+### Premises
+
+| Citation | Result |
+| --- | --- |
+| `subagent.ts:58`, `:45`, `:208` | TRUE |
+| `subagent.ts:56-73` | FALSE by two lines (F5) |
+| `task.ts:80`, `:81`, `:82-85`, `:93` | TRUE |
+| `agent-defs.ts:132-147` | TRUE |
+| `wiring.ts:473-475`, `:109-111` | TRUE |
+| `eval:62-65`, `:399-413`, `:569` | TRUE |
+| `eval:650` | FALSE (F5) |
+| "Nothing persists the type name" | FALSE (F4) |
+| "The DEFAULT type does not change" | FALSE (F1) |
+
+### Attacks tried
+
+1. A user `general-purpose.md` with restricted tools: found F1.
+2. A file renamed but keeping `name:`: found F2.
+3. Old name on the wire and in pods: nothing found.
+4. An old `agent_task` re-executed at resume: not re-run; nothing found.
+5. A consumer keying off the string in `src`: none. Outside `src`, user hooks (F4).
+6. `docs/feat/packages.md:355` left unedited: Execution's drift note is right, the
+   line is a dated review finding.
+
+**Not executed:** the end-to-end trace, and so the Repro re-run on `main`. Running a
+scratch script with `bun` needed an approval this session did not have. F1 rests on
+the executor's saved `repro-before`/`repro-after` output plus the code; F2, the
+`explorer` case in Q1 and the rendered text rest on reading the code. To verify:
+`bun .tentacle/tmp/subagent-general-rename-review/trace.ts` (it stays in the
+worktree, gitignored).
+
+### Owner questions
+
+- **Q1. Should an unknown `subagent_type` tell the model?** Today a typo like
+  `explorer` silently runs the default type, with all tools, when the model expected
+  a read-only child (`task.ts:84`). The behaviour predates this task.
+  (a) Leave it. (b) Keep running, and add a note to the tool_result:
+  `_(unknown sub-agent type "explorer": ran as general)_`. (c) Return an error that
+  lists the valid types. **Recommend (b), as a separate small task:** it keeps C2's
+  "still runs" and makes the result truthful. (c) is the only option that stops the
+  unintended child, but it reverses C2.
+- **Q2. Warn when a `general-purpose.md` exists?** **Recommend no:** pre-public, no
+  compat shim (AGENTS §7). F1's CHANGELOG line is enough.
+
+### How the executor behaved
+
+Disciplined: repro before any edit, tests before the rename, a mutation restored
+and checked by `shasum`, and drift reported, including the mutation it had not run.
+Skipping the `packages.md` edit was the right call. Its weak spot was claims it did
+not test: the "DEFAULT does not change" row (F1) and "Red today" (F3). Its own
+`repro-before` output contradicts F1's claim.
+
