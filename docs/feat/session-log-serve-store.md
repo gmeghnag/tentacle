@@ -1006,6 +1006,123 @@ contradicted FM 22 and §7, plus M1, which the plan's memory analysis did not co
 M1: fix as the reviewer suggests (drop the store's writer state when the host clears `entry.record`), with a test. L1 via answer 2; L3: fix the stale references; L2: no change.
 No `critical` value, entry type or `PROTOCOL_VERSION` change.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-08* (re-review of `a7e1507`, the fix commit after `39fd650`. Same
+model family as the original executor; the fix round was claude-sonnet-5-5.)
+
+**Verdict: PASS** (0 HIGH · 0 MEDIUM). M1, M2, L1 and L3 are fixed. L2 is unchanged by decision.
+No regression found in the new code. Two LOWs remain as debt.
+
+#### Gate (at `a7e1507`, before any mutation)
+
+| Check | Result |
+|---|---|
+| `bunx tsc --noEmit` | exit 0 |
+| `bunx biome check .` | 734 files, no findings |
+| `bun test packages` | 5383 pass · 3 skip (the opt-in three) · 0 fail · 61358 expects · 375 files |
+
+`git diff bd46999 a7e1507 -- packages/protocol packages/daemon/src/connection.ts packages/transport
+packages/client/src` is empty: no `critical` value, entry type, `LOG_ENTRY_CRITICAL`,
+`PROTOCOL_VERSION` or RPC handler change.
+
+#### Findings of round 1
+
+| # | Status | Evidence |
+|---|---|---|
+| M1 | **Fixed** | `session-host.ts:737-740` calls `persister.forget` only in the `ok` branch, after the guards. r1 C was `writers after archive 1 entries 9 chars 1971`; now `writers after archive 0 entries undefined chars 0 resident false` |
+| M2 | **Fixed** | Header before the missing-state check in `load` and `loadState` (`session-persister.ts`). r2 was `newer-nostate.jsonl: present=false`; now the output below |
+| L1 | **Fixed** | `AGENTS.md:198-199` states the rewrite-crash exception, `:208` says "the sidecar and the log's first line only": both now match the code |
+| L2 | No change | By decision (answer). r1 E output unchanged |
+| L3 | **Fixed** | No `parseDaemonRecord`, `DAEMON_RECORD`, `JsonSessionStore` or "minted at the reload" left in `packages`; P5 cites `:209-228` |
+
+#### Repro output (`.tentacle/tmp/session-log-serve-store/review/`)
+
+`r1.test.ts`: 20 pass, 2 fail. Both failures are the harness's own `at=2` row of test A (FM 5: log,
+no state; `serve` sets it aside), the same row as round 1. Every other crash point of A is unchanged.
+
+```
+at=14 kind=state g2=unpaired asides=0 err=0 g3=paired same=true bases=1 …   (keep=false)
+at=14 kind=state g2=paired asides=1 err=0 g3=paired same=true bases=2 …     (keep=true)
+sizes [ 3440, 3440, 3440 ] bases 2
+writers after archive 0 entries undefined chars 0 resident false
+loadState newer-log no-state: {"ok":false,"reason":"session log schemaVersion 99 is not 1 (written by another tentacle version): update tentacle"}
+healed true true
+H1 base {"prev":"…/6","seq":7,"count":2,"turn":"T1"} head {"seq":6,"id":"…/6"} n 5
+H2 msgs ["user:go","assistant:","tool:Not run: the daemo"]
+I copies 1 1 paired
+J expired [{"id":"s1","reason":"idle_ttl","archived":true}] [ "s1.jsonl", "s1.state.json" ] archivedAt 10000000
+K returned ["r2"] log same true errors 0
+N1 writers 0 1 base reload true true stateHadHead true
+N1 writers after 2nd close 0 errors [] asides []
+N2 sync|microtask|1ms|5ms writers 1 errors 0 asides 0
+N3 writers 0 title {"text":"landed name","source":"user"} log same true errors []
+N4 writers 1 0 errors 1
+N5 [["base","reload",true],["message","user",false],["message","assistant",false],["message","tool",false],["title","",false]]
+```
+
+`r2.test.ts` (real `startDaemon`; paths shortened), 1 pass:
+
+```
+skipped newer-nostate.jsonl / …: session log schemaVersion 99 is not 1 … (left as is)
+skipped corrupthdr-nostate.jsonl / …: line 1 is not JSON (left as is)
+skipped wrongid-nostate.jsonl / …: id "someone-else" does not match the file name (left as is)
+set current-nostate.stale-….aside aside: a log with no state file …
+set bodycorrupt-nostate.stale-….aside aside: a log with no state file …
+set crit-nostate.stale-….aside aside: a log with no state file …
+newer-nostate.jsonl: present=true same=true
+corrupthdr-nostate.jsonl: present=true same=true
+wrongid-nostate.jsonl: present=true same=true
+current-nostate.jsonl: present=false same=false
+removed [ "gone.jsonl", "gone.state.json" ] added [ "deleted-sessions" ]
+```
+
+#### New tests are red on the old behaviour
+
+They call `residentWriters()`, absent at `39fd650`, so on that commit they would fail trivially. I
+therefore mutated `a7e1507` back to each old behaviour (cp backup → mutate → test → restore;
+`shasum -c` OK, `git status` clean).
+
+| # | Mutation | Test | Result |
+|---|---|---|---|
+| A | `settleWrite` never calls `forget` (39fd650's behaviour) | "M1" ×2 | **red** ×2 (`Expected 0 / Received 1`) |
+| B | reviewer: `forget` also on a FAILED archive | "M1" failed-archive | **red** (`Expected 1 / Received 0`) |
+| C | `loadState`: missing-state check before the header (39fd650's order) | "M2" ×3, e2e "FM 5 / M2" | **red** ×4 (current-version case stays green) |
+| D | `load`: the same order | "M2" ×3 | **red** ×3 |
+
+#### Attacks on the new code
+
+| Attack | Result |
+|---|---|
+| Reopen from disk after the forget, a turn, close again, restart, reopen (N1) | Holds: `base{reload}` continues the landed head, no error or aside, same history, writers 1 live and 0 once archived, no lock or temp left |
+| Reopen racing the landing and the forget, at sync, microtask, 1 ms, 5 ms (N2) | Holds: the writer exists while live, no "no complete log segment", the next write paired on reload. `settleWrite` returns before `forget` when the entry left the archive, and the op is FIFO behind every unit |
+| Rename while resident, then after landing (N3) | Holds: the resident one is a heal unit that still has its writer (the older settle returns on `entry.record !== record`); the later one writes only the state file, log bytes identical |
+| Failed archive, reopen from the resident record, close (N4) | Holds: writer kept (1), freed after landing (0), one error reported, history exact |
+| Failed archive, retry by the sweep | Holds: the executor's test, and mutation B shows it depends on the guard |
+| Header-first scan | Holds: newer, corrupt header and wrong-id logs with no state are untouched; a current-version one is set aside with its bytes |
+
+**Item 4 (a paired restart = one rewrite, old segment contained): the explanation is correct.**
+Citations check out (`session-persister.ts:199`, `session-log-store.ts:585`, `:722`). Design §5 and
+FM 8 state exactly this, and answer 15 is met inside the rewrite: H1 and N1 show `prev` = the landed
+head and `seq` +1; N5 shows `base`, then its `count` messages, then the repair ("Not run: the session
+was ended…") as an ordinary `message` entry. Only non-projecting lines go (turn and call markers,
+checkpoints). Test B shows it does not grow the file or add a segment with `keepSuperseded` on.
+
+#### Debt (LOW, non-blocking)
+
+- **D1.** A log with a readable current-version header, a corrupt or unknown-critical BODY and no
+  state file is set aside, not skipped (r2 `bodycorrupt-nostate`, `crit-nostate`; also the live
+  note's class). This is exactly what answer 1 decided, and bytes are kept, but FM 22's row still
+  reads wider ("corrupt line, … unknown critical entry → never writes or removes"). Narrow that row
+  to "with a state file".
+- **D2.** `SessionPersister.forget` swallows a failed queued op (`session-persister.ts`, `.catch(() => {})`),
+  for example a busy lock: the segment then stays in memory until restart. No effect on data.
+
+#### Not verified by this review
+
+- Linux "unit" latency (Acceptance, p99 < 5 ms): still not run.
+- The live run (6/6) is the orchestrator's report, not re-run here; it did not exercise a rename.
+
 ## Appendix A — probe (gitignored scratch, pasted per AGENTS §6)
 
 `.tentacle/tmp/session-log-serve-store/probe-preload.ts`, preloaded into existing tests (no repo
