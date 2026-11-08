@@ -490,6 +490,9 @@ worktree, gitignored).
 
 ### Owner questions
 
+**Owner answers (2026-11-08, after merge):** Q1 YES as a separate small task (`feat/subagent-unknown-type-note` in TODO: a one-line note in the tool_result when `subagent_type` names no known type); Q2 NO startup warning for an old `agents/general-purpose.md` (the CHANGELOG is enough).
+
+
 - **Q1. Should an unknown `subagent_type` tell the model?** Today a typo like
   `explorer` silently runs the default type, with all tools, when the model expected
   a read-only child (`task.ts:84`). The behaviour predates this task.

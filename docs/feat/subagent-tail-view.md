@@ -1390,6 +1390,9 @@ unrecorded.
 
 ### Owner questions
 
+**Owner answers (2026-11-08, after merge):** all four defaults CONFIRMED — Q1 totals stay on the head row; Q2 one closing `└─ ✗ cancelled` / `└─ ✗ error` row for a non-`end_turn` end; Q3 `… +N earlier · ctrl+o to expand`; `max_iterations` → `✗ iteration cap`.
+
+
 - **Q1. Totals: on the head (as built) or on a closing row (mockup 1)?** Recommend **the head**: it
   costs no row and the totals stay visible while running. Amend the mockup rather than the code.
 - **Q2. How should a non-clean end show?** Recommend closing with one row only when it is not

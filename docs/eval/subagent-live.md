@@ -714,3 +714,363 @@ All follow the recommendation:
 - **Q10: (a).** At load, a lost or undelivered subagent is written as a note into the loaded history, with NO wake; the model reads it at the user's next turn.
 - **Q11: (a).** `subagent_end` carries the report, capped by the same spill transform as the exit note.
 - **Q12: moot.** `feat/session-log-serve-store` merged on main (79ccf1b) before task 5 starts; task 5's Implementation re-verifies this eval's daemon-reload citations against the merged code (AGENTS §8).
+
+## Architecture & UI/UX review (Opus)
+
+*— claude-opus-5-5, 2026-11-08*
+
+Verified against `main` @ `604522b` (this worktree), reading the CODE, not this eval's
+citations. Owner decisions, answers and round 2 are binding and are not reopened here.
+
+### Verdict: **sound with changes**
+
+The decomposition is right: a subagent becomes a background job reusing the exit/auto-wake
+path (`pendingExits` → `flushBackgroundExits`, `agent.ts:1844-1866`; `maybeWake`), with the
+durable facts as ordinary `message` entries plus two non-critical markers. Every runtime stays
+on the one session path, since everything runs daemon-side. The single broker is untouched.
+The model stays on the laptop (C4's name-only allowlist is the right shape). The pod stays
+untrusted (F16 is accepted, the same class as session-log task 1). No handler serializes the
+peer (`agent_kill` is a short request). Nothing is a second agent loop.
+
+The design does have four HIGH gaps, all in the runtime of a child that outlives its tool
+call. Three are §7 interactions the eval does not see (the progress path, liveness, the ask's
+signal). The fourth is a size problem: task 6 is an XL and must be split.
+
+### Findings
+
+#### HIGH
+
+**H1. A background child's live progress has no path. "`tool_progress` unchanged" (A6, A7) is
+wrong.** The agent pushes a call's progress into a per-call `EventQueue` that is closed when
+the call settles (`agent.ts:1321-1326`, `:1338` `.finally(() => progress.close())`). After the
+child detaches, its `onEvent` writes into a closed queue. The client also drops a turn-scoped
+update outside its turn's brackets (`client/src/remote-session.ts:1258-1262`, "a null or
+untracked stamp is dropped", the T-B0 contract). So an idle TUI would never see the tail, and
+if a later turn is running, the daemon would stamp progress of an earlier turn's call into it.
+**Change (task 6a):** the agent-job registry owns a session-level sink. A background child's
+progress travels in the session-scoped `subagents` full-state update. Each child carries
+`{id, callId, type, description, state, toolUses, tokens, startedAt, tail: last ≤ 8 labels}`.
+Updates are coalesced (≤ 4/s), included in the open snapshot, and routed by a listener like
+`queued` (`remote-client.ts:2179-2181`; `remote-session.ts:1250-1257` lists the not-turn-scoped
+kinds). A foreground child keeps `tool_progress` inside its turn, exactly as today; at detach
+its row moves to the session list. This also fixes a gap the eval missed: a `connect` client or
+a second TUI attaching mid-run would otherwise see an empty tail.
+
+**H2. A running background child is invisible to every liveness predicate.**
+- The `serve` reaper's `busy` is `this.running`, the turn (`hosted-session.ts:1055` →
+  `session-reaper.ts:99`). The idle TTL therefore closes a detached `serve` session while a
+  child works, and F1's "nothing is lost" is false.
+- The detached relay is idle when `turn over && asks 0 && jobs 0` (`relay-state.ts:183`).
+  `jobs` counts running SHELL jobs only (`hosted-session.ts:1046`; `exitPlan`'s `use.jobs`,
+  `relay-state.ts:324`). So a `run --detach` relay leaves while a child runs. The relay is the
+  laptop end of `model/stream`, so the pod child loses its model and ends in `error`, and A4's
+  "the subagent runs on" is false. With `--rm`, the relay deletes the workload under the
+  running child, which breaks the §7 pod-lifecycle invariant ("removes only … a clean idle").
+
+**Change (6a):** one predicate, "active work" = turn running ∨ shell jobs ∨ agent jobs. It
+feeds `summary().jobs` (or a new free field `agents`, for `ps`) and `liveness().busy`. Tests go
+in `relay-state` and `session-reaper`, beside the existing jobs cases. (Shell jobs have the
+same reaper gap today; record it, don't widen 6a to fix it.)
+
+**H3. The background ask is bound to the wrong signal and the wrong turn.**
+- `awaitDecision` takes the CURRENT turn's signal and refuses while compacting
+  (`hosted-session.ts:627-634`). While idle the ask is auto-cancelled (the eval knows this:
+  F2). But during a LATER turn the ask is bound to that turn, so an Esc on an unrelated turn,
+  or a `/compact`, cancels the child's ask.
+- The client attributes an ask to the turn whose stream carried it (`remote-client.ts:2155-2157`,
+  "the wire names none"). Auto-accept answers only "own" asks (`permission-ui.ts:60-68`).
+  So the same child's ask is auto-accepted or prompted depending on timing, and a turnless
+  (idle) ask is never auto-accepted.
+
+**Change (6a):** for `origin: "subagent"` of a background child, `awaitDecision` takes the
+CHILD's signal from the requester options. `permission_request` gains the SPAWNING turn's id
+(an optional field that rides the bump to 18), so `ownRequest` works unchanged: the TUI that
+owned the spawning turn auto-accepts per its toggle, and the others prompt.
+
+What already holds (verified, no new code): asks queue one at a time in the client
+(`permission-router.ts:85-114`), which is exactly owner Q5's "queued behind the agent's own".
+A subagent ask is never resumable (`persisted-session.ts:140-151`, `origin === "call"` only),
+so a reload never re-asks it. That matches "lost on reload".
+
+**H4. Task 6 is an XL.** It holds a new seam in the agent loop's steering window, the registry,
+the own controller, the cap, the exit note, the background ask (H3), the session progress sink
+(H1), the liveness predicates (H2), `agent_kill` as a tool and a method, two updates, the quit
+confirm (M7), the compaction carry (M4) and a protocol bump. AGENTS §10 has no XL.
+**Split** (TODO.md updated):
+- **6a `feat/subagent-background`** (L, load-bearing): the child is launched with
+  `background: true` only (the owner's addition). It gets everything above except the detach
+  seam, and it emits task 5's markers. It ships the owner's addition alone, and it is useful
+  alone.
+- **6b `feat/subagent-detach`** (M, load-bearing): `ToolContext.detach`, which fires when the
+  USER writes while a spawn runs (M1), plus the send-now behaviour (Q13). It reuses 6a's whole
+  runtime. Its one load-bearing assumption is cheap to prove alone (M1).
+
+#### MEDIUM
+
+**M1. The detach trigger is on the wrong layer.** A2 fires detach "when `Session.enqueue`
+adds a text". `Session.enqueue` (`session.ts:211`) is also how a reload restores steers
+(`hosted-session.ts:575-581`), and how B2 delivers `[sub-agent sa-1]`. So a child's notify
+would detach every foreground sibling. **Change (6b):** fire detach from `HostedSession.enqueue`,
+the user's path (`hosted-session.ts:1973-1999`, synchronous), and from `send_now` (Q13). Never
+fire it from `Session.enqueue`. **6b's load-bearing assumption:** firing the signal inside the
+synchronous `enqueue` adds no `await` to the steering window. Prove it with a test: a steer
+during a foreground spawn gives `started in background as sa-N` in the SAME round, and the steer
+is drained at the next boundary (`agent.ts:864-867`). Also start the child with its own
+controller, LINKED to the turn signal until detach and unlinked then. Do not switch signals
+mid-run.
+
+**M2. Agent-originated text in the steering queue renders as the user, and pollutes queue
+reconciliation.** Every drained steer becomes `{role:"user"}` plus a `steer` event
+(`agent.ts:864-867`), and the TUI renders every `steer` as a user row (`state.ts:438-441`). B2's
+"rendered as a `context_note`" has no path. **Change (task 9):** steering items become typed
+`{origin: "user" | "subagent", id?, text}`, and a non-user item emits
+`context_note{reason:"subagent_message"}`, not `steer`. **Task 8:** the parent's
+`[user → sa-N]` note must NOT count in `pendingExitCount` (`agent.ts:552-554`). Otherwise
+writing to a child wakes the agent, a model turn nobody asked for. It is a pending NOTE,
+flushed at the next turn, not an exit.
+
+**M3. Notes are recognised by parsing their text.** The load derivation (A4) matches
+`[background] sub-agent sa-N `, and `--resume` renders EVERY user-role message as a user row
+(`tui/src/resume.ts:32`). So after a resume, a multi-KB report shows as if the user had typed it
+(shell exit notes already have this problem; reports make it much worse). There is a precedent
+for display-only fields on `ChatMessage`: `spill`, `durationMs`, `denialReply`
+(`core/src/model.ts:35-52`). **Change (task 5):** add an optional display-only
+`note?: {kind: "background_exit" | "subagent_report" | "subagent_lost" | "user_to_subagent" |
+"subagent_message", id}` on these messages. The derivation keys on `note.id` (structural, and
+idempotent by construction). `resume.ts` and the live TUI render a notice, with the report
+collapsed and expandable (Ctrl+O). It is an optional field on the wire `ChatMessage` (free,
+strip schemas), carried by `message` entries.
+
+**M4. The MODEL forgets running children after a compaction or `context_reset`.** A4 re-emits
+the markers for the log, but the new context does not mention them: compaction carries skills
+only (`compact.ts`, `carryOverSkills`; nothing about jobs). The model may re-spawn the same
+work, or be puzzled when the report arrives. **Change (6a):** append one carried line to the
+compaction/reset seed, "Still running in background: sa-3 (desc); job 2 (`npm test`)". Make it
+shared for shell jobs and subagents.
+
+**M5. On pod / in-process runs, the "undelivered report" is often not on the laptop.** The
+laptop reads the log on `tool_result` and at turn end (`cli/src/local-runtime.ts:398-405`). A
+child that ends while the session is idle, with the wake refused (`lastEndBad`) or `autoWake`
+off, logs `subagent_end{report}` that the laptop never reads before a quit. So Q11 holds only
+on `serve`. **Change (6a):** the client's `subagent_exit` listener calls the same coalesced
+`flush()`. It is one line.
+
+**M6. The panel hides the input, so `[user → sa-N]` cannot be typed.** Behind a list panel
+nothing edits the input (`App.tsx:2646-2649`). A6's `tree-panel`/`ListPanel` is fine for
+inspecting, but not for writing. **Change (7/8):** use two surfaces. The **list** (ListPanel:
+inspect, stop) and a **focus** view: Enter on a row focuses `sa-N`, the transcript area shows its
+tail, the input stays live with the border title `→ sa-1` (`modelBorder` already draws a
+title), and Esc goes back. Focus is a pure module (`subagent-focus.ts`: input target, key
+routing), so the App key handler (known debt) gains one dispatch and no logic.
+
+**M7. The quit confirm owner Q7 extends does not exist where it is needed.** The only confirm
+today is "N other terminals attached — close for all?" (`commands.ts:263-266`,
+`App.tsx:1740-1753`). A plain in-process/`run` `/quit`, and Ctrl+C while idle
+(`App.tsx:2384-2391`), exit without asking. **Change (6a):** `quitCommandStep` gets an `agents`
+count, Ctrl+C while idle asks too when children run, and `quitConfirmText({others, agents})`
+combines both. SIGHUP cannot ask: the lost note covers it. `connect` and `--detach` only detach,
+so they get no confirm.
+
+**M8. Background children compete with the agent for slots, and the limiter is in the wrong
+task.** The per-round cap (`agent.ts:1248-1251`, `effectiveAgentCap`, `round-plan.ts:217-221`)
+works today because the agent WAITS for its foreground children. Background children share the
+endpoint with the agent's own requests: on llama.cpp `-np 2` with two background children, the
+user's chat queues behind them. C6 also puts a session-level limiter in task 3, before any child
+outlives a round. And the limiter must live outside `buildAgent`, which a settings sync rebuilds
+(inject it like `jobs`, `wiring.ts:300-306`). **Change:** task 3 keeps per-endpoint slot SIZING
+for foreground rounds (the type's endpoint, not the agent's). A new small task
+**`feat/subagent-slots`** (M, cross-module), after 6a, adds the session-level per-endpoint
+limiter that background children hold, with the reservation from Q14.
+
+#### LOW
+
+- **L1.** The title is re-logged at four segment-start sites (`hosted-session.ts:543,1213,1939,2084`).
+  Re-emitting the markers (A4) at each of them is easy to forget at a fifth. Use ONE helper,
+  `logSegmentFacts()` (title + running/undelivered markers).
+- **L2.** Q2's "over the cap → error" should apply to background launches. Foreground spawns
+  over the cap stay serialized in their lane as today. Otherwise a 4-way fan-out with 2
+  background children running errors two calls that would simply have waited.
+- **L3.** C4's laptop allowlist must be the UNION of `subagents.types.*.model` values and
+  `subagents.selectableModels` (the owner's addition); C4 names only the former.
+- **L4.** Task 2 stands alone with no rebuild if `subAgentView` returns the view-model that 6a
+  (footbar), 7 (panel) and focus reuse: `{head, hidden, rows, done}` with a `maxRows`. Keep the
+  state cap of 50 (`state.ts:189`), since the panel shows more than the tail.
+- **L5.** A notify that arrives during the user's `/compact` is held, not dropped (task 9 test).
+
+**Load-bearing assumption per load-bearing task, and how to prove it.**
+- **4:** the laptop serves a name only from its OWN published set. Prove it with a hostile-pod
+  test (a name outside the set → `InvalidRequest`, key never used) and an older-peer
+  `VersionMismatch` test.
+- **5:** the derivation over the current segment is idempotent, and a seed restates messages
+  only. Prove it: load twice → one note; a new segment seeded from a closed load → no second note.
+- **6a:** a child outlives its tool call without the turn's stream (H1). Prove it: a background
+  child's tool events reach an IDLE client, and a later turn's stream carries none of them.
+- **6b:** see M1.
+- **8:** the inbox drains only at the child's boundaries. This already holds: `runMessages`
+  takes `drainSteering` (`agent.ts:732`).
+- **9:** the wake budget bounds ping-pong: 4 child notifies → ≤ 3 wakes, and the rest is
+  delivered at the next user turn.
+
+### Failure modes red-teamed (beyond H1–H3)
+
+| Case | What happens (with the changes above) |
+|---|---|
+| Background child running while the user's turn runs and the agent compacts / `context_reset`s | Its exit stays in `pendingExits` across both (neither clears it). The note flushes at the next turn start. The markers are re-emitted at the new segment (A4, L1). The model is told what still runs (M4). Its ask, if any, is unaffected by `compacting` (H3). |
+| Child ask vs the agent's ask | One dialog at a time, FIFO (client router). The dialog names `sa-N · type · "desc" (background)`. Owner Q5 holds. A pod-side ask is the same `permission_request` through the single laptop broker: no new trust path. |
+| Esc | Stops the TURN and its FOREGROUND children (today's `ctx.signal`). Never a background child (own controller). Stopping one = `x` in the list (y/N) or `agent_kill`. Esc in the list / focus only closes it. |
+| Quit with children | in-process / plain `run`: confirm (M7), then the lost note at resume. `serve`/`connect`/`--detach`: detaches, the child runs on, the session stays alive (H2). |
+| Detach the TUI on `serve`, a second TUI attaches | The snapshot carries the `subagents` list WITH its tail (H1). The exit wakes via `daemonWakeGate`. The ask goes to an attached client; with none attached it is held (`blockingUnsupported` keeps today's "held for a client to attach"). |
+| Pod `run`/`attach` | The child's model goes through the tunnel by name (task 4). A relay stays while children run (H2). The undelivered report reaches the laptop (M5). |
+| llama.cpp slots, several endpoints | Foreground rounds: per-endpoint sizing (task 3). Background children: session limiter + reservation (`feat/subagent-slots`, Q14). Until that lands, oversubscription only QUEUES on the server, so it is slow but correct. |
+| Two-way ping-pong | B3's budget (3 child wakes per user message) + coalescing + a per-child cap. Child text is never a user row (M2). A user → child note never wakes (M2). |
+
+### UI/UX
+
+**Today, for background shell jobs:** a RUNNING job has no indicator at all. Only its exit
+appears, as a dimmed notice deduped by job id (`state.ts:178-186`). On resume, its note shows as
+a user row (M3). Subagents should not copy that silence. The list below is the first "what is
+running in background" surface, and Q15 proposes it covers both kinds, so they feel like one
+system: the same row grammar, the same exit notice, the same Ctrl+O to expand.
+
+**Keys** (checked against the App handler and `input-actions.ts`). Taken: Shift+Tab
+(auto-accept), Esc (stop / close), Ctrl+C, Ctrl+O (expand), Ctrl+X Ctrl+S (send-now), Ctrl+A/E/W/V,
+Meta+B/F/D, and the arrows (history/scroll). **Ctrl+T is free** (`t` is used only without Ctrl,
+in the permission reply, `permission-reply.ts:132`). Proposal: `/agents` + Ctrl+T toggles the
+list (Q16). In the list: ↑↓ move, Enter focus, `x` stop, Esc close. In focus: the input is live
+and Esc goes back.
+
+Glyphs below are illustrative; the real ones are `render-lines.ts`'s.
+
+1. **Foreground, rolling tail (A5, task 2)**, ≥ 80 cols:
+```
+● agent_task  explore · find callers of parseConfig
+  … +14 earlier
+  │ fs_read packages/config/src/schema.ts
+  │ fs_grep "parseConfig(" packages/
+  │ fs_read packages/cli/src/wiring.ts
+  │ fs_grep "loadConfig" packages/cli
+  │ shell bun test packages/config
+  └─ 19 tool uses · 12.4k tok · 1m12s
+```
+2. **The user writes while it runs → background (6b).** The block freezes in place and says so:
+```
+● agent_task  explore · find callers of parseConfig
+  … +17 earlier
+  │ shell bun test packages/config
+  └─ → background as sa-1 · its report will arrive later
+› also check the docs folder
+```
+3. **Footbar list (6a: a count only; 7: the rows)**, idle, 2 running, ≥ 80 cols:
+```
+╭──────────────────────────────────────────────── qwen3-27b ╮
+│ >                                                         │
+╰───────────────────────────────────────────────────────────╯
+ ~/repo · ctx ████░░░░ 42% · ⏵⏵ auto-accept off (shift+tab)
+ ◐ sa-1 explore  find callers of parseConfig      19 tools · 1m12s
+ ◑ sa-2 general  migrate tests to bun   ⚠ waiting for permission
+   job 3         npm run watch                     running · 5m   (Q15)
+                                                   ctrl+t agents
+```
+   At ~46 cols: the type drops, the description is cut by CELLS (string-width, as `cells.ts`),
+   at most 2 rows + `+K more`:
+```
+ ◐ sa-1 find callers of parseCo… 19t 1m
+ ◑ sa-2 migrate tests to bun   ⚠ perm
+ +1 more · ctrl+t
+```
+4. **List (Ctrl+T or `/agents`; `ListPanel` over `tree-panel`):**
+```
+ Background agents                                         esc close
+ ▸ sa-1 · explore · find callers of parseConfig · running · 19 tools
+     fs_grep "loadConfig" packages/cli
+     shell bun test packages/config
+   sa-2 · general · migrate tests to bun · waiting for permission
+   sa-0 · explore · map the repo · done (end_turn) · report delivered
+ enter focus · x stop · ↑↓ move
+```
+5. **Focus on sa-1 (7/8): you write to the child, the agent is told at its next turn:**
+```
+ sa-1 · explore · find callers of parseConfig · running      esc back
+   … +17 earlier
+   fs_read packages/cli/src/wiring.ts
+   [you → sa-1] skip the tests folder
+   fs_grep "loadConfig" packages/cli
+╭ → sa-1 ───────────────────────────────────────────────────╮
+│ > _                                                       │
+╰───────────────────────────────────────────────────────────╯
+```
+6. **The report arrives later** (live `subagent_exit`; the same notice style as a shell exit,
+   deduped against the turn-start flush). The wake turn follows if the gate allows it:
+```
+ ◆ sa-1 finished (end_turn) · 19 tools · 1m40s — report sent to the agent (ctrl+o to read)
+```
+7. **Background ask** (queued FIFO behind any open dialog):
+```
+ sa-2 · general · "migrate tests to bun" · background
+ shell  bun test packages/config
+ ❯ Allow once   Allow always   Deny   Deny with reply
+```
+8. **Quit (M7)**, one row; combined when a `serve` session also has other terminals:
+```
+ 2 background sub-agents (sa-1, sa-2) will be lost — quit? (y/N)
+ 1 other terminal attached · 2 sub-agents running — close the session for all? (y/N)
+```
+9. **Resumed session / `connect` attach:** lost and undelivered children are notices, never
+   user rows (M3). A `connect` client sees the live list with its tail from the snapshot (H1):
+```
+ ⚠ sa-1 (find callers of parseConfig) was lost: the session restarted
+ ◆ sa-2 finished before the restart — report sent to the agent (ctrl+o to read)
+```
+
+### Task split (revised)
+
+| # | Task | Size | Blast | Reviewer |
+|---|---|---|---|---|
+| 1 | `feat/subagent-general-rename` (on a branch) | S | contained | in-context |
+| 2 | `feat/subagent-tail-view` (+ reusable view-model, L4) | S | contained | in-context; a weaker model may execute |
+| 3 | `feat/models-map` (limiter moved out, M8; selectableModels stays) | M | cross-module | in-context, by a strong model (config schema) |
+| 4 | `feat/models-map-pod` (allowlist = union, L3) | M | load-bearing | fresh-context, red-team "pod not trusted" + "model stays on laptop" |
+| 5 | `feat/subagent-ledger-log` (+ `note` field, M3) | M | load-bearing | fresh-context, red-team persistence (aside, segments, idempotence) |
+| 6a | `feat/subagent-background` (H1–H3, M4, M5, M7) | L | load-bearing | fresh-context, red-team one session path, single broker, pod lifecycle |
+| 6b | `feat/subagent-detach` (M1, Q13) | M | load-bearing | fresh-context, red-team the steering window |
+| 6c | `feat/subagent-slots` (M8, Q14) | M | cross-module | in-context |
+| 7 | `feat/subagent-panel` (list + focus, M6) | M | cross-module | in-context + a TUI frame test per mockup |
+| 8 | `feat/agent-message` (+ user → child, M2) | M | load-bearing | fresh-context |
+| 9 | `feat/agent-message-two-way` (typed steers, M2) | M | load-bearing | fresh-context |
+
+Order: 1 → 2 → 3 → 4 → 5 → 6a → 6b → 6c → 7 → 8 → 9. Tasks 2 and 3/4 are independent of 5/6.
+6c only needs 6a and 3. 7 may ship read-only after 6a, with its focus/write half after 8.
+None of these is XL any more.
+
+### Owner questions (round 3)
+
+Five real design choices; they can be answered in one batch.
+
+**Q13. Send-now (Ctrl+X Ctrl+S) while a subagent is working in the foreground.** Send-now
+stops the turn today.
+(a) the subagent first moves to background, then your message is sent, so its work is kept;
+(b) the subagent is stopped with the turn, as today.
+**Recommend (a):** "writing while it runs moves it to background" (Q1) should hold for both ways
+of writing.
+
+**Q14. Local model server with few parallel slots (llama.cpp `-np N`).**
+(a) keep one slot for the agent itself, so background subagents can never block your chat
+(with `-np 1` nothing can be kept back, so everything shares the one slot, as in (b));
+(b) no reservation: everything shares the slots.
+**Recommend (a).**
+
+**Q15. The list under the footbar.**
+(a) one "background" list: subagents AND running shell jobs (shell rows as a small follow-up
+task);
+(b) subagents only; shell jobs stay invisible until they exit, as today.
+**Recommend (a):** one place to see what is running.
+
+**Q16. The key that opens the subagent list.**
+(a) only the `/agents` command;
+(b) `/agents` and Ctrl+T (free today);
+(c) `/agents` and ↓ on an empty input.
+**Recommend (b).** (c) conflicts with history navigation.
+
+**Q17. How many recent steps a foreground subagent shows (A5, never confirmed).**
+(a) 5; (b) 3; (c) 8.
+**Recommend (a).** The list/focus view shows more.
