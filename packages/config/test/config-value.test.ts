@@ -238,6 +238,24 @@ describe("HIGH-2/Q-B: maskStored is the ONLY source of a printed stored value", 
     expect(maskStored(SECRET, ["profiles", "work", "model", "apiKey"])).toBe("***");
   });
 
+  test("a models entry's key and key command are masked, in both trees (models-map)", () => {
+    const masked = maskStored(
+      {
+        models: { claude: { model: "sonnet", apiKey: SECRET, apiKeyCommand: `echo ${SECRET}` } },
+        profiles: { p: { models: { claude: { apiKey: SECRET } } } },
+      },
+      [],
+    );
+    expect(masked).toEqual({
+      models: { claude: { model: "sonnet", apiKey: "***", apiKeyCommand: "***" } },
+      profiles: { p: { models: { claude: { apiKey: "***" } } } },
+    });
+    expect(JSON.stringify(masked)).not.toContain(SECRET);
+    expect(isArgvRefusedSecret("models.claude.apiKey")).toBe(true);
+    expect(isArgvRefusedSecret("profiles.p.models.claude.apiKey")).toBe(true);
+    expect(isArgvRefusedSecret("models.claude.apiKeyCommand")).toBe(false);
+  });
+
   test("an object is masked inside, and never leaks a secret value", () => {
     // The HIGH-2 hole: `get model --json` emitted the raw object.
     const masked = maskStored({ model: "qwen3", apiKey: SECRET }, ["model"]);

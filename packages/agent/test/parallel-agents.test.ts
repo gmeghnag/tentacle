@@ -473,23 +473,37 @@ describe("the agents' lane (T-E)", () => {
   });
 });
 
-describe("the server's slots (T-S)", () => {
-  test("slots lower the cap; slots = 1 runs every call alone", async () => {
-    const model = new TreeModel([spawn("c1", "one"), spawn("c2", "two"), { type: "done" }]);
-    const phases: string[] = [];
-    await expectOneAtATime(model, () =>
-      drive(build(model, { ...parallel, slots: async () => 1 }), {
-        onEvent: (e) => {
-          if (e.type === "tool_phase") {
-            phases.push(e.phase);
-          }
-        },
-      }),
+describe("the cap is exactly subagents.maxParallel (owner 2026-11-08: no slots)", () => {
+  test("a server that would report 1 slot no longer lowers the cap", async () => {
+    const model = new TreeModel([
+      spawn("c1", "one"),
+      spawn("c2", "two"),
+      spawn("c3", "three"),
+      { type: "done" },
+    ]);
+    // Whatever the provider or the config says about slots, nobody asks it.
+    let probed = 0;
+    const slots = async () => {
+      probed++;
+      return 1;
+    };
+    Object.assign(model, { slots });
+    const one = model.gate("one");
+    const two = model.gate("two");
+    const three = model.gate("three");
+    const running = drive(
+      build(model, { mode: "parallel", maxParallel: 3, ...({ slots } as object) }),
     );
-    expect(phases).not.toContain("queued"); // today's path: no group
+    await until(() => model.started.length === 3);
+    one.resolve();
+    two.resolve();
+    three.resolve();
+    await running;
+    expect(model.peak).toBe(3);
+    expect(probed).toBe(0);
   });
 
-  test("slots above the config: the config wins", async () => {
+  test("maxParallel still bounds the fan-out", async () => {
     const model = new TreeModel([
       spawn("c1", "one"),
       spawn("c2", "two"),
@@ -499,7 +513,7 @@ describe("the server's slots (T-S)", () => {
     const one = model.gate("one");
     const two = model.gate("two");
     const three = model.gate("three");
-    const running = drive(build(model, { mode: "parallel", maxParallel: 2, slots: async () => 9 }));
+    const running = drive(build(model, { mode: "parallel", maxParallel: 2 }));
     await until(() => model.started.length === 2);
     await new Promise((r) => setTimeout(r, 0));
     expect(model.started.length).toBe(2);
@@ -510,60 +524,19 @@ describe("the server's slots (T-S)", () => {
     expect(model.peak).toBe(2);
   });
 
-  test("a failing or a garbage probe: the config's cap", async () => {
-    for (const slots of [
-      async () => {
-        throw new Error("dead host");
-      },
-      async () => 0,
-    ]) {
-      const model = new TreeModel([spawn("c1", "one"), spawn("c2", "two"), { type: "done" }]);
-      const one = model.gate("one");
-      const two = model.gate("two");
-      const running = drive(build(model, { ...parallel, slots }));
-      await until(() => model.started.length === 2);
-      one.resolve();
-      two.resolve();
-      await running;
-    }
-  });
-
-  test("the probe runs only on a fan-out (mutation: always → red)", async () => {
-    let probed = 0;
-    const slots = async () => {
-      probed++;
-      return 4;
-    };
-    const single = new TreeModel([spawn("c1", "one"), { type: "done" }]);
-    await drive(build(single, { ...parallel, slots }));
-    expect(probed).toBe(0);
-    const sequential = new TreeModel([spawn("c1", "one"), spawn("c2", "two"), { type: "done" }]);
-    await drive(build(sequential, { mode: "sequential", maxParallel: 4, slots }));
-    expect(probed).toBe(0);
-    const fan = new TreeModel([spawn("c1", "one"), spawn("c2", "two"), { type: "done" }]);
-    await drive(build(fan, { ...parallel, slots }));
-    expect(probed).toBe(1);
-  });
-
-  test("an abort during the probe: nothing starts, every call answered", async () => {
+  test("maxParallel 1 runs every call alone, on the single-call path", async () => {
     const model = new TreeModel([spawn("c1", "one"), spawn("c2", "two"), { type: "done" }]);
-    const controller = new AbortController();
-    let probing = false;
-    const running = drive(
-      build(model, {
-        ...parallel,
-        slots: () => {
-          probing = true;
-          return new Promise(() => {}); // a hung tunnel
+    const phases: string[] = [];
+    await expectOneAtATime(model, () =>
+      drive(build(model, { mode: "parallel", maxParallel: 1 }), {
+        onEvent: (e) => {
+          if (e.type === "tool_phase") {
+            phases.push(e.phase);
+          }
         },
       }),
-      { signal: controller.signal },
     );
-    await until(() => probing);
-    controller.abort();
-    const { messages } = await running;
-    expect(model.started).toEqual([]);
-    expect(toolAnswers(messages)).toEqual(["c1", "c2"]);
+    expect(phases).not.toContain("queued");
   });
 });
 

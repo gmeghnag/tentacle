@@ -34,7 +34,6 @@ import {
   type Usage,
   allowAll,
   countTokensBounded,
-  slotsBounded,
 } from "@tentacle/core";
 import {
   CONTEXT_RESET_TOOL_NAME,
@@ -70,8 +69,6 @@ import {
   type ExecutionMode,
   classOf,
   dependencies,
-  effectiveAgentCap,
-  hasSpawnFanOut,
   nextRunnable,
   planRound,
   spawnDependencies,
@@ -395,14 +392,13 @@ export interface AgentConfig {
   /**
    * How a round's `agent_task` calls may overlap (`subagents.execution` /
    * `subagents.maxParallel`, docs/feat/parallel-agents.md): their own lane,
-   * independent of `toolExecution`. `slots`: the server's parallel slots, asked
-   * only when a round fans out; the cap is the lower of the two. Absent →
+   * independent of `toolExecution`. The cap is exactly `maxParallel`: no server
+   * is asked for its slots (owner 2026-11-08, docs/feat/models-map.md). Absent →
    * sequential.
    */
   readonly subagentExecution?: {
     readonly mode: ExecutionMode;
     readonly maxParallel: number;
-    slots?(signal?: AbortSignal): Promise<number | undefined>;
   };
   /**
    * The session tree's approvals and ask lane, shared with its sub-agents
@@ -1220,8 +1216,7 @@ export class Agent {
   /**
    * Run one round's tool calls, group by group (`planRound`, by
    * `toolExecution` and `subagentExecution`; absent = sequential, every call
-   * alone). The server's slots are asked only here and only for a fan-out, so
-   * every other round has no extra await. A call alone is
+   * alone). A call alone is
    * authorized and run, and its result pushed and committed before the next
    * one starts — so a history suspended inside it is "earlier calls answered,
    * this one and the later ones not" (`suspendedCalls`). A group of several
@@ -1245,10 +1240,8 @@ export class Agent {
     );
     const agents = this.config.subagentExecution;
     const agentMode = agents?.mode ?? "sequential";
-    let agentCap = agents?.maxParallel ?? 1;
-    if (agents && agentCap > 1 && hasSpawnFanOut(kinds, agentMode)) {
-      agentCap = effectiveAgentCap(agentCap, await slotsBounded(agents, toolContext.signal));
-    }
+    // The user's `subagents.maxParallel`, exactly (owner 2026-11-08: no slot probe).
+    const agentCap = agents?.maxParallel ?? 1;
     const rules: Record<"tools" | "agents", GroupRule> = {
       tools: {
         cap: maxParallel,

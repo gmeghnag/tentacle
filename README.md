@@ -345,6 +345,16 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `model.model` | `TENTACLE_MODEL` | "default" | The model id sent to the endpoint (`--model <id>` beats it, for that command). |
 | `model.provider` | `TENTACLE_PROVIDER` | "openai" | The API flavour: `openai` (chat/completions) or `anthropic` (Messages). |
 | `model.titleModel` | — | — | The model id that writes those titles, e.g. a cheaper one. |
+| `models.*.apiKey` | — | — | A literal API key for this entry — stored in plaintext (prefer `apiKeyCommand`). |
+| `models.*.apiKeyCommand` | — | — | A shell command whose stdout is this entry's key; run at startup. |
+| `models.*.autoTitle` | — | — | Accepted for the shape of `model`; has no effect inside an entry. |
+| `models.*.baseURL` | — | — | The endpoint; unset with no other connection key: `model`'s. |
+| `models.*.contextWindow` | — | — | This model's context window in tokens; unset: `model`'s. |
+| `models.*.description` | — | — | When to pick this model — shown to the agent when it is selectable. |
+| `models.*.maxTokens` | — | — | Max output tokens per response; unset: `model`'s. |
+| `models.*.model` | — | — | The model id sent to the endpoint; unset: `model`'s. |
+| `models.*.provider` | — | — | The API flavour; setting it (or any connection key) inherits no endpoint or key from `model`. |
+| `models.*.titleModel` | — | — | Accepted for the shape of `model`; has no effect inside an entry. |
 | `mount.hide` | — | — | The paths to hide — this list REPLACES the default one. |
 | `mount.hideExtra` | — | — | Extra paths to hide, ADDED to the default list. |
 | `packages.*` | — | — | Whether this installed package is enabled. |
@@ -355,7 +365,9 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `subagents.enabled` | `TENTACLE_SUBAGENTS` | true | Whether the `agent_task` sub-agent tool is offered. |
 | `subagents.execution` | `TENTACLE_SUBAGENT_EXECUTION` | "parallel" | `agent_task` overlap: `parallel` (default; they share one workspace), `read-only`, `sequential`. |
 | `subagents.maxIterations` | `TENTACLE_SUBAGENT_MAX_ITERATIONS` | 50 | Step limit for a sub-agent's own loop. |
-| `subagents.maxParallel` | `TENTACLE_SUBAGENT_MAX_PARALLEL` | 4 | At most this many sub-agents at once; a llama.cpp server with fewer slots lowers it. |
+| `subagents.maxParallel` | `TENTACLE_SUBAGENT_MAX_PARALLEL` | 4 | At most this many sub-agents at once — the only limit; match it to your server. |
+| `subagents.selectableModels` | — | — | `models` entries the agent may pick per `agent_task` call; absent or empty: off. |
+| `subagents.types.*.model` | — | — | The `models` entry this type runs on (beats the type's `agents/*.md` `model`). |
 | `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline, not a path) | `PROMPT.md` in the config dir | The system prompt file: relative to the config dir, or absolute. |
 | `tools.dedupOutput` | `TENTACLE_DEDUP_OUTPUT` | true | Collapse runs of identical consecutive output lines. |
 | `tools.execution` | `TENTACLE_TOOL_EXECUTION` | "read-only" | Tool calls in a round: `read-only` (default; reads together, writes and `shell` alone), `sequential`, `parallel`. |

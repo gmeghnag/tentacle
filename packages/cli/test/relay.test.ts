@@ -2055,6 +2055,51 @@ describe("relayMain", () => {
     // tests would then scaffold a config dir named so in the cwd.
     expect(process.env.TENTACLE_CONFIG_DIR).toBe(saved as string);
   });
+
+  /** The real `relayMain` on a config; "kept entry … not found" = past the config load. */
+  const relayOn = async (file: unknown): Promise<string> => {
+    const config = mkdtempSync(join(tmpdir(), "relay-models-"));
+    writeFileSync(join(config, "config.jsonc"), JSON.stringify(file));
+    const path = join(config, "spec.json");
+    writeFileSync(path, JSON.stringify(spec({ stem: "ffffffffffffffff", cwd: config })));
+    const saved = process.env.TENTACLE_CONFIG_DIR;
+    process.env.TENTACLE_CONFIG_DIR = config;
+    const err: string[] = [];
+    try {
+      expect(await relayMain({ [RELAY_SPEC_ENV]: path }, (t) => err.push(t))).toBe(1);
+    } finally {
+      if (saved === undefined) {
+        Reflect.deleteProperty(process.env, "TENTACLE_CONFIG_DIR");
+      } else {
+        process.env.TENTACLE_CONFIG_DIR = saved;
+      }
+    }
+    return err.join("");
+  };
+
+  test("a models entry's key command neither runs nor stops a relay: it has no terminal", async () => {
+    const marker = join(tmpdir(), `relay-entry-ran-${crypto.randomUUID()}`);
+    const err = await relayOn({
+      model: { baseURL: "http://127.0.0.1:9/v1", model: "m" },
+      models: {
+        claude: {
+          provider: "anthropic",
+          model: "c",
+          apiKeyCommand: `touch ${marker}; echo 'pinentry: no tty' >&2; exit 7`,
+        },
+      },
+    });
+    expect(err).toContain("kept entry ffffffffffffffff not found");
+    expect(err).not.toContain("models.claude");
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("the main key command still runs in a relay: it is the relay's model key", async () => {
+    const err = await relayOn({
+      model: { baseURL: "http://127.0.0.1:9/v1", model: "m", apiKeyCommand: "exit 7" },
+    });
+    expect(err).toContain("apiKeyCommand exited with code 7");
+  });
 });
 
 describe("launchRelay", () => {

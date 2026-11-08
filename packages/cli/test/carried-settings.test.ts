@@ -248,7 +248,19 @@ describe("carriedSettings: an allowlist", () => {
           model: { apiKey: "sk-secret-value", baseURL: "http://secret.example/v1" },
           hooks: [{ event: "tool_call", command: "echo SECRET-HOOK" }],
           mcpServers: { secretserver: { command: "secret-mcp" } },
-          subagents: { agentTaskDescription: "custom" },
+          // models-map: nothing of `models` travels (task 4 carries names only).
+          models: {
+            claude: {
+              baseURL: "http://only-laptop.example/v1",
+              apiKey: "s3cret-entry",
+              model: "secret-model-id",
+            },
+          },
+          subagents: {
+            agentTaskDescription: "custom",
+            types: { explore: { model: "claude" } },
+            selectableModels: ["claude"],
+          },
         }),
       }),
       cwd: dir({ "AGENTS.md": "SECRET-RULES\n" }),
@@ -264,6 +276,10 @@ describe("carriedSettings: an allowlist", () => {
       "SECRET-HOOK",
       "secretserver",
       "SECRET-RULES",
+      "s3cret-entry",
+      "only-laptop.example",
+      "secret-model-id",
+      "claude",
     ]) {
       expect(json).not.toContain(secret);
     }

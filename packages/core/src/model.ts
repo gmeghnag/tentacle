@@ -99,11 +99,4 @@ export interface ModelProvider {
    * Optional (docs/feat/tui-target-badge.md).
    */
   countTokens?(request: ChatRequest): Promise<number | undefined>;
-  /**
-   * How many requests the server runs at once (llama.cpp `/props`
-   * `total_slots`), so a fan-out of sub-agents is capped to it. `undefined`: this
-   * provider cannot tell. Best effort: may reject, the caller treats it alike.
-   * Optional (docs/feat/parallel-agents.md, Design 6).
-   */
-  slots?(signal?: AbortSignal): Promise<number | undefined>;
 }

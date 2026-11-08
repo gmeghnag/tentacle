@@ -10,47 +10,6 @@ import type { ChatMessage, ChatRequest, ModelProvider } from "./model.ts";
 /** The bound on any exact token count made for a meter (docs/feat/tui-target-badge.md). */
 export const COUNT_TOKENS_CAP_MS = 2000;
 
-/** The bound on a slot probe: a dead host never holds a round for longer. */
-export const SLOTS_CAP_MS = 2000;
-
-/**
- * `model.slots(signal)` under a deadline (docs/feat/parallel-agents.md, Design
- * 6): the server's parallel slots, or `undefined` when it cannot say, fails, is
- * slower than `timeoutMs` or `signal` aborts — never throws (the config's cap
- * then applies). The provider's own signal is aborted on the way out.
- */
-export async function slotsBounded(
-  model: Pick<ModelProvider, "slots">,
-  signal?: AbortSignal,
-  timeoutMs: number = SLOTS_CAP_MS,
-): Promise<number | undefined> {
-  if (model.slots === undefined) {
-    return undefined;
-  }
-  const deadline = new AbortController();
-  const timer = setTimeout(() => deadline.abort(), timeoutMs);
-  const stop = (): void => deadline.abort();
-  if (signal?.aborted) {
-    stop();
-  }
-  signal?.addEventListener("abort", stop, { once: true });
-  try {
-    const cut = new Promise<undefined>((resolve) => {
-      deadline.signal.addEventListener("abort", () => resolve(undefined), { once: true });
-      if (deadline.signal.aborted) {
-        resolve(undefined);
-      }
-    });
-    return await Promise.race([model.slots(deadline.signal).catch(() => undefined), cut]);
-  } catch {
-    return undefined;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", stop);
-    deadline.abort();
-  }
-}
-
 /**
  * `model.countTokens(request)` under a deadline: the provider's exact count, or
  * `undefined` when it cannot, fails, is slower than `timeoutMs` or `signal`

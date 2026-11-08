@@ -406,7 +406,20 @@ describe("HIGH-1: a secret inside an object/array value on argv is refused", () 
     },
     { key: "profiles.p", text: '{"model":{"apiKey":"sk-LEAK13"}}', secret: "sk-LEAK13" },
     { key: "model.apiKey", text: "sk-LEAK14", secret: "sk-LEAK14" },
+    // models-map: an entry's key, directly, inside the entry, and in a profile.
+    { key: "models.claude.apiKey", text: "sk-LEAK18", secret: "sk-LEAK18" },
+    { key: "models.claude", text: '{"apiKey":"sk-LEAK19"}', secret: "sk-LEAK19" },
+    { key: "models.claude.apiKey", text: "sk-LEAK20", secret: "sk-LEAK20", profile: "p" },
   ];
+
+  test("an entry key's hint names its OWN apiKeyCommand; model.apiKey's is unchanged", async () => {
+    seeded();
+    const entry = await run(setOp("models.claude.apiKey", "sk-LEAK21"));
+    expect(entry.err).toContain('tentacle config models.claude.apiKeyCommand "pass show tentacle"');
+    expect(entry.err).toContain("tentacle explain models.claude.apiKeyCommand");
+    const main = await run(setOp("model.apiKey", "sk-LEAK22"));
+    expect(main.err).toContain('tentacle config model.apiKeyCommand "pass show tentacle"');
+  });
 
   for (const { key, text, secret, profile } of CASES) {
     test(`refused, exit 1, bytes unchanged, no secret in the output: ${key} (profile: ${profile ?? "—"})`, async () => {

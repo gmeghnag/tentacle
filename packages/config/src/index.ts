@@ -13,6 +13,7 @@ export * from "./config-edit.ts";
 export * from "./config-value.ts";
 export * from "./key-docs.ts";
 export * from "./profile.ts";
+export * from "./models.ts";
 export * from "./resolve.ts";
 export * from "./load.ts";
 export * from "./skills.ts";

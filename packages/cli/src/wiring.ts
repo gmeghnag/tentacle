@@ -60,7 +60,12 @@ import {
 } from "@tentacle/tools";
 import { logDaemonError } from "./daemon-log.ts";
 import { createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
-import { configuredModelProvider } from "./model-provider.ts";
+import {
+  type ProviderFactory,
+  configuredModelProvider,
+  createModelProviders,
+  subagentModelResolver,
+} from "./model-provider.ts";
 
 /**
  * Load user-defined agent types from `<configDir>/agents/*.md`, then from each
@@ -286,8 +291,9 @@ export interface BuildAgentOptions {
   readonly toolOutput?: ToolOutputStore;
   /** Replace the configured provider — e.g. a proxy that tunnels model calls
    *  to a remote client (the pod reverse-tunnel, F4.d). Used for the main model
-   *  and for sub-agents (per-type model overrides are ignored over the
-   *  tunnel). */
+   *  and for every sub-agent: `models`, `subagents.types` and
+   *  `selectableModels` are ignored over the tunnel (task 4,
+   *  docs/feat/models-map.md), so no laptop key is used for a pod. */
   readonly modelOverride?: ModelProvider;
   /** The title's own override: the pod's tunnel that marks a call as a title one (`purpose: "title"`). */
   readonly titleModelOverride?: ModelProvider;
@@ -315,12 +321,6 @@ export interface BuildAgentOptions {
    */
   readonly notice?: (line: string) => void;
   /**
-   * The sub-agents' own daemon-side notice (the server's slots lowered the
-   * cap): the caller gives it its own prefix. Absent → `notice`. Never the
-   * hook `log`.
-   */
-  readonly agentsNotice?: (line: string) => void;
-  /**
    * Asks whether to run the project's hooks when a turn brings no asker (the
    * in-process TUI, which has no RPC). Absent → project hooks are declined.
    */
@@ -331,30 +331,16 @@ export interface BuildAgentOptions {
    * (a one-shot) → the start-up's discovery, rescans read the folders directly.
    */
   readonly skillScan?: SkillScan;
-}
-
-/**
- * `model.slots`, saying once in the daemon log (never the terminal, AGENTS §7)
- * that the server's slots lower the sub-agents' cap.
- */
-function slotsReader(
-  model: ModelProvider,
-  maxParallel: number,
-  notice: ((line: string) => void) | undefined,
-): (signal?: AbortSignal) => Promise<number | undefined> {
-  let said = false;
-  return async (signal) => {
-    const slots = await model.slots?.(signal);
-    if (!said && slots !== undefined && slots < maxParallel) {
-      said = true;
-      notice?.(`sub-agents capped at ${slots} at once: the model server's slots`);
-    }
-    return slots;
-  };
+  /**
+   * How the agent's providers are built (main, title, `models` entries). Tests
+   * inject a spy; default `createModelProvider`. Unused over a `modelOverride`.
+   */
+  readonly createProvider?: ProviderFactory;
 }
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
-  const model = options.modelOverride ?? configuredModelProvider(config);
+  const model =
+    options.modelOverride ?? configuredModelProvider(config, config.model, options.createProvider);
   const outputs = options.toolOutput ?? toolOutputStore();
   const toolOutput = outputs.forProject(config.cwd);
   const env = new HostExecution({
@@ -474,11 +460,29 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       BUILTIN_AGENT_TYPES,
       loadUserAgentTypes(config.configDir, config.packageAgentDirs).types,
     );
+    // A sub-agent's model (docs/feat/models-map.md): the call's selectable
+    // `model` › `subagents.types.<t>.model` › the `agents/*.md` `model` › the
+    // main model. Over the model tunnel (a pod, task 4 not built) NOTHING of
+    // `models` is used: every child is the tunnel, no laptop key is touched.
+    const tunnelled = options.modelOverride !== undefined;
+    if (
+      tunnelled &&
+      (Object.keys(config.subagentModels).length > 0 || config.selectableModels.length > 0)
+    ) {
+      options.notice?.(
+        "models: per-type and selectable sub-agent models are ignored over the model tunnel; sub-agents use the laptop's main model",
+      );
+    }
     const { run, types, readOnlyType } = createSubagentRunner({
       model,
-      // Per-type model override: same endpoint, a different model id. Over a
-      // model tunnel the override provider is used for every type.
-      modelFor: (modelId) => options.modelOverride ?? configuredModelProvider(config, modelId),
+      ...(tunnelled
+        ? {}
+        : {
+            modelFor: subagentModelResolver(
+              config,
+              createModelProviders(config, options.createProvider),
+            ),
+          }),
       env,
       tools,
       requestPermission: (req, options) => permissions.request(req, options),
@@ -497,6 +501,12 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         description: config.agentTaskDescription,
         mode: config.subagentExecution,
         readOnlyType,
+        models: tunnelled
+          ? []
+          : config.selectableModels.map((name) => {
+              const description = config.models[name]?.description;
+              return description !== undefined ? { name, description } : { name };
+            }),
       }),
     );
   }
@@ -545,16 +555,8 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     toolExecution: config.toolExecution,
     subagentExecution: {
       mode: config.subagentExecution,
+      // The user's ceiling, exactly: no server is asked for slots (owner 2026-11-08).
       maxParallel: config.subagentMaxParallel,
-      ...(model.slots
-        ? {
-            slots: slotsReader(
-              model,
-              config.subagentMaxParallel,
-              options.agentsNotice ?? options.notice ?? options.log,
-            ),
-          }
-        : {}),
     },
   });
   // Names the session after its first exchange (docs/feat/session-titles.md),
@@ -565,7 +567,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     ? (options.titleModelOverride ??
       options.modelOverride ??
       (config.titleModel !== undefined
-        ? configuredModelProvider(config, config.titleModel)
+        ? configuredModelProvider(config, config.titleModel, options.createProvider)
         : model))
     : undefined;
   return { agent, permissions, jobs, tools, grants, ...(titleModel ? { titleModel } : {}) };

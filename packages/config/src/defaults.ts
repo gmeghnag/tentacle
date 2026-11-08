@@ -144,7 +144,7 @@ export const DEFAULT_CONFIG_JSONC = `{
 
   // Sub-agents: the \`agent_task\` tool that delegates work to an isolated child agent.
   // "subagents": { "enabled": ${DEFAULT_SUBAGENTS_ENABLED}, "maxIterations": ${DEFAULT_SUBAGENT_MAX_ITERATIONS}, "execution": "${DEFAULT_SUBAGENT_EXECUTION}", "maxParallel": ${DEFAULT_SUBAGENT_MAX_PARALLEL} }, // maxIterations: -1 = unlimited
-  // execution: "parallel", "read-only" (only sub-agents that cannot write overlap) or "sequential". maxParallel: at most that many at once, lower on a server with fewer slots.
+  // execution: "parallel", "read-only" (only sub-agents that cannot write overlap) or "sequential". maxParallel: at most that many at once — set it to what your model server can run in parallel.
   // "agentTaskDescription" or "agentTaskDescriptionFile": replace the tool's description, at most ${MAX_AGENT_TASK_DESCRIPTION_BYTES} bytes.
 
   // Context awareness: tell the model how full its context is — a short line

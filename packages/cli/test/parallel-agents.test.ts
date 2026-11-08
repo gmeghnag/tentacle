@@ -1,7 +1,8 @@
 /**
  * The real wiring of parallel sub-agents (docs/feat/parallel-agents.md, S5):
  * T-W (`buildAgent` reads the config), T-DESC (the description), T-CARRY (a pod
- * takes the laptop's values, over the channel pair), `model/slots` end to end.
+ * takes the laptop's values, over the channel pair). No slot probe anywhere: the
+ * cap is `subagents.maxParallel` (owner 2026-11-08, docs/feat/models-map.md).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -69,6 +70,7 @@ class GatedModel implements ModelProvider {
   private running = 0;
   peak = 0;
   slotCalls = 0;
+  /** What an old build would have asked: present only to prove nobody calls it now. */
   slots?: (signal?: AbortSignal) => Promise<number | undefined>;
 
   constructor(
@@ -185,39 +187,24 @@ describe("buildAgent reads subagents.* (T-W)", () => {
     await expectOneAtATime(model, () => runLocal(agent));
   });
 
-  test("the slots are wired from the model, and lowering the cap is logged once", async () => {
+  test("a server that would report 1 slot: the cap stays maxParallel, nobody asks, no notice", async () => {
+    // Owner 2026-11-08 (docs/feat/models-map.md): only `subagents.maxParallel` limits.
     const model = new GatedModel(two, 1);
+    const one = model.gate("CHILD-1");
+    const second = model.gate("CHILD-2");
     const lines: string[] = [];
     const { agent } = buildAgent(
       { ...config, subagentExecution: "parallel", subagentMaxParallel: 4 },
-      { modelOverride: model, notice: (line) => lines.push(line) },
+      { modelOverride: model, notice: (l) => lines.push(l), log: (l) => lines.push(l) },
     );
-    await expectOneAtATime(model, () => runLocal(agent));
-    expect(model.slotCalls).toBe(1);
-    expect(lines.filter((l) => l.includes("capped at 1"))).toHaveLength(1);
-  });
-
-  test("the cap line goes to agentsNotice, not the hook log; notice is the fallback", async () => {
-    const run = async (extra: Record<string, (line: string) => void>) => {
-      const model = new GatedModel(two, 1);
-      const { agent } = buildAgent(
-        { ...config, subagentExecution: "parallel", subagentMaxParallel: 4 },
-        { modelOverride: model, ...extra },
-      );
-      await expectOneAtATime(model, () => runLocal(agent));
-    };
-    const hook: string[] = [];
-    const agents: string[] = [];
-    await run({ log: (l) => hook.push(l), agentsNotice: (l) => agents.push(l) });
-    expect(hook).toEqual([]);
-    expect(agents.filter((l) => l.includes("capped at 1"))).toHaveLength(1);
-    const notices: string[] = [];
-    await run({ notice: (l) => notices.push(l) });
-    expect(notices.filter((l) => l.includes("capped at 1"))).toHaveLength(1);
-    // The in-process worker passes only `log`: the line must still arrive.
-    const logged: string[] = [];
-    await run({ log: (l) => logged.push(l) });
-    expect(logged.filter((l) => l.includes("capped at 1"))).toHaveLength(1);
+    const running = runLocal(agent);
+    await until(() => model.started.length === 2);
+    one.resolve();
+    second.resolve();
+    await running;
+    expect(model.peak).toBe(2);
+    expect(model.slotCalls).toBe(0);
+    expect(lines).toEqual([]);
   });
 
   test("a child's rounds inherit tools.*", async () => {
@@ -387,16 +374,8 @@ describe("a pod takes the laptop's values (T-CARRY)", () => {
     t.close();
   });
 
-  test("model/slots reaches the laptop's provider and lowers the cap (slots = 1 → no overlap)", async () => {
+  test("a laptop whose server would report 1 slot: the carried cap applies, it is never asked", async () => {
     const laptop = new GatedModel(two, 1);
-    const t = await pod({}, laptop, { subagentExecution: "parallel", subagentMaxParallel: 4 });
-    await expectOneAtATime(laptop, () => t.say());
-    expect(laptop.slotCalls).toBe(1);
-    t.close();
-  });
-
-  test("a laptop with no slots: the carried cap applies", async () => {
-    const laptop = new GatedModel(two);
     const one = laptop.gate("CHILD-1");
     const second = laptop.gate("CHILD-2");
     const t = await pod({}, laptop, { subagentExecution: "parallel", subagentMaxParallel: 4 });
@@ -406,13 +385,6 @@ describe("a pod takes the laptop's values (T-CARRY)", () => {
     second.resolve();
     await said;
     expect(laptop.peak).toBe(2);
-    t.close();
-  });
-
-  test("no call without a fan-out: a lone agent_task never probes", async () => {
-    const laptop = new GatedModel([spawn("c1", "CHILD-1"), { type: "done" }], 2);
-    const t = await pod({}, laptop, { subagentExecution: "parallel", subagentMaxParallel: 4 });
-    await t.say();
     expect(laptop.slotCalls).toBe(0);
     t.close();
   });

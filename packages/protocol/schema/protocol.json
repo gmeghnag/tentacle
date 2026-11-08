@@ -1209,21 +1209,6 @@
       "enum": ["title"],
       "type": "string"
     },
-    "ModelSlotsParams": {
-      "additionalProperties": true,
-      "properties": {},
-      "type": "object"
-    },
-    "ModelSlotsResult": {
-      "additionalProperties": true,
-      "properties": {
-        "slots": {
-          "exclusiveMinimum": 0,
-          "type": "integer"
-        }
-      },
-      "type": "object"
-    },
     "ModelStreamChunkedParams": {
       "additionalProperties": true,
       "properties": {
@@ -3141,14 +3126,6 @@
         "$ref": "#/$defs/ModelCountTokensResult"
       }
     },
-    "model/slots": {
-      "params": {
-        "$ref": "#/$defs/ModelSlotsParams"
-      },
-      "result": {
-        "$ref": "#/$defs/ModelSlotsResult"
-      }
-    },
     "model/stream": {
       "params": {
         "$ref": "#/$defs/ModelStreamParams"
@@ -3325,5 +3302,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 17
+  "x-protocol-version": 18
 }

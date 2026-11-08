@@ -103,7 +103,8 @@ describe("createSubagentRunner", () => {
     const say = () => new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
     const { run } = createSubagentRunner({
       model: say(),
-      modelFor: () => say(),
+      modelFor: (type) =>
+        type.model !== undefined ? { provider: say(), modelId: type.model } : undefined,
       env,
       tools: fullRegistry(),
       types: [
@@ -122,6 +123,52 @@ describe("createSubagentRunner", () => {
     await run({ description: "d", prompt: "p", type: "plain" });
     await new Promise((r) => setTimeout(r, 5));
     expect(models).toEqual(["child-m", "parent-m"]);
+  });
+
+  test("hooks get the CHOSEN model's id, not the type's own frontmatter model", async () => {
+    const models: unknown[] = [];
+    const env: ExecutionEnvironment = {
+      id: "hk",
+      async exec(_command, options) {
+        models.push((JSON.parse(options?.stdin ?? "null") as { model: unknown }).model);
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+      async readFile() {
+        return "";
+      },
+      async writeFile() {},
+    };
+    const first = BUILTIN_AGENT_TYPES[0];
+    if (!first) throw new Error("no builtin type");
+    const { model: _model, ...base } = first;
+    const say = () => new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
+    const { run } = createSubagentRunner({
+      model: say(),
+      // A type routed by `subagents.types`: the id is the entry's, never `type.model`.
+      modelFor: (type) =>
+        type.name === "framed"
+          ? { provider: say(), modelId: "routed-over-frontmatter" }
+          : type.name === "routed"
+            ? { provider: say(), modelId: "routed-m" }
+            : undefined,
+      env,
+      tools: fullRegistry(),
+      types: [
+        { ...base, name: "framed", model: "frontmatter-m" },
+        { ...base, name: "routed" },
+      ],
+      hooks: new HookRunner({
+        specs: [{ event: "model_request", command: "mr" }],
+        env,
+        cwd: "/w",
+        modelId: "parent-m",
+        modelRequestHooks: true,
+      }),
+    });
+    await run({ description: "d", prompt: "p", type: "framed" });
+    await run({ description: "d", prompt: "p", type: "routed" });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(models).toEqual(["routed-over-frontmatter", "routed-m"]);
   });
 
   test("returns the child's final text as the report (isolated run)", async () => {
@@ -250,16 +297,40 @@ describe("createSubagentRunner", () => {
     expect(offered[0]).not.toContain(CONTEXT_RESET_TOOL_NAME);
   });
 
+  test("the call's requested model reaches modelFor with the type (models-map)", async () => {
+    const { env } = recordingEnv();
+    const base = new ScriptedProvider([[{ type: "text", delta: "from base" }, { type: "done" }]]);
+    const fast = new ScriptedProvider([[{ type: "text", delta: "from fast" }, { type: "done" }]]);
+    const seen: (string | undefined)[][] = [];
+    const { run } = createSubagentRunner({
+      model: base,
+      modelFor: (type, requested) => {
+        seen.push([type.name, requested]);
+        return requested === "fast" ? { provider: fast } : undefined;
+      },
+      env,
+      tools: fullRegistry(),
+    });
+    const picked = await run({ description: "d", prompt: "go", type: "explore", model: "fast" });
+    const plain = await run({ description: "d", prompt: "go", type: "general" });
+    expect(seen).toEqual([
+      ["explore", "fast"],
+      ["general", undefined],
+    ]);
+    expect(picked.report).toBe("from fast");
+    expect(plain.report).toBe("from base");
+  });
+
   test("a type's model override routes to the provider from modelFor", async () => {
     const { env } = recordingEnv();
     const base = new ScriptedProvider([[{ type: "text", delta: "from base" }, { type: "done" }]]);
     const big = new ScriptedProvider([[{ type: "text", delta: "from big" }, { type: "done" }]]);
-    const usedModels: string[] = [];
+    const usedModels: (string | undefined)[] = [];
     const { run } = createSubagentRunner({
       model: base,
-      modelFor: (id) => {
-        usedModels.push(id);
-        return big;
+      modelFor: (type) => {
+        usedModels.push(type.model);
+        return { provider: big };
       },
       env,
       tools: fullRegistry(),

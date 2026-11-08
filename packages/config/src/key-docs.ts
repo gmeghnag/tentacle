@@ -277,6 +277,121 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Unset: omitted for openai (the server decides), 64000 for anthropic (its API requires one). Lower it for a model with a smaller cap.",
     example: "64000",
   },
+  models: {
+    summary:
+      "Named models for sub-agents: each has the keys of `model`; unset keys come from `model`.",
+    kind: "section",
+    type: "map",
+    scope: "both",
+    carried: "no",
+    details:
+      "An unset key takes the main model's EFFECTIVE value (after the profile, env and `--model`). The connection group moves as a unit, as in a profile: an entry that sets any of provider/baseURL/apiKey/apiKeyCommand inherits none of them, so the main key is never sent to another endpoint — repeat the key (or its command) if that endpoint needs one, even when it is the same URL. Key commands run at startup, before the TUI; an identical command runs once (a detached run's background relay has no terminal and runs none of them). `autoTitle` and `titleModel` are accepted in an entry and have no effect there (titles are a `model` setting). In a profile, entries merge by name and a profile's entry replaces the base one whole. On `run`/`attach` they are not applied yet (sub-agents use the laptop's main model) and never carried: the keys stay on the laptop.",
+  },
+  "models.*": {
+    summary: "One named model, referenced by its name.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+    details:
+      "`models.<name>` — a name holds letters, digits, `_` and `-` (at most 64). Used by `subagents.types.<type>.model`, `subagents.selectableModels` and an `agents/*.md` `model` (a `models` name first, else a model id on the main endpoint).",
+  },
+  "models.*.provider": {
+    summary:
+      "The API flavour; setting it (or any connection key) inherits no endpoint or key from `model`.",
+    kind: "leaf",
+    type: "enum",
+    values: [...PROVIDER_VALUES],
+    scope: "both",
+    carried: "no",
+    details:
+      "Unset with no other connection key: `model`'s provider. Unset beside a `baseURL`/key of its own: `openai`.",
+    example: '"anthropic"',
+  },
+  "models.*.baseURL": {
+    summary: "The endpoint; unset with no other connection key: `model`'s.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "Setting it inherits no provider and no key from `model`. Unset beside another connection key: the provider's default URL.",
+    example: '"http://localhost:8081/v1"',
+  },
+  "models.*.model": {
+    summary: "The model id sent to the endpoint; unset: `model`'s.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    example: '"qwen3-4b"',
+  },
+  "models.*.autoTitle": {
+    summary: "Accepted for the shape of `model`; has no effect inside an entry.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    details: "Session titles are decided by `model.autoTitle` only.",
+    example: "false",
+  },
+  "models.*.titleModel": {
+    summary: "Accepted for the shape of `model`; has no effect inside an entry.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details: "The title model is `model.titleModel` only.",
+    example: '"qwen3-4b"',
+  },
+  "models.*.apiKey": {
+    summary: "A literal API key for this entry — stored in plaintext (prefer `apiKeyCommand`).",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    secret: true,
+    details:
+      "Any copy of this file exposes the key. `TENTACLE_MODEL_API_KEY` applies to `model` only; an entry with an endpoint of its own never inherits a key.",
+    example: '"sk-…"',
+  },
+  "models.*.apiKeyCommand": {
+    summary: "A shell command whose stdout is this entry's key; run at startup.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    secret: true,
+    details:
+      "Runs once at startup, before the TUI (an identical command runs once for every entry and `model`); its output is trimmed and never written. Not run by a pod daemon. Treat it as a secret: a command line can embed one.",
+    example: '"pass show anthropic"',
+  },
+  "models.*.contextWindow": {
+    summary: "This model's context window in tokens; unset: `model`'s.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    details: "The window a sub-agent on this model counts its context line against.",
+    example: "32768",
+  },
+  "models.*.maxTokens": {
+    summary: "Max output tokens per response; unset: `model`'s.",
+    kind: "leaf",
+    type: "integer",
+    scope: "both",
+    carried: "no",
+    example: "8192",
+  },
+  "models.*.description": {
+    summary: "When to pick this model — shown to the agent when it is selectable.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "Listed in the `agent_task` description when the entry is in `subagents.selectableModels`. Sent to the model: never put a secret here. At most 300 characters.",
+    example: '"Small and quick: file searches, summaries."',
+  },
   hooks: {
     summary: "Shell commands run on agent events, with a JSON input on stdin.",
     kind: "leaf",
@@ -402,7 +517,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: '"read-only"',
   },
   "subagents.maxParallel": {
-    summary: "At most this many sub-agents at once; a llama.cpp server with fewer slots lowers it.",
+    summary: "At most this many sub-agents at once — the only limit; match it to your server.",
     kind: "leaf",
     type: "integer",
     scope: "both",
@@ -412,7 +527,8 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     sourceKey: "subagentMaxParallel",
     env: "TENTACLE_SUBAGENT_MAX_PARALLEL",
     sample: "2",
-    details: "A llama.cpp endpoint's own slot count lowers it and never raises it.",
+    details:
+      "tentacle does not ask the model server how many requests it runs at once: set this to what your server handles (e.g. llama.cpp's `-np`). It is the cap for all sub-agents of one round together, whatever their `models` endpoints; nothing is reserved for the agent.",
     example: "4",
   },
   "subagents.agentTaskDescription": {
@@ -438,6 +554,41 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "Relative to the config dir, or absolute. Read at start, so an edit needs a restart. Not together with `agentTaskDescription`.",
     example: '"agent-task.md"',
+  },
+  "subagents.types": {
+    summary: "Per sub-agent type settings, keyed by type name.",
+    kind: "section",
+    type: "map",
+    scope: "both",
+    carried: "no",
+    details:
+      "`subagents.types.<type>` — `general`, `explore`, or an `agents/*.md` name. A type no built-in or `agents/*.md` defines gets a startup warning. In a profile, types merge by name and a profile's block replaces the base one whole.",
+  },
+  "subagents.types.*": {
+    summary: "One sub-agent type's settings (`general`, `explore`, or an `agents/*.md` name).",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "subagents.types.*.model": {
+    summary: "The `models` entry this type runs on (beats the type's `agents/*.md` `model`).",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "Must name a `models` entry, or the config is refused. Precedence for a sub-agent's model: the `agent_task` call's `model` (when selectable), this key, the type's `agents/*.md` `model`, then `model`. On `run`/`attach` not applied yet: sub-agents use the laptop's main model.",
+    example: '"fast"',
+  },
+  "subagents.selectableModels": {
+    summary: "`models` entries the agent may pick per `agent_task` call; absent or empty: off.",
+    kind: "leaf",
+    type: "array",
+    scope: "both",
+    carried: "no",
+    details:
+      "Each name must be a `models` entry. When set, `agent_task` takes an optional `model` argument limited to these names, and its description lists them with their `description`; any other name is an error and no sub-agent starts. On `run`/`attach` not applied yet.",
+    example: '["fast", "claude"]',
   },
   contextAwareness: {
     summary: "Tell the model how full its context is, once per step of the window.",
@@ -895,7 +1046,7 @@ const CONTAINER_KEYS: Readonly<Record<string, KeyDoc>> = {
     scope: "user",
     carried: "no",
     details:
-      "Applied with `--profile <name>` on the command that starts the session, or `TENTACLE_PROFILE` (`--profile` wins). A profile holds every setting the file does except `$schema` and `profiles`. Merge rules: `model` per key, but provider/baseURL/apiKey/apiKeyCommand move as one unit; `subagents`, `tools`, `contextAwareness`, `contextReset` merge per key; every other setting replaces the base one; `mcpServers` merge by name, where `null` REMOVES a base server for that profile.",
+      "Applied with `--profile <name>` on the command that starts the session, or `TENTACLE_PROFILE` (`--profile` wins). A profile holds every setting the file does except `$schema` and `profiles`. Merge rules: `model` per key, but provider/baseURL/apiKey/apiKeyCommand move as one unit; `subagents`, `tools`, `contextAwareness`, `contextReset` merge per key; every other setting replaces the base one; `mcpServers` merge by name, where `null` REMOVES a base server for that profile; `models` and `subagents.types` merge by name, a profile's entry replacing the base one whole.",
   },
   "profiles.*": {
     summary: "One named profile's settings.",

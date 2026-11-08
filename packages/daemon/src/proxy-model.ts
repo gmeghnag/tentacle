@@ -22,7 +22,6 @@ import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { JsonRpcErrorCode, ModelStreamProgressValueSchema } from "@tentacle/protocol";
 import type {
   ModelCountTokensResult,
-  ModelSlotsResult,
   ModelStreamChunkedResult,
   ModelStreamResult,
   WireChatRequest,
@@ -54,12 +53,6 @@ export type ModelCountTokensSender = (
   request: WireChatRequest,
   signal?: AbortSignal,
 ) => Promise<ModelCountTokensResult>;
-
-/**
- * Sends a `model/slots` request to the client: how many requests its LOCAL
- * endpoint runs at once (docs/feat/parallel-agents.md, Design 6).
- */
-export type ModelSlotsSender = (signal?: AbortSignal) => Promise<ModelSlotsResult>;
 
 function toWireRequest(request: ChatRequest): WireChatRequest {
   return {
@@ -176,28 +169,7 @@ export class ProxyModelProvider implements ModelProvider {
     private readonly send: ModelStreamSender,
     private readonly sendChunked?: ModelStreamChunkedSender,
     private readonly sendCount?: ModelCountTokensSender,
-    private readonly sendSlots?: ModelSlotsSender,
   ) {}
-
-  /**
-   * The LAPTOP's endpoint's slots. `undefined` when no sender, the laptop cannot
-   * tell (`slots` omitted) or it is old (`MethodNotFound`); any other failure
-   * rejects — the caller (`slotsBounded`) applies the config's cap.
-   */
-  async slots(signal?: AbortSignal): Promise<number | undefined> {
-    if (!this.sendSlots) {
-      return undefined;
-    }
-    try {
-      const { slots } = await this.sendSlots(signal);
-      return slots;
-    } catch (error) {
-      if (isMethodNotFound(error)) {
-        return undefined;
-      }
-      throw error;
-    }
-  }
 
   /**
    * The exact prompt size, counted by the LAPTOP's provider (the model and its

@@ -6,6 +6,7 @@
  * behaviour an enterprise config system should have.
  */
 import { z } from "zod";
+import { modelRefIssues } from "./models.ts";
 
 export const ModelConfigSchema = z
   .object({
@@ -49,6 +50,42 @@ export const ModelConfigSchema = z
   .strict();
 
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
+
+/**
+ * A `models` entry (docs/feat/models-map.md): the shape of `model` — its
+ * `autoTitle`/`titleModel` are accepted and have no effect (owner Q3) — plus a
+ * `description` the agent reads when the entry is selectable.
+ */
+export const ModelEntrySchema = ModelConfigSchema.extend({
+  description: z.string().min(1).max(300).optional(),
+});
+
+export type ModelEntryConfig = z.infer<typeof ModelEntrySchema>;
+
+/** A `models` name: no `.` (it would make a config path ambiguous), at most 64. */
+export const MODEL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+const MODEL_NAME_MESSAGE =
+  'models: a name may hold only letters, digits, "_" and "-" (at most 64 characters)';
+
+/**
+ * `__proto__` cannot be a name: the JSONC parser assigns it, swapping the map's
+ * prototype (so the record check reads the entry's FIELDS as entries), and
+ * `JSON.parse` keeps it as an own key the record then drops. Refused by name.
+ */
+function refuseProtoName(value: unknown, ctx: z.RefinementCtx): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto === Object.prototype && !Object.hasOwn(value, "__proto__")) {
+    return value;
+  }
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'a model cannot be named "__proto__" (a reserved name): choose another',
+  });
+  return {};
+}
 
 /**
  * Which of a server's tools may run beside other reads in one round
@@ -187,6 +224,13 @@ export type MountConfig = {
 /** The settings a config file — and each of its profiles — can hold. */
 const settingsShape = {
   model: ModelConfigSchema.optional(),
+  /** Named models for sub-agents (docs/feat/models-map.md); unset keys come from `model`. */
+  models: z
+    .preprocess(
+      refuseProtoName,
+      z.record(z.string().regex(MODEL_NAME, MODEL_NAME_MESSAGE), ModelEntrySchema),
+    )
+    .optional(),
   /**
    * User hooks: shell commands run on agent events (docs/feat/hooks-core.md).
    * A top-level setting, so a profile's `hooks` replaces the base list.
@@ -234,8 +278,8 @@ const settingsShape = {
        */
       execution: z.enum(["sequential", "read-only", "parallel"]).optional(),
       /**
-       * At most this many sub-agents at once. Default 4; a llama.cpp endpoint's
-       * slots lower it, never raise it. Owner: as `execution`.
+       * At most this many sub-agents at once. Default 4; the only limit (no
+       * server is asked for its slots). Owner: as `execution`.
        */
       maxParallel: z.number().int().positive().optional(),
       /**
@@ -245,6 +289,12 @@ const settingsShape = {
       agentTaskDescription: z.string().min(1).optional(),
       /** The same, read once at start from a file relative to the config dir, or absolute. */
       agentTaskDescriptionFile: z.string().min(1).optional(),
+      /** Per-type settings, keyed by type name; `model` names a `models` entry. */
+      types: z
+        .record(z.string().min(1), z.object({ model: z.string().min(1).optional() }).strict())
+        .optional(),
+      /** `models` entries the agent may pick per `agent_task` call; absent or empty: off. */
+      selectableModels: z.array(z.string().min(1)).optional(),
     })
     .strict()
     .superRefine((subagents, ctx) => {
@@ -415,6 +465,14 @@ export const FileConfigSchema = z
     /** Named profiles, keyed by name; at most one is applied per launch. */
     profiles: z.record(ProfileSchema).optional(),
   })
-  .strict();
+  .strict()
+  // A `models` name used by `subagents.*` must exist, in the base and in each
+  // profile's merged view (docs/feat/models-map.md A2). Here, so `loadConfig`
+  // and `config set`'s whole-file validation both refuse it.
+  .superRefine((file, ctx) => {
+    for (const message of modelRefIssues(file)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    }
+  });
 
 export type FileConfig = z.infer<typeof FileConfigSchema>;

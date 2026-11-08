@@ -314,6 +314,49 @@ describe("cli main: agent definition diagnostics (fix/agent-defs-warn)", () => {
   });
 });
 
+describe("cli main: the models-map notices (docs/feat/models-map.md F-4)", () => {
+  test("[agents] for an unknown configured type where this config builds the agent; [models] on run", async () => {
+    const path = join(dir, "config", "config.jsonc");
+    const before = existsSync(path) ? await readFile(path, "utf8") : undefined;
+    await writeFile(
+      path,
+      JSON.stringify({
+        models: { fast: { model: "f" } },
+        subagents: { types: { reviewr: { model: "fast" } } },
+      }),
+    );
+    try {
+      const out: string[] = [];
+      const err: string[] = [];
+      const io = {
+        out: (t: string) => out.push(t),
+        err: (t: string) => err.push(t),
+        terminal: NO_TERMINAL,
+      };
+      const tagged = (tag: string) => err.filter((l) => l.startsWith(tag));
+      expect(await main(["bun", "cli"], io)).toBe(1); // help path: config loaded locally
+      expect(tagged("[agents]").join("")).toContain(
+        'subagents.types.reviewr: no sub-agent type "reviewr"',
+      );
+      expect(tagged("[models]")).toEqual([]);
+      expect(out.join("")).not.toContain("subagents.types.reviewr"); // never on stdout
+
+      err.length = 0;
+      expect(await main(["bun", "cli", "run"], io)).toBe(1); // no --image: fails after config
+      expect(tagged("[models]")).toEqual([
+        "[models] subagents.types / subagents.selectableModels are not applied on run/attach yet (feat/models-map-pod): every sub-agent uses the laptop's main model\n",
+      ]);
+      expect(tagged("[agents]")).toEqual([]);
+    } finally {
+      if (before === undefined) {
+        await rm(path, { force: true });
+      } else {
+        await writeFile(path, before);
+      }
+    }
+  });
+});
+
 // The exit net's compiled child re-runs THIS binary with a hidden subcommand
 // (B Review finding 1): the dispatch must exist for the SAME constant the
 // command builders use, or a rename orphans every workload silently.
@@ -2664,7 +2707,7 @@ describe("cli main: --engine", () => {
       );
       expect(r.reached).toBe(true);
       expect(r.text).toContain(
-        "[container] warning: apiKeyCommand: the API key file could not be determined from the command, so it is NOT hidden",
+        "[container] warning: model.apiKeyCommand: the API key file could not be determined from the command, so it is NOT hidden",
       );
     });
 

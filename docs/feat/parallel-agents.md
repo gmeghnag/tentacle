@@ -3,6 +3,11 @@
 > **Status:** execution done (S1–S5, on `main` @ `b8b714b`); fresh-context Review pending
 > **Branch:** `feat/parallel-agents`
 > **Size:** L · **Blast:** load-bearing · **Suited:** strong model executes; mandatory fresh-context Review that red-teams the §7 *Persistence* invariant ("pending on disk ⇒ never started"), the single-broker path, the replay cut, and "a pod is not trusted"
+>
+> **Superseded in part (owner, 2026-11-08, `docs/feat/models-map.md`):** Design 6 — the server's
+> slots (`/props` `total_slots`, `ModelProvider.slots`, `model/slots`, `effectiveAgentCap`,
+> the "capped at N" notice) — is REMOVED. The sub-agent cap is exactly `subagents.maxParallel`;
+> `PROTOCOL_VERSION` 18. The text below is the historical record of what was built then.
 
 Type: feat · Size: L · Blast: load-bearing · Suited: strong model + fresh-context Review
 

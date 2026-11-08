@@ -19,7 +19,7 @@ import { createInterface } from "node:readline";
  * NOTE: F1 auto-approves tool calls; the interactive permission engine arrives
  * in F4. Until then, point the CLI at a trusted model and workspace.
  */
-import { Session, recordFromSnapshot } from "@tentacle/agent";
+import { BUILTIN_AGENT_TYPES, Session, mergeAgentTypes, recordFromSnapshot } from "@tentacle/agent";
 import { webSocketChannelFactory } from "@tentacle/client";
 import { type ChatMessage, PermissionBroker } from "@tentacle/core";
 import { DELETE_CONTAINER_SUBCOMMAND, deleteContainerFromEnv } from "@tentacle/docker";
@@ -37,8 +37,10 @@ import {
   configDirFromEnv,
   loadConfig,
   longToolNameWarnings,
+  modelsPodNotice,
   titleConfigNotice,
   topLevelKeys,
+  unknownTypeModelWarnings,
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
@@ -137,9 +139,10 @@ import { APP_BUILD, APP_VERSION } from "./version.ts";
 import { buildAgent, connectConfiguredMcp, inProcessAgents, loadUserAgentTypes } from "./wiring.ts";
 import {
   type WorkspacePlan,
-  apiKeyFileUnknown,
   hideList,
   isYes,
+  keyCommandsOf,
+  keyFileUnknownOwners,
   mountGate,
   planWorkspace,
 } from "./workspace-mount.ts";
@@ -820,11 +823,23 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
     for (const line of agentTypes.diagnostics) {
       err(`[agents] ${line}\n`);
     }
-  } else if (config.packages.length > 0) {
-    // D11: laptop packages are not shipped to the pod in v1.
-    err(
-      `[packages] ${config.packages.length} installed package(s) are not loaded in a pod session (the pod uses its own config)\n`,
-    );
+    // A `subagents.types.<t>` no type defines (docs/feat/models-map.md): said, not refused.
+    const knownTypes = mergeAgentTypes(BUILTIN_AGENT_TYPES, agentTypes.types).map((t) => t.name);
+    for (const line of unknownTypeModelWarnings(config.subagentModels, knownTypes)) {
+      err(`[agents] ${line}\n`);
+    }
+  } else {
+    if (config.packages.length > 0) {
+      // D11: laptop packages are not shipped to the pod in v1.
+      err(
+        `[packages] ${config.packages.length} installed package(s) are not loaded in a pod session (the pod uses its own config)\n`,
+      );
+    }
+    // Task 3 is local/serve only: this laptop's per-type models are not used in a pod.
+    const podModels = modelsPodNotice(config);
+    if (podModels) {
+      err(`[models] ${podModels}\n`);
+    }
   }
 
   // Host the remote-control daemon and run until interrupted.
@@ -1147,8 +1162,9 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               cwd: config.cwd,
               configDir: config.configDir,
               binDir: binDir ?? "/usr/local/bin",
-              hide: hideList(config.mount, config.apiKeyCommand),
-              keyFileUnknown: apiKeyFileUnknown(config.apiKeyCommand),
+              // Every key file: the main one AND each `models` entry's (models-map).
+              hide: hideList(config.mount, keyCommandsOf(config)),
+              keyFileUnknown: keyFileUnknownOwners(config),
             }),
           );
     if (wsPlan.kind === "refuse") {
@@ -1778,7 +1794,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       buildAgent(config, {
         log: (l) => process.stderr.write(`[hook] ${l}\n`),
         notice: (l) => process.stderr.write(`[context] ${l}\n`),
-        agentsNotice: (l) => process.stderr.write(`[agents] ${l}\n`),
       }).agent,
     );
   }
@@ -1889,7 +1904,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   const { agent, tools } = buildAgent(config, {
     log: (l) => err(`[hook] ${l}\n`),
     notice: (l) => err(`[context] ${l}\n`),
-    agentsNotice: (l) => err(`[agents] ${l}\n`),
   });
   const mcp = await connectConfiguredMcp(config, tools);
   for (const [name, message] of Object.entries(mcp.errors)) {
