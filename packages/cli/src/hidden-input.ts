@@ -16,7 +16,7 @@ export interface HiddenInput {
   readonly input: NodeJS.ReadableStream;
   /** Where the prompt is written (usually `process.stderr`: stdout carries data). */
   readonly output: NodeJS.WritableStream;
-  /** The line ends on Ctrl+C / EOF: `""` (the caller treats it as "nothing given"). */
+  /** The line ends on Ctrl+C / EOF: `undefined` — a CANCEL, not an empty value. */
   readonly onInterrupt?: () => void;
 }
 
@@ -29,12 +29,16 @@ interface MuteableReadline {
 }
 
 /**
- * Ask `prompt`, echo nothing, resolve the typed line. The prompt itself IS
- * written (it names the key, not the value). Ctrl+C and EOF resolve `""`, so a
- * caller never has to distinguish "aborted" from "empty" — an empty value is
- * refused by the schema anyway.
+ * Ask `prompt`, echo nothing, resolve the typed line — or `undefined` when the
+ * user CANCELS (Ctrl+C, or EOF on a closed terminal). The prompt itself IS
+ * written (it names the key, not the value).
+ *
+ * A cancel is not an empty value (LOW-7): `""` would run on into the schema and
+ * be answered with "an empty value is not a setting — use unset", which is a
+ * misleading reply to a deliberate Ctrl+C. `config` turns `undefined` into exit
+ * 130 with "cancelled" and writes nothing.
  */
-export function readHiddenLine(prompt: string, io: HiddenInput): Promise<string> {
+export function readHiddenLine(prompt: string, io: HiddenInput): Promise<string | undefined> {
   return new Promise((resolve) => {
     io.output.write(prompt);
     const rl = createInterface({
@@ -46,7 +50,7 @@ export function readHiddenLine(prompt: string, io: HiddenInput): Promise<string>
     // paints the typed characters; the interface has no public mute.
     rl._writeToOutput = () => undefined;
     let done = false;
-    const finish = (answer: string): void => {
+    const finish = (answer: string | undefined): void => {
       if (done) {
         return;
       }
@@ -57,9 +61,9 @@ export function readHiddenLine(prompt: string, io: HiddenInput): Promise<string>
     };
     rl.on("SIGINT", () => {
       io.onInterrupt?.();
-      finish("");
+      finish(undefined);
     });
-    rl.on("close", () => finish(""));
+    rl.on("close", () => finish(undefined));
     rl.question("", finish);
   });
 }

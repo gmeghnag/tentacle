@@ -57,8 +57,6 @@ function planned(text: string, segments: readonly string[], op: EditOp): string 
 
 describe("T10: the edit changes only the touched node, byte for byte", () => {
   test("a set inserts the node and leaves every other byte alone", () => {
-    // Mutation: compute the text with `JSON.stringify(value, null, 4)` → the
-    // comments and the key order are gone, so the equality below fails.
     const out = planned(FIXTURE, ["subagents", "maxParallel"], set(3));
     expect(out).toBe(
       FIXTURE.replace(
@@ -160,6 +158,77 @@ describe("T10: the edit changes only the touched node, byte for byte", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.details?.join(" ")).toContain("mcpServers.fs.command");
+  });
+
+  test("LOW-5: unsetting the only key of an object with a trailing comma works", () => {
+    // jsonc-parser's `modify` leaves an ORPHAN comma behind (`{ "tui": { , } }`),
+    // which does not parse, so the edit was refused with a message that blamed
+    // the schema. The repair drops that comma (and only it).
+    const text = '{\n  "tui": {\n    "theme": "dark",\n  },\n}\n';
+    const out = planned(text, ["tui", "theme"], del);
+    // Valid JSONC again, holding `{ tui: {} }` — and nothing outside the node
+    // moved (the `,` that made the reference invalid is gone, the outer trailing
+    // comma of the FILE is kept as it was).
+    const reparsed = parseConfigText(out);
+    expect(reparsed.ok && reparsed.value).toEqual({ tui: {} });
+    expect(out.startsWith('{\n  "tui": {')).toBe(true);
+    expect(out.endsWith("}\n")).toBe(true);
+    expect(out).not.toContain("{,");
+    // The non-trailing-comma file is unchanged behaviour.
+    expect(planned('{\n  "tui": {\n    "theme": "dark",\n  }\n}\n', ["tui", "theme"], del)).toBe(
+      '{\n  "tui": {\n  }\n}\n',
+    );
+    // A trailing comma before a SIBLING is a legit trailing comma: kept, and the
+    // unset of either member still works.
+    const siblings = '{\n  "subagents": {\n    "enabled": true,\n    "maxParallel": 3,\n  },\n}\n';
+    const one = planned(siblings, ["subagents", "enabled"], del);
+    expect(one).toBe('{\n  "subagents": {\n    "maxParallel": 3,\n  },\n}\n');
+    const last = planned(siblings, ["subagents", "maxParallel"], del);
+    expect(last).toBe('{\n  "subagents": {\n    "enabled": true,\n  },\n}\n');
+    expect(parseConfigText(last).ok).toBe(true);
+    // …and removing the second one THEN the first (the emptied-object case again).
+    expect(parseConfigText(planned(one, ["subagents", "maxParallel"], del)).ok).toBe(true);
+  });
+
+  test("LOW-6: a file with no trailing newline does not gain one", () => {
+    // One extra byte outside the touched node is against T10's property.
+    const out = planned('{"maxIterations": 5}', ["autoWake"], set(true));
+    expect(out).toBe('{\n  "maxIterations": 5,\n  "autoWake": true\n}');
+    expect(out.endsWith("\n")).toBe(false);
+    // The same for a new key in an unindented multi-line file.
+    const multi = '{\n"maxIterations": 5\n}';
+    expect(planned(multi, ["autoWake"], set(true)).endsWith("\n")).toBe(false);
+  });
+
+  test("a new (empty) file IS written with a trailing newline", () => {
+    // The one case the newline is ours: there was no text to copy a style from.
+    expect(planned("", ["autoWake"], set(true))).toBe('{\n  "autoWake": true\n}\n');
+    expect(planned("  \n", ["autoWake"], set(true)).endsWith("\n")).toBe(true);
+  });
+
+  test("MEDIUM-4: a schema message names the path and the expected values, never the value", () => {
+    // A value pasted into the wrong slot: zod's `received '…'` tail echoed it.
+    for (const [value, path] of [
+      [{ tools: { execution: "sk-LEAKECHO" } }, "tools.execution"],
+      [{ model: { provider: "sk-LEAKECHO" } }, "model.provider"],
+      [{ engine: "sk-LEAKECHO" }, "engine"],
+      [{ tui: { theme: "sk-LEAKECHO" } }, "tui.theme"],
+    ] as const) {
+      const result = validateFileConfig(value);
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      const text = `${result.error} ${(result.details ?? []).join(" ")}`;
+      expect(text).not.toContain("sk-LEAKECHO");
+      expect(text).toContain(path);
+    }
+    // The expected set survives (that is the point of the message).
+    const enumIssue = validateFileConfig({ tools: { execution: "sk-LEAKECHO" } });
+    expect(enumIssue.ok).toBe(false);
+    if (enumIssue.ok) return;
+    const detail = (enumIssue.details ?? []).join(" ");
+    expect(detail).toContain("sequential");
+    expect(detail).toContain("read-only");
+    expect(detail).toContain("parallel");
   });
 
   test("the formatting is read from the file (spaces, tabs, CRLF)", () => {

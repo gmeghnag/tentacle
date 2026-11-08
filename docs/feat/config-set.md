@@ -1,6 +1,6 @@
 # feat/config-set — `tentacle config set/unset/get/list/path` (jsonc-preserving edits, secrets, atomic write)
 
-> **Status:** implementation → execution → review
+> **Status:** implementation → execution → review → **round 2 (review fixes) → re-review**
 > **Branch:** `feat/config-set` (stacked on `feat/config-explain`, not yet merged)
 > **Type:** feat · **Size:** L · **Blast:** cross-module · **Suited:** strong model; mandatory fresh-context Review (writes the user's only config file; secrets)
 
@@ -725,6 +725,240 @@ file's key order (including the commented `// "model": "qwen3",` block the new
 key landed above) survived, and the `list` above shows the secret as `***` while
 the file itself holds it in plaintext (which the command says, with the mode).
 
+### Round 2 (review fixes)
+
+*— claude-sonnet-5-5 (tentacle), 2026-11-09*
+
+Scope: the fresh-context review's `REQUEST-CHANGES` (2 HIGH, 2 MEDIUM, 4 LOW,
+2 owner questions). Fix order below is the review's own. Every fix ships a test
+shown RED on the pre-fix code first (AGENTS §9), and each surviving mutation is
+recorded under *Mutations*.
+
+**HIGH-1 — a secret inside an object/array value on argv.** Root cause: the
+argv refusal asked `secretOf(<the key>)` only, so a parent key (`model`,
+`mcpServers.fs`, `profiles.p`) passed and its JSON carried the credential.
+`config-value.ts` gains `secretPathsIn(value, segments)` — the SAME walk the
+masking uses (`isArgvRefusedSecret` on each path, so `apiKeyCommand` keeps its
+exemption and no second table exists) — and `config-run.ts` asks it of the
+TYPED value at its target path, for `from: "argv"` only. `secretOnArgv(key,
+paths)` is the one refusal (it was inline before), naming the secret PATH(S),
+never the value, and listing the same three safe forms; a nested case reads
+`"model.apiKey" (in the value for "model")`. The stdin `-` form is untouched.
+
+```
+$ tentacle config model={"apiKey":"sk-LEAK7"}          → exit 1
+[error] refusing a secret on the command line: "model.apiKey" (in the value for "model") would be visible in your shell history and in `ps`
+read it from stdin instead:  printf '%s\n' "$KEY" | tentacle config model.apiKey -
+or with no value, it is prompted for without echo:  tentacle config model.apiKey
+better: store a command that prints it — tentacle config model.apiKeyCommand "pass show tentacle" (see `tentacle explain model.apiKeyCommand`)
+$ tentacle config --profile p model={"apiKey":"sk-LEAK11"}   → exit 1 ("model.apiKey" — the path is the target's)
+$ tentacle config mcpServers.fs.env={"T":"sk-LEAK9"}         → exit 1 ("mcpServers.fs.env.T")
+$ tentacle config profiles.p={"model":{"apiKey":"sk-LEAK12"}} → exit 1 ("profiles.p.model.apiKey")
+$ tentacle config mcpServers.fs={"command":"mcp-fs","args":["--token","sk-LEAK13"]} → exit 1 ("mcpServers.fs.args")
+$ tentacle config set model {"apiKey":"sk-LEAK14"}           → exit 1 (same)
+$ diff before.jsonc cfg/config.jsonc  →  IDENTICAL (no secret substring in any output)
+$ printf '{"apiKey":"sk-STDIN9"}\n' | tentacle config model -   → exit 0 (stdin stays allowed)
+```
+Test: `config-run.test.ts` — every command above, both forms, each `exit 1`,
+file bytes equal, `out+err` free of the secret; plus the path-naming test and
+the stdin-still-allowed test.
+
+**HIGH-2 — `get <section> --json` printed a stored secret.** Root cause: the
+JSON branch emitted `found.value` for anything that was not a leaf mask.
+`config-value.ts` gains `maskStored(value, segments): unknown` — the tree with
+`"***"` / `["***"]` in place of every secret — and it is now the ONLY source of
+a printed stored value: `get` (`bug`: plain) and `get --json` both render it
+(`renderStored(maskStored(...))` / the tree itself), and `list --json`
+serializes the `value` each `StoredLine` already carries instead of re-deriving
+one from text. `flattenStored` and `renderStored` share ONE mask decision
+(`maskOf`), so the two can no longer disagree.
+
+```
+$ tentacle config get model --json        {"key":"model","value":{"apiKey":"***"}}
+$ tentacle config get model               {"apiKey":***}
+$ tentacle config get mcpServers --json   {"key":"mcpServers","value":{"fs":{"command":"mcp-fs","env":{"TOKEN":"***"}}}}
+$ tentacle config get profiles --json     {"key":"profiles","value":{"work":{"model":{"apiKey":"***"}}}}
+$ tentacle config list --json             {"maxIterations": 8,"model.apiKey": "***"}
+$ tentacle config list                    maxIterations = 8 / model.apiKey = ***
+```
+Test: `config-value.test.ts` (`maskStored`, 6 tests) and `config-run.test.ts`
+(`get model --json`, `get mcpServers --json`, `get mcpServers.fs --json`,
+`get profiles --json`, `list --json`, plain `get`/`list`), asserting the whole
+output is free of the secret and that the JSON keeps its shape.
+
+The whole matrix, live, on a file holding five secrets — every form, zero
+occurrences of any of them (`grep -c 'sk-'` per line):
+
+```
+file: {"model":{"model":"qwen3","apiKey":"sk-…1"},
+       "mcpServers":{"fs":{"command":"mcp-fs","args":["--token","sk-…2"],"env":{"TOKEN":"sk-…3"}}},
+       "profiles":{"work":{"model":{"apiKey":"sk-…4"}}},
+       "model2":{"apiKey":"sk-…5"}}          # an unknown top-level key (Q-B)
+$ tentacle config get model --json        {"key":"model","value":{"model":"qwen3","apiKey":"***"}}      0
+$ tentacle config get model               {"model":"qwen3","apiKey":***}                               0
+$ tentacle config get mcpServers --json   …"args":["***"],"env":{"TOKEN":"***"}…                       0
+$ tentacle config get mcpServers.fs --json  same                                                      0
+$ tentacle config get profiles --json     {"key":"profiles","value":{"work":{"model":{"apiKey":"***"}}}} 0
+$ tentacle config list                    mcpServers.fs.args = [***] / mcpServers.fs.command = "mcp-fs"
+                                          / mcpServers.fs.env.TOKEN = *** / model.apiKey = ***
+                                          / model.model = "qwen3" / model2 = ***                   0
+$ tentacle config list --json             {"mcpServers.fs.args": ["***"],…,"model2": "***",…}          0
+```
+
+
+**MEDIUM-3 — "an error never contains the value" was not pinned.** The review's
+two mutations now die (see *Mutations* M3/M4). Tests: `config-run.test.ts`'s
+MEDIUM-3 block feeds a secret-looking value to a SECRET leaf that fails typing
+(`mcpServers.fs.args` non-array via stdin, `mcpServers.fs.env` non-object via
+stdin), to a secret leaf whose value fails the schema (`model.apiKey` via the
+prompt), and a non-secret key (`tools.maxParallel`), asserting `out+err` lacks
+it. No code change was needed: the assertions hold because the typer and the
+typed-error line already withheld the text — which is exactly what the review
+said nobody had proven.
+
+**MEDIUM-4 — a schema message echoed a stored value.** Root cause: `issueLines`
+forwarded zod's text, which ends `received '<the value>'` for an enum, literal
+or union. It is now REBUILT from the issue's `code` + `options`/`expected`
+(`tools.execution: Invalid enum value. Expected 'sequential' | 'read-only' |
+'parallel'`), with a belt-and-braces strip of any `, received …` tail for codes
+that build no expected text. Path and expected set survive.
+
+```
+$ tentacle config set autoWake false     # file holds "tools":{"execution":"sk-LEAKECHO"}
+[error] the result would not be valid config (2 issues)
+  model: Unrecognized key(s) in object: 'foo'
+  tools.execution: Invalid enum value. Expected 'sequential' | 'read-only' | 'parallel'
+nothing was changed; check the key's schema with: tentacle explain autoWake
+$ … 2>&1 | grep -c sk-LEAKECHO   →  0
+```
+
+**Q-B (owner default applied, to confirm) — an unknown/misplaced key's value is
+masked.** `maskOf` masks any path the schema does not know (`isKnownKey`, from
+`resolveKeyPath` — the walker, not a list), so `list`/`get` print
+`model.foo = ***` while the PATH is still shown. `config list` is what a user
+pastes into a bug report, and a value pasted into the wrong slot is not a
+setting. `get model.foo` still refuses it as an unknown key (unchanged).
+Test: in both suites (a `model2`/`model.foo` value, plain and `--json`).
+
+**Q-A (owner default applied, to confirm) — a `config`-swallowed sentence keeps
+its way back.** `main.ts` prints `promptHint` when the refusal is
+`unknown config key` and the first word after `config` has no `.`/`=` and is
+not a top-level key (`topLevelKeys()`), i.e. it cannot be a key path. It also
+covers the parse-level refusals (`config how are you --json` → `unexpected
+argument`), which `explain` already did.
+
+```
+$ tentacle config my nginx
+[error] unknown config key "my"
+did you mean rm?
+
+to send this as a prompt, use: tentacle -- config my nginx
+$ tentacle config model.foo=x    → no prompt hint (a near miss, not a sentence)
+```
+
+**LOW-5 — unset of the only key of an object with a trailing comma.** Root
+cause, reproduced: jsonc-parser's `modify` deletes the member but leaves an
+ORPHAN comma (`{"tui":{"theme":"dark",}}` → `{"tui":{,}}`), which does not
+parse, so the plan refused with a message that blamed the schema. The plan now
+repairs exactly that comma — located by the JSONC parse error's offset, so a
+`,}` inside a STRING is untouchable (a blanket regex was tried and rejected for
+that reason) — and removes the whole line when the comma stood alone on it, so
+no stray indent is left behind. The empty parent still stays (documented debt).
+Test: T10's LOW-5 case (trailing comma, no trailing comma, a sibling, and the
+two-step unset).
+
+**LOW-6 — a file with no trailing newline gained one.** The newline is now added
+only when the original text was empty (a NEW file, where there is no style to
+copy). Test: T10's LOW-6 case (`{"maxIterations": 5}` → still no trailing
+`\n`; a new file still gets one).
+
+**LOW-7 — Ctrl+C / EOF at the hidden prompt.** `readHiddenLine` now resolves
+`undefined` on SIGINT and on EOF (the readline `close` event), `""` only for a
+real empty line. `config-run.ts` turns `undefined` into `code 130` with
+`cancelled` and writes nothing, for both the hidden prompt and the visible
+`ask` prompt. Test: `hidden-input.test.ts` (SIGINT → `undefined`, EOF →
+`undefined`, `"\n"` → `""`), and `config-main.test.ts` through `main` (exit
+130, `cancelled`, file sha unchanged).
+
+**LOW-8 — a non-ENOENT `lstat` error read as "not a regular file".**
+`nodeConfigFs.kind` now rethrows anything but ENOENT, and `readSnapshot` asks it
+through `kindOf`, which reports `cannot read <path>: <the error>` — every
+`kind()` call is covered, not just the first. Test: `config-run.test.ts` pins
+the REAL fs with a `chmod 000` directory (a real EACCES), plus the same failure
+through the command, plus the harmless missing file.
+
+**Drift from the review's suggestions (and why).**
+
+- The review suggested "refuse also when the target is a section whose subtree
+  contains a secret key". Implemented as the VALUE walk only: the value is what
+  goes on argv, and a section whose registry subtree contains a secret key but
+  whose given value does not (e.g. `mcpServers.fs` with only `command`/`cwd`)
+  carries no secret, so refusing it would forbid a legitimate, safe set.
+- `renderStored` was NOT rewritten on top of `maskStored`; both share `maskOf`
+  instead. Re-serializing the masked TREE would turn a secret array into
+  `["***"]` where the format is `[***]` — the drift the review's own text
+  warned about.
+- Q-A's hint is printed by `main.ts` (the layer that owns the argv words and the
+  prompt hint, exactly as `explain` does), not by `config-run.ts`, which sees
+  only the parsed op.
+- One pre-existing test had to change its SEED, not its assertion: `an MCP
+  server's env/headers/args are masked in list` set the whole server from argv,
+  which HIGH-1 now (correctly) refuses — it seeds through `-` instead.
+  `hidden-input.test.ts`'s "EOF resolves empty" was the old contract and is now
+  "EOF is a CANCEL".
+- `config model` (a known section with no value) types `""` as an empty object
+  and reports `must be a JSON object, e.g. {"key":"value"}`. That predates this
+  round and is not one of the findings; recorded as debt below rather than
+  changed under a review-fix task.
+
+**Red/green evidence, round 2** (narrow suites, before/after):
+
+```
+$ bun test packages/config/test/config-value.test.ts     # before: SyntaxError, maskStored not exported
+$ bun test packages/config/test/config-edit.test.ts      # before: 3 fail (LOW-5 refused, LOW-6 newline, MEDIUM-4 echo)
+$ bun test packages/cli/test/config-run.test.ts          # before: 9 fail (HIGH-1 ×5, HIGH-1 names, HIGH-2 ×2, LOW-8)
+$ bun test packages/cli/test/hidden-input.test.ts        # before: 2 fail (SIGINT, EOF)
+$ bun test packages/cli/test/config-main.test.ts         # before: 3 fail (Q-A ×2, LOW-7)
+# after, all of the above: 0 fail
+```
+
+**Mutations, round 2** (cp backup → mutate → narrow suite → restore → shasum):
+
+| # | Mutation | Killed by |
+|---|---|---|
+| M3 | `typeArray` echoes `got ${text}` (the review's own) | MEDIUM-3 `mcpServers.fs.args` (1 fail) — **was SURVIVED before** |
+| M4 | the typed error appends `(got ${raw.text})` | MEDIUM-3 ×2 (2 fail) — **was SURVIVED before** |
+| M5 | `get` renders `found.value`, not `maskStored(...)` | HIGH-2 "no form of get or list prints a stored secret" |
+| M6 | skip the nested-secret argv refusal (`&& false`) | HIGH-1 ×6 |
+| M7 | `maskOf` masks only registry secrets (no Q-B rule) | Q-B ×2 + HIGH-2 ×2 (4 fail) |
+| M8 | `readHiddenLine` resolves `""` on SIGINT/EOF | LOW-7 ×3 |
+| M9 | `issueLines` forwards zod's message | MEDIUM-4 |
+| M10 | no orphan-comma repair | LOW-5 |
+| M11 | always append the trailing newline | LOW-6 |
+| M12 | `kind` maps any error to `"other"` | LOW-8 (after the test was tightened to drive the REAL fs — the first version passed the mutation, which is why it now pins `nodeConfigFs.kind` against a real `chmod 000` EACCES) |
+
+Restore verified by shasum (all four sources):
+
+```
+$ cd .tentacle/tmp/config-set/mut2 && shasum -c shas.txt
+config-value.ts: OK    config-edit.ts: OK    config-run.ts: OK    hidden-input.ts: OK
+```
+
+**The gate, round 2.**
+
+```
+$ bunx tsc --noEmit                       → clean
+$ bunx biome check .                      → Checked 751 files. No fixes applied.
+$ bun test packages                       → 5701 pass, 3 skip, 0 fail (386 files, 166s)
+$ bun run docs:config                     → "README.md's config table is up to date"
+$ bun run docs:config (again) + git status → README/CHANGELOG untouched, only the
+                                            10 code/test files modified
+$ git diff --stat schema.ts defaults.ts resolve.ts load.ts  → empty (byte-untouched)
+```
+
+The 3 skips are the documented opt-ins (live k8s, live docker, the real-socket
+keepalive) — the same three as on `main`.
+
 ### Debt recorded, not fixed
 
 - **`load.ts:85` reports only `issues[0]`** and this task may not edit it, so
@@ -739,6 +973,12 @@ the file itself holds it in plaintext (which the command says, with the mode).
   form (`profiles["a.b"].model`) is future work.
 - **A lock file** was not added: "documented, not locked (a lock file would be
   new state for a rare case)" — the eval's own decision.
+- **A bare known section with no value** (`tentacle config model`) types `""` as
+  an object and reports `must be a JSON object, e.g. {"key":"value"}` — a
+  confusing answer to "show me the map". It should print the stored value or say
+  a value is needed. Found while checking Q-A, not a review finding, so left.
+- **Q-A/Q-B are the reviewer's recommendation applied as the default**, pending
+  the owner's confirmation (recorded in the task's summary, as asked).
 - **An unset leaves an empty object behind** when the removed key was its only
   child (`"subagents": {\n    }`), because `modify` deletes the node, not the
   emptied parent. `jsonc-parser` has no "remove if empty", and pruning in the
@@ -746,7 +986,8 @@ the file itself holds it in plaintext (which the command says, with the mode).
   `{}` — valid and harmless where the parent's fields are optional. Where one is
   REQUIRED (`mcpServers.*.command`, `schema.ts:66`) the whole-file validate
   refuses the unset instead of writing an invalid entry, which is pinned by a
-  test.
+  test. (Round 2 made the trailing-comma case of this WORK — the orphan comma is
+  repaired — but the parent still stays.)
 
 ## Review
 

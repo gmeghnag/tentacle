@@ -99,14 +99,72 @@ export function parseConfigText(
   return { ok: true, value: value === undefined ? {} : value };
 }
 
-/** One zod issue as a line: `path: message` (the loader prints only `issues[0]`). */
+/**
+ * One zod issue as a line: `path: message` (the loader prints only `issues[0]`).
+ *
+ * The message is REBUILT from the issue's code and its expected set, never
+ * forwarded: zod's own text ends in `received '<the value>'` for an enum, literal
+ * or union, which echoes a stored value into an error (MEDIUM-4 — a file with
+ * `"tools":{"execution":"sk-…"}` printed the value). Path + what was expected is
+ * the whole diagnostic; the value is already in the user's file.
+ */
+function issueLine(issue: {
+  readonly code?: string;
+  readonly path: readonly (string | number)[];
+  readonly message: string;
+  readonly expected?: unknown;
+  readonly options?: readonly unknown[];
+}): string {
+  const path = issue.path.map(String).join(".");
+  const message = forwardedMessage(issue);
+  return path === "" ? message : `${path}: ${message}`;
+}
+
+/** The issue's message, with any echoed value removed. */
+function forwardedMessage(issue: {
+  readonly code?: string;
+  readonly message: string;
+  readonly expected?: unknown;
+  readonly options?: readonly unknown[];
+}): string {
+  const expected = expectedText(issue);
+  if (expected !== undefined) {
+    return expected;
+  }
+  // Anything else (a schema's own `superRefine` message, a `min(1)`) already
+  // names no value; a `received '…'` tail is dropped where one appears anyway.
+  return issue.message.replace(/,?\s*received\s+.*$/i, "").replace(/\s+$/, "");
+}
+
+/** What the issue expected, from its code and options — never the value it got. */
+function expectedText(issue: {
+  readonly code?: string;
+  readonly expected?: unknown;
+  readonly options?: readonly unknown[];
+}): string | undefined {
+  const options = issue.options;
+  if (options !== undefined && options.length > 0) {
+    const listed = options.map((option) => `'${String(option)}'`).join(" | ");
+    return issue.code === "invalid_enum_value"
+      ? `Invalid enum value. Expected ${listed}`
+      : `Expected ${listed}`;
+  }
+  if (typeof issue.expected === "string" && issue.code === "invalid_type") {
+    return `Expected ${issue.expected}`;
+  }
+  return undefined;
+}
+
 function issueLines(error: {
-  issues: readonly { path: readonly (string | number)[]; message: string }[];
+  issues: readonly {
+    readonly path: readonly (string | number)[];
+    readonly message: string;
+    readonly code?: string;
+    readonly expected?: unknown;
+    readonly options?: readonly unknown[];
+  }[];
 }): string[] {
-  return error.issues.map((issue) => {
-    const path = issue.path.map(String).join(".");
-    return path === "" ? issue.message : `${path}: ${issue.message}`;
-  });
+  return error.issues.map((issue) => issueLine(issue));
 }
 
 /**
@@ -240,6 +298,38 @@ export function formattingOf(text: string): FormattingOptions {
 }
 
 /**
+ * jsonc-parser's `modify` leaves an ORPHAN comma when it empties an object whose
+ * last member had a trailing comma (`{"tui":{"theme":"dark",}}` → `{"tui":{,}}`,
+ * LOW-5), and drops the member before its own comma otherwise. The repair removes
+ * exactly that comma: the parse error names its offset, so no other byte — and no
+ * `,}` inside a STRING — can be touched (a blanket regex would).
+ */
+function repairOrphanComma(text: string): string | undefined {
+  const errors: ParseError[] = [];
+  parse(text, errors, { allowTrailingComma: true });
+  if (errors.length !== 1) {
+    return undefined;
+  }
+  const [error] = errors;
+  if (error === undefined || printParseErrorCode(error.error) !== "ValueExpected") {
+    return undefined;
+  }
+  if (text.slice(error.offset, error.offset + 1) !== ",") {
+    return undefined;
+  }
+  // The whole line the comma was alone on goes with it: leaving an indent behind
+  // would be a byte outside the removed member (the same rule LOW-6 pins).
+  const lineStart = text.lastIndexOf("\n", error.offset - 1) + 1;
+  const alone = text.slice(lineStart, error.offset).trim() === "";
+  const lineEnd = text.indexOf("\n", error.offset);
+  const restIsBlank = lineEnd >= 0 && text.slice(error.offset + 1, lineEnd).trim() === "";
+  if (alone && restIsBlank && lineEnd > 0) {
+    return `${text.slice(0, lineStart)}${text.slice(lineEnd + 1)}`;
+  }
+  return `${text.slice(0, error.offset)}${text.slice(error.offset + 1)}`;
+}
+
+/**
  * The edit plan, in the eval's order (A3 "Validate before write"): parse → apply
  * in memory → validate the whole → text edit → re-verify the text. A refusal
  * leaves the file untouched, because nothing has been written yet.
@@ -281,10 +371,17 @@ export function planConfigEdit(input: {
       hint: "fix the file by hand — nothing was changed",
     });
   }
-  // A new file starts as `{}` + the key: give it the trailing newline a text
-  // file should end with (jsonc-parser writes none).
+  edited = repairOrphanComma(edited) ?? edited;
+  // A NEW file — no text at all — gets the trailing newline a text file should
+  // end with (jsonc-parser writes none). An existing file keeps exactly what it
+  // had: an extra byte outside the touched node is against T10's property
+  // (LOW-6), so a file that ended without a newline still ends without one.
   const text =
-    edited === "" || /[\r\n]$/.test(edited) ? edited : `${edited}${formattingOf(input.text).eol}`;
+    /[\r\n]$/.test(edited) || edited === ""
+      ? edited
+      : input.text.trim() === ""
+        ? `${edited}${formattingOf(input.text).eol}`
+        : edited;
   const recheck = parseConfigText(text);
   if (!recheck.ok) {
     return fail("the edit would not produce valid JSONC — nothing was changed");

@@ -385,3 +385,231 @@ describe("unset", () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 });
+
+describe("HIGH-1: a secret inside an object/array value on argv is refused", () => {
+  /** A seeded file, so "unchanged" is a real byte comparison. */
+  function seeded(): string {
+    mkdirSync(configDir, { recursive: true });
+    const original = '{\n  // mine\n  "maxIterations": 8\n}\n';
+    writeFileSync(configPath, original);
+    return original;
+  }
+
+  const CASES: readonly { key: string; text: string; secret: string; profile?: string }[] = [
+    { key: "model", text: '{"apiKey":"sk-LEAK7"}', secret: "sk-LEAK7" },
+    { key: "model", text: '{"apiKey":"sk-LEAK11"}', secret: "sk-LEAK11", profile: "p" },
+    { key: "mcpServers.fs.env", text: '{"T":"sk-LEAK9"}', secret: "sk-LEAK9" },
+    {
+      key: "mcpServers.fs",
+      text: '{"command":"mcp-fs","args":["--token","sk-LEAK12"]}',
+      secret: "sk-LEAK12",
+    },
+    { key: "profiles.p", text: '{"model":{"apiKey":"sk-LEAK13"}}', secret: "sk-LEAK13" },
+    { key: "model.apiKey", text: "sk-LEAK14", secret: "sk-LEAK14" },
+  ];
+
+  for (const { key, text, secret, profile } of CASES) {
+    test(`refused, exit 1, bytes unchanged, no secret in the output: ${key} (profile: ${profile ?? "—"})`, async () => {
+      const original = seeded();
+      const opts = profile === undefined ? {} : { profile };
+      const { code, out, err } = await run(setOp(key, text), opts);
+      expect(code).toBe(1);
+      expect(`${out}${err}`).not.toContain(secret);
+      expect(readFileSync(configPath, "utf8")).toBe(original);
+      // The refusal names the secret KEY (a path, never a value) and the safe forms.
+      expect(err).toContain("refusing a secret on the command line");
+      expect(err).toContain("stdin");
+    });
+  }
+
+  test("the refusal names the secret path(s), and the safe forms", async () => {
+    seeded();
+    const { err } = await run(setOp("model", '{"model":"qwen3","apiKey":"sk-LEAK15"}'));
+    expect(err).toContain("model.apiKey");
+    expect(err).not.toContain("sk-LEAK15");
+    expect(err).toContain("-");
+    const mcp = await run(
+      setOp("mcpServers.fs", '{"command":"x","env":{"A":"sk-LEAK16"},"args":["sk-LEAK17"]}'),
+    );
+    expect(mcp.err).toContain("mcpServers.fs.args");
+    expect(mcp.err).toContain("mcpServers.fs.env.A");
+  });
+
+  test("the stdin `-` form for an object value stays allowed", async () => {
+    seeded();
+    const { code, out } = await run(
+      { kind: "set", key: "model", value: { from: "stdin" } },
+      {
+        readStdin: async () => '{"apiKey":"sk-STDIN1"}\n',
+      },
+    );
+    expect(code).toBe(0);
+    expect(out).not.toContain("sk-STDIN1");
+    expect(readFileSync(configPath, "utf8")).toContain('"apiKey": "sk-STDIN1"');
+  });
+});
+
+describe("HIGH-2/Q-B: get and list render only the masked tree", () => {
+  const SECRET = "sk-STORE9";
+  const API_CMD = "pass show tentacle";
+
+  function seededSecrets(): void {
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      configPath,
+      `{
+  "model": { "model": "qwen3", "apiKey": "${SECRET}" },
+  "mcpServers": {
+    "fs": {
+      "command": "mcp-fs",
+      "args": ["--token", "${SECRET}"],
+      "env": { "TOKEN": "${SECRET}" },
+      "headers": { "Authorization": "Bearer ${SECRET}" }
+    }
+  },
+  "profiles": { "work": { "model": { "apiKey": "${SECRET}" } }, "ip": { "model": { "apiKeyCommand": "${API_CMD}" } } },
+  "model2": { "apiKey": "${SECRET}" }
+}
+`,
+    );
+  }
+
+  test("no form of get or list prints a stored secret", async () => {
+    seededSecrets();
+    const runs = [
+      await run({ kind: "get", key: "model" }),
+      await run({ kind: "get", key: "model" }, { json: true }),
+      await run({ kind: "get", key: "mcpServers" }, { json: true }),
+      await run({ kind: "get", key: "mcpServers.fs" }, { json: true }),
+      await run({ kind: "get", key: "profiles" }, { json: true }),
+      await run({ kind: "get", key: "model.apiKey" }, { json: true }),
+      await run({ kind: "list" }),
+      await run({ kind: "list" }, { json: true }),
+    ];
+    for (const got of runs) {
+      expect(got.code).toBe(0);
+      expect(`${got.out}${got.err}`).not.toContain(SECRET);
+      expect(got.out).toContain("***");
+    }
+    // The JSON keeps its shape (a machine reader still sees which key is secret).
+    const model = await run({ kind: "get", key: "model" }, { json: true });
+    expect(JSON.parse(model.out)).toEqual({
+      key: "model",
+      value: { model: "qwen3", apiKey: "***" },
+    });
+    const mcp = await run({ kind: "get", key: "mcpServers" }, { json: true });
+    const mcpValue = (JSON.parse(mcp.out) as { value: Record<string, unknown> }).value;
+    expect(JSON.stringify(mcpValue)).toContain("mcp-fs");
+    expect(JSON.stringify(mcpValue)).toContain('"args":["***"]');
+    // `apiKeyCommand` is a secret in the registry too: masked on read.
+    const profiles = await run({ kind: "get", key: "profiles" }, { json: true });
+    expect(profiles.out).not.toContain(API_CMD);
+  });
+
+  test("Q-B: an unknown/misplaced key's value is masked, its path still shown", async () => {
+    seededSecrets();
+    const listed = await run({ kind: "list" });
+    expect(listed.code).toBe(0);
+    expect(listed.out).toContain("model2 = ***");
+    expect(listed.out).not.toContain(SECRET);
+    const json = await run({ kind: "list" }, { json: true });
+    expect((JSON.parse(json.out) as Record<string, unknown>).model2).toBe("***");
+    const got = await run({ kind: "get", key: "model2" }, { json: true });
+    // `model2` is not a registry key, so `get` refuses it as unknown…
+    expect(got.code).toBe(1);
+    expect(got.err).toContain("unknown config key");
+  });
+});
+
+describe("MEDIUM-3: an error never carries the value that failed", () => {
+  const SECRET = "sk-NOTINT";
+
+  function seeded(): void {
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(configPath, '{\n  "maxIterations": 8\n}\n');
+  }
+
+  test("a secret-looking value refused by the TYPER is not echoed", async () => {
+    seeded();
+    // `args` is a secret array: a non-array value fails types.
+    const args = await run(
+      { kind: "set", key: "mcpServers.fs.args", value: { from: "stdin" } },
+      { readStdin: async () => `${SECRET}\n` },
+    );
+    expect(args.code).toBe(1);
+    expect(`${args.out}${args.err}`).not.toContain(SECRET);
+    expect(args.err).toContain("JSON array");
+    // `env` is a secret map: a non-object value fails types.
+    const env = await run(
+      { kind: "set", key: "mcpServers.fs.env", value: { from: "stdin" } },
+      { readStdin: async () => `${SECRET}\n` },
+    );
+    expect(env.code).toBe(1);
+    expect(`${env.out}${env.err}`).not.toContain(SECRET);
+    expect(env.err).toContain("JSON object");
+    // A secret leaf whose value fails the schema (min(1)) — through the prompt.
+    const key = await run(
+      { kind: "set", key: "model.apiKey", value: { from: "prompt" } },
+      { isStdinTerminal: true, readSecret: async () => "" },
+    );
+    expect(key.code).toBe(1);
+    expect(`${key.out}${key.err}`).not.toContain(SECRET);
+  });
+
+  test("a schema issue on a secret-looking value does not echo it (M4's path)", async () => {
+    seeded();
+    // `tools.writableDirs` is not secret, but the VALUE is what must not escape:
+    // the whole-file validate's message is the mediator here.
+    const result = await run(setOp("tools.maxParallel", SECRET));
+    expect(result.code).toBe(1);
+    expect(`${result.out}${result.err}`).not.toContain(SECRET);
+  });
+});
+
+describe("LOW-8: an lstat error other than ENOENT is reported as itself", () => {
+  test("the real fs: EACCES throws out of `kind` instead of reading as 'other'", () => {
+    // A real, unreadable directory: the lstat fails with EACCES, which means
+    // "cannot tell", not "not a regular file" — so it must not become `"other"`.
+    const locked = join(dir, "locked");
+    mkdirSync(locked, { recursive: true });
+    writeFileSync(join(locked, "config.jsonc"), "{}\n");
+    chmodSync(locked, 0o000);
+    try {
+      let thrown: unknown;
+      try {
+        nodeConfigFs.kind(join(locked, "config.jsonc"));
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown instanceof Error).toBe(true);
+      expect((thrown as NodeJS.ErrnoException).code).toBe("EACCES");
+      // The harmless case still means "missing" (the ENOENT branch, unchanged).
+      expect(nodeConfigFs.kind(join(dir, "nope", "config.jsonc"))).toBe("missing");
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+  });
+
+  test("a `kind` that throws reaches the user as that error, with the path", async () => {
+    // The same failure through the command: readSnapshot must report it, not call
+    // it "not a regular file".
+    const refusing: ConfigFs = {
+      ...nodeConfigFs,
+      kind: () => {
+        throw Object.assign(new Error("EACCES: permission denied, lstat"), { code: "EACCES" });
+      },
+    };
+    const { code, err } = await run(setOp("autoWake", "true"), { fs: refusing });
+    expect(code).toBe(1);
+    expect(err).toContain("EACCES: permission denied");
+    expect(err).toContain("config.jsonc");
+    expect(err).not.toContain("not a regular file");
+  });
+
+  test("a missing file is still 'missing' (the ENOENT path is unchanged)", async () => {
+    // No hooks: the real fs, no file — the harmless case must not regress.
+    const { code, out } = await run(setOp("autoWake", "true"));
+    expect(code).toBe(0);
+    expect(out).toContain("set autoWake");
+  });
+});

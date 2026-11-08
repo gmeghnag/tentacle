@@ -38,6 +38,7 @@ import {
   loadConfig,
   longToolNameWarnings,
   titleConfigNotice,
+  topLevelKeys,
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
@@ -440,6 +441,26 @@ function promptWords(args: readonly string[]): readonly string[] {
   return args.filter((word) => !word.startsWith("-"));
 }
 
+/**
+ * The way back to a prompt for a word `config` swallowed (owner Q-A, the same
+ * trade-off `explain` settled): only when the first word after `config` could
+ * not be a key — no `.` and no `=` in it, and not a top-level key — because then
+ * it is a sentence, not a typo'd path (`model.foo=x` gets suggestions instead).
+ */
+function configPromptHint(positional: readonly string[], args: readonly string[]): string {
+  const first = positional[0];
+  if (first === undefined || first === "set" || first === "get" || first === "unset") {
+    return "";
+  }
+  if (first.includes(".") || first.includes("=")) {
+    return "";
+  }
+  if (topLevelKeys().includes(first)) {
+    return "";
+  }
+  return `\n${promptHint(promptWords(args))}\n`;
+}
+
 export async function main(argv: readonly string[], io: CliIO = {}): Promise<number> {
   // Two sinks (docs/fix/cli-output-streams.md): `out` = data only (stdout),
   // `err` = everything else (stderr). Every styled line is an `err` line, so
@@ -647,7 +668,12 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   if (mode === "config") {
     const parsedConfig = parseConfigArgs(parsed.positional, parsed.flags, parsed.bools);
     if (!parsedConfig.ok) {
-      err(`[error] ${parsedConfig.error}\nusage: ${USAGE.config}\n`);
+      // Q-A: `tentacle config my nginx` is a SENTENCE the old build sent as a
+      // prompt, now read as a command. A first word with no `.`/`=` cannot be a
+      // key path, so say the way back (the same line `explain` prints).
+      err(
+        `[error] ${parsedConfig.error}${configPromptHint(parsed.positional, args)}\nusage: ${USAGE.config}\n`,
+      );
       return 1;
     }
     const result = await runConfig({
@@ -676,8 +702,13 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
             }
           : {}),
     });
+    // Q-A: an unknown key whose first word could not be a key path is a SENTENCE
+    // (the old build sent it to the model) — say the way back.
+    const unknownHint = result.err.includes('unknown config key "')
+      ? configPromptHint(parsed.positional, args)
+      : "";
     if (result.out !== "") out(result.out);
-    if (result.err !== "") err(result.err);
+    if (result.err !== "") err(`${result.err}${unknownHint}`);
     return result.code;
   }
 

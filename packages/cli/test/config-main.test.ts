@@ -254,10 +254,15 @@ describe("T9: a secret never reaches argv, and never reaches the output", () => 
 
   test("an MCP server's env/headers/args are masked in list", async () => {
     seeded();
-    await run([
-      "mcpServers.fs",
-      '{"command":"mcp-fs","args":["--token","tok-123"],"env":{"TOKEN":"tok-456"}}',
-    ]);
+    // Seeded through stdin: the object form on ARGV is refused now (HIGH-1).
+    const written = await main(["bun", "cli", "config", "mcpServers.fs", "-"], {
+      out: () => undefined,
+      err: () => undefined,
+      terminal: NO_TERMINAL,
+      readStdin: async () =>
+        '{"command":"mcp-fs","args":["--token","tok-123"],"env":{"TOKEN":"tok-456"}}\n',
+    });
+    expect(written).toBe(0);
     const listed = await run(["list"]);
     expect(listed.code).toBe(0);
     expect(listed.out).toContain("mcpServers.fs.args = [***]");
@@ -457,5 +462,51 @@ describe("the command surface (owner Q7)", () => {
     const { code, err } = await run(["how", "do", "I", "set", "a", "key"]);
     expect(code).toBe(1);
     expect(err).toContain("tentacle -- config how do I set a key");
+  });
+});
+
+describe("Q-A: a prompt that starts with `config` keeps a way back to the prompt", () => {
+  test("`tentacle config my nginx` says how to send it as a prompt", async () => {
+    // The first word after `config` has no `.`/`=` and is not a top-level key, so
+    // it cannot be a key path: the old build sent the whole thing to the model.
+    const { code, err } = await run(["my", "nginx"]);
+    expect(code).toBe(1);
+    expect(err).toContain('unknown config key "my"');
+    expect(err).toContain("to send this as a prompt, use: tentacle -- config my nginx");
+  });
+
+  test("a real key path or a `key=value` gets NO prompt hint", async () => {
+    seeded();
+    // A key path that does not resolve is a near miss, not a sentence.
+    const typo = await run(["model.foo=x"]);
+    expect(typo.err).toContain("unknown config key");
+    expect(typo.err).not.toContain("as a prompt");
+    // A command word (`get`, `list`, …) is never a prompt.
+    expect((await run(["list"])).err).not.toContain("as a prompt");
+  });
+
+  test("the hint carries the words as typed, flags aside", async () => {
+    const { err } = await run(["how", "are", "you", "--json"]);
+    expect(err).toContain("tentacle -- config how are you");
+  });
+});
+
+describe("LOW-7: Ctrl+C / EOF at the hidden prompt cancels, and writes nothing", () => {
+  test("an interrupted prompt is a cancellation: exit 130, 'cancelled', no write", async () => {
+    seeded();
+    const before = sha(configPath);
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await main(["bun", "cli", "config", "model.apiKey"], {
+      out: (text) => out.push(text),
+      err: (text) => err.push(text),
+      terminal: { stdin: true, stdout: true },
+      // `readHiddenLine` resolves `undefined` on SIGINT / EOF (see its own test).
+      readSecret: async () => undefined as unknown as string,
+    });
+    expect(code).toBe(130);
+    expect(err.join("")).toContain("cancelled");
+    expect(out.join("")).toBe("");
+    expect(sha(configPath)).toBe(before);
   });
 });

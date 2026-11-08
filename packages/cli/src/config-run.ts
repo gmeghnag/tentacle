@@ -40,6 +40,7 @@ import {
   docForKey,
   flattenStored,
   isArgvRefusedSecret,
+  maskStored,
   nearestKeys,
   parseConfigText,
   planConfigEdit,
@@ -47,6 +48,7 @@ import {
   renderStored,
   resolveKeyPath,
   secretOf,
+  secretPathsIn,
   typeConfigValue,
   validateFileConfig,
 } from "@tentacle/config";
@@ -67,7 +69,9 @@ export interface FileStat {
 export interface ConfigFs {
   readText(path: string): string;
   stat(path: string): FileStat;
-  /** What is at `path`: a regular file, a symlink, another kind, or nothing. */
+  /** What is at `path`: a regular file, a symlink, another kind, or nothing.
+   * Any OTHER failure (EACCES, ELOOP, …) is thrown, so its real message and path
+   * reach the user instead of reading as "not a regular file" (LOW-8). */
   kind(path: string): "file" | "symlink" | "other" | "missing";
   realpath(path: string): string;
   /** `mkdir -p` with mode 0700. */
@@ -96,7 +100,13 @@ export const nodeConfigFs: ConfigFs = {
       if (s.isSymbolicLink()) return "symlink";
       return s.isFile() ? "file" : "other";
     } catch (error) {
-      return codeOf(error) === "ENOENT" ? "missing" : "other";
+      // ONLY ENOENT means "nothing there": anything else (EACCES on the
+      // directory, ELOOP, ENAMETOOLONG) is a real failure and must say so
+      // (LOW-8), never read as "not a regular file".
+      if (codeOf(error) === "ENOENT") {
+        return "missing";
+      }
+      throw error;
     }
   },
   realpath: (path) => realpathSync(path),
@@ -129,8 +139,9 @@ export interface ConfigRunInput {
   readonly ask?: (prompt: string) => Promise<string>;
   /** stdin to EOF (`config <key> -`). */
   readonly readStdin?: () => Promise<string>;
-  /** A hidden prompt on a terminal (no echo: the value may be a key). */
-  readonly readSecret?: (prompt: string) => Promise<string>;
+  /** A hidden prompt on a terminal (no echo: the value may be a key). A
+   * resolved `undefined` means the user cancelled (Ctrl+C / EOF). */
+  readonly readSecret?: (prompt: string) => Promise<string | undefined>;
 }
 
 export interface ConfigRunResult {
@@ -193,6 +204,34 @@ function resolveTarget(key: string, profile: string | undefined): Target | Confi
   return { segments, canonical: node.path, key };
 }
 
+/**
+ * The refusal for a secret given on ARGV (owner Q6 / eval A4): it would be
+ * visible in shell history and in `ps`. `paths` are the concrete registry paths
+ * that carry the secret — the key itself, or any key INSIDE an object/array
+ * value (HIGH-1: `config model='{"apiKey":"sk-x"}'` leaked the key through a
+ * parent). They are PATHS, never the value.
+ */
+function secretOnArgv(key: string, paths: readonly string[]): ConfigRunResult {
+  const which =
+    paths.length === 1 && paths[0] === key
+      ? `"${key}"`
+      : `${paths.map((path) => `"${path}"`).join(", ")} (in the value for "${key}")`;
+  const leaf = paths[0] ?? key;
+  return {
+    code: 1,
+    out: "",
+    err:
+      line(
+        `[error] refusing a secret on the command line: ${which} would be visible in your shell history and in \`ps\``,
+      ) +
+      line(`read it from stdin instead:  printf '%s\\n' "$KEY" | tentacle config ${leaf} -`) +
+      line(`or with no value, it is prompted for without echo:  tentacle config ${leaf}`) +
+      line(
+        `better: store a command that prints it — tentacle config model.apiKeyCommand "pass show tentacle" (see \`tentacle explain model.apiKeyCommand\`)`,
+      ),
+  };
+}
+
 const isRunResult = (value: Target | ConfigRunResult): value is ConfigRunResult =>
   "code" in value && "err" in value;
 
@@ -212,24 +251,57 @@ type Snapshot =
   | { readonly ok: false; readonly result: ConfigRunResult };
 
 /**
- * Locate the real file (a symlink is written THROUGH, its target renamed over,
- * so a dotfiles link survives), refuse anything that is not a regular file, and
- * read it with its stamp.
+ * `fs.kind`, with an lstat failure that is not ENOENT reported as itself, with
+ * the path (LOW-8): EACCES on the directory used to read as "not a regular
+ * file", which blames the wrong thing. Only `nodeConfigFs` decides what ENOENT
+ * means; every other kind of failure comes out here as a refusal.
  */
-function readSnapshot(fs: ConfigFs, configPath: string): Snapshot {
-  const kind = fs.kind(configPath);
-  if (kind === "other") {
+function kindOf(
+  fs: ConfigFs,
+  path: string,
+):
+  | { readonly ok: true; readonly value: "file" | "symlink" | "other" | "missing" }
+  | { readonly ok: false; readonly result: ConfigRunResult } {
+  try {
+    return { ok: true, value: fs.kind(path) };
+  } catch (error) {
     return {
       ok: false,
       result: {
         code: 1,
         out: "",
-        err: line(`[error] ${shown(configPath)} is not a regular file — nothing was changed`),
+        err: line(
+          `[error] cannot read ${shown(path)}: ${error instanceof Error ? error.message : String(error)} — nothing was changed`,
+        ),
       },
     };
   }
+}
+
+const notRegularFile = (path: string): Snapshot => ({
+  ok: false,
+  result: {
+    code: 1,
+    out: "",
+    err: line(`[error] ${shown(path)} is not a regular file — nothing was changed`),
+  },
+});
+
+/**
+ * Locate the real file (a symlink is written THROUGH, its target renamed over,
+ * so a dotfiles link survives), refuse anything that is not a regular file, and
+ * read it with its stamp.
+ */
+function readSnapshot(fs: ConfigFs, configPath: string): Snapshot {
+  const kind = kindOf(fs, configPath);
+  if (!kind.ok) {
+    return kind;
+  }
+  if (kind.value === "other") {
+    return notRegularFile(configPath);
+  }
   let real = configPath;
-  if (kind === "symlink") {
+  if (kind.value === "symlink") {
     try {
       real = fs.realpath(configPath);
     } catch (error) {
@@ -244,19 +316,19 @@ function readSnapshot(fs: ConfigFs, configPath: string): Snapshot {
         },
       };
     }
-    const targetKind = fs.kind(real);
-    if (targetKind === "other") {
-      return {
-        ok: false,
-        result: {
-          code: 1,
-          out: "",
-          err: line(`[error] ${shown(real)} is not a regular file — nothing was changed`),
-        },
-      };
+    const targetKind = kindOf(fs, real);
+    if (!targetKind.ok) {
+      return targetKind;
+    }
+    if (targetKind.value === "other") {
+      return notRegularFile(real);
     }
   }
-  if (fs.kind(real) === "missing") {
+  const realKind = kindOf(fs, real);
+  if (!realKind.ok) {
+    return realKind;
+  }
+  if (realKind.value === "missing") {
     return {
       ok: true,
       real,
@@ -417,7 +489,8 @@ async function valueText(
   secret: boolean,
 ): Promise<
   | { readonly ok: true; readonly text: string }
-  | { readonly ok: false; readonly result: ConfigRunResult }
+  | { readonly ok: false; readonly cancelled: true }
+  | { readonly ok: false; readonly cancelled?: false; readonly result: ConfigRunResult }
 > {
   const source = op.value;
   if (source.from === "argv") {
@@ -448,11 +521,19 @@ async function valueText(
   if (!input.isStdinTerminal) {
     return fromStdin();
   }
+  const asked = async (ask: (prompt: string) => Promise<string | undefined>) => {
+    // `undefined` is a CANCEL (Ctrl+C / EOF at the prompt, LOW-7): neither an
+    // empty value (which the schema would answer with "use unset") nor a write.
+    const answer = await ask(`${op.key}: `);
+    return answer === undefined
+      ? ({ ok: false, cancelled: true } as const)
+      : { ok: true as const, text: trimOneNewline(answer) };
+  };
   if (secret && input.readSecret !== undefined) {
-    return { ok: true, text: trimOneNewline(await input.readSecret(`${op.key}: `)) };
+    return asked(input.readSecret);
   }
   if (input.ask !== undefined) {
-    return { ok: true, text: trimOneNewline(await input.ask(`${op.key}: `)) };
+    return asked(input.ask);
   }
   return fromStdin();
 }
@@ -484,20 +565,7 @@ async function write(
     return unknownKey(op.key);
   }
   if (op.kind === "set" && op.value.from === "argv" && isArgvRefusedSecret(op.key)) {
-    // Owner Q6 / eval A4: a secret on argv leaks into shell history and `ps`.
-    return {
-      code: 1,
-      out: "",
-      err:
-        line(
-          `[error] refusing a secret on the command line: "${op.key}" would be visible in your shell history and in \`ps\``,
-        ) +
-        line(`read it from stdin instead:  printf '%s\\n' "$KEY" | tentacle config ${op.key} -`) +
-        line(`or with no value, it is prompted for without echo:  tentacle config ${op.key}`) +
-        line(
-          `better: store a command that prints it — tentacle config model.apiKeyCommand "pass show tentacle" (see \`tentacle explain model.apiKeyCommand\`)`,
-        ),
-    };
+    return secretOnArgv(op.key, [op.key]);
   }
 
   let snapshot = readSnapshot(fs, input.configPath);
@@ -513,7 +581,11 @@ async function write(
   if (op.kind === "set") {
     const raw = await valueText(op, input, secretOf(target.segments.join(".")) !== undefined);
     if (!raw.ok) {
-      return raw.result;
+      // A cancel at the hidden prompt is not an error to explain: 130 is what a
+      // Ctrl+C answers everywhere else in the CLI (LOW-7).
+      return "cancelled" in raw && raw.cancelled
+        ? { code: 130, out: "", err: line("cancelled") }
+        : raw.result;
     }
     emptyValue = raw.text === "";
     const node = resolveKeyPath(target.segments.join("."));
@@ -536,6 +608,15 @@ async function write(
       };
     }
     editOp = { kind: "set", value: typed.value };
+    // HIGH-1: a secret INSIDE an argv value (an object or array holding an
+    // `apiKey`, a token, an `args` list) is on argv just the same. Asked of the
+    // TYPED value at its target path, with the registry walk — no second table.
+    if (op.value.from === "argv") {
+      const secretPaths = secretPathsIn(typed.value, target.segments);
+      if (secretPaths.length > 0) {
+        return secretOnArgv(op.key, secretPaths);
+      }
+    }
     printedValue = renderStored(typed.value, target.segments);
   } else {
     const parsed = parseConfigText(snapshot.text);
@@ -685,16 +766,17 @@ function get(input: ConfigRunInput, op: Extract<ConfigOp, { kind: "get" }>): Con
         (fallback !== undefined ? line(`default: ${fallback}`) : ""),
     };
   }
-  const mask = renderStored(found.value, target.segments);
+  // HIGH-2: every form renders the MASKED tree, never `found.value` — an object
+  // used to be emitted raw by `--json`, so `get model --json` printed the key.
+  const masked = maskStored(found.value, target.segments);
   if (input.json) {
-    const value = mask === "***" || mask === "[***]" ? mask : found.value;
     return {
       code: 0,
-      out: `${JSON.stringify({ key: target.segments.join("."), value })}\n`,
+      out: `${JSON.stringify({ key: target.segments.join("."), value: masked })}\n`,
       err: "",
     };
   }
-  return { code: 0, out: line(mask), err: "" };
+  return { code: 0, out: line(renderStored(masked, target.segments)), err: "" };
 }
 
 /** `list`: every setting the file holds, one `key = value` line, secrets masked. */
@@ -726,9 +808,9 @@ function list(input: ConfigRunInput): ConfigRunResult {
   const prefix = input.profile === undefined ? [] : ["profiles", input.profile];
   const lines = flattenStored(scope, prefix);
   if (input.json) {
+    // HIGH-2: the VALUE the walk produced (already masked), never a re-read.
     const entries = lines.map(
-      (entry) =>
-        `${JSON.stringify(entry.path)}: ${entry.text === "***" || entry.text === "[***]" ? JSON.stringify(entry.text) : entry.text}`,
+      (entry) => `${JSON.stringify(entry.path)}: ${JSON.stringify(entry.value)}`,
     );
     return { code: 0, out: entries.length === 0 ? "{}\n" : `{${entries.join(",")}}\n`, err: "" };
   }

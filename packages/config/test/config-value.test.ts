@@ -5,11 +5,18 @@ import {
   checkSegments,
   flattenStored,
   isArgvRefusedSecret,
+  maskStored,
   renderStored,
   secretOf,
+  secretPathsIn,
   typeConfigValue,
 } from "../src/config-value.ts";
 import { keyDoc } from "../src/key-docs.ts";
+
+/** The secret paths an argv value would put under `segments` (HIGH-1). */
+function argvSecretPaths(value: unknown, segments: readonly string[]): readonly string[] {
+  return secretPathsIn(value, segments);
+}
 
 /** The schema node a concrete key names, asserting it is a leaf of `type`. */
 function leaf(key: string): KeyNode {
@@ -187,15 +194,124 @@ describe("T9: masked printing never emits the value", () => {
   test("a secret's subtree is masked line by line, never a partial leak", () => {
     const lines = flattenStored({ mcpServers: { fs: { env: { A: SECRET, B: SECRET } } } });
     expect(lines).toEqual([
-      { path: "mcpServers.fs.env.A", text: "***" },
-      { path: "mcpServers.fs.env.B", text: "***" },
+      { path: "mcpServers.fs.env.A", text: "***", value: "***" },
+      { path: "mcpServers.fs.env.B", text: "***", value: "***" },
     ]);
   });
 
   test("an empty object is one line, and an empty file lists nothing", () => {
     expect(flattenStored({})).toEqual([]);
-    expect(flattenStored({ hooks: [] })).toEqual([{ path: "hooks", text: "[]" }]);
-    expect(flattenStored({ profiles: {} })).toEqual([{ path: "profiles", text: "{}" }]);
+    expect(flattenStored({ hooks: [] })).toEqual([{ path: "hooks", text: "[]", value: [] }]);
+    expect(flattenStored({ profiles: {} })).toEqual([{ path: "profiles", text: "{}", value: {} }]);
+  });
+
+  test("each line carries its masked VALUE too, so `list --json` never re-reads one", () => {
+    const lines = flattenStored({ model: { apiKey: SECRET, model: "qwen3" } });
+    expect(lines).toEqual([
+      { path: "model.apiKey", text: "***", value: "***" },
+      { path: "model.model", text: '"qwen3"', value: "qwen3" },
+    ]);
+    expect(JSON.stringify(lines.map((l) => l.value))).not.toContain(SECRET);
+  });
+});
+
+describe("HIGH-2/Q-B: maskStored is the ONLY source of a printed stored value", () => {
+  const SECRET = "sk-live-m4sk";
+
+  test("a secret leaf becomes *** and a secret array [***], in both trees", () => {
+    expect(maskStored(SECRET, ["model", "apiKey"])).toBe("***");
+    expect(maskStored(["a", SECRET], ["mcpServers", "fs", "args"])).toEqual(["***"]);
+    expect(maskStored({ TOKEN: SECRET }, ["mcpServers", "fs", "env", "TOKEN"])).toBe("***");
+    expect(maskStored(SECRET, ["profiles", "work", "model", "apiKey"])).toBe("***");
+  });
+
+  test("an object is masked inside, and never leaks a secret value", () => {
+    // The HIGH-2 hole: `get model --json` emitted the raw object.
+    const masked = maskStored({ model: "qwen3", apiKey: SECRET }, ["model"]);
+    expect(masked).toEqual({ model: "qwen3", apiKey: "***" });
+    expect(JSON.stringify(masked)).not.toContain(SECRET);
+    const mcp = maskStored(
+      { command: "mcp-fs", args: ["--token", SECRET], env: { TOKEN: SECRET } },
+      ["mcpServers", "fs"],
+    );
+    expect(mcp).toEqual({ command: "mcp-fs", args: ["***"], env: { TOKEN: "***" } });
+    expect(JSON.stringify(mcp)).not.toContain(SECRET);
+  });
+
+  test("a whole section of profiles masks every secret under it", () => {
+    const file = {
+      work: { model: { model: "qwen3", apiKey: SECRET }, mcpServers: null },
+    };
+    const masked = maskStored(file, ["profiles"]);
+    expect(JSON.stringify(masked)).not.toContain(SECRET);
+    expect(JSON.stringify(masked)).toContain("qwen3");
+  });
+
+  test("Q-B: a key that is not in the registry is masked, wherever it sits", () => {
+    // A value pasted into the wrong slot is not a setting: `list`/`get` must not
+    // print it (it lands in bug reports). Its PATH is still shown.
+    const masked = maskStored({ model: { foo: SECRET }, tools: { execution: SECRET } }, []);
+    expect(masked).toEqual({ model: { foo: "***" }, tools: { execution: SECRET } });
+    // A key outside the schema entirely (a misplaced section).
+    expect(maskStored({ bogus: { a: SECRET } }, [])).toEqual({ bogus: "***" });
+    // …and inside a profile, against the `profiles.*` mirror.
+    expect(maskStored({ p: { nope: SECRET } }, ["profiles"])).toEqual({ p: { nope: "***" } });
+  });
+
+  test("a non-secret value is the value (get/list keep working)", () => {
+    expect(maskStored(20, ["maxIterations"])).toBe(20);
+    expect(maskStored(["/tmp"], ["tools", "writableDirs"])).toEqual(["/tmp"]);
+    expect(maskStored({ enabled: true }, ["subagents"])).toEqual({ enabled: true });
+    expect(maskStored({}, ["subagents"])).toEqual({});
+    // The file itself (no path) is walked, not masked.
+    expect(maskStored({ maxIterations: 8 })).toEqual({ maxIterations: 8 });
+  });
+
+  test("renderStored of the masked tree never emits the value (list/get plain)", () => {
+    const file = { model: { model: "qwen3", apiKey: SECRET }, bogus: SECRET };
+    const text = flattenStored(maskStored(file))
+      .map((l) => `${l.path} = ${l.text}`)
+      .join("\n");
+    expect(text).not.toContain(SECRET);
+    expect(text).toContain("model.apiKey = ***");
+    expect(text).toContain("bogus = ***");
+  });
+});
+
+describe("HIGH-1: a secret inside an argv value, at its target path", () => {
+  test("a secret nested in an object is found, with its concrete path", () => {
+    // `config model='{"apiKey":"sk-x"}'`: the KEY is not secret, its value is.
+    expect(argvSecretPaths({ apiKey: "sk-x" }, ["model"])).toEqual(["model.apiKey"]);
+    expect(argvSecretPaths({ apiKey: "sk-x" }, ["profiles", "p", "model"])).toEqual([
+      "profiles.p.model.apiKey",
+    ]);
+    expect(argvSecretPaths({ T: "sk-x" }, ["mcpServers", "fs", "env"])).toEqual([
+      "mcpServers.fs.env.T",
+    ]);
+    expect(argvSecretPaths({ model: { apiKey: "sk-x" } }, ["profiles", "p"])).toEqual([
+      "profiles.p.model.apiKey",
+    ]);
+    // A whole server: `args` is a secret ARRAY, `env`/`headers` maps of secrets.
+    expect(
+      argvSecretPaths({ command: "x", args: ["--token", "sk-x"], env: { A: "sk-x" }, cwd: "." }, [
+        "mcpServers",
+        "fs",
+      ]),
+    ).toEqual(["mcpServers.fs.args", "mcpServers.fs.env.A"]);
+  });
+
+  test("the secret leaf itself is found (the whole-object form of the leaf case)", () => {
+    expect(argvSecretPaths("sk-x", ["model", "apiKey"])).toEqual(["model.apiKey"]);
+    expect(argvSecretPaths(["--token", "sk-x"], ["mcpServers", "fs", "args"])).toEqual([
+      "mcpServers.fs.args",
+    ]);
+  });
+
+  test("apiKeyCommand stays the documented safe form, and nothing else is named", () => {
+    expect(argvSecretPaths({ apiKeyCommand: "pass show x" }, ["model"])).toEqual([]);
+    expect(argvSecretPaths({ command: "mcp-fs", cwd: "." }, ["mcpServers", "fs"])).toEqual([]);
+    expect(argvSecretPaths({ enabled: false }, ["subagents"])).toEqual([]);
+    expect(argvSecretPaths("qwen3", ["model", "model"])).toEqual([]);
   });
 });
 

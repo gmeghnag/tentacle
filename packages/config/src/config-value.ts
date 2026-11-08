@@ -130,6 +130,11 @@ export function docForKey(key: string): KeyDoc | undefined {
   return node === undefined ? undefined : keyDoc(node.path);
 }
 
+/** Is `key` a path the SCHEMA knows at all (a leaf, a section, a map entry)? */
+export function isKnownKey(key: string): boolean {
+  return resolveKeyPath(key) !== undefined;
+}
+
 /** `true` = the value IS a credential; `"values"` = every value under it is. */
 export function secretOf(key: string): true | "values" | undefined {
   return docForKey(key)?.secret;
@@ -155,19 +160,38 @@ const MASK = "***";
 const ARRAY_MASK = "[***]";
 
 /**
- * A stored value as `get`/`list` may print it: the JSON the file holds, except
- * that a secret leaf is `***` and a secret array (`args`) is `[***]` — never a
- * prefix, never a length (eval A4: no error or output contains a secret value).
- * An object recurses, so `get mcpServers.fs` masks inside it.
+ * The mask a value at `segments` gets, or `undefined` when it is a plain setting:
+ * a secret leaf/array from the registry (eval A4), OR a key the registry/schema
+ * does not know at all (owner Q-B, HIGH-2's sibling) — a value pasted into the
+ * wrong slot is not a setting, and `list` is what a user pastes into a bug
+ * report.
  */
-export function renderStored(value: unknown, segments: readonly string[]): string {
+function maskOf(segments: readonly string[]): "***" | "[***]" | undefined {
   const key = segments.join(".");
-  const secret = key === "" ? undefined : secretOf(key);
+  if (key === "") {
+    return undefined;
+  }
+  const secret = secretOf(key);
   if (secret === "values") {
     return ARRAY_MASK;
   }
   if (secret === true) {
     return MASK;
+  }
+  return isKnownKey(key) ? undefined : MASK;
+}
+
+/**
+ * A stored value as `get`/`list` may print it: the JSON the file holds, except
+ * that a secret leaf is `***`, a secret array (`args`) is `[***]`, and an
+ * unknown key's value is `***` — never a prefix, never a length (eval A4: no
+ * error or output contains a secret value). An object recurses, so
+ * `get mcpServers.fs` masks inside it.
+ */
+export function renderStored(value: unknown, segments: readonly string[]): string {
+  const mask = maskOf(segments);
+  if (mask !== undefined) {
+    return mask;
   }
   if (Array.isArray(value)) {
     return JSON.stringify(value) ?? "[]";
@@ -181,11 +205,75 @@ export function renderStored(value: unknown, segments: readonly string[]): strin
   return JSON.stringify(value) ?? "null";
 }
 
+/**
+ * The same tree with every masked node replaced by its mask: `"***"` for a
+ * secret leaf or an unknown key, `["***"]` for a secret array.
+ *
+ * This is the ONLY source of a printed stored value (HIGH-2): `get --json`
+ * emitted `found.value` raw for an object, so `get model --json` printed the
+ * stored `apiKey`. `renderStored` is this tree re-serialized for people,
+ * `get --json`/`list --json` are the same tree for machines, and neither ever
+ * sees the raw value it replaces.
+ */
+export function maskStored(value: unknown, segments: readonly string[] = []): unknown {
+  const mask = maskOf(segments);
+  if (mask !== undefined) {
+    return mask === ARRAY_MASK ? [MASK] : MASK;
+  }
+  if (Array.isArray(value)) {
+    // An array is a LEAF: its entries are values, not addressable keys, so there
+    // is no segmented path under it to mask (`hooks` is one such list).
+    return value;
+  }
+  if (isObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [name, child] of Object.entries(value)) {
+      out[name] = maskStored(child, [...segments, name]);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Every registry-secret path a value would create UNDER `segments` (HIGH-1):
+ * `{"apiKey":"sk-x"}` at `model` → `["model.apiKey"]`. The same walk as
+ * `flattenStored`/`renderStored`, so there is no second table of secrets.
+ * `apiKeyCommand` is exempt by the same rule argv refusal uses (owner Q6/A4:
+ * setting the command itself is the documented safe form).
+ */
+export function secretPathsIn(value: unknown, segments: readonly string[] = []): readonly string[] {
+  const key = segments.join(".");
+  if (key !== "" && isArgvRefusedSecret(key)) {
+    // A secret ARRAY (`args`) is refused wholesale; a secret leaf is the value.
+    return [key];
+  }
+  const found: string[] = [];
+  const walk = (node: unknown, path: readonly string[]): void => {
+    if (!isObject(node)) {
+      return;
+    }
+    for (const [name, child] of Object.entries(node)) {
+      const childPath = [...path, name];
+      const childKey = childPath.join(".");
+      if (isArgvRefusedSecret(childKey)) {
+        found.push(childKey);
+        continue;
+      }
+      walk(child, childPath);
+    }
+  };
+  walk(value, segments);
+  return found;
+}
+
 /** One `key = value` line of `config list`. */
 export interface StoredLine {
   readonly path: string;
-  /** The value, already masked where the key is a secret. */
+  /** The value, already masked where the key is a secret (or unknown). */
   readonly text: string;
+  /** The same, as a value: what `list --json` serializes (never the raw one). */
+  readonly value: unknown;
 }
 
 /**
@@ -201,23 +289,44 @@ export function flattenStored(
   return flattenInOrder(value, prefix).sort((a, b) => a.path.localeCompare(b.path));
 }
 
+/** The value at `segments` as it may be printed: the mask, or the value. */
+const printedValue = (value: unknown, segments: readonly string[]): unknown => {
+  const mask = maskOf(segments);
+  if (mask === undefined) {
+    return value;
+  }
+  return mask === ARRAY_MASK ? [MASK] : MASK;
+};
+
 function flattenInOrder(value: unknown, prefix: readonly string[]): StoredLine[] {
   if (!isObject(value)) {
     return prefix.length === 0
       ? []
-      : [{ path: prefix.join("."), text: renderStored(value, prefix) }];
+      : [
+          {
+            path: prefix.join("."),
+            text: renderStored(value, prefix),
+            value: printedValue(value, prefix),
+          },
+        ];
   }
   const entries = Object.entries(value);
   if (entries.length === 0 && prefix.length > 0) {
-    return [{ path: prefix.join("."), text: "{}" }];
+    return [{ path: prefix.join("."), text: "{}", value: {} }];
   }
   return entries.flatMap(([name, child]) => {
     const segments = [...prefix, name];
-    const secret = secretOf(segments.join("."));
-    // A secret stops the walk: one masked line, never a leaf-by-leaf leak, and
-    // never a masked parent with its children beside it.
-    return secret !== undefined
-      ? [{ path: segments.join("."), text: renderStored(child, segments) }]
+    // A mask (a secret, or a key the schema does not know — owner Q-B) stops the
+    // walk: one masked line, never a leaf-by-leaf leak, and never a masked parent
+    // with its children beside it.
+    return maskOf(segments) !== undefined
+      ? [
+          {
+            path: segments.join("."),
+            text: renderStored(child, segments),
+            value: printedValue(child, segments),
+          },
+        ]
       : flattenInOrder(child, segments);
   });
 }
