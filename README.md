@@ -298,30 +298,60 @@ A non-loopback `--host` requires a token. TLS: `--tls-cert`/`--tls-key` on
 
 Precedence: **environment variables › `config.jsonc` › built-in defaults**.
 
-| Config key (`config.jsonc`) | Env override | Meaning |
-| --- | --- | --- |
-| `model.provider` | `TENTACLE_PROVIDER` | `openai` (default) or `anthropic` |
-| `model.baseURL` | `TENTACLE_MODEL_BASE_URL` | Base URL incl. version. Default: `http://localhost:8080/v1` (openai) or `https://api.anthropic.com/v1` (anthropic) |
-| `model.model` | `TENTACLE_MODEL` | Model id sent to the endpoint (`--model <id>` beats both, for that command — see below) |
-| `model.apiKey` | `TENTACLE_MODEL_API_KEY` | API key, **stored in plaintext** (discouraged) |
-| `model.apiKeyCommand` | — | Shell command whose stdout is the key; never written to disk |
-| `model.contextWindow` | — | Token budget for the TUI context meter |
-| `model.maxTokens` | `TENTACLE_MAX_TOKENS` | Max output tokens per response. Unset: omitted for openai, `64000` for anthropic |
-| `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` (inline) | System prompt file (default `PROMPT.md`) |
-| `maxIterations` | `TENTACLE_MAX_ITERATIONS` | Max model/tool rounds per turn |
-| `subagents.enabled` | `TENTACLE_SUBAGENTS` | The `agent_task` sub-agent tool (default on) |
-| `subagents.execution` | `TENTACLE_SUBAGENT_EXECUTION` | How a message's `agent_task` calls overlap: `parallel` (default; they share one workspace), `read-only` (only sub-agents that cannot write) or `sequential` |
-| `subagents.maxParallel` | `TENTACLE_SUBAGENT_MAX_PARALLEL` | At most this many sub-agents at once (default `4`). A llama.cpp server with fewer slots lowers it automatically |
-| `subagents.agentTaskDescription` / `agentTaskDescriptionFile` | — | Replaces the `agent_task` description, at most 4096 bytes (the list of sub-agent types is always appended). The file is relative to the config dir, or absolute. Setting both is an error |
-| `contextReset.enabled` | `TENTACLE_CONTEXT_RESET` | The model's `context_reset` tool: it renews its own context from a restart prompt it writes, asked like any tool (default on) |
-| `contextReset.maxPerMessage` | `TENTACLE_CONTEXT_RESET_MAX` | Context resets per user message (default `-1` = unlimited) |
-| `loadSkills` | `TENTACLE_NO_SKILLS` (truthy disables) | Agent Skills discovery (default on) |
-| `tools.execution` | `TENTACLE_TOOL_EXECUTION` | How a round's tool calls overlap: `read-only` (default: reads — `fs_read`, read-only MCP tools — run together; writes and `shell` one at a time), `sequential`, or `parallel` (any calls on different files/resources) |
-| `tools.maxParallel` | `TENTACLE_TOOL_MAX_PARALLEL` | At most this many calls of a round at once (default `8`; `1` = sequential) |
-| `tools.writableDirs` | `TENTACLE_WRITABLE_DIRS` (`:`-separated; empty = `[]`) | Where `fs_write`/`fs_edit`/`fs_multi_edit` may write besides the project: absolute or `~/…` dirs, matched by real path (a symlink out of one stays refused; a dangling or looping symlink, or a FIFO, is refused everywhere). Files are replaced atomically (a `0600` temp file, then the target's permission bits, then rename), so a planted hard link never gets written through. Like an editor's atomic save, this breaks hard links and does not keep owner, group, ACLs or extended attributes. A file you could not write in place (read-only, or another user's) is still refused with `EACCES`. In a directory you cannot create files in, an existing writable file is written in place (no symlink followed, refused if hard-linked); a new file there is refused. Limit, on hosts shared with other users only: another user who controls a directory on the path (e.g. one they made in `/tmp`) can race a swap and make the content land in a new hidden file elsewhere; an existing file there is never written in place. Default: the system temp dir (`$TMPDIR`) and `/tmp`. A list **replaces** that default; `[]` = the project only; `/` and relative entries are ignored (and logged). Each write still asks (unless auto-accept is on). Not carried to a pod: there the pod's own temp dirs apply. The `shell` tool is not confined |
-| `mcpServers.<name>.readOnlyTools` | — | Which of a server's tools count as reads: `"hint"` (default: those it marks `readOnlyHint`), `"none"`, or a list of its tool names |
-| `engine` | `TENTACLE_ENGINE` | Default engine of `run`/`attach`: `kubernetes` (default), `docker` or `podman`; `--engine` wins. An unknown value is an error |
-| `tui.theme` | — | The TUI's palette: `auto` (default) reads the terminal's background colour before the first frame and picks a light or dark palette; `dark`/`light` force one and skip that query. A display setting of this laptop only — never carried to a pod |
+<!-- config-keys:start -->
+| Config key (`config.jsonc`) | Env override | Default | Meaning |
+| --- | --- | --- | --- |
+| `$schema` | — | — | A JSON-schema pointer for editor completion; accepted and ignored. |
+| `autoWake` | `TENTACLE_AUTO_WAKE` | true | Start a continuation turn when a background job exits while idle. |
+| `contextAwareness.enabled` | — | true | Whether the model is told how full its context is. |
+| `contextAwareness.stepPercent` | — | 1 | A line per this many percent of the window (1–100). |
+| `contextReset.enabled` | `TENTACLE_CONTEXT_RESET` | true | Whether the `context_reset` tool is offered. |
+| `contextReset.maxPerMessage` | `TENTACLE_CONTEXT_RESET_MAX` | -1 | Resets allowed per user message (-1 = unlimited). |
+| `detach.keepAwake` | — | true | Hold a macOS sleep assertion while a turn of a detached run runs. |
+| `engine` | `TENTACLE_ENGINE` | "kubernetes" | Default engine of `run`/`attach`: kubernetes, docker or podman. |
+| `hooks` | — | — | Shell commands run on agent events, with a JSON input on stdin. |
+| `loadAgentsMd` | `TENTACLE_NO_AGENTS_MD` (inverted) | true | Auto-load a per-repo `AGENTS.md` into the system prompt. |
+| `loadSkills` | `TENTACLE_NO_SKILLS` (inverted) | true | Discover Agent Skills and offer the `skill` tool. |
+| `maxIterations` | `TENTACLE_MAX_ITERATIONS` | 16 | Max model/tool iterations per turn. |
+| `mcpServers.*.args` | — | — | Arguments passed to `command`. |
+| `mcpServers.*.command` | — | — | The executable to spawn (a stdio server). |
+| `mcpServers.*.cwd` | — | — | Working directory for the server process. |
+| `mcpServers.*.env.*` | — | — | One variable of the server's environment. |
+| `mcpServers.*.headers.*` | — | — | One header sent with the server's requests. |
+| `mcpServers.*.readOnlyTools` | — | — | Which of the server's tools may run beside other reads. |
+| `mcpServers.*.type` | — | — | How the server is reached: `stdio` (spawned) or `http` (Streamable HTTP). |
+| `mcpServers.*.url` | — | — | The server's MCP endpoint (an http server). |
+| `model.apiKey` | `TENTACLE_MODEL_API_KEY` | — | A literal API key — stored in plaintext (prefer `apiKeyCommand`). |
+| `model.apiKeyCommand` | — | — | A shell command whose stdout is the key; never written to disk. |
+| `model.autoTitle` | — | false | Ask a model to name each session after its first exchange. |
+| `model.baseURL` | `TENTACLE_MODEL_BASE_URL` | "http://localhost:8080/v1" | The endpoint, including its API version. |
+| `model.contextWindow` | `TENTACLE_CONTEXT_WINDOW` | 128000 | The context window in tokens: the fill meter and the model's context line. |
+| `model.maxTokens` | `TENTACLE_MAX_TOKENS` | — | Max output tokens per response (`max_tokens` on the wire). |
+| `model.model` | `TENTACLE_MODEL` | "default" | The model id sent to the endpoint. |
+| `model.provider` | `TENTACLE_PROVIDER` | "openai" | The API flavour: `openai` (chat/completions) or `anthropic` (Messages). |
+| `model.titleModel` | — | — | The model id that writes those titles, e.g. a cheaper one. |
+| `mount.hide` | — | — | The paths to hide — this list REPLACES the default one. |
+| `mount.hideExtra` | — | — | Extra paths to hide, ADDED to the default list. |
+| `packages.*` | — | — | Whether this installed package is enabled. |
+| `rm` | — | false | Whether `run` removes its pod/container when the run ends. |
+| `subagents.agentTaskDescription` | — | — | Replaces the `agent_task` tool's description (max 4096 bytes). |
+| `subagents.agentTaskDescriptionFile` | — | — | The same description, read once at start from a file. |
+| `subagents.enabled` | `TENTACLE_SUBAGENTS` | true | Whether the agent may spawn sub-agents. |
+| `subagents.execution` | `TENTACLE_SUBAGENT_EXECUTION` | "parallel" | How a round's `agent_task` calls may overlap. |
+| `subagents.maxIterations` | `TENTACLE_SUBAGENT_MAX_ITERATIONS` | 50 | Step limit for a sub-agent's own loop. |
+| `subagents.maxParallel` | `TENTACLE_SUBAGENT_MAX_PARALLEL` | 4 | At most this many sub-agents at once. |
+| `systemPromptFile` | `TENTACLE_SYSTEM_PROMPT` | — | The system prompt file: relative to the config dir, or absolute. |
+| `tools.dedupOutput` | `TENTACLE_DEDUP_OUTPUT` | true | Collapse runs of identical consecutive output lines. |
+| `tools.execution` | `TENTACLE_TOOL_EXECUTION` | "read-only" | How a round's tool calls may overlap. |
+| `tools.maxInlineOutputChars` | `TENTACLE_MAX_OUTPUT_CHARS` | 16000 | Max characters of a tool result kept inline before it is spilled. |
+| `tools.maxParallel` | `TENTACLE_TOOL_MAX_PARALLEL` | 8 | At most this many calls of a round at once (`1` = sequential). |
+| `tools.outputRetentionDays` | `TENTACLE_TOOL_OUTPUT_RETENTION_DAYS` | 30 | Days a spilled tool output is kept (swept when the daemon starts). |
+| `tools.redactSecrets` | `TENTACLE_REDACT_SECRETS` | false | Mask keys, tokens and credentials in tool output. |
+| `tools.summarizeLargeOutput` | `TENTACLE_SUMMARIZE_OUTPUT` | false | Replace large output with a model-written summary. |
+| `tools.tabulateJson` | `TENTACLE_TABULATE_JSON` | false | Render a JSON array-of-objects result as a compact table. |
+| `tools.writableDirs` | `TENTACLE_WRITABLE_DIRS` | ["/tmp"] | Where `fs_write`/`fs_edit`/`fs_multi_edit` may write besides the project. |
+| `tui.theme` | — | "auto" | The palette: `auto` probes the terminal, `dark`/`light` force one. |
+<!-- config-keys:end -->
 
 **`--model <id>` and `--profile <name>`** are flags of the commands that start a
 session, written **after** the command: `tentacle run --image x --model m`,

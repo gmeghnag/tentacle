@@ -56,6 +56,7 @@ import {
   resolveRm,
   setupFailureLine,
 } from "./engine-select.ts";
+import { explain, explainErrorText, renderExplainJson, renderExplainText } from "./explain.ts";
 import {
   ARGS,
   type ParsedFlags,
@@ -189,6 +190,12 @@ Usage:
                            detaches (the session keeps running there)
   tentacle hooks trust --list | --revoke <folder>
                            list / revoke stored project-hooks trust decisions
+  tentacle explain [key] [--all] [--json]
+                           what a config.jsonc key means: no argument lists the
+                           top-level keys, a section its sub-keys, a leaf the full
+                           card (type, default, env, flag, carried, scope,
+                           example); --all is every leaf; --json for scripts.
+                           Reads no config file, so it works with a broken one
   tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]
                            manage packages (skills, agent types, MCP servers,
                            hooks) in <configDir>/packages; installing trusts
@@ -557,6 +564,20 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         err,
       },
     );
+  }
+
+  // `tentacle explain [key] [--all] [--json]` (docs/feat/config-explain.md): the
+  // key registry and nothing else, so — like `update` — it runs BEFORE
+  // `loadConfig`: it must work with a broken or missing config.jsonc, offline
+  // and in CI (eval Q8 = (a): the effective value is `config show`'s job).
+  if (mode === "explain") {
+    const result = explain(parsed.positional[0], { all: parsed.bools.has("all") });
+    if (!result.ok) {
+      err(explainErrorText(result));
+      return 1;
+    }
+    out(parsed.bools.has("json") ? renderExplainJson(result) : renderExplainText(result));
+    return 0;
   }
 
   // Everything below needs configuration; load it once (scaffolds on first run).

@@ -173,6 +173,10 @@ export const ARGS = {
     positional: { min: 1, max: Number.MAX_SAFE_INTEGER },
   },
   package: { positional: { min: 1, max: 2 } },
+  explain: {
+    bools: { all: {}, json: {} },
+    positional: { min: 0, max: 1 },
+  },
   update: { values: { version: {} }, bools: { check: {} }, positional: { min: 0, max: 0 } },
 } as const satisfies Record<string, ArgSpec>;
 
@@ -518,6 +522,7 @@ const SUBCOMMANDS = new Set([
   "connect",
   "hooks",
   "package",
+  "explain",
   "update",
   "install",
 ]);
@@ -626,6 +631,7 @@ export type CliMode =
   | "rm"
   | "hooks"
   | "package"
+  | "explain"
   | "update"
   | "plain"
   | "tui"
@@ -651,6 +657,7 @@ export function cliMode(args: readonly string[]): CliMode {
     first === "rm" ||
     first === "hooks" ||
     first === "package" ||
+    first === "explain" ||
     first === "update"
   ) {
     return first;
@@ -677,6 +684,7 @@ export const USAGE: Readonly<Record<Exclude<CliMode, "prompt" | "empty">, string
   plain: "tentacle --plain [--model <id>] [--profile <name>]",
   hooks: "tentacle hooks trust --list | --revoke <folder>",
   package: "tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]",
+  explain: "tentacle explain [key] [--all] [--json]",
   update: "tentacle update [--check] [--version vX.Y.Z]",
   tui: "tentacle [-i] [--resume [uid]|--continue] [--in-process] [--model <id>] [--profile <name>]",
 };
