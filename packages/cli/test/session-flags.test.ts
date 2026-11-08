@@ -72,7 +72,7 @@ describe("session commands take --model and --profile after the command", () => 
     expect(cliMode(["--plain", "--model", "X"])).toBe("plain");
     // Mutation: `--plain` only as the first word → `--model X --plain` is the TUI's, and fails.
     expect(cliMode(["--model", "X", "--plain"])).toBe("plain");
-    expect(cliMode(["explain", "--plain"])).toBe("prompt"); // prompt text stays prompt text
+    expect(cliMode(["fix", "--plain"])).toBe("prompt"); // prompt text stays prompt text
   });
 });
 
