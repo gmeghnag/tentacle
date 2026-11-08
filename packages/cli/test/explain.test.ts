@@ -114,6 +114,26 @@ describe("explain <section>: its summary and its DIRECT sub-keys", () => {
     expect(result.entries.map((e) => e.path)).toContain("subagents.maxIterations");
   });
 
+  test("a section prints its details between its summary and its children", () => {
+    for (const key of ["models", "profiles", "model"]) {
+      const details = keyDoc(key)?.details;
+      if (details === undefined) throw new Error(`no details for ${key}`);
+      const result = explain(key);
+      if (!result.ok) throw new Error(`expected ok for ${key}`);
+      const out = renderExplainText(result, { width: 100000 }).split("\n");
+      expect(out[0]?.startsWith(`${key} — `)).toBe(true);
+      expect(out.slice(1, 4)).toEqual(["", details, ""]);
+      expect(out[4]?.startsWith(`  ${key}.`)).toBe(true);
+    }
+  });
+
+  test("a section with no details keeps its summary directly above its children", () => {
+    expect(keyDoc("subagents")?.details).toBeUndefined();
+    const out = lines("subagents");
+    expect(out[1]).toBe("");
+    expect(out[2]?.startsWith("  subagents.")).toBe(true);
+  });
+
   test("a map's children are its `*` fields, never a bare `*`", () => {
     const result = explain("mcpServers");
     if (!result.ok) throw new Error("expected ok");
@@ -297,7 +317,15 @@ describe("width: the output fits the terminal (LOW 6)", () => {
       .filter((line) => line.length > width);
 
   test("at 80 columns every level fits, with no sentence broken mid-word", () => {
-    for (const key of [undefined, "model", "subagents", "tools", "mcpServers", "profiles"]) {
+    for (const key of [
+      undefined,
+      "model",
+      "models",
+      "subagents",
+      "tools",
+      "mcpServers",
+      "profiles",
+    ]) {
       const result = explain(key);
       if (!result.ok) throw new Error(`expected ok for ${String(key)}`);
       expect({ key, wide: wide(renderExplainText(result, { width: 80 }), 80) }).toEqual({

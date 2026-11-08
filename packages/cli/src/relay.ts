@@ -669,6 +669,8 @@ export async function relayMain(
     const config = await loadConfig({
       cwd: spec.cwd,
       scaffold: false,
+      // No terminal here, and a pod session uses only the main key.
+      skipModelsKeyCommands: true,
       ...(spec.profile !== undefined ? { profile: spec.profile } : {}),
     });
     const kept = readKept(keptDir(config.configDir));

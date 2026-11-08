@@ -115,6 +115,12 @@ export interface LoadConfigOptions {
    * never uses (docs/feat/config-carry.md).
    */
   readonly podDaemon?: boolean;
+  /**
+   * Run no `models` entry's `apiKeyCommand`; the main one still runs. For a
+   * detached relay: it has no terminal to prompt on and uses only the main key
+   * (docs/feat/models-map.md F-2), so an entry's command must not stop it.
+   */
+  readonly skipModelsKeyCommands?: boolean;
 }
 
 export interface TentacleConfig {
@@ -714,7 +720,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
   const models = await resolveModelKeys(
     resolved.models,
     { apiKey, apiKeyCommand: resolved.apiKeyCommand },
-    options.podDaemon === true ? undefined : runCommand,
+    options.podDaemon === true || options.skipModelsKeyCommands === true ? undefined : runCommand,
   );
 
   const cwd = resolvePath(expandTilde(resolved.cwd, home));

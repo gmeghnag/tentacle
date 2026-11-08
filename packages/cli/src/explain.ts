@@ -397,7 +397,13 @@ export function renderExplainText(
   }
   const head =
     result.level === "section" && result.section !== undefined
-      ? [...wrap(`${result.section.path} — ${result.section.summary}`, width), ""]
+      ? [
+          ...wrap(`${result.section.path} — ${result.section.summary}`, width),
+          "",
+          ...(result.section.details !== undefined
+            ? [...wrap(result.section.details, width), ""]
+            : []),
+        ]
       : [];
   const column = columnOf(result.entries, width);
   const lines = result.entries.flatMap((entry) => listLines(entry, column, width));

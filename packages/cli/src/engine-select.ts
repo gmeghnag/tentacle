@@ -321,8 +321,8 @@ export function laptopWorkspaceInput(input: {
   readonly binDir: string;
   /** `hideList(config.mount, keyCommandsOf(config))` — every key file, resolved here. */
   readonly hide: readonly HideEntry[];
-  /** `apiKeyFileUnknown(keyCommandsOf(config))`: passed through to the plan's warning. */
-  readonly keyFileUnknown?: boolean;
+  /** `keyFileUnknownOwners(config)`: passed through to the plan's warning. */
+  readonly keyFileUnknown?: readonly string[];
   readonly homeDir?: string;
 }): WorkspaceInput {
   const real = (path: string): string => {
@@ -403,7 +403,7 @@ export function laptopWorkspaceInput(input: {
     hide,
     ...(problem !== undefined ? { hideProblem: problem } : {}),
     ...(hideWarnings.length > 0 ? { hideWarnings } : {}),
-    ...(input.keyFileUnknown ? { keyFileUnknown: true } : {}),
+    ...(input.keyFileUnknown ? { keyFileUnknown: input.keyFileUnknown } : {}),
     ...(caseAliased.length > 0 ? { caseAliased } : {}),
     binDir: input.binDir,
     entries,

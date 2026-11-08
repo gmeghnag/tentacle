@@ -42,8 +42,10 @@ function spyRunner(outputs: Record<string, string | Error>) {
   return { calls, run };
 }
 
-const load = (run: (c: string) => Promise<string>, extra: { podDaemon?: boolean } = {}) =>
-  loadConfig({ env: { HOME: dir }, configDir, cwd: dir, runCommand: run, ...extra });
+const load = (
+  run: (c: string) => Promise<string>,
+  extra: { podDaemon?: boolean; skipModelsKeyCommands?: boolean; model?: string } = {},
+) => loadConfig({ env: { HOME: dir }, configDir, cwd: dir, runCommand: run, ...extra });
 
 describe("models: keys at load", () => {
   test("each distinct command runs once; inherited entries get the main command's key", async () => {
@@ -72,6 +74,65 @@ describe("models: keys at load", () => {
     const cfg = await load(spy.run, { podDaemon: true });
     expect(spy.calls).toEqual([]);
     expect(cfg.models.a?.apiKey).toBeUndefined();
+  });
+
+  test("skipModelsKeyCommands runs the main command and no entry's", async () => {
+    await write({
+      model: { apiKeyCommand: "main-cmd" },
+      models: {
+        same: { model: "small" },
+        a: { baseURL: "http://a/v1", apiKeyCommand: "entry-cmd" },
+      },
+    });
+    const spy = spyRunner({
+      "main-cmd": MAIN_KEY,
+      "entry-cmd": new ConfigError("apiKeyCommand exited with code 7: no tty"),
+    });
+    const cfg = await load(spy.run, { skipModelsKeyCommands: true });
+    expect(spy.calls).toEqual(["main-cmd"]);
+    expect(cfg.apiKey).toBe(MAIN_KEY);
+    expect(cfg.models.same?.apiKey).toBe(MAIN_KEY);
+    expect(cfg.models.a?.apiKey).toBeUndefined();
+    // The command stays known: a docker/podman run must still hide its key file.
+    expect(cfg.models.a?.apiKeyCommand).toBe("entry-cmd");
+  });
+
+  test("--model reaches an inheriting entry, not one with its own model id", async () => {
+    await write({
+      model: { model: "file-id" },
+      models: { plain: { contextWindow: 1000 }, own: { model: "own-id" } },
+    });
+    const cfg = await load(spyRunner({}).run, { model: "flag-id" });
+    expect(cfg.models.plain?.model).toBe("flag-id");
+    expect(cfg.models.own?.model).toBe("own-id");
+  });
+
+  test("__proto__ as a model name is refused by name, wherever it is written", async () => {
+    const message = 'a model cannot be named "__proto__" (a reserved name): choose another';
+    const path = join(configDir, CONFIG_FILENAME);
+    for (const text of [
+      '{"models":{"__proto__":{"model":"x"}}}',
+      '{"models":{"__proto__":{}}}',
+      '{"profiles":{"p":{"models":{"__proto__":{"model":"x"}}}}}',
+    ]) {
+      await writeFile(path, text, "utf8");
+      const error = await load(spyRunner({}).run).catch((e: unknown) => e);
+      expect({ text, message: (error as Error).message }).toEqual({
+        text,
+        message: `Invalid ${path}: ${message}`,
+      });
+    }
+  });
+
+  test("constructor is an ordinary model name", async () => {
+    await writeFile(
+      join(configDir, CONFIG_FILENAME),
+      '{"models":{"constructor":{"model":"x"}}}',
+      "utf8",
+    );
+    const cfg = await load(spyRunner({}).run);
+    expect(Object.keys(cfg.models)).toEqual(["constructor"]);
+    expect(Object.values(cfg.models)[0]?.model).toBe("x");
   });
 
   test("a failing command names the entry, never a key", async () => {

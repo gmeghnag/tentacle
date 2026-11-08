@@ -139,10 +139,10 @@ import { APP_BUILD, APP_VERSION } from "./version.ts";
 import { buildAgent, connectConfiguredMcp, inProcessAgents, loadUserAgentTypes } from "./wiring.ts";
 import {
   type WorkspacePlan,
-  apiKeyFileUnknown,
   hideList,
   isYes,
   keyCommandsOf,
+  keyFileUnknownOwners,
   mountGate,
   planWorkspace,
 } from "./workspace-mount.ts";
@@ -1164,7 +1164,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               binDir: binDir ?? "/usr/local/bin",
               // Every key file: the main one AND each `models` entry's (models-map).
               hide: hideList(config.mount, keyCommandsOf(config)),
-              keyFileUnknown: apiKeyFileUnknown(keyCommandsOf(config)),
+              keyFileUnknown: keyFileUnknownOwners(config),
             }),
           );
     if (wsPlan.kind === "refuse") {

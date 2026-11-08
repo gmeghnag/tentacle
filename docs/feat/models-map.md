@@ -149,7 +149,8 @@ them on argv, with no code in the CLI.
 - The workspace mount of a docker/podman `run` hides the main key FILE named by
   `apiKeyCommand` (`workspace-mount.ts:71-90`, called at `main.ts:1150-1151`). A k8s pod never
   mounts a laptop folder (`main.ts:1140-1141`).
-- `PROTOCOL_VERSION` = 17 (`protocol/src/version.ts:7`). This task changes no wire schema.
+- `PROTOCOL_VERSION` was 17 at planning (`protocol/src/version.ts:7`). Parts A and B change no
+  wire schema; part C removes `model/slots` and bumps it to 18 (owner 2026-11-08, see *C*).
 
 ### Design
 
@@ -491,7 +492,8 @@ the workspace would otherwise be readable by the untrusted container. Change:
 - `hideList(mount, apiKeyCommands: readonly string[])` — every command's key file is hidden
   (`always: true`, label `"the API key file"`), de-duplicated by path.
 - `apiKeyFileUnknown(apiKeyCommands: readonly string[])` → `true` when ANY command's file
-  cannot be derived.
+  cannot be derived. (Replaced in review round 2 by `keyFileUnknownOwners(config)`, which
+  names each `model` / `models.<n>` whose file is unknown: F-5.)
 - `keyCommandsOf(config: Pick<TentacleConfig, "apiKeyCommand" | "models">): string[]` → the
   main command plus every entry's own `apiKeyCommand`, defined ones, de-duplicated.
 - Call sites: `main.ts:1150-1151` pass `keyCommandsOf(config)`; fix the doc comments at
@@ -616,20 +618,20 @@ production caller exists (`rg` verified for `hideList`/`apiKeyFileUnknown`: `mai
 | F3 | Frontmatter `model` is a typo of a `models` name | Read as a model id on the main endpoint (owner Q4); the server answers "model not found", the child ends in `error`, its result says so. Documented in `models.*` details. |
 | F4 | Agent passes `model` not in the list [B] | Error result, `run` never called (B1). Off (no list): the argument is not advertised and is stripped by zod (`registry.ts:86-96`). |
 | F5 | Main key sent to another endpoint | Impossible by rule A4.2 (connection unit); pinned by a test with env `TENTACLE_MODEL_API_KEY`, a file `apiKey` and a main `apiKeyCommand`. An entry re-stating the SAME `baseURL` without a key gets no key (documented: repeat the key or its command). |
-| F6 | An entry's key printed | Error texts carry paths and exit codes only; `config list/get` mask by registry; `explain` reads only the registry; the tool description shows names + descriptions; the slots notice (C) names the entry. Tests assert the key string is absent from every error and from `carriedSettings(config)`. |
+| F6 | An entry's key printed | Error texts carry paths and exit codes only; `config list/get` mask by registry; `explain` reads only the registry; the tool description shows names + descriptions. Tests assert the key string is absent from every error and from `carriedSettings(config)`. |
 | F7 | A secret on argv | `config set models.x.apiKey …` refused (registry, `isArgvRefusedSecret`); `apiKeyCommand` on argv stays allowed (the documented safe form). We spawn no child with a key on argv: providers get the key in memory; the key command runs via `/bin/sh -c` exactly as the main one (existing). |
 | F8 | Entry key command fails / prints nothing | `ConfigError` naming `models.<name>.apiKeyCommand` (A5), before Ink. Identical commands run once, so one failure is one message. |
-| F9 | Entry key command prompts (pinentry) | Runs at load, before Ink (Q4) — never mid-session. |
-| F10 | Pod `run`/`attach` with `models` configured | Laptop `[models]` notice; not carried; every child uses the tunnel (main model). Pod daemon: no entry command runs (`podDaemon`), its own types ignored + a daemon-log notice. No key leaves the laptop. |
-| F11 | docker/podman workspace mount with an entry key file inside the workspace | Hidden like the main key file (A9); an opaque command (`pass show …`) flips `apiKeyFileUnknown`, so the plan's existing warning shows. |
+| F9 | Entry key command prompts (pinentry) | Runs at load, before Ink (Q4) — never mid-session. A detached relay (no terminal) skips the entries' commands and still runs the main one (R-Q1 a, F-2). |
+| F10 | Pod `run`/`attach` with `models` configured | Laptop `[models]` notice; not carried; every child uses the tunnel (main model). Pod daemon: no entry command runs (`podDaemon`), its own types ignored + a daemon-log notice. A detached run's relay runs no entry command either (F9). No key leaves the laptop. |
+| F11 | docker/podman workspace mount with an entry key file inside the workspace | Hidden like the main key file (A9); an opaque command (`pass show …`) is listed by `keyFileUnknownOwners`, so the plan's warning shows, naming `model` / `models.<n>` (F-5). |
 | F12 | `--profile` | Everything resolves after `applyProfile`: inherited entries follow the PROFILE's main endpoint and key; a profile's entry replaces the base one whole (Q5), so a base key never pairs with a profile URL. Each profile is reference-checked at parse time (A2), so a broken profile is refused even when not selected — the same rule as any invalid key in a profile today. |
 | F13 | A `models` entry with its own `apiKey` inside a profile | Valid; masked as `profiles.<p>.models.<n>.apiKey = ***` (mirror, A6); refused on argv; replaces the base entry whole; never carried. |
 | F14 | `--model` / `TENTACLE_MODEL` / `TENTACLE_MODEL_BASE_URL` | Change the main model; entries that do not set the field inherit the effective value (Q2). `TENTACLE_MODEL_API_KEY` reaches only inheriting entries (same endpoint). |
-| F15 | Version skew | Wire: none (no schema, no update, no method; `PROTOCOL_VERSION` stays 17; the name never travels in task 3). Disk: no persisted format (a choice is not persisted; a resume re-resolves from the current config; an old `agent_task` call with `model` in history is history only). Config: an older build refuses a file with `models` loudly (`Unrecognized key(s) in object: 'models'`) — pre-public, fine. Laptop ↔ pod of different builds: unaffected (nothing carried). |
+| F15 | Version skew | Wire: parts A and B add nothing (the name never travels in task 3); part C removes `model/slots`, so `PROTOCOL_VERSION` is 18 and a 17 ↔ 18 pair is refused at `initialize` with the worded `VersionMismatch`. Disk: no persisted format (a choice is not persisted; a resume re-resolves from the current config; an old `agent_task` call with `model` in history is history only). Config: an older build refuses a file with `models` loudly (`Unrecognized key(s) in object: 'models'`) — pre-public, fine. Laptop ↔ pod of different builds: unaffected (nothing carried). |
 | F16 | Settings sync rebuilds the agent | `buildAgent` rebuilds providers from the same `TentacleConfig` (lazy, cheap); no state to carry. |
 | F17 | Same command string for main and an entry | Run once (A5); both get the output. Entry inherits nothing else. |
 | F18 | Empty `models` / `types` / `selectableModels` | Same as unset: no `model` argument, no list, unchanged description (pinned byte-identical). |
-| F19 | Name with `.` or longer than 64 | Schema refusal with `MODEL_NAME_MESSAGE`. |
+| F19 | Name with `.` or longer than 64 | Schema refusal with `MODEL_NAME_MESSAGE`. `__proto__` is refused by name (F-7); `constructor` is an ordinary name (`Object.hasOwn` everywhere). |
 | F20 | `autoTitle`/`titleModel` inside an entry (owner Q3 = b) | Accepted, ignored: `resolveModelEntry` never copies them; `explain models.*.autoTitle` says "has no effect inside an entry". |
 | F21 | An old pod daemon / `serve` (protocol 17) with a new laptop, or the reverse | `initialize` refuses with `VersionMismatch` (protocol 18), worded "update" — never a mid-turn `MethodNotFound` on `model/slots`. Pinned in `daemon/test/version-mismatch.test.ts` (17 ↔ 18). |
 | F22 | A fan-out of N sub-agents on a llama.cpp server with fewer slots than N | Up to `maxParallel` run at once; the server queues the extra requests (slower, correct). Nobody asks `/props`. Pinned: agent + CLI + pod tests with a provider that would report 1 slot (never called). |
@@ -643,7 +645,7 @@ the export does not exist — that IS the red for a feature; record the failing 
 GREEN. Mutation checks are listed where a test could pass vacuously.
 
 0. **Probe first** (`.tentacle/tmp/models-map/probe.ts`, paste output into Execution): run the
-   Repro; then confirm `ModelConfigSchema.omit({autoTitle:true,titleModel:true}).extend({description: z.string().optional()})`
+   Repro; then confirm `ModelConfigSchema.extend({description: z.string().optional()})` (no `omit`: Q3 = b)
    still refuses an unknown key (`_def.unknownKeys === "strict"`) and that a record keyed by
    `z.string().regex(MODEL_NAME)` refuses `"a.b"`. If either fails, STOP and update this plan.
 1. `packages/config/test/models.test.ts` (new):
@@ -651,7 +653,7 @@ GREEN. Mutation checks are listed where a test could pass vacuously.
    - `modelRefIssues`: unknown type ref (exact text, `defined:` sorted); `no models defined`; unknown selectable [B]; a profile-only issue prefixed `profiles.<p>: `; a base issue reported ONCE (not per profile); a base ref defined only in a profile → base issue; a type block without `model` → no issue.
    - `pickSubagentModel`: each precedence step beats the next (call › type › frontmatter name › frontmatter id › default) [call = B]; windows per A7 (type entry ignores frontmatter window; frontmatter name uses it); a `requested` not in the list is ignored; `Object.hasOwn` — a type named `constructor` / `__proto__` does not crash or match.
    - `modelsPodNotice`, `unknownTypeModelWarnings`: exact texts, `null`/`[]` when empty.
-2. `packages/config/test/subagent-keys.test.ts` (extend) or a new `models-schema.test.ts`: names (`a.b`, `""`, 65 chars refused; `fast_2-x` ok); entry strict (`{ foo: 1 }` refused; `autoTitle` refused per Q3); `description` > 300 refused [B]; `subagents.types.x` strict (`{ model: "a", foo: 1 }` refused); config-level error message through `FileConfigSchema.safeParse` equals the A2 text.
+2. `packages/config/test/subagent-keys.test.ts` (extend) or a new `models-schema.test.ts`: names (`a.b`, `""`, 65 chars refused; `fast_2-x` ok); entry strict (`{ foo: 1 }` refused; `autoTitle`/`titleModel` accepted and ignored per Q3 = b); `description` > 300 refused [B]; `subagents.types.x` strict (`{ model: "a", foo: 1 }` refused); config-level error message through `FileConfigSchema.safeParse` equals the A2 text.
 3. `packages/config/test/profile.test.ts`: `models` whole-entry replace (a base entry's `apiKey` absent after a profile entry with only `baseURL`); `subagents.types` merged by name; `selectableModels` replaced [B].
 4. `packages/config/test/load.test.ts`: a spy `runCommand` — distinct commands run once each (a command shared by two entries and the main runs ONCE); with `podDaemon: true` no entry command runs; failure text `models.claude.apiKeyCommand exited with code 1: …`; empty → `models.claude.apiKeyCommand produced an empty key`; an inherited entry gets the main command's output; the key string (`"s3cret-entry"`) appears in NO thrown message.
 5. `packages/config/test/key-docs.test.ts`: T1 goes red on the schema change alone (proves the registry gate) and green with A6; extend T7's first test with `models.*.apiKey`, `models.*.apiKeyCommand` (`true`). `readme-config-table.test.ts` red until `bun run docs:config`.
@@ -829,6 +831,68 @@ worktree; `rg` finds no `slots`/`model/slots` use under `apps/`).
 `models` entry on a second llama.cpp server, `explore` mapped to it, watch both servers'
 logs). Task 6c (`feat/subagent-slots`) in `TODO.md` now contradicts the owner's rule — owner
 to re-scope; TODO.md not touched.
+
+### Round 2 (review fixes)
+
+*— claude-opus-5-5, 2026-11-08*
+
+Fixes for the Review's F-1…F-8, on `4b6d018`.
+
+**R-Q1 = (a): default, awaiting owner confirmation.** The relay skips the `models` entries' key
+commands and still runs the main one. **R-Q2** is moot: task 6c is already dropped on `main`.
+
+| Finding | Change | Red → green |
+|---|---|---|
+| F-1 | `explain.ts` `renderExplainText`: a section prints `details` between its summary and its children. | `explain.test.ts` "a section prints its details…": red on the old code (`["", details, ""]` not found), green after. `models` added to the 80-column check. |
+| F-2 | `load.ts`: `skipModelsKeyCommands` (entries' commands only); `relay.ts` `relayMain` passes it. | `relay.test.ts`, real `relayMain`: red with `[relay] models.claude.apiKeyCommand exited with code 7: pinentry: no tty`, green past the load, and the command's marker file is never created. `models-load.test.ts` pins main-runs/entries-do-not. |
+| F-3 | Tests only (code was correct). | Mutations below, killed. |
+| F-4 | Call-site test instead of a grep-guard: `main.test.ts` drives the real `main` (`[agents]` on the local path, `[models]` on `run`). | Green on the code; M20, M21 killed. |
+| F-5 | `workspace-mount.ts`: `keyFileUnknownOwners(config)` replaces `apiKeyFileUnknown`; the warning starts `model.apiKeyCommand, models.claude.apiKeyCommand: …`. `engine-select.ts`, `main.ts` pass the list. | Red on a stub returning `[]` (assertion) and on the old warning text; green after. The existing `main.test.ts` R2-1 text updated. |
+| F-6 | This doc: `:152`, F6, F15, Tests item 2 (`autoTitle` per Q3 = b), the probe's `omit`, A9's `apiKeyFileUnknown`; F9/F10/F11/F19 updated for this round. `TODO.md:456` not touched, as instructed. | n/a |
+| F-7 | `schema.ts`: `refuseProtoName`, a `z.preprocess` on `models` (base and profile share `settingsShape`). | `models-load.test.ts` (real JSONC) and `models.test.ts` (`JSON.parse`): red, green after. |
+| F-8 | Note only: `tsc -p apps/mobile` not run, mobile deps not installed. | Close with `bun run typecheck` on a full install. |
+
+**F-7 cause, and a case the review did not list.** The JSONC parser assigns `"__proto__"`, which
+swaps the map's prototype. The record then read the entry's fields as entries (`Expected object`),
+and an empty `{"__proto__":{}}` loaded silently with no entry at all. Both now say
+`a model cannot be named "__proto__" (a reserved name): choose another`, at load and at
+`config set` (`models: a model cannot…`). `constructor` stays an ordinary name: every lookup uses
+`Object.hasOwn`, pinned by a load test.
+
+**Reviewer's mutations, now killed** (`review/mutate.ts`; all `restored=true`):
+| Mutation | Test that fails now |
+|---|---|
+| M19a, M26: entry's model id from the file | "env overrides of the main model…", "--model reaches an inheriting entry…" |
+| M16, M25: hooks get `type.model` | "hooks get the CHOSEN model's id…" |
+| M17: `has` uses `in` | "a name like __proto__ or constructor…", "a frontmatter `constructor`…" |
+| M20, M21: notices off at the call site | "cli main: the models-map notices" |
+
+**This round's guards** (`round2/mutate2.ts`; all killed, `restored=true`): relay skip also skips
+the main key (N1) · relay does not pass the option (N2) · `__proto__` own-key check off (N3) ·
+prototype-swap check off (N4) · section details not printed (N5) · warning names no owner (N6).
+`cp` backups taken before the runs; after them, `shasum` of all 9 mutated source files equals the
+backup's.
+
+**Evidence.** `bun review/relay-repro.ts` after the fix:
+```
+control (no models): exit 1 — [relay] kept entry 0123456789abcdef not found
+entry command that needs a terminal: exit 1 — [relay] kept entry 0123456789abcdef not found
+```
+`tentacle explain models` prints the summary, then the details (EFFECTIVE inheritance, the
+connection unit, key commands, the profile rule), then the children. `bun run docs:config`:
+"README.md's config table is up to date": the table is built from leaf summaries and never used
+`details`, so no regeneration was needed.
+
+**Drift:** F-4 is a real `main` test, not the grep-guard the finding also allowed. Beyond the
+findings: the `models` details now say a relay runs no entry command (`key-docs.ts`), and
+`CHANGELOG.md` mentions the relay, `explain` and the warning's owner.
+
+**Gate (2026-11-08):** `bunx tsc --noEmit` clean · `bunx biome check .` 763 files, no findings ·
+`bun test packages` **5778 pass, 3 skip (the opt-in live-k8s / live-docker / slow-socket), 0 fail**.
+
+**Left / unverified:** the `run --detach` relay path is exercised through the real `relayMain` up
+to the config load, not against a live engine (verify: `run --detach` with a failing entry
+command on docker). A live pair of llama.cpp servers is still unexercised, as in Round 1.
 
 ## Review
 

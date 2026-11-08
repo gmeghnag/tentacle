@@ -68,6 +68,26 @@ const MODEL_NAME_MESSAGE =
   'models: a name may hold only letters, digits, "_" and "-" (at most 64 characters)';
 
 /**
+ * `__proto__` cannot be a name: the JSONC parser assigns it, swapping the map's
+ * prototype (so the record check reads the entry's FIELDS as entries), and
+ * `JSON.parse` keeps it as an own key the record then drops. Refused by name.
+ */
+function refuseProtoName(value: unknown, ctx: z.RefinementCtx): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto === Object.prototype && !Object.hasOwn(value, "__proto__")) {
+    return value;
+  }
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'a model cannot be named "__proto__" (a reserved name): choose another',
+  });
+  return {};
+}
+
+/**
  * Which of a server's tools may run beside other reads in one round
  * (docs/feat/parallel-tools.md): `"hint"` (default) — those the server marks
  * `readOnlyHint`; `"none"` — none; a list — exactly those, by bare MCP name.
@@ -205,7 +225,12 @@ export type MountConfig = {
 const settingsShape = {
   model: ModelConfigSchema.optional(),
   /** Named models for sub-agents (docs/feat/models-map.md); unset keys come from `model`. */
-  models: z.record(z.string().regex(MODEL_NAME, MODEL_NAME_MESSAGE), ModelEntrySchema).optional(),
+  models: z
+    .preprocess(
+      refuseProtoName,
+      z.record(z.string().regex(MODEL_NAME, MODEL_NAME_MESSAGE), ModelEntrySchema),
+    )
+    .optional(),
   /**
    * User hooks: shell commands run on agent events (docs/feat/hooks-core.md).
    * A top-level setting, so a profile's `hooks` replaces the base list.

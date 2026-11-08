@@ -144,12 +144,20 @@ describe("reference check", () => {
   });
 
   test("a name like __proto__ or constructor is never found by accident", () => {
-    expect(modelRefIssues({ subagents: { types: { x: { model: "constructor" } } } })).toHaveLength(
-      1,
-    );
+    // A non-empty map: with no map at all, any lookup is false and this proves nothing.
+    const models = { fast: {} };
     expect(
-      modelRefIssues({ subagents: { types: { x: { model: "__proto__" } } } } as never),
-    ).toHaveLength(1);
+      modelRefIssues({ models, subagents: { types: { x: { model: "constructor" } } } } as never),
+    ).toEqual(['subagents.types.x.model: "constructor" is not a models entry (defined: fast)']);
+    expect(
+      modelRefIssues({ models, subagents: { types: { x: { model: "__proto__" } } } } as never),
+    ).toEqual(['subagents.types.x.model: "__proto__" is not a models entry (defined: fast)']);
+  });
+
+  test("a schema-level own __proto__ key is refused too (JSON.parse keeps it own)", () => {
+    expect(firstIssue(JSON.parse('{"models":{"__proto__":{}}}'))).toBe(
+      'a model cannot be named "__proto__" (a reserved name): choose another',
+    );
   });
 });
 
@@ -272,16 +280,20 @@ describe("resolveConfig: models over the EFFECTIVE main model", () => {
   test("env overrides of the main model reach inheriting entries only", () => {
     const r = ctx(
       {
-        model: { baseURL: "http://file/v1", apiKey: "file-key" },
-        models: { same: { model: "x" }, other: { baseURL: "http://other/v1" } },
+        model: { baseURL: "http://file/v1", apiKey: "file-key", model: "file-id" },
+        models: { same: { model: "x" }, plain: {}, other: { baseURL: "http://other/v1" } },
         subagents: { types: { explore: { model: "same" } }, selectableModels: ["other", "other"] },
       },
       {
         TENTACLE_MODEL_BASE_URL: "http://env/v1",
         TENTACLE_MODEL_API_KEY: "env-key",
         TENTACLE_CONTEXT_WINDOW: "9000",
+        TENTACLE_MODEL: "env-id",
       },
     );
+    expect(r.models.plain?.model).toBe("env-id");
+    expect(r.models.same?.model).toBe("x");
+    expect(r.models.other?.model).toBe("env-id");
     expect(r.models.same?.baseURL).toBe("http://env/v1");
     expect(r.models.same?.apiKey).toBe("env-key");
     expect(r.models.same?.contextWindow).toBe(9000);
@@ -362,6 +374,12 @@ describe("pickSubagentModel", () => {
       kind: "id",
       id: "raw-id",
     });
+  });
+
+  test("a frontmatter `constructor` is a model id, never a property of Object", () => {
+    expect(pickSubagentModel({ typeName: "rev", frontmatterModel: "constructor" }, config)).toEqual(
+      { kind: "id", id: "constructor" },
+    );
   });
 
   test("nothing configured: default", () => {

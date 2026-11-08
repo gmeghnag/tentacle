@@ -13,7 +13,6 @@ import {
   type WorkspaceInput,
   type WorkspaceMount,
   apiKeyFileOf,
-  apiKeyFileUnknown,
   attachCwdWarning,
   caseAliasedFiles,
   engineFacts,
@@ -21,6 +20,7 @@ import {
   hidesPath,
   isYes,
   keyCommandsOf,
+  keyFileUnknownOwners,
   loadHideFile,
   mountGate,
   parseHideFile,
@@ -304,15 +304,32 @@ describe("hideList / apiKeyFileOf (D-2)", () => {
       { label: "the API key file", path: "~/.cache/main-key", always: true },
       { label: "the API key file", path: "./keys/claude", always: true },
     ]);
-    expect(apiKeyFileUnknown(["cat ~/.k", "pass show claude"])).toBe(true);
-    expect(apiKeyFileUnknown(["cat ~/.k", "cat ./keys/claude"])).toBe(false);
+  });
+
+  test("keyFileUnknownOwners names each key whose file cannot be named", () => {
+    expect(
+      keyFileUnknownOwners({
+        apiKeyCommand: "pass show main",
+        models: {
+          claude: { apiKeyCommand: "pass show claude" },
+          local: { apiKeyCommand: "cat ./keys/local" },
+          same: {},
+        },
+      }),
+    ).toEqual(["model", "models.claude"]);
+    expect(
+      keyFileUnknownOwners({
+        apiKeyCommand: "cat ~/.k",
+        models: { claude: { apiKeyCommand: "cat ./keys/claude" } },
+      }),
+    ).toEqual([]);
   });
 
   test("grep-guard: `run` builds its hide list from EVERY key command (main.ts)", async () => {
     // The call site is the leak's last mile; a revert to `config.apiKeyCommand` re-opens it.
     const main = await Bun.file(`${import.meta.dir}/../src/main.ts`).text();
     expect(main).toContain("hideList(config.mount, keyCommandsOf(config))");
-    expect(main).toContain("apiKeyFileUnknown(keyCommandsOf(config))");
+    expect(main).toContain("keyFileUnknown: keyFileUnknownOwners(config)");
     expect(main).not.toMatch(/hideList\([^)]*config\.apiKeyCommand/);
   });
 
@@ -892,21 +909,26 @@ describe("R2-1: the apiKeyCommand key file — derived, or said to be NOT hidden
     }
   });
 
-  test("apiKeyFileUnknown: only a set command whose file cannot be named", () => {
-    expect(apiKeyFileUnknown(undefined)).toBe(false);
-    expect(apiKeyFileUnknown("cat ~/.k")).toBe(false);
-    expect(apiKeyFileUnknown('cat "$HOME/.k"')).toBe(false);
-    expect(apiKeyFileUnknown("cat ~/.k | tr -d '\\n'")).toBe(true);
-    expect(apiKeyFileUnknown("pass show anthropic")).toBe(true);
+  test("keyFileUnknownOwners: only a set command whose file cannot be named", () => {
+    const owners = (apiKeyCommand: string | undefined) =>
+      keyFileUnknownOwners({ apiKeyCommand, models: {} });
+    expect(owners(undefined)).toEqual([]);
+    expect(owners("cat ~/.k")).toEqual([]);
+    expect(owners('cat "$HOME/.k"')).toEqual([]);
+    expect(owners("cat ~/.k | tr -d '\\n'")).toEqual(["model"]);
+    expect(owners("pass show anthropic")).toEqual(["model"]);
   });
 
-  test("an unknown key file → an explicit warning on the mount plan (never silent)", () => {
-    const p = plan({ keyFileUnknown: true });
+  test("an unknown key file → a warning naming whose key it is (never silent)", () => {
+    const p = plan({ keyFileUnknown: ["model", "models.claude"] });
     expect(p.kind === "mount" ? p.warnings : undefined).toEqual([
-      "apiKeyCommand: the API key file could not be determined from the command, so it is NOT hidden from the container — use `cat <path>`, or add the file to mount.hideExtra",
+      "model.apiKeyCommand, models.claude.apiKeyCommand: the API key file could not be determined from the command, so it is NOT hidden from the container — use `cat <path>`, or add the file to mount.hideExtra",
     ]);
+    // None unknown → no warning.
+    const clean = plan({ keyFileUnknown: [] });
+    expect(clean.kind === "mount" ? clean.warnings : undefined).toBeUndefined();
     // No mount → nothing to warn about.
-    expect(plan({ keyFileUnknown: true, noMount: true })).toEqual({ kind: "none" });
+    expect(plan({ keyFileUnknown: ["model"], noMount: true })).toEqual({ kind: "none" });
   });
 });
 

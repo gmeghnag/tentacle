@@ -45,7 +45,7 @@ export interface HideEntry {
  * `cat [--] <path>`: single-quoted (literal), double-quoted or bare, where a
  * leading `$HOME`/`${HOME}` becomes `~`. Anything else — another expansion, a
  * glob, an escape, a pipeline, a password manager — has no file we can name
- * → `undefined` (and the caller warns: `apiKeyFileUnknown`).
+ * → `undefined` (and the caller warns: `keyFileUnknownOwners`).
  */
 export function apiKeyFileOf(command: string): string | undefined {
   const m = /^\s*cat\s+(?:--\s+)?(?:'([^']+)'|"([^"]+)"|([^\s'"|;&<>`\\*?[]+))\s*$/.exec(command);
@@ -89,9 +89,24 @@ export function keyCommandsOf(config: {
 const commandsOf = (commands: string | readonly string[] | undefined): readonly string[] =>
   commands === undefined ? [] : typeof commands === "string" ? [commands] : commands;
 
-/** A key command is set but its key file cannot be named: it is NOT hidden (say so). */
-export function apiKeyFileUnknown(apiKeyCommands: string | readonly string[] | undefined): boolean {
-  return commandsOf(apiKeyCommands).some((command) => apiKeyFileOf(command) === undefined);
+/**
+ * Whose key command names no file (`model`, `models.<n>`), so that key file is
+ * NOT hidden: the plan's warning says which command to change.
+ */
+export function keyFileUnknownOwners(config: {
+  readonly apiKeyCommand?: string | undefined;
+  readonly models: Readonly<Record<string, { readonly apiKeyCommand?: string | undefined }>>;
+}): string[] {
+  const owners: [string, string | undefined][] = [
+    ["model", config.apiKeyCommand],
+    ...Object.entries(config.models).map(([name, entry]): [string, string | undefined] => [
+      `models.${name}`,
+      entry.apiKeyCommand,
+    ]),
+  ];
+  return owners
+    .filter(([, command]) => command !== undefined && apiKeyFileOf(command) === undefined)
+    .map(([owner]) => owner);
 }
 
 /** The effective hide list: (`hide` ?? the default) + `hideExtra`, then every API key file. */
@@ -522,8 +537,8 @@ export interface WorkspaceInput {
   readonly hideProblem?: string;
   /** `.tentacle/hide` notes (a pattern or symlink escaping the folder was ignored). */
   readonly hideWarnings?: readonly string[];
-  /** `apiKeyFileUnknown`: the key file is NOT hidden — the plan says so. */
-  readonly keyFileUnknown?: boolean;
+  /** `keyFileUnknownOwners`: those keys' files are NOT hidden — the plan names them. */
+  readonly keyFileUnknown?: readonly string[];
   /** The hidden FILES (realpaths) another spelling reaches (`caseAliasedFiles`). */
   readonly caseAliased?: readonly string[];
   /** The binary injection dir inside the container (`/usr/local/bin` / `--bin-dir`). */
@@ -726,7 +741,9 @@ export function planWorkspace(input: WorkspaceInput): WorkspacePlan {
   };
   const danger = dangerOf(input);
   const notes = [
-    ...(input.keyFileUnknown ? [KEY_FILE_UNKNOWN] : []),
+    ...(input.keyFileUnknown !== undefined && input.keyFileUnknown.length > 0
+      ? [keyFileUnknownNote(input.keyFileUnknown)]
+      : []),
     ...(input.hideWarnings ?? []),
   ];
   return {
@@ -741,8 +758,8 @@ export function planWorkspace(input: WorkspaceInput): WorkspacePlan {
   };
 }
 
-const KEY_FILE_UNKNOWN =
-  "apiKeyCommand: the API key file could not be determined from the command, so it is NOT hidden from the container — use `cat <path>`, or add the file to mount.hideExtra";
+const keyFileUnknownNote = (owners: readonly string[]): string =>
+  `${owners.map((owner) => `${owner}.apiKeyCommand`).join(", ")}: the API key file could not be determined from the command, so it is NOT hidden from the container — use \`cat <path>\`, or add the file to mount.hideExtra`;
 
 export type MountGate =
   /** `warnings`: printed before Ink (`--confirm-mount` over a case problem). */
