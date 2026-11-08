@@ -415,7 +415,9 @@ schema issue is printed — a refused edit leaves the file byte for byte as it w
 A secret is never accepted on the command line (it would be visible in your
 shell history and in `ps`): pipe it in, or let it prompt without echo — and
 `get`/`list` print it as `***` (as they do every MCP server's `env`, `headers`
-and `args`):
+and `args`). The registry's secret set is the only thing masked: a key it does
+not know — a typo, or a key in the wrong place (`"model": { "foo": "x" }`) —
+prints its value in clear, so the mistake is visible:
 
 ```sh
 printf '%s\n' "$KEY" | tentacle config model.apiKey -

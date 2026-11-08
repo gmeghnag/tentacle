@@ -839,6 +839,7 @@ masked.** `maskOf` masks any path the schema does not know (`isKnownKey`, from
 pastes into a bug report, and a value pasted into the wrong slot is not a
 setting. `get model.foo` still refuses it as an unknown key (unchanged).
 Test: in both suites (a `model2`/`model.foo` value, plain and `--json`).
+**Q-B rejected by the owner 2026-11-08; see docs/fix/config-unknown-plain.md.**
 
 **Q-A (owner default applied, to confirm) — a `config`-swallowed sentence keeps
 its way back.** `main.ts` prints `promptHint` when the refusal is

@@ -467,8 +467,22 @@ describe("HIGH-2/Q-B: get and list render only the masked tree", () => {
       "headers": { "Authorization": "Bearer ${SECRET}" }
     }
   },
-  "profiles": { "work": { "model": { "apiKey": "${SECRET}" } }, "ip": { "model": { "apiKeyCommand": "${API_CMD}" } } },
-  "model2": { "apiKey": "${SECRET}" }
+  "profiles": { "work": { "model": { "apiKey": "${SECRET}" } }, "ip": { "model": { "apiKeyCommand": "${API_CMD}" } } }
+}
+`,
+    );
+  }
+
+  /** The Q-B inverse: unknown keys the registry knows nothing about, in clear. */
+  function seededUnknown(): void {
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      configPath,
+      `{
+  "model": { "model": "qwen3", "apiKey": "${SECRET}", "foo": "hello-typo" },
+  "mcpServers": { "fs": { "command": "mcp-fs", "env": { "ANYTHING": "${SECRET}" }, "headers": { "Y": "Bearer ${SECRET}" } } },
+  "model2": { "nope": "visible" },
+  "bogus": "wrong-place"
 }
 `,
     );
@@ -506,18 +520,44 @@ describe("HIGH-2/Q-B: get and list render only the masked tree", () => {
     expect(profiles.out).not.toContain(API_CMD);
   });
 
-  test("Q-B: an unknown/misplaced key's value is masked, its path still shown", async () => {
-    seededSecrets();
+  test("an unknown/misplaced key's value is IN CLEAR, its path still shown", async () => {
+    // Owner 2026-11-08: Q-B's default was rejected — a typo must be diagnosable
+    // from `list`/`get`, so only the registry's secret set masks.
+    // (docs/fix/config-unknown-plain.md)
+    seededUnknown();
     const listed = await run({ kind: "list" });
     expect(listed.code).toBe(0);
-    expect(listed.out).toContain("model2 = ***");
+    expect(listed.out).toContain('model.foo = "hello-typo"');
+    // An unknown OBJECT recurses like any plain section (no mask stops the walk).
+    expect(listed.out).toContain('model2.nope = "visible"');
+    expect(listed.out).toContain('bogus = "wrong-place"');
+    // …and the secrets of the very same run stay masked and absent.
+    expect(listed.out).toContain("model.apiKey = ***");
+    expect(listed.out).toContain("mcpServers.fs.env.ANYTHING = ***");
+    expect(listed.out).toContain("mcpServers.fs.headers.Y = ***");
     expect(listed.out).not.toContain(SECRET);
-    const json = await run({ kind: "list" }, { json: true });
-    expect((JSON.parse(json.out) as Record<string, unknown>).model2).toBe("***");
-    const got = await run({ kind: "get", key: "model2" }, { json: true });
-    // `model2` is not a registry key, so `get` refuses it as unknown…
-    expect(got.code).toBe(1);
-    expect(got.err).toContain("unknown config key");
+    const json = JSON.parse((await run({ kind: "list" }, { json: true })).out) as Record<
+      string,
+      unknown
+    >;
+    expect(json["model.foo"]).toBe("hello-typo");
+    expect(json["model2.nope"]).toBe("visible");
+    expect(json.bogus).toBe("wrong-place");
+    expect(json["mcpServers.fs.env.ANYTHING"]).toBe("***");
+    expect(JSON.stringify(json)).not.toContain(SECRET);
+    // `get <known section>`: the unknown child in clear, the secret still masked.
+    const got = await run({ kind: "get", key: "model" }, { json: true });
+    expect(JSON.parse(got.out)).toEqual({
+      key: "model",
+      value: { model: "qwen3", apiKey: "***", foo: "hello-typo" },
+    });
+    const gotPlain = await run({ kind: "get", key: "model" });
+    expect(gotPlain.out.trim()).toBe('{"model":"qwen3","apiKey":***,"foo":"hello-typo"}');
+    // `get <unknown key>` still refuses before rendering anything.
+    const refused = await run({ kind: "get", key: "model2" }, { json: true });
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("unknown config key");
+    expect(`${refused.out}${refused.err}`).not.toContain("visible");
   });
 });
 
