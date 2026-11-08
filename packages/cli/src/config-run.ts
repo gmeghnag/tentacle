@@ -34,6 +34,7 @@ import { basename, dirname, join } from "node:path";
 import {
   type EditOp,
   KEY_DOCS,
+  type KeyNode,
   appliesToText,
   checkSegments,
   configKeyNodes,
@@ -548,6 +549,25 @@ function isDestructive(text: string, segments: readonly string[]): boolean {
   return current.found && typeof current.value === "object" && current.value !== null;
 }
 
+/**
+ * A key that holds a whole object (a section, a map, an object-typed leaf) rather
+ * than one typed value: owner Q-D, the value is JSON and cannot be prompted for.
+ */
+const isObjectNode = (node: KeyNode): boolean =>
+  node.kind === "section" ||
+  node.type.split("|").some((type) => type.trim() === "object" || type.trim() === "map");
+
+/**
+ * Owner Q-D: a section/map/object key given no value. Nothing is written, and the
+ * way to LOOK at it is `get` — `unset` deletes the whole section, which is not
+ * what "show me this" means. Keeping the `unset` hint for a leaf given `""`.
+ */
+const objectNeedsValue = (path: string): ConfigRunResult => ({
+  code: 1,
+  out: "",
+  err: line(`[error] ${path} needs a JSON object value; show it with: tentacle config get ${path}`),
+});
+
 const yesAnswer = (answer: string): boolean => /^(y|yes)$/i.test(answer.trim());
 
 /** `set` / `unset`: the read → plan → confirm → write flow. */
@@ -579,6 +599,16 @@ async function write(
    * the useful answer is `unset` (eval A3, owner Q4). */
   let emptyValue = false;
   if (op.kind === "set") {
+    const node = resolveKeyPath(target.segments.join("."));
+    if (node === undefined) {
+      return unknownKey(op.key);
+    }
+    // No value given at a TERMINAL, for a key that holds an object: there is
+    // nothing useful to type at a one-line prompt, so say so before asking
+    // (owner Q-D). A PIPE is still a value (`… | tentacle config subagents`).
+    if (isObjectNode(node) && op.value.from === "prompt" && input.isStdinTerminal) {
+      return objectNeedsValue(where(target));
+    }
     const raw = await valueText(op, input, secretOf(target.segments.join(".")) !== undefined);
     if (!raw.ok) {
       // A cancel at the hidden prompt is not an error to explain: 130 is what a
@@ -588,9 +618,10 @@ async function write(
         : raw.result;
     }
     emptyValue = raw.text === "";
-    const node = resolveKeyPath(target.segments.join("."));
-    if (node === undefined) {
-      return unknownKey(op.key);
+    // An object given an empty value (`subagents ""`, an empty `-`) is the same
+    // answer: it is a JSON object, and `unset` is not what the user asked for.
+    if (emptyValue && isObjectNode(node)) {
+      return objectNeedsValue(where(target));
     }
     const typed = typeConfigValue(node, raw.text);
     if (!typed.ok) {

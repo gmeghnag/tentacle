@@ -43,7 +43,11 @@ interface Run {
 
 async function run(
   args: readonly string[],
-  io: { stdin?: NodeJS.ReadableStream; readSecret?: (prompt: string) => Promise<string> } = {},
+  io: {
+    stdin?: NodeJS.ReadableStream;
+    readSecret?: (prompt: string) => Promise<string>;
+    readStdin?: () => Promise<string>;
+  } = {},
 ): Promise<Run> {
   const out: string[] = [];
   const err: string[] = [];
@@ -52,6 +56,7 @@ async function run(
     err: (text) => err.push(text),
     terminal: NO_TERMINAL,
     ...(io.readSecret !== undefined ? { readSecret: io.readSecret } : {}),
+    ...(io.readStdin !== undefined ? { readStdin: io.readStdin } : {}),
   });
   return { code, out: out.join(""), err: err.join("") };
 }
@@ -419,6 +424,43 @@ describe("the command surface (owner Q7)", () => {
     expect(code).toBe(1);
     expect(err).toContain("model.model");
     expect(err).toContain("unset");
+  });
+
+  test("Q-D: a section with no value says `get`, not `unset`, and writes nothing", async () => {
+    seeded();
+    const before = sha(configPath);
+    for (const key of ["subagents", "mcpServers", "model"]) {
+      // NO_TERMINAL means piped stdin: without the fix, the empty stdin value
+      // reaches the typer, and its refusal steers the user to `unset` a section
+      // they only wanted to look at.
+      const { code, err } = await run([key], { readStdin: async () => "" });
+      expect(code).toBe(1);
+      expect(err).toContain(`${key} needs a JSON object value`);
+      expect(err).toContain(`show it with: tentacle config get ${key}`);
+      expect(err).not.toContain("unset");
+    }
+    expect(sha(configPath)).toBe(before);
+  });
+
+  test('Q-D: a leaf given `""` keeps the `unset` hint; a secret leaf keeps the prompt', async () => {
+    seeded();
+    const leaf = await run(["model.model="]);
+    expect(leaf.code).toBe(1);
+    expect(leaf.err).toContain("unset");
+    expect(leaf.err).not.toContain("config get");
+    // A secret LEAF with no value still prompts (hidden), it is not an object.
+    const prompts: string[] = [];
+    const code = await main(["bun", "cli", "config", "model.apiKey"], {
+      out: () => undefined,
+      err: () => undefined,
+      terminal: { stdin: true, stdout: true },
+      readSecret: async (prompt) => {
+        prompts.push(prompt);
+        return "sk-qd\n";
+      },
+    });
+    expect(code).toBe(0);
+    expect(prompts).toEqual(["model.apiKey: "]);
   });
 
   test("a shorthand value keeps its own `=` (split at the first)", async () => {

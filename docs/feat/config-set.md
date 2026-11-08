@@ -1139,6 +1139,96 @@ helpers and the `FileStyle` type), `packages/config/test/config-edit.test.ts` (t
 round-3 block), this doc. `schema.ts`, `defaults.ts`, `resolve.ts`, `load.ts` are
 byte-untouched.
 
+### Round 4 (Q-D)
+
+*— claude-sonnet-5-5 (tentacle), 2026-11-09*
+
+Owner default applied (review round 2, Q-D), to confirm: `tentacle config <key>`
+with no value, for a key that holds an OBJECT (a section, a map, an object-typed
+leaf — `subagents`, `mcpServers`, `model`), now answers
+
+```
+[error] subagents needs a JSON object value; show it with: tentacle config get subagents
+```
+
+exit 1, nothing written, and **no `unset` hint** — `unset` deletes the whole
+section, which is not what "show me this" means. The `unset` hint stays for a
+LEAF given an empty string (`model.model=` → `… to REMOVE the key, use: tentacle
+config unset model.model`), and a secret LEAF with no value still takes the
+hidden prompt.
+
+**Where the decision lives** (`config-run.ts`): `isObjectNode` (kind `section`,
+or a `object`/`map` member of the node's union type) and `objectNeedsValue`
+(one line, header + `err`, `::line`, the same shape every refusal has). Two call
+sites, both inside `write`:
+
+- `op.value.from === "prompt"` **and** `input.isStdinTerminal` → refuse BEFORE
+  `valueText`, so no prompt is drawn and no stdin is read. The terminal guard is
+  deliberate: a PIPE is still a value, so `printf '{"enabled":false}\n' | tentacle
+  config subagents` keeps working (verified below).
+- after `valueText`, when the value arrived but is `""` (`subagents ""`, or an
+  empty `-`) → the same refusal. This is the branch that also covers a piped
+  EMPTY stdin, which is what the review's own repro did; without it the empty
+  text reaches the typer and the `unset` hint comes back (that is exactly what
+  the red test pins).
+
+The `unknownKey` check moved above the terminal refusal so a bad key is still
+reported as an unknown key (`node === undefined` → `unknownKey(op.key)`), not as
+an object problem; it is the same call, just earlier.
+
+**Red test first** (`packages/cli/test/config-main.test.ts`, two new tests in
+"the command surface (owner Q7)"; the `run` helper gained a `readStdin` seam to
+reach the piped-empty path deterministically):
+
+```
+(fail) the command surface (owner Q7) > Q-D: a section with no value says `get`, not `unset`, and writes nothing
+Expected to contain: "subagents needs a JSON object value"
+Received: "[error] subagents: must be a JSON object, e.g. {\"key\":\"value\"}\n
+           an empty value is not a setting — to remove the key, use: tentacle config unset subagents\n"
+```
+
+Then green: **37 pass, 0 fail** (`bun test packages/cli/test/config-main.test.ts`).
+The test asserts, for `subagents`, `mcpServers`, `model`: exit 1, the `needs a
+JSON object value` line, the `config get <key>` line, **`err` does not contain
+`unset`**, and `sha(configPath)` unchanged. The second test pins the two things
+that must NOT move: `model.model=` still carries `unset` (and not `config get`),
+and `model.apiKey` with no value still prompts (`prompts === ["model.apiKey: "]`).
+
+**Mutation** (§9, `cp` backup → narrow test → restore → `shasum`):
+`isObjectNode` → `return false` (the fix disabled). **KILLED** — the Q-D test
+fails, 36 pass / 1 fail. Restored by copy; `shasum -c` on
+`config-run.ts` → `OK` (`74003238…`). A weaker mutant, `node.type === "object" ||
+"map"` without `kind === "section"`, is NOT killed — sections carry
+`type: "object"` already, so it is an equivalent mutant, not evidence.
+
+**Live check** (`TENTACLE_CONFIG_DIR=./.tentacle/tmp/config-set/qd/cfg2`, `< /dev/null`):
+
+```
+== subagents (no value)   [error] subagents needs a JSON object value; show it with: tentacle config get subagents   exit=1
+== mcpServers (no value)  [error] mcpServers needs a JSON object value; … get mcpServers                          exit=1
+== model (no value)       [error] model needs a JSON object value; … get model                                     exit=1
+== subagents ""           [error] subagents needs a JSON object value; … get subagents                             exit=1
+== model.model=           [error] … model.model: String must contain at least 1 character(s)
+                          an empty value is not a setting — to REMOVE the key, use: tentacle config unset model.model exit=1
+== printf '{"enabled":false}' | config subagents   set subagents = {"enabled":false} in `…`                        exit=0
+```
+
+After the two refusals the config dir `cfg2` does not exist (nothing written), and
+the same message is what a TTY gets (`script -q /dev/null … config subagents` → no
+prompt drawn).
+
+**Gate:** `bunx tsc --noEmit` exit 0 · `bunx biome check .` "Checked 751 files. No
+fixes applied." (two formatting fixes applied to my own edits first) · `bun test
+packages`: **5713 pass, 3 skip, 0 fail**, 5716 tests (5711 before: the 3
+documented opt-in skips are unchanged; +2 = the two Q-D tests added here) ·
+`bun run docs:config` → "README.md's config table is up to date",
+`git status` showing only `config-run.ts`, `config-main.test.ts` and this doc.
+
+**Files:** `packages/cli/src/config-run.ts` (two helpers, two call sites, the
+`KeyNode` type import), `packages/cli/test/config-main.test.ts` (the `readStdin`
+seam + two tests), this doc. `schema.ts`, `defaults.ts`, `resolve.ts`, `load.ts`
+byte-untouched (`git diff` on them: empty).
+
 ### Debt recorded, not fixed
 
 - **`load.ts:85` reports only `issues[0]`** and this task may not edit it, so
@@ -1153,10 +1243,11 @@ byte-untouched.
   form (`profiles["a.b"].model`) is future work.
 - **A lock file** was not added: "documented, not locked (a lock file would be
   new state for a rare case)" — the eval's own decision.
-- **A bare known section with no value** (`tentacle config model`) types `""` as
-  an object and reports `must be a JSON object, e.g. {"key":"value"}` — a
-  confusing answer to "show me the map". It should print the stored value or say
-  a value is needed. Found while checking Q-A, not a review finding, so left.
+- ~~**A bare known section with no value** (`tentacle config model`) types `""`
+  as an object and reports `must be a JSON object, e.g. {"key":"value"}`~~ —
+  **fixed in round 4 (Q-D):** it now says `<key> needs a JSON object value; show
+  it with: tentacle config get <key>` and drops the `unset` hint, which was the
+  confusing half (it steered a read towards deleting a section).
 - **Q-A/Q-B are the reviewer's recommendation applied as the default**, pending
   the owner's confirmation (recorded in the task's summary, as asked).
 - **An unset leaves an empty object behind** when the removed key was its only
