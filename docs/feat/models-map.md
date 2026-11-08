@@ -832,4 +832,177 @@ to re-scope; TODO.md not touched.
 
 ## Review
 
-*— (reviewer), (date)*
+*— claude-opus-5-5, 2026-11-08*
+
+**Verdict: REQUEST-CHANGES.** No secret leak, no misrouted key, and the removal is complete,
+all confirmed by execution. Two behaviours fall short of what the plan promises (F-1, F-2),
+and one of the owner's binding decisions (Q2) has a part no test holds (F-3). The fixes are
+small. Reviewed on `e80e337`; no source file was changed (`git status --short` empty after the
+mutations).
+
+Same model as the executor (claude-opus-5-5), fresh context only: shared blind spots survive
+both passes. For a load-bearing task AGENTS §10 prefers a different model on a later pass.
+
+### Findings
+
+**MEDIUM**
+
+- **F-1. `tentacle explain models` does not print the section's `details`.**
+  `packages/cli/src/explain.ts:384-405` renders a section as its summary plus children;
+  `details` appears only on a leaf card (`cardLines`, `:315-319`) and in `--json`.
+  `scripts/config-docs.ts` does not use `details` either. So the text at
+  `packages/config/src/key-docs.ts:287-288` never reaches a terminal or the README: EFFECTIVE
+  inheritance, "repeat the key even when it is the same URL", key commands at startup, a
+  profile's entry replacing the base one whole. Observed live: `explain models`, `explain
+  models.*`, `explain profiles` show no details. This contradicts A6 ("the `models` summary and
+  details") and Execution's drift note, which skips `docs/feat/config-profiles.md` because the
+  merge rule is in the `profiles` details "(which `explain` prints)". It does not print them.
+  **Fix:** print `section.details` under the summary in the section branch of
+  `renderExplainText`, pin it in `explain.test.ts`; then `config-profiles.md` can stay as is.
+- **F-2. A detached relay runs every entry's key command, uses none of them, and dies if one
+  fails.** `packages/cli/src/relay.ts:669` calls `loadConfig` without `podDaemon`, and
+  `load.ts:714-718` then runs the entry commands. The relay has no terminal (`relay.ts:701-705`:
+  `detached: true`, stdin ignored), and in a pod the entries are never used. So F9's "runs at
+  load, before Ink" reasoning does not hold on this path, and F10 omits it. Repro
+  (`relay-repro.ts`, real `relayMain`):
+  ```
+  control (no models): exit 1 — [relay] kept entry 0123456789abcdef not found   (past the config load)
+  entry command that needs a terminal: exit 1 — [relay] models.claude.apiKeyCommand exited with code 7: pinentry: no tty
+  ```
+  A launcher with a terminal succeeds, then its relay exits at startup, because of a setting
+  documented as "not applied on run/attach yet". The failure is loud (`relay.log`). The main
+  key has the same exposure today, but the relay needs that key. See owner question R-Q1.
+- **F-3. Three tests do not hold what they claim (mutations survived).**
+  - **Q2, the inherited model id.** With `model: fileConfig.model?.model ?? modelId.value` in
+    `resolve.ts:518-525`, an inheriting entry ignores `TENTACLE_MODEL`/`--model`, and all of
+    `packages/config/test` stays green (M19a/M26). The base URL half is pinned (M19b killed).
+    Behaviour today is correct (live: env → `env-id`, `--model` → `flag-id`). **Fix:** assert
+    `model` in "env overrides of the main model reach inheriting entries only", with a
+    file-set `model.model`, and one `--model` case in `models-load.test.ts`.
+  - **Hooks get the chosen id (plan test 7).** Replacing `chosen?.modelId ?? …` by `type.model`
+    at `subagent.ts:289` survives (M16/M25): the fake at `subagent.test.ts:107` sets
+    `modelId: type.model`, so old and new agree. A type routed by `subagents.types` would report
+    no model to hooks and nothing would notice. **Fix:** a test whose `modelId` differs from
+    `type.model`.
+  - **"never found by accident".** `models.test.ts:146-153` calls `modelRefIssues` with no
+    `models` at all, so `has` is false on `undefined` and the case passes with `key in map`
+    (M17). The real risk is a frontmatter or ref of `constructor` with a `models` map present:
+    with `in`, `pickSubagentModel` would return an entry from `Object`. Code is correct today.
+    **Fix:** run both assertions with a non-empty `models`, and add a frontmatter `constructor`
+    case to `pickSubagentModel`.
+
+**LOW**
+
+- **F-4.** `main.ts:826-842`: the `[agents]` warning and the `[models]` notice have no test at
+  the call site (M20, M21 survive the whole `packages/cli/test`). The pure helpers are pinned
+  and the `[agents]` line was observed live; `[models]` was not (it needs an engine). **Fix:**
+  a `main` seam test or a grep-guard as for the hide list.
+- **F-5.** `workspace-mount.ts:744-745`: `KEY_FILE_UNKNOWN` says "apiKeyCommand" without saying
+  whose. With entries the user cannot tell which command to change. **Fix:** name the
+  `models.<n>` (or `model`) in the warning.
+- **F-6. Stale plan text** (AGENTS §8, the doc is the source of truth): `:152` "changes no wire
+  schema", `:628` F15 "`PROTOCOL_VERSION` stays 17", `:619` F6 "the slots notice", `:654`
+  "`autoTitle` refused per Q3". `TODO.md:456` still lists `slots` on the pod task's wire.
+- **F-7.** A model named `__proto__` is refused, but with an unhelpful text: `models.model:
+  Expected object` (`config set`), `Expected object, received string` (a load). Safe; cosmetic.
+- **F-8.** Mobile typecheck was not run by the executor or by this review (deps not installed
+  in the worktree). `rg` finds no `slots` use under `apps/`, and the only `protocolVersion` hit
+  prints the daemon's value (`apps/mobile/src/spike.ts:85`). `bun run typecheck` on a full
+  install closes it.
+
+### Gate (re-run)
+
+`bunx tsc --noEmit` clean · `bunx biome check .` 763 files, no findings · `bun test packages`
+**5765 pass, 3 skip, 0 fail** (63096 expects, 393 files), matching Execution.
+
+### Premise table (read at `09f63cf`)
+
+| Premise | Result |
+|---|---|
+| Context repro re-run on main's schema: the three probes refused with the quoted messages (accepted shape on the branch) | TRUE |
+| `model-provider.ts:13-29` same endpoint and key for a model id | TRUE |
+| `subagent.ts:228`, `:235-236` the only pick of the child's provider | TRUE |
+| `wiring.ts:477-481` one `modelFor`; now one `createSubagentRunner` caller (`wiring.ts:476`) | TRUE |
+| `serve.ts:452-456` tunnel for every type | TRUE |
+| `profile.ts:18-29` connection unit, `:86-100` per-key `subagents` | TRUE |
+| `resolve.ts:493-506` key precedence; `apiKeyCommand` stays unset when env or file wins | TRUE |
+| `load.ts:468-472` stderr only; `:546-547` `--model` on a copy; `:634-640` main command; `:78-92` first issue; `:109-116` `podDaemon` | TRUE |
+| `config-edit.ts:182-190`, `config-value.ts:145-151`, `config-keys.ts:60-83`, `registry.ts:79-96` | TRUE |
+| `workspace-mount.ts:71-90`, `main.ts:1140-1151` only the main key file hidden | TRUE |
+| `carried-settings.ts`: no connection key carried (list read at `09f63cf`) | TRUE |
+| `version.ts:7` = 17, `agent.ts:1246-1249` the probe | TRUE |
+
+### Mutations (`mutate.ts`: edit, run, restore, sha256 compared; all `restored=true`)
+
+| Property broken | Outcome |
+|---|---|
+| Command entry gets the main key (M1) · keyless own endpoint gets it (M3) · `forEntry` falls back to it (M4) | killed |
+| Pod daemon runs entry commands (M2) · selectable list offered in a pod (M11) | killed |
+| `keyCommandsOf` drops entries (M5) · `main.ts` hides the main key only (M6, grep-guard) | killed |
+| Cap = min(maxParallel, 2) (M7) · `PROTOCOL_VERSION` 17 (M13) | killed |
+| Type beats call (M8) · frontmatter beats type (M9) · unlisted model accepted (M10) | killed |
+| Profile entry merged per key (M12) · main output not reused (M14) · empty key accepted (M18) | killed |
+| Inherited base URL from the file (M19b) · selectable check dropped (M22) · reference check removed (M23) | killed |
+| Child window ignores the chosen one (M15 narrow; M24 on `packages/agent/test`) | killed by `context-awareness-loop` |
+| Inherited model id from the file (M19a, M26) · hooks get `type.model` (M16, M25) · `has` uses `in` (M17) | **survived → F-3** |
+| `[models]` notice off (M20) · `[agents]` warning off (M21) | **survived → F-4** |
+
+### Attacks tried
+
+1. **Key routing end to end** (`e2e.ts`: real `loadConfig`, `buildAgent` and providers against
+   two HTTP servers recording headers; 20 scenarios). Inherited entry → main endpoint, main key.
+   Own entry → its endpoint, its key. `TENTACLE_MODEL_API_KEY` reaches inheriting entries only.
+   Own endpoint with no key on the SAME URL as main → no auth header at all. Anthropic key on
+   `x-api-key` only. Nothing found.
+2. **Precedence.** Call › type › frontmatter name › frontmatter id › main, the default type and
+   an unknown `subagent_type` included; unlisted name → error result, no child request; `model`
+   stripped when off. Nothing found.
+3. **Profile and Q2.** A profile's entry replaces the base whole (main endpoint + key after);
+   `TENTACLE_MODEL_BASE_URL` moves inheriting entries with their key. Nothing found.
+4. **Keys at load.** A command shared by main and two entries runs once; `podDaemon` runs none;
+   a failure names the entry and carries stderr, never stdout (`LEAKED-STDOUT` absent).
+5. **Printing** (real CLI, fake keys, scratch `TENTACLE_CONFIG_DIR`). `config list [--json]`,
+   `config get` on a leaf, an entry, the map and a profile mask every key and command. Argv
+   refused for a leaf, a nested JSON value, the map, a profile mirror and the `k=v` form; `-`
+   from stdin works; the hint names the entry's own `…apiKeyCommand`. Nothing found.
+6. **Config errors.** Unknown ref at `set`, at `unset` of a referenced entry and at load, each
+   naming the defined entries; profile-only issue prefixed; dotted name refused. Clear. `explain`
+   → F-1.
+7. **Pods.** No key reaches a pod: nothing of `models` is in `carried-settings`, a tunnelled
+   `buildAgent` builds no provider (M11, `f.made` empty) and offers no `model` argument, and
+   `model/stream` serves the main model only. Docker and podman share the one hide-list site
+   (`main.ts:1166`), `run --detach` included; k8s, remote engines and `attach` mount nothing new.
+   A key file of a profile NOT selected is not hidden, the same shape as the main key today.
+   Not exercised against a live engine. Detach → F-2.
+8. **Removal.** `rg` over the tree: what remains is the 0.3.0 CHANGELOG entry, the new
+   Unreleased note, comments saying no server is asked, `TODO.md` (F-6, R-Q2), unrelated `slots`
+   words, and the fake in tests that proves nobody asks. No request to `/props` in any e2e
+   scenario. `initialize` refuses 17 ↔ 18 with the worded message; both ends share the constant
+   (`connection.ts:360`, `remote-client.ts:1518`, `pod-resident.ts:557`).
+9. **Agent loop.** `agentCap` is exactly `maxParallel` (M7 killed); peak 3 at 3, bounded at 2,
+   one at a time at 1.
+10. **Two real endpoints** ("left unverified" in Execution): covered at the HTTP level by attack
+    1, with fake servers; a live llama.cpp pair is still unexercised.
+
+### What holds
+
+The connection group as a unit, masking and argv refusal driven by the registry, the pod
+boundary, the `maxParallel` cap, the protocol bump on both ends, and the removal's completeness.
+
+### How the executor behaved
+
+Accurate on the gate and on its four listed mutations. Drift is reported honestly, including
+the mixed-zod probe. One Execution claim is false (`explain` printing a section's details,
+F-1), the plan's text was not refreshed after the owner's changes (F-6), and three pins were
+weaker than described (F-3): the tests were present but did not separate the behaviours.
+
+### Owner questions
+
+- **R-Q1 (F-2). A relay and the entry key commands.** (a) The relay skips them, through a
+  `loadConfig` option that still runs the main key; (b) leave it, so a detached run also needs
+  every entry command to succeed without a terminal. **Recommend (a):** the relay uses none of
+  them until `feat/models-map-pod`, which can then decide for itself. Q4's reason (prompt before
+  the TUI) does not apply where there is no terminal.
+- **R-Q2. `TODO.md` task 6c (`feat/subagent-slots`)** contradicts the 2026-11-08 rule. (a) Drop
+  it; (b) re-scope it to a limit the user sets. **Recommend (a):** `subagents.maxParallel` is
+  now the only limit you asked for.
