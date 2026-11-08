@@ -18,9 +18,9 @@ import {
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { DomainErrorCode, RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { Connection } from "../src/connection.ts";
-import type { DaemonSessionRecord } from "../src/persisted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
-import { type RecordStore, SessionPersister } from "../src/session-persister.ts";
+import { SessionPersister } from "../src/session-persister.ts";
+import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
 
 // A `serve` daemon wakes its own session on a background-job exit when NOBODY
 // is attached (docs/feat/serve-autowake.md). One `FakeJobs` is given to BOTH
@@ -491,18 +491,9 @@ describe("a serve daemon wakes a session nobody is attached to", () => {
   });
 
   test("W-9 the wake turn is persisted like any turn (serve's persister)", async () => {
-    const saved = new Map<string, DaemonSessionRecord>();
-    const store: RecordStore = {
-      async save(record) {
-        // A copy at save time, like bytes on a disk.
-        saved.set(record.id, JSON.parse(JSON.stringify(record)) as DaemonSessionRecord);
-      },
-      async remove() {},
-      async drain() {},
-      async load() {
-        throw new Error("unused");
-      },
-    };
+    // The two files in memory, decoded by the real decoders (like bytes on a disk).
+    const store = new SpyDaemonStore();
+    const saved = store.durable;
     const persister = new SessionPersister({
       store,
       cwd: "/tmp/serve-autowake",

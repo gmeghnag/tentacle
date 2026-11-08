@@ -27,7 +27,8 @@ import type { Attachment } from "../src/hosted-session.ts";
 import type { DaemonSessionRecord } from "../src/persisted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
 import { type SessionSummary, toSessionList } from "../src/session-list.ts";
-import { type RecordStore, SessionPersister } from "../src/session-persister.ts";
+import { SessionPersister } from "../src/session-persister.ts";
+import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
 
 // `session/list` (docs/feat/session-list.md). Each test names the mutation
 // (the plan's M1..M10) that must turn it red (AGENTS §9).
@@ -248,17 +249,8 @@ class Gated implements ModelProvider {
   }
 }
 
-class NullStore implements RecordStore {
-  readonly saves: Parameters<RecordStore["save"]>[0][] = [];
-  async save(record: Parameters<RecordStore["save"]>[0]): Promise<void> {
-    this.saves.push(record);
-  }
-  async remove(): Promise<void> {}
-  async drain(): Promise<void> {}
-  async load(): Promise<{ status: "absent" }> {
-    return { status: "absent" };
-  }
-}
+/** Persists into memory (the two-file spy); the tests read only the host. */
+class NullStore extends SpyDaemonStore {}
 
 function daemon(opts: { persist?: boolean; jobs?: JobController } = {}) {
   const clock = { t: 0 };
@@ -427,12 +419,13 @@ describe("SessionHost.list over the wire", () => {
       updatedAt: 7,
       title: "t",
       messages: [{ role: "user", content: "an old question" }],
-      kind: "tentacle.daemon-session",
-      schemaVersion: 8,
       lastActiveAt: 9,
       turns: [],
       enqueueIds: [],
       returned: [],
+      logged: [{ role: "user", content: "an old question" }],
+      logHead: { seq: 2, id: "old/2" },
+      paired: true,
     };
     d.host.restore(record);
     const c = await d.connect();

@@ -1,6 +1,6 @@
 # feat/session-log-serve-store — the `serve` daemon store becomes the typed event log (`<uid>.jsonl` + a small state sidecar)
 
-> **Status:** Implementation approved (2026-11-08), executing
+> **Status:** Executed (2026-11-08) — awaiting the mandatory fresh-context Review and the live `serve`/`connect` run
 > **Branch:** `feat/session-log-serve-store` (to open off `main` @ `bd46999`, which has task 2 merged)
 > **Type:** feat · **Size:** L · **Blast:** load-bearing (§7 daemon-side persistence: steering window, "pending on disk ⇒ never started", archive, suspended-turn resume, on-disk versioning; the shared log store task 2 landed) · **Suited:** strong model executes; mandatory fresh-context Review (`docs/REVIEWER-BRIEF.md`) red-teaming the crash contract across two files, the steering window and the archive paths
 >
@@ -599,7 +599,171 @@ already in AGENTS §7 on main (`e34466e`). Nothing from task 2's review changes 
 
 ## Execution
 
-*(empty until the Implementation is approved)*
+*— claude-opus-5-5, 2026-11-08*
+
+### Load-bearing proof (first)
+
+- **Probe re-run on HEAD `5a0a54d`** (Appendix A's preload, pointed at this worktree): same 38
+  files, 666 pass · 1 skip; **984 captures, 984 exact, 0 in place, overlay 0/1/2 = 883/100/1** —
+  identical to the plan. Assumption (i) holds empirically.
+- **S1** (`daemon/test/serve-log-store.test.ts`, real disk, written before wiring the rest): a
+  scripted life (create, ask, steer, approval, parallel group with `inFlight`, compaction,
+  mid-turn `context_reset`, rename, close) is replayed once per io call with a "crash" AT that
+  call (an append writes half its bytes; a whole-file write throws before its rename; every later
+  call fails). 33 io calls → 34 crash points: 2 absent (first unit never landed), 30 paired (each
+  reload deep-equals the last landed capture — messages, turn, keys, ids, head, archivedAt,
+  clocks — AND its `logged` equals that capture's log projection), 2 unpaired (only at the state
+  file of a compaction / reset REWRITE: the log's new segment loads, never resumed). For every
+  reload with a resumable ask, that call never ran before the crash. A clean run asserts every
+  unit landed. **Verdict: the assumption holds.**
+
+### As built (plan order)
+
+1. `protocol` — **no change** (`git diff --stat -- packages/protocol` is empty: no `critical`
+   value, entry type or `PROTOCOL_VERSION` touched).
+2. `session-log.ts`: `since()` (slot references, never materializes), `projection`, public
+   `materialize`, `Slot` exported.
+3. `session-log-file.ts`: `SESSION_LOG_FORMAT/VERSION` (Q12), `foldThrough` (refuses a head
+   inside a base's owed messages), `parseHeaderLine`.
+4. `session-log-store.ts`: `LogWrite.sidecar` / `keepEmpty`; the sidecar written atomically after
+   the log op in the same queued op + lock (`StateWriteError` names the state file); ops `state`
+   (`writeState`), `aside` (`setAside`, FM 5), `dropState` (`removeState`, FM 25); `remove`
+   deletes the state file FIRST; sweep knows `.<uid>.state.json.tmp-*`; `readRaw`, `readState`
+   (header = first line only), `daemonFiles`; the `prev` containment rule in `settleLast` (Q11).
+5. `daemon-state-file.ts` (new, pure): `DAEMON_STATE_FORMAT/VERSION = 1`, `sidecarOf` (overlay by
+   reference), `encodeSidecar`, `parseSidecar` (current shape only, strict), `rebuild`.
+6. `persisted-session.ts`: `DaemonLogCapture`, `DaemonSessionState.log`, `DaemonSessionRecord`
+   without `kind`/`schemaVersion`, with `logged`/`logHead`/`paired`; `PersistedTurn.steeringIds`
+   now required; deleted `DAEMON_RECORD_*`, `READABLE_VERSIONS`, `currentTurn`, `withoutIds`,
+   `toDaemonRecord`, `parseDaemonRecord` (+ helpers moved into `daemon-state-file.ts`), the
+   old-steers branch; `resumableTurn` returns nothing when `!paired`.
+7. `session-persister.ts`: the `DaemonStore` seam; a unit = capture (sync) → hand-over on the
+   next microtask (wire form, overlay, state text built there) → `store.write`; `archive(id,
+   build, at)`, `writeRecord` (heal unit), `writeState`, `load`, `loadState`; `acquireStoreLock`
+   unchanged.
+8. `hosted-session.ts`: `persistedState(after)` + `logCapture`; `archive(after)` keeps the
+   BEFORE log part; the constructor's reload `start(logged, "reload", head)` + `commit`.
+9. `session-host.ts`: `restore` passes `log` when paired; `addArchived(ArchivedMeta)`;
+   `rewriteArchived` state-file-only for a non-resident entry; sweeps retry those quietly.
+10. `index.ts`: exports `daemon-state-file.ts`.
+11. `agent/session-store.ts`: `JsonSessionStore`, `SessionStoreIo`, `parseSessionRecord`,
+    `ListResult`, `SkippedSession` deleted (Q10); kept `SessionRecord`, `LoadResult`, titles,
+    `projectKey`, `isValidSessionId`.
+12. `cli/serve.ts`: `LogSessionStore(dir, {keepSuperseded: config.sessions?.keepSuperseded})`,
+    asides → `onNotice`; the scan of §6 (orphan state removed; no state → aside; unusable →
+    `block` + "skipped <log> / <state>: … (left as is)"; archived → `loadState` only; live →
+    `load` + `restore`; an unpaired load gets one notice).
+13. Docs: AGENTS §7 (the Design §7 wording, verbatim), `CHANGELOG.md` `[Unreleased]`, the
+    `TODO.md` row, the pointer in `docs/feat/daemon-side-persistence.md`.
+
+### Drift from the Implementation (and why)
+
+- **The log cursor lives in the persister, not in `HostedSession`** (`StateBuild = (after?) =>
+  state`). A unit dropped before reaching the store would leave the store's writer segment with
+  a gap, and only the persister can then reset the cursor (next capture cold → a rewrite).
+  Consequence: `persister.archive(id, build, at)` takes the build, not a state.
+- **Hand-over on a microtask** (`queueMicrotask`) rather than "after one `await`" — same effect,
+  and units reach the store in capture order. Tests that read `store.saves` synchronously now
+  `await handed()` (the capture itself is still synchronous, so their property is unchanged).
+- **`writeRecord` has no `landedLog` flag**: it always sends a heal unit (no entries, linear from
+  `logHead`); the store then skips or appends what the file lacks, then writes the state file.
+  Records read from disk never reach it: `rewriteArchived` uses `loadState`/`writeState`.
+- **Store API additions** beyond the plan's list: `setAside`, `removeState`, `daemonFiles`,
+  `StateWriteError`.
+- **Unpaired load ignores the state file's `head`** (it indexes a history that is not the one
+  loaded): the reload rule (`legacyHead`) applies. A send-now on a just-compacted summary after
+  an FM-4 crash mid-turn may therefore start an unasked turn — rare (FM 4 window ~ms).
+- **A real bug found by T4 and fixed**: resolving `Promise.withResolvers` with the store's
+  promise ADOPTS it, so every unit read as "not landed" silently (`beforeRun` → false). The
+  hand-over is now boxed. S1 got a clean-run assertion so this cannot hide again.
+- **S11 runs 200 real SIGKILLs in the default suite** (~14 s, no new opt-in skip): a chain of
+  restarts on one store (the child reloads like `serve`, continues turns, is killed at a random
+  5–125 ms). Checked: every reload is loadable (never unreadable), each history is a prefix of the
+  next, no `run` call ever ran twice.
+- **The test seam**: one shared spy, `daemon/test/support/daemon-store-spy.ts` (holds both files'
+  TEXT, applies units like the store, decodes with the real `parseLogFile`/`parseSidecar`/
+  `rebuild`; `failIf`, `snapshots`, `stateLoads`, `stateWrites`). The client and cli tests import
+  it by relative path (precedent: `tui/test` imports `protocol/src`).
+
+### Tests
+
+New: `daemon/test/serve-log-store.test.ts` (S1, S2a/b, S3 ×2, S5 ×2, S7, S8 ×2, S9 ×2, S11, S12,
+the state file's parser); S10 ×2 in `daemon/test/session-log-store.test.ts`; S4 ×3 in
+`client/test/reattach.test.ts`; FM 5/25 and FM 22 (six unusable variants, both files
+byte-identical) and FM 23 in `cli/test/serve-persistence.test.ts`.
+
+Red-first: every new test targets a new seam, so on unmodified code it fails at import/compile,
+not on its assertion. Non-vacuity is shown by **one mutation per behaviour** (cp backup → mutate
+→ test → restore, `shasum -c` / `cmp` OK each time):
+
+| Mutation | Test | Result |
+|---|---|---|
+| state file written BEFORE the log | S1 | red |
+| loader folds to EOF, not `logHead` | S1 | survived at first → S1 now also asserts `logged`; red |
+| unit resolves after the log only | S1 | red ("pending ⇒ never started") |
+| overlay `tail` dropped | S2a, S2b | red |
+| `k` without the reference compare | S2b | red |
+| entries built inside the capture | S3 | red |
+| `since()` materializes | S3 | red |
+| reload base restates the repaired history | S4 | survived the idle variant → added the repair variant; red |
+| archived rename reads the history | S5 | red |
+| `resumableTurn` ignores `paired` | S8 | red |
+| restore without lineage | S8 | red |
+| `prev` containment clause dropped | S10 | red |
+| `keepEmpty` ignored | S12 | red |
+| `serve` blocks a no-state log instead of setting it aside | FM 5 | red |
+| non-atomic rewrite | S11 | red (state file not JSON) |
+| state file before the log | S11 | survives (the unpaired fallback is safe by design; S1 catches it) |
+
+Re-pointed, never weakened (S6/S13): `persistence`, `send-now`, `parallel-agents`,
+`session-titles`, `session-list`, `serve-autowake` (daemon), `client/reattach`,
+`client/foreign-turns`, `cli/serve-persistence`, `agent/session-title-record`.
+**Deleted** (they only protected the JSON record / ladder, Q10): `agent/session-store.test.ts`
+describes `JsonSessionStore`, `JsonSessionStore durability`, `parseSessionRecord`, `a spilled tool
+message in the record`, `JsonSessionStore.remove`, `JsonSessionStore (serve) writes every record`;
+`cli/session-resume.test.ts` "parseSessionRecord mirrors the wire ChatMessageSchema";
+`agent/session-title-record` "A1 a malformed chosen title" (re-asserted on `parseSidecar`);
+`persistence.test.ts` "P-R1 a v3 record reads as v4…", "Q-R2 a v3 turn…", "V5-1", "V6-1",
+"V6-2", "V7-1", "V7-2", "V8-1", the v3 part of "Q9", the "older build's head" line of "V8-4";
+`send-now.test.ts` "F1a … (v3)"; the ladder part of `session-titles` "D6"; `cli` "S2 a v1 record…"
+(replaced by FM 23). Re-asserted on the state file: kind/version → format/`DAEMON_STATE_VERSION`,
+wire stamps, `archivedAt`, steer ids, `returned`, pending list / `inFlight`, `head`, title.
+"reconcile: steers become user messages" and B6/U3 now expect the steers RETURNED (the
+id-less branch is gone).
+
+### Gate
+
+`bunx tsc --noEmit` exit 0 · `bunx biome check .` 734 files, 0 errors / 0 warnings ·
+`bun test packages` **5375 pass · 3 skip (the opt-in three) · 0 fail** (375 files).
+
+### Unverified (and how to verify)
+
+- The Linux "unit" measurement (Acceptance, p99 < 5 ms) was not run (no live runs here): rerun
+  `fsync.mjs` in unit mode in `node:22` / a cluster disk.
+- `serve`'s `keepSuperseded` pass-through has no cli test (one line in `serve.ts`; S9 tests the
+  store): verify live (below).
+- S6: the TTL / detached-cap archives go through the same `archive()` unit and their existing
+  tests pass, but no new assertion reads the sidecar's `archivedAt` there (A13/S1/S5 do for close).
+- Archived **reclaim** has no new real-disk test (it shares the state-file-only path with rename;
+  the spy-based persistence tests cover it).
+
+### Live checklist (`tentacle serve` + `connect`)
+
+1. `serve`, `connect`, two turns (one with an approved tool); `ls <configDir>/daemon/<project>/`:
+   `<id>.jsonl` + `<id>.state.json`, no `<id>.json`.
+2. Restart `serve` mid-session (Ctrl-C, start again); `connect --resume`: same history, no fork
+   notice / no aside file; continue a turn.
+3. `/quit` in `connect` (detach), close the session from another client (archive); rename it
+   (`session/rename` via `/sessions`); check `stat` of `<id>.jsonl` unchanged, title in the state
+   file; reopen: new title, history intact.
+4. Long session → `/compact`: with default config one `base` in the `.jsonl`; set
+   `"sessions": {"keepSuperseded": true}` in the serve host's config, restart, compact again:
+   two `base` lines; reload identical.
+5. Start a turn with a tool needing approval, `kill -9` the `serve` pid while the ask is shown;
+   restart: notice "1 resumed a turn waiting for approval", the ask is shown again, approve → the
+   tool runs ONCE. Repeat killing during a running tool: "Interrupted" note, no re-run.
+6. Put a junk `<x>.state.json` beside a copied `.jsonl`: start notice "skipped … (left as is)",
+   bytes unchanged.
 
 ## Review
 

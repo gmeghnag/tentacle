@@ -1,71 +1,123 @@
 /**
- * The `serve` daemon's writer of session records (docs/feat/daemon-side-persistence.md),
- * plus the lock that keeps one daemon per store directory.
+ * The `serve` daemon's writer of sessions (docs/feat/daemon-side-persistence.md;
+ * the files: docs/feat/session-log-serve-store.md), plus the lock that keeps
+ * one daemon per store directory.
+ *
+ * On disk a session is its typed log `<uid>.jsonl` (the laptop's format: the
+ * daemon writes its OWN entries — it is trusted) plus a small state file
+ * `<uid>.state.json` written AFTER the log (`daemon-state-file.ts`). One write
+ * is one UNIT — the log entries derived since the last unit, then the state
+ * file — in the store's per-session FIFO queue, and it LANDS when its state
+ * file does: every wait on durability (`flush`, `write`, `archive`) waits for
+ * both files. A reload reads the log only up to the entry the state file names.
  *
  * `schedule` is the only write a turn ever makes, and it is SYNCHRONOUS and
- * returns nothing: the record is captured at the call site (so it equals the
- * history there, not at the later I/O) and handed to the store, whose own
- * serialized latest-wins queue does the writing. A turn never waits on the
- * disk — that is what keeps the turn-end write out of the steering window
- * (agent.ts, the late-steer INVARIANT). Only three things wait, via `flush`,
- * all outside that window: a permission request before it is shown, an
- * approved tool about to run (both inside the gate, mid-round), and an
- * `enqueue` ack.
+ * returns nothing: the state is captured at the call site (so it equals the
+ * history there, not at the later I/O) — the history as today's copy, the log
+ * part as references to the entries derived since this persister's cursor
+ * (`SessionLog.since`, O(Δ)) — and handed on. Their wire form, the overlay and
+ * the state file's text are built on the next microtask, outside the steering
+ * window (agent.ts, the late-steer INVARIANT), and the store does the I/O. A
+ * turn never waits on the disk. Only three things wait, via `flush`, all
+ * outside that window: a permission request before it is shown, an approved
+ * tool about to run (both inside the gate, mid-round), and an `enqueue` ack.
  *
  * A failed write is reported to `onError` and never thrown: the session keeps
- * serving from memory and the next `schedule` writes fresher data.
+ * serving from memory and the next unit heals the files (the store's writer
+ * follows every unit, written or not).
  */
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { type LoadResult, type SessionRecord, isValidSessionId } from "@tentacle/agent";
+import { encodeTitle, isValidSessionId } from "@tentacle/agent";
+import type { LogCursor } from "@tentacle/protocol";
 import {
-  type DaemonSessionRecord,
-  type DaemonSessionState,
-  parseDaemonRecord,
-  toDaemonRecord,
+  type DaemonSidecar,
+  encodeSidecar,
+  parseSidecar,
+  rebuild,
+  sidecarOf,
+} from "./daemon-state-file.ts";
+import type {
+  DaemonLogCapture,
+  DaemonSessionRecord,
+  DaemonSessionState,
 } from "./persisted-session.ts";
+import { type LogFileHeader, parseHeaderLine, parseLogFile } from "./session-log-file.ts";
+import type { LogWrite, RawSessionFiles, RawSessionState } from "./session-log-store.ts";
 import type { TombstoneStore } from "./session-tombstones.ts";
 
-/** The slice of `JsonSessionStore` the persister uses (tests pass a spy). */
-export interface RecordStore {
-  save(record: SessionRecord): Promise<void>;
+/** The slice of `LogSessionStore` the persister uses (tests pass a spy holding the files' text). */
+export interface DaemonStore {
+  /** One unit: the log op, then the state file (`LogWrite.sidecar`), in the session's queue. */
+  write(unit: LogWrite): Promise<void>;
+  /** The state file only (an archived rename / reclaim). */
+  writeState(id: string, data: string): Promise<void>;
   remove(id: string): Promise<void>;
   drain(): Promise<void>;
-  /** One record by id (an archived session's, on its reopen). */
-  load(id: string): Promise<LoadResult>;
+  /** The log's text and the state file's (an archived session's reopen, a live one at start). */
+  readRaw(id: string): Promise<RawSessionFiles>;
+  /** The log's header line and the state file's text (the log itself unread). */
+  readState(id: string): Promise<RawSessionState>;
 }
 
+/** What a session builds at each write; `after` = this persister's log cursor for it. */
+export type StateBuild = (after?: LogCursor) => DaemonSessionState;
+
 export interface PersisterOptions {
-  readonly store: RecordStore;
-  /** Every record's project and model (the daemon's own). */
+  readonly store: DaemonStore;
+  /** Every session's project and model (the daemon's own). */
   readonly cwd: string;
   readonly model: string;
   readonly onError: (error: Error) => void;
   /**
-   * Whether a record's cwd is this daemon's project (`serve` compares project
+   * Whether a session's cwd is this daemon's project (`serve` compares project
    * keys: a symlinked cwd is the same project). Default: the same string as `cwd`.
    */
   readonly sameProject?: (cwd: string) => boolean;
   /**
    * Where a deleted id is recorded for good (`serve`: `TombstoneFile`), before
-   * its file is removed. Absent → the host's tombstone is in memory only.
+   * its files are removed. Absent → the host's tombstone is in memory only.
    */
   readonly tombstones?: TombstoneStore;
 }
 
-/** A record read back by `load`: the parsed record, or why it cannot be used. */
+/** A session read back by `load`: the rebuilt record, or why it cannot be used. */
 export type LoadedRecord =
   | { readonly ok: true; readonly record: DaemonSessionRecord }
-  | { readonly ok: false; readonly reason: string };
+  | { readonly ok: false; readonly reason: string; readonly missingState?: true };
+
+/** What an archived session is indexed by (`loadState`): the header and the state file, no history. */
+export interface ArchivedMeta {
+  readonly id: string;
+  readonly cwd: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly title: DaemonSessionRecord["title"];
+  readonly archivedAt?: number;
+}
+
+/** A session's state read back by `loadState`. */
+export type LoadedState =
+  | {
+      readonly ok: true;
+      readonly header: LogFileHeader;
+      readonly sidecar: DaemonSidecar;
+      readonly meta: ArchivedMeta;
+    }
+  | { readonly ok: false; readonly reason: string; readonly missingState?: true };
 
 const asError = (error: unknown): Error =>
   error instanceof Error ? error : new Error(String(error));
+
+const NO_STATE = "it has no state file (a session cut before its first save landed)";
 
 export class SessionPersister {
   private readonly opts: PersisterOptions;
   /** Settles when the latest write scheduled for the id has (never rejects). */
   private readonly latest = new Map<string, Promise<void>>();
-  /** Ids whose file could not be loaded: never written, never removed. */
+  /** The log entry each session's last unit was captured at: the next unit's entries start after it. */
+  private readonly cursors = new Map<string, LogCursor>();
+  /** Ids whose files could not be loaded: never written, never removed. */
   private readonly blocked = new Set<string>();
   private readonly removals = new Set<Promise<void>>();
   /** Ids already reported as "not persisted" (one line per session, not per write). */
@@ -77,117 +129,278 @@ export class SessionPersister {
   }
 
   /**
-   * Never write or delete `id`'s file: it exists but could not be loaded
-   * (corrupt, another project's, a newer daemon's), and it stays as it is.
+   * Never write or delete `id`'s files: they exist but could not be loaded
+   * (corrupt, another project's, a newer daemon's), and they stay as they are.
    */
   block(id: string): void {
     this.blocked.add(id);
   }
 
   /** Write `build()` for `id`, captured NOW. Synchronous; never awaited, never throws. */
-  schedule(id: string, build: () => DaemonSessionState): void {
+  schedule(id: string, build: StateBuild): void {
     void this.write(id, build);
   }
 
   /**
-   * `schedule`, and resolves whether THIS write landed (never rejects): `false`
-   * when it failed, or when `id` is not written at all (stopped, blocked, an
-   * unsafe name). The capture is synchronous, like `schedule`'s.
+   * `schedule`, and resolves whether THIS write landed — both files (never
+   * rejects): `false` when it failed, or when `id` is not written at all
+   * (stopped, blocked, an unsafe name). The capture is synchronous, like `schedule`'s.
    */
-  write(id: string, build: () => DaemonSessionState): Promise<boolean> {
+  write(id: string, build: StateBuild): Promise<boolean> {
     if (this.stopped || !this.persistable(id)) {
       return Promise.resolve(false);
     }
-    let record: DaemonSessionRecord;
-    try {
-      record = this.toRecord(build());
-    } catch (error) {
-      this.report(error);
-      return Promise.resolve(false);
-    }
-    return this.writeRecord(record);
+    const captured = this.capture(id, build, undefined);
+    return captured
+      ? this.unit(captured.record, captured.log, captured.from)
+      : Promise.resolve(false);
   }
 
   /**
-   * Write `state` as an ARCHIVED record (stamped `archivedAt`), captured now,
-   * through the same per-id queue as `schedule`. Returns the record (`null`:
-   * `id` cannot be persisted — a blocked file, an unsafe name — nothing is
-   * kept) and whether the write landed (a failure is reported, never thrown).
+   * Write `build()` as an ARCHIVED session (stamped `archivedAt`), captured
+   * now, through the same per-id queue as `schedule`. Returns the record
+   * (`null`: `id` cannot be persisted — a blocked file, an unsafe name —
+   * nothing is kept) and whether the write landed (a failure is reported,
+   * never thrown).
    */
   archive(
-    state: DaemonSessionState,
+    id: string,
+    build: StateBuild,
     archivedAt: number,
   ): { readonly record: DaemonSessionRecord | null; readonly written: Promise<boolean> } {
-    if (!this.persistable(state.id)) {
+    if (!this.persistable(id)) {
+      // Still taken: the session must close whatever happens to its files.
+      build(this.cursors.get(id));
       return { record: null, written: Promise.resolve(false) };
     }
-    let record: DaemonSessionRecord;
-    try {
-      record = this.toRecord({ ...state, archivedAt });
-    } catch (error) {
-      this.report(error);
+    const captured = this.capture(id, build, archivedAt);
+    if (!captured) {
       return { record: null, written: Promise.resolve(false) };
     }
-    return { record, written: this.writeRecord(record) };
+    return {
+      record: captured.record,
+      written: this.stopped
+        ? Promise.resolve(false)
+        : this.unit(captured.record, captured.log, captured.from),
+    };
   }
 
   /**
-   * Write an already-built record (an archived one whose write failed, again);
-   * resolves whether it landed. `report: false` → a failure is not reported
-   * (the caller already said it once). After `stop`: not written, `false`.
+   * The synchronous part of a write: the state built against this session's
+   * cursor, which then moves to the capture's log tip.
+   */
+  private capture(
+    id: string,
+    build: StateBuild,
+    archivedAt: number | undefined,
+  ): { record: DaemonSessionRecord; log: DaemonLogCapture; from: LogCursor | undefined } | null {
+    const from = this.cursors.get(id);
+    let record: DaemonSessionRecord;
+    let log: DaemonLogCapture;
+    try {
+      const state = build(from);
+      if (!state.log) {
+        throw new Error(`session ${id}: a capture without its log part`);
+      }
+      log = state.log;
+      record = this.toRecord(archivedAt === undefined ? state : { ...state, archivedAt }, log);
+    } catch (error) {
+      this.report(error);
+      return null;
+    }
+    this.cursors.set(id, log.head);
+    return { record, log, from };
+  }
+
+  /**
+   * Write an already-built record again (an archived one whose write failed,
+   * or one rewritten by a rename / reclaim while still in memory): a unit
+   * with no new entries, so the store appends whatever of its log the file
+   * lacks (or skips) and then writes its state file. Resolves whether it
+   * landed. `report: false` → a failure is not reported (the caller already
+   * said it once). After `stop`: not written, `false`.
    */
   writeRecord(record: DaemonSessionRecord, report = true): Promise<boolean> {
     if (this.stopped) {
       return Promise.resolve(false);
     }
-    let saving: Promise<void>;
-    try {
-      saving = this.opts.store.save(record);
-    } catch (error) {
-      if (report) {
-        this.report(error);
-      }
+    return this.unit(record, undefined, record.logHead, report);
+  }
+
+  /**
+   * Write `sidecar` as `id`'s state file only (an archived session's rename
+   * or reclaim: its log is already on disk and is not touched). Resolves
+   * whether it landed. After `stop`: not written, `false`.
+   */
+  writeState(id: string, sidecar: DaemonSidecar, report = true): Promise<boolean> {
+    if (this.stopped || !this.persistable(id)) {
       return Promise.resolve(false);
     }
+    let saving: Promise<void>;
+    try {
+      saving = this.opts.store.writeState(id, encodeSidecar(sidecar));
+    } catch (error) {
+      if (report) this.report(error);
+      return Promise.resolve(false);
+    }
+    return this.track(id, saving, report);
+  }
+
+  /**
+   * One unit, handed to the store on the next microtask (outside the
+   * caller's synchronous stretch: the entries' wire form, the overlay and the
+   * state file's text are built there). Microtasks run in order, so units
+   * reach the store in capture order.
+   */
+  private unit(
+    record: DaemonSessionRecord,
+    log: DaemonLogCapture | undefined,
+    from: LogCursor | undefined,
+    report = true,
+  ): Promise<boolean> {
+    const id = record.id;
+    const outcome =
+      log === undefined ? "linear" : log.rebased ? "rebased" : from ? "linear" : "cold";
+    // Boxed: resolving with the store's promise itself would ADOPT it (and lose it).
+    const { promise, resolve } = Promise.withResolvers<{ saving: Promise<void> } | null>();
+    queueMicrotask(() => {
+      try {
+        resolve({
+          saving: this.opts.store.write({
+            id,
+            meta: { cwd: this.opts.cwd, model: this.opts.model, createdAt: record.createdAt },
+            entries: log ? log.entries() : [],
+            messages: record.logged,
+            read: { ...(from ? { from } : {}), head: record.logHead, outcome },
+            sidecar: encodeSidecar(sidecarOf(record)),
+            keepEmpty: true,
+          }),
+        });
+      } catch (error) {
+        // Never handed to the store: its entries are not in the store's
+        // writer, so the next capture starts cold (from its `base`: a rewrite).
+        if (log && this.cursors.get(id)?.id === record.logHead.id) {
+          this.cursors.delete(id);
+        }
+        if (report) this.report(error);
+        resolve(null);
+      }
+    });
+    // `null`: never handed over (already reported above).
+    return this.track(
+      id,
+      promise.then((handed) => handed?.saving ?? Promise.reject(null)),
+      report,
+    );
+  }
+
+  /** `saving` as the id's latest write: resolves whether it landed (a failure reported once). */
+  private track(id: string, saving: Promise<void>, report: boolean): Promise<boolean> {
     const landed = saving.then(
       () => true,
       (error) => {
-        if (report) {
+        if (error !== null && report) {
           this.report(error);
         }
         return false;
       },
     );
     this.latest.set(
-      record.id,
+      id,
       landed.then(() => {}),
     );
     return landed;
   }
 
   /**
-   * Read `id`'s record back (an archived session's reopen): after its latest
-   * pending write has landed, parsed and checked like at start (version,
-   * project). Never throws.
+   * Read `id`'s session back (an archived session's reopen, a live one at
+   * start): after its latest pending write has landed, both files parsed and
+   * checked (versions, project) and the record rebuilt (`rebuild`). Never throws.
    */
   async load(id: string): Promise<LoadedRecord> {
     await this.flush(id);
-    let result: LoadResult;
+    let raw: RawSessionFiles;
     try {
-      result = await this.opts.store.load(id);
+      raw = await this.opts.store.readRaw(id);
     } catch (error) {
       return { ok: false, reason: asError(error).message };
     }
-    if (result.status === "absent") {
+    if (raw.status === "absent") {
       return { ok: false, reason: "its file is gone" };
     }
-    if (result.status === "unreadable") {
-      return { ok: false, reason: result.reason };
+    if (raw.status === "unreadable") {
+      return { ok: false, reason: raw.reason };
     }
-    return parseDaemonRecord(
-      result.record,
-      this.opts.sameProject ?? ((cwd) => cwd === this.opts.cwd),
-    );
+    if (raw.state === null) {
+      return { ok: false, reason: NO_STATE, missingState: true };
+    }
+    const sidecar = parseSidecar(raw.state, id);
+    if (!sidecar.ok) {
+      return { ok: false, reason: sidecar.reason };
+    }
+    const parsed = parseLogFile(raw.log, id);
+    if (!parsed.ok) {
+      return { ok: false, reason: parsed.reason };
+    }
+    const rebuilt = rebuild(parsed, sidecar.value, this.sameProject());
+    return rebuilt.ok ? { ok: true, record: rebuilt.value } : { ok: false, reason: rebuilt.reason };
+  }
+
+  /**
+   * Read `id`'s header and state file only — never its history (an archived
+   * session's index entry at start, its rename / reclaim). Checked like
+   * `load` (versions, project). Never throws.
+   */
+  async loadState(id: string): Promise<LoadedState> {
+    await this.flush(id);
+    let raw: RawSessionState;
+    try {
+      raw = await this.opts.store.readState(id);
+    } catch (error) {
+      return { ok: false, reason: asError(error).message };
+    }
+    if (raw.status === "absent") {
+      return { ok: false, reason: "its file is gone" };
+    }
+    if (raw.status === "unreadable") {
+      return { ok: false, reason: raw.reason };
+    }
+    if (raw.state === null) {
+      return { ok: false, reason: NO_STATE, missingState: true };
+    }
+    const header = parseHeaderLine(raw.header, id);
+    if (!header.ok) {
+      return { ok: false, reason: header.reason };
+    }
+    const sidecar = parseSidecar(raw.state, id);
+    if (!sidecar.ok) {
+      return { ok: false, reason: sidecar.reason };
+    }
+    if (!this.sameProject()(header.header.cwd)) {
+      return { ok: false, reason: `belongs to another project (${header.header.cwd})` };
+    }
+    const h = header.header;
+    const s = sidecar.value;
+    if (!Number.isSafeInteger(h.createdAt) || h.createdAt < 0) {
+      return { ok: false, reason: '"createdAt" is not a non-negative integer' };
+    }
+    return {
+      ok: true,
+      header: h,
+      sidecar: s,
+      meta: {
+        id,
+        cwd: h.cwd,
+        createdAt: h.createdAt,
+        updatedAt: s.updatedAt,
+        title: s.title,
+        ...(s.archivedAt !== undefined ? { archivedAt: s.archivedAt } : {}),
+      },
+    };
+  }
+
+  private sameProject(): (cwd: string) => boolean {
+    return this.opts.sameProject ?? ((cwd) => cwd === this.opts.cwd);
   }
 
   /**
@@ -217,14 +430,28 @@ export class SessionPersister {
     return true;
   }
 
-  private toRecord(state: DaemonSessionState): DaemonSessionRecord {
+  private toRecord(state: DaemonSessionState, log: DaemonLogCapture): DaemonSessionRecord {
     // `updatedAt` = the last conversation change, never the write time: a
     // detach or a restart writes too, and must not reorder `session/list`.
-    return toDaemonRecord(
-      state,
-      { cwd: this.opts.cwd, model: this.opts.model },
-      state.lastChangeAt,
-    );
+    return {
+      id: state.id,
+      cwd: this.opts.cwd,
+      model: this.opts.model,
+      createdAt: state.createdAt,
+      updatedAt: state.lastChangeAt,
+      title: encodeTitle(state.title ?? { source: "auto" }, state.messages),
+      messages: state.messages,
+      lastActiveAt: state.lastActiveAt,
+      turns: state.turns,
+      enqueueIds: state.enqueueIds,
+      returned: state.returned ?? [],
+      ...(state.turn ? { turn: state.turn } : {}),
+      ...(state.archivedAt !== undefined ? { archivedAt: state.archivedAt } : {}),
+      ...(state.head !== undefined ? { head: state.head } : {}),
+      logged: log.logged,
+      logHead: log.head,
+      paired: true,
+    };
   }
 
   /** Resolves once the latest write scheduled for `id` has settled (failures are reported, not thrown). */
@@ -233,16 +460,17 @@ export class SessionPersister {
   }
 
   /**
-   * Delete `id`'s file (`session/delete`): its tombstone is recorded FIRST, so
-   * no crash can leave the id with neither (a file left beside its tombstone
-   * is removed at the next start). `tombstone: false` → only finish a removal
-   * (the tombstone is already on disk). A failure of either step is reported,
-   * and the file is removed anyway (the user asked for it). Fire-and-forget;
-   * `stop` waits for it.
+   * Delete `id`'s files (`session/delete`): its tombstone is recorded FIRST,
+   * so no crash can leave the id with neither (files left beside their
+   * tombstone are removed at the next start). `tombstone: false` → only
+   * finish a removal (the tombstone is already on disk). A failure of either
+   * step is reported, and the files are removed anyway (the user asked for
+   * it). Fire-and-forget; `stop` waits for it.
    */
   remove(id: string, tombstone = true): void {
     this.latest.delete(id);
     this.reported.delete(id);
+    this.cursors.delete(id);
     if (!isValidSessionId(id)) {
       return;
     }
@@ -262,6 +490,8 @@ export class SessionPersister {
   /** Shutdown: accept no more writes, then wait for every pending write and removal. */
   async stop(): Promise<void> {
     this.stopped = true;
+    // A unit is handed to the store on a microtask: let the last ones reach it.
+    await Promise.resolve();
     await Promise.all([this.opts.store.drain(), ...this.removals]);
   }
 

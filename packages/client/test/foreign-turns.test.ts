@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent, type LoadResult } from "@tentacle/agent";
+import { Agent } from "@tentacle/agent";
 import {
   type ChatMessage,
   type ChatRequest,
@@ -10,13 +10,7 @@ import {
   type StreamEvent,
   type Tool,
 } from "@tentacle/core";
-import {
-  Connection,
-  type DaemonSessionRecord,
-  type RecordStore,
-  SessionHost,
-  SessionPersister,
-} from "@tentacle/daemon";
+import { Connection, SessionHost, SessionPersister } from "@tentacle/daemon";
 import { JsonRpcErrorCode, Method, Notification, PROTOCOL_VERSION } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import {
@@ -27,6 +21,7 @@ import {
   createChannelPair,
 } from "@tentacle/transport";
 import { z } from "zod";
+import { SpyDaemonStore } from "../../daemon/test/support/daemon-store-spy.ts";
 import type { SessionEvent } from "../src/mapping.ts";
 import { RemoteClient } from "../src/remote-client.ts";
 import type { RemoteSession, SessionActivity } from "../src/remote-session.ts";
@@ -107,20 +102,8 @@ const tool = (name: string, permission: Tool["permission"]): Tool => ({
   execute: async () => ({ content: `${name} ok` }),
 });
 
-class MemStore implements RecordStore {
-  readonly durable = new Map<string, DaemonSessionRecord>();
-  async save(record: Parameters<RecordStore["save"]>[0]): Promise<void> {
-    this.durable.set(record.id, JSON.parse(JSON.stringify(record)) as DaemonSessionRecord);
-  }
-  async remove(id: string): Promise<void> {
-    this.durable.delete(id);
-  }
-  async drain(): Promise<void> {}
-  async load(id: string): Promise<LoadResult> {
-    const record = this.durable.get(id);
-    return record ? { status: "ok", record } : { status: "absent" };
-  }
-}
+/** The daemon's two-file store in memory (the daemon suite's spy: real decoders). */
+class MemStore extends SpyDaemonStore {}
 
 interface Frame {
   readonly method?: string;

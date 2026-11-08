@@ -8,6 +8,17 @@ those.
 
 ## [Unreleased]
 
+### Changed
+
+- **`tentacle serve` now stores its sessions as a session log, like the laptop.** Each session
+  in `<configDir>/daemon/<project>/` is `<id>.jsonl` (the same log format as your local
+  sessions) plus a small `<id>.state.json`; a save appends what changed instead of rewriting
+  the whole history. A restart continues each session's log, so a client that was reading it
+  carries on without a fork. Old `<id>.json` files from earlier builds are ignored (no
+  conversion: delete the folder to clean up); a session a newer build wrote is left untouched.
+  `sessions.keepSuperseded` now also applies to `serve` (from the `serve` host's config).
+  Use one build per store: an older build does not see these sessions.
+
 ### Added
 
 - **A `tentacle serve` session reacts when a background job ends — connected or not.**

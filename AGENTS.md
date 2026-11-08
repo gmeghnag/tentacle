@@ -190,19 +190,23 @@ assume.
   (turn/call markers, title, checkpoints) — never rendering-only events (e.g.
   `steer`). A
   `serve` daemon additionally writes each live session to
-  `<configDir>/daemon/<projectKey(cwd)>/` at every committed boundary and
-  reloads it on start (one daemon per store: a lock); on re-attach the daemon's
-  copy wins. Pod daemons (`serve --stdio`, `run`/`attach`) and the in-process
+  `<configDir>/daemon/<projectKey(cwd)>/` in the same log format (`<uid>.jsonl`,
+  its OWN entries: the daemon is trusted) plus a small whole-file state sidecar
+  `<uid>.state.json` (turn, pending asks, keys, title, archive stamp, and the
+  log entry it pairs with), written AFTER the log; a write lands when its
+  sidecar does, and a reload reads the log only up to the entry the sidecar
+  names. It reloads them on start (one daemon per store: a lock), continuing
+  each session's log lineage; on re-attach the daemon's copy wins. Pod daemons (`serve --stdio`, `run`/`attach`) and the in-process
   worker never persist — only `startDaemon` gives `SessionHost` a persister. A
   daemon write inside a turn is `SessionPersister.schedule` (synchronous
   capture, never awaited) — the steering window. On reload a turn suspended
   on its own call's permission runs again and is re-asked (pending on disk ⇒
   never started); any other turn cut short is closed honestly. A `serve`
   session that ends (`session/close`, the idle TTL, the detached cap) is kept
-  ARCHIVED (record stamped `archivedAt`, indexed by metadata only, reloaded
+  ARCHIVED (its sidecar stamped `archivedAt`, indexed from the sidecar only, reloaded
   only by an explicit `session/open{reopen}` — a reconnect never revives it)
   until `session/delete`; nothing is ever purged automatically. `connect`
-  keeps no laptop copy — the `serve` daemon's record is the truth; `--resume`
+  keeps no laptop copy — the `serve` daemon's log is the truth; `--resume`
   and `/sessions` read `session/list`, and quitting only detaches. Design:
   `docs/feat/daemon-side-persistence.md`, `docs/feat/suspended-turn-resume.md`,
   `docs/feat/session-archive.md`, `docs/feat/connect-sessions.md`.
@@ -260,9 +264,11 @@ assume.
         an RPC request.
     - **Truly breaking** (a changed or removed field, a changed meaning) →
       bump `PROTOCOL_VERSION`.
-    - **On-disk records are versioned separately from the wire.** A daemon
-      record carries `schemaVersion` (`DAEMON_RECORD_VERSION`), and an unknown
-      one is refused and left untouched. The laptop's log carries a header
+    - **On-disk records are versioned separately from the wire.** A `serve`
+      session's log carries the same header `schemaVersion` as the laptop's,
+      and its sidecar its own (`DAEMON_STATE_VERSION`); an unknown one of
+      either is refused and the files are left untouched (never written by
+      that daemon). The laptop's log carries a header
       `schemaVersion` (an unknown one is refused, and the file is set aside,
       never overwritten). Inside it, an entry of an unknown type is refused if
       `critical` and skipped if not; its line is kept on append and set aside,

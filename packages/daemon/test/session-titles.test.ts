@@ -17,9 +17,10 @@ import { ToolRegistry } from "@tentacle/tools";
 import { RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { Connection } from "../src/connection.ts";
 import { type Attachment, HostedSession } from "../src/hosted-session.ts";
-import { type DaemonSessionRecord, parseDaemonRecord } from "../src/persisted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
-import { type RecordStore, SessionPersister } from "../src/session-persister.ts";
+import type { LogWrite } from "../src/session-log-store.ts";
+import { SessionPersister } from "../src/session-persister.ts";
+import { SpyDaemonStore } from "./support/daemon-store-spy.ts";
 
 // Session titles (docs/feat/session-titles.md): the daemon generates a title
 // after the first exchange, in the background, never in the user's way; a
@@ -103,33 +104,8 @@ class TitleModel implements ModelProvider {
   }
 }
 
-/** An in-memory record store (the persistence suite's `SpyStore`, trimmed). */
-class MemStore implements RecordStore {
-  readonly durable = new Map<string, DaemonSessionRecord>();
-  readonly loads: string[] = [];
-  holdLoads = false;
-  private heldLoads: Array<() => void> = [];
-  async save(record: Parameters<RecordStore["save"]>[0]): Promise<void> {
-    const copy = JSON.parse(JSON.stringify(record)) as DaemonSessionRecord;
-    await Promise.resolve();
-    this.durable.set(copy.id, copy);
-  }
-  async remove(id: string): Promise<void> {
-    this.durable.delete(id);
-  }
-  async drain(): Promise<void> {}
-  async load(id: string): Promise<LoadResult> {
-    this.loads.push(id);
-    if (this.holdLoads) await new Promise<void>((r) => this.heldLoads.push(r));
-    const record = this.durable.get(id);
-    return record
-      ? { status: "ok", record: JSON.parse(JSON.stringify(record)) }
-      : { status: "absent" };
-  }
-  releaseLoads(): void {
-    for (const r of this.heldLoads.splice(0)) r();
-  }
-}
+/** The two-file in-memory store (`support/daemon-store-spy.ts`, the persistence suite's). */
+class MemStore extends SpyDaemonStore {}
 
 interface Rig {
   host: SessionHost;
@@ -140,21 +116,21 @@ interface Rig {
 
 /** A record store whose saves can be held, then landed or failed one by one (review round 1, finding 1). */
 class GatedStore extends MemStore {
-  hold = false;
-  private held: Array<(fail: boolean) => void> = [];
-  override async save(record: Parameters<RecordStore["save"]>[0]): Promise<void> {
-    if (this.hold) {
-      const fail = await new Promise<boolean>((r) => this.held.push(r));
+  gate = false;
+  private gated: Array<(fail: boolean) => void> = [];
+  override async write(unit: LogWrite): Promise<void> {
+    if (this.gate) {
+      const fail = await new Promise<boolean>((r) => this.gated.push(r));
       if (fail) throw new Error("disk full");
     }
-    return super.save(record);
+    return super.write(unit);
   }
   get waiting(): number {
-    return this.held.length;
+    return this.gated.length;
   }
   /** Settle the oldest held save. */
   settle(fail: boolean): void {
-    this.held.shift()?.(fail);
+    this.gated.shift()?.(fail);
   }
 }
 
@@ -530,42 +506,20 @@ describe("seed, persistence, archive", () => {
     expect(hosted.summary(CWD).title).toBe("Seeded");
   });
 
-  test("D6 a chosen title survives a restart; the record is current (v7 since context-awareness); v1/v2 read as auto; a newer one is refused", async () => {
+  test("D6 a chosen title survives a restart (decoded from the files by the real decoders)", async () => {
+    // (The record's v1–v8 ladder is gone with the record: the state file's
+    // title validation is pinned in serve-log-store.test.ts.)
     const store = new MemStore();
     const r = rig(new TitleModel([{ text: "Fix login" }]), { store });
     const hosted = await firstExchange(r, sink());
     await until(() => hosted.summary(CWD).title === "Fix login");
     await until(() => typeof store.durable.get("s1")?.title === "object");
     const record = store.durable.get("s1");
-    expect(record?.schemaVersion as number).toBe(8);
     expect(record?.title).toEqual({ text: "Fix login", source: "model" });
-    const same = (c: string) => c === CWD;
-    const parsed = parseDaemonRecord(JSON.parse(JSON.stringify(record)), same);
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
+    if (!record) return;
     const next = rig(new TitleModel([{ text: "never" }]), { store: new MemStore() });
-    const back = next.host.restore(parsed.record);
+    const back = next.host.restore(record);
     expect(titleOf(back)).toEqual({ text: "Fix login", source: "model" });
-    // An older record (string title) reads as auto, never half-loaded.
-    for (const schemaVersion of [1, 2]) {
-      const old = {
-        ...JSON.parse(JSON.stringify(record)),
-        schemaVersion,
-        title: "please fix the login bug",
-      };
-      const read = parseDaemonRecord(old, same);
-      expect(read.ok).toBe(true);
-      if (read.ok) expect(read.record.schemaVersion as number).toBe(8);
-      // An object title in a version that never wrote one is not ours.
-      expect(parseDaemonRecord({ ...old, title: { text: "x", source: "user" } }, same).ok).toBe(
-        false,
-      );
-    }
-    const newer = parseDaemonRecord(
-      { ...JSON.parse(JSON.stringify(record)), schemaVersion: 9 },
-      same,
-    );
-    expect(newer.ok).toBe(false);
   });
 
   test("an ARCHIVED session is renamed in place: listed, record rewritten (still archived), reopen keeps it", async () => {
@@ -576,6 +530,8 @@ describe("seed, persistence, archive", () => {
     await until(() => store.durable.get("s1")?.archivedAt !== undefined);
     await tick(5); // the archive write confirmed: the record is no longer resident
     const loadsBefore = store.loads.length;
+    const stateLoadsBefore = store.stateLoads.length;
+    const unitsBefore = store.units.length;
     expect(renameOf(r.host)?.call(r.host, "s1", "Archived name")).toEqual({
       text: "Archived name",
       source: "user",
@@ -591,7 +547,12 @@ describe("seed, persistence, archive", () => {
     expect(durable?.archivedAt).toBeNumber();
     // Not reopened: still archived, not live.
     expect(r.host.get("s1")).toBeUndefined();
-    expect(store.loads.length).toBe(loadsBefore + 1);
+    // Only the state file was read back and rewritten: the history (log) neither
+    // read nor written (docs/feat/session-log-serve-store.md Q8).
+    expect(store.loads.length).toBe(loadsBefore);
+    expect(store.stateLoads.length).toBe(stateLoadsBefore + 1);
+    expect(store.units.length).toBe(unitsBefore);
+    expect(store.stateWrites.map((w) => w.id)).toEqual(["s1"]);
     const prepared = await r.host.prepareOpen({ sessionId: "s1", reopen: true });
     const { hosted } = r.host.open({ sessionId: "s1", reopen: true }, sink().attachment, prepared);
     expect(titleOf(hosted)).toEqual({ text: "Archived name", source: "user" });
@@ -605,10 +566,12 @@ describe("seed, persistence, archive", () => {
     const r = rig(undefined, { store });
     await firstExchange(r, sink());
     await tick(5);
-    store.hold = true;
+    store.gate = true;
     r.host.close("s1"); // R1: the archived record, held
+    await Promise.resolve(); // (a unit reaches the store on the next microtask)
     expect(store.waiting).toBe(1);
     renameOf(r.host)?.call(r.host, "s1", "Kept name"); // R2: R1 (resident) + the title, held
+    await Promise.resolve();
     expect(store.waiting).toBe(2);
     store.settle(false); // R1 lands
     await tick();
@@ -618,7 +581,7 @@ describe("seed, persistence, archive", () => {
     expect(store.durable.get("s1")?.archivedAt).toBeNumber();
     expect(typeof store.durable.get("s1")?.title).toBe("string");
     expect(r.errors.map((e) => e.message)).toContain("disk full");
-    store.hold = false;
+    store.gate = false;
     r.host.reapExpired({ idleTtlMs: 24 * 3_600_000 });
     await until(() => typeof store.durable.get("s1")?.title === "object", 500);
     expect(store.durable.get("s1")?.title).toEqual({ text: "Kept name", source: "user" });

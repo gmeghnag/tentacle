@@ -22,43 +22,25 @@ import {
   INTERRUPTED_NOTE,
   NOT_RUN_NOTE,
   SUBAGENT_INTERRUPTED_NOTE,
-  parseDaemonRecord,
   reconcileOnReload,
 } from "../src/persisted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
-import { type RecordStore, SessionPersister } from "../src/session-persister.ts";
+import type { LogWrite } from "../src/session-log-store.ts";
+import { SessionPersister } from "../src/session-persister.ts";
+import { SpyDaemonStore, decodeFiles, filesOf } from "./support/daemon-store-spy.ts";
 
 const CWD = "/tmp/parallel-agents-work";
 const env = {} as ExecutionEnvironment;
 const go = [{ type: "text" as const, text: "go" }];
 
-class Store implements RecordStore {
-  readonly durable = new Map<string, DaemonSessionRecord>();
-  save(record: Parameters<RecordStore["save"]>[0]): Promise<void> {
-    const copy = JSON.parse(JSON.stringify(record)) as DaemonSessionRecord;
-    this.durable.set(copy.id, copy);
-    return Promise.resolve();
-  }
-  async remove(id: string): Promise<void> {
-    this.durable.delete(id);
-  }
-  async drain(): Promise<void> {}
-  async load(id: string): ReturnType<RecordStore["load"]> {
-    const record = this.durable.get(id);
-    return record
-      ? { status: "ok", record: JSON.parse(JSON.stringify(record)) }
-      : { status: "absent" };
-  }
-}
+/** The two-file store, decoded by the real decoders (`support/daemon-store-spy.ts`). */
+class Store extends SpyDaemonStore {}
 
 /** A store whose writes of an in-flight set fail (`beforeRun` → false); the rest land. */
 class NoInFlightStore extends Store {
-  override save(record: Parameters<RecordStore["save"]>[0]): Promise<void> {
-    if ((record as DaemonSessionRecord).turn?.inFlight !== undefined) {
-      return Promise.reject(new Error("disk full"));
-    }
-    return super.save(record);
-  }
+  override failIf = (unit: LogWrite): boolean =>
+    (JSON.parse(unit.sidecar ?? "{}") as { turn?: { inFlight?: unknown } }).turn?.inFlight !==
+    undefined;
 }
 
 const spawn = (id: string, prompt: string): StreamEvent => ({
@@ -201,11 +183,7 @@ const reread = (record: DaemonSessionRecord | undefined): DaemonSessionRecord =>
   if (!record) {
     throw new Error("nothing durable");
   }
-  const parsed = parseDaemonRecord(JSON.parse(JSON.stringify(record)), (c) => c === CWD);
-  if (!parsed.ok) {
-    throw new Error(parsed.reason);
-  }
-  return parsed.record;
+  return decodeFiles(record.id, filesOf(record));
 };
 
 const toolRows = (record: DaemonSessionRecord): string[] =>

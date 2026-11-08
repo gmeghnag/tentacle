@@ -22,10 +22,13 @@ import { ToolRegistry } from "@tentacle/tools";
 import { RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
 import { z } from "zod";
 import { Connection } from "../src/connection.ts";
+import { parseSidecar, rebuild } from "../src/daemon-state-file.ts";
 import type { Attachment, HostedSession } from "../src/hosted-session.ts";
-import { type DaemonSessionRecord, parseDaemonRecord } from "../src/persisted-session.ts";
+import type { DaemonSessionRecord } from "../src/persisted-session.ts";
 import { SessionHost } from "../src/session-host.ts";
-import { type RecordStore, SessionPersister } from "../src/session-persister.ts";
+import { parseLogFile } from "../src/session-log-file.ts";
+import { SessionPersister } from "../src/session-persister.ts";
+import { type Fixture, SpyDaemonStore, filesOf } from "./support/daemon-store-spy.ts";
 
 // `session/send_now` (docs/feat/send-now-a.md): cancel what runs and start the
 // queued texts as a new turn in ONE daemon step. Each test names the plan's
@@ -101,17 +104,22 @@ class Gate {
   }
 }
 
-/** Records what landed on the "disk" (a copy per save, like bytes). */
-class SpyStore implements RecordStore {
-  readonly saves: DaemonSessionRecord[] = [];
-  async save(record: Parameters<RecordStore["save"]>[0]): Promise<void> {
-    this.saves.push(JSON.parse(JSON.stringify(record)) as DaemonSessionRecord);
-  }
-  async remove(): Promise<void> {}
-  async drain(): Promise<void> {}
-  async load(): Promise<{ status: "absent" }> {
-    return { status: "absent" };
-  }
+/** Records what landed on the "disk": the two files, decoded (`support/daemon-store-spy.ts`). */
+class SpyStore extends SpyDaemonStore {}
+
+/** A record as the loader rebuilds it from its files (this project only). */
+function loadFixture(
+  record: unknown,
+  sameProject: (cwd: string) => boolean,
+): { ok: true; record: DaemonSessionRecord } | { ok: false; reason: string } {
+  const fixture = record as Fixture;
+  const files = filesOf(fixture);
+  const sidecar = parseSidecar(files.state ?? "", fixture.id);
+  if (!sidecar.ok) return sidecar;
+  const parsed = parseLogFile(files.log ?? "", fixture.id);
+  if (!parsed.ok) return parsed;
+  const rebuilt = rebuild(parsed, sidecar.value, sameProject);
+  return rebuilt.ok ? { ok: true, record: rebuilt.value } : rebuilt;
 }
 
 interface RigOptions {
@@ -641,10 +649,7 @@ describe("session/send_now — persistence", () => {
       if (t2 && !t2.end) expect(save.turn?.turnId).toBe("T2");
     }
 
-    const parsed = parseDaemonRecord(
-      JSON.parse(JSON.stringify(windowRecord)),
-      (cwd) => cwd === CWD,
-    );
+    const parsed = loadFixture(JSON.parse(JSON.stringify(windowRecord)), (cwd) => cwd === CWD);
     if (!parsed.ok) throw new Error(parsed.reason);
     // A persister, as on `serve`: only then does `restore` carry the keys over.
     const r2 = rig([], { store: new SpyStore() });
@@ -672,7 +677,7 @@ describe("session/send_now — persistence", () => {
     const last = store.saves.at(-1);
     if (!last) throw new Error("no record");
     const raw = JSON.parse(JSON.stringify(last));
-    const parsed = parseDaemonRecord(raw, (cwd) => cwd === CWD);
+    const parsed = loadFixture(raw, (cwd) => cwd === CWD);
     if (!parsed.ok) throw new Error(parsed.reason);
     const restored = rig([], { store: new SpyStore() }).host.restore(parsed.record);
     expect(restored.sendNow("T2", turn("T1"), [msg("a", "A")])).toEqual({
@@ -682,7 +687,7 @@ describe("session/send_now — persistence", () => {
     for (const key of raw.turns) {
       if (key.turnId === "T2") key.end.delivered = "no";
     }
-    expect(parseDaemonRecord(raw, (cwd) => cwd === CWD)).toMatchObject({ ok: false });
+    expect(loadFixture(raw, (cwd) => cwd === CWD)).toMatchObject({ ok: false });
   });
 });
 
@@ -710,7 +715,7 @@ describe("session/send_now — delivered but unanswered (review F1)", () => {
   test("F1a a crash before the hand-off (v4): the reload returns the steer to its writer; the resent send-now sends it", async () => {
     // Changed on purpose by owner decision Q2 (docs/feat/queued-broadcast.md):
     // a v4 crash-cut steer goes back to its writer, never into the history.
-    const parsed = parseDaemonRecord(await crashedWithSteer(), (cwd) => cwd === CWD);
+    const parsed = loadFixture(await crashedWithSteer(), (cwd) => cwd === CWD);
     if (!parsed.ok) throw new Error(parsed.reason);
     let clock = 500;
     const r2 = rig([say("answer")], { store: new SpyStore(), now: () => clock });
@@ -740,25 +745,6 @@ describe("session/send_now — delivered but unanswered (review F1)", () => {
       entries: [],
       returned: [],
     });
-    answered(r2.model, "A");
-  });
-
-  test("F1a a crash before the hand-off (v3): the reload appends the steer; the resent send-now answers it", async () => {
-    const parsed = parseDaemonRecord(
-      { ...(await crashedWithSteer()), schemaVersion: 3 },
-      (cwd) => cwd === CWD,
-    );
-    if (!parsed.ok) throw new Error(parsed.reason);
-    const r2 = rig([say("answer")], { store: new SpyStore() });
-    const restored = r2.host.restore(parsed.record);
-    const c2 = client();
-    restored.attach(c2.attachment);
-    expect(userTexts(restored.snapshotPage().messages)).toEqual(["go", "A"]);
-    expect(restored.sendNow("T2", turn("T1"), [msg("a", "A")])).toEqual({ turnId: "T2" });
-    await until(() => c2.ended("T2"));
-    expect(c2.start("T2")).toEqual({ type: "turn_start", turnId: "T2", prompt: "" });
-    expect(c2.end("T2")).toMatchObject({ stopReason: "end_turn" });
-    expect(userTexts(restored.snapshotPage().messages)).toEqual(["go", "A"]);
     answered(r2.model, "A");
   });
 
@@ -978,7 +964,7 @@ describe("session/send_now — the structural unanswered rule", () => {
     await hosted.persisted();
     const record = store.saves.at(-1);
     expect(record?.turn?.turnId).toBe("T1");
-    const parsed = parseDaemonRecord(JSON.parse(JSON.stringify(record)), (cwd) => cwd === CWD);
+    const parsed = loadFixture(JSON.parse(JSON.stringify(record)), (cwd) => cwd === CWD);
     if (!parsed.ok) throw new Error(parsed.reason);
     r.model.release();
 
@@ -1038,7 +1024,7 @@ describe("session/send_now — the structural unanswered rule", () => {
     await hosted.persisted();
     const record = store.saves.at(-1);
     expect(record?.turn).toBeUndefined();
-    const parsed = parseDaemonRecord(JSON.parse(JSON.stringify(record)), (cwd) => cwd === CWD);
+    const parsed = loadFixture(JSON.parse(JSON.stringify(record)), (cwd) => cwd === CWD);
     if (!parsed.ok) throw new Error(parsed.reason);
 
     const r2 = rig([say("spurious")], { store: new SpyStore(), systemPrompt: "sys" });

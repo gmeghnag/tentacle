@@ -6,16 +6,17 @@
  * `reattach.e2e.test.ts`.
  */
 import { describe, expect, test } from "bun:test";
-import { Agent, type LoadResult } from "@tentacle/agent";
+import { createHash } from "node:crypto";
+import { Agent } from "@tentacle/agent";
 import { type ModelProvider, PermissionBroker, allowAll } from "@tentacle/core";
 import {
   Connection,
   type DaemonSessionRecord,
-  type RecordStore,
+  type HostedSession,
   SessionHost,
   SessionPersister,
-  parseDaemonRecord,
 } from "@tentacle/daemon";
+import type { LogResult } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import {
   DomainErrorCode,
@@ -23,10 +24,17 @@ import {
   RpcError,
   createChannelPair,
 } from "@tentacle/transport";
+import {
+  type Fixture,
+  SpyDaemonStore,
+  decodeFiles,
+  filesOf,
+} from "../../daemon/test/support/daemon-store-spy.ts";
 import type { ReturnedRow } from "../src/hand-back.ts";
 import { ChannelError, LIVENESS_MS, type LinkStatus } from "../src/link-machine.ts";
 import type { SessionEvent } from "../src/mapping.ts";
 import { type Clock, RemoteClient } from "../src/remote-client.ts";
+import { applyLogRead } from "../src/session-log-reader.ts";
 import type { StreamOutput } from "../src/session-reducer.ts";
 import { GatedModel, type Step, approver, done, t, tick, until } from "./support/fakes.ts";
 import { cutLink } from "./support/link-cutter.ts";
@@ -561,21 +569,17 @@ describe("re-attach: commands across a drop", () => {
   });
 });
 
-/** An in-memory record store (what a `serve` restart reads back). */
-class MemStore implements RecordStore {
-  readonly durable = new Map<string, DaemonSessionRecord>();
-  async save(record: Parameters<RecordStore["save"]>[0]): Promise<void> {
-    this.durable.set(record.id, JSON.parse(JSON.stringify(record)) as DaemonSessionRecord);
-  }
-  async remove(id: string): Promise<void> {
-    this.durable.delete(id);
-  }
-  async drain(): Promise<void> {}
-  async load(id: string): Promise<LoadResult> {
-    const record = this.durable.get(id);
-    return record ? { status: "ok", record } : { status: "absent" };
-  }
-}
+/** The daemon's two files in memory (what a `serve` restart reads back; the daemon suite's spy). */
+class MemStore extends SpyDaemonStore {}
+
+/** What a restarted daemon loads for `record`: its files (a log segment + the state file), decoded. */
+const reloadOf = (
+  record: unknown,
+  _sameProject: (cwd: string) => boolean,
+): { ok: true; record: DaemonSessionRecord } => {
+  const fixture = record as Fixture;
+  return { ok: true, record: decodeFiles(fixture.id, filesOf(fixture)) };
+};
 
 const persisterFor = (store: MemStore): SessionPersister =>
   new SessionPersister({ store, cwd: CWD, model: "m", onError: () => {} });
@@ -606,8 +610,8 @@ describe("re-attach: a `serve` restart with a turn suspended on approval (suspen
     await target.host.get("S")?.persisted();
     const durable = store.durable.get("S");
     if (!durable) throw new Error("nothing durable");
-    const parsed = parseDaemonRecord(JSON.parse(JSON.stringify(durable)), (c) => c === CWD);
-    if (!parsed.ok) throw new Error(parsed.reason);
+    const parsed = reloadOf(JSON.parse(JSON.stringify(durable)), (c) => c === CWD);
+    if (!parsed.ok) throw new Error("not reloadable");
     // The restart: a new daemon restores the record; the old one is gone.
     const model2 = new GatedModel([[t("b"), done]]);
     const host2 = makeHost(model2, runs, persisterFor(new MemStore()));
@@ -660,8 +664,8 @@ describe("re-attach: send-now after a `serve` restart (send-now-c follow-up 1)",
       messages: [{ role: "user", content: "A" }],
       turns: [{ turnId: running.turnId, end: { stopReason: "end_turn" } }],
     };
-    const parsed = parseDaemonRecord(JSON.parse(JSON.stringify(record)), (c) => c === CWD);
-    if (!parsed.ok) throw new Error(parsed.reason);
+    const parsed = reloadOf(JSON.parse(JSON.stringify(record)), (c) => c === CWD);
+    if (!parsed.ok) throw new Error("not reloadable");
     const model2 = new GatedModel([[t("Z-answer"), done]]);
     const host2 = makeHost(model2, runs, persisterFor(new MemStore()));
     const restored = host2.restore(parsed.record);
@@ -1895,11 +1899,8 @@ describe("re-attach: a crash-cut turn's steers after a `serve` restart (docs/fea
     await until(() => model1.waiting);
     await session.enqueue("A", "a");
     await target.host.get("S")?.persisted();
-    const parsed = parseDaemonRecord(
-      JSON.parse(JSON.stringify(store.durable.get("S"))),
-      (c) => c === CWD,
-    );
-    if (!parsed.ok) throw new Error(parsed.reason);
+    const parsed = reloadOf(JSON.parse(JSON.stringify(store.durable.get("S"))), (c) => c === CWD);
+    if (!parsed.ok) throw new Error("not reloadable");
     expect(parsed.record.turn).toMatchObject({ steering: ["A"], steeringIds: ["a"] });
     const model2 = new GatedModel([[t("sent"), done]]);
     const host2 = makeHost(model2, runs, persisterFor(new MemStore()));
@@ -2003,5 +2004,113 @@ describe("returned rows of a closed session (docs/feat/queued-broadcast.md, owne
     });
     expect(w.returned).toEqual([]);
     w.client.close();
+  });
+});
+
+// docs/feat/session-log-serve-store.md S4 (task 1 Q12): a `serve` restart continues
+// the session's log lineage, so a client holding the landed head RESEEDS (P5).
+describe("S4 the log lineage across a `serve` restart", () => {
+  const sha = (s: string): string => createHash("sha256").update(s).digest("hex");
+  /** Every page of a cold read, as the client reads them. */
+  const coldRead = (hosted: HostedSession, from?: { seq: number; id: string }): LogResult[] => {
+    const pages: LogResult[] = [];
+    let after: { seq: number; id: string } | undefined = from;
+    for (;;) {
+      const page = hosted.logRead(after);
+      pages.push(page);
+      const last = page.entries.at(-1);
+      if (!page.more || last === undefined) break;
+      after = { seq: last.seq, id: last.id };
+    }
+    return pages;
+  };
+  async function idleTurn(store: MemStore) {
+    const host = makeHost(
+      new GatedModel([
+        [t("one"), done],
+        [t("two"), done],
+      ]),
+      { n: 0 },
+      persisterFor(store),
+    );
+    const hosted = host.open({ sessionId: "S", create: true }, { send: () => {} }).hosted;
+    hosted.prompt("T1", [{ type: "text", text: "go" }]);
+    await until(() => !hosted.running);
+    await hosted.persisted();
+    return hosted;
+  }
+
+  test("a client holding the landed head reads the restarted daemon's log as a reseed (same messages after the repair)", async () => {
+    // Mutation: the reload's base restates the REPAIRED history, or carries no `prev`
+    // (a new lineage) → `fork` (aside) or `adopt`, never `reseed`.
+    const store = new MemStore();
+    const hosted = await idleTurn(store);
+    const held = applyLogRead(null, coldRead(hosted), sha);
+    if ("error" in held) throw new Error(held.error);
+    const record = store.durable.get("S");
+    if (!record) throw new Error("nothing durable");
+    expect(record.logHead).toEqual(held.state.head);
+    hosted.close();
+    const restored = makeHost(new GatedModel([]), { n: 0 }, persisterFor(new MemStore())).restore(
+      record,
+    );
+    const after = applyLogRead(held.state, coldRead(restored, held.state.head), sha);
+    if ("error" in after) throw new Error(after.error);
+    expect(after.outcome).toBe("reseed");
+    expect(after.state.messages).toEqual(restored.snapshotPage().messages);
+    restored.close();
+  });
+
+  test("with a repair (a turn cut mid-ask, reopened with its notes): still a reseed — the base restates what landed, the notes follow as entries", async () => {
+    // Mutation: the base restates the repaired history → the seed digests differ → `fork`.
+    const store = new MemStore();
+    const host = makeHost(
+      new GatedModel([[t("a"), shell("c1"), done]]),
+      { n: 0 },
+      persisterFor(store),
+    );
+    const hosted = host.open({ sessionId: "S", create: true }, { send: () => {} }).hosted;
+    hosted.prompt("T1", [{ type: "text", text: "go" }]);
+    await until(() => store.durable.get("S")?.turn?.pending !== undefined);
+    await hosted.persisted();
+    const held = applyLogRead(null, coldRead(hosted), sha);
+    if ("error" in held) throw new Error(held.error);
+    const record = store.durable.get("S");
+    if (!record) throw new Error("nothing durable");
+    expect(record.logHead).toEqual(held.state.head);
+    hosted.close();
+    const restored = makeHost(new GatedModel([]), { n: 0 }, persisterFor(new MemStore())).restore({
+      ...record,
+      archivedAt: 1,
+    });
+    // The repair appended a note: the history is longer than what landed.
+    expect(restored.snapshotPage().messages.length).toBeGreaterThan(record.logged.length);
+    const after = applyLogRead(held.state, coldRead(restored, held.state.head), sha);
+    if ("error" in after) throw new Error(after.error);
+    expect(after.outcome).toBe("reseed");
+    expect(after.state.messages).toEqual(restored.snapshotPage().messages);
+    restored.close();
+  });
+
+  test("a client that read entries which never landed: the restart's content compare forks (its copy aside)", async () => {
+    const store = new MemStore();
+    const hosted = await idleTurn(store);
+    store.fail = new Error("disk full"); // the next turn's units never land
+    hosted.prompt("T2", [{ type: "text", text: "again" }]);
+    await until(() => !hosted.running);
+    const held = applyLogRead(null, coldRead(hosted), sha);
+    if ("error" in held) throw new Error(held.error);
+    const record = store.durable.get("S");
+    if (!record) throw new Error("nothing durable");
+    expect(record.logHead.seq).toBeLessThan(held.state.head.seq);
+    hosted.close();
+    const restored = makeHost(new GatedModel([]), { n: 0 }, persisterFor(new MemStore())).restore(
+      record,
+    );
+    const after = applyLogRead(held.state, coldRead(restored, held.state.head), sha);
+    if ("error" in after) throw new Error(after.error);
+    expect(after.outcome).toBe("fork");
+    expect(after.aside?.some((m) => m.content === "again")).toBe(true);
+    restored.close();
   });
 });

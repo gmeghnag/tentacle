@@ -102,6 +102,7 @@ import {
 } from "./mapping.ts";
 import { outcomeToResponse, toPermissionRequestUpdate } from "./permission-map.ts";
 import {
+  type DaemonLogCapture,
   type DaemonSessionState,
   type PendingPermission,
   type PersistedTurnKey,
@@ -239,6 +240,15 @@ export interface RestoredSessionState {
   readonly title?: TitleState;
   /** The rows the record kept for their writer (absent = none). */
   readonly returned?: readonly ReturnedEntry[];
+  /**
+   * The log entry the record paired with and the log's projection there
+   * (`DaemonSessionRecord.logHead` / `logged`): the new incarnation's log
+   * CONTINUES that lineage — its `base{reload}` restates exactly `logged`
+   * (`prev` = `head`), and the reload's repair follows as ordinary entries
+   * (docs/feat/session-log-serve-store.md §5). Absent (an unpaired record):
+   * a new lineage, from the reloaded history.
+   */
+  readonly log?: { readonly head: LogCursor; readonly logged: readonly ChatMessage[] };
 }
 
 /**
@@ -482,8 +492,8 @@ export class HostedSession {
       this.enqueued.add(enqueueId);
       this.restoredIds.add(enqueueId);
     }
-    // A reload lost the summary's identity: the record names it (v8 `head`;
-    // an older record's by the old rule, `parseDaemonRecord`) — so a send-now
+    // A reload lost the summary's identity: the record names it (`head`, or
+    // the reload rule when none is marked, `rebuild`) — so a send-now
     // there is `NoTurnRunning`, never an unasked turn that may run tools, even
     // after a crash at a context reset's barrier.
     if (restored?.head !== undefined) {
@@ -515,12 +525,21 @@ export class HostedSession {
     this.logSha256 = logOptions.sha256 ?? nodeSha256;
     this.logVerify = logOptions.verify;
     this.log = new SessionLog(crypto.randomUUID(), now);
-    this.log.start(
-      session.messages,
-      restored ? "reload" : (logOptions.reason ?? "create"),
-      restored ? undefined : logOptions.base,
-      resume?.turnId,
-    );
+    if (restored?.log) {
+      // A reload of a paired record continues its lineage: the base restates
+      // EXACTLY what the last landed write logged (a reader holding that head
+      // reseeds instead of forking), then the overlay and the repair notes
+      // become ordinary entries (pointer compares only).
+      this.log.start(restored.log.logged, "reload", restored.log.head, resume?.turnId);
+      this.log.commit(session.messages, session.messages.length);
+    } else {
+      this.log.start(
+        session.messages,
+        restored ? "reload" : (logOptions.reason ?? "create"),
+        restored ? undefined : logOptions.base,
+        resume?.turnId,
+      );
+    }
     this.log.title(this.wireTitle());
     this.verifyLog();
     this.returned = (restored?.returned ?? []).map((r) => ({ ...r }));
@@ -807,7 +826,7 @@ export class HostedSession {
   /** Hand the persister this session's state as of NOW (a no-op without one, or once closed). */
   private persist(): void {
     if (this.persister && !this.closed) {
-      this.persister.schedule(this.id, () => this.persistedState());
+      this.persister.schedule(this.id, (after) => this.persistedState(after));
     }
   }
 
@@ -848,7 +867,7 @@ export class HostedSession {
     if (!this.persister || !this.persister.writable(this.id)) {
       return true;
     }
-    const landed = this.persister.write(this.id, () => this.persistedState());
+    const landed = this.persister.write(this.id, (after) => this.persistedState(after));
     await untilAborted(landed, signal);
     return signal.aborted ? false : landed;
   }
@@ -873,8 +892,14 @@ export class HostedSession {
     await untilAborted(this.persisted(), signal);
   }
 
-  /** The state a record captures, copied now (the arrays are live). */
-  private persistedState(): DaemonSessionState {
+  /**
+   * The state a record captures, copied now (the arrays are live) — with its
+   * log part: references to the entries derived after `after` (the
+   * persister's cursor; absent: from the last `base`) and the log's
+   * projection, nothing materialized or hashed here (docs/feat/session-log-serve-store.md
+   * §2: this runs inside the steering window). `withLog: false` → none.
+   */
+  private persistedState(after?: LogCursor, withLog = true): DaemonSessionState {
     const turns: PersistedTurnKey[] = [];
     for (const [turnId, entry] of this.turns) {
       turns.push(entry.end ? { turnId, end: entry.end } : { turnId });
@@ -898,6 +923,7 @@ export class HostedSession {
       title: this.title,
       returned: this.returned.map((r) => ({ ...r })),
       ...(head >= 0 ? { head } : {}),
+      ...(withLog ? { log: this.logCapture(after) } : {}),
       // From the mirror (= the agent's queue in every stretch, the module's
       // load-bearing assumption), so texts and ids never disagree.
       ...(turnId !== null
@@ -911,6 +937,19 @@ export class HostedSession {
             },
           }
         : {}),
+    };
+  }
+
+  /** The log's part of a capture: O(Δ) slot references + the projection (no wire form built). */
+  private logCapture(after: LogCursor | undefined): DaemonLogCapture {
+    const { slots, head, rebased } = this.log.since(after);
+    const log = this.log;
+    const sha256 = this.logSha256;
+    return {
+      entries: () => slots.map((slot) => log.materialize(slot, sha256)),
+      head,
+      rebased,
+      logged: log.projection,
     };
   }
 
@@ -2134,12 +2173,16 @@ export class HostedSession {
    * their writer (`returned`, as streamed), so the reopen must not also
    * append them as user messages — handed back AND delivered.
    */
-  archive(): DaemonSessionState {
-    const before = this.persistedState();
+  archive(after?: LogCursor): DaemonSessionState {
+    const before = this.persistedState(after);
     this.close("closed");
-    const after = this.persistedState();
+    // The log part is the one BEFORE the close (docs/feat/session-log-serve-store.md
+    // §2): an archived session's log is the shape a crash leaves — no
+    // `turn_end` of the turn the close cut — and the reopen closes it as ended.
+    const closed = this.persistedState(undefined, false);
     return {
-      ...after,
+      ...closed,
+      ...(before.log ? { log: before.log } : {}),
       ...(before.turn ? { turn: { ...before.turn, steering: [], steeringIds: [] } } : {}),
     };
   }
