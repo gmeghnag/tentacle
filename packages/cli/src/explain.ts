@@ -40,7 +40,11 @@ export interface ExplainEntry {
   readonly values?: readonly string[];
   /** The built-in default as a value (`4`, `true`, `"read-only"`, `["/tmp"]`). */
   readonly default?: unknown;
+  /** The default as TEXT, when it is runtime state (`$TMPDIR` and `/tmp`). */
+  readonly defaultText?: string;
   readonly env?: string;
+  /** How the env var is written (`:"-separated; empty = []`), when it matters. */
+  readonly envNote?: string;
   /** `true` when the env var is inverted (a truthy value turns the setting OFF). */
   readonly envInverts?: true;
   readonly flag?: string;
@@ -64,6 +68,12 @@ export type ExplainResult =
       readonly ok: false;
       readonly error: string;
       readonly suggestions: readonly string[];
+      /**
+       * The key was a sentence, not a path: the user meant it as a prompt
+       * (review O1). The way back is `tentacle -- <prompt>`, and only the
+       * caller knows the whole argv, so it builds that line (`promptHint`).
+       */
+      readonly prompt?: true;
     };
 
 const MAX_SUGGESTIONS = 3;
@@ -92,7 +102,9 @@ function entryOf(path: string): ExplainEntry | undefined {
     ...(doc.type !== undefined ? { type: doc.type } : {}),
     ...(doc.values !== undefined ? { values: doc.values } : {}),
     ...(fallback !== undefined ? { default: fallback } : {}),
+    ...(doc.defaultText !== undefined ? { defaultText: doc.defaultText } : {}),
     ...(doc.env !== undefined ? { env: doc.env } : {}),
+    ...(doc.envNote !== undefined ? { envNote: doc.envNote } : {}),
     ...(doc.envInverts === true ? { envInverts: true as const } : {}),
     ...(doc.flag !== undefined ? { flag: doc.flag } : {}),
     ...(doc.secret !== undefined ? { secret: doc.secret } : {}),
@@ -108,11 +120,27 @@ function entriesOf(paths: readonly string[]): readonly ExplainEntry[] {
     .filter((entry): entry is ExplainEntry => entry !== undefined);
 }
 
-const fail = (error: string, suggestions: readonly string[] = []): ExplainResult => ({
+const fail = (
+  error: string,
+  suggestions: readonly string[] = [],
+  prompt?: true,
+): ExplainResult => ({
   ok: false,
   error,
   suggestions,
+  ...(prompt === true ? { prompt: true as const } : {}),
 });
+
+/**
+ * `explain` is a subcommand, so a word that names one is never a prompt
+ * (docs/feat/config-explain.md, review O1 — the owner accepted it). The way
+ * back is `tentacle -- <prompt>`, and an error that leaves the user stuck is
+ * the half of the trade-off that is not acceptable: say it, exactly. `words`
+ * are the argv after `tentacle`, i.e. the prompt the old build would have sent.
+ */
+export function promptHint(words: readonly string[]): string {
+  return `to send this as a prompt, use: tentacle -- ${words.join(" ")}`;
+}
 
 /**
  * Answer `explain <key>`. A key resolves through the schema, so a map's free
@@ -140,6 +168,12 @@ export function explain(
   const trimmed = key.trim();
   const node = resolveKeyPath(trimmed);
   if (node === undefined) {
+    // A whole sentence is not a typo: it is a prompt the user expected to be
+    // sent (O1). Suggesting keys would be noise, so the caller gets `prompt`
+    // and answers with the way back instead of a "did you mean".
+    if (/\s/.test(trimmed)) {
+      return fail(`unknown config key "${key}"`, [], true);
+    }
     return fail(`unknown config key "${key}"`, nearestKeys(trimmed, allPaths(), MAX_SUGGESTIONS));
   }
   const entry = entryOf(node.path);
@@ -160,37 +194,89 @@ export function explain(
 }
 
 /** A default value rendered short, for a `= …` on a list line or a card. */
-function shortDefault(value: unknown): string {
-  const rendered = JSON.stringify(value);
+function shortDefault(entry: ExplainEntry): string {
+  if (entry.defaultText !== undefined) {
+    return entry.defaultText;
+  }
+  const rendered = JSON.stringify(entry.default);
   return rendered === undefined ? "" : rendered;
 }
 
-/** The widest path a `(N sub-keys)` / `= default` column has to fit under. */
-const COLUMN = 44;
+/** The width `explain` fits its output to when the terminal does not say. */
+export const DEFAULT_WIDTH = 80;
+
+/** The least room a summary is given beside its path before the column is capped. */
+const MIN_SUMMARY = 24;
 
 /**
- * One key of a list (the top level, a section's children): ONE line — the
- * path, its sub-key count or its short default, then its summary.
+ * Greedy word wrap. A word longer than the width (a long path, a URL) is kept
+ * whole: breaking it mid-token would make it unsearchable, which is the one
+ * thing this output is for.
  */
-function listLine(entry: ExplainEntry, width: number): string {
+function wrap(text: string, width: number): string[] {
+  const limit = Math.max(1, width);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/).filter((w) => w !== "")) {
+    if (line === "") {
+      line = word;
+      continue;
+    }
+    if (line.length + 1 + word.length <= limit) {
+      line = `${line} ${word}`;
+      continue;
+    }
+    lines.push(line);
+    line = word;
+  }
+  lines.push(line);
+  return lines;
+}
+
+/** The narrowest path column worth aligning to (a short list still lines up). */
+const MIN_COLUMN = 24;
+
+/**
+ * One key of a list (the top level, a section's children): the path, its
+ * sub-key count or its short default, then its summary — wrapped to `width`,
+ * with the continuation under the summary column so the path reads as a left
+ * margin (review LOW 6: at 80 columns the old form ran to 108 and the terminal
+ * then broke it mid-word).
+ */
+function listLines(entry: ExplainEntry, column: number, width: number): string[] {
   const lead = listLead(entry);
-  return `${lead}${" ".repeat(Math.max(2, width - lead.length))}${entry.summary}`;
+  const pad = column - lead.length;
+  if (pad < 2) {
+    // The path is wider than the column: the annotation goes under it rather
+    // than pushing the line past the width.
+    return [lead, ...wrap(entry.summary, width - 2).map((line) => `  ${line}`)];
+  }
+  const cont = " ".repeat(column);
+  const wrapped = wrap(entry.summary, width - column);
+  return wrapped.map((line, i) =>
+    i === 0 ? `${lead}${" ".repeat(pad)}${line}` : `${cont}${line}`,
+  );
 }
 
 /** The left column of a list line: the indented path, and its count/default. */
 function listLead(entry: ExplainEntry): string {
+  const fallback = shortDefault(entry);
   const marker =
     entry.subKeys !== undefined
       ? ` (${entry.subKeys} sub-key${entry.subKeys === 1 ? "" : "s"})`
-      : entry.default !== undefined && shortDefault(entry.default).length <= 24
-        ? ` = ${shortDefault(entry.default)}`
+      : entry.default !== undefined && fallback.length <= 24
+        ? ` = ${fallback}`
         : "";
   return `  ${entry.path}${marker}`;
 }
 
-/** The width the path column of one list needs, so the summaries line up. */
-function columnOf(entries: readonly ExplainEntry[]): number {
-  return Math.max(COLUMN, ...entries.map((entry) => listLead(entry).length + 2));
+/**
+ * The width of the path column: wide enough for this list's leads, never so
+ * wide that a summary has no room left on a narrow terminal.
+ */
+function columnOf(entries: readonly ExplainEntry[], width: number): number {
+  const wanted = Math.max(MIN_COLUMN, ...entries.map((entry) => listLead(entry).length + 2));
+  return Math.max(4, Math.min(wanted, width - MIN_SUMMARY));
 }
 
 /** Where a leaf may be written: the top-level file, a profile, or both. */
@@ -215,35 +301,55 @@ function carriedText(carried: KeyDoc["carried"]): string {
   return "not carried: a pod uses its own value";
 }
 
+/** The indent of a card's labelled lines (`  type         …`). */
+const LABEL = 15;
+
+/** One labelled card line, its value wrapped under the label. */
+function field(label: string, value: string, width: number): string[] {
+  const head = `  ${label.padEnd(LABEL - 2)}`;
+  const wrapped = wrap(value, width - LABEL);
+  return wrapped.map((line, i) => (i === 0 ? `${head}${line}` : `${" ".repeat(LABEL)}${line}`));
+}
+
 /** The full card: every fact the owner asked for, one labelled line each. */
-function cardLines(entry: ExplainEntry): string[] {
-  const out: string[] = [`${entry.path}`, "", entry.summary];
+function cardLines(entry: ExplainEntry, width: number): string[] {
+  const out: string[] = [entry.path, "", ...wrap(entry.summary, width)];
   if (entry.details !== undefined) {
-    out.push("", entry.details);
+    out.push("", ...wrap(entry.details, width));
   }
   out.push("");
   if (entry.type !== undefined) {
-    out.push(`  type         ${entry.type}`);
+    out.push(...field("type", entry.type, width));
   }
   if (entry.values !== undefined && entry.values.length > 0) {
-    out.push(`  values       ${entry.values.join(" | ")}`);
+    out.push(...field("values", entry.values.join(" | "), width));
   }
   if (entry.secret !== undefined) {
     out.push(
-      `  secret       yes — never printed (masked as ***); open the file to read it${
-        entry.secret === "values" ? " (every value under this key is masked)" : ""
-      }`,
+      ...field(
+        "secret",
+        `yes — never printed (masked as ***); open the file to read it${
+          entry.secret === "values" ? " (every value under this key is masked)" : ""
+        }`,
+        width,
+      ),
     );
   }
   out.push(
-    `  default      ${entry.default === undefined ? "unset (see above)" : shortDefault(entry.default)}`,
+    ...field(
+      "default",
+      entry.default === undefined && entry.defaultText === undefined
+        ? "unset (see above)"
+        : shortDefault(entry),
+      width,
+    ),
   );
-  out.push(`  env          ${envText(entry)}`);
-  out.push(`  flag         ${entry.flag ?? "—"}`);
-  out.push(`  carried      ${carriedText(entry.carried)}`);
-  out.push(`  scope        ${scopeText(entry.scope)}`);
+  out.push(...field("env", envText(entry), width));
+  out.push(...field("flag", entry.flag ?? "—", width));
+  out.push(...field("carried", carriedText(entry.carried), width));
+  out.push(...field("scope", scopeText(entry.scope), width));
   if (entry.example !== undefined) {
-    out.push(`  example      ${oneLine(entry.example)}`);
+    out.push(...field("example", oneLine(entry.example), width));
   }
   return out;
 }
@@ -252,9 +358,11 @@ function envText(entry: ExplainEntry): string {
   if (entry.env === undefined) {
     return "— (file only)";
   }
-  return entry.envInverts === true
-    ? `${entry.env} (inverted: a truthy value turns the setting OFF)`
-    : entry.env;
+  const value =
+    entry.envInverts === true
+      ? `${entry.env} (inverted: a truthy value turns the setting OFF)`
+      : entry.env;
+  return entry.envNote !== undefined ? `${value} (${entry.envNote})` : value;
 }
 
 /** An example value on one line: a multi-line array/object is collapsed. */
@@ -269,23 +377,31 @@ function oneLine(example: string): string {
  * The text the command prints (STDOUT: this is the command's data). An error
  * renders as `""` — `main` prints it on STDERR with its suggestions, so the
  * data stream stays free of prose.
+ *
+ * `opts.width` is the terminal's width, read by `main` and passed in so this
+ * stays pure (review LOW 6). 80 when the terminal does not say.
  */
-export function renderExplainText(result: ExplainResult): string {
+export function renderExplainText(
+  result: ExplainResult,
+  opts: { readonly width?: number } = {},
+): string {
   if (!result.ok) {
     return "";
   }
+  const width = opts.width !== undefined && opts.width > 0 ? opts.width : DEFAULT_WIDTH;
   if (result.level === "leaf") {
-    return `${cardLines(result.entries[0] as ExplainEntry).join("\n")}\n`;
+    return `${cardLines(result.entries[0] as ExplainEntry, width).join("\n")}\n`;
   }
   if (result.level === "all") {
     return `${result.entries.map((entry) => entry.path).join("\n")}\n`;
   }
   const head =
     result.level === "section" && result.section !== undefined
-      ? [`${result.section.path} — ${result.section.summary}`, ""]
+      ? [...wrap(`${result.section.path} — ${result.section.summary}`, width), ""]
       : [];
-  const column = columnOf(result.entries);
-  return `${[...head, ...result.entries.map((entry) => listLine(entry, column))].join("\n")}\n`;
+  const column = columnOf(result.entries, width);
+  const lines = result.entries.flatMap((entry) => listLines(entry, column, width));
+  return `${[...head, ...lines].join("\n")}\n`;
 }
 
 /** The same model as JSON (STDOUT), for scripts and editors. */
@@ -293,14 +409,24 @@ export function renderExplainJson(result: ExplainResult): string {
   return `${JSON.stringify(result, null, 2)}\n`;
 }
 
-/** The error line `main` prints on STDERR, suggestions included. */
-export function explainErrorText(result: ExplainResult): string {
+/**
+ * The error line `main` prints on STDERR, suggestions (or the caller's
+ * `promptHint`) included.
+ */
+export function explainErrorText(
+  result: ExplainResult,
+  opts: { readonly hint?: string } = {},
+): string {
   if (result.ok) {
     return "";
   }
+  // An explicit hint wins: it is the answer the user needs (`tentacle -- …`),
+  // not a guess at a key they did not mean. It always sits on its own line.
   const hint =
-    result.suggestions.length === 0
-      ? "\nrun `tentacle explain` for the top-level keys"
-      : `\ndid you mean ${result.suggestions.join(", ")}?`;
+    opts.hint !== undefined
+      ? `\n${opts.hint}`
+      : result.suggestions.length === 0
+        ? "\nrun `tentacle explain` for the top-level keys"
+        : `\ndid you mean ${result.suggestions.join(", ")}?`;
   return `[error] ${result.error}${hint}\n`;
 }

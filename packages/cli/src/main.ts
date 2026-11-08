@@ -56,7 +56,13 @@ import {
   resolveRm,
   setupFailureLine,
 } from "./engine-select.ts";
-import { explain, explainErrorText, renderExplainJson, renderExplainText } from "./explain.ts";
+import {
+  explain,
+  explainErrorText,
+  promptHint,
+  renderExplainJson,
+  renderExplainText,
+} from "./explain.ts";
 import {
   ARGS,
   type ParsedFlags,
@@ -183,7 +189,9 @@ Usage:
                                 a running one asks y/N, -f skips the question). A
                                 detached run is stopped first
   tentacle <prompt...>     run a single task and exit
-  tentacle -- <prompt...>  the same, for a prompt that starts with '-'
+  tentacle -- <prompt...>  the same, for a prompt that starts with '-' or
+                           with a subcommand word (tentacle -- explain how
+                           config works: the first bare word IS the subcommand)
   tentacle serve [opts]    host the remote-control daemon
   tentacle connect <url> [--resume [id]|--continue]
                            drive a remote daemon with the TUI; quitting
@@ -333,6 +341,8 @@ export interface CliIO {
   out?: (text: string) => void;
   /** Test seam: STDERR (everything else). An injected sink is never a terminal. */
   err?: (text: string) => void;
+  /** Test seam: the width `explain` fits its output to (default: stdout's). */
+  columns?: number;
   /** Test seam: stdout is a terminal (`run --detach` prints its name only when not). Default: a real TTY stdout, `false` with an injected `out`. */
   outTty?: boolean;
   /** Test seam: replaces the `run` engine runtime (pins the flag/config → `resumeHint` wiring). */
@@ -399,6 +409,14 @@ function askLine(prompt: string, input: NodeJS.ReadableStream = process.stdin): 
     rl.on("close", () => finish(""));
     rl.question(prompt, finish);
   });
+}
+
+/**
+ * The words `tentacle -- …` would send for this argv: everything after
+ * `tentacle` as typed, minus the flags (a flag was asked for, not said).
+ */
+function promptWords(args: readonly string[]): readonly string[] {
+  return args.filter((word) => !word.startsWith("-"));
 }
 
 export async function main(argv: readonly string[], io: CliIO = {}): Promise<number> {
@@ -492,7 +510,15 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         out(info === "help" ? HELP : `tentacle ${APP_VERSION}\n`);
         return 0;
       }
-      err(`[error] ${result.error}\nusage: ${USAGE[mode]}\n`);
+      // `tentacle explain how config works`: `explain` is now a subcommand, so
+      // the words are not sent as a prompt — say exactly how to send them
+      // (docs/feat/config-explain.md, review O1). The words are the WHOLE argv
+      // after `tentacle` as typed, flags aside (a flag was asked for, not said).
+      const promptLine =
+        mode === "explain" && result.error.startsWith("unexpected argument")
+          ? `\n${promptHint(promptWords(args))}`
+          : "";
+      err(`[error] ${result.error}${promptLine}\nusage: ${USAGE[mode]}\n`);
       return 1;
     }
     parsed = result;
@@ -573,10 +599,21 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
   if (mode === "explain") {
     const result = explain(parsed.positional[0], { all: parsed.bools.has("all") });
     if (!result.ok) {
-      err(explainErrorText(result));
+      // A quoted sentence (`tentacle explain "how does X work"`) reaches here as
+      // one argument, so `parseArgs` saw nothing wrong; the way back is the
+      // same line, built from the argv the old build would have sent.
+      err(
+        explainErrorText(result, {
+          hint: result.prompt === true ? promptHint(promptWords(args)) : undefined,
+        }),
+      );
       return 1;
     }
-    out(parsed.bools.has("json") ? renderExplainJson(result) : renderExplainText(result));
+    out(
+      parsed.bools.has("json")
+        ? renderExplainJson(result)
+        : renderExplainText(result, { width: io.columns ?? process.stdout.columns }),
+    );
     return 0;
   }
 

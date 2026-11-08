@@ -32,13 +32,14 @@ interface Run {
   readonly err: string;
 }
 
-async function run(args: string[]): Promise<Run> {
+async function run(args: string[], io: { columns?: number } = {}): Promise<Run> {
   const out: string[] = [];
   const err: string[] = [];
   const code = await main(["bun", "cli", "explain", ...args], {
     out: (text) => out.push(text),
     err: (text) => err.push(text),
     terminal: NO_TERMINAL,
+    ...(io.columns !== undefined ? { columns: io.columns } : {}),
   });
   return { code, out: out.join(""), err: err.join("") };
 }
@@ -126,6 +127,75 @@ describe("tentacle explain", () => {
     const { code, err } = await run(["model", "tools"]);
     expect(code).toBe(1);
     expect(err).toContain("usage:");
+  });
+
+  test("a multi-word argument says exactly how to send it as a prompt (O1)", async () => {
+    // `explain` is a subcommand now, so `tentacle explain how …` is an
+    // argument error — and the error must not leave the user stuck.
+    const { code, out, err } = await run(["how", "config", "works"]);
+    expect(code).toBe(1);
+    expect(out).toBe("");
+    expect(err).toContain("to send this as a prompt, use: tentacle -- explain how config works");
+    // The ordinary suggestion hint is not printed on top of it.
+    expect(err).not.toContain("did you mean");
+  });
+
+  test("a multi-word KEY (one quoted argument) gets the same way back", async () => {
+    // The argv as typed, the flag dropped: exactly the prompt the old build
+    // would have sent.
+    const { code, err } = await run(["how does X work", "--json"]);
+    expect(code).toBe(1);
+    expect(err).toContain("to send this as a prompt, use: tentacle -- explain how does X work");
+    expect(err).not.toContain("--json\n");
+  });
+
+  test("a single stray word still gets the argument error and the usage line", async () => {
+    const { code, err } = await run(["model", "tools"]);
+    expect(code).toBe(1);
+    expect(err).toContain('unexpected argument "tools"');
+    expect(err).toContain("usage: tentacle explain");
+  });
+
+  test("the output fits the terminal width it is given (LOW 6)", async () => {
+    for (const args of [[], ["model"], ["tools.writableDirs"], ["mcpServers"]]) {
+      const { code, out } = await run(args, { columns: 80 });
+      expect(code).toBe(0);
+      const over = out
+        .trimEnd()
+        .split("\n")
+        .filter((line) => line.length > 80);
+      expect({ args, over }).toEqual({ args, over: [] });
+    }
+  });
+
+  test("with no terminal width it assumes 80", async () => {
+    const { out } = await run([]);
+    const over = out
+      .trimEnd()
+      .split("\n")
+      .filter((line) => line.length > 80);
+    expect(over).toEqual([]);
+  });
+
+  test("$schema is listed last, not first (O2)", async () => {
+    const { out } = await run([], { columns: 200 });
+    const rows = out.trimEnd().split("\n");
+    const head = (path: string): number =>
+      rows.findIndex((row) => row.trimStart().startsWith(`${path} `));
+    expect(head("$schema")).toBeGreaterThan(head("model"));
+    expect(head("$schema")).toBe(rows.length - 1);
+  });
+
+  test("--help says how to send a prompt that starts with a subcommand word", async () => {
+    const out: string[] = [];
+    const code = await main(["bun", "cli", "--help"], {
+      out: (t) => out.push(t),
+      terminal: NO_TERMINAL,
+    });
+    expect(code).toBe(0);
+    const help = out.join("");
+    expect(help).toContain("tentacle -- <prompt...>");
+    expect(help).toContain("subcommand word");
   });
 
   test("it is listed in --help", async () => {

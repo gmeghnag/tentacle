@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { keyDoc, leafPaths } from "@tentacle/config";
-import { explain, renderExplainJson, renderExplainText } from "../src/explain.ts";
+import { keyDoc, leafPaths, renderConfigKeysTable } from "@tentacle/config";
+import {
+  explain,
+  explainErrorText,
+  promptHint,
+  renderExplainJson,
+  renderExplainText,
+} from "../src/explain.ts";
 
 const text = (key: string | undefined, opts: { all?: boolean } = {}): string => {
   const result = explain(key, opts);
@@ -36,6 +42,15 @@ describe("explain with no key: the top level only", () => {
     expect(new Set(paths).size).toBe(paths.length);
   });
 
+  test("$schema is listed, LAST — a pointer for editors, not a setting", () => {
+    // Review O2: keep it explainable, but do not open the list with it.
+    const result = explain(undefined);
+    if (!result.ok) throw new Error("expected ok");
+    const paths = result.entries.map((e) => e.path);
+    expect(paths[0]).not.toBe("$schema");
+    expect(paths[paths.length - 1]).toBe("$schema");
+  });
+
   test("the count is of DIRECT sub-keys, and it is the model's own field", () => {
     const result = explain(undefined);
     if (!result.ok) throw new Error("expected ok");
@@ -45,16 +60,39 @@ describe("explain with no key: the top level only", () => {
     expect(text(undefined)).toContain("(9 sub-keys)");
   });
 
-  test("it is a list, not a wall of prose: one line per key, summary included", () => {
-    const out = lines(undefined);
+  test("it is a list, not a wall of prose: one line per key on a wide terminal", () => {
+    // The form (no blank lines, no headings, no wrapping) is asserted at a
+    // width wide enough for every summary — where it must hold. At 80 a
+    // summary may CONTINUE under its column (review LOW 6), which the next
+    // test pins; what may never happen is a blank line or a lost entry.
     const result = explain(undefined);
     if (!result.ok) throw new Error("expected ok");
-    // Exactly one line per entry: no blank lines, no wrapping, no headings.
+    const out = renderExplainText(result, { width: 200 }).trimEnd().split("\n");
     expect(out.length).toBe(result.entries.length);
     for (const line of out) {
       expect(line.trim()).not.toBe("");
     }
     expect(text(undefined)).toContain("token budget");
+    // Every key is named at the head of its own line, exactly once.
+    for (const entry of result.entries) {
+      expect(out.filter((line) => line.trimStart().startsWith(entry.path)).length).toBe(1);
+    }
+  });
+
+  test("at 80 columns the summary wraps under its column, and no entry is lost", () => {
+    const result = explain(undefined);
+    if (!result.ok) throw new Error("expected ok");
+    const out = renderExplainText(result, { width: 80 }).trimEnd().split("\n");
+    // Still a list: no blank line, and each entry's summary is reachable by
+    // joining the continuation lines back onto their head.
+    for (const line of out) {
+      expect(line.trim()).not.toBe("");
+    }
+    const joined = out.map((line) => line.trim()).join(" ");
+    for (const entry of result.entries) {
+      expect(joined).toContain(entry.summary.replace(/\s+/g, " "));
+    }
+    expect(out.filter((line) => line.trimStart().startsWith("model")).length).toBeGreaterThan(0);
   });
 });
 
@@ -244,6 +282,134 @@ describe("--json", () => {
     const entry = (JSON.parse(json) as { entries: { secret?: unknown }[] }).entries[0];
     expect(entry?.secret).toBe(true);
     expect(json).not.toMatch(/sk-[A-Za-z0-9]{8,}/);
+  });
+});
+
+describe("width: the output fits the terminal (LOW 6)", () => {
+  const wide = (out: string, width: number): string[] =>
+    out
+      .trimEnd()
+      .split("\n")
+      .filter((line) => line.length > width);
+
+  test("at 80 columns every level fits, with no sentence broken mid-word", () => {
+    for (const key of [undefined, "model", "subagents", "tools", "mcpServers", "profiles"]) {
+      const result = explain(key);
+      if (!result.ok) throw new Error(`expected ok for ${String(key)}`);
+      expect({ key, wide: wide(renderExplainText(result, { width: 80 }), 80) }).toEqual({
+        key,
+        wide: [],
+      });
+    }
+  });
+
+  test("a leaf card fits too, details and all", () => {
+    // `tools.writableDirs` has the longest `details` in the registry (~1200 chars).
+    for (const key of [
+      "tools.writableDirs",
+      "tools.redactSecrets",
+      "model.apiKey",
+      "mcpServers.*.readOnlyTools",
+      "hooks",
+    ]) {
+      const result = explain(key);
+      if (!result.ok) throw new Error(`expected ok for ${key}`);
+      expect({ key, wide: wide(renderExplainText(result, { width: 80 }), 80) }).toEqual({
+        key,
+        wide: [],
+      });
+    }
+  });
+
+  test("80 is the default when the terminal does not say", () => {
+    const result = explain(undefined);
+    if (!result.ok) throw new Error("expected ok");
+    expect(renderExplainText(result)).toBe(renderExplainText(result, { width: 80 }));
+  });
+
+  test("a narrow terminal is honoured, not overflowed", () => {
+    const result = explain("subagents");
+    if (!result.ok) throw new Error("expected ok");
+    expect(wide(renderExplainText(result, { width: 60 }), 60)).toEqual([]);
+  });
+
+  test("it is still one line per key when it does fit", () => {
+    // The wrap must not break the list shape on a wide terminal.
+    const result = explain("subagents");
+    if (!result.ok) throw new Error("expected ok");
+    const rows = renderExplainText(result, { width: 200 }).trimEnd().split("\n");
+    // Its own summary line, a blank, then one line per child.
+    expect(rows.length).toBe(result.entries.length + 2);
+  });
+
+  test("a path wider than the whole column still fits, its summary below it", () => {
+    // At 80 the longest path (`profiles.*.subagents.agentTaskDescriptionFile`)
+    // still leaves a column; at a narrower one the summary wraps under the path
+    // rather than pushing the line past the width.
+    for (const width of [60, 70, 80]) {
+      const result = explain("profiles");
+      if (!result.ok) throw new Error("expected ok");
+      expect({ width, wide: wide(renderExplainText(result, { width }), width) }).toEqual({
+        width,
+        wide: [],
+      });
+    }
+  });
+});
+
+describe("a multi-word key is a prompt, not a typo (LOW 2 / O1)", () => {
+  test("the result flags it, and `main` answers with `tentacle -- <prompt>`", () => {
+    const result = explain("explain how config works");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    // `explain` cannot know the whole argv, so it reports the INTENT; `main`
+    // builds the line from the argv the old build would have sent.
+    expect(result.prompt).toBe(true);
+    // No "did you mean": the words are a sentence, not a misspelt key.
+    expect(result.suggestions).toEqual([]);
+    const hint = promptHint(["explain", "explain how config works"]);
+    expect(hint).toBe(
+      "to send this as a prompt, use: tentacle -- explain explain how config works",
+    );
+    expect(explainErrorText(result, { hint })).toContain(
+      "to send this as a prompt, use: tentacle --",
+    );
+  });
+
+  test("a single misspelt word still gets its suggestions, not the prompt hint", () => {
+    const result = explain("modle");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.prompt).toBeUndefined();
+    expect(result.suggestions).toContain("model");
+  });
+
+  test("a sentence under a known section is a prompt too", () => {
+    const result = explain("tools how do I write to tmp");
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.prompt).toBe(true);
+  });
+});
+
+describe("defaults that are runtime state are text, not a value (LOW 5)", () => {
+  test('tools.writableDirs shows the real default, not `["/tmp"]`', () => {
+    const out = text("tools.writableDirs");
+    expect(out).toContain("$TMPDIR");
+    expect(out).toContain("/tmp");
+    expect(out).not.toContain('["/tmp"]');
+  });
+
+  test("the list line and the README table use the same text", () => {
+    const listed = text("tools");
+    // Long defaults are not put on a list line; the card carries it.
+    expect(listed).not.toContain('["/tmp"]');
+    expect(renderConfigKeysTable()).toContain("the system temp dir (`$TMPDIR`) and `/tmp`");
+  });
+
+  test("the env format from the old README row is still shown (LOW 7)", () => {
+    expect(text("tools.writableDirs")).toContain(":`-separated; empty = `[]`");
+    expect(renderConfigKeysTable()).toContain(":`-separated; empty = `[]`");
   });
 });
 

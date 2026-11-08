@@ -583,6 +583,207 @@ leaves STDOUT empty, and `--all` is the flat sorted leaf list (no `profiles.*`
 mirror — the same key documented once).
 
 
+### Fix round 1
+
+*— deepseek-v4.1-flash (tentacle), 2026-11-08*
+
+All of Sonnet's round-1 findings are addressed. Nothing under `schema.ts`,
+`defaults.ts`, `resolve.ts` or `load.ts` was touched (`git diff --stat` over them
+is empty); no other package's tests were weakened — the one existing test that
+changed shape ("one line per key") now asserts the same property at a width
+where it must hold, and a new test pins the 80-column form.
+
+**MEDIUM 1 — the one wrong entry, and the check that would have caught it.**
+
+I first measured the whole registry against the schema walker rather than
+reading the one entry (`.tentacle/tmp/config-explain/typecheck2.ts`): comparing
+every path's `type` and `values` with `configKeyNodes()` found exactly two
+mismatches, and they are one setting (`mcpServers.*.readOnlyTools` and its
+`profiles.*` mirror):
+
+```
+MISMATCH mcpServers.*.readOnlyTools: reg enum [hint|none] vs schema enum|array [hint|none]
+checked 127, bad 2
+```
+
+Every other `mcpServers.*` entry and every other map entry (`env.*`,
+`headers.*`, `packages.*`, `profiles.*`) was correct; the probe is the evidence,
+not my reading. The schema is `z.union([z.literal("hint"), z.literal("none"),
+z.array(z.string().min(1))])` (`schema.ts:58-62`), so the registry is now
+`type: "enum | array"`, keeping `values: ["hint", "none"]` as the literals of the
+union, and the summary names all three forms.
+
+The "better" half of the reviewer's suggestion is taken: **T1 now compares
+`type` and `values` with the walker** (`key-docs.test.ts`, "each entry's `type`
+and `values` are the schema's, not a second opinion"). Union members are
+compared as SETS (`enum | array` == `enum|array`), a section's absent `type`
+means `object`. Red on the round-1 code with exactly the two paths above, green
+after the fix. That is the check that makes this class of error impossible
+rather than fixed once.
+
+**MEDIUM 2 / O1 — the subcommand trade-off, with the way back.**
+
+Owner decision (orchestrator, pending the owner): accept `explain` as a
+subcommand. What was missing is the escape hatch, in three places, each tested:
+
+- `README.md` "Ways to run": a `tentacle -- explain how config works` line and a
+  paragraph: a first word that names a subcommand IS that subcommand, so a
+  one-shot prompt that starts with one needs `--` first.
+- `HELP` (`main.ts`): `tentacle -- <prompt...>` now says "for a prompt that
+  starts with '-' **or with a subcommand word**", with the example.
+- The error itself. Two paths, because a user can type it two ways:
+  - `tentacle explain how config works` → `parseArgs` refuses the extra
+    positionals (`flags.ts`'s `positional.max: 1`); `main.ts` now appends
+    `to send this as a prompt, use: tentacle -- explain how config works`
+    beside the usage line.
+  - `tentacle explain "how does X work"` → one argument, so it reaches
+    `explain()` as an unknown key; a key containing whitespace is a sentence,
+    not a typo, so `explain()` reports `prompt: true` instead of guessing keys
+    (a single misspelt word still gets its suggestions — pinned), and `main`
+    prints the same line.
+  `promptHint()` is the one place the sentence is built, and `main.ts` calls it
+  with `promptWords(args)` — the argv after `tentacle` as typed, flags dropped —
+  so both paths print the prompt the OLD build would have sent:
+  `tentacle -- explain how config works` (`explain` included, because that is
+  what the user's own words were). `explain.ts` stays free of `process.argv`;
+  it reports the intent, `main` owns the argv.
+
+**LOW 3 — T1's message says what to do.**
+
+`missing` is now
+`add an entry for "<key>" in packages/config/src/key-docs.ts`, the mirror is not
+listed (it is derived by `derive()`, so naming it was noise), and the reverse
+direction says `remove the entry for "<key>" from packages/config/src/key-docs.ts`.
+The message builder is a named function (`missingEntries`/`extraEntries`) so it
+is asserted directly; mutating it back to a bare path list makes 2 tests red.
+
+**LOW 4 — `tools.redactSecrets` details.**
+
+The `(The comment above the schema's `redactSecrets` says "Default: enabled" …)`
+parenthesis is gone. The entry states the true default — off — and nothing else;
+the schema-comment drift stays recorded in Execution, where it belongs.
+
+**LOW 5 — `tools.writableDirs`' real default.**
+
+`KeyDoc` gained `defaultText`: the default as TEXT, for a default that is
+runtime state. `renderDefault()` (README table) and `explain` (list line and
+card) both prefer it, so the table, the card and the list cannot disagree. The
+entry reads `the system temp dir ($TMPDIR) and /tmp`; the `default()` thunk
+stays (T2 still pins it against `resolveConfig`'s real resolution). The
+provider-dependent defaults got the same treatment while I was there, because
+they were the same bug: `model.baseURL` (both providers) and `model.maxTokens`
+(unset → provider-decided, `64000` for anthropic) — that is LOW 7's fact too.
+And `systemPromptFile` shows its real default (`PROMPT.md` in the config dir).
+
+**LOW 6 — width.**
+
+`renderExplainText` takes `{ width }`; `main.ts` passes
+`io.columns ?? process.stdout.columns` (a new `CliIO.columns` seam), so the
+formatter stays pure. Default 80.
+
+- A list line wraps its summary under the summary column, so the path stays a
+  left margin; when a path is wider than the column allows, the summary goes
+  under it rather than pushing the line out.
+- A card wraps its summary, its `details` and every labelled field, the
+  continuation indented under the label — so `explain tools.writableDirs` (a
+  ~1200-character `details`) is now prose at 80 columns instead of one 1261-
+  column line.
+- The column is capped at `width - 24`, so a narrow terminal shrinks the column
+  instead of overflowing it.
+
+Tests: at 80 columns every level (top, `model`, `subagents`, `tools`,
+`mcpServers`, `profiles`) has no line over 80, five leaf cards including the
+longest `details` have none, 60 and 70 columns work, and the default (no width
+given) equals 80. `explain-main.test.ts` repeats it through `main()` with
+`columns: 80` and with no width at all.
+
+**LOW 7 — the facts the hand table had.**
+
+`git show main:README.md` against the generated table, row by row, was run as a
+script rather than by eye (`.tentacle/tmp/config-explain/tablediff.ts`, output
+in the terminal log). Every fact the old table carried and the first generated
+one dropped is back, in the registry entry that owns it:
+
+| Lost fact | Where it lives now |
+|---|---|
+| `writableDirs` env is `:`-separated, empty = `[]` | new `KeyDoc.envNote`, shown in the table and on the card |
+| `writableDirs` default is `$TMPDIR` and `/tmp` | `defaultText` (LOW 5) |
+| `readOnlyTools`'s array form and `hint` = `readOnlyHint` | summary + `type: "enum | array"` |
+| `maxTokens` 64000 for anthropic, omitted for openai | `defaultText` |
+| `baseURL`'s anthropic default | `defaultText` |
+| `systemPromptFile` default `PROMPT.md`, env is inline not a path | `defaultText` + `envNote` |
+| `tools.execution`'s "writes and `shell` alone" | summary |
+| `subagents.execution`'s "they share one workspace" | summary |
+| `engine`: an unknown value is refused | summary |
+| `contextReset.enabled`: asked like any other tool | summary |
+| `tui.theme`: never carried to a pod | summary |
+| `model.model`: `--model` beats it, for that command | summary |
+| `subagents.agentTaskDescription` family: 4096 bytes, types appended, not both | summary |
+| `subagents.maxParallel`: a llama.cpp server lowers it | summary |
+
+A regression test (`readme-config-table.test.ts`, "the facts the old HAND table
+carried are still in the generated one") lists each as `[path, fact]` and fails
+if its row stops carrying it — red on the round-1 registry, green now. The long
+`writableDirs` prose stays in `details` (a card), which is where the eval said
+it should go; the table keeps the summary, and the README now says where to read
+the rest (`tentacle explain <key>`).
+
+**O2 — `$schema` last.**
+
+Kept and explainable, listed at the END of the top-level list
+(`topLevelKeys()` moves it), not first. Two tests pin the position (one on the
+model, one through `main()`).
+
+**Red/green evidence (each red before the change, green after):**
+
+- The two README tests, against the OLD registry with the README regenerated:
+  **2 failed** (the hand-table facts, the `["/tmp"]` default).
+- Every other assertion was shown red by a MUTATION of the current code (the
+  table below), not by the stash run — that run is weaker here, because
+  `explain.test.ts` cannot even import the old module. Where it did run (the
+  stash of the three source files), 10 failed in `key-docs`/`explain-main`,
+  exactly the new assertions.
+
+**Gate:**
+
+- `bunx tsc --noEmit` — clean.
+- `bunx biome check .` — clean (0 errors, 0 warnings). `--write` fixed a few
+  formatting nits in the new code.
+- `bun test packages` — **5510 pass · 3 skip · 0 fail** (5513 tests, 377 files).
+  The 3 skips are the opt-in ones (live k8s, live docker, the real-socket
+  keepalive); none is a new failure. The round-1 baseline was 5481 pass (5484
+  tests), so the 29 new tests are all green and no existing test was removed —
+  the one that changed shape still asserts the same property (see LOW 6).
+- `bun run docs:config` — "up to date"; a second run writes no bytes, and T4
+  asserts that idempotence as text.
+
+**Mutation check (§9), each with a `cp` backup and a restore, final test code:**
+
+| Mutation | Result |
+|---|---|
+| `renderExplainText` ignores `width` (`const width = 100000`) | red: 6 (four `explain.test.ts` width tests, both `explain-main` ones) |
+| `topLevelKeys()` returns the schema order (`$schema` first) | red: 2 (`$schema` last, model and `main`) |
+| `shortDefault` ignores `defaultText` | red: 2 (`["/tmp"]` shown, card/table text) |
+| the `writableDirs` `defaultText` deleted from the registry | red: 4 (card, table text, T4 drift, T2) |
+| `explain()` guesses keys for a sentence again | red: 3 (both hint tests, the quoted-argv one) |
+| the T1 message builder back to a bare path list | red: 2 (the message test, the extra direction) |
+| `readOnlyTools` back to `type: "enum"` | red: 1 (T1 type/values, both trees reported in the one message) |
+
+**Red on the round-1 code.** `git stash push` of the three source files, then
+the three test files: **10 failed** in `key-docs`/`explain-main` (T1's type
+check, the two runtime-default tests, the two prompt-hint tests, four width
+tests, `$schema` last, `--help`). `explain.test.ts` could not run at all on the
+old code (it imports `promptHint` and passes `{ width }`, which did not exist) —
+which is why the mutation table above is the evidence for those, not the stash
+run: a test that errors instead of failing proves nothing on its own.
+
+**Not verified, and how to:** the wrap at a width the terminal reports but the
+`CliIO` seam cannot carry (a real resize mid-command) — `process.stdout.columns`
+is read ONCE, when the command renders, which is the same "read now" discipline
+`StatusLine` uses. A resize during the print is not followed; that is the
+command's whole output, one write, so there is nothing to redraw.
+
+
 ## Review
 
 *— claude-sonnet-5-5, 2026-11-08* (fresh context; a different model family from the

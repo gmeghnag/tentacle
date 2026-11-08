@@ -74,4 +74,50 @@ describe("T4: the README's config table is the registry's", () => {
     expect(renderConfigKeysTable()).toBe(renderConfigKeysTable());
     expect(renderConfigKeysTable().startsWith("| ")).toBe(true);
   });
+
+  test("the facts the old HAND table carried are still in the generated one (LOW 7)", () => {
+    // Each row is a fact `git show main:README.md` had and the first generated
+    // table dropped. They live in the registry now, so they cannot be lost
+    // again without failing here.
+    const block = committedBlock() ?? "";
+    const lost: [string, string][] = [
+      // The env format: `: separated, empty = []`.
+      ["tools.writableDirs", "`:`-separated; empty = `[]`"],
+      // The real default, not the literal `["/tmp"]`.
+      ["tools.writableDirs", "the system temp dir (`$TMPDIR`) and `/tmp`"],
+      // The array form of readOnlyTools, and its `hint` meaning.
+      ["mcpServers.*.readOnlyTools", "`hint` (default: those it marks `readOnlyHint`)"],
+      ["mcpServers.*.readOnlyTools", "or a list"],
+      // maxTokens: unset is not one value.
+      ["model.maxTokens", "`64000` for anthropic"],
+      // baseURL: both providers' defaults.
+      ["model.baseURL", "`https://api.anthropic.com/v1` (anthropic)"],
+      // systemPromptFile's default name, and that the env is not a path.
+      ["systemPromptFile", "`PROMPT.md` in the config dir"],
+      ["systemPromptFile", "inline, not a path"],
+      // The overlap semantics of tools.execution, kept in the summary.
+      ["tools.execution", "writes and `shell` alone"],
+      // Sub-agent overlap, the workspace-sharing fact.
+      ["subagents.execution", "they share one workspace"],
+      // engine: an unknown value is refused.
+      ["engine", "unknown refused"],
+      // contextReset: asked like any tool.
+      ["contextReset.enabled", "asked like any other tool"],
+      // tui.theme: never carried.
+      ["tui.theme", "never carried to a pod"],
+    ];
+    const missing = lost
+      .filter(([path, fact]) => {
+        const row = block.split("\n").find((line) => line.startsWith(`| \`${path}\` |`));
+        return row === undefined || !row.includes(fact);
+      })
+      .map(([path, fact]) => `${path}: ${fact}`);
+    expect(missing).toEqual([]);
+  });
+
+  test('a runtime-state default is stated as TEXT, never as ["/tmp"] (LOW 5)', () => {
+    const block = committedBlock() ?? "";
+    expect(block).not.toContain('| ["/tmp"] |');
+    expect(block).toContain("the system temp dir (`$TMPDIR`) and `/tmp`");
+  });
 });

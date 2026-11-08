@@ -69,9 +69,14 @@ export interface KeyDoc {
   readonly scope: KeyScope;
   /** Laptop → pod. Required on every entry, so T6 can compare a total set. */
   readonly carried: KeyCarried;
-  /** `boolean`, `string`, `integer`, `number`, `enum`, `array`, `map`, `object`. */
+  /**
+   * `boolean`, `string`, `integer`, `number`, `enum`, `array`, `map`, `object` —
+   * or a union of them, members joined with `" | "` (`readOnlyTools` is
+   * `"enum | array"`). T1 compares it with the schema walker's own type, so it
+   * cannot be a second opinion.
+   */
   readonly type?: string;
-  /** The allowed values, for an `enum`. */
+  /** The allowed values, for an `enum` (or the literals of a union with one). */
   readonly values?: readonly string[];
   /** The value, or a map of values (`"values"`), must never be printed. */
   readonly secret?: true | "values";
@@ -81,6 +86,14 @@ export interface KeyDoc {
    * optional, or its default is "unset means X" (see `details`).
    */
   readonly default?: () => unknown;
+  /**
+   * The default as TEXT, for a default that is runtime state and cannot be
+   * printed as a value: `tools.writableDirs` resolves to `["/tmp"]` here, but
+   * its real default is the system temp dir (`$TMPDIR`) and `/tmp`, computed
+   * per machine. Shown instead of `JSON.stringify(default())` wherever a
+   * default is rendered (the README table, the `explain` card and list).
+   */
+  readonly defaultText?: string;
   /**
    * The resolved field this key feeds, so T2 compares `default()` against a
    * real resolution instead of a hand-written value. Present exactly when
@@ -92,6 +105,8 @@ export interface KeyDoc {
   readonly sourceKey?: keyof ResolvedConfig["sources"];
   /** The env var that overrides it. */
   readonly env?: string;
+  /** How the env var is WRITTEN (`":"-separated; empty = []`), beside its name. */
+  readonly envNote?: string;
   /** The env var is inverted: a truthy value turns the setting OFF. */
   readonly envInverts?: true;
   /** A short, VALID value for `env` — what T3 sets to prove the env is read. */
@@ -155,6 +170,10 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     scope: "both",
     carried: "no",
     default: () => DEFAULT_BASE_URL,
+    // The default follows the provider, so the one value `DEFAULT_BASE_URL`
+    // holds is not the whole answer.
+    defaultText:
+      "`http://localhost:8080/v1` (openai) or `https://api.anthropic.com/v1` (anthropic)",
     resolved: (c) => c.baseURL,
     sourceKey: "baseURL",
     env: "TENTACLE_MODEL_BASE_URL",
@@ -164,7 +183,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: '"http://localhost:8080/v1"',
   },
   "model.model": {
-    summary: "The model id sent to the endpoint.",
+    summary: "The model id sent to the endpoint (`--model <id>` beats it, for that command).",
     kind: "leaf",
     type: "string",
     scope: "both",
@@ -247,6 +266,9 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     type: "integer",
     scope: "both",
     carried: "no",
+    // No `default`: unset means "let the provider decide", and that decision
+    // differs by provider, so it is text.
+    defaultText: "omitted for openai (the server decides); `64000` for anthropic",
     resolved: (c) => c.maxTokens,
     sourceKey: "maxTokens",
     env: "TENTACLE_MAX_TOKENS",
@@ -274,7 +296,11 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     carried: "no",
     sourceKey: "systemPrompt",
     env: "TENTACLE_SYSTEM_PROMPT",
+    envNote: "inline, not a path",
     sample: "hello",
+    // No `default` thunk: the loader reads this file's CONTENT into the prompt
+    // (`defaultResponse` is not a resolved setting), so the default is a name.
+    defaultText: "`PROMPT.md` in the config dir",
     details:
       "Default `PROMPT.md` in the config dir (scaffolded on first run). `TENTACLE_SYSTEM_PROMPT` is NOT a path: it is the whole prompt, inline, and wins. The repo's `AGENTS.md` and the skills catalog are appended after it, never replacing it.",
     example: '"PROMPT.md"',
@@ -331,7 +357,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     carried: "no",
   },
   "subagents.enabled": {
-    summary: "Whether the agent may spawn sub-agents.",
+    summary: "Whether the `agent_task` sub-agent tool is offered.",
     kind: "leaf",
     type: "boolean",
     scope: "both",
@@ -359,7 +385,8 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: "50",
   },
   "subagents.execution": {
-    summary: "How a round's `agent_task` calls may overlap.",
+    summary:
+      "`agent_task` overlap: `parallel` (default; they share one workspace), `read-only`, `sequential`.",
     kind: "leaf",
     type: "enum",
     values: [...EXECUTION_VALUES],
@@ -375,7 +402,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: '"read-only"',
   },
   "subagents.maxParallel": {
-    summary: "At most this many sub-agents at once.",
+    summary: "At most this many sub-agents at once; a llama.cpp server with fewer slots lowers it.",
     kind: "leaf",
     type: "integer",
     scope: "both",
@@ -389,7 +416,8 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: "4",
   },
   "subagents.agentTaskDescription": {
-    summary: "Replaces the `agent_task` tool's description (max 4096 bytes).",
+    summary:
+      "Replaces the `agent_task` description (max 4096 bytes; the sub-agent types are appended).",
     kind: "leaf",
     type: "string",
     scope: "both",
@@ -401,7 +429,8 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: '"Delegate a self-contained investigation; it cannot ask you questions."',
   },
   "subagents.agentTaskDescriptionFile": {
-    summary: "The same description, read once at start from a file.",
+    summary:
+      "The same description, read once at start from a file (config dir or absolute; not both).",
     kind: "leaf",
     type: "string",
     scope: "both",
@@ -447,7 +476,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     carried: "no",
   },
   "contextReset.enabled": {
-    summary: "Whether the `context_reset` tool is offered.",
+    summary: "The model's `context_reset` tool renews its own context, asked like any other tool.",
     kind: "leaf",
     type: "boolean",
     scope: "both",
@@ -490,7 +519,8 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: "false",
   },
   engine: {
-    summary: "Default engine of `run`/`attach`: kubernetes, docker or podman.",
+    summary:
+      "Default engine of `run`/`attach`: kubernetes, docker or podman; `--engine` wins, unknown refused.",
     kind: "leaf",
     type: "enum",
     values: [...ENGINE_VALUES],
@@ -539,7 +569,8 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     carried: "no",
   },
   "tui.theme": {
-    summary: "The palette: `auto` probes the terminal, `dark`/`light` force one.",
+    summary:
+      "The palette: `auto` probes the terminal, `dark`/`light` force one; never carried to a pod.",
     kind: "leaf",
     type: "enum",
     values: [...THEME_VALUES],
@@ -645,14 +676,15 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: '"."',
   },
   "mcpServers.*.readOnlyTools": {
-    summary: "Which of the server's tools may run beside other reads.",
+    summary:
+      "Which of its tools count as reads: `hint` (default: those it marks `readOnlyHint`), `none`, or a list.",
     kind: "leaf",
-    type: "enum",
+    type: "enum | array",
     values: ["hint", "none"],
     scope: "both",
     carried: "no",
     details:
-      '`"hint"` (default) trusts the server\'s own `readOnlyHint`; `"none"` treats every tool of this server as a write; or give an array of the server\'s bare tool names that are reads.',
+      '`"hint"` (default) trusts the server\'s own `readOnlyHint`; `"none"` treats every tool of this server as a write; or give an array of the server\'s bare tool names that are reads, e.g. `["read_file", "list_dir"]`.',
     example: '"none"',
   },
   "mcpServers.*.url": {
@@ -744,7 +776,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     env: "TENTACLE_REDACT_SECRETS",
     sample: "on",
     details:
-      'OFF by default: masking runs a pattern pass over every tool result, so it is opt-in. Turn it on when tool output may quote a credential. (The comment above the schema\'s `redactSecrets` says "Default: enabled"; the constant and this entry say off — see docs/feat/config-explain.md, Execution.)',
+      "Off by default: masking runs a pattern pass over every tool result, so it is opt-in. Turn it on when tool output may quote a credential.",
     example: "true",
   },
   "tools.dedupOutput": {
@@ -774,7 +806,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: "true",
   },
   "tools.summarizeLargeOutput": {
-    summary: "Replace large output with a model-written summary.",
+    summary: "Replace large output with a model-written summary (full text still spilled).",
     kind: "leaf",
     type: "boolean",
     scope: "both",
@@ -788,7 +820,8 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: "true",
   },
   "tools.execution": {
-    summary: "How a round's tool calls may overlap.",
+    summary:
+      "Tool calls in a round: `read-only` (default; reads together, writes and `shell` alone), `sequential`, `parallel`.",
     kind: "leaf",
     type: "enum",
     values: [...EXECUTION_VALUES],
@@ -823,9 +856,13 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     scope: "both",
     carried: "no",
     default: () => defaultWritableDirs({}),
+    // Runtime state (`TMPDIR` is per machine), so the default is stated as
+    // text: `defaultWritableDirs({})` above is only what an empty env gives.
+    defaultText: "the system temp dir (`$TMPDIR`) and `/tmp`",
     resolved: (c) => c.writableDirs,
     sourceKey: "writableDirs",
     env: "TENTACLE_WRITABLE_DIRS",
+    envNote: "`:`-separated; empty = `[]`",
     sample: "~/scratch",
     details:
       "Absolute or `~/…` dirs, matched by real path (a symlink out of one stays refused; a dangling or looping symlink, or a FIFO, is refused everywhere). Files are replaced atomically (a `0600` temp file, then the target's permission bits, then rename), so a planted hard link is never written through; like an editor's atomic save this breaks hard links and does not keep owner, group, ACLs or extended attributes. A file you could not write in place (read-only, or another user's) is still refused with `EACCES`. In a directory you cannot create files in, an existing writable file is written in place (no symlink followed, refused if hard-linked); a new file there is refused. Limit, on hosts shared with other users only: another user who controls a directory on the path (e.g. one they made in `/tmp`) can race a swap and make the content land in a new hidden file elsewhere; an existing file there is never written in place. The default is the system temp dir (`$TMPDIR`) and `/tmp`; a list REPLACES it, `[]` means the project only, and `/` and relative entries are ignored (and logged). Matched on the daemon's host, so NOT carried to a pod: there the pod's own temp dirs apply. Each write still asks unless auto-accept is on. The `shell` tool is not confined.",
@@ -937,13 +974,28 @@ export function directChildren(path: string): readonly string[] {
   return [...new Set(children)];
 }
 
-/** The top-level keys, as `explain` with no argument lists them. */
+/**
+ * The top-level keys, as `explain` with no argument lists them: the settings
+ * first, in the file's own order, then `$schema` — a pointer for editors, kept
+ * because a user who meets it in their file should be able to ask about it
+ * (review O2), but last so the list reads as the settings it is.
+ */
 export function topLevelKeys(): readonly string[] {
-  return directChildren("").filter((path) => !path.startsWith("profiles.*."));
+  const keys = directChildren("").filter((path) => !path.startsWith("profiles.*."));
+  return [
+    ...keys.filter((path) => path !== "$schema"),
+    ...keys.filter((path) => path === "$schema"),
+  ];
 }
 
-/** A default rendered short, for a one-line list or the README table. */
+/**
+ * A default rendered short, for a one-line list or the README table: its
+ * `defaultText` when the real default is runtime state, else the value.
+ */
 export function renderDefault(doc: KeyDoc): string | undefined {
+  if (doc.defaultText !== undefined) {
+    return doc.defaultText;
+  }
   if (doc.default === undefined) {
     return undefined;
   }
@@ -971,7 +1023,11 @@ export function renderConfigKeysTable(): string {
         return "";
       }
       const env =
-        doc.env === undefined ? "—" : `\`${doc.env}\`${doc.envInverts ? " (inverted)" : ""}`;
+        doc.env === undefined
+          ? "—"
+          : `\`${doc.env}\`${doc.envInverts ? " (inverted)" : ""}${
+              doc.envNote !== undefined ? ` (${cell(doc.envNote)})` : ""
+            }`;
       const fallback = renderDefault(doc) ?? "—";
       return `| \`${path}\` | ${env} | ${cell(fallback)} | ${cell(doc.summary)} |`;
     });

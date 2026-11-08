@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { type KeyNode, NON_KEY_ENV, configKeyNodes, resolveKeyPath } from "../src/config-keys.ts";
+import { defaultWritableDirs } from "../src/defaults.ts";
 import {
   KEY_DOCS,
   type KeyDoc,
@@ -28,14 +29,83 @@ function emptyResolve(env: Record<string, string | undefined> = {}) {
   return resolveConfig({ fileConfig: {}, env, defaultCwd: "/workspace" });
 }
 
+/**
+ * T1's message: one line per hole, saying what to DO (review LOW 3). A
+ * `profiles.*` path is derived from its base entry, so it is not the author's
+ * to add — naming it would be noise in the message they read.
+ */
+function missingEntries(schema: readonly string[], documented: readonly string[]): string[] {
+  return schema
+    .filter((path) => !documented.includes(path) && !path.startsWith("profiles.*."))
+    .map((path) => `add an entry for "${path}" in packages/config/src/key-docs.ts`);
+}
+
+/** T1's other direction: an entry the schema does not have. */
+function extraEntries(schema: readonly string[], documented: readonly string[]): string[] {
+  return documented
+    .filter((path) => !schema.includes(path))
+    .map((path) => `remove the entry for "${path}" from packages/config/src/key-docs.ts`);
+}
+
+/** The registry's entry for `path`, asserting it exists (no `!` assertion). */
+function docOf(path: string): KeyDoc {
+  const doc = keyDoc(path);
+  if (doc === undefined) {
+    throw new Error(`no registry entry for ${path}`);
+  }
+  return doc;
+}
+
 describe("T1: every schema path is documented, and nothing else", () => {
   test("the registry's paths equal the schema's leaf AND section paths", () => {
     const schema = paths().sort();
     const documented = Object.keys(KEY_DOCS).sort();
-    const missing = schema.filter((p) => !documented.includes(p));
-    const extra = documented.filter((p) => !schema.includes(p));
+    const missing = missingEntries(schema, documented);
+    const extra = extraEntries(schema, documented);
     expect({ missing, extra }).toEqual({ missing: [], extra: [] });
     expect(documented).toEqual(schema);
+  });
+
+  test("a hole's message says what to DO, and spares the derived mirror (LOW 3)", () => {
+    // The real inputs plus one key the registry does not have: exactly the
+    // failure a `schema.ts` edit on another branch produces.
+    const missing = missingEntries(
+      [...paths(), "subagents.fakeNewKey", "profiles.*.subagents.fakeNewKey"],
+      Object.keys(KEY_DOCS),
+    );
+    expect(missing).toEqual([
+      'add an entry for "subagents.fakeNewKey" in packages/config/src/key-docs.ts',
+    ]);
+    const extra = extraEntries(paths(), [...Object.keys(KEY_DOCS), "subagents.gone"]);
+    expect(extra).toEqual([
+      'remove the entry for "subagents.gone" from packages/config/src/key-docs.ts',
+    ]);
+  });
+
+  test("each entry's `type` and `values` are the schema's, not a second opinion", () => {
+    // A union is written here as `enum | array` and reported by the walker as
+    // `enum|array`: compare the members, not the spelling.
+    const members = (type: string): string =>
+      type
+        .split("|")
+        .map((member) => member.trim())
+        .sort()
+        .join("|");
+    const wrong = nodes()
+      .map((node) => {
+        const doc = keyDoc(node.path);
+        if (doc === undefined) return undefined;
+        // A section's `type` is optional in the registry (`object` implied);
+        // a leaf always names one (T1 below).
+        const type = members(doc.type ?? "object");
+        const values = [...(doc.values ?? [])].sort().join("|");
+        const schemaValues = [...(node.values ?? [])].sort().join("|");
+        return type === members(node.type) && values === schemaValues
+          ? undefined
+          : `${node.path}: registry ${type} [${values}], schema ${members(node.type)} [${schemaValues}]`;
+      })
+      .filter((entry): entry is string => entry !== undefined);
+    expect(wrong).toEqual([]);
   });
 
   test("each entry's kind matches the schema's", () => {
@@ -64,6 +134,17 @@ describe("T1: every schema path is documented, and nothing else", () => {
       .filter(([, doc]) => doc.summary.includes("\n") || doc.summary.length > 120)
       .map(([path]) => path);
     expect(long).toEqual([]);
+  });
+
+  test("the failure message says what to do, not just what is missing (LOW 3)", () => {
+    // The message is the one an author of the OTHER branch reads when T1 fires.
+    // Asserted as text so it cannot silently degrade into a bare path list.
+    const missing = missingEntries(["subagents.fakeNewKey"], []);
+    expect(missing.join("\n")).toContain(
+      'add an entry for "subagents.fakeNewKey" in packages/config/src/key-docs.ts',
+    );
+    // And the mirror is not the author's to add: `derive()` builds it.
+    expect(missingEntries(["profiles.*.subagents.fakeNewKey"], [])).toEqual([]);
   });
 
   test("a leaf names its type; a leaf under no map has an example", () => {
@@ -147,6 +228,38 @@ describe("T1b: the profiles.* mirror is faithful", () => {
 
 describe("T2: the documented default is what an empty config resolves to", () => {
   const resolved = emptyResolve();
+
+  test("a default that is runtime state is TEXT, and says what the real default is (LOW 5)", () => {
+    // `tools.writableDirs` resolves to `["/tmp"]` here, but on macOS `$TMPDIR`
+    // is elsewhere: a value would be a lie about the user's machine.
+    expect(renderDefault(docOf("tools.writableDirs"))).toBe(
+      "the system temp dir (`$TMPDIR`) and `/tmp`",
+    );
+    // The old README row's facts live on the card, not lost with the table:
+    // the env is `:`-separated and empty means `[]`.
+    expect(docOf("tools.writableDirs").envNote).toBe("`:`-separated; empty = `[]`");
+    expect(resolved.writableDirs).toEqual(defaultWritableDirs({}));
+  });
+
+  test("a provider-dependent default is text on both keys it depends on (LOW 7)", () => {
+    expect(renderDefault(docOf("model.baseURL"))).toContain("anthropic.com");
+    expect(renderDefault(docOf("model.maxTokens"))).toContain("anthropic");
+    // `maxTokens` still documents NO value default: unset is not a number.
+    expect(docOf("model.maxTokens").default).toBeUndefined();
+  });
+
+  test("a defaultText agrees with the resolved value where one is a value at all", () => {
+    // A guard against drift: `defaultText` is prose, but where a key ALSO has a
+    // value default, the text must not contradict it (a number, a boolean).
+    const contradictory = baseEntries()
+      .filter(([, doc]) => doc.defaultText !== undefined && doc.default !== undefined)
+      .filter(([, doc]) => {
+        const value = doc.default?.();
+        return typeof value === "number" || typeof value === "boolean";
+      })
+      .map(([path]) => path);
+    expect(contradictory).toEqual([]);
+  });
 
   test("every entry with a `resolved` accessor matches its default thunk", () => {
     const drift = baseEntries()
