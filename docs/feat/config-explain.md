@@ -585,7 +585,116 @@ mirror — the same key documented once).
 
 ## Review
 
-*— pending (fresh context — this is `cross-module` blast, so AGENTS §10 requires it)*
+*— claude-sonnet-5-5, 2026-11-08* (fresh context; a different model family from the
+executor, deepseek-v4.1-flash)
+
+**Verdict: REQUEST-CHANGES** — small. 0 HIGH · 2 MEDIUM · 5 LOW · 2 owner questions.
+No design flaw. The mechanism (T1–T7, the pure formatter, no config read, the
+generated README) holds. One registry entry is wrong, and a dispatch regression
+needs an owner decision.
+
+### Gate (re-run)
+
+- `bunx tsc --noEmit`: clean. `bunx biome check .`: clean (0 errors, 0 warnings).
+- `bun test packages`: **5481 pass · 3 skip · 0 fail** (5484 tests, 377 files). The 3 skips are the opt-in ones.
+- **Untouched files:** `git diff main...HEAD --stat` over `schema.ts`, `defaults.ts`, `resolve.ts`, `load.ts` is empty. The owner constraint holds.
+- I did not run `bun run docs:config` (it writes `README.md`; blocked here). The idempotence evidence is T4: the committed block equals `renderConfigKeysTable()`, so a run is a no-op.
+
+### Findings
+
+**MEDIUM**
+
+1. **A wrong registry entry: `mcpServers.*.readOnlyTools`** (`packages/config/src/key-docs.ts:647-657`).
+   - It is documented as `type: "enum"`, `values: ["hint","none"]`.
+   - The schema is a union: `"hint" | "none" | string[]` (`schema.ts:58-62`).
+   - `explain mcpServers.*.readOnlyTools` therefore shows two allowed values and hides the array form. Only `details` mentions the array.
+   - T1 and T1c cannot catch it: `type` and `values` are checked for presence, not for truth.
+   - **Fix:** `type: "enum | array"`, or `type: "array"` with `values` marked as the two literals. Better, derive a leaf's `type` from the walker and have T1 compare it. Today the walker computes `KeyNode.type`, but `type` and `values` in the registry are not compared with it.
+   - **Check:** this is the only wrong entry I found. I read the whole registry (`key-docs.ts`) against `resolve.ts`'s env reads, `defaults.ts` and `schema.ts`. T2, T3, T5 and T6 all pass, so defaults, env names, flags and carried classes are code-pinned.
+   - The prose I verified by hand: hooks `timeout` 600 s (`packages/agent/src/hooks.ts:26`); anthropic `maxTokens` 64000 (`anthropic-provider.ts:38`); the apiKey precedence (`resolve.ts:491-502`); the `mount.hide` default list (`schema.ts:321`).
+
+2. **`tentacle explain <prompt words>` changes behaviour**, see owner question O1.
+   - I measured it, so it is listed here as well.
+   - `tentacle explain how config works` now exits 1 with `unexpected argument "config"`.
+   - `tentacle explain "how does X work"` exits 1 with `unknown config key`.
+   - Before: `cliMode` returned `"prompt"` and the words went to the model.
+
+**LOW**
+
+3. **T1's message says what is missing but not what to do** (`packages/config/test/key-docs.test.ts:35-37`).
+   - Mutation: I added `subagents.fakeNewKey` to the schema. T1 went red with `missing: ["profiles.*.subagents.fakeNewKey","subagents.fakeNewKey"]` and `subagents.fakeNewKey: schema leaf, registry undefined`. The path is clear.
+   - The test does not say "add the entry to `FILE_KEYS` in `key-docs.ts`; the `profiles.*` mirror is derived". The `profiles.*` line is noise for the author of the other branch.
+   - **Fix:** add a custom message, e.g. `"add <path> to FILE_KEYS (key-docs.ts); profiles.* is derived"`, and drop the `profiles.*.` entries from `missing`.
+   - **Also:** `type` and `values` per leaf are not compared to the walker's `KeyNode` (see finding 1).
+
+4. **The `tools.redactSecrets` details leak an internal pointer** (`key-docs.ts:747`).
+   - It tells the end user: "(The comment above the schema's `redactSecrets` says 'Default: enabled' … see docs/feat/config-explain.md, Execution.)".
+   - The drift is real: the schema comment at `schema.ts:354` says enabled, while `DEFAULT_REDACT_SECRETS` is `false`.
+   - The user does not need that sentence, and it will rot once the schema comment is fixed.
+   - **Fix:** remove the parenthesis from `details`. The drift stays recorded in Execution, which is enough.
+
+5. **The `tools.writableDirs` default is shown as `["/tmp"]`** (`key-docs.ts:825`; README; card).
+   - It comes from `defaultWritableDirs({})`. Its own `details` says the real default is `$TMPDIR` and `/tmp`, and on macOS `$TMPDIR` is non-empty.
+   - It is not wrong enough to be a bug. The card should say `$TMPDIR, /tmp`, or the default thunk should be omitted and `details` carry it.
+
+6. **Width.**
+   - At 80 columns, the top-level list uses up to 108 columns, because the path column is padded to 42. The mcpServers line is 108 wide and wraps into the summary column.
+   - Leaf `details` are single lines of up to ~2000 characters (`explain tools.writableDirs`). The terminal wraps them, so they are readable but not formatted.
+   - **Fix:** wrap `details` and summaries at the terminal width, with a default of 80 and `process.stdout.columns` read only in `main.ts`, passed in so the formatter stays pure. Or accept it (the executor's own open question 4).
+
+7. **README lost facts the old table had.**
+   - The old row for `tools.writableDirs` said the env is `:`-separated and that empty means `[]`.
+   - The old row for `readOnlyTools` listed the array form.
+   - The old `maxTokens` row said "64000 for anthropic", and its Default column is now `—`.
+   - The `baseURL` default now shows openai's only.
+   - **Fix:** put the env format in `details`, where a card shows it; use the `Meaning` column for the one-liners that need it. Optional: `$schema` is listed as a top-level key and in `--all`; consider hiding it from `explain` (see O2).
+
+### Owner questions
+
+**O1. `explain` is now a subcommand, so a one-shot prompt that starts with "explain" no longer works.**
+- Evidence: the two commands above. The edit to `session-flags.test.ts:75` is justified: it swapped the prompt-text example from `explain --plain` to `fix --plain`. It does not weaken anything, because the same assertion (a subcommand-looking word is prompt text) still runs on `fix`. It also records the behaviour change.
+- The same trade-off already exists for `update`, `install`, `rm` and `ps`. A first word that names a subcommand is the subcommand.
+- **Recommendation:** accept it. It is a natural-language word, so `explain how X works` will be typed. Add a one-line note in `README` and `HELP`: to send a prompt that starts with "explain", start it with another word (I did not check whether the repo has an explicit prompt flag). If the owner does not want that, the alternative is `tentacle config explain` (task 4 of the eval) and no `explain` top-level.
+
+**O2. Should `$schema` be listed by `explain`?**
+- It is accepted and ignored; the registry documents it as a user-only leaf. It shows in the top-level list and in `--all`.
+- **Recommendation:** keep it. A user who finds it in their file can ask what it is. If the list should be only the keys that do something, filter it in `topLevelKeys` and keep it explainable by name.
+
+### Mutations (§9)
+
+| Test | Mutation | Result |
+|---|---|---|
+| T1 | A new schema key `subagents.fakeNewKey` added to `schema.ts` (backup, restore, shasum `2ccb87ea…` identical) | red: 2 fail (missing + kind) |
+| T3 | `tools.redactSecrets` env changed to `TENTACLE_REDACT` in `key-docs.ts` (shasum `f3e3134a…` identical after restore) | red: T3 (`source default`) and T3b both fail |
+| T4 | README `maxIterations` default 16 → 17 (shasum `4f05b78e…` identical after restore) | red: drift test fails |
+
+`git status` was clean after each restore.
+
+### Attacks tried
+
+- **Secrets.**
+  - `model.apiKey`, `model.apiKeyCommand`, `mcpServers.*.env.*`, `mcpServers.*.headers.*` are `secret: true`; `mcpServers.*.args` is `"values"`.
+  - A card prints the marker and a placeholder example (`"sk-…"`, `"***"`, `"Bearer <token>"`). No path in the formatter takes a config value. Nothing found.
+- **Never reads the user's config.** `explain` runs before `loadConfig` (`main.ts`), like `update`, and the formatter imports only the registry. I read the dispatch (`main.ts`) and `explain.ts`'s imports; I did not trace file access at runtime. The dedicated test (`explain-main.test.ts`) uses a broken `config.jsonc`. Nothing found.
+- **Unknown key and typos.** `explain subagnts.maxParalel` gives `did you mean subagents.maxParallel?` on stderr, exit 1. `explain ""` gives exit 1 and a usage hint. `explain mcpServers.fs.env.TOKEN --json` resolves through `*` to the canonical path. Nothing found.
+- **Levels.** Top level, section (direct children only; `mcpServers (8 sub-keys)`, `model (9)` counted correctly), leaf card, `--all` (flat sorted list of leaf paths) all behave as the owner's addition says. The formatter is pure: `explain.ts` has no I/O or `process` use, and it is unit-tested (`explain.test.ts`).
+- **Profile mirror.** `profiles.*` is derived from the base entries. T1b pins it key for key, and the derivation overrides only `mcpServers.*` details. Nothing found.
+- **Carried and flags.** T5 checks every `flag` against `ARGS`; T6 compares with `CARRIED` in both directions and per class. Sample cards match `carried-settings.ts`.
+
+### What holds
+
+- One registry, schema untouched, byte-identical protected files, 7 test groups that go red on the mutation of the fact they pin.
+- Defaults come from the real `resolveConfig`; env names from its provenance. This is where a doc is most likely to rot, and it cannot.
+- Residual risk the executor named and I agree with: prose (`summary`, `details`, `example`) and `type`/`values` are checked for shape, not truth. Finding 1 is exactly such an entry.
+
+### How the executor behaved
+
+- It followed the protocol: red before green, mutations with backup and shasum, drift recorded rather than the read-only files edited (it found the `redactSecrets` comment drift and left `schema.ts` alone, as the owner required).
+- Its open questions in this section were honest and aimed at the right places.
+- It missed: the `readOnlyTools` union (the one wrong entry), and the prompt regression; it noticed the second only as "a form a user would reasonably type" without measuring.
+- It left an internal doc pointer in user-facing text (finding 4).
+
+### Executor's suggested attack list (answered above)
 
 What a reviewer should attack, in order:
 
