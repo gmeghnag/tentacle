@@ -792,3 +792,105 @@ The allowlist is built only on the laptop, in one place, and is complete for bot
 ### How the executor behaved
 
 Honest. Execution discloses the unrun mobile typecheck and live check, the stderr in the relay line, and the drift from the plan, and its red-before-green and mutation claims match what was re-run here. Its gap is scope of proof: every load-bearing test exercises `laptopModels` in isolation, so the two call sites that make the feature real were never pinned, and the "laptop's log" claim was tested only at `RemoteClient.onError`, one layer short of where a relay's line is lost.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-09*
+
+**Reviewer disclosure.** Fresh context. The fix commit `c0d00b8` was written by Sonnet, so that diff had a different model. The rest of the branch was written by Opus, the same model as this reviewer.
+
+#### Verdict: REQUEST-CHANGES
+
+F3, F4 and F5 are fixed. F1 and F2 work, but each needs one more change: F1's route writes more than the refused name to `relay.log` (R2-1), and the two lines that make F2 real have no test (R2-2). Both are small and need no owner decision. Q1 (c), Q2 (a) and Q3 (b) are untouched.
+
+#### Findings
+
+**Major**
+
+- **R2-1. The relay's log now receives every laptop RPC error, not only refused names: an endpoint's response body lands in `relay.log`, and a hostile pod can flood the file.** `packages/cli/src/engine-runtime.ts:1069-1072` routes all of `onPeerError` to `deps.log`. That covers the full `ModelRequestError` (`packages/client/src/remote-client.ts:2462`), whose message holds 200 characters of the body (`packages/providers/src/openai-provider.ts:48`), the `ModelUnreachableError` that names the endpoint (`remote-client.ts:2434`), and `unknown notification: <method>` (`packages/transport/src/peer.ts:388`). Trace on the real attach path with relay-shaped deps and a 401 whose body quotes a key, an id and a URL:
+  ```
+  [laptop rpc] model request failed with status 401: {"error":"bad key sk-ECHOED-fast-key for model fast-id at https://only-laptop.example/v1"}
+  pod saw: the model endpoint answered 401 (unauthorized)
+  junk notifications logged: 500 of 500
+  ```
+  The file is 0600 and stays on the laptop, and nothing reaches the pod. But this route is new in the fix commit, and it is the same class of problem F5 removed (a third party's arbitrary output in an unattended log). The flood also defeats the trace F1 wanted: past 1 MiB the log rotates, one rotation kept (`packages/cli/src/run-state.ts:40,566-567`), so about 2 MiB of junk erases the refusal, against "where it cannot erase them" (`remote-client.ts:2397`). The pod-safe cause already reaches `relay.log` (`CHANGELOG.md:291`), so nothing useful is lost by narrowing. **Fix:** have `refusedName` report a named error (e.g. `ModelNameRefusedError`, `remote-client.ts:2403`), and in `onPeerError` send only that error to `deps.log` when `stderr.path === undefined && deps.interactive === false`; anything else keeps today's `stderr.onStderr`. The refusals stay bounded at 16 names per client. Add to `engine-runtime.test.ts`: under relay-shaped deps, a 401 with a sentinel body and a junk notification leave no `[laptop rpc]` line, and a refused name still leaves exactly one. Show it failing with the name check removed.
+
+- **R2-2. F2's two production sites have no test: restoring the old patch at either leaves the suite green.** `packages/cli/src/relay.ts:161` and `packages/cli/src/main.ts:1479` are the lines that fix F2, and M2c and M2d below both SURVIVED (0 fail, 2301 pass, whole CLI suite). This is the gap F3 named, for a different call: the helper is tested, its use is not, and §9's red-before-green was shown only on the helper. **Fix:** extend the two existing tests. In `relay.test.ts:476` ("the relay serves the run's model") add an inheriting and an own-id entry, and assert what `attach` receives (`models.inherit.model` is the run's, `models.own.model` is unchanged). In `main.test.ts:1635` ("`attach` uses the run's model") assert the same on the config the attach runtime gets. Show each failing with the old patch back.
+
+**Nits**
+
+- A failing MAIN key command still puts its stderr in `relay.log`: a no-terminal load gives `apiKeyCommand exited with code 4: MAIN-STDERR-MARKER`, and `relay.ts:690` writes it. It predates this task and F5 was about entries, and the relay dies there, so the reason is arguably wanted. Report the code alone if you want the two paths to match.
+- The `"published"` branch of `appliesToText` (`packages/config/src/config-value.ts:370`) has no test; `packages/config/test/config-value.test.ts` never matches its text.
+- This doc's header (line 3) is still stale. Round 1's two other nits (title refusal unlogged, `RpcError:` prefix) are unchanged.
+
+#### Status of Round 1
+
+| Finding | Status | Evidence |
+|---|---|---|
+| F1 refused name reaches `relay.log` | Works, narrowing needed (R2-1) | M1a–M1c killed; CHANGELOG line correct |
+| F2 inheriting entries follow the run's model | Works, sites untested (R2-2) | Trace below; M2a, M2b killed; M2c, M2d survived |
+| F3 production sites pinned | Fixed in tests; **live docker check still pending** (orchestrator, not run here) | M3a, M3b killed |
+| F4 `explain` truthful | Fixed | Tests in `explain.test.ts`, `key-docs-carried.test.ts` |
+| F5 no stderr in the entry no-terminal path | Fixed | M5a, M5b killed; strict path keeps stderr |
+
+#### Gate (this worktree, HEAD `c0d00b8`)
+
+| Command | Result |
+|---|---|
+| `bunx tsc --noEmit` | clean |
+| `bunx biome check .` | 767 files, no fixes |
+| `bun test packages` | **5882 pass, 3 skip (the opt-in three), 0 fail**, 63472 expects, 397 files |
+| `bun run docs:config` | up to date |
+| `bunx tsc -p apps/mobile` | **not run**: the command needs an approval this session did not get. Still open. |
+
+#### Mutation non-vacuity
+
+`.tentacle/tmp/models-map-pod/review2/mutate.ts`: apply, run tests, restore, compare sha256. Every restore matched, and `git status` was clean afterwards.
+
+| Mutation | Result |
+|---|---|
+| M1a `onPeerError` never reaches `deps.log` | KILLED, 1 fail |
+| M1b the `interactive === false` guard removed | KILLED, 1 fail |
+| M1c relay passes `interactive: true` | KILLED, 1 fail |
+| M2a `withRunModel` overwrites an entry's own `model` | KILLED, 2 fail |
+| M2b `modelInherited` not set at resolve | KILLED, 5 fail |
+| M2c relay site back to the old patch (whole CLI) | **SURVIVED, 2301 pass (R2-2)** |
+| M2d attach site back to the old patch (whole CLI) | **SURVIVED, 2301 pass (R2-2)** |
+| M3a run site drops `namedModels` | KILLED, 1 fail |
+| M3b attach site drops `namedModels` | KILLED, 1 fail |
+| M5a stderr back in the relay line | KILLED, 1 fail |
+| M5b strict load loses stderr | KILLED, 1 fail |
+
+#### Premises of the fix round
+
+| Claim (Execution "Fix round 1") | Status |
+|---|---|
+| The relay is the only caller with `interactive: false` into `attachEngineRuntime` (`relay.ts:367`; `main.ts:1180` is another function's flag) | TRUE |
+| `relay.log` is sanitised, line-split, 0600, capped (`run-state.ts:550-579`) | TRUE |
+| Both patches replaced by `withRunModel` (`relay.ts:161`, `main.ts:1479`); no third site found by `rg` | TRUE |
+| The `run` site's `onPeerError` is unchanged (`engine-runtime.ts:670`) | TRUE |
+| "RED" for F1, F3, F4, F5 | TRUE where re-run (M1, M3, M5). F2's RED covers only the helper (R2-2) |
+
+#### Attacks tried
+
+| # | Attack | Result |
+|---|---|---|
+| 1 | F1, TUI attach with a `daemon.log` (temporary test, real attach path) | Refusal in the file, 0 lines through `deps.log`. **Holds** |
+| 2 | F1, interactive attach with no log file: anything raw while Ink owns the terminal | Nothing written (M1b pins it). Only the relay reaches `deps.log`. **Holds** (§7) |
+| 3 | F1, content of the refused-name line | Only the schema-shaped name. **Holds** |
+| 4 | F1, content of everything else on the same route | **Fails: R2-1** |
+| 5 | F2, real `loadConfig` + `withRunModel` + `laptopModels` + HTTP: `--model` moved after load | `inherit` and `other` get `flag-X`, each with its own key and path; `own` keeps `own-id`. **Holds** |
+| 6 | F2, precedence: env beats file, profile, as launched | `config.model` and inheriting entries agree in each case; same object when nothing changes. **Holds** |
+| 7 | F2, an entry named `__proto__` | `{...models}` makes an own property, so the assignment updates it. **Holds** (by reading) |
+| 8 | F2, the sites | **Fails: R2-2** |
+| 9 | F5, what else in the no-terminal path can carry a command's output | The remaining `ConfigError`s are our own texts; the real-runner test pins it. **Holds** |
+| 10 | F5, terminal path | Strict message keeps stderr (M5b). **Holds** |
+| 11 | F4, other readers of `carried` | `explain.ts`, `config-value.ts`, `carriedDocPaths` all handle `published`. **Holds** (one untested text, nit) |
+
+#### What holds
+
+The laptop gate from Round 1 is unchanged by this commit. The fix commit routes a refused name out of a relay, re-points inheriting entries without touching an entry's own id, and keeps a key command's stderr out of the entries' relay lines while the terminal path still reports it. No raw terminal write was introduced.
+
+#### How the executor behaved
+
+Honest and on scope: the owner answers are untouched, the drift on F1 (`interactive === false`) is declared and correct for §7, and the pending live check is stated. The gap is the one Round 1 warned about: F1's proof looked only at the line it wanted, not at what else takes the same route, and F2's proof stopped at the helper.
