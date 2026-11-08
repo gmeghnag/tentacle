@@ -433,6 +433,18 @@ export interface SessionDeletedNotice {
   readonly sessionId: string;
 }
 
+/**
+ * A pod asked for a model name this laptop does not serve (`refusedName`). Its
+ * message holds only the schema-shaped name, so it alone is safe for an unattended
+ * log (the detached relay's): `onError` also carries endpoint bodies and junk.
+ */
+export class ModelNameRefusedError extends Error {
+  constructor(text: string) {
+    super(`refused a model call from the pod: ${text}`);
+    this.name = "ModelNameRefusedError";
+  }
+}
+
 /** A shared session the daemon no longer has after a drop: it ended while this client was away (R7). */
 class VanishedError extends RpcError {
   constructor() {
@@ -2400,7 +2412,7 @@ export class RemoteClient {
   private refusedName(name: string, text: string): RpcError {
     if (!this.refusalsLogged.has(name) && this.refusalsLogged.size < MAX_REFUSED_NAMES_LOGGED) {
       this.refusalsLogged.add(name);
-      this.onError?.(new Error(`refused a model call from the pod: ${text}`));
+      this.onError?.(new ModelNameRefusedError(text));
     }
     return new RpcError(JsonRpcErrorCode.InvalidRequest, text);
   }

@@ -221,6 +221,25 @@ describe("models: keys at load", () => {
       expect(lines).toEqual(["pub: models.pub.apiKeyCommand exited with code 3"]);
     });
 
+    test("R2 nit, the real runner: a failing MAIN command in a no-terminal load reports its code alone", async () => {
+      // Mutation: drop the catch → "MAIN-STDERR-MARKER" in the error.
+      await write({ model: { apiKeyCommand: "echo MAIN-STDERR-MARKER >&2; exit 4" } });
+      const { option } = reports();
+      const error = await loadConfig({
+        env: { HOME: dir },
+        configDir,
+        cwd: dir,
+        modelKeysNoTerminal: option,
+      }).catch((e: unknown) => e);
+      expect((error as Error).message).toBe("apiKeyCommand exited with code 4");
+      const strict = await loadConfig({ env: { HOME: dir }, configDir, cwd: dir }).catch(
+        (e: unknown) => e,
+      );
+      expect((strict as Error).message).toBe(
+        "apiKeyCommand exited with code 4: MAIN-STDERR-MARKER",
+      );
+    });
+
     test("F5, the strict load still carries the stderr (a terminal user needs it)", async () => {
       await write({
         models: {

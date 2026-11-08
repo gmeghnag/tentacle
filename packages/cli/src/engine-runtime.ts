@@ -25,7 +25,7 @@
  */
 import { existsSync } from "node:fs";
 import type { SessionRecord } from "@tentacle/agent";
-import type { NamedModels } from "@tentacle/client";
+import { ModelNameRefusedError, type NamedModels } from "@tentacle/client";
 import { type TentacleConfig, publishedModelNames } from "@tentacle/config";
 import type { ModelProvider, PermissionBroker } from "@tentacle/core";
 import { createModelProvider } from "@tentacle/providers";
@@ -1065,10 +1065,14 @@ export async function attachEngineRuntime(
       // failure of the attach. The TUI shows its cause as a status-only text;
       // the full error is only here.
       // No log file and no terminal (the detached relay): its own log is the
-      // only place a refused name of a hostile pod can leave a trace.
+      // only place a refused name of a hostile pod can leave a trace. ONLY that
+      // refusal goes there (bounded, name-only text): any other error can carry an
+      // endpoint's body or a pod's junk, which must not reach an unattended log.
       onPeerError: (error) =>
         stderr.path === undefined && deps.interactive === false
-          ? deps.log(`[laptop rpc] ${error.message}`)
+          ? error instanceof ModelNameRefusedError
+            ? deps.log(`[laptop rpc] ${error.message}`)
+            : undefined
           : stderr.onStderr(`[laptop rpc] ${error.message}\n`),
       ...(deps.notify ? { notify: deps.notify } : {}),
       ...(deps.interactive !== undefined ? { interactive: deps.interactive } : {}),

@@ -1643,6 +1643,7 @@ describe("cli main: --engine", () => {
         path,
         JSON.stringify({
           model: { model: "laptop-default", baseURL: "http://default.invalid/v1" },
+          models: { inherit: { contextWindow: 1000 }, own: { model: "own-id" } },
           profiles: {
             deep: { model: { model: "deep-chat", baseURL: "http://deep.invalid/v1" } },
             other: { model: { model: "other-model", baseURL: "http://other.invalid/v1" } },
@@ -1670,6 +1671,22 @@ describe("cli main: --engine", () => {
             baseURL: "http://deep.invalid/v1",
           });
           expect(r.seen.tuiModel).toBe("deep-chat"); // and SHOWN in the status bar
+          // R2-2 (F2): a run started with `--model` records an id its profile does not
+          // resolve to; an entry with no `model` of its own follows the run's, one with
+          // its own id keeps it. Mutation: the old `{ ...loaded, model: plan.model }`.
+          setup(`${2 ** 30} 1`);
+          recordKept(keptIndexDir(config), { ...runEntry, model: "run-flag-model" });
+          const flagged = await attached(["attach", "box"]);
+          expect(flagged.code).toBe(0);
+          const flaggedConfig = flagged.seen.config as {
+            model?: string;
+            models?: Record<string, { model?: string }>;
+          };
+          expect(flaggedConfig.model).toBe("run-flag-model");
+          expect(flaggedConfig.models?.inherit?.model).toBe("run-flag-model");
+          expect(flaggedConfig.models?.own?.model).toBe("own-id");
+          setup(`${2 ** 30} 1`);
+          recordKept(keptIndexDir(config), runEntry); // restore for the cases below
           const explicit = await at(["attach", "box", "--profile", "other"]);
           expect(explicit.seen.config).toMatchObject({
             model: "other-model",

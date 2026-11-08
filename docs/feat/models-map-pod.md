@@ -1,6 +1,6 @@
 # feat/models-map-pod — `models` in pod runs: a name on the tunnel, a laptop allowlist
 
-> **Status:** Execution done (owner answers Q1 (c), Q2 (a), Q3 (b)); Review not started
+> **Status:** Execution done incl. fix rounds 1–2 (owner answers Q1 (c), Q2 (a), Q3 (b)); Review round 2 findings fixed, re-review and the live docker check pending
 > **Branch:** `feat/models-map-pod`, stacked on `feat/models-map` (task 3, review PASS, not merged)
 > **Size:** L · **Blast:** load-bearing · **Suited:** AGENTS §10 rule for load-bearing or L: a stronger executor (the owner assigns it) + mandatory fresh-context Review that red-teams the laptop gate
 
@@ -680,6 +680,15 @@ Review round 1 (F1–F5) applied as specified; owner decisions Q1 (c), Q2 (a), Q
 - **F5.** `defaultRunner` throws `KeyCommandExit` (a `ConfigError` with `code`); in the no-terminal path the relay line is `apiKeyCommand exited with code N` (no stderr); the strict path's message (with stderr) is unchanged. Comment fixed. Tests: `models-load.test.ts` (real runner: stderr marker absent; strict load keeps it), `relay.test.ts` and `models-pod.test.ts` expectations updated. RED: the new real-runner test fails with the exit branch disabled.
 
 Gate (2026-11-09): `bunx tsc --noEmit` clean; `bunx biome check .` 767 files, no fixes; `bun test packages` 5882 pass, 3 skip (opt-in), 0 fail; `bun run docs:config` up to date. Still not run: `tsc -p apps/mobile`, the live check.
+
+### Fix round 2
+
+- **R2-1.** `refusedName` now reports a named `ModelNameRefusedError` (`remote-client.ts`, exported); `engine-runtime.ts` `onPeerError` sends ONLY that error to `deps.log` under relay-shaped deps (no log file, `interactive === false`); anything else keeps `stderr.onStderr` (a no-op without a file). Test `engine-runtime.test.ts` "R2-1": a 401 whose body quotes `sk-ECHOED-fast-key`, 20 junk notifications and one refused name leave exactly the one refusal line and no sentinel. Mutation: `instanceof ModelNameRefusedError` → `instanceof Error` makes it fail (the 401 body line appears); restored.
+- **R2-2.** `relay.test.ts` "F5: the relay serves the run's model" now has an inheriting and an own-id entry and asserts what `attach` receives (`inherit` = the run's id, `own` unchanged); `main.test.ts` "round 10 / owner A" records a run with `--model run-flag-model` and asserts the same on the attach config. Mutation: the old patch restored at `relay.ts:161` → relay test fails; at `main.ts:1479` → main test fails (`Expected "run-flag-model", Received "deep-chat"`); both restored.
+- **Nits.** A failing MAIN key command in a no-terminal load reports its code alone (`load.ts`, test in `models-load.test.ts`, red with the catch disabled; the strict load keeps the stderr). `appliesToText`'s `published` branch has a test (`config-value.test.ts`, red with the branch disabled). Doc header updated. Not done, as unchanged round-1 nits: the unlogged title refusal and the `RpcError:` prefix.
+- Gate: see the final report of this round (typecheck, lint, full `bun test`). The live docker check and `tsc -p apps/mobile` remain pending.
+
+*— claude-sonnet-5-5, 2026-11-09*
 
 ## Review
 

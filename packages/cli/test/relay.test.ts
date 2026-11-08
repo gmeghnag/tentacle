@@ -477,15 +477,35 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
     // `--model` reaches the relay only through the entry (main.ts records
     // `config.model`); the relay process re-loads its config without the flag.
     // Mutation: hand `deps.config` through untouched → `laptop-x`.
-    const seen: string[] = [];
-    const { start } = rig({}, {}, { model: "laptop-x" });
+    // R2-2 (F2): an entry with no `model` of its own follows the run's id, one with
+    // its own keeps it. Mutation: the old `{ ...deps.config, model: entry.model }` patch.
+    const entryOf = (model: string, modelInherited?: true) => ({
+      provider: "openai",
+      baseURL: "http://x/v1",
+      model,
+      ...(modelInherited ? { modelInherited } : {}),
+      contextWindow: 1000,
+      apiKeySource: "inherited",
+    });
+    const seen: { model: string; inherit?: string; own?: string }[] = [];
+    const { start } = rig({}, {}, {
+      model: "laptop-x",
+      models: {
+        inherit: entryOf("laptop-x", true),
+        own: entryOf("own-id"),
+      },
+    } as unknown as Partial<TentacleConfig>);
     expect(
       await start(async (config) => {
-        seen.push(config.model);
+        seen.push({
+          model: config.model,
+          inherit: config.models.inherit?.model,
+          own: config.models.own?.model,
+        });
         throw new Error("enough");
       }),
     ).toBe(1);
-    expect(seen).toEqual([entry.model]);
+    expect(seen).toEqual([{ model: entry.model, inherit: entry.model, own: "own-id" }]);
   });
 
   test("a failed attach is `failed`, its text sanitised, and the lock is free", async () => {

@@ -798,7 +798,16 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
 
   let apiKey = resolved.apiKey;
   if (resolved.apiKeySource === "command" && resolved.apiKeyCommand && options.podDaemon !== true) {
-    apiKey = (await runCommand(resolved.apiKeyCommand)).trim();
+    try {
+      apiKey = (await runCommand(resolved.apiKeyCommand)).trim();
+    } catch (error) {
+      // A no-terminal load (the relay) writes this to its log: the exit code alone,
+      // like the entries' path; a terminal user keeps the stderr.
+      if (options.modelKeysNoTerminal && error instanceof KeyCommandExit) {
+        throw new ConfigError(`apiKeyCommand exited with code ${error.code}`);
+      }
+      throw error;
+    }
     if (apiKey === "") {
       throw new ConfigError("apiKeyCommand produced an empty key");
     }

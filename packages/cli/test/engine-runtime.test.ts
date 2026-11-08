@@ -3187,6 +3187,57 @@ describe("named models at the production sites (run, attach/relay)", () => {
     a.dispose();
   });
 
+  test("R2-1: a relay logs ONLY the refusal: an endpoint's body and a junk notification never reach its log", async () => {
+    // Mutation: drop the `instanceof ModelNameRefusedError` check → the 401 body and
+    // the junk method land in the relay's log.
+    const bad = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response(
+          '{"error":"bad key sk-ECHOED-fast-key for model fast-id at https://only-laptop.example/v1"}',
+          {
+            status: 401,
+          },
+        ),
+    });
+    try {
+      const config = withModels();
+      (config.models as Record<string, unknown>).bad = {
+        provider: "openai",
+        baseURL: `http://localhost:${bad.port}/v1`,
+        model: "fast-id",
+        contextWindow: 1000,
+        apiKeySource: "file",
+        apiKey: "k",
+      };
+      (config.subagentModels as Record<string, string>).review = "bad";
+      const lines: string[] = [];
+      const c = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));
+      const a = await startAttachRuntime(config, {
+        ...deps(c, "ns-r2-1", (line) => lines.push(line)),
+        interactive: false,
+      });
+      const link = c.link() as unknown as Named & {
+        peer: { notify: (method: string, params: unknown) => void };
+      };
+      const failed = await link.requestModelStream(ask, undefined, "bad").catch((e: unknown) => e);
+      expect(failed).toBeInstanceOf(Error);
+      for (let i = 0; i < 20; i++) {
+        link.peer.notify(`junk/${i}`, {});
+      }
+      await link.requestModelStream(ask, undefined, "hidden").catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+      const rpc = lines.filter((l) => l.includes("[laptop rpc]"));
+      expect(rpc).toEqual([
+        '[laptop rpc] refused a model call from the pod: model "hidden" is not published by this laptop',
+      ]);
+      expect(lines.join("\n")).not.toContain("sk-ECHOED");
+      a.dispose();
+    } finally {
+      bad.stop(true);
+    }
+  });
+
   test("F1: an interactive attach with no log file writes nothing to its terminal log", async () => {
     const lines: string[] = [];
     const c = new TunnelCluster(new ScriptedProvider([[{ type: "done" }]]));

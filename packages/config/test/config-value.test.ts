@@ -411,6 +411,15 @@ describe("A6: what the write applies to", () => {
     expect(text("tui.theme")).toContain("not carried");
   });
 
+  test("a published key says the laptop publishes it and a pod's own value is ignored", () => {
+    // Mutation: drop the `published` branch → it would say "carried to a pod".
+    for (const path of ["subagents.selectableModels", "subagents.types.*.model"]) {
+      expect(text(path)).toContain("published by the laptop");
+      expect(text(path)).toContain("a pod's own value is ignored");
+      expect(text(path)).not.toContain("not carried");
+    }
+  });
+
   test("it is one line", () => {
     expect(text("model.model").includes("\n")).toBe(false);
   });
