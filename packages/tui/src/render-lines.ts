@@ -14,7 +14,7 @@ import stringWidth from "string-width";
 import wrapAnsi from "wrap-ansi";
 import { BULLET, blinkOn, hiddenBullet } from "./blink.ts";
 import { truncateCells } from "./cells.ts";
-import { formatDurationMs, formatTokens } from "./format.ts";
+import { formatDurationMs } from "./format.ts";
 import { expandTabs } from "./input-view.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { messageRows } from "./message-row.ts";
@@ -22,9 +22,9 @@ import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
-import { subAgentView } from "./subagent-view.ts";
+import { subAgentEarlierRow, subAgentHeadRow, subAgentRow, subAgentView } from "./subagent-view.ts";
 import { dashedRule, theme, themeMode } from "./theme.ts";
-import { fitSubtitle, isExpanded } from "./tool-expand.ts";
+import { EXPAND_HINT, fitSubtitle, isExpanded } from "./tool-expand.ts";
 import { queuedRow } from "./tool-phase-view.ts";
 import { type WordOp, changeRatio, diffWords } from "./word-diff.ts";
 
@@ -279,23 +279,24 @@ function subAgentLines(tool: ToolItem, width: number, expanded: boolean): string
   if (!sub) {
     return [];
   }
+  // Ctrl+O keeps the whole kept trail (the escape hatch, as before).
   const view = subAgentView(sub, expanded ? { maxRows: Number.POSITIVE_INFINITY } : {});
-  const uses = `${view.head.toolUses} tool ${view.head.toolUses === 1 ? "use" : "uses"}`;
-  // Its own tokens, a bare number like the session total's (owner 2026-10-26).
-  const tokens = view.head.tokens > 0 ? ` · ${formatTokens(view.head.tokens)}` : "";
-  // `◆ ` takes 2 cells of the body's width.
-  const headText = truncateCells(`${view.head.agentType} · ${uses}${tokens}`, width - 2);
-  const out = [theme.subtle(`${theme.accent("◆")} ${headText}`)];
-  if (view.hidden > 0) {
+  const out = [theme.subtle(`${theme.accent("◆")} ${subAgentHeadRow(view.head, width)}`)];
+  const earlier = subAgentEarlierRow(view.hidden, expanded);
+  if (earlier !== null) {
     // The existing ellipsis grammar, pointed at the past instead of the future.
-    out.push(theme.subtle(truncateCells(`… +${view.hidden} earlier`, width)));
+    out.push(theme.subtle(truncateCells(earlier, width)));
   }
+  const closing = view.done?.closing;
   view.rows.forEach((label, i) => {
-    // `├─ `/`└─ ` take 3 cells; the last row closes the block once it is done.
-    const last = i === view.rows.length - 1 && view.done !== null;
-    out.push(theme.subtle(`${last ? "└─" : "├─"} ${truncateCells(label, width - 3)}`));
+    // The last row closes the block on a CLEAN end; a non-clean one closes on
+    // its own row below (review M3 / Q2).
+    const last = i === view.rows.length - 1 && view.done !== null && closing === undefined;
+    out.push(theme.subtle(`${last ? "└─" : "├─"} ${subAgentRow(label, width, expanded)}`));
   });
-  if (view.done === null) {
+  if (closing !== undefined) {
+    out.push(`${theme.subtle("└─")} ${theme.error(closing)}`);
+  } else if (view.done === null) {
     out.push(theme.subtle("└─ …"));
   }
   return out;
@@ -322,18 +323,14 @@ export function hookLines(
   return { name: hook.name, rest: ` blocked ${label}`, reason, replacesBody: true };
 }
 
-function toolBody(tool: ToolItem, width: number, inPod: boolean, headLimit?: number): string[] {
+function toolBody(tool: ToolItem, width: number, inPod: boolean, fit: BodyFit): string[] {
   const hook = hookLines(tool);
   if (!hook) {
-    return plainToolBody(tool, width, inPod, headLimit);
+    return plainToolBody(tool, width, inPod, fit);
   }
   const line = theme.subtle("hook ") + theme.accent(hook.name) + theme.subtle(hook.rest);
   const reason = hook.reason.map((l) => theme.subtle(l));
-  return [
-    line,
-    ...reason,
-    ...(hook.replacesBody ? [] : plainToolBody(tool, width, inPod, headLimit)),
-  ];
+  return [line, ...reason, ...(hook.replacesBody ? [] : plainToolBody(tool, width, inPod, fit))];
 }
 
 // A spilled result's head and tail lines, memoised on the item like
@@ -407,35 +404,31 @@ function readLines(tool: ToolItem, limit: number | undefined): readonly string[]
   return lines;
 }
 
-function plainToolBody(
-  tool: ToolItem,
-  width: number,
-  inPod: boolean,
-  headLimit?: number,
-): string[] {
+function plainToolBody(tool: ToolItem, width: number, inPod: boolean, fit: BodyFit): string[] {
   if (tool.detail?.kind === "diff") {
     return diffBody(tool.detail, width);
   }
-  // `headLimit` is undefined exactly when expanded (Ctrl+O): `toolLines`.
-  const expanded = headLimit === undefined;
+  const expanded = fit.expanded;
   // Sub-agent (`agent_task`): the rolling tail, then its report (when done).
+  // The TREE is exempt from the generic top-collapse (`toolLines`, review H1):
+  // it is what the block exists to show, and a finished child's report used to
+  // push its newest step, its closing row AND the report itself out of view,
+  // leaving two different cut markers stacked in one block. Only the report
+  // collapses, with the transcript's own marker.
   if (tool.sub) {
     const tree = subAgentLines(tool, width, expanded);
     if (tool.status === "running") {
       return tree;
     }
     const report = tool.spill
-      ? ["", ...spillBody(tool, tool.spill, expanded, inPod)]
+      ? spillBody(tool, tool.spill, expanded, inPod)
       : tool.resultText && tool.resultText.length > 0
-        ? [
-            "",
-            ...tool.resultText
-              .replace(/\n+$/, "")
-              .split("\n")
-              .map((l) => theme.subtle(l)),
-          ]
+        ? tool.resultText
+            .replace(/\n+$/, "")
+            .split("\n")
+            .map((l) => theme.subtle(l))
         : [];
-    return [...tree, ...report];
+    return [...tree, ...(report.length > 0 ? ["", ...collapsedBody(report, fit)] : [])];
   }
   if (tool.status === "running") {
     return [theme.subtle("running…")];
@@ -457,7 +450,7 @@ function plainToolBody(
   }
   if (tool.resultText && tool.resultText.length > 0) {
     if (tool.name === "fs_read" && tool.status !== "error") {
-      const coloured = readLines(tool, headLimit);
+      const coloured = readLines(tool, fit.limit);
       if (coloured) {
         return [...coloured];
       }
@@ -553,6 +546,37 @@ function commandRows(subtitle: string, cols: number): string[] {
   return rows;
 }
 
+/**
+ * The one place a long BODY is cut, shared by the generic tool body and a
+ * sub-agent's report (a sub-agent's STEP TREE is exempt: review H1). Collapsed,
+ * everything over `threshold` rows becomes the first `preview` plus
+ * `… +N more lines · ctrl+o to expand`; expanded, the whole body.
+ */
+function collapsedBody(body: string[], fit: CollapseFit): string[] {
+  if (fit.expanded || body.length <= fit.threshold) {
+    return body;
+  }
+  const hidden = body.length - fit.preview;
+  return [...body.slice(0, fit.preview), theme.subtle(`… +${hidden} more lines · ${EXPAND_HINT}`)];
+}
+
+/** How a body collapses: Ctrl+O shows it whole; else `threshold`/`preview` rows. */
+interface CollapseFit {
+  readonly expanded: boolean;
+  readonly threshold: number;
+  readonly preview: number;
+}
+
+/**
+ * How a tool BODY is fitted: the collapse rules plus `readLines`' preview limit
+ * (undefined = highlight the whole file). One value threaded down to
+ * `plainToolBody`, which needs both.
+ */
+interface BodyFit extends CollapseFit {
+  /** `readLines`' preview limit (undefined = highlight the whole file). */
+  readonly limit: number | undefined;
+}
+
 function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const cols = Math.max(1, Math.floor(opts.width ?? DEFAULT_WIDTH));
   if (tool.status === "queued") {
@@ -579,18 +603,19 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
 
   const threshold = opts.collapseThreshold ?? DEFAULT_THRESHOLD;
   const preview = opts.previewLines ?? DEFAULT_PREVIEW;
-  const body = toolBody(
-    tool,
-    width,
-    opts.spillInPod === true,
-    opts.expandAll ? undefined : Math.max(threshold, preview),
-  );
+  const body = toolBody(tool, width, opts.spillInPod === true, {
+    expanded: opts.expandAll === true,
+    limit: opts.expandAll ? undefined : Math.max(threshold, preview),
+    threshold,
+    preview,
+  });
 
-  let shown = body;
-  if (!opts.expandAll && body.length > threshold) {
-    const hidden = body.length - preview;
-    shown = [...body.slice(0, preview), theme.subtle(`… +${hidden} more lines · ctrl+o to expand`)];
-  }
+  // The generic cut. A sub-agent body never reaches here uncut: its tree is
+  // exempt and its report is already folded by `collapsedBody` inside
+  // `plainToolBody` (review H1).
+  const shown = tool.sub
+    ? body
+    : collapsedBody(body, { expanded: opts.expandAll === true, threshold, preview });
   // The first body line carries the corner connector; the rest align under it.
   return [header, ...command, ...shown.map((l, i) => (i === 0 ? connector() : INDENT) + l)];
 }

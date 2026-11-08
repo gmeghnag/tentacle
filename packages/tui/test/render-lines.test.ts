@@ -186,8 +186,7 @@ describe("itemLines", () => {
     for (const i of [8, 9, 10, 11, 12]) {
       expect(joined).toContain(`Read f${i}.ts`);
     }
-    expect(joined).toContain("… +7 earlier");
-    expect(joined).not.toContain("ctrl+o to expand"); // a tail, not a top-collapse
+    expect(joined).toContain("… +7 earlier · ctrl+o to expand");
     // The head grammar is unchanged (type · uses · tokens).
     expect(joined).toContain("explore · 12 tool uses · 12k");
     // Running: it still closes with the bare ellipsis row (2-space body indent).
@@ -255,8 +254,9 @@ describe("itemLines", () => {
     for (const row of rows) {
       expect(stringWidth(row)).toBeLessThanOrEqual(46);
     }
-    // Cut with the ellipsis, on the one row the head owns (never a wrapped second).
-    expect(rows).toContain("⎿ ◆ a-sub-agent-type-name-far-too-long-for-f…");
+    // Cut with the ellipsis, on the one row the head owns (never a wrapped second)
+    // — and the TYPE is what gives way: the counts survive (review L4).
+    expect(rows).toContain("⎿ ◆ a-sub-agent-type-na… · 12 tool uses · 12k");
     expect(rows.filter((r) => r.includes("a-sub-agent-type"))).toHaveLength(1);
   });
 
@@ -299,6 +299,275 @@ describe("itemLines", () => {
     expect(joined).toContain("Read f1.ts");
     expect(joined).toContain("Read f12.ts");
     expect(joined).not.toContain("earlier");
+  });
+
+  // Review M1: the head says `<n> tool uses` (the child's own counter) while the
+  // cut row is derived from the LABELS state kept (capped at 50). 60 steps read
+  // `60 tool uses` then `… +45 earlier` — a block contradicting itself.
+  test("the cut row counts what the head counts, past the 50-label cap", () => {
+    const sixty = runningSub({
+      sub: {
+        ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+        activities: Array.from({ length: 60 }, (_, i) => `Read f${i + 1}.ts`).slice(-50),
+        toolUses: 60,
+      },
+    });
+    const rows = itemLines(sixty, { expandAll: false, width: 80 }).map((l) => strip(l).trimEnd());
+    const joined = rows.join("\n");
+    expect(joined).toContain("explore · 60 tool uses");
+    expect(joined).toContain("… +55 earlier");
+    expect(joined).not.toContain("… +45 earlier");
+    expect(joined).toContain("Read f60.ts");
+  });
+
+  // Review Q3 (owner-recommended default): one grammar with the existing
+  // top-collapse, `… +N earlier · ctrl+o to expand`, and it fits at 46 columns.
+  test("the cut row carries the ctrl+o hint, like every other cut marker", () => {
+    const joined = bodyOfWidth(80).join("\n");
+    expect(joined).toContain("… +7 earlier · ctrl+o to expand");
+  });
+
+  test("the cut row still fits at 46 columns (88 earlier steps is the widest count)", () => {
+    const many = runningSub({
+      sub: {
+        ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+        activities: Array.from({ length: 93 }, (_, i) => `Read f${i + 1}.ts`).slice(-50),
+        toolUses: 93,
+      },
+    });
+    const rows = itemLines(many, { expandAll: false, width: 46 }).map((l) => strip(l).trimEnd());
+    expect(rows.join("\n")).toContain("… +88 earlier · ctrl+o to expand");
+    for (const row of rows) {
+      expect(stringWidth(row)).toBeLessThanOrEqual(46);
+    }
+  });
+
+  // Review H1: a FINISHED child used to be cut by the generic body collapse
+  // (`toolLines`' 8-row threshold), which hid the newest step, the closing row
+  // and the report — two different cut markers in one block. The tree is exempt;
+  // only the REPORT collapses.
+  const finishedSub = (over: Partial<ToolItem> = {}): ToolItem =>
+    runningSub({
+      status: "ok",
+      durationMs: 5,
+      sub: {
+        ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+        done: true,
+        stopReason: "end_turn",
+      },
+      ...over,
+    });
+
+  test("a finished child keeps its newest step and its closing row beside a report", () => {
+    // Mutation (red, verified): let `plainToolBody`'s sub-agent body back into
+    // the generic cut → `Read f12.ts` and `└─ Read f12.ts` disappear.
+    const rows = itemLines(finishedSub({ resultText: "The bug is in auth.ts" }), {
+      expandAll: false,
+      width: 80,
+    }).map((l) => strip(l).trimEnd());
+    const joined = rows.join("\n");
+    expect(joined).toContain("Read f12.ts");
+    expect(rows).toContain("⎿ ◆ explore · 12 tool uses · 12k");
+    expect(rows.some((r) => r.trim() === "└─ Read f12.ts")).toBe(true);
+    expect(rows.some((r) => r.trim() === "└─ …")).toBe(false);
+    // The report is there, one row, and it is the LAST row.
+    expect(rows.at(-1)?.trim()).toBe("The bug is in auth.ts");
+    // ONE cut marker per block: the tail's own, never the generic `more lines`.
+    expect(joined).not.toContain("more lines");
+  });
+
+  test("a long report still collapses, from the top, beside the whole tree", () => {
+    const report = Array.from({ length: 12 }, (_, i) => `report line ${i + 1}`).join("\n");
+    const rows = itemLines(finishedSub({ resultText: report }), {
+      expandAll: false,
+      width: 80,
+    }).map((l) => strip(l).trimEnd());
+    const joined = rows.join("\n");
+    // The whole tree, both cut-free rows included.
+    expect(joined).toContain("Read f8.ts");
+    expect(rows.some((r) => r.trim() === "└─ Read f12.ts")).toBe(true);
+    // The report's head, then its OWN cut row.
+    expect(joined).toContain("report line 1");
+    expect(joined).not.toContain("report line 12");
+    expect(joined).toMatch(/… \+\d+ more lines · ctrl\+o to expand/);
+    expect(joined).toContain("… +7 earlier");
+  });
+
+  test("a 6-row tail: the exempt tree does not collapse (the trap if the constant grows)", () => {
+    // The running block is 8 rows only by arithmetic (head + cut + 5 + `└─ …`
+    // = the threshold). Pinning the finished case at a 6-row tree keeps that
+    // from becoming a silent regression (review H1).
+    const six = finishedSub({
+      resultText: "ok",
+      sub: {
+        ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+        activities: STEPS_12.slice(-6),
+        done: true,
+        stopReason: "end_turn",
+      },
+    });
+    const rows = itemLines(six, { expandAll: false, width: 80 }).map((l) => strip(l).trimEnd());
+    expect(rows.join("\n")).not.toContain("more lines");
+    expect(rows.some((r) => r.trim() === "└─ Read f12.ts")).toBe(true);
+  });
+
+  // Review M3 / Q2: `agent_task` returns no `isError` for a cancelled child, so
+  // the tool row is `ok` and the block used to match a clean run character for
+  // character. One closing row now says otherwise.
+  test("a cancelled child closes with `└─ ✗ cancelled`, and keeps its tail", () => {
+    const rows = itemLines(
+      finishedSub({
+        resultText: "partial",
+        sub: {
+          ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+          done: true,
+          stopReason: "cancelled",
+        },
+      }),
+      { expandAll: false, width: 80 },
+    ).map((l) => strip(l).trimEnd());
+    const joined = rows.join("\n");
+    expect(joined).toContain("Read f12.ts");
+    expect(rows.some((r) => r.trim() === "└─ ✗ cancelled")).toBe(true);
+    expect(rows.some((r) => r.trim() === "└─ Read f12.ts")).toBe(false);
+  });
+
+  test("an errored child closes the same way: `└─ ✗ error`", () => {
+    const rows = itemLines(
+      finishedSub({
+        status: "error",
+        resultText: "boom",
+        sub: {
+          ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+          done: true,
+          stopReason: "error",
+        },
+      }),
+      { expandAll: false, width: 80 },
+    ).map((l) => strip(l).trimEnd());
+    expect(rows.some((r) => r.trim() === "└─ ✗ error")).toBe(true);
+  });
+
+  test("a clean end is unchanged: the last step row closes the block", () => {
+    const rows = itemLines(finishedSub({ resultText: "ok" }), { expandAll: false, width: 80 }).map(
+      (l) => strip(l).trimEnd(),
+    );
+    expect(rows.some((r) => r.trim() === "└─ Read f12.ts")).toBe(true);
+    expect(rows.join("\n")).not.toContain("✗");
+  });
+
+  // Review M2: Ctrl+O is the view documented as the escape hatch, and it used to
+  // cut a long label anyway. Mutation (red, verified): drop the `expanded ?`
+  // branch → the whole 170-cell label is gone.
+  test("Ctrl+O shows a long label in full, wrapped, instead of cutting it", () => {
+    const LONG = `$ bun test ${"packages/config/src/a-very-long-directory-name/".repeat(3)}`;
+    const long = runningSub({
+      sub: {
+        ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+        activities: [LONG],
+        toolUses: 1,
+      },
+    });
+    const collapsed = itemLines(long, { expandAll: false, width: 46 }).map((l) => strip(l));
+    expect(collapsed.join("\n")).not.toContain(LONG); // still cut when collapsed
+    const expanded = itemLines(long, { expandAll: true, width: 80 }).map((l) => strip(l));
+    // Wrapped across rows, so the label survives whole (minus the row prefixes).
+    expect(expanded.map((r) => r.replace(/^\s*(?:│ )?/, "")).join(" ")).toContain("bun test");
+    expect(expanded.join("").replace(/\s+/g, "")).toContain(LONG.replace(/\s+/g, "").slice(0, 150));
+  });
+
+  // Review L4: a long `subagent_type` cut the COUNTS (they sit to its right), so
+  // `7 tool uses` vanished and only the type survived. Cut the type alone.
+  test("a very long type leaves the counts on the head", () => {
+    const wide = runningSub({
+      sub: {
+        ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+        agentType: "an-extremely-long-sub-agent-type-name-that-goes-on-and-on-forever",
+        activities: STEPS_12.slice(0, 7),
+        toolUses: 7,
+      },
+    });
+    for (const width of [80, 46]) {
+      const rows = itemLines(wide, { expandAll: false, width }).map((l) => strip(l).trimEnd());
+      const headRow = rows.find((r) => r.includes("◆")) ?? "";
+      expect(headRow).toContain("7 tool uses");
+      expect(headRow).toContain("12k");
+      expect(headRow).toContain("…"); // the type is what got cut
+      expect(headRow).not.toContain("forever");
+      for (const row of rows) {
+        expect(stringWidth(row)).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+
+  // Review L2: a wide-character label through the block, at both widths.
+  test("wide (CJK / emoji) labels are cut by CELLS, never over the width", () => {
+    const wide = runningSub({
+      sub: {
+        ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+        activities: [
+          "Read 日本語のとても長いファイル名がここに続いています/設定スキーマ定義ファイル.ts",
+          `$ echo ${"🎉".repeat(27)}`,
+        ],
+        toolUses: 2,
+      },
+    });
+    for (const width of [80, 46]) {
+      const rows = itemLines(wide, { expandAll: false, width }).map((l) => strip(l).trimEnd());
+      expect(rows.join("\n")).toContain("Read 日本語");
+      for (const row of rows) {
+        expect(stringWidth(row)).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+
+  // Review L2: two sub-agents in one transcript keep their OWN rows and counts.
+  test("two sub-agents in parallel: each block keeps its own steps and count", () => {
+    const one: ToolItem = {
+      kind: "tool",
+      id: "a",
+      name: "agent_task",
+      args: '{"description":"scan the auth module"}',
+      status: "ok",
+      durationMs: 3,
+      resultText: "a done",
+      sub: {
+        agentType: "explore",
+        description: "scan the auth module",
+        activities: Array.from({ length: 8 }, (_, i) => `Read a${(i + 1) * 2}.ts`),
+        toolUses: 8,
+        tokens: 0,
+        done: true,
+        stopReason: "end_turn",
+      },
+    };
+    const two: ToolItem = {
+      kind: "tool",
+      id: "b",
+      name: "agent_task",
+      args: '{"description":"migrate tests to bun"}',
+      status: "running",
+      sub: {
+        agentType: "general",
+        description: "migrate tests to bun",
+        activities: Array.from({ length: 6 }, (_, i) => `Edit b${i + 1}.ts`),
+        toolUses: 6,
+        tokens: 0,
+        done: false,
+      },
+    };
+    const rows = transcriptLines([one, two], { expandAll: false, width: 80 }).map((l) =>
+      strip(l).trimEnd(),
+    );
+    const blockA = rows.slice(0, rows.indexOf(""));
+    const blockB = rows.slice(rows.indexOf("") + 1);
+    expect(blockA.join("\n")).not.toContain("Edit b");
+    expect(blockA.join("\n")).toContain("8 tool uses");
+    expect(blockA.join("\n")).toContain("… +3 earlier");
+    expect(blockB.join("\n")).not.toContain("Read a");
+    expect(blockB.join("\n")).toContain("6 tool uses");
+    expect(blockB.join("\n")).toContain("… +1 earlier");
+    expect(blockB.some((r) => r.trim() === "└─ …")).toBe(true);
   });
 
   test("tool header shows a friendly action label per tool", () => {

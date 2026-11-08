@@ -70,8 +70,11 @@ export interface SubAgentProgress {
   readonly tokens: number;
   readonly done: boolean;
   /**
-   * Why it stopped (`end_turn`, `error`, `cancelled`, …): set with `done` by
-   * `subagent_end`. Absent while it runs, and on an older daemon's frame.
+   * Why it stopped (`end_turn`, `error`, `cancelled`, `max_iterations`): set with
+   * `done` by `subagent_end`. Absent only while it runs — a finished child always
+   * has one: `AgentEvent.stopReason` is required (`agent.ts:264-269`) and the
+   * client DROPS a `subagent_end` without it (`client/src/mapping.ts:128-136`).
+   * Optional so a hand-built state still types.
    */
   readonly stopReason?: string;
 }

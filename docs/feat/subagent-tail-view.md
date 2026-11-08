@@ -1,6 +1,6 @@
 # feat/subagent-tail-view — a foreground sub-agent shows a rolling tail (task 2/9)
 
-> **Status:** review
+> **Status:** review — review fixes applied (round 2); owner to confirm Q1–Q3 defaults
 > **Branch:** `feat/subagent-tail-view` — stacked on `feat/subagent-general-rename` (task 1, not merged)
 > **Size:** S · **Blast:** contained · **Suited:** a weaker model may execute; standard in-context Review
 
@@ -27,6 +27,12 @@ Opus's architecture/UI review (`.tentacle/worktrees/eval-subagent-live-arch/docs
   Keep the state cap of 50 (`state.ts:189`), since the panel shows more than the tail."*
 - **Mockup 1 (Foreground, rolling tail)**: the head line, then `… +14 earlier`, then the last
   rows, then the closing row.
+  **Amended after this task's Review (Q1, owner-recommended, to confirm):** the totals
+  (`19 tool uses · 12.4k tok · 1m12s`) stay on the **head** row, not on a closing row — it costs
+  no row and they stay visible while the child runs. The "closing row" is the last step (or
+  `└─ …` while running), plus `└─ ✗ <reason>` when the child did not end cleanly (Q2). The
+  earlier-steps row reads `… +N earlier · ctrl+o to expand` (Q3). See **Execution → Round 2
+  (review fixes)** and the round-2 **Review**.
 
 Scope: this task only — the pure view-model + the component that renders it. No background,
 no footbar list, no panel, no protocol, no persistence change.
@@ -283,6 +289,322 @@ last step visible: true
 At 46 columns the frame keeps the same 9 rows; the cut is visible on the one label that does
 not fit (`packages/daem…`), which is why the repro's exact-substring counter says 4 there —
 no row wraps, and the tail is the same 5 steps.
+
+### Round 2 (review fixes)
+
+*— claude-opus-5-5 (the review's model), 2026-11-08 — fixes the review above: H1, M1–M4, L1–L4,
+and the three owner questions as recommended defaults.*
+
+**What was fixed, and where the decision lives.** Every branch is in the pure view-model
+(`packages/tui/src/subagent-view.ts`, AGENTS §7); `render-lines.ts` only colours, indents and
+folds.
+
+| Finding | Fix | Decision in |
+|---|---|---|
+| **H1** a finished child hides its newest step, its close and its report | A sub-agent's STEP TREE is exempt from `toolLines`' generic 8-row cut. Only the REPORT collapses, through the one shared `collapsedBody` (`render-lines.ts:555-566`), with the transcript's own `… +N more lines · ctrl+o to expand`. One cut marker per block, never two. | `render-lines.ts:613-618` |
+| **M1** `hidden` contradicted the head past the 50-label cap (`60 tool uses` over `… +45 earlier`) | The block counts off ONE number, `max(toolUses, activities.length)`, reported as BOTH `head.toolUses` and the base of `hidden` — so the head and the cut row can never describe it two ways. 60 steps now read `60 tool uses` over `… +55 earlier`. They are equal on a real stream (one `subagent_tool` bumps both); the two only diverge past the cap. | `subagent-view.ts:76-91` |
+| **M2** Ctrl+O still cut a long label | `subAgentRow(label, width, expanded)` cuts only when collapsed; expanded, the label is whole and `wrapLines` folds it. | `subagent-view.ts:135-139` |
+| **M3** a cancelled/errored child looked like a clean one | **Q2 (recommended default):** a non-clean end gets ONE closing row, `└─ ✗ <reason>` — `✗ cancelled`, `✗ error`, and `✗ max_iterations` for any other non-`end_turn` reason. Clean ends are unchanged (the last step row closes). | `subagent-view.ts:95-101`, `render-lines.ts:290-303` |
+| **M4** undeclared drift from mockup 1 | **Q1 (recommended default):** the totals STAY on the head. Mockup 1's description in **Context** is amended, not the code. | Context, mockup 1 |
+| **L1** false premise in a comment and a test name | `state.ts`'s `stopReason` doc now states the truth: a finished child always has one (`AgentEvent.stopReason` is required, `agent.ts:264-269`; the client DROPS a `subagent_end` without it, `client/src/mapping.ts:128-136`); optional only so a hand-built state types. The test is renamed `a done with no recorded reason (unreachable from the wire)`. | `state.ts:72-80` |
+| **L2** no wide-char and no two-sub-agent test through the block; weak 46-col assertion | Added: CJK/emoji labels at 80 and 46 (cells, never over the width); two sub-agents in one transcript (`transcriptLines`, each block keeps its own rows, count and cut row); and the 46-col test now pins the exact cut text, not a bare `…`. | `render-lines.test.ts` |
+| **L3** expect a small adapter in 6a | No change (a note). The view-model still takes `SubAgentProgress`; 6a narrows the input when the wire row lands. | — |
+| **L4** a long type cut the COUNTS | `subAgentHeadRow(head, width)` cuts the TYPE alone, to the room the counts leave, so `7 tool uses · 12k` always survives. | `subagent-view.ts:103-120` |
+| **Q3** wording | `… +N earlier · ctrl+o to expand` — one grammar with the transcript's other cut markers, both reading the ONE `EXPAND_HINT` (`tool-expand.ts:75-81`).In the EXPANDED view the hint is dropped (Ctrl+O is already on). **33 cells, 35 with the indent** at a 999-step worst case, so it fits at 46 columns (pinned by a test). | `subagent-view.ts:121-133` |
+
+**Red before green** (AGENTS §9), each group shown failing on the pre-fix code:
+
+| Group | Test(s) first run RED on the old code | Fail count |
+|---|---|---|
+| H1 | `render-lines.test.ts`: "a finished child keeps its newest step and its closing row beside a report", "a long report still collapses, from the top, beside the whole tree", "a 6-row tail: the exempt tree does not collapse" | 3 |
+| M1 | `subagent-view.test.ts`: "60 steps … 55 counted earlier", "the wire's own shape (a tail of 8 labels, 19 tool uses)"; `render-lines.test.ts`: "the cut row counts what the head counts" | 3 |
+| M3/Q2 | `subagent-view.test.ts`: "a non-clean end carries a closing row", "every other non-clean reason closes with a row too"; `render-lines.test.ts`: "`└─ ✗ cancelled`", "`└─ ✗ error`" | 4 |
+| M2 | `render-lines.test.ts`: "Ctrl+O shows a long label in full, wrapped" | 1 |
+| L4 | `subagent-view.test.ts`: "a long type is cut; the counts and the tokens always survive", "a width that cannot hold the counts alone still fits", "a short type is not cut at all"; `render-lines.test.ts`: "a very long type leaves the counts on the head" | 4 |
+| Q3 | `render-lines.test.ts`: "the cut row carries the ctrl+o hint", "the cut row still fits at 46 columns"; `subagent-view.test.ts`: "one grammar with the transcript's other cut markers", "it fits at 46 columns even at the 999-step worst case" | 4 |
+
+**Mutations, one per finding group** (cp backup + `shasum -c` restore,
+`.tentacle/tmp/subagent-tail-view/r2-backup/`; both files restored to the final
+`render-lines.ts 7370d2d7…` / `subagent-view.ts f660c120…`, verified by `shasum -c` after
+every mutation; mutations A, B, C and F were re-run against the final code, the refactor's
+frames were snapshotted in `frames-r2.after.txt` and were byte-identical, and every mutation's
+fail count below is the final code's):
+
+| # | Mutation | Result |
+|---|---|---|
+| A | H1: `tool.sub ? body : …` → `false ? body : …` (the tree back into the generic cut) | **7 fail** (6 in `render-lines.test.ts`, 1 in the app frame) |
+| B | M1: `counted` back to `sub.activities.length` | **4 fail** (2 view-model, 2 render-lines) |
+| C | Q3: drop `· ctrl+o to expand` from the earlier row | **3 fail** (render-lines) |
+| D | M3/Q2: `closingRow` always returns `{}` | **5 fail** (2 view-model, 2 render-lines, 1 app frame) |
+| E | M2: `subAgentRow` always cuts (`expanded ? label : …` → unconditional) | **1 fail** (render-lines) |
+| F | L4: cut the joined head from the right (the old behaviour) | **3 fail** (1 view-model head-row test, 2 render-lines) |
+| G | L2: cut a row by CODE POINTS instead of cells (`label.slice(0, width-3)`) | **1 fail** (the CJK/emoji test) |
+
+**Frames re-captured after the fix** (`.tentacle/tmp/subagent-tail-view/review-frames-r2.ts`,
+gitignored): the same pipeline as the review's — real `applyEvent` events → `itemLines` →
+`wrapLines` → an Ink frame from `ink-testing-library`; SGR stripped; a row over the width would
+be flagged `<< OVER` (**none was, at any width**). Heights are in the last pair of blocks.
+
+```
+=== 2 steps running @80 / @60 / @46 (rows 5, identical at all three) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ Read packages/f2.ts
+|  └─ …
+
+=== 12 steps running @80 / @60 / @46 (rows 9, identical at all three) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ …
+
+=== 60 steps running @80 / @60 / @46 (rows 9) — M1: 55, matching `60 tool uses` ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 60 tool uses
+|  … +55 earlier · ctrl+o to expand
+|  ├─ Read packages/f56.ts
+|  ├─ Read packages/f57.ts
+|  ├─ Read packages/f58.ts
+|  ├─ Read packages/f59.ts
+|  ├─ Read packages/f60.ts
+|  └─ …
+
+=== 12 steps DONE end_turn, 1-line report @80 / @60 / @46 (rows 10) — H1: step 12, the close and the report are all there ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  The bug is in auth.ts.
+
+=== 12 steps DONE end_turn, 12-line report @80 (rows 16) — only the REPORT collapses ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  report line 1
+|  report line 2
+|  report line 3
+|  report line 4
+|  report line 5
+|  report line 6
+|  … +6 more lines · ctrl+o to expand
+
+=== 12 steps DONE end_turn, no report @80 (rows 8) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+
+=== 12 steps stopReason=cancelled @80 / @46 (rows 11) — M3/Q2 ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ cancelled
+|
+|  partial
+
+=== 12 steps stopReason=error, isError @80 / @46 (rows 11) — M3/Q2 ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ error
+|
+|  boom
+
+=== 12 steps stopReason=end_turn, ok report @80 / @46 (rows 10) — the clean comparison ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  partial
+
+=== Ctrl+O running 12 @80 (rows 16) ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ … (f2 to f11, one row each)
+|  ├─ Read packages/f12.ts
+|  └─ …
+
+=== Ctrl+O running, long label @46 (rows 8) — M2: whole, wrapped, never cut ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test packages/config/src/a-very-lon
+|g-directory-name/packages/config/src/a-very-lo
+|ng-directory-name/packages/config/src/a-very-l
+|ong-directory-name/
+|  └─ …
+
+=== collapsed running, long label @46 (rows 4) — still cut (the default is a tail, not a flood) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test packages/config/src/a-very-l…
+|  └─ …
+
+=== very long type, 7 steps @80 (rows 9) — L4: the counts survive, the TYPE is cut ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ an-extremely-long-sub-agent-type-name-that-goes-on-and-on-fo… · 7 tool uses
+|  … +2 earlier · ctrl+o to expand
+|  ├─ Read packages/f3.ts
+|  ├─ Read packages/f4.ts
+|  ├─ Read packages/f5.ts
+|  ├─ Read packages/f6.ts
+|  ├─ Read packages/f7.ts
+|  └─ …
+
+=== very long type, 7 steps @46 (rows 9) — L4 at the narrow width: still the counts ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ an-extremely-long-sub-agen… · 7 tool uses
+|  … +2 earlier · ctrl+o to expand
+|  ├─ Read packages/f3.ts
+|  ├─ Read packages/f4.ts
+|  ├─ Read packages/f5.ts
+|  ├─ Read packages/f6.ts
+|  ├─ Read packages/f7.ts
+|  └─ …
+
+=== wide chars @46 (rows 5) — cut by CELLS, no row over the width ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ Read 日本語のとても長いファイル名がここ…
+|  ├─ $ echo 🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉…
+|  └─ …
+
+=== two in parallel (interleaved events) @80 (rows 19) — each block keeps its own rows and count ===
+|⏺ Agent scan the auth module
+|⎿ ◆ explore · 8 tool uses
+|  … +3 earlier · ctrl+o to expand
+|  ├─ Read a6.ts
+|  ├─ Read a8.ts
+|  ├─ Read a10.ts
+|  ├─ Read a12.ts
+|  └─ Read a14.ts
+|
+|  a report
+|⏺ Agent migrate tests to bun
+|⎿ ◆ general · 8 tool uses
+|  … +3 earlier · ctrl+o to expand
+|  ├─ Edit b7.ts
+|  ├─ Edit b9.ts
+|  ├─ Edit b11.ts
+|  ├─ Edit b13.ts
+|  ├─ Edit b15.ts
+|  └─ …
+
+=== two in parallel, one cancelled @80 (rows 20) ===
+|⏺ Agent scan the auth module
+|⎿ ◆ explore · 8 tool uses
+|  … +3 earlier · ctrl+o to expand
+|  ├─ Read a6.ts
+|  ├─ Read a8.ts
+|  ├─ Read a10.ts
+|  ├─ Read a12.ts
+|  ├─ Read a14.ts
+|  └─ …
+|⏺ Agent migrate tests to bun
+|⎿ ◆ general · 8 tool uses
+|  … +3 earlier · ctrl+o to expand
+|  ├─ Edit b7.ts
+|  ├─ Edit b9.ts
+|  ├─ Edit b11.ts
+|  ├─ Edit b13.ts
+|  ├─ Edit b15.ts
+|  └─ ✗ cancelled
+|
+|  partial
+
+heights @80: steps 0..12 = 3,4,5,6,7,8,9,9,9,9,9,9,9 · done=8 · +1-line report=10 · +12-line report=16 · cancelled=11
+heights @46: steps 0..12 = 3,4,5,6,7,8,9,9,9,9,9,9,9 · done=8 · +1-line report=10 · +12-line report=16 · cancelled=11
+```
+
+The height curve is unchanged while running (it stops at 9 at step 6, as before). The END
+now GROWS, which is the H1 fix and is the point: a finished child is the one you read, so its
+report is worth the rows — `+1-line report` 10 (was 8, and the report was invisible),
+`+12-line report` 16 (report head 6 + its own cut row), `cancelled` 11 (the `✗` row is one of
+them). At 46 columns the curve is identical: nothing wraps into an extra row.
+
+**Drift from the Implementation** (and why):
+
+- The Implementation's design kept a `headLimit` argument threaded into `plainToolBody`. The H1
+  fix needs the collapse rules on BOTH sides of the same seam (the generic body and a
+  sub-agent's report share one marker), so one `BodyFit` value (`expanded`, `limit`,
+  `threshold`, `preview`) replaced it and `collapsedBody` became the single place a body is cut.
+  `readLines`' highlight limit is unchanged (`fit.limit`).
+- `toolLines`' cut is now SKIPPED for a `tool.sub` body. A sub-agent's rows are therefore never
+  counted by the generic threshold — the property H1 needs, and the reason raising
+  `SUBAGENT_TAIL_ROWS` to 6 (owner Q17) no longer risks collapsing the live tail.
+- The earlier-steps row gained `· ctrl+o to expand` (Q3). The expanded view drops the hint,
+  because past the state cap it cannot reveal the labels state no longer keeps — saying so
+  there would promise something the escape hatch cannot deliver.
+- **Owner questions, all three taken as the review's recommended defaults — the owner should
+  confirm:** Q1 totals on the head (mockup amended in **Context**, code unchanged); Q2 one
+  closing row for a non-`end_turn` reason, `└─ ✗ <reason>`; Q3 `… +N earlier · ctrl+o to expand`.
+  Any of the three is a one-line revert in `subagent-view.ts`.
+
+**Gate, after the fixes** (this worktree, 2026-11-08):
+
+- `bunx tsc --noEmit` → exit 0.
+- `bunx biome check .` → `Checked 757 files … No fixes applied` (0 errors, 0 warnings — the
+  §6 baseline).
+- `bun test packages` → **5721 pass, 3 skip, 0 fail**, 62844 `expect()`, 388 files, 5724 tests.
+  The 3 skips are the three opt-in ones (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS=1`,
+  `TENTACLE_SLOW_TESTS=1`, AGENTS §6) — no non-opt-in skip, no new failure. 25 new tests, 16 new
+  `expect()` calls over the review's baseline of 5696 tests / 62828 `expect()`.
+
+After the last self-check (the one-count change in `subagent-view.ts`), `tsc`, `biome` and
+`bun test packages/tui` were re-run green (1170 pass); the full `bun test packages` was re-run
+**5721 pass / 3 skip / 0 fail** on the final tree, and the six frames were regenerated
+byte-identically.
+
+**Files changed in round 2:** `packages/tui/src/subagent-view.ts` (the decisions: `hidden`,
+`closing`, `subAgentHeadRow`, `subAgentEarlierRow`, `subAgentRow`),
+`packages/tui/src/render-lines.ts` (`BodyFit`/`CollapseFit` + one `collapsedBody`; the tree
+exempt; the closing row), `packages/tui/src/state.ts` (the `stopReason` doc),
+`packages/tui/src/index.ts` (the new exports), `packages/tui/src/tool-expand.ts`
+(`EXPAND_HINT`, one constant for both cut markers), `packages/tui/test/subagent-view.test.ts`,
+`packages/tui/test/render-lines.test.ts` and `packages/tui/test/app.test.tsx`.
+
+**Not fixed (deliberately, with the review's own reasoning):** L3 (a small adapter in 6a — no
+code needed here); the `maxRows: Infinity` sentinel (kept: the view-model's contract is a
+positive row budget, and task 7 will want an explicit cap anyway); the background row's
+`state`/`sa-N` (task 6b). No protocol, no persistence, no `TODO.md`/`CHANGELOG.md` change.
 
 ## Review
 
@@ -667,4 +989,35 @@ unrecorded.
   they are.
 - **Q3. Wording:** Recommend `… +7 earlier · ctrl+o to expand`: one grammar with the existing hint,
   33 cells with the indent, so it fits at 46 columns. It extends mockup 1's text, hence the question.
+
+### Round 2: outcome, and what a fresh review should attack
+
+*— claude-opus-5-5 (the review's own model), 2026-11-08 — implementation, so this is a self-check,
+not the fresh-context Review AGENTS §10 asks for; a **fresh** pass is still owed before merge.*
+
+All ten findings are addressed, and Q1–Q3 are applied as the recommendations above. Evidence is in
+**Execution → Round 2** (red-before-green per group, 7 mutations with `shasum -c` restores, and the
+re-captured frames at 80/60/46 for running/done/cancelled/error/2/12/60 steps/Ctrl+O/parallel).
+For that fresh pass, the parts to attack hardest:
+
+1. **H1's new shape.** The tree is exempt from the generic cut and the report collapses on its own.
+   The property that matters is *"a finished child's newest step, close row and report are all on
+   screen, at a width where the whole block exceeds 8 rows"* — proven at 80/60/46 with a 12-line
+   report. Attack: a report that is itself huge (a spill), a child with 0 steps and a report, a
+   report with a trailing newline, a report whose first line is blank.
+2. **The one `collapsedBody`.** It now serves the generic body and a sub-agent's report. Attack:
+   does a plain `shell`/`fs_read` body still collapse to exactly 6 + 1 rows at the default (the
+   `tool-body collapse` describe), and at `collapseThreshold` 50 (the cache test)?
+3. **`hidden` past the cap.** The block now counts off ONE number (`max(toolUses,
+   activities.length)`, also reported as `head.toolUses`), so the head and the cut row cannot
+   disagree. Attack: the counter/label direction that cannot happen on the wire either way — both
+   are pinned, and a real stream increments them together (`state.ts:427-430`).
+4. **Q2's wording.** `✗ <stopReason>` prints the raw reason, so a future reason reads as-is
+   (`✗ budget_exceeded`). That is deliberate (honest, no mapping to drift) — but if a friendlier
+   phrase is wanted, it belongs in `closingRow` and nowhere else.
+5. **The app frame tests.** Both are real Ink frames, but the *cancelled* one asserts the string
+   `└─ ✗ cancelled` after SGR stripping, so a colour-only difference is not covered; `theme.error`
+   is applied, and that is a presentation claim no stripped-frame test can pin. A colour assertion
+   would need the raw frame's SGR.
+
 

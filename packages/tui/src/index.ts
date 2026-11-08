@@ -11,6 +11,9 @@ export {
   type SubAgentOutcome,
   type SubAgentView,
   type SubAgentViewOptions,
+  subAgentEarlierRow,
+  subAgentHeadRow,
+  subAgentRow,
   subAgentView,
 } from "./subagent-view.ts";
 export * from "./scroll.ts";
