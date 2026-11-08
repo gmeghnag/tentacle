@@ -102,7 +102,10 @@ holds the full text. A model or turn error is not a failure: the TUI already sho
 it. The startup status line redraws in place (cut to the terminal width, never
 padded). `--rm` (or `rm: true` in the config or a profile)
 removes it when the run ends instead (`--rm=false` overrides the config); flag > profile > user config > default (kept). The model key and the approvals
-stay on your machine; sessions are saved locally, so `--resume` works.
+stay on your machine; sessions are saved locally, so `--resume` works. Each session
+is one append-only log, `~/.config/tentacle/sessions/<folder>/<uid>.jsonl`;
+`sessions: { keepSuperseded: true }` also keeps the history a compaction or a
+context reset replaced (default off).
 
 ```sh
 tentacle run --image <ref> [-n <namespace>] [--rm] [--name <n>] ["<prompt>"]        # Kubernetes (default)

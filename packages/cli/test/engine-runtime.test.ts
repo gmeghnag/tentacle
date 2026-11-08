@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Agent, JsonSessionStore } from "@tentacle/agent";
+import { Agent } from "@tentacle/agent";
 import type { LinkStatus } from "@tentacle/client";
 import type {
   ChatRequest,
@@ -15,7 +15,7 @@ import type {
   StreamEvent,
 } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
-import { Connection, SessionHost, versionMismatch } from "@tentacle/daemon";
+import { Connection, LogSessionStore, SessionHost, versionMismatch } from "@tentacle/daemon";
 import {
   type ExecChannelOptions,
   type ExecTarget,
@@ -336,7 +336,7 @@ describe("startPodRuntime", () => {
       image: "repo/img:tag",
       binDir: "/tmp",
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(join(dir, "bindir")), () => {}),
+      saver: new SessionSaver(new LogSessionStore(join(dir, "bindir")), () => {}),
       resume: null,
       log: () => {},
     });
@@ -381,7 +381,7 @@ describe("startPodRuntime", () => {
       [{ type: "text", delta: "hi from the pod" }, { type: "done" }],
     ]);
     const kube = new FakeCluster(model);
-    const store = new JsonSessionStore(join(dir, "ok"));
+    const store = new LogSessionStore(join(dir, "ok"));
 
     const runtime = await startPodRuntime(baseConfig("/pod/work"), {
       kube,
@@ -418,7 +418,7 @@ describe("startPodRuntime", () => {
     // A turn runs over the exec channel and persists on the laptop side.
     await drain(runtime.createSession().send("hello"));
     await new Promise((r) => setTimeout(r, 20));
-    const saved = (await store.list()).records;
+    const saved = (await store.loadAll()).records;
     expect(saved).toHaveLength(1);
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "hi from the pod"]);
 
@@ -435,7 +435,7 @@ describe("startPodRuntime", () => {
     const kube = new SpyFakeCluster(
       new AskModel("fs_write", '{"path":"/tmp/x.txt","content":"hi"}'),
     );
-    const store = new JsonSessionStore(join(dir, "perm-run"));
+    const store = new LogSessionStore(join(dir, "perm-run"));
 
     const runtime = await startPodRuntime(baseConfig("/pod/work"), {
       kube,
@@ -485,7 +485,7 @@ describe("startPodRuntime", () => {
       namespace: "dev",
       image: "repo/img:tag",
       permissions: spy,
-      saver: new SessionSaver(new JsonSessionStore(join(dir, "perm-reply")), () => {}),
+      saver: new SessionSaver(new LogSessionStore(join(dir, "perm-reply")), () => {}),
       resume: null,
       log: () => {},
     });
@@ -518,7 +518,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         permissions: new PermissionBroker(),
-        saver: new SessionSaver(new JsonSessionStore(join(dir, "injection-fail")), () => {}),
+        saver: new SessionSaver(new LogSessionStore(join(dir, "injection-fail")), () => {}),
         resume: null,
         log: () => {},
       }),
@@ -532,7 +532,7 @@ describe("startPodRuntime", () => {
   test("uses an explicit pod name when provided (else generates one)", async () => {
     const model = new ScriptedProvider([[{ type: "done" }]]);
     const kube = new FakeCluster(model);
-    const store = new JsonSessionStore(join(dir, "named"));
+    const store = new LogSessionStore(join(dir, "named"));
 
     const runtime = await startPodRuntime(baseConfig("/pod/work"), {
       kube,
@@ -571,7 +571,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         permissions: new PermissionBroker(),
-        saver: new SessionSaver(new JsonSessionStore(join(dir, "no-ns")), () => {}),
+        saver: new SessionSaver(new LogSessionStore(join(dir, "no-ns")), () => {}),
         resume: null,
         log: () => {},
       }),
@@ -606,7 +606,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         permissions: new PermissionBroker(),
-        saver: new SessionSaver(new JsonSessionStore(join(dir, "rbac")), () => {}),
+        saver: new SessionSaver(new LogSessionStore(join(dir, "rbac")), () => {}),
         resume: null,
         log: () => {},
       }),
@@ -616,7 +616,7 @@ describe("startPodRuntime", () => {
   test("registers a process-exit cleanup that deletes the pod (Ctrl+C safety net)", async () => {
     const model = new ScriptedProvider([[{ type: "done" }]]);
     const kube = new FakeCluster(model);
-    const store = new JsonSessionStore(join(dir, "exit-cleanup"));
+    const store = new LogSessionStore(join(dir, "exit-cleanup"));
 
     // Capture the `exit` listener `startPodRuntime` registers, then remove it
     // (so a later test's `process` teardown can't fire a stale delete).
@@ -692,7 +692,7 @@ describe("startPodRuntime", () => {
         name: "keeper",
         resumeHint: (name) => `tentacle attach --engine kubernetes -n dev ${name}`,
         permissions: new PermissionBroker(),
-        saver: new SessionSaver(new JsonSessionStore(join(dir, "keep")), () => {}),
+        saver: new SessionSaver(new LogSessionStore(join(dir, "keep")), () => {}),
         resume: null,
         log: (line) => logs.push(line),
       });
@@ -750,7 +750,7 @@ describe("startPodRuntime", () => {
         name: "box",
         permissions: new PermissionBroker(),
         saver: new SessionSaver(
-          new JsonSessionStore(join(dir, `stderr-${logPath.length}-${logCounter}`)),
+          new LogSessionStore(join(dir, `stderr-${logPath.length}-${logCounter}`)),
           () => {},
         ),
         resume: null,
@@ -836,7 +836,7 @@ describe("startPodRuntime", () => {
         name: "mypod",
         permissions: new PermissionBroker(),
         saver: new SessionSaver(
-          new JsonSessionStore(join(dir, `astderr-${logPath.length}-${logCounter}`)),
+          new LogSessionStore(join(dir, `astderr-${logPath.length}-${logCounter}`)),
           () => {},
         ),
         resume: null,
@@ -1055,7 +1055,7 @@ describe("startPodRuntime", () => {
           resumeHint: (n) => `tentacle attach ${n}`,
           permissions: new PermissionBroker(),
           saver: new SessionSaver(
-            new JsonSessionStore(join(dir, `keptline-${path.length}`)),
+            new LogSessionStore(join(dir, `keptline-${path.length}`)),
             () => {},
           ),
           resume: null,
@@ -1166,7 +1166,7 @@ describe("startPodRuntime", () => {
         name: "broken",
         resumeHint: (name) => `tentacle attach --engine kubernetes -n dev ${name}`,
         permissions: new PermissionBroker(),
-        saver: new SessionSaver(new JsonSessionStore(join(dir, "keep-fail")), () => {}),
+        saver: new SessionSaver(new LogSessionStore(join(dir, "keep-fail")), () => {}),
         resume: null,
         log: (line) => logs.push(line),
       }),
@@ -1279,7 +1279,7 @@ describe("startPodRuntime", () => {
         return () => recorded.push(`forgot:${name}`);
       },
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(join(dir, "keep-rec")), () => {}),
+      saver: new SessionSaver(new LogSessionStore(join(dir, "keep-rec")), () => {}),
       resume: null,
       log: () => {},
     });
@@ -1305,7 +1305,7 @@ describe("startPodRuntime", () => {
           return () => recorded.push(`forgot:${name}`);
         },
         permissions: new PermissionBroker(),
-        saver: new SessionSaver(new JsonSessionStore(join(dir, "keep-rm")), () => {}),
+        saver: new SessionSaver(new LogSessionStore(join(dir, "keep-rm")), () => {}),
         resume: null,
         log: () => {},
       }),
@@ -1326,7 +1326,7 @@ describe("startPodRuntime", () => {
         throw new Error("EACCES");
       },
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(join(dir, "keep-err")), () => {}),
+      saver: new SessionSaver(new LogSessionStore(join(dir, "keep-err")), () => {}),
       resume: null,
       log: (line) => logs.push(line),
     });
@@ -1365,7 +1365,7 @@ describe("startPodRuntime", () => {
         namespace: "dev",
         image: "img",
         permissions: new PermissionBroker(),
-        saver: new SessionSaver(new JsonSessionStore(join(dir, "fail")), () => {}),
+        saver: new SessionSaver(new LogSessionStore(join(dir, "fail")), () => {}),
         resume: null,
         log: () => {},
       }),
@@ -1411,7 +1411,7 @@ describe("pod titles: the laptop's model.autoTitle decides", () => {
     namespace: "dev",
     podName: "mypod",
     permissions: new PermissionBroker(),
-    saver: new SessionSaver(new JsonSessionStore(join(dir, name)), () => {}),
+    saver: new SessionSaver(new LogSessionStore(join(dir, name)), () => {}),
     resume: null,
     log: () => {},
   });
@@ -1483,7 +1483,7 @@ describe("pod titles: the laptop's model.autoTitle decides", () => {
 });
 
 describe("startAttachRuntime (attach to an existing pod)", () => {
-  const deps = (kube: PodCluster, store: JsonSessionStore) => ({
+  const deps = (kube: PodCluster, store: LogSessionStore) => ({
     kube,
     namespace: "dev",
     podName: "mypod",
@@ -1498,7 +1498,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
       [{ type: "text", delta: "hi from the existing pod" }, { type: "done" }],
     ]);
     const kube = new FakeCluster(model);
-    const store = new JsonSessionStore(join(dir, "exec-ok"));
+    const store = new LogSessionStore(join(dir, "exec-ok"));
 
     const runtime = await startAttachRuntime(baseConfig("/pod/work"), deps(kube, store));
 
@@ -1516,7 +1516,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     // A turn runs over the exec channel and persists on the laptop side.
     await drain(runtime.createSession().send("hello"));
     await new Promise((r) => setTimeout(r, 20));
-    const saved = (await store.list()).records;
+    const saved = (await store.loadAll()).records;
     expect(saved).toHaveLength(1);
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "hi from the existing pod"]);
 
@@ -1556,7 +1556,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
 
     const runtime = await startAttachRuntime(
       baseConfig("/pod/work"),
-      deps(kube, new JsonSessionStore(join(dir, "exec-inject"))),
+      deps(kube, new LogSessionStore(join(dir, "exec-inject"))),
     );
 
     // Preflight probes (install path, then PATH) → the resident guard (asks the
@@ -1585,7 +1585,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     await expect(
       startAttachRuntime(
         baseConfig("/pod/work"),
-        deps(kube, new JsonSessionStore(join(dir, "exec-404"))),
+        deps(kube, new LogSessionStore(join(dir, "exec-404"))),
       ),
     ).rejects.toThrow(/pod "mypod" not found in namespace "dev".*kubectl get pods/);
     // Nothing else happened: no injection, no exec, no delete.
@@ -1599,7 +1599,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     await expect(
       startAttachRuntime(
         baseConfig("/pod/work"),
-        deps(kube, new JsonSessionStore(join(dir, "exec-dead"))),
+        deps(kube, new LogSessionStore(join(dir, "exec-dead"))),
       ),
     ).rejects.toThrow(/pod "mypod" is Failed; cannot attach/);
     expect(kube.calls).toEqual(["get:mypod"]);
@@ -1613,7 +1613,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     await expect(
       startAttachRuntime(
         baseConfig("/pod/work"),
-        deps(kube, new JsonSessionStore(join(dir, "exec-container"))),
+        deps(kube, new LogSessionStore(join(dir, "exec-container"))),
       ),
     ).rejects.toThrow(/cannot exec into pod "mypod".*--container <c> \(alias -c\)/);
     // The failure surfaced at the preflight (the first exec); nothing else ran.
@@ -1624,7 +1624,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
   test("an explicit container (-c) is passed to every exec in the flow", async () => {
     const model = new ScriptedProvider([[{ type: "done" }]]);
     const kube = new FakeCluster(model);
-    const store = new JsonSessionStore(join(dir, "exec-explicit"));
+    const store = new LogSessionStore(join(dir, "exec-explicit"));
 
     const runtime = await startAttachRuntime(baseConfig("/pod/work"), {
       ...deps(kube, store),
@@ -1647,7 +1647,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
 
     const runtime = await startAttachRuntime(
       baseConfig("/pod/work"),
-      deps(kube, new JsonSessionStore(join(dir, "exec-pending"))),
+      deps(kube, new LogSessionStore(join(dir, "exec-pending"))),
     );
 
     // getPod (Pending) → the bounded wait → the preflight → the daemon exec.
@@ -1685,7 +1685,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     await expect(
       startAttachRuntime(
         baseConfig("/pod/work"),
-        deps(kube, new JsonSessionStore(join(dir, "exec-musl"))),
+        deps(kube, new LogSessionStore(join(dir, "exec-musl"))),
       ),
     ).rejects.toThrow(/--version failed.*lack glibc/);
     // The daemon exec never happened, and the pod was left untouched.
@@ -1701,7 +1701,7 @@ describe("startAttachRuntime (attach to an existing pod)", () => {
     const kube = new SpyFakeCluster(
       new AskModel("fs_write", '{"path":"/tmp/x.txt","content":"hi"}'),
     );
-    const store = new JsonSessionStore(join(dir, "perm-exec"));
+    const store = new LogSessionStore(join(dir, "perm-exec"));
 
     const runtime = await startAttachRuntime(baseConfig("/pod/work"), {
       ...deps(kube, store),
@@ -1755,7 +1755,7 @@ describe("pod binary version check (D1/D2: offline, before any cluster mutation)
     namespace: "dev",
     image: "repo/img:tag",
     permissions: new PermissionBroker(),
-    saver: new SessionSaver(new JsonSessionStore(join(dir, `rel-store-${label}`)), () => {}),
+    saver: new SessionSaver(new LogSessionStore(join(dir, `rel-store-${label}`)), () => {}),
     resume: null,
     log: () => {},
     appVersion: "0.3.0",
@@ -2872,7 +2872,7 @@ async function until(pred: () => boolean, ms = 3000): Promise<boolean> {
 describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
   const runDeps = (
     kube: PodCluster,
-    store: JsonSessionStore | SessionSaver,
+    store: LogSessionStore | SessionSaver,
     permissions = new PermissionBroker(),
   ) => ({
     kube,
@@ -2909,7 +2909,7 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
       [{ type: "text", delta: "two" }, { type: "done" }],
     ]);
     const kube = new DroppingCluster(model);
-    const store = new JsonSessionStore(join(dir, "reconnect-idle"));
+    const store = new LogSessionStore(join(dir, "reconnect-idle"));
     const notices: string[] = [];
     const saver = new SessionSaver(store, () => {});
     const runtime = await startPodRuntime(baseConfig("/pod/work"), {
@@ -2930,7 +2930,7 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
     const execs = kube.execs();
     expect(execs).toHaveLength(2);
     expect(new Set(execs).size).toBe(1); // the same command, re-run
-    const saved = (await store.list()).records;
+    const saved = (await store.loadAll()).records;
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "one", "again", "two"]);
     expect(notices).toEqual([]);
   });
@@ -2946,7 +2946,7 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
     const kube = new DroppingCluster(model);
     const notices: string[] = [];
     const runtime = await startPodRuntime(baseConfig("/pod/work"), {
-      ...runDeps(kube, new JsonSessionStore(join(dir, "reconnect-window"))),
+      ...runDeps(kube, new LogSessionStore(join(dir, "reconnect-window"))),
       notify: (text: string) => notices.push(text),
     });
     const session = runtime.createSession();
@@ -2963,7 +2963,7 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
   test("run: the exec drops mid-turn — the turn is reported lost (never re-run), the next one works, the pod stays", async () => {
     const model = new GateProvider();
     const kube = new DroppingCluster(model);
-    const store = new JsonSessionStore(join(dir, "reconnect-midturn"));
+    const store = new LogSessionStore(join(dir, "reconnect-midturn"));
     const runtime = await startPodRuntime(baseConfig("/pod/work"), runDeps(kube, store));
     const session = runtime.createSession();
     const turn = drain(session.send("first")).then(
@@ -2985,7 +2985,7 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
   test("run: the pod is gone on reconnect — the link stops (no exec storm), the next turn fails clearly", async () => {
     const model = new ScriptedProvider([[{ type: "text", delta: "one" }, { type: "done" }]]);
     const kube = new DroppingCluster(model);
-    const store = new JsonSessionStore(join(dir, "reconnect-gone"));
+    const store = new LogSessionStore(join(dir, "reconnect-gone"));
     const runtime = await startPodRuntime(baseConfig("/pod/work"), runDeps(kube, store));
     const statuses: LinkStatus[] = [];
     runtime.link.onLinkStatus((s) => statuses.push(s));
@@ -3009,7 +3009,7 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
       [{ type: "text", delta: "two" }, { type: "done" }],
     ]);
     const kube = new DroppingCluster(model);
-    const store = new JsonSessionStore(join(dir, "reconnect-attach"));
+    const store = new LogSessionStore(join(dir, "reconnect-attach"));
     const runtime = await startAttachRuntime(baseConfig("/pod/work"), {
       kube,
       namespace: "dev",
@@ -3039,7 +3039,7 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
   test("single broker across a reconnect: the new exec's daemon asks on the SAME broker", async () => {
     const spy = new SpyBroker();
     const kube = new DroppingSpyCluster(new AskEveryTurn());
-    const store = new JsonSessionStore(join(dir, "reconnect-broker"));
+    const store = new LogSessionStore(join(dir, "reconnect-broker"));
     const runtime = await startPodRuntime(baseConfig("/pod/work"), runDeps(kube, store, spy));
     const statuses: LinkStatus[] = [];
     runtime.link.onLinkStatus((s) => statuses.push(s));
@@ -3059,7 +3059,7 @@ describe("pod reconnect (docs/feat/client-reattach-frontends.md §2)", () => {
       [{ type: "text", delta: "two" }, { type: "done" }],
     ]);
     const kube = new DroppingCluster(model);
-    const store = new JsonSessionStore(join(dir, "reconnect-typed-while-down"));
+    const store = new LogSessionStore(join(dir, "reconnect-typed-while-down"));
     const runtime = await startPodRuntime(baseConfig("/pod/work"), runDeps(kube, store));
     const session = runtime.createSession();
     await drain(session.send("hello"));

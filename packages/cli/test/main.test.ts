@@ -4,7 +4,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { JsonSessionStore, type SessionRecord, projectKey } from "@tentacle/agent";
+import { type SessionRecord, projectKey } from "@tentacle/agent";
+import { LogSessionStore } from "@tentacle/daemon";
 import { DELETE_CONTAINER_SUBCOMMAND } from "@tentacle/docker";
 import { DELETE_POD_SUBCOMMAND } from "@tentacle/k8s";
 import { type EngineHost, WorkloadNotFoundError } from "../src/engine-host.ts";
@@ -23,6 +24,7 @@ import {
   runDirFor,
   writeOwner,
 } from "../src/run-state.ts";
+import { saveFixture } from "./session-fixture.ts";
 import { simulateSilentTerminal } from "./silent-terminal.ts";
 
 /** Piped stdin and stdout, whatever terminal runs the suite (CliIO.terminal). */
@@ -1992,7 +1994,7 @@ describe("cli main: --engine", () => {
         ],
       });
       const store = (cwd: string) =>
-        new JsonSessionStore(join(dir, "config", "sessions", projectKey(cwd)));
+        new LogSessionStore(join(dir, "config", "sessions", projectKey(cwd)));
       const index = async (over: Partial<KeptEntry>, records: SessionRecord[] = []) => {
         const config = join(dir, "config");
         await mkdir(folder, { recursive: true });
@@ -2000,7 +2002,7 @@ describe("cli main: --engine", () => {
         rmSync(keptIndexDir(config), { recursive: true, force: true });
         recordKept(keptIndexDir(config), { ...entry, mount: folder, ...over });
         for (const r of records) {
-          await store(r.cwd).save(r);
+          await saveFixture(store(r.cwd), r);
         }
       };
       const cleanup = () => {
@@ -2079,10 +2081,10 @@ describe("cli main: --engine", () => {
           note(await attached(["attach", "box"], true, true));
           // The file is there but unusable.
           await index({ sessionId: A });
-          await store(folder).save(record(A, folder));
+          await saveFixture(store(folder), record(A, folder));
           await writeFile(
-            join(dir, "config", "sessions", projectKey(folder), `${A}.json`),
-            "{nope",
+            join(dir, "config", "sessions", projectKey(folder), `${A}.jsonl`),
+            "{nope\n",
           );
           note(await attached(["attach", "box"], true, true));
         });
@@ -2125,7 +2127,7 @@ describe("cli main: --engine", () => {
           // Its folder is gone (renamed, deleted): never a refusal — the conversation is
           // reopened from the record filed under the ORIGINAL path.
           const missing = join(dir, "gone-run-folder");
-          await store(missing).save(record(B, missing));
+          await saveFixture(store(missing), record(B, missing));
           recordKept(keptIndexDir(config), { ...noMount, cwd: missing, sessionId: B });
           const gone = await attached(["attach", "box"], true, true);
           expect(gone.code).toBe(0);

@@ -9,7 +9,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonSessionStore } from "@tentacle/agent";
 import {
   DISMISSED,
   type ModelProvider,
@@ -17,6 +16,7 @@ import {
   type PermissionRequest,
   type PermissionResponse,
 } from "@tentacle/core";
+import { LogSessionStore } from "@tentacle/daemon";
 import { Method, PROTOCOL_VERSION } from "@tentacle/protocol";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { ARGS, cliMode, parseArgs } from "../src/flags.ts";
@@ -257,7 +257,7 @@ describe("createLocalRuntime wiring (hooks/trust)", () => {
       channel: clientCh,
       disposeTransport: () => daemon.close(),
       permissions: broker,
-      saver: new SessionSaver(new JsonSessionStore(dir), () => {}),
+      saver: new SessionSaver(new LogSessionStore(dir), () => {}),
       cwd: "/tmp/work",
       model: "m",
       resume: null,

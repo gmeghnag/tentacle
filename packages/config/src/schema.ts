@@ -316,6 +316,14 @@ const settingsShape = {
     .strict()
     .optional(),
   /**
+   * The laptop's session logs (docs/feat/session-log-laptop-store.md):
+   * `keepSuperseded` keeps the history a compaction or a `context_reset`
+   * replaced in the session file (resume still shows the current one). Unset:
+   * false (today's behaviour: superseded history is not kept). LAPTOP-ONLY:
+   * never carried to a pod.
+   */
+  sessions: z.object({ keepSuperseded: z.boolean().optional() }).strict().optional(),
+  /**
    * What a docker/podman workspace mount hides from the container
    * (docs/feat/docker-workspace-mount.md): `hide` REPLACES the default list
    * (`~/.ssh`, `~/.aws`, `~/.kube`, `~/.config/gcloud`, `~/.docker/config.json`,

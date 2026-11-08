@@ -3,7 +3,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Agent, JsonSessionStore } from "@tentacle/agent";
+import { Agent } from "@tentacle/agent";
 import type {
   ChatRequest,
   ExecutionEnvironment,
@@ -14,7 +14,7 @@ import type {
   StreamEvent,
 } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import {
   type ContainerCreateBody,
   type ContainerInspect,
@@ -298,7 +298,7 @@ afterAll(async () => {
 });
 
 function common(slug: string, logs: string[] = [], permissions = new PermissionBroker()) {
-  const store = new JsonSessionStore(join(dir, slug));
+  const store = new LogSessionStore(join(dir, slug));
   return {
     store,
     deps: {
@@ -376,7 +376,7 @@ describe("run on a Docker engine (startEngineRuntime + dockerEngineHost)", () =>
 
     await drain(runtime.createSession().send("hello"));
     await new Promise((r) => setTimeout(r, 20));
-    const saved = (await store.list()).records;
+    const saved = (await store.loadAll()).records;
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "hi from docker"]);
 
     runtime.dispose();

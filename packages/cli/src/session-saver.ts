@@ -7,14 +7,18 @@
  * teardown is reported once Ink has unmounted. The teardown wait is bounded: a
  * hung filesystem must not freeze the terminal after the TUI is gone.
  */
-import type { JsonSessionStore, SessionRecord } from "@tentacle/agent";
+import type { SessionRecord, TitleState } from "@tentacle/agent";
+import type { ChatMessage } from "@tentacle/core";
+import type { LogMeta, LogSessionStore, LogWrite } from "@tentacle/daemon";
 
 /**
- * All the saver needs from a store: a `save` whose promise settles with the
- * write, and `remove`; `saveAside` when the store can keep a diverged copy.
+ * All the saver needs from a store (the laptop's `LogSessionStore`): `write`
+ * (one `session/log` read) and `saveSnapshot` (a whole history, the
+ * in-process path), each promise settling with the write, and `remove`;
+ * `saveAside` when the store can keep a diverged copy.
  */
-export type SaveTarget = Pick<JsonSessionStore, "save" | "remove"> &
-  Partial<Pick<JsonSessionStore, "saveAside">>;
+export type SaveTarget = Pick<LogSessionStore, "write" | "saveSnapshot" | "remove"> &
+  Partial<Pick<LogSessionStore, "saveAside">>;
 
 /** A uid's last save outcome: fine, or failing with the latest error. */
 export type SaveState =
@@ -65,7 +69,7 @@ export class SessionSaver {
   private readonly pending = new Map<Promise<void>, string>();
   /** Uids whose local copy was removed: a later save of one is dropped (never written back). */
   private readonly removed = new Set<string>();
-  private readonly listeners: Array<(record: SessionRecord) => void> = [];
+  private readonly listeners: Array<(saved: { readonly id: string }) => void> = [];
 
   constructor(
     private readonly target: SaveTarget,
@@ -73,34 +77,43 @@ export class SessionSaver {
   ) {}
 
   /**
-   * Told of every record `save` takes (a laptop-side bookkeeping hook, e.g. the
-   * kept index's latest session). A listener that throws is ignored.
+   * Told of every session a save takes (a laptop-side bookkeeping hook, e.g.
+   * the kept index's latest session). A listener that throws is ignored.
    */
-  observe(listener: (record: SessionRecord) => void): void {
+  observe(listener: (saved: { readonly id: string }) => void): void {
     this.listeners.push(listener);
   }
 
-  /** Save in the background; the outcome is reported, never thrown. */
+  /** Save one `session/log` read in the background; the outcome is reported, never thrown. */
+  write(update: LogWrite): void {
+    this.track(update.id, () => this.target.write(update));
+  }
+
+  /** Save a whole history (the in-process path, no daemon log); reported like `write`. */
   save(record: SessionRecord): void {
-    if (this.removed.has(record.id)) {
+    this.track(record.id, () => this.target.saveSnapshot(record));
+  }
+
+  private track(id: string, start: () => Promise<void>): void {
+    if (this.removed.has(id)) {
       return;
     }
     for (const listener of this.listeners) {
       try {
-        listener(record);
+        listener({ id });
       } catch {
         // Bookkeeping must never break a save.
       }
     }
-    const settled = this.target.save(record).then(
-      () => this.settle(record.id, { ok: true }),
+    const settled = start().then(
+      () => this.settle(id, { ok: true }),
       (error: unknown) =>
-        this.settle(record.id, {
+        this.settle(id, {
           ok: false,
           error: error instanceof Error ? error.message : String(error),
         }),
     );
-    this.pending.set(settled, record.id);
+    this.pending.set(settled, id);
     void settled.finally(() => this.pending.delete(settled));
   }
 
@@ -110,14 +123,19 @@ export class SessionSaver {
    * durable; REJECTS when it is not (the caller then keeps the session file as
    * it is, and tries again at the next save) — never a silent loss.
    */
-  async saveAside(record: SessionRecord): Promise<void> {
+  async saveAside(
+    id: string,
+    meta: LogMeta,
+    messages: readonly ChatMessage[],
+    title: TitleState,
+  ): Promise<void> {
     if (!this.target.saveAside) {
       throw new Error("this store cannot keep a copy aside");
     }
-    const file = await this.target.saveAside(record);
+    const file = await this.target.saveAside(id, meta, messages, title);
     try {
       this.notify(
-        `⚠ Session ${record.id.slice(0, 8)}: the daemon's history diverged from this copy (a restarted daemon was reseeded from another copy) — this copy saved aside in ${file}`,
+        `⚠ Session ${id.slice(0, 8)}: the daemon's history diverged from this copy (a restarted daemon was reseeded from another copy) — this copy saved aside in ${file}`,
       );
     } catch {
       // A broken listener must not undo a write that landed.

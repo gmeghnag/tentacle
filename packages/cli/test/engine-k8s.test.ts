@@ -3,8 +3,8 @@ import { writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonSessionStore } from "@tentacle/agent";
 import { PermissionBroker } from "@tentacle/core";
+import { LogSessionStore } from "@tentacle/daemon";
 import {
   type ExecChannelOptions,
   type ExecTarget,
@@ -102,7 +102,7 @@ afterAll(async () => {
 
 const commonDeps = (log: (line: string) => void) => ({
   permissions: new PermissionBroker(),
-  saver: new SessionSaver(new JsonSessionStore(join(dir, "s")), () => {}),
+  saver: new SessionSaver(new LogSessionStore(join(dir, "s")), () => {}),
   resume: null,
   log,
 });

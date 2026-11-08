@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonSessionStore, offeredSkillNames } from "@tentacle/agent";
+import { offeredSkillNames } from "@tentacle/agent";
 import type { SessionEvent } from "@tentacle/client";
 import { type TentacleConfig, loadConfig } from "@tentacle/config";
 import {
@@ -11,7 +11,7 @@ import {
   PermissionBroker,
   type StreamEvent,
 } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import { createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime } from "../src/local-runtime.ts";
 import { inProcessSessions } from "../src/session-jobs.ts";
@@ -89,7 +89,7 @@ async function daemonRuntime(config: TentacleConfig, model: ModelProvider) {
     channel: clientCh,
     disposeTransport: () => connection.close(),
     permissions: new PermissionBroker(),
-    saver: new SessionSaver(new JsonSessionStore(join(dir, "sessions")), () => {}),
+    saver: new SessionSaver(new LogSessionStore(join(dir, "sessions")), () => {}),
     cwd: dir,
     model: "scripted",
     resume: null,
