@@ -1143,3 +1143,5 @@ as the executor, fresh context only, as in round 1.
 
 **Still unexercised:** a live docker/podman/k8s run and a pair of real llama.cpp servers; the
 `[models]` notice is covered by the `main` test, not observed against an engine.
+
+**F-8 closed (orchestrator, 2026-11-08):** `bunx tsc -p apps/mobile` passes on the test build `bd14b5b` (main + this branch at 574e197, full `bun install --frozen-lockfile`). Live check (Sonnet, real deepseek agent + fake OpenAI endpoint): 6/6 PASS — per-type model, key isolation (every fake request carried only the entry key), selectableModels incl. unknown name refused, `maxParallel 2` held with 4 parallel calls, `config list` masks, detached relay starts with a failing entry key command. The startup config-error text was not produced live (`config set` refuses a bad name at write time); unit tests cover it.
