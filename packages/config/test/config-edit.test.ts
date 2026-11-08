@@ -378,3 +378,130 @@ describe("the plan's own building blocks", () => {
     expect(result.config.tools?.execution).toBe("parallel");
   });
 });
+
+/**
+ * Round 3 (docs/feat/config-set.md): jsonc-parser's `modify` formats an INSERT by
+ * expanding the edit to every WHOLE LINE it touches (`impl/edit.js:159-166`) and
+ * reformatting those lines, so adding a key after a sibling written on one line
+ * rewrote that sibling — a byte change OUTSIDE the touched node, against T10 and
+ * eval Q9 ("comments, layout and key order are preserved"). The fix splices the
+ * new property in and formats that text alone.
+ *
+ * The oracle is the strongest one available: the expected text is built here as
+ * literal bytes — `INPUT` with ONLY the new property's text inserted — so any
+ * other change (a re-indented sibling, an extra byte, a line moved) fails.
+ */
+/**
+ * `after` is `before` with ONE region inserted (nothing else): the shared prefix
+ * and suffix account for every byte of `before`, in order. This is the exact
+ * property T10 states — not a weaker "contains" — and it holds for a pure insert.
+ */
+function onlyInserted(before: string, after: string): boolean {
+  const { prefix, suffix } = changedRegion(before, after);
+  return prefix + suffix >= before.length;
+}
+
+describe("T10 (round 3): only the NEW property's text is inserted", () => {
+  test("after a sibling written on one line (an inline OBJECT)", () => {
+    const input =
+      '{\n  // my notes\n  "maxIterations": 16, // keep\n\n  "tui": { "theme": "dark" }\n}\n';
+    const expected =
+      '{\n  // my notes\n  "maxIterations": 16, // keep\n\n  "tui": { "theme": "dark" },\n  "subagents": {\n    "maxParallel": 3\n  }\n}\n';
+    const out = planned(input, ["subagents", "maxParallel"], set(3));
+    expect(out).toBe(expected);
+    // Every byte of the input survives, in order: the inline object included.
+    expect(onlyInserted(input, out)).toBe(true);
+    expect(out).toContain('"tui": { "theme": "dark" },\n');
+  });
+
+  test("after a sibling written on one line (an inline ARRAY)", () => {
+    const input = '{\n  "tools": { "writableDirs": ["~", "/tmp"] }\n}\n';
+    const expected = '{\n  "tools": { "writableDirs": ["~", "/tmp"] },\n  "maxIterations": 8\n}\n';
+    const out = planned(input, ["maxIterations"], set(8));
+    expect(out).toBe(expected);
+    expect(onlyInserted(input, out)).toBe(true);
+  });
+
+  test("after a sibling that a line comment follows", () => {
+    const input = '{\n  "maxIterations": 8 // keep this\n}\n';
+    const expected = '{\n  "maxIterations": 8, // keep this\n  "autoWake": true\n}\n';
+    const out = planned(input, ["autoWake"], set(true));
+    expect(out).toBe(expected);
+    // Two insertions, no rewrite: the separator comma the sibling lacked, and the
+    // new property's line. Every other byte of the input is still there, in order.
+    const lines = out.split("\n");
+    expect(lines[1]).toBe(`  "maxIterations": 8, // keep this`);
+    expect([lines[0], `${lines[2]}`, ...lines.slice(3)].join("\n")).toBe(
+      '{\n  "autoWake": true\n}\n',
+    );
+    // The comment's bytes are all still there, in one piece and on its own line.
+    expect(out).toContain("// keep this\n");
+    expect(out.match(/keep this/g)?.length).toBe(1);
+  });
+
+  test("after the LAST key before `}` when the file trails its commas", () => {
+    const input = '{\n  "maxIterations": 8,\n}\n';
+    const expected = '{\n  "maxIterations": 8,\n  "autoWake": true,\n}\n';
+    const out = planned(input, ["autoWake"], set(true));
+    expect(out).toBe(expected);
+    expect(onlyInserted(input, out)).toBe(true);
+    // …and the same file without a trailing comma gains exactly one comma.
+    expect(planned('{\n  "maxIterations": 8\n}\n', ["autoWake"], set(true))).toBe(
+      '{\n  "maxIterations": 8,\n  "autoWake": true\n}\n',
+    );
+  });
+
+  test("a CRLF file with an inline object: CRLF throughout, the sibling untouched", () => {
+    const input = '{\r\n  "tui": { "theme": "dark" }\r\n}\r\n';
+    const expected =
+      '{\r\n  "tui": { "theme": "dark" },\r\n  "subagents": {\r\n    "maxParallel": 3\r\n  }\r\n}\r\n';
+    const out = planned(input, ["subagents", "maxParallel"], set(3));
+    expect(out).toBe(expected);
+    expect(onlyInserted(input, out)).toBe(true);
+    // Not one bare LF, and not one bare CRLF-less line break.
+    expect(/[^\r]\n/.test(planned(input, ["subagents", "maxParallel"], set(3)))).toBe(false);
+  });
+
+  test("a tab-indented file: the new node uses tabs, the one-line sibling is kept", () => {
+    const input = '{\n\t"tui": { "theme": "dark" }\n}\n';
+    const expected =
+      '{\n\t"tui": { "theme": "dark" },\n\t"subagents": {\n\t\t"maxParallel": 3\n\t}\n}\n';
+    const out = planned(input, ["subagents", "maxParallel"], set(3));
+    expect(out).toBe(expected);
+    expect(onlyInserted(input, out)).toBe(true);
+  });
+
+  test("a block comment after the sibling keeps every byte, even across lines", () => {
+    const one = '{\n  "maxIterations": 8 /* keep */\n}\n';
+    expect(planned(one, ["autoWake"], set(true))).toBe(
+      '{\n  "maxIterations": 8, /* keep */\n  "autoWake": true\n}\n',
+    );
+    const multi = '{\n  "maxIterations": 8 /* a\n     b */\n}\n';
+    expect(planned(multi, ["autoWake"], set(true))).toBe(
+      '{\n  "maxIterations": 8, /* a\n     b */\n  "autoWake": true\n}\n',
+    );
+  });
+
+  test("a brace inside a sibling's comment is not the parent's closing brace", () => {
+    // A comment-stripping check is what tells the two apart (`// uses }` must not
+    // read as an object written on one line and fall back to comment-mangling).
+    const input = '{\n  "maxIterations": 8 // uses }\n}\n';
+    expect(planned(input, ["autoWake"], set(true))).toBe(
+      '{\n  "maxIterations": 8, // uses }\n  "autoWake": true\n}\n',
+    );
+  });
+
+  test("a one-line object still gains a readable, indented node", () => {
+    // The parent is written on ONE line: the file's own layout for a new member
+    // is to break it out, at one unit deeper than the line the parent sits on.
+    const out = planned('{"maxIterations": 5}', ["subagents", "maxParallel"], set(3));
+    expect(out).toBe('{\n  "maxIterations": 5,\n  "subagents": {\n    "maxParallel": 3\n  }\n}');
+    expect(parseConfigText(out).ok).toBe(true);
+  });
+
+  test("an empty object gains its first member indented, with no invented comma", () => {
+    expect(planned('{\n  "tui": {}\n}\n', ["tui", "theme"], set("light"))).toBe(
+      '{\n  "tui": {\n    "theme": "light"\n  }\n}\n',
+    );
+  });
+});

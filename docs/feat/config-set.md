@@ -959,6 +959,186 @@ $ git diff --stat schema.ts defaults.ts resolve.ts load.ts  → empty (byte-unto
 The 3 skips are the documented opt-ins (live k8s, live docker, the real-socket
 keepalive) — the same three as on `main`.
 
+### Round 3 (layout fix)
+
+*— claude-opus-4-6 (tentacle), 2026-11-08*
+
+Scope: one defect the orchestrator found in a live check. Appending a NEW key
+after a sibling written on ONE line reformatted that sibling — eval A3 / owner
+Q9 ("comments, layout and key order are preserved") and T10 both say only the
+touched node may change. Setting an existing key, or a key inside the inline
+object, did not reformat: only an INSERT after a one-line sibling did.
+
+**Probe first** (`.tentacle/tmp/config-set/probe-inline.ts`, 10 lines, the
+`modify` call alone with no `config-edit.ts` in the path):
+
+```
+$ bun .tentacle/tmp/config-set/probe-inline.ts
+EDITS [
+  { "offset": 48, "length": 28,
+    "content": "  \"tui\": {\n    \"theme\": \"dark\"\n  },\n  \"subagents\": {\n    \"maxParallel\": 3\n  }" }
+]
+--- input ---
+"{\n  // my notes\n  \"maxIterations\": 16, // keep\n\n  \"tui\": { \"theme\": \"dark\" }\n}\n"
+--- output json ---
+"{\n  // my notes\n  \"maxIterations\": 16, // keep\n\n  \"tui\": {\n    \"theme\": \"dark\"\n  },\n  \"subagents\": {\n    \"maxParallel\": 3\n  }\n}\n"
+```
+
+**Root cause, in jsonc-parser itself** — not in our formatting options.
+`modify` delegates to `withFormatting` (`lib/esm/impl/edit.js:150-179`), which
+for an insert or a remove expands the edit to EVERY WHOLE LINE it touches and
+hands that range to `format` with `keepLines: false`:
+
+```js
+// edit.js:159-166
+if (edit.length === 0 || edit.content.length === 0) { // insert or remove
+    while (begin > 0 && !isEOL(newText, begin - 1)) { begin--; }
+    while (end < newText.length && !isEOL(newText, end)) { end++; }
+}
+const edits = format(newText, { offset: begin, length: end - begin }, { ...options.formattingOptions, keepLines: false });
+```
+
+The insert's `offset` is the end of the PREVIOUS sibling (`edit.js:78`), so
+`begin` walks back to the start of THAT sibling's line — `"tui": { "theme":
+"dark" }` — and it is reformatted into four lines. A REPLACE is not affected
+(its range is the value itself), which is exactly why setting an existing key was
+already byte-exact. That is why the offset in the probe edit is 48, not 66: the
+library's own edit already starts at the `"tui"` line.
+
+**As built** (`packages/config/src/config-edit.ts`, one new seam: `editedText`,
+which `planConfigEdit` now calls in place of the inline `modify` + `applyEdits`):
+
+- `editedText` asks `modify(…, {})` — NO `formattingOptions` — for the minimal
+  splice `(offset, length, content)`. When it is a pure INSERT (`length === 0`),
+  `spliceInsert` lays out the new property itself; every other case (a REPLACE, a
+  DELETE) keeps `modify` + `formattingOptions`, the pre-round-3 path, which is
+  already byte-exact for a value and already the wanted whole-line handling for a
+  removed member.
+- `afterSibling` re-emits the rest of the previous sibling's line **unchanged**
+  and appends `,` + the file's EOL + the new property's line: the separator comma
+  goes before a comment, so `"maxIterations": 8 // keep` becomes `… 8, // keep`
+  with every byte of the comment kept. A `/* … */` spanning lines is consumed
+  whole. A trailing comma the file already had is kept (not doubled).
+- `firstMember` handles the one insert `modify` places just INSIDE an opening
+  brace (an EMPTY object, `edit.js:80-82`): the property gets a line of its own at
+  one indent unit, the closing brace back on the opening one's line, and no
+  invented trailing comma.
+- `propertyText` applies the file's own style to the NEW text only —
+  `format(fragment, undefined, {…, keepLines: false})`, then the file's EOL, then
+  `indent` on every following line. Pure text work, no I/O.
+- The inline-PARENT shape (`"tools": { "execution": "parallel" }` gaining
+  `tools.maxParallel`) deliberately keeps jsonc-parser's formatting
+  (`/[}\]]/.test(stripComments(rest))` → `undefined`): that parent is one line
+  already, so there is no "surrounding line" of a sibling to preserve, and HEAD's
+  output for it is byte-identical. Recorded as a non-change, not a fix.
+- `FileStyle` gives `insertSpaces`/`tabSize`/`eol` non-optional types so the
+  splice arithmetic typechecks under `noUncheckedIndexedAccess`; `formattingOf`
+  still returns the same object and its test is unchanged.
+
+Kept, all pinned by existing tests still green: comments, CRLF, tabs, trailing
+commas, the orphan-comma repair (LOW-5), the no-new-trailing-newline rule
+(LOW-6), `"tui": {\n  }` after an unset (A3 accepts the empty parent — untouched),
+and a new nested section coming out readably indented in the file's style
+(`subagents` absent → a two-level block; `profiles.work.model.model` → four).
+
+**Red, then green** (AGENTS §9). The new block in
+`packages/config/test/config-edit.test.ts` is `describe("T10 (round 3) …")`, 10
+cases (the 5 shapes the defect named — an inline object, an inline array, a
+following line comment, the last key before `}` under trailing commas, a CRLF file
+with an inline object — plus a tab file, a block comment, a comment holding a
+brace, a one-line object and an empty object). Each builds the expected text as
+explicit bytes — the input with ONLY the new property's text inserted — and the
+inline-object case additionally asserts `onlyInserted` (via `changedRegion`: the
+shared prefix+suffix cover every byte of the input), so a re-indented sibling, an
+extra byte or a moved line all fail. The line-comment case asserts each line
+instead, because it makes TWO insertions (the separator comma, then the property)
+and is therefore not a single changed region.
+
+```
+$ git show HEAD:packages/config/src/config-edit.ts > packages/config/src/config-edit.ts
+$ bun test packages/config/test/config-edit.test.ts
+(fail) … after a sibling written on one line (an inline OBJECT)
+(fail) … after a sibling written on one line (an inline ARRAY)
+(fail) … after a sibling that a line comment follows
+(fail) … a CRLF file with an inline object: CRLF throughout, the sibling untouched
+(fail) … a tab-indented file: the new node uses tabs, the one-line sibling is kept
+(fail) … a block comment after the sibling keeps every byte, even across lines
+(fail) … a brace inside a sibling's comment is not the parent's closing brace
+ 32 pass, 7 fail
+$ cp .tentacle/tmp/config-set/final.ts packages/config/src/config-edit.ts   # shasum 40c5fff…
+$ bun test packages/config/test/config-edit.test.ts
+ 39 pass, 0 fail
+```
+
+Seven of the ten are RED on `36e7189`; the other three (`after the LAST key …`,
+`a one-line object still gains a readable, indented node`, `an empty object gains
+its first member`) pass on both — they are coverage of the shapes the splice must
+not break, and saying so is better than pretending they were red.
+
+**Mutation** (`cp` backup, narrow test, restore, `shasum`):
+
+```
+$ cp packages/config/src/config-edit.ts .tentacle/tmp/config-set/pre-mut2.ts
+$ # mutation: spliceInsert(...) → undefined, i.e. re-enable whole-line formatting
+$ bun test packages/config/test/config-edit.test.ts
+(fail) × the same 7 round-3 tests          → 32 pass, 7 fail   KILLED
+$ cp .tentacle/tmp/config-set/pre-mut2.ts packages/config/src/config-edit.ts
+$ shasum packages/config/src/config-edit.ts .tentacle/tmp/config-set/final.ts
+40c5fff629291ff87245938d8ca5dacc49244eb5  packages/config/src/config-edit.ts
+40c5fff629291ff87245938d8ca5dacc49244eb5  .tentacle/tmp/config-set/final.ts
+```
+
+**The live repro, before and after** (scratch config dir under
+`.tentacle/tmp/config-set/`; `TENTACLE_CONFIG_DIR` always set):
+
+```
+$ printf '{\n  // my notes\n  "maxIterations": 16, // keep\n\n  "tui": { "theme": "dark" }\n}\n' > cfg/config.jsonc
+$ TENTACLE_CONFIG_DIR=$PWD/cfg bun packages/cli/src/main.ts config subagents.maxParallel=3
+```
+
+Before (36e7189) — the inline object rewritten:
+
+```
+-  "tui": { "theme": "dark" }
++  "tui": {
++    "theme": "dark"
++  },
++  "subagents": {
++    "maxParallel": 3
++  }
+```
+
+After:
+
+```
+--- before.jsonc
++++ cfg/config.jsonc
+@@ -2,5 +2,8 @@
+   // my notes
+   "maxIterations": 16, // keep
+
+-  "tui": { "theme": "dark" }
++  "tui": { "theme": "dark" },
++  "subagents": {
++    "maxParallel": 3
++  }
+ }
+```
+
+Only the new property's text is added; the one-line sibling, its blank line above
+it and both comments are byte-identical.
+
+**Gate:** `bunx tsc --noEmit` clean · `bunx biome check .` "Checked 751 files. No
+fixes applied." · `bun test packages` all pass except the 3 documented opt-in
+skips (live k8s, live docker, the real-socket keepalive — the same three as on
+`main`), 0 fail · `bun run docs:config` twice, both "README.md's config table is
+up to date", `git status` showing only the three files below.
+
+**Files:** `packages/config/src/config-edit.ts` (the seam, its seven private
+helpers and the `FileStyle` type), `packages/config/test/config-edit.test.ts` (the
+round-3 block), this doc. `schema.ts`, `defaults.ts`, `resolve.ts`, `load.ts` are
+byte-untouched.
+
 ### Debt recorded, not fixed
 
 - **`load.ts:85` reports only `issues[0]`** and this task may not edit it, so

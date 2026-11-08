@@ -14,12 +14,23 @@
  * user reads, so comments, layout and key order outside the touched node are
  * kept byte for byte (docs/eval/config-cli.md A3/Q9, pinned by T10).
  *
+ * Why `modify` WITHOUT `formattingOptions`, and a splice of our own: jsonc-parser
+ * formats an insert by expanding the edit to EVERY WHOLE LINE it touches
+ * (`impl/edit.js:159-166` — "insert or remove") and reformatting those lines, so
+ * appending a key after a sibling written on one line (`"tui": { "theme": "dark" }`)
+ * rewrote that sibling into four lines — a byte change outside the touched node,
+ * against T10 (docs/feat/config-set.md, round 3). The edits `modify` returns with
+ * no formatting options are minimal splices; `spliceInsert` + `propertyText` then
+ * lay out ONLY the new property's text, with the file's own indent width and EOL.
+ *
  * Pure: no file I/O, no env, no registry. `config-run.ts` reads and writes.
  */
 import {
+  type Edit,
   type FormattingOptions,
   type ParseError,
   applyEdits,
+  format,
   modify,
   parse,
   printParseErrorCode,
@@ -287,7 +298,14 @@ export function readPath(
  * itself: jsonc-parser defaults to two spaces, which on a tab-indented file
  * emits a mixed-indent node (verified: `.tentacle/tmp/config-set/probe-edge2.ts`).
  */
-export function formattingOf(text: string): FormattingOptions {
+/** The file's own style, with the three fields this module reads made known. */
+interface FileStyle extends FormattingOptions {
+  readonly insertSpaces: boolean;
+  readonly tabSize: number;
+  readonly eol: string;
+}
+
+export function formattingOf(text: string): FileStyle {
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const indented = text.split(/\r?\n/).find((line) => /^[ \t]+\S/.test(line));
   if (indented?.startsWith("\t") === true) {
@@ -295,6 +313,139 @@ export function formattingOf(text: string): FormattingOptions {
   }
   const spaces = indented === undefined ? 0 : (/^ +/.exec(indented)?.[0].length ?? 0);
   return { insertSpaces: true, tabSize: spaces >= 1 && spaces <= 8 ? spaces : 2, eol };
+}
+
+/** The indent unit the file uses: one tab, or `tabSize` spaces. */
+function indentUnit(options: FileStyle): string {
+  return options.insertSpaces ? " ".repeat(options.tabSize) : "\t";
+}
+
+/** The leading whitespace of the line holding `offset`. */
+function indentOfLine(text: string, offset: number): string {
+  const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
+  return /^[ \t]*/.exec(text.slice(lineStart, offset))?.[0] ?? "";
+}
+
+/** The offset of the line break that ends the line holding `offset`. */
+function endOfLine(text: string, offset: number): number {
+  const eol = text.indexOf("\n", offset);
+  if (eol < 0) {
+    return text.length;
+  }
+  return text[eol - 1] === "\r" ? eol - 1 : eol;
+}
+
+/**
+ * A new property's text, laid out the way the file holds its members: `"key":
+ * value` at `indent`, a wrapped value one nesting level per unit, with the file's
+ * EOL. Only this NEW text is ever formatted — never a byte already in the file.
+ * (Round 3: jsonc-parser's `withFormatting` expands an insert to every WHOLE LINE
+ * it touches and reformats those lines, `impl/edit.js:159-166`, so the previous
+ * sibling was rewritten.)
+ */
+function propertyText(property: string, indent: string, options: FileStyle): string {
+  // `keepLines: false` is what `withFormatting` itself uses (`impl/edit.js:167`):
+  // an object/array goes one member per line, in the file's own indent style.
+  const formatted = applyEdits(
+    property,
+    format(property, undefined, { ...options, keepLines: false }),
+  ).replace(/\r?\n/g, options.eol);
+  return `${indent}${formatted.split(options.eol).join(`${options.eol}${indent}`)}`;
+}
+
+/**
+ * A new property placed after a SIBLING: only the new text is added, so a
+ * sibling written on one line stays on one line, and a `// keep` comment after it
+ * keeps its line and every one of its bytes (the comma goes before it).
+ */
+function afterSibling(
+  text: string,
+  offset: number,
+  property: string,
+  options: FileStyle,
+): Edit[] | undefined {
+  // The rest of the sibling's line, extended past a block comment that spans
+  // lines: re-emitting it unchanged keeps every comment byte where the user put
+  // it. (`indexOf`, not a regex: the opener is a literal two-character string.)
+  let end = endOfLine(text, offset);
+  const blockOpen = text.indexOf("/*", offset);
+  if (blockOpen >= 0 && blockOpen < end) {
+    const blockClose = text.indexOf("*/", blockOpen + 2);
+    if (blockClose >= 0) {
+      end = blockClose + 2;
+    }
+  }
+  const rest = text.slice(offset, end);
+  // A closing brace/bracket on the same line means the PARENT is written on one
+  // line, so the file's own layout for a new member is not a line break — that is
+  // the pre-round-3 shape, and this module does not change it (`{"a": 1}` still
+  // gains its member on a line of its own, as jsonc-parser formats it). A brace
+  // inside a comment is not one, hence the comment strip.
+  if (/[}\]]/.test(stripComments(rest))) {
+    return undefined;
+  }
+  const trailingComma = /^[ \t]*,/.test(rest);
+  const line = propertyText(property, indentOfLine(text, offset), options);
+  const content = `${trailingComma ? "" : ","}${rest}${options.eol}${line}${trailingComma ? "," : ""}`;
+  return [{ offset, length: rest.length, content }];
+}
+
+/**
+ * A new property as the FIRST member of an EMPTY object: `modify` splices it just
+ * after the opening brace (`impl/edit.js:80-82`, no separator comma), so the
+ * property goes on a line of its own at the indent such a member takes and the
+ * closing brace back on the line the opening one started. (An object with members
+ * never reaches here: it always inserts after the last one, above.)
+ */
+function firstMember(
+  text: string,
+  offset: number,
+  property: string,
+  options: FileStyle,
+): Edit[] | undefined {
+  if (text[offset - 1] !== "{") {
+    return undefined;
+  }
+  const blank = /^[ \t]*/.exec(text.slice(offset))?.[0] ?? "";
+  if (text[offset + blank.length] !== "}") {
+    return undefined;
+  }
+  const outer = indentOfLine(text, offset - 1);
+  const line = propertyText(property, `${outer}${indentUnit(options)}`, options);
+  return [{ offset, length: blank.length, content: `${options.eol}${line}${options.eol}${outer}` }];
+}
+
+/**
+ * An INSERT made byte-exact outside the text it adds: `modify`'s own edit only
+ * says where the new member goes and what it says; the layout is spliced here.
+ * `undefined` for a shape this does not handle (no object at `offset`) — the
+ * caller then keeps jsonc-parser's formatting, which is the pre-round-3 path.
+ */
+function spliceInsert(text: string, edit: Edit, options: FileStyle): Edit[] | undefined {
+  if (edit.content.startsWith(",")) {
+    return afterSibling(text, edit.offset, edit.content.slice(1), options);
+  }
+  // Before a closing brace `modify` appends the separator comma to its content.
+  return firstMember(text, edit.offset, edit.content.replace(/,$/, ""), options);
+}
+
+/**
+ * The whole new text: an INSERT is spliced by this module (round 3); a REPLACE or
+ * a DELETE keeps jsonc-parser's formatting, which is already byte-exact for a
+ * replaced value — its range IS the value — and whose whole-line handling of a
+ * removed member is what the user wants.
+ */
+function editedText(text: string, segments: readonly string[], op: EditOp): string {
+  const value = op.kind === "set" ? op.value : undefined;
+  const options = formattingOf(text);
+  const [only] = modify(text, [...segments], value, {});
+  if (only !== undefined && only.length === 0) {
+    const spliced = spliceInsert(text, only, options);
+    if (spliced !== undefined) {
+      return applyEdits(text, spliced);
+    }
+  }
+  return applyEdits(text, modify(text, [...segments], value, { formattingOptions: options }));
 }
 
 /**
@@ -353,17 +504,7 @@ export function planConfigEdit(input: {
   }
   let edited: string;
   try {
-    edited = applyEdits(
-      input.text,
-      modify(
-        input.text,
-        [...input.segments],
-        input.op.kind === "set" ? input.op.value : undefined,
-        {
-          formattingOptions: formattingOf(input.text),
-        },
-      ),
-    );
+    edited = editedText(input.text, input.segments, input.op);
   } catch (error) {
     // `modify` THROWS on a non-object document ("Can not add index to parent of
     // type number"): a refusal, never an escaping exception.
