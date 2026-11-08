@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonSessionStore, type SessionRecord } from "@tentacle/agent";
+import type { SessionRecord } from "@tentacle/agent";
+import { LogSessionStore } from "@tentacle/daemon";
 import { SessionSaver, nextSaveState } from "../src/session-saver.ts";
 
 let dir: string;
@@ -26,12 +27,20 @@ const rec = (id: string, updatedAt: number): SessionRecord => ({
 /** A real store whose writes fail while `failing` holds the error. */
 function flakyStore(sub: string) {
   const control: { failing: Error | null } = { failing: null };
-  const store = new JsonSessionStore(join(dir, sub), {
-    writeDurable: async (path, data) => {
-      if (control.failing) {
-        throw control.failing;
-      }
-      await writeFile(path, data);
+  const store = new LogSessionStore(join(dir, sub), {
+    io: {
+      append: async (path, data) => {
+        if (control.failing) {
+          throw control.failing;
+        }
+        await appendFile(path, data);
+      },
+      writeDurable: async (path, data) => {
+        if (control.failing) {
+          throw control.failing;
+        }
+        await writeFile(path, data);
+      },
     },
   });
   return { store, control };
@@ -66,20 +75,21 @@ describe("SessionSaver", () => {
       control.failing = new Error("EACCES: permission denied");
       saver.save(rec("s1", 1));
       expect(await saver.drain()).toEqual([
-        `[session] not saved: s1 — couldn't write ${join(dir, "flaky", "s1.json")}: EACCES: permission denied (any file on disk is from an earlier save)\n`,
+        `[session] not saved: s1 — couldn't write ${join(dir, "flaky", "s1.jsonl")}: EACCES: permission denied (any file on disk is from an earlier save)\n`,
       ]);
       saver.save(rec("s1", 2)); // still failing: silent
       await saver.drain();
       expect(notices).toHaveLength(1);
       expect(notices[0]).toContain("Session s1 not saved — couldn't write");
-      expect(notices[0]).toContain("s1.json: EACCES: permission denied.");
+      expect(notices[0]).toContain("s1.jsonl: EACCES: permission denied.");
 
       control.failing = null;
       saver.save(rec("s1", 3));
       expect(await saver.drain()).toEqual([]);
       expect(notices[1]).toBe("Session s1 saved again.");
       const loaded = await store.load("s1");
-      expect(loaded.status === "ok" ? loaded.record.updatedAt : null).toBe(3);
+      // The recovering save landed (a log's updatedAt is its mtime, Q4).
+      expect(loaded.status === "ok" ? loaded.record.messages : null).toEqual(rec("s1", 3).messages);
       await Bun.sleep(5);
       expect(unhandled).toEqual([]);
     } finally {
@@ -99,7 +109,7 @@ describe("SessionSaver", () => {
     const lines = await saver.drain();
     expect(notices).toHaveLength(1);
     expect(lines).toEqual([
-      `[session] not saved: old — couldn't write ${join(dir, "per-uid", "old.json")}: ENOSPC (any file on disk is from an earlier save)\n`,
+      `[session] not saved: old — couldn't write ${join(dir, "per-uid", "old.jsonl")}: ENOSPC (any file on disk is from an earlier save)\n`,
     ]);
   });
 
@@ -109,7 +119,7 @@ describe("SessionSaver", () => {
     saver.save(rec("d", 7));
     await saver.drain();
     const loaded = await store.load("d");
-    expect(loaded.status === "ok" ? loaded.record.updatedAt : null).toBe(7);
+    expect(loaded.status === "ok" ? loaded.record.messages : null).toEqual(rec("d", 7).messages);
   });
 
   test("drain waits for save's own outcome, whatever the store does internally", async () => {
@@ -117,7 +127,8 @@ describe("SessionSaver", () => {
     // write fails late. Mutation: return before waiting → no line.
     const saver = new SessionSaver(
       {
-        save: () => Bun.sleep(20).then(() => Promise.reject(new Error("late EIO"))),
+        write: async () => {},
+        saveSnapshot: () => Bun.sleep(20).then(() => Promise.reject(new Error("late EIO"))),
         remove: async () => {},
       },
       () => {},
@@ -130,7 +141,11 @@ describe("SessionSaver", () => {
 
   test("a hung save: drain says it is waiting, then gives up and reports it — never hangs", async () => {
     const saver = new SessionSaver(
-      { save: () => new Promise<void>(() => {}), remove: async () => {} },
+      {
+        write: async () => {},
+        saveSnapshot: () => new Promise<void>(() => {}),
+        remove: async () => {},
+      },
       () => {},
     );
     saver.save(rec("hung", 1));
@@ -149,7 +164,10 @@ describe("SessionSaver", () => {
   });
 
   test("a fast drain neither calls onSlow nor waits for the timeout", async () => {
-    const saver = new SessionSaver({ save: async () => {}, remove: async () => {} }, () => {});
+    const saver = new SessionSaver(
+      { write: async () => {}, saveSnapshot: async () => {}, remove: async () => {} },
+      () => {},
+    );
     saver.save(rec("fast", 1));
     let slowCalls = 0;
     const started = Date.now();
@@ -173,7 +191,7 @@ describe("SessionSaver", () => {
 
   test("failed(): a save that never reached the store is reported like a failed write (notice + drain)", async () => {
     const notices: string[] = [];
-    const saver = new SessionSaver(new JsonSessionStore(join(dir, "failed")), (t) =>
+    const saver = new SessionSaver(new LogSessionStore(join(dir, "failed")), (t) =>
       notices.push(t),
     );
     saver.failed("abcdef0123", "could not read the history back: connection closed");
@@ -208,7 +226,11 @@ describe("SessionSaver", () => {
     expect(notices).toEqual([]);
     // A failed removal is one notice, never thrown.
     const broken = new SessionSaver(
-      { save: async () => {}, remove: () => Promise.reject(new Error("EACCES")) },
+      {
+        write: async () => {},
+        saveSnapshot: async () => {},
+        remove: () => Promise.reject(new Error("EACCES")),
+      },
       (t) => notices.push(t),
     );
     broken.remove("abcdef0123");

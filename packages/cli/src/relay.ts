@@ -341,7 +341,11 @@ export async function runRelay(deps: RelayDeps): Promise<number> {
   // else may: a second one's default would silently approve everything.
   const permissions = new PermissionBroker(policy.requester, { holdUntilSet: true });
   const sessions = await openTuiSessions(
-    { root: join(config.configDir, "sessions"), cwd: config.cwd },
+    {
+      root: join(config.configDir, "sessions"),
+      cwd: config.cwd,
+      keepSuperseded: config.sessions?.keepSuperseded === true,
+    },
     { wanted: false },
     log,
   );

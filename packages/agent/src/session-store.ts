@@ -180,8 +180,6 @@ export function projectKey(cwd: string): string {
 const STALE_TEMP_MS = 60 * 60 * 1000;
 /** `.<uid>.json.tmp-<pid>-<rand>`: the writer's pid tells a leftover from a write in flight. */
 const TEMP_NAME = /^\..+\.json\.tmp-(\d+)-[0-9a-f]+$/;
-/** What follows `<id>.stale-` in a Q6 aside's name (`writeAtomic`): `<ms>-<8 hex>.aside`. */
-const ASIDE_TAIL = /^\d+-[0-9a-f]{8}\.aside$/;
 const FS_ERRORS: Record<string, string> = {
   EACCES: "permission denied",
   EPERM: "operation not permitted",
@@ -394,45 +392,20 @@ interface WriteSlot {
   running: Promise<void> | null;
 }
 
-/** A write the store did not make: the file held a longer history, this copy went aside. */
-export interface AsideInfo {
-  readonly id: string;
-  /** The separate file holding the copy that was not written. */
-  readonly file: string;
-  /** Messages the session file holds (and keeps). */
-  readonly kept: number;
-  /** Messages the copy set aside holds. */
-  readonly dropped: number;
-}
-
 /**
- * Whether `incoming` is a strict prefix of `held`: a stale writer's shorter copy
- * of the same history. A rewritten history (a compaction) is not one.
+ * A directory of `<uid>.json` session files: the `serve` daemon's store
+ * (docs/feat/daemon-side-persistence.md) until it moves to the log
+ * (`feat/session-log-serve-store`). The laptop's store is `LogSessionStore`
+ * (`@tentacle/daemon`, docs/feat/session-log-laptop-store.md).
  */
-function dropsHeld(held: readonly ChatMessage[], incoming: readonly ChatMessage[]): boolean {
-  return (
-    incoming.length < held.length &&
-    incoming.every((message, i) => JSON.stringify(message) === JSON.stringify(held[i]))
-  );
-}
-
-/** A directory of `<uid>.json` session files. */
 export class JsonSessionStore {
   private readonly slots = new Map<string, WriteSlot>();
   /** Crash leftovers are swept once per store, before its first write. */
   private swept = false;
 
-  /**
-   * `onAside` opts in to the stale-writer guard (docs/fix/detach-live.md Q6):
-   * a save never silently replaces a longer history the file already holds. The
-   * copy goes to `<uid>.stale-<time>.aside` next to it (a name no listing or
-   * load takes for a session) and `onAside` says so. Without it, a save
-   * replaces the file as ever (the daemon's own store).
-   */
   constructor(
     private readonly dir: string,
     private readonly io: SessionStoreIo = defaultIo,
-    private readonly onAside?: (info: AsideInfo) => void,
   ) {}
 
   private file(id: string): string {
@@ -448,31 +421,6 @@ export class JsonSessionStore {
    */
   save(record: SessionRecord): Promise<void> {
     return this.enqueue(record.id, record);
-  }
-
-  /**
-   * Write `record` to a NEW aside file next to its session file —
-   * `<uid>.stale-<ms>-<hex>.aside`, the Q6 name no listing or load takes for a
-   * session — and resolve with its path. Never touches `<uid>.json`. Used when
-   * the daemon's history diverged from this copy (docs/feat/session-log.md
-   * F1): the copy is kept, never lost. Rejects when the write fails.
-   */
-  async saveAside(record: SessionRecord): Promise<string> {
-    if (!SAFE_ID.test(record.id)) {
-      throw new Error(`invalid session id ${JSON.stringify(record.id)}`);
-    }
-    const suffix = crypto.randomUUID().slice(0, 8);
-    const temp = join(this.dir, `.${record.id}.json.tmp-${process.pid}-${suffix}`);
-    const destination = join(this.dir, `${record.id}.stale-${Date.now()}-${suffix}.aside`);
-    try {
-      await mkdir(this.dir, { recursive: true });
-      await this.io.writeDurable(temp, `${JSON.stringify(record, null, 2)}\n`);
-      await rename(temp, destination);
-      return destination;
-    } catch (error) {
-      await rm(temp, { force: true }).catch(() => {});
-      throw new Error(`couldn't write ${destination}: ${describeFsError(error)}`, { cause: error });
-    }
   }
 
   /** Queue `op` for `id` (replacing a queued one) and start the pump if idle. */
@@ -526,23 +474,8 @@ export class JsonSessionStore {
         this.swept = true;
         await this.sweepTemps();
       }
-      // Q6: a stale writer's shorter copy never replaces the longer history on
-      // disk. An absent or unreadable file holds nothing to protect.
-      const held = this.onAside ? await this.load(record.id) : ({ status: "absent" } as const);
-      const stale = held.status === "ok" && dropsHeld(held.record.messages, record.messages);
-      const destination = stale
-        ? join(this.dir, `${record.id}.stale-${Date.now()}-${suffix}.aside`)
-        : target;
       await this.io.writeDurable(temp, `${JSON.stringify(record, null, 2)}\n`);
-      await rename(temp, destination);
-      if (stale && held.status === "ok") {
-        this.onAside?.({
-          id: record.id,
-          file: destination,
-          kept: held.record.messages.length,
-          dropped: record.messages.length,
-        });
-      }
+      await rename(temp, target);
     } catch (error) {
       await rm(temp, { force: true }).catch(() => {});
       // Name the file the user knows, not the hidden temp the error was raised on.
@@ -598,28 +531,6 @@ export class JsonSessionStore {
       await rm(target, { force: true });
     } catch (error) {
       throw new Error(`couldn't remove ${target}: ${describeFsError(error)}`, { cause: error });
-    }
-    await this.removeAsides(id);
-  }
-
-  /**
-   * The Q6 copies set aside for `id` go with it (docs/fix/detach-live-followups.md
-   * F7). Matched by the EXACT name `writeAtomic` makes, never a prefix: `SAFE_ID`
-   * allows `.`, so another id can start with `<id>.stale-`. Best-effort: the
-   * session itself is removed; a leftover is never loaded (`scan` takes `.json`).
-   */
-  private async removeAsides(id: string): Promise<void> {
-    let names: string[];
-    try {
-      names = await readdir(this.dir);
-    } catch {
-      return;
-    }
-    const prefix = `${id}.stale-`;
-    for (const name of names) {
-      if (name.startsWith(prefix) && ASIDE_TAIL.test(name.slice(prefix.length))) {
-        await rm(join(this.dir, name), { force: true }).catch(() => {});
-      }
     }
   }
 

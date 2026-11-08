@@ -90,7 +90,8 @@ describe("SessionSaver.observe", () => {
     const saved: string[] = [];
     const saver = new SessionSaver(
       {
-        save: async (r) => {
+        write: async () => {},
+        saveSnapshot: async (r) => {
           saved.push(r.id);
         },
         remove: async () => {},
@@ -110,7 +111,10 @@ describe("SessionSaver.observe", () => {
 
   test("a removed session is not observed (never written back)", async () => {
     const seen: string[] = [];
-    const saver = new SessionSaver({ save: async () => {}, remove: async () => {} }, () => {});
+    const saver = new SessionSaver(
+      { write: async () => {}, saveSnapshot: async () => {}, remove: async () => {} },
+      () => {},
+    );
     saver.observe((r) => seen.push(r.id));
     saver.remove("gone");
     saver.save(rec("gone"));

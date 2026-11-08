@@ -31,6 +31,7 @@ those.
 
 ### Changed
 
+- **Sessions are saved as an append-only log, `<uid>.jsonl`.** Each round adds only its own lines to `~/.config/tentacle/sessions/<folder>/<uid>.jsonl` (a 2 MB session no longer rewrites 2 MB per round). Old `<uid>.json` sessions are **not read** any more (no conversion): `--resume` and the picker list only `.jsonl` sessions. A copy from another writer that the file does not contain is set aside in `<uid>.stale-….aside` with a notice, never dropped silently; two terminals of one detached run no longer overwrite each other. A turn cut mid-way is closed when the session is loaded. New `sessions: { keepSuperseded: true }` keeps the history a compaction or a context reset replaced (default off).
 - The TUI's turn indicator reads `Working…` / `Thinking…` (capitalised), the word in the accent colour with the spinner; the timer and hint stay grey.
 - **Saving a session after each round moves only what changed.** The laptop
   used to read the WHOLE history back from the daemon after every committed

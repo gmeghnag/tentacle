@@ -2,9 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonSessionStore, type SessionRecord, projectKey } from "@tentacle/agent";
+import { type SessionRecord, projectKey } from "@tentacle/agent";
+import { LogSessionStore } from "@tentacle/daemon";
 import { findInOtherProjects } from "../src/session-projects.ts";
 import { type TuiSessions, openTuiSessions } from "../src/tui-sessions.ts";
+import { saveFixture } from "./session-fixture.ts";
 
 /** The resumed record, or `undefined` when `openTuiSessions` said "don't start". */
 const resumeOf = (opened: TuiSessions | { readonly exit: number }) =>
@@ -38,13 +40,14 @@ const rec = (id: string, cwd: string, updatedAt: number): SessionRecord => ({
   model: "m",
   createdAt: updatedAt,
   updatedAt,
-  title: `title ${id}`,
+  // A chosen title (a string one is derived from the messages in a log).
+  title: { text: `title ${id}`, source: "user" },
   messages: [{ role: "user", content: `hello ${id}` }],
 });
 
 /** Save `record` where the per-project layout puts it. */
 const saveIn = (root: string, record: SessionRecord): Promise<void> =>
-  new JsonSessionStore(join(root, projectKey(record.cwd))).save(record);
+  saveFixture(new LogSessionStore(join(root, projectKey(record.cwd))), record);
 
 const filesIn = async (dir: string): Promise<string[]> => (await readdir(dir)).sort();
 
@@ -53,7 +56,7 @@ describe("findInOtherProjects", () => {
     const root = freshRoot();
     await saveIn(root, rec("inA", projA, 1));
     await saveIn(root, rec("inB", projB, 1));
-    await new JsonSessionStore(root).save(rec("flat", projA, 1));
+    await saveFixture(new LogSessionStore(root), rec("flat", projA, 1));
     const keyB = projectKey(projB);
     const inA = await findInOtherProjects(root, keyB, "inA");
     expect(inA.status === "ok" && inA.record.cwd).toBe(projA);
@@ -65,10 +68,10 @@ describe("findInOtherProjects", () => {
     const root = freshRoot();
     await saveIn(root, rec("dup", projA, 1));
     const other = join(root, "other-000000000000");
-    await new JsonSessionStore(other).save(rec("dup", "/elsewhere", 9));
+    await saveFixture(new LogSessionStore(other), rec("dup", "/elsewhere", 9));
     const dup = await findInOtherProjects(root, projectKey(projB), "dup");
     expect(dup.status === "ok" && dup.record.updatedAt).toBe(9);
-    await writeFile(join(other, "bad.json"), "{trunc");
+    await writeFile(join(other, "bad.jsonl"), "{trunc");
     expect((await findInOtherProjects(root, projectKey(projB), "bad")).status).toBe("unreadable");
     expect((await findInOtherProjects(join(base, "never"), "k", "x")).status).toBe("absent");
   });
@@ -109,7 +112,7 @@ describe("openTuiSessions per project (end to end at the seam)", () => {
   test("old flat files are ignored: never resumed, never moved", async () => {
     // Mutation: a fallback to the root store → the flat session resumes.
     const root = freshRoot();
-    await new JsonSessionStore(root).save(rec("flatOld", projA, 1));
+    await saveFixture(new LogSessionStore(root), rec("flatOld", projA, 1));
     const out: string[] = [];
     const sessions = await openTuiSessions(
       { root, cwd: projA },
@@ -124,7 +127,7 @@ describe("openTuiSessions per project (end to end at the seam)", () => {
       () => {},
     );
     expect(resumeOf(byUid)).toBeNull();
-    expect(await filesIn(root)).toEqual(["flatOld.json"]);
+    expect(await filesIn(root)).toEqual(["flatOld.jsonl"]);
   });
 
   test("no session in this project: fresh, and the message names the project", async () => {
@@ -176,6 +179,6 @@ describe("openTuiSessions per project (end to end at the seam)", () => {
     sessions.saver.save(rec("new", projA, 5));
     await sessions.saver.drain();
     expect(await filesIn(root)).toEqual([projectKey(projA)]);
-    expect(await filesIn(join(root, projectKey(projA)))).toEqual(["new.json"]);
+    expect(await filesIn(join(root, projectKey(projA)))).toEqual(["new.jsonl"]);
   });
 });

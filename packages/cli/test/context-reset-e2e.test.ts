@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonSessionStore, restartPromptOf } from "@tentacle/agent";
+import { restartPromptOf } from "@tentacle/agent";
 import { loadConfig } from "@tentacle/config";
 import {
   type ChatRequest,
@@ -11,7 +11,7 @@ import {
   type PermissionRequest,
   type StreamEvent,
 } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import { createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
@@ -111,7 +111,7 @@ test("a context reset end to end: fresh files, the laptop's approval, the saved 
       asked.push(req);
       return { allowed: true };
     });
-    const store = new JsonSessionStore(join(dir, "sessions"));
+    const store = new LogSessionStore(join(dir, "sessions"));
     const runtime = await createLocalRuntime({
       channel: clientCh,
       disposeTransport: () => connection.close(),
@@ -180,7 +180,7 @@ test("a context reset end to end: fresh files, the laptop's approval, the saved 
 
     // The laptop's saved copy holds only the fresh context (decision 4).
     await new Promise((r) => setTimeout(r, 20));
-    const listed = await store.list();
+    const listed = await store.loadAll();
     const record = listed.records[0];
     expect(record?.messages[0]?.content).toBe(system);
     expect(restartPromptOf(record?.messages[1]?.content ?? "")).toBe(

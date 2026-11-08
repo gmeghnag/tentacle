@@ -170,6 +170,8 @@ export interface TentacleConfig {
   readonly mount?: ResolvedConfig["mount"];
   /** The configured TUI palette (file or profile); absent = `auto` (the TUI probes). */
   readonly tui?: ResolvedConfig["tui"];
+  /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
+  readonly sessions?: ResolvedConfig["sessions"];
   /**
    * The configured `apiKeyCommand` (the command, never its output): the CLI
    * hides the key FILE it reads from a workspace mount.
@@ -681,6 +683,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.detach !== undefined ? { detach: resolved.detach } : {}),
     ...(resolved.mount !== undefined ? { mount: resolved.mount } : {}),
     ...(resolved.tui !== undefined ? { tui: resolved.tui } : {}),
+    ...(resolved.sessions !== undefined ? { sessions: resolved.sessions } : {}),
     ...(resolved.apiKeyCommand !== undefined ? { apiKeyCommand: resolved.apiKeyCommand } : {}),
     hooks: contributed.hooks,
     mcpServers: contributed.mcpServers,

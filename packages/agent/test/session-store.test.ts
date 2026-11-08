@@ -475,7 +475,10 @@ describe("JsonSessionStore.remove", () => {
   });
 });
 
-describe("JsonSessionStore never silently replaces a longer history (docs/fix/detach-live.md Q6)", () => {
+// The Q6 stale-writer guard and its asides moved to the laptop log store
+// (docs/feat/session-log-laptop-store.md, packages/daemon/test/session-log-store.test.ts);
+// the serve store replaces a record as ever.
+describe("JsonSessionStore (serve) writes every record it is given", () => {
   const full: ChatMessage[] = [
     { role: "user", content: "one" },
     { role: "assistant", content: "ok" },
@@ -485,54 +488,9 @@ describe("JsonSessionStore never silently replaces a longer history (docs/fix/de
   const record = (id: string, msgs: ChatMessage[]) =>
     recordFromSnapshot({ id, messages: msgs }, { cwd: "/w", model: "m" });
 
-  test("a write that drops messages the file holds keeps the file, saves the copy aside, says so", async () => {
-    // Mutation: drop the prefix check in `writeAtomic` → the stale write replaces the file.
-    const asides: { id: string; file: string; kept: number; dropped: number }[] = [];
-    const where = join(dir, "q6-stale");
-    const store = new JsonSessionStore(where, undefined, (info) => asides.push(info));
-    await store.save(record("s", full));
-    await store.save(record("s", full.slice(0, 2)));
-    const loaded = await store.load("s");
-    expect(loaded.status === "ok" && loaded.record.messages.length).toBe(4);
-    expect(asides).toHaveLength(1);
-    expect(asides[0]).toMatchObject({ id: "s", kept: 4, dropped: 2 });
-    const names = await readdir(where);
-    const aside = names.filter((n) => n.startsWith("s.stale-"));
-    expect(aside).toHaveLength(1);
-    expect(asides[0]?.file).toBe(join(where, aside[0] ?? ""));
-    // Never a session: not loadable, not listed, not scanned.
-    expect((await store.list()).records.map((r) => r.id)).toEqual(["s"]);
-    expect((await store.list()).skipped).toEqual([]);
-    const kept = JSON.parse(await readFile(asides[0]?.file ?? "", "utf8")) as SessionRecord;
-    expect(kept.messages).toHaveLength(2);
-  });
-
-  test("Q11: removing a session removes its aside copies too, never another id's", async () => {
-    // docs/fix/detach-live-followups.md F7 (owner OQ9). Mutation: `removeFile`
-    // without the aside sweep → `s.stale-…aside` survives the delete.
-    const where = join(dir, "q11");
-    const store = new JsonSessionStore(where, undefined, () => {});
-    await store.save(record("s", full));
-    await store.save(record("s", full.slice(0, 2))); // → s.stale-<ms>-<hex>.aside
-    // An id that only LOOKS like s's aside (SAFE_ID allows `.`), with its own aside.
-    const twin = "s.stale-1-deadbeef";
-    await store.save(record(twin, full));
-    await store.save(record(twin, full.slice(0, 2)));
-    expect((await readdir(where)).filter((n) => n.endsWith(".aside"))).toHaveLength(2);
-    await store.remove("s");
-    const left = (await readdir(where)).sort();
-    expect(
-      left.filter((n) => n === "s.json" || /^s\.stale-\d+-[0-9a-f]{8}\.aside$/.test(n)),
-    ).toEqual([]);
-    expect(left).toContain(`${twin}.json`);
-    expect(left.filter((n) => n.startsWith(`${twin}.stale-`) && n.endsWith(".aside"))).toHaveLength(
-      1,
-    );
-  });
-
-  test("not a drop: a longer history, an equal one, a rewritten one (a compaction) all write", async () => {
-    const asides: unknown[] = [];
-    const store = new JsonSessionStore(join(dir, "q6-ok"), undefined, (i) => asides.push(i));
+  test("a longer history, an equal one, a rewritten one (a compaction), a shorter one all write; no aside", async () => {
+    const where = join(dir, "q6-ok");
+    const store = new JsonSessionStore(where);
     await store.save(record("s", full.slice(0, 2)));
     await store.save(record("s", full));
     await store.save(record("s", full));
@@ -540,7 +498,10 @@ describe("JsonSessionStore never silently replaces a longer history (docs/fix/de
     await store.save(record("s", compacted));
     const loaded = await store.load("s");
     expect(loaded.status === "ok" && loaded.record.messages).toEqual(compacted);
-    expect(asides).toEqual([]);
+    await store.save(record("s", full.slice(0, 1)));
+    const shorter = await store.load("s");
+    expect(shorter.status === "ok" && shorter.record.messages.length).toBe(1);
+    expect((await readdir(where)).filter((n) => n.endsWith(".aside"))).toEqual([]);
   });
 
   test("an unreadable file is not a longer history: the write goes through", async () => {

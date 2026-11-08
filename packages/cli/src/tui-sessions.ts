@@ -6,8 +6,9 @@
  * unmounted (AGENTS §7). One tested copy instead of three in `main.ts`.
  */
 import { join } from "node:path";
-import { JsonSessionStore, type SessionRecord, projectKey } from "@tentacle/agent";
+import { type SessionRecord, projectKey } from "@tentacle/agent";
 import type { ChatMessage } from "@tentacle/core";
+import { LogSessionStore } from "@tentacle/daemon";
 import type { NoticeFeed, SessionPick } from "@tentacle/tui";
 import { NoticeHub } from "./notice-hub.ts";
 import { findInOtherProjects } from "./session-projects.ts";
@@ -52,7 +53,12 @@ export interface ResumeRequest {
  * nothing, e.g. `titleConfigNotice`) are queued for the TUI, never written.
  */
 export async function openTuiSessions(
-  where: { readonly root: string; readonly cwd: string },
+  where: {
+    readonly root: string;
+    readonly cwd: string;
+    /** `sessions.keepSuperseded` (docs/feat/session-log-laptop-store.md); default off. */
+    readonly keepSuperseded?: boolean;
+  },
   resume: ResumeRequest,
   write: (line: string) => void,
   pick?: SessionPick,
@@ -60,16 +66,20 @@ export async function openTuiSessions(
 ): Promise<TuiSessions | { readonly exit: number }> {
   // One directory per project (docs/fix/session-store-per-project.md): the
   // resume AND the saver use it, so this folder's sessions are the only ones
-  // offered. Old flat files at the root are ignored (no migration, pre-v0.1.0).
+  // offered. Old flat files at the root are ignored (no migration, pre-v0.1.0),
+  // and so are legacy `<uid>.json` records (only `<uid>.jsonl` logs are read).
   const key = projectKey(where.cwd);
   const notices = new NoticeHub();
-  // Q6: a stale writer never replaces a longer history; said in the TUI (a
-  // notice, never a raw write while Ink owns the terminal).
-  const store = new JsonSessionStore(join(where.root, key), undefined, (aside) =>
-    notices.notify(
-      `⚠ Session ${aside.id.slice(0, 8)}: its file holds ${aside.kept} messages, this copy only ${aside.dropped} — the file was kept, this copy saved aside in ${aside.file}`,
-    ),
-  );
+  // A replace never drops content its own copy does not contain: that content
+  // goes aside first, said in the TUI (a notice, never a raw write while Ink
+  // owns the terminal).
+  const store = new LogSessionStore(join(where.root, key), {
+    keepSuperseded: where.keepSuperseded === true,
+    onAside: (aside) =>
+      notices.notify(
+        `⚠ Session ${aside.id.slice(0, 8)}: ${aside.reason} — that content was saved aside in ${aside.file}`,
+      ),
+  });
   for (const text of startup) {
     notices.notify(text);
   }
@@ -138,7 +148,7 @@ export async function readSessionRecord(
   where: { readonly root: string; readonly cwd: string },
   uid: string,
 ): Promise<SessionRecord | null> {
-  const loaded = await new JsonSessionStore(join(where.root, projectKey(where.cwd))).load(uid);
+  const loaded = await new LogSessionStore(join(where.root, projectKey(where.cwd))).load(uid);
   if (loaded.status === "unreadable") {
     throw new Error(`could not read ${loaded.file}: ${loaded.reason}`);
   }

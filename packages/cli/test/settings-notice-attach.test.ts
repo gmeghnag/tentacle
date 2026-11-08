@@ -4,10 +4,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonSessionStore, type SessionRecord } from "@tentacle/agent";
+import type { SessionRecord } from "@tentacle/agent";
 import type { ModelProvider, StreamEvent } from "@tentacle/core";
 import { PermissionBroker } from "@tentacle/core";
-import { Connection, type SessionHost } from "@tentacle/daemon";
+import { Connection, LogSessionStore, type SessionHost } from "@tentacle/daemon";
 import type { SessionSettings } from "@tentacle/protocol";
 import { createChannelPair } from "@tentacle/transport";
 import { loadConfig } from "../src/config.ts";
@@ -59,7 +59,7 @@ describe("the settings notice through the real attach", () => {
     const [daemonCh, clientCh] = createChannelPair();
     const connection = new Connection(daemonCh, host, () => {}, { servesModel: true });
     const notices: string[] = [];
-    const store = new JsonSessionStore(await fresh());
+    const store = new LogSessionStore(await fresh());
     const saver = new SessionSaver(store, () => {});
     const runtime = await createLocalRuntime({
       channel: clientCh,

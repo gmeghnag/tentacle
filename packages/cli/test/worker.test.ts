@@ -2,8 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JsonSessionStore } from "@tentacle/agent";
 import { PermissionBroker } from "@tentacle/core";
+import { LogSessionStore } from "@tentacle/daemon";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { startWorkerRuntime } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
@@ -60,7 +60,7 @@ describe("startWorkerRuntime (real worker spawn)", () => {
       config,
       {
         permissions: new PermissionBroker(),
-        saver: new SessionSaver(new JsonSessionStore(join(dir, "sessions")), () => {}),
+        saver: new SessionSaver(new LogSessionStore(join(dir, "sessions")), () => {}),
         resume: null,
       },
       () => {},
@@ -94,7 +94,7 @@ describe("startWorkerRuntime (real worker spawn)", () => {
       },
       {
         permissions: new PermissionBroker(),
-        saver: new SessionSaver(new JsonSessionStore(join(dir, "sessions-mcp")), () => {}),
+        saver: new SessionSaver(new LogSessionStore(join(dir, "sessions-mcp")), () => {}),
         resume: null,
       },
       () => {},

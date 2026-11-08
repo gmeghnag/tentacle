@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, JsonSessionStore, projectKey } from "@tentacle/agent";
+import { Agent, projectKey } from "@tentacle/agent";
 import type {
   BackgroundJob,
   ChatRequest,
@@ -21,7 +21,7 @@ import type {
   StreamEvent,
 } from "@tentacle/core";
 import { DISMISSED, PermissionBroker } from "@tentacle/core";
-import { Connection, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
+import { Connection, LogSessionStore, ProxyModelProvider, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import { autoApproves, ownRequest } from "@tentacle/tui";
@@ -232,7 +232,7 @@ function rig(
   } as unknown as TentacleConfig;
   const stopRef: { stop?: () => void } = {};
   const dir = runDirFor(configDir, entry);
-  const store = new JsonSessionStore(join(configDir, "sessions", projectKey("/work")));
+  const store = new LogSessionStore(join(configDir, "sessions", projectKey("/work")));
   const start = (attach: typeof attachEngineRuntime) =>
     runRelay({
       config,
@@ -371,7 +371,7 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
     expect(pod.frames.some((f) => f.includes('"session/detach"'))).toBe(true);
     expect(pod.frames.some((f) => f.includes('"session/close"'))).toBe(false);
     expect(pod.host.list({}).sessions[0]).toMatchObject({ sessionId: UID, attached: 0 });
-    const { records } = await store.list();
+    const { records } = await store.loadAll();
     expect(records.map((r) => r.id)).toEqual([UID]);
     expect(records[0]?.messages.map((m) => m.content)).toEqual(["go", "done"]);
     expect(owner(dir)).toMatchObject({ state: "idle", sessionId: UID, pid: process.pid });
@@ -398,7 +398,7 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
     expect(await exit).toBe(0);
     expect(pod.execs).toEqual([]);
     expect(owner(dir)?.state).toBe("idle");
-    const { records } = await store.list();
+    const { records } = await store.loadAll();
     expect(records[0]?.messages.map((m) => m.role)).toContain("user");
     expect(pod.host.size).toBe(1);
     expect(pod.frames.some((f) => f.includes('"session/close"'))).toBe(false);
@@ -613,7 +613,7 @@ describe("rm=true: the relay removes the workload (docs/feat/detached-relay-life
     expect(r.calls).toEqual(["describe:box", "remove:box"]);
     expect(at).toEqual({ detached: true, locked: true, saved: true });
     expect(r.entries()).toEqual([]);
-    const { records } = await r.store.list();
+    const { records } = await r.store.loadAll();
     expect(records[0]?.messages.map((m) => m.content)).toEqual(["go", "done"]);
     // Q4 (b): the run dir goes, its lock with it.
     expect(existsSync(r.dir)).toBe(false);
@@ -819,7 +819,7 @@ describe("rm=true: the relay removes the workload (docs/feat/detached-relay-life
     expect(await holding).toBe(0);
     expect(asked.execs).toEqual([]);
     expect(h.calls).toContain("remove:box");
-    const { records } = await h.store.list();
+    const { records } = await h.store.loadAll();
     expect(records[0]?.messages.map((m) => m.role)).toContain("user");
   });
 
@@ -928,7 +928,7 @@ describe("rm=true: the relay removes the workload (docs/feat/detached-relay-life
     expect(await afterGrace(exit)).toBe(0);
     expect(r.calls).toEqual(["describe:box", "remove:box"]);
     expect(existsSync(r.dir)).toBe(false);
-    const { records } = await r.store.list();
+    const { records } = await r.store.loadAll();
     expect(records[0]?.messages.map((m) => m.role)).toContain("user");
   });
 
@@ -972,7 +972,7 @@ describe("rm=true: the relay removes the workload (docs/feat/detached-relay-life
     const exit = r.start(pod.attach);
     await waitFor(() => owner(r.dir)?.state === "idle", "idle");
     await waitFor(() => r.net.saved?.() ?? true, "the save confirmed");
-    const { records } = await r.store.list();
+    const { records } = await r.store.loadAll();
     expect(records).toHaveLength(1);
     expect(await afterGrace(exit)).toBe(0);
     expect(r.calls).toEqual(["describe:box", "remove:box"]);
@@ -1301,7 +1301,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
   ) {
     const [daemonCh, clientCh] = createChannelPair();
     const connection = new Connection(daemonCh, pod.host, () => {}, { servesModel: true });
-    const store = new JsonSessionStore(mkdtempSync(join(tmpdir(), "tui-store-")));
+    const store = new LogSessionStore(mkdtempSync(join(tmpdir(), "tui-store-")));
     const saver = new SessionSaver(store, () => {});
     const runtime = await createLocalRuntime({
       channel: clientCh,
@@ -1428,7 +1428,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
         i < 200 && (last as { content?: string } | undefined)?.content !== "ok";
         i++
       ) {
-        last = (await r.store.list()).records[0]?.messages.at(-1);
+        last = (await r.store.loadAll()).records[0]?.messages.at(-1);
         if ((last as { content?: string } | undefined)?.content !== "ok") await tick(5);
       }
       expect(last).toMatchObject({ role: "assistant", content: "ok" });
@@ -1450,12 +1450,12 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
     const tui = await tuiOf(pod, new Scripted([[{ type: "text", delta: "after the ack" }, END]]));
     await tui.runtime.attachTo(UID, null);
     await conn.send({ op: "commit" });
-    const atAck = (await r.store.list()).records.map((x) => JSON.stringify(x.messages));
+    const atAck = (await r.store.loadAll()).records.map((x) => JSON.stringify(x.messages));
     relayModel.open(0);
     await exit;
     await waitFor(() => pod.host.get(UID)?.running === false, "the turn's end");
     await tick(30);
-    expect((await r.store.list()).records.map((x) => JSON.stringify(x.messages))).toEqual(atAck);
+    expect((await r.store.loadAll()).records.map((x) => JSON.stringify(x.messages))).toEqual(atAck);
     conn.close();
   });
 
@@ -1793,7 +1793,7 @@ describe("the hand-over: the relay's side (docs/feat/detached-handover.md, Phase
     expect(r.calls.indexOf(`disarm:${process.pid}`)).toBeGreaterThan(r.calls.indexOf("remove:box"));
     expect(existsSync(r.dir)).toBe(false);
     expect(r.entries()).toEqual([]);
-    const records = (await r.store.list()).records;
+    const records = (await r.store.loadAll()).records;
     expect(records.map((x) => x.id)).toEqual([UID]);
     expect(records[0]?.messages[0]).toMatchObject({ role: "user", content: "go" });
     expect(view.log.some((l) => l.startsWith("THREW"))).toBe(false);
@@ -2293,8 +2293,8 @@ describe("the wake on a job exit, no TUI (docs/fix/detached-autowake.md)", () =>
     if (!conn) throw new Error("no control socket");
     return { conn, reply: await conn.send({ op: "prepare", sessionId: UID }) };
   }
-  const contents = async (store: JsonSessionStore): Promise<unknown[]> =>
-    (await store.list()).records[0]?.messages.map((m) => m.content) ?? [];
+  const contents = async (store: LogSessionStore): Promise<unknown[]> =>
+    (await store.loadAll()).records[0]?.messages.map((m) => m.content) ?? [];
   const logOf = (dir: string): string => readFileSync(relayLogPath(dir), "utf8");
 
   test("R-W1 THE bug: idle, one exit → one continuation, saved, with the state going running → idle", async () => {
@@ -2635,7 +2635,7 @@ describe("the wake on a job exit, no TUI (docs/fix/detached-autowake.md)", () =>
       channel: clientCh,
       disposeTransport: () => connection.close(),
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(mkdtempSync(join(tmpdir(), "s-"))), () => {}),
+      saver: new SessionSaver(new LogSessionStore(mkdtempSync(join(tmpdir(), "s-"))), () => {}),
       cwd: "/work",
       model: "m",
       resume: null,
