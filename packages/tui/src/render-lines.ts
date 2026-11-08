@@ -22,7 +22,14 @@ import { DENIED_LABEL, denialReplyLines } from "./permission-reply.ts";
 import { cleanReadText, highlightRead, pathOfArgs } from "./read-highlight.ts";
 import { type SpillView, spillView } from "./spill-view.ts";
 import type { DisplayItem, ToolItem } from "./state.ts";
-import { subAgentEarlierRow, subAgentHeadRow, subAgentRow, subAgentView } from "./subagent-view.ts";
+import {
+  subAgentEarlierRow,
+  subAgentHeadRow,
+  subAgentOutcomeNote,
+  subAgentReport,
+  subAgentRow,
+  subAgentView,
+} from "./subagent-view.ts";
 import { dashedRule, theme, themeMode } from "./theme.ts";
 import { EXPAND_HINT, fitSubtitle, isExpanded } from "./tool-expand.ts";
 import { queuedRow } from "./tool-phase-view.ts";
@@ -292,7 +299,12 @@ function subAgentLines(tool: ToolItem, width: number, expanded: boolean): string
     // The last row closes the block on a CLEAN end; a non-clean one closes on
     // its own row below (review M3 / Q2).
     const last = i === view.rows.length - 1 && view.done !== null && closing === undefined;
-    out.push(theme.subtle(`${last ? "└─" : "├─"} ${subAgentRow(label, width, expanded)}`));
+    const prefix = `${last ? "└─" : "├─"} `;
+    // A `├─ `/`└─ ` row is padded and pre-wrapped to the body's width: the
+    // transcript's `wrapLines` then leaves it alone, so a wrapped label's
+    // continuation stays under its own row instead of restarting at column 0
+    // with a mid-word break (review N2). Same seam as `commandRows`.
+    out.push(...subAgentStepRow(prefix, label, width, expanded));
   });
   if (closing !== undefined) {
     out.push(`${theme.subtle("└─")} ${theme.error(closing)}`);
@@ -300,6 +312,33 @@ function subAgentLines(tool: ToolItem, width: number, expanded: boolean): string
     out.push(theme.subtle("└─ …"));
   }
   return out;
+}
+
+/**
+ * One step row of a sub-agent's tree. Collapsed, `subAgentRow` cuts the label by
+ * CELLS on a single row (the tail is a summary, not a flood). Expanded, the label
+ * is whole, so it is wrapped HERE to `width - prefix` and every continuation row
+ * is indented to the LABEL's column: each row already fits the width, so the
+ * transcript's `wrapLines` leaves it alone instead of re-breaking the joined row
+ * at column 0 (review N2). Same seam as `commandRows`.
+ */
+function subAgentStepRow(
+  prefix: string,
+  label: string,
+  width: number,
+  expanded: boolean,
+): readonly string[] {
+  // The cut-vs-whole decision is the view-model's (`subAgentRow`); this only
+  // wraps and indents it.
+  const text = subAgentRow(label, width, expanded);
+  if (!expanded) {
+    return [theme.subtle(`${prefix}${text}`)];
+  }
+  const indent = " ".repeat(stringWidth(prefix));
+  const room = Math.max(1, width - stringWidth(prefix));
+  return wrapLines([expandTabs(text)], room).map((row, i) =>
+    theme.subtle(`${i === 0 ? prefix : indent}${row}`),
+  );
 }
 
 /**
@@ -360,21 +399,32 @@ function spillParts(
   return parts;
 }
 
-/** The note, the path (expanded only), the head, the omitted line, the tail. */
+/**
+ * The note, the path (expanded only), the head, the omitted line, the tail.
+ * `dropNote` removes one trailing already-coloured line: a sub-agent's spilled
+ * report carries `agent_task`'s `_(sub-agent …)_` note at its end, and the
+ * block's closing row already says it (review N3).
+ */
 function spillBody(
   tool: ToolItem,
   spill: ToolResultSpill,
   expanded: boolean,
   inPod: boolean,
+  dropNote?: string,
 ): string[] {
   const view = spillView(spill, { expanded, inPod });
   const [head, tail] = spillParts(tool, view);
+  const plain = (l: string): string => stripAnsi(l).trim();
+  const rest =
+    dropNote !== undefined && tail.length > 0 && plain(tail[tail.length - 1] ?? "") === dropNote
+      ? tail.slice(0, -1)
+      : tail;
   return [
     theme.subtle(view.note),
     ...(view.where !== undefined ? [theme.subtle(view.where)] : []),
     ...head,
     ...(view.omitted !== undefined ? [theme.subtle(view.omitted)] : []),
-    ...tail,
+    ...rest,
   ];
 }
 
@@ -421,14 +471,19 @@ function plainToolBody(tool: ToolItem, width: number, inPod: boolean, fit: BodyF
       return tree;
     }
     const report = tool.spill
-      ? spillBody(tool, tool.spill, expanded, inPod)
+      ? spillBody(tool, tool.spill, expanded, inPod, subAgentOutcomeNote(tool.sub.stopReason))
       : tool.resultText && tool.resultText.length > 0
-        ? tool.resultText
-            .replace(/\n+$/, "")
+        ? subAgentReport(tool.resultText, tool.sub.stopReason)
             .split("\n")
             .map((l) => theme.subtle(l))
         : [];
-    return [...tree, ...(report.length > 0 ? ["", ...collapsedBody(report, fit)] : [])];
+    // Folded to the body's width FIRST, then cut (review N1): the cut counts ROWS
+    // the terminal draws, not logical lines. A prose report is paragraphs on
+    // single long lines, so counting lines let 8 of them through uncut and the
+    // block rendered 49/65/81 rows at 80/60/46 columns — the newest steps
+    // scrolled off the top, exactly what this block exists to prevent.
+    const folded = report.flatMap((l) => wrapLines([l], width));
+    return [...tree, ...(folded.length > 0 ? ["", ...collapsedBody(folded, fit)] : [])];
   }
   if (tool.status === "running") {
     return [theme.subtle("running…")];

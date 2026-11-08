@@ -13,6 +13,7 @@ export {
   type SubAgentViewOptions,
   subAgentEarlierRow,
   subAgentHeadRow,
+  subAgentReport,
   subAgentRow,
   subAgentView,
 } from "./subagent-view.ts";

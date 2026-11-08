@@ -2793,7 +2793,9 @@ describe("idle warm of the other Ctrl+O view", () => {
         // The report is the block's last row, and it is there.
         expect(joined).toContain("The bug is in auth.ts");
         expect(rows.find((r) => r.includes("The bug is in auth.ts"))).toBeDefined();
-        // ONE cut marker in the block: never the generic `more lines`.
+        // A SHORT report adds no cut marker of its own: the block's only one is
+        // the earlier-steps row (review N4 — a long report adds a second, in the
+        // same grammar, opened by the same key).
         expect(joined).not.toContain("more lines");
       }
     } finally {
@@ -2822,7 +2824,7 @@ describe("idle warm of the other Ctrl+O view", () => {
         emit({ kind: "subagent_tool", label: "Read a.ts" });
         await gate;
         emit({ kind: "subagent_end", toolUses: 1, stopReason: "cancelled" });
-        return { content: "partial" };
+        return { content: "partial\n\n_(sub-agent cancelled)_" };
       },
     };
     const model = new ScriptedProvider([
@@ -2854,6 +2856,11 @@ describe("idle warm of the other Ctrl+O view", () => {
       const rows = (lastFrame() ?? "").split("\n").map((r) => stripAnsi(r).trimEnd());
       expect(rows.some((r) => r.includes("└─ ✗ cancelled"))).toBe(true);
       expect(rows.some((r) => r.includes("└─ Read a.ts"))).toBe(false);
+      // Said ONCE (review N3): `task.ts:118-122` appends `_(sub-agent cancelled)_`
+      // to the result, so the frame used to carry the word twice. The fake above
+      // returns exactly what the real tool returns.
+      expect(rows.filter((r) => r.includes("cancelled"))).toHaveLength(1);
+      expect(rows.join("\n")).not.toContain("_(sub-agent cancelled)_");
     } finally {
       release();
       await delay(100);

@@ -5,6 +5,7 @@ import {
   SUBAGENT_TAIL_ROWS,
   subAgentEarlierRow,
   subAgentHeadRow,
+  subAgentReport,
   subAgentView,
 } from "../src/subagent-view.ts";
 
@@ -234,8 +235,22 @@ describe("subAgentView: the outcome", () => {
     for (const stopReason of ["error", "max_iterations"]) {
       expect(
         subAgentView(sub({ activities: labels(2), done: true, stopReason })).done?.closing,
-      ).toBe(`✗ ${stopReason}`);
+      ).toBe(`✗ ${stopReason === "max_iterations" ? "iteration cap" : stopReason}`);
     }
+  });
+
+  // Owner default, awaiting confirmation (review N3): `max_iterations` is the
+  // wire's identifier, not English, and it read beside a prose note.
+  test("a capped end reads `✗ iteration cap`; an unmapped reason stays as the wire says", () => {
+    expect(
+      subAgentView(sub({ activities: labels(1), done: true, stopReason: "max_iterations" })).done
+        ?.closing,
+    ).toBe("✗ iteration cap");
+    // No mapping, no invention: an unknown reason is printed as-is.
+    expect(
+      subAgentView(sub({ activities: labels(1), done: true, stopReason: "budget_exceeded" })).done
+        ?.closing,
+    ).toBe("✗ budget_exceeded");
   });
 
   test("a running child never carries a closing row", () => {
@@ -248,5 +263,50 @@ describe("subAgentView: the outcome", () => {
     // without one (`client/src/mapping.ts:128-136`). Only a hand-built state
     // can reach this, and it must still draw a finished block.
     expect(subAgentView(sub({ activities: labels(2), done: true })).done).toEqual({});
+  });
+});
+
+// Review N3: `agent_task` appends its own note to a non-clean child's result
+// (`packages/tools/src/task.ts:118-122`), so the block printed the outcome twice —
+// `└─ ✗ cancelled` and then `_(sub-agent cancelled)_`. The note stays in the tool
+// result (the MODEL reads it); only the render drops it.
+describe("subAgentReport: the outcome is said once", () => {
+  test("drops the cancelled note and the blank line before it", () => {
+    expect(subAgentReport("partial findings\n\n_(sub-agent cancelled)_", "cancelled")).toBe(
+      "partial findings",
+    );
+  });
+
+  test("drops the iteration-cap note too", () => {
+    expect(subAgentReport("ran out\n\n_(sub-agent hit its iteration cap)_", "max_iterations")).toBe(
+      "ran out",
+    );
+  });
+
+  test("keeps the note when the reason does not carry it (an errored child)", () => {
+    // `error` has no note of its own (`task.ts:119-122`), so nothing is dropped.
+    expect(subAgentReport("boom\n\n_(sub-agent cancelled)_", "error")).toBe(
+      "boom\n\n_(sub-agent cancelled)_",
+    );
+  });
+
+  test("a note-shaped line the model wrote itself is NOT dropped unless it ends the report", () => {
+    // Only the exact trailing note `agent_task` appends goes; a report that
+    // merely mentions it keeps its text.
+    expect(subAgentReport("it said _(sub-agent cancelled)_ and stopped", "cancelled")).toBe(
+      "it said _(sub-agent cancelled)_ and stopped",
+    );
+    expect(subAgentReport("_(sub-agent cancelled)_\n\nbut then it continued", "cancelled")).toBe(
+      "_(sub-agent cancelled)_\n\nbut then it continued",
+    );
+  });
+
+  test("a report that is ONLY the note becomes empty (the closing row says it)", () => {
+    expect(subAgentReport("_(sub-agent cancelled)_", "cancelled")).toBe("");
+  });
+
+  test("trailing newlines are gone; a clean end keeps its text verbatim", () => {
+    expect(subAgentReport("The bug is in auth.ts.\n\n", "end_turn")).toBe("The bug is in auth.ts.");
+    expect(subAgentReport("", "end_turn")).toBe("");
   });
 });

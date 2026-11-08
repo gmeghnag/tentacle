@@ -372,7 +372,10 @@ describe("itemLines", () => {
     expect(rows.some((r) => r.trim() === "└─ …")).toBe(false);
     // The report is there, one row, and it is the LAST row.
     expect(rows.at(-1)?.trim()).toBe("The bug is in auth.ts");
-    // ONE cut marker per block: the tail's own, never the generic `more lines`.
+    // Two cut markers is the honest maximum, in ONE grammar pointing at ONE key:
+    // the earlier-steps row (`… +7 earlier`) and, when the report is long, the
+    // report's own (`… +N more lines`) — both opened by Ctrl+O. A SHORT report
+    // adds none, so this block has only the earlier-steps one (review N4).
     expect(joined).not.toContain("more lines");
   });
 
@@ -391,6 +394,172 @@ describe("itemLines", () => {
     expect(joined).not.toContain("report line 12");
     expect(joined).toMatch(/… \+\d+ more lines · ctrl\+o to expand/);
     expect(joined).toContain("… +7 earlier");
+  });
+
+  // Review N1 (MEDIUM): the cut counted LOGICAL lines and a report is usually
+  // paragraphs on single long lines, so 8 of them passed the 8-row threshold
+  // uncut and the block rendered 49/65/81 rows at 80/60/46 columns — the newest
+  // steps scrolled off the top, which is what this whole task exists to avoid.
+  // Wrap to the body's width FIRST, then cut.
+  test("a prose report is wrapped before it is cut: at most 8 report rows at any width", () => {
+    const para = (i: number): string =>
+      `Paragraph ${i}: ${"the parser reads the config once at startup and the watcher re-reads it on change, so ".repeat(4)}`;
+    // 8 paragraphs: at the threshold (8) when counted as LOGICAL lines, so the
+    // old code let all 8 through uncut and their wrapping pushed the block to
+    // 49/65/81 rows at 80/60/46 columns.
+    const report = Array.from({ length: 8 }, (_, i) => para(i + 1)).join("\n");
+    for (const width of [200, 120, 80, 60, 46, 30]) {
+      // The ROWS the terminal draws, not the logical lines: that is the observable.
+      const rows = wrapLines(
+        itemLines(finishedSub({ resultText: report }), { expandAll: false, width }),
+        width,
+      ).map((l) => strip(l).trimEnd());
+      const blank = rows.findIndex((r) => r === "");
+      expect(blank).toBeGreaterThan(0); // the tree, then the blank, then the report
+      // THE property: the collapsed report costs at most `threshold` rows — the
+      // preview plus its cut marker, or the whole report when it fits — whatever
+      // the width. Counting logical lines made it width-dependent.
+      const reportRows = rows.slice(blank + 1);
+      expect(reportRows.length).toBeLessThanOrEqual(8);
+      expect(reportRows[0]).toContain("Paragraph 1");
+      if (reportRows.length > 7) {
+        // 8 short enough rows fit the threshold whole; more than that is cut.
+        expect(reportRows.length).toBe(8);
+      } else {
+        expect(reportRows.at(-1)).toMatch(/… \+\d+ more lines · ctrl\+o to expand/);
+      }
+      // The tree is still whole, and no row overflows the terminal.
+      expect(rows.some((r) => r.trim() === "└─ Read f12.ts")).toBe(true);
+      expect(rows.length).toBeLessThanOrEqual(17);
+      for (const row of rows) {
+        expect(stringWidth(row)).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+
+  // The bound the fix claims: the tree (at most 8 rows) + a blank + the report's
+  // budget. A report that fits within `threshold` rows is shown WHOLE, so the
+  // uncut case — not the long one — is the worst case: `threshold` rows.
+  test("the worst case is a report that just fits the threshold, not a long one", () => {
+    const exact = Array.from({ length: 8 }, (_, i) => `report line ${i + 1}`).join("\n");
+    const rows = itemLines(finishedSub({ resultText: exact }), { expandAll: false, width: 80 }).map(
+      (l) => strip(l).trimEnd(),
+    );
+    expect(rows.filter((r) => r.includes("report line")).length).toBe(8); // uncut
+    expect(rows.length).toBeLessThanOrEqual(17);
+  });
+
+  // Review N2: under Ctrl+O a wrapped label restarted at column 0 and broke
+  // mid-word, so the expanded view lost the tree's alignment.
+  test("Ctrl+O: a wrapped label's continuation sits under its row, never at column 0", () => {
+    const LONG = `$ bun test ${"packages/config/src/a-very-long-directory-name/".repeat(3)}`;
+    const item = runningSub({
+      sub: {
+        ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+        activities: [LONG],
+        toolUses: 1,
+      },
+    });
+    const rows = wrapLines(itemLines(item, { expandAll: true, width: 46 }), 46).map((l) =>
+      strip(l).trimEnd(),
+    );
+    const labelRows = rows.filter((r) => r.includes("packages/config/src"));
+    expect(labelRows.length).toBeGreaterThan(1);
+    // The first carries the tree's `├─ `; each continuation is indented to the
+    // LABEL's column (2 body cells + the 3 of `├─ `), not to column 0.
+    for (const [i, row] of labelRows.entries()) {
+      expect(row.startsWith(i === 0 ? "  ├─ $ bun test" : "     ")).toBe(true);
+    }
+    for (const row of rows) {
+      expect(stringWidth(row)).toBeLessThanOrEqual(46);
+    }
+  });
+
+  // The indent must not cost the wrapping its word boundaries: a label made of
+  // WORDS folds between them, and every continuation is still indented.
+  test("Ctrl+O: a word-wrapped label keeps its words whole and its indent", () => {
+    const WORDS =
+      "grep -rn callers of the parser in every package under packages/agent and packages/cli";
+    const item = runningSub({
+      sub: {
+        ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+        activities: [WORDS],
+        toolUses: 1,
+      },
+    });
+    const rows = wrapLines(itemLines(item, { expandAll: true, width: 46 }), 46).map((l) =>
+      strip(l).trimEnd(),
+    );
+    const step = rows.filter((r) => r.startsWith("  ├─") || r.startsWith("     "));
+    expect(step.length).toBeGreaterThan(1);
+    // Every word is intact: the rows rejoin to the original text.
+    expect(step.map((r) => r.replace(/^\s*├─ |^\s{5}/, "")).join(" ")).toBe(WORDS);
+    for (const row of step.slice(1)) {
+      expect(row.startsWith("     ")).toBe(true);
+    }
+  });
+
+  // Review N3: `agent_task` appends `_(sub-agent cancelled)_` to a cancelled
+  // child's result (`tools/src/task.ts:118-122`), so the block said it twice —
+  // `└─ ✗ cancelled` and then the note.
+  test("a cancelled child says it ONCE: the note is dropped under `✗ cancelled`", () => {
+    const cancelled = itemLines(
+      finishedSub({
+        resultText: "partial findings\n\n_(sub-agent cancelled)_",
+        sub: {
+          ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+          done: true,
+          stopReason: "cancelled",
+        },
+      }),
+      { expandAll: false, width: 80 },
+    ).map((l) => strip(l).trimEnd());
+    expect(cancelled.filter((r) => r.includes("cancelled"))).toHaveLength(1);
+    expect(cancelled.some((r) => r.trim() === "└─ ✗ cancelled")).toBe(true);
+    expect(cancelled.join("\n")).toContain("partial findings");
+  });
+
+  // Owner default (awaiting confirmation): a raw `max_iterations` identifier is
+  // not what a person watching reads. Mapped in the view-model, and its own note
+  // goes the same way as `cancelled`'s.
+  test("a capped child reads `└─ ✗ iteration cap`, and its note is not repeated", () => {
+    const capped = itemLines(
+      finishedSub({
+        resultText: "ran out of budget\n\n_(sub-agent hit its iteration cap)_",
+        sub: {
+          ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+          done: true,
+          stopReason: "max_iterations",
+        },
+      }),
+      { expandAll: false, width: 80 },
+    ).map((l) => strip(l).trimEnd());
+    expect(capped.some((r) => r.trim() === "└─ ✗ iteration cap")).toBe(true);
+    expect(capped.join("\n")).not.toContain("max_iterations");
+    expect(capped.join("\n")).not.toContain("hit its iteration cap");
+    expect(capped.join("\n")).toContain("ran out of budget");
+  });
+
+  test("a spilled report drops the note too (the closing row already says it)", () => {
+    const note = "_(sub-agent cancelled)_";
+    const item = finishedSub({
+      resultText: "report",
+      spill: {
+        chars: 40_800,
+        path: "/tmp/o/x.txt",
+        head: "partial findings",
+        tail: `partial findings\n\n${note}`,
+        omitted: 39_600,
+      },
+      sub: {
+        ...(runningSub().sub as NonNullable<ToolItem["sub"]>),
+        done: true,
+        stopReason: "cancelled",
+      },
+    });
+    const rows = itemLines(item, { expandAll: false, width: 80 }).map((l) => strip(l).trimEnd());
+    expect(rows.some((r) => r.trim() === "└─ ✗ cancelled")).toBe(true);
+    expect(rows.filter((r) => r.includes("cancelled"))).toHaveLength(1);
   });
 
   test("a 6-row tail: the exempt tree does not collapse (the trap if the constant grows)", () => {

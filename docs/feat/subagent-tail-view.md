@@ -292,8 +292,10 @@ no row wraps, and the tail is the same 5 steps.
 
 ### Round 2 (review fixes)
 
-*— claude-opus-5-5 (the review's model), 2026-11-08 — fixes the review above: H1, M1–M4, L1–L4,
-and the three owner questions as recommended defaults.*
+*— deepseek-v4.1-flash (tentacle), 2026-11-08 — fixes the review above: H1, M1–M4, L1–L4,
+and the three owner questions as recommended defaults. (Corrected in round 3, review N5: this
+section said `claude-opus-5-5`, the reviewer's model, while commit e95e88a and the brief say
+deepseek.)*
 
 **What was fixed, and where the decision lives.** Every branch is in the pure view-model
 (`packages/tui/src/subagent-view.ts`, AGENTS §7); `render-lines.ts` only colours, indents and
@@ -301,7 +303,7 @@ folds.
 
 | Finding | Fix | Decision in |
 |---|---|---|
-| **H1** a finished child hides its newest step, its close and its report | A sub-agent's STEP TREE is exempt from `toolLines`' generic 8-row cut. Only the REPORT collapses, through the one shared `collapsedBody` (`render-lines.ts:555-566`), with the transcript's own `… +N more lines · ctrl+o to expand`. One cut marker per block, never two. | `render-lines.ts:613-618` |
+| **H1** a finished child hides its newest step, its close and its report | A sub-agent's STEP TREE is exempt from `toolLines`' generic 8-row cut. Only the REPORT collapses, through the one shared `collapsedBody` (`render-lines.ts:555-566`), with the transcript's own `… +N more lines · ctrl+o to expand`. At most TWO cut markers per block, in one grammar pointing at one key: the earlier-steps row, and — only when the report is long — the report's own. A short report adds none (corrected in round 3, review N4). | `render-lines.ts:613-618` |
 | **M1** `hidden` contradicted the head past the 50-label cap (`60 tool uses` over `… +45 earlier`) | The block counts off ONE number, `max(toolUses, activities.length)`, reported as BOTH `head.toolUses` and the base of `hidden` — so the head and the cut row can never describe it two ways. 60 steps now read `60 tool uses` over `… +55 earlier`. They are equal on a real stream (one `subagent_tool` bumps both); the two only diverge past the cap. | `subagent-view.ts:76-91` |
 | **M2** Ctrl+O still cut a long label | `subAgentRow(label, width, expanded)` cuts only when collapsed; expanded, the label is whole and `wrapLines` folds it. | `subagent-view.ts:135-139` |
 | **M3** a cancelled/errored child looked like a clean one | **Q2 (recommended default):** a non-clean end gets ONE closing row, `└─ ✗ <reason>` — `✗ cancelled`, `✗ error`, and `✗ max_iterations` for any other non-`end_turn` reason. Clean ends are unchanged (the last step row closes). | `subagent-view.ts:95-101`, `render-lines.ts:290-303` |
@@ -605,6 +607,412 @@ exempt; the closing row), `packages/tui/src/state.ts` (the `stopReason` doc),
 code needed here); the `maxRows: Infinity` sentinel (kept: the view-model's contract is a
 positive row budget, and task 7 will want an explicit cap anyway); the background row's
 `state`/`sa-N` (task 6b). No protocol, no persistence, no `TODO.md`/`CHANGELOG.md` change.
+
+### Round 3 (review round-2 fixes)
+
+*— claude-opus-5-5, 2026-11-08 — fixes the review's round-2 REQUEST-CHANGES: N1 (MEDIUM) and
+every nit in it (N2–N5), plus the owner-question default for a `max_iterations` end.*
+
+**What was fixed, and where the decision lives.** Every branch stays in the pure modules
+(AGENTS §7): the note de-duplication and the closing-row wording in `subagent-view.ts`,
+the wrap-then-cut and the continuation indent in `render-lines.ts` (which only colours,
+indents and folds). No component gained logic.
+
+| Finding | Fix | Decision in |
+|---|---|---|
+| **N1** (MEDIUM) the report cut counted LOGICAL lines: a prose report rendered 49/65/81 rows at 80/60/46 | The report is folded to the BODY's width (`wrapLines`) **before** `collapsedBody` counts rows, so the cut counts the rows the terminal draws. The collapsed report now costs at most `threshold` (8) rows at any width — 6 preview rows + the cut marker. Measured before and after at 200/120/80/60/46/30/24 columns. | `render-lines.ts:477-490` |
+| **N2** (LOW) under Ctrl+O a wrapped label restarted at column 0 and broke mid-word | One `subAgentStepRow`: expanded, the label is wrapped here to `width - prefix` and every continuation is indented to the LABEL's column (`  ├─ ` → 5 spaces), so each row already fits and `wrapLines` leaves it alone. Same seam as `commandRows`. Wrapping is unchanged (`wrapLines` folds at words where it can), so a label of words re-reads as the original once the indent is stripped. | `render-lines.ts:317-343` |
+| **N3** (LOW) `└─ ✗ cancelled` was repeated by `_(sub-agent cancelled)_` | The note `agent_task` appends (`tools/src/task.ts:118-122`) is dropped at RENDER only, and only when it is the trailing text of the report: the tool result is untouched (the MODEL reads it, and the note is what tells it why the child stopped). A spilled report's trailing note goes the same way. | `subagent-view.ts:110-150` (`subAgentReport`, `subAgentOutcomeNote`), `render-lines.ts:400-425` |
+| **N4** (LOW) "one cut marker per block, never two" was false | The behaviour is right (one grammar, one key); the sentence was wrong. Corrected in the H1 row of **Execution → Round 2** and in both test comments: a block has at most TWO cut markers — the earlier-steps row, and the report's own when the report is long; a short report adds none. | this doc, `render-lines.test.ts`, `app.test.tsx` |
+| **N5** (LOW) the fix round was signed with the reviewer's model | **Execution → Round 2** and **Round 2: outcome** now read `deepseek-v4.1-flash (tentacle)`, matching commit e95e88a and the brief, with a note saying what was wrong. | this doc, lines 293-300 and 995-1000 |
+| **Owner default** (awaiting confirmation): a `max_iterations` end read `✗ max_iterations` | Mapped in `closingRow`: `✗ iteration cap` (`cancelled` and `error` map to themselves). An UNMAPPED reason still prints as the wire says it — honest, and it cannot drift. Its `_(sub-agent hit its iteration cap)_` note goes with the `cancelled` one. | `subagent-view.ts:96-127` |
+
+**Red before green** (AGENTS §9) — each test first run against the pre-fix code, in
+`packages/tui/test/render-lines.test.ts` unless stated:
+
+| Group | Test first run RED | Failures on the old code |
+|---|---|---|
+| N1 | "a prose report is wrapped before it is cut: at most 8 report rows at any width" | 1 (8 uncut paragraphs wrapped to 49/65/81 ROWS at 80/60/46 columns) |
+| N1 bound | "the worst case is a report that just fits the threshold, not a long one" | passes both sides — kept as the BOUND's pin, not as the fix's proof (see below) |
+| N2 | "Ctrl+O: a wrapped label's continuation sits under its row, never at column 0"; "Ctrl+O: a word-wrapped label keeps its words whole and its indent" | 2 (continuation started at column 0) |
+| N3 | "a cancelled child says it ONCE: the note is dropped under `✗ cancelled`"; "a spilled report drops the note too"; `subagent-view.test.ts` × 6 (`subAgentReport`); `app.test.tsx` "a cancelled sub-agent closes with `└─ ✗ cancelled` on the real frame" (now asserting ONE mention) | 1 + 6 + 1 |
+| Cap | "a capped child reads `└─ ✗ iteration cap`, and its note is not repeated"; `subagent-view.test.ts` "a capped end reads `✗ iteration cap`…" and the loop in "every other non-clean reason…" | 3 |
+
+**Mutations** (AGENTS §9 non-vacuity; `cp` backup in
+`.tentacle/tmp/subagent-tail-view/r3/backup/`, restored with `shasum -c SHASUMS` →
+`render-lines.ts 4794fab0…`, `subagent-view.ts e21a7b6c…`, both `OK`):
+
+| # | Mutation | Result |
+|---|---|---|
+| A | N1: `folded = report.flatMap((l) => wrapLines([l], width))` → `folded = report` | **1 fail**: "a prose report is wrapped before it is cut…" |
+| B | N2: wrap/indent removed (`return [prefix + expandTabs(text)]`) | **2 fail**: both Ctrl+O continuation tests |
+| C | N3: `subAgentReport` never drops (`\|\| note !== undefined`) | **5 fail**: 3 `subAgentReport` unit tests, the render-lines "says it ONCE", the cap's note test |
+| D | N3 (spill): `spillBody(..., subAgentOutcomeNote(...))` → `spillBody(..., undefined)` | **1 fail**: "a spilled report drops the note too" |
+| E | Cap: `✗ ${CLOSING_LABELS[stopReason] ?? stopReason}` → `✗ ${stopReason}` | **3 fail**: 2 in `subagent-view.test.ts`, the render-lines cap test |
+| F | Cap/note (app path): mutation C, run on `app.test.tsx -t "cancelled sub-agent"` | **1 fail**: the real frame carries the word twice |
+
+Mutation A is why the N1 test asserts *rendered* rows through `wrapLines`, not `itemLines`'
+logical lines: it is the same observable the review measured (81 rows at 46 columns), so the
+mutation lands on the exact property. The "worst case" test above is deliberately NOT counted as
+N1's proof — it is green on both sides, because an 8-row report fits the threshold whole either
+way; it pins the bound (17 rows at the default), which is the claim the doc makes.
+
+**Real frames** (`.tentacle/tmp/subagent-tail-view/r3/frames-r3.ts` and
+`frames-r3-app.ts`, both gitignored). Part A/B: real `applyEvent` → `itemLines` → `wrapLines` →
+an Ink frame from `ink-testing-library`, SGR stripped, every row over the width flagged
+(**none was, at any width**). Part C: the real `App` and `Agent`, two concurrent `agent_task`
+calls (`peak concurrent agent_task calls: 2`), real Ctrl+O and Esc keys; the `agent_task` is a
+fake that emits the progress events **and returns exactly what the real tool returns for a
+cancelled child** (`content + "\n\n_(sub-agent cancelled)_"`, `task.ts:118-122`), so the frames
+show the real note. As in `app.test.tsx`, `⏺ Agent` has no description there. SGR is stripped,
+so colours are not evidenced.
+
+```
+=== done 12 steps, 8 PROSE paragraphs @80 (rows 16) — N1: 49 rows before ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  Paragraph 1: the parser reads the config once at startup and the watcher
+|  re-reads it on change, so the parser reads the config once at startup and the
+|   watcher re-reads it on change, so the parser reads the config once at
+|  startup and the watcher re-reads it on change, so the parser reads the config
+|   once at startup and the watcher re-reads it on change, so
+|  Paragraph 2: the parser reads the config once at startup and the watcher
+|  … +34 more lines · ctrl+o to expand
+
+=== done 12 steps, 8 PROSE paragraphs @60 (rows 16) — 65 rows before ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  Paragraph 1: the parser reads the config once at startup
+|  and the watcher re-reads it on change, so the parser
+|  reads the config once at startup and the watcher re-reads
+|   it on change, so the parser reads the config once at
+|  startup and the watcher re-reads it on change, so the
+|  parser reads the config once at startup and the watcher
+|  … +50 more lines · ctrl+o to expand
+
+=== done 12 steps, 8 PROSE paragraphs @46 (rows 16) — 81 rows before ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  Paragraph 1: the parser reads the config
+|  once at startup and the watcher re-reads it
+|   on change, so the parser reads the config
+|  once at startup and the watcher re-reads it
+|   on change, so the parser reads the config
+|  once at startup and the watcher re-reads it
+|  … +66 more lines · ctrl+o to expand
+
+prose rows @80: 16 · @60: 16 · @46: 16
+
+=== 12 steps, 12 PROSE paragraphs @46 (rows 16; over the threshold, so cut) ===
+[the same block; only the count differs: `… +102 more lines · ctrl+o to expand`]
+```
+
+The bound, measured (`.tentacle/tmp/subagent-tail-view/r3/bound-probe.ts`): across 200/120/80/
+60/46/30/24 columns × {no report, 1 line, 7/8/9 short lines, 8 prose} × {`end_turn`,
+`cancelled`} × {0, 2, 12, 60 steps}, the collapsed block's worst height is **18 rows** — a
+9-row tree (`✗` row included) + a blank + 8 report rows. The 8-row case is the worst one, not a
+long report: a report within the threshold is shown WHOLE. Before the fix it was 81. At 30 and
+24 columns the two cut/head rows wrap, which is the pre-existing `Math.max(20, …)` floor (not
+new, not a real terminal size).
+
+```
+=== Ctrl+O, a long label @80 (rows 7) — N2: continuation under its row ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test
+|     packages/config/src/a-very-long-directory-name/packages/config/src/a-very-
+|     long-directory-name/packages/config/src/a-very-long-directory-name/
+|  └─ …
+
+=== Ctrl+O, a long label @60 (rows 7) ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test packages/config/src/a-very-long-directory-n
+|     ame/packages/config/src/a-very-long-directory-name/pac
+|     kages/config/src/a-very-long-directory-name/
+|  └─ …
+
+=== Ctrl+O, a long label @46 (rows 8) ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test packages/config/src/a-very-lo
+|     ng-directory-name/packages/config/src/a-
+|     very-long-directory-name/packages/config
+|     /src/a-very-long-directory-name/
+|  └─ …
+
+=== the same label COLLAPSED @46 (rows 4) — unchanged: one cut row, no wrap ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test packages/config/src/a-very-l…
+|  └─ …
+
+=== Ctrl+O, two long labels, a finished tree @46 (rows 13) — `└─` folds the same way ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ $ bun test packages/config/src/a-very-lo
+|     ng-directory-name/packages/config/src/a-
+|     very-long-directory-name/packages/config
+|     /src/a-very-long-directory-name/
+|  └─ $ bun test packages/config/src/a-very-lo
+|     ng-directory-name/packages/config/src/a-
+|     very-long-directory-name/packages/config
+|     /src/a-very-long-directory-name/
+|
+|  ok
+
+=== 12 steps CANCELLED (report + note) @80/60/46 (rows 11) — N3: said once ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ cancelled
+|
+|  partial findings
+
+=== 2 steps CANCELLED @80/60/46 (rows 7) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ Read packages/f2.ts
+|  └─ ✗ cancelled
+|
+|  partial findings
+
+=== 12 steps CANCELLED with NO report (the placeholder + note) @46 (rows 11) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ cancelled
+|
+|  (the sub-agent produced no output)
+
+=== 12 steps MAX_ITERATIONS @80/60/46 (rows 11) — the owner default, awaiting confirmation ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ iteration cap
+|
+|  ran out of budget
+
+=== 12 steps ERROR @46 (rows 11) — unchanged ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ error
+|
+|  provider exploded
+
+=== 12 steps, CLEAN end + 1-line report @46 (rows 10) — the comparison ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  The bug is in auth.ts.
+
+=== 12 steps, 12 SHORT-line report @46 (rows 16) — N4: the second cut marker, by design ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  report line 1
+|  report line 2
+|  report line 3
+|  report line 4
+|  report line 5
+|  report line 6
+|  … +6 more lines · ctrl+o to expand
+
+=== 60 steps running @46 (rows 9) — M1 unchanged ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 60 tool uses
+|  … +55 earlier · ctrl+o to expand
+|  ├─ Read packages/f56.ts
+|  ├─ Read packages/f57.ts
+|  ├─ Read packages/f58.ts
+|  ├─ Read packages/f59.ts
+|  ├─ Read packages/f60.ts
+|  └─ …
+
+=== wide labels @80 (rows 5) — CJK/emoji still cut by CELLS, unchanged ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ Read 日本語のとても長いファイル名がここに続いています/設定スキーマ定義フ…
+|  ├─ $ echo 🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉
+|  └─ …
+```
+
+The height curve is unchanged where it should be: `heights @80/60/46: running 0..12 =
+3,4,5,6,7,8,9,9,9,9,9,9,9 · done=8 · +1-line=10 · +8-prose=16 · cancelled=11`. Only the prose
+case moved (81 → 16), which is N1.
+
+**Real App frames** (real `App` + `Agent`, two concurrent `agent_task` calls, real Ctrl+O and
+Esc). `@60` is omitted where it is identical to `@80` apart from the footbar's rules.
+
+```
+=== APP two in parallel, running @46 (viewport, rows 23) ===
+|  … +4 earlier · ctrl+o to expand
+|  ├─ Read a5.ts
+|  ├─ Read a6.ts
+|  ├─ Read a7.ts
+|  ├─ Read a8.ts
+|  ├─ Read a9.ts
+|  └─ …
+|
+|⏺ Agent
+|⎿ ◆ general · 9 tool uses
+|  … +4 earlier · ctrl+o to expand
+|  ├─ Read b5.ts
+|  ├─ Read b6.ts
+|  ├─ Read b7.ts
+|  ├─ Read b8.ts
+|  ├─ Read b9.ts
+|  └─ …
+|
+|⠼ Working… 0s · esc/ctrl+c to stop
+|────────────────────────────────────── qwen3 ─
+|❯  Queue a task…
+|──────────────────────────────────────────────
+|/tmp/work · ↑7 ↓3 · ctx ░░░░░░░░░░ 0% (7/128k)
+
+=== APP after a real Ctrl+O @46 (viewport, rows 23) ===
+|  ├─ Read a7.ts
+|  ├─ Read a8.ts
+|  ├─ Read a9.ts
+|  └─ …
+|
+|⏺ Agent
+|⎿ ◆ general · 9 tool uses
+|  ├─ Read b1.ts
+|  ├─ Read b2.ts
+|  ├─ Read b3.ts
+|  ├─ Read b4.ts
+|  ├─ Read b5.ts
+|  ├─ Read b6.ts
+|  ├─ Read b7.ts
+|  ├─ Read b8.ts
+|  ├─ Read b9.ts
+|  └─ …
+|
+|⠋ Working… 0s · esc/ctrl+c to stop
+|────────────────────────────────────── qwen3 ─
+|❯  Queue a task…
+|──────────────────────────────────────────────
+|/tmp/work · ctx 0% (7/128k) · expanded
+
+=== APP after a real Esc (CANCELLED) @46 (viewport, rows 23) — the prose report, cut, said once ===
+|
+|⏺ Agent 1.0s
+|⎿ ◆ general · 9 tool uses
+|  … +4 earlier · ctrl+o to expand
+|  ├─ Read b5.ts
+|  ├─ Read b6.ts
+|  ├─ Read b7.ts
+|  ├─ Read b8.ts
+|  ├─ Read b9.ts
+|  └─ ✗ cancelled
+|
+|  Paragraph 1: the parser reads the config
+|  once at startup and the watcher re-reads it
+|   on change, so the parser reads the config
+|  once at startup and the watcher re-reads it
+|   on change, so the parser reads the config
+|  once at startup and the watcher re-reads it
+|  … +66 more lines · ctrl+o to expand
+|
+|────────────────────────────────────── qwen3 ─
+|❯  Type a task or /command
+|──────────────────────────────────────────────
+|/tmp/work · ↑7 ↓3 · ctx ░░░░░░░░░░ 0% (7/128k)
+```
+
+**Gate** (this worktree, final tree, 2026-11-08):
+
+- `bunx tsc --noEmit` → exit 0.
+- `bunx biome check .` → `Checked 757 files … No fixes applied` (0 errors, 0 warnings — the §6
+  baseline).
+- `bun test packages` → **5735 pass, 0 fail, 3 skip**, 63015 `expect()`, 388 files, 5738 tests.
+  The 3 skips are the opt-in ones (`TENTACLE_K8S_SERVER`, `TENTACLE_DOCKER_TESTS=1`,
+  `TENTACLE_SLOW_TESTS=1`, AGENTS §6): no non-opt-in skip, no new failure. Over the review's
+  baseline (5721 pass / 62844 `expect()`) that is 14 new tests and 171 new `expect()` calls.
+
+**Drift from the review's suggested fix, and why:**
+
+- The review suggested `collapsedBody(wrapLines(report, width), fit)`. Built as a fold of the
+  ALREADY-COLOURED report lines (one `wrapLines([l], width)` each), which is the same thing but
+  keeps the colouring where it was: `wrapLines` is ANSI-aware, and `carryColor` re-emits a colour
+  that spans a wrap point, so wrapping the raw text then colouring would lose that.
+- The `_(sub-agent …)_` note is dropped at RENDER, not in `packages/tools/src/task.ts`. The note
+  is model-facing: it tells the MODEL why the child stopped, and `task.ts` is where the result the
+  model reads is built. Dropping it there would be a behaviour change to the agent loop, not to
+  the block — out of this task's scope, and a worse one.
+- An unmapped stop reason is NOT mapped to prose: `✗ budget_exceeded` stays as the wire says it.
+  Inventing a phrase for a reason nobody has seen yet would be a claim the code cannot keep.
+
+**Files changed in round 3:** `packages/tui/src/render-lines.ts` (wrap-then-cut for the report;
+`subAgentStepRow`; the spill note), `packages/tui/src/subagent-view.ts` (`CLOSING_LABELS`,
+`OUTCOME_NOTES`, `subAgentReport`, `subAgentOutcomeNote`), `packages/tui/src/index.ts` (the new
+exports), `packages/tui/test/render-lines.test.ts`, `packages/tui/test/subagent-view.test.ts`,
+`packages/tui/test/app.test.tsx`, and this doc.
+
+**Not fixed (deliberately):** the panel/background surfaces (tasks 6a/6b), the `maxRows: Infinity`
+sentinel (unchanged, as in round 2), and the pre-existing `Math.max(20, …)` width floor (below 23
+columns a row wraps; not a real terminal size and not this task's). No protocol, no persistence,
+no `TODO.md`/`CHANGELOG.md` change, no commit.
 
 ## Review
 
@@ -992,8 +1400,10 @@ unrecorded.
 
 ### Round 2: outcome, and what a fresh review should attack
 
-*— claude-opus-5-5 (the review's own model), 2026-11-08 — implementation, so this is a self-check,
-not the fresh-context Review AGENTS §10 asks for; a **fresh** pass is still owed before merge.*
+*— deepseek-v4.1-flash (tentacle), 2026-11-08 — implementation, so this is a self-check, not the
+fresh-context Review AGENTS §10 asks for; a **fresh** pass is still owed before merge. (Corrected in
+round 3, review N5: this was signed `claude-opus-5-5`, the reviewer's model. The Round 2 work, like
+this section, is deepseek's.)*
 
 All ten findings are addressed, and Q1–Q3 are applied as the recommendations above. Evidence is in
 **Execution → Round 2** (red-before-green per group, 7 mutations with `shasum -c` restores, and the
@@ -1012,9 +1422,10 @@ For that fresh pass, the parts to attack hardest:
    activities.length)`, also reported as `head.toolUses`), so the head and the cut row cannot
    disagree. Attack: the counter/label direction that cannot happen on the wire either way — both
    are pinned, and a real stream increments them together (`state.ts:427-430`).
-4. **Q2's wording.** `✗ <stopReason>` prints the raw reason, so a future reason reads as-is
-   (`✗ budget_exceeded`). That is deliberate (honest, no mapping to drift) — but if a friendlier
-   phrase is wanted, it belongs in `closingRow` and nowhere else.
+4. **Q2's wording.** `✗ <stopReason>` printed the raw reason, so a future reason read as-is
+   (`✗ budget_exceeded`). Round 3 mapped `cancelled` / `error` / `max_iterations` (`iteration cap`,
+   a default awaiting the owner) and still prints an unmapped reason as the wire says it — all of it
+   in `closingRow`, nowhere else.
 5. **The app frame tests.** Both are real Ink frames, but the *cancelled* one asserts the string
    `└─ ✗ cancelled` after SGR stripping, so a colour-only difference is not covered; `theme.error`
    is applied, and that is a presentation claim no stripped-frame test can pin. A colour assertion

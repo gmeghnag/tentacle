@@ -95,12 +95,59 @@ export function subAgentView(sub: SubAgentProgress, opts: SubAgentViewOptions = 
   };
 }
 
+/**
+ * How a non-clean end reads on its closing row. `max_iterations` is the wire's
+ * identifier, not English: it read `✗ max_iterations` beside a prose note
+ * (review N3), so it is mapped — the owner's default, awaiting confirmation. An
+ * unmapped reason prints as-is, which is honest and cannot drift.
+ */
+const CLOSING_LABELS: Readonly<Record<string, string>> = {
+  cancelled: "cancelled",
+  error: "error",
+  max_iterations: "iteration cap",
+};
+
+/**
+ * The note `agent_task` itself appends to a non-clean child's result
+ * (`packages/tools/src/task.ts:118-122`). The MODEL needs it (it reads the tool
+ * result); the block does not — its closing row says the same thing, so the
+ * note was the second `cancelled` on screen (review N3). Dropped at render only.
+ */
+const OUTCOME_NOTES: Readonly<Record<string, string>> = {
+  cancelled: "_(sub-agent cancelled)_",
+  max_iterations: "_(sub-agent hit its iteration cap)_",
+};
+
 /** The closing row a stop reason earns: one for anything but a clean `end_turn`. */
 function closingRow(stopReason: string | undefined): { closing?: string } {
   if (stopReason === undefined || stopReason === "end_turn") {
     return {};
   }
-  return { closing: `✗ ${stopReason}` };
+  return { closing: `✗ ${CLOSING_LABELS[stopReason] ?? stopReason}` };
+}
+
+/**
+ * The `_(sub-agent …)_` note `agent_task` appends to this reason's result, if it
+ * has one (`packages/tools/src/task.ts:118-122`). Review N3: the MODEL needs
+ * that note (it reads the tool result); the block does not, because its closing
+ * row says the same thing.
+ */
+export function subAgentOutcomeNote(stopReason: string | undefined): string | undefined {
+  return stopReason === undefined ? undefined : OUTCOME_NOTES[stopReason];
+}
+
+/**
+ * A finished child's report as the block shows it: trailing newlines gone, and
+ * the tool's own `_(sub-agent …)_` note dropped when the closing row already
+ * carries it (review N3 — say it once). Pure; `render-lines.ts` only colours it.
+ */
+export function subAgentReport(report: string, stopReason: string | undefined): string {
+  const trimmed = report.replace(/\n+$/, "");
+  const note = subAgentOutcomeNote(stopReason);
+  if (note === undefined || !trimmed.endsWith(note)) {
+    return trimmed;
+  }
+  return trimmed.slice(0, -note.length).replace(/\n+$/, "");
 }
 
 /**
