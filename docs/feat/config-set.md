@@ -750,4 +750,174 @@ the file itself holds it in plaintext (which the command says, with the mode).
 
 ## Review
 
-*(empty until the implementation is complete — a fresh context reviews it)*
+**Verdict: REQUEST-CHANGES.** The write path is solid (atomic, symlink, mode,
+CRLF/tab/comment preservation, validate-before-write all hold), but the secret
+rule has two real holes: a secret can still go on argv inside a whole-object
+value, and `get <section> --json` prints a stored secret in clear. Both break
+eval A4 and need a fix plus a test.
+
+Reviewer: `claude-sonnet-5-5`, a fresh context. The executor was DeepSeek, a
+different family. Scratch lives in `./.tentacle/tmp/config-set-review/`; the
+real `~/.config/tentacle` was never touched (`TENTACLE_CONFIG_DIR` on every run).
+
+### Findings
+
+**HIGH-1. A secret goes on argv inside an object value** —
+`packages/cli/src/config-run.ts:486` (with `config-value.ts:isArgvRefusedSecret`).
+The argv refusal only looks at `secretOf(<the key>)`, so the key of a parent
+(`model`, `mcpServers.fs`, `mcpServers.fs.env`, `profiles.p`, `profiles.p.model`)
+passes, and its JSON carries the credential. Evidence (sandbox dir `sec`):
+- `tentacle config model='{"apiKey":"sk-LEAK7"}'` → exit 0, file holds `"apiKey": "sk-LEAK7"`.
+- `tentacle config --profile p model='{"apiKey":"sk-LEAK11"}'` → exit 0.
+- `tentacle config mcpServers.fs.env='{"T":"sk-LEAK9"}'` → exit 0, `T` stored.
+The output masks it (`{"apiKey":***}`), but the value was already in shell
+history and `ps`, which is exactly what A4/Q6 forbid. Fix: for an object or
+array `set` from argv, parse the typed value and refuse if any path inside it,
+under the target's segments, has `secretOf(...) !== undefined` (use the
+`flattenStored`/`renderStored` walk, not a new table); refuse also when the
+target is a section whose subtree contains a secret key. Apply the
+`apiKeyCommand` exemption by path as today. Test: the three commands above, in
+both forms, each refused with the file unchanged.
+
+**HIGH-2. `get <section> --json` prints a stored secret in clear** —
+`config-run.ts:689-695`. `value = mask === "***" || mask === "[***]" ? mask : found.value`
+masks only a leaf; for an object the masked text is `{"apiKey":***}`, so the raw
+`found.value` is emitted. Evidence: `tentacle config get model --json` →
+`{"key":"model","value":{"apiKey":"sk-LEAK11"}}`; `get mcpServers --json` →
+`…"env":{"T":"sk-LEAK9"}…`. The plain `get model` form is masked; only `--json`
+leaks. Fix: build the JSON from a masked tree (a `maskStored(value, segments)`
+in `config-value.ts` that returns the object with `"***"`/`["***"]` in place of
+secrets, and have `renderStored` use it), never from `found.value`. Test:
+`get model --json` and `get mcpServers --json` contain no secret substring
+(assert on the whole output).
+
+**MEDIUM-3. T9's "an error never contains the value" is not pinned.** I changed
+the typed-error path to echo the value, in two places, and the narrow suites
+stayed green:
+- `config-run.ts:530`: `` `${typed.error} (got ${raw.text})` `` → `config-run` and
+  `config-main`: 46 pass, 0 fail.
+- `config-value.ts` `typeArray`: `` `must be a JSON array, got ${text}` `` →
+  `config-value`, `config-run`, `config-main`: 69 pass, 0 fail.
+Fix: add a test that feeds a secret-looking value that fails typing to a secret
+leaf (`mcpServers.fs.args` with a non-array via stdin, `mcpServers.fs.env` as a
+non-object) and asserts the whole `out + err` lacks it; it must be red on those
+two mutations.
+
+**MEDIUM-4. A schema message echoes a stored value, and may echo a secret.**
+`config-edit.ts:issueLines` forwards zod text. With a file holding
+`"tools":{"execution":"sk-LEAKECHO"}` (a key pasted in the wrong slot),
+`config set autoWake false` prints `tools.execution: Invalid enum value.
+Expected 'sequential' | 'read-only' | 'parallel', received 'sk-LEAKECHO'`.
+Likewise `config list` prints an unknown key's value unmasked
+(`model.foo = "sk-LEAKKEYNAME"`). Eval A4 says an error never echoes a value.
+Fix: in `issueLines`, drop the `received '…'` tail (strip `, received .*$` from
+`invalid_enum_value`/`invalid_literal` messages, or build the line from
+`issue.code` and `issue.options`); keep the path and the expected set. The
+`list` case is an owner question (Q-B).
+
+**LOW-5. `unset` of the only key of a section with a trailing comma is refused
+with a wrong message.** `config-edit.ts` (recheck, last block). File
+`{ "tui": { "theme": "dark", }, }`, `config unset tui.theme` →
+`[error] the edit would not produce valid JSONC — nothing was changed` and the
+hint "check the key's schema". Without the trailing comma the same unset works
+(leaves `"tui": {\n  }`). No data loss (fail-closed), but a valid operation on
+a file the loader accepts is refused, and the message blames the schema. Fix:
+either remove the now-empty parent too, or retry `modify` with
+`isArrayInsertion`-free options and the trailing-comma cleanup; at minimum give
+a message that names the cause. Add the case to T10.
+
+**LOW-6. A file with no trailing newline gains one** (`config-edit.ts`, the
+`edited === "" || /[\r\n]$/` line): `{"maxIterations": 5}` → `…7}\n`. One extra
+byte outside the touched node, contra T10's "differs only on the touched node".
+Fix: add the newline only when the original text was empty.
+
+**LOW-7. Ctrl+C at the hidden prompt does not abort.** `hidden-input.ts` resolves
+`""` on SIGINT/EOF, so the flow continues to the schema, which reports "empty
+value … use unset" (a misleading message; nothing is written, so no harm). Fix:
+resolve `undefined` on interrupt and exit 130 with "cancelled". Not exercised
+on a real TTY here (no TTY available in this session).
+
+**LOW-8. `lstat` errors other than ENOENT read as "not a regular file"**
+(`config-run.ts:99`), e.g. EACCES on the directory. Message accuracy only.
+
+### Owner questions
+
+- **Q-A. `tentacle config my nginx` is now a command.** A prompt starting with
+  `config` and one or two more words gets `unknown config key "my" / did you
+  mean rm?` and no prompt hint (the `explain` hint appears only for
+  `unexpected argument`, i.e. 4+ words: `config how do I tune nginx` shows
+  `use: tentacle -- config how do I tune nginx`). `tentacle -- config …` still
+  reaches the prompt path (`cliMode`: `first === "--"` → prompt). Recommend:
+  also print the `promptHint` on `unknown config key` when the first word has no
+  `.`/`=` (it cannot be a key path). Consistent with how `explain` was handled.
+- **Q-B. Should `config list` mask the value of an unknown/misplaced key?**
+  Today it prints it. Recommend masking any value whose key is not in the
+  registry unless `--json`-less debugging is wanted: `list` is a place users
+  paste into bug reports.
+- **Q-C. `mcpServers.*.env.*`/`headers.*` values ARE refused on argv** (confirmed
+  for `…env.TOKEN=` and `…headers.Authorization=`); the gap is only the
+  object forms (HIGH-1). Eval A4 requires the refusal, so this is not a new
+  decision, just completeness.
+
+### Attacks tried (result)
+
+| Attack | Result |
+|---|---|
+| Tabs, CRLF, comments, trailing commas: `set` | Only the touched node changes; CRLF kept; tab indent kept (`odd`, `crlf`). |
+| BOM file | Refused, no write (`InvalidSymbol at offset 0`); the loader rejects it identically (`package list`: `Failed to parse … InvalidSymbol at offset 0`), so no new divergence. |
+| Invalid syntax | Refused, file byte-identical. |
+| Existing schema-invalid file | Refused, nothing written (`echo1`). |
+| A `set` the loader would reject | Not found: validated whole + text re-check. The `mcpServers.fs.env='{"T":…}'` without `command` is refused (`command: Required`). |
+| Symlinked config | Written through; link kept (`link` → `real/dot.jsonc`). New dir/file modes 0700/0600 (`stdin`). |
+| Not-a-regular-file, rename failure, concurrent change | Read from T11/T12: they use the real fs wrapped with failing/mutating hooks (`tracedFs`), not mocks; non-vacuous for the symlink case (mutation M1). |
+| Secret in argv: `model.apiKey=`, `set model.apiKey`, `--profile x`, `profiles.x.model.apiKey=`, `mcpServers.fs.env.T=`, `…headers.Authorization=`, `…args=[…]` | All refused. Object forms are not: HIGH-1. |
+| `get`/`list` plain | Masked. `get <section> --json`: HIGH-2. `list --json`: masked. |
+| Stdin `-` | One trailing newline trimmed (`"sk-S1\n"` kept from `sk-S1\n\n`). |
+| `maxIterations=true`, `model.model=`, `profiles.a.b.c=1`, `--profile x profiles.y…` | Type error / `unset` hint / unknown key / "already names a profile". All fail with nothing written. |
+| Dispatch | See Q-A. |
+
+### Mutations (cp backup, narrow test, restore, shasum — all restored, `git status` clean)
+
+| # | Mutation | Test run | Outcome |
+|---|---|---|---|
+| M1 | symlink: `real = configPath` (no write-through) | `config-run.test.ts` | KILLED (`a symlinked config is written THROUGH the link`) |
+| M2 | skip `validateFileConfig` refusal in `planConfigEdit` | `config-edit`, `config-run`, `config-main` | KILLED, 6 tests (T8 ×4, T10 ×1, command surface ×1) |
+| M3 | `typeArray` echoes the value | `config-value`, `config-run`, `config-main` | **SURVIVED** (69 pass) → MEDIUM-3 |
+| M4 | typed error echoes `raw.text` | `config-run`, `config-main` | **SURVIVED** (46 pass) → MEDIUM-3 |
+
+Hashes after restore equal the pre-mutation ones (`config-run.ts` 6f094c68…,
+`config-edit.ts` b26f2077…, `config-value.ts` 71b5b6e7…).
+
+### Premises and gate
+
+- `schema.ts`, `defaults.ts`, `resolve.ts`, `load.ts` byte-untouched vs
+  `feat/config-explain`: `git diff feat/config-explain...HEAD -- <the four>` is
+  empty. TRUE.
+- `bunx tsc --noEmit`: clean. `bunx biome check .`: 743 files, no fixes.
+  `bun test packages`: 5624 pass, 3 skip (the opt-in ones), 0 fail, 5627 tests.
+- NOT run: `bun run docs:config` (needs approval in this session). The README
+  drift test passed inside `bun test`, so the generated block matches.
+- AGENTS §7: logic is in `config-edit.ts`, `config-value.ts`, `config-args.ts`;
+  `config-run.ts` is I/O behind an injectable `ConfigFs`; the `main.ts` branch is
+  thin. No raw terminal write mid-Ink (`config` runs before Ink). No peer or
+  broker involvement. Holds.
+
+### What holds
+
+Validate-then-edit-then-recheck design; the injectable fs is real (wraps the
+real fs, so T11/T12 prove behaviour); the mutation M1/M2 kills; formatting
+preservation (tabs, CRLF, comments); fail-closed on every malformed input I
+tried; protected files untouched.
+
+### How the executor behaved
+
+Disciplined on the write path: the plan had the recheck that catches the
+`modify` vs zod divergence, and the T11/T12 seams are honest. It stopped short
+on secrets: it treated "secret" as a property of the leaf key and never asked
+what a container key carries, so both holes are the same blind spot (the output
+is masked everywhere it wrote a mask, and nowhere it did not). Its tests assert
+the masked outputs but not the absence of the value on error paths, which is how
+M3/M4 survive. Shared blind spots with the author's family are possible;
+this is the second pass, by a different model.
+
+*— claude-sonnet-5-5, 2026-11-08*
