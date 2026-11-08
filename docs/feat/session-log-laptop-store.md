@@ -754,7 +754,160 @@ untouched (no entry type added, no `critical` value changed).
 
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-08* (fresh context; **same model as the executor** — shared blind
+spots can survive both passes; a load-bearing task would ideally get a different-model pass too)
+
+**Verdict: REQUEST-CHANGES** — two MEDIUM findings, both on the "never silently lost" promise of
+the new §7 text; everything else holds.
+
+**Gate** (commit `70afac3`): `bunx tsc --noEmit` clean · `bunx biome check .` 730 files, 0/0 ·
+`bun test packages` run twice: **5424 pass, 3 skip (the opt-in ones), 0 fail** both times
+(164.4 s / 164.0 s). `tsc -p apps/mobile` not run (not in the asked gate).
+
+### Findings
+
+**M1 (MEDIUM) — an older writer of the same daemon regresses the file after a compaction, with no
+aside.** `packages/daemon/src/session-log-store.ts:578-590` (`settleLast`): `sameInc` counts as
+"contained" in both directions. When the file's last segment is NEWER than the writer's (same
+`inc`, a later `base`), it is dropped and the older segment replaces it. The "file ahead → skip"
+check (`:528`) only covers the SAME `base` id. Scenario (two TUIs of one detached run): B reads
+round N; the user compacts; A reads (round N+1 + the `compact` base + a new prompt) and saves
+first; B's older save lands after it. Repro `review/r2-older-writer.ts`, with
+`keepSuperseded` false AND true:
+```
+after A: [{"role":"user","content":"SUMMARY"},{"role":"user","content":"prompt AFTER compaction"}]
+after B: [{"role":"user","content":"first prompt"},{"role":"assistant","content":"first answer"}]
+asides: 0
+```
+The next save of either writer heals the file. A crash of both, or the last save of a `--rm` run
+whose save is "confirmed", inside that window loses the post-compaction messages silently. This is
+the L3 class the task says it fixed. No test covers it (the suite is green with the bug).
+Fix: same `inc` and `last.base.seq > mine.seq` → skip like `:528` (the file is ahead), plus a
+test.
+
+**M2 (MEDIUM) — a torn tail is truncated at a CHAR offset on one append path.**
+`session-log-store.ts:543-546` passes `size: text.length, contentEnd: parsed.contentEnd` (UTF-16
+code units of the decoded text) to `appendLines`, which calls `truncate(path, contentEnd)` (bytes).
+The other append paths use `readTail`'s byte offsets and are fine. You reach this path when the
+file's last line is an unknown non-critical entry (written by a newer build) and there is also a
+torn tail. With any non-ASCII content (Italian accents are enough), the truncate cuts into valid
+lines. Repro `review/r1-utf8-torn.ts`:
+```
+parse after write: REFUSED: line 4 is not JSON          (ASCII control r1b: ok, 2 messages, unknown=1)
+{"type":"future_note","seq":3,"{"type":"message","seq":4,…
+```
+The newer build's line is destroyed, and the session is `unreadable` until the next write sets it
+aside. Not reachable today (no build writes an unknown type yet). It is the forward-compat path
+that §7 now promises ("kept on append"). Fix: byte offsets (`Buffer.byteLength` / re-use
+`readTail`), plus a non-ASCII test.
+
+**L1 (LOW) — empty-body lock race.** `session-log-store.ts:719-753`: a live holder between
+`open(wx)` and `writeFile(body)` has an empty file. A waiter reads it as pid `NaN` → stale → `rm`
+→ two holders. The window is tiny and it converges (exact duplicates skipped, the next save's tail
+check heals), but it opens exactly under contention. Fix: an empty or unparsable body counts as
+live until the lock's mtime is older than `lockStaleMs`.
+
+**L2 (LOW) — §7 wording is slightly broader and narrower than the code.** "Every write holds the
+session's lock file": `saveAside` (`:303-323`) writes a new aside without it (harmless: it never
+touches `<uid>.jsonl`). "A write that does not continue the file's last entry rewrites the current
+segment": the code may also append only the missing suffix (`:461-471`, `:537-551`) or skip when
+the file is ahead (`:528`). Suggested addition: "…; a writer of the same segment appends only what
+the file lacks, or skips when the file is already ahead".
+
+**L3 (LOW) — two silent drops on rewrite paths.** (a) The continuing compaction rewrite
+(`:449-455`, `keepSuperseded` off) drops the superseded segment's unknown non-critical lines
+without an aside. §7 now says such lines are "set aside, never dropped, by a rewrite". This needs
+two builds writing one file at the same time. (b) Segments kept with `keepSuperseded: true` are
+dropped with no aside by a later replace with the option off (`:553-555`), or by `--in-process`
+`saveSnapshot` (`:606-649`). See owner question 3.
+
+**L4 (LOW, drift the executor disclosed) — "stopped, then /quit".** The stopped turn has its
+`turn_end`, so it now loads raw. On `main` the quit cut also appended the ended-turn note when the
+tail was a prompt or a tool result. The visible result differs from `main` in that one case
+(interrupted / not-run labels for a RUNNING turn cut by the quit are unchanged: Q2 e2e tests
+green). See owner question 4.
+
+### Attacks tried
+1. **Crash mid-append, real SIGKILL** (`review/r4-crash.ts` (a), 8 kills of a child appending
+   300 KB lines): 0 torn tails (a single `write(2)` completes under SIGKILL). The file always
+   loads, and the next write continues with 0 duplicates. A synthetic torn tail split inside a
+   multi-byte char (b): load ignores it (`torn=94`), and the continuing write truncates at the
+   right byte and appends → **holds** (the main paths use `readTail` bytes; M2 is the one
+   exception).
+2. **Crash mid-replace**: a dead temp `.<uid>.jsonl.tmp-999999-…` is swept by a new store's first
+   write (r4 (c)). Temp + `fsync` + `rename` → old or new → **holds** (no dir fsync: parity,
+   noted).
+3. **Lock** (`review/r3-lock.ts`): live holder → fails after 2000 ms with a clear message, lock
+   left alone. Dead pid / 31 s stamp / empty body → taken at once → **holds** (L1 is the
+   empty-body side of it). No await on the turn path: `persist` → `SessionSaver.write` is
+   fire-and-forget (`local-runtime.ts` `build`). No lock or await reaches a `Connection` handler
+   → §7 "don't serialize the RPC peer" **holds**.
+4. **Several writers, older read lands last** (r2) → **M1**.
+5. **Forward-compat append with non-ASCII + torn tail** (r1) → **M2**.
+6. **F4**: `ReadBack.entries` = `applied.entries` (known types, zod-stripped, re-serialized);
+   the store stringifies only those. W15 + the executor's M15 → **holds**. Pod-forged lineage
+   forcing a REPLACE: accepted class, the aside rule keeps the previous segment.
+7. **Critical table (item 14)**: `LOG_ENTRY_CRITICAL` untouched (the diff only adds
+   `projectEntry`). `segmentFromMessages` mints only `base`/`message` (`critical: true`, as the
+   table says) and `title` (no `critical`) → **no new or changed value**. `PROTOCOL_VERSION`
+   untouched.
+8. **Legacy / listing / connect**: `ids()` takes only `*.jsonl` (not hidden). `remove` never
+   touches `.json`. `JsonSessionStore` is referenced only by `serve.ts`. `connect.ts`: 0
+   references to a saver / readBack / store / `jsonl`. `updatedAt` = `mtime` in `load` and
+   `summarize`. `record.model` is never read by the CLI, so the immutable header model is harmless
+   → **holds**.
+
+### Mutations (cp backup → mutate → test → restore; `shasum -c` OK at the end)
+- E1 = executor M4 (skip remembers the file head): **killed**, W4 ×2 (in-process + second
+  process).
+- E2 = executor M6 (`keepSuperseded` ignored on a linear batch with a base): **killed**, W6.
+- R1 = mine, the most load-bearing line (`settleLast` containment forced true → never set aside):
+  **killed**, W5 (F1 on disk) + W13.
+- Red on `main`: the new store/format tests are red by import there (modules absent). The
+  executor's assertion-level red for W1 on `be2ef89` was not re-run here.
+
+### Premise spot-check
+P5 (aside names), P7 (`call_started` = `runningCalls` source), P10 (package deps), P11 (no
+`sessions` key before): TRUE on `be2ef89`/HEAD. The Context repro is not re-run (the owner
+amendments removed its JSON half). Its divergent-copy claim is re-tested on the new code by W5.
+
+### What holds
+The format (header non-entry, strict/lax parse, torn tail, exact-duplicate skip, unknown
+critical/version → refused, and a write sets the file aside first). The shared fold
+(`projectEntry`, the client unchanged in behaviour). Close-at-load. Append cost. The lock basics.
+F4. Config default `false`. Docs pointers.
+
+### How the executor behaved
+Thorough and honest. Drift is disclosed, bugs found by its own tests are recorded (W4 duplicates,
+empty reads), 15 mutations were run, and its own process slip was admitted (the amendments were
+written after coding). Its blind spot is the one shared with this reviewer's model: the
+several-writers analysis covered the same-`base` case and not a same-`inc`, newer-`base` file (M1).
+The forward-compat append path was not tested with non-ASCII (M2).
+
+### Owner questions (all at once; each with a recommendation and one plain line)
+1. **M1: when the file already holds a NEWER segment of the same daemon, should the older writer
+   skip instead of rewriting?** — **Yes.** *Two terminals: the one that is behind must never
+   overwrite the one that is ahead, even right after a /compact.*
+2. **M2: compute the torn-tail cut in bytes on every path?** — **Yes.** *A file with accented
+   letters must never get cut in the wrong place after a crash.*
+3. **Once old segments have been kept (`keepSuperseded: true`), should they survive turning the
+   option off or a `--in-process` save?** — **Yes, carry them over (never delete kept history
+   silently).** *Switching the option off stops keeping NEW old history. It does not erase what is
+   already saved.*
+4. **A turn you stopped yourself, then `/quit`: resume shows it as it was (no "the session was
+   ended…" note), unlike `main`?** — **Yes, accept.** *You closed that turn yourself, so there is
+   nothing to explain on resume.*
+5. **§7 wording: add "a writer of the same segment appends only what the file lacks, or skips when
+   the file is ahead" (L2)?** — **Yes.** *The rule then says exactly what the code does.*
+
+### Orchestrator answers to the review (2026-11-08, owner asleep — decided overnight under the owner's delegation, to be confirmed in the morning report)
+1. M1 — **Yes**: same daemon (`inc`) and the file's last segment is newer → skip, like the same-`base` case. Test with `keepSuperseded` false and true.
+2. M2 — **Yes**: byte offsets on every truncate path, plus a non-ASCII test.
+3. Kept segments — **Yes, carry them over**: turning `keepSuperseded` off, or an `--in-process` save, never drops segments already kept; L3(a) too: the unknown non-critical lines of a superseded segment are set aside, not dropped.
+4. Stopped turn then `/quit` — **Yes, accept** the drift (no ended-turn note).
+5. §7 wording — **Yes**, add the L2 sentence; also say `saveAside` writes outside the lock (it never touches `<uid>.jsonl`).
+L1 (empty-body lock) — fix as suggested: an empty/unparsable body counts as live until the lock's mtime is older than `lockStaleMs`.
+No `critical` value is added or changed by these answers.
 
 ## Task 3 sketch — `feat/session-log-serve-store`
 
