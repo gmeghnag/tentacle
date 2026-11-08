@@ -1020,4 +1020,434 @@ For that fresh pass, the parts to attack hardest:
    is applied, and that is a presentation claim no stripped-frame test can pin. A colour assertion
    would need the raw frame's SGR.
 
+### Round 2 (re-review of e95e88a)
+
+*— claude-opus-5-5, 2026-11-08 — adversarial re-review of commit e95e88a. Same model as the Round 1
+review, whose recommendations this commit applied, and the Round 2 sections above carry the same
+signature (N5): a shared blind spot is possible, and N1 below is one.*
+
+#### Verdict: **REQUEST-CHANGES** (one MEDIUM, small fix)
+
+H1, M1–M4 and L1–L4 are fixed, and nothing regressed outside the block. One new MEDIUM stops a
+PASS: the report's cut counts logical lines, so an ordinary prose report fills the screen at 46
+columns (N1). That problem comes from the fix I recommended in Round 1 ("only the REPORT
+collapses"). The change is about one line plus a test; the rest are nits.
+
+#### Gate (this worktree, e95e88a)
+
+- `bunx tsc --noEmit` → exit 0.
+- `bunx biome check .` → 757 files, no fixes.
+- `bun test packages` → **5721 pass, 0 fail, 3 skip** (the opt-in baseline), 62844 `expect()`,
+  5724 tests, 388 files.
+
+#### Status of every finding
+
+| Finding | Status | Evidence |
+|---|---|---|
+| H1 newest step, close, report hidden | **Fixed** | "12 steps done" frame; `render-lines.ts:431`, `:616` |
+| M1 `hidden` against the head | **Fixed** | "60 steps" frames: `60 tool uses` over `… +55 earlier`; `subagent-view.ts:79,84,87` |
+| M2 Ctrl+O cuts labels | **Fixed** (whole label shown; layout nit N2) | "long label Ctrl+O"; `subagent-view.ts:141` |
+| M3 cancelled/error look clean | **Fixed** | "cancelled"/"error" frames; `subagent-view.ts:99-104`, `render-lines.ts:297-298`. Real Esc in the App too |
+| M4 mockup drift | **Fixed** (Q1: mockup amended) | Context, lines 30-35; head row in every frame |
+| L1 false premise | **Fixed** | `subagent-view.ts:29-34`, `state.ts` comment, test renamed |
+| L2 test gaps | **Fixed** | `render-lines.test.ts:504`, `:525` |
+| L3 adapter in 6a | **Unchanged, as agreed** | The `hidden` fix already handles a short wire tail |
+| L4 long type cuts counts | **Fixed** | "long type" frames; `subagent-view.ts:113-123` |
+| Q3 wording | **Applied** | Every cut frame; `tool-expand.ts:81` is the only literal in `src` (grep; the rest are comments) |
+
+No finding regressed.
+
+#### New findings
+
+**N1 (MEDIUM). A prose report is not cut: 81 rows at 46 columns.** `collapsedBody` counts LOGICAL
+lines (`render-lines.ts:431`, cut at `:555-561`) and `wrapLines` runs later. A report is usually
+paragraphs on single long lines, so 8 of them pass the threshold (8) uncut. Round 1 showed 8 rows
+for this block. With 12 paragraphs the cut does fire and the block is still 64 rows. Real frame
+(abbreviated only where marked):
+
+```
+=== done 12 steps, 8 prose lines (at threshold) @46 (rows 81) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  Paragraph 1: the parser reads the config
+|once at startup and the watcher re-reads it on
+| change, so the parser reads the config once
+|at startup and the watcher re-reads it on
+   [... 68 more rows of the same shape, no cut marker ...]
+```
+
+The newest steps scroll off the top, which is what this task set out to avoid, and two parallel
+children double it. The same pre-wrap count exists for every tool body, but before this commit a
+child with ≥ 6 steps never reached it. **Fix:** `collapsedBody(wrapLines(report, width), fit)` at
+`render-lines.ts:431`. The cut then counts real rows, the block is at most 16 rows at any width (17
+with a `✗` row), and continuation rows keep the body indent. Generic tool bodies stay as they are. Red test: 8 long
+paragraphs at 46 columns, expect a row count ≤ 16 and `more lines` present; a short report stays
+uncut.
+
+**N2 (LOW). Under Ctrl+O a wrapped label loses the tree.** The continuation starts at column 0 and
+hard-breaks mid-word, as `wrapLines` does on the fully prefixed row. Not a regression (the same as
+before this task), but it is the one untidy frame in the expanded view. Fix if cheap: wrap to
+`width - 3` and indent continuation rows.
+
+```
+=== long label Ctrl+O @46 (rows 8) ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test packages/config/src/a-very-lon
+|g-directory-name/packages/config/src/a-very-lo
+|ng-directory-name/packages/config/src/a-very-l
+|ong-directory-name/
+|  └─ …
+```
+
+**N3 (LOW). A non-clean end says it twice, and one spelling is raw.** `└─ ✗ cancelled` is followed
+by `_(sub-agent cancelled)_` (`packages/tools/src/task.ts:119-122`), and `└─ ✗ max_iterations` by
+`_(sub-agent hit its iteration cap)_`. See the owner question below.
+
+**N4 (LOW). "One cut marker per block, never two" is false.** It is at line 304 of this doc and in
+the comment at `render-lines.test.ts:375`. The frame "12 short lines" has both `… +7 earlier · ctrl+o
+to expand` and `… +6 more lines · ctrl+o to expand`. The behaviour is fine (same grammar, the same
+key reveals both); fix the sentence.
+
+**N5 (LOW). Wrong signature on the fix round.** Execution → Round 2 (line 295) and "Round 2: outcome"
+are signed `claude-opus-5-5`, while commit e95e88a says `(deepseek)`, as does the task brief. AGENTS
+§10 uses these signatures to see which model did what. Correct them.
+
+#### Red-team of the new code
+
+| Attack | Result |
+|---|---|
+| Exemption with a hook on the call (`tool.hook`, `modified`) | Nothing: one extra row. A `blocked` hook ends the call before any child runs, so it has no `sub` |
+| Report huge enough to spill | Nothing: collapsed 17 rows, Ctrl+O shows path and tail |
+| 0 steps with a report; 0 steps cancelled | Nothing: head, then report or `└─ ✗ cancelled` |
+| Report with leading blank lines | Three blank rows, not reachable: `run` trims the report (`subagent.ts:307`) |
+| Shared `collapsedBody` on plain tools | Same condition as before (`!expandAll && length > threshold`); the existing suite is green |
+| A false `✗` on a clean end | Nothing: `AgentStopReason` is `end_turn`, `cancelled`, `max_iterations` (`agent.ts:84`); `error` only on a throw (`subagent.ts:300`) |
+| Step count past the cap under Ctrl+O | Honest: 50 rows under `… +10 earlier`, no hint (frame below) |
+| Head at the width limit | Fine down to 23 columns. Below that the existing `Math.max(20, …)` floor makes rows wrap (`toolLines`); not new, and not a real terminal size |
+| CJK and emoji, collapsed and Ctrl+O | Nothing: cut by cells, no row over the width |
+| Height over time | Running 3,4,5,6,7,8,9,9…9 (stable from step 6); end 8; with a one-line report 10 |
+
+#### Mutations (backup in `.tentacle/tmp/subagent-tail-view/r2b-backup/`)
+
+Narrow run: `bun test packages/tui/test/render-lines.test.ts packages/tui/test/subagent-view.test.ts`.
+None of the three is in the executor's list.
+
+| Mutation | Result |
+|---|---|
+| `render-lines.ts:431`: `collapsedBody(report, fit)` → `report` | **1 fail**: "a long report still collapses…" |
+| `render-lines.ts:294`: drop `&& closing === undefined` | **1 fail**: "a cancelled child closes with `└─ ✗ cancelled`…" |
+| `subagent-view.ts:135`: always the hint | **1 fail**: "one grammar with the transcript's other cut markers" |
+
+The last two ran together; each failure is attributed by its own test. Restored by `cp`, `shasum`
+identical to before: `render-lines.ts 7370d2d7…`, `subagent-view.ts f660c120…`; `git status` clean.
+
+#### UI/UX at 46 columns
+
+**Clear and calm while it runs, and on a short report; not calm on a prose report (N1).** The
+running block holds 9 rows from step 6, the cut row and `ctrl+o` hint fit, a long type keeps its
+counts, and `✗` reads at once. The tail, the type cut and the outcome row are the right design.
+Once N1 is fixed, a finished block is at most 16 rows at any width (17 with a `✗` row).
+
+#### Real frames
+
+`.tentacle/tmp/subagent-tail-view/review-frames-r2b.ts` (gitignored). Matrix and long cases: real
+`applyEvent` → `itemLines` → `wrapLines` → Ink. **App frames:** the real `App` and `Agent`, two
+concurrent calls (`peak concurrent agent_task calls: 2`), real Ctrl+O and Esc keys; the `agent_task`
+is a fake that emits the progress events, as in `app.test.tsx`, so `⏺ Agent` has no description
+there. SGR is stripped, so colours are not evidenced. No row was flagged over the width at 23 columns
+or more. The title lists the widths that gave identical frames.
+
+```
+=== 2 steps running @80/60/46 (rows 5) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ Read packages/f2.ts
+|  └─ …
+
+=== 2 steps done @80/60/46 (rows 6) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ Read packages/f1.ts
+|  └─ Read packages/f2.ts
+|
+|  The bug is in auth.ts.
+
+=== 2 steps cancelled @80/60/46 (rows 9) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ Read packages/f2.ts
+|  └─ ✗ cancelled
+|
+|  partial findings
+|
+|  _(sub-agent cancelled)_
+
+=== 2 steps error @80/60/46 (rows 7) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ Read packages/f2.ts
+|  └─ ✗ error
+|
+|  provider exploded
+
+=== 12 steps running @80/60/46 (rows 9) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ …
+
+=== 12 steps done @80/60/46 (rows 10) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  The bug is in auth.ts.
+
+=== 12 steps cancelled @80/60/46 (rows 13) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ cancelled
+|
+|  partial findings
+|
+|  _(sub-agent cancelled)_
+
+=== 12 steps error @80/60/46 (rows 11) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ ✗ error
+|
+|  provider exploded
+
+=== 60 steps running @80/60/46 (rows 9) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 60 tool uses
+|  … +55 earlier · ctrl+o to expand
+|  ├─ Read packages/f56.ts
+|  ├─ Read packages/f57.ts
+|  ├─ Read packages/f58.ts
+|  ├─ Read packages/f59.ts
+|  ├─ Read packages/f60.ts
+|  └─ …
+
+=== 60 steps done @80/60/46 (rows 10) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 60 tool uses
+|  … +55 earlier · ctrl+o to expand
+|  ├─ Read packages/f56.ts
+|  ├─ Read packages/f57.ts
+|  ├─ Read packages/f58.ts
+|  ├─ Read packages/f59.ts
+|  └─ Read packages/f60.ts
+|
+|  The bug is in auth.ts.
+
+=== 60 steps cancelled @80/60/46 (rows 13) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 60 tool uses
+|  … +55 earlier · ctrl+o to expand
+|  ├─ Read packages/f56.ts
+|  ├─ Read packages/f57.ts
+|  ├─ Read packages/f58.ts
+|  ├─ Read packages/f59.ts
+|  ├─ Read packages/f60.ts
+|  └─ ✗ cancelled
+|
+|  partial findings
+|
+|  _(sub-agent cancelled)_
+
+=== 60 steps error @80/60/46 (rows 11) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 60 tool uses
+|  … +55 earlier · ctrl+o to expand
+|  ├─ Read packages/f56.ts
+|  ├─ Read packages/f57.ts
+|  ├─ Read packages/f58.ts
+|  ├─ Read packages/f59.ts
+|  ├─ Read packages/f60.ts
+|  └─ ✗ error
+|
+|  provider exploded
+
+=== Ctrl+O 60 done @46 (rows 56; f12 to f58 elided here) ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 60 tool uses
+|  … +10 earlier
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f59.ts
+|  └─ Read packages/f60.ts
+|
+|  ok
+
+=== long label collapsed @80 (rows 4) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test packages/config/src/a-very-long-directory-name/packages/config…
+|  └─ …
+
+=== long label collapsed @60 (rows 4) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test packages/config/src/a-very-long-directory-…
+|  └─ …
+
+=== long label collapsed @46 (rows 4) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test packages/config/src/a-very-l…
+|  └─ …
+
+=== long type @80 (rows 9; the five step rows elided here) ===
+|⏺ Agent xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…
+|⎿ ◆ an-extremely-long-sub-agent-type-name-that-goes-on-and-on-fo… · 7 tool uses
+|  … +2 earlier · ctrl+o to expand
+
+=== long type @60 (rows 9; the five step rows elided here) ===
+|⏺ Agent xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…
+|⎿ ◆ an-extremely-long-sub-agent-type-name-th… · 7 tool uses
+|  … +2 earlier · ctrl+o to expand
+
+=== long type @46 (rows 9; the five step rows elided here) ===
+|⏺ Agent xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…
+|⎿ ◆ an-extremely-long-sub-agen… · 7 tool uses
+|  … +2 earlier · ctrl+o to expand
+
+=== done 12 steps, 12 short lines @46 (rows 16; N4) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier · ctrl+o to expand
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+|
+|  report line 1
+|  report line 2
+|  report line 3
+|  report line 4
+|  report line 5
+|  report line 6
+|  … +6 more lines · ctrl+o to expand
+
+=== APP two in parallel, running @46 (viewport, rows 23) ===
+|  … +4 earlier · ctrl+o to expand
+|  ├─ Read a5.ts
+|  ├─ Read a6.ts
+|  ├─ Read a7.ts
+|  ├─ Read a8.ts
+|  ├─ Read a9.ts
+|  └─ …
+|
+|⏺ Agent
+|⎿ ◆ general · 9 tool uses
+|  … +4 earlier · ctrl+o to expand
+|  ├─ Read b5.ts
+|  ├─ Read b6.ts
+|  ├─ Read b7.ts
+|  ├─ Read b8.ts
+|  ├─ Read b9.ts
+|  └─ …
+|
+|⠼ Working… 0s · esc/ctrl+c to stop
+|────────────────────────────────────── qwen3 ─
+|❯  Queue a task…
+|──────────────────────────────────────────────
+|/tmp/work · ↑7 ↓3 · ctx ░░░░░░░░░░ 0% (7/128k)
+
+=== APP after a real Ctrl+O @46 (viewport, rows 23) ===
+|  ├─ Read a7.ts
+|  ├─ Read a8.ts
+|  ├─ Read a9.ts
+|  └─ …
+|
+|⏺ Agent
+|⎿ ◆ general · 9 tool uses
+|  ├─ Read b1.ts
+|  ├─ Read b2.ts
+|  ├─ Read b3.ts
+|  ├─ Read b4.ts
+|  ├─ Read b5.ts
+|  ├─ Read b6.ts
+|  ├─ Read b7.ts
+|  ├─ Read b8.ts
+|  ├─ Read b9.ts
+|  └─ …
+|
+|⠴ Working… 0s · esc/ctrl+c to stop
+|────────────────────────────────────── qwen3 ─
+|❯  Queue a task…
+|──────────────────────────────────────────────
+|/tmp/work · ctx 0% (7/128k) · expanded
+
+=== APP after a second Ctrl+O @46: identical to "running" apart from the spinner ===
+
+=== APP after a real Esc @46 (viewport, rows 23) ===
+|
+|  partial
+|
+|  _(sub-agent cancelled)_
+|
+|⏺ Agent 0.6s
+|⎿ ◆ general · 9 tool uses
+|  … +4 earlier · ctrl+o to expand
+|  ├─ Read b5.ts
+|  ├─ Read b6.ts
+|  ├─ Read b7.ts
+|  ├─ Read b8.ts
+|  ├─ Read b9.ts
+|  └─ ✗ cancelled
+|
+|  partial
+|
+|  _(sub-agent cancelled)_
+|
+|────────────────────────────────────── qwen3 ─
+|❯  Type a task or /command
+|──────────────────────────────────────────────
+|/tmp/work · ↑7 ↓3 · ctx ░░░░░░░░░░ 0% (7/128k)
+```
+
+#### Owner question
+
+- **`✗ max_iterations` is a raw identifier beside a prose note.** Your Q2 default named only `cancelled`
+  and `error`. Recommend `✗ iteration cap`, mapped in `closingRow`, and leaving the `_(…)_` note to
+  the report, since the model reads that text too.
+
 
