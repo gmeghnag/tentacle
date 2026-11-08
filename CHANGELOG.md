@@ -10,6 +10,8 @@ those.
 
 ### Changed
 
+- **Sub-agents are limited only by `subagents.maxParallel`.** tentacle no longer asks a llama.cpp server for its slot count (`/props`) to lower that limit, locally or on `run`/`attach`. Set `subagents.maxParallel` to match your server (e.g. llama.cpp's `-np`); with more sub-agents than slots, the server queues the extra requests. The protocol version moved to 18: an older pod daemon or `serve` is refused at connect with "update", as for any version change.
+
 - **A running sub-agent shows its latest steps.** The `agent_task` block lists the last 5 tool calls of the sub-agent, under `… +N earlier · ctrl+o to expand`, instead of its first ones, so you see what it is doing now; Ctrl+O still expands the whole trail. A finished sub-agent keeps its last steps and its report visible, and one that was cancelled or failed ends with `✗ cancelled` / `✗ error`. Long rows are cut to the terminal width; the counts on the first row always stay visible.
 - **The built-in sub-agent type `general-purpose` is now called `general`.** `agent_task` lists `general` and `explore`. An old session that names `general-purpose` still runs, on the default type. A user `agents/general-purpose.md` no longer replaces the built-in: it becomes an extra type, and the default type (used when a call names none) is now the built-in `general`, with all its tools. To keep your override, rename the file to `agents/general.md` (and its `name:` line, if it has one). A hook script that matches `agent.type == "general-purpose"` must now match `general`.
 - **`tentacle serve` now stores its sessions as a session log, like the laptop.** Each session
@@ -23,6 +25,23 @@ those.
 
 ### Added
 
+- **Named models for sub-agents (`models`).** Declare extra models next to `model`, then say which sub-agent type runs on which, and optionally let the agent pick one per task:
+  ```jsonc
+  {
+    "model": { "baseURL": "http://localhost:8080/v1", "model": "qwen3-27b", "apiKeyCommand": "cat ~/.cache/llama-key" },
+    "models": {
+      // Same server and key as `model`, another model id.
+      "fast": { "model": "qwen3-4b", "contextWindow": 32768, "description": "Small and quick: searches, summaries." },
+      // Its own endpoint and key: nothing of `model`'s connection is inherited.
+      "claude": { "provider": "anthropic", "model": "claude-sonnet-5-5", "apiKeyCommand": "pass show anthropic", "description": "Hard bugs and design questions." }
+    },
+    "subagents": {
+      "types": { "explore": { "model": "fast" } },
+      "selectableModels": ["fast", "claude"]
+    }
+  }
+  ```
+  An entry has the keys of `model`; what it leaves out comes from `model` — except the endpoint and key, which move together: an entry that sets any of `provider`, `baseURL`, `apiKey` or `apiKeyCommand` inherits none of them, so your main key is never sent to another server. `subagents.types.<type>.model` must name an entry (a typo refuses the config, naming the defined ones). An `agents/*.md` `model` is looked up in `models` first, else used as a model id on the main endpoint, as before; the config beats it. With `selectableModels`, `agent_task` lists those models with their `description` and takes an optional `model`; any other name is refused and no sub-agent starts. Every entry's `apiKeyCommand` runs once at startup, before the TUI. In a profile, an entry replaces the base one whole. Keys are masked by `tentacle config list/get` and refused on the command line, like `model.apiKey`; a docker/podman `run` hides every entry's key file from the workspace mount. Not applied on `run`/`attach` yet (sub-agents there use the laptop's main model, and say so at start); `autoTitle`/`titleModel` inside an entry are accepted and have no effect.
 - **`tentacle config` edits your config from the command line.** `tentacle config subagents.maxParallel=3` (or `config set <key> <value>`), `config unset <key>`, `config get <key>`, `config list` and `config path`; `--profile <name>` targets that profile. The value is typed by the key (true/false, numbers, text; arrays and objects as JSON) and the whole file is validated before anything is written, so a bad value leaves the file untouched. Your comments, layout and key order are kept, and the write is atomic (a symlinked config is written through the link). A secret such as `model.apiKey` is never accepted on the command line, where it would land in shell history: pass `-` to read it from stdin, or leave the value out for a hidden prompt. `get` and `list` print secrets as `***`. A prompt that starts with the word "config" needs `tentacle -- config …`.
 - **`tentacle explain [key]` documents every config key.** With no key it lists the top-level keys; a section (`tentacle explain subagents`) lists its direct sub-keys; a leaf (`tentacle explain subagents.maxParallel`) prints its card: meaning, type, allowed values, default, env var, flag, whether it is carried to a pod, scope and an example. `--all` prints every leaf, `--json` the same as data, and a typo gets the nearest key. It never reads your config and never prints a secret. Because `explain` is now a subcommand, a one-shot prompt that starts with the word "explain" needs `tentacle -- explain …`. The README's config table is generated from the same registry, so the two no longer drift.
 

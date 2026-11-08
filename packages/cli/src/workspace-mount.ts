@@ -67,25 +67,47 @@ export function apiKeyFileOf(command: string): string | undefined {
   return home ? `~${rest}` : word;
 }
 
-/** An `apiKeyCommand` is set but its key file cannot be named: it is NOT hidden (say so). */
-export function apiKeyFileUnknown(apiKeyCommand: string | undefined): boolean {
-  return apiKeyCommand !== undefined && apiKeyFileOf(apiKeyCommand) === undefined;
+/**
+ * Every key command of a config: `model.apiKeyCommand` and each `models` entry's
+ * own (docs/feat/models-map.md), de-duplicated in order. A docker/podman run
+ * must hide ALL their key files from the workspace mount, not only the main one:
+ * a pod is not trusted and a key never leaves the laptop (AGENTS §7).
+ */
+export function keyCommandsOf(config: {
+  readonly apiKeyCommand?: string | undefined;
+  readonly models: Readonly<Record<string, { readonly apiKeyCommand?: string | undefined }>>;
+}): string[] {
+  const all = [
+    config.apiKeyCommand,
+    ...Object.values(config.models).map((entry) => entry.apiKeyCommand),
+  ];
+  return all.filter(
+    (command, i): command is string => command !== undefined && all.indexOf(command) === i,
+  );
 }
 
-/** The effective hide list: (`hide` ?? the default) + `hideExtra`, then the API key file. */
+const commandsOf = (commands: string | readonly string[] | undefined): readonly string[] =>
+  commands === undefined ? [] : typeof commands === "string" ? [commands] : commands;
+
+/** A key command is set but its key file cannot be named: it is NOT hidden (say so). */
+export function apiKeyFileUnknown(apiKeyCommands: string | readonly string[] | undefined): boolean {
+  return commandsOf(apiKeyCommands).some((command) => apiKeyFileOf(command) === undefined);
+}
+
+/** The effective hide list: (`hide` ?? the default) + `hideExtra`, then every API key file. */
 export function hideList(
   mount: { readonly hide?: readonly string[]; readonly hideExtra?: readonly string[] } | undefined,
-  apiKeyCommand: string | undefined,
+  apiKeyCommands: string | readonly string[] | undefined,
 ): HideEntry[] {
   const paths = [...(mount?.hide ?? DEFAULT_HIDE), ...(mount?.hideExtra ?? [])].filter(
     (path, i, all) => all.indexOf(path) === i,
   );
-  const keyFile = apiKeyCommand === undefined ? undefined : apiKeyFileOf(apiKeyCommand);
+  const keyFiles = commandsOf(apiKeyCommands)
+    .map((command) => apiKeyFileOf(command))
+    .filter((file, i, all): file is string => file !== undefined && all.indexOf(file) === i);
   return [
     ...paths.map((path) => ({ label: path, path })),
-    ...(keyFile !== undefined
-      ? [{ label: "the API key file", path: keyFile, always: true as const }]
-      : []),
+    ...keyFiles.map((path) => ({ label: "the API key file", path, always: true as const })),
   ];
 }
 

@@ -20,6 +20,7 @@ import {
   hideList,
   hidesPath,
   isYes,
+  keyCommandsOf,
   loadHideFile,
   mountGate,
   parseHideFile,
@@ -288,6 +289,45 @@ describe("hideList / apiKeyFileOf (D-2)", () => {
     expect(hideList({ hide: [] }, "cat ~/.cache/anthropic-key")).toEqual([
       { label: "the API key file", path: "~/.cache/anthropic-key", always: true },
     ]);
+  });
+
+  test("every models entry's key file is hidden too (models-map: no key file reaches a container)", () => {
+    // The leak this pins: only `model.apiKeyCommand`'s file was hidden, so a
+    // `models.<n>.apiKeyCommand` file in the workspace was readable by the run.
+    expect(
+      hideList({ hide: [] }, [
+        "cat ~/.cache/main-key",
+        "cat ./keys/claude",
+        "cat ~/.cache/main-key",
+      ]),
+    ).toEqual([
+      { label: "the API key file", path: "~/.cache/main-key", always: true },
+      { label: "the API key file", path: "./keys/claude", always: true },
+    ]);
+    expect(apiKeyFileUnknown(["cat ~/.k", "pass show claude"])).toBe(true);
+    expect(apiKeyFileUnknown(["cat ~/.k", "cat ./keys/claude"])).toBe(false);
+  });
+
+  test("grep-guard: `run` builds its hide list from EVERY key command (main.ts)", async () => {
+    // The call site is the leak's last mile; a revert to `config.apiKeyCommand` re-opens it.
+    const main = await Bun.file(`${import.meta.dir}/../src/main.ts`).text();
+    expect(main).toContain("hideList(config.mount, keyCommandsOf(config))");
+    expect(main).toContain("apiKeyFileUnknown(keyCommandsOf(config))");
+    expect(main).not.toMatch(/hideList\([^)]*config\.apiKeyCommand/);
+  });
+
+  test("keyCommandsOf: the main command and every entry's own, once each", () => {
+    expect(
+      keyCommandsOf({
+        apiKeyCommand: "cat ~/.k",
+        models: {
+          a: { apiKeyCommand: "cat ./keys/a" },
+          b: { apiKeyCommand: "cat ~/.k" },
+          c: {},
+        },
+      }),
+    ).toEqual(["cat ~/.k", "cat ./keys/a"]);
+    expect(keyCommandsOf({ models: {} })).toEqual([]);
   });
 
   test("apiKeyFileOf: `cat [--] <path>` (quoted or not); anything else is not a file", () => {

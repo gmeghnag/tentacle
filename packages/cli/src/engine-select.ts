@@ -319,9 +319,9 @@ export function laptopWorkspaceInput(input: {
   readonly cwd: string;
   readonly configDir: string;
   readonly binDir: string;
-  /** `hideList(config.mount, config.apiKeyCommand)` — resolved here. */
+  /** `hideList(config.mount, keyCommandsOf(config))` — every key file, resolved here. */
   readonly hide: readonly HideEntry[];
-  /** `apiKeyFileUnknown(config.apiKeyCommand)`: passed through to the plan's warning. */
+  /** `apiKeyFileUnknown(keyCommandsOf(config))`: passed through to the plan's warning. */
   readonly keyFileUnknown?: boolean;
   readonly homeDir?: string;
 }): WorkspaceInput {

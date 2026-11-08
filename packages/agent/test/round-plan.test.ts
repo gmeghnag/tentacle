@@ -5,8 +5,6 @@ import {
   type CallClass,
   classOf,
   dependencies,
-  effectiveAgentCap,
-  hasSpawnFanOut,
   isReadClass,
   nextRunnable,
   planGroups,
@@ -103,23 +101,6 @@ describe("spawn dependencies and the cap (T-P)", () => {
       [0],
       [0, 1],
     ]);
-  });
-
-  test("the fan-out test: two consecutive admissible spawns", () => {
-    expect(hasSpawnFanOut(["writer", "writer"], "parallel")).toBe(true);
-    expect(hasSpawnFanOut(["writer", undefined, "writer"], "parallel")).toBe(false);
-    expect(hasSpawnFanOut(["writer", "writer"], "read-only")).toBe(false);
-    expect(hasSpawnFanOut(["read-only", "read-only"], "sequential")).toBe(false);
-    expect(hasSpawnFanOut([], "parallel")).toBe(false);
-  });
-
-  test("the effective cap: the lower of config and slots; a bad answer is none", () => {
-    expect(effectiveAgentCap(4, undefined)).toBe(4);
-    expect(effectiveAgentCap(4, 2)).toBe(2);
-    expect(effectiveAgentCap(4, 9)).toBe(4);
-    for (const bad of [0, -1, 1.5, Number.NaN]) {
-      expect(effectiveAgentCap(4, bad)).toBe(4);
-    }
   });
 
   test("spawnKindOf is total", () => {

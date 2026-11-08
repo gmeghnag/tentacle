@@ -414,6 +414,10 @@ describe("T7: secrets are marked, and never illustrated with a real value", () =
     expect(keyDoc("mcpServers.*.env.*")?.secret).toBe(true);
     expect(keyDoc("mcpServers.*.headers.*")?.secret).toBe(true);
     expect(keyDoc("mcpServers.*.args")?.secret).toBe("values");
+    // docs/feat/models-map.md: an entry's key and key command, and their profile mirror.
+    expect(keyDoc("models.*.apiKey")?.secret).toBe(true);
+    expect(keyDoc("models.*.apiKeyCommand")?.secret).toBe(true);
+    expect(keyDoc("profiles.*.models.*.apiKey")?.secret).toBe(true);
   });
 
   test("a non-secret key is not marked, in either tree", () => {

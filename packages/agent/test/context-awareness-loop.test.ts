@@ -323,9 +323,17 @@ describe("context awareness in the agent loop", () => {
       },
       { name: "big", description: "d", prompt: "p", tools: "all" as const, model: "big-model" },
     ];
+    // The wiring's resolver (models-map) hands back the window it chose, as a
+    // frontmatter id with its window does: `{ id, contextWindow }`.
     const { run } = createSubagentRunner({
       model: parent,
-      modelFor: (id) => (id === "small-model" ? small : plain),
+      modelFor: (type) =>
+        type.model === "small-model"
+          ? {
+              provider: small,
+              ...(type.contextWindow ? { contextWindow: type.contextWindow } : {}),
+            }
+          : { provider: plain },
       env,
       tools: new ToolRegistry(),
       types,
@@ -334,7 +342,41 @@ describe("context awareness in the agent loop", () => {
     await run({ type: "small", description: "d", prompt: "go" });
     await run({ type: "big", description: "d", prompt: "go" });
     expect(small.requests[0]?.messages.at(-1)?.content).toMatch(/ \/ 32k tokens \(\d+%\)\]$/);
-    // No contextWindow on the type → the parent's window (unchanged behaviour).
+    // No window chosen → the parent's window (unchanged behaviour).
     expect(plain.requests[0]?.messages.at(-1)?.content).toMatch(/ \/ 200k tokens \(\d+%\)\]$/);
+  });
+
+  // models-map: the window the resolver chose wins over the type's frontmatter one,
+  // and no choice (default) keeps the type's own window, as before.
+  test("a chosen model's window beats the frontmatter's; the default keeps the type's", async () => {
+    const parent = new Scripted([[{ type: "text", delta: "r" }, done()]]);
+    const chosen = new Scripted([[{ type: "text", delta: "r" }, done()]]);
+    const typed = {
+      name: "rev",
+      description: "d",
+      prompt: "p",
+      tools: "all" as const,
+      contextWindow: 32000,
+    };
+    const run1 = createSubagentRunner({
+      model: parent,
+      modelFor: () => ({ provider: chosen, contextWindow: 64000 }),
+      env,
+      tools: new ToolRegistry(),
+      types: [typed],
+      contextAwareness: { window: 200000, stepPercent: 1 },
+    }).run;
+    await run1({ type: "rev", description: "d", prompt: "go" });
+    expect(chosen.requests[0]?.messages.at(-1)?.content).toMatch(/ \/ 64k tokens \(\d+%\)\]$/);
+    const run2 = createSubagentRunner({
+      model: parent,
+      modelFor: () => undefined,
+      env,
+      tools: new ToolRegistry(),
+      types: [typed],
+      contextAwareness: { window: 200000, stepPercent: 1 },
+    }).run;
+    await run2({ type: "rev", description: "d", prompt: "go" });
+    expect(parent.requests[0]?.messages.at(-1)?.content).toMatch(/ \/ 32k tokens \(\d+%\)\]$/);
   });
 });

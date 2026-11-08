@@ -12,8 +12,6 @@ import {
   CancelRequestParamsSchema,
   ModelCountTokensParamsSchema,
   ModelCountTokensResultSchema,
-  ModelSlotsParamsSchema,
-  ModelSlotsResultSchema,
   ModelStreamChunkedParamsSchema,
   ModelStreamChunkedResultSchema,
   ModelStreamParamsSchema,
@@ -81,8 +79,6 @@ export const Method = {
   ModelStreamChunked: "model/streamChunked",
   /** Daemon → client: the exact prompt size of a request, counted by the laptop's provider. */
   ModelCountTokens: "model/countTokens",
-  /** Daemon → client: how many requests the laptop's endpoint runs at once. */
-  ModelSlots: "model/slots",
   /** The size of the context a session would send now (docs/feat/tui-target-badge.md). */
   SessionContext: "session/context",
   McpStatus: "mcp/status",
@@ -140,10 +136,6 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
   [Method.ModelCountTokens]: {
     params: ModelCountTokensParamsSchema,
     result: ModelCountTokensResultSchema,
-  },
-  [Method.ModelSlots]: {
-    params: ModelSlotsParamsSchema,
-    result: ModelSlotsResultSchema,
   },
   [Method.SessionContext]: {
     params: SessionContextParamsSchema,

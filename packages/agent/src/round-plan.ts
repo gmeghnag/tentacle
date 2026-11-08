@@ -173,21 +173,6 @@ export function planRound(
   return groups;
 }
 
-/** Whether a round has a run of at least two admissible spawns (the only time the cap matters). */
-export function hasSpawnFanOut(
-  kinds: readonly (SpawnKind | undefined)[],
-  mode: ExecutionMode,
-): boolean {
-  let run = 0;
-  for (const kind of kinds) {
-    run = spawnAdmissible(kind, mode) ? run + 1 : 0;
-    if (run >= 2) {
-      return true;
-    }
-  }
-  return false;
-}
-
 /**
  * `dependencies` for an `agents` group, on the EFFECTIVE input (a hook may
  * rewrite `subagent_type`): admissible spawns wait for nothing among
@@ -208,16 +193,6 @@ export function spawnDependencies(
     }
     return deps;
   });
-}
-
-/**
- * The sub-agents' cap: the config's ceiling, lowered to a server's slots when
- * they are known. Anything but a positive integer is not an answer.
- */
-export function effectiveAgentCap(maxParallel: number, slots: number | undefined): number {
-  return slots !== undefined && Number.isInteger(slots) && slots > 0
-    ? Math.min(maxParallel, slots)
-    : maxParallel;
 }
 
 /** Two classes conflict: `exclusive` with anything; else a shared resource with a write. */

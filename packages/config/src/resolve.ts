@@ -35,6 +35,7 @@ import {
   DEFAULT_TOOL_OUTPUT_RETENTION_DAYS,
   defaultWritableDirs,
 } from "./defaults.ts";
+import { type ResolvedModel, resolveModelEntry } from "./models.ts";
 import type { FileConfig, HookSpecConfig, McpServerConfig, MountConfig } from "./schema.ts";
 import { type SkillInfo, renderSkillsCatalog } from "./skills.ts";
 
@@ -94,6 +95,15 @@ export interface ResolvedConfig {
   readonly subagentMaxParallel: number;
   /** A custom `agent_task` description, resolved (I/O in load.ts); absent → the neutral default. */
   readonly agentTaskDescription?: string;
+  /**
+   * The `models` entries over the effective main model (docs/feat/models-map.md);
+   * a command key is not run here (load.ts). Empty when unset.
+   */
+  readonly models: Readonly<Record<string, ResolvedModel>>;
+  /** `subagents.types.<type>.model`: type → `models` name (types without one omitted). */
+  readonly subagentModels: Readonly<Record<string, string>>;
+  /** `subagents.selectableModels`, de-duplicated in order; `[]` when unset (off). */
+  readonly selectableModels: readonly string[];
   /** Max characters of a tool result kept inline before spilling to a file. */
   readonly maxInlineOutputChars: number;
   /** Days a spilled tool output is kept; `<= 0` = never swept. */
@@ -505,6 +515,27 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     apiKeySource = "command";
   }
 
+  // `models` over the EFFECTIVE main model (owner Q2): env and `--model` included.
+  const mainModel = {
+    provider: providerValue,
+    baseURL: baseURL.value,
+    model: modelId.value,
+    contextWindow: contextWindow.value,
+    ...(maxTokens.value !== undefined ? { maxTokens: maxTokens.value } : {}),
+    ...(apiKey !== undefined ? { apiKey } : {}),
+  };
+  const models: Record<string, ResolvedModel> = {};
+  for (const [name, entry] of Object.entries(fileConfig.models ?? {})) {
+    models[name] = resolveModelEntry(mainModel, entry);
+  }
+  const subagentModels: Record<string, string> = {};
+  for (const [type, block] of Object.entries(fileConfig.subagents?.types ?? {})) {
+    if (block.model !== undefined) {
+      subagentModels[type] = block.model;
+    }
+  }
+  const selectableModels = [...new Set(fileConfig.subagents?.selectableModels ?? [])];
+
   return {
     provider: providerValue,
     baseURL: baseURL.value,
@@ -534,6 +565,9 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(ctx.agentTaskDescription !== undefined
       ? { agentTaskDescription: ctx.agentTaskDescription }
       : {}),
+    models,
+    subagentModels,
+    selectableModels,
     maxInlineOutputChars: maxInlineOutputChars.value,
     toolOutputRetentionDays: toolOutputRetentionDays.value,
     redactSecrets: redactSecrets.value,

@@ -33,7 +33,10 @@ export interface AgentType {
   readonly prompt: string;
   /** Tool names the child may use; `"all"` = every parent tool (minus the spawn tool). */
   readonly tools: "all" | readonly string[];
-  /** Optional model id override; resolved via `SubagentDeps.modelFor`. */
+  /**
+   * The `agents/*.md` `model`: a `models` name, else a model id on the main
+   * endpoint (docs/feat/models-map.md); resolved via `SubagentDeps.modelFor`.
+   */
   readonly model?: string;
   /**
    * That model's context window (tokens), for the child's context line
@@ -75,6 +78,17 @@ export interface SubagentRunOptions {
   readonly prompt: string;
   /** The agent type name; falls back to the first type if unknown. */
   readonly type: string;
+  /** The call's requested `models` name (the tool checked it); passed to `modelFor`. */
+  readonly model?: string;
+}
+
+/** A child's model, chosen by the wiring (docs/feat/models-map.md). */
+export interface SubagentModel {
+  readonly provider: ModelProvider;
+  /** The window the child counts against; absent → the parent's. */
+  readonly contextWindow?: number;
+  /** The model id the child's hooks report (`model` in a hook payload). */
+  readonly modelId?: string;
 }
 
 export interface SubagentResult {
@@ -157,8 +171,12 @@ export function childToolLabel(name: string, args: string): string {
 
 export interface SubagentDeps {
   readonly model: ModelProvider;
-  /** Build a provider for a type's `model` override; falls back to `model`. */
-  readonly modelFor?: (modelId: string) => ModelProvider;
+  /**
+   * The child's model for a type and the call's requested `models` name.
+   * `undefined` (or absent) → `model`, with the type's own `contextWindow`
+   * if any, else the parent's window — the behaviour before `models`.
+   */
+  readonly modelFor?: (type: AgentType, requested: string | undefined) => SubagentModel | undefined;
   readonly env: ExecutionEnvironment;
   /** The parent's registry; a child gets a filtered subset, never the spawn tool. */
   readonly tools: ToolRegistry;
@@ -225,11 +243,14 @@ export function createSubagentRunner(deps: SubagentDeps): {
       }
     }
 
-    const model = type.model && deps.modelFor ? deps.modelFor(type.model) : deps.model;
-    // The child counts against its own model's window when the type names one.
+    const chosen = deps.modelFor?.(type, opts.model);
+    const model = chosen?.provider ?? deps.model;
+    // The child counts against its own model's window: the chosen one's, else
+    // (no choice) the type's own, else the parent's.
+    const window = chosen !== undefined ? chosen.contextWindow : type.contextWindow;
     const contextAwareness =
-      deps.contextAwareness && type.contextWindow !== undefined
-        ? { ...deps.contextAwareness, window: type.contextWindow }
+      deps.contextAwareness && window !== undefined
+        ? { ...deps.contextAwareness, window }
         : deps.contextAwareness;
     const child = new Agent({
       model,
@@ -265,7 +286,7 @@ export function createSubagentRunner(deps: SubagentDeps): {
         ? {
             hooks: deps.hooks.forAgent(
               { type: type.name, description: opts.description },
-              type.model,
+              chosen?.modelId ?? (chosen === undefined ? type.model : undefined),
             ),
           }
         : {}),

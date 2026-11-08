@@ -17,6 +17,7 @@ import {
   PROMPT_FILENAME,
 } from "./defaults.ts";
 import { type ProjectHooks, discoverProjectHooks } from "./hooks-scan.ts";
+import type { ResolvedModel } from "./models.ts";
 import {
   type PackageHook,
   type PackageInfo,
@@ -145,6 +146,15 @@ export interface TentacleConfig {
   readonly subagentMaxParallel: number;
   /** A custom `agent_task` description, resolved (read by `feat/parallel-agents`; on a pod the laptop's, carried). */
   readonly agentTaskDescription?: string;
+  /**
+   * The `models` entries, keys resolved (docs/feat/models-map.md). Laptop/serve
+   * only: never carried to a pod, never printed; a pod daemon runs no key command.
+   */
+  readonly models: Readonly<Record<string, ResolvedModel>>;
+  /** `subagents.types.<type>.model`: type → `models` name. */
+  readonly subagentModels: Readonly<Record<string, string>>;
+  /** `subagents.selectableModels` (`[]` = off). */
+  readonly selectableModels: readonly string[];
   readonly maxInlineOutputChars: number;
   /** Days a spilled tool output is kept; `<= 0` = never swept. */
   readonly toolOutputRetentionDays: number;
@@ -540,6 +550,69 @@ function parseConfigFile(text: string, path: string): unknown {
   return value ?? {};
 }
 
+/**
+ * The `models` entries' keys (docs/feat/models-map.md A5, owner Q4): every
+ * DISTINCT own command runs once, in parallel, here — before any TUI, like the
+ * main key (a prompting command never lands on Ink's screen). The main
+ * command's output is reused, never re-run. An inherited entry gets the main
+ * model's final key. `run` undefined (a pod daemon load) → no command runs and
+ * a command-keyed entry keeps no key (never used over the tunnel). A failure
+ * names the entry (sorted first) and carries stderr only, never a key.
+ */
+async function resolveModelKeys(
+  models: ResolvedConfig["models"],
+  main: { readonly apiKey: string | undefined; readonly apiKeyCommand: string | undefined },
+  run: CommandRunner | undefined,
+): Promise<Record<string, ResolvedModel>> {
+  const names = Object.keys(models).sort();
+  const outputs = new Map<string, string>();
+  if (main.apiKeyCommand !== undefined && main.apiKey !== undefined && run !== undefined) {
+    outputs.set(main.apiKeyCommand, main.apiKey);
+  }
+  if (run !== undefined) {
+    const owner = new Map<string, string>();
+    for (const name of names) {
+      const command = models[name]?.apiKeyCommand;
+      if (command !== undefined && !outputs.has(command) && !owner.has(command)) {
+        owner.set(command, name);
+      }
+    }
+    await Promise.all(
+      [...owner].map(async ([command, name]) => {
+        let key: string;
+        try {
+          key = (await run(command)).trim();
+        } catch (error) {
+          if (error instanceof ConfigError) {
+            throw new ConfigError(`models.${name}.${error.message}`);
+          }
+          throw error;
+        }
+        if (key === "") {
+          throw new ConfigError(`models.${name}.apiKeyCommand produced an empty key`);
+        }
+        outputs.set(command, key);
+      }),
+    );
+  }
+  const out: Record<string, ResolvedModel> = {};
+  for (const name of names) {
+    const entry = models[name];
+    if (entry === undefined) {
+      continue;
+    }
+    const { apiKey: _drop, ...rest } = entry;
+    const key =
+      entry.apiKeySource === "inherited"
+        ? main.apiKey
+        : entry.apiKeySource === "command" && entry.apiKeyCommand !== undefined
+          ? outputs.get(entry.apiKeyCommand)
+          : entry.apiKey;
+    out[name] = key !== undefined ? { ...rest, apiKey: key } : rest;
+  }
+  return out;
+}
+
 export async function loadConfig(options: LoadConfigOptions = {}): Promise<TentacleConfig> {
   const base = options.env ?? process.env;
   // `--model` is TENTACLE_MODEL's CLI twin: resolved from a COPY, so no child
@@ -638,6 +711,11 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
       throw new ConfigError("apiKeyCommand produced an empty key");
     }
   }
+  const models = await resolveModelKeys(
+    resolved.models,
+    { apiKey, apiKeyCommand: resolved.apiKeyCommand },
+    options.podDaemon === true ? undefined : runCommand,
+  );
 
   const cwd = resolvePath(expandTilde(resolved.cwd, home));
   const contributed = mergePackageContributions(
@@ -669,6 +747,9 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(resolved.agentTaskDescription !== undefined
       ? { agentTaskDescription: resolved.agentTaskDescription }
       : {}),
+    models,
+    subagentModels: resolved.subagentModels,
+    selectableModels: resolved.selectableModels,
     maxInlineOutputChars: resolved.maxInlineOutputChars,
     toolOutputRetentionDays: resolved.toolOutputRetentionDays,
     redactSecrets: resolved.redactSecrets,

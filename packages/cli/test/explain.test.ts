@@ -21,7 +21,9 @@ describe("explain with no key: the top level only", () => {
   test("one line per top-level key, sections marked with their sub-key count", () => {
     const out = lines(undefined);
     expect(out.some((line) => /^\s*model\b.*\(9 sub-keys\)/.test(line))).toBe(true);
-    expect(out.some((line) => /^\s*subagents\b.*\(6 sub-keys\)/.test(line))).toBe(true);
+    // 8 since models-map (`subagents.types`, `subagents.selectableModels`).
+    expect(out.some((line) => /^\s*subagents\b.*\(8 sub-keys\)/.test(line))).toBe(true);
+    expect(out.some((line) => /^\s*models\b.*\(10 sub-keys\)/.test(line))).toBe(true);
     // A leaf at the top level has no count and no children of its own.
     expect(out.some((line) => /^\s*maxIterations\b/.test(line))).toBe(true);
     expect(out.some((line) => /^\s*maxIterations\b.*sub-keys/.test(line))).toBe(false);
@@ -74,8 +76,9 @@ describe("explain with no key: the top level only", () => {
     }
     expect(text(undefined)).toContain("token budget");
     // Every key is named at the head of its own line, exactly once.
+    // The path as a whole word: `model` must not also count the `models` line.
     for (const entry of result.entries) {
-      expect(out.filter((line) => line.trimStart().startsWith(entry.path)).length).toBe(1);
+      expect(out.filter((line) => line.trimStart().split(/\s/)[0] === entry.path).length).toBe(1);
     }
   });
 
@@ -130,7 +133,8 @@ describe("explain <section>: its summary and its DIRECT sub-keys", () => {
     const out = text("subagents");
     expect(out).toContain("4");
     expect(out).toContain("parallel");
-    expect(out.split("\n").length).toBeLessThan(20);
+    // 8 direct sub-keys since models-map, most wrapping once at 80 columns.
+    expect(out.split("\n").length).toBeLessThan(25);
   });
 
   test("profiles: the profile settings, not the base keys", () => {

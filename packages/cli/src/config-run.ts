@@ -218,6 +218,8 @@ function secretOnArgv(key: string, paths: readonly string[]): ConfigRunResult {
       ? `"${key}"`
       : `${paths.map((path) => `"${path}"`).join(", ")} (in the value for "${key}")`;
   const leaf = paths[0] ?? key;
+  // A key's own command sits beside it (`models.<n>.apiKeyCommand`, models-map).
+  const command = leaf.endsWith(".apiKey") ? `${leaf}Command` : "model.apiKeyCommand";
   return {
     code: 1,
     out: "",
@@ -228,7 +230,7 @@ function secretOnArgv(key: string, paths: readonly string[]): ConfigRunResult {
       line(`read it from stdin instead:  printf '%s\\n' "$KEY" | tentacle config ${leaf} -`) +
       line(`or with no value, it is prompted for without echo:  tentacle config ${leaf}`) +
       line(
-        `better: store a command that prints it — tentacle config model.apiKeyCommand "pass show tentacle" (see \`tentacle explain model.apiKeyCommand\`)`,
+        `better: store a command that prints it — tentacle config ${command} "pass show tentacle" (see \`tentacle explain ${command}\`)`,
       ),
   };
 }

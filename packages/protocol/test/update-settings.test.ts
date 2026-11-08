@@ -45,7 +45,7 @@ describe("session/update_settings", () => {
   });
 
   test("no protocol bump: a method, a display update and a field are free", () => {
-    expect(PROTOCOL_VERSION).toBe(17);
+    expect(PROTOCOL_VERSION).toBe(18);
   });
 });
 

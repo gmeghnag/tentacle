@@ -122,20 +122,6 @@ export const ModelCountTokensResultSchema = z.object({
 });
 export type ModelCountTokensResult = z.infer<typeof ModelCountTokensResultSchema>;
 
-// --- model/slots (docs/feat/parallel-agents.md, Design 6) ------------------
-// The daemon asks how many requests the client's LOCAL endpoint runs at once,
-// to cap a fan-out of sub-agents. No pod input, one number back. Additive: an
-// older client answers `MethodNotFound`; one that cannot tell omits `slots`.
-
-export const ModelSlotsParamsSchema = z.object({});
-export type ModelSlotsParams = z.infer<typeof ModelSlotsParamsSchema>;
-
-export const ModelSlotsResultSchema = z.object({
-  /** Absent: unknown (an optional field is omitted, never null). */
-  slots: z.number().int().positive().optional(),
-});
-export type ModelSlotsResult = z.infer<typeof ModelSlotsResultSchema>;
-
 // --- $/progress / $/cancelRequest (generic peer primitives) ---------------
 //
 // Two generic, method-agnostic notifications the peer understands: a responder

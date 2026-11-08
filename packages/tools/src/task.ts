@@ -25,13 +25,20 @@ export interface TaskRunControls {
 }
 
 export type TaskRunner = (
-  opts: { description: string; prompt: string; type: string },
+  /** `model`: the call's requested `models` name, already checked against the list. */
+  opts: { description: string; prompt: string; type: string; model?: string },
   controls?: TaskRunControls,
 ) => Promise<TaskRunResult>;
 
 export interface TaskAgentType {
   readonly name: string;
   readonly description: string;
+}
+
+/** A model the agent may pick (`subagents.selectableModels`, docs/feat/models-map.md). */
+export interface TaskModelOption {
+  readonly name: string;
+  readonly description?: string;
 }
 
 /** `subagents.execution`: how a round's `agent_task` calls may overlap. */
@@ -44,6 +51,11 @@ export interface TaskToolOptions {
   readonly description?: string | undefined;
   /** What the neutral text states about overlap. Absent → nothing, as `sequential`. */
   readonly mode?: TaskExecutionMode;
+  /**
+   * `subagents.selectableModels` with their descriptions. Absent or empty → no
+   * `model` argument, and the tool is exactly what it was without `models`.
+   */
+  readonly models?: readonly TaskModelOption[];
 }
 
 const NEUTRAL_DESCRIPTION =
@@ -65,9 +77,24 @@ export function taskToolDescription(
   custom: string | undefined,
   mode: TaskExecutionMode,
   typeList: string,
+  modelList = "",
 ): string {
   const text = custom ?? `${NEUTRAL_DESCRIPTION}${OVERLAP_NOTE[mode]}`;
-  return `${text}\n\nAvailable sub-agent types:\n${typeList}`;
+  const models =
+    modelList === ""
+      ? ""
+      : `\n\nAvailable models (optional \`model\` argument; omit it to use the sub-agent type's own model):\n${modelList}`;
+  return `${text}\n\nAvailable sub-agent types:\n${typeList}${models}`;
+}
+
+/** One line per selectable model; a description's whitespace runs collapse to one space. */
+function renderModelList(models: readonly TaskModelOption[]): string {
+  return models
+    .map((m) => {
+      const about = m.description?.replace(/\s+/g, " ").trim();
+      return about ? `- ${m.name}: ${about}` : `- ${m.name}`;
+    })
+    .join("\n");
 }
 
 /** Build the `agent_task` tool for the given runner and available sub-agent types. */
@@ -84,7 +111,9 @@ export function createTaskTool(
     return names.includes(name) ? name : defaultType;
   };
 
-  const inputSchema = z.object({
+  const models = options.models ?? [];
+  const modelNames = models.map((m) => m.name);
+  const baseSchema = z.object({
     description: z.string().min(1).describe("A short (3-5 word) description of the task"),
     prompt: z.string().min(1).describe("The full task for the sub-agent to perform"),
     subagent_type: z
@@ -92,10 +121,28 @@ export function createTaskTool(
       .optional()
       .describe(`Which sub-agent to use (default ${defaultType})`),
   });
+  // `model` only when the user made models selectable: otherwise the agent is
+  // never told it exists, and a stray one is stripped like any unknown argument.
+  const inputSchema =
+    models.length > 0
+      ? baseSchema.extend({
+          model: z
+            .string()
+            .optional()
+            .describe(
+              `Which model runs the sub-agent: one of ${modelNames.join(", ")}. Omit it for the type's own model.`,
+            ),
+        })
+      : baseSchema;
 
   return {
     name: "agent_task",
-    description: taskToolDescription(options.description, options.mode ?? "sequential", typeList),
+    description: taskToolDescription(
+      options.description,
+      options.mode ?? "sequential",
+      typeList,
+      renderModelList(models),
+    ),
     inputSchema,
     permission: "none",
     // Resolved as `execute` does. Bad input throws: not groupable.
@@ -104,10 +151,23 @@ export function createTaskTool(
       return options.readOnlyType?.(type) ? "read-only" : "writer";
     },
     async execute(input, ctx): Promise<ToolResult> {
-      const args = input as z.infer<typeof inputSchema>;
+      const args = input as z.infer<typeof baseSchema> & { model?: string };
       const type = resolveType(args.subagent_type);
+      const model = models.length > 0 ? args.model : undefined;
+      if (model !== undefined && !modelNames.includes(model)) {
+        // No child starts: the agent learns the allowed names and may retry.
+        return {
+          content: `unknown model ${JSON.stringify(model.slice(0, 64))} for agent_task — use one of: ${modelNames.join(", ")}, or omit model`,
+          isError: true,
+        };
+      }
       const result = await run(
-        { description: args.description, prompt: args.prompt, type },
+        {
+          description: args.description,
+          prompt: args.prompt,
+          type,
+          ...(model !== undefined ? { model } : {}),
+        },
         {
           signal: ctx.signal,
           ...(ctx.emitProgress ? { onEvent: ctx.emitProgress } : {}),

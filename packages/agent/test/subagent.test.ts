@@ -103,7 +103,8 @@ describe("createSubagentRunner", () => {
     const say = () => new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
     const { run } = createSubagentRunner({
       model: say(),
-      modelFor: () => say(),
+      modelFor: (type) =>
+        type.model !== undefined ? { provider: say(), modelId: type.model } : undefined,
       env,
       tools: fullRegistry(),
       types: [
@@ -250,16 +251,40 @@ describe("createSubagentRunner", () => {
     expect(offered[0]).not.toContain(CONTEXT_RESET_TOOL_NAME);
   });
 
+  test("the call's requested model reaches modelFor with the type (models-map)", async () => {
+    const { env } = recordingEnv();
+    const base = new ScriptedProvider([[{ type: "text", delta: "from base" }, { type: "done" }]]);
+    const fast = new ScriptedProvider([[{ type: "text", delta: "from fast" }, { type: "done" }]]);
+    const seen: (string | undefined)[][] = [];
+    const { run } = createSubagentRunner({
+      model: base,
+      modelFor: (type, requested) => {
+        seen.push([type.name, requested]);
+        return requested === "fast" ? { provider: fast } : undefined;
+      },
+      env,
+      tools: fullRegistry(),
+    });
+    const picked = await run({ description: "d", prompt: "go", type: "explore", model: "fast" });
+    const plain = await run({ description: "d", prompt: "go", type: "general" });
+    expect(seen).toEqual([
+      ["explore", "fast"],
+      ["general", undefined],
+    ]);
+    expect(picked.report).toBe("from fast");
+    expect(plain.report).toBe("from base");
+  });
+
   test("a type's model override routes to the provider from modelFor", async () => {
     const { env } = recordingEnv();
     const base = new ScriptedProvider([[{ type: "text", delta: "from base" }, { type: "done" }]]);
     const big = new ScriptedProvider([[{ type: "text", delta: "from big" }, { type: "done" }]]);
-    const usedModels: string[] = [];
+    const usedModels: (string | undefined)[] = [];
     const { run } = createSubagentRunner({
       model: base,
-      modelFor: (id) => {
-        usedModels.push(id);
-        return big;
+      modelFor: (type) => {
+        usedModels.push(type.model);
+        return { provider: big };
       },
       env,
       tools: fullRegistry(),

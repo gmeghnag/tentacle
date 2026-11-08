@@ -149,7 +149,7 @@ describe("session/open.settings: an opaque carrier (docs/feat/config-carry.md)",
       /protocol/i,
     );
     expect(contexts).toHaveLength(0);
-    expect(PROTOCOL_VERSION).toBe(17);
+    expect(PROTOCOL_VERSION).toBe(18);
     connection.close();
   });
 

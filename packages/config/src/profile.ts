@@ -7,7 +7,10 @@
  * `contextAwareness`/`contextReset`/`mount`/`detach`/`tui` merge per key; `model` merges per key EXCEPT the connection group (provider, baseURL,
  * apiKey, apiKeyCommand), which moves as a unit, so a key is never sent to an
  * endpoint it was not configured for; `mcpServers` merge by name (a definition
- * is replaced whole, `null` removes it). The result never carries `profiles`.
+ * is replaced whole, `null` removes it); `models` and `subagents.types` merge by
+ * name, a profile's entry replacing the base one WHOLE (docs/feat/models-map.md,
+ * owner Q5: a base key never pairs with a profile's endpoint). The result never
+ * carries `profiles`.
  */
 import type { FileConfig, McpServerConfig, ModelConfig } from "./schema.ts";
 
@@ -15,8 +18,11 @@ export type ProfileResult =
   | { readonly ok: true; readonly config: FileConfig }
   | { readonly ok: false; readonly reason: string };
 
-/** The `model` keys that identify an endpoint and its credentials. */
-const CONNECTION_KEYS = ["provider", "baseURL", "apiKey", "apiKeyCommand"] as const;
+/**
+ * The `model` keys that identify an endpoint and its credentials. Shared with a
+ * `models` entry's resolution (`models.ts`): the same unit, the same rule.
+ */
+export const CONNECTION_KEYS = ["provider", "baseURL", "apiKey", "apiKeyCommand"] as const;
 
 function mergeModel(base: ModelConfig | undefined, over: ModelConfig): ModelConfig {
   const merged: ModelConfig = { ...base };
@@ -60,6 +66,7 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
   }
   const {
     model,
+    models,
     subagents,
     tools,
     contextAwareness,
@@ -83,6 +90,9 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
   if (model) {
     config.model = mergeModel(base.model, model);
   }
+  if (models) {
+    config.models = { ...base.models, ...models };
+  }
   if (subagents) {
     // The description's two forms are one setting: the profile's replaces the base's.
     const { agentTaskDescription, agentTaskDescriptionFile, ...rest } = base.subagents ?? {};
@@ -96,6 +106,9 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
         ? { agentTaskDescriptionFile }
         : {}),
       ...subagents,
+      ...(rest.types !== undefined || subagents.types !== undefined
+        ? { types: { ...rest.types, ...subagents.types } }
+        : {}),
     };
   }
   if (contextAwareness) {

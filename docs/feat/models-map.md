@@ -1,10 +1,10 @@
 # feat/models-map — named `models`, per-type sub-agent models, agent-selectable models
 
-> **Status:** implementation (plan written, awaiting owner approval + answers Q1–Q5)
+> **Status:** execution done (A + B + the slots-cap removal, one branch); fresh-context Review pending
 > **Branch:** `feat/models-map`
-> **Size:** M (upper end; see the split proposal, Q1) · **Blast:** cross-module · **Suited:** a cheaper model (DeepSeek) may execute parts **A** and **B** of this plan; Review is **mandatory fresh-context** (a sub-agent or `/code-review`) red-teaming secrets: key routing, masking, the workspace-mount hide list, and "a key never leaves the laptop". Part **C** (slot sizing) is split out: it touches the agent loop, so it is load-bearing and goes to a strong model.
+> **Size:** M–L · **Blast:** load-bearing (a protocol method removed + `PROTOCOL_VERSION` 18; the agent loop's fan-out cap; secrets routing) · **Suited:** strong model executes (claude-opus-5-5, owner 2026-11-08); **mandatory fresh-context Review** red-teaming: key routing (a key never reaches another endpoint or a pod), masking, the workspace-mount hide list, the removed `model/slots` on both ends, the cap = `maxParallel`.
 
-Type: feat · Size: M · Blast: cross-module · Suited: DeepSeek executes A (+B if Q1 = b), fresh-context secret red-team Review; C → `feat/models-map-slots` (S–M, load-bearing, strong model)
+Type: feat · Size: M–L · Blast: load-bearing · Suited: strong model + mandatory fresh-context Review
 
 Vocabulary (owner): **agent** = the main model the user chats with; **subagent** = the
 child started by an `agent_task` call; **entry** = one `models.<name>` block.
@@ -34,8 +34,10 @@ model, hard work goes to a hosted model with its own key".
   `agent_task` description, `agent_task` gets an optional `model` argument that accepts
   only a listed name (any other → an error result, no child starts). Precedence: the call's
   `model` › `subagents.types.<t>.model` › the `agents/*.md` `model` › the top-level `model`.
-- Per-endpoint slot SIZING for foreground rounds belongs to task 3; the session-level limiter
-  is task 6c; NO slot reservation for the agent (Opus review M8, owner Q14 = b).
+- ~~Per-endpoint slot SIZING for foreground rounds belongs to task 3~~ — **superseded by the
+  owner on 2026-11-08** (see *Owner answers*): tentacle sizes nothing by server slots; the only
+  sub-agent concurrency limit is the user's `subagents.maxParallel`, and the existing slots cap
+  is removed in this task. NO slot reservation for the agent (owner Q14 = b) still holds.
 - Local/`serve` only. Pod runs are task 4 (`feat/models-map-pod`, the name on
   `model/stream`, the laptop allowlist, a `PROTOCOL_VERSION` bump).
 
@@ -45,10 +47,8 @@ masking in `config list/get` and the argv refusal in `config set` are driven by 
 (`packages/config/src/config-value.ts:134-151,163-175`). The README config table is
 generated (`bun run docs:config`, gate `packages/config/test/readme-config-table.test.ts`).
 
-**Repro** (capability missing). Run from `.tentacle/tmp/models-map/` on current `main`
-(the architect's sandbox denied `bun` execution, so the output below is the one the strict
-schema must give — `schema.ts:410-418` is `.strict()` with no `models` key; the executor
-re-runs it before any edit and pastes the real output here):
+**Repro** (capability missing). Run from `.tentacle/tmp/models-map/` on unchanged
+`main` @ `09f63cf` (`bun .tentacle/tmp/models-map/repro.ts`, 2026-11-08, before any edit):
 
 ```ts
 // .tentacle/tmp/models-map/repro.ts
@@ -62,7 +62,7 @@ for (const probe of [
   console.log(JSON.stringify(probe), "→", r.success ? "ok" : r.error.issues[0]?.message);
 }
 ```
-Expected on `main` @ `09f63cf`:
+Observed (identical to what the strict schema predicted):
 ```
 {"models":{"fast":{"model":"qwen3-4b"}}} → Unrecognized key(s) in object: 'models'
 {"subagents":{"types":{"explore":{"model":"fast"}}}} → Unrecognized key(s) in object: 'types'
@@ -73,14 +73,14 @@ Expected on `main` @ `09f63cf`:
 
 *— claude-opus-5-5, 2026-11-08*
 
-Written against `main` @ `09f63cf`. The plan has three parts:
+Written against `main` @ `09f63cf`. After the owner's answers (end of this section) the
+branch carries:
 - **A — the `models` map + per-type routing** (config, resolution, keys, wiring, pods, mount hide).
 - **B — agent-selectable models** (`selectableModels`, `description`, the `agent_task` `model` arg).
-- **C — per-endpoint slot sizing for foreground rounds** — **split out** (outline only below).
+- **C — REMOVAL of the server-slots cap** (owner 2026-11-08; it replaces the per-endpoint slot
+  sizing first planned here). See *C. Removal of the slots cap*.
 
-Q1 decides whether B ships on this branch (recommended: yes, it is small) or on its own.
-Every step is tagged **[A]** or **[B]**. If Q1 = (a), do the [A] steps only, and skip the
-`selectableModels`/`description` keys too.
+Steps tagged **[A]**/**[B]** are all built (owner Q1 = c: one branch).
 
 ### Load-bearing assumption
 
@@ -193,10 +193,10 @@ them on argv, with no code in the CLI.
 Schema (`schema.ts`):
 - `MODEL_NAME = /^[A-Za-z0-9_-]{1,64}$/`. A name with `.` would make a config path
   ambiguous (`config set models.a.b.model`); it also appears in the tool description.
-- `ModelEntrySchema = ModelConfigSchema.omit({ autoTitle: true, titleModel: true })`
-  `.extend({ description: z.string().min(1).max(300).optional() })` — **[B]** adds
-  `description`; the `omit` is Q3 (recommended). Zod 3.23.8 `omit`/`extend` keep
-  `.strict()` (they copy `_def`); the executor proves it first (Tests, step 0).
+- `ModelEntrySchema = ModelConfigSchema.extend({ description: z.string().min(1).max(300).optional() })`
+  — **[B]** adds `description`. Owner Q3 = (b): NO `omit`; `autoTitle`/`titleModel` are
+  accepted in an entry and IGNORED (the resolver never reads them; the registry and `explain`
+  say "has no effect inside an entry"). Zod 3.23.8 `extend` keeps `.strict()` (probe, Execution).
 - `settingsShape.models = z.record(z.string().regex(MODEL_NAME, MODEL_NAME_MESSAGE), ModelEntrySchema).optional()`,
   with `MODEL_NAME_MESSAGE = 'models: a name may hold only letters, digits, "_" and "-" (at most 64 characters)'`.
   Place it right after `model:` (`schema.ts:189`) so `explain` lists it next to `model`.
@@ -545,27 +545,41 @@ Available models (optional `model` argument; omit it to use the sub-agent type's
 
 B2. `wiring.ts`: `createTaskTool(…, { …, models: options.modelOverride ? [] : config.selectableModels.map((name) => { const d = config.models[name]?.description; return d !== undefined ? { name, description: d } : { name }; }) })`.
 
-#### C. Per-endpoint slot sizing — split out to `feat/models-map-slots` (outline, not built here)
+#### C. Removal of the slots cap (owner 2026-11-08)
 
-Why split: it changes the agent loop's round scheduling (`agent.ts:1246-1251` cap,
-`runGroup`'s `nextRunnable` loop `agent.ts:1488-1515`, `round-plan.ts:257-272`) and the core
-`Tool` interface — load-bearing by AGENTS §10, so a strong model executes it with a
-fresh-context Review; parts A/B do not touch the loop.
+*Replaces the per-endpoint slot sizing first planned here (dropped entirely).* Owner: the
+harness cannot know which local server runs or how many slots it has (only llama.cpp
+advertises `/props` `total_slots`); scheduling policy is out of the harness's scope. **The
+only sub-agent concurrency limit is `subagents.maxParallel`, set by the user.**
 
-Outline (its own doc re-verifies): a spawn's pool = its endpoint (normalized resolved
-`baseURL`; the main endpoint is the default pool). The task tool exposes
-`spawnPool?(input) → { key, slots?(signal) } | undefined` (undefined = the main pool, whose
-slots are today's `subagentExecution.slots`). In a fan-out round, the distinct pools' slots
-are read once each (`slotsBounded`, in parallel). One pool → exactly today's cap
-`effectiveAgentCap(maxParallel, slots)`. Several → the round's cap is `maxParallel` and
-`nextRunnable` gains per-pool caps (an item runs only while fewer than its pool's slots of
-the same pool run). The slots notice names the entry, never the URL (a `baseURL` may hold
-userinfo). No reservation (owner Q14 = b). Background children are 6c.
+Removed (every site from `rg -n "slots|total_slots|/props|effectiveAgentCap|slotsBounded"`;
+the remaining hits are unrelated uses of the word — `session-log*.ts` slot arrays,
+`render-lines.ts` layout slots):
+- core: `ModelProvider.slots` (`core/src/model.ts:102-108`), `slotsBounded` + `SLOTS_CAP_MS`
+  (`core/src/context.ts:13-52`).
+- providers: `OpenAIProvider.slots()` (`GET <root>/props`), `parseSlots`, `SLOTS_TIMEOUT_MS`,
+  `MAX_SLOTS`, `slotsTimeoutMs`, `knownSlots` (`openai-provider.ts:35-36,127-200`);
+  `RetryingModelProvider.slots` (`retry.ts:182-185`); `providers/test/slots.test.ts` (deleted).
+- agent: `subagentExecution.slots`, the probe in `runToolCalls` (`agent.ts:1246-1249`) — the
+  cap is now `agents?.maxParallel ?? 1`; `effectiveAgentCap` and `hasSpawnFanOut` (its only
+  user was the probe) in `round-plan.ts`, with their tests.
+- protocol: `model/slots` (`Method.ModelSlots`, `ModelSlotsParams/ResultSchema`, its
+  `RequestSchemas` row), the JSON schema regenerated (`bun run schema:export`);
+  **`PROTOCOL_VERSION` 17 → 18** (a removed method is breaking; pre-public: no shim).
+- daemon: `ProxyModelProvider.slots` + `ModelSlotsSender`, `Connection.requestModelSlots`,
+  `ModelLink`'s optional member.
+- client: `RemoteClient.onModelSlots` and its dispatch.
+- cli: `serve.ts`'s slots sender to the tunnel; `wiring.ts`'s `slotsReader` (the "sub-agents
+  capped at N" notice) and `BuildAgentOptions.agentsNotice` (only that notice used it) and its
+  two `main.ts` callers.
+- config/docs: `subagents.maxParallel`'s summary/details, the schema comment, the scaffold
+  comment (`defaults.ts:147`), the README row (regenerated), a "superseded" banner on
+  `docs/feat/parallel-agents.md` (its Design 6 is the removed feature; the text stays as
+  history).
 
-**Until C lands (interim, documented in the key docs):** a fan-out's cap is
-`min(maxParallel, slots of the MAIN endpoint)` for every spawn, whatever its endpoint. A
-child on a smaller llama.cpp server may queue on that server (slow, correct); a child on a
-hosted API may be held to the main server's slots (under-used, correct).
+Failure modes: F21–F23 below. Tests: the agent, CLI and pod fan-out tests with a provider
+that WOULD report 1 slot (`peak` = `maxParallel`, the probe never called); `no-slots.test.ts`
+(method gone, version 18); `version-mismatch.test.ts` 17 ↔ 18.
 
 ### Files
 
@@ -587,6 +601,7 @@ In dependency order (config → agent → tools → cli → docs). [B] = part B 
 14. `packages/cli/src/engine-select.ts` — doc comments `:322-324` only.
 15. `packages/cli/src/config-run.ts` — the A10 hint.
 16. Docs: `docs/feat/config-profiles.md` (merge rules: one line for `models` / `subagents.types`); this doc's Execution.
+17. Part C (removal): `core/src/{model,context}.ts`, `providers/src/{openai-provider,retry}.ts`, `agent/src/{agent,round-plan}.ts`, `protocol/src/{model,methods,version}.ts` + `schema/protocol.json`, `daemon/src/{proxy-model,connection}.ts`, `client/src/remote-client.ts`, `cli/src/{serve,wiring,main}.ts`, `config/src/{key-docs,schema,defaults}.ts`, `docs/feat/parallel-agents.md`, `CHANGELOG.md`; tests listed in C.
 
 Callers of a changed signature to update (rg before editing): `hideList(`, `apiKeyFileUnknown(`,
 `modelFor:` (agent tests), `taskToolDescription(`, `createTaskTool(` (tests). No other
@@ -615,7 +630,10 @@ production caller exists (`rg` verified for `hideList`/`apiKeyFileUnknown`: `mai
 | F17 | Same command string for main and an entry | Run once (A5); both get the output. Entry inherits nothing else. |
 | F18 | Empty `models` / `types` / `selectableModels` | Same as unset: no `model` argument, no list, unchanged description (pinned byte-identical). |
 | F19 | Name with `.` or longer than 64 | Schema refusal with `MODEL_NAME_MESSAGE`. |
-| F20 | `autoTitle`/`titleModel` inside an entry (Q3 = a) | `Unrecognized key(s) in object: 'autoTitle'` — titles stay a `model` setting. |
+| F20 | `autoTitle`/`titleModel` inside an entry (owner Q3 = b) | Accepted, ignored: `resolveModelEntry` never copies them; `explain models.*.autoTitle` says "has no effect inside an entry". |
+| F21 | An old pod daemon / `serve` (protocol 17) with a new laptop, or the reverse | `initialize` refuses with `VersionMismatch` (protocol 18), worded "update" — never a mid-turn `MethodNotFound` on `model/slots`. Pinned in `daemon/test/version-mismatch.test.ts` (17 ↔ 18). |
+| F22 | A fan-out of N sub-agents on a llama.cpp server with fewer slots than N | Up to `maxParallel` run at once; the server queues the extra requests (slower, correct). Nobody asks `/props`. Pinned: agent + CLI + pod tests with a provider that would report 1 slot (never called). |
+| F23 | A user who relied on the automatic cap | One CHANGELOG line (`### Changed`) and the `subagents.maxParallel` docs/scaffold say: set it to your server's parallelism. |
 
 ### Tests
 
@@ -649,17 +667,13 @@ GREEN. Mutation checks are listed where a test could pass vacuously.
 Gate before "done": `bun test` (baseline: all pass except the three opt-in skips),
 `bun run typecheck`, `bun run lint` (baseline clean) — AGENTS §6.
 
-### Proposed split and TODO lines
+### Split (superseded)
 
-| # | Task | Size | Blast | Executor / Review |
-|---|---|---|---|---|
-| 3 | `feat/models-map` — part A (+ part B if Q1 = b) | M | cross-module | DeepSeek; fresh-context Review red-teaming secrets (F5–F7, F10–F13) |
-| 3b | `feat/models-select` — part B (only if Q1 = a) | S | contained | a weaker model; in-context Review |
-| 3c | `feat/models-map-slots` — part C | S–M | load-bearing | strong model; fresh-context Review of the round scheduler |
-
-Order: 3 → (3b) → 3c → 4. 3c needs 3's resolved endpoints; task 4 (pod) needs 3; 6c
-(session limiter) needs 3c's pools. Proposed `TODO.md` line for 3c (to add on `main` with the
-owner's OK, docs carve-out): `- [ ] **feat/models-map-slots** (task 3c, split from feat/models-map): per-endpoint slot sizing for foreground fan-outs (pools keyed by endpoint; one pool = today's cap). Type: feat · Size: S–M · Blast: load-bearing.`
+The split proposed here (3 / 3b / 3c `feat/models-map-slots`) is void: owner Q1 = (c), one
+branch, and the per-endpoint sizing (3c) was dropped altogether — see *Owner answers*. No
+`feat/models-map-slots` task exists. Task 6c (`feat/subagent-slots`, a session-level slot
+limiter) contradicts the owner's 2026-11-08 rule ("tentacle does not size or limit by server
+slots anywhere") and should be re-scoped or dropped in `TODO.md` (not touched here: owner's call).
 
 ### Owner questions
 
@@ -692,9 +706,129 @@ startup error.
 Simplest rule, and no way to pair a base key with a profile endpoint. Cost: a profile that
 only wants a different `contextWindow` restates the entry.
 
+### Owner answers (2026-11-08)
+
+*— claude-opus-5-5 (recording the owner's answers), 2026-11-08*
+
+- **Q1: (c)**, against the recommendation: A + B (+ C) in this ONE branch; it is therefore
+  load-bearing and executed by a strong model (claude-opus-5-5). **Then moot for C:** the owner
+  dropped part C (per-endpoint slot sizing) and **removed the existing slots cap** — the only
+  sub-agent concurrency limit is `subagents.maxParallel`; tentacle sizes nothing by server
+  slots anywhere (the harness cannot know which server runs or its slots; scheduling policy is
+  out of scope). Removing `model/slots` is breaking → `PROTOCOL_VERSION` 18. Built as part C.
+- **Q2: (a)** — an entry inherits the agent's EFFECTIVE values (profile, env, `--model`).
+- **Q3: (b)**, against the recommendation — `autoTitle`/`titleModel` inside an entry are
+  accepted and IGNORED (the shape of `model`); the docs and `explain` say they have no effect.
+- **Q4: (a)** — every entry's `apiKeyCommand` runs at startup, before the TUI, identical
+  commands once, in parallel.
+- **Q5: (a)** — a profile's `models` entry replaces the base entry whole.
+- Unchanged (eval owner Q14 = b): no slot reservation for the agent (now trivially: no slots).
+
 ## Execution
 
-*— (executor), (date)*
+*— claude-opus-5-5, 2026-11-08*
+
+**Repro (before any edit), on `main` @ `09f63cf`:** see *Context → Repro* (observed output
+pasted there; identical to the prediction). Dependencies were missing in the worktree:
+`bun install --frozen-lockfile --filter '!@tentacle/mobile'` first.
+
+**Probe** (`.tentacle/tmp/models-map/probe.ts`): `ModelConfigSchema.extend({description})` →
+`_def.unknownKeys: "strict"`, `{foo: 1}` refused, `{autoTitle: true}` accepted. (A record
+keyed by a regex looked wrong in the probe — a mixed zod instance imported from the tmp dir;
+the real check is `models.test.ts` "a name holds letters…", green.)
+
+**As built, in order** (every behaviour shown RED on the old code first, on an assertion,
+then GREEN; "stub" = an export skeleton returning a wrong value, so the red is on the
+assertion and not on an import error, as the executor brief requires):
+1. **config** — `schema.ts` (`ModelEntrySchema`, `MODEL_NAME`, `models`, `subagents.types`,
+   `subagents.selectableModels`, `FileConfigSchema.superRefine(modelRefIssues)`),
+   `profile.ts` (`CONNECTION_KEYS` exported; `models` / `subagents.types` merged by name, an
+   entry replaced whole), `models.ts` (new: `resolveModelEntry`, `modelRefIssues`,
+   `pickSubagentModel`, `modelsPodNotice`, `unknownTypeModelWarnings`), `resolve.ts`
+   (`models` over the effective main model, `subagentModels`, `selectableModels`), `load.ts`
+   (`resolveModelKeys`: distinct commands once, in parallel, main output reused, skipped for a
+   pod daemon, errors `models.<n>.apiKeyCommand …`), `key-docs.ts` (16 new entries incl.
+   `models.*.autoTitle/titleModel` "no effect", secret flags; `profiles` details), README
+   regenerated. Red: `models.test.ts` 26 fail / 4 pass on the stub; `models-load.test.ts`
+   5 fail / 1 pass; registry gate T1 red on the schema alone (16 missing paths), README T4 red
+   until `bun run docs:config`. Green: config 390 pass.
+2. **slots removal (part C)** — new agent test "a server that would report 1 slot no longer
+   lowers the cap": RED on the old loop (only 1 of 3 children started), GREEN after removing
+   the probe. Then every site listed in *C* (core, providers, agent, protocol + schema,
+   daemon, client, cli serve/wiring/main, config docs). `PROTOCOL_VERSION` 18; the three
+   "current version" pins updated 17 → 18; new `no-slots.test.ts`; `version-mismatch` gets
+   a 17 ↔ 18 case. Obsolete tests deleted (`providers/test/slots.test.ts`,
+   `ProxyModelProvider.slots` tests, `effectiveAgentCap`/`hasSpawnFanOut` tests, the T-S
+   probe tests) or rewritten to assert the probe is never called.
+3. **agent** — `subagent.ts`: `SubagentModel`, `modelFor(type, requested)`,
+   `SubagentRunOptions.model`, window = chosen › type › parent, hooks get the chosen model id.
+   Red: 5 fail (old runner passes an id and uses the result as a provider). Green: agent 458.
+4. **tools (B)** — `task.ts`: `models` option, the exact description section, `model` only
+   when selectable, the refusal `unknown model "<x>" for agent_task — use one of: …, or omit
+   model` (no child starts). Red: `task-models.test.ts` 5 fail / 2 pass (the 2 = "off is
+   exactly today's" guards). Green: tools 80.
+5. **cli** — `model-provider.ts`: `ProviderFactory`, `createModelProviders` (entry's own
+   endpoint/key only, cached), `subagentModelResolver`; `configuredModelProvider` takes the
+   factory. `wiring.ts`: `createProvider` seam (main, title, entries), `modelFor` only off the
+   tunnel, the pod daemon-log notice, `models` to the task tool. Red: `models-providers` 4 fail
+   on the stub; `models-wiring` 4 fail (3 on the missing seam — they reached the network —, 1 on
+   the notice assertion). Green.
+6. **docker/podman key-file leak** — `workspace-mount.ts`: `hideList`/`apiKeyFileUnknown`
+   take a command list, `keyCommandsOf(config)`; `main.ts:1150-1151` uses it. Red: the hide
+   test (old `hideList` ignored a list → `[]`) and `keyCommandsOf` on the stub. Pinned by a
+   grep-guard on the `main.ts` call site (the last mile of the leak).
+7. **main.ts** — `[agents]` warning for a configured type no one defines; `[models]` notice on
+   `run`/`attach` (pre-Ink, beside the `[packages]` line). **config-run.ts** — the argv-secret
+   hint names the key's own `…apiKeyCommand` (red: 1 fail, then green); three
+   `models.*.apiKey` argv-refusal cases added to HIGH-1.
+8. Docs: `CHANGELOG.md` (`### Added` models with an example config; `### Changed` slots
+   removal), `docs/feat/parallel-agents.md` banner, this doc.
+
+**Mutations (cp backup → mutate → run → restore, shasum equal before/after):**
+| Mutation | Test that went red |
+|---|---|
+| `key-docs.ts`: drop `secret: true` from `models.*.apiKey` | `config-value` mask test (key printed in clear) + T7 |
+| `models.ts`: connection-unit branch disabled (`&& false`) | 4 `models.test.ts` tests (main key/provider leaked to an own-endpoint entry, env key reached `other`) |
+| `wiring.ts`: give `modelFor` to the tunnel path | `models-wiring` pod test (`from fast-id` instead of the tunnel) |
+| `methods.ts`: re-add `ModelSlots: "model/slots"` | `no-slots.test.ts` |
+Checksums restored: key-docs `ebf3ba76…`, models.ts `d2c033cc…`, wiring `6574327b…`,
+methods `f39fd782…`.
+
+**Guards that are green on both by design** (they pin an invariant that already held):
+`carried-settings` — `carriedSettings(config)` JSON holds no entry key, URL, model id or name;
+`task-models` "off is exactly today's" (description + schema byte-identical, stray `model`
+stripped).
+
+**UX evidence** (`.tentacle/tmp/models-map/explain.ts`): `explain` lists `models (10 sub-keys)`
+next to `model`, `subagents (8 sub-keys)`; `explain models` lists `models.*.provider` …
+`models.*.description` (the two title keys say "Accepted for the shape of `model`; has no
+effect inside an entry."); `explain models.claude.apiKey` → `secret  yes — never printed
+(masked as ***)`.
+
+**Drift from Implementation (and why):**
+- Part C is a REMOVAL, not per-endpoint sizing (owner change mid-task). `agentsNotice` and
+  `hasSpawnFanOut` went with it (their only purpose was the slots path: no dead code).
+- Q3 = (b): no `omit`; the registry documents the two title keys instead.
+- `createProvider` also builds the MAIN and title providers (the plan had it for entries
+  only): needed so a wiring test never reaches the network.
+- `hideList`/`apiKeyFileUnknown` accept `string | string[] | undefined` (not only a list), so
+  the ~10 existing call sites in tests stay as they were.
+- Tests live in new files (`config/test/models*.test.ts`, `tools/test/task-models.test.ts`,
+  `cli/test/models-{providers,wiring}.test.ts`, `protocol/test/no-slots.test.ts`) rather than
+  the files the plan named; `explain.test.ts` counts updated (subagents 6 → 8 sub-keys) and
+  its "named once" check made whole-word (`model` matched the new `models` line).
+- `docs/feat/config-profiles.md` not edited: the merge rule is in the registry's `profiles`
+  details (which `explain` prints) and in `profile.ts`'s header.
+
+**Gate (2026-11-08):** `bunx tsc --noEmit` clean · `bunx biome check .` 763 files, 0 errors,
+0 warnings · `bun test packages` **5765 pass, 3 skip (the opt-in live-k8s / live-docker /
+slow-socket), 0 fail**. Not run: `tsc -p apps/mobile` (mobile deps not installed in this
+worktree; `rg` finds no `slots`/`model/slots` use under `apps/`).
+
+**Left / unverified:** a live run against two real endpoints (verify: a config with a
+`models` entry on a second llama.cpp server, `explore` mapped to it, watch both servers'
+logs). Task 6c (`feat/subagent-slots`) in `TODO.md` now contradicts the owner's rule — owner
+to re-scope; TODO.md not touched.
 
 ## Review
 

@@ -270,8 +270,6 @@ const FIXTURES: Record<string, Json[]> = {
     { request: { messages: [{ role: "user", content: "hi" }] } },
   ],
   "methods/model~1countTokens/result": [{}, { tokens: 0 }, { tokens: 1234 }],
-  "methods/model~1slots/params": [{}],
-  "methods/model~1slots/result": [{}, { slots: 1 }, { slots: 4 }],
   "methods/session~1skills/params": [{}, { sessionId: "s" }],
   "methods/session~1skills/result": [
     { slash: [], skills: [], problems: [], moreProblems: 0 },
