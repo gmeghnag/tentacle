@@ -765,9 +765,177 @@ id-less branch is gone).
 6. Put a junk `<x>.state.json` beside a copied `.jsonl`: start notice "skipped … (left as is)",
    bytes unchanged.
 
+### Live test (2026-11-08, orchestrator-run, branch binary, `serve` + `connect`, model `--profile deepseek`)
+Sonnet agent in tmux, isolated config dir, report `.tentacle/tmp/session-log-serve-store/live/live-report.md`. 6/6 PASS, no regression vs main:
+1. Tool turn: `<uid>.jsonl` + `<uid>.state.json` appear, the log grows during the turn, header stable; detach + `--resume` OK.
+2. Daemon restart between turns → resume OK. **Note:** the first write after the restart REWRITES the log (earlier turn markers gone) — to be checked against answer 15 (fix round 1, item 4).
+3. `kill -9` serve mid-turn → restart → finished rounds present, cut turn "Interrupted", no tool re-run.
+4. `/compact`: 1 base by default, 2 bases with `keepSuperseded`.
+5. Archive / list / reopen / delete OK (rename not exercised: no TUI command).
+6. Garbage: legacy `.json` untouched; an orphan corrupt `.jsonl` was renamed `.aside` (bytes intact) — the same class as review M2.
+*— claude-opus-5-5 (orchestrator), 2026-11-08*
+
 ## Review
 
-*(empty)*
+*— claude-opus-5-5, 2026-11-08* (round 1, fresh context, code commit `0563664`, base `bd46999`.
+Same model family as the executor: only the context is fresh, so shared blind spots can survive
+both passes.)
+
+### Verdict: **REQUEST-CHANGES** (0 HIGH · 2 MEDIUM · 3 LOW; not a PASS)
+
+The crash contract holds on every window I attacked. The two MEDIUM findings are outside it: a
+memory regression in a long-lived `serve`, and a newer or corrupt log that is moved away although
+§7 says it is left untouched.
+
+### Findings
+
+**M1 (MEDIUM) — an archived session's whole log segment stays in the daemon's memory until
+`session/delete` or a restart.**
+- Where: `session-log-store.ts:264` (`writers`), filled at `:480-504`. It is deleted only at `:476`
+  (set aside) and `:779` (remove). `SessionHost.settleWrite` drops the host's own copy
+  (`session-host.ts:736-738`), but nothing drops the store's.
+- Contract broken: `docs/feat/session-archive.md:382` (the record "is held only until its write is
+  confirmed (then dropped…)") and `:441` (peak memory), plus this branch's own comment at
+  `serve.ts:234` ("the peak is one history plus the live sessions, however many are kept"). On main
+  a landed archive frees the history.
+- Failure scenario: a `serve` that runs for months ends 1000 sessions of about 2 MB each (TTL,
+  `session/close`, detached cap). About 2 GB of `KnownLogEntry` stays resident until the process
+  restarts, although none of those sessions is live.
+- Repro (`review/r1.test.ts`, test C), after the archive landed:
+  `writers after archive 1 entries 9 chars 1971 resident false` — the host dropped the record, the
+  store did not.
+- Fix direction: drop the writer's state once an archive unit has landed. A resident rename or
+  retry still needs it, so drop it when the host clears `entry.record`. Add a test.
+
+**M2 (MEDIUM) — a log with no state file is moved aside before its header is read, so a newer or
+corrupt log is NOT left untouched.**
+- Where: `session-persister.ts:368-370` returns `missingState` before `parseHeaderLine` (`:371`);
+  `serve.ts:250-254` then calls `setAside`, which removes the `.jsonl`.
+- Contract broken: AGENTS §7 (`AGENTS.md:270`, "an unknown one of either is refused and the files
+  are left untouched (never written by that daemon)") and FM 22 ("The daemon never writes or removes
+  them"). Design §6 lists "sidecar absent" first, so the plan's order produced the contradiction,
+  and neither its FM table nor its tests caught it (FM 22's fixtures all have a state file).
+- Failure scenario: a log written by a newer build (`schemaVersion` 2) has no state file (its first
+  unit was cut, or a later layout does not use one). Starting this build renames it to
+  `.aside` and frees the id; going back to the newer build finds no session. Bytes are kept, so it
+  is recoverable by hand.
+- Repro (`review/r2.test.ts`, real `startDaemon`), planted `newer-nostate.jsonl`, schema 99:
+  `set …/newer-nostate.stale-…aside aside: a log with no state file…` and
+  `newer-nostate.jsonl: present=false`. With a state file the same log is correct:
+  `newer-state.jsonl: present=true same=true`, "skipped … (left as is)".
+- Fix direction: parse the header first. Only a readable header of this version with no state file
+  is FM 5; anything else is `block` + "skipped … (left as is)". Owner question 1.
+
+**L1 (LOW) — the §7 wording says slightly more than the code does (the owner asked for "no more,
+no less").**
+- `AGENTS.md:198-199` "continuing each session's log lineage" and "a reload reads the log only up
+  to the entry the sidecar names" are unconditional, but an unpaired load (FM 4, Q5) reads the last
+  segment and starts a new lineage (`daemon-state-file.ts:380-385`, `session-host.ts:774-775`).
+- `AGENTS.md:206` "indexed from the sidecar only": the index also reads the log's first line for
+  `cwd`/`createdAt` (`session-persister.ts:371-394`).
+- Failure scenario: a later change relies on "a reload always continues the lineage" and treats a
+  `base{reload}` without `prev` as a bug. Owner question 2 (the wording was approved verbatim).
+
+**L2 (LOW) — an archived session with a corrupt or unknown-critical log is only refused at its
+reopen.** The approved index reads no history (§6, S5), so the scan lists it. A rename is written
+beside it and the reopen is refused, with the reason going to `onError` only. Bytes stay untouched
+(`review/r1.test.ts` E: `reopen refused`, log unchanged). No change requested; recorded so it is
+not read as item 4's "skipped with a message" at start.
+
+**L3 (LOW) — stale references.** `persisted-session.ts:296` still says ids are "absent from an older
+record (minted at the reload)"; `cli/test/serve-persistence.test.ts:144`, `:403` name the deleted
+`parseDaemonRecord` in their mutation notes. P5's citation has drifted: the reseed decision is at
+`session-log-reader.ts:209-228`, not `:216-239` (the premise itself is true).
+
+### Gate (re-run by the reviewer, before any mutation)
+
+| Check | Result |
+|---|---|
+| `bunx tsc --noEmit` | exit 0 |
+| `bunx biome check .` | 734 files, no findings |
+| `bun test packages` run 1 | 5375 pass · 3 skip (the opt-in three) · 0 fail · 61319 expects · 375 files |
+| `bun test packages` run 2 | identical (5375 · 3 · 0) |
+
+### Mutations (cp backup → mutate → test → restore; `shasum -c` OK on all files, `git status` clean)
+
+| # | Origin | Mutation | Test | Result |
+|---|---|---|---|---|
+| 1 | executor | the loader folds to the end of the file, not `logHead` (`rebuild`) | S1 | **red** (`:400`) |
+| 2 | executor | `resumableTurn` ignores `paired` | S8 | **red** (`:703`) |
+| 3 | reviewer | the reload's `log.commit(session.messages, …)` removed (`hosted-session.ts`, the line Q15 stands on) | S4 "with a repair" | **red** (`reattach.test.ts:2091`) |
+
+### Premise table (`git show bd46999:…`)
+
+| Premise | Verdict |
+|---|---|
+| Context: `serve.ts:122` builds `JsonSessionStore` | TRUE |
+| `hosted-session.ts:808-812` persist, `:895` whole-history copy | TRUE |
+| `persisted-session.ts:53` `DAEMON_RECORD_VERSION = 8` | TRUE |
+| P3 repair only appends (`:497-513`), a resumed turn leaves history untouched (`:650-653`) | TRUE |
+| P4 the constructor `start(...)` (`:513-524`) | TRUE |
+| P5 lineage rule | TRUE, citation drifted (L3) |
+| P8 `TEMP_NAME`, empty-history skip, containment line (`session-log-store.ts:200-202`, `:430-432`, `:614`) | TRUE |
+| P9 the `.lock` store lock is not swept | TRUE (attack L below) |
+| proof 1 the in-place annotation (`agent.ts:1156`) | TRUE |
+
+### Attacks tried (scratch: `.tentacle/tmp/session-log-serve-store/review/r1.test.ts`, `r2.test.ts`; real disk, real store and host)
+
+| # | Attack | Result |
+|---|---|---|
+| A | A crash at every one of the 18 io calls, `keepSuperseded` off and on, then two more generations (reload, continue, reload) | Holds: every reload loads, generation 3 equals what generation 2 served, `g3=paired`. Unpaired only at a rewrite's state file (`at=14`, off). Log-ahead content went aside (`asides=1`), none silently dropped. The harness's one flagged row (`at=2`) is FM 5 (log, no state), expected |
+| B | Three clean restarts, `keepSuperseded` on | Holds: same file size (3440 ×3), 2 bases, no aside, `tail` empty |
+| C | Memory after an archive | **M1** |
+| D, r2 | Newer, corrupt, unknown-state-version and unknown-critical files through the real scan | Holds with a state file (bytes identical, "skipped … (left as is)"); **M2** without one. Legacy `.json` ignored |
+| E | Archived + unknown critical entry, rename, reopen | L2; log bytes unchanged |
+| F | The archive unit's log op fails (ENOSPC), then the heal | Holds: paired, archived, history exact |
+| H1 | A waiting call across a restart | Holds: `base.prev` = saved head, `seq` +1, `base.turn` = the turn; re-asked; approved once, ran once; no re-run at the next restart |
+| H2 | Crash in the reload's rewrite window before the state file | Holds: unpaired, tool message "Not run…", never re-asked, 0 runs |
+| I | A prompt only in the overlay (`k 0`, `tail 1`), two restarts | Holds: one copy, paired |
+| J, K | Idle TTL and detached cap (S6's gap) | Holds: `archivedAt` stamped in the state file through the unit |
+| K | Reclaim on a non-resident archived session (the doc's unverified item) | Holds: only the state file changes (`["r2"]`, log identical) |
+| L | Dead pid's state temp and per-session lock | Swept; the store's `.lock` untouched |
+| r2 | Delete and list | `removed [gone.jsonl, gone.state.json]`, only `deleted-sessions` added; `session/list` right for live and archived |
+| Static | `git diff` of `packages/protocol`, `connection.ts`, transport, client `src` | Empty: no `critical`, entry type, `PROTOCOL_VERSION` or RPC change. `hosted-session.ts` adds no `await`; the capture stays synchronous |
+| Static | Deleted JSON code | No caller in `packages/*/src`; only the comments of L3 |
+| Static | Task 2 M1/M2 | `ahead` check at `session-log-store.ts:623-626`, byte offset at `:647`; store and file tests 42 pass |
+
+Sidecar growth: 1000 turn keys = 82 KB, 1000 enqueue ids = 39 KB (the doc estimated ~70 B and
+~40 B each): consistent with its Notes.
+
+### What holds
+
+The two-file crash contract, "pending on disk ⇒ never started", the overlay, lineage (answer 15),
+one archive path, sidecar-only rename and reclaim, delete, the store and per-session locks, and the
+synchronous capture.
+
+### Not verified by this review
+
+- Linux "unit" latency (Acceptance, p99 < 5 ms): not run, as Execution also says.
+- The live `serve`/`connect` checklist: not run.
+- `serve.ts` passing `keepSuperseded` from the config is checked by reading only; the store and host
+  behaviour was run with both values.
+
+### Executor behaviour
+
+Honest and thorough: the drifts, the mutation that first survived, and its own unverified items are
+all in Execution, and every claim I re-ran matched. Its miss is M2, where Design §6's ordering
+contradicted FM 22 and §7, plus M1, which the plan's memory analysis did not cover.
+
+### Owner questions (all of them)
+
+1. **A log with no state file but a newer version or a corrupt header: leave it untouched and skip
+   it with a message, instead of moving it aside?** — **Yes.** *A file this version cannot read
+   should stay exactly where it is; only a session that really was cut before its first save gets
+   moved.*
+2. **Reword §7 so it says that a crash during a rewrite loads the log's last segment and starts a
+   new lineage, and that the archive index also reads the log's first line?** — **Yes.** *The rule
+   should describe the rare crash case too, not only the normal one.*
+
+### Orchestrator answers to the review (2026-11-08, under the owner's delegation; in the morning report)
+1. **Yes** — a log with no state file but an unreadable/corrupt header or an unknown `schemaVersion` is left untouched and skipped with a message; only a readable header of this version with no state file is FM 5 (set aside).
+2. **Yes** — reword §7: a crash during a rewrite loads the log's last segment and starts a new lineage; the archive index also reads the log's first line.
+M1: fix as the reviewer suggests (drop the store's writer state when the host clears `entry.record`), with a test. L1 via answer 2; L3: fix the stale references; L2: no change.
+No `critical` value, entry type or `PROTOCOL_VERSION` change.
 
 ## Appendix A — probe (gitignored scratch, pasted per AGENTS §6)
 
