@@ -159,22 +159,104 @@ describe("buildAgent routes a sub-agent to its models entry", () => {
   });
 });
 
-describe("over the model tunnel (a pod): models is not used", () => {
-  test("every child is the tunnel; no models provider, no list; one daemon-log notice", async () => {
-    // Mutation: give the pod path `modelFor` → the explore child runs on fast → red.
-    const tunnel = new Parent(spawn({ subagent_type: "explore", model: "claude" }));
+describe("over the model tunnel (a pod): the laptop's published models", () => {
+  const published = {
+    models: [
+      { name: "claude", contextWindow: 200000, description: "Strong." },
+      { name: "fast", contextWindow: 32768 },
+    ],
+    types: [{ type: "explore", model: "fast" }],
+    selectable: ["claude"],
+  };
+
+  /** A pod with NO models of its own, unless `over` adds them. */
+  function pod(call: StreamEvent, over: Partial<TentacleConfig> = {}) {
+    const tunnel = new Parent(call);
     const f = factory(tunnel);
+    const named: string[] = [];
     const lines: string[] = [];
-    const { agent } = buildAgent(withModels({ selectableModels: ["claude"] }), {
-      modelOverride: tunnel,
-      createProvider: f.create,
-      notice: (l) => lines.push(l),
+    const { agent } = buildAgent(
+      { ...withModels({ models: {}, subagentModels: {}, selectableModels: [] }), ...over },
+      {
+        modelOverride: tunnel,
+        namedModelOverride: (name) => {
+          named.push(name);
+          return new Child(`tunnel:${name}`);
+        },
+        createProvider: f.create,
+        notice: (l) => lines.push(l),
+      },
+    );
+    return { agent, tunnel, f, named, lines };
+  }
+
+  test("a type's published model: the child rides the named tunnel, and no provider is built here", async () => {
+    const p = pod(spawn({ subagent_type: "explore" }), { publishedModels: published });
+    expect(await run(p.agent)).toEqual(["from tunnel:fast"]);
+    expect(p.named).toEqual(["fast"]);
+    expect(p.f.made).toEqual([]);
+  });
+
+  test("a call's selectable model beats the type's", async () => {
+    const p = pod(spawn({ subagent_type: "explore", model: "claude" }), {
+      publishedModels: published,
     });
-    expect(await run(agent)).toEqual(["from parent model"]);
-    expect(f.made).toEqual([]);
-    expect(descriptionOf(tunnel)).not.toContain("Available models");
-    expect(lines).toEqual([
-      "models: per-type and selectable sub-agent models are ignored over the model tunnel; sub-agents use the laptop's main model",
+    expect(await run(p.agent)).toEqual(["from tunnel:claude"]);
+    expect(p.named).toEqual(["claude"]);
+  });
+
+  test("a type with no published model stays on the main tunnel, and no name is sent", async () => {
+    const p = pod(spawn({ subagent_type: "general" }), { publishedModels: published });
+    expect(await run(p.agent)).toEqual(["from parent model"]);
+    expect(p.named).toEqual([]);
+  });
+
+  test("the agent_task description lists the published selectable models", async () => {
+    const p = pod(spawn({ subagent_type: "general" }), { publishedModels: published });
+    await run(p.agent);
+    expect(descriptionOf(p.tunnel)).toContain(
+      "Available models (optional `model` argument; omit it to use the sub-agent type's own model):\n- claude: Strong.",
+    );
+    expect(descriptionOf(p.tunnel)).not.toContain("- fast");
+  });
+
+  test("a model published for a type but not selectable is an error when the call names it", async () => {
+    const p = pod(spawn({ subagent_type: "explore", model: "fast" }), {
+      publishedModels: published,
+    });
+    const [result] = await run(p.agent);
+    expect(result).toContain('unknown model "fast"');
+    expect(p.named).toEqual([]);
+  });
+
+  test("nothing published: every child on the main tunnel, no list", async () => {
+    const p = pod(spawn({ subagent_type: "explore", model: "claude" }));
+    expect(await run(p.agent)).toEqual(["from parent model"]);
+    expect(p.named).toEqual([]);
+    expect(descriptionOf(p.tunnel)).not.toContain("Available models");
+  });
+
+  test("the pod's OWN models are ignored, with one daemon-log notice", async () => {
+    // Mutation: give the pod path task 3's resolver → the explore child runs on fast-id → red.
+    const own = withModels({ selectableModels: ["claude"] });
+    const p = pod(spawn({ subagent_type: "explore", model: "claude" }), {
+      models: own.models,
+      subagentModels: own.subagentModels,
+      selectableModels: own.selectableModels,
+    });
+    expect(await run(p.agent)).toEqual(["from parent model"]);
+    expect(p.f.made).toEqual([]);
+    expect(p.named).toEqual([]);
+    expect(p.lines).toEqual([
+      "models: this pod's own models, subagents.types and selectableModels are ignored; the laptop's published models apply",
     ]);
+  });
+
+  test("a published type the pod does not have is said in the daemon log", async () => {
+    const p = pod(spawn({ subagent_type: "general" }), {
+      publishedModels: { ...published, types: [{ type: "reviewr", model: "fast" }] },
+    });
+    await run(p.agent);
+    expect(p.lines.join("\n")).toContain('subagents.types.reviewr: no sub-agent type "reviewr"');
   });
 });

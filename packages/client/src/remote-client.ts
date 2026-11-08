@@ -88,6 +88,7 @@ import {
   liveness,
   stopped,
 } from "./link-machine.ts";
+import { type CallGate, CallGateError, createCallGate } from "./model-gate.ts";
 import { answerLostCause, normalizePermissionReply } from "./permission-map.ts";
 import { PermissionRouter, type RouterAction } from "./permission-router.ts";
 import { RemoteSession } from "./remote-session.ts";
@@ -228,6 +229,23 @@ const systemClock: Clock = {
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+/**
+ * The named models a laptop serves to a pod (docs/feat/models-map-pod.md).
+ * Built from the laptop's OWN config: this is the allowlist (AGENTS §7).
+ */
+export interface NamedModels {
+  /** A provider; `"unavailable"`: published, but no key here; `undefined`: not published. */
+  resolve(name: string): ModelProvider | "unavailable" | undefined;
+  /** At most this many named calls run at once: the user's `subagents.maxParallel`. */
+  readonly maxConcurrent: number;
+}
+
+/** Named calls that may wait for a slot; past it a call is refused. Honest pods never get near it. */
+export const NAMED_MODEL_MAX_QUEUED = 32;
+
+/** Refused names reported to the laptop's log, so a hostile pod cannot flood it. */
+const MAX_REFUSED_NAMES_LOGGED = 16;
+
 export interface RemoteClientOptions {
   readonly onError?: (error: Error) => void;
   /**
@@ -259,6 +277,8 @@ export interface RemoteClientOptions {
    * on the laptop; the pod never names a model (docs/feat/session-titles.md).
    */
   readonly titleModelProvider?: ModelProvider;
+  /** The named models this laptop serves to a pod; absent → every name is refused. */
+  readonly namedModels?: NamedModels;
   /**
    * The laptop's settings for a pod (docs/feat/config-carry.md), sent wherever a
    * session may be created or described as new; never on an attach. Absent →
@@ -498,6 +518,11 @@ export class RemoteClient {
   /** pod-safe model-error text → its full laptop-side message (display only). */
   private readonly laptopTexts = new Map<string, string>();
   private readonly titleModelProvider?: ModelProvider;
+  private readonly namedModels?: NamedModels;
+  /** Bounds the named calls a pod can cause (docs/feat/models-map-pod.md F7). */
+  private readonly namedGate?: CallGate;
+  /** The refused names already told to `onError` (bounded). */
+  private readonly refusalsLogged = new Set<string>();
   /** `{ settings }`, or nothing: spread into each frame that may create a session. */
   private readonly carried: { readonly settings?: SessionSettings };
   private readonly settingsListeners = new Set<(notice: SessionSettingsNotice) => void>();
@@ -547,6 +572,10 @@ export class RemoteClient {
     this.daemonKind = options.daemonKind ?? "serve";
     if (options.titleModelProvider) {
       this.titleModelProvider = options.titleModelProvider;
+    }
+    if (options.namedModels) {
+      this.namedModels = options.namedModels;
+      this.namedGate = createCallGate(options.namedModels.maxConcurrent, NAMED_MODEL_MAX_QUEUED);
     }
     this.carried = options.sessionSettings ? { settings: options.sessionSettings } : {};
     this.sha256 = options.sha256 ?? bunSha256();
@@ -1462,7 +1491,9 @@ export class RemoteClient {
       },
       onRequest: async (method, params, context) => {
         if (method === Method.ModelStream) {
-          return this.servingCall(() => this.onModelStream(params as ModelStreamParams));
+          return this.servingCall(() =>
+            this.onModelStream(params as ModelStreamParams, context?.signal),
+          );
         }
         if (method === Method.ModelStreamChunked) {
           return this.servingCall(() =>
@@ -1629,6 +1660,8 @@ export class RemoteClient {
       return;
     }
     this.up = false;
+    // A named call still waiting has nobody left to answer: it must not run.
+    this.namedGate?.dropWaiting();
     if (!this.channelFactory || this.disposed) {
       // No reconnect: the turn's outcome would never arrive, so end every open
       // turn explicitly (same error a pending request gets).
@@ -2357,17 +2390,71 @@ export class RemoteClient {
    * response. Kept so an old daemon (which only knows `model/stream`) works
    * against a new laptop.
    */
-  private async onModelStream(params: ModelStreamParams): Promise<ModelStreamResult> {
-    const model = this.servingModel(Method.ModelStream, params.purpose);
+  private async onModelStream(
+    params: ModelStreamParams,
+    signal?: AbortSignal,
+  ): Promise<ModelStreamResult> {
+    const model = this.servingModel(Method.ModelStream, params.purpose, params.model);
+    const release = await this.enterNamedGate(params.model, signal);
     const events: WireStreamEvent[] = [];
     try {
-      for await (const event of model.stream(params.request as unknown as ChatRequest)) {
+      for await (const event of model.stream(this.servedRequest(params))) {
         events.push(event as WireStreamEvent);
       }
     } catch (error) {
       throw this.connectionLost(error) ?? error;
+    } finally {
+      release();
     }
     return { events };
+  }
+
+  /**
+   * The request a tunnelled call runs. On a NAMED call the pod's `maxTokens` is
+   * dropped, so `models.<name>.maxTokens` (or the provider's default) holds: a
+   * child never sets one, and a hostile pod must not raise what a paid entry
+   * may spend (docs/feat/models-map-pod.md F7).
+   */
+  private servedRequest(params: ModelStreamParams | ModelStreamChunkedParams): ChatRequest {
+    if (params.model === undefined) {
+      return params.request as unknown as ChatRequest;
+    }
+    const { maxTokens: _fromThePod, ...request } = params.request;
+    return request as unknown as ChatRequest;
+  }
+
+  /** A named call's slot; a no-op for any other call (the main model and titles are not gated). */
+  private async enterNamedGate(
+    name: string | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<() => void> {
+    if (name === undefined || !this.namedGate) {
+      return () => {};
+    }
+    try {
+      return await this.namedGate.enter(signal);
+    } catch (error) {
+      if (error instanceof CallGateError && error.reason === "full") {
+        throw new RpcError(
+          JsonRpcErrorCode.InvalidRequest,
+          "too many queued calls to named models",
+        );
+      }
+      throw new RpcError(JsonRpcErrorCode.InternalError, "model stream cancelled");
+    }
+  }
+
+  /**
+   * A refusal of a name the pod asked for. The first one per name reaches
+   * `onError` (the laptop's log): a hostile pod's attempts leave a trace here,
+   * where it cannot erase them. The name is safe to echo: the schema shaped it.
+   */
+  private refusedName(name: string, text: string): RpcError {
+    if (!this.refusalsLogged.has(name) && this.refusalsLogged.size < MAX_REFUSED_NAMES_LOGGED) {
+      this.refusalsLogged.add(name);
+      this.onError?.(new Error(`refused a model call from the pod: ${text}`));
+    }
+    return new RpcError(JsonRpcErrorCode.InvalidRequest, text);
   }
 
   /**
@@ -2449,11 +2536,34 @@ export class RemoteClient {
   /**
    * The LOCAL model that serves a tunnelled call. A turn → the main one; a
    * title (`purpose: "title"`) → `titleModelProvider`, refused when this
-   * laptop's `model.autoTitle` is off. The laptop decides, never the pod.
+   * laptop's `model.autoTitle` is off. A name → that entry, ONLY if this laptop
+   * published it (`namedModels`, from its own config): this is the gate on what
+   * a pod can reach; whatever the pod daemon checks first is UX (AGENTS §7).
+   * The laptop decides, never the pod.
    */
-  private servingModel(method: string, purpose: ModelPurpose | undefined): ModelProvider {
+  private servingModel(
+    method: string,
+    purpose: ModelPurpose | undefined,
+    name?: string,
+  ): ModelProvider {
     if (!this.modelProvider) {
       throw new RpcError(JsonRpcErrorCode.MethodNotFound, `no local model to serve ${method}`);
+    }
+    if (name !== undefined) {
+      if (purpose !== undefined) {
+        throw new RpcError(JsonRpcErrorCode.InvalidRequest, "a title call names no model");
+      }
+      const served = this.namedModels?.resolve(name);
+      if (served === "unavailable") {
+        throw this.refusedName(
+          name,
+          `model "${name}" is unavailable on this laptop: its key command did not succeed here`,
+        );
+      }
+      if (served === undefined) {
+        throw this.refusedName(name, `model "${name}" is not published by this laptop`);
+      }
+      return served;
     }
     if (purpose !== "title") {
       return this.modelProvider;
@@ -2485,8 +2595,9 @@ export class RemoteClient {
     params: ModelStreamChunkedParams,
     context: RequestContext,
   ): Promise<ModelStreamChunkedResult> {
-    const model = this.servingModel(Method.ModelStreamChunked, params.purpose);
+    const model = this.servingModel(Method.ModelStreamChunked, params.purpose, params.model);
     const signal = context.signal;
+    const release = await this.enterNamedGate(params.model, signal);
     const id = String(context.id);
     // Coalesce into batches (see MODEL_STREAM_COALESCE_MS): one frame per
     // window at most, a quiet stream's next event at once, a size cap per
@@ -2536,7 +2647,7 @@ export class RemoteClient {
     };
     try {
       for await (const event of model.stream({
-        ...(params.request as unknown as ChatRequest),
+        ...this.servedRequest(params),
         ...(signal ? { signal } : {}),
       })) {
         const wire = event as WireStreamEvent;
@@ -2559,6 +2670,8 @@ export class RemoteClient {
       // connection or an HTTP error: a text built from code/status only
       // (`connectionLost`).
       throw this.connectionLost(error) ?? error;
+    } finally {
+      release();
     }
     // Flush the tail synchronously so the last events precede the result frame.
     flush();

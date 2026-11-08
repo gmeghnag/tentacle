@@ -343,9 +343,8 @@ describe("cli main: the models-map notices (docs/feat/models-map.md F-4)", () =>
 
       err.length = 0;
       expect(await main(["bun", "cli", "run"], io)).toBe(1); // no --image: fails after config
-      expect(tagged("[models]")).toEqual([
-        "[models] subagents.types / subagents.selectableModels are not applied on run/attach yet (feat/models-map-pod): every sub-agent uses the laptop's main model\n",
-      ]);
+      // The per-type models do apply in a pod now (docs/feat/models-map-pod.md).
+      expect(tagged("[models]")).toEqual([]);
       expect(tagged("[agents]")).toEqual([]);
     } finally {
       if (before === undefined) {

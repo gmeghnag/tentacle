@@ -1205,6 +1205,10 @@
       },
       "type": "object"
     },
+    "ModelName": {
+      "pattern": "^[A-Za-z0-9_-]{1,64}$",
+      "type": "string"
+    },
     "ModelPurpose": {
       "enum": ["title"],
       "type": "string"
@@ -1212,6 +1216,9 @@
     "ModelStreamChunkedParams": {
       "additionalProperties": true,
       "properties": {
+        "model": {
+          "$ref": "#/$defs/ModelName"
+        },
         "purpose": {
           "$ref": "#/$defs/ModelPurpose"
         },
@@ -1236,6 +1243,9 @@
     "ModelStreamParams": {
       "additionalProperties": true,
       "properties": {
+        "model": {
+          "$ref": "#/$defs/ModelName"
+        },
         "purpose": {
           "$ref": "#/$defs/ModelPurpose"
         },
@@ -1613,6 +1623,64 @@
         }
       },
       "required": ["turnId"],
+      "type": "object"
+    },
+    "PublishedModel": {
+      "additionalProperties": true,
+      "properties": {
+        "contextWindow": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "maxLength": 300,
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/ModelName"
+        }
+      },
+      "required": ["contextWindow", "name"],
+      "type": "object"
+    },
+    "PublishedModels": {
+      "additionalProperties": true,
+      "properties": {
+        "models": {
+          "items": {
+            "$ref": "#/$defs/PublishedModel"
+          },
+          "type": "array"
+        },
+        "selectable": {
+          "items": {
+            "$ref": "#/$defs/ModelName"
+          },
+          "type": "array"
+        },
+        "types": {
+          "items": {
+            "$ref": "#/$defs/PublishedTypeModel"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["models", "selectable", "types"],
+      "type": "object"
+    },
+    "PublishedTypeModel": {
+      "additionalProperties": true,
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/ModelName"
+        },
+        "type": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["model", "type"],
       "type": "object"
     },
     "QueueState": {
@@ -2096,6 +2164,9 @@
         },
         "maxIterations": {
           "$ref": "#/$defs/IterationLimit"
+        },
+        "publishedModels": {
+          "$ref": "#/$defs/PublishedModels"
         },
         "redactSecrets": {
           "type": "boolean"
@@ -3302,5 +3373,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 18
+  "x-protocol-version": 19
 }

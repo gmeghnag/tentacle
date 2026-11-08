@@ -15,7 +15,14 @@ import {
   type SessionSettingsReport,
   type UpdateSettingsResult,
 } from "@tentacle/protocol";
-import { CARRIED, TEXT_DIFFERS, settingsNotices, shown } from "./carried-settings.ts";
+import {
+  CARRIED,
+  OPAQUE,
+  TEXT_DIFFERS,
+  sameSetting,
+  settingsNotices,
+  shown,
+} from "./carried-settings.ts";
 
 /** One notice line: the text, and a hint the TUI draws grey after it. */
 export interface SettingsLine {
@@ -25,7 +32,6 @@ export interface SettingsLine {
 
 type Key = keyof SessionSettings;
 const KEYS = Object.keys(CARRIED) as Key[];
-const DESCRIPTION: Key = "agentTaskDescription";
 const SAME_TEXT = "(same text)";
 const DEFAULT = "(default)";
 
@@ -53,8 +59,8 @@ function sessionShown(key: Key, value: unknown, mine: SessionSettings): string |
   if (value === undefined) {
     return DEFAULT;
   }
-  if (key === DESCRIPTION) {
-    return value === mine[DESCRIPTION] ? SAME_TEXT : TEXT_DIFFERS;
+  if (OPAQUE.has(key)) {
+    return sameSetting(value, mine[key]) ? SAME_TEXT : TEXT_DIFFERS;
   }
   return shown(key, value);
 }
@@ -79,7 +85,7 @@ function differing(
   return KEYS.filter(
     (key) =>
       !container.has(key) &&
-      mine[key] !== report.carried[key] &&
+      !sameSetting(mine[key], report.carried[key]) &&
       (mine[key] !== undefined || report.carried[key] !== undefined),
   );
 }
@@ -89,7 +95,7 @@ function mineShown(key: Key, mine: SessionSettings): string {
   if (mine[key] === undefined) {
     return DEFAULT;
   }
-  return key === DESCRIPTION ? TEXT_DIFFERS : JSON.stringify(shown(key, mine[key]));
+  return OPAQUE.has(key) ? TEXT_DIFFERS : JSON.stringify(shown(key, mine[key]));
 }
 
 /** One setting of the block: where it nests, its JSON value, its end-of-line comment. */
@@ -112,7 +118,9 @@ function blockRow(
   const value = running(report, key);
   const isContainer = container.has(key);
   // A container-set key mine leaves out: nothing to compare (the pod's value stands).
-  const differs = isContainer ? mine[key] !== undefined && mine[key] !== value : syncable.has(key);
+  const differs = isContainer
+    ? mine[key] !== undefined && !sameSetting(mine[key], value)
+    : syncable.has(key);
   return {
     section: dot < 0 ? null : configKey.slice(0, dot),
     name: dot < 0 ? configKey : configKey.slice(dot + 1),
@@ -213,7 +221,8 @@ export function changedNotice(
   const keys = KEYS.filter((key) =>
     previous === undefined
       ? running(next, key) !== undefined
-      : running(previous, key) !== running(next, key) || before.has(key) !== after.has(key),
+      : !sameSetting(running(previous, key), running(next, key)) ||
+        before.has(key) !== after.has(key),
   );
   if (keys.length === 0) {
     return null;

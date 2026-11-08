@@ -209,6 +209,7 @@ const ALL_KEYS = [
   "loadSkills",
   "maxInlineOutputChars",
   "maxIterations",
+  "publishedModels",
   "redactSecrets",
   "subagentExecution",
   "subagentMaxIterations",
@@ -224,14 +225,14 @@ const read = (key: keyof SessionSettings, config: TentacleConfig): unknown =>
   CARRIED[key].read(config);
 
 describe("the table is complete", () => {
-  test("7 P + 14 W, and the two test tables cover each", () => {
+  test("8 P + 14 W, and the two test tables cover each (publishedModels: its own describe)", () => {
     expect(Object.keys(CARRIED).sort()).toEqual([...ALL_KEYS]);
     const classOf = (name: "P" | "W") =>
       Object.entries(CARRIED)
         .filter(([, row]) => row.class === name)
         .map(([key]) => key)
         .sort();
-    expect(classOf("P")).toEqual(P.map((row) => row.key).sort());
+    expect(classOf("P")).toEqual([...P.map((row) => row.key), "publishedModels"].sort());
     expect(classOf("W")).toEqual(W.map((row) => row.key).sort());
   });
 
@@ -241,19 +242,25 @@ describe("the table is complete", () => {
 });
 
 describe("carriedSettings: an allowlist", () => {
-  test("exactly the 21 keys, and no secret or code, whatever the config holds", async () => {
+  test("exactly the 22 keys, and no secret or code, whatever the config holds", async () => {
     const laptop = await loadConfig({
       configDir: dir({
         "config.jsonc": JSON.stringify({
           model: { apiKey: "sk-secret-value", baseURL: "http://secret.example/v1" },
           hooks: [{ event: "tool_call", command: "echo SECRET-HOOK" }],
           mcpServers: { secretserver: { command: "secret-mcp" } },
-          // models-map: nothing of `models` travels (task 4 carries names only).
+          // Of `models`, only a published name and its window travel (models-map-pod).
           models: {
             claude: {
               baseURL: "http://only-laptop.example/v1",
               apiKey: "s3cret-entry",
+              apiKeyCommand: undefined,
               model: "secret-model-id",
+            },
+            notpublished: {
+              baseURL: "http://other-laptop.example/v1",
+              apiKey: "s3cret-other",
+              model: "other-model-id",
             },
           },
           subagents: {
@@ -279,10 +286,18 @@ describe("carriedSettings: an allowlist", () => {
       "s3cret-entry",
       "only-laptop.example",
       "secret-model-id",
-      "claude",
+      "s3cret-other",
+      "other-laptop.example",
+      "other-model-id",
+      "notpublished",
+      "apiKey",
+      "baseURL",
     ]) {
       expect(json).not.toContain(secret);
     }
+    // Non-vacuity: the published name did travel.
+    expect(carried.publishedModels?.selectable).toEqual(["claude"]);
+    expect(carried.publishedModels?.types).toEqual([{ type: "explore", model: "claude" }]);
   });
 
   test("the laptop's resolved values: env > active profile > global", async () => {
@@ -318,7 +333,7 @@ describe("W: the laptop's value is the lowest layer", () => {
     test(`${row.key}: an unset pod takes it, stamped carried`, async () => {
       const { config, report } = applyCarried(UNSET, { [row.key]: row.carried });
       expect(read(row.key, config)).toBe(row.carried);
-      const source = CARRIED[row.key].source;
+      const source = CARRIED[row.key].source as keyof TentacleConfig["sources"];
       expect(config.sources[source]).toBe("carried");
       expect(report?.overridden).toEqual({});
     });
@@ -328,7 +343,9 @@ describe("W: the laptop's value is the lowest layer", () => {
       const explicit = await pod(row.file(podValue as never));
       const { config, report } = applyCarried(explicit, { [row.key]: row.carried });
       expect(read(row.key, config)).toBe(podValue);
-      expect(config.sources[CARRIED[row.key].source]).toBe("file");
+      expect(config.sources[CARRIED[row.key].source as keyof TentacleConfig["sources"]]).toBe(
+        "file",
+      );
       expect(report?.overridden).toEqual({ [row.key]: podValue });
     });
 
@@ -339,7 +356,9 @@ describe("W: the laptop's value is the lowest layer", () => {
         const explicit = await pod({}, envOf(podValue as never));
         const { config, report } = applyCarried(explicit, { [row.key]: row.carried });
         expect(read(row.key, config)).toBe(podValue);
-        expect(config.sources[CARRIED[row.key].source]).toBe("env");
+        expect(config.sources[CARRIED[row.key].source as keyof TentacleConfig["sources"]]).toBe(
+          "env",
+        );
         expect(report?.overridden).toEqual({ [row.key]: podValue });
       });
     }

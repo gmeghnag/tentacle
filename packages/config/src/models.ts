@@ -155,12 +155,13 @@ export function pickSubagentModel(
     readonly frontmatterWindow?: number | undefined;
   },
   config: {
-    readonly models: Readonly<Record<string, ResolvedModel>>;
+    /** Only the window is read: a pod has no more than that (`PublishedModels`). */
+    readonly models: Readonly<Record<string, Pick<ResolvedModel, "contextWindow">>>;
     readonly subagentModels: Readonly<Record<string, string>>;
     readonly selectableModels: readonly string[];
   },
 ): ModelChoice {
-  const entry = (name: string): ResolvedModel | undefined =>
+  const entry = (name: string): Pick<ResolvedModel, "contextWindow"> | undefined =>
     has(config.models, name) ? config.models[name] : undefined;
   const { requested, typeName, frontmatterModel, frontmatterWindow } = input;
   if (requested !== undefined && config.selectableModels.includes(requested)) {
@@ -198,17 +199,56 @@ export function pickSubagentModel(
 }
 
 /**
- * The laptop's notice on `run`/`attach` (task 3 is local/serve only): its
- * per-type and selectable models are not applied in a pod yet. `null` when
- * neither is configured.
+ * What a laptop publishes to a pod (docs/feat/models-map-pod.md): names and
+ * numbers, never a model id, a URL or a key. Structurally the wire's
+ * `PublishedModels`; this package does not depend on the protocol.
  */
-export function modelsPodNotice(config: {
+export interface PublishedModels {
+  readonly models: {
+    readonly name: string;
+    readonly contextWindow: number;
+    readonly description?: string | undefined;
+  }[];
+  readonly types: { readonly type: string; readonly model: string }[];
+  readonly selectable: string[];
+}
+
+interface ModelsView {
+  readonly models: Readonly<Record<string, ResolvedModel>>;
   readonly subagentModels: Readonly<Record<string, string>>;
   readonly selectableModels: readonly string[];
-}): string | null {
-  return Object.keys(config.subagentModels).length > 0 || config.selectableModels.length > 0
-    ? "subagents.types / subagents.selectableModels are not applied on run/attach yet (feat/models-map-pod): every sub-agent uses the laptop's main model"
-    : null;
+}
+
+/**
+ * THE allowlist: the names a pod may ask this laptop for — the entries
+ * `subagents.types` and `subagents.selectableModels` use, sorted. The laptop's
+ * own config is its only input: what a pod says never widens it (AGENTS §7).
+ */
+export function publishedModelNames(config: ModelsView): string[] {
+  const used = [...Object.values(config.subagentModels), ...config.selectableModels];
+  return [...new Set(used)].filter((name) => has(config.models, name)).sort();
+}
+
+/** What travels (`undefined`: nothing). Sorted, so equal configs give equal JSON. */
+export function publishedModels(config: ModelsView): PublishedModels | undefined {
+  const names = publishedModelNames(config);
+  if (names.length === 0) {
+    return undefined;
+  }
+  const published = new Set(names);
+  const selectable = [...new Set(config.selectableModels)].filter((name) => published.has(name));
+  return {
+    models: names.map((name) => {
+      const contextWindow = config.models[name]?.contextWindow ?? 0;
+      const description = selectable.includes(name) ? config.models[name]?.description : undefined;
+      return { name, contextWindow, ...(description !== undefined ? { description } : {}) };
+    }),
+    types: Object.entries(config.subagentModels)
+      .filter(([, model]) => published.has(model))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([type, model]) => ({ type, model })),
+    selectable,
+  };
 }
 
 /** A configured type that no built-in or `agents/*.md` defines: its model is unused. */

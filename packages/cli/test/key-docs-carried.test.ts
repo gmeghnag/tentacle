@@ -99,7 +99,7 @@ describe("T6: CARRIED and the registry's carried set agree", () => {
   });
 
   test("CARRIED is not empty, so the comparison above is not vacuous", () => {
-    expect(Object.keys(CARRIED).length).toBe(21);
+    expect(Object.keys(CARRIED).length).toBe(22);
     expect(carriedRows().filter(([, cls]) => cls === "pinned").length).toBeGreaterThan(0);
     expect(carriedRows().filter(([, cls]) => cls === "workspace").length).toBeGreaterThan(0);
   });

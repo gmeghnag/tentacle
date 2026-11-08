@@ -4,6 +4,7 @@
  * Bump on any breaking change to the message shapes. Clients and the daemon
  * compare this during the handshake and refuse incompatible majors.
  */
-// 18: `model/slots` removed (docs/feat/models-map.md: the sub-agent cap is the
-// user's `subagents.maxParallel` only) — an older pod daemon fails at `initialize`.
-export const PROTOCOL_VERSION = 18 as const;
+// 19: a model name on `model/stream*` and `settings.publishedModels`
+// (docs/feat/models-map-pod.md): an older laptop would strip the name and serve
+// a named call with its main model, silently.
+export const PROTOCOL_VERSION = 19 as const;

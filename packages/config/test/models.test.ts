@@ -9,7 +9,6 @@ import {
   type MainModel,
   type ResolvedModel,
   modelRefIssues,
-  modelsPodNotice,
   pickSubagentModel,
   resolveModelEntry,
   unknownTypeModelWarnings,
@@ -391,14 +390,6 @@ describe("pickSubagentModel", () => {
 });
 
 describe("notices", () => {
-  test("pod notice only when something is configured", () => {
-    expect(modelsPodNotice({ subagentModels: {}, selectableModels: [] })).toBeNull();
-    expect(modelsPodNotice({ subagentModels: { explore: "fast" }, selectableModels: [] })).toBe(
-      "subagents.types / subagents.selectableModels are not applied on run/attach yet (feat/models-map-pod): every sub-agent uses the laptop's main model",
-    );
-    expect(modelsPodNotice({ subagentModels: {}, selectableModels: ["a"] })).not.toBeNull();
-  });
-
   test("an unknown type is warned about, a known one is not", () => {
     expect(
       unknownTypeModelWarnings({ explore: "fast", reviewr: "big" }, ["general", "explore"]),

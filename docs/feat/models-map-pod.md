@@ -271,14 +271,17 @@ export const ModelNameSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 
 ```ts
 /** What a laptop publishes to a pod (docs/feat/models-map-pod.md): names and numbers. Never an id, a URL or a key. */
+export const PublishedModelSchema = z.object({
+  name: ModelNameSchema,
+  contextWindow: z.number().int().positive(),
+  description: z.string().min(1).max(300).optional(),
+});
+export const PublishedTypeModelSchema = z.object({ type: z.string().min(1), model: ModelNameSchema });
 export const PublishedModelsSchema = z.object({
-  /** Every published name: the window a child counts against; a description only if selectable. */
-  models: z.record(ModelNameSchema, z.object({
-    contextWindow: z.number().int().positive(),
-    description: z.string().min(1).max(300).optional(),
-  })),
-  /** `subagents.types.<type>.model`. */
-  types: z.record(z.string().min(1), ModelNameSchema),
+  /** Every published name: the window a child counts against; a description only if selectable. Sorted by name. */
+  models: z.array(PublishedModelSchema),
+  /** `subagents.types.<type>.model`, sorted by type. */
+  types: z.array(PublishedTypeModelSchema),
   /** `subagents.selectableModels`, in order. */
   selectable: z.array(ModelNameSchema),
 });
@@ -287,6 +290,8 @@ export type PublishedModels = z.infer<typeof PublishedModelsSchema>;
 /** Absent → no named model: every child uses the laptop's main model. */
 publishedModels: PublishedModelsSchema.optional(),
 ```
+
+Arrays, not `z.record`: the protocol's JSON Schema export refuses a record on purpose (`packages/protocol/src/json-schema.ts:70-76`; corrected during Execution, this plan first said record).
 
 `ModelNameSchema` must be declared where `session.ts` can import it. `model.ts` has no dependency on `session.ts`: import it from there.
 
@@ -298,8 +303,8 @@ In `packages/config/src/models.ts`:
 
 ```ts
 export interface PublishedModels {
-  readonly models: Readonly<Record<string, { readonly contextWindow: number; readonly description?: string }>>;
-  readonly types: Readonly<Record<string, string>>;
+  readonly models: readonly { readonly name: string; readonly contextWindow: number; readonly description?: string }[];
+  readonly types: readonly { readonly type: string; readonly model: string }[];
   readonly selectable: readonly string[];
 }
 /** The names a pod may ask for: the values of `subagentModels` ∪ `selectableModels`, sorted, only entries that exist. */
@@ -437,7 +442,11 @@ export function tunnelSubagentResolver(
   return (type, requested) => {
     const choice = pickSubagentModel(
       { requested, typeName: type.name, frontmatterModel: type.model, frontmatterWindow: type.contextWindow },
-      { models: published.models, subagentModels: published.types, selectableModels: published.selectable },
+      {
+        models: Object.fromEntries(published.models.map((m) => [m.name, m])),
+        subagentModels: Object.fromEntries(published.types.map((t) => [t.type, t.model])),
+        selectableModels: published.selectable,
+      },
     );
     return choice.kind === "entry"
       ? { provider: tunnel(choice.name), contextWindow: choice.contextWindow, modelId: choice.name }

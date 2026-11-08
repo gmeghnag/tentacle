@@ -2077,7 +2077,7 @@ describe("relayMain", () => {
     return err.join("");
   };
 
-  test("a models entry's key command neither runs nor stops a relay: it has no terminal", async () => {
+  test("a published entry's key command runs in a relay; its failure is said and does not stop it", async () => {
     const marker = join(tmpdir(), `relay-entry-ran-${crypto.randomUUID()}`);
     const err = await relayOn({
       model: { baseURL: "http://127.0.0.1:9/v1", model: "m" },
@@ -2087,6 +2087,22 @@ describe("relayMain", () => {
           model: "c",
           apiKeyCommand: `touch ${marker}; echo 'pinentry: no tty' >&2; exit 7`,
         },
+      },
+      subagents: { selectableModels: ["claude"] },
+    });
+    expect(err).toContain("kept entry ffffffffffffffff not found");
+    expect(err).toContain(
+      '[relay] models.claude.apiKeyCommand exited with code 7: pinentry: no tty — "claude" is unavailable to this detached run until a terminal attaches\n',
+    );
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  test("an entry nothing publishes: its key command never runs in a relay", async () => {
+    const marker = join(tmpdir(), `relay-entry-ran-${crypto.randomUUID()}`);
+    const err = await relayOn({
+      model: { baseURL: "http://127.0.0.1:9/v1", model: "m" },
+      models: {
+        claude: { provider: "anthropic", model: "c", apiKeyCommand: `touch ${marker}; exit 7` },
       },
     });
     expect(err).toContain("kept entry ffffffffffffffff not found");

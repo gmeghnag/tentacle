@@ -37,7 +37,6 @@ import {
   configDirFromEnv,
   loadConfig,
   longToolNameWarnings,
-  modelsPodNotice,
   titleConfigNotice,
   topLevelKeys,
   unknownTypeModelWarnings,
@@ -834,11 +833,6 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       err(
         `[packages] ${config.packages.length} installed package(s) are not loaded in a pod session (the pod uses its own config)\n`,
       );
-    }
-    // Task 3 is local/serve only: this laptop's per-type models are not used in a pod.
-    const podModels = modelsPodNotice(config);
-    if (podModels) {
-      err(`[models] ${podModels}\n`);
     }
   }
 

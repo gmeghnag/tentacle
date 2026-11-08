@@ -17,7 +17,7 @@ import {
   PROMPT_FILENAME,
 } from "./defaults.ts";
 import { type ProjectHooks, discoverProjectHooks } from "./hooks-scan.ts";
-import type { ResolvedModel } from "./models.ts";
+import { type PublishedModels, type ResolvedModel, publishedModelNames } from "./models.ts";
 import {
   type PackageHook,
   type PackageInfo,
@@ -44,7 +44,10 @@ export class ConfigError extends Error {
 }
 
 /** Runs a shell command and returns its stdout. Injectable for tests. */
-export type CommandRunner = (command: string) => Promise<string>;
+export type CommandRunner = (command: string, signal?: AbortSignal) => Promise<string>;
+
+/** How long a key command may run with no terminal to answer it (the relay's launcher waits 60 s). */
+const NO_TERMINAL_KEY_TIMEOUT_MS = 10_000;
 
 /**
  * The user's config file, parsed, validated and with the selected profile folded
@@ -116,11 +119,17 @@ export interface LoadConfigOptions {
    */
   readonly podDaemon?: boolean;
   /**
-   * Run no `models` entry's `apiKeyCommand`; the main one still runs. For a
-   * detached relay: it has no terminal to prompt on and uses only the main key
-   * (docs/feat/models-map.md F-2), so an entry's command must not stop it.
+   * A process with no terminal: the detached relay, which serves the pod's
+   * named model calls (docs/feat/models-map-pod.md D6). The main key as usual.
+   * Of the entries, only the PUBLISHED ones run their command, each bounded by
+   * `timeoutMs`; one that fails, is empty or runs out of time leaves that entry
+   * keyless (the laptop then refuses the name) and is told to `report`, never
+   * stopping the load: nobody is there to answer a prompt.
    */
-  readonly skipModelsKeyCommands?: boolean;
+  readonly modelKeysNoTerminal?: {
+    readonly report: (name: string, line: string) => void;
+    readonly timeoutMs?: number;
+  };
 }
 
 export interface TentacleConfig {
@@ -161,6 +170,11 @@ export interface TentacleConfig {
   readonly subagentModels: Readonly<Record<string, string>>;
   /** `subagents.selectableModels` (`[]` = off). */
   readonly selectableModels: readonly string[];
+  /**
+   * Over the model tunnel: what the laptop published (docs/feat/models-map-pod.md).
+   * Never loaded from a file: only the laptop's carried settings set it.
+   */
+  readonly publishedModels?: PublishedModels;
   readonly maxInlineOutputChars: number;
   /** Days a spilled tool output is kept; `<= 0` = never swept. */
   readonly toolOutputRetentionDays: number;
@@ -477,8 +491,12 @@ function resolveConfigDir(override: string | undefined, env: Env, home: string):
   return join(home, ".config", "tentacle");
 }
 
-async function defaultRunner(command: string): Promise<string> {
-  const proc = Bun.spawn(["/bin/sh", "-c", command], { stdout: "pipe", stderr: "pipe" });
+async function defaultRunner(command: string, signal?: AbortSignal): Promise<string> {
+  const proc = Bun.spawn(["/bin/sh", "-c", command], {
+    stdout: "pipe",
+    stderr: "pipe",
+    ...(signal ? { signal } : {}),
+  });
   const stdout = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   const code = await proc.exited;
@@ -557,6 +575,30 @@ function parseConfigFile(text: string, path: string): unknown {
 }
 
 /**
+ * A key command under a deadline. The abort kills the shell; the race is what
+ * ends the wait, because a grandchild can keep the pipe the read is awaiting
+ * open long after the shell died (docs/feat/models-map-pod.md, Probe 2).
+ */
+async function runBounded(run: CommandRunner, command: string, timeoutMs: number): Promise<string> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+      reject(
+        new ConfigError(`apiKeyCommand did not finish within ${seconds}s (it may need a terminal)`),
+      );
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([run(command, controller.signal), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * The `models` entries' keys (docs/feat/models-map.md A5, owner Q4): every
  * DISTINCT own command runs once, in parallel, here — before any TUI, like the
  * main key (a prompting command never lands on Ink's screen). The main
@@ -564,11 +606,18 @@ function parseConfigFile(text: string, path: string): unknown {
  * model's final key. `run` undefined (a pod daemon load) → no command runs and
  * a command-keyed entry keeps no key (never used over the tunnel). A failure
  * names the entry (sorted first) and carries stderr only, never a key.
+ * `noTerminal` (a detached relay): only the published entries' commands run,
+ * bounded, and a failure leaves those entries keyless and is reported.
  */
 async function resolveModelKeys(
   models: ResolvedConfig["models"],
   main: { readonly apiKey: string | undefined; readonly apiKeyCommand: string | undefined },
   run: CommandRunner | undefined,
+  noTerminal?: {
+    readonly published: ReadonlySet<string>;
+    readonly report: (name: string, line: string) => void;
+    readonly timeoutMs: number;
+  },
 ): Promise<Record<string, ResolvedModel>> {
   const names = Object.keys(models).sort();
   const outputs = new Map<string, string>();
@@ -576,30 +625,54 @@ async function resolveModelKeys(
     outputs.set(main.apiKeyCommand, main.apiKey);
   }
   if (run !== undefined) {
+    const eligible = names.filter((name) => noTerminal?.published.has(name) ?? true);
     const owner = new Map<string, string>();
-    for (const name of names) {
+    for (const name of eligible) {
       const command = models[name]?.apiKeyCommand;
       if (command !== undefined && !outputs.has(command) && !owner.has(command)) {
         owner.set(command, name);
       }
     }
+    /** command → what went wrong, after the `models.<name>.` prefix. */
+    const failed = new Map<string, string>();
     await Promise.all(
       [...owner].map(async ([command, name]) => {
         let key: string;
         try {
-          key = (await run(command)).trim();
+          key = noTerminal
+            ? (await runBounded(run, command, noTerminal.timeoutMs)).trim()
+            : (await run(command)).trim();
         } catch (error) {
+          if (noTerminal) {
+            // Only our own text: another error could quote what the command printed.
+            failed.set(
+              command,
+              error instanceof ConfigError ? error.message : "apiKeyCommand failed",
+            );
+            return;
+          }
           if (error instanceof ConfigError) {
             throw new ConfigError(`models.${name}.${error.message}`);
           }
           throw error;
         }
         if (key === "") {
+          if (noTerminal) {
+            failed.set(command, "apiKeyCommand produced an empty key");
+            return;
+          }
           throw new ConfigError(`models.${name}.apiKeyCommand produced an empty key`);
         }
         outputs.set(command, key);
       }),
     );
+    for (const name of eligible) {
+      const command = models[name]?.apiKeyCommand;
+      const message = command !== undefined ? failed.get(command) : undefined;
+      if (message !== undefined) {
+        noTerminal?.report(name, `models.${name}.${message}`);
+      }
+    }
   }
   const out: Record<string, ResolvedModel> = {};
   for (const name of names) {
@@ -720,7 +793,14 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
   const models = await resolveModelKeys(
     resolved.models,
     { apiKey, apiKeyCommand: resolved.apiKeyCommand },
-    options.podDaemon === true || options.skipModelsKeyCommands === true ? undefined : runCommand,
+    options.podDaemon === true ? undefined : runCommand,
+    options.modelKeysNoTerminal
+      ? {
+          published: new Set(publishedModelNames(resolved)),
+          report: options.modelKeysNoTerminal.report,
+          timeoutMs: options.modelKeysNoTerminal.timeoutMs ?? NO_TERMINAL_KEY_TIMEOUT_MS,
+        }
+      : undefined,
   );
 
   const cwd = resolvePath(expandTilde(resolved.cwd, home));

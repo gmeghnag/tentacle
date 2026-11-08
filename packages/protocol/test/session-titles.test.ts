@@ -89,8 +89,9 @@ describe("session titles (docs/feat/session-titles.md)", () => {
       expect(parsed(params, { request })).toEqual({ request });
       // An unknown purpose is refused at parse (loud), never served as a turn.
       expect(parsed(params, { request, purpose: "summary" })).toBeUndefined();
-      // No model id rides the request: an unknown `model` field is stripped.
-      expect(parsed(params, { request, model: "x" })).toEqual({ request });
+      // Only a `models` NAME rides the call (protocol 19), never an id or a URL.
+      expect(parsed(params, { request, model: "x" })).toEqual({ request, model: "x" });
+      expect(parsed(params, { request, model: "org/model:latest" })).toBeUndefined();
     }
   });
 

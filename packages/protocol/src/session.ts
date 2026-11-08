@@ -13,6 +13,7 @@
  */
 import { z } from "zod";
 import { ContentBlockSchema } from "./content.ts";
+import { ModelNameSchema } from "./model.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
 import { ToolResultSpillSchema } from "./spill.ts";
 import { line } from "./text-line.ts";
@@ -441,6 +442,35 @@ export const IterationLimitSchema = z.union([z.literal(-1), z.number().int().pos
 export const ExecutionModeSchema = z.enum(["sequential", "read-only", "parallel"]);
 
 /**
+ * What a laptop publishes to a pod (docs/feat/models-map-pod.md): names and
+ * numbers. Never a model id, a URL or a key: those stay on the laptop, and the
+ * laptop serves a name only if ITS OWN config publishes it (AGENTS §7).
+ */
+export const PublishedModelSchema = z.object({
+  name: ModelNameSchema,
+  /** The window a child on this model counts against. */
+  contextWindow: z.number().int().positive(),
+  /** Only a selectable model has one: it is listed to the agent. */
+  description: z.string().min(1).max(300).optional(),
+});
+
+/** `subagents.types.<type>.model`. */
+export const PublishedTypeModelSchema = z.object({
+  type: z.string().min(1),
+  model: ModelNameSchema,
+});
+
+export const PublishedModelsSchema = z.object({
+  /** Every published name, sorted. */
+  models: z.array(PublishedModelSchema),
+  /** Sorted by type. */
+  types: z.array(PublishedTypeModelSchema),
+  /** `subagents.selectableModels`, in order. */
+  selectable: z.array(ModelNameSchema),
+});
+export type PublishedModels = z.infer<typeof PublishedModelsSchema>;
+
+/**
  * The settings a laptop carries into a pod. The same bounds as the config file,
  * except the description: the config's cap is 4096 UTF-8 BYTES (checked at load,
  * on the laptop); a wire schema must stay representable as JSON Schema, so here
@@ -469,6 +499,8 @@ export const SessionSettingsSchema = z.object({
   summarizeLargeOutput: z.boolean().optional(),
   toolExecution: ExecutionModeSchema.optional(),
   toolMaxParallel: z.number().int().positive().optional(),
+  /** Absent → no named model: every sub-agent uses the laptop's main model. */
+  publishedModels: PublishedModelsSchema.optional(),
 });
 export type SessionSettings = z.infer<typeof SessionSettingsSchema>;
 
