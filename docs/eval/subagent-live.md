@@ -2,12 +2,37 @@
 
 > **Status:** eval (context + source-verified analysis; owner questions open)
 > **Branch:** none — an `eval` is committed directly to `main` (AGENTS §10). Promotion → the split in *Proposed split*
-> **Type:** eval → feat · **Size:** L overall (split into 8 tasks, none XL) · **Blast:** load-bearing (the agent loop's steering window, the single session path, the model tunnel, protocol — AGENTS §7) · **Suited:** strong model + fresh-context Review for every load-bearing slice
+> **Type:** eval → feat · **Size:** L overall (split into 9 tasks, none XL) · **Blast:** load-bearing (the agent loop's steering window, the single session path, the model tunnel, the persisted event log, protocol — AGENTS §7) · **Suited:** strong model + fresh-context Review for every load-bearing slice
 
 Vocabulary (owner): **agent** = the main model the user chats with;
 **subagent** = the child the agent starts with an `agent_task` tool call.
 
 ## Context
+
+### Refresh 2026-11-08 (after session-log-laptop-store)
+
+*— claude-sonnet-5-5, 2026-11-08*
+
+Written against `main` @ `bd46999` (task 2 of the session log merged as `3031822`;
+`PROTOCOL_VERSION` = 17, `protocol/src/version.ts:7`). What changed in this doc:
+- **A4 rewritten** for the typed event log `<uid>.jsonl`. Key finding: everything the
+  *model* sees about a subagent is already a `ChatMessage`, so it is already a `message`
+  entry. The log needs NO new type for correctness. It does need two small NON-critical
+  lifecycle markers, because the old plan ("derive lost from the note text") breaks after a
+  compaction and cannot recover a report that finished but was not yet delivered.
+- **A7** and **Failure modes** updated for the log (version skew of a new entry type, an
+  older build reading subagent entries, superseded segments); F1, F4, F10 reworded, F12–F14 new.
+- **Stale citations fixed** (A1–A3, A7, C1, C4): `relay.ts:422`→`:430`, `hosted-session.ts:817`→`:812-816`,
+  `subagent.ts:107-122`→`:102-120`, `:251-260`→`:170,:250`, `schema.ts:10-47`→`:10-51`,
+  `remote-client.ts:2452-2466`→`:2376,:2466-2473`, `protocol/model.ts:53-67`→`:60-68`,
+  `wiring.ts:472-475`→`:473-476`. Every other persistence / steering / wake / event citation
+  was re-checked and still holds.
+- **Split**: one new task (log markers + a pure ledger) before the background task; 8 → 9 tasks.
+- **Owner questions (round 2)** at the end: only what the new format opens. Round 1
+  (Q1–Q7, the owner answers and additions) is untouched and binding.
+- The sibling `feat/session-log-serve-store` (in flight, plan approved, not merged) adds no
+  entry type and no `critical` value, and gives the daemon store the same `.jsonl` + a
+  `<uid>.state.json` sidecar. Treat its details as provisional.
 
 *— claude-opus-5-5, 2026-11-07*
 
@@ -40,7 +65,7 @@ key for each subagent type. Built-ins: `general-purpose` → **renamed
 `general`**, and `explore`. It must work in pods too (today the proxy override
 ignores the type's model). Approved shape:
 - a NEW top-level `models` map: name → the same shape as the top-level `model`
-  block (`ModelConfigSchema`, `config/src/schema.ts:10-47`). Unset fields
+  block (`ModelConfigSchema`, `config/src/schema.ts:10-51`). Unset fields
   inherit from `model`;
 - `subagents.<type>.model: "<name>"` must name a `models` entry (unknown → a
   config error);
@@ -71,7 +96,7 @@ The `/btw` side question is superseded or parked by A.
 - Parallelism: spawns overlap in their own lane, capped by
   `effectiveAgentCap(maxParallel, slots)` per round (`agent.ts:1250`,
   `round-plan.ts:217-219`; docs/feat/parallel-agents.md).
-- The child's permission asks carry the PARENT call id (`subagent.ts:107-122`).
+- The child's permission asks carry the PARENT call id (`subagent.ts:102-120`).
 
 ### A2. Background jobs, exits, auto-wake, steering
 
@@ -84,7 +109,7 @@ The `/btw` side question is superseded or parked by A.
   and `kickWake` → `maybeWake` (`:1740-1794`) starts ONE continuation turn
   when `pendingExitCount > 0` and `daemonWakeGate` allows it (`core/src/auto-wake.ts:56-62`).
   The TUI and the detached relay decide their own wakes with `wakeStep/wakeDue`
-  (`auto-wake.ts:24-37`; `cli/src/relay.ts:422`).
+  (`auto-wake.ts:24-37`; `cli/src/relay.ts:430`, `relayWakeDue`).
 - Steering: `HostedSession.enqueue` (`hosted-session.ts:1934-1958`) →
   `Session.enqueue` (`agent/src/session.ts:211`). The loop drains the queue
   only at an iteration boundary (`agent.ts:864-868`) or in the late drain
@@ -97,7 +122,7 @@ Nothing today tells a running tool that a steer arrived. Proposal:
 - `ToolContext` gains `detach?: AbortSignal` (`core/src/tool.ts:89-114`). The
   agent fires it for every in-flight SPAWN call when `Session.enqueue` adds a
   text. This is synchronous: it adds no `await` to the steering window
-  (`hosted-session.ts:817`).
+  (`hosted-session.ts:812-816`).
 - On `detach`, `agent_task` resolves at once with
   `started in background as sa-<n>: <description>. Its report will arrive later
   as a [background] note; you can keep working.` The child keeps running. It
@@ -105,7 +130,7 @@ Nothing today tells a running tool that a steer arrived. Proposal:
 - **Transcript validity holds.** The `tool_call` gets a real `tool_result` in
   the same round (`agent.ts:1835-1836` pushes the tool message). The later
   report is a separate user-role note, like a shell exit's
-  (`agent.ts:1858-1860`). The history-validity invariant
+  (`agent.ts:1859`). The history-validity invariant
   (docs/eval/history-validity-invariant.md) is untouched.
 - Non-spawn calls in the same round still run to completion. Only spawns
   detach. Then the round ends and the steer is drained at the next boundary
@@ -123,7 +148,7 @@ Reuse the exit path; do not build a second one.
   (`agent.ts:1844`). An agent exit's note carries the REPORT itself:
   `[background] sub-agent sa-1 (<description>) finished (end_turn):\n<report>`.
   The model needs no read tool for it. Large reports go through the same
-  spill transform as tool output (`subagent.ts:251-260`).
+  spill transform as tool output (`subagent.ts:170`, `:250`).
 - `pendingExitCount` (`agent.ts:552-554`) counts both kinds, so the daemon
   wake (`hosted-session.ts:1757-1794`) works without a change. The live frame
   for TUI/relay wakes is a new display update `subagent_exit` (see A7). The
@@ -135,23 +160,112 @@ Reuse the exit path; do not build a second one.
 
 ### A4. Persistence and resume
 
-- A child's conversation lives only in memory (`subagent.ts:278-282`). The
-  daemon persists only the PARENT history (`serve` only; pods and the
-  in-process worker never persist — §7). A background subagent cannot survive a
-  daemon restart, and it should not try to.
-- **Proposal: derive "lost" from history; change no format.** A pure function
-  over the parent messages finds each `agent_task` result that says `started in
-  background as sa-N` with no later `[background] sub-agent sa-N` note. At open
-  or reload, each such id gets ONE note: `[background] sub-agent sa-N was lost
-  (the session restarted); its partial work may have had side effects.` The
-  same function serves the laptop store (`--resume`) and the daemon reload. No
-  `DAEMON_RECORD_VERSION` bump. The existing interrupted-subagent wording is
-  the model (`daemon/src/persisted-session.ts:462-473`).
-- `serve`: the daemon keeps running when the TUI detaches, so a background
-  subagent keeps running too and wakes the session (`daemonWakeGate`). Pods: a
-  detached run's relay keeps the pod daemon alive (docs/fix/detach-live.md),
-  so the subagent runs on. A plain `run`/in-process session dies with its TUI,
-  and the "lost" note covers it on resume.
+*— claude-sonnet-5-5, 2026-11-08 (rewrites the 2026-11-07 text, which assumed the
+whole-record JSON store; verified on `main` @ `bd46999`)*
+
+**Where things live now.** The laptop keeps one typed event log per session,
+`<uid>.jsonl` (header line, then `session/log` entries; AGENTS §7). The daemon derives
+the entries (`daemon/src/session-log.ts:56`, `SessionLog`: `commit` / `title` /
+`turnStart` / `turnEnd` / `callStarted` / `checkpoint`) and the laptop writes only the
+entries its client validated (`LogSessionStore`, `session-log-store.ts`). A turn cut
+short is closed when the log is LOADED (`closeAtLoad`, `session-log-file.ts:392`,
+`cutHistory` `:364`), not when saved. The `serve` daemon store moves to the same file in the
+in-flight `feat/session-log-serve-store` (no new type, a `<uid>.state.json` sidecar, a
+reload = `base{reason:"reload"}`). A child's conversation is still memory-only
+(`subagent.ts:278`), and pods and the in-process worker still never persist on the daemon
+side. A background subagent cannot survive a process restart, and it should not try to.
+
+**Finding 1: the model-visible facts are already log entries.** Every one is a
+`ChatMessage` pushed to the parent history and committed like any other
+(`hosted-session.ts:1173`, `recordCut` → `SessionLog.commit` → `message` entry). No new
+type is needed for them:
+
+| Fact | Where it already lands | New log type? |
+|---|---|---|
+| `agent_task` call and its result `started in background as sa-N: …` | assistant + tool `message` entries | no |
+| the report re-entry `[background] sub-agent sa-N (…) finished (…):\n<report>` (A3) | a user-role `message` (flushed at a turn's start, `agent.ts:1844-1866`) | no |
+| `agent_message(id, text)` call + result (B1) | assistant + tool `message` entries | no |
+| user → subagent `[user → sa-N] …` (owner answer Q1) | a user-role note in the parent, at its next turn: a `message` | no |
+| a subagent's `agent_notify` text (B2) | a `[sub-agent sa-N]` user-role `message` (steer or exit note) | no |
+| `agent_kill(id)` call + result (F7) | assistant + tool `message` entries | no |
+| the "lost" note (below) | a `message` appended at load / reload | no |
+
+The text that went INTO the child (`[message from the parent agent] …`, the user's text)
+lives only in the child's memory: it is not persisted (the parent's own `[user → sa-N]`
+note is the durable record, by design of Q1).
+
+**Finding 2: two lifecycle markers ARE needed (non-critical).** The 2026-11-07 plan derived
+"lost" from note text (`started in background as sa-N` with no later `[background] …
+sa-N`). It breaks in two cases the log makes visible:
+1. **Compaction / `context_reset` while a child runs.** A new segment starts at a `base`
+   (`protocol/src/session-log.ts:76`); the summary may drop the `started … sa-3` result, so after a
+   restart nothing says sa-3 existed and the model believes it is still running.
+2. **A child that ENDED but whose report was not yet delivered.** The exit sits in the
+   agent's `pendingExits` (memory only, `agent.ts:507`) until the next turn's start or wake
+   (`maybeWake`, `hosted-session.ts:1757`). If the process dies in between, the report (the
+   work product) is gone. A shell exit can be lost harmlessly; a subagent report cannot.
+
+So the daemon emits, in the same synchronous stretches it already has (a child's
+start/end handler, like `callStarted` at `hosted-session.ts:1632`; never an `await` in the
+steering window):
+
+| `type` | Payload | When | Critical |
+|---|---|---|---|
+| `subagent_background` | `{id, callId, agentType, description}` | the child becomes a background child (launched with `background: true`, or detached by a steer) | **no** (proposed; Q8) |
+| `subagent_end` | `{id, stopReason, report?}` | the child ends (`end_turn`, `error`, `cancelled`, killed); `report` = the same text the exit note will carry, after the spill transform | **no** (proposed; Q8) |
+
+A foreground child needs no marker: it dies with its turn, and the turn's cut already
+labels its unanswered `agent_task` call ("Interrupted: … a sub-agent of this task …",
+`persisted-session.ts:462-473`).
+At each segment start (`base`: a compaction, `context_reset`, a reload, a reseed) the
+daemon re-emits `subagent_background` for every child still running or ended-but-undelivered,
+the way the title is re-logged at every segment start (`session-log.ts` `segment`; laptop-store
+doc P1). A cold read from the last `base` (F5) then knows them without the earlier segment.
+The architectural precedent is `call_started` / `turn_start`: owner decision 4 of
+docs/feat/session-log.md (line 26) already names "sub-agent" as a type to add "when a reader
+needs it". The reader here is `closeAtLoad`.
+
+**Rendering-only: NOT persisted (AGENTS §7).** The `tool_progress` frames
+(`subagent_start/tool/usage/end`, the rolling tail), the `subagents` full-state list, the live
+`subagent_exit` frame, the panel rows, the child's own history and tool calls, a child's
+permission ask (a pending ask is the sidecar's business on `serve`, and a child is lost on a
+reload anyway: F2), the detach signal and the `session/agent_kill` request. The note
+and the markers carry the durable facts; the rest is display. Opening a finished or lost
+subagent after a resume therefore shows its summary line and report only, not its tool
+trail (Q9).
+
+**What `--resume` / a reload shows (honestly closed, like a cut turn).** The load derives,
+from the CURRENT segment only (`currentSegment`, `session-log-file.ts:348`; a superseded
+segment kept with `keepSuperseded` is never consulted, and its unmatched start is not a
+loss):
+- `subagent_background` with no `subagent_end` → **lost**: append ONE user-role note
+  `[background] sub-agent sa-N (<description>) was lost (the session restarted); its partial
+  work may have had side effects.` (a message only: the load writes nothing; the note rides
+  the seed and the next persist, and the daemon's new segment then closes the id).
+- `subagent_end` with a `report` but no `[background] sub-agent sa-N ` note after it in the
+  messages → **undelivered**: append the exit note it would have carried, with the report.
+  No wake (Q10).
+- a note already present closes the id: the derivation is idempotent.
+
+Where it runs (one pure function over a `LogSegment`, next to `closeAtLoad`, so both stores
+share it): the laptop at `--resume` / `attach` load (`closeAtLoad`), and the `serve` daemon at
+reload (after `feat/session-log-serve-store` lands: its loader folds through the same
+`session-log-file.ts`). It runs at LOAD, not at save, like the turn cut. The resumed session is
+seeded from the loaded (closed) projection (`open{messages}`), a superset of the raw disk, so
+the next cold read finds it contained and sets no aside (laptop-store FM 13). The markers of
+the old segment do not travel in a seed (`base{seed}` restates messages only); the note in the
+messages is what closes the id from then on.
+**The id counter** continues from the highest `sa-N` seen in the loaded markers or message
+text (so a new child never reuses an old id the model has seen).
+
+**Runtime, unchanged:** `serve`: the daemon keeps running when the TUI detaches, so a background
+subagent keeps running and wakes the session (`daemonWakeGate`). Pods: a detached run's relay
+keeps the pod daemon alive (docs/fix/detach-live.md), so the subagent runs on. A plain
+`run`/in-process session dies with its TUI, and the "lost" note covers it on resume. A pod
+daemon persists nothing: the laptop's copy holds what the laptop read before the pod died, and
+a report that finished after the last read is gone (the child died with the pod anyway).
+
+*— claude-sonnet-5-5, 2026-11-08*
 
 ### A5. TUI: today's rendering and the rolling tail
 
@@ -194,12 +308,30 @@ Reuse the exit path; do not build a second one.
 | `tool_progress` after the call's result | unchanged | already keyed by call id |
 | `permission_request` from a background child | **changed meaning** | its `toolCallId` names a call that already has a result; it is asked outside any turn (see F2) |
 | `session/agent_kill {sessionId, id}` (panel "stop") | method | an unknown method → `MethodNotFound` |
+| log entry `subagent_background {id, callId, agentType, description}` | log type, **non-critical** (proposed, Q8) | a reader that does not know it SKIPS it (`protocol/src/session-log.ts:12-18`); it never changes the projection (`projectEntry` default branch, `:226-227`) |
+| log entry `subagent_end {id, stopReason, report?}` | log type, **non-critical** (proposed, Q8) | same |
 
-**PROTOCOL_VERSION:** 17 today (`protocol/src/version.ts:7`). The background
+*— claude-sonnet-5-5, 2026-11-08 (the two log rows; the rest of the table is 2026-11-07)*
+
+**Log entry rules (the session-log module, verified).** Each type has a strict (strip)
+schema in `protocol/src/session-log.ts`, joins `KnownLogEntrySchema` (`:166`) and
+`LOG_ENTRY_CRITICAL` (`:181`, a `Record<LogEntryType, boolean>`, so a missing value is a
+type error). The client validates and re-serializes each entry it knows and drops an unknown
+non-critical one before it reaches state or disk (F4), so a pod's `subagent_*` line never
+reaches the laptop file verbatim. Adding a NON-critical type needs no version bump by the
+module's own rule (`:16-18`: only a critical type does). The log's ordering contract
+needs both entries to be emitted inside a synchronous stretch (like `callStarted`).
+Everything else in the table is `session/update` display and does not touch the log.
+
+**PROTOCOL_VERSION:** 17 today (`protocol/src/version.ts:7`; the in-flight
+`serve-store` task adds no bump). The background
 slice bumps it to **18**. The display updates alone are free, but the
 permission ask's changed meaning is not (an older client would attach the prompt
 to a finished row, or the daemon would refuse it). The pod-models slice (C) also
-needs a bump (C5). If both land in one release window, they share it.
+needs a bump (C5). If both land in one release window, they share it. The two log types
+alone would NOT need a bump (non-critical); they ride the bump of the background slice for
+the permission change, and ship earlier at 17 in the ledger slice (see the split).
+If Q8 is answered "critical", the ledger slice itself bumps to 18.
 
 ### B1. `agent_message(id, text)`, one-way
 
@@ -256,7 +388,7 @@ needs a bump (C5). If both land in one release window, they share it.
 - Unknown names fail at load (owner rule): a `subagents.types.X.model` that is
   not in `models` is a config error. A type that does not exist (no built-in,
   no `agents/X.md`) gets a warning only, since `agents/` is loaded later
-  (`wiring.ts:472-475`).
+  (`wiring.ts:473-476`).
 - Wiring: `modelFor` (`wiring.ts:481`) today takes a model id on the SAME
   endpoint (`cli/src/model-provider.ts:13-29`). It becomes
   `modelFor(type) → provider`, cached per `models` name.
@@ -292,8 +424,8 @@ beats the frontmatter. Precedence: config type → frontmatter → `model`.
 
 - Today in a pod, `modelOverride` (the tunnel) wins for every type
   (`wiring.ts:287-291,481`). The laptop serves a call with its main model, or
-  with the title model for `purpose:"title"` (`client/src/remote-client.ts:2452-2466`;
-  `protocol/src/model.ts:53-67`).
+  with the title model for `purpose:"title"` (`client/src/remote-client.ts:2376,2466-2473`;
+  `protocol/src/model.ts:60-68`).
 - Design: `ModelStreamParams` (and the chunked, countTokens and slots params)
   gain `model?: string`, a **`models` NAME**, never an endpoint, id or key. The
   pod daemon builds one tunnel per name (`cli/src/serve.ts:408`,
@@ -352,10 +484,12 @@ several endpoints:
   session's daemon ends: the child is aborted with it, and on resume the
   "lost" note (A4) tells the model. The quit confirm should list the running
   children (Q7).
-- **F4 Resume / daemon reload.** The child is gone (memory only). The note is
-  derived from history (A4), so it converges on the laptop store and the
-  daemon record alike, and is never written twice: the note itself closes the
-  id.
+- **F4 Resume / daemon reload.** *(reworded 2026-11-08, claude-sonnet-5-5)* The child is
+  gone (memory only). The "lost" (or "undelivered report") note is derived at LOAD from the
+  current segment's `subagent_background` / `subagent_end` markers (A4), by one pure
+  function shared by the laptop's `closeAtLoad` and the daemon reload. It is never written
+  twice: the note, once in the messages, closes the id, and a seed restates messages only.
+  A crash in the middle of the load changes nothing on disk (the load writes nothing).
 - **F5 Pod.** The child runs in the pod daemon. Its model calls go through the
   tunnel, by name (C4). When the tunnel drops, the child's model call fails like
   the parent's (`proxy-model.ts`) and it exits with `error`. Its exit note says
@@ -378,14 +512,55 @@ several endpoints:
   is existing behaviour, kept.
 - **F10 The session closes or is archived.** `close` disposes jobs
   (`hosted-session.ts:2122`), and it must abort the agent-job registry too.
-  The record is archived with the "lost" ids derivable.
+  The record is archived with the "lost" ids derivable *(2026-11-08: from the log's
+  markers; an archived `serve` session is only reloaded by an explicit
+  `session/open{reopen}`, so the lost note is written then, not at close)*. The
+  `subagent_end{stopReason:"cancelled"}` of the aborted child is emitted before the close
+  persist, so a close does not leave a start without an end.
 - **F11 Agent rebuilt by a settings sync.** The registry carries over like
   `jobs` (`wiring.ts:300-305`), and unflushed agent exits move through
   `retire/adoptExits` (`agent.ts:540-559`).
 
+*Added 2026-11-08 for the event log — claude-sonnet-5-5:*
+
+- **F12 Version skew of a new entry type.** The two types are non-critical, so a build that
+  does not know them SKIPS them: it loses only the lost-note derivation, never the
+  projection. On the wire this needs the same `PROTOCOL_VERSION` anyway (the background slice
+  bumps it for the permission meaning); an older laptop with a same-version newer pod daemon
+  drops the unknown lines before state (F4). A **critical** type would make every older
+  build refuse the whole log: that is why Q8 recommends non-critical and why no critical
+  value is decided here.
+- **F13 An older build reads a log that has subagent entries.** A post-task-2 build without
+  these types: `parseLogFile` skips and counts the non-critical lines (`session-log-file.ts`,
+  laptop-store FM 15); an APPEND leaves them as they are; a REPLACE that would drop them
+  sets the bytes ASIDE (laptop-store Q2) — an extra `.aside` file after an old build writes,
+  never data loss. Messages and notes are ordinary entries, so history and the report are
+  intact. What the old build cannot do is turn an open marker into a lost note: the resumed
+  model is told nothing, which is today's behaviour for a subagent. Pre-public, one build:
+  noted in the changelog, no shim.
+- **F14 Superseded segments with subagent history.** `keepSuperseded` (default off) keeps
+  the pre-compaction segment, markers and notes included. Only the LAST segment decides
+  "lost" (A4); a superseded segment's unmatched `subagent_background` is NOT a loss (the
+  daemon re-emits the running ones at the new segment's start). With the option off, the
+  superseded segment is dropped, and the re-emission is what keeps a running child known. A
+  fork aside holds a held copy, never loaded, never consulted.
+- **F15 Report finished, process dies before delivery.** The exit is in `pendingExits`
+  (memory); the daemon has logged `subagent_end{report}`. On `serve` the daemon persists it
+  at the next committed boundary; on a pod the laptop has it only if it read the log in
+  between. At load: undelivered → the note is delivered with the report, without a wake (Q10).
+- **F16 A hostile pod writes a marker.** A forged `subagent_background` makes the next
+  resume say "sa-9 was lost", or a forged `subagent_end{report}` injects text into the
+  model's context at load. Both are pod-supplied history, the same class as a forged
+  message (AGENTS §7: a pod is not trusted; nothing durable from a pod prompt). The laptop
+  keeps only schema-valid, size-bounded entries, and the report is capped like the exit
+  note. Accepted, as the forged-lineage class of session-log task 1.
+- **F17 Id reuse after a reload.** The counter continues from the highest `sa-N` in markers
+  and message text (A4); without it, a new `sa-1` would collide with a note the model
+  already read.
+
 ## Proposed split into tasks
 
-*— claude-opus-5-5, 2026-11-07*
+*— claude-opus-5-5, 2026-11-07; rows 5–9, the Order and "Why a separate #5" paragraphs: claude-sonnet-5-5, 2026-11-08*
 
 In dependency order. Each one ships alone.
 
@@ -395,15 +570,28 @@ In dependency order. Each one ships alone.
 | 2 | `feat/subagent-tail-view` | S | contained | pure `subAgentView` rolling tail (A5). A weaker model may execute it |
 | 3 | `feat/models-map` | M | cross-module | `models`, `subagents.types.<t>.model`, resolution, the C3 rule, per-endpoint slot limiter (C1, C3, C6). Local/serve only; in a pod a type model is still ignored, as today, with a daemon-log notice |
 | 4 | `feat/models-map-pod` | M | load-bearing | `model` name on `model/stream*`/`slots`, laptop allowlist, carry `type→name` (C4, C5). Bumps `PROTOCOL_VERSION` |
-| 5 | `feat/subagent-background` | L | load-bearing | `detach` seam, agent-job registry, exit note with report, own controller, cap, background ask (F2), "lost" derivation, `subagent_exit` + `subagents` updates, `agent_kill` tool/method. Bumps `PROTOCOL_VERSION`. TUI: a minimal footbar count only |
-| 6 | `feat/subagent-panel` | M | cross-module | footbar list + openable panel on `tree-panel` (A6) |
-| 7 | `feat/agent-message` | M | load-bearing | one-way `agent_message` (B1): child steering drain |
-| 8 | `feat/agent-message-two-way` | M | load-bearing | `agent_notify`, wake, guard (B2, B3), behind the Q3 switch |
+| 5 | `feat/subagent-ledger-log` | M | load-bearing | **new 2026-11-08.** The persistence contract of a background child, with no process behind it yet: a pure `AgentJobLedger` (running / ended / delivered, the `sa-N` counter, the re-emission set at a segment start), the two non-critical log types (A4/A7) with `SessionLog` methods + hooks, the shared load derivation (lost / undelivered, one pure function next to `closeAtLoad`, current segment only) for the laptop load AND the daemon reload, tests per F12–F17. Touches the §7 persistence invariant and a shared fold, so load-bearing, but the diff is small and each part is pure. No `PROTOCOL_VERSION` bump if Q8 = non-critical |
+| 6 | `feat/subagent-background` | L | load-bearing | `detach` seam, session-level registry (the runtime around task 5's ledger), exit note with report, own controller, cap, background ask (F2), `subagent_exit` + `subagents` updates, `agent_kill` tool/method; it EMITS task 5's entries. Bumps `PROTOCOL_VERSION` to 18. TUI: a minimal footbar count only. Its former "lost derivation" moved to task 5 |
+| 7 | `feat/subagent-panel` | M | cross-module | footbar list + openable panel on `tree-panel` (A6); user→subagent `[user → sa-N]` (owner Q1) reuses #8's inbox, so that line lands with #8 |
+| 8 | `feat/agent-message` | M | load-bearing | one-way `agent_message` (B1): child steering drain; the user's panel text to a child (`[user → sa-N]` note in the parent, a plain `message`, no new type) |
+| 9 | `feat/agent-message-two-way` | M | load-bearing | `agent_notify`, wake, guard (B2, B3), behind the Q3 switch |
 
-**Go first:** #1 (tiny, unblocks C naming). Then #2 (visible at once,
-independent). #5 is the core of A. It depends on nothing in C, so the owner
-may order it before #3–#4. #7 needs #5 (only background ids are addressable).
-#8 needs #7.
+**Order (changed 2026-11-08).** Rename stays first (#1: the code still says
+`general-purpose` at `subagent.ts:58`, `task.ts:80`; nothing in the log changes that).
+Then #2 (visible at once, independent). #3–#4 are unaffected by the log (a model name is not
+persisted; the entries carry no model). **#5 waits for `feat/session-log-serve-store` to
+merge**: its daemon-reload half edits the loader that task rewrites
+(`persisted-session.ts` / the shared `session-log-file.ts`), and the plan says "restart
+restates the saved point then appends fixes as normal entries", which is exactly where the
+lost note goes. #6 needs #5. #8 needs #6 (only background ids are addressable), and #9 needs #8.
+#7 needs #6; it may ship before #8 as read-only (its write-to-child half is #8).
+
+**Why a separate #5 and not part of #6.** Splitting #6 along "log vs runtime" leaves no
+dead code: the ledger is the state machine #6 plugs real children into, and its
+derivation is testable with plain arrays (like `SessionLog` was). Folded into #6, one task
+would hold a new seam in the agent loop, a protocol bump, the registry, the cap, the ask and
+a persistence contract: an XL by AGENTS §10, which has no XL. If the owner prefers one task,
+the cut line is exactly this one.
 
 ## Owner questions
 
@@ -413,7 +601,7 @@ may order it before #3–#4. #7 needs #5 (only background ids are addressable).
 (a) No, panel is read-only; (b) yes, the text goes to the child as with
 `agent_message`, and the parent is told at its next turn
 (`[user → sa-1] …`); (c) yes, and the parent is never told.
-**Recommend (b)**, after #7, reusing its inbox. The parent's context stays
+**Recommend (b)**, after #7 (renumbered #8 on 2026-11-08), reusing its inbox. The parent's context stays
 truthful about what steered its child.
 
 **Q2. The background subagent cap.**
@@ -473,3 +661,56 @@ quit silently, and the "lost" note covers it on resume.
   - Precedence: the call's `model`, then `subagents.types.<t>.model`, then the `agents/*.md` `model`, then the top-level `model`.
   - In a pod the laptop checks the name against the same list before using a key (the task 4 allowlist).
   - It belongs to `feat/models-map` (task 3). Split it out only if that task grows past M.
+
+## Owner questions (round 2)
+
+*— claude-sonnet-5-5, 2026-11-08*
+
+Only what the new on-disk format (`<uid>.jsonl`, the typed `session/log`) really opens. Round 1
+(Q1–Q7) is closed and untouched. Q8–Q12 can be answered in one batch; AGENTS §10 says the
+owner decides every `critical: true` type, so Q8 is the one that gates task 5.
+
+**Q8. `critical` for the two new log types (`subagent_background`, `subagent_end`).**
+(a) both NOT critical: an older build skips them (F12, F13); (b) `subagent_background` critical:
+an older build refuses any log that holds a background child; (c) both critical.
+**Recommend (a).** Neither changes the projection (`projectEntry` leaves them alone), so
+nothing is lost by skipping them, and a critical type bumps `PROTOCOL_VERSION` and locks out
+older builds. I decide no `critical: true` here: this question is the only one that would.
+
+**Q9. Persist a subagent's tail / tool trail so it can be opened after a resume?**
+(a) No: only the lifecycle markers and the report are durable, an opened finished/lost
+subagent shows its summary line and report; (b) yes, a `subagent_tool` entry per step (a new
+type, volume = every child tool call).
+**Recommend (a).** The tail is rendering-only (AGENTS §7: never persist rendering-only events),
+the child's history is memory-only today, and (b) would grow the log by every child step.
+
+**Q10. At load, a lost or undelivered subagent is told to the model with a wake?**
+(a) Write the note into the loaded history, NO wake: it is read at the user's next turn;
+(b) queue it as a pending exit that wakes the resumed session at once.
+**Recommend (a).** A resume is a human act, and an auto-wake on open would start a model turn
+nobody asked for (the wake gate already refuses after a bad end, `auto-wake.ts:45,60`).
+
+**Q11. Does `subagent_end` carry the report text?**
+(a) Yes, capped by the same spill transform as the exit note (A3): a finished-but-undelivered
+report survives a daemon restart; (b) no: a report not yet delivered when the process dies is
+lost, and the load says so.
+**Recommend (a).** The report is the work product; losing it silently to a crash a minute
+after the child finished is the worst outcome of the feature. Cost: the report lives twice in
+the log (entry and note), bounded by the spill cap.
+
+**Q12. Order: task 5 (`feat/subagent-ledger-log`) after `feat/session-log-serve-store` merges?**
+(a) Yes, wait; (b) no, do the laptop half first and the daemon-reload half after.
+**Recommend (a).** The daemon-reload half edits the loader that task rewrites (and deletes
+`DAEMON_RECORD_VERSION`); doing both at once is the parallel-edit mess AGENTS §10 forbids.
+Tasks #1–#4 depend on neither, so the wait costs nothing.
+
+### Owner answers — round 2 (2026-11-08)
+
+*— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-08*
+
+All follow the recommendation:
+- **Q8: non-critical.** `subagent_background` and `subagent_end` are non-critical log types; an older build skips them. No `PROTOCOL_VERSION` bump for task 5.
+- **Q9: (a).** Only the lifecycle markers and the report are durable; the tail / tool trail is rendering-only and is not persisted.
+- **Q10: (a).** At load, a lost or undelivered subagent is written as a note into the loaded history, with NO wake; the model reads it at the user's next turn.
+- **Q11: (a).** `subagent_end` carries the report, capped by the same spill transform as the exit note.
+- **Q12: moot.** `feat/session-log-serve-store` merged on main (79ccf1b) before task 5 starts; task 5's Implementation re-verifies this eval's daemon-reload citations against the merged code (AGENTS §8).
