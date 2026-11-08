@@ -346,3 +346,325 @@ first set only `tool.status: "ok"` — the block still drew `└─ …`, becaus
 sub-agent's own flag, not the tool row's. That is the fixture being wrong, not the code, and
 the view-model test pins the distinction.
 
+## Review (fresh-context, adversarial, code + UI/UX)
+
+*— claude-opus-5-5, 2026-11-08 — different model from the executor (deepseek-v4.1-flash). Updated
+the same day with real frames.*
+
+### Verdict: **REQUEST-CHANGES**
+
+The running tail is right at every width tried. A FINISHED sub-agent still hides its newest step
+(H1, now seen in real frames), which is the defect this task exists to remove. M1–M3 are cheap and
+should ride the same fix round.
+
+**What the real frames changed:** H1 and M1–M4 are all **confirmed, none corrected**. One new LOW
+(L4). One statement of mine was wrong and is fixed below: a one-line report does not add rows when
+the block ends, because H1 collapses it.
+
+### Frames: how they were captured, and their limits
+
+`bun .tentacle/tmp/subagent-tail-view/review-frames.ts` (gitignored): real `applyEvent` events →
+`itemLines` → `wrapLines` → an Ink frame from `ink-testing-library`; SGR stripped, a row over the
+width would be flagged `<< OVER` (none was).
+
+| Asked (item 2) | Result |
+|---|---|
+| 2 and 12 steps, 80/60/46 cols | OK, below. Short labels, so 60 matches 80 and 46; the cut was exercised at 46 and 80 only |
+| Running vs done | OK while running; done → H1 |
+| Error / cancelled | M3: same text as a clean end |
+| Ctrl+O | Tail → whole trail, OK; long labels → M2. Driven by `expandAll`, the value the App passes, not by a keypress |
+| Two sub-agents, interleaved | No mixing, counts right. Reducer level: interleaved events, not two concurrent App calls |
+| Very long description | Header cut on one row, OK |
+| Very long type | No wrap, but the counts are cut (L4) |
+| CJK / emoji | Cut by cells at 46, no row over the width |
+| Height | Stable past step 5, below |
+
+```
+=== 2 steps running @46 (rows 5) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 2 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ Read packages/f2.ts
+|  └─ …
+
+=== 12 steps running @46 (rows 9) ===     (80 and 60: identical)
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  ├─ Read packages/f12.ts
+|  └─ …
+
+=== Ctrl+O running 12 @80 (rows 16) ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  ├─ Read packages/f1.ts
+|  ├─ … (f2 to f11, one row each)
+|  ├─ Read packages/f12.ts
+|  └─ …
+
+=== parallel interleaved @80 (rows 17) ===
+|⏺ Agent scan the auth module
+|⎿ ◆ explore · 8 tool uses
+|  … +3 earlier
+|  ├─ Read a6.ts
+|  ├─ Read a8.ts
+|  ├─ Read a10.ts
+|  ├─ Read a12.ts
+|  └─ Read a14.ts
+|⏺ Agent migrate tests to bun
+|⎿ ◆ general · 8 tool uses
+|  … +3 earlier
+|  ├─ Edit b7.ts
+|  ├─ Edit b9.ts
+|  ├─ Edit b11.ts
+|  ├─ Edit b13.ts
+|  ├─ Edit b15.ts
+|  └─ …
+
+=== wide chars @46 (first rows) ===
+|⎿ ◆ explore · 4 tool uses
+|  ├─ Read 日本語のとても長いファイル名がここ…
+|  ├─ $ echo 🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉…
+
+heights @80: steps 0..12 = 3,4,5,6,7,8,9,9,9,9,9,9,9 · done=8 · +1-line report=8
+heights @46: steps 0..12 = 3,4,5,6,7,8,9,9,9,9,9,9,9 · done=8 · +1-line report=8
+```
+
+Height: it grows by one per step up to 5, by one more when `… +1 earlier` appears at step 6, then
+**stays at 9**. The end drops the `└─ …` row (9 → 8). The report adds no row today only because of
+H1, so the H1 fix will make the block grow at the end, by the report's collapsed preview.
+
+### Findings
+
+#### HIGH
+
+**H1. A finished sub-agent's newest step, closing row and report are hidden by the generic
+collapse.** `plainToolBody` returns `[...tree, ...report]` (`render-lines.ts:438`). `toolLines`
+then cuts any body over 8 rows to its first 6 (`:590-592`, `DEFAULT_THRESHOLD`/`DEFAULT_PREVIEW`,
+`:61-62`). `run` never returns an empty report (`packages/agent/src/subagent.ts:304-312`), so a
+finished child with ≥ 6 steps always has a body of at least 7 + 1 blank + 1 report = 9 rows.
+**Confirmed by the real frame** (compare the same child with no report, which a real child shows
+only between `subagent_end` and its `tool_result`):
+
+```
+=== 12 steps DONE end_turn, 1-line report @80 (rows 8) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  … +3 more lines · ctrl+o to expand
+
+=== 12 steps DONE end_turn, no report @80 (rows 8) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  └─ Read packages/f12.ts
+```
+
+Step 12, the `└─` close and the report are gone, and two different cut markers sit in one block.
+A 12-line report gives the same frame with `… +14 more lines`.
+That contradicts the eval's A5 ("With `done` it keeps the last rows as well") and the owner's
+decision. It also hides the only cancellation signal (M3). The test missed it because the finished
+fixture has no `resultText` (`render-lines.test.ts`, "a finished sub-agent's tail closes…").
+The same mechanism makes the running case correct only by arithmetic: head + `earlier` + 5 + `└─ …`
+= 8 = the threshold, so raising `SUBAGENT_TAIL_ROWS` to 6 (owner Q17) would collapse the live tail
+too. The Execution's "no longer collides" holds only for the running block at exactly 5.
+**Fix:** a sub-agent body is exempt from the generic cut for its tree, and only the REPORT
+collapses (with the existing `… +N more lines · ctrl+o to expand`). Red test: 12 steps, done, a
+multi-line report: `Read f12.ts` and `└─` are present; and one with the tail constant at 6.
+
+#### MEDIUM
+
+**M1. `hidden` contradicts the head past the 50 cap, and will be wrong for the background row.**
+`subagent-view.ts:61` counts `activities.length - rows.length`. At 60 steps the block reads
+`60 tool uses` then `… +45 earlier` with 5 rows: 50, not 60 (the test at
+`subagent-view.test.ts` pins 45 as correct). "Honest about what state holds" is not honest to the
+reader. **Confirmed by the real frame:**
+
+```
+=== 60 steps running @80 (rows 9) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 60 tool uses
+|  … +45 earlier
+|  ├─ Read packages/f56.ts
+|  ├─ Read packages/f57.ts
+|  ├─ Read packages/f58.ts
+|  ├─ Read packages/f59.ts
+|  ├─ Read packages/f60.ts
+|  └─ …
+```
+
+It is also the L4 reuse problem: 6a's wire row carries `tail: last ≤ 8 labels` plus
+`toolUses` (review H1), so `hidden` would be 3 for 19 tool uses, against mockups 2 and 5
+(`… +17 earlier`). **Fix:** `hidden = Math.max(sub.toolUses, sub.activities.length) - rows.length`,
+floored at 0; both counters are per `tool_start` (`subagent.ts:286-287`, `state.ts`). Update the
+60-step test to 55.
+
+**M2. Ctrl+O still truncates labels.** `render-lines.ts:296` cuts by cells whether or not
+`expanded` is set. Before this diff a long label wrapped in full, so the view documented as the
+escape hatch can no longer show a long shell command (labels run up to 200 chars,
+`client/src/mapping.ts:84`). The "Ctrl+O keeps the whole kept trail" test has only short labels.
+**Confirmed by the real frame** (the label is 170 characters long):
+
+```
+=== Ctrl+O running, long label @46 (rows 5) ===
+|⏺ Agent
+|  │ find callers of parseConfig
+|⎿ ◆ explore · 1 tool use
+|  ├─ $ bun test packages/config/src/a-very-l…
+|  └─ …
+```
+
+**Fix:** `expanded ? label : truncateCells(label, width - 3)`; `wrapLines` folds it. Red test: one
+long label, `expandAll: true`, the whole text present.
+
+**M3. A failed or cancelled child looks like a success.** `done.stopReason` is recorded and never
+read: `render-lines.ts` tests only `view.done !== null`. `packages/tools/src/task.ts:118-125`
+returns no `isError` for `cancelled`, `max_iterations` or a `turn_end` reason of `error`, so the
+tool row is `ok` and the block matches a clean run. The only trace is the `_(sub-agent cancelled)_`
+note at the END of the report, which H1 hides. **Confirmed by the real frames:** `stopReason`
+`error`, `cancelled` and `end_turn` give the same eight rows, character for character, each ending
+`… +3 more lines · ctrl+o to expand`:
+
+```
+=== 12 steps stopReason=cancelled, ok report @80 (rows 8) ===
+|⏺ Agent find callers of parseConfig
+|⎿ ◆ explore · 12 tool uses
+|  … +7 earlier
+|  ├─ Read packages/f8.ts
+|  ├─ Read packages/f9.ts
+|  ├─ Read packages/f10.ts
+|  ├─ Read packages/f11.ts
+|  … +3 more lines · ctrl+o to expand
+```
+
+SGR is stripped, so a colour difference is not visible here. A thrown child (`isError`) can differ
+by its bullet colour; a `cancelled` child's tool row is `ok`, so it has no such difference.
+**Fix:** see Q2.
+
+**M4. Undeclared drift from mockup 1, which is binding.** The mockup closes with
+`└─ 19 tool uses · 12.4k tok · 1m12s`; the build keeps the totals on the `◆` head and closes on the
+last step or `└─ …`, as every frame above shows (**confirmed**). The Context cites "then the
+closing row" and the Execution's drift list omits it. The glyphs (`├─` for `│`) are declared illustrative, so they are fine. **Fix:** see Q1, and
+record the outcome in Execution.
+
+#### LOW
+
+- **L1. False premise in a comment and a test name.** `state.ts:73` and "done with no stop reason
+  (an older daemon's frame)" claim such a frame yields `done` with no reason. `client/src/mapping.ts:129`
+  DROPS a `subagent_end` missing `stopReason`, and `AgentEvent.stopReason` is required
+  (`agent.ts:264-269`). A finished child always has one; `done: {}` is unreachable. Fix the wording,
+  or simplify `SubAgentOutcome.stopReason` to required.
+- **L2. Test gaps.** No wide-character label and no two interleaved sub-agents are driven through
+  the block (the second was already asked of `docs/feat/subagent-progress-wire.md`).
+  `expect(joined).toContain("…")` (`render-lines.test.ts`, 46-col test) is weak: the next assertion
+  does the work.
+- **L3. Expect a small adapter in 6a, no rebuild.** `subAgentView` takes `SubAgentProgress`, while
+  review H1's wire row names `type`/`tail`. The input could be narrowed then.
+- **L4 (new, from the frames). A long type cuts the counts, not the type.** `render-lines.ts:287`
+  cuts the joined string from the right, so the numbers go first. At 80 columns:
+  `⎿ ◆ an-extremely-long-sub-agent-type-name-that-goes-on-and-on-forever · 7 tool…`; at 46 the
+  counts are gone: `⎿ ◆ an-extremely-long-sub-agent-type-name-th…`. It needs a very long
+  user-defined type name, so it is rare. **Fix:** cut `agentType` alone to the room the counts leave.
+
+### 1. The view-model (L4)
+
+`{head, hidden, rows, done}` with `maxRows` is the shape L4 asked for, and it is React-free. Once
+M1 is fixed, 6a, 7 and focus can reuse it. What they will add is additive and comes from the
+registry, not from this object: `sa-N`, `state` (`⚠ waiting for permission`), `startedAt`.
+- Running step vs finished steps: not missing here. `subagent_tool` fires only on `tool_start`
+  (`subagent.ts:286-287`), so the data does not exist; while `done === null` the last row is the
+  running one by construction.
+- Error row: there is no per-step error event, so `done.stopReason` is the right level.
+- Stable id: a row has none, and needs none in a line renderer; the panel selects the sub-agent.
+- AGENTS §7: holds. `render-lines.ts` is the framework-free layer, and what remains there is
+  grammar and fitting. The `└─`/`├─` choice is presentation.
+
+### 2. Wording
+
+`… +7 earlier` follows mockup 1, but it is the only cut marker with no Ctrl+O hint, though Ctrl+O
+does reveal those rows. In a finished block it now sits two rows above `… +3 more lines · ctrl+o
+to expand` (H1 frame), so the two wordings are visibly inconsistent. See Q3.
+
+### 3. State
+
+Correct: `stopReason: event.stopReason` (`state.ts`, `subagent_end`), from `agent.ts:319` and
+`client/src/mapping.ts:128-136`. Nothing is persisted: `.sub`/`activities` are read only in
+`state.ts`, `render-lines.ts` and `subagent-view.ts`, and `resume.ts` has no such field. No log
+entry or protocol schema is in the diff.
+
+### 4. Tests and mutation
+
+The executor's tests bite on what they pin. My mutation, `render-lines.ts:295`, `const last = false
+&& …` (the close of a finished block): `bun test packages/tui/test/render-lines.test.ts
+packages/tui/test/subagent-view.test.ts` → **87 pass, 2 fail** ("a finished sub-agent's tail
+closes…", "a sub-agent whose report spilled"). Restored by `cp`; `shasum` before and after
+`e8f6e4075f8f907735ad9e8bfc858c94d43789b6`. The App frame test's own mutation record is the
+executor's and was not re-run.
+
+### 5. Gate (2026-11-08, this worktree)
+
+- `bunx tsc --noEmit` → exit 0.
+- `bunx biome check .` → 757 files, no fixes.
+- `bun test packages` → **5696 pass, 0 fail, 3 skip**, 62721 `expect()`, 388 files, 5699 tests.
+
+### Premise table
+
+| Premise | Result |
+|---|---|
+| Activities newest-last, cap 50 | TRUE (`SUB_ACTIVITY_CAP`, now `state.ts:195`; append at the `subagent_tool` case) |
+| `subagent_end` carries `stopReason`; reducer dropped it | TRUE (`agent.ts:264-269`, `:319`; diff) |
+| `truncateCells` at `cells.ts:38` | TRUE |
+| Body width passed down (`cols - INDENT - 1`) | TRUE (now `render-lines.ts:566`) |
+| Older daemon gives `done` with no reason | **FALSE** (L1) |
+| "The tail no longer collides with the generic body collapse" | **FALSE once done** (H1, real frame) |
+| Repro on `main` | **NOT RE-RUN**: it needs the pre-diff code, and the diff shows the old `sub.activities.map` directly |
+
+### Attacks tried
+
+1. Finished block with a report → **found H1** (real frame).
+2. More steps than the cap → **found M1** (real frame).
+3. Ctrl+O with a long label → **found M2** (real frame).
+4. Cancelled/error outcome → **found M3** (real frames).
+5. Multi-line or tabbed label wrapping the frame → nothing reachable. The repro feeds the reducer
+   directly, and a raw tab label DID wrap at 46 columns (`|and more an…` on a row of its own). On the
+   real path `progressText` turns control characters into spaces first
+   (`client/src/mapping.ts:90-93`), and every runtime goes through it (AGENTS §7), so that frame is
+   an artefact of the repro.
+6. Stale `└─ …` after Esc → nothing new: `run` emits `subagent_end` on both paths
+   (`subagent.ts:300,303`).
+7. A per-call click expanding the tail → nothing: the real frame keeps `… +7 earlier` and the tail,
+   and shows the command row only.
+8. CJK and emoji labels at 80 and 46 → nothing: cut by cells, no row over the width.
+9. A very long type and description → **found L4**; the description is fine.
+10. Two interleaved sub-agents → nothing: each block has its own rows and counts.
+
+### Executor behaviour
+
+Solid on the view-model and honest about its two self-corrections. Its weak spot is the fixtures:
+the finished-state test used no report, so the common end state went unexercised, and its
+in-context Review re-walked its own failure-mode list without attacking it. The mockup drift went
+unrecorded.
+
+### Owner questions
+
+- **Q1. Totals: on the head (as built) or on a closing row (mockup 1)?** Recommend **the head**: it
+  costs no row and the totals stay visible while running. Amend the mockup rather than the code.
+- **Q2. How should a non-clean end show?** Recommend closing with one row only when it is not
+  `end_turn`, e.g. `└─ ✗ cancelled` or `└─ ✗ error`, computed in the view-model. Clean ends stay as
+  they are.
+- **Q3. Wording:** Recommend `… +7 earlier · ctrl+o to expand`: one grammar with the existing hint,
+  33 cells with the indent, so it fits at 46 columns. It extends mockup 1's text, hence the question.
+
