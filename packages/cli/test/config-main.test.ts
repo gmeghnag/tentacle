@@ -1,0 +1,461 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { USAGE, cliMode } from "../src/flags.ts";
+import { main } from "../src/index.ts";
+
+/** Piped stdin and stdout, whatever terminal runs the suite (CliIO.terminal). */
+const NO_TERMINAL = { stdin: false, stdout: false };
+
+let dir: string;
+let configDir: string;
+let configPath: string;
+const savedConfigDir = process.env.TENTACLE_CONFIG_DIR;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "tentacle-config-main-"));
+  configDir = join(dir, "cfg");
+  configPath = join(configDir, "config.jsonc");
+  process.env.TENTACLE_CONFIG_DIR = configDir;
+});
+
+afterEach(() => {
+  const key = "TENTACLE_CONFIG_DIR";
+  if (savedConfigDir === undefined) delete process.env[key];
+  else process.env.TENTACLE_CONFIG_DIR = savedConfigDir;
+});
+
+interface Run {
+  readonly code: number;
+  readonly out: string;
+  readonly err: string;
+}
+
+async function run(
+  args: readonly string[],
+  io: { stdin?: NodeJS.ReadableStream; readSecret?: (prompt: string) => Promise<string> } = {},
+): Promise<Run> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = await main(["bun", "cli", "config", ...args], {
+    out: (text) => out.push(text),
+    err: (text) => err.push(text),
+    terminal: NO_TERMINAL,
+    ...(io.readSecret !== undefined ? { readSecret: io.readSecret } : {}),
+  });
+  return { code, out: out.join(""), err: err.join("") };
+}
+
+/** The file's bytes, hashed — T8's "nothing was written" observable. */
+const sha = (path: string): string =>
+  createHash("sha256").update(readFileSync(path, "utf8")).digest("hex");
+
+/** A commented file, the shape the scaffold leaves behind. */
+const FIXTURE = `{
+  // tentacle configuration.
+  //
+  // Uncomment a setting to override the default shown in the comment.
+
+  "model": {
+    // Model id sent to the endpoint.
+    // "model": "qwen3",
+  },
+
+  // Max model/tool iterations per turn.
+  // "maxIterations": 48, // -1 = unlimited
+}
+`;
+
+function seeded(): void {
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(configPath, FIXTURE);
+}
+
+describe("T8: refused before writing — the file's bytes are unchanged", () => {
+  test("a type error", async () => {
+    // Mutation: validate after the write → the file's sha changes here.
+    seeded();
+    const before = sha(configPath);
+    const { code, out, err } = await run(["subagents.maxParallel=abc"]);
+    expect(code).toBe(1);
+    expect(out).toBe("");
+    expect(err).toContain("integer");
+    expect(err).toContain("subagents.maxParallel");
+    expect(sha(configPath)).toBe(before);
+  });
+
+  test("an unknown key, with the nearest suggestion", async () => {
+    seeded();
+    const before = sha(configPath);
+    const { code, err } = await run(["modle.model=x"]);
+    expect(code).toBe(1);
+    expect(err).toContain("unknown config key");
+    expect(err).toContain("did you mean");
+    expect(err).toContain("model.model");
+    expect(sha(configPath)).toBe(before);
+  });
+
+  test("a cross-field violation on the WHOLE result", async () => {
+    seeded();
+    const first = await run(["subagents.agentTaskDescription=do this"]);
+    expect(first.code).toBe(0);
+    const before = sha(configPath);
+    const second = await run(["subagents.agentTaskDescriptionFile=desc.md"]);
+    expect(second.code).toBe(1);
+    expect(second.err).toContain("not both");
+    expect(sha(configPath)).toBe(before);
+  });
+
+  test("a broken file: set refuses, `unset` of the broken key is allowed", async () => {
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(configPath, '{\n  "model": { "provider": "nope" },\n  "maxIterations": 8\n}\n');
+    const before = sha(configPath);
+    const refused = await run(["autoWake=true"]);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("model.provider");
+    expect(sha(configPath)).toBe(before);
+    // The unset validates the RESULT, so removing the offending key works.
+    const fixed = await run(["unset", "model", "--yes"]);
+    expect(fixed.code).toBe(0);
+    expect(readFileSync(configPath, "utf8")).not.toContain("provider");
+  });
+
+  test("a file that does not parse is refused with every parse error", async () => {
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(configPath, '{ "a": , "b": , }\n');
+    const before = sha(configPath);
+    const { code, err } = await run(["autoWake=true"]);
+    expect(code).toBe(1);
+    expect(err).toContain("not valid JSONC");
+    expect(sha(configPath)).toBe(before);
+    // `get` and `list` refuse the same way: they cannot honestly answer.
+    expect((await run(["get", "model.model"])).code).toBe(1);
+    expect((await run(["list"])).code).toBe(1);
+    expect((await run(["list"])).err).toContain("not valid JSONC");
+  });
+});
+
+describe("T9: a secret never reaches argv, and never reaches the output", () => {
+  const SECRET = "sk-test-4b91";
+
+  test("argv is refused, and the whole output is free of the value", async () => {
+    seeded();
+    const before = sha(configPath);
+    const { code, out, err } = await run([`model.apiKey=${SECRET}`]);
+    expect(code).toBe(1);
+    expect(`${out}${err}`).not.toContain(SECRET);
+    expect(err).toContain("model.apiKey");
+    expect(err).toContain("stdin");
+    expect(err).toContain("apiKeyCommand");
+    expect(sha(configPath)).toBe(before);
+    // `set k v` is the same road.
+    const spaced = await run(["set", "model.apiKey", SECRET]);
+    expect(spaced.code).toBe(1);
+    expect(`${spaced.out}${spaced.err}`).not.toContain(SECRET);
+  });
+
+  test("stdin is accepted (one trailing newline trimmed) and reported as plaintext", async () => {
+    seeded();
+    // Piped stdin, no value: `main`'s seam stands in for `-` (the same code path
+    // as `Bun.stdin.text()`, deterministically).
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await main(["bun", "cli", "config", "model.apiKey", "-"], {
+      out: (text) => out.push(text),
+      err: (text) => err.push(text),
+      terminal: { stdin: false, stdout: false },
+      readStdin: async () => `${SECRET}\n`,
+    });
+    expect(code).toBe(0);
+    expect(err.join("")).not.toContain(SECRET);
+    expect(out.join("")).not.toContain(SECRET);
+    expect(out.join("")).toContain("stored in plaintext");
+    // Exactly one trailing newline is trimmed, and nothing else.
+    expect(readFileSync(configPath, "utf8")).toContain(`"apiKey": "${SECRET}"`);
+  });
+
+  test("with no value on a terminal, the prompt is hidden and its answer is stored", async () => {
+    // The real default reader (`readHiddenLine`) needs a TTY; this pins the
+    // WIRING instead: terminal stdin + no value → the `readSecret` seam runs, and
+    // its answer is what gets stored (eval A4's third safe form).
+    seeded();
+    const prompts: string[] = [];
+    const out: string[] = [];
+    const code = await main(["bun", "cli", "config", "model.apiKey"], {
+      out: (text) => out.push(text),
+      err: () => undefined,
+      terminal: { stdin: true, stdout: true },
+      readSecret: async (prompt) => {
+        prompts.push(prompt);
+        return `${SECRET}\n`;
+      },
+    });
+    expect(code).toBe(0);
+    expect(prompts).toEqual(["model.apiKey: "]);
+    expect(out.join("")).toContain("stored in plaintext");
+    expect(out.join("")).not.toContain(SECRET);
+    expect(readFileSync(configPath, "utf8")).toContain(SECRET);
+  });
+
+  test("the file is written 0600, and `get`/`list` print ***", async () => {
+    seeded();
+    const written = await main(["bun", "cli", "config", "model.apiKey", "-"], {
+      out: () => undefined,
+      err: () => undefined,
+      terminal: NO_TERMINAL,
+      readStdin: async () => `${SECRET}\n`,
+    });
+    expect(written).toBe(0);
+    const text = readFileSync(configPath, "utf8");
+    expect(text).toContain(SECRET); // it IS stored: that is what plaintext means
+    // The value is never printed by get/list:
+    const got = await run(["get", "model.apiKey"]);
+    expect(got.code).toBe(0);
+    expect(got.out.trim()).toBe("***");
+    expect(got.out).not.toContain(SECRET);
+    const listed = await run(["list"]);
+    expect(listed.code).toBe(0);
+    expect(listed.out).toContain("model.apiKey = ***");
+    expect(listed.out).not.toContain(SECRET);
+    // …not in the JSON forms either.
+    const json = await run(["get", "model.apiKey", "--json"]);
+    expect(json.out).not.toContain(SECRET);
+    // A group/world-readable file is warned about, not chmodded silently.
+    chmodSync(configPath, 0o644);
+    const warn: string[] = [];
+    const again = await main(["bun", "cli", "config", "model.apiKey", "-"], {
+      out: () => undefined,
+      err: (text) => warn.push(text),
+      terminal: NO_TERMINAL,
+      readStdin: async () => SECRET,
+    });
+    expect(again).toBe(0);
+    expect(warn.join("")).toContain("readable by other users");
+    // The write kept the file's own mode (it never chmods behind the user's back).
+    expect(statSync(configPath).mode & 0o777).toBe(0o644);
+  });
+
+  test("an apiKeyCommand IS accepted from argv (the documented safe form)", async () => {
+    seeded();
+    const { code } = await run(["model.apiKeyCommand=pass show tentacle"]);
+    expect(code).toBe(0);
+    expect(readFileSync(configPath, "utf8")).toContain("pass show tentacle");
+  });
+
+  test("an MCP server's env/headers/args are masked in list", async () => {
+    seeded();
+    await run([
+      "mcpServers.fs",
+      '{"command":"mcp-fs","args":["--token","tok-123"],"env":{"TOKEN":"tok-456"}}',
+    ]);
+    const listed = await run(["list"]);
+    expect(listed.code).toBe(0);
+    expect(listed.out).toContain("mcpServers.fs.args = [***]");
+    expect(listed.out).toContain("mcpServers.fs.env.TOKEN = ***");
+    expect(listed.out).not.toContain("tok-123");
+    expect(listed.out).not.toContain("tok-456");
+  });
+});
+
+describe("the command surface (owner Q7)", () => {
+  test("`config` is a subcommand, with its own usage line", () => {
+    expect(cliMode(["config", "list"])).toBe("config");
+    expect(USAGE.config).toContain("tentacle config set");
+    // `config` no longer swallows a prompt without saying so.
+    expect(cliMode(["config"])).toBe("config");
+  });
+
+  test("--help lists the config command (main's HELP)", async () => {
+    const out: string[] = [];
+    const code = await main(["bun", "cli", "--help"], {
+      out: (text) => out.push(text),
+      err: () => undefined,
+      terminal: NO_TERMINAL,
+    });
+    expect(code).toBe(0);
+    expect(out.join("")).toContain("tentacle config set");
+  });
+
+  test("path prints the file, and creates nothing", async () => {
+    const { code, out } = await run(["path"]);
+    expect(code).toBe(0);
+    expect(out.trim()).toBe(configPath);
+    expect(existsSync(configPath)).toBe(false);
+  });
+
+  test("get on a missing file exits 1, list exits 0", async () => {
+    const got = await run(["get", "model.model"]);
+    expect(got.code).toBe(1);
+    expect(got.err).toContain("no config file");
+    const listed = await run(["list"]);
+    expect(listed.code).toBe(0);
+    expect(listed.err).toContain("no config file");
+  });
+
+  test("a set prints the value, the path and what it applies to (A6)", async () => {
+    seeded();
+    const { code, out } = await run(["set", "subagents.maxParallel", "3"]);
+    expect(code).toBe(0);
+    expect(out).toContain("set subagents.maxParallel = 3 in");
+    expect(out).toContain(configPath);
+    expect(out).toContain("sessions started after this");
+    expect(out).toContain("carried to a pod");
+    // The scaffold's comments are still there, byte for byte.
+    expect(readFileSync(configPath, "utf8")).toContain("// Max model/tool iterations per turn.");
+  });
+
+  test("get prints the value as stored; a missing one names the default", async () => {
+    seeded();
+    await run(["subagents.maxParallel=3"]);
+    const got = await run(["get", "subagents.maxParallel"]);
+    expect(got.code).toBe(0);
+    expect(got.out.trim()).toBe("3");
+    const absent = await run(["get", "tools.maxParallel"]);
+    expect(absent.code).toBe(1);
+    expect(absent.err).toContain("not set");
+    expect(absent.err).toContain("8");
+  });
+
+  test("a parseable file that fails the schema: `get`/`list` still answer", async () => {
+    // They are how a user finds the offending key, so they must read a file whose
+    // settings are wrong — only a file that does not PARSE stops them.
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(configPath, '{\n  "model": { "provider": "nope" },\n  "maxIterations": 8\n}\n');
+    const got = await run(["get", "maxIterations"]);
+    expect(got.code).toBe(0);
+    expect(got.out.trim()).toBe("8");
+    const listed = await run(["list"]);
+    expect(listed.code).toBe(0);
+    expect(listed.out).toContain('model.provider = "nope"');
+    expect(listed.out).toContain("maxIterations = 8");
+  });
+
+  test("a map entry is created from one leaf, and the schema infers `type`", async () => {
+    seeded();
+    // eval A5: `McpServerSchema` infers `stdio` from a command and `http` from a url.
+    expect((await run(["mcpServers.fs.command=mcp-fs"])).code).toBe(0);
+    expect((await run(["mcpServers.web.url=https://mcp.example.com/mcp"])).code).toBe(0);
+    const text = readFileSync(configPath, "utf8");
+    expect(text).toContain('"fs"');
+    expect(text).toContain('"web"');
+    // The inferred type survives a re-read by the real loader's schema.
+    const listed = await run(["list", "--json"]);
+    expect(listed.code).toBe(0);
+  });
+
+  test("a map-of-boolean entry, and a whole-object set, both validate", async () => {
+    seeded();
+    expect((await run(["packages.some-pkg=false"])).code).toBe(0);
+    expect((await run(["subagents", '{"enabled":false,"maxParallel":2}'])).code).toBe(0);
+    const listed = await run(["list"]);
+    expect(listed.out).toContain("packages.some-pkg = false");
+    expect(listed.out).toContain("subagents.maxParallel = 2");
+  });
+
+  test("$schema is a plain string at the top level (and refused in a profile)", async () => {
+    seeded();
+    const set = await run(["$schema=./config.schema.json"]);
+    expect(set.code).toBe(0);
+    expect(readFileSync(configPath, "utf8")).toContain('"$schema": "./config.schema.json"');
+    const got = await run(["get", "$schema"]);
+    expect(got.out.trim()).toBe('"./config.schema.json"');
+  });
+
+  test("--json is machine-readable for get and list", async () => {
+    seeded();
+    await run(["subagents.maxParallel=3"]);
+    const got = JSON.parse((await run(["get", "subagents.maxParallel", "--json"])).out) as unknown;
+    expect(got).toEqual({ key: "subagents.maxParallel", value: 3 });
+    const listed = JSON.parse((await run(["list", "--json"])).out) as unknown;
+    expect(listed).toEqual({ model: {}, "subagents.maxParallel": 3 });
+  });
+
+  test("--profile targets profiles.<name> in the same file", async () => {
+    seeded();
+    const { code, out } = await run(["set", "model.model", "qwen3-coder", "--profile", "work"]);
+    expect(code).toBe(0);
+    expect(out).toContain("profiles.work.model.model");
+    const text = readFileSync(configPath, "utf8");
+    expect(text).toContain('"profiles"');
+    expect(text).toContain('"work"');
+    const got = await run(["get", "model.model", "--profile", "work"]);
+    expect(got.out.trim()).toBe('"qwen3-coder"');
+    const listed = await run(["list", "--profile", "work"]);
+    expect(listed.out).toContain("profiles.work.model.model");
+  });
+
+  test("a key that already names a profile is ambiguous with --profile", async () => {
+    seeded();
+    const { code, err } = await run(["set", "profiles.work.model.model", "x", "--profile", "work"]);
+    expect(code).toBe(1);
+    expect(err).toContain("profile");
+  });
+
+  test("$schema cannot be put in a profile", async () => {
+    seeded();
+    const { code, err } = await run(["set", "$schema", "./x.json", "--profile", "work"]);
+    expect(code).toBe(1);
+    expect(err).toContain("$schema");
+  });
+
+  test("an empty value is the schema's message plus the `unset` hint", async () => {
+    seeded();
+    const { code, err } = await run(["model.model="]);
+    expect(code).toBe(1);
+    expect(err).toContain("model.model");
+    expect(err).toContain("unset");
+  });
+
+  test("a shorthand value keeps its own `=` (split at the first)", async () => {
+    seeded();
+    const { code } = await run(["model.baseURL=http://localhost:8080/v1?x=1"]);
+    expect(code).toBe(0);
+    expect(readFileSync(configPath, "utf8")).toContain("http://localhost:8080/v1?x=1");
+  });
+
+  test("unset removes a leaf; a whole section needs --yes without a terminal", async () => {
+    seeded();
+    await run(["subagents.maxParallel=3"]);
+    const removed = await run(["unset", "subagents.maxParallel"]);
+    expect(removed.code).toBe(0);
+    expect(removed.out).toContain("unset subagents.maxParallel");
+    expect(readFileSync(configPath, "utf8")).not.toContain("maxParallel");
+    // A section is destructive: refused without a terminal unless --yes.
+    const refused = await run(["unset", "model"]);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("--yes");
+    const yes = await run(["unset", "model", "--yes"]);
+    expect(yes.code).toBe(0);
+  });
+
+  test("--unset <key> is the same as `unset <key>`", async () => {
+    seeded();
+    await run(["autoWake=true"]);
+    const { code } = await run(["--unset", "autoWake"]);
+    expect(code).toBe(0);
+    expect(readFileSync(configPath, "utf8")).not.toContain("autoWake");
+  });
+
+  test("no arguments is an error naming the forms", async () => {
+    const { code, err } = await run([]);
+    expect(code).toBe(1);
+    expect(err).toContain("tentacle config set");
+    expect(err).toContain("usage:");
+  });
+
+  test("a sentence after `config` gets the way back to a prompt", async () => {
+    const { code, err } = await run(["how", "do", "I", "set", "a", "key"]);
+    expect(code).toBe(1);
+    expect(err).toContain("tentacle -- config how do I set a key");
+  });
+});

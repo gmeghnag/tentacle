@@ -29,7 +29,10 @@ import { type AutoAcceptFeed, type SessionController, pickSession, startTui } fr
 import { attachFailureNotice, unflushedExitsNotice } from "./attach-notice.ts";
 import { type AttachPlan, plainResumeUid, planAttach } from "./attach-plan.ts";
 import { type Joined, joinRun } from "./attach-run.ts";
+import { parseConfigArgs } from "./config-args.ts";
+import { runConfig } from "./config-run.ts";
 import {
+  CONFIG_FILENAME,
   type TentacleConfig,
   configDirFromEnv,
   loadConfig,
@@ -79,6 +82,7 @@ import {
   resolveTls,
   resolveToken,
 } from "./flags.ts";
+import { readHiddenLine } from "./hidden-input.ts";
 import { fileTrustStore, hooksTrustCommand, projectHooksWireProblem } from "./hooks-trust.ts";
 import { type KeptDeps, psCommand, resolveKeptAttach, rmCommand } from "./kept-cmd.ts";
 import {
@@ -204,6 +208,17 @@ Usage:
                            card (type, default, env, flag, carried, scope,
                            example); --all is every leaf; --json for scripts.
                            Reads no config file, so it works with a broken one
+  tentacle config set <key> <value> | <key>=<value>
+  tentacle config unset <key> [--yes] | get <key> [--json]
+  tentacle config list [--json] | path
+                           edit YOUR config.jsonc, keeping its comments, layout
+                           and key order: the value is typed by the key (true/false,
+                           a number, a listed value, JSON for an array or an
+                           object); nothing is written unless the whole file still
+                           validates. --profile <name> targets profiles.<name>.
+                           A secret (model.apiKey, an MCP env/header) is refused
+                           on the command line: use "-" for stdin or no value for
+                           a hidden prompt. "path" prints the file's location
   tentacle package install <path|git-url>[#ref] | list | remove <name> | update [<name>]
                            manage packages (skills, agent types, MCP servers,
                            hooks) in <configDir>/packages; installing trusts
@@ -380,6 +395,12 @@ export interface CliIO {
   /** Test seam: `--prompt -`'s stdin. Default: all of it. */
   readStdin?: () => Promise<string>;
   /**
+   * Test seam: `config <key>`'s hidden prompt, when stdin is a terminal and no
+   * value is given (docs/feat/config-set.md, eval A4). Default:
+   * {@link readHiddenLine} — the prompt on stderr, no echo.
+   */
+  readSecret?: (prompt: string) => Promise<string>;
+  /**
    * Test seam: the pre-Ink y/N question (a dangerous mount source); present =
    * interactive. Default: a readline prompt, when stdin and STDERR (where it is
    * asked) are terminals.
@@ -514,8 +535,10 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       // the words are not sent as a prompt — say exactly how to send them
       // (docs/feat/config-explain.md, review O1). The words are the WHOLE argv
       // after `tentacle` as typed, flags aside (a flag was asked for, not said).
+      // `config` joins it for the same reason: `tentacle config how do I …` now
+      // means the command, and the way back is one line, not a guess.
       const promptLine =
-        mode === "explain" && result.error.startsWith("unexpected argument")
+        (mode === "explain" || mode === "config") && result.error.startsWith("unexpected argument")
           ? `\n${promptHint(promptWords(args))}`
           : "";
       err(`[error] ${result.error}${promptLine}\nusage: ${USAGE[mode]}\n`);
@@ -615,6 +638,47 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         : renderExplainText(result, { width: io.columns ?? process.stdout.columns }),
     );
     return 0;
+  }
+
+  // `tentacle config set/unset/get/list/path` (docs/feat/config-set.md): like
+  // `explain`, BEFORE `loadConfig` — it must work on a BROKEN file (that is one
+  // of the things it helps fix), it never rescaffolds, and it edits the laptop's
+  // user file only. All the deciding is in `config-args.ts` / `config-run.ts`.
+  if (mode === "config") {
+    const parsedConfig = parseConfigArgs(parsed.positional, parsed.flags, parsed.bools);
+    if (!parsedConfig.ok) {
+      err(`[error] ${parsedConfig.error}\nusage: ${USAGE.config}\n`);
+      return 1;
+    }
+    const result = await runConfig({
+      op: parsedConfig.op,
+      configPath: join(configDirFromEnv(), CONFIG_FILENAME),
+      json: parsedConfig.json,
+      yes: parsedConfig.yes,
+      ...(parsedConfig.profile !== undefined ? { profile: parsedConfig.profile } : {}),
+      isStdinTerminal: terminal.stdin,
+      ...(io.readStdin !== undefined
+        ? { readStdin: io.readStdin }
+        : { readStdin: () => Bun.stdin.text() }),
+      ...(io.ask !== undefined ? { ask: io.ask } : canAsk ? { ask: askStdin } : {}),
+      // A hidden prompt only on a terminal: a pipe is a VALUE (a non-terminal
+      // stdin already sends the value down that road), and the prompt must never
+      // echo — it may be a key.
+      ...(io.readSecret !== undefined
+        ? { readSecret: io.readSecret }
+        : terminal.stdin
+          ? {
+              readSecret: (prompt: string) =>
+                readHiddenLine(prompt, {
+                  input: io.stdin ?? process.stdin,
+                  output: process.stderr,
+                }),
+            }
+          : {}),
+    });
+    if (result.out !== "") out(result.out);
+    if (result.err !== "") err(result.err);
+    return result.code;
   }
 
   // Everything below needs configuration; load it once (scaffolds on first run).
