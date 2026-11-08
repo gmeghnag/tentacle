@@ -385,6 +385,52 @@ error naming the right form).
 Key precedence: `TENTACLE_MODEL_API_KEY` › file `apiKey` › file `apiKeyCommand`.
 `TENTACLE_CONFIG_DIR` (or `XDG_CONFIG_HOME`) moves the config directory.
 
+### Editing config from the CLI
+
+`tentacle config` edits `config.jsonc` for you, keeping its comments, layout and
+key order — only the key you name changes (`bun run docs:config` still owns the
+table above, so nothing here is generated):
+
+```sh
+tentacle config subagents.maxParallel=3     # the shorthand: <key>=<value>
+tentacle config set model.model qwen3       # the same, as two words
+tentacle config set tools.writableDirs '["/tmp","~/scratch"]'
+tentacle config --unset subagents.maxParallel
+tentacle config get subagents.maxParallel   # the value as stored (--json)
+tentacle config list                        # every setting in the file
+tentacle config path                        # which file these edit
+```
+
+A value is typed by the key, not guessed: `true`/`false` for a boolean, a number
+for a numeric key, one of the listed values for an enum, and JSON for an array or
+an object. A string is taken as written, so no quoting is needed for a URL (a
+value that starts with `"` and parses as a JSON string is accepted as that
+string). Nothing is written unless the whole file still validates, and every
+schema issue is printed — a refused edit leaves the file byte for byte as it was.
+
+`--profile <name>` targets `profiles.<name>.` in the same file, so
+`tentacle config model.model small --profile work` only changes that profile.
+`unset` of a whole section or profile asks first (`--yes` skips the question).
+
+A secret is never accepted on the command line (it would be visible in your
+shell history and in `ps`): pipe it in, or let it prompt without echo — and
+`get`/`list` print it as `***` (as they do every MCP server's `env`, `headers`
+and `args`):
+
+```sh
+printf '%s\n' "$KEY" | tentacle config model.apiKey -
+tentacle config model.apiKey          # prompts with no echo
+```
+
+It is still stored in **plaintext** in that file (mode `0600`), which the
+command says when it succeeds; `model.apiKeyCommand` — a command whose output is
+the key at startup — keeps it out of the file entirely.
+
+A change applies to **sessions started after it**: a running `serve` daemon keeps
+its value until restarted, and on `run`/`attach` the laptop's value is carried to
+a pod when a session is opened (a few settings, like `tools.writableDirs`, are
+the pod's own and are never carried).
+
 ### Hooks
 
 Full reference and worked examples: [docs/extensions.md](docs/extensions.md#3-hook-reference).
