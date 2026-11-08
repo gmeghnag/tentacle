@@ -141,7 +141,7 @@ describe("serve persistence (end to end, real disk)", () => {
   });
 
   test("S1 a restart brings archived records back ARCHIVED (indexed, not live), live ones live; one list", async () => {
-    // Mutation M8: parseDaemonRecord drops archivedAt (an archived record restored live) → red.
+    // Mutation M8: the state-file loader drops archivedAt (an archived record restored live) → red.
     const first = await serve();
     const a = await client(first.url);
     await a.request("session/open", { sessionId: "s-live", messages: seed });
@@ -256,6 +256,46 @@ describe("serve persistence (end to end, real disk)", () => {
     } finally {
       await second.stop();
     }
+  });
+
+  test("FM 5 / M2: only a readable log header of THIS version with no state file is set aside; a newer or corrupt one is skipped, untouched", async () => {
+    // Mutation: the missing-state check before the header parse in `loadState` → the
+    // newer and corrupt logs are moved to `.aside` (review M2).
+    const first = await serve();
+    const a = await client(first.url);
+    await a.request("session/open", { sessionId: "cut", messages: seed });
+    a.ws.close();
+    await first.stop();
+    const goodLog = await readFile(logPath("cut"), "utf8");
+    const nl = goodLog.indexOf("\n");
+    const header = JSON.parse(goodLog.slice(0, nl)) as Record<string, unknown>;
+    const body = goodLog.slice(nl + 1);
+    await rm(logPath("cut"));
+    await rm(statePath("cut"));
+    const logs: Record<string, string> = {
+      "newer-nostate": `${JSON.stringify({ ...header, id: "newer-nostate", schemaVersion: 99 })}\n${body}`,
+      "corrupt-nostate": `{"format":"tentacle-session-log", broken\n${body}`,
+      "current-nostate": `${JSON.stringify({ ...header, id: "current-nostate" })}\n${body}`,
+    };
+    for (const [id, text] of Object.entries(logs)) await writeFile(logPath(id), text);
+    const notices: string[] = [];
+    const second = await serve(config, notices);
+    await second.stop();
+    const names = await readdir(daemonStoreDir(config));
+    for (const id of ["newer-nostate", "corrupt-nostate"]) {
+      expect(await readFile(logPath(id), "utf8")).toBe(logs[id] ?? "");
+      expect(names.some((n) => n.startsWith(`${id}.stale-`))).toBe(false);
+      expect(notices.find((l) => l.startsWith("skipped") && l.includes(`/${id}.jsonl`))).toMatch(
+        /\(left as is\)$/,
+      );
+    }
+    // The readable current-version header: FM 5, set aside with its bytes.
+    expect(names).not.toContain("current-nostate.jsonl");
+    const aside = names.find((n) => n.startsWith("current-nostate.stale-"));
+    expect(aside).toBeDefined();
+    expect(await readFile(join(daemonStoreDir(config), aside ?? ""), "utf8")).toBe(
+      logs["current-nostate"] ?? "",
+    );
   });
 
   test("B7 a turn suspended at a restart is asked again over the wire; cancel converges on disk", async () => {
@@ -400,7 +440,7 @@ describe("serve persistence (end to end, real disk)", () => {
   });
 
   test("R10 a record with a non-integer updatedAt is skipped loudly; session/list stays valid for the rest", async () => {
-    // Review finding 2. Mutation: drop the integer check in parseDaemonRecord → the
+    // Review finding 2. Mutation: drop the integer check in `parseSidecar` → the
     // record loads, its entry carries 1.5 and the list fails the client's schema.
     const first = await serve();
     const a = await client(first.url);

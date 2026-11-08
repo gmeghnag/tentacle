@@ -53,6 +53,8 @@ export interface DaemonStore {
   /** The state file only (an archived rename / reclaim). */
   writeState(id: string, data: string): Promise<void>;
   remove(id: string): Promise<void>;
+  /** Drop the store's in-memory writer state for `id` (an archived session's landed segment). */
+  forget(id: string): Promise<void>;
   drain(): Promise<void>;
   /** The log's text and the state file's (an archived session's reopen, a live one at start). */
   readRaw(id: string): Promise<RawSessionFiles>;
@@ -331,6 +333,15 @@ export class SessionPersister {
     if (raw.status === "unreadable") {
       return { ok: false, reason: raw.reason };
     }
+    // The header first (review M2): a log this build cannot read — a newer
+    // version, a corrupt first line — is refused and left as it is, whether or
+    // not it has a state file. Only a readable header of THIS version with no
+    // state file is a session cut before its first save (FM 5).
+    const nl = raw.log.indexOf("\n");
+    const header = parseHeaderLine(nl < 0 ? raw.log : raw.log.slice(0, nl), id);
+    if (!header.ok) {
+      return { ok: false, reason: header.reason };
+    }
     if (raw.state === null) {
       return { ok: false, reason: NO_STATE, missingState: true };
     }
@@ -365,12 +376,13 @@ export class SessionPersister {
     if (raw.status === "unreadable") {
       return { ok: false, reason: raw.reason };
     }
-    if (raw.state === null) {
-      return { ok: false, reason: NO_STATE, missingState: true };
-    }
+    // The header first (review M2), as in `load`.
     const header = parseHeaderLine(raw.header, id);
     if (!header.ok) {
       return { ok: false, reason: header.reason };
+    }
+    if (raw.state === null) {
+      return { ok: false, reason: NO_STATE, missingState: true };
     }
     const sidecar = parseSidecar(raw.state, id);
     if (!sidecar.ok) {
@@ -452,6 +464,21 @@ export class SessionPersister {
       logHead: log.head,
       paired: true,
     };
+  }
+
+  /**
+   * `id` is archived and its archive write landed (the host dropped its
+   * resident record): nothing writes from its segment again, so the store's
+   * writer state and this persister's cursor are released — an archived
+   * session costs no history in memory (review M1). Fire-and-forget; a
+   * reopen's first write is cold (a fresh writer state).
+   */
+  forget(id: string): void {
+    if (this.stopped || !isValidSessionId(id)) {
+      return;
+    }
+    this.cursors.delete(id);
+    this.opts.store.forget(id).catch(() => {});
   }
 
   /** Resolves once the latest write scheduled for `id` has settled (failures are reported, not thrown). */

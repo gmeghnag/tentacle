@@ -870,3 +870,124 @@ describe("S11 — a real SIGKILL at random points (a chain of restarts on one st
     await rm(dir, { recursive: true, force: true });
   }, 120_000);
 });
+
+// --- fix round 1 (review M1, M2) ---
+
+describe("M1 — an archived session frees the store's writer state once its archive unit landed", () => {
+  test("a landed archive leaves no resident segment; a resident rename (a heal unit) still works, then frees it", async () => {
+    // Mutation: `settleWrite` never calls `persister.forget` → the segment stays resident.
+    const dir = await freshDir();
+    const store = new LogSessionStore(dir);
+    const persister = persisterOn(dir, { store });
+    const host = hostWith(persister, SCRIPT, []);
+    const c = client();
+    const { hosted } = host.open({ sessionId: "s1", create: true }, c.attachment);
+    hosted.prompt("T1", [{ type: "text", text: "go" }]);
+    await until(() => c.asks().length === 1);
+    expect(store.residentWriters()).toBe(1);
+    host.close("s1");
+    // Renamed while its archive record is still resident: written as a whole unit (needs the writer).
+    host.rename("s1", "Quick name");
+    await persister.flush("s1");
+    await tick(30);
+    expect(store.residentWriters()).toBe(0);
+    expect((await stateFile(dir)).title).toEqual({ text: "Quick name", source: "user" });
+    expect((await loaded(dir)).archivedAt).toEqual(expect.any(Number));
+    await persister.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("a failed archive unit keeps the writer (the sweep's retry heals from it); the retry landing frees it", async () => {
+    const dir = await freshDir();
+    const store = new LogSessionStore(dir);
+    const persister = persisterOn(dir, { store });
+    const host = hostWith(persister, [text("hi")], []);
+    const c = client();
+    const { hosted } = host.open({ sessionId: "s1", create: true }, c.attachment);
+    hosted.prompt("T1", [{ type: "text", text: "go" }]);
+    await until(() => c.ended("T1"));
+    await hosted.persisted();
+    const realWrite = store.write.bind(store);
+    store.write = () => Promise.reject(new Error("disk full"));
+    host.close("s1");
+    await persister.flush("s1");
+    await tick(10);
+    expect(store.residentWriters()).toBe(1);
+    store.write = realWrite;
+    host.reapExpired({ idleTtlMs: 24 * 3_600_000 });
+    await until(() => store.residentWriters() === 0);
+    expect((await loaded(dir)).archivedAt).toEqual(expect.any(Number));
+    await persister.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("M2 — a log with no state file: the header is read first", () => {
+  const header = (over: Record<string, unknown> = {}) =>
+    `${JSON.stringify({
+      format: "tentacle-session-log",
+      schemaVersion: 1,
+      id: "s1",
+      cwd: CWD,
+      model: "m",
+      createdAt: 1,
+      ...over,
+    })}\n`;
+
+  for (const [name, content, missing] of [
+    ["a newer log version", header({ schemaVersion: 99 }), false],
+    ["a corrupt header", "{not json\n", false],
+    ["a header of another format", `${JSON.stringify({ hello: 1 })}\n`, false],
+    ["a current-version header", header(), true],
+  ] as const) {
+    test(`${name}, no state file → ${missing ? "FM 5 (missingState)" : "refused, not missingState"}`, async () => {
+      // Mutation: the missing-state check before the header parse → the first three read as missingState.
+      const dir = await freshDir();
+      await writeFile(join(dir, "s1.jsonl"), content);
+      const p = persisterOn(dir);
+      for (const read of [await p.loadState("s1"), await p.load("s1")]) {
+        expect(read.ok).toBe(false);
+        expect(!read.ok && read.missingState === true).toBe(missing);
+      }
+      await rm(dir, { recursive: true, force: true });
+    });
+  }
+});
+
+describe("FM 8 — a paired restart's first write is ONE rewrite that restates the landed point (answers 11, 15)", () => {
+  test("the file's segment is replaced by `base{reload}` (prev = the landed head) + the repair; no aside; the earlier turn markers go with the replaced segment", async () => {
+    // Pins review fix-round item 4: this is the plan's §5 / FM 8 behaviour, not a regression.
+    const dir = await freshDir();
+    const first = persisterOn(dir);
+    const host = hostWith(first, [text("hi")], []);
+    const c = client();
+    const { hosted } = host.open({ sessionId: "s1", create: true }, c.attachment);
+    hosted.prompt("T1", [{ type: "text", text: "go" }]);
+    await until(() => c.ended("T1"));
+    await hosted.persisted();
+    await first.stop();
+    const before = await readFile(join(dir, "s1.jsonl"), "utf8");
+    expect(before).toContain('"turn_start"');
+    const landed = await loaded(dir);
+
+    const asides: string[] = [];
+    const store = new LogSessionStore(dir, { onAside: (i) => asides.push(i.file) });
+    const second = persisterOn(dir, { store });
+    const restored = hostWith(second, [], []).restore(landed);
+    await restored.persisted();
+    await second.stop();
+    const after = await readFile(join(dir, "s1.jsonl"), "utf8");
+    const lines = after.split("\n").filter((l) => l !== "");
+    const bases = lines.filter((l) => l.includes('"type":"base"'));
+    expect(bases).toHaveLength(1); // ONE segment: the old one was replaced (keepSuperseded off)
+    const base = JSON.parse(bases[0] ?? "{}") as { reason: string; prev: string; seq: number };
+    expect(base.reason).toBe("reload");
+    expect(base.prev).toBe(landed.logHead.id);
+    expect(base.seq).toBe(landed.logHead.seq + 1);
+    expect(after).not.toContain('"turn_start"'); // the old segment's markers went with it
+    expect(asides).toEqual([]); // contained: an explicit continuation, nothing set aside
+    expect((await loaded(dir)).messages).toEqual(landed.messages);
+    restored.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+});

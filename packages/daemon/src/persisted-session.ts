@@ -293,7 +293,7 @@ export interface ResumedTurn {
   readonly from: string;
   /** Accepted, not yet drained — re-queued, drained where they would have been. */
   readonly steering: readonly string[];
-  /** Their enqueue ids, parallel to `steering` (v4); absent from an older record (minted at the reload). */
+  /** Their enqueue ids, parallel to `steering` (one per steer: the state file always has them). */
   readonly steeringIds?: readonly string[];
   /** The record's pending entries, each kept until its call's re-ask replaces it. */
   readonly pending: readonly PendingPermission[];

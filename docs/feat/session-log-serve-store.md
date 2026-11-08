@@ -164,9 +164,9 @@ It is pinned first in Execution by test S1, before anything else is wired.
     resume?.turnId)`;
   - so today a reload has NO `prev` (new lineage). `SessionLog.start(…, from)` already supports
     continuing a lineage (`session-log.ts:79-92`: `seq = from.seq + 1`, `prev = from.id`, `root`).
-- **P5** The client's lineage rule (`client/src/session-log-reader.ts:216-239`):
+- **P5** The client's lineage rule (`client/src/session-log-reader.ts:209-228`):
   - a rebased read whose `base.prev === held.head.id` is a `reseed` ONLY if the base's seed digests
-    equal the held copy (`:219-228`); otherwise it is a `fork` (aside);
+    equal the held copy (`:213-218`); otherwise it is a `fork` (aside);
   - so a reload base must restate EXACTLY the projection a reader held at `logHead`, not the
     repaired history (Design §5).
 - **P6** The archive path:
@@ -327,7 +327,10 @@ Sidecar (compact JSON, one object):
   and the reason is that the sidecar is exact (Q4). The log's `turn_end` of an archived turn is
   never written (§2: `before` capture), so the two never disagree on disk.
 - **`serve.ts` scan.** Tombstones first, as today. Then for each `*.jsonl`:
-  - sidecar absent → the log goes aside, reported, id free (FM 5, Q6);
+  - *(fix round 1, M2: the log's header is parsed FIRST; a missing, corrupt or newer-version header
+    is `block` + "skipped … (left as is)", files untouched, whatever else is missing.)*
+    Readable header of this version, sidecar absent → the log goes aside, reported, id free
+    (FM 5, Q6);
   - sidecar unreadable, unknown `DAEMON_STATE_VERSION`, wrong project, log unreadable or an
     unknown log `schemaVersion` → `block` + "skipped … (left as is)" (today's rule, P7);
   - archived → indexed from header + sidecar ONLY (`addArchived(meta)`; the log is not parsed);
@@ -346,11 +349,13 @@ daemon per store: a lock); on re-attach the daemon's copy wins." with:
 > the daemon is trusted) plus a small whole-file state sidecar `<uid>.state.json` (turn, pending
 > asks, keys, title, archive stamp, and the log entry it pairs with), written AFTER the log; a
 > write lands when its sidecar does, and a reload reads the log only up to the entry the sidecar
-> names. It reloads them on start (one daemon per store: a lock), continuing each session's log
-> lineage; on re-attach the daemon's copy wins.
+> names (a crash during a rewrite, which leaves no such entry, loads the log's last segment
+> instead and starts a new lineage). It reloads them on start (one daemon per store: a lock),
+> continuing each session's log lineage; on re-attach the daemon's copy wins.
 
-and "(record stamped `archivedAt`, indexed by metadata only, …)" → "(its sidecar stamped
-`archivedAt`, indexed from the sidecar only, …)", and "the `serve` daemon's record is the truth"
+*(Reworded in fix round 1, owner answer 2 to the review: the parenthesis is new.)* and
+"(record stamped `archivedAt`, indexed by metadata only, …)" → "(its sidecar stamped
+`archivedAt`, indexed from the sidecar and the log's first line only, …)", and "the `serve` daemon's record is the truth"
 → "the `serve` daemon's log is the truth".
 
 In "On-disk records are versioned separately", replace "A daemon record carries `schemaVersion`
@@ -774,6 +779,70 @@ Sonnet agent in tmux, isolated config dir, report `.tentacle/tmp/session-log-ser
 5. Archive / list / reopen / delete OK (rename not exercised: no TUI command).
 6. Garbage: legacy `.json` untouched; an orphan corrupt `.jsonl` was renamed `.aside` (bytes intact) — the same class as review M2.
 *— claude-opus-5-5 (orchestrator), 2026-11-08*
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-08*
+
+Against the review's REQUEST-CHANGES and the orchestrator answers (all binding). No `critical`
+value, entry type, `LOG_ENTRY_CRITICAL` or `PROTOCOL_VERSION` touched (`git diff -- packages/protocol`
+empty).
+
+**M1 — fixed.** `LogSessionStore.forget(id)` (a queued op after the session's units; drops its
+writer state; `residentWriters()` for inspection), `SessionPersister.forget(id)` (also drops the
+persister's cursor), called by `SessionHost.settleWrite` when an archive unit landed and
+`entry.record` is cleared (`session-host.ts`, the `ok` branch). A failed unit keeps the writer (the
+sweep's retry heals from it); a resident rename still works and frees it after. `DaemonStore` gained
+`forget`; the spy implements it. Tests (`serve-log-store.test.ts`, "M1"): landed archive + resident
+rename → 0 writers, state file renamed; failed archive → 1 writer, retry landed → 0. Red on HEAD:
+`Expected 0 / Received 1` (the new `residentWriters()` added first, behaviour unchanged). Mutation:
+the host's `forget` call removed → both red; restored (`shasum -c` OK).
+
+**M2 — fixed.** `SessionPersister.load` and `loadState` parse the log header BEFORE the
+missing-state check; a missing/corrupt header or an unknown `schemaVersion` is a plain failure
+(`serve` then `block`s and says "skipped … (left as is)", files untouched). Only a readable header
+of this version with no state file is `missingState` (set aside, FM 5). Tests: "M2" ×4 at the
+persister (newer, corrupt, other format → refused and NOT `missingState`; current version →
+`missingState`, for both `load` and `loadState`), and an end-to-end `startDaemon` test in
+`cli/serve-persistence.test.ts` (newer-no-state and corrupt-no-state: bytes identical, no aside,
+"skipped … (left as is)"; current-no-state: aside with its bytes). Red on HEAD: the three refused cases
+read `missingState` (unit) — `Received: true`. Mutation: the old order restored in `loadState` →
+unit ×3 and the e2e red; restored (backup `cmp`/`shasum` OK). Design §6 carries a dated note.
+
+**L1 — done (answer 2).** AGENTS §7 and the Design §7 copy now say: a reload reads the log only up to
+the entry the sidecar names (a crash during a rewrite, which leaves no such entry, loads the log's
+last segment instead and starts a new lineage), and the archive is "indexed from the sidecar and
+the log's first line only". **L3 — done:** the `persisted-session.ts` doc comment on
+`ResumedTurn.steeringIds`, the two stale `parseDaemonRecord` mentions in
+`cli/test/serve-persistence.test.ts`, and P5's citation (`session-log-reader.ts:209-228`).
+**L2:** no change (answer).
+
+**Item 4 (live note 2) — expected, no code change.** After a paired `serve` restart the first write
+REWRITES the log: the restarted `HostedSession` starts a new incarnation whose persister has no
+cursor (`session-persister.ts:199`), so its first unit is a cold capture (`outcome: "cold"`, from the
+`base`); the store cannot continue the old incarnation's last line, so it takes the replace path
+(`session-log-store.ts:585`) and `settleLast` treats the file's old segment as CONTAINED because
+the new base's `prev` is its last entry (`:722`, answer 11) — dropped without an aside. This is what
+the plan says: Design §5 last bullet ("The first write after a reload is a cold capture (from the
+base), so a REPLACE … no aside when paired and nothing is unlanded") and FM 8 ("one rewrite per
+session per restart"). Answer 15 ("restates the saved point, then the fixes as normal entries") is
+met inside that one rewrite: `base{reload}` has `prev` = the landed head, `count` = the landed
+projection, and the repair follows as entries (S4 reseeds). What goes is the old segment's non-
+projection lines (`turn_start`/`turn_end`/`call_started`/checkpoints): a reader holding the landed
+head already reseeds from the base, and turn markers are not needed for a closed session. New
+test "FM 8" (`serve-log-store.test.ts`) pins it: one base, `reason: reload`, `prev` = landed head,
+`seq` = head+1, no aside, markers of the replaced segment gone, same messages after reload.
+Mutation: restore without lineage (`log:` line removed in `restore`) → red; restored.
+(A `keepSuperseded` host keeps the old segment through `settleLast`'s keep branch only for
+compaction/reset bases, not for a `reload` one — unchanged from the plan.)
+
+**Reviewer repros re-run on the fix** (worktree root):
+`r1.test.ts` C: `writers after archive 0 entries undefined chars 0 resident false` (was `1 entries 9
+chars 1971`). `r2.test.ts`: `newer-nostate.jsonl: present=true same=true` and "skipped … newer-nostate
+… schemaVersion 99 … (left as is)" (was `present=false`, set aside); the with-state cases unchanged.
+
+**Gate:** `bunx tsc --noEmit` exit 0 · `bunx biome check .` 734 files, clean · `bun test packages`
+5383 pass · 3 skip (opt-in) · 0 fail.
 
 ## Review
 

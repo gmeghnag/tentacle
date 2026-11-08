@@ -195,15 +195,17 @@ assume.
   `<uid>.state.json` (turn, pending asks, keys, title, archive stamp, and the
   log entry it pairs with), written AFTER the log; a write lands when its
   sidecar does, and a reload reads the log only up to the entry the sidecar
-  names. It reloads them on start (one daemon per store: a lock), continuing
-  each session's log lineage; on re-attach the daemon's copy wins. Pod daemons (`serve --stdio`, `run`/`attach`) and the in-process
+  names (a crash during a rewrite, which leaves no such entry, loads the log's
+  last segment instead and starts a new lineage). It reloads them on start (one
+  daemon per store: a lock), continuing each session's log lineage; on
+  re-attach the daemon's copy wins. Pod daemons (`serve --stdio`, `run`/`attach`) and the in-process
   worker never persist — only `startDaemon` gives `SessionHost` a persister. A
   daemon write inside a turn is `SessionPersister.schedule` (synchronous
   capture, never awaited) — the steering window. On reload a turn suspended
   on its own call's permission runs again and is re-asked (pending on disk ⇒
   never started); any other turn cut short is closed honestly. A `serve`
   session that ends (`session/close`, the idle TTL, the detached cap) is kept
-  ARCHIVED (its sidecar stamped `archivedAt`, indexed from the sidecar only, reloaded
+  ARCHIVED (its sidecar stamped `archivedAt`, indexed from the sidecar and the log's first line only, reloaded
   only by an explicit `session/open{reopen}` — a reconnect never revives it)
   until `session/delete`; nothing is ever purged automatically. `connect`
   keeps no laptop copy — the `serve` daemon's log is the truth; `--resume`

@@ -186,6 +186,7 @@ type Op =
   | { readonly kind: "state"; readonly data: string }
   | { readonly kind: "aside"; readonly reason: string }
   | { readonly kind: "dropState" }
+  | { readonly kind: "forget" }
   | { readonly kind: "remove" };
 
 interface Slot {
@@ -332,6 +333,22 @@ export class LogSessionStore {
     return this.enqueue(id, { kind: "aside", reason });
   }
 
+  /**
+   * Drop the session's writer state (its segment in memory) once nothing will
+   * write from it again — `serve`: an archive unit landed and the host let go
+   * of its resident record (docs/feat/session-log-serve-store.md, review M1).
+   * In the session's queue, so it follows every unit already handed over; a
+   * later write of the id (a reopen: a cold read) starts a fresh writer state.
+   */
+  forget(id: string): Promise<void> {
+    return this.enqueue(id, { kind: "forget" });
+  }
+
+  /** How many sessions' writer state (their current segment's entries) this store holds in memory. */
+  residentWriters(): number {
+    return this.writers.size;
+  }
+
   /** Delete only the session's state file (`serve`: one left with no log, a remove cut short). */
   removeState(id: string): Promise<void> {
     return this.enqueue(id, { kind: "dropState" });
@@ -438,6 +455,7 @@ export class LogSessionStore {
         else if (op.kind === "state") await this.writeStateLocked(id, op.data);
         else if (op.kind === "aside") await this.asideLocked(id, op.reason);
         else if (op.kind === "dropState") await rm(this.stateFile(id), { force: true });
+        else if (op.kind === "forget") this.writers.delete(id);
         else await this.removeLocked(id);
       } finally {
         await release();

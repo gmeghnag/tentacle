@@ -206,6 +206,13 @@ export class SpyDaemonStore implements DaemonStore {
     this.segments.delete(id);
   }
 
+  /** Ids whose writer state the persister released (an archive landed). */
+  readonly forgotten: string[] = [];
+  async forget(id: string): Promise<void> {
+    this.forgotten.push(id);
+    this.segments.delete(id);
+  }
+
   async drain(): Promise<void> {}
 
   /** Ids read back (`readRaw` / `readState`); `holdLoads` parks a read until `releaseLoads()`; `loadAs` overrides it. */

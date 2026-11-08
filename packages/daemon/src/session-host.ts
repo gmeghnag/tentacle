@@ -736,6 +736,8 @@ export class SessionHost {
     if (ok) {
       entry.record = undefined;
       entry.unwritten = false;
+      // Nothing writes from this session's segment any more: free the store's copy.
+      this.opts.persister?.forget(entry.id);
     } else {
       entry.unwritten = true;
     }
