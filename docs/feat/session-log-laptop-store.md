@@ -970,6 +970,81 @@ The forward-compat append path was not tested with non-ASCII (M2).
 L1 (empty-body lock) — fix as suggested: an empty/unparsable body counts as live until the lock's mtime is older than `lockStaleMs`.
 No `critical` value is added or changed by these answers.
 
+### Round 2
+
+*— claude-opus-5-5, 2026-11-08* (same reviewer context as round 1. The fix round was executed by
+claude-sonnet-5-5, a different model.)
+
+**Verdict: PASS.** Every round-1 finding is fixed, with a test shown red on `e1af680`'s code. No
+MEDIUM+ regression found in the new code. The remaining LOWs are debt (below).
+
+**Gate** (HEAD `bf75acc`): `bunx tsc --noEmit` clean · `bunx biome check .` 730 files, 0/0 ·
+`bun test packages` **5431 pass, 3 skip (the opt-in ones), 0 fail** (164.4 s). Re-run after a
+temporary file swap, so this count is from an untouched tree.
+
+**Fixed — reviewer repros re-run on HEAD**
+- **M1** (`session-log-store.ts` `replace`, the `ahead` check): `r2-older-writer.ts`, with
+  `keepSuperseded` off and `keep`, identical output:
+  ```
+  after A: [{"role":"user","content":"SUMMARY"},{"role":"user","content":"prompt AFTER compaction"}]
+  after B: [{"role":"user","content":"SUMMARY"},{"role":"user","content":"prompt AFTER compaction"}]
+  asides: 0
+  ```
+- **M2** (byte offsets, `Buffer.byteLength(text.slice(0, parsed.contentEnd))`: the prefix ends at
+  a `\n`, so its decoded byte length is exact even when the torn tail splits a multi-byte
+  character): `r1-utf8-torn.ts` → `parse after write: ok, 2 messages, unknown=1` · `load: "ok"`
+  · `aside files: 0`.
+- **L1** (an empty or unparsable lock body counts as live until its mtime is stale):
+  `r3-lock.ts` → live pid: fails at 2003 ms · dead pid / 31 s stamp: taken in 2 ms · **empty
+  body: now waited for, then `FAILED … not saved this time` at 2099 ms** (before: taken at once).
+- **L2**: AGENTS §7 now says "every write to `<uid>.jsonl` holds the lock (an aside is a new file,
+  written outside it)" and "a writer of the same segment appends only what the file lacks, or
+  skips when the file is already ahead".
+- **L3(a)**: the continuing compaction rewrite goes through `replace`. `settleLast` sets aside a
+  superseded segment that holds unknown lines. **L3(b)**: `replace` and `saveSnapshot` always
+  carry the earlier segments over.
+- **Red on `e1af680`**: I put `git show e1af680:packages/daemon/src/session-log-store.ts` in
+  place and ran `packages/daemon/test/session-log-store.test.ts`: **7 fail / 18 pass**. The 7
+  fails are exactly the new `fix round 1` tests (M1 ×2, M2, L3 kept segments with the option
+  off, L3 snapshot carry, L3a aside, L1). Then I restored the file and `shasum -c` was OK.
+
+**Attacks on the new code** (`review/r5-round2.ts`):
+```
+(a) restart (new inc, lower base seq): inc-E/1(seed,2) dups=0 asides=0
+(b1) kept after compaction: inc-D/1(create,1) | inc-D/3(compact,1) dups=0
+(b2) restart reseed, option OFF: inc-D/1(create,1) | inc-E/1(seed,2) dups=0 asides=0
+(b3) same cold read again: inc-D/1(create,1) | inc-E/1(seed,2) dups=0
+(b4) compaction with option OFF: inc-D/1(create,1) | inc-E/4(compact,1) dups=0 asides=0
+(b5) two in-process snapshots: inc-D/1(create,1) | laptop-…/1(create,3) dups=0 asides=0
+(b5) load: ["SUM2","x","y"]
+```
+- **The M1 skip does not stop a legitimately newer writer.** A writer after a daemon restart
+  (a new `inc` whose `base.seq` 1 is lower than the file's 22) replaces the file (a). The
+  `ahead` check needs the SAME `inc` (`last.base.inc === mine.inc`). A reseed or reload always
+  carries a new `inc` (the reader's lineage rule). Within one `inc` the seq only grows. After a
+  skip, the writer's next linear read (which carries the new `base`) appends what is missing by
+  id (pair forgotten, `indexOfId`), so it never stalls.
+- **Kept segments are never duplicated or reordered.** They stay in order across a reseed with
+  the option off (b2), a repeated cold read (b3: same `base` → skip), a compaction with the
+  option off (b4: only the superseded current segment drops, the earlier kept one stays) and
+  in-process snapshots (b5: its own earlier snapshot is replaced, the kept segment carried).
+- **Wire / critical**: the diff `e1af680..HEAD` touches no file under `packages/protocol`.
+  Over `main...HEAD` there is no `PROTOCOL_VERSION` or `critical:` change in protocol, and
+  `LOG_ENTRY_CRITICAL` is unchanged.
+
+**LOW (debt, non-blocking)**
+- D1. AGENTS §7 still says "Superseded history … is kept only with `sessions.keepSuperseded`".
+  The code now also never drops segments ALREADY kept when the option is turned off (owner
+  answer 3). A clause "segments already kept survive turning it off" would make it exact.
+- D2. "An aside is a new file, written outside it [the lock]" is exact for `saveAside`. The
+  asides that `replace`/`saveSnapshot` make (`asideRaw`) are written while the lock is held.
+  This is harmless: the sentence is about `<uid>.jsonl`.
+- D3. The M1 skip trusts a same-`inc` larger `base.seq` from a pod. A forged one can make a
+  writer skip a save. The file loses nothing: the next honest read replaces from its own segment.
+  This is the accepted forged-lineage class (task 1 L1/L6), and the executor noted it.
+- D4. L4 (stopped turn then `/quit` loads raw) is accepted by orchestrator answer 4, which still
+  needs the owner's morning confirmation.
+
 ## Task 3 sketch — `feat/session-log-serve-store`
 
 *— claude-opus-5-5, 2026-11-07*
