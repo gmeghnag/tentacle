@@ -130,11 +130,6 @@ export function docForKey(key: string): KeyDoc | undefined {
   return node === undefined ? undefined : keyDoc(node.path);
 }
 
-/** Is `key` a path the SCHEMA knows at all (a leaf, a section, a map entry)? */
-export function isKnownKey(key: string): boolean {
-  return resolveKeyPath(key) !== undefined;
-}
-
 /** `true` = the value IS a credential; `"values"` = every value under it is. */
 export function secretOf(key: string): true | "values" | undefined {
   return docForKey(key)?.secret;
@@ -161,10 +156,12 @@ const ARRAY_MASK = "[***]";
 
 /**
  * The mask a value at `segments` gets, or `undefined` when it is a plain setting:
- * a secret leaf/array from the registry (eval A4), OR a key the registry/schema
- * does not know at all (owner Q-B, HIGH-2's sibling) — a value pasted into the
- * wrong slot is not a setting, and `list` is what a user pastes into a bug
- * report.
+ * a secret leaf/array from the registry (eval A4), and nothing else. A key the
+ * registry does not know is NOT masked — the owner rejected that default
+ * (2026-11-08): a typo, or a key in the wrong place, must show its value in clear
+ * in `list`/`get`, or there is no way to diagnose it. A secret's child is still a
+ * secret whatever its NAME (`mcpServers.*.env.*` matches `env.ANYTHING`).
+ * (docs/fix/config-unknown-plain.md)
  */
 function maskOf(segments: readonly string[]): "***" | "[***]" | undefined {
   const key = segments.join(".");
@@ -175,18 +172,14 @@ function maskOf(segments: readonly string[]): "***" | "[***]" | undefined {
   if (secret === "values") {
     return ARRAY_MASK;
   }
-  if (secret === true) {
-    return MASK;
-  }
-  return isKnownKey(key) ? undefined : MASK;
+  return secret === true ? MASK : undefined;
 }
 
 /**
  * A stored value as `get`/`list` may print it: the JSON the file holds, except
- * that a secret leaf is `***`, a secret array (`args`) is `[***]`, and an
- * unknown key's value is `***` — never a prefix, never a length (eval A4: no
- * error or output contains a secret value). An object recurses, so
- * `get mcpServers.fs` masks inside it.
+ * that a secret leaf is `***` and a secret array (`args`) is `[***]` — never a
+ * prefix, never a length (eval A4: no error or output contains a secret value).
+ * An object recurses, so `get mcpServers.fs` masks inside it.
  */
 export function renderStored(value: unknown, segments: readonly string[]): string {
   const mask = maskOf(segments);
@@ -207,7 +200,7 @@ export function renderStored(value: unknown, segments: readonly string[]): strin
 
 /**
  * The same tree with every masked node replaced by its mask: `"***"` for a
- * secret leaf or an unknown key, `["***"]` for a secret array.
+ * secret leaf, `["***"]` for a secret array.
  *
  * This is the ONLY source of a printed stored value (HIGH-2): `get --json`
  * emitted `found.value` raw for an object, so `get model --json` printed the
@@ -270,7 +263,7 @@ export function secretPathsIn(value: unknown, segments: readonly string[] = []):
 /** One `key = value` line of `config list`. */
 export interface StoredLine {
   readonly path: string;
-  /** The value, already masked where the key is a secret (or unknown). */
+  /** The value, already masked where the key is a secret. */
   readonly text: string;
   /** The same, as a value: what `list --json` serializes (never the raw one). */
   readonly value: unknown;
@@ -316,9 +309,9 @@ function flattenInOrder(value: unknown, prefix: readonly string[]): StoredLine[]
   }
   return entries.flatMap(([name, child]) => {
     const segments = [...prefix, name];
-    // A mask (a secret, or a key the schema does not know — owner Q-B) stops the
-    // walk: one masked line, never a leaf-by-leaf leak, and never a masked parent
-    // with its children beside it.
+    // A mask (a secret from the registry) stops the walk: one masked line, never a
+    // leaf-by-leaf leak, and never a masked parent with its children beside it.
+    // An unknown key is no longer a mask, so it flattens like any plain setting.
     return maskOf(segments) !== undefined
       ? [
           {

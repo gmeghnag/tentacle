@@ -199,6 +199,19 @@ describe("T9: masked printing never emits the value", () => {
     ]);
   });
 
+  test("an unknown key is a plain leaf line, value in clear", () => {
+    // Before: one masked `model.foo` line. Now it flattens like any setting, so a
+    // typo'd nested object is visible key by key.
+    expect(flattenStored({ model: { foo: "hello-typo", bar: { a: 1 } } })).toEqual([
+      { path: "model.bar.a", text: "1", value: 1 },
+      { path: "model.foo", text: '"hello-typo"', value: "hello-typo" },
+    ]);
+    // …while a secret map under an unknown name still stops the walk, per child.
+    expect(flattenStored({ mcpServers: { fs: { env: { ANYTHING: SECRET } } } })).toEqual([
+      { path: "mcpServers.fs.env.ANYTHING", text: "***", value: "***" },
+    ]);
+  });
+
   test("an empty object is one line, and an empty file lists nothing", () => {
     expect(flattenStored({})).toEqual([]);
     expect(flattenStored({ hooks: [] })).toEqual([{ path: "hooks", text: "[]", value: [] }]);
@@ -247,15 +260,32 @@ describe("HIGH-2/Q-B: maskStored is the ONLY source of a printed stored value", 
     expect(JSON.stringify(masked)).toContain("qwen3");
   });
 
-  test("Q-B: a key that is not in the registry is masked, wherever it sits", () => {
-    // A value pasted into the wrong slot is not a setting: `list`/`get` must not
-    // print it (it lands in bug reports). Its PATH is still shown.
-    const masked = maskStored({ model: { foo: SECRET }, tools: { execution: SECRET } }, []);
-    expect(masked).toEqual({ model: { foo: "***" }, tools: { execution: SECRET } });
-    // A key outside the schema entirely (a misplaced section).
-    expect(maskStored({ bogus: { a: SECRET } }, [])).toEqual({ bogus: "***" });
+  test("an unknown key's value is IN CLEAR (owner 2026-11-08: Q-B rejected)", () => {
+    // A typo, or a key in the wrong place, must be diagnosable from `list`/`get`:
+    // only the registry's secret set masks. (docs/fix/config-unknown-plain.md)
+    const file = { model: { foo: "hello-typo" }, tools: { execution: SECRET } };
+    expect(maskStored(file, [])).toEqual(file);
+    // A key outside the schema entirely (a misplaced section), value and all.
+    expect(maskStored({ bogus: { a: "b" } }, [])).toEqual({ bogus: { a: "b" } });
     // …and inside a profile, against the `profiles.*` mirror.
-    expect(maskStored({ p: { nope: SECRET } }, ["profiles"])).toEqual({ p: { nope: "***" } });
+    expect(maskStored({ p: { nope: "x" } }, ["profiles"])).toEqual({ p: { nope: "x" } });
+    // The boundary, stated so it is a decision and not a surprise: the owner's rule
+    // is the registry, so a credential-shaped value at a path the registry does not
+    // know (`model2.apiKey` — a misplaced `apiKey`) is in clear too. Masking by NAME
+    // would need a second table of secrets, which is what A4 forbids.
+    expect(maskStored({ model2: { apiKey: "sk-x" } }, [])).toEqual({ model2: { apiKey: "sk-x" } });
+  });
+
+  test("an unknown NAME under a secret map is STILL a secret", () => {
+    // The one thing the unknown-key rule must not have been holding up: `env` and
+    // `headers` are secret per CHILD (`mcpServers.*.env.*`), so a name the registry
+    // does not list (ANYTHING, Y) is masked by the registry, not by "unknown".
+    const masked = maskStored(
+      { fs: { env: { ANYTHING: SECRET }, headers: { Y: `Bearer ${SECRET}` } } },
+      ["mcpServers"],
+    );
+    expect(masked).toEqual({ fs: { env: { ANYTHING: "***" }, headers: { Y: "***" } } });
+    expect(JSON.stringify(masked)).not.toContain(SECRET);
   });
 
   test("a non-secret value is the value (get/list keep working)", () => {
@@ -267,14 +297,15 @@ describe("HIGH-2/Q-B: maskStored is the ONLY source of a printed stored value", 
     expect(maskStored({ maxIterations: 8 })).toEqual({ maxIterations: 8 });
   });
 
-  test("renderStored of the masked tree never emits the value (list/get plain)", () => {
-    const file = { model: { model: "qwen3", apiKey: SECRET }, bogus: SECRET };
+  test("renderStored of the masked tree never emits a SECRET (list/get plain)", () => {
+    const file = { model: { model: "qwen3", apiKey: SECRET }, bogus: "typo-value" };
     const text = flattenStored(maskStored(file))
       .map((l) => `${l.path} = ${l.text}`)
       .join("\n");
     expect(text).not.toContain(SECRET);
     expect(text).toContain("model.apiKey = ***");
-    expect(text).toContain("bogus = ***");
+    // Not a secret, so not masked: what the user pasted is what they see.
+    expect(text).toContain('bogus = "typo-value"');
   });
 });
 
