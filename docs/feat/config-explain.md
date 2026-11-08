@@ -917,3 +917,74 @@ What a reviewer should attack, in order:
    pushes the summary right; a very narrow terminal is not considered. Is that
    acceptable for a docs command (it is, by the same standard as `--help`)?
 
+
+## Review — round 2
+
+*— claude-sonnet-5-5, 2026-11-08* (fresh context; the same model as the round-1
+reviewer, a different family from the executor, deepseek-v4.1-flash)
+
+**Verdict: PASS.** 0 HIGH · 0 MEDIUM · 0 LOW · 0 owner questions. Every
+round-1 finding is fixed, tested, and the tests go red on my mutations.
+
+### Gate (re-run)
+
+- `bunx tsc --noEmit`: clean. `bunx biome check .`: 732 files, no fixes.
+- `bun test packages`: **5510 pass · 3 skip · 0 fail** (5513 tests, 377 files). The 3 skips are the opt-in ones.
+- Protected files: `git diff main...HEAD --stat` over `schema.ts`, `defaults.ts`, `resolve.ts`, `load.ts` is empty. The owner constraint holds.
+- `bun run docs:config`: **not run** (it writes `README.md`; blocked here). Evidence instead: T4 (the committed block equals `renderConfigKeysTable()`) passes, so a run is a no-op. Unverified by execution; verify with `bun run docs:config && git status --short`.
+
+### Round-1 findings
+
+| # | Fixed? | Evidence |
+|---|---|---|
+| M1 `readOnlyTools` type | yes | `key-docs.ts` entry is `type: "enum \| array"`; `explain mcpServers.fs.readOnlyTools` prints `type enum \| array`, `values hint \| none`, and the `["read_file", "list_dir"]` example. New T1 test "type and values are the schema's" compares members against the walker. |
+| M2 / O1 prompt words | yes | `explain how config works` → exit 1, `unexpected argument "config"` + `to send this as a prompt, use: tentacle -- explain how config works`. `explain "how does X work"` → exit 1, same hint, no "did you mean". HELP documents `--`. |
+| L3 T1 message | yes | `missingEntries`/`extraEntries` say what to do and skip the derived `profiles.*` mirror; two tests pin the text. |
+| L4 internal pointer | yes | The `redactSecrets` details no longer mention `docs/feat/…`. |
+| L5 `writableDirs` default | yes | Card: `default the system temp dir ($TMPDIR) and /tmp`. Matches `defaults.ts:66` (`TMPDIR \|\| TMP \|\| TEMP \|\| /tmp`). |
+| L6 width | yes | `renderExplainText(result, {width})`, 80 by default, `process.stdout.columns` read only in `main.ts`. Tests at 80 and 60 for every level and the long cards. |
+| L7 README facts | yes | `envNote`, `defaultText`, richer summaries; a test lists 13 facts the old hand table had and checks each in the generated row. |
+| O2 `$schema` | yes | Kept, listed last in `explain` (confirmed in the output), explainable by name. |
+
+### Mutations (§9)
+
+| Test | Mutation | Result |
+|---|---|---|
+| T1 type/values vs walker | `readOnlyTools` `type: "enum \| array"` → `"enum"` in `key-docs.ts` | red: `registry enum [hint\|none], schema array\|enum [hint\|none]`, for the base and the `profiles.*` path (1 fail). Restored; shasum `4e167e01…` identical. |
+| 80-column wrap | `word.length <= limit` → `<= limit + 1` in `explain.ts` `wrap()` | red: 4 fail in `explain.test.ts` (width tests, e.g. the 60-column and path-wider-than-column ones). Restored; shasum `6516fde3…` identical. |
+
+`git status` was clean after both restores.
+
+### Re-sampled entries (not sampled in round 1)
+
+`model.baseURL` (`resolve.ts:363-365`, `defaults.ts:5,7`: both URLs correct) ·
+`model.maxTokens` (omitted for openai, 64000 for anthropic: `defaults.ts:134-136`) ·
+`systemPromptFile` (`PROMPT.md` in the config dir, `load.ts:553,577-580`; the env
+is inline, `load.ts:375`, `resolve.ts:391`) · `tools.writableDirs` (default and
+`:`-separated env, `resolve.ts:184,486`, `defaults.ts:232-234`) ·
+`subagents.execution` (default `parallel`, `defaults.ts:147`) ·
+`subagents.maxParallel`, `subagents.enabled`, `tools.execution`,
+`tools.redactSecrets`, `engine`, `tui.theme` (cards read; defaults pinned by T2/T3).
+No wrong entry found.
+
+### Output check
+
+- `explain`, `explain subagents`, `explain tools.writableDirs`: read in full. Every line is ≤ 80 columns, wrapped under the summary column. `explain modle` → exit 1, `did you mean model?`.
+- I could not run a script over *all* paths and widths (running a scratch file was blocked); the coverage is the executor's width tests (every level + the longest cards at 80 and 60) plus my mutation on `wrap()`, which they caught.
+
+### Attacks tried
+
+- A `defaultText` contradicting a value default: guarded by the new test (numbers/booleans only); no entry violates it.
+- The prompt hint on a quoted sentence: `explain "how does X work"` is handled in the dispatch (`prompt: true`), not only in `parseArgs`. Works.
+- `explain` reading the user's config: unchanged from round 1 (dispatch before `loadConfig`).
+- A new prose lie in the changed summaries (`subagents.execution`, `tools.execution`, `readOnlyTools`): checked against `defaults.ts` and the round-1 reading. None.
+
+### Notes (not findings)
+
+- The card prints `` (`:`-separated; empty = `[]`) `` with nested backticks; cosmetic.
+- `promptWords` drops words that start with `-` and does not shell-quote, so for a prompt with shell metacharacters the printed `tentacle -- …` line may need quoting. The common case (plain words) is exact.
+
+### How the executor behaved
+
+- It fixed all nine items in one commit, and added a test for each, including the stronger T1 I had suggested (a comparison with the walker) — the right answer to finding 1, not a patch of the one entry.
+- It did not touch the protected files and did not widen scope. It put the O1 answer where the user needs it (the error), not only in HELP.
