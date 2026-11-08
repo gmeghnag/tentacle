@@ -813,6 +813,15 @@ asides: 0
 (true for one daemon's monotonic seq); a pod forging `inc` and `seq` can only make a writer
 skip a save, not lose file content (the next honest read replaces from its own segment).
 
+### Live test (2026-11-08, orchestrator-run, branch binary, model `--profile deepseek`)
+Driven by a Sonnet agent in tmux, isolated config dir. All PASS, no regression:
+1. Local: the `.jsonl` grows during a turn (20→25→28→37 lines), header byte-identical, no duplicate `seq`; `--resume` shows the full history.
+2. `run --engine docker`, `docker stop` mid-turn: the finished rounds are on disk; after `docker start` + `attach --resume` they are shown, and the cut turn is closed at load ("Interrupted: …"). No aside, no lock left. The TUI still prints the old "not saved — could not read the history back" line at the stop (pre-existing text; the rounds were already saved — follow-up candidate).
+3. Detached run, two terminals, prompts from both + `/compact`: one file, no duplicates, no aside, no lock at idle; with `keepSuperseded: true` two `base` segments stay in the file.
+4. A legacy `<uid>.json` is ignored silently and left untouched.
+5. Torn tail: resume loads up to the last good entry, the next write removes the torn bytes. A plain `--resume` (new daemon incarnation) rewrites the file once as a new `base` segment — as designed.
+*— claude-opus-5-5 (orchestrator), 2026-11-08*
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-08* (fresh context; **same model as the executor** — shared blind
