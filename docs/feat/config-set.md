@@ -1342,3 +1342,149 @@ M3/M4 survive. Shared blind spots with the author's family are possible;
 this is the second pass, by a different model.
 
 *— claude-sonnet-5-5, 2026-11-08*
+
+## Review — round 2
+
+**Verdict: PASS.** Every round-1 finding (HIGH-1, HIGH-2, MEDIUM-3, MEDIUM-4,
+LOW-5..8) is fixed and pinned; the round-3 layout fix holds on 16 shapes I tried.
+0 blocking findings, 0 new defects; 3 non-blocking judgements and 1 owner
+question below.
+
+Reviewer: `claude-sonnet-5-5`, a fresh context, and the SAME model as round 1
+(not the executors, DeepSeek and claude-opus-4-6). Shared blind spots with my
+own round 1 are possible. Scratch: `./.tentacle/tmp/config-set-review2/`
+(`a1.sh`…`a5.sh`, `mut*.sh`, `*.out`); `TENTACLE_CONFIG_DIR` on every run, the
+real `~/.config/tentacle` never touched. No code changed, nothing committed.
+
+### Owner constraint and gate
+
+- `git diff main --stat -- schema.ts defaults.ts resolve.ts load.ts`: empty. TRUE.
+- `bunx tsc --noEmit`: exit 0. `bunx biome check .`: 751 files, no fixes.
+  `bun test packages`: **5711 pass, 3 skip (the opt-in ones), 0 fail**, 5714 tests.
+
+### 1. Secret attacks (`a1.sh`, `a2.sh`; grep of all stdout+stderr for each planted value)
+
+Round 1's evidence commands, now: `model={"apiKey":…}`, `--profile p model=…`,
+`mcpServers.fs.env={"T":…}` → each exit 1, file not created, the refusal names the
+PATH (`model.apiKey`, `mcpServers.fs.env.T`), never the value. New routes:
+
+| Attack | Result |
+|---|---|
+| `profiles={"p":{"model":{"apiKey":…}}}`, `profiles.p={…}` | refused (`profiles.p.model.apiKey`) |
+| `mcpServers={"fs":{"command":"x","headers":{"A":…}}}`, `mcpServers.fs={… "env":{"A":…}}` | refused (`…headers.A`, `…env.A`) |
+| `mcpServers.fs.args=["--token",…]`, `mcpServers.fs.args=sk-…`, object holding `args` | refused (`mcpServers.fs.args`) |
+| odd case `authorization` (header), `APIKEY`, `apikey`, `api_key` | `authorization` refused; the other three are unknown keys → schema refuses, value not echoed (`Unrecognized key(s)… 'APIKEY'` names the key, not the value) |
+| `config <section>=<json>` vs `config set <section> <json>` | same refusal, same text |
+| malformed JSON holding a secret (`model={"apiKey":"sk-…"` / unquoted / trailing comma) | `must be a JSON object, e.g. {"key":"value"}`: the parse error does NOT quote the text |
+| `model=sk-…`, `model=["sk-…"]` | type error, no value |
+| a secret inside a non-secret slot (`subagents={"maxParallel":"sk-…"}`, `tui={"theme":"sk-…"}`) | `Expected number` / `Invalid enum value. Expected 'auto' \| 'dark' \| 'light'`, no `received …` tail |
+| the "applies to" line | prints the path and a fixed sentence only |
+| stdin `-` for objects | allowed, output masked (`set model = {"apiKey":***,"model":"m"}`) |
+| `list` / `list --json` / `get model` / `get model --json` / `get mcpServers --json` / `get profiles --json` / `get …args` / `--profile p get model --json` on a file holding secrets in `model`, `mcpServers.fs.{env,headers,args}`, `profiles.p.model`, and an UNKNOWN `model.foo` | all masked (`***`, `[***]`, `["***"]`); `model.foo` masked (Q-B applied) |
+| a file with a secret in a wrong slot, then `config set autoWake false` | refused (3 issues), lines carry path + expected set only |
+
+The only `sk-` strings in any output: `tools.execution = "sk-WRONGSLOT"`
+(`list`, `list --json`, `get`) — a KNOWN, non-secret key. Nothing can tell that
+value from a legitimate one; masking every known key would make `list` useless.
+Not a defect. The key NAME `mcpServers.sk-LEAK40` is echoed, as a path always was.
+
+### 2. Q-A (`a3.sh`; no model session started)
+
+- `tentacle config my nginx` → `unknown config key "my"` + `did you mean rm?` + the line
+  `to send this as a prompt, use: tentacle -- config my nginx`. OK.
+- `config how do I tune nginx` → `unexpected argument "tune"` + the same hint. OK.
+- `cliMode` (`flags.ts:656`): a leading `--` is neither a subcommand nor `-…`
+  (`first !== "--"`), so it falls to `"prompt"`; pinned by `config-main.test.ts`
+  ("the hint carries the words as typed"). I did not launch `tentacle -- config …`
+  (it would start a model session); the reading of the code and that test are the evidence.
+- `tentacle config subagents` / `tui` / `model` (a section, no value) →
+  `must be a JSON object, e.g. {"key":"value"}` + `an empty value is not a setting —
+  to remove the key, use: tentacle config unset subagents`. **Judgement: acceptable,
+  not blocking, but the second line steers toward deleting a section the user only
+  wanted to look at.** `unset` is a separate explicit command, nothing is written, so
+  it is wording, not data risk. Owner question Q-D below.
+
+### 3. The changed seed and hidden-input's contract
+
+- `config-main.test.ts`: the `mcpServers.fs` seed moved from argv to stdin because the
+  object form on argv is now refused; the assertions (`args = [***]`, no `tok-123`,
+  no `tok-456`) are unchanged and the seed is asserted to succeed (`written === 0`).
+  Justified, not weakened. A separate test pins that the argv form is refused.
+- `hidden-input`: EOF/Ctrl+C now resolve `undefined` (was `""`). The old EOF test
+  was renamed and inverted deliberately (LOW-7), with new tests for Ctrl+C, EOF, an
+  empty line still `""`, and a clean screen. The only production caller is
+  `main.ts:697`; `config-run.ts:144` types `readSecret` as `string | undefined`
+  and exits 130 with `cancelled`, nothing written (pinned). Justified. Nit, not a
+  finding: `main.ts:403` still types the io seam `Promise<string>`, which is why the
+  test needs `undefined as unknown as string`.
+
+### 4. Mutations (cp backup → narrow tests → restore → `shasum`; `git status` empty after each run)
+
+| # | Mutation | Suites | Outcome |
+|---|---|---|---|
+| M1 | `secretPathsIn`: stop recursing into children | config-value, config-run, config-main, config-edit | KILLED, 3 tests (nested path, `profiles.p`, path naming) |
+| M2 | `maskStored`: a nested map's child returned raw | same | KILLED, 4 tests (incl. "no form of get or list prints a stored secret") |
+| M3 | `maskOf`: unknown key not masked (Q-B) | same | KILLED, 4 tests |
+| M6 | `typeArray` echoes the text (round 1's M3) | same | KILLED, 1 test (MEDIUM-3 test) |
+| M7 | `forwardedMessage` forwards zod's text raw (MEDIUM-4) | config-edit, config-run | KILLED, 1 test |
+| M5 | only the `received …` regex fallback at `config-edit.ts:147` removed | same | SURVIVED (137 pass) — it is a belt behind `expectedText`; M7 kills the primary path. Not a finding. |
+
+Hashes after restore: `config-value.ts` `fcc5f8c2…`, `config-edit.ts` `40c5fff6…`,
+both equal to before.
+
+### 5. The layout fix (`a5.sh`, 16 cases: `diff` + `cat -et`, then `config list` must load)
+
+Root cause confirmed: `jsonc-parser`'s `withFormatting` widens an insert to the
+whole line(s) it touches, and the insert offset is the end of the PREVIOUS
+sibling, so that sibling's line is reformatted (the library's own edit in the
+executor's probe starts at the `"tui"` line). The fix (`spliceInsert`, own text
+layout for the new property only) is the right shape, and a replace was never affected.
+
+Result: the original repro changes ONLY the added lines (`"tui": { "theme": "dark" },`
+then `subagents`). Also byte-exact except the added text and the separator comma:
+inline array sibling (B); `// trailing` after the sibling (C, comma goes before the
+comment); CRLF (D, every new line `^M`); multi-line sibling (I); block comment
+spanning lines (H); sibling holding `}, // x` in a string (M); tabs (N); trailing
+comma kept, not doubled (O); insert after a middle inline sibling (P) and after
+`"a": 1, "b": 2` on one line (L); nested new section 3 levels (K); empty file (J).
+Every result loads (`list` exit 0).
+
+- **Inline PARENT (E)** `"subagents": { "enabled": true }` + `subagents.maxParallel`
+  → expanded to three lines; and a WHOLE one-line file (F) is expanded to nine.
+  Judgement: acceptable, and the executor's non-change is right. There is no
+  multi-line layout of that object to preserve; what changed is the touched object's
+  own layout, plus (F) its one-line siblings because the touched node IS the root
+  line. Eval A3/T10 say comments, other lines and order are preserved: all kept. A
+  user who writes JSON on one line gets a readable file after a `set`.
+  Fix, if ever wanted: in `spliceInsert`, when the parent is inline, insert
+  `, "key": value` before the closing brace (no reformat); red test: E must equal
+  `{ "enabled": true, "maxParallel": 3 }`.
+- **`unset` of the only key (G)** leaves `"subagents": {\n  }`. Acceptable: valid,
+  loads, A3 accepts it, and pruning would edit a second node. Where the parent has a
+  required field the whole-file validation refuses. No change requested.
+
+### Findings
+
+None blocking. No new defect from the round-2/3 diff.
+
+### Owner questions
+
+- **Q-D (`config <section>` with no value).** Recommend a one-line follow-up, not a
+  blocker: for an object-typed key with no value, say `needs a JSON object value;
+  show it with: tentacle config get <key>` (and drop the `unset` hint, kept for a
+  leaf given `""`). Red test: `config subagents` stderr must not contain `unset`.
+- **Q-A/Q-B** defaults (prompt hint on an unknown first word; unknown keys masked in
+  `list`/`get`): confirmed good in practice; recommend keeping them.
+
+### How the executors behaved
+
+DeepSeek (round 2) fixed what the review named, by root cause (one shared
+`maskOf` and one `secretPathsIn` instead of tables), and its tests assert the absence
+of the value on the output and the error paths, which is what M1–M3, M6, M7 kill.
+opus-4-6 (round 3) did the probe first, found the root cause in the library, kept
+the change to one seam, listed which of its new tests were NOT red before the fix,
+and recorded the inline-parent and empty-parent shapes as decisions instead of
+hiding them. Honest reporting throughout; the only gap I found is the wording in Q-D,
+which the executor itself had listed as debt.
+
+*— claude-sonnet-5-5, 2026-11-08*
