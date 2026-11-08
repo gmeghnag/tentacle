@@ -471,6 +471,52 @@ describe("createSubagentRunner", () => {
       },
     ]);
   });
+
+  test('an old history\'s "general-purpose" runs as the default built-in, through agent_task', async () => {
+    // Wiring level (feat/subagent-general-rename, eval C2): no user agent files,
+    // so the real wiring's merged list (`wiring.ts:473-477`) IS the built-ins.
+    // The runner is given no `types` here, which is the same list. A call stored
+    // before the rename names a type that no longer exists; the generic
+    // unknown→default path (`task.ts:82-85`) runs the child as the default
+    // built-in — no alias.
+    const { env } = recordingEnv();
+    const { run, types } = createSubagentRunner({
+      model: new ScriptedProvider([[toolCall("shell", { command: "ls" }), { type: "done" }]]),
+      env,
+      tools: fullRegistry(),
+    });
+    // No `types`: the runner falls back to the real built-ins, as `wiring.ts:477` gets.
+    expect(types.map((t) => t.name)).toEqual(["general", "explore"]);
+    const parent = new Agent({
+      model: new ScriptedProvider([
+        [
+          {
+            type: "tool_call",
+            toolCall: {
+              id: "task-1",
+              name: "agent_task",
+              arguments: JSON.stringify({
+                description: "look",
+                prompt: "run ls",
+                subagent_type: "general-purpose",
+              }),
+            },
+          },
+          { type: "done" },
+        ],
+      ]),
+      tools: new ToolRegistry().register(createTaskTool(run, types)),
+      env,
+    });
+    const starts: { id: string; agentType: string }[] = [];
+    for await (const event of parent.run("s", [{ role: "user", content: "go" }])) {
+      // `subagent_start.agentType` is the child's RESOLVED type, not the requested one.
+      if (event.type === "subagent_start") {
+        starts.push({ id: event.id, agentType: event.agentType });
+      }
+    }
+    expect(starts).toEqual([{ id: "task-1", agentType: "general" }]);
+  });
 });
 
 describe("childToolLabel", () => {

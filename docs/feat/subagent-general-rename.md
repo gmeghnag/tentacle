@@ -17,11 +17,14 @@ decision **C** of `docs/eval/subagent-live.md:62-65`: "Built-ins:
 users write configs".
 
 The timing is the point: the config key shape is `subagents.types.<type>`
-(owner Q6 = (a), `docs/eval/subagent-live.md:650`), and tasks 3/4
+(owner Q6 = (a), `docs/eval/subagent-live.md:654`), and tasks 3/4
 (`feat/models-map`) let a user write `subagents.types.<type>.model`. Renaming
 the type *after* users have written those keys would break them, so the rename
-lands first, while nothing names a type in a persisted config or in a session
-log.
+lands first, while nothing names a type in a persisted CONFIG. A session log
+does hold the old name, in one place that is inert history: an old
+`agent_task` call's `subagent_type` argument, inside the persisted
+`ChatMessage`s. It is never read back as a type (see the load-bearing
+assumption and the failure-modes table), so the rename leaves it alone.
 
 **Eval C2's three facts** (`docs/eval/subagent-live.md:399-413`):
 
@@ -59,21 +62,37 @@ overrides — exactly inverted from what the rename wants (4).
 
 ### Load-bearing assumption
 
-**The name `general-purpose` is a plain data value with no consumer that keys
-off the string.** Every use is either the definition itself or a test/doc
-naming it: `packages/agent/src/subagent.ts:58` (the built-in), and
+**No consumer in source keys off the string `general-purpose`, but the string
+does survive outside `src` in two places — in inert history, and in user hook
+scripts.** In `src` every use is either the definition itself or a doc/test
+naming it: `packages/agent/src/subagent.ts:58` (the built-in) and
 `packages/tools/src/task.ts:80` (the fallback used only when the caller passes
-an EMPTY type list). Nothing persists the type name — it is not in the session
-log's typed entries (AGENTS §7 lists what persists: turn/call markers, title,
-checkpoints, `ChatMessage`s) and not in the config schema (`subagentsEnabled`,
+an EMPTY type list). `grep -rn "general-purpose" packages apps scripts` → 2
+source hits, 29 test hits, 0 in `apps/` or `scripts/`; there is no enum, no
+branch and no config-schema field naming a type (`subagentsEnabled`,
 `subagentExecution`, `subagentMaxParallel`, `subagents.agentTaskDescription` are
-booleans/numbers/strings unrelated to a type name). Verified by
-`grep -rn "general-purpose" packages apps scripts` → 2 source hits, 29 test
-hits, 0 in `apps/` or `scripts/`.
+booleans/numbers/strings unrelated to a type name; `subagents.types.<type>`
+does not exist until `feat/models-map`).
+
+Two facts the "nothing persists it" phrasing got wrong:
+
+- **An old `agent_task` call's arguments ARE persisted**, as part of the
+  `ChatMessage`s (AGENTS §7's own list). So a session log written before the
+  rename holds `subagent_type: "general-purpose"`. Harmless, and that is eval
+  C2's second fact: the value is never read back as a type — the call is not
+  re-run (an interrupted one is closed with `SUBAGENT_INTERRUPTED_NOTE`,
+  `packages/daemon/src/persisted-session.ts:186-188`), and the type is resolved
+  at call time from the then-current list.
+- **User hook scripts DO see the type**, as `agent.type` in the stdin JSON
+  (`packages/agent/src/hooks.ts:514`, contract in
+  `docs/feat/hooks-core.md:296`). A hook matching
+  `agent.type == "general-purpose"` silently stops matching after the rename.
+  This is outside `src`, so the grep above cannot see it; it is called out in
+  `CHANGELOG.md` (F4), and nothing in the code can fix a user's script.
 
 ### Preconditions
 
-- Built-in list: `packages/agent/src/subagent.ts:56-73`; the name at `:58`, the
+- Built-in list: `packages/agent/src/subagent.ts:56-71`; the name at `:58`, the
   prompt constant `GENERAL_PROMPT` at `:45` (already `general`-neutral, no
   rename needed).
 - `agent_task` default + fallback: `packages/tools/src/task.ts:80`
@@ -140,8 +159,8 @@ records of what was true then (the task's scope says so explicitly).
 
 | Case | After the rename | Why it converges |
 | --- | --- | --- |
-| Old history / a model echoing `subagent_type: "general-purpose"` | Runs as `general` | `task.ts:82-85` unknown→default; no error, no alias needed. **Pinned by a test.** |
-| A user has `agents/general-purpose.md` (it used to override) | It is now an EXTRA type, appended after the built-ins | `agent-defs.ts:141-144`; the built-in `general` keeps its place as `types[0]`, so the DEFAULT type does not change under them. In a package it is no longer reported as replacing a built-in. **Pinned by a test.** |
+| Old history / a model echoing `subagent_type: "general-purpose"` | Runs as `general` | `task.ts:82-85` unknown→default; no error, no alias needed. **Pinned by a test** — and, over the REAL built-ins, end to end by Implementation test 5. |
+| A user has `agents/general-purpose.md` (it used to override) | It is now an EXTRA type, appended after the built-ins, and **the default type changes under them**: it is now the built-in `general` (full tool-set), where `types[0]` used to be their file | `agent-defs.ts:141-144` appends it, but the built-in `general` keeps index 0, so `names[0]` (`task.ts:80`) and `types[0]` (`subagent.ts:208`) are now the built-in — a user who restricted that file (e.g. `tools: [fs_read]`) gets a full-tool default for every call that names no `subagent_type`. Nothing reports it; the child's permission gate still applies. `CHANGELOG.md` states it. In a package it is no longer reported as replacing a built-in. The append is **pinned by a test**; so is the resulting index order, `["general", "explore", "general-purpose"]` (`agent-defs.test.ts:132`), which is what makes the built-in the default. |
 | A user has `agents/general.md` | Overrides the built-in in place | `agent-defs.ts:139-144`, same-name branch. **Pinned by a test.** |
 | Both files (`general.md` + `general-purpose.md`) | `general` overrides, `general-purpose` appends | Same two branches; order is built-ins first, then user files in file-name order. |
 | Config `subagents.types.general-purpose` (not implemented yet; lands with `feat/models-map`) | Would name a type that no longer exists | Not reachable at this commit: the key does not exist (§7 config schema untouched). This is why the rename goes first (eval:569). |
@@ -157,9 +176,17 @@ Red first (§9), each on the property it names, not on a compile error:
    (Red today: the list is `["general-purpose","explore"]`.)
 2. **`packages/tools/test/task.test.ts`** — an `agent_task` call with
    `subagent_type: "general-purpose"` hands the runner `type: "general"` (the
-   default), exactly as `"bogus"` does. (Red today: the runner receives
-   `"general-purpose"` — indistinguishable from a real type, so the assertion
-   `["general", "general"]` fails.)
+   default), exactly as `"bogus"` does. **Not red today, and the earlier draft
+   of this line was wrong to claim it.** The test runs on the file's own `TYPES`
+   fixture (`task.test.ts:6-9`), which the same commit renames, so it never sees
+   the built-in list and passes on either source. It is not vacuous: mutation 2
+   of the Review (an alias `general-purpose → explore` at `task.ts:84`) makes it
+   fail. What it pins is the *mechanism* (`task.ts:82-85`); that the mechanism
+   is fed `general` by the real built-ins is pinned separately, by test 1 and by
+   test 5 below.
+   - The one test in this file that WAS red is "with no types at all, the
+     fallback names the built-in type `general`" — it asserts the literal at
+     `task.ts:80`, and appears in `red.txt`.
 3. **`packages/agent/test/agent-defs.test.ts`** — a user type named `general`
    replaces the built-in (its description wins, the list length stays 2); a user
    type named `general-purpose` is APPENDED as an extra type (list length 3, the
@@ -168,10 +195,21 @@ Red first (§9), each on the property it names, not on a compile error:
 4. **`packages/cli/test/wiring.test.ts`** — a package `agents/general.md` is
    reported as "replaces the built-in one"; a package `agents/general-purpose.md`
    is NOT (it shadows nothing). (Extends the existing shadowing test.)
+5. **`packages/agent/test/subagent.test.ts`** (wiring level, added in Round 2)
+   — a runner built with NO `types` (so it uses the real
+   `BUILTIN_AGENT_TYPES`, as `wiring.ts:473-477` does) driven through a real
+   `agent_task` call whose stored arguments say
+   `subagent_type: "general-purpose"`: the parent's own `subagent_start` event
+   reports the child's RESOLVED type, `general`. This is the end-to-end form of
+   what tests 1 and 2 pin separately — the mechanism, fed by the real
+   built-ins. On the old code it is red on its first assertion (the built-in
+   list is `["general-purpose","explore"]`); under the alias mutation below it is
+   red on the resolved type (`explore`, where the test expects `general`).
 
 Mutation check (§9 non-vacuity): put `general-purpose` back in the built-in list
-(`subagent.ts:58`), confirm tests 1 and 3 go red, restore from a `cp` backup and
-verify by `shasum`.
+(`subagent.ts:58`), confirm tests 1, 3 and 5 go red, restore from a `cp` backup
+and verify by `shasum`. A second mutation — an alias `general-purpose →
+explore` at `task.ts:84` — makes tests 2 and 5 fail.
 
 ## Execution
 
@@ -302,6 +340,31 @@ run was executed with the *rest* of the tree already green, so it isolates the
 built-in-list line; I did not additionally mutate `task.ts:80` (its test was red
 in step 1 on that literal, which is the same evidence). Verifying the second
 mutation is one command: `sed -i '' '80s/"general"/"general-purpose"/' packages/tools/src/task.ts && bun test packages/tools/test/task.test.ts`.
+
+**Round 2 (review text fixes, 2026-11-08).** F1, F3, F4 and F5 are applied as
+text fixes above (failure-modes row 2, test 2's "Red today" claim, the
+load-bearing assumption — now about consumers in `src` plus the two surviving
+uses — and the `eval:654` / `subagent.ts:56-71` citations); F2 is the
+orchestrator's `CHANGELOG.md` edit. F3's optional test was added
+(`packages/agent/test/subagent.test.ts`, Implementation test 5): green, and red
+under both mutations (built-in list back to `general-purpose` → fails on the list
+assertion; an alias `general-purpose → explore` at `task.ts:84` → fails on the
+resolved type), with `subagent.ts` / `task.ts` `cp`-backed up and their `shasum`s
+re-verified identical (`45a935f2…`, `791f9b31…`). Gate: `bunx tsc --noEmit` clean,
+`bunx biome check .` 755 files no fixes, and:
+
+```
+$ bun test packages
+ 5672 pass
+ 3 skip
+ 0 fail
+ 62592 expect() calls
+Ran 5675 tests across 387 files. [179.22s]
+```
+
+That is one pass more than the pre-Round-2 baseline (5671), the test added here;
+the 3 skips are the opt-in ones AGENTS §6 names. `tsc -p apps/mobile` not re-run
+(nothing there changed).
 
 ## Review
 
