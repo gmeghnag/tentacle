@@ -903,3 +903,81 @@ The laptop gate from Round 1 is unchanged by this commit. The fix commit routes 
 #### How the executor behaved
 
 Honest and on scope: the owner answers are untouched, the drift on F1 (`interactive === false`) is declared and correct for §7, and the pending live check is stated. The gap is the one Round 1 warned about: F1's proof looked only at the line it wanted, not at what else takes the same route, and F2's proof stopped at the helper.
+
+### Round 3
+
+*— claude-opus-5-5 (resumed), 2026-11-09*
+
+**Reviewer disclosure.** Resumed session of Round 2, so NOT a fresh context: this round checks my own findings. The fix commit `784f808` was written by Sonnet.
+
+#### Verdict: PASS with nits
+
+R2-1, R2-2 and the two Round 2 nits that were code are fixed, and every mutation below went red. No new defect. **Not verified here, so still open before merge:** the live docker check (orchestrator) and the `apps/mobile` typecheck and tests (orchestrator's combined build).
+
+**Owner questions: none.**
+
+#### Findings
+
+No Critical, Major or Minor findings.
+
+**Nits** (none blocks the merge)
+
+- `TODO.md:456` still says `slots` and `Size: M`. Execution leaves it for the merge.
+- Execution "Fix round 2" says "Gate: see the final report of this round" instead of the numbers. The gate below is the record.
+- Round 1's two nits are unchanged, as Execution states: a title call with a name is refused without a log line (`remote-client.ts`, `servingModel`), and the agent sees the `RpcError:` prefix.
+
+#### Status of Round 2
+
+| Finding | Status | Evidence |
+|---|---|---|
+| R2-1 only the refusal reaches `relay.log` | Fixed | A1–A3 killed; the test feeds a 401 with a sentinel body, 20 junk notifications and one refused name, and asserts exactly one line |
+| R2-2 both F2 sites pinned | Fixed | B1, B2 killed (both survived in Round 2); B3 shows the same site tests also catch an overwritten own id |
+| Nit: main key's stderr in a no-terminal load | Fixed | C1, C2 killed: code alone with no terminal, stderr kept on a strict load |
+| Nit: `published` branch of `appliesToText` | Fixed | C3 killed |
+| Nit: stale header | Fixed | Doc line 3 |
+
+#### Gate (this worktree, HEAD `784f808`, unmodified)
+
+| Command | Result |
+|---|---|
+| Narrow: the 8 touched or related test files | 453 pass, 0 fail |
+| `bun test packages` | **5885 pass, 3 skip (the opt-in three), 0 fail**, 63487 expects, 397 files |
+| `bunx tsc --noEmit` | clean |
+| `bun run lint` | 767 files, no fixes |
+| `apps/mobile` typecheck and tests | not run in this worktree (mobile deps not installed; the orchestrator's combined build covers them) |
+
+#### Mutation non-vacuity
+
+`.tentacle/tmp/models-map-pod/review2/mutate3.ts`: apply, run tests, restore, compare sha256. Every restore matched, and `git status` was clean afterwards.
+
+| Mutation | Result |
+|---|---|
+| A1 `relay.log` routing widened to every error | KILLED, 1 fail (R2-1 test) |
+| A2 the refusal reported as a plain `Error` | KILLED, 2 fail (a refused name would be lost) |
+| A3 the `interactive === false` guard removed | KILLED, 1 fail |
+| B1 old patch back at `relay.ts:161` | KILLED, 1 fail |
+| B2 old patch back at `main.ts:1479` | KILLED, 1 fail |
+| B3 `withRunModel` overwrites an own id (only the two site tests run) | KILLED, 2 fail |
+| C1 main key catch disabled | KILLED, 1 fail |
+| C2 main key catch also on a strict load | KILLED, 1 fail |
+| C3 `published` branch of `appliesToText` dropped | KILLED, 1 fail |
+
+#### Attacks tried
+
+| # | Attack | Result |
+|---|---|---|
+| 1 | Can a pod produce a `ModelNameRefusedError`, or get its own text into one? | Built only in `refusedName` (`remote-client.ts:2415`), on the laptop, and its text holds only a name the schema shaped. The title refusal does not use it. **Holds** |
+| 2 | The class is checked by `instanceof` across packages: does the check really match on the real path? | The refusal is built in `@tentacle/client` and checked in `@tentacle/cli`; the F1 test runs that real path, and A2 proves it depends on the class. **Holds** (source run; a compiled binary is the live check's to confirm) |
+| 3 | Flood: can a hostile pod still rotate the trace away through this route? | Junk no longer reaches the log; refusals stay at 16 names per client (`MAX_REFUSED_NAMES_LOGGED`). **Holds** |
+| 4 | Does narrowing lose the cause of a failed run? | A main-model 401 still ends the relay as `state: failed the model endpoint answered 401 (unauthorized)`, by the pod-safe path (`docs/fix/detached-model-error-reason.md:156`, not changed here). A sub-agent's failure on a named call reaches the agent as a tool error, and leaves no `relay.log` line, as before F1. **Holds** |
+| 5 | TUI path: does it still record every error? | The `else` branch is untouched; the file route was traced in Round 2 and A3 pins the guard. **Holds** |
+| 6 | Main key nit: another site that runs a key command with a no-terminal load, or a caller matching the old text? | One main-key site in `load.ts:802`, guarded by `modelKeysNoTerminal`; the strict text is unchanged and pinned (C2). **Holds** |
+| 7 | Regressions from the new value import of `@tentacle/client` in `engine-runtime.ts` | Typecheck clean, full suite green. `local-runtime.ts` already depends on that package. **Holds** |
+
+#### What holds
+
+The laptop gate is untouched by this commit: the only `remote-client.ts` change is the class of the error given to `onError`. `relay.log` now gets the refused name and not an endpoint's body. The run's model reaches inheriting entries at both production sites, and both are pinned. Q1 (c), Q2 (a) and Q3 (b) are untouched.
+
+#### How the executor behaved
+
+Each finding was fixed as specified, with the mutations it reported confirmed here, and the two Round 1 nits it left are declared. The one slip is the missing gate numbers in its Execution note.
