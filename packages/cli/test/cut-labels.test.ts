@@ -2,7 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage } from "@tentacle/core";
 import { ENDED_INTERRUPTED_NOTE, ENDED_NOT_RUN_NOTE, ENDED_TURN_NOTE } from "@tentacle/daemon";
-import { cutHistory } from "../src/local-runtime.ts";
+import { cutHistory } from "@tentacle/daemon";
 
 const round: ChatMessage[] = [
   { role: "user", content: "go" },

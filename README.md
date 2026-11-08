@@ -102,7 +102,10 @@ holds the full text. A model or turn error is not a failure: the TUI already sho
 it. The startup status line redraws in place (cut to the terminal width, never
 padded). `--rm` (or `rm: true` in the config or a profile)
 removes it when the run ends instead (`--rm=false` overrides the config); flag > profile > user config > default (kept). The model key and the approvals
-stay on your machine; sessions are saved locally, so `--resume` works.
+stay on your machine; sessions are saved locally, so `--resume` works. Each session
+is one append-only log, `~/.config/tentacle/sessions/<folder>/<uid>.jsonl`;
+`sessions: { keepSuperseded: true }` also keeps the history a compaction or a
+context reset replaced (default off).
 
 ```sh
 tentacle run --image <ref> [-n <namespace>] [--rm] [--name <n>] ["<prompt>"]        # Kubernetes (default)
@@ -346,6 +349,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `mount.hideExtra` | — | — | Extra paths to hide, ADDED to the default list. |
 | `packages.*` | — | — | Whether this installed package is enabled. |
 | `rm` | — | false | Whether `run` removes its pod/container when the run ends. |
+| `sessions.keepSuperseded` | — | — | Keep the history a compaction or a `context_reset` replaced in the session file. |
 | `subagents.agentTaskDescription` | — | — | Replaces the `agent_task` description (max 4096 bytes; the sub-agent types are appended). |
 | `subagents.agentTaskDescriptionFile` | — | — | The same description, read once at start from a file (config dir or absolute; not both). |
 | `subagents.enabled` | `TENTACLE_SUBAGENTS` | true | Whether the `agent_task` sub-agent tool is offered. |

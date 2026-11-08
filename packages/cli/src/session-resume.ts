@@ -11,14 +11,21 @@
  * terminal) the newest resumes.
  */
 import {
-  type JsonSessionStore,
   type LoadResult,
   type SessionRecord,
   isValidSessionId,
   projectKey,
   recordTitleText,
 } from "@tentacle/agent";
+import type { LogSessionStore, SessionSummary } from "@tentacle/daemon";
 import type { SessionChoice, SessionPick } from "@tentacle/tui";
+
+/**
+ * What resuming reads: `list` gives every session's summary (a quick walk of
+ * each log, docs/feat/session-log-laptop-store.md Q5), `load` the chosen one's
+ * full, strictly checked history.
+ */
+export type ResumeStore = Pick<LogSessionStore, "load" | "list">;
 
 /**
  * The project the store belongs to (docs/fix/session-store-per-project.md):
@@ -46,7 +53,7 @@ export interface ResumeResolution {
 }
 
 export async function resolveResume(
-  store: JsonSessionStore,
+  store: ResumeStore,
   uid: string | undefined,
   scope?: ResumeScope,
   pick?: SessionPick,
@@ -110,10 +117,10 @@ export async function resolveResume(
     if (!chosen) {
       return fatal(`[resume] the picker returned an unknown session "${id}"; not starting\n`);
     }
-    return found(chosen, warning);
+    return loadChosen(store, chosen, warning);
   }
-  const record = records[0];
-  if (!record) {
+  const newest = records[0];
+  if (!newest) {
     return {
       record: null,
       lines: [
@@ -126,15 +133,34 @@ export async function resolveResume(
       fatal: false,
     };
   }
-  return found(record, warning);
+  return loadChosen(store, newest, warning);
 }
 
-function toChoice(record: SessionRecord): SessionChoice {
+/** The chosen summary's full history (strictly checked: a summary is a quick walk). */
+async function loadChosen(
+  store: ResumeStore,
+  chosen: SessionSummary,
+  warning: readonly string[],
+): Promise<ResumeResolution> {
+  const result = await store.load(chosen.id);
+  switch (result.status) {
+    case "ok":
+      return found(result.record, warning);
+    case "absent":
+      return fatal(`[resume] session "${chosen.id}" vanished while resuming; not starting\n`);
+    case "unreadable":
+      return fatal(
+        `[resume] session "${chosen.id}" is unreadable: ${result.reason} (${result.file}); not starting — fix or remove the file, or run without --resume\n`,
+      );
+  }
+}
+
+function toChoice(summary: SessionSummary): SessionChoice {
   return {
-    id: record.id,
-    title: recordTitleText(record),
-    updatedAt: record.updatedAt,
-    messageCount: record.messages.filter((m) => m.role !== "system").length,
+    id: summary.id,
+    title: recordTitleText(summary),
+    updatedAt: summary.updatedAt,
+    messageCount: summary.messageCount,
   };
 }
 

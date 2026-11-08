@@ -2,10 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, JsonSessionStore, type SessionRecord } from "@tentacle/agent";
+import { Agent, type SessionRecord } from "@tentacle/agent";
 import { ChannelError, type RemoteSession } from "@tentacle/client";
 import type {
   BackgroundJob,
+  ChatMessage,
   ChatRequest,
   ExecutionEnvironment,
   JobController,
@@ -19,15 +20,19 @@ import {
   Connection,
   ENDED_INTERRUPTED_NOTE,
   ENDED_TURN_NOTE,
+  LogSessionStore,
   ProxyModelProvider,
   SessionHost,
+  currentSegment,
   failedTurnNote,
+  parseLogFile,
 } from "@tentacle/daemon";
 import { DomainErrorCode } from "@tentacle/protocol";
 import { ToolRegistry, shellTool } from "@tentacle/tools";
 import { RpcPeer, createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
+import { saveFixture } from "./session-fixture.ts";
 
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
@@ -128,7 +133,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       channel: clientCh,
       disposeTransport: () => daemonPeer.close(),
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(join(dir, "peer-error")), () => {}),
+      saver: new SessionSaver(new LogSessionStore(join(dir, "peer-error")), () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: null,
@@ -155,7 +160,7 @@ describe("createLocalRuntime (local over RPC)", () => {
         dispose();
       },
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(join(dir, "close")), () => {}),
+      saver: new SessionSaver(new LogSessionStore(join(dir, "close")), () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: null,
@@ -192,7 +197,7 @@ describe("createLocalRuntime (local over RPC)", () => {
         dispose();
       },
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(join(dir, "release")), () => {}),
+      saver: new SessionSaver(new LogSessionStore(join(dir, "release")), () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: null,
@@ -216,7 +221,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       channel,
       disposeTransport: dispose,
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(join(dir, "jobs")), () => {}),
+      saver: new SessionSaver(new LogSessionStore(join(dir, "jobs")), () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: null,
@@ -244,7 +249,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       [{ type: "text", delta: "b" }, { type: "done" }],
     ]);
     const { channel, dispose } = daemon(model);
-    const store = new JsonSessionStore(join(dir, "session-id"));
+    const store = new LogSessionStore(join(dir, "session-id"));
     const saver = new SessionSaver(store, () => {});
     const runtime = await createLocalRuntime({
       channel,
@@ -260,7 +265,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     await drain(runtime.createSession().send("two"));
     await runtime.dispose();
     await saver.drain();
-    const ids = (await store.list()).records.map((s) => s.id);
+    const ids = (await store.loadAll()).records.map((s) => s.id);
     expect(ids).toHaveLength(2);
     expect(ids).toContain(id);
   });
@@ -268,7 +273,7 @@ describe("createLocalRuntime (local over RPC)", () => {
   test("persists the session after a turn, under a stable uid", async () => {
     const model = new ScriptedProvider([[{ type: "text", delta: "hi back" }, { type: "done" }]]);
     const { channel, dispose } = daemon(model);
-    const store = new JsonSessionStore(join(dir, "a"));
+    const store = new LogSessionStore(join(dir, "a"));
     const runtime = await createLocalRuntime({
       channel,
       disposeTransport: dispose,
@@ -283,7 +288,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     // Give the post-turn snapshot/persist a tick to land.
     await new Promise((r) => setTimeout(r, 20));
 
-    const saved = (await store.list()).records;
+    const saved = (await store.loadAll()).records;
     expect(saved).toHaveLength(1);
     expect(saved[0]?.messages.map((m) => m.content)).toEqual(["hello", "hi back"]);
     expect(saved[0]?.title).toBe("hello");
@@ -294,7 +299,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     // Mutation: drop `deps.saver.save(...)` from the persist callback → no file.
     const model = new ScriptedProvider([[{ type: "text", delta: "bye" }, { type: "done" }]]);
     const { channel, dispose } = daemon(model);
-    const store = new JsonSessionStore(join(dir, "drain"));
+    const store = new LogSessionStore(join(dir, "drain"));
     const saver = new SessionSaver(store, () => {});
     const runtime = await createLocalRuntime({
       channel,
@@ -308,7 +313,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     await drain(runtime.createSession().send("last words"));
     await runtime.dispose();
     expect(await saver.drain()).toEqual([]);
-    const saved = (await store.list()).records;
+    const saved = (await store.loadAll()).records;
     expect(saved.map((r) => r.messages.map((m) => m.content))).toEqual([["last words", "bye"]]);
   });
 
@@ -340,7 +345,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       channel,
       disposeTransport: dispose,
       permissions: new PermissionBroker(),
-      saver: new SessionSaver(new JsonSessionStore(join(dir, "progress")), () => {}),
+      saver: new SessionSaver(new LogSessionStore(join(dir, "progress")), () => {}),
       cwd: "/tmp/work",
       model: "qwen3",
       resume: null,
@@ -385,7 +390,7 @@ describe("createLocalRuntime (local over RPC)", () => {
         channel: clientCh,
         disposeTransport: () => connection.close(),
         permissions: new PermissionBroker(),
-        saver: new SessionSaver(new JsonSessionStore(join(dir, name)), () => {}),
+        saver: new SessionSaver(new LogSessionStore(join(dir, name)), () => {}),
         cwd: "/tmp/work",
         model: "qwen3",
         resume: null,
@@ -413,7 +418,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     const model = new ScriptedProvider([[{ type: "text", delta: "ok" }, { type: "done" }]]);
     const jobs = new FakeJobs();
     const { channel, dispose } = daemon(model, jobs);
-    const store = new JsonSessionStore(join(dir, "jobs"));
+    const store = new LogSessionStore(join(dir, "jobs"));
     const runtime = await createLocalRuntime({
       channel,
       disposeTransport: dispose,
@@ -446,7 +451,7 @@ describe("createLocalRuntime (local over RPC)", () => {
   });
 
   test("resumes a saved session: seeds history and keeps the same uid file", async () => {
-    const store = new JsonSessionStore(join(dir, "b"));
+    const store = new LogSessionStore(join(dir, "b"));
     // First run creates a session.
     const model1 = new ScriptedProvider([[{ type: "text", delta: "one" }, { type: "done" }]]);
     const d1 = daemon(model1);
@@ -461,7 +466,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     });
     await drain(rt1.createSession().send("first question"));
     await new Promise((r) => setTimeout(r, 20));
-    const record = (await store.latest()).record;
+    const record = (await store.loadAll()).records[0] ?? null;
     expect(record).not.toBeNull();
     rt1.dispose();
 
@@ -487,7 +492,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       "second question",
     ]);
     // And it was saved back under the SAME uid (one file, not two).
-    const all = (await store.list()).records;
+    const all = (await store.loadAll()).records;
     expect(all).toHaveLength(1);
     expect(all[0]?.id).toBe(record?.id ?? "");
     rt2.dispose();
@@ -500,7 +505,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     // Another device had S on this daemon and deleted it: tombstoned.
     host.open({ sessionId: "S", create: true }, { send: () => {} });
     expect(host.delete("S")).toBe(true);
-    const store = new JsonSessionStore(join(dir, "deleted-elsewhere"));
+    const store = new LogSessionStore(join(dir, "deleted-elsewhere"));
     const record = {
       id: "S",
       cwd: "/tmp/work",
@@ -510,7 +515,7 @@ describe("createLocalRuntime (local over RPC)", () => {
       title: "mine",
       messages: [{ role: "user" as const, content: "mine" }],
     };
-    await store.save(record);
+    await saveFixture(store, record);
     const notices: string[] = [];
     const saver = new SessionSaver(store, (t) => notices.push(t));
     const runtime = await createLocalRuntime({
@@ -789,18 +794,20 @@ describe("createLocalRuntime (local over RPC)", () => {
   test("R6 SessionSaver.clean: false while a write is pending and after a failed one", async () => {
     let fail = false;
     let release = () => {};
+    const pending = () =>
+      new Promise<void>((resolve, reject) => {
+        release = () => (fail ? reject(new Error("disk full")) : resolve());
+      });
     const saver = new SessionSaver(
       {
-        save: () =>
-          new Promise<void>((resolve, reject) => {
-            release = () => (fail ? reject(new Error("disk full")) : resolve());
-          }),
+        write: pending,
+        saveSnapshot: pending,
         remove: async () => {},
       } as unknown as ConstructorParameters<typeof SessionSaver>[0],
       () => {},
     );
     expect(saver.clean()).toBe(true);
-    saver.save({ id: "s" } as unknown as Parameters<SessionSaver["save"]>[0]);
+    saver.write({ id: "s" } as unknown as Parameters<SessionSaver["write"]>[0]);
     expect(saver.clean()).toBe(false);
     fail = true;
     release();
@@ -899,7 +906,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     const model = new ScriptedProvider([[{ type: "text", delta: "x" }, { type: "done" }]]);
     const { channel, dispose } = daemon(model);
     const notices: string[] = [];
-    const saver = new SessionSaver(new JsonSessionStore(join(dir, "flush-fail")), (t) =>
+    const saver = new SessionSaver(new LogSessionStore(join(dir, "flush-fail")), (t) =>
       notices.push(t),
     );
     const runtime = await createLocalRuntime({
@@ -931,7 +938,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     // right after the turn would land between them (→ UnknownSession, not saved).
     const model = new ScriptedProvider([[{ type: "text", delta: "tail" }, { type: "done" }]]);
     const { channel, dispose } = daemon(model);
-    const store = new JsonSessionStore(join(dir, "paged"));
+    const store = new LogSessionStore(join(dir, "paged"));
     const saver = new SessionSaver(store, () => {});
     const history = Array.from({ length: 300 }, (_, i) => ({
       role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
@@ -957,7 +964,7 @@ describe("createLocalRuntime (local over RPC)", () => {
     await drain(runtime.createSession().send("last"));
     await runtime.dispose();
     expect(await saver.drain()).toEqual([]);
-    const saved = (await store.list()).records;
+    const saved = (await store.loadAll()).records;
     expect(saved[0]?.messages).toHaveLength(302);
   });
 
@@ -1103,11 +1110,12 @@ describe("N clients of one session (detached-handover)", () => {
       const [daemonCh, clientCh] = createChannelPair();
       const connection = new Connection(daemonCh, host, () => {}, { servesModel: true });
       const frames: string[] = [];
-      const store = new JsonSessionStore(join(dir, `shared-${crypto.randomUUID()}`));
+      const store = new LogSessionStore(join(dir, `shared-${crypto.randomUUID()}`));
       const saver = new SessionSaver(
         opts.fullDisk
           ? {
-              save: () => Promise.reject(new Error("ENOSPC")),
+              write: () => Promise.reject(new Error("ENOSPC")),
+              saveSnapshot: () => Promise.reject(new Error("ENOSPC")),
               remove: () => Promise.resolve(),
             }
           : store,
@@ -1257,7 +1265,7 @@ describe("N clients of one session (detached-handover)", () => {
     expect(b.seen).toContain("turn"); // B is on A's session: same view
     await b.session.flushed();
     await b.saver.drain();
-    const saved = (await b.store.list()).records.find((r) => r.id === UID);
+    const saved = (await b.store.loadAll()).records.find((r) => r.id === UID);
     expect(JSON.stringify(saved?.messages ?? [])).toContain("echo due");
     await a.runtime.quit({ closeForAll: true });
     await until(() => b.seen.includes("closed"), 500).catch(() => {});
@@ -1315,7 +1323,7 @@ describe("N clients of one session (detached-handover)", () => {
       const tui = await pod.connect({ shared: true });
       expect(await tui.runtime.attachTo(UID, null)).toBe(true);
       expect(tui.runtime.saveConfirmed()).toBe(true);
-      const saved = (await tui.store.list()).records.find((r) => r.id === UID);
+      const saved = (await tui.store.loadAll()).records.find((r) => r.id === UID);
       expect(saved?.messages[0]).toMatchObject({ role: "user", content: "first turn" });
     });
 
@@ -1340,7 +1348,7 @@ describe("N clients of one session (detached-handover)", () => {
       held.answer(true);
       await turn;
       await until(() => tui.runtime.saveConfirmed());
-      const saved = (await tui.store.list()).records.find((r) => r.id === UID);
+      const saved = (await tui.store.loadAll()).records.find((r) => r.id === UID);
       expect(saved?.messages.map((m) => m.role)).toContain("tool"); // the end is on the laptop
     });
 
@@ -1395,7 +1403,7 @@ describe("N clients of one session (detached-handover)", () => {
     expect(close).toBeGreaterThan(read);
     expect(tui.frames.find((f) => f.includes('"session/close"'))).toContain('"ifLast":true');
     expect(await tui.saver.drain()).toEqual([]);
-    const saved = (await tui.store.list()).records;
+    const saved = (await tui.store.loadAll()).records;
     expect(saved.map((r) => r.id)).toEqual([UID]);
     expect(saved[0]?.messages[0]).toMatchObject({ role: "user", content: "first turn" });
     held.answer(false);
@@ -1771,7 +1779,7 @@ describe("N clients of one session (detached-handover)", () => {
       await relay.runtime.release();
       await new Promise((r) => setTimeout(r, 30));
       await tui.runtime.quit({ closeForAll: true });
-      const stored = (await tui.store.list()).records;
+      const stored = (await tui.store.loadAll()).records;
       const messages = stored[0]?.messages ?? [];
       expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
       expect(messages[2]).toEqual({
@@ -1808,7 +1816,7 @@ describe("N clients of one session (detached-handover)", () => {
       // docs/fix/detach-live.md fix round 8. Mutation: no tail note → [user] only.
       const tui = await cutInStream();
       await tui.runtime.quit({ closeForAll: true });
-      const messages = (await tui.store.list()).records[0]?.messages ?? [];
+      const messages = (await tui.store.loadAll()).records[0]?.messages ?? [];
       expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
       // The relay (the model link) left mid-call first, so the turn FAILED
       // before the close: the daemon's own note (round 10, owner B) says so.
@@ -1821,15 +1829,19 @@ describe("N clients of one session (detached-handover)", () => {
     test("live item 6: a lone /quit (it ends the session, `ending`) is marked the same", async () => {
       const tui = await cutInStream();
       await tui.runtime.quit({ ending: true });
-      const messages = (await tui.store.list()).records[0]?.messages ?? [];
+      const messages = (await tui.store.loadAll()).records[0]?.messages ?? [];
       expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
     });
 
     test("a quit that leaves the turn to others (not for all) marks nothing: the turn goes on", async () => {
       const { relay, tui } = await cutInTool();
       await tui.runtime.quit();
-      const messages = (await tui.store.list()).records[0]?.messages ?? [];
-      expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+      // The FILE holds the raw log: no note was written at save, the turn is
+      // still open in it (no `turn_end`). Only a LOAD closes it (Q11).
+      const parsed = parseLogFile(await readFile(tui.store.file(UID), "utf8"), UID);
+      const segment = parsed.ok ? currentSegment(parsed) : null;
+      expect(segment?.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+      expect(segment?.openTurns.length).toBe(1);
       void relay;
     });
   });
@@ -1860,13 +1872,11 @@ describe("N clients of one session (detached-handover)", () => {
       saved: true,
     });
     expect(await tui.saver.drain()).toEqual([]);
-    const stored = (await tui.store.list()).records;
-    expect(stored[0]?.messages.map((m) => m.role)).toEqual([
-      "user",
-      "assistant",
-      "tool",
-      "assistant", // the cut turn's tail note (fix round 8)
-    ]);
+    const stored = (await tui.store.loadAll()).records;
+    // The stopped turn has its `turn_end` in the log: a CLOSED turn loads as it
+    // is (docs/feat/session-log-laptop-store.md Q11). The old save-time cut also
+    // put the "session was ended" note on it, because the quit cut every read.
+    expect(stored[0]?.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool"]);
   }, 15_000);
 });
 
@@ -1936,8 +1946,10 @@ describe("per-round save inside a turn", () => {
     return { inner, held, push };
   }
 
-  test("a committed round (tool_result) reads the history back while the turn still runs; the record is cut, saveConfirmed stays false", async () => {
+  test("a committed round (tool_result) reads the history back while the turn still runs; the read is saved RAW, saveConfirmed stays false", async () => {
     // Mutation: drop the tool_result flush in `saved()` → held stays empty (red on main).
+    // The close of a cut turn moved to LOAD (docs/feat/session-log-laptop-store.md
+    // Q11, pinned by W12): the save hands on the read as it is.
     const { inner, held, push } = liveInner();
     const saved: (readonly { role: string; content: unknown }[])[] = [];
     const ctl = persistingController(inner, (m) => saved.push(m));
@@ -1950,16 +1962,15 @@ describe("per-round save inside a turn", () => {
     held[0]?.resolve([user("go"), asst("", ["c1"]), tool("c1")]);
     await ctl.flushed();
     expect(saved).toHaveLength(1);
-    // Cut: the tail is a tool result, so the closing note ends it (never a dangling call).
-    expect(saved[0]?.at(-1)).toEqual({ role: "assistant", content: ENDED_TURN_NOTE });
-    expect(saved[0]).toHaveLength(4);
+    expect(saved[0]).toEqual([user("go"), asst("", ["c1"]), tool("c1")]);
     expect(ctl.saveConfirmed()).toBe(false); // R9 unchanged: a turn runs
     push(null);
     await turn;
   });
 
-  test("an unanswered call in a mid-turn read is closed (Not run), never left dangling", async () => {
-    // Mutation: persist `back.messages` uncut while a turn runs → 1 answered, not 2.
+  test("an unanswered call in a mid-turn read is saved as it is (closed at load, never at save)", async () => {
+    // Mutation: put the save-time cut back → 2 answered, not 1. The "Not run"
+    // close itself is pinned at load (W12, packages/daemon/test/session-log-file.test.ts).
     const { inner, held, push } = liveInner();
     const saved: { role: string; content: unknown }[][] = [];
     const ctl = persistingController(inner, (m) => saved.push([...m]));
@@ -1969,7 +1980,7 @@ describe("per-round save inside a turn", () => {
     held[0]?.resolve([user("go"), asst("", ["c1", "c2"]), tool("c1")]);
     await ctl.flushed();
     const answered = saved[0]?.filter((m) => m.role === "tool").length;
-    expect(answered).toBe(2); // c2 got a synthetic answer
+    expect(answered).toBe(1);
     push(null);
     await turn;
   });
@@ -1998,7 +2009,7 @@ describe("per-round save inside a turn", () => {
     ]);
     await ctl.flushed();
     expect(held).toHaveLength(2);
-    expect(saved).toEqual([4, 8]); // 3 + note, 7 + note: the newest state is what is on disk
+    expect(saved).toEqual([3, 7]); // raw reads: the newest state is what is on disk
     push(null);
     await turn;
   });
@@ -2023,7 +2034,7 @@ describe("per-round save inside a turn", () => {
     await until(() => held.length === 2, "retry on the next round");
     held[1]?.resolve([user("go"), asst("", ["c1"]), tool("c1"), asst("", ["c2"]), tool("c2")]);
     await ctl.flushed();
-    expect(saved).toEqual([6]);
+    expect(saved).toEqual([5]);
     push(null);
     await turn;
   });
@@ -2042,7 +2053,7 @@ describe("per-round save inside a turn", () => {
     held[1]?.resolve([user("summary"), asst("", ["c2"]), tool("c2")]);
     await ctl.flushed();
     expect(saved[1]?.[0]).toEqual(user("summary"));
-    expect(saved[1]).toHaveLength(4);
+    expect(saved[1]).toHaveLength(3);
     push(null);
     await turn;
   });
@@ -2109,7 +2120,7 @@ describe("per-round save inside a turn", () => {
 
   async function podRuntime(name: string, rounds: number) {
     const pod = podLike(rounds);
-    const store = new JsonSessionStore(join(dir, name));
+    const store = new LogSessionStore(join(dir, name));
     const notices: string[] = [];
     const saver = new SessionSaver(store, (t) => notices.push(t));
     const observed: string[] = [];
@@ -2125,7 +2136,7 @@ describe("per-round save inside a turn", () => {
       resume: null,
       daemonKind: "container",
     });
-    const records = async () => (await store.list()).records;
+    const records = async () => (await store.loadAll()).records;
     return { pod, store, saver, notices, observed, runtime, records };
   }
 
@@ -2239,15 +2250,20 @@ describe("per-round save inside a turn", () => {
     void runtime.dispose();
   });
 
-  test("Q6: a turn-end read equal to the last mid-turn copy's raw history is not set aside", async () => {
-    // Cancelled-turn shape: the final raw history == the last mid-turn raw read.
+  test("every read is persisted RAW, mid-turn ones too (the cut moved to load), and one writer never sets its own copy aside", async () => {
+    // docs/feat/session-log-laptop-store.md Q11: was Q6/L1 (the save-time cut
+    // and its length hack, `lastMidTurnCount`, both removed). Cancelled-turn and
+    // no-growth shapes: equal raw reads, a turn end with a read in flight.
+    // Mutation: put `cutHistory` back on mid-turn reads → the first persisted copy has the notes.
     const { inner, held, push } = liveInner();
     const asides: string[] = [];
-    const store = new JsonSessionStore(join(dir, "q6"), undefined, (info) =>
-      asides.push(info.file),
-    );
+    const persisted: (readonly ChatMessage[])[] = [];
+    const store = new LogSessionStore(join(dir, "raw-reads"), {
+      onAside: (info) => asides.push(info.file),
+    });
     const saver = new SessionSaver(store, () => {});
-    const ctl = persistingController(inner, (messages) =>
+    const ctl = persistingController(inner, (messages) => {
+      persisted.push(messages);
       saver.save({
         id: "u1",
         cwd: "/",
@@ -2256,59 +2272,26 @@ describe("per-round save inside a turn", () => {
         updatedAt: 1,
         title: "t",
         messages: [...messages],
-      }),
-    );
-    const turn = drain(ctl.send("go"));
-    const raw = [user("go"), asst("", ["c1"]), tool("c1")];
-    push(result("c1"));
-    await until(() => held.length === 1, "mid-turn read");
-    held[0]?.resolve(raw);
-    await ctl.flushed();
-    await saver.drain();
-    push(null);
-    await turn;
-    await until(() => held.length === 2, "turn-end read");
-    held[1]?.resolve(raw);
-    await ctl.flushed();
-    await saver.drain();
-    expect(asides).toEqual([]);
-  });
-
-  test("L1: a no-growth round signal, then a turn end with a read in flight: no spurious .aside (the closed copy's length is remembered)", async () => {
-    // Mutation: `lastMidTurnCount = midTurn ? … : -1` (the old line) → the 3rd read is raw and set aside.
-    const { inner, held, push } = liveInner();
-    const asides: string[] = [];
-    const store = new JsonSessionStore(join(dir, "l1"), undefined, (info) =>
-      asides.push(info.file),
-    );
-    const saver = new SessionSaver(store, () => {});
-    const ctl = persistingController(inner, (messages) =>
-      saver.save({
-        id: "u1",
-        cwd: "/",
-        model: "m",
-        createdAt: 1,
-        updatedAt: 1,
-        title: "t",
-        messages: [...messages],
-      }),
-    );
+      });
+    });
     const turn = drain(ctl.send("go"));
     const raw = [user("go"), asst("", ["c1"]), tool("c1")];
     push(result("c1"));
     await until(() => held.length === 1, "R1");
-    held[0]?.resolve(raw); // persisted cut (4 messages)
+    held[0]?.resolve(raw);
     await ctl.flushed();
     await saver.drain();
     push(result("c1b")); // same round: no committed growth, R2 starts
     await until(() => held.length === 2, "R2");
     push(null); // the turn ends while R2 is in flight → `again`
     await turn;
-    held[1]?.resolve(raw); // closed through the equality branch
+    held[1]?.resolve(raw);
     await until(() => held.length === 3, "R3");
-    held[2]?.resolve(raw); // must still be closed, not a strict prefix of the 4-message copy
+    held[2]?.resolve(raw);
     await ctl.flushed();
     await saver.drain();
+    expect(persisted.map((m) => m.length)).toEqual([3, 3, 3]);
+    expect(persisted[0]).toEqual(raw);
     expect(asides).toEqual([]);
   });
 });
@@ -2348,7 +2331,7 @@ describe("session/log on the laptop (docs/feat/session-log.md)", () => {
     // RED on main: the session file is silently replaced by the daemon's
     // divergent history (no aside, no notice) — F1's silent drop.
     const p = pod(new ScriptedProvider([[{ type: "text", delta: "A-answer" }, { type: "done" }]]));
-    const store = new JsonSessionStore(join(dir, "fork"));
+    const store = new LogSessionStore(join(dir, "fork"));
     const notices: string[] = [];
     const saver = new SessionSaver(store, (text) => notices.push(text));
     const runtime = await createLocalRuntime({
@@ -2384,10 +2367,10 @@ describe("session/log on the laptop (docs/feat/session-log.md)", () => {
     const files = await readdir(join(dir, "fork"));
     const asides = files.filter((f) => f.startsWith(`${UID}.stale-`) && f.endsWith(".aside"));
     expect(asides).toHaveLength(1);
-    const aside = JSON.parse(
-      await readFile(join(dir, "fork", asides[0] ?? ""), "utf8"),
-    ) as SessionRecord;
-    expect(aside.messages.map((m) => m.content)).toEqual(["A-question", "A-answer"]);
+    // The aside is a log file too (Q7): its segment folds to this copy.
+    const aside = parseLogFile(await readFile(join(dir, "fork", asides[0] ?? ""), "utf8"), UID);
+    const asideMessages = aside.ok ? currentSegment(aside).messages : [];
+    expect(asideMessages.map((m) => m.content)).toEqual(["A-question", "A-answer"]);
     const main = await store.load(UID);
     const kept = main.status === "ok" ? main.record.messages.map((m) => m.content) : [];
     expect(kept).toEqual(["B's own history", "next", "after"]);
@@ -2436,9 +2419,10 @@ describe("session/log on the laptop (docs/feat/session-log.md)", () => {
     expect(log).toEqual(["aside:mine", "persist:theirs"]); // retried first, then the file
   });
 
-  test("I5 the saved JSON record after each round is today's (a mid-turn copy closed by `cutHistory`, the end raw)", async () => {
-    // A two-round turn: the mid-turn save (at the tool result) is closed, the
-    // turn-end save is the real history — the disk format is unchanged.
+  test("I5 the saved log after a turn loads to the daemon's history (W1 pins every round)", async () => {
+    // A two-round turn: the mid-turn save is the raw log (closed only at load,
+    // docs/feat/session-log-laptop-store.md Q11), the turn-end one loads to
+    // exactly the daemon's history.
     const model = new ScriptedProvider([
       [
         { type: "tool_call", toolCall: { id: "c1", name: "shell", arguments: '{"command":"ls"}' } },
@@ -2464,10 +2448,10 @@ describe("session/log on the laptop (docs/feat/session-log.md)", () => {
     });
     const [d, c] = createChannelPair();
     new Connection(d, host);
-    const store = new JsonSessionStore(join(dir, "i5"));
-    const saved: SessionRecord[] = [];
+    const store = new LogSessionStore(join(dir, "i5"));
+    const saved: string[] = [];
     const saver = new SessionSaver(store, () => {});
-    saver.observe((record) => saved.push(record));
+    saver.observe((s) => saved.push(s.id));
     const runtime = await createLocalRuntime({
       channel: c,
       disposeTransport: () => {},
@@ -2482,7 +2466,9 @@ describe("session/log on the laptop (docs/feat/session-log.md)", () => {
     await drain(session.send("list"));
     await session.flushed?.();
     await saver.drain();
-    const last = saved.at(-1);
+    expect(saved.at(-1)).toBe(UID);
+    const loaded = await store.load(UID);
+    const last = loaded.status === "ok" ? loaded.record : undefined;
     expect(last?.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
     expect(last?.messages.at(-1)?.content).toBe("listed");
     expect(last?.messages).toEqual(

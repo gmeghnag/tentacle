@@ -129,6 +129,8 @@ export interface ResolvedConfig {
   readonly mount?: MountConfig;
   /** The configured TUI palette (file or profile); absent = `auto` (the TUI probes). */
   readonly tui?: { readonly theme?: "auto" | "dark" | "light" | undefined };
+  /** The laptop's session-log settings (file or profile); absent = defaults (`keepSuperseded` false). */
+  readonly sessions?: { readonly keepSuperseded?: boolean | undefined };
   /** User hooks (file-only, no env form); empty when unset. */
   readonly hooks: readonly HookSpecConfig[];
   /** MCP servers to connect to (from the config file), keyed by name. */
@@ -545,6 +547,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     ...(fileConfig.rm !== undefined ? { rm: fileConfig.rm } : {}),
     ...(fileConfig.detach !== undefined ? { detach: fileConfig.detach } : {}),
     ...(fileConfig.tui !== undefined ? { tui: fileConfig.tui } : {}),
+    ...(fileConfig.sessions !== undefined ? { sessions: fileConfig.sessions } : {}),
     ...(fileConfig.mount !== undefined ? { mount: fileConfig.mount } : {}),
     hooks: fileConfig.hooks ?? [],
     // MCP servers are file-only (no env form); empty when unset.

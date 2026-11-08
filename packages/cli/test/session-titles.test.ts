@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, JsonSessionStore, type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
+import { Agent, type SessionRecord, recordFromSnapshot } from "@tentacle/agent";
 import type { RemoteSession, SessionTitleNotice } from "@tentacle/client";
 import {
   type ChatMessage,
@@ -18,13 +18,14 @@ import {
   PermissionBroker,
   type StreamEvent,
 } from "@tentacle/core";
-import { Connection, SessionHost } from "@tentacle/daemon";
+import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import { ToolRegistry } from "@tentacle/tools";
 import { createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime, persistingController } from "../src/local-runtime.ts";
 import { inProcessSessions } from "../src/session-jobs.ts";
 import { resolveResume } from "../src/session-resume.ts";
 import { SessionSaver } from "../src/session-saver.ts";
+import { saveFixture } from "./session-fixture.ts";
 
 const env = {} as ExecutionEnvironment;
 const tick = (ms = 2) => new Promise((r) => setTimeout(r, ms));
@@ -81,7 +82,7 @@ async function runtimeOn(
   d: ReturnType<typeof daemon>,
   resume: SessionRecord | null = null,
 ) {
-  const store = new JsonSessionStore(join(dir, name));
+  const store = new LogSessionStore(join(dir, name));
   const saver = new SessionSaver(store, () => {});
   const runtime = await createLocalRuntime({
     channel: d.channel,
@@ -108,7 +109,7 @@ describe("laptop store titles", () => {
     );
     await tick(20);
     await saver.drain();
-    const [record] = (await store.list()).records;
+    const [record] = (await store.loadAll()).records;
     expect(record?.title).toEqual({ text: "Greeting exchange", source: "model" });
     await runtime.dispose();
   });
@@ -123,7 +124,7 @@ describe("laptop store titles", () => {
     expect(await rename?.call(ctl, "  Mine\tnow ")).toBe("Mine now");
     await runtime.dispose();
     await saver.drain();
-    const [record] = (await store.list()).records;
+    const [record] = (await store.loadAll()).records;
     expect(record?.title).toEqual({ text: "Mine now", source: "user" });
   });
 
@@ -238,8 +239,8 @@ describe("in-process fallback (no daemon)", () => {
 
 describe("--resume shows the chosen title", () => {
   test("the picker choice and the [resume] line read the object title's text", async () => {
-    const store = new JsonSessionStore(join(dir, "resume"));
-    await store.save({
+    const store = new LogSessionStore(join(dir, "resume"));
+    await saveFixture(store, {
       id: "s1",
       cwd: "/w",
       model: "m",
@@ -251,7 +252,7 @@ describe("--resume shows the chosen title", () => {
     const ok = await resolveResume(store, "s1");
     expect(ok.lines).toEqual(["[resume] s1 — Fix login\n"]);
     // The picker opens with two or more sessions.
-    await store.save({
+    await saveFixture(store, {
       id: "s0",
       cwd: "/w",
       model: "m",

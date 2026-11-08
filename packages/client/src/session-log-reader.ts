@@ -30,6 +30,7 @@ import {
   type Sha256,
   digestOfDigests,
   messageDigest,
+  projectEntry,
 } from "@tentacle/protocol";
 
 /** What a client holds of a session's log: its head, the projection, and each message's digest. */
@@ -138,8 +139,8 @@ export function applyLogRead(
   }
 
   // Project.
-  let messages: ChatMessage[] = linear && held !== null ? [...held.messages] : [];
-  let digests: string[] = linear && held !== null ? [...held.digests] : [];
+  const messages: ChatMessage[] = linear && held !== null ? [...held.messages] : [];
+  const digests: string[] = linear && held !== null ? [...held.digests] : [];
   let inc = held?.inc ?? "";
   let firstBase: Extract<KnownLogEntry, { type: "base" }> | undefined;
   /**
@@ -155,35 +156,24 @@ export function applyLogRead(
     if (expect > 0 && e.type !== "message") {
       return { error: `base owes ${expect} messages, got ${e.type}` };
     }
+    // The shared fold (the disk log applies the same step), on both lists.
+    const problem =
+      projectEntry(messages, e, (m) => m as ChatMessage) ??
+      projectEntry(digests, e, (m) => messageDigest(m, sha256));
+    if (problem !== null) {
+      return { error: problem };
+    }
     switch (e.type) {
       case "base":
         firstBase ??= e;
         inc = e.inc;
-        messages = [];
-        digests = [];
         expect = e.count;
         if (e === firstBase && expect === 0) seed = [];
         break;
       case "message":
-        messages.push(e.message as ChatMessage);
-        digests.push(messageDigest(e.message, sha256));
         if (expect > 0 && --expect === 0 && seed === undefined && firstBase !== undefined) {
           seed = [...digests];
         }
-        break;
-      case "replace":
-        if (e.index >= messages.length) {
-          return { error: `replace at ${e.index} past the end (${messages.length})` };
-        }
-        messages[e.index] = e.message as ChatMessage;
-        digests[e.index] = messageDigest(e.message, sha256);
-        break;
-      case "truncate":
-        if (e.length > messages.length) {
-          return { error: `truncate to ${e.length} grows the history (${messages.length})` };
-        }
-        messages.length = e.length;
-        digests.length = e.length;
         break;
       case "checkpoint":
         if (
@@ -197,7 +187,7 @@ export function applyLogRead(
         title = e.title;
         break;
       default:
-        break; // turn markers: not part of the projection
+        break; // `replace`/`truncate` (projected above) and the turn markers
     }
   }
   if (expect > 0) {

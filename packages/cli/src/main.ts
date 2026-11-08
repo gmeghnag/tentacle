@@ -921,14 +921,18 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       return null;
     }
   };
-  // Sessions persist as JSON under <configDir>/sessions/<projectKey(cwd)>/ (store
+  // Sessions persist as `<uid>.jsonl` logs under <configDir>/sessions/<projectKey(cwd)>/ (store
   // + saver + notice hub, `--resume`/`--continue` resolved pre-mount, only among
   // THIS folder's sessions). `{ exit }` = don't start (reason written). The
   // picker (docs/feat/resume-picker.md) runs only on a terminal, before any
   // runtime or pod starts, so the chosen session seeds it like `--resume <uid>`.
   const openSessions = (flags: Map<string, string>, bools: Set<string>) =>
     openTuiSessions(
-      { root: join(config.configDir, "sessions"), cwd: config.cwd },
+      {
+        root: join(config.configDir, "sessions"),
+        cwd: config.cwd,
+        keepSuperseded: config.sessions?.keepSuperseded === true,
+      },
       {
         wanted: bools.has("resume") || flags.has("resume") || bools.has("continue"),
         uid: flags.get("resume"),
@@ -1544,7 +1548,11 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
         procOf: laptopProc,
         openSessions: () =>
           openTuiSessions(
-            { root: join(config.configDir, "sessions"), cwd: config.cwd },
+            {
+              root: join(config.configDir, "sessions"),
+              cwd: config.cwd,
+              keepSuperseded: config.sessions?.keepSuperseded === true,
+            },
             { wanted: true, uid: plan.sessionId, live: true },
             err,
             undefined,

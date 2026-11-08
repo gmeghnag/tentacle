@@ -183,6 +183,11 @@ export const DEFAULT_CONFIG_JSONC = `{
   // that query (useful on a slow link, or when the guess is wrong).
   // "tui": { "theme": "auto" },
 
+  // Session files (one log per conversation under <configDir>/sessions/): keep the
+  // history a compaction or a context reset replaced in the file too (resume still
+  // shows the current context). Default false: superseded history is not kept.
+  // "sessions": { "keepSuperseded": false },
+
   // \`tentacle run --engine docker|podman\` mounts the current folder into the
   // container; these paths (dirs or files, "~/…" or absolute) are hidden when
   // inside it. "hide" REPLACES the default list (~/.ssh, ~/.aws, ~/.kube,
