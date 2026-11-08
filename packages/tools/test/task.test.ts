@@ -4,7 +4,7 @@ import { type TaskRunResult, createTaskTool } from "../src/task.ts";
 
 const ctx = { sessionId: "s", signal: new AbortController().signal } as unknown as ToolContext;
 const TYPES = [
-  { name: "general-purpose", description: "all tools" },
+  { name: "general", description: "all tools" },
   { name: "explore", description: "read-only" },
 ];
 
@@ -45,7 +45,32 @@ describe("createTaskTool", () => {
     const tool = createTaskTool(run, TYPES);
     await tool.execute({ description: "d", prompt: "p" }, ctx); // no type
     await tool.execute({ description: "d", prompt: "p", subagent_type: "bogus" }, ctx);
-    expect(calls.map((c) => c.type)).toEqual(["general-purpose", "general-purpose"]);
+    expect(calls.map((c) => c.type)).toEqual(["general", "general"]);
+  });
+
+  test('an old history\'s "general-purpose" falls back to the default type (no alias)', async () => {
+    // feat/subagent-general-rename, eval C2: the type was renamed, and a session
+    // log written before that still holds `subagent_type: "general-purpose"`.
+    // No alias exists (pre-public, AGENTS §7): the unknown name takes the same
+    // path any unknown name takes — the default type.
+    const { run, calls } = runnerReturning({ report: "x", toolUses: 0, stopReason: "end_turn" });
+    const tool = createTaskTool(run, TYPES);
+    const result = await tool.execute(
+      { description: "d", prompt: "p", subagent_type: "general-purpose" },
+      ctx,
+    );
+    expect(result.isError).toBeUndefined();
+    expect(calls.map((c) => c.type)).toEqual(["general"]);
+  });
+
+  test("with no types at all, the fallback names the built-in type `general`", async () => {
+    // task.ts:80 — the literal. Unreachable from the real wiring (the built-ins
+    // always exist), but it must name the same type as the built-in.
+    const { run, calls } = runnerReturning({ report: "x", toolUses: 0, stopReason: "end_turn" });
+    const tool = createTaskTool(run, []);
+    await tool.execute({ description: "d", prompt: "p" }, ctx);
+    expect(calls.map((c) => c.type)).toEqual(["general"]);
+    expect(tool.description).not.toContain("general-purpose");
   });
 
   test("annotates a cancelled or capped run", async () => {
@@ -71,7 +96,8 @@ describe("createTaskTool", () => {
       TYPES,
     );
     expect(tool.permission).toBe("none");
-    expect(tool.description).toContain("general-purpose");
+    expect(tool.description).toContain("general");
     expect(tool.description).toContain("explore");
+    expect(tool.description).not.toContain("general-purpose");
   });
 });

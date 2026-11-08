@@ -108,9 +108,31 @@ describe("mergeAgentTypes", () => {
       { name: "reviewer", description: "r", prompt: "p", tools: ["fs_read"] },
     ];
     const merged = mergeAgentTypes(BUILTIN_AGENT_TYPES, user);
-    // explore overridden in place; general-purpose kept; reviewer appended.
+    // explore overridden in place; general kept; reviewer appended.
     expect(merged.find((t) => t.name === "explore")?.description).toBe("custom explore");
-    expect(merged.some((t) => t.name === "general-purpose")).toBe(true);
+    expect(merged.some((t) => t.name === "general")).toBe(true);
     expect(merged.at(-1)?.name).toBe("reviewer");
+  });
+
+  // feat/subagent-general-rename, eval C2: the built-in is `general`, so a user
+  // `agents/general.md` OVERRIDES it (same name), while `agents/general-purpose.md`
+  // is now just an extra type (it used to shadow the built-in).
+  test('a user "general" replaces the built-in in place; "general-purpose" is an extra type', () => {
+    const mine = (name: string): AgentType => ({
+      name,
+      description: `${name} of mine`,
+      prompt: "p",
+      tools: "all",
+    });
+    const overridden = mergeAgentTypes(BUILTIN_AGENT_TYPES, [mine("general")]);
+    expect(overridden.map((t) => t.name)).toEqual(["general", "explore"]);
+    expect(overridden[0]?.description).toBe("general of mine");
+
+    const appended = mergeAgentTypes(BUILTIN_AGENT_TYPES, [mine("general-purpose")]);
+    expect(appended.map((t) => t.name)).toEqual(["general", "explore", "general-purpose"]);
+    // The built-in `general` is untouched: it stays the first (default) type.
+    const builtinGeneral = BUILTIN_AGENT_TYPES.find((t) => t.name === "general");
+    expect(builtinGeneral).toBeDefined();
+    expect(appended[0]?.description).toBe(builtinGeneral?.description ?? "");
   });
 });

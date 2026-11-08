@@ -150,7 +150,7 @@ describe("a refusal with the person's reply", () => {
       tools: new ToolRegistry().register(shellTool),
       requestPermission: async () => ({ allowed: false, message: "why? try bun run build first" }),
     });
-    await runChild({ description: "d", prompt: "clean", type: "general-purpose" });
+    await runChild({ description: "d", prompt: "clean", type: "general" });
     expect(ran).toEqual([]);
     expect(toolMsg(seen[1])?.content).toBe(REPLIED);
     expect(toolMsg(seen[1])?.denialReply).toBe("why? try bun run build first");

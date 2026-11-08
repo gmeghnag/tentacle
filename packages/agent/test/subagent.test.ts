@@ -78,9 +78,9 @@ describe("createSubagentRunner", () => {
       tools: fullRegistry(),
       hooks: new HookRunner({ specs: [{ event: "tool_call", command: "audit" }], env, cwd: "/w" }),
     });
-    await run({ description: "scan repo", prompt: "look", type: "general-purpose" });
+    await run({ description: "scan repo", prompt: "look", type: "general" });
     expect(stdins).toMatchObject([
-      { agent: { type: "general-purpose", description: "scan repo" }, tool_name: "shell" },
+      { agent: { type: "general", description: "scan repo" }, tool_name: "shell" },
     ]);
   });
 
@@ -131,13 +131,13 @@ describe("createSubagentRunner", () => {
       env,
       tools: fullRegistry(),
     });
-    const result = await run({ description: "d", prompt: "look", type: "general-purpose" });
+    const result = await run({ description: "d", prompt: "look", type: "general" });
     expect(result.report).toBe("found the bug");
     expect(result.toolUses).toBe(0);
     expect(result.stopReason).toBe("end_turn");
   });
 
-  test("a general-purpose child can run an allowed tool with the inherited env", async () => {
+  test("a general child can run an allowed tool with the inherited env", async () => {
     const { env, readCalls } = recordingEnv();
     const { run } = createSubagentRunner({
       model: new ScriptedProvider([
@@ -147,7 +147,7 @@ describe("createSubagentRunner", () => {
       env,
       tools: fullRegistry(),
     });
-    const result = await run({ description: "d", prompt: "read a.ts", type: "general-purpose" });
+    const result = await run({ description: "d", prompt: "read a.ts", type: "general" });
     expect(readCalls).toEqual(["a.ts"]);
     expect(result.toolUses).toBe(1);
     expect(result.report).toBe("read it");
@@ -223,7 +223,7 @@ describe("createSubagentRunner", () => {
       env,
       tools: parentTools,
     });
-    await run({ description: "d", prompt: "spawn", type: "general-purpose" });
+    await run({ description: "d", prompt: "spawn", type: "general" });
     // The child attempted to call the spawn tool; it must be rejected as
     // unknown (not in the child's registry) and therefore never executed.
     expect(spawned).toEqual([]);
@@ -245,7 +245,7 @@ describe("createSubagentRunner", () => {
       env,
       tools: fullRegistry().register(createContextResetTool()),
     });
-    await run({ description: "d", prompt: "go", type: "general-purpose" });
+    await run({ description: "d", prompt: "go", type: "general" });
     expect(offered[0]?.length).toBeGreaterThan(0);
     expect(offered[0]).not.toContain(CONTEXT_RESET_TOOL_NAME);
   });
@@ -290,7 +290,7 @@ describe("createSubagentRunner", () => {
       tools: fullRegistry(),
     });
     await run(
-      { description: "look", prompt: "read a.ts", type: "general-purpose" },
+      { description: "look", prompt: "read a.ts", type: "general" },
       {
         onEvent: (e) => {
           if (e.kind === "subagent_start") {
@@ -303,7 +303,7 @@ describe("createSubagentRunner", () => {
         },
       },
     );
-    expect(events).toEqual(["start:general-purpose", "tool:Read a.ts", "end:1"]);
+    expect(events).toEqual(["start:general", "tool:Read a.ts", "end:1"]);
   });
 
   test("forwards each child usage event as subagent_usage (its own tokens, per model call)", async () => {
@@ -324,7 +324,7 @@ describe("createSubagentRunner", () => {
       tools: fullRegistry(),
     });
     await run(
-      { description: "look", prompt: "read a.ts", type: "general-purpose" },
+      { description: "look", prompt: "read a.ts", type: "general" },
       {
         onEvent: (e) => {
           if (e.kind === "subagent_usage") {
@@ -350,7 +350,7 @@ describe("createSubagentRunner", () => {
       tools: fullRegistry(),
       requestPermission: async () => ({ allowed: false }),
     });
-    await run({ description: "d", prompt: "run ls", type: "general-purpose" });
+    await run({ description: "d", prompt: "run ls", type: "general" });
     expect(execCalls).toEqual([]); // denied by the inherited requester
   });
 
@@ -370,14 +370,14 @@ describe("createSubagentRunner", () => {
       },
     });
     await run(
-      { description: "scan repo", prompt: "run ls", type: "general-purpose" },
+      { description: "scan repo", prompt: "run ls", type: "general" },
       { toolCallId: "parent-9" },
     );
     expect(seen).toEqual([
       {
         toolCallId: "parent-9",
         origin: "subagent",
-        agent: { type: "general-purpose", description: "scan repo" },
+        agent: { type: "general", description: "scan repo" },
       },
     ]);
   });
@@ -394,10 +394,8 @@ describe("createSubagentRunner", () => {
         return { allowed: false };
       },
     });
-    await run({ description: "d", prompt: "run ls", type: "general-purpose" });
-    expect(seen).toEqual([
-      { origin: "subagent", agent: { type: "general-purpose", description: "d" } },
-    ]);
+    await run({ description: "d", prompt: "run ls", type: "general" });
+    expect(seen).toEqual([{ origin: "subagent", agent: { type: "general", description: "d" } }]);
   });
 
   test("the wrapper keeps the other options and overrides origin/agent", async () => {
@@ -469,9 +467,55 @@ describe("createSubagentRunner", () => {
       {
         toolCallId: "task-42",
         origin: "subagent",
-        agent: { type: "general-purpose", description: "look" },
+        agent: { type: "general", description: "look" },
       },
     ]);
+  });
+
+  test('an old history\'s "general-purpose" runs as the default built-in, through agent_task', async () => {
+    // Wiring level (feat/subagent-general-rename, eval C2): no user agent files,
+    // so the real wiring's merged list (`wiring.ts:473-477`) IS the built-ins.
+    // The runner is given no `types` here, which is the same list. A call stored
+    // before the rename names a type that no longer exists; the generic
+    // unknown→default path (`task.ts:82-85`) runs the child as the default
+    // built-in — no alias.
+    const { env } = recordingEnv();
+    const { run, types } = createSubagentRunner({
+      model: new ScriptedProvider([[toolCall("shell", { command: "ls" }), { type: "done" }]]),
+      env,
+      tools: fullRegistry(),
+    });
+    // No `types`: the runner falls back to the real built-ins, as `wiring.ts:477` gets.
+    expect(types.map((t) => t.name)).toEqual(["general", "explore"]);
+    const parent = new Agent({
+      model: new ScriptedProvider([
+        [
+          {
+            type: "tool_call",
+            toolCall: {
+              id: "task-1",
+              name: "agent_task",
+              arguments: JSON.stringify({
+                description: "look",
+                prompt: "run ls",
+                subagent_type: "general-purpose",
+              }),
+            },
+          },
+          { type: "done" },
+        ],
+      ]),
+      tools: new ToolRegistry().register(createTaskTool(run, types)),
+      env,
+    });
+    const starts: { id: string; agentType: string }[] = [];
+    for await (const event of parent.run("s", [{ role: "user", content: "go" }])) {
+      // `subagent_start.agentType` is the child's RESOLVED type, not the requested one.
+      if (event.type === "subagent_start") {
+        starts.push({ id: event.id, agentType: event.agentType });
+      }
+    }
+    expect(starts).toEqual([{ id: "task-1", agentType: "general" }]);
   });
 });
 

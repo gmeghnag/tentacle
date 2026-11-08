@@ -116,7 +116,7 @@ describe("inProcessAgents (single-broker invariant, AGENTS §7)", () => {
       {
         toolCallId: "t1",
         origin: "subagent",
-        agent: { type: "general-purpose", description: "look" },
+        agent: { type: "general", description: "look" },
       },
     ]);
   });
@@ -624,11 +624,24 @@ describe("loadUserAgentTypes: built-in shadowing (post-review)", () => {
     const pkg = join(root, "pkg", "agents");
     for (const d of [join(cfg, "agents"), pkg]) await mkdir(d, { recursive: true });
     await writeFile(join(cfg, "agents", "explore.md"), "mine");
-    await writeFile(join(pkg, "general-purpose.md"), "theirs");
+    await writeFile(join(pkg, "general.md"), "theirs");
     const { diagnostics } = loadUserAgentTypes(cfg, [pkg]);
     expect(diagnostics).toEqual([
-      `agent type "general-purpose" in ${join(pkg, "general-purpose.md")} replaces the built-in one`,
+      `agent type "general" in ${join(pkg, "general.md")} replaces the built-in one`,
     ]);
+  });
+
+  // feat/subagent-general-rename, eval C2: `general-purpose` used to shadow the
+  // built-in; it is now an ordinary extra type, so nothing is reported.
+  test('a package "general-purpose.md" no longer replaces a built-in', async () => {
+    const root = await mkdtemp(join(tmpdir(), "agent-builtin-"));
+    const cfg = join(root, "cfg");
+    const pkg = join(root, "pkg", "agents");
+    for (const d of [join(cfg, "agents"), pkg]) await mkdir(d, { recursive: true });
+    await writeFile(join(pkg, "general-purpose.md"), "theirs");
+    const { types, diagnostics } = loadUserAgentTypes(cfg, [pkg]);
+    expect(diagnostics).toEqual([]);
+    expect(types.map((t) => t.name)).toEqual(["general-purpose"]);
   });
 });
 
