@@ -74,7 +74,28 @@ export interface LogWrite {
     readonly head: LogCursor;
     readonly outcome: string;
   };
+  /**
+   * The `serve` daemon's state file (docs/feat/session-log-serve-store.md):
+   * written atomically to `<uid>.state.json` AFTER the log op succeeded, in
+   * the same queued op and lock — the unit's commit marker. A failed log op
+   * throws before it (the old state file stays). The laptop never passes it.
+   */
+  readonly sidecar?: string;
+  /** Write header + `base` even for an empty history (`serve`: a created session survives a restart). */
+  readonly keepEmpty?: boolean;
 }
+
+/** A daemon session's files as read back (`readRaw`): the log's text and its state file's (null: none). */
+export type RawSessionFiles =
+  | { readonly status: "ok"; readonly log: string; readonly state: string | null }
+  | { readonly status: "absent" }
+  | { readonly status: "unreadable"; readonly file: string; readonly reason: string };
+
+/** A daemon session's header line and state file (`readState`): the log itself is not read. */
+export type RawSessionState =
+  | { readonly status: "ok"; readonly header: string; readonly state: string | null }
+  | { readonly status: "absent" }
+  | { readonly status: "unreadable"; readonly file: string; readonly reason: string };
 
 /** What a session list shows, without loading every history (`summarize`). */
 export interface SessionSummary {
@@ -162,6 +183,10 @@ interface WriterState {
 type Op =
   | { readonly kind: "write"; readonly update: LogWrite }
   | { readonly kind: "snapshot"; readonly record: SessionRecord }
+  | { readonly kind: "state"; readonly data: string }
+  | { readonly kind: "aside"; readonly reason: string }
+  | { readonly kind: "dropState" }
+  | { readonly kind: "forget" }
   | { readonly kind: "remove" };
 
 interface Slot {
@@ -196,8 +221,8 @@ function processAlive(pid: number): boolean {
   }
 }
 
-/** `.<uid>.jsonl.tmp-<pid>-<hex>`: a replace's temp. */
-const TEMP_NAME = /^\..+\.jsonl\.tmp-(\d+)-[0-9a-f]+$/;
+/** `.<uid>.jsonl.tmp-<pid>-<hex>`: a replace's temp; `.<uid>.state.json.tmp-…`: a state file's. */
+const TEMP_NAME = /^\..+\.(?:jsonl|state\.json)\.tmp-(\d+)-[0-9a-f]+$/;
 /** `.<uid>.lock`. */
 const LOCK_NAME = /^\..+\.lock$/;
 /** What follows `<id>.stale-` in an aside's name. */
@@ -261,6 +286,11 @@ export class LogSessionStore {
     return join(this.dir, `${id}.jsonl`);
   }
 
+  /** The `serve` daemon's state file of the session (`LogWrite.sidecar`). */
+  stateFile(id: string): string {
+    return join(this.dir, `${id}.state.json`);
+  }
+
   private lockFile(id: string): string {
     return join(this.dir, `.${id}.lock`);
   }
@@ -286,7 +316,45 @@ export class LogSessionStore {
     return this.enqueue(record.id, { kind: "snapshot", record });
   }
 
-  /** Delete the session's file and its asides, under its lock, in its queue (latest wins). */
+  /**
+   * Replace the session's state file only (`serve`: an archived rename or
+   * reclaim — the log is not touched), under its lock, in its queue.
+   */
+  writeState(id: string, data: string): Promise<void> {
+    return this.enqueue(id, { kind: "state", data });
+  }
+
+  /**
+   * Move the session's log aside (`<uid>.stale-<ms>-<hex>.aside`, `onAside`
+   * says where), under its lock, in its queue: `serve`'s log with no state
+   * file (a new session cut before its first save landed, FM 5).
+   */
+  setAside(id: string, reason: string): Promise<void> {
+    return this.enqueue(id, { kind: "aside", reason });
+  }
+
+  /**
+   * Drop the session's writer state (its segment in memory) once nothing will
+   * write from it again — `serve`: an archive unit landed and the host let go
+   * of its resident record (docs/feat/session-log-serve-store.md, review M1).
+   * In the session's queue, so it follows every unit already handed over; a
+   * later write of the id (a reopen: a cold read) starts a fresh writer state.
+   */
+  forget(id: string): Promise<void> {
+    return this.enqueue(id, { kind: "forget" });
+  }
+
+  /** How many sessions' writer state (their current segment's entries) this store holds in memory. */
+  residentWriters(): number {
+    return this.writers.size;
+  }
+
+  /** Delete only the session's state file (`serve`: one left with no log, a remove cut short). */
+  removeState(id: string): Promise<void> {
+    return this.enqueue(id, { kind: "dropState" });
+  }
+
+  /** Delete the session's state file, its log and its asides (in that order), under its lock, in its queue. */
   remove(id: string): Promise<void> {
     if (!isValidSessionId(id)) {
       return Promise.reject(new Error(`invalid session id ${JSON.stringify(id)}`));
@@ -378,17 +446,52 @@ export class LogSessionStore {
       }
       const release = await this.lock(id);
       try {
-        if (op.kind === "write") await this.writeLocked(id, op.update);
-        else if (op.kind === "snapshot") await this.snapshotLocked(op.record);
+        if (op.kind === "write") {
+          await this.writeLocked(id, op.update);
+          if (op.update.sidecar !== undefined) {
+            await this.writeStateLocked(id, op.update.sidecar);
+          }
+        } else if (op.kind === "snapshot") await this.snapshotLocked(op.record);
+        else if (op.kind === "state") await this.writeStateLocked(id, op.data);
+        else if (op.kind === "aside") await this.asideLocked(id, op.reason);
+        else if (op.kind === "dropState") await rm(this.stateFile(id), { force: true });
+        else if (op.kind === "forget") this.writers.delete(id);
         else await this.removeLocked(id);
       } finally {
         await release();
       }
     } catch (error) {
-      if (error instanceof LockBusyError) throw error;
+      if (error instanceof LockBusyError || error instanceof StateWriteError) throw error;
       const verb = op.kind === "remove" ? "remove" : "write";
       throw new Error(`couldn't ${verb} ${target}: ${describeFsError(error)}`, { cause: error });
     }
+  }
+
+  /** The state file, atomically (temp + fsync + rename): the old one or the new one. */
+  private async writeStateLocked(id: string, data: string): Promise<void> {
+    const path = this.stateFile(id);
+    try {
+      await this.writeWhole(path, data);
+    } catch (error) {
+      throw new StateWriteError(`couldn't write ${path}: ${describeFsError(error)}`, {
+        cause: error,
+      });
+    }
+  }
+
+  /** The log moved aside whole (its bytes kept), the id free again. */
+  private async asideLocked(id: string, reason: string): Promise<void> {
+    const path = this.file(id);
+    let text: string;
+    try {
+      text = await readFile(path, "utf8");
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "ENOENT") return;
+      throw error;
+    }
+    await this.asideRaw(id, text, reason);
+    await rm(path, { force: true });
+    this.writers.delete(id);
   }
 
   /** Fold a read into the writer's segment (a batch with a `base` restarts it there). */
@@ -427,7 +530,7 @@ export class LogSessionStore {
     const segment = state.segment;
     const path = this.file(id);
     const tail = await readTail(path);
-    if (tail.kind === "absent" && update.messages.length === 0) {
+    if (tail.kind === "absent" && update.messages.length === 0 && update.keepEmpty !== true) {
       return; // nothing to keep yet (no prompt committed): no empty session file
     }
     const hasBase = update.entries.some((e) => e.type === "base");
@@ -611,7 +714,14 @@ export class LogSessionStore {
       if (last.unknown === 0) return "";
       // Dropped by config, but it holds lines this build does not know (a newer
       // build's): set aside, never dropped silently (falls through).
-    } else if (last.unknown === 0 && (sameInc || isPrefix(last.messages, messages))) {
+    } else if (
+      last.unknown === 0 &&
+      (sameInc ||
+        // A base that explicitly continues the file's last entry restates that
+        // segment (`serve`'s reload, docs/feat/session-log-serve-store.md Q11).
+        (mine.prev !== undefined && last.entries.at(-1)?.id === mine.prev) ||
+        isPrefix(last.messages, messages))
+    ) {
       return ""; // contained: a restatement (seed/reload/create) or the same lineage
     }
     if (last.unknown === 0 && state.asided && isPrefix(last.messages, state.asided)) {
@@ -680,6 +790,9 @@ export class LogSessionStore {
   }
 
   private async removeLocked(id: string): Promise<void> {
+    // The state file first: a remove cut short leaves a log with no state
+    // (set aside at the next start) or nothing, never a state with no log.
+    await rm(this.stateFile(id), { force: true });
     await rm(this.file(id), { force: true });
     this.writers.delete(id);
     let names: string[];
@@ -867,6 +980,87 @@ export class LogSessionStore {
     };
   }
 
+  /**
+   * `serve`: the session's log text and state file text, as they are (the
+   * daemon's loader parses them, `daemon-state-file.ts`; no turn is closed
+   * here). A log with no state file → `state: null`; no log → `absent`.
+   */
+  async readRaw(id: string): Promise<RawSessionFiles> {
+    const file = this.file(id);
+    if (!isValidSessionId(id)) {
+      return { status: "unreadable", file, reason: `invalid session id ${JSON.stringify(id)}` };
+    }
+    let log: string;
+    try {
+      log = await readFile(file, "utf8");
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "ENOENT") return { status: "absent" };
+      return { status: "unreadable", file, reason: describeFsError(error) };
+    }
+    const state = await this.readStateText(id);
+    return state.ok ? { status: "ok", log, state: state.text } : state.unreadable;
+  }
+
+  /**
+   * `serve`: the session's header line and state file text — the log beyond
+   * its first line is NOT read (an archived session is indexed from these).
+   */
+  async readState(id: string): Promise<RawSessionState> {
+    const file = this.file(id);
+    if (!isValidSessionId(id)) {
+      return { status: "unreadable", file, reason: `invalid session id ${JSON.stringify(id)}` };
+    }
+    let header: string;
+    try {
+      header = await readFirstLine(file);
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "ENOENT") return { status: "absent" };
+      return { status: "unreadable", file, reason: describeFsError(error) };
+    }
+    const state = await this.readStateText(id);
+    return state.ok ? { status: "ok", header, state: state.text } : state.unreadable;
+  }
+
+  private async readStateText(id: string): Promise<
+    | { readonly ok: true; readonly text: string | null }
+    | {
+        readonly ok: false;
+        readonly unreadable: { status: "unreadable"; file: string; reason: string };
+      }
+  > {
+    const file = this.stateFile(id);
+    try {
+      return { ok: true, text: await readFile(file, "utf8") };
+    } catch (error) {
+      if ((error as { code?: unknown }).code === "ENOENT") return { ok: true, text: null };
+      return {
+        ok: false,
+        unreadable: { status: "unreadable", file, reason: describeFsError(error) },
+      };
+    }
+  }
+
+  /**
+   * `serve`'s start-up listing: the ids with a log (`<uid>.jsonl`), and the
+   * ids with a state file but no log (a remove cut short). A legacy
+   * `<uid>.json` is not listed.
+   */
+  async daemonFiles(): Promise<{ readonly logs: string[]; readonly orphanStates: string[] }> {
+    let names: string[];
+    try {
+      names = await readdir(this.dir);
+    } catch {
+      return { logs: [], orphanStates: [] };
+    }
+    const logs = await this.ids();
+    const withLog = new Set(logs);
+    const orphanStates = names
+      .filter((name) => name.endsWith(".state.json") && !name.startsWith("."))
+      .map((name) => name.slice(0, -".state.json".length))
+      .filter((id) => isValidSessionId(id) && !withLog.has(id));
+    return { logs, orphanStates };
+  }
+
   /** One session's list entry: the same walk as `load`, without the per-entry schema parse. */
   async summarize(
     id: string,
@@ -966,6 +1160,34 @@ export class LogSessionStore {
 
 /** A live holder kept the session's lock past the wait: this save failed (retried at the next). */
 export class LockBusyError extends Error {}
+
+/** The log op landed but the state file did not (`serve`: the unit failed; the next one heals). */
+export class StateWriteError extends Error {}
+
+/** A file's first line (without its `\n`), read in chunks: the header of a log file. */
+async function readFirstLine(path: string): Promise<string> {
+  const handle = await open(path, "r");
+  try {
+    const CHUNK = 16 * 1024;
+    const parts: Uint8Array[] = [];
+    let position = 0;
+    for (;;) {
+      const chunk = new Uint8Array(CHUNK);
+      const { bytesRead } = await handle.read(chunk, 0, CHUNK, position);
+      if (bytesRead === 0) break;
+      const nl = chunk.subarray(0, bytesRead).indexOf(0x0a);
+      if (nl >= 0) {
+        parts.push(chunk.subarray(0, nl));
+        break;
+      }
+      parts.push(chunk.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    return Buffer.concat(parts).toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
 
 /** Index of the last `base` in `entries` (-1 when none). */
 function lastBaseIndex(entries: readonly KnownLogEntry[]): number {

@@ -4,6 +4,10 @@
 > **Branch:** `feat/daemon-side-persistence`
 > **Type:** feat · **Size:** M (Part A) · **Blast:** load-bearing (persistence + pod-trust invariants, steering window, AGENTS §7 rule change) · **Suited:** strong model executes; mandatory fresh-context Review
 
+> **Store format: `docs/feat/session-log-serve-store.md` (2026-11-08)** — the JSON record below
+> (`<uid>.json`, `DAEMON_RECORD_VERSION`) is replaced by the session log `<uid>.jsonl` + a state
+> sidecar `<uid>.state.json`; the behaviour (steering window, pending ⇒ never started, archive) is unchanged.
+
 > **Superseded in part by `docs/feat/session-archive.md` (2026-10-24): close archives; delete removes.**
 > Below, "close deletes the record" (Open question 5, the `close` row of the
 > write table, A9) is no longer true. A close — and the reaper's, and the

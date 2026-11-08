@@ -47,7 +47,7 @@ import {
   restoredActivity,
 } from "./persisted-session.ts";
 import { type SessionSummary, toSessionList } from "./session-list.ts";
-import type { SessionPersister } from "./session-persister.ts";
+import type { ArchivedMeta, SessionPersister } from "./session-persister.ts";
 import { type Expired, type ReapPolicy, selectEvictable, selectExpired } from "./session-reaper.ts";
 import { type TitleState, renameText, seedState } from "./session-title.ts";
 import type { DaemonIdentity } from "./version-mismatch.ts";
@@ -227,7 +227,7 @@ interface ArchivedEntry {
 }
 
 function archivedEntry(
-  record: DaemonSessionRecord,
+  record: ArchivedMeta,
   resident: DaemonSessionRecord | undefined,
 ): ArchivedEntry {
   return {
@@ -597,49 +597,65 @@ export class SessionHost {
   }
 
   /**
-   * Write an archived entry's record with its `renamed` title (the latest one
-   * when renames overlap) and without its `reclaimed` rows. Read back first
-   * when the record is not resident; a read that fails leaves the change in
-   * memory only (listed, kept by a reopen), reported. Skipped once the entry
-   * is no longer archived (reopened: the live session carries it; deleted),
-   * or when it changes nothing. The rewritten record stays resident until its
-   * write lands; a failed write is retried by the sweeps. Resolves once the
-   * write settled.
+   * Write an archived entry with its `renamed` title (the latest one when
+   * renames overlap) and without its `reclaimed` rows. A RESIDENT record (its
+   * archive write not confirmed yet) is rewritten whole and stays resident
+   * until that write lands. Otherwise only its STATE FILE is read back and
+   * rewritten — never its history (docs/feat/session-log-serve-store.md Q8:
+   * the log's title catches up at the reopen); a read that fails leaves the
+   * change in memory only (listed, kept by a reopen), reported. Skipped once
+   * the entry is no longer archived (reopened: the live session carries it;
+   * deleted), or when it changes nothing. A failed write is retried by the
+   * sweeps (`quiet`: not reported again). Resolves once the write settled.
    */
-  private async rewriteArchived(entry: ArchivedEntry, what: string): Promise<void> {
+  private async rewriteArchived(entry: ArchivedEntry, what: string, quiet = false): Promise<void> {
     const persister = this.opts.persister;
     if (!persister) {
       return;
     }
-    let base = entry.record;
-    if (!base) {
-      const loaded = await persister.load(entry.id);
-      if (!loaded.ok) {
-        if (this.archived.get(entry.id) === entry) {
-          persister.report(
-            new Error(
-              `archived session ${entry.id} was ${what} in memory only: its record could not be read back (${loaded.reason})`,
-            ),
-          );
-        }
+    const resident = entry.record;
+    if (resident) {
+      const renamed = entry.renamed;
+      const kept = withoutReclaimed(resident, entry.reclaimed);
+      if (!renamed && kept === resident) {
         return;
       }
-      base = loaded.record;
-    }
-    if (this.archived.get(entry.id) !== entry) {
+      const record: DaemonSessionRecord = { ...kept, ...(renamed ? { title: renamed } : {}) };
+      entry.record = record;
+      entry.unwritten = false;
+      const ok = await persister.writeRecord(record, !quiet);
+      this.settleWrite(entry, ok, record);
       return;
     }
-    const current = entry.record ?? base;
+    const loaded = await persister.loadState(entry.id);
+    if (!loaded.ok) {
+      if (this.archived.get(entry.id) === entry && !quiet) {
+        persister.report(
+          new Error(
+            `archived session ${entry.id} was ${what} in memory only: its record could not be read back (${loaded.reason})`,
+          ),
+        );
+      }
+      return;
+    }
+    if (this.archived.get(entry.id) !== entry || entry.record) {
+      return;
+    }
+    const sidecar = loaded.sidecar;
     const renamed = entry.renamed;
-    const kept = withoutReclaimed(current, entry.reclaimed);
-    if (!renamed && kept === current) {
+    const returned = sidecar.returned.filter((r) => !entry.reclaimed.has(r.id));
+    if (!renamed && returned.length === sidecar.returned.length) {
       return;
     }
-    const record: DaemonSessionRecord = { ...kept, ...(renamed ? { title: renamed } : {}) };
-    entry.record = record;
     entry.unwritten = false;
-    const ok = await persister.writeRecord(record);
-    this.settleWrite(entry, ok, record);
+    const ok = await persister.writeState(
+      entry.id,
+      { ...sidecar, ...(renamed ? { title: renamed } : {}), returned },
+      !quiet,
+    );
+    if (this.archived.get(entry.id) === entry && !entry.record) {
+      entry.unwritten = !ok;
+    }
   }
 
   /**
@@ -664,10 +680,11 @@ export class SessionHost {
   }
 
   /**
-   * Index an archived record found at start: metadata only (the record is
-   * read again on its reopen). Never live, never counted by the limits.
+   * Index an archived session found at start: metadata only — its header and
+   * state file (`SessionPersister.loadState`); the history is read on its
+   * reopen. Never live, never counted by the limits.
    */
-  addArchived(record: DaemonSessionRecord): void {
+  addArchived(record: ArchivedMeta): void {
     if (this.known(record.id)) {
       throw new Error(`session ${record.id} is already known`);
     }
@@ -692,7 +709,7 @@ export class SessionHost {
       hosted.close();
       return { closed: true, archived: false };
     }
-    const { record, written } = persister.archive(hosted.archive(), this.now());
+    const { record, written } = persister.archive(id, (after) => hosted.archive(after), this.now());
     if (!record) {
       return { closed: true, archived: false };
     }
@@ -719,6 +736,8 @@ export class SessionHost {
     if (ok) {
       entry.record = undefined;
       entry.unwritten = false;
+      // Nothing writes from this session's segment any more: free the store's copy.
+      this.opts.persister?.forget(entry.id);
     } else {
       entry.unwritten = true;
     }
@@ -754,6 +773,8 @@ export class SessionHost {
       returned: reconciled.returned,
       ...(record.head !== undefined ? { head: record.head } : {}),
       ...(reconciled.resume ? { resume: reconciled.resume } : {}),
+      // Paired: the log continues the lineage the files hold (§5); else a new one.
+      ...(record.paired ? { log: { head: record.logHead, logged: record.logged } } : {}),
     });
     this.sessions.set(record.id, hosted);
     return hosted;
@@ -853,9 +874,17 @@ export class SessionHost {
     }
     for (const entry of this.archived.values()) {
       const record = entry.record;
-      if (entry.unwritten && record && !entry.retrying) {
-        entry.retrying = true;
+      if (!entry.unwritten || entry.retrying) {
+        continue;
+      }
+      entry.retrying = true;
+      if (record) {
         void persister.writeRecord(record, false).then((ok) => this.settleWrite(entry, ok, record));
+      } else {
+        // A state-file-only rewrite (rename / reclaim) that failed: again, quietly.
+        void this.rewriteArchived(entry, "retried", true).finally(() => {
+          entry.retrying = false;
+        });
       }
     }
   }

@@ -5,7 +5,7 @@ import {
   ENDED_TURN_NOTE,
 } from "../src/persisted-session.ts";
 import {
-  LAPTOP_LOG_VERSION,
+  SESSION_LOG_VERSION,
   closeAtLoad,
   currentSegment,
   cutHistory,
@@ -44,7 +44,7 @@ describe("parseLogFile", () => {
       ]);
     const file = parsed(text);
     const seg = currentSegment(file);
-    expect(file.header.schemaVersion).toBe(LAPTOP_LOG_VERSION);
+    expect(file.header.schemaVersion).toBe(SESSION_LOG_VERSION);
     expect(seg.messages).toEqual([user("a2"), asst("b")]);
     expect(seg.title).toEqual({ text: "T", source: "user" });
     expect(seg.openTurns).toEqual([]);

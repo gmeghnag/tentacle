@@ -8,6 +8,17 @@ those.
 
 ## [Unreleased]
 
+### Changed
+
+- **`tentacle serve` now stores its sessions as a session log, like the laptop.** Each session
+  in `<configDir>/daemon/<project>/` is `<id>.jsonl` (the same log format as your local
+  sessions) plus a small `<id>.state.json`; a save appends what changed instead of rewriting
+  the whole history. A restart continues each session's log, so a client that was reading it
+  carries on without a fork. Old `<id>.json` files from earlier builds are ignored (no
+  conversion: delete the folder to clean up); a session a newer build wrote is left untouched.
+  `sessions.keepSuperseded` now also applies to `serve` (from the `serve` host's config).
+  Use one build per store: an older build does not see these sessions.
+
 ### Added
 
 - **`tentacle config` edits your config from the command line.** `tentacle config subagents.maxParallel=3` (or `config set <key> <value>`), `config unset <key>`, `config get <key>`, `config list` and `config path`; `--profile <name>` targets that profile. The value is typed by the key (true/false, numbers, text; arrays and objects as JSON) and the whole file is validated before anything is written, so a bad value leaves the file untouched. Your comments, layout and key order are kept, and the write is atomic (a symlinked config is written through the link). A secret such as `model.apiKey` is never accepted on the command line, where it would land in shell history: pass `-` to read it from stdin, or leave the value out for a hidden prompt. `get` and `list` print secrets as `***`. A prompt that starts with the word "config" needs `tentacle -- config …`.

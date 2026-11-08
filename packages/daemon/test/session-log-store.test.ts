@@ -234,6 +234,48 @@ describe("F1 on disk: a replace never drops content its copy does not contain", 
     expect(asides).toHaveLength(1);
     expect(await load(mine, "s")).toEqual([user("stale")]);
   });
+
+  // docs/feat/session-log-serve-store.md Q11: a base that explicitly continues
+  // the file's last entry (`prev` = its id: `serve`'s reload) restates that segment.
+  test("S10 a base continuing the file's last entry is contained (no aside), even with in-place changes after it", async () => {
+    // Mutation: drop the `prev` clause in `settleLast` → the reload's restatement + an
+    // in-place repair is not a prefix → a useless aside at every restart.
+    const where = fresh();
+    const asides: LogAsideInfo[] = [];
+    const store = new LogSessionStore(where, { onAside: (i) => asides.push(i) });
+    const d1 = new FakeLog("D1");
+    const first = [user("go"), asst("", ["c1"]), tool("c1")];
+    const r1 = new FakeReader("s");
+    await store.write(r1.read(d1.base(first), "cold"));
+    // The reload: base{reload, prev = the file's last id} restating `first`, then the
+    // repair rewrites message 2 in place (an overlay) — the projection is not a prefix extension.
+    const d2 = new FakeLog("D2", r1.head);
+    const reload = [...d2.base(first, "reload"), d2.replace(2, tool("c1", "annotated"))];
+    await new LogSessionStore(where, { onAside: (i) => asides.push(i) }).write(
+      new FakeReader("s").read(reload, "cold"),
+    );
+    expect(asides).toEqual([]);
+    expect(await load(store, "s")).toEqual([user("go"), asst("", ["c1"]), tool("c1", "annotated")]);
+  });
+
+  test("S10 an entry after the continued one (a unit that never landed) → exactly that content goes aside", async () => {
+    const where = fresh();
+    const asides: LogAsideInfo[] = [];
+    const store = new LogSessionStore(where, { onAside: (i) => asides.push(i) });
+    const d1 = new FakeLog("D1");
+    const r1 = new FakeReader("s");
+    await store.write(r1.read(d1.base([user("go")]), "cold"));
+    const landed = r1.head; // what the state file named
+    await store.write(r1.read([d1.msg(asst("never landed"))])); // the log ahead of its state file
+    const d2 = new FakeLog("D2", landed);
+    await new LogSessionStore(where, { onAside: (i) => asides.push(i) }).write(
+      new FakeReader("s").read([...d2.base([user("go")], "reload"), d2.msg(user("note"))], "cold"),
+    );
+    expect(asides).toHaveLength(1);
+    const kept = parseLogFile(await readFile(asides[0]?.file ?? "", "utf8"), "s");
+    expect(kept.ok && currentSegment(kept).messages).toEqual([user("go"), asst("never landed")]);
+    expect(await load(store, "s")).toEqual([user("go"), user("note")]);
+  });
 });
 
 describe("W4 several writers of one session (Q8)", () => {

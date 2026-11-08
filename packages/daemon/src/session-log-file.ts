@@ -38,14 +38,14 @@ import {
 } from "./persisted-session.ts";
 
 /** The header's `format` tag. */
-export const LAPTOP_LOG_FORMAT = "tentacle-session-log";
+export const SESSION_LOG_FORMAT = "tentacle-session-log";
 /** The laptop log's own version (separate from the wire's and the daemon record's). */
-export const LAPTOP_LOG_VERSION = 1;
+export const SESSION_LOG_VERSION = 1;
 
 /** Line 1 of a log file: the session's immutable facts. */
 export interface LogFileHeader {
-  readonly format: typeof LAPTOP_LOG_FORMAT;
-  readonly schemaVersion: typeof LAPTOP_LOG_VERSION;
+  readonly format: typeof SESSION_LOG_FORMAT;
+  readonly schemaVersion: typeof SESSION_LOG_VERSION;
   readonly id: string;
   readonly cwd: string;
   readonly model: string;
@@ -105,11 +105,11 @@ function headerProblem(value: unknown, id: string): string | null {
   if (!isObject(value)) {
     return "the header is not a JSON object";
   }
-  if (value.format !== LAPTOP_LOG_FORMAT) {
+  if (value.format !== SESSION_LOG_FORMAT) {
     return "not a tentacle session log (no header)";
   }
-  if (value.schemaVersion !== LAPTOP_LOG_VERSION) {
-    return `session log schemaVersion ${JSON.stringify(value.schemaVersion)} is not ${LAPTOP_LOG_VERSION} (written by another tentacle version): update tentacle`;
+  if (value.schemaVersion !== SESSION_LOG_VERSION) {
+    return `session log schemaVersion ${JSON.stringify(value.schemaVersion)} is not ${SESSION_LOG_VERSION} (written by another tentacle version): update tentacle`;
   }
   if (value.id !== id) {
     return `id ${JSON.stringify(value.id)} does not match the file name`;
@@ -344,6 +344,56 @@ export function parseLogFile(
   };
 }
 
+/**
+ * The projection THROUGH entry `head` (same `seq` and `id`): the fold of the
+ * segment holding it, from its `base` up to and including it — the `serve`
+ * loader reads the log only up to the entry its state file names
+ * (docs/feat/session-log-serve-store.md §6). `null` when no complete segment
+ * holds it, or when it falls inside a base's owed messages (never a capture
+ * point): the pair cannot be proven.
+ */
+export function foldThrough(
+  parsed: ParsedLogFile,
+  head: { readonly seq: number; readonly id: string },
+): ChatMessage[] | null {
+  for (let s = parsed.segments.length - 1; s >= 0; s--) {
+    const segment = parsed.segments[s];
+    if (segment === undefined) continue;
+    const at = segment.entries.findIndex((e) => e.id === head.id);
+    if (at < 0) continue;
+    // Entries 1..count are the base's owed messages: a head among them is no capture point.
+    if (segment.entries[at]?.seq !== head.seq || at < segment.base.count) return null;
+    const list: ChatMessage[] = [];
+    for (let i = 0; i <= at; i++) {
+      const entry = segment.entries[i];
+      if (entry === undefined || projectEntry(list, entry, (m) => m as ChatMessage) !== null) {
+        return null;
+      }
+    }
+    return list;
+  }
+  return null;
+}
+
+/** A header line's facts for session `id` (the first line of a log file), or why it is not one. */
+export function parseHeaderLine(
+  line: string,
+  id: string,
+):
+  | { readonly ok: true; readonly header: LogFileHeader }
+  | { readonly ok: false; readonly reason: string } {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return { ok: false, reason: "line 1 is not JSON" };
+  }
+  const problem = headerProblem(value, id);
+  return problem === null
+    ? { ok: true, header: value as LogFileHeader }
+    : { ok: false, reason: problem };
+}
+
 /** The projection's segment (the last complete one). */
 export function currentSegment(parsed: ParsedLogFile): LogSegment {
   const last = parsed.segments[parsed.segments.length - 1];
@@ -403,8 +453,8 @@ export function closeAtLoad(segment: LogSegment): readonly ChatMessage[] {
 /** The header line (with its `\n`). */
 export function headerLine(header: Omit<LogFileHeader, "format" | "schemaVersion">): string {
   const full: LogFileHeader = {
-    format: LAPTOP_LOG_FORMAT,
-    schemaVersion: LAPTOP_LOG_VERSION,
+    format: SESSION_LOG_FORMAT,
+    schemaVersion: SESSION_LOG_VERSION,
     id: header.id,
     cwd: header.cwd,
     model: header.model,

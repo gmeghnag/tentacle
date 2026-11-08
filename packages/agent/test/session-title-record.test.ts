@@ -47,39 +47,20 @@ function legacyParse(value: unknown, id: string): { ok: boolean; reason?: string
 }
 
 describe("record titles (docs/feat/session-titles.md)", () => {
-  test("A1 a string title (any older file, or an auto title) loads as auto", () => {
-    const parsed = A.parseSessionRecord({ ...base, title: "please fix the login bug" }, "u1");
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(call("recordTitleState", parsed.record)).toEqual({ source: "auto" });
-    expect(call("recordTitleText", parsed.record)).toBe("please fix the login bug");
+  // (A malformed chosen title is refused by the `serve` state file's parser:
+  // `daemon/test/serve-log-store.test.ts`; `parseSessionRecord` is gone with
+  // the JSON record store.)
+  test("A1 a string title (any older file, or an auto title) reads as auto", () => {
+    const record = { ...base, title: "please fix the login bug" };
+    expect(call("recordTitleState", record)).toEqual({ source: "auto" });
+    expect(call("recordTitleText", record)).toBe("please fix the login bug");
   });
 
-  test("A1 a chosen title loads with its source", () => {
+  test("A1 a chosen title reads with its source", () => {
     for (const source of ["model", "user"]) {
-      const parsed = A.parseSessionRecord({ ...base, title: { text: "Fix login", source } }, "u1");
-      expect(parsed.ok).toBe(true);
-      if (!parsed.ok) continue;
-      expect(call("recordTitleState", parsed.record)).toEqual({ source, text: "Fix login" });
-      expect(call("recordTitleText", parsed.record)).toBe("Fix login");
-    }
-  });
-
-  test("A1 a malformed chosen title is unreadable, with the reason", () => {
-    for (const title of [
-      { text: "x", source: "auto" },
-      { text: "", source: "user" },
-      { text: 3, source: "user" },
-      { text: "x" },
-      { text: "x", source: "user", extra: 1 },
-      { text: "x".repeat(257), source: "user" },
-      ["x"],
-      null,
-    ]) {
-      const parsed = A.parseSessionRecord({ ...base, title }, "u1");
-      expect(parsed.ok).toBe(false);
-      if (parsed.ok) continue;
-      expect(parsed.reason).toContain('"title"');
+      const record = { ...base, title: { text: "Fix login", source } };
+      expect(call("recordTitleState", record)).toEqual({ source, text: "Fix login" });
+      expect(call("recordTitleText", record)).toBe("Fix login");
     }
   });
 
@@ -109,8 +90,7 @@ describe("record titles (docs/feat/session-titles.md)", () => {
       const old = legacyParse(JSON.parse(JSON.stringify(record)), "u1");
       expect(old).toEqual({ ok: false, reason: '"title" is not a string' });
       // And this build reads it back as written.
-      const parsed = A.parseSessionRecord(JSON.parse(JSON.stringify(record)), "u1");
-      expect(parsed.ok && call("recordTitleState", parsed.record)).toEqual({
+      expect(call("recordTitleState", JSON.parse(JSON.stringify(record)))).toEqual({
         source,
         text: "Fix login",
       });

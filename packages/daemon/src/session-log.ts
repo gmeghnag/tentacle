@@ -38,7 +38,7 @@ import {
 } from "@tentacle/protocol";
 
 /** One retained entry: its wire object (a checkpoint's built on first read) and its size, once known. */
-interface Slot {
+export interface Slot {
   entry: KnownLogEntry | null;
   /** A checkpoint not served yet: the projection it asserts (immutable messages). */
   readonly lazy?: {
@@ -196,11 +196,44 @@ export class SessionLog {
     };
   }
 
+  /** The committed projection as of the last derivation (never mutated in place: each derivation replaces it). */
+  get projection(): readonly ChatMessage[] {
+    return this.ref;
+  }
+
+  /**
+   * The retained entries after `after` as SLOT REFERENCES (the `serve`
+   * persister's capture, docs/feat/session-log-serve-store.md §2): `after`
+   * absent → from the last `base` (cold); unknown, evicted or of another
+   * incarnation → from the last `base`, `rebased`. Never materializes a
+   * checkpoint nor computes a size (it runs in the steering window): O(Δ)
+   * references. A slot's entry is immutable once built, and a checkpoint's
+   * is built from an immutable snapshot, so `materialize` later gives the same entry.
+   */
+  since(after?: LogCursor): {
+    readonly slots: readonly Slot[];
+    readonly head: LogCursor;
+    readonly rebased: boolean;
+  } {
+    let start = this.current;
+    let rebased = false;
+    if (after !== undefined) {
+      const at = after.seq - this.firstSeq;
+      if (at >= 0 && at < this.slots.length && this.idOf(at) === after.id) {
+        start = at + 1;
+      } else {
+        rebased = true;
+      }
+    }
+    return { slots: this.slots.slice(start), head: this.tip, rebased };
+  }
+
   private idOf(index: number): string {
     return `${this.inc}/${this.firstSeq + index}`;
   }
 
-  private materialize(slot: Slot, sha256: Sha256): KnownLogEntry {
+  /** A slot's wire entry (a checkpoint's digest computed here, once). */
+  materialize(slot: Slot, sha256: Sha256): KnownLogEntry {
     if (slot.entry !== null) {
       return slot.entry;
     }

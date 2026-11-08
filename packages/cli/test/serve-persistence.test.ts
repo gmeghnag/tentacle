@@ -4,13 +4,15 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DomainErrorCode, PROTOCOL_VERSION, SessionListResultSchema } from "@tentacle/protocol";
+import { decodeFiles, filesOf } from "../../daemon/test/support/daemon-store-spy.ts";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { daemonStoreDir, startDaemon } from "../src/serve.ts";
 import { toolOutputStore } from "../src/wiring.ts";
 
 // `serve` persists its sessions on its own host and reloads them on start
-// (docs/feat/daemon-side-persistence.md), over a REAL disk under a temp
-// configDir. Each test names the mutation that must turn it red (AGENTS §9).
+// (docs/feat/daemon-side-persistence.md; the files: docs/feat/session-log-serve-store.md),
+// over a REAL disk under a temp configDir. Each test names the mutation that
+// must turn it red (AGENTS §9).
 
 describe("serve persistence (end to end, real disk)", () => {
   let dir: string;
@@ -79,6 +81,19 @@ describe("serve persistence (end to end, real disk)", () => {
   const serve = (cfg: TentacleConfig = config, notices: string[] = []) =>
     startDaemon(cfg, { host: "127.0.0.1", port: 0, onNotice: (l) => notices.push(l) });
 
+  // A session on disk: its log `<id>.jsonl` and its state file `<id>.state.json`
+  // (docs/feat/session-log-serve-store.md).
+  const logPath = (id: string) => join(daemonStoreDir(config), `${id}.jsonl`);
+  const statePath = (id: string) => join(daemonStoreDir(config), `${id}.state.json`);
+  const stateOf = async (id: string) =>
+    JSON.parse(await readFile(statePath(id), "utf8")) as Record<string, unknown>;
+  /** The session as a restart loads it (the real decoders over the two files). */
+  const loadedOf = async (id: string) =>
+    decodeFiles(id, {
+      log: await readFile(logPath(id), "utf8"),
+      state: await readFile(statePath(id), "utf8"),
+    });
+
   test("A13 a session survives a serve restart; the daemon's copy is served on re-open", async () => {
     // Mutation: drop `sessionHost.restore` in startDaemon → UnknownSession after the restart.
     const first = await serve();
@@ -87,7 +102,9 @@ describe("serve persistence (end to end, real disk)", () => {
     expect(opened?.result).toMatchObject({ sessionId: "s-e2e", created: true });
     a.ws.close();
     await first.stop();
-    expect(await readdir(daemonStoreDir(config))).toContain("s-e2e.json");
+    expect(await readdir(daemonStoreDir(config))).toEqual(
+      expect.arrayContaining(["s-e2e.jsonl", "s-e2e.state.json"]),
+    );
 
     const notices: string[] = [];
     const second = await serve(config, notices);
@@ -108,7 +125,7 @@ describe("serve persistence (end to end, real disk)", () => {
     } finally {
       await second.stop();
     }
-    const kept = JSON.parse(await readFile(join(daemonStoreDir(config), "s-e2e.json"), "utf8"));
+    const kept = await stateOf("s-e2e");
     expect(kept.archivedAt).toEqual(expect.any(Number));
     const third = await serve();
     try {
@@ -118,11 +135,13 @@ describe("serve persistence (end to end, real disk)", () => {
     } finally {
       await third.stop();
     }
-    expect(await readdir(daemonStoreDir(config))).not.toContain("s-e2e.json");
+    const left = await readdir(daemonStoreDir(config));
+    expect(left).not.toContain("s-e2e.jsonl");
+    expect(left).not.toContain("s-e2e.state.json");
   });
 
   test("S1 a restart brings archived records back ARCHIVED (indexed, not live), live ones live; one list", async () => {
-    // Mutation M8: parseDaemonRecord drops archivedAt (an archived record restored live) → red.
+    // Mutation M8: the state-file loader drops archivedAt (an archived record restored live) → red.
     const first = await serve();
     const a = await client(first.url);
     await a.request("session/open", { sessionId: "s-live", messages: seed });
@@ -130,10 +149,9 @@ describe("serve persistence (end to end, real disk)", () => {
     await a.request("session/close", { sessionId: "s-arch" });
     a.ws.close();
     await first.stop();
-    const archivedFile = JSON.parse(
-      await readFile(join(daemonStoreDir(config), "s-arch.json"), "utf8"),
-    );
-    expect(archivedFile.schemaVersion).toBe(8);
+    const archivedFile = await stateOf("s-arch");
+    expect(archivedFile.format).toBe("tentacle-daemon-state");
+    expect(archivedFile.schemaVersion).toBe(1); // DAEMON_STATE_VERSION
     expect(archivedFile.archivedAt).toEqual(expect.any(Number));
 
     const notices: string[] = [];
@@ -163,44 +181,121 @@ describe("serve persistence (end to end, real disk)", () => {
       await second.stop();
     }
     // Reopened = live again: its record lost the stamp.
-    const after = JSON.parse(await readFile(join(daemonStoreDir(config), "s-arch.json"), "utf8"));
+    const after = await stateOf("s-arch");
     expect(after.archivedAt).toBeUndefined();
   });
 
-  test("S2 a v1 record (an older build's format) restores live after the upgrade, rewritten at the current version", async () => {
-    // Mutation: refuse schemaVersion 1 → skipped "unsupported record version 1".
+  test("S2 (FM 23) a legacy `<uid>.json` record is ignored silently and left byte-identical", async () => {
+    // Owner: no conversion, no back-compat. Mutation: scan `*.json` → a notice / a restore.
     const record = {
-      id: "s-v1",
+      id: "s-v8",
       cwd: config.cwd,
       model: config.model,
       createdAt: 1,
       updatedAt: 2,
       title: "t",
       kind: "tentacle.daemon-session",
-      schemaVersion: 1,
+      schemaVersion: 8,
       lastActiveAt: 2,
       enqueueIds: [],
       turns: [],
+      returned: [],
       messages: seed,
     };
     await mkdir(daemonStoreDir(config), { recursive: true });
-    const file = join(daemonStoreDir(config), "s-v1.json");
-    await writeFile(file, JSON.stringify(record));
+    const file = join(daemonStoreDir(config), "s-v8.json");
+    const text = JSON.stringify(record);
+    await writeFile(file, text);
     const notices: string[] = [];
     const daemon = await serve(config, notices);
     try {
-      expect(notices.filter((l) => l.startsWith("skipped"))).toEqual([]);
-      expect(notices.some((l) => l.startsWith("restored 1 session from"))).toBe(true);
+      expect(notices).toEqual([]);
       const c = await client(daemon.url);
-      const opened = await c.request("session/open", { sessionId: "s-v1" });
-      expect(opened?.result).toMatchObject({ created: false });
+      expect((await c.request("session/open", { sessionId: "s-v8" }))?.error?.code).toBe(
+        DomainErrorCode.UnknownSession,
+      );
       c.ws.close();
     } finally {
       await daemon.stop();
     }
-    const after = JSON.parse(await readFile(file, "utf8"));
-    expect(after.schemaVersion).toBe(8);
-    expect(after.archivedAt).toBeUndefined();
+    expect(await readFile(file, "utf8")).toBe(text);
+  });
+
+  test("FM 5 / FM 25: a log with no state file is set aside (id free); a state file with no log is removed", async () => {
+    // Mutations: block the no-state log instead (`skipped`, id taken) → red; skip the
+    // orphan sweep → the state file stays.
+    const first = await serve();
+    const a = await client(first.url);
+    await a.request("session/open", { sessionId: "cut", messages: seed });
+    await a.request("session/open", { sessionId: "orphan", messages: seed });
+    a.ws.close();
+    await first.stop();
+    const cutLog = await readFile(logPath("cut"), "utf8");
+    await rm(statePath("cut")); // its first unit's state file never landed
+    await rm(logPath("orphan")); // a removal cut short between the two files
+    const notices: string[] = [];
+    const second = await serve(config, notices);
+    try {
+      const names = await readdir(daemonStoreDir(config));
+      expect(names).not.toContain("cut.jsonl");
+      expect(names).not.toContain("orphan.state.json");
+      const aside = names.find((n) => n.startsWith("cut.stale-") && n.endsWith(".aside"));
+      expect(aside).toBeDefined();
+      expect(await readFile(join(daemonStoreDir(config), aside ?? ""), "utf8")).toBe(cutLog);
+      expect(notices.some((l) => l.includes("aside") && l.includes("no state file"))).toBe(true);
+      expect(notices.filter((l) => l.startsWith("skipped"))).toEqual([]);
+      // The id is free again: as today, the session cut before its first save does not exist.
+      const b = await client(second.url);
+      expect((await b.request("session/open", { sessionId: "cut" }))?.error?.code).toBe(
+        DomainErrorCode.UnknownSession,
+      );
+      expect(
+        (await b.request("session/open", { sessionId: "cut", create: true }))?.result,
+      ).toMatchObject({ created: true });
+      b.ws.close();
+    } finally {
+      await second.stop();
+    }
+  });
+
+  test("FM 5 / M2: only a readable log header of THIS version with no state file is set aside; a newer or corrupt one is skipped, untouched", async () => {
+    // Mutation: the missing-state check before the header parse in `loadState` → the
+    // newer and corrupt logs are moved to `.aside` (review M2).
+    const first = await serve();
+    const a = await client(first.url);
+    await a.request("session/open", { sessionId: "cut", messages: seed });
+    a.ws.close();
+    await first.stop();
+    const goodLog = await readFile(logPath("cut"), "utf8");
+    const nl = goodLog.indexOf("\n");
+    const header = JSON.parse(goodLog.slice(0, nl)) as Record<string, unknown>;
+    const body = goodLog.slice(nl + 1);
+    await rm(logPath("cut"));
+    await rm(statePath("cut"));
+    const logs: Record<string, string> = {
+      "newer-nostate": `${JSON.stringify({ ...header, id: "newer-nostate", schemaVersion: 99 })}\n${body}`,
+      "corrupt-nostate": `{"format":"tentacle-session-log", broken\n${body}`,
+      "current-nostate": `${JSON.stringify({ ...header, id: "current-nostate" })}\n${body}`,
+    };
+    for (const [id, text] of Object.entries(logs)) await writeFile(logPath(id), text);
+    const notices: string[] = [];
+    const second = await serve(config, notices);
+    await second.stop();
+    const names = await readdir(daemonStoreDir(config));
+    for (const id of ["newer-nostate", "corrupt-nostate"]) {
+      expect(await readFile(logPath(id), "utf8")).toBe(logs[id] ?? "");
+      expect(names.some((n) => n.startsWith(`${id}.stale-`))).toBe(false);
+      expect(notices.find((l) => l.startsWith("skipped") && l.includes(`/${id}.jsonl`))).toMatch(
+        /\(left as is\)$/,
+      );
+    }
+    // The readable current-version header: FM 5, set aside with its bytes.
+    expect(names).not.toContain("current-nostate.jsonl");
+    const aside = names.find((n) => n.startsWith("current-nostate.stale-"));
+    expect(aside).toBeDefined();
+    expect(await readFile(join(daemonStoreDir(config), aside ?? ""), "utf8")).toBe(
+      logs["current-nostate"] ?? "",
+    );
   });
 
   test("B7 a turn suspended at a restart is asked again over the wire; cancel converges on disk", async () => {
@@ -213,10 +308,9 @@ describe("serve persistence (end to end, real disk)", () => {
       createdAt: 1,
       updatedAt: 2,
       title: "t",
-      kind: "tentacle.daemon-session",
-      schemaVersion: 1,
       lastActiveAt: 2,
       enqueueIds: [],
+      returned: [],
       turns: [{ turnId: "T1" }],
       messages: [
         { role: "user", content: "say hi" },
@@ -229,12 +323,14 @@ describe("serve persistence (end to end, real disk)", () => {
       turn: {
         turnId: "T1",
         steering: [],
-        pending: { toolCallId: "c1", tool: "shell", resumable: true, requestedAt: 2 },
+        steeringIds: [],
+        pending: [{ toolCallId: "c1", tool: "shell", resumable: true, requestedAt: 2 }],
       },
     };
     await mkdir(daemonStoreDir(config), { recursive: true });
-    const file = join(daemonStoreDir(config), "s-resume.json");
-    await writeFile(file, JSON.stringify(record));
+    const files = filesOf(record as unknown as Parameters<typeof filesOf>[0]);
+    await writeFile(logPath("s-resume"), files.log ?? "");
+    await writeFile(statePath("s-resume"), files.state ?? "");
     const notices: string[] = [];
     const daemon = await serve(config, notices);
     try {
@@ -270,7 +366,8 @@ describe("serve persistence (end to end, real disk)", () => {
     } finally {
       await daemon.stop();
     }
-    const after = JSON.parse(await readFile(file, "utf8"));
+    const after = await loadedOf("s-resume");
+    expect(after.paired).toBe(true);
     expect(after.turn).toBeUndefined();
     expect(after.messages.at(-1)).toMatchObject({ role: "tool", toolCallId: "c1" });
     expect(after.turns).toEqual([{ turnId: "T1", end: { stopReason: "cancelled" } }]);
@@ -283,30 +380,51 @@ describe("serve persistence (end to end, real disk)", () => {
     await a.request("session/open", { sessionId: "good", messages: seed });
     a.ws.close();
     await first.stop();
-    const store = daemonStoreDir(config);
-    const good = JSON.parse(await readFile(join(store, "good.json"), "utf8"));
-    const bad: Record<string, string> = {
-      truncated: JSON.stringify({ ...good, id: "truncated" }).slice(0, 40),
-      "client-shaped": JSON.stringify({ ...good, id: "client-shaped", kind: undefined }),
-      newer: JSON.stringify({ ...good, id: "newer", schemaVersion: 9 }),
-      foreign: JSON.stringify({ ...good, id: "foreign", cwd: "/another/project" }),
+    // (FM 22) Each bad session as its two files: the good one's, re-identified, then broken.
+    const goodLog = await readFile(logPath("good"), "utf8");
+    const goodState = await stateOf("good");
+    const header = JSON.parse(goodLog.slice(0, goodLog.indexOf("\n"))) as Record<string, unknown>;
+    const body = goodLog.slice(goodLog.indexOf("\n") + 1);
+    const logFor = (id: string, over: Record<string, unknown> = {}) =>
+      `${JSON.stringify({ ...header, id, ...over })}\n${body}`;
+    const stateFor = (id: string, over: Record<string, unknown> = {}) =>
+      JSON.stringify({ ...goodState, id, ...over });
+    const bad: Record<string, { log: string; state: string }> = {
+      truncated: { log: logFor("truncated"), state: stateFor("truncated").slice(0, 40) },
+      "client-shaped": {
+        log: logFor("client-shaped"),
+        state: stateFor("client-shaped", { format: "tentacle.daemon-session" }),
+      },
+      newer: { log: logFor("newer"), state: stateFor("newer", { schemaVersion: 2 }) },
+      "newer-log": { log: logFor("newer-log", { schemaVersion: 2 }), state: stateFor("newer-log") },
+      foreign: { log: logFor("foreign", { cwd: "/another/project" }), state: stateFor("foreign") },
+      "corrupt-log": {
+        log: `${logFor("corrupt-log")}{"type":"message","not json\n`,
+        state: stateFor("corrupt-log"),
+      },
     };
-    for (const [id, text] of Object.entries(bad)) await writeFile(join(store, `${id}.json`), text);
+    for (const [id, f] of Object.entries(bad)) {
+      await writeFile(logPath(id), f.log);
+      await writeFile(statePath(id), f.state);
+    }
 
     const notices: string[] = [];
     const second = await serve(config, notices);
     try {
       const skipped = notices.filter((l) => l.startsWith("skipped "));
-      expect(skipped).toHaveLength(4);
-      expect(skipped.find((l) => l.includes("newer.json"))).toMatch(/unsupported record version 9/);
-      expect(skipped.find((l) => l.includes("foreign.json"))).toMatch(/another project/);
-      expect(skipped.find((l) => l.includes("client-shaped.json"))).toMatch(/not a daemon session/);
-      expect(skipped.find((l) => l.includes("truncated.json"))).toMatch(/invalid JSON/);
+      expect(skipped).toHaveLength(6);
+      const about = (id: string) => skipped.find((l) => l.includes(`/${id}.jsonl`));
+      expect(about("newer")).toMatch(/state file schemaVersion 2 is not 1/);
+      expect(about("newer-log")).toMatch(/session log schemaVersion 2 is not 1/);
+      expect(about("foreign")).toMatch(/another project/);
+      expect(about("client-shaped")).toMatch(/not a tentacle daemon state file/);
+      expect(about("truncated")).toMatch(/the state file is not JSON/);
+      expect(about("corrupt-log")).toMatch(/is not JSON/);
+      expect(skipped.every((l) => l.endsWith("(left as is)"))).toBe(true);
       expect(notices.some((l) => l.startsWith("restored 1 session"))).toBe(true);
       // A client opening a skipped uid gets a session — in memory only.
       const b = await client(second.url);
-      // Both kinds of skip: one `list()` could not read, one the daemon would not accept.
-      for (const sessionId of ["truncated", "newer"]) {
+      for (const sessionId of ["truncated", "newer", "corrupt-log"]) {
         const opened = await b.request("session/open", { sessionId, messages: seed });
         expect(opened?.result).toMatchObject({ created: true });
         await b.request("session/close", { sessionId });
@@ -315,23 +433,29 @@ describe("serve persistence (end to end, real disk)", () => {
     } finally {
       await second.stop();
     }
-    for (const [id, text] of Object.entries(bad)) {
-      expect(await readFile(join(store, `${id}.json`), "utf8")).toBe(text);
+    for (const [id, f] of Object.entries(bad)) {
+      expect(await readFile(logPath(id), "utf8")).toBe(f.log);
+      expect(await readFile(statePath(id), "utf8")).toBe(f.state);
     }
   });
 
   test("R10 a record with a non-integer updatedAt is skipped loudly; session/list stays valid for the rest", async () => {
-    // Review finding 2. Mutation: drop the integer check in parseDaemonRecord → the
+    // Review finding 2. Mutation: drop the integer check in `parseSidecar` → the
     // record loads, its entry carries 1.5 and the list fails the client's schema.
     const first = await serve();
     const a = await client(first.url);
     await a.request("session/open", { sessionId: "good", messages: seed });
     a.ws.close();
     await first.stop();
-    const store = daemonStoreDir(config);
-    const good = JSON.parse(await readFile(join(store, "good.json"), "utf8"));
-    const badText = JSON.stringify({ ...good, id: "bad-stamp", updatedAt: 1.5 });
-    await writeFile(join(store, "bad-stamp.json"), badText);
+    const goodLog = await readFile(logPath("good"), "utf8");
+    const nl = goodLog.indexOf("\n");
+    const header = JSON.parse(goodLog.slice(0, nl)) as Record<string, unknown>;
+    await writeFile(
+      logPath("bad-stamp"),
+      `${JSON.stringify({ ...header, id: "bad-stamp" })}\n${goodLog.slice(nl + 1)}`,
+    );
+    const badText = JSON.stringify({ ...(await stateOf("good")), id: "bad-stamp", updatedAt: 1.5 });
+    await writeFile(statePath("bad-stamp"), badText);
 
     const notices: string[] = [];
     const second = await serve(config, notices);
@@ -345,14 +469,14 @@ describe("serve persistence (end to end, real disk)", () => {
       ).toEqual(["good"]);
       b.ws.close();
       // Hidden, never silently: the existing startup report names the file and why.
-      expect(notices.find((l) => l.includes("bad-stamp.json"))).toMatch(
+      expect(notices.find((l) => l.includes("bad-stamp.jsonl"))).toMatch(
         /^skipped .*"updatedAt" is not a non-negative integer \(left as is\)$/,
       );
       expect(notices.some((l) => l.startsWith("restored 1 session"))).toBe(true);
     } finally {
       await second.stop();
     }
-    expect(await readFile(join(store, "bad-stamp.json"), "utf8")).toBe(badText);
+    expect(await readFile(statePath("bad-stamp"), "utf8")).toBe(badText);
   });
 
   test("R6 the same project reached through a symlink restores its sessions", async () => {
@@ -461,8 +585,10 @@ describe("serve persistence (end to end, real disk)", () => {
     a.ws.close();
     await first.stop();
     const files = await readdir(daemonStoreDir(config));
-    expect(files).not.toContain("s-del.json");
-    expect(files).not.toContain("s-del-arch.json");
+    for (const id of ["s-del", "s-del-arch"]) {
+      expect(files).not.toContain(`${id}.jsonl`);
+      expect(files).not.toContain(`${id}.state.json`);
+    }
 
     const second = await serve();
     try {
@@ -492,7 +618,7 @@ describe("serve persistence (end to end, real disk)", () => {
     } finally {
       await second.stop();
     }
-    expect(await readdir(daemonStoreDir(config))).not.toContain("s-del.json");
+    expect(await readdir(daemonStoreDir(config))).not.toContain("s-del.jsonl");
   });
 
   test("R2-3 a garbled tombstone line is skipped WITH a start notice; the valid ones still hold", async () => {
@@ -540,15 +666,16 @@ describe("serve persistence (end to end, real disk)", () => {
     await a.request("session/open", { sessionId: "s-half", messages: seed });
     a.ws.close();
     await first.stop();
-    const file = join(daemonStoreDir(config), "s-half.json");
-    const bytes = await readFile(file, "utf8");
+    const logBytes = await readFile(logPath("s-half"), "utf8");
+    const stateBytes = await readFile(statePath("s-half"), "utf8");
     const second = await serve();
     const b = await client(second.url);
     await b.request("session/delete", { sessionId: "s-half" });
     b.ws.close();
     await second.stop();
-    // The crash window: the file is back as it was, the tombstone is on disk.
-    await writeFile(file, bytes);
+    // The crash window: the files are back as they were, the tombstone is on disk.
+    await writeFile(logPath("s-half"), logBytes);
+    await writeFile(statePath("s-half"), stateBytes);
     const notices: string[] = [];
     const third = await serve(config, notices);
     try {
@@ -561,7 +688,9 @@ describe("serve persistence (end to end, real disk)", () => {
     } finally {
       await third.stop();
     }
-    // The interrupted removal is finished.
-    expect(await readdir(daemonStoreDir(config))).not.toContain("s-half.json");
+    // The interrupted removal is finished: both files.
+    const left = await readdir(daemonStoreDir(config));
+    expect(left).not.toContain("s-half.jsonl");
+    expect(left).not.toContain("s-half.state.json");
   });
 });

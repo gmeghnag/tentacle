@@ -4,7 +4,7 @@
  * Binding is loopback-safe by default (a non-loopback bind requires a token).
  */
 import { join } from "node:path";
-import { EMPTY_SKILL_LISTING, JsonSessionStore, projectKey } from "@tentacle/agent";
+import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import {
   type AgentReuse,
@@ -12,6 +12,7 @@ import {
   DEFAULT_MAX_DETACHED_SESSIONS,
   DEFAULT_MAX_SESSIONS,
   DEFAULT_SESSION_TTL_MS,
+  LogSessionStore,
   type ModelLink,
   ProxyModelProvider,
   type ReapPolicy,
@@ -21,7 +22,6 @@ import {
   type SessionTtlControl,
   TombstoneFile,
   acquireStoreLock,
-  parseDaemonRecord,
   startReaper,
   startWsServer,
   sweepIntervalFor,
@@ -119,7 +119,12 @@ export async function startDaemon(
   const lock = acquireStoreLock(dir);
   let persister: SessionPersister | undefined;
   try {
-    const store = new JsonSessionStore(dir);
+    // The laptop's log format (docs/feat/session-log-serve-store.md): `<uid>.jsonl`
+    // + the daemon's state file. `keepSuperseded` from THIS host's config.
+    const store = new LogSessionStore(dir, {
+      keepSuperseded: config.sessions?.keepSuperseded === true,
+      onAside: (info) => options.onNotice?.(`set ${info.file} aside: ${info.reason}`),
+    });
     // By project key, not by string: the same project through a symlink (or a
     // trailing slash) shares this directory and must restore its sessions.
     const key = projectKey(config.cwd);
@@ -159,7 +164,7 @@ export async function startDaemon(
 async function reloadedHost(
   config: TentacleConfig,
   options: ServeOptions,
-  store: JsonSessionStore,
+  store: LogSessionStore,
   persister: SessionPersister,
   sessionTtl: SessionTtlControl,
   sameProject: (cwd: string) => boolean,
@@ -225,37 +230,54 @@ async function reloadedHost(
   for (const id of ids) {
     sessionHost.addDeleted(id);
   }
-  // One record at a time (`scan`): an archived one keeps only its metadata,
-  // so the peak is one record plus the live sessions, however many are kept.
-  for await (const { id, result } of store.scan()) {
-    if (result.status === "absent") {
-      continue;
-    }
+  // One session at a time: an archived one is indexed from its header and
+  // state file only (its log is not read), so the peak is one history plus
+  // the live sessions, however many are kept. A legacy `<uid>.json` is not
+  // listed (owner: no conversion).
+  const { logs, orphanStates } = await store.daemonFiles();
+  for (const id of orphanStates) {
+    // A state file with no log: a removal cut short between the two (FM 25).
+    await store.removeState(id).catch((error) => options.onError?.(error as Error));
+  }
+  for (const id of logs) {
     if (sessionHost.isDeleted(id)) {
       // Finish the removal the user asked for (its tombstone is already on disk).
       persister.remove(id, false);
       continue;
     }
-    if (result.status === "unreadable") {
-      persister.block(id);
-      notice(`skipped ${result.file}: ${result.reason} (left as is)`);
+    const files = `${store.file(id)} / ${store.stateFile(id)}`;
+    const state = await persister.loadState(id);
+    if (!state.ok && state.missingState) {
+      // A new session cut before its first write landed (FM 5): as today it
+      // does not exist after the restart; its bytes are kept, the id is free.
+      await store
+        .setAside(id, "a log with no state file (a session cut before its first save landed)")
+        .catch((error) => options.onError?.(error as Error));
       continue;
     }
-    const parsed = parseDaemonRecord(result.record, sameProject);
-    if (!parsed.ok) {
+    if (!state.ok) {
       persister.block(id);
-      notice(
-        `skipped ${join(daemonStoreDir(config), `${id}.json`)}: ${parsed.reason} (left as is)`,
-      );
+      notice(`skipped ${files}: ${state.reason} (left as is)`);
       continue;
     }
-    if (parsed.record.archivedAt !== undefined) {
-      sessionHost.addArchived(parsed.record);
+    if (state.meta.archivedAt !== undefined) {
+      sessionHost.addArchived(state.meta);
       archived++;
       continue;
     }
+    const loaded = await persister.load(id);
+    if (!loaded.ok) {
+      persister.block(id);
+      notice(`skipped ${files}: ${loaded.reason} (left as is)`);
+      continue;
+    }
+    if (!loaded.record.paired) {
+      notice(
+        `session ${id}: its state file names a log entry its log no longer holds (a crash during a rewrite) — loaded the log's last segment; a cut turn is closed, not resumed`,
+      );
+    }
     // Running right after a restore = a turn suspended on a permission, asked again.
-    if (sessionHost.restore(parsed.record).running) {
+    if (sessionHost.restore(loaded.record).running) {
       resumed++;
     }
     restored++;
