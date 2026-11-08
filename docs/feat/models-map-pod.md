@@ -669,4 +669,112 @@ Two sessions. The first (Opus, stopped by quota) is the WIP commit `e69a954` on 
 
 ## Review
 
-*Not started.*
+*— claude-opus-5-5, 2026-11-08*
+
+**Reviewer disclosure.** Same model as the executor, fresh context only: shared blind spots survive both passes. AGENTS §10 prefers a different model for a load-bearing task.
+
+### Verdict: REQUEST-CHANGES
+
+The security core holds: no hostile frame reached an unpublished entry, and no key, URL or model id reached the pod. Q1, Q2 and Q3 are implemented as decided. Three things must be fixed before merge: F1 (the relay loses the trace of a refused name), F2 (a silently different model in a detached or re-attached run) and F3 (nothing pins the production wiring, and the live check was never run). There are no owner questions: each fix below is mechanical.
+
+### Findings
+
+**Major**
+
+- **F1. In a relay, a hostile pod's refused names leave no trace, and the CHANGELOG says they do.** `relayMain` → `runRelay` calls `attachEngineRuntime` with no `daemonLogPath` (`packages/cli/src/relay.ts:361-372`). So `openDaemonLog(undefined, …)` (`packages/cli/src/engine-runtime.ts:821`) "keeps nothing" (`packages/cli/src/pod-stderr-log.ts:46-47`), and `onPeerError` (`engine-runtime.ts:1067`) writes to it. Trace E2E-F: `path=undefined hasContent=false`. The relay is the unattended case, which is where the plan's F1 ("First refusal per name goes to the laptop's log") matters most. `CHANGELOG.md:45` promises "or in `relay.log`". It also says "a `[laptop rpc]` line once the TUI closes", but for a TUI the line goes straight to the run's `daemon.log` and nothing is printed on close unless the run faulted (`engine-runtime.ts:1054-1056`). **Fix:** in `attachEngineRuntime`, send `onPeerError` to `deps.log` when there is no log file (the relay's `log` is `createRelayLog`), add a `relayMain`/`runRelay` test that a refused name reaches it, and correct the CHANGELOG sentence.
+
+- **F2. An entry with no `model` of its own silently changes model id in a detached relay and on re-attach.** `resolveModelEntry` copies the main id at load (`packages/config/src/models.ts:60`). The relay reloads without `--model` and patches only the top level (`relay.ts:161-162`), and `attach` does the same (`packages/cli/src/main.ts:1478`). So `config.models.<n>.model` keeps the file's id. Trace E2E-E, with `models.inherit: { contextWindow: 1000 }` and `run --model flag-X`: `launcher main=flag-X inherit→flag-X` but `relay main=flag-X inherit→main-id`. `explain models` promises "the main model's EFFECTIVE value (after the profile, env and `--model`)". This is new here: before this task a relay or a pod never served an entry. **Fix:** have `resolveModelEntry` record that the id was inherited, and replace the two patches with one helper that sets the run's model on `config` and on every inheriting entry (one pure function, unit-tested at both sites' shape).
+
+- **F3. Nothing pins the named models at the two production sites, and the live check did not run.** Replacing `...laptopModels(config)` by the same spread minus `namedModels` at the attach/relay site (`engine-runtime.ts:1040`) or the run site (`engine-runtime.ts:645`) leaves the whole CLI suite green: **SURVIVED, 0 fail / 1824 pass, both** (table below). Every named-model test calls `laptopModels` directly, and `relay.test.ts` injects `deps.attach`. One lost spread would turn the feature off in every real run while the gate stays green. Execution's live check (docker, `run --detach`) is listed as not run, and this review could not run it either (`docker info` needs an approval this session did not get). **Fix:** one test per site with the existing fake host (`engine-runtime.test.ts` already drives both) asserting a named `model/stream` is served by the entry, then run the live check of the plan and paste it into Execution.
+
+**Minor**
+
+- **F4. `tentacle explain` states the opposite of the behaviour for the two keys that drive the allowlist.** Real CLI, `explain subagents.selectableModels`: `carried  not carried: a pod uses its own value`, while F18 and the CHANGELOG say the pod's own value is ignored. Same row for `subagents.types.*.model` (`packages/config/src/key-docs.ts:578,588`). T6 forces `carried: "no"` because only `models` is a `CARRIED` row (`packages/cli/test/key-docs-carried.test.ts:67-78`). **Fix:** a registry value such as `carried: "published"` printing "published by the laptop: a pod's own value is ignored", excluded from T6's comparison.
+
+- **F5. A key command's stderr goes into `relay.log`, and the comment says it does not.** `load.ts:647` reads "Only our own text: another error could quote what the command printed", but the `ConfigError` it keeps carries the stderr (`load.ts:504-506`). Trace: `models.cmdbad.apiKeyCommand exited with code 3: oops-from-stderr`. The file is 0600 and on the laptop, and it never reaches the pod. It is still a command's arbitrary output in a log, written with no terminal to notice it. **Fix:** in the no-terminal path report only the exit code, or correct the comment if the stderr is wanted.
+
+**Nits**
+
+- A title call with a name is refused without a log line (`packages/client/src/remote-client.ts:2501-2503`), unlike the other refusals.
+- The agent sees `tool agent_task failed: RpcError: model "cmdbad" is unavailable…`: the class name is noise.
+- This doc's header is stale ("Review not started", "not merged"). `TODO.md:456` still says `slots`, left for the merge as Execution states.
+
+### Gate (this worktree, unmodified HEAD `a453298`)
+
+| Command | Result |
+|---|---|
+| `bunx tsc --noEmit` | clean |
+| `bunx biome check .` | 767 files, no fixes |
+| `bun test packages` | **5868 pass, 3 skip (the opt-in three), 0 fail**, 63440 expects, 397 files |
+| `tsc -p apps/mobile` | **not run**: needs an approval this session did not get (same as Execution). Still open. |
+| `protocol.json` freshness | pinned by `packages/protocol/test/json-schema.test.ts:39` (green) |
+
+### Mutation non-vacuity
+
+Script: backup, apply, narrow tests, restore, sha256 compare. All restored; `git status` clean afterwards.
+
+| Mutation | Result |
+|---|---|
+| R1 `resolve` serves any config entry | KILLED, 4 fail |
+| R2 `"unavailable"` check removed | KILLED, 2 fail |
+| R3 title + name allowed | KILLED, 2 fail |
+| R4 chunked handler ignores the name | KILLED, 17 fail |
+| R5 Q3: `frontmatterModel` passed in a pod | KILLED, 3 fail |
+| R6 relay runs every entry's command | KILLED, 6 fail |
+| R7 pod side drops the name (chunked) | KILLED, 3 fail |
+| R8 schema: any string is a name | KILLED, 4 fail |
+| R9 publication carries the model id | KILLED, 5 fail |
+| R12 relay back to a strict load | KILLED, 2 fail |
+| R13 named tunnel carries no name | KILLED, 3 fail |
+| R10′ attach/relay site drops only `namedModels` (whole CLI suite) | **SURVIVED, 1824 pass (F3)** |
+| R11′ run site drops only `namedModels` (whole CLI suite) | **SURVIVED, 1824 pass (F3)** |
+
+### Premise table
+
+| Premise | Status |
+|---|---|
+| Context symptom: on `main` a named call is silently served by MAIN. Re-run: `probe.ts` with `main`'s `model.ts`, `session.ts`, `version.ts`, `remote-client.ts`, `carried-settings.ts` | TRUE: output A–D identical to the Repro |
+| `servingModel` has three callers and is the only reader of `modelProvider` (`remote-client.ts:2363,2383,2546`; `:2497,2517`) | TRUE |
+| Params parsed before the handler (`peer.ts:338`); dispatch concurrent (`peer.ts:322`) | TRUE |
+| One pick of the child's model (`subagent.ts:246-250`) | TRUE |
+| A named tunnel never counts: `sendCount` absent → `undefined` (`proxy-model.ts:180-183`); only a session counts (`session.ts:172-176`, `hosted-session.ts:1281`, `session-host.ts:309`) | TRUE |
+| A request's `maxTokens` beats the configured one (`openai-provider.ts:274`, `anthropic-provider.ts:417`); only titles set it (`session-title.ts:97`) | TRUE |
+| `defaultRunner` had no deadline; Probe 2's race is needed | TRUE (R6 area, `runBounded`) |
+| Relay has no terminal, log 0600 (`relay.ts:703-714`); relay uses `attachEngineRuntime` (`relay.ts:361`) | TRUE |
+| Schema export refuses a record (`json-schema.ts:70`, `SUPPORTED_KINDS`) | TRUE |
+| Implementation line numbers | Written against `74a1d70`; those re-opened had shifted only by this diff (e.g. `engine-runtime.ts:614,1009` → `:645,1040`) |
+
+Not every premise was opened: the handshake lines, `carried-settings.ts:38-42,199-275` and the `key-docs` T6 citations were covered through their tests and the diff.
+
+### Attacks tried
+
+End-to-end trace: real `loadConfig` with real commands, real `laptopModels`, real `RemoteClient`, the real OpenAI provider over HTTP to a fake server logging path and `Authorization`, against a raw-frame pod. Then the real `tunnelledAgent` for the child path. Script: `.tentacle/tmp/models-map-pod/review/e2e.ts` (gitignored). Fake keys only; `TENTACLE_CONFIG_DIR` under the review folder.
+
+| # | Attack (both `model/stream` and `model/streamChunked`) | Result |
+|---|---|---|
+| 1 | An entry not published (`hidden`), `main`, `main-id`, `fast-id`, `__proto__`, `constructor`, `toString` | `-32600`, 0 HTTP hits. **Holds** |
+| 2 | URL, `a/b`, `""`, 65 chars, `"fast\n"`, `null`, `["fast"]` as the name | `-32602` at parse, 0 hits. **Holds** |
+| 3 | `fast` with `baseURL`/`apiKey`/`provider` on params and in `request` | Served at `/fast/v1`, `Bearer fake-FAST-key`, `fast-id`. **Holds** |
+| 4 | Key routing: `fast`, `cmdok`, `inherit`, no name | Each hit its own path with its own key; `inherit` and no name used the main key by design. **Holds** |
+| 5 | `fast` + `purpose:"title"` | `-32600`. **Holds** |
+| 6 | Relay key commands: failing, `sleep 30` (700 ms bound), unpublished with a marker file | Two reports; the marker never appeared; load in 707 ms; both names `unavailable`, 0 hits, no key-less request. **Holds (Q2)** |
+| 7 | Secrets over the wire: all frames to the pod and `carriedSettings`, searched for every key, URL and id | Carried: none. Frames: only `fast-id`/`main-id`, the attacker's own names echoed in the refusal. **Holds** |
+| 8 | Real pod child on `cmdbad` | Tool result names the entry as unavailable; one laptop `onError`. **Holds** (see nit on the prefix) |
+| 9 | `agent_task` asking `hidden` | Tool error listing the selectable names, 0 hits. **Holds** |
+| 10 | Q1 leftovers: `rg` for gate, `maxConcurrent`, queue, `model-gate`, `maxTokens` drop | None; the request is passed as sent (`remote-client.ts:2381-2383`). **Holds** |
+| 11 | Q3: `tunnelSubagentResolver` frontmatter | No `frontmatterModel` (`model-provider.ts:125-130`), pinned by 3 tests (R5). **Holds** |
+| 12 | Daemon-side check relied on as security | None: the allowlist is `publishedModelNames(laptop config)` in `laptopModels`; `config.publishedModels` is read only pod-side. A hostile `settings.publishedModels` to a `serve` daemon is ignored (`wiring.ts`, `tunnelled ? … : undefined`). **Holds** |
+| 13 | Protocol 19: both ends, no new update kind, `UPDATE_CLASS` untouched, 18↔19 refused | Wired on `model.ts`, `connection.ts`, `remote-client.ts`; R4 and R7 kill either end; `version-mismatch.test.ts` green. **Holds** |
+| 14 | Non-`RpcError` from `resolve`/provider creation | Goes to the peer's opaque default: `exposeInternalErrors` only on the worker (`worker.ts:147`). **Holds** |
+| 15 | `publishedModels` refused at `session/open` for a legal config (window, description, name bounds) | Config and wire bounds identical (`schema.ts:46,60,66`, env by `parsePositiveInt`). **Holds** |
+| 16 | `--model` with an inheriting entry, relay and attach | **Fails: F2** |
+| 17 | Trace of a refusal in an unattended relay | **Fails: F1** |
+| 18 | `tentacle explain` truthfulness | **Fails: F4** (the `models` section's own text is right) |
+
+### What holds
+
+The allowlist is built only on the laptop, in one place, and is complete for both streaming methods; `model/countTokens` has no name and reaches only main. Keys stay on the laptop. Q1 (c), Q2 (a) and Q3 (b) are followed. A relay key-command failure degrades only that entry, and a key-less request is never made. Hand-over and re-attach use the per-call link lookup, unchanged for named calls; this rests on reading the code and on F3's missing test, not on a live run.
+
+### How the executor behaved
+
+Honest. Execution discloses the unrun mobile typecheck and live check, the stderr in the relay line, and the drift from the plan, and its red-before-green and mutation claims match what was re-run here. Its gap is scope of proof: every load-bearing test exercises `laptopModels` in isolation, so the two call sites that make the feature real were never pinned, and the "laptop's log" claim was tested only at `RemoteClient.onError`, one layer short of where a relay's line is lost.
