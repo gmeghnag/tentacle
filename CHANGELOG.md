@@ -10,6 +10,8 @@ those.
 
 ### Added
 
+- **`tentacle explain [key]` documents every config key.** With no key it lists the top-level keys; a section (`tentacle explain subagents`) lists its direct sub-keys; a leaf (`tentacle explain subagents.maxParallel`) prints its card: meaning, type, allowed values, default, env var, flag, whether it is carried to a pod, scope and an example. `--all` prints every leaf, `--json` the same as data, and a typo gets the nearest key. It never reads your config and never prints a secret. Because `explain` is now a subcommand, a one-shot prompt that starts with the word "explain" needs `tentacle -- explain …`. The README's config table is generated from the same registry, so the two no longer drift.
+
 - **A `tentacle serve` session reacts when a background job ends — connected or not.**
   The daemon starts the follow-up turn itself and saves it: with `connect` attached you watch
   it live (and can stop it with Esc); after `connect` quits (it only detaches),

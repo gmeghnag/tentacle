@@ -581,6 +581,22 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "`auto` reads the terminal's background before the first frame and picks a light or dark palette; the others skip that query (useful on a slow link, or when the guess is wrong). A display setting of this laptop — never carried to a pod.",
     example: '"dark"',
   },
+  sessions: {
+    summary: "The laptop's session logs: what they keep of a history that was replaced.",
+    kind: "section",
+    scope: "both",
+    carried: "no",
+  },
+  "sessions.keepSuperseded": {
+    summary: "Keep the history a compaction or a `context_reset` replaced in the session file.",
+    kind: "leaf",
+    type: "boolean",
+    scope: "both",
+    carried: "no",
+    details:
+      "Unset: off — a compaction or a `context_reset` rewrites `<uid>.jsonl`, so the history it replaced is not kept (`--resume` shows the current context either way). On, the replaced segments stay in the file. A LAPTOP-ONLY setting: never carried to a pod.",
+    example: "true",
+  },
   mount: {
     summary: "What a docker/podman run hides from the container's workspace mount.",
     kind: "section",

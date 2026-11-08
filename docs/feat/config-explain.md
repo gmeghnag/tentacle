@@ -918,6 +918,124 @@ What a reviewer should attack, in order:
    acceptable for a docs command (it is, by the same standard as `--help`)?
 
 
+### Round 3: main merged, `sessions` added
+
+*— deepseek-v4.1-flash (tentacle), 2026-11-09* (fix round on the same branch, after
+`f9ca8fa` merged `main` with `feat/session-log-laptop-store`)
+
+`main` added one section and one leaf (`schema.ts:318-325`), so T1 fired exactly
+as designed — in the "missing" direction, with the message it was written to
+print:
+
+```
+add an entry for "sessions" in packages/config/src/key-docs.ts
+add an entry for "sessions.keepSuperseded" in packages/config/src/key-docs.ts
+```
+
+**The two entries** (`key-docs.ts`, placed between `tui.theme` and `mount`, the
+schema's own order) and the `file:line` each fact rests on:
+
+| Fact | Value | Evidence |
+|---|---|---|
+| `kind` | `section` / `leaf` | `schema.ts:325` — a `z.object({keepSuperseded})`, its one child a `z.boolean()` |
+| `type` | `boolean` | `schema.ts:325` (`z.boolean().optional()`) |
+| `scope` | `both` (the file and a profile) | `sessions` is in `settingsShape` (`schema.ts:188`), which both `ProfileSchema` (`:403`) and `FileConfigSchema` (`:414`) spread; `profile.ts` does not destructure `sessions`, so it is merged by the scalars spread (`profile.ts:63-73`) — a profile's whole `sessions` object replaces the base's, no per-key merge |
+| `carried` | `no` | `carried-settings.ts:42-195` — `CARRIED` has 21 rows and no `sessions`; `SessionSettingsSchema` (`protocol/src/session.ts:449-472`) has no such field, so there is nothing to carry; the schema comment says so (`schema.ts:323-324`) |
+| `env` | none | `resolve.ts` has no `TENTACLE_*` for it; T3b's sweep of every `TENTACLE_*` in `config/src` stays green, which is the proof no read was invented |
+| `flag` | none | `flags.ts` has no `sessions`/`keep-superseded` flag; T5 checks the documented flag list is exactly `--engine`, `--model`, `--rm` |
+| default | **no `default()`** — `details` says "Unset: off" | `resolve.ts:549-551` passes `fileConfig.sessions` through **unset** when the file omits it (`...spread`, not a value), exactly like `tui`/`detach`; the once-unset `===\`true\`` test lives in the CLI (`main.ts:870,1490`, `relay.ts:347`, `tui-sessions.ts:77`), not in `resolveConfig`. T2b pins that the entries with a `default()` and no `sourceKey` are exactly the four CLI-side ones, so a `default: () => false` here would be a red test |
+| consumers | — | `main.ts:870` (the TUI), `main.ts:1490` (the detached TUI), `relay.ts:347` (the relay), narrowed in `tui-sessions.ts:77` into `LogSessionStore`'s `keepSuperseded` |
+
+The default took one correction, which is the guardrail working: my first draft
+was `default: () => false` ("unset = false"), and **T2b went red** — it caught
+that `resolveConfig` never substitutes a value for this key, so the default is
+the CLI's, not the registry's. The truth is stated in `details` instead, the
+same shape as its sibling `detach.keepAwake` ("Unset: on"). T2's companion test
+still pins `resolved`-less keys, so nothing was weakened.
+
+**README regenerated** — one new row, and idempotent by execution:
+
+```
+$ bun run docs:config
+docs:config: README.md's config table updated (README.md)
+$ bun run docs:config
+docs:config: README.md's config table is up to date
+```
+
+The added row: `| \`sessions.keepSuperseded\` | — | — | Keep the history a compaction or a \`context_reset\` replaced in the session file. |`
+(the `mount.hide`/`tui.theme`/`detach.keepAwake` rows show `—` in Default too:
+text-only defaults are not table values).
+
+**The three commands, verbatim** (`bun packages/cli/src/main.ts`):
+
+```
+$ bun packages/cli/src/main.ts explain
+  rm = false                     Whether `run` removes its pod/container when
+                                 the run ends.
+  detach (1 sub-key)             `run --detach`: what the relay holding the run
+                                 may do.
+  tui (1 sub-key)                The TUI's own display settings.
+  sessions (1 sub-key)           The laptop's session logs: what they keep of a
+                                 history that was replaced.
+  mount (2 sub-keys)             What a docker/podman run hides from the
+                                 container's workspace mount.
+```
+
+```
+$ bun packages/cli/src/main.ts explain sessions
+sessions — The laptop's session logs: what they keep of a history that was
+replaced.
+
+  sessions.keepSuperseded  Keep the history a compaction or a `context_reset`
+                           replaced in the session file.
+```
+
+```
+$ bun packages/cli/src/main.ts explain sessions.keepSuperseded
+sessions.keepSuperseded
+
+Keep the history a compaction or a `context_reset` replaced in the session file.
+
+Unset: off — a compaction or a `context_reset` rewrites `<uid>.jsonl`, so the
+history it replaced is not kept (`--resume` shows the current context either
+way). On, the replaced segments stay in the file. A LAPTOP-ONLY setting: never
+carried to a pod.
+
+  type         boolean
+  default      unset (see above)
+  env          — (file only)
+  flag         —
+  carried      not carried: a pod uses its own value
+  scope        the file and a profile
+  example      true
+```
+
+Every line above is true against the code: `— (file only)` for an env the file
+alone sets (`resolve.ts:550`); `not carried: a pod uses its own value` for the
+`no` class; `default unset (see above)` for an entry whose default is the
+"unset means X" case, which `details` carries; `scope the file and a profile`
+for `both`. **Not verified here:** the `details` sentence that the replaced
+segments are *kept* describes the store's behaviour, pinned by
+`session-log-laptop-store`'s own tests (W6), not by this branch — this round
+checked the config key (that it is read, where, and with what default), not the
+`LogSessionStore`.
+
+**Gate (round 3, run in this worktree):**
+
+- `bunx tsc --noEmit`: clean (exit 0).
+- `bunx biome check .`: 740 files, no fixes, no warnings.
+- `bun test packages`: **5550 pass · 3 skip · 0 fail** (5553 tests, 380 files).
+  The 3 skips are the opt-in ones (live k8s, live docker, the real-socket
+  keepalive).
+- Protected files: `git status` shows `schema.ts`, `defaults.ts`, `resolve.ts`,
+  `load.ts` **unmodified**; the whole round is three files — `key-docs.ts`
+  (+16), `README.md` (+1, generated) and this doc.
+- `bunx tsc -p apps/mobile --noEmit`: **47 errors, all pre-existing and
+  unrelated** — `apps/mobile/node_modules` is not installed in this worktree
+  (`bun install --filter '!@tentacle/mobile'`, CI's own install), so
+  `react-native` and its types are missing. The log names no `@tentacle/config`
+  file, no `sessions`, no `key-docs`.
+
 ## Review — round 2
 
 *— claude-sonnet-5-5, 2026-11-08* (fresh context; the same model as the round-1
