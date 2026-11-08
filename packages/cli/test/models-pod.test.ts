@@ -473,7 +473,7 @@ describe("a HOSTILE pod against the real laptop gate (raw frames)", () => {
       'model "claude" is unavailable on this laptop: its key command did not succeed here',
     );
     expect(pod.f.built.some((o) => o.model === "c")).toBe(false);
-    expect(lines).toEqual(["models.claude.apiKeyCommand exited with code 3: (no stderr)"]);
+    expect(lines).toEqual(["models.claude.apiKeyCommand exited with code 3"]);
     // The main model is unaffected.
     expect((await pod.call(Method.ModelStream, { request })).error).toBeUndefined();
     pod.client.close();

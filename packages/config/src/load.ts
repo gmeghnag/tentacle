@@ -491,6 +491,16 @@ function resolveConfigDir(override: string | undefined, env: Env, home: string):
   return join(home, ".config", "tentacle");
 }
 
+/** A key command that exited non-zero: `message` carries its stderr (strict loads); `code` alone is safe to log. */
+class KeyCommandExit extends ConfigError {
+  constructor(
+    readonly code: number,
+    detail: string,
+  ) {
+    super(`apiKeyCommand exited with code ${code}: ${detail}`);
+  }
+}
+
 async function defaultRunner(command: string, signal?: AbortSignal): Promise<string> {
   const proc = Bun.spawn(["/bin/sh", "-c", command], {
     stdout: "pipe",
@@ -501,9 +511,7 @@ async function defaultRunner(command: string, signal?: AbortSignal): Promise<str
   const stderr = await new Response(proc.stderr).text();
   const code = await proc.exited;
   if (code !== 0) {
-    throw new ConfigError(
-      `apiKeyCommand exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
-    );
+    throw new KeyCommandExit(code, stderr.trim() || "(no stderr)");
   }
   return stdout;
 }
@@ -644,10 +652,15 @@ async function resolveModelKeys(
             : (await run(command)).trim();
         } catch (error) {
           if (noTerminal) {
-            // Only our own text: another error could quote what the command printed.
+            // Only our own text, never what the command printed: a non-zero exit
+            // reports its code alone (its stderr stays out of relay.log).
             failed.set(
               command,
-              error instanceof ConfigError ? error.message : "apiKeyCommand failed",
+              error instanceof KeyCommandExit
+                ? `apiKeyCommand exited with code ${error.code}`
+                : error instanceof ConfigError
+                  ? error.message
+                  : "apiKeyCommand failed",
             );
             return;
           }

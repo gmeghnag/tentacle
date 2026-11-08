@@ -199,6 +199,42 @@ describe("models: keys at load", () => {
       ]);
     });
 
+    test("F5, the real runner: a failing command reports its exit code and never its stderr", async () => {
+      // Mutation: report `error.message` of the exit error → "oops-from-stderr" in the line.
+      await write({
+        models: {
+          pub: {
+            baseURL: "http://a/v1",
+            apiKeyCommand: "echo oops-from-stderr-s3cret >&2; exit 3",
+          },
+        },
+        subagents: { selectableModels: ["pub"] },
+      });
+      const { lines, option } = reports();
+      const cfg = await loadConfig({
+        env: { HOME: dir },
+        configDir,
+        cwd: dir,
+        modelKeysNoTerminal: option,
+      });
+      expect(cfg.models.pub?.apiKey).toBeUndefined();
+      expect(lines).toEqual(["pub: models.pub.apiKeyCommand exited with code 3"]);
+    });
+
+    test("F5, the strict load still carries the stderr (a terminal user needs it)", async () => {
+      await write({
+        models: {
+          pub: { baseURL: "http://a/v1", apiKeyCommand: "echo why-it-failed >&2; exit 3" },
+        },
+      });
+      const error = await loadConfig({ env: { HOME: dir }, configDir, cwd: dir }).catch(
+        (e: unknown) => e,
+      );
+      expect((error as Error).message).toBe(
+        "models.pub.apiKeyCommand exited with code 3: why-it-failed",
+      );
+    });
+
     test("the real runner: a grandchild holding the pipe does not hold the load", async () => {
       await write({
         models: { pub: { baseURL: "http://a/v1", apiKeyCommand: "sleep 3; echo key" } },

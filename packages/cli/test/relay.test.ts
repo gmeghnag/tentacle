@@ -378,6 +378,28 @@ describe("runRelay (docs/feat/detached-relay.md R11)", () => {
     expect(readFileSync(relayLogPath(dir), "utf8")).toContain("relay exit");
   });
 
+  test("F1: attach gets the relay's own log, no daemon log file and no terminal (a refused name lands in relay.log)", async () => {
+    // Pairs with engine-runtime.test.ts "F1": there `attachEngineRuntime` sends a
+    // laptop-rpc line to `deps.log` exactly under these deps.
+    // Mutation: the relay passes a `daemonLogPath`, or `interactive: true`, or no `log`.
+    const pod = resident(new Scripted([[{ type: "text", delta: "done" }, { type: "done" }]]));
+    const seen: { daemonLogPath?: unknown; interactive?: unknown } = {};
+    const attach: typeof attachEngineRuntime = (config, deps) => {
+      seen.daemonLogPath = deps.daemonLogPath;
+      seen.interactive = deps.interactive;
+      deps.log('[laptop rpc] refused a model call from the pod: model "hidden" is not published');
+      return pod.attach(config, deps);
+    };
+    const { dir, start } = rig();
+    const exit = start(attach);
+    await waitFor(() => owner(dir)?.state === "idle", "idle");
+    expect(await afterGrace(exit)).toBe(0);
+    expect(seen).toEqual({ daemonLogPath: undefined, interactive: false });
+    expect(readFileSync(relayLogPath(dir), "utf8")).toContain(
+      '[laptop rpc] refused a model call from the pod: model "hidden" is not published',
+    );
+  });
+
   test("a held ask keeps it alive past the grace, the tool unrun; a stop cancels, saves, exits", async () => {
     // Mutation: a second broker given to the runtime → the ask never reaches the
     // policy and is approved: the state never shows `waiting-permission`.
@@ -2092,8 +2114,9 @@ describe("relayMain", () => {
     });
     expect(err).toContain("kept entry ffffffffffffffff not found");
     expect(err).toContain(
-      '[relay] models.claude.apiKeyCommand exited with code 7: pinentry: no tty — "claude" is unavailable to this detached run until a terminal attaches\n',
+      '[relay] models.claude.apiKeyCommand exited with code 7 — "claude" is unavailable to this detached run until a terminal attaches\n',
     );
+    expect(err).not.toContain("pinentry");
     expect(existsSync(marker)).toBe(true);
   });
 

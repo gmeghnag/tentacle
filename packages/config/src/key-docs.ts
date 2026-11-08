@@ -55,10 +55,12 @@ export type KeyScope = "user" | "profile" | "both";
 /**
  * Whether the laptop carries the key into a pod (`CARRIED`'s classes,
  * packages/cli/src/carried-settings.ts): `pinned` (P) the laptop decides,
- * `workspace` (W) the laptop's value is the lowest layer, `no` not carried —
+ * `workspace` (W) the laptop's value is the lowest layer, `published` the laptop's value
+ * is not carried itself but decides what a pod may ask for (the pod's own is ignored;
+ * outside T6's comparison), `no` not carried —
  * the pod uses its own.
  */
-export type KeyCarried = "pinned" | "workspace" | "no";
+export type KeyCarried = "pinned" | "workspace" | "published" | "no";
 
 /** One key's documentation. */
 export interface KeyDoc {
@@ -575,7 +577,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     kind: "leaf",
     type: "string",
     scope: "both",
-    carried: "no",
+    carried: "published",
     details:
       "Must name a `models` entry, or the config is refused. Precedence for a sub-agent's model: the `agent_task` call's `model` (when selectable), this key, the type's `agents/*.md` `model`, then `model`. On `run`/`attach` it applies too: the sub-agent's calls go to this entry, on the laptop. An entry named here is one a pod may ask for. In a pod the pod's own `agents/*.md` `model` is ignored (a local run uses it): there only this key and the call's selectable `model` pick an entry.",
     example: '"fast"',
@@ -585,7 +587,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     kind: "leaf",
     type: "array",
     scope: "both",
-    carried: "no",
+    carried: "published",
     details:
       "Each name must be a `models` entry. When set, `agent_task` takes an optional `model` argument limited to these names, and its description lists them with their `description`; any other name is an error and no sub-agent starts. On `run`/`attach` it applies too, and an entry listed here is one a pod may ask for.",
     example: '["fast", "claude"]',
@@ -1107,10 +1109,10 @@ export function leafPaths(): readonly string[] {
     .sort();
 }
 
-/** The keys the laptop carries into a pod (T6's total set). */
+/** The keys the laptop carries into a pod (T6's total set; `published` keys are not carried themselves). */
 export function carriedDocPaths(): readonly string[] {
   return Object.keys(KEY_DOCS)
-    .filter((path) => KEY_DOCS[path]?.carried !== "no")
+    .filter((path) => KEY_DOCS[path]?.carried !== "no" && KEY_DOCS[path]?.carried !== "published")
     .sort();
 }
 

@@ -1064,7 +1064,12 @@ export async function attachEngineRuntime(
       // Laptop-side RPC errors join the log file; a model/turn error is not a
       // failure of the attach. The TUI shows its cause as a status-only text;
       // the full error is only here.
-      onPeerError: (error) => stderr.onStderr(`[laptop rpc] ${error.message}\n`),
+      // No log file and no terminal (the detached relay): its own log is the
+      // only place a refused name of a hostile pod can leave a trace.
+      onPeerError: (error) =>
+        stderr.path === undefined && deps.interactive === false
+          ? deps.log(`[laptop rpc] ${error.message}`)
+          : stderr.onStderr(`[laptop rpc] ${error.message}\n`),
       ...(deps.notify ? { notify: deps.notify } : {}),
       ...(deps.interactive !== undefined ? { interactive: deps.interactive } : {}),
       ...(deps.sessionId !== undefined ? { sessionId: deps.sessionId } : {}),

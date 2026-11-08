@@ -32,6 +32,8 @@ export interface ResolvedModel {
   readonly provider: "openai" | "anthropic";
   readonly baseURL: string;
   readonly model: string;
+  /** True when `model` is the main model's id (the entry sets none): `withRunModel` re-points it. */
+  readonly modelInherited?: true;
   readonly contextWindow: number;
   readonly maxTokens?: number;
   readonly description?: string;
@@ -58,6 +60,7 @@ export function resolveModelEntry(main: MainModel, entry: ModelEntryConfig): Res
   const maxTokens = entry.maxTokens ?? main.maxTokens;
   const rest = {
     model: entry.model ?? main.model,
+    ...(entry.model === undefined ? { modelInherited: true as const } : {}),
     contextWindow: entry.contextWindow ?? main.contextWindow,
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     ...(entry.description !== undefined ? { description: entry.description } : {}),
@@ -87,6 +90,31 @@ export function resolveModelEntry(main: MainModel, entry: ModelEntryConfig): Res
     };
   }
   return { provider, baseURL, ...rest, apiKeySource: "none" };
+}
+
+/**
+ * The run's model on a loaded config: `config.model` and every entry that
+ * inherited the main id (a `--model` reaches a relay or an `attach` only
+ * after the load). The same object when nothing changes.
+ */
+export function withRunModel<
+  C extends { model: string; models: Readonly<Record<string, ResolvedModel>> },
+>(config: C, model: string): C {
+  // `?? {}`: a partial config (a test fixture) has no `models`.
+  const inheriting = Object.entries(config.models ?? {}).filter(
+    ([, entry]) => entry.modelInherited === true && entry.model !== model,
+  );
+  if (config.model === model && inheriting.length === 0) {
+    return config;
+  }
+  if (inheriting.length === 0) {
+    return { ...config, model };
+  }
+  const models: Record<string, ResolvedModel> = { ...config.models };
+  for (const [name, entry] of inheriting) {
+    models[name] = { ...entry, model };
+  }
+  return { ...config, model, models };
 }
 
 /** The part of a config view the reference check reads. */

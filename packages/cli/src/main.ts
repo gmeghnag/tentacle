@@ -40,6 +40,7 @@ import {
   titleConfigNotice,
   topLevelKeys,
   unknownTypeModelWarnings,
+  withRunModel,
 } from "./config.ts";
 import { connectTui } from "./connect.ts";
 import { type EngineKind, WorkloadNotFoundError } from "./engine-host.ts";
@@ -1475,7 +1476,7 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
                 scaffold: false,
                 ...(plan.profile !== undefined ? { profile: plan.profile } : {}),
               });
-        config = loaded.model === plan.model ? loaded : { ...loaded, model: plan.model };
+        config = withRunModel(loaded, plan.model);
         return true;
       } catch (error) {
         err(

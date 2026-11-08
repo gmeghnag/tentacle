@@ -197,6 +197,13 @@ describe("explain <leaf>: the full card", () => {
     expect(text("model.contextWindow")).toMatch(/carried to a pod/i);
   });
 
+  test("F4: the allowlist keys say the laptop publishes them and a pod's own value is ignored", () => {
+    for (const path of ["subagents.selectableModels", "subagents.types.*.model"]) {
+      expect(text(path)).toContain("published by the laptop: a pod's own value is ignored");
+      expect(text(path)).not.toContain("a pod uses its own value");
+    }
+  });
+
   test("a leaf's card never shows a secret value — only the placeholder", () => {
     const out = text("model.apiKey");
     expect(out).toContain("sk-…");

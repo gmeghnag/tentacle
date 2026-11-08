@@ -667,6 +667,20 @@ Two sessions. The first (Opus, stopped by quota) is the WIP commit `e69a954` on 
 
 **Not verified:** `tsc -p apps/mobile` (the mobile half of `bun run typecheck`; the command needed an approval this session did not get. The protocol change is additive for the app's imports, but run it). The live check (docker `run` with two fake endpoints, a selectable entry, a `run --detach` with a failing entry command) was not run: verify routing by each endpoint's log, the key per request and the `relay.log` line.
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-09*
+
+Review round 1 (F1–F5) applied as specified; owner decisions Q1 (c), Q2 (a), Q3 (b) untouched. Not committed.
+
+- **F1.** `attachEngineRuntime` (`engine-runtime.ts`, `onPeerError`) sends the `[laptop rpc]` line to `deps.log` when there is no log file. Drift: only when also `deps.interactive === false` (the relay), so a TUI whose `daemon.log` cannot be opened never writes to the terminal Ink owns (AGENTS §7). Tests: `engine-runtime.test.ts` "F1" (relay-shaped deps: refused name reaches `log` once; an interactive attach writes nothing) and `relay.test.ts` "F1" (`runRelay` hands `attach` its own log, no `daemonLogPath`, `interactive: false`, and a `deps.log` line lands in `relay.log`). CHANGELOG sentence corrected (`daemon.log`, or `relay.log` for a detached run). RED: with `onPeerError` back to `stderr.onStderr` only, the engine-runtime F1 test fails; with the relay's `interactive: true`, the relay F1 test fails.
+- **F2.** `ResolvedModel.modelInherited` (set by `resolveModelEntry` when the entry has no `model`) + ONE pure helper `withRunModel(config, model)` (`config/src/models.ts`) that sets `config.model` and every inheriting entry; used at the relay (`relay.ts`) and the `attach` (`main.ts`) sites, replacing both `{ ...config, model }` patches. Tolerates a config with no `models` (partial test fixtures). Tests: `models.test.ts` (flag on/off, helper sets only inheriting entries, no mutation, repeated move, same object when unchanged, stale entry under an equal `config.model`). RED: helper that copies entries without re-pointing the id → 3 fail.
+- **F3.** `engine-runtime.test.ts` "named models at the production sites": real `startEngineRuntime` (run) and `attachEngineRuntime` (attach/relay) over the fake `TunnelCluster`, real providers over HTTP to two local servers; a named `model/stream` is served by the entry's endpoint with `Bearer fast-key` and main sees nothing. RED by mutation: `namedModels: undefined` after the spread at line 645 (run) and at line 1040 (attach) → one failure each, reverted. **The live docker check is PENDING** (the orchestrator runs it after the build); nothing in this round ran it.
+- **F4.** `KeyCarried` gains `"published"`; `subagents.types.*.model` and `subagents.selectableModels` use it; `explain` prints "published by the laptop: a pod's own value is ignored"; `appliesToText` and `carriedDocPaths` handle it; T6 (`key-docs-carried.test.ts`) excludes it from the CARRIED comparison and a new test pins exactly those two keys. `explain.test.ts` pins the text. RED: one key back to `no` → both new tests fail.
+- **F5.** `defaultRunner` throws `KeyCommandExit` (a `ConfigError` with `code`); in the no-terminal path the relay line is `apiKeyCommand exited with code N` (no stderr); the strict path's message (with stderr) is unchanged. Comment fixed. Tests: `models-load.test.ts` (real runner: stderr marker absent; strict load keeps it), `relay.test.ts` and `models-pod.test.ts` expectations updated. RED: the new real-runner test fails with the exit branch disabled.
+
+Gate (2026-11-09): `bunx tsc --noEmit` clean; `bunx biome check .` 767 files, no fixes; `bun test packages` 5882 pass, 3 skip (opt-in), 0 fail; `bun run docs:config` up to date. Still not run: `tsc -p apps/mobile`, the live check.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-08*
