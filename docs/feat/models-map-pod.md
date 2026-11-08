@@ -1,6 +1,6 @@
 # feat/models-map-pod — `models` in pod runs: a name on the tunnel, a laptop allowlist
 
-> **Status:** Execution done incl. fix rounds 1–2 (owner answers Q1 (c), Q2 (a), Q3 (b)); Review round 2 findings fixed, re-review and the live docker check pending
+> **Status:** Execution done incl. fix rounds 1–2 and the live docker check (owner answers Q1 (c), Q2 (a), Q3 (b)); Review round 3 PASS with nits
 > **Branch:** `feat/models-map-pod`, stacked on `feat/models-map` (task 3, review PASS, not merged)
 > **Size:** L · **Blast:** load-bearing · **Suited:** AGENTS §10 rule for load-bearing or L: a stronger executor (the owner assigns it) + mandatory fresh-context Review that red-teams the laptop gate
 
@@ -563,8 +563,8 @@ Callers to re-check with `rg` before editing: `skipModelsKeyCommands`, `modelsPo
 | F9 | `attach` to a pod with an older tentacle | Today's path, unchanged: the worded mismatch, the binary replaced at `attach`, `residentGuard` protecting a run still in use (`engine-runtime.ts:878-886`). A replaced daemon has no old session to keep. |
 | F10 | A detached relay | Needs the published keys. Runs them with no terminal, bounded: D6's table. A failure makes one entry unavailable; the run goes on. |
 | F11 | Hand-over between relay and TUI | The link is looked up per call (`serve.ts:423-429`), so the next named call goes to the new laptop process, with its own keys and gate. A batch call queued on the closed link is rejected (D4). |
-| F12 | `--resume` (a new session from the laptop's copy) | `open{messages, settings}` carries the CURRENT publication. History's `agent_task` `model` arguments are only history. A name no longer published applies to no new call: an unknown `model` in a new call is the tool's error (task 3 B1). |
-| F13 | Re-attach to a live session after the laptop's config changed | `settings` apply only on create, so the session keeps its old routing. A name still asked but no longer published is refused (F1), and the child errors. The drift notice appears (`"models": "(text differs)"`), and `/settings sync` rebuilds the agent. |
+| F12 | `--resume`, or an `attach` when the pod no longer has that session (a TUI's quit closed it, the resident idled out or restarted): a new session from the laptop's copy, under the same uid | `open{messages, settings}` creates it (`session-host.ts:477-496`) with the CURRENT publication, so a type no longer published runs on the main model, with no refusal and no drift notice: that is what the laptop's config now says. History's `agent_task` `model` arguments are only history. A name no longer published applies to no new call: an unknown `model` in a new call is the tool's error (task 3 B1). |
+| F13 | Re-attach to a session STILL LIVE in the pod after the laptop's config changed (a session the pod no longer has is F12) | `settings` apply only on create (`session-host.ts:446-450`), so the session keeps its old routing. A name still asked but no longer published is refused (F1), and the child errors. The drift notice appears (`"models": "(text differs)"`), and `/settings sync` rebuilds the agent. |
 | F14 | Two laptops on one pod | The most recent serving connection is the link. It serves with ITS allowlist and keys: a name it lacks is refused (F1), a same-named entry is that laptop's. |
 | F15 | `settings` absent (a bare open) or nothing published | No `publishedModels`, no `modelFor`, an empty selectable list: every child on the main tunnel, as today. `namedModels` absent on the laptop: every name refused. |
 | F16 | The pod's own `agents/*.md` names a model | **Owner Q3 (b): ignored for picking an entry**, even a published name: the main tunnel, with the type's own `contextWindow`; nothing is sent to the entry. Differs from a local run (said in `explain` and the CHANGELOG). A hostile pod can still send a published name on the wire: the allowlist bounds that (F6). |
@@ -686,9 +686,46 @@ Gate (2026-11-09): `bunx tsc --noEmit` clean; `bunx biome check .` 767 files, no
 - **R2-1.** `refusedName` now reports a named `ModelNameRefusedError` (`remote-client.ts`, exported); `engine-runtime.ts` `onPeerError` sends ONLY that error to `deps.log` under relay-shaped deps (no log file, `interactive === false`); anything else keeps `stderr.onStderr` (a no-op without a file). Test `engine-runtime.test.ts` "R2-1": a 401 whose body quotes `sk-ECHOED-fast-key`, 20 junk notifications and one refused name leave exactly the one refusal line and no sentinel. Mutation: `instanceof ModelNameRefusedError` → `instanceof Error` makes it fail (the 401 body line appears); restored.
 - **R2-2.** `relay.test.ts` "F5: the relay serves the run's model" now has an inheriting and an own-id entry and asserts what `attach` receives (`inherit` = the run's id, `own` unchanged); `main.test.ts` "round 10 / owner A" records a run with `--model run-flag-model` and asserts the same on the attach config. Mutation: the old patch restored at `relay.ts:161` → relay test fails; at `main.ts:1479` → main test fails (`Expected "run-flag-model", Received "deep-chat"`); both restored.
 - **Nits.** A failing MAIN key command in a no-terminal load reports its code alone (`load.ts`, test in `models-load.test.ts`, red with the catch disabled; the strict load keeps the stderr). `appliesToText`'s `published` branch has a test (`config-value.test.ts`, red with the branch disabled). Doc header updated. Not done, as unchanged round-1 nits: the unlogged title refusal and the `RpcError:` prefix.
-- Gate: see the final report of this round (typecheck, lint, full `bun test`). The live docker check and `tsc -p apps/mobile` remain pending.
+- Gate (`784f808`, numbers from Review round 3): `bunx tsc --noEmit` clean; `bun run lint` 767 files, no fixes; `bun test packages` 5885 pass, 3 skip (opt-in), 0 fail. The live docker check is below; `tsc -p apps/mobile` is left to the orchestrator's combined build.
 
 *— claude-sonnet-5-5, 2026-11-09*
+
+### Live check
+
+*— claude-opus-5-5 (resumed), 2026-11-09*
+
+Docker, on the installed build (main + `784f808`). Run by the orchestrator; report in `.tentacle/tmp/models-map-pod/live/live-report.md` (gitignored).
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | Pod run, per-type model (`explore.model=fake`) | PASS: the child was served by `fake` with its key, the agent by the main model |
+| 2 | Key isolation inside the container | PASS: no key, URL or `sk-` pattern in env, home, `/tmp`, `/etc`, workspace. Process argv not checked (`ps` absent in the image) |
+| 3 | `selectableModels` in a pod | PASS: listed, served by `fake`; `nonexistent` refused by the tool, with no model call |
+| 4 | Detached run survives the TUI | PASS: re-attach reached the same session, and a new child was served by `fake` |
+| 5 | Name no longer published | Not the F13 case; see below |
+| 6 | Failing entry key command in a relay | PASS: one `relay.log` line with the exit code, `fake` still served, `bad` failed cleanly. Refusal line with no key, URL or body |
+
+**Scenario 5: the code is right, and the run exercised F12, not F13.** After the config change the pod no longer had mmp-3's session: the laptop's log for it (`aa7cdd87…jsonl`) restarts with `{"type":"base","reason":"seed","count":13}` at 23:47:17, between the last `fake` call (23:47:08) and the next child. A seed base exists only for a session created from the client's messages (`packages/daemon/src/session-host.ts:491-495`). So `open` found no live id (`:446-450`) and built a new session from the CURRENT settings (`:485-490`), under the same uid. The report's "re-opened the same session" holds for the uid only. How the previous TUI left is not recorded; a quit closes the session (`packages/cli/src/local-runtime.ts:770`), and a pod daemon then forgets it (`session-host.ts:504-505`).
+
+Both cases, on a real `podSessionHost` + `laptopModels` + `RemoteClient`, after removing the publication (`.tentacle/tmp/models-map-pod/review2/f13.ts`, a temporary test, file restored):
+
+```
+A live session re-attached: results ["from fast-id", "tool agent_task failed: RpcError: model \"fast\" is not published by this laptop"], one refusal logged
+B session re-created from the laptop's copy: results ["from fast-id", "from the MAIN model"], no refusal
+```
+
+This is correct by design and safe. A re-created session follows the laptop's config as it is now: with `explore.model` unset the child belongs on the main model, on the laptop, with the laptop's key. It is not the F2 class, where the value the config states was not honoured; here it is honoured. Q1 (c), Q2 (a) and Q3 (b) are not involved, and the allowlist decided nothing here because no name was asked for. F13 was right for a live session. F12 did not cover an `attach` that re-creates the session, so both rows are now precise.
+
+**Observations:**
+
+| # | Origin | Decision |
+|---|---|---|
+| O1 `RpcError:` prefix in the child's error | Pre-existing format (`packages/tools/src/registry.ts:97`, `String(error)`; not in this branch's diff). This branch only adds new errors that show it | Nothing now; cosmetic |
+| O2 `ps`/`rm` fail when a key command fails with no tty | Pre-existing on main: `loadConfig` runs before dispatch (`packages/cli/src/main.ts:729`, `:768`); main key always, entries since `feat/models-map`. Not this branch | Separate TODO. Commands that use no model should run no key command: `ps`/`rm` are "no model" by their own comment (`main.ts:767`), and `package`/`hooks` need only the config dir. A load option can reuse the `podDaemon` skip (`packages/config/src/load.ts:800`) |
+| O3 SIGHUP to a TUI interrupts the running turn | Not from this branch: no TUI or detach code in its diff (`local-runtime.ts` only forwards `namedModels`). Whether it is a bug is not determined: §7 promises only that the workload and session stay, and they did | Separate TODO: reproduce on main and compare with `docs/fix/detach-live.md` |
+| O4 `docker ps` showed `Up 27 seconds` about 2 min after creation | Not this branch: `packages/docker` is not in its diff and sets no restart policy. Not investigated; may be the report's timing | Nothing unless it reproduces |
+
+**Owner questions: none.**
 
 ## Review
 
