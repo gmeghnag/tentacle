@@ -7,7 +7,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NAMED_MODEL_MAX_QUEUED, RemoteClient } from "@tentacle/client";
+import { RemoteClient } from "@tentacle/client";
 import {
   type ChatRequest,
   type ModelProvider,
@@ -138,12 +138,15 @@ class MainModel implements ModelProvider {
 }
 
 /** A real pod agent and a real laptop on one channel; `frames` is everything that crossed. */
-async function podRun(call: StreamEvent) {
+async function podRun(call: StreamEvent, podOver: Partial<TentacleConfig> = {}) {
   const laptop = await load(LAPTOP);
-  const podConfig = await load(
-    { models: { fast: { baseURL: "http://pod-own.example/v1", apiKey: "fake-pod-key" } } },
-    { podDaemon: true },
-  );
+  const podConfig = {
+    ...(await load(
+      { models: { fast: { baseURL: "http://pod-own.example/v1", apiKey: "fake-pod-key" } } },
+      { podDaemon: true },
+    )),
+    ...podOver,
+  };
   const main = new MainModel(call);
   const f = spyFactory(main);
   const { modelProvider, ...rest } = laptopModels(laptop, f.create);
@@ -220,6 +223,21 @@ describe("a sub-agent in a pod runs on the laptop's named model", () => {
     expect(f.built.map((o) => o.model)).toEqual([MAIN_ID]);
   });
 
+  test("the pod's own agents/*.md naming a published entry: the MAIN model, nothing reaches the entry (owner Q3 b)", async () => {
+    const agents = scratch();
+    writeFileSync(
+      join(agents, "scout.md"),
+      "---\nname: scout\ndescription: Scout.\nmodel: claude\n---\nScout.",
+    );
+    const { main, f, frames } = await podRun(spawnCall({ subagent_type: "scout" }), {
+      packageAgentDirs: [agents],
+    });
+    expect(main.results).toEqual(["from the MAIN model"]);
+    expect(f.served.get("claude-id")).toBeUndefined();
+    expect(f.built.map((o) => o.model)).toEqual([MAIN_ID]);
+    expect(frames.some((frame) => frame.includes('"model":"claude"'))).toBe(false);
+  });
+
   test("the pod's own `models` play no part", async () => {
     const { f } = await podRun(spawnCall({ subagent_type: "explore" }));
     expect(f.built.some((o) => o.baseURL.includes("pod-own"))).toBe(false);
@@ -234,7 +252,8 @@ describe("a sub-agent in a pod runs on the laptop's named model", () => {
     const [a, b] = createChannelPair();
     const connection = new Connection(
       a,
-      podSessionHost(podConfig, (line) => console.error(`DBG ${line}`), { modelProxy: true }),
+      podSessionHost(podConfig, undefined, { modelProxy: true }),
+      undefined,
       { servesModel: true },
     );
     // The client holds this object: changing it is this terminal's config changing.
@@ -417,38 +436,22 @@ describe("a HOSTILE pod against the real laptop gate (raw frames)", () => {
     pod.client.close();
   });
 
-  test("a flood on a paid entry: subagents.maxParallel run, the queue is bounded", async () => {
-    let started = 0;
-    const gates: (() => void)[] = [];
-    const held = (main: ModelProvider): ReturnType<typeof spyFactory> => {
-      const inner = spyFactory(main);
-      return {
-        ...inner,
-        create: (options) =>
-          options.model === MAIN_ID
-            ? inner.create(options)
-            : {
-                id: options.model,
-                async *stream(): AsyncIterable<StreamEvent> {
-                  started += 1;
-                  await new Promise<void>((resolve) => gates.push(resolve));
-                  yield { type: "done" };
-                },
-              },
-      };
-    };
-    const pod = await hostile(LAPTOP, held);
-    const flood = 2 + NAMED_MODEL_MAX_QUEUED + 20;
-    const calls = Array.from({ length: flood }, () =>
-      pod.call(Method.ModelStream, { request, model: "claude" }),
+  test("a flood of unpublished and spoofed names: all refused, no provider built, main untouched", async () => {
+    const pod = await hostile();
+    const before = pod.f.built.length;
+    const names = ["hidden", MAIN_ID, "main", "__proto__", "fast-id", "claude-id"];
+    const frames = await Promise.all(
+      Array.from({ length: 120 }, (_, i) =>
+        pod.call(i % 2 === 0 ? Method.ModelStream : Method.ModelStreamChunked, {
+          request,
+          model: names[i % names.length],
+        }),
+      ),
     );
-    await new Promise((r) => setTimeout(r, 5));
-    expect(started).toBe(2);
-    const refused = await Promise.all(calls.slice(-20));
-    expect(refused.every((f) => f.error?.message === "too many queued calls to named models")).toBe(
-      true,
-    );
-    expect(started).toBe(2);
+    expect(frames.every((f) => f.error?.code === JsonRpcErrorCode.InvalidRequest)).toBe(true);
+    expect(pod.f.built.length).toBe(before);
+    expect([...pod.f.served.values()].every((seen) => seen.length === 0)).toBe(true);
+    expect(pod.mainSeen).toEqual([]);
     pod.client.close();
   });
 

@@ -12,7 +12,7 @@ import {
 } from "@tentacle/core";
 import { JsonRpcErrorCode, Method } from "@tentacle/protocol";
 import { createChannelPair } from "@tentacle/transport";
-import { NAMED_MODEL_MAX_QUEUED, type NamedModels, RemoteClient } from "../src/remote-client.ts";
+import { type NamedModels, RemoteClient } from "../src/remote-client.ts";
 
 const REQUEST = { messages: [{ role: "user", content: "hi" }] };
 const STREAMS = [Method.ModelStream, Method.ModelStreamChunked];
@@ -60,12 +60,10 @@ function gatedModel(id: string) {
 
 function namedModels(
   map: Record<string, ModelProvider | "unavailable">,
-  maxConcurrent = 4,
 ): NamedModels & { asked: string[] } {
   const asked: string[] = [];
   return {
     asked,
-    maxConcurrent,
     resolve(name) {
       asked.push(name);
       return Object.hasOwn(map, name) ? map[name] : undefined;
@@ -219,21 +217,32 @@ describe("a HOSTILE pod", () => {
       pod.client.close();
     });
 
-    test(`${method}: the pod's maxTokens does not reach a named model; it still reaches main and titles`, async () => {
+    test(`${method}: a named call has the main model's exposure: the request as sent (owner Q1 c)`, async () => {
       const main = spyModel("main");
       const fast = spyModel("fast");
-      const title = spyModel("title");
-      const pod = hostilePod(main.model, {
-        namedModels: namedModels({ fast: fast.model }),
-        titleModelProvider: title.model,
-      });
-      const request = { ...REQUEST, maxTokens: 9_000_000 };
+      const pod = hostilePod(main.model, { namedModels: namedModels({ fast: fast.model }) });
+      const request = { ...REQUEST, maxTokens: 4096 };
       await pod.call(method, { request, model: "fast" });
       await pod.call(method, { request });
-      await pod.call(method, { request, purpose: "title" });
-      expect(fast.seen[0]?.maxTokens).toBeUndefined();
-      expect(main.seen[0]?.maxTokens).toBe(9_000_000);
-      expect(title.seen[0]?.maxTokens).toBe(9_000_000);
+      expect(fast.seen[0]?.maxTokens).toBe(4096);
+      expect(main.seen[0]?.maxTokens).toBe(4096);
+      pod.client.close();
+    });
+
+    test(`${method}: a provider error on a named call reaches the pod opaque`, async () => {
+      const main = spyModel("main");
+      const leaky: ModelProvider = {
+        id: "leaky",
+        // biome-ignore lint/correctness/useYield: it fails before its first event
+        async *stream(): AsyncIterable<StreamEvent> {
+          throw new Error("401 from https://only-laptop.example/v1 with key sk-s3cret-entry");
+        },
+      };
+      const pod = hostilePod(main.model, { namedModels: namedModels({ leaky }) });
+      const { error } = await pod.call(method, { request: REQUEST, model: "leaky" });
+      expect(error).toBeDefined();
+      expect(JSON.stringify(error)).not.toContain("only-laptop.example");
+      expect(JSON.stringify(error)).not.toContain("s3cret");
       pod.client.close();
     });
   }
@@ -254,124 +263,37 @@ describe("a HOSTILE pod", () => {
     pod.client.close();
   });
 
-  test("a FLOOD: `maxConcurrent` run, the queue fills, the rest is refused at once", async () => {
+  test("a FLOOD of unpublished names, all at once: every one refused, no provider reached", async () => {
     const main = spyModel("main");
-    const paid = gatedModel("paid");
-    const pod = hostilePod(main.model, { namedModels: namedModels({ paid: paid.model }, 2) });
-    const total = 2 + NAMED_MODEL_MAX_QUEUED + 10;
-    const calls = Array.from({ length: total }, () =>
-      pod.call(Method.ModelStream, { request: REQUEST, model: "paid" }),
+    const fast = spyModel("fast");
+    const pod = hostilePod(main.model, { namedModels: namedModels({ fast: fast.model }) });
+    const frames = await Promise.all(
+      Array.from({ length: 200 }, (_, i) =>
+        pod.call(i % 2 === 0 ? Method.ModelStream : Method.ModelStreamChunked, {
+          request: REQUEST,
+          model: `evil${i % 50}`,
+        }),
+      ),
     );
-    await tick();
-    expect(paid.started()).toBe(2);
-    // Each of the last ten got its refusal while nothing has finished.
-    const refused = await Promise.all(calls.slice(-10));
-    expect(refused.map((f) => f.error?.message)).toEqual(
-      Array(10).fill("too many queued calls to named models"),
-    );
-    expect(refused.every((f) => f.error?.code === JsonRpcErrorCode.InvalidRequest)).toBe(true);
-    expect(paid.started()).toBe(2);
-    // Everything queued does run, never more than two at once.
-    for (let round = 0; round < NAMED_MODEL_MAX_QUEUED; round += 2) {
-      paid.open();
-      await tick();
-      expect(paid.started()).toBe(Math.min(2 + round + 2, 2 + NAMED_MODEL_MAX_QUEUED));
-    }
-    paid.open();
-    const served = await Promise.all(calls.slice(0, 2 + NAMED_MODEL_MAX_QUEUED));
-    expect(served.every((f) => f.error === undefined)).toBe(true);
+    expect(frames.every((f) => f.error?.code === JsonRpcErrorCode.InvalidRequest)).toBe(true);
+    expect([fast.seen.length, main.seen.length]).toEqual([0, 0]);
+    expect(pod.errors.length).toBeLessThanOrEqual(16);
     pod.client.close();
   });
 
-  test("the limit is shared by all names: N names do not multiply it", async () => {
-    const main = spyModel("main");
-    const [a, b, c] = [gatedModel("a"), gatedModel("b"), gatedModel("c")];
-    const pod = hostilePod(main.model, {
-      namedModels: namedModels({ a: a.model, b: b.model, c: c.model }, 2),
-    });
-    const calls = ["a", "b", "c"].map((model) =>
-      pod.call(Method.ModelStreamChunked, { request: REQUEST, model }),
-    );
-    await tick();
-    expect([a.started(), b.started(), c.started()]).toEqual([1, 1, 0]);
-    a.open();
-    b.open();
-    await tick();
-    expect(c.started()).toBe(1);
-    c.open();
-    await Promise.all(calls);
-    pod.client.close();
-  });
-
-  test("a flood on a named model never delays the main model", async () => {
+  test("published calls are not limited on the laptop (owner Q1 c), and never delay main", async () => {
     const main = spyModel("main");
     const paid = gatedModel("paid");
-    const pod = hostilePod(main.model, { namedModels: namedModels({ paid: paid.model }, 1) });
-    const held = [1, 2, 3].map(() =>
+    const pod = hostilePod(main.model, { namedModels: namedModels({ paid: paid.model }) });
+    const held = Array.from({ length: 40 }, () =>
       pod.call(Method.ModelStream, { request: REQUEST, model: "paid" }),
     );
     await tick();
+    expect(paid.started()).toBe(40);
     expect((await pod.call(Method.ModelStream, { request: REQUEST })).error).toBeUndefined();
     expect(main.seen.length).toBe(1);
     paid.open();
-    await tick();
-    paid.open();
-    await tick();
-    paid.open();
-    await Promise.all(held);
-    pod.client.close();
-  });
-
-  test("a refused name holds no slot", async () => {
-    const main = spyModel("main");
-    const fast = spyModel("fast");
-    const pod = hostilePod(main.model, { namedModels: namedModels({ fast: fast.model }, 1) });
-    for (let i = 0; i < 5; i++) {
-      await pod.call(Method.ModelStream, { request: REQUEST, model: "evil" });
-    }
-    expect(
-      (await pod.call(Method.ModelStream, { request: REQUEST, model: "fast" })).error,
-    ).toBeUndefined();
-    pod.client.close();
-  });
-
-  test("a provider that fails releases its slot", async () => {
-    const main = spyModel("main");
-    let calls = 0;
-    const flaky: ModelProvider = {
-      id: "flaky",
-      // biome-ignore lint/correctness/useYield: it fails before its first event
-      async *stream(): AsyncIterable<StreamEvent> {
-        calls += 1;
-        throw new Error("boom");
-      },
-    };
-    const pod = hostilePod(main.model, { namedModels: namedModels({ flaky }, 1) });
-    for (let i = 0; i < 3; i++) {
-      expect(
-        (await pod.call(Method.ModelStreamChunked, { request: REQUEST, model: "flaky" })).error,
-      ).toBeDefined();
-      expect(
-        (await pod.call(Method.ModelStream, { request: REQUEST, model: "flaky" })).error,
-      ).toBeDefined();
-    }
-    expect(calls).toBe(6);
-    pod.client.close();
-  });
-
-  test("a queued call never runs once the link is gone", async () => {
-    const main = spyModel("main");
-    const paid = gatedModel("paid");
-    const pod = hostilePod(main.model, { namedModels: namedModels({ paid: paid.model }, 1) });
-    void pod.call(Method.ModelStream, { request: REQUEST, model: "paid" });
-    void pod.call(Method.ModelStream, { request: REQUEST, model: "paid" });
-    await tick();
-    expect(paid.started()).toBe(1);
-    pod.podCh.close();
-    await tick();
-    paid.open();
-    await tick();
-    expect(paid.started()).toBe(1);
+    expect((await Promise.all(held)).every((f) => f.error === undefined)).toBe(true);
     pod.client.close();
   });
 });

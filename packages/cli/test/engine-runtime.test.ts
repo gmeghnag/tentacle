@@ -278,10 +278,13 @@ class SpyFakeCluster extends FakeCluster {
 }
 
 function baseConfig(cwd: string): TentacleConfig {
-  // Only the fields the pod runtime reads (cwd, model) matter here.
+  // Only the fields the pod runtime reads (cwd, model, what it publishes) matter here.
   return {
     cwd,
     model: "qwen3",
+    models: {},
+    subagentModels: {},
+    selectableModels: [],
     contextWindow: 128000,
     contextAwareness: { enabled: true, stepPercent: 1 },
     contextReset: { enabled: true, maxPerMessage: -1 },

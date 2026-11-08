@@ -270,6 +270,9 @@ const workspaceLabelsEmpty = {
 const config = {
   cwd: "/work",
   model: "m",
+  models: {},
+  subagentModels: {},
+  selectableModels: [],
   contextWindow: 128000,
   contextAwareness: { enabled: true, stepPercent: 1 },
   contextReset: { enabled: true, maxPerMessage: -1 },

@@ -47,10 +47,12 @@ describe("tunnelSubagentResolver: only a published name is ever asked for", () =
     expect(resolve(type({ name: "general" }), "fast")).toBeUndefined();
   });
 
-  test("the pod's agents/*.md may name a published model (Q3), with its own window if it has one", () => {
-    expect(resolve(type({ model: "claude" }), undefined)?.provider.id).toBe("tunnel:claude");
-    expect(resolve(type({ model: "claude", contextWindow: 5000 }), undefined)?.contextWindow).toBe(
-      5000,
+  test("the pod's agents/*.md `model` never picks a published entry (owner Q3 b)", () => {
+    expect(resolve(type({ model: "claude" }), undefined)).toBeUndefined();
+    expect(resolve(type({ model: "fast", contextWindow: 5000 }), undefined)).toBeUndefined();
+    // The laptop's own routes still win for the same type.
+    expect(resolve(type({ name: "explore", model: "claude" }), undefined)?.provider.id).toBe(
+      "tunnel:fast",
     );
   });
 
@@ -82,7 +84,6 @@ describe("laptopModels: the allowlist a pod is served from", () => {
   test("a published entry resolves to ITS OWN provider, with its own key", () => {
     const f = spyFactory();
     const { namedModels } = laptopModels(laptop(published), f.create);
-    expect(namedModels?.maxConcurrent).toBe(3);
     const before = f.made.length;
     expect(typeof namedModels?.resolve("claude")).toBe("object");
     const built = f.made.slice(before);

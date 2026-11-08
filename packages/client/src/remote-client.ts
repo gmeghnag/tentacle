@@ -88,7 +88,6 @@ import {
   liveness,
   stopped,
 } from "./link-machine.ts";
-import { type CallGate, CallGateError, createCallGate } from "./model-gate.ts";
 import { answerLostCause, normalizePermissionReply } from "./permission-map.ts";
 import { PermissionRouter, type RouterAction } from "./permission-router.ts";
 import { RemoteSession } from "./remote-session.ts";
@@ -236,12 +235,7 @@ const systemClock: Clock = {
 export interface NamedModels {
   /** A provider; `"unavailable"`: published, but no key here; `undefined`: not published. */
   resolve(name: string): ModelProvider | "unavailable" | undefined;
-  /** At most this many named calls run at once: the user's `subagents.maxParallel`. */
-  readonly maxConcurrent: number;
 }
-
-/** Named calls that may wait for a slot; past it a call is refused. Honest pods never get near it. */
-export const NAMED_MODEL_MAX_QUEUED = 32;
 
 /** Refused names reported to the laptop's log, so a hostile pod cannot flood it. */
 const MAX_REFUSED_NAMES_LOGGED = 16;
@@ -519,8 +513,6 @@ export class RemoteClient {
   private readonly laptopTexts = new Map<string, string>();
   private readonly titleModelProvider?: ModelProvider;
   private readonly namedModels?: NamedModels;
-  /** Bounds the named calls a pod can cause (docs/feat/models-map-pod.md F7). */
-  private readonly namedGate?: CallGate;
   /** The refused names already told to `onError` (bounded). */
   private readonly refusalsLogged = new Set<string>();
   /** `{ settings }`, or nothing: spread into each frame that may create a session. */
@@ -575,7 +567,6 @@ export class RemoteClient {
     }
     if (options.namedModels) {
       this.namedModels = options.namedModels;
-      this.namedGate = createCallGate(options.namedModels.maxConcurrent, NAMED_MODEL_MAX_QUEUED);
     }
     this.carried = options.sessionSettings ? { settings: options.sessionSettings } : {};
     this.sha256 = options.sha256 ?? bunSha256();
@@ -1491,9 +1482,7 @@ export class RemoteClient {
       },
       onRequest: async (method, params, context) => {
         if (method === Method.ModelStream) {
-          return this.servingCall(() =>
-            this.onModelStream(params as ModelStreamParams, context?.signal),
-          );
+          return this.servingCall(() => this.onModelStream(params as ModelStreamParams));
         }
         if (method === Method.ModelStreamChunked) {
           return this.servingCall(() =>
@@ -1660,8 +1649,6 @@ export class RemoteClient {
       return;
     }
     this.up = false;
-    // A named call still waiting has nobody left to answer: it must not run.
-    this.namedGate?.dropWaiting();
     if (!this.channelFactory || this.disposed) {
       // No reconnect: the turn's outcome would never arrive, so end every open
       // turn explicitly (same error a pending request gets).
@@ -2390,58 +2377,19 @@ export class RemoteClient {
    * response. Kept so an old daemon (which only knows `model/stream`) works
    * against a new laptop.
    */
-  private async onModelStream(
-    params: ModelStreamParams,
-    signal?: AbortSignal,
-  ): Promise<ModelStreamResult> {
+  private async onModelStream(params: ModelStreamParams): Promise<ModelStreamResult> {
+    // A named call has the main model's exposure: no laptop-side limit and the
+    // request as sent (owner Q1 (c), docs/feat/models-map-pod.md F7).
     const model = this.servingModel(Method.ModelStream, params.purpose, params.model);
-    const release = await this.enterNamedGate(params.model, signal);
     const events: WireStreamEvent[] = [];
     try {
-      for await (const event of model.stream(this.servedRequest(params))) {
+      for await (const event of model.stream(params.request as unknown as ChatRequest)) {
         events.push(event as WireStreamEvent);
       }
     } catch (error) {
       throw this.connectionLost(error) ?? error;
-    } finally {
-      release();
     }
     return { events };
-  }
-
-  /**
-   * The request a tunnelled call runs. On a NAMED call the pod's `maxTokens` is
-   * dropped, so `models.<name>.maxTokens` (or the provider's default) holds: a
-   * child never sets one, and a hostile pod must not raise what a paid entry
-   * may spend (docs/feat/models-map-pod.md F7).
-   */
-  private servedRequest(params: ModelStreamParams | ModelStreamChunkedParams): ChatRequest {
-    if (params.model === undefined) {
-      return params.request as unknown as ChatRequest;
-    }
-    const { maxTokens: _fromThePod, ...request } = params.request;
-    return request as unknown as ChatRequest;
-  }
-
-  /** A named call's slot; a no-op for any other call (the main model and titles are not gated). */
-  private async enterNamedGate(
-    name: string | undefined,
-    signal: AbortSignal | undefined,
-  ): Promise<() => void> {
-    if (name === undefined || !this.namedGate) {
-      return () => {};
-    }
-    try {
-      return await this.namedGate.enter(signal);
-    } catch (error) {
-      if (error instanceof CallGateError && error.reason === "full") {
-        throw new RpcError(
-          JsonRpcErrorCode.InvalidRequest,
-          "too many queued calls to named models",
-        );
-      }
-      throw new RpcError(JsonRpcErrorCode.InternalError, "model stream cancelled");
-    }
   }
 
   /**
@@ -2597,7 +2545,6 @@ export class RemoteClient {
   ): Promise<ModelStreamChunkedResult> {
     const model = this.servingModel(Method.ModelStreamChunked, params.purpose, params.model);
     const signal = context.signal;
-    const release = await this.enterNamedGate(params.model, signal);
     const id = String(context.id);
     // Coalesce into batches (see MODEL_STREAM_COALESCE_MS): one frame per
     // window at most, a quiet stream's next event at once, a size cap per
@@ -2647,7 +2594,7 @@ export class RemoteClient {
     };
     try {
       for await (const event of model.stream({
-        ...this.servedRequest(params),
+        ...(params.request as unknown as ChatRequest),
         ...(signal ? { signal } : {}),
       })) {
         const wire = event as WireStreamEvent;
@@ -2670,8 +2617,6 @@ export class RemoteClient {
       // connection or an HTTP error: a text built from code/status only
       // (`connectionLost`).
       throw this.connectionLost(error) ?? error;
-    } finally {
-      release();
     }
     // Flush the tail synchronously so the last events precede the result frame.
     flush();

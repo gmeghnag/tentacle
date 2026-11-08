@@ -119,7 +119,6 @@ export function laptopModels(
       ? {}
       : {
           namedModels: {
-            maxConcurrent: config.subagentMaxParallel,
             resolve(name) {
               if (!names.has(name)) {
                 return undefined;

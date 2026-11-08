@@ -1,11 +1,12 @@
 /**
  * `buildAgent` and the `models` map (docs/feat/models-map.md A8/B2): a type's
  * configured entry, and a selectable one, really run the child; over the pod
- * tunnel (`modelOverride`) nothing of `models` is used. Scratch config dir and a
- * spy provider factory only: no network, never the user's config.
+ * tunnel (`modelOverride`) the pod's own `models` are not used. Scratch config dir and a
+ * spy provider factory only: no network, never the user's config. Over the
+ * tunnel only the laptop's published models apply (docs/feat/models-map-pod.md).
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
@@ -250,6 +251,23 @@ describe("over the model tunnel (a pod): the laptop's published models", () => {
     expect(p.lines).toEqual([
       "models: this pod's own models, subagents.types and selectableModels are ignored; the laptop's published models apply",
     ]);
+  });
+
+  test("a pod's own agents/*.md `model` naming a published entry is IGNORED (owner Q3 b)", async () => {
+    // Mutation: pass `frontmatterModel: type.model` in tunnelSubagentResolver → tunnel:fast → red.
+    const agents = join(dir, "pod-agents");
+    await mkdir(agents, { recursive: true });
+    await writeFile(
+      join(agents, "scout.md"),
+      "---\nname: scout\ndescription: Scout.\nmodel: fast\ncontextWindow: 9000\n---\nScout.",
+    );
+    const p = pod(spawn({ subagent_type: "scout" }), {
+      publishedModels: published,
+      packageAgentDirs: [agents],
+    });
+    expect(await run(p.agent)).toEqual(["from parent model"]);
+    expect(p.named).toEqual([]);
+    expect(p.f.made).toEqual([]);
   });
 
   test("a published type the pod does not have is said in the daemon log", async () => {

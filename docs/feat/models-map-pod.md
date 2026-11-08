@@ -1,6 +1,6 @@
 # feat/models-map-pod — `models` in pod runs: a name on the tunnel, a laptop allowlist
 
-> **Status:** implementation written; owner questions open (end of Implementation); Execution not started
+> **Status:** Execution done (owner answers Q1 (c), Q2 (a), Q3 (b)); Review not started
 > **Branch:** `feat/models-map-pod`, stacked on `feat/models-map` (task 3, review PASS, not merged)
 > **Size:** L · **Blast:** load-bearing · **Suited:** AGENTS §10 rule for load-bearing or L: a stronger executor (the owner assigns it) + mandatory fresh-context Review that red-teams the laptop gate
 
@@ -153,6 +153,8 @@ What it shows:
 *— claude-opus-5-5, 2026-11-08*
 
 Written against `74a1d70`. The steps tagged **[Q1]** and **[Q2]** follow the recommended answers below. If the owner answers otherwise, drop the tagged part as the question says.
+
+**Owner answered Q1 (c): every step tagged [Q1] is DROPPED** (no `model-gate.ts`, no `maxConcurrent`, no queue, no `maxTokens` drop, no Tests 5 nor the [Q1] bullets of Test 4). They are left struck below only as the record of what was decided against. **Q3 (b)** changes D5's `tunnelSubagentResolver` (no `frontmatterModel`) and F16. See *Owner answers* at the end.
 
 ### Load-bearing assumption
 
@@ -556,7 +558,7 @@ Callers to re-check with `rg` before editing: `skipModelsKeyCommands`, `modelsPo
 | F4 | `purpose: "title"` + a name, to reach an entry through the title path | `InvalidRequest "a title call names no model"`. |
 | F5 | Extra fields in `request` or params (`baseURL`, `apiKey`, `provider`) | Stripped (Repro A); the provider sees `messages` and the known options. |
 | F6 | The pod's published map lies or is widened | Irrelevant: the laptop never reads it. `publishedModelNames(laptop config)` is the only allowlist. Pinned by a test that publishes nothing and asks anyway. A hostile pod may still use a published name for a type it was not assigned to: accepted, it chooses only among what the user published (C4). |
-| F7 | A huge stream of requests to an expensive entry | **In scope, narrowly [Q1].** At most `subagents.maxParallel` named calls run at once and 32 wait; past that, an error. This matters because a config with a local main model and a paid entry would otherwise give a pod a new way to spend. `maxTokens` from the pod is dropped on named calls. It bounds the RATE, not the total: a budget is a separate feature (Notes). An honest single session never queues, because children are capped at the same number. Several sessions on one laptop may queue: slower, correct. |
+| F7 | A huge stream of requests to an expensive entry | **Owner Q1 (c): out of scope.** A pod's named calls have the same exposure as its main-model calls today: no laptop-side limit, the request (`maxTokens` included) as sent. Pinned by tests (40 concurrent published calls all start; `maxTokens` reaches the entry). *Dropped plan text:* At most `subagents.maxParallel` named calls run at once and 32 wait; past that, an error. This matters because a config with a local main model and a paid entry would otherwise give a pod a new way to spend. `maxTokens` from the pod is dropped on named calls. It bounds the RATE, not the total: a budget is a separate feature (Notes). An honest single session never queues, because children are capped at the same number. Several sessions on one laptop may queue: slower, correct. |
 | F8 | Version skew, laptop 19 ↔ pod 18, or the reverse | `initialize` refuses with the worded `VersionMismatch`. Without the bump a laptop 18 would serve a named call with main, silently (Repro A). Pinned 18 ↔ 19. |
 | F9 | `attach` to a pod with an older tentacle | Today's path, unchanged: the worded mismatch, the binary replaced at `attach`, `residentGuard` protecting a run still in use (`engine-runtime.ts:878-886`). A replaced daemon has no old session to keep. |
 | F10 | A detached relay | Needs the published keys. Runs them with no terminal, bounded: D6's table. A failure makes one entry unavailable; the run goes on. |
@@ -565,7 +567,7 @@ Callers to re-check with `rg` before editing: `skipModelsKeyCommands`, `modelsPo
 | F13 | Re-attach to a live session after the laptop's config changed | `settings` apply only on create, so the session keeps its old routing. A name still asked but no longer published is refused (F1), and the child errors. The drift notice appears (`"models": "(text differs)"`), and `/settings sync` rebuilds the agent. |
 | F14 | Two laptops on one pod | The most recent serving connection is the link. It serves with ITS allowlist and keys: a name it lacks is refused (F1), a same-named entry is that laptop's. |
 | F15 | `settings` absent (a bare open) or nothing published | No `publishedModels`, no `modelFor`, an empty selectable list: every child on the main tunnel, as today. `namedModels` absent on the laptop: every name refused. |
-| F16 | The pod's own `agents/*.md` names a model | A published name: used (Owner Q3). Anything else: the main tunnel, as today, and the id is not sent. |
+| F16 | The pod's own `agents/*.md` names a model | **Owner Q3 (b): ignored for picking an entry**, even a published name: the main tunnel, with the type's own `contextWindow`; nothing is sent to the entry. Differs from a local run (said in `explain` and the CHANGELOG). A hostile pod can still send a published name on the wire: the allowlist bounds that (F6). |
 | F17 | A `subagents.types.<t>` the pod has no type for | Never used. One line in the pod daemon's log (D5). |
 | F18 | The pod's own config has `models` / keys | Ignored over the tunnel, with a daemon-log notice. No entry command runs there (`podDaemon`, `load.ts:723`). |
 | F19 | The tunnel drops during a child's named call | As for the main model: the call fails, the child ends in error, and the next call uses the new link. |
@@ -617,9 +619,53 @@ Gate before "done": `bun test` (baseline: all pass except the three opt-in skips
 
 **Q3. A pod's own `agents/*.md` naming a published model.** (a) Allowed: your rule "a `models` name first" applies in the pod too; (b) ignored in a pod: only the laptop's `subagents.types` and the agent's selectable call can pick a name. **Recommend (a).** The allowlist already bounds it (F6), a hostile pod can send the name anyway, and (b) would make the same file behave differently in a pod. With (b): in `tunnelSubagentResolver` pass no `frontmatterModel`.
 
+### Owner answers (binding, 2026-11-08)
+
+- **Q1 → (c)**, no laptop-side limit and no `maxTokens` drop. A pod's named calls have the same exposure as its main-model calls today. Every [Q1] step is removed.
+- **Q2 → (a) confirmed.** The relay runs only the published entries' key commands, no terminal, 10 s each; a failure makes only that entry unavailable.
+- **Q3 → (b)**, against the recommendation. In a pod, the pod's own `agents/*.md` `model` is IGNORED for picking a `models` entry; only the laptop's `subagents.types.<t>.model` and the agent's selectable `model` argument pick a name. Documented as a difference from local runs (CHANGELOG, `explain models`, `explain subagents.types.*.model`).
+
 ## Execution
 
-*Not started.*
+*— claude-opus-5-5, 2026-11-08*
+
+Two sessions. The first (Opus, stopped by quota) is the WIP commit `e69a954` on top of the plan commit `191600e`. The second (this one) applied the owner answers, finished the missing parts, and ran the gate. Nothing committed.
+
+**From the stopped session (`e69a954`), kept as built:** D1 (`ModelNameSchema`, `model` on both stream params, `PublishedModelsSchema` as ARRAYS, the settings key, `PROTOCOL_VERSION = 19`, `protocol.json` regenerated); D2 (`publishedModelNames`, `publishedModels`, narrowed pick, `modelsPodNotice` removed); D3 (carry row with optional `source`, `sameSetting`, `OPAQUE`, `settings-view` comparisons); D4 (`NamedModels.resolve`, `servingModel(name)`, `refusedName` with a 16-name log bound, `laptopModels` with the `create` seam and the `"unavailable"` check); D5 (`requestModelStream*` `model` param, `namedTunnel` per name with no count sender, `namedModelOverride`, the tunnelled `modelFor`, published task-tool list, notices, `unknownTypeModelWarnings` in the pod); D6 (`modelKeysNoTerminal` replacing `skipModelsKeyCommands`, `runBounded` = abort + race, relay option and its `relay.log` line); D7 key-docs texts; the `main.ts` notice removed; most tests.
+
+**This session:**
+1. **Q1 (c), removed:** `packages/client/src/model-gate.ts` and its test (deleted); `NamedModels.maxConcurrent`, `NAMED_MODEL_MAX_QUEUED`, `namedGate`, `enterNamedGate`, `dropWaiting` in `onLinkClosed`, and `servedRequest` (the `maxTokens` drop) from `remote-client.ts`; `maxConcurrent` from `laptopModels`; the "at most `subagents.maxParallel`" sentence in `key-docs.ts` `models`. Tests: the gate/queue/flood-limit tests in `named-models.test.ts` and `models-pod.test.ts` were replaced by tests of the decided behaviour (below).
+2. **Q3 (b):** `tunnelSubagentResolver` (`packages/cli/src/model-provider.ts`) passes no `frontmatterModel`. Tests: `models-providers.test.ts` (the old Q3 (a) test inverted), a new `models-wiring.test.ts` case (pod `agents/scout.md` with `model: fast` → main tunnel, `named` empty, no provider built), and an end-to-end `models-pod.test.ts` case (pod frontmatter `model: claude` → "from the MAIN model", the claude entry never built or served, no `"model":"claude"` frame). Texts: `key-docs.ts` `models` and `subagents.types.*.model`, CHANGELOG.
+3. **Fixed tests the stopped session left failing or unrun:** the `/settings sync` re-route test in `models-pod.test.ts` passed `{ servesModel: true }` as the 3rd `Connection` argument (it is the 4th), so the link was never set ("model proxy transport not ready"). The `engine-runtime.test.ts` and `engine-docker.test.ts` partial-config fixtures lacked `models`/`subagentModels`/`selectableModels`, which `laptopModels` now reads (14 failures in the first full run); the fixtures gained the three empty fields (production configs always have them).
+4. **Hostile-pod tests added:** a 200-call flood of unpublished names over both methods (all `InvalidRequest`, no provider reached, ≤ 16 log lines); a 120-call flood mixing unpublished, the main id, `main`, `__proto__` and entry model ids against the REAL `laptopModels` (no provider built or served, main untouched); a provider error carrying a URL and a key reaches the pod opaque (both methods).
+5. **Q1 (c) pinned:** `maxTokens` from the pod reaches the named entry and main alike; 40 concurrent calls to one published entry all start, and a main call is served meanwhile.
+6. CHANGELOG: the task-3 entry's "not applied on run/attach yet" and "the relay runs only the main one" now point to a new entry "Named models work on run/attach too" (protocol 19: update the pods). `bun run docs:config`: README up to date.
+
+**Drift from Implementation:** arrays instead of `z.record` (stopped session, recorded in D1: the JSON-Schema export refuses records). [Q1] removed per owner. `NamedModels` has only `resolve`. The relay's report line includes the command's stderr (the existing `ConfigError` text of `defaultRunner`, as in the strict path; it goes to the laptop-local `relay.log`, never to the pod); a non-`ConfigError` failure is reported as `apiKeyCommand failed` with no detail. TODO.md not touched (orchestrator's instruction), so `TODO.md:456` of D7 is left for the merge.
+
+**Red before green** (each by copying the file from `git show 191600e:<path>` over the current one, running, then restoring from `.tentacle/tmp/models-map-pod/bak/` and checking shasums):
+- `remote-client.ts` @191600e → `named-models.test.ts` **21 fail / 2 pass** (the 2 are the schema-level `InvalidParams` cases, which belong to the protocol change). E.g. a published name served by main (`[0,1]` vs `[1,0]`), unpublished name `code: undefined`.
+- `wiring.ts` @191600e → `models-wiring.test.ts` **6 fail** (child on "parent model" instead of `tunnel:fast`, no published list, old notice, no unknown-type line).
+- `load.ts` @191600e → `models-load.test.ts` **8 fail** (the unpublished command ran; failing/empty commands threw; the deadline test timed out at 5 s; the real runner's grandchild held the load 3063 ms).
+- `version.ts` @191600e → `published-models.test.ts` + `version-mismatch.test.ts` **3 fail** (18 ≠ 19; "initialize succeeded" for an 18 ↔ 19 pair).
+- Q3: the new `models-wiring` case failed (`from tunnel:fast`) before the `model-provider.ts` change, then passed.
+- `carried-settings.ts` @191600e cannot run (the tests import `OPAQUE`): replaced by mutation M5 below.
+
+**Non-vacuity by mutation** (each reverted, shasum-checked):
+- M1a, laptop allowlist: `laptopModels.resolve` also accepts any `config.models` name → 6 fail (`hidden` served, `__proto__` → `-32603`, the flood test, the providers test builds `keyless`).
+- M1b, the gate in `servingModel`: an unpublished name returns the main provider → 14 fail across `named-models` and `models-pod`.
+- M2, version: covered by the 191600e `version.ts` run above.
+- M3, relay deadline: `runBounded` without the race (abort only) → the deadline test times out at 5 s and the real-runner test takes 3065 ms > 2000 → 2 fail.
+- M4, relay key path: `relayMain` without `modelKeysNoTerminal` (strict load) → 2 `relay.test.ts` fail (the relay dies at the entry's command instead of continuing).
+- M5, carry leak: `publishedModels` spreads the whole entry → 5 fail (`models-published.test.ts` sees `s3cret-entry`, the URL and the model id; `carried-settings.test.ts` sees the key in the carried JSON).
+- M6, Q3: `frontmatterModel: type.model` put back → 3 fail (providers, wiring, the end-to-end pod test: "from claude-id").
+- `sameSetting` → identity only → the "equal publications are no drift" test fails (Repro C).
+
+**Secrets:** no key on argv (key commands run as `/bin/sh -c <command>`, unchanged; keys are read from stdout); nothing new in a pod's env or mounts (`namedModels` lives only in the laptop's `RemoteClient`); the carried publication holds names, windows and selectable descriptions only (M5); refusal texts hold only the schema-shaped name; provider errors on named calls stay opaque (test). Fake keys and scratch dirs only; `~/.config/tentacle` never touched.
+
+**Gate** (2026-11-08, this worktree): `bunx tsc --noEmit` clean; `bunx biome check .` 767 files, no fixes; `bun test packages` **5868 pass, 3 skip (the opt-in three), 0 fail**; `bun run docs:config` up to date.
+
+**Not verified:** `tsc -p apps/mobile` (the mobile half of `bun run typecheck`; the command needed an approval this session did not get. The protocol change is additive for the app's imports, but run it). The live check (docker `run` with two fake endpoints, a selectable entry, a `run --detach` with a failing entry command) was not run: verify routing by each endpoint's log, the key per request and the `relay.log` line.
 
 ## Review
 
