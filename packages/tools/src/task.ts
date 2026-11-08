@@ -77,7 +77,7 @@ export function createTaskTool(
   options: TaskToolOptions = {},
 ): Tool {
   const names = types.map((t) => t.name);
-  const defaultType = names[0] ?? "general-purpose";
+  const defaultType = names[0] ?? "general";
   const typeList = types.map((t) => `- ${t.name}: ${t.description}`).join("\n");
   const resolveType = (requested: string | undefined): string => {
     const name = requested ?? defaultType;

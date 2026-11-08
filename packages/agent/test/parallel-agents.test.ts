@@ -586,16 +586,18 @@ describe("the read-only type", () => {
       execute: async () => ({ content: "" }),
     }) as Tool;
 
-  test("explore is read-only; general-purpose is not", () => {
+  test("the built-ins are general and explore; explore is read-only", () => {
     const tools = new ToolRegistry().register(fsReadTool).register(shellTool);
     const { readOnlyType } = createSubagentRunner({
       model: new TreeModel([]),
       env: noopEnv,
       tools,
     });
-    expect(BUILTIN_AGENT_TYPES.map((t) => t.name)).toEqual(["general-purpose", "explore"]);
+    // feat/subagent-general-rename: the built-in is `general`, never `general-purpose`.
+    expect(BUILTIN_AGENT_TYPES.map((t) => t.name)).toEqual(["general", "explore"]);
+    expect(BUILTIN_AGENT_TYPES.map((t) => t.name)).not.toContain("general-purpose");
     expect(readOnlyType("explore")).toBe(true);
-    expect(readOnlyType("general-purpose")).toBe(false);
+    expect(readOnlyType("general")).toBe(false);
     expect(readOnlyType("nobody")).toBe(false);
   });
 

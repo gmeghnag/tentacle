@@ -55,7 +55,7 @@ report is the only thing the parent receives.`;
 /** The built-in sub-agent types. */
 export const BUILTIN_AGENT_TYPES: readonly AgentType[] = [
   {
-    name: "general-purpose",
+    name: "general",
     description:
       "General autonomous agent for multi-step tasks and open-ended work. Has the full tool-set.",
     prompt: GENERAL_PROMPT,

@@ -176,7 +176,7 @@ describe("buildAgent reads subagents.* (T-W)", () => {
     await expectOneAtATime(model, () => runLocal(agent));
   });
 
-  test("read-only: general-purpose children do not overlap", async () => {
+  test("read-only: general children do not overlap", async () => {
     const model = new GatedModel(two);
     const { agent } = buildAgent(
       { ...config, subagentExecution: "read-only", subagentMaxParallel: 4 },
