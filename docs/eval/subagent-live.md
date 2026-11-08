@@ -1084,3 +1084,11 @@ task);
 - **Q15: (a).** One "background" list under the footbar: subagents and running shell jobs (the shell rows are a small follow-up task).
 - **Q16: (b).** `/agents` and Ctrl+T open the list.
 - **Q17: (a).** 5 recent steps, as built and live-tested in `feat/subagent-tail-view` (merged 2026-11-08).
+
+### Owner decision — slots (2026-11-08, supersedes Q14 and M8)
+
+*— claude-opus-5-5 (orchestrator, recording the owner's decision), 2026-11-08*
+
+The only sub-agent concurrency limit is **`subagents.maxParallel`**, set by the user. Tentacle does not size or limit anything by server slots: the harness cannot know which local server runs or how many slots it has (only llama.cpp publishes `/props` `total_slots`), and scheduling policy is out of scope for it. Consequences:
+- Task 6c `feat/subagent-slots` is **dropped**; Q14's reservation question is moot. Background children count toward `maxParallel` (Q2), which 6a enforces.
+- Task 3 (`feat/models-map`) drops its per-endpoint slot sizing (part C) and **removes the existing slots cap** (`effectiveAgentCap(maxParallel, slots)`, the provider's `/props` read, the pod `model/slots` RPC, with a `PROTOCOL_VERSION` bump). Over-subscription only queues on the server.
