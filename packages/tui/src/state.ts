@@ -69,6 +69,14 @@ export interface SubAgentProgress {
    */
   readonly tokens: number;
   readonly done: boolean;
+  /**
+   * Why it stopped (`end_turn`, `error`, `cancelled`, `max_iterations`): set with
+   * `done` by `subagent_end`. Absent only while it runs — a finished child always
+   * has one: `AgentEvent.stopReason` is required (`agent.ts:264-269`) and the
+   * client DROPS a `subagent_end` without it (`client/src/mapping.ts:128-136`).
+   * Optional so a hand-built state still types.
+   */
+  readonly stopReason?: string;
 }
 
 export interface ToolItem {
@@ -428,7 +436,12 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     case "subagent_end":
       return updateTool(state, event.id, (t) => ({
         ...t,
-        sub: { ...(t.sub ?? EMPTY_SUB), toolUses: event.toolUses, done: true },
+        sub: {
+          ...(t.sub ?? EMPTY_SUB),
+          toolUses: event.toolUses,
+          done: true,
+          stopReason: event.stopReason,
+        },
       }));
 
     case "background_exit":

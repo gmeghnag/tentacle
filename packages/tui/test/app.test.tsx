@@ -2629,6 +2629,244 @@ describe("idle warm of the other Ctrl+O view", () => {
     await delay(100);
     unmount();
   });
+
+  test("a foreground sub-agent shows a rolling tail of its LATEST steps, at 80 and at 46 columns", async () => {
+    // docs/feat/subagent-tail-view.md (eval A5; Opus L4 + mockup 1). The owner
+    // 2026-11-07: "metti visibili gli ultimi aggiornamenti del subagent invece che
+    // mostrare le prime tool call". Mutation: render the kept list from the top
+    // (`slice(0, n)`) → "Read f1.ts" reappears, "Read f12.ts" disappears.
+    const stepRows = (frame: string): string[] =>
+      frame.split("\n").filter((l) => /Read f\d+\.ts|earlier|a-very-long-directory/.test(l));
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const agentTask = {
+      ...shellTool,
+      name: "agent_task",
+      permission: "none" as const,
+      async execute(_input: unknown, ctx: { emitProgress?: (e: never) => void }) {
+        const emit = ctx.emitProgress as (e: unknown) => void;
+        emit({ kind: "subagent_start", agentType: "explore", description: "find it" });
+        for (let i = 1; i <= 12; i++) {
+          // One label wider than 46 columns, so the width cut is exercised for real.
+          emit({
+            kind: "subagent_tool",
+            label:
+              i === 12
+                ? "Read f12.ts packages/config/src/a-very-long-directory/schema.ts"
+                : `Read f${i}.ts`,
+          });
+        }
+        await gate;
+        return { content: "report" };
+      },
+    };
+    const model = new ScriptedProvider([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "p1", name: "agent_task", arguments: '{"command":"x"}' },
+        },
+        { type: "done", usage: { promptTokens: 7, completionTokens: 3 } },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(agentTask as never),
+      env: noopEnv,
+    });
+    const { stdout, stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" />,
+    );
+    try {
+      await delay(30);
+      stdin.write("go");
+      await delay(30);
+      stdin.write("\r");
+      await delay(200);
+      // 80 columns (ink-testing-library's own default width is 100).
+      Object.defineProperty(stdout, "columns", { value: 80, configurable: true });
+      stdout.emit("resize");
+      await delay(60);
+      const wide = stepRows(lastFrame() ?? "");
+      expect(wide.join("\n")).toContain("… +7 earlier");
+      // Steps 8..11 by their short labels; step 12 is the long one.
+      for (const i of [8, 9, 10, 11]) {
+        expect(wide.join("\n")).toContain(`Read f${i}.ts`);
+      }
+      expect(wide.join("\n")).toContain("a-very-long-directory/schema.ts"); // 80: not cut
+      expect(wide.join("\n")).not.toContain("Read f1.ts");
+      expect(wide.join("\n")).not.toContain("Read f7.ts");
+      // 46 columns: still the same tail, and no row overflows the frame.
+      Object.defineProperty(stdout, "columns", { value: 46, configurable: true });
+      stdout.emit("resize");
+      await delay(60);
+      const frame = lastFrame() ?? "";
+      const narrow = stepRows(frame);
+      expect(narrow.join("\n")).toContain("… +7 earlier");
+      // The tail is still 8..12, but the long last step is now CUT (cells), not wrapped.
+      expect(narrow.join("\n")).toContain("Read f12.ts packages");
+      expect(narrow.join("\n")).not.toContain("a-very-long-directory/schema.ts");
+      // Each shown step owns EXACTLY one prefixed row: a wrapped label would
+      // leave an unprefixed continuation row and grow the block.
+      const block = frame
+        .split("\n")
+        .map((r) => stripAnsi(r).trimEnd())
+        .slice(frame.split("\n").findIndex((r) => r.includes("earlier")));
+      const cutAt = block.findIndex((r) => r.includes("└─ …"));
+      expect(cutAt).toBe(6); // `… +7 earlier` + the 5 step rows, then `└─ …`
+      for (const row of block.slice(1, cutAt)) {
+        expect(row.trim()).toMatch(/^[├└]─ /);
+      }
+      for (const row of frame.split("\n")) {
+        expect(stringWidth(stripAnsi(row))).toBeLessThanOrEqual(46);
+      }
+    } finally {
+      release();
+      await delay(100);
+      unmount();
+    }
+  });
+
+  test("a finished sub-agent keeps its newest step, its closing row and its report, at 80 and 46", async () => {
+    // docs/feat/subagent-tail-view.md review H1: the generic 8-row body collapse
+    // cut a finished child to its first 6 rows, so step 12, the `└─` close and the
+    // report were gone — two cut markers in one block. Mutation: let the tree back
+    // into `toolLines`' cut → "Read f12.ts", the `└─` row and the report vanish.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const agentTask = {
+      ...shellTool,
+      name: "agent_task",
+      permission: "none" as const,
+      async execute(_input: unknown, ctx: { emitProgress?: (e: never) => void }) {
+        const emit = ctx.emitProgress as (e: unknown) => void;
+        emit({ kind: "subagent_start", agentType: "explore", description: "find it" });
+        for (let i = 1; i <= 12; i++) {
+          emit({ kind: "subagent_tool", label: `Read f${i}.ts` });
+        }
+        await gate;
+        emit({ kind: "subagent_end", toolUses: 12, stopReason: "end_turn" });
+        return { content: "The bug is in auth.ts" };
+      },
+    };
+    const model = new ScriptedProvider([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "p1", name: "agent_task", arguments: '{"command":"x"}' },
+        },
+        { type: "done", usage: { promptTokens: 7, completionTokens: 3 } },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(agentTask as never),
+      env: noopEnv,
+    });
+    const { stdout, stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" />,
+    );
+    try {
+      await delay(30);
+      stdin.write("go");
+      await delay(30);
+      stdin.write("\r");
+      await delay(200);
+      release();
+      await delay(150);
+      for (const cols of [80, 46]) {
+        Object.defineProperty(stdout, "columns", { value: cols, configurable: true });
+        stdout.emit("resize");
+        await delay(60);
+        const rows = (lastFrame() ?? "").split("\n").map((r) => stripAnsi(r).trimEnd());
+        const joined = rows.join("\n");
+        // The tree, whole: the newest step and its closing row.
+        expect(joined).toContain("… +7 earlier");
+        expect(joined).toContain("Read f12.ts");
+        expect(rows.some((r) => r.includes("└─ Read f12.ts"))).toBe(true);
+        // The report is the block's last row, and it is there.
+        expect(joined).toContain("The bug is in auth.ts");
+        expect(rows.find((r) => r.includes("The bug is in auth.ts"))).toBeDefined();
+        // A SHORT report adds no cut marker of its own: the block's only one is
+        // the earlier-steps row (review N4 — a long report adds a second, in the
+        // same grammar, opened by the same key).
+        expect(joined).not.toContain("more lines");
+      }
+    } finally {
+      release();
+      await delay(100);
+      unmount();
+    }
+  });
+
+  test("a cancelled sub-agent closes with `└─ ✗ cancelled` on the real frame", async () => {
+    // Review M3/Q2: `agent_task` returns no `isError` for a cancelled child
+    // (`packages/tools/src/task.ts:118-125`), so the tool row is `ok` and the
+    // block used to be identical to a clean run. Mutation: drop `closing` from
+    // the view-model → no `✗` row.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const agentTask = {
+      ...shellTool,
+      name: "agent_task",
+      permission: "none" as const,
+      async execute(_input: unknown, ctx: { emitProgress?: (e: never) => void }) {
+        const emit = ctx.emitProgress as (e: unknown) => void;
+        emit({ kind: "subagent_start", agentType: "explore", description: "find it" });
+        emit({ kind: "subagent_tool", label: "Read a.ts" });
+        await gate;
+        emit({ kind: "subagent_end", toolUses: 1, stopReason: "cancelled" });
+        return { content: "partial\n\n_(sub-agent cancelled)_" };
+      },
+    };
+    const model = new ScriptedProvider([
+      [
+        {
+          type: "tool_call",
+          toolCall: { id: "p1", name: "agent_task", arguments: '{"command":"x"}' },
+        },
+        { type: "done", usage: { promptTokens: 7, completionTokens: 3 } },
+      ],
+      [{ type: "text", delta: "ok" }, { type: "done" }],
+    ]);
+    const agent = new Agent({
+      model,
+      tools: new ToolRegistry().register(agentTask as never),
+      env: noopEnv,
+    });
+    const { stdin, lastFrame, unmount } = render(
+      <App agent={agent} model="qwen3" cwd="/tmp/work" />,
+    );
+    try {
+      await delay(30);
+      stdin.write("go");
+      await delay(30);
+      stdin.write("\r");
+      await delay(200);
+      release();
+      await delay(150);
+      const rows = (lastFrame() ?? "").split("\n").map((r) => stripAnsi(r).trimEnd());
+      expect(rows.some((r) => r.includes("└─ ✗ cancelled"))).toBe(true);
+      expect(rows.some((r) => r.includes("└─ Read a.ts"))).toBe(false);
+      // Said ONCE (review N3): `task.ts:118-122` appends `_(sub-agent cancelled)_`
+      // to the result, so the frame used to carry the word twice. The fake above
+      // returns exactly what the real tool returns.
+      expect(rows.filter((r) => r.includes("cancelled"))).toHaveLength(1);
+      expect(rows.join("\n")).not.toContain("_(sub-agent cancelled)_");
+    } finally {
+      release();
+      await delay(100);
+      unmount();
+    }
+  });
 });
 
 describe("a running tool call's bullet blinks (docs/feat/tui-tool-blink.md)", () => {

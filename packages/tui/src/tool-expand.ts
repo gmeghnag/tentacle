@@ -72,6 +72,14 @@ export function nextClick(state: ClickState, report: MouseReport): ClickStep {
   return { state: { armed: { x: report.x, y: report.y } }, click: null };
 }
 
+/**
+ * The hint that ends every "there is more" cut marker in the transcript
+ * (`… +N more lines · ctrl+o to expand`, and the sub-agent tail's
+ * `… +N earlier · ctrl+o to expand`). ONE constant, so the two grammars can
+ * never drift apart (docs/feat/subagent-tail-view.md review Q3).
+ */
+export const EXPAND_HINT = "ctrl+o to expand";
+
 /** Whether `id`'s command is shown expanded (ids are the daemon's tool-call ids). */
 export function isExpanded(ids: readonly string[], id: string): boolean {
   return ids.includes(id);

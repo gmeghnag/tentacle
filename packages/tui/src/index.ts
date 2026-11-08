@@ -5,6 +5,18 @@ export * from "./state.ts";
 export * from "./diff-format.ts";
 export * from "./markdown.ts";
 export * from "./render-lines.ts";
+export {
+  SUBAGENT_TAIL_ROWS,
+  type SubAgentHead,
+  type SubAgentOutcome,
+  type SubAgentView,
+  type SubAgentViewOptions,
+  subAgentEarlierRow,
+  subAgentHeadRow,
+  subAgentReport,
+  subAgentRow,
+  subAgentView,
+} from "./subagent-view.ts";
 export * from "./scroll.ts";
 export * from "./commands.ts";
 export * from "./link-status.ts";

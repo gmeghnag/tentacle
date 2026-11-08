@@ -54,8 +54,35 @@ describe("display state reducer", () => {
         toolUses: 2,
         tokens: 0,
         done: true,
+        stopReason: "end_turn",
       });
     }
+  });
+
+  test("the 50-step cap holds: the NEWEST 50 labels are kept, the oldest fall off", () => {
+    // docs/feat/subagent-tail-view.md: the tail view relies on `activities` being
+    // the newest-last, capped list (`state.ts:190,422`); keep the cap untouched.
+    // Mutation: `slice(-SUB_ACTIVITY_CAP)` → `slice(0, …)` fails `activities[0]`.
+    const events: AgentEvent[] = [
+      { type: "tool_start", id: "t1", name: "agent_task", arguments: "{}" },
+      { type: "subagent_start", id: "t1", agentType: "explore", description: "d" },
+      ...Array.from(
+        { length: 60 },
+        (_, i): AgentEvent => ({
+          type: "subagent_tool",
+          id: "t1",
+          label: `Read f${i + 1}.ts`,
+        }),
+      ),
+    ];
+    const tool = fold(initialState, events).items.find((i) => i.kind === "tool");
+    if (tool?.kind !== "tool" || !tool.sub) {
+      throw new Error("no sub-agent progress");
+    }
+    expect(tool.sub.activities).toHaveLength(50);
+    expect(tool.sub.activities[0]).toBe("Read f11.ts"); // steps 1–10 dropped
+    expect(tool.sub.activities.at(-1)).toBe("Read f60.ts"); // the newest is last
+    expect(tool.sub.toolUses).toBe(60); // the COUNT is not capped, only the labels
   });
 
   test("subagent_usage sums into the row's own tokens, never the session total or the context meter (owner 2026-10-26)", () => {
