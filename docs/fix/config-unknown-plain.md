@@ -1,6 +1,6 @@
 # fix/config-unknown-plain — an unknown config key's value is shown in clear
 
-> **Status:** execution (Review pending — a fresh-context pass)
+> **Status:** review APPROVE-WITH-NITS (claude-sonnet-5-5, 2026-11-08); N2 (seed comment) left as debt
 > **Branch:** `fix/config-unknown-plain`
 > **Size:** S · **Blast:** contained · **Suited:** any model; standard in-context Review
 
@@ -253,3 +253,77 @@ run `tentacle explain` to see the top-level keys
 Unknown keys in clear (`bogus`, `model.foo`), every registry secret still `***`
 / `[***]` — including the names the registry does not list under `env`/`headers`
 — and `get <unknown key>` still refuses without printing it.
+
+## Review
+
+*— claude-sonnet-5-5, 2026-11-08* (fresh context; a different model family from the executor, deepseek-v4.1-flash)
+
+**Verdict: APPROVE-WITH-NITS.** The change is the one-line fix the plan claims
+(`packages/config/src/config-value.ts:175`, `secret === true ? MASK : undefined`);
+every registry secret stays masked, every unknown key prints in clear, and the
+error paths never echo a secret. No blocking finding.
+
+### Evidence (scratch dir `.tentacle/tmp/config-unknown-plain-review/`, `TENTACLE_CONFIG_DIR` there, never `~/.config`)
+
+`run.sh` seeds one file with distinct markers: secrets `SEC-*` in `model.apiKey`,
+`mcpServers.fs.args`, `env.TOKEN` / `env.ANYTHING`, `headers.Authorization` / `headers.Y`,
+and the same slots under `profiles.work.*`; clear markers `CLEAR-*` in `model.foo`,
+`mcpServers.fs.weird`, `model2.apiKey`, `bogus`, `profiles.work.model.nope`. It then
+runs `list`, `list --json`, `get model.apiKey`, `get model` (+`--json`), `get mcpServers`
+(+`--json`), `get mcpServers.fs.args|env|headers`, `get profiles` (+`--json`),
+`get profiles.work`, `get profiles.work.model.apiKey`, `get profiles.work.mcpServers --json`.
+
+1. **Secrets masked everywhere:** `grep -c SEC-` over all output = **0**. Seen masked: `model.apiKey`,
+   `args` (`[***]` / `["***"]`), `env.TOKEN`, `env.ANYTHING` (unknown NAME), `headers.Authorization`,
+   `headers.Y` (unknown NAME), and the same under `profiles.work.*`, in plain, `--json`,
+   leaf, section and parent forms.
+2. **Unknown in clear:** `CLEAR-foo` ×4, `CLEAR-weird` ×4, `CLEAR-model2key` ×2, `CLEAR-bogus` ×2,
+   `CLEAR-pnope` ×5 (list, list --json, get section, get section --json, profiles). `get model.foo`,
+   `get bogus`, `get model2` still refuse as unknown without printing the value.
+   The accepted case (`model2.apiKey = "CLEAR-model2key"`) behaves as the owner decided.
+3. **Error paths** (`errs.sh`): `config model.apiKey=SEC-ARGV`, `…env.TOKEN=…`, `…args=…` are refused
+   without the value (the only `SEC-` hits in the output are my own echoed command lines); the
+   schema-issue list prints key NAMES only (`model: Unrecognized key(s) 'foo'`), never a value;
+   `get …env.NOPE` / `…TOKEN.x` print no value. The round-2 config-set tests are in the green suite below.
+4. **HIGH-2 seed edit — justified, not weakening.** The removed entry was `"model2": { "apiKey": … }`,
+   a path the registry does not know; under the owner's rule it is correctly in clear, so keeping it
+   in a "no stored secret is printed" seed would assert the opposite of the decision. Every real secret
+   slot of that seed (`model.apiKey`, env, headers, `args`, `profiles.*`) is untouched and still asserted
+   absent. The boundary is not lost: it is pinned explicitly at `config-value.test.ts:274-276`
+   (`maskStored({model2:{apiKey}})` is in clear) and `config-run.test.ts:482-484,530-557`.
+5. **Own mutation:** `maskOf` last line → `secret === true && !key.includes(".headers.") ? MASK : undefined`
+   (`mut.sh`: `cp` backup, narrow tests, restore). **KILLED, 4 tests** (`T9` secret leaf both trees; "unknown NAME
+   under a secret map is STILL a secret"; HIGH-2 "no form of get or list prints a stored secret"; the
+   new in-clear CLI test). `shasum` before = after = `0510822e…`, `git status` clean.
+6. **Gate:** `bunx tsc --noEmit` 0 errors · `bunx biome check .` 751 files, no fixes, 0 diagnostics ·
+   `bun test packages` **5715 pass, 3 skip (the opt-in ones), 0 fail** (386 files, 162 s).
+
+### Premise table
+
+| Premise | Result |
+|---|---|
+| `maskOf` is the only mask source; `renderStored`/`maskStored`/`printedValue`/`flattenInOrder` all go through it | TRUE (diff + live output consistent in all forms) |
+| `isKnownKey` has no other caller | TRUE (typecheck + biome clean after deletion) |
+| `mcpServers.*.env.*` / `headers.*` are `secret: true` and match unknown names | TRUE (`key-docs.ts:674-681`, live `env.ANYTHING` masked) |
+| `get <unknown key>` refuses before rendering | TRUE (live: model.foo, bogus, model2) |
+| Repro on `main` shows `model.foo = ***` | not re-run on `main` (would need a second checkout); the red tests in Execution plus the mutation here cover it |
+
+### Attacks tried
+
+1. Unknown NAME under `env`/`headers`, top level and under `profiles.*` — masked. Nothing found.
+2. Secret reachable by a parent: `get profiles`, `get profiles.work`, `get mcpServers` plain and `--json` — masked inside. Nothing found.
+3. Secret echoed by an error (argv refusal, validation issues, unknown-key suggestion, `NOPE` / `TOKEN.x`) — none. Nothing found.
+4. Mutation on `headers` (above) — killed.
+5. A secret under a misplaced PARENT of a known slot (`model2.apiKey`) — in clear, accepted by the owner; documented and pinned.
+
+### Nits (non-blocking)
+
+- N1 `docs/fix/config-unknown-plain.md:3` — the status line still reads "Review pending"; update it to review done on merge.
+- N2 The "no form of get or list prints a stored secret" test no longer mentions in a comment why `model2` left its seed; the reason lives in Execution and in `config-value.test.ts:272-276`. A one-line pointer in the seed would help the next reader. Optional.
+
+### How the executor behaved
+
+Disciplined: red before green (3 + 1 failing on the assertion), a single-line source change, dead helper removed,
+mutation done with `cp` + `shasum`, the one seed edit disclosed with its reasoning instead of hidden. Shared
+blind spots: a different model family reviewed, so the pass is independent; scope was contained, so no
+fresh-context mandatory-review rule applied beyond this.
