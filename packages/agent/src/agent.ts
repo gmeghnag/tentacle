@@ -24,6 +24,7 @@ import {
   HeuristicTokenCounter,
   type JobController,
   type ModelProvider,
+  NOTE_KIND,
   type PermissionRequester,
   type TokenCounter,
   type Tool,
@@ -1850,7 +1851,13 @@ export class Agent {
       });
       const code = job.exitCode !== null ? ` with exit code ${job.exitCode}` : "";
       const note = `[background] job ${job.id} (\`${job.command}\`) ${job.status}${code}. Read its output with shell_output({ job_id: "${job.id}" }) if relevant.`;
-      messages.push({ role: "user", content: note });
+      // `note`: a resume renders it as a notice, not as a row the person typed
+      // (docs/feat/subagent-ledger-log.md, M3). The model still sees `content`.
+      messages.push({
+        role: "user",
+        content: note,
+        note: { kind: NOTE_KIND.backgroundExit, id: job.id },
+      });
       events.push({ type: "context_note", text: note, reason: "background_exit" });
     }
     return events;

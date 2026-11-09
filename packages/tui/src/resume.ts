@@ -11,6 +11,23 @@ import type { DisplayItem, ToolItem } from "./state.ts";
 export const CONTEXT_RESET_SEPARATOR = "↻ context reset by the model";
 
 /**
+ * A tentacle-written note (a job's exit, a sub-agent's report/loss) as a
+ * NOTICE, never as a row the person typed: the first line is the notice's
+ * text, the rest is its `body` (shown only when expanded). An unknown kind is a
+ * plain notice of the first line, so a newer `note.kind` never breaks a resume.
+ */
+function noteItem(m: ChatMessage): DisplayItem {
+  const [first = "", ...rest] = m.content.split("\n");
+  const body = rest.join("\n").trim();
+  return {
+    kind: "notice",
+    text: first,
+    ...(body !== "" ? { body } : {}),
+    ...(m.note !== undefined ? { noteKind: m.note.kind } : {}),
+  };
+}
+
+/**
  * A restart message (a context reset's first user message) is shown as the
  * separator, then the model's prompt alone — tentacle's appended notes
  * (jobs, skills) are the model's, not the user's.
@@ -28,6 +45,8 @@ export function messagesToItems(messages: readonly ChatMessage[]): DisplayItem[]
       if (restart !== null) {
         items.push({ kind: "notice", text: CONTEXT_RESET_SEPARATOR, separator: true });
         items.push({ kind: "user", text: restart, restart: true });
+      } else if (m.note !== undefined) {
+        items.push(noteItem(m));
       } else {
         items.push({ kind: "user", text: m.content });
       }

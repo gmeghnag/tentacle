@@ -14,8 +14,9 @@
  * whole log when it is `true` (it cannot project without it). The v1 table is
  * owner-approved and binding: critical = `base`, `message`, `replace`,
  * `truncate`; not critical = `title`, `checkpoint`, `turn_start`, `turn_end`,
- * `call_started`. Adding a critical type (or changing a value) is decided with
- * the owner AND bumps `PROTOCOL_VERSION`, like a `mandatory` update class.
+ * `call_started`, `subagent_background`, `subagent_end`. Adding a critical type
+ * (or changing a value) is decided with the owner AND bumps `PROTOCOL_VERSION`,
+ * like a `mandatory` update class.
  *
  * The RESULT carries entries as the open envelope (`.passthrough()`): one
  * unknown type must not reject the whole read at the peer's result parse. The
@@ -25,6 +26,12 @@
  *
  * The same entries are what the laptop's disk log will hold (task 2): they are
  * self-describing, ordered by `seq`, linked by `prev`, segmented at `base`.
+ *
+ * `subagent_background` / `subagent_end` (docs/feat/subagent-ledger-log.md) are
+ * two NON-critical types: a background sub-agent exists, and it ended (with its
+ * report, capped). A build that does not know them skips them; the LOAD
+ * derivation (`subagentLoadNotes`, core) turns what they leave open into a
+ * history note, so a restart is honest without them.
  */
 import { z } from "zod";
 import {
@@ -45,6 +52,27 @@ export const LOG_PAGE_MAX_CHARS = 256 * 1024;
 
 /** An entry's opaque id (`"<incarnation>/<seq>"` from a daemon; never parsed by a reader). */
 export const LogEntryIdSchema = z.string().min(1).max(256);
+
+/**
+ * A background sub-agent's `description`, capped (docs/feat/subagent-ledger-log.md):
+ * enforced by the EMITTER (the ledger), never discovered by a reader.
+ */
+export const SUBAGENT_DESCRIPTION_MAX_CHARS = 512;
+/**
+ * A background sub-agent's report as `subagent_end` carries it (64 KiB). The
+ * emitter caps it (head + tail + a cut line) so the log never holds a value a
+ * reader must refuse.
+ */
+export const SUBAGENT_REPORT_MAX_CHARS = 64 * 1024;
+/**
+ * A background sub-agent's `agentType` (the tool's own type name), `callId` (the
+ * `agent_task` call's id) and `stopReason` (6a's free text): capped by the EMITTER
+ * (the ledger), so a reader never refuses a value a task legitimately writes
+ * (review M4).
+ */
+export const SUBAGENT_AGENT_TYPE_MAX_CHARS = 128;
+export const SUBAGENT_CALL_ID_MAX_CHARS = 256;
+export const SUBAGENT_STOP_REASON_MAX_CHARS = 64;
 
 /** A position in a log: the last entry a reader holds. Both must match (a seq alone is ambiguous across lineages). */
 export const LogCursorSchema = z.object({
@@ -162,6 +190,33 @@ export const LogCallStartedEntrySchema = z.object({
   callId: z.string().min(1).max(256),
 });
 
+/**
+ * A sub-agent's `agent_task` call started it in the BACKGROUND
+ * (docs/feat/subagent-ledger-log.md): the durable fact that it exists, so a
+ * load can tell "running" from "never existed". The payload field is `agentId`,
+ * never `id`: every entry's envelope already carries `id`.
+ */
+export const LogSubagentBackgroundEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("subagent_background"),
+  agentId: z.string().min(1).max(64),
+  callId: z.string().min(1).max(SUBAGENT_CALL_ID_MAX_CHARS),
+  agentType: z.string().min(1).max(SUBAGENT_AGENT_TYPE_MAX_CHARS),
+  description: z.string().max(SUBAGENT_DESCRIPTION_MAX_CHARS),
+});
+
+/** A background sub-agent ended (`report`: its work product, capped by the emitter). */
+export const LogSubagentEndEntrySchema = z.object({
+  ...envelopeShape(),
+  ...skippable(),
+  type: z.literal("subagent_end"),
+  agentId: z.string().min(1).max(64),
+  /** A bounded free string, not `StopReasonSchema`: 6a may add `killed`. */
+  stopReason: z.string().min(1).max(SUBAGENT_STOP_REASON_MAX_CHARS),
+  report: z.string().max(SUBAGENT_REPORT_MAX_CHARS).optional(),
+});
+
 /** Every entry type this protocol version knows, parsed strictly by its own schema (strip). */
 export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogBaseEntrySchema,
@@ -173,6 +228,8 @@ export const KnownLogEntrySchema = z.discriminatedUnion("type", [
   LogTurnStartEntrySchema,
   LogTurnEndEntrySchema,
   LogCallStartedEntrySchema,
+  LogSubagentBackgroundEntrySchema,
+  LogSubagentEndEntrySchema,
 ]);
 export type KnownLogEntry = z.infer<typeof KnownLogEntrySchema>;
 export type LogEntryType = KnownLogEntry["type"];
@@ -188,6 +245,8 @@ export const LOG_ENTRY_CRITICAL: Readonly<Record<LogEntryType, boolean>> = {
   turn_start: false,
   turn_end: false,
   call_started: false,
+  subagent_background: false,
+  subagent_end: false,
 };
 
 /**

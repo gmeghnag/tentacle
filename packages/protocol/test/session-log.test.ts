@@ -8,6 +8,11 @@ import {
   Method,
   OpenParamsSchema,
   RequestSchemas,
+  SUBAGENT_AGENT_TYPE_MAX_CHARS,
+  SUBAGENT_CALL_ID_MAX_CHARS,
+  SUBAGENT_DESCRIPTION_MAX_CHARS,
+  SUBAGENT_REPORT_MAX_CHARS,
+  SUBAGENT_STOP_REASON_MAX_CHARS,
   canonicalMessage,
   projectionDigest,
 } from "../src/index.ts";
@@ -130,6 +135,8 @@ describe("session/log schemas", () => {
       turn_start: false,
       turn_end: false,
       call_started: false,
+      subagent_background: false,
+      subagent_end: false,
     });
     for (const option of KnownLogEntrySchema.options) {
       const type = option.shape.type.value as keyof typeof LOG_ENTRY_CRITICAL;
@@ -145,5 +152,92 @@ describe("session/log schemas", () => {
     expect(ok({ seq: 0, id: "i/0" })).toBe(false);
     expect(ok({ seq: 4, id: "" })).toBe(false);
     expect(ok({ seq: 4, id: "x".repeat(257) })).toBe(false);
+  });
+});
+
+describe("subagent markers (docs/feat/subagent-ledger-log.md, Q8: non-critical)", () => {
+  const bg = {
+    type: "subagent_background",
+    seq: 2,
+    id: "i/2",
+    prev: "i/1",
+    ts: 1,
+    agentId: "sa-1",
+    callId: "c1",
+    agentType: "explore",
+    description: "map the repo",
+  };
+  const end = {
+    type: "subagent_end",
+    seq: 3,
+    id: "i/3",
+    prev: "i/2",
+    ts: 1,
+    agentId: "sa-1",
+    stopReason: "end_turn",
+    report: "the report",
+  };
+
+  test("both types are NON-critical, and a critical variant is refused (a bump would be needed)", () => {
+    // RED on main: the types are unknown there, so nothing can be logged.
+    // Mutation: `critical: true` in either schema → this fails, and an older
+    // build would REFUSE the whole log instead of skipping the entry (FM 9) → red.
+    expect(LOG_ENTRY_CRITICAL.subagent_background).toBe(false);
+    expect(LOG_ENTRY_CRITICAL.subagent_end).toBe(false);
+    expect(KnownLogEntrySchema.safeParse(bg).success).toBe(true);
+    expect(KnownLogEntrySchema.safeParse(end).success).toBe(true);
+    expect(KnownLogEntrySchema.safeParse({ ...bg, critical: true }).success).toBe(false);
+    expect(KnownLogEntrySchema.safeParse({ ...end, critical: true }).success).toBe(false);
+  });
+
+  test("`agentId` survives next to the envelope's own `id` (the payload can never be called `id`)", () => {
+    // The eval's name was `id`; the envelope overwrote it and ONE child produced
+    // TWO notes (Context). Mutation: rename the field to `id` → `agentId` is
+    // stripped and the entry no longer says which child it is about → red.
+    const parsed = KnownLogEntrySchema.parse(bg);
+    expect(parsed.type === "subagent_background" && parsed.agentId).toBe("sa-1");
+    expect(parsed.type === "subagent_background" && parsed.id).toBe("i/2");
+  });
+
+  test("the fields stay lenient: a future `stopReason` (killed) parses; the caps are the emitter's", () => {
+    // Mutation: `stopReason: StopReasonSchema` → 6a's `killed` makes the entry
+    // malformed and the WHOLE log is refused (a KNOWN type that fails its
+    // schema refuses the file) → red.
+    expect(KnownLogEntrySchema.safeParse({ ...end, stopReason: "killed" }).success).toBe(true);
+    expect(KnownLogEntrySchema.safeParse({ ...end, report: undefined }).success).toBe(true);
+    // Over the cap: refused here (the reader's loud path, FM 16)…
+    expect(
+      KnownLogEntrySchema.safeParse({ ...end, report: "x".repeat(SUBAGENT_REPORT_MAX_CHARS + 1) })
+        .success,
+    ).toBe(false);
+    // …which is why the ledger caps it before logging (core's test).
+    expect(
+      KnownLogEntrySchema.safeParse({ ...end, report: "x".repeat(SUBAGENT_REPORT_MAX_CHARS) })
+        .success,
+    ).toBe(true);
+    expect(KnownLogEntrySchema.safeParse({ ...bg, agentId: "" }).success).toBe(false);
+    expect(
+      KnownLogEntrySchema.safeParse({
+        ...bg,
+        description: "x".repeat(SUBAGENT_DESCRIPTION_MAX_CHARS + 1),
+      }).success,
+    ).toBe(false);
+  });
+
+  test("M4: every cap is an exported constant and BOTH schemas really use it", () => {
+    // docs/feat/subagent-ledger-log.md review M4: the emitter imported the cap
+    // while the schema kept a literal, so an over-long field was written and every
+    // reader refused the file. Mutation: a literal in the schema that disagrees
+    // with its constant (e.g. `max(128)` → `max(256)`) → the +1 case parses → red.
+    const at = (n: number): string => "x".repeat(n);
+    const cases: Array<[string, number, Record<string, unknown>]> = [
+      ["agentType", SUBAGENT_AGENT_TYPE_MAX_CHARS, bg],
+      ["callId", SUBAGENT_CALL_ID_MAX_CHARS, bg],
+      ["stopReason", SUBAGENT_STOP_REASON_MAX_CHARS, end],
+    ];
+    for (const [field, max, base] of cases) {
+      expect(KnownLogEntrySchema.safeParse({ ...base, [field]: at(max) }).success).toBe(true);
+      expect(KnownLogEntrySchema.safeParse({ ...base, [field]: at(max + 1) }).success).toBe(false);
+    }
   });
 });

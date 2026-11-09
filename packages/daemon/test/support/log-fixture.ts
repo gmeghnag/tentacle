@@ -64,6 +64,26 @@ export class FakeLog {
   callStarted(callId: string): KnownLogEntry {
     return this.next({ type: "call_started", callId });
   }
+  /** A background sub-agent marker (docs/feat/subagent-ledger-log.md; non-critical). */
+  subagentBackground(agentId: string, callId = `c-${agentId}`): KnownLogEntry {
+    return this.next({
+      type: "subagent_background",
+      critical: false,
+      agentId,
+      callId,
+      agentType: "explore",
+      description: "map the repo",
+    });
+  }
+  subagentEnd(agentId: string, report?: string): KnownLogEntry {
+    return this.next({
+      type: "subagent_end",
+      critical: false,
+      agentId,
+      stopReason: "end_turn",
+      ...(report !== undefined ? { report } : {}),
+    });
+  }
 }
 
 /** A client's view of one session: its head and projection, and the `LogWrite` of each read. */

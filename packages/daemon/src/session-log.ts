@@ -22,7 +22,7 @@
  * entries reference the live message objects). A reader further behind is
  * `rebased` to the last `base`.
  */
-import type { ChatMessage } from "@tentacle/core";
+import type { ChatMessage, SubagentBackgroundBody, SubagentEndBody } from "@tentacle/core";
 import {
   type KnownLogEntry,
   LOG_PAGE_MAX_CHARS,
@@ -138,6 +138,16 @@ export class SessionLog {
 
   callStarted(callId: string): void {
     this.push({ type: "call_started", callId });
+  }
+
+  /** A sub-agent's `agent_task` call started it in the background (docs/feat/subagent-ledger-log.md). */
+  subagentBackground(body: SubagentBackgroundBody): void {
+    this.push({ type: "subagent_background", critical: false, ...body });
+  }
+
+  /** A background sub-agent ended (`report`: its capped work product). */
+  subagentEnd(body: SubagentEndBody): void {
+    this.push({ type: "subagent_end", critical: false, ...body });
   }
 
   /** Assert the projection here; its digest is computed by the first read that serves it. */

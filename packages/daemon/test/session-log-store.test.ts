@@ -701,3 +701,96 @@ describe("fix round 1", () => {
 function cutLoad(messages: ChatMessage[]): ChatMessage[] {
   return [...messages, { role: "assistant", content: expect.any(String) as unknown as string }];
 }
+
+describe("the sub-agent load derivation on the laptop's load (docs/feat/subagent-ledger-log.md)", () => {
+  test("an open `bg` becomes the lost note at load; loading twice gives ONE note each time and writes nothing", async () => {
+    // RED on main: `load()` returns the file's projection as it is — a child a
+    // restart killed is invisible to the resumed model (eval A4, Finding 2).
+    // Mutation: derive from ALL segments (not the current one) → the
+    // superseded-segment case below goes red; skipping the derivation → this.
+    const where = fresh();
+    const store = new LogSessionStore(where);
+    const log = new FakeLog("D1");
+    const reader = new FakeReader("s");
+    await store.write(reader.read(log.base([user("go")]), "cold"));
+    await store.write(reader.read([log.subagentBackground("sa-1")]));
+
+    const before = await readFile(store.file("s"), "utf8");
+    const first = await load(store, "s");
+    if (typeof first === "string") throw new Error(first);
+    expect(first.map((m) => m.role)).toEqual(["user", "user"]);
+    expect(first[1]?.note).toEqual({ kind: "subagent_lost", id: "sa-1" });
+    expect(first[1]?.content).toContain("sa-1 (map the repo) was lost");
+    // The LOAD writes nothing: the same bytes, and the same notes again.
+    expect(await readFile(store.file("s"), "utf8")).toBe(before);
+    const second = await load(store, "s");
+    if (typeof second === "string") throw new Error(second);
+    expect(second).toEqual(first);
+  });
+
+  test("a note already in the history closes its id: no second note (idempotent across a save)", async () => {
+    // Mutation: `subagentLoadNotes` without the `noteSeen` pass → every load
+    // notes the child again (and every save adds one more) → red.
+    const where = fresh();
+    const store = new LogSessionStore(where);
+    const log = new FakeLog("D1");
+    const reader = new FakeReader("s");
+    const ended = {
+      role: "user" as const,
+      content: "[background] sub-agent sa-1 finished",
+      note: { kind: "subagent_report", id: "sa-1" },
+    };
+    await store.write(reader.read(log.base([user("go"), ended]), "cold"));
+    await store.write(reader.read([log.subagentBackground("sa-1"), log.subagentEnd("sa-1", "R")]));
+    const messages = await load(store, "s");
+    if (typeof messages === "string") throw new Error(messages);
+    expect(messages).toEqual([user("go"), ended]);
+  });
+
+  test("an open `bg` in a SUPERSEDED segment only: no note (only the current segment is derived, F14)", async () => {
+    // Mutation: fold every segment the file keeps (keepSuperseded) → a child the
+    // new segment deliberately dropped (a /clear, a fresh start) is revived → red.
+    const where = fresh();
+    const store = new LogSessionStore(where, { keepSuperseded: true });
+    const log = new FakeLog("D1");
+    const reader = new FakeReader("s");
+    await store.write(reader.read(log.base([user("go")]), "cold"));
+    await store.write(reader.read([log.subagentBackground("sa-1")]));
+    // A compaction whose summary drops everything: a new segment, no marker.
+    await store.write(reader.read(log.base([user("SUMMARY")], "compact"), "fork"));
+    const messages = await load(store, "s");
+    if (typeof messages === "string") throw new Error(messages);
+    expect(messages).toEqual([user("SUMMARY")]);
+    // Both segments are on disk (the old one still holds the marker).
+    const parsed = await parse(store, "s");
+    expect(parsed.segments).toHaveLength(2);
+  });
+
+  test("an open turn's repair comes first, then the lost note (both are appended, order kept)", async () => {
+    // FM 1: a crash between the marker and the tool result. Mutation: append the
+    // notes BEFORE the closed turn → the history ends on a cut-turn note while a
+    // child is still open → red.
+    const where = fresh();
+    const store = new LogSessionStore(where);
+    const log = new FakeLog("D1");
+    const reader = new FakeReader("s");
+    await store.write(reader.read(log.base([user("go")]), "cold"));
+    await store.write(
+      reader.read([
+        log.turnStart("t1"),
+        log.callStarted("c1"),
+        log.subagentBackground("sa-1", "c1"),
+        log.msg(asst("", ["c1"])),
+      ]),
+    );
+    const messages = await load(store, "s");
+    if (typeof messages === "string") throw new Error(messages);
+    // The cut turn's own repair (an answer to c1 + the ended-turn note), THEN the lost note.
+    const last = messages.at(-1);
+    expect(last?.note).toEqual({ kind: "subagent_lost", id: "sa-1" });
+    const repair = messages.slice(0, -1);
+    expect(repair[1]?.toolCalls?.[0]?.id).toBe("c1");
+    expect(repair.map((m) => m.content).join(" ")).toMatch(/interrupted/i);
+    expect(repair.every((m) => m.note === undefined)).toBe(true);
+  });
+});

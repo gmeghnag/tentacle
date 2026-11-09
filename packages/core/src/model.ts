@@ -58,7 +58,36 @@ export interface ChatMessage {
    * it while the stored `content` stays clean. The TUI ignores it.
    */
   readonly contextUsage?: ContextUsage;
+  /**
+   * On a tentacle-written `user` message: what kind of note it is and what it is
+   * about (docs/feat/subagent-ledger-log.md). Display only, like `spill`: the
+   * provider mappers copy field by field, so the model sees only `content`. The
+   * load derivation keys on it (structural, idempotent), and a resume renders
+   * such a message as a notice, not as a row the person typed.
+   */
+  readonly note?: MessageNote;
 }
+
+/**
+ * A tentacle-written note's kind and subject. `kind` is a bounded free string on
+ * the wire (an enum would refuse a newer build's kind inside a CRITICAL entry);
+ * the known ones are `NOTE_KIND` constants below.
+ */
+export interface MessageNote {
+  readonly kind: string;
+  /** The job (`sh-N`) or sub-agent (`sa-N`) it is about. */
+  readonly id?: string;
+}
+
+/** The `note.kind` values this build writes. They are constants, never a schema enum. */
+export const NOTE_KIND = {
+  /** A shell job exited (agent.ts's flush). */
+  backgroundExit: "background_exit",
+  /** A finished background sub-agent's report, delivered. */
+  subagentReport: "subagent_report",
+  /** A background sub-agent a restart found unfinished: its work product is gone. */
+  subagentLost: "subagent_lost",
+} as const;
 
 /** How full the model's context was: `used` tokens of a `window` (both tokens). */
 export interface ContextUsage {

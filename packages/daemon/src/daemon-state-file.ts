@@ -21,7 +21,7 @@
  */
 import type { RecordTitle } from "@tentacle/agent";
 import { RECORD_TITLE_MAX } from "@tentacle/agent";
-import type { ChatMessage } from "@tentacle/core";
+import { type ChatMessage, subagentLoadNotes } from "@tentacle/core";
 import { ChatMessageSchema, type LogCursor, type ReturnedEntry } from "@tentacle/protocol";
 import type {
   DaemonSessionRecord,
@@ -29,7 +29,12 @@ import type {
   PersistedTurn,
   PersistedTurnKey,
 } from "./persisted-session.ts";
-import { type ParsedLogFile, currentSegment, foldThrough } from "./session-log-file.ts";
+import {
+  type ParsedLogFile,
+  currentSegment,
+  entriesThrough,
+  foldThrough,
+} from "./session-log-file.ts";
 
 /** The state file's `format` tag. */
 export const DAEMON_STATE_FORMAT = "tentacle-daemon-state";
@@ -364,6 +369,14 @@ export function rebuild(
   let logged: readonly ChatMessage[];
   let messages: readonly ChatMessage[];
   let head: number | undefined;
+  // The entries the sub-agent notes are derived from: the segment THROUGH
+  // `logHead` when paired (a marker after it belongs to a write whose sidecar
+  // did not land — ignored, as the whole tail is, FM 17), else the last
+  // segment's. `foldThrough` returns non-null exactly when `entriesThrough`
+  // does (its first line), so there is no "paired but unprovable" case to
+  // fall back from: one `entriesThrough` call, folded (`through !== null`) —
+  // never a second, possibly different, segment source (review nit-1).
+  const derivedFrom = entriesThrough(parsed, sidecar.logHead) ?? currentSegment(parsed).entries;
   if (through !== null) {
     if (sidecar.k > through.length) {
       return {
@@ -383,6 +396,10 @@ export function rebuild(
     messages = logged;
     head = legacyHead(messages, sidecar.turn !== undefined);
   }
+  // The notes a load appends (docs/feat/subagent-ledger-log.md), over the FINAL
+  // messages: a note delivered after the last log write is in the sidecar's
+  // tail, and closes its id. `reconcileOnReload` appends them.
+  const loadNotes = subagentLoadNotes(derivedFrom, messages);
   return {
     ok: true,
     value: {
@@ -403,6 +420,7 @@ export function rebuild(
       logged,
       logHead: sidecar.logHead,
       paired: through !== null,
+      loadNotes,
     },
   };
 }

@@ -463,6 +463,9 @@ export class SessionPersister {
       logged: log.logged,
       logHead: log.head,
       paired: true,
+      // A live session's notes were appended when it RELOADED (they are in
+      // `state.messages` now): nothing left to append, and nothing to persist.
+      loadNotes: [],
     };
   }
 

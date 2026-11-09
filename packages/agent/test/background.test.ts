@@ -86,6 +86,10 @@ describe("background-job exit trigger", () => {
     const note = messages.find((m) => m.role === "user" && m.content.includes("[background]"));
     expect(note?.content).toContain("bg-1");
     expect(note?.content).toContain("shell_output");
+    // The note carries its kind and job id (docs/feat/subagent-ledger-log.md,
+    // M3), so a resume renders it as a notice, not as a row the person typed.
+    // Mutation: drop the `note` field → it renders as a user message again → red.
+    expect(note?.note).toEqual({ kind: "background_exit", id: "bg-1" });
   });
 
   test("does not re-surface the same exit on a later turn", async () => {

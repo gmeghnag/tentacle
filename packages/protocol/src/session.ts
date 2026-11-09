@@ -31,6 +31,23 @@ export const WireToolCallSchema = z.object({
   arguments: z.string(),
 });
 
+/**
+ * A tentacle-written note on a message (display only,
+ * docs/feat/subagent-ledger-log.md). Its own schema because the field on
+ * `ChatMessageSchema` is FAIL-SOFT: a note a later build writes outside these
+ * bounds is dropped, never a refusal — `message` entries are CRITICAL, so a
+ * refusal here would make the whole log unloadable (review M3).
+ */
+export const MessageNoteSchema = z.object({
+  kind: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[a-z][a-z0-9_]*$/),
+  id: z.string().min(1).max(64).optional(),
+});
+export type MessageNote = z.infer<typeof MessageNoteSchema>;
+
 export const ChatMessageSchema = z.object({
   role: z.enum(["system", "user", "assistant", "tool"]),
   content: z.string(),
@@ -49,6 +66,16 @@ export const ChatMessageSchema = z.object({
   contextUsage: z
     .object({ used: z.number().int().nonnegative(), window: z.number().int().positive() })
     .optional(),
+  /**
+   * On a tentacle-written user message: what kind of note it is (display only,
+   * docs/feat/subagent-ledger-log.md). `kind` is a bounded FREE string, never an
+   * enum: the message entry is CRITICAL, so an unknown enum value would make it
+   * malformed and refuse the whole log. `id` names the job/sub-agent it is about.
+   * FAIL-SOFT (`.catch(undefined)`, owner Q4): a note a later build writes outside
+   * these bounds is DROPPED and the message still loads — the strip-schema rule
+   * applied to a display-only field. Never tighten into a lock-out (review M3).
+   */
+  note: MessageNoteSchema.optional().catch(undefined),
 });
 export type WireChatMessage = z.infer<typeof ChatMessageSchema>;
 

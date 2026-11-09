@@ -124,6 +124,13 @@ export interface DaemonSessionRecord extends SessionRecord {
    * loaded as it is — the turn is closed, never resumed, and a new lineage starts.
    */
   readonly paired: boolean;
+  /**
+   * The sub-agent notes a reload APPENDS to the history
+   * (docs/feat/subagent-ledger-log.md): what the log's `subagent_*` markers
+   * leave open, minus the ids a message already notes. Empty when there is
+   * nothing to say, so an idle resume is untouched.
+   */
+  readonly loadNotes: readonly ChatMessage[];
 }
 
 /**
@@ -327,6 +334,13 @@ function resumableTurn(record: DaemonSessionRecord): ResumedTurn | undefined {
   if (!turn || !first || turn.inFlight !== undefined || !record.paired) {
     return undefined;
   }
+  // A load note cannot go after a suspended turn's unanswered calls (an
+  // invalid history, P8), so a turn with one to append is closed honestly
+  // instead (owner Q1 (a), docs/feat/subagent-ledger-log.md): the child's
+  // death already changed the turn's premises, and the user re-asks.
+  if (record.loadNotes.length > 0) {
+    return undefined;
+  }
   const from = first.groupStart ?? first.toolCallId;
   const key = record.turns.find((k) => k.turnId === turn.turnId);
   const ok = pending.every(
@@ -371,8 +385,19 @@ export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
   const messages = [...record.messages];
   const turn = record.turn;
   const returned = record.returned;
+  // The sub-agent notes a load appends (docs/feat/subagent-ledger-log.md): AFTER
+  // the closed turn's repair (the history must end on the turn's own notes,
+  // never on a note of another topic), and as is when no turn was open. A
+  // resumed turn never gets here with any: `resumableTurn` refuses one (Q1 (a)).
+  const appendNotes = (): ChatMessage[] =>
+    record.loadNotes.length === 0 ? messages : [...messages, ...record.loadNotes];
   if (!turn) {
-    return { messages, turns: record.turns, enqueueIds: record.enqueueIds, returned };
+    return {
+      messages: appendNotes(),
+      turns: record.turns,
+      enqueueIds: record.enqueueIds,
+      returned,
+    };
   }
   const ended = record.archivedAt !== undefined;
   const resume = ended ? undefined : resumableTurn(record);
@@ -420,7 +445,7 @@ export function reconcileOnReload(record: DaemonSessionRecord): Reconciled {
     return id === undefined || known.has(id) ? [] : [{ id, text, cause: "ended" as const }];
   });
   return {
-    messages,
+    messages: appendNotes(),
     turns,
     enqueueIds: record.enqueueIds,
     returned: [...returned, ...back],

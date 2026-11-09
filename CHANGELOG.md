@@ -10,6 +10,8 @@ those.
 
 ### Changed
 
+- **Background job notices stay notices after a resume.** The `[background] job N … finished` note the agent received now shows as a dimmed notice when you `--resume` a session (or a terminal resyncs), not as a message you typed.
+
 - **Sub-agents are limited only by `subagents.maxParallel`.** tentacle no longer asks a llama.cpp server for its slot count (`/props`) to lower that limit, locally or on `run`/`attach`. Set `subagents.maxParallel` to match your server (e.g. llama.cpp's `-np`); with more sub-agents than slots, the server queues the extra requests. The protocol version moved to 18: an older pod daemon or `serve` is refused at connect with "update", as for any version change.
 
 - **A running sub-agent shows its latest steps.** The `agent_task` block lists the last 5 tool calls of the sub-agent, under `… +N earlier · ctrl+o to expand`, instead of its first ones, so you see what it is doing now; Ctrl+O still expands the whole trail. A finished sub-agent keeps its last steps and its report visible, and one that was cancelled or failed ends with `✗ cancelled` / `✗ error`. Long rows are cut to the terminal width; the counts on the first row always stay visible.

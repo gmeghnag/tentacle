@@ -393,6 +393,32 @@ is named on the `base` itself: `base.turn?: turnId`. So a cold read from the las
 knows a turn is open without the `turn_start` before it. Rule for task 2's reader: a turn is
 open from its `turn_start` (or a `base` carrying `turn`) to its `turn_end`.
 
+#### 5b. Background sub-agent markers (feat/subagent-ledger-log, owner Q8)
+
+*— deepseek-v4.1-flash (tentacle), 2026-11-09*
+
+Two more v1 types, both `critical: false` (owner Q8: no `PROTOCOL_VERSION` bump). An older
+build SKIPS them and its projection is intact; a `critical` value would make it refuse the whole
+log. The fields are lenient by design (`stopReason` is a bounded FREE string, not
+`StopReasonSchema`: 6a may add `killed`), and the length caps are enforced by the EMITTER (the
+ledger in `@tentacle/core`), never discovered by a reader — a KNOWN type that fails its own
+schema refuses the file.
+
+| `type` | Payload | Emitted |
+|---|---|---|
+| `subagent_background` | `{agentId, callId, agentType, description}` | `HostedSession.backgroundAgent` (`hosted-session.ts`), one `SessionLog.subagentBackground` push; `agentId` is `sa-N` from the session's ledger |
+| `subagent_end` | `{agentId, stopReason, report?}` (`report` capped at `SUBAGENT_REPORT_MAX_CHARS` = 64 KiB, head+tail with a `[… N chars cut]` line) | `HostedSession.agentEnded`, then `persist()` — a child may end while the session is idle |
+
+The payload field is `agentId`, never `id`: every entry's envelope already carries `id`
+(`"<incarnation>/<seq>"`), so an eval-era `id` was overwritten and ONE child produced TWO notes.
+
+The markers never travel past a segment start; the NOTE does. So the load derivation
+(`subagentLoadNotes`, core) is `open markers of the CURRENT segment − ids a note in the messages
+names`, which makes it idempotent: a load writes nothing. Both load sites call it — the laptop's
+`LogSessionStore.load` and the `serve` daemon's `rebuild` (through the sidecar's `logHead`,
+`entriesThrough`) → `reconcileOnReload`. `ChatMessage.note{kind, id?}` (display only, outside
+`canonicalMessage`) is what a note is keyed on; a resume renders it as a notice.
+
 #### 6. Executor additions found while re-verifying (drift-free refinements)
 
 - `RemoteClient.snapshot()` today is `readBack().messages` (`remote-client.ts:1085-1087`) and
@@ -1411,4 +1437,4 @@ The flake (1 in 12 runs) was never reproduced and is not attributed to this bran
 11. Q11 YES — the title rides the log (`title` entry, non-critical).
 12. Q12 YES — `serve` lineage across reloads deferred to task 3.
 13. Q13 YES — one L task (fallback split point if Review finds it illegible: protocol+daemon / client+cli).
-14. **Critical table (owner, 2026-11-07) — APPROVED, binding:** `critical: true` = `base`, `message`, `replace`, `truncate`; `critical: false` = `title`, `checkpoint`, `turn_start`, `turn_end`, `call_started`. **Owner rule: any new `critical` value (a new type, or changing one) is decided WITH the owner** — the executor must not add or change one on its own: write it as an owner question in the doc and keep the table above.
+14. **Critical table (owner, 2026-11-07) — APPROVED, binding:** `critical: true` = `base`, `message`, `replace`, `truncate`; `critical: false` = `title`, `checkpoint`, `turn_start`, `turn_end`, `call_started`. **Owner rule: any new `critical` value (a new type, or changing one) is decided WITH the owner** — the executor must not add or change one on its own: write it as an owner question in the doc and keep the table above. (Extended with the owner's approval in `feat/subagent-ledger-log` Q8: `subagent_background` / `subagent_end`, both `false` — see §5b.)
