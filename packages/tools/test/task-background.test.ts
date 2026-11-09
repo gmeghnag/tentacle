@@ -62,6 +62,20 @@ describe("agent_task background", () => {
     expect(ended).toEqual(["sa-1:end_turn"]);
   });
 
+  test("no tool call id: refused before anything starts (a blank callId breaks the schema)", async () => {
+    const { jobs, ended } = jobsRig();
+    const g = gatedRunner();
+    const tool = createTaskTool(g.run, TYPES, { background: jobs });
+    const ctx = { sessionId: "s", signal: new AbortController().signal } as unknown as ToolContext;
+    const result = await tool.execute({ description: "map", prompt: "p", background: true }, ctx);
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("need a tool call id");
+    // No launch, no slot held, no child: `log.subagentBackground` never saw "".
+    expect(jobs.list()).toEqual([]);
+    expect(g.seen).toHaveLength(0);
+    expect(ended).toEqual([]);
+  });
+
   test("at the cap a background launch is an error naming the running ids; no child starts", async () => {
     const { jobs } = jobsRig(1);
     const g = gatedRunner();

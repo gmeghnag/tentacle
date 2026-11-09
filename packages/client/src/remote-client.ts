@@ -2197,7 +2197,8 @@ export class RemoteClient {
       // Permission events are session state, not turn-scoped (a re-attach
       // replays a pending one): the router decides, never the turn handler.
       if (update.type === "permission_request") {
-        // Attributed to the turn the stream raised it in (the wire names none).
+        // Attributed to the turn the stream raised it in; the update's own
+        // `turnId` (a background child's spawning turn) wins in the router.
         this.runPermissionActions(this.router.request(entry.id, update, out.turn));
       } else if (update.type === "permission_resolved") {
         this.runPermissionActions(this.router.resolved(entry.id, update.requestId));

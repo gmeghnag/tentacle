@@ -99,7 +99,8 @@ export class PermissionRouter {
 
   /**
    * A `permission_request` arrived (live or replayed). `turnId`: the turn the
-   * stream raised it in (the wire request names none), kept until it is asked.
+   * stream raised it in; a background child's ask names its own `turnId`, which
+   * wins. Kept until it is asked.
    */
   request(
     sessionId: string,

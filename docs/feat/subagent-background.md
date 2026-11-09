@@ -661,6 +661,7 @@ Opens after 6a-1 merges. Move this Part to `docs/feat/subagent-background-ui.md`
 - The child's tool trail is not persisted (Q9): after a resume only its report or the lost note exists.
 - **Task 5 review L3** (a note pushed and wiped by a `context_reset` in the same uncommitted window is never seen by `noteSeen`): handled for sub-agent reports by D5.9 (`noteSeen` at the flush that pushes the note). Shell-job notes are not touched.
 - No wake budget: a model that keeps relaunching keeps waking, as with shell jobs. Task 9 owns the budget.
+- A background `agent_task` runs the result transforms (and PostToolUse hooks) twice for its call id: the launch line, then the report (nit-3, D2's "the same transforms").
 
 ## Owner questions (all, at once)
 
@@ -731,6 +732,71 @@ Run from the worktree root after the last code change (`biome check --write .` h
 - `bun run schema:export` re-run: `packages/protocol/schema/protocol.json` matches the zod schemas (the protocol drift gate is inside `bun test packages`).
 
 Not run as one command: `bun run check` itself (I ran its three parts separately, above).
+
+### Fix round 1
+
+*— deepseek-v4.1-flash (tentacle), 2026-11-09*
+
+Scope: exactly what the Review lists — LOW-1, LOW-2, nit-1 … nit-5. Part 2 (6a-2) untouched, no git state changes, `TODO.md` untouched. Method per finding: test RED (pasted below), then the fix, then GREEN; mutations through the executor's `mutate.ts` (replace once, run the file, restore, sha1 check), with `sha1sum -c` over the two touched sources at the end: both `OK`.
+
+**LOW-1 — `drive` had no guard after `run` (a throwing `host.ended` lost the exit and left a rejected promise).** Fixed in `packages/core/src/agent-jobs.ts:192-197` (the `host.ended` call is wrapped, so the listener loop always runs) and `:114-116` (`void this.drive(...).catch(() => {})`, the last net).
+- Premise confirmed empirically (it was "not checked" in the Review): `.tentacle/tmp/subagent-background/probe-no-handler.ts` — a bare `void (async () => {throw})()` with **no** handler prints `alive after the escaped rejection` and then the process **exits 1** (`error: log store down`). `probe-unhandled.ts` — the same throw with a `process.on("unhandledRejection")` observer — exits 0 and reports `unhandled observed: 1`. So Bun 1.4.3 does kill the process, and the test's `expect(unhandled).toEqual([])` is non-vacuous (it can only be observed, never silently passes for a missed rejection).
+- RED: `packages/core/test/agent-jobs.test.ts:140` `a throwing host.ended loses no exit and no unhandled rejection; the slot is still freed`:
+  ```
+  error: log store down
+        at ended (…/agent-jobs.test.ts:158:23)
+        at drive (…/core/src/agent-jobs.ts:180:16)
+  (fail) AgentJobs.start > a throwing host.ended loses no exit and no unhandled rejection; the slot is still freed [0.26ms]
+  error: expect(received).toEqual(expected)   // exits.map(…) → []
+  - [ "R" ]  + []
+  ```
+  The test proves all three prescribed properties: no rejection reached the observer (process alive), the exit still reached the listener (`["R"]`) and the slot was freed (`jobs.list()` empty), and `start` works again after (the second end reaches its host, `log: ["ended"]`).
+- GREEN: `13 pass, 0 fail` in the file.
+- Mutations (`fix1-mut.json`): **LOW-1a** — drop the inner `try/catch` — **KILLED** (12 pass | 1 fail, this test). **LOW-1c** — the pre-fix shape, both guards gone — **KILLED** (same test). **LOW-1b** — drop the `.catch` on `start`'s promise only — **SURVIVED**, and it is an **equivalent mutant**: with the inner guard in place `drive` has no other way to reject (`run`'s throw is caught at `:175-183`, the listeners each catch their own, `capSubagentText` does not throw on a string), so no observable behaviour changes. The `.catch` stays as the Review's "last net" for a future throw in that block; the guard that actually carries the property is LOW-1a/1c, both KILLED.
+
+**LOW-2 — the refusal text was false in two cases.** Fixed in `packages/core/src/agent-jobs.ts:152-165` (`refusal()` emits the "end your turn (you are woken …)" clause only when `this.running.size > 0`, else `"… Nothing was started. Retry when the running foreground sub-agents return, or do this work yourself."`) and `:124-127` (`acquire` after `dispose` returns `"sub-agents are not available: the session is closing"` instead of the cap refusal). The approved Q2 (b) wording is unchanged for the case with a background child running (`:130` still uses `refusal()`).
+- RED: `agent-jobs.test.ts:254` `foreground holders alone fill the cap…`:
+  ```
+  error: expect(received).not.toContain(expected)
+  Expected to not contain: "end your turn"
+  Received: "at the sub-agent limit (subagents.maxParallel = 2); running: (foreground) fg one, (foreground) fg two. Nothing was started. Either end your turn (…)"
+  (fail) … foreground holders alone fill the cap: the refusal promises no wake (it would stall the task) [0.08ms]
+  ```
+  and `:242` `after dispose it is refused for the reason (the session is closing), not as a limit`:
+  ```
+  Expected: "sub-agents are not available: the session is closing"
+  Received: "at the sub-agent limit (subagents.maxParallel = 2); running: none. Nothing was started. Either end your turn (…)"
+  ```
+  A third test (`:278`) pins the other half: with a background child running, the refusal still says "end your turn" and names `sa-1 (bg one)` — the fix is not "always drop the clause".
+- GREEN: `13 pass, 0 fail`.
+- Mutations: **LOW-2a** — `refusal()` always promises the wake — **KILLED** (the foreground-holders test). **LOW-2b** — `acquire` returns the cap refusal after `dispose` (`this.disposed || this.used() >= this.cap`) — **KILLED** (the after-dispose test).
+
+**nit-1 — stale/false comments.** `client/src/remote-client.ts:2200-2201` → "Attributed to the turn the stream raised it in; the update's own `turnId` (a background child's spawning turn) wins in the router." `client/src/permission-router.ts:100-104` → "`turnId`: the turn the stream raised it in; a background child's ask names its own `turnId`, which wins." `client/src/remote-session.ts:853-854` → "Defensive: `install` only gets own turns today (foreign ones go through `startForeign`)." The guard stays. Comment-only: nothing to test, both ends of the suite still pass.
+
+**nit-2 — the version bump's reason.** `protocol/src/version.ts:10-13` reworded to the Review's text (a `permission_request` may belong to a turn other than the one streaming it; an older client would mis-attribute it, auto-accept included; a sub-agent exit rides `background_exit`). `PROTOCOL_VERSION` is unchanged (20), pinned by `protocol/test/subagent-background.test.ts` and `daemon/test/version-mismatch.test.ts`.
+
+**nit-3 — the double result transform, undocumented.** One sentence added to the `ToolContext.shapeResult` doc (`core/src/tool.ts:118-120`: "A background `agent_task` therefore runs them (and the PostToolUse hooks) twice for its call id: the launch line, then the report.") and the matching Notes/debt bullet (this doc, Notes/debt). Doc/comment only.
+
+**nit-4 — `callId: ctx.toolCallId ?? ""` could write a schema-invalid `subagent_background`.** Fixed at `packages/tools/src/task.ts:193-199`: an early `isError` refusal (`"background sub-agents need a tool call id: run it in the foreground"`) before `bg.start`, and the call is now `callId: ctx.toolCallId` (narrowed, no `?? ""`) at `:201`.
+- RED: `packages/tools/test/task-background.test.ts:65`:
+  ```
+  expect(result.isError).toBe(true);
+  error: expect(received).toBe(expected)   Expected: true   Received: undefined
+  (fail) agent_task background > no tool call id: refused before anything starts (a blank callId breaks the schema) [0.22ms]
+  ```
+  The test also asserts nothing started: `jobs.list()` empty, the runner never called, no `ended`.
+- GREEN: `7 pass, 0 fail` in the file.
+- Mutation: the guard removed → **KILLED** (this test).
+
+**nit-5 — the loosened version tests.** `protocol/test/session-settings.test.ts:89` ("protocol 16") now says `toBeGreaterThanOrEqual(16)`, stating its own property. The other loosened tests were left as-is (the Review calls them acceptable, and the exact `20` is pinned twice). Behaviour-neutral.
+
+**Gate (re-run on the final tree, after the last change and the mutation restores).**
+- `bunx tsc --noEmit` → no output (clean). `bunx tsc -p apps/mobile` → no output (clean).
+- `bunx biome check .` → `Checked 781 files … No fixes applied.` (0 errors, 0 warnings; the baseline is kept). One format error of my own (a long `for` array in the new test) was fixed with `biome check --write` on that file before this run.
+- `bun test packages` → **6011 pass, 3 skip (the opt-in live-k8s / live-docker / slow keepalive), 0 fail**, 6014 tests across 409 files, 182 s — the executor's 6007 + the 4 new tests (3 core, 1 tools).
+- `sha1sum -c` over the two mutated sources after the mutation run: both `OK`; `git status --short` shows only the 11 intended files modified.
+
+**Not fixed / not verified (explicit).** Nothing from the Review is left unfixed. Two honest caveats: (a) LOW-1b is an equivalent mutant and survives on its own (explained above); (b) the LOW-1 test observes `unhandledRejection` on the *test* process, which is the same single Bun process the daemon would die in — it proves the property for the library, not for a real daemon under a crash, which no test can prove without killing the runner.
 
 ## Review
 

@@ -115,7 +115,9 @@ export interface ToolContext {
    * The loop's result transforms for THIS call (redaction, hooks, spill),
    * callable after the call returned: a background sub-agent's report is
    * shaped by them when it finishes, as a foreground one is when it returns.
-   * Absent outside the agent loop.
+   * A background `agent_task` therefore runs them (and the PostToolUse hooks)
+   * twice for its call id: the launch line, then the report. Absent outside the
+   * agent loop.
    */
   readonly shapeResult?: (result: ToolResult, signal?: AbortSignal) => Promise<ToolResult>;
 }

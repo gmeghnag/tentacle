@@ -850,7 +850,8 @@ export class RemoteSession implements SessionStreamListener {
   private install(turn: ActiveTurn): void {
     this.active = turn;
     this.turnId = turn.turnId;
-    // Only a turn THIS session minted (install is also reached by a foreign one).
+    // Defensive: `install` only gets own turns today (foreign ones go through
+    // `startForeign`).
     if (turn.foreign !== true) {
       this.mint(turn.turnId);
     }

@@ -137,6 +137,51 @@ describe("AgentJobs.start", () => {
     await tick();
   });
 
+  test("a throwing host.ended loses no exit and no unhandled rejection; the slot is still freed", async () => {
+    // Bun 1.4.3 EXITS the process on an unhandled rejection and the repo installs
+    // no handler: a throw escaping `drive` would take down every session on the
+    // daemon. The handler here only observes; nothing may reach it.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown): void => {
+      unhandled.push(error);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const jobs = new AgentJobs(1);
+      const log: string[] = [];
+      let ends = 0;
+      jobs.bind({
+        launched: () => "sa-1",
+        ended: () => {
+          ends += 1;
+          if (ends === 1) {
+            throw new Error("log store down");
+          }
+          log.push("ended");
+        },
+      });
+      const exits: AgentJobExit[] = [];
+      jobs.onExit((e) => exits.push(e));
+      expect(jobs.start(spec(), async () => result()).ok).toBe(true);
+      await tick();
+      await Bun.sleep(25); // the runtime reports an escaped rejection after a turn
+      // 1. Nothing escaped: the process is alive and no rejection was raised.
+      expect(unhandled).toEqual([]);
+      // 2. Durability is lost, but the exit still reaches the listeners (the
+      //    live note and the wake go out) and the slot is freed.
+      expect(exits.map((e) => e.report)).toEqual(["R"]);
+      expect(jobs.list()).toEqual([]);
+      // 3. `start` works again afterwards, and the second end reaches its host.
+      expect(jobs.start(spec("again"), async () => result()).ok).toBe(true);
+      await tick();
+      expect(jobs.list()).toEqual([]);
+      expect(log).toEqual(["ended"]);
+      expect(exits).toHaveLength(2);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   test("dispose aborts every child, writes no ended and emits no exit", async () => {
     const { jobs, log } = rig();
     const g = gated();
@@ -194,10 +239,54 @@ describe("AgentJobs.acquire (a foreground child)", () => {
     expect(jobs.acquire("c").ok).toBe(false);
   });
 
-  test("after dispose it is refused", () => {
+  test("after dispose it is refused for the reason (the session is closing), not as a limit", () => {
     const { jobs } = rig();
     jobs.dispose();
-    expect(jobs.acquire("x").ok).toBe(false);
+    const refused = jobs.acquire("x");
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      // A disposed runtime holds nothing: "at the limit … running: none" is false.
+      expect(refused.reason).toBe("sub-agents are not available: the session is closing");
+      expect(refused.reason).not.toContain("limit");
+    }
+  });
+
+  test("foreground holders alone fill the cap: the refusal promises no wake (it would stall the task)", () => {
+    const { jobs } = rig(2);
+    expect(jobs.acquire("fg one").ok).toBe(true);
+    expect(jobs.acquire("fg two").ok).toBe(true);
+    // A background launch and a foreground call are refused the same way.
+    for (const refused of [
+      jobs.start(spec("bg"), async () => result()),
+      jobs.acquire("fg three"),
+    ]) {
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) {
+        expect(refused.reason).toContain("subagents.maxParallel = 2");
+        expect(refused.reason).toContain("fg one");
+        // No background child is running: ending the turn wakes nobody.
+        expect(refused.reason).not.toContain("end your turn");
+        expect(refused.reason).toContain(
+          "Nothing was started. Retry when the running foreground sub-agents return, or do this work yourself.",
+        );
+      }
+    }
+    // With a background child running the approved wording stays.
+    expect(jobs.start(spec("bg"), async () => result()).ok).toBe(false);
+  });
+
+  test("a background child in the running set keeps the approved 'end your turn' wording", async () => {
+    const { jobs } = rig(1);
+    const g = gated();
+    jobs.start(spec("bg one"), g.run);
+    const refused = jobs.acquire("fg one");
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.reason).toContain("sa-1 (bg one)");
+      expect(refused.reason).toContain("end your turn");
+    }
+    g.done();
+    await tick();
   });
 });
 

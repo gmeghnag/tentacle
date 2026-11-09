@@ -190,8 +190,15 @@ export function createTaskTool(
       };
       const bg = options.background;
       if (args.background === true && bg) {
+        if (ctx.toolCallId === undefined) {
+          // A blank callId would write a `subagent_background` the schema refuses.
+          return {
+            content: "background sub-agents need a tool call id: run it in the foreground",
+            isError: true,
+          };
+        }
         const started = bg.start(
-          { callId: ctx.toolCallId ?? "", agentType: type, description: args.description },
+          { callId: ctx.toolCallId, agentType: type, description: args.description },
           async ({ signal, agentId }) => {
             let outcome: TaskRunResult;
             try {

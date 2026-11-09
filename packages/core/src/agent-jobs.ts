@@ -111,7 +111,9 @@ export class AgentJobs {
     const agentId = host.launched(spec);
     const controller = new AbortController();
     this.running.set(agentId, { job: { ...spec, agentId }, controller });
-    void this.drive(agentId, spec, controller, run);
+    // Last net: nothing `drive` can throw may escape as an unhandled rejection
+    // (Bun exits the process on one). `drive` handles its own failures.
+    void this.drive(agentId, spec, controller, run).catch(() => {});
     return { ok: true, agentId };
   }
 
@@ -120,7 +122,11 @@ export class AgentJobs {
    * foreground is as full as the background. The caller releases in `finally`.
    */
   acquire(description: string): AgentSlot {
-    if (this.disposed || this.used() >= this.cap) {
+    if (this.disposed) {
+      // A disposed runtime holds nothing: a "limit" here would be a lie.
+      return { ok: false, reason: "sub-agents are not available: the session is closing" };
+    }
+    if (this.used() >= this.cap) {
       return { ok: false, reason: this.refusal() };
     }
     const token = Symbol("foreground");
@@ -148,9 +154,15 @@ export class AgentJobs {
       ...this.list().map((job) => `${job.agentId} (${job.description})`),
       ...[...this.foreground.values()].map((description) => `(foreground) ${description}`),
     ];
+    // "End your turn and be woken" is only true when a background child runs:
+    // foreground holders alone wake nobody, so ending the turn would stall the task.
+    const next =
+      this.running.size > 0
+        ? "Either end your turn (you are woken by a [background] note when a background sub-agent finishes) or do this work yourself."
+        : "Retry when the running foreground sub-agents return, or do this work yourself.";
     return `at the sub-agent limit (subagents.maxParallel = ${this.cap}); running: ${
       named.length > 0 ? named.join(", ") : "none"
-    }. Nothing was started. Either end your turn (you are woken by a [background] note when a background sub-agent finishes) or do this work yourself.`;
+    }. Nothing was started. ${next}`;
   }
 
   private async drive(
@@ -177,7 +189,12 @@ export class AgentJobs {
       result.report.trim() === "" ? NO_OUTPUT : result.report,
       SUBAGENT_REPORT_MAX_CHARS,
     );
-    this.host?.ended(agentId, result.stopReason, report);
+    try {
+      this.host?.ended(agentId, result.stopReason, report);
+    } catch {
+      // Durability is lost, but the live note and the wake still go out: the
+      // listeners below run unconditionally, and nothing is left rejected.
+    }
     const exit: AgentJobExit = { ...spec, agentId, ...result, report };
     for (const listener of [...this.listeners]) {
       try {
