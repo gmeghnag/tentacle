@@ -189,6 +189,11 @@ export class SpyDaemonStore implements DaemonStore {
     });
   }
 
+  /** A fork is an ordinary unit for the spy (its source's queue is not modelled). */
+  fork(_sourceId: string, unit: LogWrite): Promise<void> {
+    return this.write(unit);
+  }
+
   writeState(id: string, data: string): Promise<void> {
     this.stateWrites.push({ id, data });
     return this.park(() => {

@@ -20,3 +20,4 @@ export { SessionLog, replayFromBase, type LogBase } from "./session-log.ts";
 export * from "./daemon-state-file.ts";
 export * from "./session-log-file.ts";
 export * from "./session-log-store.ts";
+export * from "./session-fork.ts";

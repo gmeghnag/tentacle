@@ -48,6 +48,7 @@ import {
 } from "./hosted-session.ts";
 import { toSessionSkills } from "./mapping.ts";
 import {
+  type ClearForkCapture,
   type DaemonSessionRecord,
   reconcileOnReload,
   restoredActivity,
@@ -740,6 +741,21 @@ export class SessionHost {
   }
 
   /**
+   * `/clear` dropped a chat: keep it as a NEW archived session (a fork), resident
+   * until its write is confirmed, like an archive. Never throws.
+   */
+  private keepFork(sourceId: string, capture: ClearForkCapture): void {
+    const persister = this.opts.persister;
+    if (!persister) {
+      return;
+    }
+    const { record, written } = persister.fork(sourceId, capture, this.now());
+    const entry = archivedEntry(record, record);
+    this.archived.set(record.id, entry);
+    void written.then((ok) => this.settleWrite(entry, ok, record));
+  }
+
+  /**
    * A write of `record` for `entry` settled: landed → memory drops the record;
    * failed → a sweep retries. Only for the entry's CURRENT record: an older
    * write settling after a rename rewrote it changes nothing.
@@ -945,7 +961,11 @@ export class SessionHost {
       this.opts.ringBytes,
       () => this.now(),
       this.opts.persister
-        ? { persister: this.opts.persister, ...(restored ? { restored } : {}) }
+        ? {
+            persister: this.opts.persister,
+            keepFork: (source, capture) => this.keepFork(source, capture),
+            ...(restored ? { restored } : {}),
+          }
         : undefined,
       {
         ...(titleModel ? { model: titleModel } : {}),

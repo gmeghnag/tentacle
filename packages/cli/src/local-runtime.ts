@@ -36,6 +36,7 @@ import type {
   ModelProvider,
   PermissionBroker,
 } from "@tentacle/core";
+import { forkWrite, forkableMessages } from "@tentacle/daemon";
 import { applyGroupMessage } from "@tentacle/exec";
 import {
   DomainErrorCode,
@@ -259,6 +260,10 @@ export interface ControllerSettings {
 const ended = (error: unknown): boolean =>
   (error as { code?: unknown } | null)?.code === DomainErrorCode.UnknownSession;
 
+/** The daemon ANSWERED with a refusal (by code): nothing changed. */
+const clearRefused = (error: unknown): boolean =>
+  Object.values(DomainErrorCode).includes((error as { code?: unknown } | null)?.code as never);
+
 /** The daemon's wire title as the store's `TitleState`. */
 function titleState(title: SessionTitle): TitleState {
   return title.source === "auto" ? { source: "auto" } : { source: title.source, text: title.text };
@@ -300,7 +305,16 @@ export function persistingController(
    * file as it is and is retried at the next save.
    */
   setAside?: (messages: readonly ChatMessage[], title: TitleState) => Promise<void>,
+  /** `/clear`: keep the chat it drops (docs/feat/clear-fork-history.md). Absent: `connect`, unit fakes. */
+  keepFork?: (messages: readonly ChatMessage[], title: TitleState) => void,
 ): PersistingController {
+  /** The newest read held (what `/clear` forks) and the read head already forked. */
+  let lastRead: {
+    messages: readonly ChatMessage[];
+    title: TitleState;
+    head: string;
+  } | null = null;
+  let forkedHead: string | null = null;
   let running: Promise<void> | null = null;
   let again = false;
   let closed = false;
@@ -311,11 +325,17 @@ export function persistingController(
   let confirmed = true;
   /** A forked-from copy not yet durable aside (F1): kept until it is, before any later write. */
   let pendingAside: readonly ChatMessage[] | null = null;
+  /**
+   * A `/clear` is on the wire: a read STARTED after it describes the NEW
+   * history, so it must never become `/clear`'s copy (M1).
+   */
+  let clearSent = false;
   const run = async (): Promise<void> => {
     do {
       again = false;
       confirmed = false;
       try {
+        const pre = !clearSent;
         const back = await inner.readBack();
         if (back?.aside && setAside) {
           pendingAside = back.aside;
@@ -328,6 +348,15 @@ export function persistingController(
         if (back) {
           if (back.title) {
             lastTitle = titleState(back.title);
+          }
+          // The copy `/clear` forks: only a read started BEFORE the clear was
+          // sent (the channel is ordered, so its reply precedes the clear's).
+          if (pre) {
+            lastRead = {
+              messages: back.messages,
+              title: lastTitle,
+              head: back.read?.head?.id ?? "",
+            };
           }
           // The start record is read AFTER the read-back resolved: every frame
           // that preceded its reply on the ordered channel is recorded (P14).
@@ -421,6 +450,21 @@ export function persistingController(
       }
     }
   }
+  const armFork = (copy: typeof lastRead): void => {
+    if (!keepFork || copy === null || copy.head === forkedHead) {
+      return;
+    }
+    const kept = forkableMessages(copy.messages);
+    if (kept === null) {
+      return;
+    }
+    forkedHead = copy.head;
+    try {
+      keepFork(kept, copy.title);
+    } catch (error) {
+      onFlushError(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
   return {
     send(prompt, signal, opts) {
       return saved(inner.send(prompt, signal, opts));
@@ -437,8 +481,30 @@ export function persistingController(
     },
     // `/clear` (docs/feat/clear-keeps-jobs.md): the daemon reset the history in
     // place; save the new segment the way a compaction's is.
+    // The old chat is kept as its own session first (clear-fork-history).
     async clear() {
-      const result = await inner.clear();
+      // Read the pre-clear history back first (bounded: a slow link must not hold /clear).
+      flush();
+      await bounded(flushed(), FLUSH_ON_EXIT_TIMEOUT_MS);
+      // The copy is taken AFTER the clear settles, so a pre-clear read slower
+      // than the bound above still lands in it (M1); a read started after the
+      // clear never does (`clearSent`, checked where the read starts).
+      clearSent = true;
+      let result: Awaited<ReturnType<typeof inner.clear>>;
+      try {
+        result = await inner.clear();
+      } catch (error) {
+        const copy = lastRead;
+        if (!clearRefused(error)) {
+          // The link dropped: it may have landed. A spare row beats a lost chat.
+          armFork(copy);
+          flush();
+        }
+        throw error;
+      } finally {
+        clearSent = false;
+      }
+      armFork(lastRead); // queued in the store BEFORE the save below can drop the old chat
       flush();
       return result;
     },
@@ -733,6 +799,19 @@ export async function createLocalRuntime(deps: LocalRuntimeDeps): Promise<LocalR
           { cwd: deps.cwd, model: deps.model, createdAt },
           messages,
           latest,
+        );
+      },
+      (messages, latest) => {
+        createdAt ??= Date.now();
+        deps.saver.keepFork(
+          uid,
+          forkWrite({
+            id: crypto.randomUUID(),
+            meta: { cwd: deps.cwd, model: deps.model, createdAt },
+            messages,
+            title: latest,
+            ts: Date.now(),
+          }),
         );
       },
     );

@@ -790,11 +790,18 @@ describe("createLocalRuntime (local over RPC)", () => {
       { ...inner, clear: async () => ({ before: 2, after: 0 }) } as unknown as RemoteSession,
       (m) => saved.push(m.map((x) => String(x.content))),
     );
-    expect(await ctl.clear?.()).toEqual({ before: 2, after: 0 });
+    // `/clear` reads the chat first (the copy a fork is made from,
+    // docs/feat/clear-fork-history.md): that read is answered, then the clear
+    // runs, then a SECOND read saves the new segment.
+    const clearing = ctl.clear?.();
+    await new Promise((r) => setTimeout(r, 5));
     expect(held).toHaveLength(1);
-    held[0]?.resolve([{ role: "user", content: "note" }]);
+    held[0]?.resolve([{ role: "user", content: "old" }]);
+    expect(await clearing).toEqual({ before: 2, after: 0 });
+    expect(held).toHaveLength(2);
+    held[1]?.resolve([{ role: "user", content: "note" }]);
     await ctl.flushed();
-    expect(saved).toEqual([["note"]]);
+    expect(saved).toEqual([["old"], ["note"]]);
   });
 
   test("detached save: send ends while the post-turn snapshot is still pending", async () => {

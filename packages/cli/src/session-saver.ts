@@ -18,7 +18,7 @@ import type { LogMeta, LogSessionStore, LogWrite } from "@tentacle/daemon";
  * `saveAside` when the store can keep a diverged copy.
  */
 export type SaveTarget = Pick<LogSessionStore, "write" | "saveSnapshot" | "remove"> &
-  Partial<Pick<LogSessionStore, "saveAside">>;
+  Partial<Pick<LogSessionStore, "saveAside" | "fork">>;
 
 /** A uid's last save outcome: fine, or failing with the latest error. */
 export type SaveState =
@@ -87,6 +87,34 @@ export class SessionSaver {
   /** Save one `session/log` read in the background; the outcome is reported, never thrown. */
   write(update: LogWrite): void {
     this.track(update.id, () => this.target.write(update));
+  }
+
+  /**
+   * Keep the chat `/clear` is about to drop as a NEW session (docs/feat/clear-fork-history.md),
+   * queued in `sourceId`'s store queue so it precedes the save that drops it. The
+   * outcome is reported like a save, never thrown. No `observe` listener: a fork
+   * is not the "latest session".
+   */
+  keepFork(sourceId: string, update: LogWrite): void {
+    if (!this.target.fork || this.removed.has(sourceId)) {
+      return;
+    }
+    let started: Promise<void>;
+    try {
+      started = this.target.fork(sourceId, update);
+    } catch (error) {
+      started = Promise.reject(error);
+    }
+    const settled = started.then(
+      () => this.settle(sourceId, { ok: true }),
+      (error: unknown) =>
+        this.settle(sourceId, {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+    );
+    this.pending.set(settled, sourceId);
+    void settled.finally(() => this.pending.delete(settled));
   }
 
   /** Save a whole history (the in-process path, no daemon log); reported like `write`. */
