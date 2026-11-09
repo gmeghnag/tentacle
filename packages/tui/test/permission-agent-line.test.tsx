@@ -24,6 +24,15 @@ describe("permissionAgentLine", () => {
     expect(permissionAgentLine(AGENT, 80)).toBe('explore · "find callers"');
   });
 
+  test("a BACKGROUND child's ask names its id and says so (docs/feat/subagent-background.md)", () => {
+    // Mutation: ignore `id` → the line is the foreground one → red.
+    expect(permissionAgentLine({ ...AGENT, id: "sa-3" }, 80)).toBe(
+      'sa-3 · explore · "find callers" · background',
+    );
+    // The row never wraps: truncated to the width like the foreground one.
+    expect(permissionAgentLine({ ...AGENT, id: "sa-3" }, 24).length).toBe(21);
+  });
+
   test("truncated to the width", () => {
     const line = permissionAgentLine({ type: "explore", description: "x".repeat(200) }, 40);
     expect(line.length).toBe(37);

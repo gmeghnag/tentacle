@@ -48,7 +48,15 @@ export function toPermissionRequestUpdate(
     ...(req.detail ? { explanation: req.detail } : {}),
     ...(req.suggestion ? { suggestion: { prefix: req.suggestion.prefix } } : {}),
     options: permissionOptions(req),
-    ...(agent ? { agent: { type: agent.type, description: agent.description } } : {}),
+    ...(agent
+      ? {
+          agent: {
+            type: agent.type,
+            description: agent.description,
+            ...(agent.id !== undefined ? { id: agent.id } : {}),
+          },
+        }
+      : {}),
     // This daemon carries a reply with a refusal to the model (docs/feat/permission-reply.md).
     reply: { maxChars: MAX_PERMISSION_REPLY_CHARS },
   };

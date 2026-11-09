@@ -253,6 +253,20 @@ process.exit(0);
 
 *— claude-opus-5-5, 2026-11-09*
 
+### Plan change (owner Q2 b)
+
+*— claude-sonnet-5-5, 2026-11-09*
+
+**Owner (2026-11-09): Q1 → (a)** `agent_kill(id)` for the model, in 6a-2 (not in 6a-1). **Q2 → (b)**: a foreground `agent_task` at a full cap is REFUSED at once, like a background launch. No FIFO wait, no waiting row, no waiters queue. This note OVERRIDES D1, D2, failure modes 10/11 and tests T6/T7/T9/T12 below; where they disagree, this note wins.
+
+- **D1.** `acquire(description)` is a synchronous try: `{ok:true, release} | {ok:false, reason}`. No `signal`, no `onWait`, no waiters, no `pump`. `used = running.size + foreground.size` (foreground entries keep their description for the refusal). `start` refuses on `used >= cap` only (no waiter clause). `release` is idempotent. `setCap` only stores the cap (nothing to admit). After `dispose`, `acquire` is refused.
+- **D2.** Foreground path: `const slot = bg ? bg.acquire(args.description) : noSlot`; `!slot.ok` → `{content: slot.reason, isError: true}`, no child, no slot. `try { run } finally { slot.release() }`.
+- **Refusal text** (both paths), naming the running children (`sa-N (description)`; foreground ones as `(foreground) description`): `at the sub-agent limit (subagents.maxParallel = N); running: …. Nothing was started. Either end your turn (you are woken by a [background] note when a background sub-agent finishes) or do this work yourself.` It does NOT say "run it in the foreground" (the foreground is equally full) and does not mention `agent_kill` (6a-2).
+- **Failure modes.** #10: a cap-full launch, background or foreground, is an error result naming the running children; no child, no marker, no id, no slot. #11: a cap lowered by a sync kills nothing; new work is refused until `used < cap`.
+- **Tests.** T6 → "foreground at full cap is refused naming the running ids; no child, no slot leaked; a release frees exactly one slot and is idempotent". T7 → dropped (no waiters). T9 → "setCap lowered: running children stay, new starts refused; raised: start works". T12 → "foreground at full cap: `isError`, names the ids, `run` never called; a throwing run still releases (the `finally`)".
+- **Citations.** Task 5 is merged; every `file:line` below was written for `7cdc9b2` and is re-verified as I reach each slice (drift is recorded in Execution).
+- **Task 5 L3 debt:** D5.9 pays it for a sub-agent report; see Notes / debt.
+
 ### Load-bearing assumption
 
 **A child started from inside a tool's `execute`, on its own `AbortController`, keeps running after the tool returned and after its turn ended, and its exit, routed through the agent's existing `pendingExits` and `kickWake`, starts exactly one turn that flushes the note. The turn's stream is not involved.**
@@ -645,6 +659,7 @@ Opens after 6a-1 merges. Move this Part to `docs/feat/subagent-background-ui.md`
 - `liveness().busy` counts children, not shell jobs: the reaper's gap for shell jobs stays (H2 said to record it).
 - `/clear` aborts children until `feat/clear-keeps-jobs`.
 - The child's tool trail is not persisted (Q9): after a resume only its report or the lost note exists.
+- **Task 5 review L3** (a note pushed and wiped by a `context_reset` in the same uncommitted window is never seen by `noteSeen`): handled for sub-agent reports by D5.9 (`noteSeen` at the flush that pushes the note). Shell-job notes are not touched.
 - No wake budget: a model that keeps relaunching keeps waking, as with shell jobs. Task 9 owns the budget.
 
 ## Owner questions (all, at once)
@@ -656,15 +671,66 @@ Numbered for this doc. Task 5's Q3 and Q4 are assumed (a), see the header.
 (b) Nothing until task 7.
 **Recommend (a):** the model that launched it can also stop it, and it is what makes the shared cap safe.
 
+**Owner (2026-11-09): (a).** `agent_kill(id)` for the model, in 6a-2 (NOT in 6a-1).
+
 **Q2. A foreground `agent_task` when background children already fill `maxParallel`.** Owner Q2 is "one cap", and L2 says foreground calls are not errored; neither says what happens when the wait is long (with `maxParallel: 1`, one background child blocks every foreground spawn until it ends).
 (a) It waits, FIFO, with a `waiting for a free slot (running: sa-1)` row, and Esc cancels it. The cap is exact.
 (b) It is refused like a background launch, with the running ids, so the model decides.
 (c) A foreground spawn ignores background children (the cap binds background launches only).
 **Recommend (a):** it is what "one cap" means, the row explains the wait, and Esc is always available. This plan is written for (a); (b) or (c) is a change of a few lines in `task.ts` and `AgentJobs.acquire`.
 
+**Owner (2026-11-09): (b), not the recommended (a).** A foreground `agent_task` at a full cap is refused at once with an error naming the running children, so the model chooses (end its turn and be woken, run the work itself, or later stop one). No FIFO, no waiting row. See "Plan change (owner Q2 b)".
+
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-sonnet-5-5, 2026-11-09*
+
+**Scope: 6a-1 only.** Part 2 (6a-2: the `subagents` update, footbar count, quit confirm, relay keep-awake, `agent_kill`) is untouched. Owner answers Q1 (a: `agent_kill` in 6a-2) and Q2 (b: refuse at the cap, no waiting) are recorded in "Owner questions" and, for Q2, in "Plan change (owner Q2 b)" at the top of Part 1 (written BEFORE any code).
+
+**Method.** Slice by slice in the plan's Files order; each test written and run RED first (assertion failures, or a missing symbol where the slice adds one), then the code, then GREEN; then one mutation per load-bearing property through `.tentacle/tmp/subagent-background/mutate.ts` (replace once, run the file, restore, sha1 check: every line below says `sha OK`). Scratch: `.tentacle/tmp/subagent-background/` (gitignored).
+
+### As built, in order
+
+1. **Protocol** — `version.ts` 20 (+comment); `permission.ts` `agent.id?`, `turnId?` (no `.max()`); `updates.ts` `background_exit.agent?`; `session.ts` `jobs` doc; `bun run schema:export` (`schema/protocol.json`, +21/−1). Three older tests that pinned `=== 19` now say `>= 19` (`protocol/test/{update-settings,session-settings,published-models}`, `daemon/test/session-settings`), and `daemon/test/version-mismatch.test.ts` follows `PROTOCOL_VERSION` (20). New: `protocol/test/subagent-background.test.ts` (T41; RED on 3/3, GREEN). Mutation `turnId: .max(10)` → KILLED.
+2. **Core** — new `core/src/agent-jobs.ts` (`AgentJobs`: `start`, `acquire`, `setCap`, `bind`, `list`, `onExit`, `dispose`; `AgentJobHost`, `AgentSlot`, …), exported from `index.ts`; `tool.ts` `ToolContext.shapeResult`; `jobs.ts` `BackgroundJob.agent?`; `permission.ts` `agent.id?`. Tests `core/test/agent-jobs.test.ts` (10 tests; RED = `Export named 'AgentJobs' not found`). Mutations (all KILLED, sha OK): drop the cap check in `start` (T2); drop the `disposed` return in `drive` (T8); foreground not counted in `used` (T6); `ended` after the listeners (T4); catch → wrong stopReason (T5); a non-idempotent release (T6b — first SURVIVED because the test released twice before a re-acquire; the test was reordered, then KILLED); `launched` twice (T1).
+3. **Tool** — `tools/src/task.ts`: `TaskToolOptions.background`, `TaskRunControls.agentId`; the schema is `z.object({...baseSchema.shape, ...model?, ...background?})`; background branch (child on its own signal, `shapeResult` on the report, also on the throw path); foreground branch takes a slot via `acquire` or returns the refusal as `isError`, releases in `finally`. Tests `tools/test/task-background.test.ts` (6; RED on 5 by assertion/timeouts). Mutations KILLED: `ctx.signal` to the child (T10); no `finally` release (T12); foreground ignores the refusal (T12b); `background` always offered (T13); skip `shapeResult` on the throw path (T14); launch refusal without `isError` (T11).
+4. **Agent** — `subagent.ts` (`SubagentRunControls.agentId`; `subagentRequester(…, background?)` forwards `agent.id` and the child's `signal`); `agent.ts` (`PendingExit`, `AgentConfig.agentJobs`, a second exit subscription removed by `retire`, `background_exit.agent`, both `ctx` builders get `shapeResult`, the agent branch in `flushBackgroundExits` using `subagentReportNote`, `runningBackground()`); `compact.ts` (`stillRunningNote`, `compactedHistory(…, running)`); `context-reset.ts` (`agents?`); `session.ts` (`compact` passes the running note). Tests `agent/test/subagent-background.test.ts` (7), `agent/test/running-note.test.ts` (4); `replace-agent.test.ts` adjusted for the `PendingExit` union. Mutations KILLED: drop signal (T15), drop `agent.id` (T15b), no agent branch (T16), no collection (T16b), no unsubscribe in `retire` (T17), no `shapeResult` in either ctx builder (T14 sequential and a separate parallel-group test T14p), reset/compaction leave out agents/running, a changed shell paragraph (T18). `bun test packages/agent`: 469 pass, 0 fail after the slice.
+5. **Daemon** — `hosted-session.ts`: new last constructor arg `agentRuntime`; `bind` (`launched` → `backgroundAgent` + `spawnTurns`; `ended` → `agentEnded`), the exit subscription (emit `background_exit{agent}` + `kickWake`); `PendingAsk.record` nullable + `reoffer`; `registerAsk` extracted from `awaitDecision` (no behaviour change; 632 daemon tests stayed green); `awaitBackgroundDecision`; `reofferBackgroundAsks` at `attach` (before the replay) and at the end of `historyReplaced`; `summary().jobs` and `liveness().busy` count children; `agentEnded` stamps `lastActiveAt`; `drive` calls `noteSeen` at the flush (task 5 L3); `close` unsubscribes and disposes; `reusable()` carries it. `permission-map.ts` copies `agent.id`; `session-host.ts` (`AgentFactory`/`AgentReuse.agentJobs`, passed to `HostedSession`, `foreign` compares it and disposes a stray, `newSessionContext` disposes); `session-reaper.ts` comment only. Tests `daemon/test/subagent-background.test.ts` (14: T19–T26, T27, T28, T29, T30, T31, T32) and `subagent-background-host.test.ts` (3: T32 through `SessionHost.updateSettings`, T33 over the real `LogSessionStore`). RED before the code: 13 of 14 failed (T31 passed vacuously because nothing bound the ledger yet; it was made non-vacuous with `wake:false` and then KILLED by the mutation below). Mutations KILLED (sha OK): remove `kickWake` (T19); ignore `lastEndBad` (T20); `busy = running` (T21); `jobs` shell-only (T21b); `lastActiveAt` not moved (T21c — SURVIVED at first because the wake turn's end moves the stamp; fixed with a `wake:false` rig, then KILLED); route the ask through the turn path (T22); the controller's signal for the ask (T23 — SURVIVED at first because the ask was raised with no turn running; the test now raises it DURING a later turn, then KILLED); no re-offer in `attach` (T24); none in `historyReplaced` (T25); give the ask a record (T26); skip `blockingUnsupported` (T28); remove `dispose` from `close` (T30); drop D5.9 (T31 — SURVIVED at first, same wake reason; fixed, KILLED); `reusable()` without it (T32); no spawn turn (T22b/c); the host-level: `buildHosted` without `agentJobs`, `foreign` without the compare, a stray not disposed.
+6. **Client** — `permission-router.ts` (`update.turnId ?? turnId`, `agent.id` through `progressText`); `mapping.ts` (`agent` copied); `remote-client.ts` (`BackgroundExitNotice.agent`, `agentExitListeners`/`onAgentExit`, fired from `deliver` only for an agent exit, never in `exitListeners`); `remote-session.ts` (`onAgentExit`, `mintedTurns` bounded at 256 in `ownsTurn`, minted in `send` and in `install` for a non-foreign turn). Tests: `client/test/agent-exit.test.ts` (3: T35, T36 ×2), `permission-router.test.ts` (T34). Mutations KILLED: ignore `update.turnId` (T34); `ownsTurn` current-only (T35); unbounded (T35b); subscribe through `onBackgroundExit` (T36); fire for shell exits (T36b); not filtered by session (T36c — first SURVIVED, the test finished the wrong session's child; fixed, KILLED). `bun test packages/client`: 476 pass.
+7. **CLI** — `wiring.ts` (`BuildAgentOptions.agentJobs`, `new AgentJobs(cap)` + `setCap`, `createTaskTool(…, {background})`, `new Agent({agentJobs})`, `WiredAgent.agentJobs`); `worker.ts` forwards it; `serve.ts` forwards `reuse.agentJobs`; `local-runtime.ts` (`remoteJobsView` forwards `agent`; `inner.onAgentExit?.(() => flush())`, unsubscribed at `close`). Tests `wiring.test.ts` (T38 ×2), `local-runtime.test.ts` (T37). Mutations KILLED: no `onAgentExit` subscription (T37); skip `setCap`, always a fresh `AgentJobs`, no `background` on the tool (T38).
+8. **TUI** — `state.ts` (`backgroundExitNotice(…, agent?)`, used on the event path), `App.tsx` (the live path passes `job.agent`), `permission-ui.ts` (`PermissionAgent.id`, the `sa-N · type · "desc" · background` row). Tests `state.test.ts` and `permission-agent-line.test.tsx` (T40). Mutations KILLED ×3.
+9. **Docs** — `CHANGELOG.md` `[Unreleased]` / Added (plain language, 6a-1 only); this doc (plan change note, owner answers, Notes/debt bullet for task 5 L3).
+
+### Drift from the plan (each with the reason)
+
+- **Q2 (b)** replaces D1's `acquire(signal, onWait)`/waiters/`pump` and D2's waiting row (owner decision; written first, see the note). Consequence: T6/T7/T9/T12 were rewritten as the note says; **T7 does not exist**.
+- **`acquire(description)` returns `AgentSlot`** (`{ok:true, release} | {ok:false, reason}`), foreground slots are kept by token so the refusal can name them (`(foreground) …`). The reason text for `start` with no host still says "run it in the foreground" (true there: the foreground is not full); the cap refusal never does.
+- **`contextResetHistory`'s `agents` is optional** (the plan says "takes agents"): existing vectors and call sites stay byte-identical. **Compaction now also names running shell jobs** (it named none before — plan P18, consequence of sharing `stillRunningNote`); with nothing running the text is unchanged (pinned).
+- **T29 is folded into the daemon tests**: the ask reaches the requester `HostedSession` installed on the shared broker, and a second spy broker is never called (a daemon-level test). The wiring-level half ("`buildAgent` forwards `agent.id`/`signal` through the real broker") is **not** tested end to end: a scripted model shared by the parent and a concurrent background child makes the call order nondeterministic. It is covered in two halves: T15 (runner → requester options) and T22 (daemon).
+- **T39 (relay-state) was not added**: the relay reads a number (`summary().jobs`), which T21 pins; no relay code changed.
+- **T25** imports `reduceStream` from the client's `src` by relative path in a daemon test (the probe's pattern), to prove the client keeps the request through the barrier.
+- **Re-offer at attach also reaches already-attached clients** (it goes through `emit`, as the plan requires for `seq` contiguity), and with nobody attached the replay holds the original frame AND the re-offer (same `requestId`): the router dedupes (P12). T27 asserts one id, ≥1 frames.
+- **Existing tests touched** only for the version bump (`>= 19` or 20) and the `PendingExit` union in `replace-agent.test.ts`.
+- The probe (`probe.ts`) was **not re-run before the edits** (the AGENTS "reproduce first" step): the capability gap is shown instead by the tests being RED on the unimplemented code (e.g. `background` absent from the schema, `Export named 'AgentJobs' not found`).
+
+### Not done / not verified (explicit)
+
+- **No live check with a real model**, a real pod, or the real TUI (plan: "not verified"). Nothing was run against a provider.
+- **Part 2 (6a-2)** and `agent_kill`: not started, by design.
+- **`feat/clear-keeps-jobs`** (D10): not built; `/clear` still aborts children silently (recorded in Notes).
+- **End-to-end `buildAgent` → `agent_task{background}` → daemon ask** is not one test (see T29 above).
+- T39 not added (above). The relay's behaviour with a child (P9) is argued from `jobs` being a count, not run.
+
+### Gate
+
+Run from the worktree root after the last code change (`biome check --write .` had only reformatted my own new/changed files; `git status` shows no unrelated file touched):
+
+- `bunx tsc --noEmit` → no output (clean). `bunx tsc -p apps/mobile` → no output (clean).
+- `bunx biome check .` → `Checked 781 files … No fixes applied.` (0 errors, 0 warnings; baseline clean kept).
+- `bun test packages` → **6007 pass, 3 skip (the opt-in live-k8s / live-docker / slow keepalive tests), 0 fail**, 6010 tests in 409 files, 180 s.
+- `bun run schema:export` re-run: `packages/protocol/schema/protocol.json` matches the zod schemas (the protocol drift gate is inside `bun test packages`).
+
+Not run as one command: `bun run check` itself (I ran its three parts separately, above).
 
 ## Review
 

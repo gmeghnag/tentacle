@@ -146,7 +146,17 @@ export function backgroundExitNotice(
   command: string,
   status: string,
   exitCode: number | null,
+  /** Set for a sub-agent's exit: `jobId` is its `sa-N`. */
+  agent?: { readonly stopReason: string; readonly toolUses: number },
 ): NoticeItem {
+  if (agent) {
+    const how = agent.stopReason === "end_turn" ? "finished" : `ended (${agent.stopReason})`;
+    return {
+      kind: "notice",
+      jobId,
+      text: `${jobId} ${how} · ${agent.toolUses} tool uses · ${command} — report sent to the agent`,
+    };
+  }
   const code = exitCode !== null ? ` (exit=${exitCode})` : "";
   return { kind: "notice", jobId, text: `background job ${jobId} ${status}${code}: ${command}` };
 }
@@ -454,7 +464,7 @@ export function applyEvent(state: DisplayState, event: AgentEvent, now: number):
     case "background_exit":
       return appendBackgroundExit(
         state,
-        backgroundExitNotice(event.jobId, event.command, event.status, event.exitCode),
+        backgroundExitNotice(event.jobId, event.command, event.status, event.exitCode, event.agent),
       );
 
     case "steer":

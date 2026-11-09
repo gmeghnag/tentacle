@@ -68,6 +68,20 @@
     "BackgroundExit": {
       "additionalProperties": true,
       "properties": {
+        "agent": {
+          "additionalProperties": true,
+          "properties": {
+            "stopReason": {
+              "type": "string"
+            },
+            "toolUses": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["stopReason", "toolUses"],
+          "type": "object"
+        },
         "command": {
           "type": "string"
         },
@@ -1584,6 +1598,9 @@
             "description": {
               "type": "string"
             },
+            "id": {
+              "type": "string"
+            },
             "type": {
               "type": "string"
             }
@@ -1633,6 +1650,9 @@
         },
         "toolCallId": {
           "minLength": 1,
+          "type": "string"
+        },
+        "turnId": {
           "type": "string"
         },
         "type": {
@@ -3497,5 +3517,5 @@
     }
   },
   "title": "tentacle wire protocol",
-  "x-protocol-version": 19
+  "x-protocol-version": 20
 }

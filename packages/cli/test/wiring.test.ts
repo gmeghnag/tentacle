@@ -11,6 +11,7 @@ import {
   projectKey,
 } from "@tentacle/agent";
 import {
+  AgentJobs,
   type ChatRequest,
   type ModelProvider,
   PermissionBroker,
@@ -119,6 +120,33 @@ describe("inProcessAgents (single-broker invariant, AGENTS §7)", () => {
         agent: { type: "general", description: "look" },
       },
     ]);
+  });
+});
+
+describe("background sub-agents wiring (docs/feat/subagent-background.md, T38)", () => {
+  const taskSchema = (tools: { definitions(): readonly { name: string }[] }) =>
+    JSON.stringify(tools.definitions().find((d) => d.name === "agent_task"));
+
+  test("`background` is offered when sub-agents are on, and not otherwise", () => {
+    const on = buildAgent({ ...config, subagentsEnabled: true });
+    expect(taskSchema(on.tools)).toContain("background");
+    const off = buildAgent({ ...config, subagentsEnabled: false });
+    expect(off.tools.definitions().some((d) => d.name === "agent_task")).toBe(false);
+  });
+
+  test("a reused AgentJobs is the one the agent gets, and the cap is set from the config", () => {
+    // Mutation: build a fresh AgentJobs, or skip setCap → red.
+    const reused = new AgentJobs(9);
+    const wired = buildAgent(
+      { ...config, subagentsEnabled: true, subagentMaxParallel: 1 },
+      { agentJobs: reused },
+    );
+    expect(wired.agentJobs).toBe(reused);
+    expect(reused.acquire("a").ok).toBe(true);
+    // The cap came from the config (1), not the constructor (9).
+    expect(reused.acquire("b").ok).toBe(false);
+    const fresh = buildAgent({ ...config, subagentsEnabled: true, subagentMaxParallel: 2 });
+    expect(fresh.agentJobs).not.toBe(reused);
   });
 });
 

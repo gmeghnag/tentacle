@@ -646,6 +646,44 @@ describe("createLocalRuntime (local over RPC)", () => {
     expect(ctl.saveConfirmed()).toBe(true);
   });
 
+  test("T37 (M5): a sub-agent's exit while idle reaches the laptop's log — one read-back, none without it", async () => {
+    // docs/feat/subagent-background.md. A report that ends while nobody streams
+    // would sit in the daemon's history only. Mutation: remove the
+    // `onAgentExit` subscription → no read-back → red.
+    const agentExit: (() => void)[] = [];
+    let unsubscribed = 0;
+    let reads = 0;
+    const inner = {
+      busy: false,
+      onTitle: () => () => {},
+      onAgentExit: (listener: () => void) => {
+        agentExit.push(listener);
+        return () => {
+          unsubscribed++;
+        };
+      },
+      readBack: async () => {
+        reads++;
+        return { messages: [{ role: "user", content: "a" }] };
+      },
+      close: () => {},
+    } as unknown as RemoteSession;
+    const saved: number[] = [];
+    const ctl = persistingController(inner, (messages) => saved.push(messages.length));
+    await ctl.flushed();
+    expect(reads).toBe(0);
+    for (const listener of agentExit) {
+      listener();
+    }
+    expect(ctl.saveConfirmed()).toBe(false); // a change to save, noted in the same tick
+    await ctl.flushed();
+    expect(reads).toBe(1);
+    expect(saved).toEqual([1]);
+    expect(ctl.saveConfirmed()).toBe(true);
+    ctl.close?.();
+    expect(unsubscribed).toBe(1);
+  });
+
   test("T-B12 persistingController: a foreign turn's end and an idle history each cause one save (docs/feat/tui-foreign-turns.md B8)", async () => {
     let snapshots = 0;
     let raise: (a: unknown) => void = () => {};

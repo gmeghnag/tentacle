@@ -15,6 +15,8 @@
  * transport-agnostic: it emits `AgentEvent`s a CLI, daemon or test can consume.
  */
 import {
+  type AgentJobExit,
+  type AgentJobs,
   type BackgroundJob,
   COUNT_TOKENS_CAP_MS,
   type ChatMessage,
@@ -35,6 +37,7 @@ import {
   type Usage,
   allowAll,
   countTokensBounded,
+  subagentReportNote,
 } from "@tentacle/core";
 import {
   CONTEXT_RESET_TOOL_NAME,
@@ -221,6 +224,9 @@ function lastUserText(messages: readonly ChatMessage[]): string {
   return "";
 }
 
+/** A finished background job awaiting its note: a shell job, or a sub-agent (`agentId` in it). */
+export type PendingExit = BackgroundJob | AgentJobExit;
+
 export type AgentEvent =
   | { readonly type: "text"; readonly delta: string }
   | { readonly type: "reasoning"; readonly delta: string }
@@ -271,6 +277,8 @@ export type AgentEvent =
       readonly command: string;
       readonly status: string;
       readonly exitCode: number | null;
+      /** Set for a sub-agent's exit (`jobId` is its `sa-N`). */
+      readonly agent?: { readonly stopReason: string; readonly toolUses: number };
     }
   // A user message queued mid-turn ("steering") was injected into the loop.
   // `id`: its enqueue id — set by the daemon (the loop knows only texts).
@@ -335,6 +343,11 @@ export interface AgentConfig {
   /** Background-job registry; when set, the shell tools can launch jobs and
    * their exits are surfaced to the model (and frontend) on the next turn. */
   readonly jobs?: JobController;
+  /**
+   * The background sub-agent runtime (docs/feat/subagent-background.md); its
+   * exits are surfaced like a job's, as a noted report. Carried across a rebuild.
+   */
+  readonly agentJobs?: AgentJobs;
   /** Transforms applied to every tool result before it enters the conversation
    * (e.g. spilling large output to a file). Applied in order. */
   readonly resultTransforms?: readonly ResultTransform[];
@@ -501,9 +514,11 @@ export class Agent {
   /** The user rescan in flight: concurrent askers share it (one scan). */
   private rescan: Promise<SkillListing> | null = null;
   /** Background jobs that finished since the last turn, awaiting surfacing. */
-  private readonly pendingExits: BackgroundJob[] = [];
+  private readonly pendingExits: PendingExit[] = [];
   /** Leaves the jobs' exit stream (`retire`). */
   private unsubscribeExits: (() => void) | undefined;
+  /** Leaves the sub-agents' exit stream (`retire`). */
+  private unsubscribeAgentExits: (() => void) | undefined;
   /**
    * The provider's last measure of each history (keyed by the array a Session
    * keeps for its life), so a turn's first request counts from real numbers.
@@ -532,6 +547,7 @@ export class Agent {
     // Collect background-job exits as they happen; they are flushed into the
     // conversation (and event stream) at the top of the next turn.
     this.unsubscribeExits = config.jobs?.onExit((job) => this.pendingExits.push(job));
+    this.unsubscribeAgentExits = config.agentJobs?.onExit((exit) => this.pendingExits.push(exit));
   }
 
   /**
@@ -539,10 +555,31 @@ export class Agent {
    * collecting job exits and hands back the ones no turn has surfaced yet, for
    * the next agent's `adoptExits`. Idempotent.
    */
-  retire(): BackgroundJob[] {
+  retire(): PendingExit[] {
     this.unsubscribeExits?.();
     this.unsubscribeExits = undefined;
+    this.unsubscribeAgentExits?.();
+    this.unsubscribeAgentExits = undefined;
     return this.pendingExits.splice(0);
+  }
+
+  /**
+   * What runs in the background right now: shell jobs and sub-agents. A history
+   * replacement (compaction, context reset) names them to the model.
+   */
+  runningBackground(): {
+    readonly jobs: readonly { readonly id: string; readonly command: string }[];
+    readonly agents: readonly { readonly agentId: string; readonly description: string }[];
+  } {
+    return {
+      jobs: (this.config.jobs?.list() ?? [])
+        .filter((j) => j.status === "running")
+        .map((j) => ({ id: j.id, command: j.command })),
+      agents: (this.config.agentJobs?.list() ?? []).map((a) => ({
+        agentId: a.agentId,
+        description: a.description,
+      })),
+    };
   }
 
   /** Job exits no turn has surfaced yet: what the next turn's start will flush. */
@@ -551,7 +588,7 @@ export class Agent {
   }
 
   /** Job exits a retired agent had not surfaced: told at this agent's next turn. */
-  adoptExits(exits: readonly BackgroundJob[]): void {
+  adoptExits(exits: readonly PendingExit[]): void {
     this.pendingExits.unshift(...exits);
   }
 
@@ -1318,6 +1355,8 @@ export class Agent {
         ...toolContext,
         emitProgress: (event: ToolProgressEvent) => progress.push(progressToEvent(call.id, event)),
         toolCallId: call.id,
+        shapeResult: (result, sig) =>
+          this.transformResult(call, result, sig, { sessionId: toolContext.sessionId }),
       };
       const prepared = await this.authorizeCall(call, ctx, {
         beforeStart: hooks.beforeResumedCall,
@@ -1421,6 +1460,8 @@ export class Agent {
         emitProgress: (event: ToolProgressEvent) =>
           queue.push({ kind: "event", event: progressToEvent(call.id, event) }),
         toolCallId: call.id,
+        shapeResult: (result, sig) =>
+          this.transformResult(call, result, sig, { sessionId: toolContext.sessionId }),
       };
       const prepared = await this.authorizeCall(call, ctx, {
         ...(head !== undefined ? { groupStart: head } : {}),
@@ -1736,9 +1777,7 @@ export class Agent {
     const next = contextResetHistory({
       systemPrompt: fresh.systemPrompt,
       prompt,
-      jobs: (this.config.jobs?.list() ?? [])
-        .filter((j) => j.status === "running")
-        .map((j) => ({ id: j.id, command: j.command })),
+      ...this.runningBackground(),
       skills: carried,
     });
     const delta = skillSetDelta(before, after);
@@ -1842,6 +1881,25 @@ export class Agent {
     const exits = this.pendingExits.splice(0);
     const events: AgentEvent[] = [];
     for (const job of exits) {
+      if ("agentId" in job) {
+        const status = job.stopReason === "cancelled" ? "killed" : "exited";
+        events.push({
+          type: "background_exit",
+          jobId: job.agentId,
+          command: job.description,
+          status,
+          exitCode: null,
+          agent: { stopReason: job.stopReason, toolUses: job.toolUses },
+        });
+        // The same helper as a load's note, with the live headline.
+        const message = subagentReportNote(
+          { ...job, state: "ended" },
+          `[background] sub-agent ${job.agentId} (${job.description}) finished (${job.stopReason}):`,
+        );
+        messages.push(message);
+        events.push({ type: "context_note", text: message.content, reason: "background_exit" });
+        continue;
+      }
       events.push({
         type: "background_exit",
         jobId: job.id,

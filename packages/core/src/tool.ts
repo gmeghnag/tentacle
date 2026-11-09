@@ -111,6 +111,13 @@ export interface ToolContext {
    * permission asks are attributed to it. Absent outside the agent loop.
    */
   readonly toolCallId?: string;
+  /**
+   * The loop's result transforms for THIS call (redaction, hooks, spill),
+   * callable after the call returned: a background sub-agent's report is
+   * shaped by them when it finishes, as a foreground one is when it returns.
+   * Absent outside the agent loop.
+   */
+  readonly shapeResult?: (result: ToolResult, signal?: AbortSignal) => Promise<ToolResult>;
 }
 
 export interface Tool<Input = unknown> {

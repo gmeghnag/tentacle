@@ -46,7 +46,12 @@ import {
   splitFrontmatter,
   unknownTypeModelWarnings,
 } from "@tentacle/config";
-import { type JobController, type ModelProvider, PermissionBroker } from "@tentacle/core";
+import {
+  AgentJobs,
+  type JobController,
+  type ModelProvider,
+  PermissionBroker,
+} from "@tentacle/core";
 import { BackgroundJobs, HostExecution } from "@tentacle/exec";
 import { type ConnectMcpResult, connectMcpServers } from "@tentacle/mcp";
 import { HooksTrustParamsSchema } from "@tentacle/protocol";
@@ -246,6 +251,8 @@ export interface WiredAgent {
   readonly permissions: PermissionBroker;
   /** Background-job registry; the TUI subscribes to surface job exits live. */
   readonly jobs: JobController;
+  /** The background sub-agent runtime (docs/feat/subagent-background.md): one per session, carried across a rebuild. */
+  readonly agentJobs: AgentJobs;
   /** The tool registry — MCP tools are registered into it after connecting. */
   readonly tools: ToolRegistry;
   /** The session's approvals (one store for its whole tree); handed over on a rebuild. */
@@ -317,6 +324,8 @@ export interface BuildAgentOptions {
    * running jobs and the approvals the user gave must carry over.
    */
   readonly jobs?: JobController;
+  /** Likewise the background sub-agent runtime: its running children carry over. */
+  readonly agentJobs?: AgentJobs;
   readonly grants?: SessionGrants;
   /**
    * Daemon-side log for hook failures (`onFailure: "ignore"`). Never the
@@ -380,6 +389,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
   // Background jobs let the shell tools launch long-running processes (servers,
   // watchers) without blocking the turn; their exits surface on the next turn.
   const jobs = options.jobs ?? new BackgroundJobs(env);
+  // Background SUB-AGENTS share `subagents.maxParallel` with foreground ones
+  // (one cap); a reused runtime takes the (possibly changed) cap of this build.
+  const agentJobs = options.agentJobs ?? new AgentJobs(config.subagentMaxParallel);
+  agentJobs.setCap(config.subagentMaxParallel);
   // The harness's value-add layer over raw tool output. Order matters: redact
   // secrets FIRST (so they never reach the context or the spilled file), then
   // handle large output — either an LLM summary (opt-in, costs a model call) or
@@ -528,6 +541,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         description: config.agentTaskDescription,
         mode: config.subagentExecution,
         readOnlyType,
+        background: agentJobs,
         models: tunnelled
           ? publishedOptions(published)
           : config.selectableModels.map((name) => {
@@ -566,6 +580,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     tools,
     env,
     jobs,
+    agentJobs,
     resultTransforms,
     toolOutput,
     systemPrompt: config.systemPrompt,
@@ -597,7 +612,15 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         ? configuredModelProvider(config, config.titleModel, options.createProvider)
         : model))
     : undefined;
-  return { agent, permissions, jobs, tools, grants, ...(titleModel ? { titleModel } : {}) };
+  return {
+    agent,
+    permissions,
+    jobs,
+    agentJobs,
+    tools,
+    grants,
+    ...(titleModel ? { titleModel } : {}),
+  };
 }
 
 /**

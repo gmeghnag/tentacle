@@ -27,6 +27,8 @@ those.
 
 ### Added
 
+- **Background sub-agents.** The agent can start a sub-agent with `background: true` and keep working: the call returns at once with an id (`sa-1`), and the report comes back later as a note that wakes the agent, like a background shell job. They share the `subagents.maxParallel` limit with foreground sub-agents. Over the limit, a new sub-agent (background or not) is refused and the agent is told which ones are running, so it can end its turn and wait for a report, or do the work itself. A background sub-agent's permission prompts are asked as usual and name it (`sa-1 · general · "…" · background`). The protocol version moved to 20: an older pod daemon or `serve` is refused at connect with "update". (Seeing them running, and stopping one, come next.)
+
 - **Named models for sub-agents (`models`).** Declare extra models next to `model`, then say which sub-agent type runs on which, and optionally let the agent pick one per task:
   ```jsonc
   {

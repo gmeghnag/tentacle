@@ -15,7 +15,13 @@ import {
   type SkillListing,
   recordTitleText,
 } from "@tentacle/agent";
-import type { ChatMessage, JobController, ModelProvider, PermissionBroker } from "@tentacle/core";
+import type {
+  AgentJobs,
+  ChatMessage,
+  JobController,
+  ModelProvider,
+  PermissionBroker,
+} from "@tentacle/core";
 import {
   JsonRpcErrorCode,
   type McpServerStatus,
@@ -83,6 +89,8 @@ export interface AgentContext {
 export interface AgentReuse {
   readonly permissions: PermissionBroker;
   readonly jobs?: JobController;
+  /** The background sub-agent runtime (docs/feat/subagent-background.md). */
+  readonly agentJobs?: AgentJobs;
   readonly grants?: SessionGrants;
 }
 
@@ -94,6 +102,11 @@ export type AgentFactory = (
   permissions: PermissionBroker;
   /** Optional: when present, the hosted session streams its job exits live. */
   jobs?: JobController;
+  /**
+   * Optional: the background sub-agent runtime. The hosted session binds it
+   * (ids, markers, exits, the ask) and disposes it at close.
+   */
+  agentJobs?: AgentJobs;
   /**
    * Optional: the provider that names the session after its first exchange
    * (docs/feat/session-titles.md). On a pod daemon it is the model proxy, so
@@ -293,7 +306,7 @@ export class SessionHost {
     seed?: readonly ChatMessage[],
     settings?: SessionSettings,
   ): Promise<SessionContextResult> {
-    const { agent, jobs } = this.opts.createAgent(this.opts.defaultCwd, {
+    const { agent, jobs, agentJobs } = this.opts.createAgent(this.opts.defaultCwd, {
       modelLink: () => link,
       ...(settings ? { settings } : {}),
     });
@@ -310,6 +323,7 @@ export class SessionHost {
       return complete ? usage : { used: usage.used, exact: false };
     } finally {
       jobs?.dispose();
+      agentJobs?.dispose();
     }
   }
 
@@ -905,13 +919,11 @@ export class SessionHost {
     // The agent exists before its session (P4): its link is bound late, and a
     // session is only reachable (hence prompted) once built.
     const bound: { hosted?: HostedSession } = {};
-    const { agent, permissions, jobs, titleModel, settingsReport, grants } = this.opts.createAgent(
-      this.opts.defaultCwd,
-      {
+    const { agent, permissions, jobs, agentJobs, titleModel, settingsReport, grants } =
+      this.opts.createAgent(this.opts.defaultCwd, {
         modelLink: () => bound.hosted?.modelLink() ?? null,
         ...(settings ? { settings } : {}),
-      },
-    );
+      });
     // core `ChatMessage` is structurally the wire schema.
     const session = new Session(agent, id, messages && messages.length > 0 ? { messages } : {});
     const { exposeTurnErrors, onTurnError } = this.opts;
@@ -939,6 +951,7 @@ export class SessionHost {
         ? { ...(this.opts.onAudit ? { onAudit: this.opts.onAudit } : {}) }
         : undefined,
       log,
+      agentJobs,
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;
@@ -968,13 +981,19 @@ export class SessionHost {
       settings,
       reuse,
     });
-    const foreign = next.permissions !== reuse.permissions || next.jobs !== reuse.jobs;
+    const foreign =
+      next.permissions !== reuse.permissions ||
+      next.jobs !== reuse.jobs ||
+      next.agentJobs !== reuse.agentJobs;
     if (!next.settingsReport || foreign) {
       // It leaves the session's jobs; jobs of its own (a factory that ignored
       // `reuse`) go with it.
       next.agent.retire();
       if (next.jobs && next.jobs !== reuse.jobs) {
         next.jobs.dispose();
+      }
+      if (next.agentJobs && next.agentJobs !== reuse.agentJobs) {
+        next.agentJobs.dispose();
       }
       if (!next.settingsReport) {
         return { applied: false };

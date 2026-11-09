@@ -93,6 +93,8 @@ export const BackgroundExitSchema = z.object({
   command: z.string(),
   status: z.string(),
   exitCode: z.number().int().nullable(),
+  /** Present: a sub-agent's exit (`jobId` is its `sa-N` id). It rides this update, not a second one. */
+  agent: z.object({ stopReason: z.string(), toolUses: z.number().int().nonnegative() }).optional(),
 });
 
 /**

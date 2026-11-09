@@ -251,6 +251,7 @@ export function updateToEvent(
         command: update.command,
         status: update.status,
         exitCode: update.exitCode,
+        ...(update.agent ? { agent: update.agent } : {}),
       };
     // A steering message was injected; the TUI drops the ⏳ entry of that id
     // (FIFO only for an older daemon, which names none).

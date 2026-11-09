@@ -76,7 +76,15 @@ export const PermissionRequestUpdateSchema = z.object({
    * an over-long value never makes this blocking update unparseable — the
    * laptop bounds it when it renders it.
    */
-  agent: z.object({ type: z.string(), description: z.string() }).optional(),
+  agent: z
+    .object({ type: z.string(), description: z.string(), id: z.string().optional() })
+    .optional(),
+  /**
+   * The turn that spawned a BACKGROUND child, whose ask may arrive outside any
+   * turn (the client attributes it to this one). No `.max()`, as `agent`: this
+   * update is blocking, and only an equality test reads it.
+   */
+  turnId: z.string().optional(),
   /**
    * The daemon accepts a reply with a refusal, up to `maxChars` (a client
    * clamps it to `MAX_PERMISSION_REPLY_CHARS`: a pod may advertise anything).

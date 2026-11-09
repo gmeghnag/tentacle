@@ -690,7 +690,7 @@ export function App({
     return jobs.onExit((job) => {
       stateRef.current = appendBackgroundExit(
         stateRef.current,
-        backgroundExitNotice(job.id, job.command, job.status, job.exitCode),
+        backgroundExitNotice(job.id, job.command, job.status, job.exitCode, job.agent),
       );
       setScrollOffset(0);
       flushNow();

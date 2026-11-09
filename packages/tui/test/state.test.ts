@@ -271,6 +271,40 @@ describe("display state reducer", () => {
     }
   });
 
+  test("an agent exit reads as a sub-agent; a shell one is unchanged (docs/feat/subagent-background.md)", () => {
+    // Mutation: ignore `agent` → the shell wording → red.
+    const done = backgroundExitNotice("sa-1", "map repo", "exited", null, {
+      stopReason: "end_turn",
+      toolUses: 4,
+    });
+    expect(done.text).toBe("sa-1 finished · 4 tool uses · map repo — report sent to the agent");
+    expect(done.jobId).toBe("sa-1");
+    const stopped = backgroundExitNotice("sa-2", "x", "killed", null, {
+      stopReason: "cancelled",
+      toolUses: 1,
+    });
+    expect(stopped.text).toBe(
+      "sa-2 ended (cancelled) · 1 tool uses · x — report sent to the agent",
+    );
+    expect(backgroundExitNotice("bg-1", "ls", "exited", 0).text).toBe(
+      "background job bg-1 exited (exit=0): ls",
+    );
+    // Through the event path too (the agent's own `background_exit`).
+    const s = applyEvent(
+      initialState,
+      {
+        type: "background_exit",
+        jobId: "sa-1",
+        command: "map repo",
+        status: "exited",
+        exitCode: null,
+        agent: { stopReason: "end_turn", toolUses: 4 },
+      },
+      1000,
+    );
+    expect((s.items.at(-1) as NoticeItem).text).toContain("sa-1 finished");
+  });
+
   test("background_exit appends one notice and does not duplicate by jobId", () => {
     // The live JobController subscription surfaced it first…
     let s = appendBackgroundExit(

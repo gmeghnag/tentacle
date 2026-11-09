@@ -6,7 +6,7 @@
  * `@tentacle/agent`. The tool itself needs no permission — spawning is
  * safe; the child's own tools enforce their permissions and confinement.
  */
-import type { SpawnKind, Tool, ToolProgressEvent, ToolResult } from "@tentacle/core";
+import type { AgentJobs, SpawnKind, Tool, ToolProgressEvent, ToolResult } from "@tentacle/core";
 import { z } from "zod";
 
 export interface TaskRunResult {
@@ -22,6 +22,8 @@ export interface TaskRunControls {
   readonly toolCallId?: string;
   /** The calling session's id: the sub-agent's spilled output is filed under it. */
   readonly sessionId?: string;
+  /** Set on a BACKGROUND child: its `sa-N` id. Its permission asks are attributed to it. */
+  readonly agentId?: string;
 }
 
 export type TaskRunner = (
@@ -56,6 +58,12 @@ export interface TaskToolOptions {
    * `model` argument, and the tool is exactly what it was without `models`.
    */
   readonly models?: readonly TaskModelOption[];
+  /**
+   * The background runtime (docs/feat/subagent-background.md). Present → the
+   * tool offers `background` and every child, foreground or background, takes
+   * a slot of its ONE cap (`subagents.maxParallel`). Absent → neither.
+   */
+  readonly background?: AgentJobs;
 }
 
 const NEUTRAL_DESCRIPTION =
@@ -121,19 +129,32 @@ export function createTaskTool(
       .optional()
       .describe(`Which sub-agent to use (default ${defaultType})`),
   });
-  // `model` only when the user made models selectable: otherwise the agent is
-  // never told it exists, and a stray one is stripped like any unknown argument.
-  const inputSchema =
-    models.length > 0
-      ? baseSchema.extend({
+  // `model` only when the user made models selectable, `background` only when
+  // the runtime is wired: otherwise the agent is never told they exist, and a
+  // stray one is stripped like any unknown argument.
+  const inputSchema = z.object({
+    ...baseSchema.shape,
+    ...(models.length > 0
+      ? {
           model: z
             .string()
             .optional()
             .describe(
               `Which model runs the sub-agent: one of ${modelNames.join(", ")}. Omit it for the type's own model.`,
             ),
-        })
-      : baseSchema;
+        }
+      : {}),
+    ...(options.background
+      ? {
+          background: z
+            .boolean()
+            .optional()
+            .describe(
+              "Run the sub-agent in the background: this call returns at once with its id (sa-N), you can keep working or end your turn, and its report arrives later as a [background] note that wakes you. Default false.",
+            ),
+        }
+      : {}),
+  });
 
   return {
     name: "agent_task",
@@ -151,7 +172,7 @@ export function createTaskTool(
       return options.readOnlyType?.(type) ? "read-only" : "writer";
     },
     async execute(input, ctx): Promise<ToolResult> {
-      const args = input as z.infer<typeof baseSchema> & { model?: string };
+      const args = input as z.infer<typeof baseSchema> & { model?: string; background?: boolean };
       const type = resolveType(args.subagent_type);
       const model = models.length > 0 ? args.model : undefined;
       if (model !== undefined && !modelNames.includes(model)) {
@@ -161,20 +182,64 @@ export function createTaskTool(
           isError: true,
         };
       }
-      const result = await run(
-        {
-          description: args.description,
-          prompt: args.prompt,
-          type,
-          ...(model !== undefined ? { model } : {}),
-        },
-        {
+      const runOpts = {
+        description: args.description,
+        prompt: args.prompt,
+        type,
+        ...(model !== undefined ? { model } : {}),
+      };
+      const bg = options.background;
+      if (args.background === true && bg) {
+        const started = bg.start(
+          { callId: ctx.toolCallId ?? "", agentType: type, description: args.description },
+          async ({ signal, agentId }) => {
+            let outcome: TaskRunResult;
+            try {
+              // NEVER `ctx.signal`: Esc on the launching turn must not stop the child.
+              outcome = await run(runOpts, {
+                signal,
+                agentId,
+                ...(ctx.toolCallId !== undefined ? { toolCallId: ctx.toolCallId } : {}),
+                sessionId: ctx.sessionId,
+              });
+            } catch (error) {
+              outcome = {
+                report: `the sub-agent failed: ${error instanceof Error ? error.message : String(error)}`,
+                toolUses: 0,
+                stopReason: "error",
+              };
+            }
+            // The same transforms as a foreground report: redaction, hooks, spill.
+            const shaped = ctx.shapeResult
+              ? await ctx.shapeResult({ content: outcome.report }, signal)
+              : { content: outcome.report };
+            return { ...outcome, report: shaped.content };
+          },
+        );
+        return started.ok
+          ? {
+              content: `started in background as ${started.agentId}: ${args.description}. Its report will arrive later as a [background] note; you can keep working or end your turn.`,
+            }
+          : { content: started.reason, isError: true };
+      }
+      // A foreground child takes a slot of the same cap, or is refused at once.
+      const slot = bg ? bg.acquire(args.description) : undefined;
+      if (slot && !slot.ok) {
+        return { content: slot.reason, isError: true };
+      }
+      let result: TaskRunResult;
+      try {
+        result = await run(runOpts, {
           signal: ctx.signal,
           ...(ctx.emitProgress ? { onEvent: ctx.emitProgress } : {}),
           ...(ctx.toolCallId !== undefined ? { toolCallId: ctx.toolCallId } : {}),
           sessionId: ctx.sessionId,
-        },
-      );
+        });
+      } finally {
+        if (slot?.ok) {
+          slot.release();
+        }
+      }
       const note =
         result.stopReason === "cancelled"
           ? "\n\n_(sub-agent cancelled)_"

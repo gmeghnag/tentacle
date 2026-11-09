@@ -3,7 +3,9 @@
  *
  * A session is IDLE when nothing is attached and no turn or compaction runs;
  * background jobs do not count (a forgotten dev server is exactly what this
- * frees). An idle session is closed once it has been idle for `idleTtlMs`. The
+ * frees; a running BACKGROUND SUB-AGENT does count: `busy` is true while one runs,
+ * docs/feat/subagent-background.md H2 — the shell-job gap stays, recorded there).
+ * An idle session is closed once it has been idle for `idleTtlMs`. The
  * opt-in admin cap closes a detached session after `adminCapMs` even if it is
  * busy. An attached session is never closed, whatever the policy. On `serve`
  * "closed" means ARCHIVED (kept, reopenable: docs/feat/session-archive.md).

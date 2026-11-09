@@ -29,6 +29,27 @@ const show = (actions: readonly RouterAction[]): string[] =>
       : `${a.kind} ${a.sessionId}/${a.requestId}`,
   );
 
+describe("a background child's ask names its spawning turn (T34)", () => {
+  test("the update's turnId wins over the stream's; the agent id rides through", () => {
+    const r = new PermissionRouter();
+    const [action] = r.request(
+      "S",
+      req("r1", { turnId: "T-spawn", agent: { type: "general", description: "d", id: "sa-1" } }),
+      "T-stream",
+    );
+    expect(action?.kind === "prompt" ? action.turnId : undefined).toBe("T-spawn");
+    expect(action?.kind === "prompt" ? action.agent : undefined).toEqual({
+      type: "general",
+      description: "d",
+      id: "sa-1",
+    });
+    // Without it, the stream's turn as before.
+    const r2 = new PermissionRouter();
+    const [plain] = r2.request("S", req("r2"), "T-stream");
+    expect(plain?.kind === "prompt" ? plain.turnId : undefined).toBe("T-stream");
+  });
+});
+
 describe("PermissionRouter (pure)", () => {
   test("a request prompts; it rebuilds the gate's request (tool, detail, suggestion)", () => {
     const r = new PermissionRouter();

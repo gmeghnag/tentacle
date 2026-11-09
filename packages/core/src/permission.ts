@@ -126,7 +126,7 @@ export interface PermissionRequestOptions {
    */
   readonly groupStart?: string;
   /** Which sub-agent asked (display only; set with `origin: "subagent"`). */
-  readonly agent?: { readonly type: string; readonly description: string };
+  readonly agent?: { readonly type: string; readonly description: string; readonly id?: string };
 }
 
 export type PermissionRequester = (
