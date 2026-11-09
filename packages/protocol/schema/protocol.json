@@ -150,22 +150,7 @@
           "type": "integer"
         },
         "note": {
-          "additionalProperties": true,
-          "properties": {
-            "id": {
-              "maxLength": 64,
-              "minLength": 1,
-              "type": "string"
-            },
-            "kind": {
-              "maxLength": 64,
-              "minLength": 1,
-              "pattern": "^[a-z][a-z0-9_]*$",
-              "type": "string"
-            }
-          },
-          "required": ["kind"],
-          "type": "object"
+          "$ref": "#/$defs/MessageNote"
         },
         "role": {
           "enum": ["system", "user", "assistant", "tool"],
@@ -1304,6 +1289,24 @@
         }
       },
       "required": ["servers"],
+      "type": "object"
+    },
+    "MessageNote": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "type": "string"
+        }
+      },
+      "required": ["kind"],
       "type": "object"
     },
     "ModelCountTokensParams": {

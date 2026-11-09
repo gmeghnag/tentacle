@@ -238,15 +238,26 @@ Proven by the probe (Repro):
 
 #### 1. Protocol (the shared truth)
 
-`protocol/src/session.ts`: `ChatMessageSchema` gains
+`protocol/src/session.ts`: a separate `MessageNoteSchema`, and `ChatMessageSchema` gains
 
 ```ts
-/** Display only (docs/feat/subagent-ledger-log.md): what kind of tentacle-written note this is. */
-note: z.object({
+export const MessageNoteSchema = z.object({
   kind: z.string().min(1).max(64).regex(/^[a-z][a-z0-9_]*$/), // free: tasks 8/9 add kinds
   id: z.string().min(1).max(64).optional(),                    // "sa-3", a job id
-}).optional(),
+});
+
+// on ChatMessageSchema:
+note: MessageNoteSchema.optional().catch(undefined),
 ```
+
+**The field is FAIL-SOFT (owner Q4 (a), review M3).** A note a LATER build writes outside these
+bounds — a dotted or capitalised `kind` (`User-X`), an `id` past 64 chars (a 100-char call id),
+a non-object shape — is DROPPED, and the message still loads. `.catch(undefined)` is what makes
+this field different from the other spray fields: `note` rides the CRITICAL `message` entry, so a
+refusal here would not lose one note, it would make every build from this task on refuse the
+whole log. The bounds stay (they keep today's own writers honest, and the projection rules read
+only what they can read); they are a constraint on what this build *writes*, never a gate on what
+it *loads*. Only the note is lost — the strip-schema rule, applied to display metadata.
 
 It stays OUT of `canonicalMessage`, so the digest is unchanged and no version skew trips a
 checkpoint. Known kinds are constants in core (`background_exit`, `subagent_report`,
@@ -329,6 +340,13 @@ export function subagentLostNote(job: AgentJob): ChatMessage;    // note{kind:"s
   `resumableTurn` returns `undefined` when `record.loadNotes.length > 0`: the turn is closed
   honestly ("interrupted: the daemon restarted") and the notes are appended. This only happens
   with a background child open at the crash, so it cannot happen before 6a.
+- **A note at the tail of an otherwise idle history makes `awaitsAnswer()` true** (review L2).
+  `awaitsAnswer` is structural (`hosted-session.ts`: the last message is a user turn), and a load
+  note IS a user message, so a send-now — the user's own explicit send — starts a continuation
+  turn where it got `NoTurnRunning` before. **This is intended** (owner Q3 (a), 2026-11-09): the
+  note is something the model should see, and the user asked to send. It is NOT a wake (no turn
+  starts by itself, Q10 holds); it needs no code, and the alternative — excluding noted messages
+  from `awaitsAnswer` — would special-case display metadata inside a scheduling decision.
 - Neither load writes. The notes ride the seed / the reload segment, and the next persist makes
   them durable (P6).
 
@@ -421,7 +439,7 @@ sub-agent notes become visible with 6a, which writes the first markers.)
 | 8 | Duplicate `end` / `bg` in one segment (replay: forged or re-emitted) | First wins; one note per id |
 | 9 | **Older build** (pre-task-5) reads a log with markers | Skipped and counted, projection intact (probe A/B). It cannot derive the notes: the resumed model is told nothing, which is today's behaviour. A REPLACE by it sets the unknown lines ASIDE (laptop-store Q2), never dropped |
 | 10 | Older build reads a `note` field | Stripped (probe C): the message renders as a user row again, digest unaffected |
-| 11 | A task-5 build reads a newer `note.kind` / newer `stopReason` | Free strings: parsed. An unknown kind renders as a plain notice |
+| 11 | A task-5 build reads a newer `note.kind` / `note.id` shape / `stopReason` | **The note is FAIL-SOFT** (owner Q4 (a), review M3): `note` is `MessageNoteSchema.optional().catch(undefined)`, so an unreadable note is DROPPED and the `message` entry — CRITICAL — still loads (rendered as a plain user row again), while an unknown-but-valid `kind` parses and renders as a plain notice. A newer `stopReason` is a free truncated string: parsed. No lock-out in either direction |
 | 12 | **Compaction / `context_reset`** while a job is open | `logSegmentFacts` re-emits `bg` (+ `end`) at the new `base` (6a populates the ledger; tested here with a seeded ledger). Only the LAST segment is derived (F14); a superseded segment's open `bg` is never a loss |
 | 13 | `keepSuperseded` on, the old segment holds an open `bg` and the new one its re-emission + note | Current segment: closed. The superseded one is never read |
 | 14 | **Pod** (never persists) | The pod daemon emits markers; the laptop keeps them after validation (P15) and derives at its own load. A report that ended after the laptop's last read is gone with the pod (eval A4; M5's flush is 6a's) |
@@ -790,6 +808,66 @@ intermediate full run (M1/M2/M4/L1 in place, before the last two tests) read `59
   test drives the real store, persister and host, but in one process. A real process death is
   outside this task's reach.
 
+### Fix round 2
+
+*— deepseek-v4.1-flash (tentacle), 2026-11-09*
+
+Scope: the Review's **M3** and **L2**, on the owner's answers of 2026-11-09 (**Q3 → (a)**: keep
+the behaviour, document only, no code. **Q4 → (a)**: fail-soft). Nothing else is touched; round 1's
+code stands as it was.
+
+| # | Finding | Change (file:line) | RED (the failing line, pre-fix) |
+|---|---|---|---|
+| 1 | **M3** (`note`'s bounds recreated the enum lock-out: an unreadable note refused the whole log) | `protocol/src/session.ts:34-49` — new `MessageNoteSchema` (same bounds, now a named object) + `export type MessageNote = z.infer<…>`; `:70-78` — `note: MessageNoteSchema.optional().catch(undefined)`, with the comment saying why this field alone is fail-soft (it rides the CRITICAL `message` entry). `protocol/schema/protocol.json` regenerated (`bun run schema:export`): `note` is now `{"$ref":"#/$defs/MessageNote"}`, the object moved to `$defs` — the JSON schema's shape is unchanged for readers | `ZodError: [{ "validation": "regex", "code": "invalid_string", "path": ["note","kind"] }]` → `(fail) ChatMessage.note … > a note this build cannot read is DROPPED, never a refusal: the message always loads (M3)` (20 pass, 1 fail) — and, in the log path, `error: line 3 is a malformed message entry` → `(fail) parseLogFile > a note this build cannot read does not refuse the file: the message loads without it (M3)` (17 pass, 1 fail): the review's exact repro, now a test |
+| 2 | **M3**, tests | `protocol/test/session.test.ts:227-244` — one test: `note:{kind:"User-X"}`, a 65-char `id`, `kind:""` and a non-object shape each parse with `note` ABSENT, and the message itself loads unchanged (`toEqual({role,content})`); the unknown-extra-field strip case moved into the happy-path test above it (`:203-221`), which still asserts a VALID note parses unchanged. `daemon/test/session-log-file.test.ts:91-108` — such a line (both shapes) inside a real log → `parseLogFile` `ok: true`, messages loaded, `note` absent, `skipped: 0` | as above (both tests written first, both red) |
+| 3 | **L2** (a load note at the tail makes `awaitsAnswer()` true) | **NO CODE — owner Q3 (a).** Documented in Design §3 (`:343-350`): a load note at the tail of an idle history counts as unanswered, so a send-now starts a continuation turn the user asked for; intended, not a wake (Q10 holds), and (b) would special-case display metadata in a scheduling decision. `daemon/src/hosted-session.ts:1513-1516` is untouched | n/a — no code change authorised |
+
+Plan text brought in line (round 2): Design §1 (`:253-260`) states the field is fail-soft and why
+(the CRITICAL `message` entry; the bounds constrain writers, never readers); FM 11 (`:442`) now
+covers a newer `note.kind`, a newer `note.id` SHAPE and a newer `stopReason` — the note is dropped,
+the message loads, no lock-out in either direction; Q3 and Q4 in the owner block are marked
+**Owner (2026-11-09): (a).**
+
+#### Mutation (one, per the brief: remove `.catch` → red; restored, `shasum`-checked)
+
+`cp packages/protocol/src/session.ts .tentacle/tmp/subagent-ledger-log/session.ts.bak`, then
+`note: MessageNoteSchema.optional(),`:
+```
+(fail) ChatMessage.note (docs/feat/subagent-ledger-log.md) > a note this build cannot read is DROPPED, never a refusal: the message always loads (M3)
+ZodError: [{ "validation": "regex", "code": "invalid_string", "path": ["note","kind"] }]
+ 20 pass  1 fail
+error: line 3 is a malformed message entry
+(fail) parseLogFile > a note this build cannot read does not refuse the file: the message loads without it (M3)
+ 17 pass  1 fail
+```
+Restored: `packages/protocol/src/session.ts: OK` (`shasum -c`), then both files green:
+`39 pass · 0 fail · 123 expect() calls`. The mutation kills BOTH new tests, so neither is vacuous.
+
+#### Gate (re-run after the fix)
+
+<!--GATE-->
+```
+bunx tsc --noEmit    → exit 0, no output (clean)
+bunx biome check .   → Checked 771 files. No fixes applied.  (0 errors, 0 warnings — baseline held)
+bun test packages    → 5942 pass · 3 skip · 0 fail · 63703 expect() calls / 5945 tests / 400 files (179.96s)
+```
+
+Round 1 was `5941 pass · 3 skip · 0 fail`; this round adds exactly ONE test-net (2 new tests, 1
+net: the protocol file's old malformed-note test became the DROPPED test and its strip case moved
+into the test above it — same test count there — plus the daemon file's new case). The 3 skips are
+the documented opt-ins (live k8s, live docker, the real-socket keepalive), not failures.
+
+**Not done / not verified (this round):**
+- **L2 is documentation, by the owner's decision** (Q3 (a)). No test pins `awaitsAnswer()`'s
+  noted-tail behaviour: there is nothing to pin that the owner wants changed, and the behaviour is
+  `awaitsAnswer`'s existing structural rule (the last message is a user turn), not new code.
+- The `.catch` is verified for the WIRE/LOG read path only. No live `serve` process was killed and
+  restarted in this round (as in round 1); the log-file test drives the real `parseLogFile` reader,
+  not a process death.
+- `MessageNoteSchema`'s bounds are unchanged, so an unreadable note is DROPPED silently (no
+  `skipped` count, no warning): the log stays loadable by design (Q4 (a)), and the message then
+  renders as a plain user row. That is the accepted trade — loud refusal was the M3 bug.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-09* (fresh context; a different model from the executor, but the
@@ -1009,6 +1087,7 @@ asked to send. Document it. (b) Exclude noted messages from `awaitsAnswer()`. A 
 says `NoTurnRunning`, and the note waits for the next real prompt. This also changes shell
 `background_exit` notes. **Recommend (a).** It is user-initiated, it needs no code, and (b)
 special-cases display metadata in a scheduling decision.
+**Owner (2026-11-09): (a).** Keep it, document only, no code change. Documented in Design §3.
 
 **Q4. `note` on the wire: fail-soft or tight (M3)?** (a) `MessageNoteSchema.optional().catch(undefined)`:
 a newer build's unreadable note is dropped (rendered as a user row), and the log always loads.
@@ -1016,6 +1095,8 @@ a newer build's unreadable note is dropped (rendered as a user row), and the log
 lock-out risk but does not remove it. (c) Keep as built: every future kind/id must fit today's
 regex/64 forever. **Recommend (a).** It is the strip-schema philosophy applied to a display-only
 field, and it costs one line.
+**Owner (2026-11-09): (a).** Fail-soft: `MessageNoteSchema.optional().catch(undefined)`. Applied in
+`protocol/src/session.ts` (fix round 2); Design §1 and FM 11 say so.
 
 <details><summary>Reviewer scratch scripts (gitignored; pasted per AGENTS §6)</summary>
 

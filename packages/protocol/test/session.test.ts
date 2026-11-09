@@ -217,22 +217,32 @@ describe("ChatMessage.note (docs/feat/subagent-ledger-log.md)", () => {
     ).toEqual({
       kind: "a",
     });
+    // Strip, never strict: an unknown field is dropped (forward compatibility).
+    expect(
+      ChatMessageSchema.parse({ role: "user", content: "x", note: { kind: "a", fromTheFuture: 1 } })
+        .note,
+    ).toEqual({ kind: "a" });
   });
 
-  test("a malformed note is refused: a bad kind, an over-long id, an unknown extra field dropped", () => {
-    const parse = (note: unknown) =>
-      ChatMessageSchema.safeParse({ role: "user", content: "x", note }).success;
-    expect(parse({ kind: "Bad-Kind" })).toBe(false);
-    expect(parse({ kind: "a", id: "x".repeat(65) })).toBe(false);
-    expect(parse({ kind: "" })).toBe(false);
-    expect(parse("subagent_lost")).toBe(false);
-    // Strip, never strict: an unknown field is dropped (forward compatibility).
-    const parsed = ChatMessageSchema.parse({
-      role: "user",
-      content: "x",
-      note: { kind: "a", fromTheFuture: 1 },
-    });
-    expect(parsed.note).toEqual({ kind: "a" });
+  test("a note this build cannot read is DROPPED, never a refusal: the message always loads (M3)", () => {
+    // RED on main: `note` is stripped (the field does not exist). RED on round 1's
+    // build: the bounds REFUSED the message, and since `message` entries are
+    // CRITICAL that refused the whole log (review M3: a lock-out).
+    // Mutation: drop `.catch(undefined)` from `note` in session.ts → every line
+    // below refuses → red.
+    const note = (value: unknown) =>
+      ChatMessageSchema.parse({ role: "user", content: "x", note: value }).note;
+    // A newer build's kind, outside `/^[a-z][a-z0-9_]*$/`.
+    expect(note({ kind: "User-X" })).toBeUndefined();
+    // A newer build's id past 64 chars (a 100-char call id).
+    expect(note({ kind: "subagent_report", id: "x".repeat(65) })).toBeUndefined();
+    expect(note({ kind: "" })).toBeUndefined();
+    // Not an object at all: a shape from a build that models notes differently.
+    expect(note("subagent_lost")).toBeUndefined();
+    // Only the note is lost: the rest of the message loads unchanged.
+    expect(
+      ChatMessageSchema.parse({ role: "user", content: "hello", note: { kind: "User-X" } }),
+    ).toEqual({ role: "user", content: "hello" });
   });
 
   test("the digest ignores `note`: a checkpoint never trips on it (its fixed field list)", () => {

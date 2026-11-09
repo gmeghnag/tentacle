@@ -88,6 +88,29 @@ describe("parseLogFile", () => {
     );
   });
 
+  test("a note this build cannot read does not refuse the file: the message loads without it (M3)", () => {
+    // RED on round 1's build: `message` is CRITICAL, so the unreadable note made
+    // the entry malformed and the WHOLE log unloadable (review M3).
+    // Mutation: drop `.catch(undefined)` from `note` in protocol/src/session.ts → red.
+    const log = new FakeLog("D1");
+    const noted = (note: unknown): ChatMessage =>
+      ({ role: "user", content: "a", note }) as unknown as ChatMessage;
+    const file = parsed(
+      header +
+        entryLines([
+          ...log.base([
+            noted({ kind: "User-X" }),
+            noted({ kind: "subagent_report", id: "x".repeat(65) }),
+          ]),
+          log.msg(asst("b")),
+        ]),
+    );
+    const seg = currentSegment(file);
+    expect(seg.messages).toEqual([user("a"), user("a"), asst("b")]);
+    expect(seg.messages.every((m) => m.note === undefined)).toBe(true);
+    expect(file.skipped).toBe(0);
+  });
+
   test("W9 an unknown header schemaVersion refuses the file (never half-loaded)", () => {
     const newer = `${JSON.stringify({ format: "tentacle-session-log", schemaVersion: 2, id: ID, cwd: "/w", model: "m", createdAt: 1 })}\n`;
     const result = parseLogFile(newer + entryLines(new FakeLog("D1").base([user("a")])), ID);
