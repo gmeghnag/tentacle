@@ -929,3 +929,53 @@ The three were applied together; the one failing test is named for its own mutat
 ### Gate
 
 `bun run check` on the fix commit: typecheck and Biome passed (the script stops before the tests otherwise), **6202 pass, 3 skip (the opt-in ones), 0 fail**, 6205 tests across 433 files.
+
+## Execution — fix round 2
+
+*— deepseek (tentacle --profile deepseek), 2026-11-09*
+
+The Review's two findings, test-only: no file under `packages/*/src/` changed (`git diff --stat packages/*/src` empty at the end of every step below). Files touched: `packages/cli/test/clear-fork-controller.test.ts`, `packages/daemon/test/session-log-store.test.ts`, plus this section. `TODO.md` untouched, no commit.
+
+### R2-M1 — a read started after the clear is never the copy
+
+**As built.** `packages/cli/test/clear-fork-controller.test.ts:151` — the review's own edit to the fake's `clear`: `held = readOf(AFTER, "h-cleared")` now runs BEFORE `await answered.promise` (the daemon reset the history at once; its reply is still on the way). A save started after `clearSent` is set therefore reads `AFTER` inside the clear's own wait, and if that read became the copy, `armFork` would fork `AFTER` — or, since `AFTER` is a different head, the assertion on `NEWEST` fails outright.
+
+**Green on today's code.** `bun test packages/cli/test/clear-fork-controller.test.ts` → `7 pass, 0 fail` (3.31 s).
+
+**Mutation — `const pre = true` at `packages/cli/src/local-runtime.ts:338`:**
+
+```
+(fail) clear keeps the old chat (persistingController) > M1 a pre-clear read slower than the 3 s bound forks the NEWEST chat, not the stale copy [3205.11ms]
+  expect(forks[0]?.messages).toEqual(NEWEST)
+  - {"content":"the OLD chat","role":"user"} … - {"content":"newest reply","role":"assistant"}
+  + {"content":"answered after the clear","role":"assistant"}
+  6 pass, 1 fail
+```
+
+The forked chat is the post-clear `AFTER` history: the regression is caught, and the failure names it. Restored (`const pre = !clearSent;`, `git diff --stat packages/cli/src` empty) → `7 pass, 0 fail`.
+
+### R2-M2 — a log without its sidecar still goes through
+
+**Test only, no code change** (`packages/daemon/test/session-log-store.test.ts:894`, `R2-M2`). An `io` whose `writeDurable` rejects (`ENOSPC`) while `failSidecar` is set for paths containing `f1.state.json` (`writeWhole` writes the temp `.f1.state.json.tmp-…`, so a rename can never sneak the sidecar past the fault). With a sidecar on the fork update: `store.fork("s", …)` rejects with `ForkWriteError`, `f1.jsonl` EXISTS and `f1.state.json` does not — the state round 1's H1 retry exists for. Then the fault is cleared and the SOURCE's next `write` (the clear's cold base) resolves, and `f1.state.json` exists holding the update's bytes, with `f1` still loading as the old chat.
+
+**Green on today's code.** `bun test packages/daemon/test/session-log-store.test.ts` → `40 pass, 0 fail`.
+
+**Mutation — `landed` returns `true` as soon as the log exists (`packages/daemon/src/session-log-store.ts:567` → `return true;`):**
+
+```
+(fail) fork (docs/feat/clear-fork-history.md): a NEW session holding the chat a source is about to drop > R2-M2 a log whose sidecar failed still goes through: the source's next write heals the fork [4.03ms]
+  expect(await readdir(where)).toContain("f1.state.json")
+  Expected to contain: "f1.state.json"
+  Received: [ "s.stale-1794253277191-ce2326f1.aside", "s.jsonl", "f1.jsonl" ]
+  39 pass, 1 fail
+```
+
+The log is there, the sidecar never is — `serve` would never list the fork after a restart. Restored → `40 pass, 0 fail`, and `git diff --stat packages/*/src` empty.
+
+### Gate
+
+`bun run check` on this tree: `tsc --noEmit` + `tsc -p apps/mobile` clean, Biome clean (807 files, no fixes), **6203 pass, 3 skip (the opt-in ones), 0 fail**, 6206 tests / 433 files (6202 + the one new `R2-M2` test; the round 1 `M1` test was only edited).
+
+### Drift
+
+- None from the Review. Both findings were test-only, as it said: no production code needed a change, and each test is red only under its own mutation, named above.

@@ -146,8 +146,11 @@ describe("clear keeps the old chat (persistingController)", () => {
         return back;
       },
       clear: async () => {
-        await answered.promise; // ordered after the slow read's reply
-        held = readOf(AFTER, "h-cleared"); // the daemon reset the history
+        // The daemon reset the history at once; its reply is still on the way
+        // (ordered after the slow read's reply). So the read a save starts
+        // AFTER the clear was sent reports AFTER, inside the clear's own wait.
+        held = readOf(AFTER, "h-cleared");
+        await answered.promise;
         return { before: NEWEST.length, after: NEW.length };
       },
       watch: () => () => {},

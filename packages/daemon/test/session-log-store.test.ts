@@ -915,6 +915,41 @@ describe("fork (docs/feat/clear-fork-history.md): a NEW session holding the chat
     expect(await readdir(where)).not.toContain("f1.state.json");
   });
 
+  test("R2-M2 a log whose sidecar failed still goes through: the source's next write heals the fork", async () => {
+    // `landed` skips a fork whose log already exists — EXCEPT when a sidecar is
+    // expected and missing (its write failed): that one must be retried, or
+    // `serve` (which indexes from `.state.json`) never lists the fork after a
+    // restart. Red under the mutation "`landed` returns true as soon as the log
+    // exists": the retry is skipped and the sidecar never appears.
+    const where = fresh();
+    let failSidecar = true;
+    const io: LogStoreIo = {
+      append: async (path, data) => {
+        await appendFile(path, data, { mode: 0o600 });
+      },
+      writeDurable: async (path, data) => {
+        if (failSidecar && path.includes("f1.state.json")) {
+          throw Object.assign(new Error("full"), { code: "ENOSPC" });
+        }
+        await writeFile(path, data, { mode: 0o600 });
+      },
+    };
+    const store = new LogSessionStore(where, { io });
+    const { cleared, reader } = await sourceWithOldChat(store);
+    const state = '{"any":"state"}';
+    await expect(store.fork("s", { ...forkOf("f1"), sidecar: state })).rejects.toBeInstanceOf(
+      ForkWriteError,
+    );
+    // The log landed, its sidecar did not; the fork stays pending on its source.
+    expect(await readdir(where)).toContain("f1.jsonl");
+    expect(await readdir(where)).not.toContain("f1.state.json");
+    failSidecar = false;
+    await store.write(reader.read(cleared.base([user("fresh")]), "cold"));
+    expect(await readdir(where)).toContain("f1.state.json");
+    expect(await readFile(store.stateFile("f1"), "utf8")).toBe(state);
+    expect(await load(store, "f1")).toEqual(OLD);
+  });
+
   test("T6 a retry of the same fork update is idempotent: one file, identical bytes", async () => {
     const where = fresh();
     const store = new LogSessionStore(where);
